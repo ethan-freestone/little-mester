@@ -127,7 +127,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       echo "Setup complete. Next: ./verify-sandbox.sh, then ./lab <workspace>"
       ;;
     build)
-      dc build agent
+      shift
+      dc build "$@" agent
       ;;
     pull)
       dc --profile setup run --rm ollama-pull
