@@ -65,13 +65,6 @@ services:
       AIDER_MODEL: ollama_chat/qwen3.6:35b-a3b
       AIDER_CHECK_UPDATE: "false"
       AIDER_ANALYTICS_DISABLE: "true"
-      GIT_AUTHOR_NAME: little-mester-agent
-      GIT_AUTHOR_EMAIL: agent@localhost
-      GIT_COMMITTER_NAME: little-mester-agent
-      GIT_COMMITTER_EMAIL: agent@localhost
-      GIT_CONFIG_COUNT: "1"
-      GIT_CONFIG_KEY_0: safe.directory
-      GIT_CONFIG_VALUE_0: "*"
     networks: [internal]            # no internet
     stdin_open: true
     tty: true
@@ -82,4 +75,6 @@ networks:
   egress: {}
 
 volumes:
-  ollama-models:
+  ollama-models:````
+
+README.md

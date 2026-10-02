@@ -1,3 +1,4 @@
 workspaces/*
 !workspaces/.gitkeep
 .aider*
+.little-mester.conf

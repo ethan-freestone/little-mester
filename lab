@@ -9,6 +9,19 @@ MOUNT_MODE="rw"  # Default mount mode
 WORKFLOW=""      # Default workflow (default, tdd, regression)
 VERBOSE=0        # Enable verbose logging
 
+# Load user config if present
+if [[ -f "$LAB_DIR/.little-mester.conf" ]]; then
+  set -a
+  source "$LAB_DIR/.little-mester.conf"
+  set +a
+fi
+
+# Default git identity if not configured
+GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-ethan-freestone}"
+GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-ejfreebie@gmail.com}"
+GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-ethan-freestone}"
+GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-ejfreebie@gmail.com}"
+
 die() { echo "REFUSED: $*" >&2; exit 1; }
 
 dc() {
@@ -18,6 +31,10 @@ dc() {
            "MOUNT_MODE=$MOUNT_MODE" \
            "LITTLE_MESTER_WORKFLOW=${WORKFLOW:-default}" \
            "LITTLE_MESTER_VERBOSE=$VERBOSE" \
+           "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME" \
+           "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL" \
+           "GIT_COMMITTER_NAME=$GIT_COMMITTER_NAME" \
+           "GIT_COMMITTER_EMAIL=$GIT_COMMITTER_EMAIL" \
     docker compose -f "$LAB_DIR/compose.yaml" --project-directory "$LAB_DIR" "$@"
 }
 
