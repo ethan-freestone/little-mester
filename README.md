@@ -73,6 +73,26 @@ Three ideas to hold onto:
 
 ---
 
+## Security & AI Interaction Boundaries
+
+### 🔒 How to Safely Interact with the Agent
+**The AI tool (`little-mester`) NEVER receives shell access to your host machine.** 
+Interaction is strictly confined to the sandboxed environment:
+1. **Workspace Mount:** You explicitly mount a single directory (`./lab <path>`) into the container at `/workspace`. The AI reads/writes only here.
+2. **Container Shell:** If you need to poke around inside the sandbox, use `./lab shell <path>`. This drops you into a hardened, non-root container with zero host access.
+3. **No Host Commands:** The AI cannot execute commands on your OS, access your SSH keys, or modify system files. All security boundaries are enforced by Docker and Linux kernel features.
+
+### 🛡️ Security Model Overview
+Full technical details, network isolation diagrams, capability drops, and immutability policies are documented in [SECURITY.md](SECURITY.md). 
+
+**Key Guarantees:**
+- ✅ **Zero Host Shell Access:** The AI operates strictly inside the container.
+- ✅ **Immutable Security Configs:** Security settings in `compose.yaml` and `lab` cannot be altered by the AI. Any changes require manual review and confirmation.
+- ✅ **Network Air-Gap:** No outbound internet access during runtime. Only `ollama-pull` has temporary egress during setup.
+- ✅ **Privilege Dropping:** Runs as non-root, drops all Linux capabilities, enforces `no-new-privileges`, and limits memory/PIDs.
+
+---
+
 ## Comprehensive Usage Guide
 
 This section provides a deep dive into managing your sandbox, models, and the agent workflow.
@@ -222,6 +242,7 @@ Alternatively, run it manually from your host:
 | `docs/` | Journal, host setup notes, threat model. | [docs/README.md](docs/README.md) |
 | `tests/` | Unit tests for the `lab` launcher script. | [Testing section above](#testing) |
 | `run-tests.sh` | Helper to run Bats tests inside the agent container. | [Testing section above](#testing) |
+| `SECURITY.md` | **Security model, network isolation, and AI interaction boundaries.** | [Security & AI Interaction Boundaries](#security--ai-interaction-boundaries) |
 | `my-agent/` | *Planned.* Build your own agent loop from scratch. | [my-agent/README.md](my-agent/README.md) |
 | `evals/` | *Planned.* Pass/fail tasks to compare models and prompts. | [evals/README.md](evals/README.md) |
 | `red-team/` | *Planned.* Attacks against your own sandbox. | [red-team/README.md](red-team/README.md) |
@@ -253,7 +274,7 @@ a program carries them out, and the results go back to the model. Aider hides th
 
 ## Security model, briefly
 
-Full version: [docs/threat-model.md](docs/threat-model.md).
+Full version: [SECURITY.md](SECURITY.md).
 
 An agent can only cause harm through what it can reach. This repo removes each channel:
 
@@ -314,7 +335,7 @@ Read this twice.
 
 Do these in order. Each has its own README with goals, exercises and "you should be able to explain" questions.
 
-1. Get the sandbox running and make `verify-sandbox.sh` pass. Read [docs/threat-model.md](docs/threat-model.md).
+1. Get the sandbox running and make `verify-sandbox.sh` pass. Read [SECURITY.md](SECURITY.md).
 2. Use Aider on a small project. Review every diff. Journal what the model gets right and wrong.
 3. Build your own agent loop: [my-agent/](my-agent/README.md).
 4. Measure it: [evals/](evals/README.md).
