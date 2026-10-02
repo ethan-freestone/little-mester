@@ -61,8 +61,8 @@ services:
       HOME: /home/agent
       OLLAMA_API_BASE: http://ollama:11434
       # Swap out AIDER models
-      AIDER_MODEL: ollama_chat/fredrezones55/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q4
       #AIDER_MODEL: ollama_chat/qwen2.5-coder:7b
+      AIDER_MODEL: ollama_chat/qwen3.6:35b-a3b
       AIDER_CHECK_UPDATE: "false"
       AIDER_ANALYTICS_DISABLE: "true"
       GIT_AUTHOR_NAME: little-mester-agent
