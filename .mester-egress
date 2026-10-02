@@ -1,0 +1,7 @@
+# Workspace egress control manifest (controlled by /lab via `check_egress_permission`)
+# Format: key=value  Lines without '=' are ignored; comments start with #
+
+permission=true     # Set to "false" to deny all internet access for the agent
+allowed_domains=pypi.org,github.com,npmjs.com,ubuntu.com,deb.debian.org  # comma-separated; blank = allow all domains
+intent=install and run application dependencies; fetch packages from package repositories
+# Note: permission=false overrides all other settings. Use with caution.
