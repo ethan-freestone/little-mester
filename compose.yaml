@@ -48,7 +48,7 @@ services:
     user: "${LAB_UID:-1000}:${LAB_GID:-1000}"
     working_dir: /workspace
     volumes:
-      - "${WORKSPACE:?run via ./lab}:/workspace"   # the ONLY host path
+      - "${WORKSPACE:?run via ./lab}:/workspace:${MOUNT_MODE:-rw}"
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

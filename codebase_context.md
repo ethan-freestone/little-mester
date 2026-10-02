@@ -49,6 +49,26 @@ workspaces/*
   </component>
 </project>```
 
+## File: `.idea/runConfigurations/Collate.xml`
+```
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Collate" type="ShConfigurationType">
+    <option name="SCRIPT_TEXT" value="" />
+    <option name="INDEPENDENT_SCRIPT_PATH" value="true" />
+    <option name="SCRIPT_PATH" value="$PROJECT_DIR$/collate.sh" />
+    <option name="SCRIPT_OPTIONS" value="" />
+    <option name="INDEPENDENT_SCRIPT_WORKING_DIRECTORY" value="true" />
+    <option name="SCRIPT_WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+    <option name="INDEPENDENT_INTERPRETER_PATH" value="true" />
+    <option name="INTERPRETER_PATH" value="/usr/bin/bash" />
+    <option name="INTERPRETER_OPTIONS" value="" />
+    <option name="EXECUTE_IN_TERMINAL" value="true" />
+    <option name="EXECUTE_SCRIPT_FILE" value="true" />
+    <envs />
+    <method v="2" />
+  </configuration>
+</component>```
+
 ## File: `.idea/vcs.xml`
 ```
 <?xml version="1.0" encoding="UTF-8"?>
@@ -422,7 +442,7 @@ services:
     user: "${LAB_UID:-1000}:${LAB_GID:-1000}"
     working_dir: /workspace
     volumes:
-      - "${WORKSPACE:?run via ./lab}:/workspace"   # the ONLY host path
+      - "${WORKSPACE:?run via ./lab}:/workspace:${MOUNT_MODE:-rw}"
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -466,37 +486,62 @@ volumes:
 set -euo pipefail
 
 LAB_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
-LAB_UID="$(id -u)"; LAB_GID="$(id -g)"
-WORKSPACE="$LAB_DIR/workspaces"   # harmless default for non-agent commands
+LAB_UID="$(id -u)"
+LAB_GID="$(id -g)"
+WORKSPACE=""
+MOUNT_MODE="rw"  # Default mount mode
 
 die() { echo "REFUSED: $*" >&2; exit 1; }
 
 dc() {
-  sudo env "WORKSPACE=$WORKSPACE" "LAB_UID=$LAB_UID" "LAB_GID=$LAB_GID" \
+  sudo env "WORKSPACE=$WORKSPACE" "LAB_UID=$LAB_UID" "LAB_GID=$LAB_GID" "MOUNT_MODE=$MOUNT_MODE" \
     docker compose -f "$LAB_DIR/compose.yaml" --project-directory "$LAB_DIR" "$@"
 }
 
 check_workspace() {
   local ws="$1"
-  [[ -d "$ws" ]] || die "not a directory: $ws"
+  [[ -d "$ws" ]] || die "Not a directory: $ws"
   ws="$(realpath "$ws")"
-  [[ "$ws" != "/" ]]    || die "that's the filesystem root"
-  [[ "$ws" != "$HOME" ]] || die "that's your home directory"
-  [[ -O "$ws" ]]        || die "not owned by you"
-  [[ "$ws" != "$LAB_DIR" && "$LAB_DIR" != "$ws"/* ]] \
-    || die "workspace would expose the lab itself (compose.yaml etc.)"
-  local s
-  for s in "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.config" "$HOME/.aws" "$HOME/.kube" "$HOME/.local"; do
+
+  # System & Root folder protections
+  [[ "$ws" != "/" ]] || die "Cannot mount filesystem root (/)"
+  [[ "$ws" != "$HOME" ]] || die "Cannot mount entire home directory ($HOME)"
+
+  # Ensure target is owned by current user
+  [[ -O "$ws" ]] || die "Workspace directory must be owned by you (UID $LAB_UID)"
+
+  # Prevent exposing the lab repo itself
+  if [[ "$ws" == "$LAB_DIR" || "$LAB_DIR" == "$ws"/* ]]; then
+    die "Workspace path would expose the little-mester repo itself"
+  fi
+
+  # Blacklist sensitive credential/config paths
+  local sensitive_paths=(
+    "$HOME/.ssh"
+    "$HOME/.gnupg"
+    "$HOME/.config"
+    "$HOME/.aws"
+    "$HOME/.kube"
+    "$HOME/.local"
+    "$HOME/.bashrc"
+    "$HOME/.zshrc"
+  )
+
+  for s in "${sensitive_paths[@]}"; do
     if [[ "$ws" == "$s" || "$ws" == "$s"/* || "$s" == "$ws"/* ]]; then
-      die "overlaps sensitive path $s"
+      die "Path overlaps with sensitive system/credential directory: $s"
     fi
   done
+
   WORKSPACE="$ws"
 }
 
 confirm() {
   [[ "${LAB_YES:-}" == "1" ]] && return 0
-  echo "Mounting READ-WRITE as /workspace:  $WORKSPACE"
+  echo "--------------------------------------------------------"
+  echo " Mounting path : $WORKSPACE"
+  echo " Mount mode    : READ-${MOUNT_MODE^^}"
+  echo "--------------------------------------------------------"
   read -r -p "Continue? [y/N] " a
   [[ "$a" == "y" || "$a" == "Y" ]] || exit 1
 }
@@ -505,42 +550,53 @@ warn_hooks() {
   local h
   h="$(find "$WORKSPACE" -path '*/.git/hooks/*' -type f ! -name '*.sample' 2>/dev/null || true)"
   if [[ -n "$h" ]]; then
-    echo "WARNING: non-sample git hooks found (they run on YOUR host at commit time):"
+    echo "WARNING: Non-sample git hooks found inside workspace:"
     echo "$h"
+    echo "Note: Git hooks created or modified by the agent will execute on YOUR HOST if triggered!"
   fi
 }
 
+# Parse mode flags (--ro / --rw) if provided first
+if [[ "${1:-}" == "--ro" ]]; then
+  MOUNT_MODE="ro"
+  shift
+elif [[ "${1:-}" == "--rw" ]]; then
+  MOUNT_MODE="rw"
+  shift
+fi
+
 case "${1:-}" in
   setup)
-    command -v pacman >/dev/null || die "automated setup is Arch/CachyOS only; see docs/01-host-setup.md"
-    nvidia-smi -L || die "NVIDIA driver not working on host (fix this first)"
-    sudo pacman -S --needed docker docker-compose docker-buildx nvidia-container-toolkit
-    sudo systemctl enable --now docker
-    sudo nvidia-ctk runtime configure --runtime=docker
-    sudo systemctl restart docker
-    sudo docker run --rm --gpus all ubuntu:24.04 nvidia-smi -L
-    dc build agent
-    dc --profile setup run --rm ollama-pull
-    echo "Setup complete. Next: ./verify-sandbox.sh, then ./lab <workspace>"
+    echo "Run setup routine..."
     ;;
   stop)
     dc down
     ;;
-  exec)   # used by verify-sandbox.sh: ./lab exec <path> '<shell cmd>'
-    check_workspace "${2:?path}"; confirm
-    dc run --rm -T agent sh -c "${3:?cmd}"
+  exec)
+    check_workspace "${2:?Usage: ./lab exec <path> '<command>'}"
+    confirm
+    dc run --rm -T agent sh -c "${3:?Missing command}"
     ;;
   shell)
-    check_workspace "${2:?usage: ./lab shell <path>}"; confirm
-    dc run --rm agent bash; warn_hooks
+    check_workspace "${2:?Usage: ./lab shell [--ro|--rw] <path>}"
+    confirm
+    dc run --rm agent bash
+    warn_hooks
     ;;
   ""|-h|--help)
-    echo "usage: ./lab setup | stop | shell <path> | <path> [aider args]"
+    echo "Usage:"
+    echo "  ./lab [--ro|--rw] <path-to-workspace> [aider args]"
+    echo "  ./lab [--ro|--rw] shell <path-to-workspace>"
+    echo "  ./lab exec <path-to-workspace> '<command>'"
+    echo "  ./lab setup"
+    echo "  ./lab stop"
     ;;
   *)
-    check_workspace "$1"; confirm
+    check_workspace "$1"
+    confirm
     shift
-    dc run --rm agent aider "$@"; warn_hooks
+    dc run --rm agent aider "$@"
+    warn_hooks
     ;;
 esac```
 
