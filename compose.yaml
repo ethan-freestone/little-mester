@@ -8,7 +8,8 @@ services:
     environment:
       OLLAMA_FLASH_ATTENTION: "1"
       OLLAMA_KV_CACHE_TYPE: q8_0
-      OLLAMA_CONTEXT_LENGTH: "32768"
+      #OLLAMA_CONTEXT_LENGTH: "32768"
+      OLLAMA_CONTEXT_LENGTH: "65536"
       OLLAMA_KEEP_ALIVE: "-1"        # keep the model loaded; reloading 24GB is slow
       OLLAMA_MAX_LOADED_MODELS: "1"  # only one model resident at a time
     deploy:
@@ -57,7 +58,7 @@ services:
     tmpfs:
       - /tmp:exec,mode=1777,size=512m
       - /home/agent:uid=${LAB_UID:-1000},gid=${LAB_GID:-1000},mode=0700
-    mem_limit: 4g
+    mem_limit: 8g
     pids_limit: 512
     environment:
       HOME: /home/agent
@@ -67,7 +68,7 @@ services:
       AIDER_MODEL: ollama_chat/qwen3.6:35b-a3b
       AIDER_CHECK_UPDATE: "false"
       AIDER_ANALYTICS_DISABLE: "true"
-    networks: ${NETWORKS:-[egress, internal]}    # default egress=true → both; false → [internal]
+    networks: [egress, internal]    # default egress=true → both; false → [internal]
     stdin_open: true
     tty: true
 
