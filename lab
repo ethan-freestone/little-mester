@@ -10,6 +10,9 @@ WORKFLOW=""      # Default workflow (default, tdd, regression)
 VERBOSE=0        # Enable verbose logging
 AGENT="aider"    # Which agent to launch: aider | opencode
 
+# Network mode: egress=true by default; --isolated flips to false
+EGRESS="${EGRESS:-true}"
+
 # Load user config if present (gitignored; put your real identity here)
 if [[ -f "$LAB_DIR/.little-mester.conf" ]]; then
   set -a
@@ -26,17 +29,24 @@ GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-agent@localhost}"
 die() { echo "REFUSED: $*" >&2; exit 1; }
 
 dc() {
+  local networks="[egress, internal]"
+  if [[ "$EGRESS" != "true" ]]; then
+    networks="[internal]"
+  fi
+
   sudo env "WORKSPACE=${WORKSPACE:-$LAB_DIR}" \
-           "LAB_UID=$LAB_UID" \
-           "LAB_GID=$LAB_GID" \
-           "MOUNT_MODE=$MOUNT_MODE" \
-           "LITTLE_MESTER_WORKFLOW=${WORKFLOW:-default}" \
-           "LITTLE_MESTER_VERBOSE=$VERBOSE" \
-           "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME" \
-           "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL" \
-           "GIT_COMMITTER_NAME=$GIT_COMMITTER_NAME" \
-           "GIT_COMMITTER_EMAIL=$GIT_COMMITTER_EMAIL" \
-    docker compose -f "$LAB_DIR/compose.yaml" --project-directory "$LAB_DIR" "$@"
+             "LAB_UID=$LAB_UID" \
+             "LAB_GID=$LAB_GID" \
+             "MOUNT_MODE=$MOUNT_MODE" \
+             "LITTLE_MESTER_WORKFLOW=${WORKFLOW:-default}" \
+             "LITTLE_MESTER_VERBOSE=$VERBOSE" \
+             "LITTLE_MESTER_EGRESS=${EGRESS}" \
+             "NETWORKS=${networks}" \
+             "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME" \
+             "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL" \
+             "GIT_COMMITTER_NAME=$GIT_COMMITTER_NAME" \
+             "GIT_COMMITTER_EMAIL=$GIT_COMMITTER_EMAIL" \
+      docker compose -f "$LAB_DIR/compose.yaml" --project-directory "$LAB_DIR" "$@"
 }
 
 check_workspace() {
@@ -77,17 +87,74 @@ check_workspace() {
   WORKSPACE="$ws"
 }
 
+# check_egress_permission: per-call authorization gate for egress access
+# Before granting internet, checks .mester-egress manifest in workspace.
+# Format of .mester-egress (if present):
+#   permission=true     | explicit default: allow
+#   permission=false    | explicit deny overrides egress=false default
+#   allowed_domains=... | comma-separated list; blank means "all domains"
+#   intent=<brief>      | human-readable description of intended use
+# Returns 0 if access is granted, non-zero otherwise.
+check_egress_permission() {
+  local manifest="$WORKSPACE/.mester-egress"
+
+  # No manifest = egress defaults to the configured EGRESS variable (true)
+  if [[ ! -f "$manifest" ]]; then
+    if [[ "$EGRESS" != "true" ]]; then
+      return 0  # user said --isolated / egress=false, no need for permission check
+    fi
+    print_verbose "No .mester-egress manifest found; egress defaults to $EGRESS"
+    return 0
+  fi
+
+  # Read manifest values (supports inline comments with #)
+  local perm domains intent
+  while IFS='=' read -r key value; do
+    # Strip leading/trailing whitespace and comments
+    key="$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^#' || true)"
+    [[ -z "$key" ]] && continue
+    value="$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^#' || true)"
+
+    case "$key" in
+      permission*) perm="$value" ;;
+      allowed_domains*) domains="$value" ;;
+      intent*) intent="$value" ;;
+    esac
+  done < "$manifest"
+
+  # Check explicit deny — overrides everything
+  if [[ "${perm:-}" == "false" ]]; then
+    print_verbose "Egress denied by .mester-egress (permission=false)"
+    return 1
+  fi
+
+  # If user explicitly requested --isolated, respect that regardless of manifest
+  if [[ "$EGRESS" != "true" ]]; then
+    print_verbose "Egress disabled via environment or flag (--isolated)"
+    return 0
+  fi
+
+  # Default when permission is true or unset and EGRESS=true: allow
+  print_verbose "Egress granted by .mester-egress (permission=${perm:-default(true)})"
+  return 0
+}
+
 confirm() {
   [[ "${LAB_YES:-}" == "1" ]] && return 0
   echo "--------------------------------------------------------"
   echo " Mounting path : $WORKSPACE"
   echo " Mount mode    : READ-${MOUNT_MODE^^}"
+  echo " Egress        : ${EGRESS}"
   echo " Agent         : $AGENT"
   echo " Workflow      : ${WORKFLOW:-default}"
   echo " Verbose       : $VERBOSE"
   echo "--------------------------------------------------------"
   read -r -p "Continue? [y/N] " a
   [[ "$a" == "y" || "$a" == "Y" ]] || exit 1
+}
+
+print_verbose() {
+  [[ "$VERBOSE" == "1" ]] && echo "[verbose] $*" >&2 || true
 }
 
 warn_hooks() {
@@ -109,6 +176,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       --workflow) WORKFLOW="${2:-default}"; shift 2 ;;
       --verbose) VERBOSE=1; shift ;;
       --agent) AGENT="${2:?--agent needs a name (aider|opencode)}"; shift 2 ;;
+      --egress) EGRESS="${2:?--egress needs true/false}"; shift 2 ;;
+      --egress-false|--isolated) EGRESS="false"; shift ;;
+      --egress-true) EGRESS="true"; shift ;;
       *) break ;;
     esac
   done
@@ -139,7 +209,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     exec)
       check_workspace "${2:?Usage: ./lab exec <path> '<command>'}"
       confirm
-      dc run --rm -T agent sh -c "${3:?Missing command}"
+      # On exec, pass egress status via env so compose knows how to route
+      LITTLE_MESTER_EGRESS="$EGRESS" dc run --rm -T agent sh -c "${3:?Missing command}"
       ;;
     shell)
       check_workspace "${2:?Usage: ./lab shell [--ro|--rw] <path>}"
@@ -149,12 +220,22 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       ;;
     ""|-h|--help)
       echo "Usage:"
-      echo "  ./lab [--ro|--rw] [--agent aider|opencode] [--workflow <name>] [--verbose] <path-to-workspace> [agent args]"
-      echo "  ./lab [--ro|--rw] shell <path-to-workspace>"
+      echo "  ./lab [flags] <path-to-workspace> [agent args]"
+      echo "  ./lab [flags] shell <path-to-workspace>"
       echo "  ./lab exec <path-to-workspace> '<command>'"
       echo "  ./lab setup | build | pull | stop"
       echo
-      echo "Flags go BEFORE the path. Anything after the path is passed to the agent."
+      echo "Flags (before path):"
+      echo "  --ro / --rw        Mount mode (default: rw)"
+      echo "  --agent name       Agent to launch (aider|opencode, default: aider)"
+      echo "  --workflow name    Workflow profile (default: default)"
+      echo "  --verbose          Show verbose logging in stderr"
+      echo "  --egress true|false Override egress default (default: true)"
+      echo "  --egress-false     Short alias for --egress false / --isolated"
+      echo "  --egress-true      Short alias for --egress true"
+      echo "  --isolated         Same as --egress-false"
+      echo
+      echo "Any remaining arguments after the path are passed to the agent."
       ;;
     *)
       case "$AGENT" in
@@ -162,6 +243,14 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         *) die "unknown agent: $AGENT (expected aider or opencode)" ;;
       esac
       check_workspace "$1"
+
+      # Per-call egress authorization gate before confirming
+      if [[ "$EGRESS" == "true" ]]; then
+        if ! check_egress_permission; then
+          die "Egress denied: agent is not permitted to access the internet in this workspace"
+        fi
+      fi
+
       confirm
       shift
       dc run --rm agent "$AGENT" "$@"
