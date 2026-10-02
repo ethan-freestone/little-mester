@@ -67,7 +67,7 @@ services:
       AIDER_MODEL: ollama_chat/qwen3.6:35b-a3b
       AIDER_CHECK_UPDATE: "false"
       AIDER_ANALYTICS_DISABLE: "true"
-    networks: [internal]            # no internet
+    networks: ${NETWORKS:-[egress, internal]}    # default egress=true → both; false → [internal]
     stdin_open: true
     tty: true
 
