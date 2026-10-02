@@ -85,3 +85,50 @@ teardown() {
   output=$(warn_hooks)
   [[ -z "$output" ]]
 }
+
+# --- Egress permission tests ---
+
+@test "check_egress_permission returns 0 when no manifest exists and EGRESS=true" {
+  EGRESS="true"
+  WORKSPACE="$WORKSPACE_TMPDIR"
+  run check_egress_permission
+  [ $status -eq 0 ]
+}
+
+@test "check_egress_permission returns 0 when no manifest exists but user passes --isolated" {
+  EGRESS="false"
+  WORKSPACE="$WORKSPACE_TMPDIR"
+  run check_egress_permission
+  [ $status -eq 0 ]
+}
+
+@test "check_egress_permission returns 0 when permission=true in manifest" {
+  EGRESS="true"
+  WORKSPACE="$WORKSPACE_TMPDIR"
+  echo "permission=true" > "$WORKSPACE/.mester-egress"
+  run check_egress_permission
+  [ $status -eq 0 ]
+}
+
+@test "check_egress_permission returns non-zero when permission=false in manifest" {
+  EGRESS="true"
+  WORKSPACE="$WORKSPACE_TMPDIR"
+  echo "permission=false" > "$WORKSPACE/.mester-egress"
+  run check_egress_permission
+  [ $status -ne 0 ]
+}
+
+@test "check_egress_permission returns 0 when user passes --isolated even if permission=true" {
+  EGRESS="false"
+  WORKSPACE="$WORKSPACE_TMPDIR"
+  echo "permission=true" > "$WORKSPACE/.mester-egress"
+  run check_egress_permission
+  [ $status -eq 0 ]
+}
+
+@test "check_egress_permission rejects when no manifest and EGRESS=false" {
+  EGRESS="false"
+  WORKSPACE="$WORKSPACE_TMPDIR"
+  run check_egress_permission
+  [ $status -eq 0 ]
+}
