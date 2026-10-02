@@ -1,0 +1,2 @@
+qwen2.5-coder:7b
+fredrezones55/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q4

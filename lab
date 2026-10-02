@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LAB_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
+LAB_UID="$(id -u)"; LAB_GID="$(id -g)"
+WORKSPACE="$LAB_DIR/workspaces"   # harmless default for non-agent commands
+
+die() { echo "REFUSED: $*" >&2; exit 1; }
+
+dc() {
+  sudo env "WORKSPACE=$WORKSPACE" "LAB_UID=$LAB_UID" "LAB_GID=$LAB_GID" \
+    docker compose -f "$LAB_DIR/compose.yaml" --project-directory "$LAB_DIR" "$@"
+}
+
+check_workspace() {
+  local ws="$1"
+  [[ -d "$ws" ]] || die "not a directory: $ws"
+  ws="$(realpath "$ws")"
+  [[ "$ws" != "/" ]]    || die "that's the filesystem root"
+  [[ "$ws" != "$HOME" ]] || die "that's your home directory"
+  [[ -O "$ws" ]]        || die "not owned by you"
+  [[ "$ws" != "$LAB_DIR" && "$LAB_DIR" != "$ws"/* ]] \
+    || die "workspace would expose the lab itself (compose.yaml etc.)"
+  local s
+  for s in "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.config" "$HOME/.aws" "$HOME/.kube" "$HOME/.local"; do
+    if [[ "$ws" == "$s" || "$ws" == "$s"/* || "$s" == "$ws"/* ]]; then
+      die "overlaps sensitive path $s"
+    fi
+  done
+  WORKSPACE="$ws"
+}
+
+confirm() {
+  [[ "${LAB_YES:-}" == "1" ]] && return 0
+  echo "Mounting READ-WRITE as /workspace:  $WORKSPACE"
+  read -r -p "Continue? [y/N] " a
+  [[ "$a" == "y" || "$a" == "Y" ]] || exit 1
+}
+
+warn_hooks() {
+  local h
+  h="$(find "$WORKSPACE" -path '*/.git/hooks/*' -type f ! -name '*.sample' 2>/dev/null || true)"
+  if [[ -n "$h" ]]; then
+    echo "WARNING: non-sample git hooks found (they run on YOUR host at commit time):"
+    echo "$h"
+  fi
+}
+
+case "${1:-}" in
+  setup)
+    command -v pacman >/dev/null || die "automated setup is Arch/CachyOS only; see docs/01-host-setup.md"
+    nvidia-smi -L || die "NVIDIA driver not working on host (fix this first)"
+    sudo pacman -S --needed docker docker-compose docker-buildx nvidia-container-toolkit
+    sudo systemctl enable --now docker
+    sudo nvidia-ctk runtime configure --runtime=docker
+    sudo systemctl restart docker
+    sudo docker run --rm --gpus all ubuntu:24.04 nvidia-smi -L
+    dc build agent
+    dc --profile setup run --rm ollama-pull
+    echo "Setup complete. Next: ./verify-sandbox.sh, then ./lab <workspace>"
+    ;;
+  stop)
+    dc down
+    ;;
+  exec)   # used by verify-sandbox.sh: ./lab exec <path> '<shell cmd>'
+    check_workspace "${2:?path}"; confirm
+    dc run --rm -T agent sh -c "${3:?cmd}"
+    ;;
+  shell)
+    check_workspace "${2:?usage: ./lab shell <path>}"; confirm
+    dc run --rm agent bash; warn_hooks
+    ;;
+  ""|-h|--help)
+    echo "usage: ./lab setup | stop | shell <path> | <path> [aider args]"
+    ;;
+  *)
+    check_workspace "$1"; confirm
+    shift
+    dc run --rm agent aider "$@"; warn_hooks
+    ;;
+esac

@@ -1,0 +1,83 @@
+name: little-mester
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: q8_0
+      OLLAMA_CONTEXT_LENGTH: "16384"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    security_opt: ["no-new-privileges:true"]
+    networks: [internal]            # no internet, no published ports
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # One-shot: the ONLY service with internet. Used by `./lab setup`.
+  ollama-pull:
+    image: ollama/ollama:latest
+    profiles: [setup]
+    entrypoint: ["/bin/sh", "/pull-models.sh"]
+    volumes:
+      - ollama-models:/root/.ollama
+      - ./ollama/pull-models.sh:/pull-models.sh:ro
+      - ./models.txt:/models.txt:ro
+    networks: [egress]
+
+  agent:
+    build:
+      context: ./agent
+      args:
+        LAB_UID: "${LAB_UID:-1000}"
+        LAB_GID: "${LAB_GID:-1000}"
+    profiles: [agent]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    user: "${LAB_UID:-1000}:${LAB_GID:-1000}"
+    working_dir: /workspace
+    volumes:
+      - "${WORKSPACE:?run via ./lab}:/workspace"   # the ONLY host path
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp
+      - /home/agent:uid=${LAB_UID:-1000},gid=${LAB_GID:-1000},mode=0700
+    mem_limit: 4g
+    pids_limit: 512
+    environment:
+      HOME: /home/agent
+      OLLAMA_API_BASE: http://ollama:11434
+      AIDER_MODEL: ollama_chat/qwen2.5-coder:7b
+      AIDER_CHECK_UPDATE: "false"
+      AIDER_ANALYTICS_DISABLE: "true"
+      GIT_AUTHOR_NAME: little-mester-agent
+      GIT_AUTHOR_EMAIL: agent@localhost
+      GIT_COMMITTER_NAME: little-mester-agent
+      GIT_COMMITTER_EMAIL: agent@localhost
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: "*"
+    networks: [internal]            # no internet
+    stdin_open: true
+    tty: true
+
+networks:
+  internal:
+    internal: true
+  egress: {}
+
+volumes:
+  ollama-models:
