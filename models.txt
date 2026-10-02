@@ -1,3 +1,2 @@
-qwen2.5-coder:7b
 qwen3.6:35b-a3b
-codellama:70b-code-q2_K
+qwen3:8b
