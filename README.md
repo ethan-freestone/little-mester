@@ -168,6 +168,33 @@ The launcher refuses `/`, `$HOME`, anything you don't own, anything overlapping
 
 ---
 
+## Testing
+
+This project uses [Bats](https://bats-core.readthedocs.io/) for unit testing the `lab` launcher script. Tests validate path guards, security checks, and helper functions without requiring Docker or GPU access.
+
+### Prerequisites
+Install Bats:
+```bash
+# Arch/CachyOS
+sudo pacman -S bats
+
+# macOS
+brew install bats-core
+```
+
+### Running Tests
+```fish
+bats tests/
+```
+
+The test suite includes regression checks for:
+- Valid workspace path acceptance
+- Rejection of sensitive paths (`$HOME`, `$HOME/.ssh`, etc.)
+- Ownership verification logic
+- Git hook warning detection
+
+---
+
 ## Repo map
 
 | Path | What it is | Read this |
@@ -180,6 +207,7 @@ The launcher refuses `/`, `$HOME`, anything you don't own, anything overlapping
 | `ollama/` | Model-pulling script and notes on running models on 8 GB VRAM. | [ollama/README.md](ollama/README.md) |
 | `workspaces/` | Where the projects the agent works on live (gitignored). | [workspaces/README.md](workspaces/README.md) |
 | `docs/` | Journal, host setup notes, threat model. | [docs/README.md](docs/README.md) |
+| `tests/` | Unit tests for the `lab` launcher script. | [Testing section above](#testing) |
 | `my-agent/` | *Planned.* Build your own agent loop from scratch. | [my-agent/README.md](my-agent/README.md) |
 | `evals/` | *Planned.* Pass/fail tasks to compare models and prompts. | [evals/README.md](evals/README.md) |
 | `red-team/` | *Planned.* Attacks against your own sandbox. | [red-team/README.md](red-team/README.md) |

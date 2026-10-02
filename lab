@@ -82,56 +82,58 @@ warn_hooks() {
 }
 
 # Parse mode flags (--ro / --rw) and workflow/verbose flags if provided first
-while [[ $# -gt 0 ]]; do
-  case "${1:-}" in
-    --ro) MOUNT_MODE="ro"; shift ;;
-    --rw) MOUNT_MODE="rw"; shift ;;
-    --workflow) WORKFLOW="${2:-default}"; shift 2 ;;
-    --verbose) VERBOSE=1; shift ;;
-    *) break ;;
-  esac
-done
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  while [[ $# -gt 0 ]]; do
+    case "${1:-}" in
+      --ro) MOUNT_MODE="ro"; shift ;;
+      --rw) MOUNT_MODE="rw"; shift ;;
+      --workflow) WORKFLOW="${2:-default}"; shift 2 ;;
+      --verbose) VERBOSE=1; shift ;;
+      *) break ;;
+    esac
+  done
 
-case "${1:-}" in
-  setup)
-    command -v pacman >/dev/null || die "automated setup is Arch/CachyOS only; see docs/01-host-setup.md"
-    nvidia-smi -L || die "NVIDIA driver not working on host (fix this first)"
-    sudo pacman -S --needed docker docker-compose docker-buildx nvidia-container-toolkit
-    sudo systemctl enable --now docker
-    sudo nvidia-ctk runtime configure --runtime=docker
-    sudo systemctl restart docker
-    sudo docker run --rm --gpus all ubuntu:24.04 nvidia-smi -L
-    dc build agent
-    dc --profile setup run --rm ollama-pull
-    echo "Setup complete. Next: ./verify-sandbox.sh, then ./lab <workspace>"
-    ;;
-  stop)
-    dc down
-    ;;
-  exec)
-    check_workspace "${2:?Usage: ./lab exec <path> '<command>'}"
-    confirm
-    dc run --rm -T agent sh -c "${3:?Missing command}"
-    ;;
-  shell)
-    check_workspace "${2:?Usage: ./lab shell [--ro|--rw] <path>}"
-    confirm
-    dc run --rm agent bash
-    warn_hooks
-    ;;
-  ""|-h|--help)
-    echo "Usage:"
-    echo "  ./lab [--ro|--rw] [--workflow <name>] [--verbose] <path-to-workspace> [aider args]"
-    echo "  ./lab [--ro|--rw] [--workflow <name>] [--verbose] shell <path-to-workspace>"
-    echo "  ./lab exec <path-to-workspace> '<command>'"
-    echo "  ./lab setup"
-    echo "  ./lab stop"
-    ;;
-  *)
-    check_workspace "$1"
-    confirm
-    shift
-    dc run --rm agent aider "$@"
-    warn_hooks
-    ;;
-esac
+  case "${1:-}" in
+    setup)
+      command -v pacman >/dev/null || die "automated setup is Arch/CachyOS only; see docs/01-host-setup.md"
+      nvidia-smi -L || die "NVIDIA driver not working on host (fix this first)"
+      sudo pacman -S --needed docker docker-compose docker-buildx nvidia-container-toolkit
+      sudo systemctl enable --now docker
+      sudo nvidia-ctk runtime configure --runtime=docker
+      sudo systemctl restart docker
+      sudo docker run --rm --gpus all ubuntu:24.04 nvidia-smi -L
+      dc build agent
+      dc --profile setup run --rm ollama-pull
+      echo "Setup complete. Next: ./verify-sandbox.sh, then ./lab <workspace>"
+      ;;
+    stop)
+      dc down
+      ;;
+    exec)
+      check_workspace "${2:?Usage: ./lab exec <path> '<command>'}"
+      confirm
+      dc run --rm -T agent sh -c "${3:?Missing command}"
+      ;;
+    shell)
+      check_workspace "${2:?Usage: ./lab shell [--ro|--rw] <path>}"
+      confirm
+      dc run --rm agent bash
+      warn_hooks
+      ;;
+    ""|-h|--help)
+      echo "Usage:"
+      echo "  ./lab [--ro|--rw] [--workflow <name>] [--verbose] <path-to-workspace> [aider args]"
+      echo "  ./lab [--ro|--rw] [--workflow <name>] [--verbose] shell <path-to-workspace>"
+      echo "  ./lab exec <path-to-workspace> '<command>'"
+      echo "  ./lab setup"
+      echo "  ./lab stop"
+      ;;
+    *)
+      check_workspace "$1"
+      confirm
+      shift
+      dc run --rm agent aider "$@"
+      warn_hooks
+      ;;
+  esac
+fi
