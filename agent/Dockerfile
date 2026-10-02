@@ -4,7 +4,7 @@ ARG LAB_UID=1000
 ARG LAB_GID=1000
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git curl ripgrep ca-certificates \
+ && apt-get install -y --no-install-recommends git curl ripgrep ca-certificates bats \
  && rm -rf /var/lib/apt/lists/*
 
 RUN python -m venv /opt/venv \

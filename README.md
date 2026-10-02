@@ -173,7 +173,7 @@ The launcher refuses `/`, `$HOME`, anything you don't own, anything overlapping
 This project uses [Bats](https://bats-core.readthedocs.io/) for unit testing the `lab` launcher script. Tests validate path guards, security checks, and helper functions without requiring Docker or GPU access.
 
 ### Prerequisites
-Install Bats:
+Install Bats on your host:
 ```bash
 # Arch/CachyOS
 sudo pacman -S bats
@@ -182,7 +182,7 @@ sudo pacman -S bats
 brew install bats-core
 ```
 
-### Running Tests
+### Running Tests (Host)
 ```fish
 bats tests/
 ```
@@ -192,6 +192,19 @@ The test suite includes regression checks for:
 - Rejection of sensitive paths (`$HOME`, `$HOME/.ssh`, etc.)
 - Ownership verification logic
 - Git hook warning detection
+
+### Running Tests via the Agent (`little-mester`)
+You can instruct the agent to run the test suite inside the sandbox itself. This is useful for verifying that code changes don't break the launcher's security guards from within the container environment.
+
+1. Ensure your workspace is set up (e.g., `workspaces/demo`).
+2. Start a session: `./lab workspaces/demo`
+3. Prompt the agent: *"Run the unit tests for the lab script using the provided helper script."*
+4. The agent will execute `./run-tests.sh`, which safely invokes `bats` inside the container via `./lab exec`.
+
+Alternatively, run it manually from your host:
+```fish
+./run-tests.sh workspaces/demo
+```
 
 ---
 
@@ -208,6 +221,7 @@ The test suite includes regression checks for:
 | `workspaces/` | Where the projects the agent works on live (gitignored). | [workspaces/README.md](workspaces/README.md) |
 | `docs/` | Journal, host setup notes, threat model. | [docs/README.md](docs/README.md) |
 | `tests/` | Unit tests for the `lab` launcher script. | [Testing section above](#testing) |
+| `run-tests.sh` | Helper to run Bats tests inside the agent container. | [Testing section above](#testing) |
 | `my-agent/` | *Planned.* Build your own agent loop from scratch. | [my-agent/README.md](my-agent/README.md) |
 | `evals/` | *Planned.* Pass/fail tasks to compare models and prompts. | [evals/README.md](evals/README.md) |
 | `red-team/` | *Planned.* Attacks against your own sandbox. | [red-team/README.md](red-team/README.md) |
