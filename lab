@@ -6,11 +6,18 @@ LAB_UID="$(id -u)"
 LAB_GID="$(id -g)"
 WORKSPACE=""
 MOUNT_MODE="rw"  # Default mount mode
+WORKFLOW=""      # Default workflow (default, tdd, regression)
+VERBOSE=0        # Enable verbose logging
 
 die() { echo "REFUSED: $*" >&2; exit 1; }
 
 dc() {
-  sudo env "WORKSPACE=${WORKSPACE:-$LAB_DIR}" "LAB_UID=$LAB_UID" "LAB_GID=$LAB_GID" "MOUNT_MODE=$MOUNT_MODE" \
+  sudo env "WORKSPACE=${WORKSPACE:-$LAB_DIR}" \
+           "LAB_UID=$LAB_UID" \
+           "LAB_GID=$LAB_GID" \
+           "MOUNT_MODE=$MOUNT_MODE" \
+           "LITTLE_MESTER_WORKFLOW=${WORKFLOW:-default}" \
+           "LITTLE_MESTER_VERBOSE=$VERBOSE" \
     docker compose -f "$LAB_DIR/compose.yaml" --project-directory "$LAB_DIR" "$@"
 }
 
@@ -57,6 +64,8 @@ confirm() {
   echo "--------------------------------------------------------"
   echo " Mounting path : $WORKSPACE"
   echo " Mount mode    : READ-${MOUNT_MODE^^}"
+  echo " Workflow      : ${WORKFLOW:-default}"
+  echo " Verbose       : $VERBOSE"
   echo "--------------------------------------------------------"
   read -r -p "Continue? [y/N] " a
   [[ "$a" == "y" || "$a" == "Y" ]] || exit 1
@@ -72,14 +81,16 @@ warn_hooks() {
   fi
 }
 
-# Parse mode flags (--ro / --rw) if provided first
-if [[ "${1:-}" == "--ro" ]]; then
-  MOUNT_MODE="ro"
-  shift
-elif [[ "${1:-}" == "--rw" ]]; then
-  MOUNT_MODE="rw"
-  shift
-fi
+# Parse mode flags (--ro / --rw) and workflow/verbose flags if provided first
+while [[ $# -gt 0 ]]; do
+  case "${1:-}" in
+    --ro) MOUNT_MODE="ro"; shift ;;
+    --rw) MOUNT_MODE="rw"; shift ;;
+    --workflow) WORKFLOW="${2:-default}"; shift 2 ;;
+    --verbose) VERBOSE=1; shift ;;
+    *) break ;;
+  esac
+done
 
 case "${1:-}" in
   setup)
@@ -110,8 +121,8 @@ case "${1:-}" in
     ;;
   ""|-h|--help)
     echo "Usage:"
-    echo "  ./lab [--ro|--rw] <path-to-workspace> [aider args]"
-    echo "  ./lab [--ro|--rw] shell <path-to-workspace>"
+    echo "  ./lab [--ro|--rw] [--workflow <name>] [--verbose] <path-to-workspace> [aider args]"
+    echo "  ./lab [--ro|--rw] [--workflow <name>] [--verbose] shell <path-to-workspace>"
     echo "  ./lab exec <path-to-workspace> '<command>'"
     echo "  ./lab setup"
     echo "  ./lab stop"
