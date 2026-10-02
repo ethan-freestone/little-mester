@@ -454,7 +454,9 @@ services:
     environment:
       HOME: /home/agent
       OLLAMA_API_BASE: http://ollama:11434
-      AIDER_MODEL: ollama_chat/qwen2.5-coder:7b
+      # Swap out AIDER models
+      AIDER_MODEL: ollama_chat/fredrezones55/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q4
+      #AIDER_MODEL: ollama_chat/qwen2.5-coder:7b
       AIDER_CHECK_UPDATE: "false"
       AIDER_ANALYTICS_DISABLE: "true"
       GIT_AUTHOR_NAME: little-mester-agent
@@ -494,7 +496,7 @@ MOUNT_MODE="rw"  # Default mount mode
 die() { echo "REFUSED: $*" >&2; exit 1; }
 
 dc() {
-  sudo env "WORKSPACE=$WORKSPACE" "LAB_UID=$LAB_UID" "LAB_GID=$LAB_GID" "MOUNT_MODE=$MOUNT_MODE" \
+  sudo env "WORKSPACE=${WORKSPACE:-$LAB_DIR}" "LAB_UID=$LAB_UID" "LAB_GID=$LAB_GID" "MOUNT_MODE=$MOUNT_MODE" \
     docker compose -f "$LAB_DIR/compose.yaml" --project-directory "$LAB_DIR" "$@"
 }
 
@@ -567,7 +569,16 @@ fi
 
 case "${1:-}" in
   setup)
-    echo "Run setup routine..."
+    command -v pacman >/dev/null || die "automated setup is Arch/CachyOS only; see docs/01-host-setup.md"
+    nvidia-smi -L || die "NVIDIA driver not working on host (fix this first)"
+    sudo pacman -S --needed docker docker-compose docker-buildx nvidia-container-toolkit
+    sudo systemctl enable --now docker
+    sudo nvidia-ctk runtime configure --runtime=docker
+    sudo systemctl restart docker
+    sudo docker run --rm --gpus all ubuntu:24.04 nvidia-smi -L
+    dc build agent
+    dc --profile setup run --rm ollama-pull
+    echo "Setup complete. Next: ./verify-sandbox.sh, then ./lab <workspace>"
     ;;
   stop)
     dc down
