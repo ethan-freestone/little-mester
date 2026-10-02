@@ -55,7 +55,7 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     tmpfs:
-      - /tmp
+      - /tmp:exec,mode=1777,size=512m
       - /home/agent:uid=${LAB_UID:-1000},gid=${LAB_GID:-1000},mode=0700
     mem_limit: 4g
     pids_limit: 512
