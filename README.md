@@ -73,6 +73,68 @@ Three ideas to hold onto:
 
 ---
 
+## Comprehensive Usage Guide
+
+This section provides a deep dive into managing your sandbox, models, and the agent workflow.
+
+### 1. Workspace Management
+The `lab` script enforces strict path rules to ensure security.
+
+*   **Valid Paths**: Must be an absolute path (or relative to current dir) pointing to a directory you own.
+*   **Invalid Paths**: `/`, `$HOME`, anything overlapping `~/.ssh`, `~/.config`, or the `little-mester` repo itself.
+*   **Multi-Repo Workspaces**: You can point `./lab` at a parent folder containing multiple git repos. The agent will see all files in that tree.
+
+**Tip**: Create a dedicated folder for your experiments:
+```bash
+mkdir -p workspaces/my-experiment
+cd workspaces/my-experiment
+git init # Initialize your project here
+```
+
+### 2. Model Management (Adding & Switching)
+Models are managed via `models.txt` and the `ollama` service.
+
+#### Adding a Model
+1.  Open `models.txt`.
+2.  Add the model name (e.g., `llama3.2:latest`, `mistral`).
+3.  Run `./lab setup`. This triggers the `ollama-pull` container to download the new model over the internet.
+
+#### Switching Models
+By default, Ollama uses the first model listed in `models.txt` or the one you last ran. To switch:
+1.  Ensure the target model is downloaded (see above).
+2.  When starting a session, you can specify the model if your version of Aider supports it, or simply rely on Ollama's default behavior.
+3.  **VRAM Check**: If the agent stalls or falls back to CPU, check `nvidia-smi`. If VRAM is full, switch to a smaller quantization (e.g., `q4_K_M`) or a smaller model (e.g., `phi3` instead of `llama3`).
+
+#### Monitoring Models
+*   **List Models**: Run `docker exec ollama ollama list` inside the container.
+*   **Check VRAM**: On your host, run `nvidia-smi`. Look for the `ollama` process. If it's using CPU (high memory usage in RAM instead of VRAM), your model is too large for your GPU.
+
+### 3. Monitoring the Agent (`little-mester`)
+Since the agent runs inside a container, you need to monitor it from the host.
+
+*   **Container Logs**: View the agent's output and errors:
+    ```bash
+    docker logs -f little-mester-agent-1
+    ```
+*   **Resource Usage**: Monitor CPU/RAM of the agent container:
+    ```bash
+    docker stats little-mester-agent-1
+    ```
+*   **Interactive Shell**: If the agent hangs or you need to debug file permissions:
+    ```bash
+    ./lab shell workspaces/my-experiment
+    # You are now inside the container as a non-root user
+    ls -la /workspace
+    exit
+    ```
+
+### 4. Agentic Workflow Tips
+*   **Context Window**: The model has a limited context window. If your workspace is huge, the agent might forget earlier instructions. Use `git add` to stage specific files you want it to focus on.
+*   **Git Hooks**: The agent writes code that runs on your host if you execute hooks (like `Makefile` or `.envrc`). **Always review** these before running them.
+*   **Iterative Prompts**: Break complex tasks into small steps. "Refactor the login module" is better than "Fix the app".
+
+---
+
 ## Quick start (new machine)
 
 Requirements: Arch/CachyOS (other distros: see [docs/01-host-setup.md](docs/01-host-setup.md)),
@@ -110,7 +172,7 @@ The launcher refuses `/`, `$HOME`, anything you don't own, anything overlapping
 
 | Path | What it is | Read this |
 |---|---|---|
-| `lab` | Launcher script. Validates the workspace path, then runs compose. | this file |
+| `lab` | Launcher script. Validates the workspace path, then runs compose. | [docs/usage-guide.md](docs/usage-guide.md) |
 | `compose.yaml` | Defines the services, networks, volumes and hardening flags. | [agent/README.md](agent/README.md) |
 | `models.txt` | List of models to download during setup. | [ollama/README.md](ollama/README.md) |
 | `verify-sandbox.sh` | Regression tests for the sandbox properties. | [docs/threat-model.md](docs/threat-model.md) |
