@@ -1,0 +1,213 @@
+#!/usr/bin/env sh
+# vim: set ft=sh:
+# ticket-lifecycle — manage tickets across their lifecycle states.
+# Commands: list, restore, cleanup, mark-archived, mark-discarded
+
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib/common.sh"
+discover_repo_root "$SCRIPT_DIR"
+
+usage() {
+    cat <<EOP
+Usage: $(basename "$0") <command> [options]
+
+Lifecycle commands:
+  list              List all tickets grouped by state (active/archived/discarded)
+  restore <ticket>  Restore an archived or discarded ticket back to active
+  cleanup           Remove stale/old ticket files (with confirmation prompt)
+  mark-archived <ticket>  Tag a ticket as archived
+  mark-discarded <ticket> Tag a ticket as discarded
+
+Options:
+  --dry-run       Show what would happen without making changes
+  -f, --force     Skip confirmation prompts
+  -h, --help      Show this help and exit
+EOP
+    exit 0
+}
+
+state_of() {
+    _path="$1"
+    case "$(basename "$_path")" in
+        ticket-discarded*) echo "discarded";;
+        *"[Aa]rchive"*|*-archived*) echo "archived";;
+        *) echo "active";;
+    esac
+}
+
+confirm_prompt() {
+    if [ "${FORCE:-no}" = "yes" ]; then
+        return 0
+    fi
+    printf '%s' "$1 [Y/n]? " >&2
+    resp=""
+    read -r resp 2>/dev/null || resp="y"
+    case "$resp" in
+        n|N|no|No) return 1;;
+        *) return 0;;
+    esac
+}
+
+find_ticket_by_num() {
+    _ftn_target="$1"
+    if [ -d "$TICKETS_DIR" ]; then
+        for _ftn_f in "$TICKETS_DIR"/ticket-[0-9]*.md; do
+            [ -f "$_ftn_f" ] || continue
+            _ftn_base="$(basename "$_ftn_f")"
+            _ftn_num=$(head -n1 "$_ftn_f" 2>/dev/null | sed -n 's/^# *Ticket *\([0-9][0-9]*\).*/\1/p')
+            _ftn_pad=$(printf '%03d' "$_ftn_target" 2>/dev/null || true)
+            case "$_ftn_base" in
+                ticket-${_ftn_pad}-*) echo "$_ftn_f"; return 0;;
+            esac
+        done
+    fi
+    return 1
+}
+
+cmd_list() {
+    _c_count=0
+    _a_count=0
+    _d_count=0
+    echo ""
+    info "=== Ticket Lifecycle ==="
+    echo ""
+    if [ -d "$TICKETS_DIR" ]; then
+        for f in "$TICKETS_DIR"/ticket-[0-9]*.md; do
+            [ -f "$f" ] || continue
+            case "$(basename "$f")" in
+                ticket-discarded*) _c_count=$((_d_count + 1)); echo "[DISCARDED] $(basename "$f")";;
+                *"[Aa]rchive"*|*-archived*) _a_count=$((_a_count + 1)); echo "[ARCHIVED] $(basename "$f")";;
+                *)
+                    _c_count=$((_c_count + 1))
+                    _num=$(head -n1 "$f" | sed -n 's/^# *Ticket *\([0-9][0-9]*\).*/\1/p')
+                    echo "[ACTIVE] $(basename "$f") — $_num";;
+            esac
+        done
+    fi
+    info "Totals: ${_c_count} active, ${_a_count} archived, ${_d_count} discarded"
+    echo ""
+}
+
+cmd_restore() {
+    _cr_target="$1"
+    [ -z "$_cr_target" ] && die "usage: $(basename "$0") restore <ticket-number>"
+    _cr_file=$(find_ticket_by_num "$_cr_target") || true
+    [ -z "$_cr_file" ] && die "Ticket '$_cr_target' not found in $TICKETS_DIR"
+    _cr_state=$(state_of "$_cr_file")
+    if [ "$_cr_state" = "active" ]; then
+        info "Already active: $(basename "$_cr_file")"; exit 0
+    fi
+    _cr_base="$(basename "$_cr_file")"
+    case "$_cr_state" in
+        discarded) _cr_new=$(printf '%s' "$_cr_base" | sed 's/^ticket-discarded-*/ticket/');;
+        archived) _cr_new=$(printf '%s' "$_cr_base" | sed 's/-[Aa]rchived*//');;
+        *) die "Unknown state: $_cr_state";;
+    esac
+    _cr_newpath="$TICKETS_DIR/$_cr_new"
+    if [ "$DRY_RUN" = "yes" ]; then
+        printf 'Would move %s -> %s\n' "$_cr_base" "$_cr_new"
+        exit 0
+    fi
+    confirm_prompt "Restore $_cr_base?" || die "Cancelled."
+    if [ -f "$_cr_newpath" ]; then fail_msg "Exists: $_cr_new"; exit 1; fi
+    mv "$_cr_file" "$_cr_newpath"
+    info "Restored $_cr_base -> $_cr_new"
+}
+
+cmd_cleanup() {
+    echo ""
+    info "=== Ticket Cleanup ==="
+    echo ""
+    if [ -d "$TICKETS_DIR" ]; then
+        for f in "$TICKETS_DIR"/ticket-[0-9]*.md; do
+            [ -f "$f" ] || continue
+            _cc_base="$(basename "$f")"
+            case "$_cc_base" in
+                ticket-discarded*) _cc_type="Discarded";;
+                *"[Aa]rchive"*|*-archived*) _cc_type="Archived";;
+                *) continue;;
+            esac
+            info "  $_cc_type: $_cc_base"
+            if confirm_prompt "    Remove?"; then
+                if [ "$DRY_RUN" = "yes" ]; then
+                    printf 'Would remove %s\n' "$_cc_base"
+                else
+                    rm -f "$f"
+                    info "  Removed $_cc_base"
+                fi
+            fi
+        done
+    fi
+    info "Cleanup complete."
+    echo ""
+}
+
+cmd_mark_archived() {
+    _ma_target="$1"
+    [ -z "$_ma_target" ] && die "usage: $(basename "$0") mark-archived <ticket-number>"
+    _ma_file=$(find_ticket_by_num "$_ma_target") || true
+    [ -z "$_ma_file" ] && die "Ticket '$_ma_target' not found in $TICKETS_DIR"
+    _ma_state=$(state_of "$_ma_file")
+    if [ "$_ma_state" = "archived" ]; then info "Already archived"; exit 0; fi
+    [ "$_ma_state" = "discarded" ] && die "Cannot archive discarded ticket. Restore first."
+    _ma_new="$TICKETS_DIR/$(basename "$_ma_file").archived"
+    if [ "$DRY_RUN" = "yes" ]; then printf 'Would archive %s\n' "$(basename "$_ma_file")"; exit 0; fi
+    confirm_prompt "Archive $(basename "$_ma_file")?" || die "Cancelled."
+    if [ -f "$_ma_new" ]; then fail_msg "Exists: $_ma_new"; exit 1; fi
+    mv "$_ma_file" "$_ma_new"
+    info "Archived $(basename "$_ma_file")"
+}
+
+cmd_mark_discarded() {
+    _md_target="$1"
+    [ -z "$_md_target" ] && die "usage: $(basename "$0") mark-discarded <ticket-number>"
+    _md_file=$(find_ticket_by_num "$_md_target") || true
+    [ -z "$_md_file" ] && die "Ticket '$_md_target' not found in $TICKETS_DIR"
+    _md_state=$(state_of "$_md_file")
+    if [ "$_md_state" = "discarded" ]; then info "Already discarded"; exit 0; fi
+    [ "$_md_state" = "archived" ] && die "Cannot discard archived ticket. Restore first."
+    _md_newbase="ticket-discarded-$(printf '%s' "$(basename "$_md_file")" | sed 's/^ticket-//')"
+    if [ "$DRY_RUN" = "yes" ]; then printf 'Would discard %s -> %s\n' "$(basename "$_md_file")" "$_md_newbase"; exit 0; fi
+    confirm_prompt "Discard $(basename "$_md_file")? NOT reversible." || die "Cancelled."
+    _md_newpath="$TICKETS_DIR/$_md_newbase"
+    if [ -f "$_md_newpath" ]; then fail_msg "Exists: $_md_newbase"; exit 1; fi
+    mv "$_md_file" "$_md_newpath"
+    info "Discarded $(basename "$_md_file") -> $_md_newbase"
+}
+
+# ── main ──────────────────────────────────────────────────────
+
+DRY_RUN=no
+FORCE=no
+COMMAND=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run) DRY_RUN=yes; shift;;
+        -f|--force) FORCE=yes; shift;;
+        -h|--help|help) usage;;
+        list|restore|cleanup|mark-archived|mark-discarded)
+            if [ -z "$COMMAND" ]; then
+                COMMAND="$1"; shift
+            else
+                case "$COMMAND" in
+                    restore) cmd_restore "$1"; exit $?;;
+                    mark-archived) cmd_mark_archived "$1"; exit $?;;
+                    mark-discarded) cmd_mark_discarded "$1"; exit $?;;
+                    *) die "No subcommand for '$COMMAND'";;
+                esac
+                break
+            fi;;
+        *) echo "Unknown: $1" >&2; exit 2;;
+    esac
+done
+
+[ -z "$COMMAND" ] && die "No command given. Run --help for usage."
+
+case "$COMMAND" in
+    list) cmd_list;;
+    cleanup) cmd_cleanup;;
+    restore|mark-archived|mark-discarded) die "Command '$COMMAND' requires a ticket number";;
+    *) die "Unknown lifecycle command: $COMMAND";;
+esac
