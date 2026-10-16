@@ -56,7 +56,8 @@ find_ticket_by_num() {
             [ -f "$_ftn_f" ] || continue
             _ftn_base="$(basename "$_ftn_f")"
             _ftn_num=$(head -n1 "$_ftn_f" 2>/dev/null | sed -n 's/^# *Ticket *\([0-9][0-9]*\).*/\1/p')
-            _ftn_pad=$(printf '%03d' "$_ftn_target" 2>/dev/null || true)
+            _ftn_num_strip=$(printf '%s' "$_ftn_target" | sed 's/^ticket-//i; s/.*[Tt]icket //i')
+            _ftn_pad=$(printf '%03d' "$_ftn_num_strip" 2>/dev/null || true)
             case "$_ftn_base" in
                 ticket-${_ftn_pad}-*) echo "$_ftn_f"; return 0;;
             esac
@@ -199,7 +200,17 @@ while [ $# -gt 0 ]; do
                 esac
                 break
             fi;;
-        *) echo "Unknown: $1" >&2; exit 2;;
+        *)
+            if [ -n "$COMMAND" ]; then
+                case "$COMMAND" in
+                    restore) cmd_restore "$1"; exit $?;;
+                    mark-archived) cmd_mark_archived "$1"; exit $?;;
+                    mark-discarded) cmd_mark_discarded "$1"; exit $?;;
+                esac
+            else
+                echo "Unknown: $1" >&2; exit 2
+            fi
+            ;;
     esac
 done
 
