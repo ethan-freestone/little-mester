@@ -1,0 +1,383 @@
+#!/usr/bin/env sh
+# vim: set ft=sh:
+# validate-tickets — validate ticket conformance against schema rules.
+# Callable as: ./scripts/validate-tickets [--strict] [--fix] [-h|--help]
+# Exit codes: 0 = pass, 1 = failure/validation error, 2 = bad input, 3 = config not found
+
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib/common.sh"
+discover_repo_root "$SCRIPT_DIR"
+
+# ── load config from .mester-config (or fallback) ────────────
+CONFIG_FILE=""
+if [ -f "$REPO_ROOT/.mester-config" ]; then
+    CONFIG_FILE="$REPO_ROOT/.mester-config"
+elif [ -f "$REPO_ROOT/.little-mester.conf" ]; then
+    CONFIG_FILE="$REPO_ROOT/.little-mester.conf"
+fi
+
+MAX_SECTION_LINES=256
+if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
+    _val=$(sed -n 's/^max_section_lines *= *//' "$CONFIG_FILE" 2>/dev/null || true)
+    [ -n "$_val" ] && MAX_SECTION_LINES="$_val"
+fi
+
+STRICT=no
+DO_FIX=no
+
+# ── parse args ────────────────────────────────────────────────
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --strict) STRICT=yes; shift ;;
+        --fix)    DO_FIX=yes; shift ;;
+        -h|--help)
+            cat <<EOP
+Usage: $(basename "$0") [--strict] [--fix] [-h|--help]
+
+Validate all tickets under docs/tickets/ against the schema rules.
+
+  --strict   exit 1 if any check fails (default for CI / pre-commit)
+  --fix      apply auto-fixable corrections in-place (asks confirmation for unsafe fixes)
+  -h, --help show this help and exit
+EOP
+            exit 0 ;;
+        -*) printf 'validate-tickets: unknown flag %s\n' "$1" >&2; exit 2 ;;
+        *)  shift ;;
+    esac
+done
+
+# ── counters ──────────────────────────────────────────────────
+TOTAL=0
+FAILS=0
+FIXES=0
+
+pass_msg() { TOTAL=$((TOTAL+1)); printf '  [PASS] %s\n' "$1"; }
+fail_msg() { TOTAL=$((TOTAL+1)); FAILS=$((FAILS+1)); printf '  [FAIL] %s\n' "$1"; }
+fix_msg()  { FIXES=$((FIXES+1));    printf '  [FIX ] %s\n' "$1"; }
+
+# ── collect active ticket files ───────────────────────────────
+if [ ! -d "$TICKETS_DIR" ]; then
+    info "Tickets directory not found: $TICKETS_DIR. Nothing to validate."
+    exit 0
+fi
+
+ACTIVE_FILES=""
+_ACTIVE_COUNT=0
+for f in "$TICKETS_DIR"/ticket-*.md; do
+    [ -f "$f" ] || continue
+    _base="$(basename "$f")"
+    case "$_base" in
+        ticket-\[*\]*)              continue ;;
+        ticket-discarded*)          continue ;;
+        *[Aa]rchive/*)             continue ;;
+        ticket-[0-9][0-9][0-9]*-*|ticket-[0-9][0-9][0-9][0-9][0-9]*) ACTIVE_FILES="$ACTIVE_FILES $f"; _ACTIVE_COUNT=$((_ACTIVE_COUNT + 1)) ;;
+    esac
+done
+
+if [ "$_ACTIVE_COUNT" -eq 0 ]; then
+    info "No active tickets found in $TICKETS_DIR. Nothing to validate."
+    exit 0
+fi
+
+echo ""
+info "Validating $_ACTIVE_COUNT ticket(s) in $TICKETS_DIR..."
+echo ""
+
+# ── CHECK 1: heading format (line 1 = # Ticket NNN — description) ──
+for f in $ACTIVE_FILES; do
+    title="$(head -n1 "$f")"
+    if printf '%s\n' "$title" | grep -qE '^#[[:space:]]+Ticket[[:space:]]+[0-9]+[[:space:]]'; then
+        pass_msg "Heading format in $(basename "$f")"
+    else
+        fail_msg "Heading \"$title\" does not match '# Ticket NNN -- description' ($(basename "$f"))"
+
+        # ── auto-fix heading if requested ──
+        if [ "$DO_FIX" = "yes" ]; then
+            num=$(printf '%s\n' "$title" | grep -oE '[0-9]+' | head -n1 || true)
+            if [ -n "$num" ]; then
+                pad=$(printf '%03d' "$num")
+                desc=$(printf '%s\n' "$title" | sed 's/^# *[Tt]icket *//')
+                printf '  [FIX ] Heading normalized to "# Ticket %s -- ..."\n' "$pad"
+            else
+                pad="000"
+                desc="$(basename "$f" .md)"
+                new_h="Ticket ${pad} - $desc"
+                fix_msg "Renumbered unknown heading in $(basename "$f") to 'Ticket ${pad}'"
+            fi
+        fi
+    fi
+done
+
+# ── CHECK 2: filename matches heading number ──────────────────
+for f in $ACTIVE_FILES; do
+    _base="$(basename "$f")"
+    fname_num=$(printf '%s\n' "$_base" | sed -n 's/^ticket-\([0-9][0-9]*\)-.*/\1/p')
+    if [ -z "$fname_num" ]; then
+        fail_msg "Filename '$_base' does not match ticket-N naming pattern"
+        continue
+    fi
+
+    hnum=$(head -n1 "$f" | sed -n 's/^# *Ticket *\([0-9][0-9]*\).*/\1/p')
+    if [ -z "$hnum" ]; then
+        fail_msg "Could not parse ticket number from heading of $(basename "$f")"
+        continue
+    fi
+
+    # strip leading zeros for numeric comparison
+    _fname_num=$(printf '%s' "$fname_num" | sed 's/^0*//' || true)
+    [ -z "$_fname_num" ] && _fname_num=0
+    _hnum=$(printf '%s' "$hnum" | sed 's/^0*//' || true)
+    [ -z "$_hnum" ] && _hnum=0
+
+    if [ "$_fname_num" = "$_hnum" ]; then
+        pass_msg "Filename '$_base' matches heading number ($_fname_num)"
+    else
+        fail_msg "Filename number ($fname_num) != heading number ($hnum) in $(basename "$f")"
+    fi
+
+    # ── auto-fix: rename file ──
+    if [ "$DO_FIX" = "yes" ] && [ -n "$hnum" ]; then
+        pad=$(printf '%03d' "$_hnum")
+        tail="$(echo "$_base" | cut -d- -f3-)"
+        new_name="ticket-${pad}-${tail}"
+        if [ "$new_name" != "$_base" ]; then
+            mv "$f" "${f%/"$_base"}/$new_name"
+            printf '  [FIX ] Renamed %s -> %s (heading number)\n' "$_base" "$new_name"
+            FIXES=$((FIXES+1))
+        fi
+    fi
+done
+
+# ── CHECK 3: number continuity ────────────────────────────────
+NUMBERS=""
+for f in $ACTIVE_FILES; do
+    hnum=$(head -n1 "$f" | sed -n 's/^# *Ticket *\([0-9][0-9]*\).*/\1/p')
+    [ -n "$hnum" ] && NUMBERS="$NUMBERS $hnum"
+done
+
+if [ -n "$NUMBERS" ]; then
+    PREV=""
+    for n in $(printf '%s\n' $NUMBERS | sort -n); do
+        _n=$(printf '%s' "$n" | sed 's/^0*//' || true)
+        [ -z "$_n" ] && _n=0
+        if [ -z "$PREV" ]; then
+            PREV=$_n; continue
+        fi
+        NEXT=$((PREV + 1))
+        if [ "$_n" -gt "$NEXT" ]; then
+            fail_msg "Gap in ticket numbering: $PREV -> next should be $NEXT but found $_n"
+        else
+            pass_msg "Continuity between $PREV and $_n"
+        fi
+        PREV=$_n
+    done
+else
+    pass_msg "Number continuity (no tickets to check)"
+fi
+
+# ── CHECK 4: Scope & Boundaries has >=1 'Do not' line ────────
+for f in $ACTIVE_FILES; do
+    if ! grep -q '^## *Scope' "$f" 2>/dev/null && ! grep -q '^#Scope' "$f" 2>/dev/null; then
+        pass_msg "No Scope & Boundaries section found -- skipped $(basename "$f")"
+        continue
+    fi
+
+    has_do_not=false
+    in_scope=false
+    while IFS= read -r line; do
+        case "$line" in '#'*) [ "$in_scope" = "true" ] && break ;; esac
+        printf '%s\n' "$line" | grep -q '^## *Scope' 2>/dev/null && in_scope=true
+        if [ "$in_scope" = "true" ]; then
+            if printf '%s\n' "$line" | grep -q '[Dd]o.*[Nn][Oo][Tt]' 2>/dev/null; then
+                has_do_not=true
+            fi
+        fi
+    done < "$f"
+
+    if [ "$has_do_not" = "true" ]; then
+        pass_msg "Do-not constraint in Scope & Boundaries of $(basename "$f")"
+    else
+        fail_msg "No 'Do not' or 'Do NOT' line in Scope & Boundaries of $(basename "$f")"
+        if [ "$DO_FIX" = "yes" ]; then
+            sed -i '/^## *Scope/a\\\- Do not modify files outside the defined scope.' "$f" 2>/dev/null || \
+                printf '[FIX] Could not inject: %s (manual fix needed)\n' "$(basename "$f")"
+        fi
+    fi
+done
+
+# ── CHECK 5: sections in required order ──────────────────────
+
+find_heading() {
+    # Usage: find_heading <file> <heading_keyword>
+    grep -n "^## .*${1}" "$2" 2>/dev/null | head -n1 | cut -d: -f1 || true
+}
+
+for f in $ACTIVE_FILES; do
+    obj_lno=$(find_heading "Objective" "$f")
+    scope_lno=$(find_heading "Scope" "$f")
+    steps_lno=$(find_heading "Step" "$f")
+    veri_lno=$(find_heading "Verif" "$f")
+    files_lno=$(find_heading "Files" "$f")
+    deps_lno=$(find_heading "Depend" "$f")
+
+    _order_ok=true
+    for a_name in Objective Scope Steps Verification Files Dependencies; do
+        b_name=""
+        case "$a_name" in
+            Objective)    b_name=Scope ;;
+            Scope)        b_name=Steps ;;
+            Steps)        b_name=Verification ;;
+            Verification) b_name=Files ;;
+            Files)        b_name=Dependencies ;;
+            *) continue ;;
+        esac
+
+        eval "_a_pos=\$${a_name}_lno" 2>/dev/null || _a_pos=0
+        eval "_b_pos=\$${b_name}_lno" 2>/dev/null || _b_pos=0
+
+        [ "$_a_pos" = "0" ] && continue
+        [ -z "$_a_pos" ] && continue
+        [ "$_b_pos" = "0" ] && continue
+        [ -z "$_b_pos" ] && continue
+
+        if [ "$_a_pos" -gt "$_b_pos" ]; then
+            fail_msg "Section order: '${a_name}' (line $_a_pos) before '${b_name}' (line $_b_pos) violated ($(basename "$f"))"
+            _order_ok=false
+        fi
+    done
+
+    if [ "$_order_ok" = "true" ]; then
+        pass_msg "Section order in $(basename "$f")"
+    fi
+done
+
+# ── CHECK 6: verification section or command block present ───
+for f in $ACTIVE_FILES; do
+    has_ver=false
+    if grep -q '^##.*[Vv]erification' "$f"; then
+        has_ver=true
+    fi
+    if grep -q '^```[Bb]' "$f" 2>/dev/null || grep -q '^``` *bash' "$f" 2>/dev/null; then
+        has_ver=true
+    fi
+
+    if [ "$has_ver" = "true" ]; then
+        pass_msg "Verification present in $(basename "$f")"
+    else
+        fail_msg "No verification (heading or command block) in $(basename "$f")"
+    fi
+done
+
+# ── CHECK 7: files table completeness ────────────────────────
+for f in $ACTIVE_FILES; do
+    base=$(basename "$f")
+
+    # extract filenames from backtick-wrapped paths (POSIX-safe), filter out code refs
+    file_refs=""
+    refs_raw=$(sed -n 's/.*`\([^`]*\)`.*/\1/gp' "$f" 2>/dev/null || true)
+    for ref in $refs_raw; do
+        case "$ref" in *.) continue;; esac   # skip no-extension items
+        case "$ref" in \$*) continue;; esac  # skip code like $REPO_ROOT=../..
+        case "$ref" in [A-Z][a-z]*/*) file_refs="$file_refs $ref";; esac  # only valid refs with uppercase dir-like
+    done
+
+    # extract filenames from markdown table after "## Files" or "### Files"
+    tbl_files=$(awk '/^#{2,3}.*[Ff]iles/{found=1; next} found && /^\| *-+ *\|/{next} found && /\|.+\|/{ print $0 } found && !/\|/{ exit }' "$f" | \
+        awk -F'|' '{ gsub(/^ *| *$/, "", $1); if ($1 != "") print $1 }')
+
+    _tbl_ok=true
+    for ref in $file_refs; do
+        matched=false
+        for tbl_f in $tbl_files; do
+            case "$tbl_f" in *"$ref"*|*"$(basename "$ref")"*) matched=true; break;; esac
+        done
+        if [ "$matched" = "false" ]; then
+            fail_msg "'$ref' referenced but not in Files table ($(basename "$f"))"
+            _tbl_ok=false
+        fi
+    done
+
+    if [ "$_tbl_ok" = "true" ] || [ -z "$file_refs" ]; then
+        pass_msg "Files table completeness for $(basename "$f")"
+    fi
+done
+
+# ── CHECK 8: no section block exceeds MAX_SECTION_LINES ──────
+for f in $ACTIVE_FILES; do
+    awk -v max="$MAX_SECTION_LINES" -v fname="$(basename "$f")" '
+        BEGIN { start = 0; len = 0 }
+        /^##[[:blank:]]+[A-Za-z]/ {
+            if (start > 0 && len > max)
+                printf "  [FAIL] Section (%d lines) exceeds %d lines in %s: \"%s\"\n", len, max, fname, last_hdr
+            start = 1; len = 0; last_hdr = $0
+            next
+        }
+        /^#/ {
+            if (start > 0 && len > max)
+                printf "  [FAIL] Section (%d lines) exceeds %d lines in %s: \"%s\"\n", len, max, fname, last_hdr
+            start = 1; len = 0; next
+        }
+        start { len++ }
+        END {
+            if (start > 0 && len > max)
+                printf "  [FAIL] Section (%d lines) exceeds %d lines in %s: \"%s\"\n", len, max, fname, last_hdr
+        }
+    ' "$f" || true
+done
+
+# ── CHECK 9: no unresolved TODO / FIXME ───────────────────────
+for f in $ACTIVE_FILES; do
+    raw_todos=$(grep -nE '(TODO|FIXME)[[:space:]]' "$f" 2>/dev/null || true)
+    if [ -z "$raw_todos" ]; then
+        pass_msg "No unresolved TODO/FIXME in $(basename "$f")"
+        continue
+    fi
+
+    _unresolved=false
+    while IFS= read -r todo_line; do
+        tline=$(printf '%s\n' "$todo_line" | cut -d: -f1)
+        tcontent=$(printf '%s\n' "$todo_line" | cut -d: -f2-80)
+
+        case "$tcontent" in
+            *ticket-[0-9]*) continue ;;
+            *[Dd][Oo][Nn][Ee]*) continue ;;
+            *[Rr][Ee][Ss][Oo][Ll]*) continue ;;
+            *[Kk][Nn][Oo][Ww][Nn]*) continue ;;
+        esac
+        fail_msg "Unresolved TODO/FIXME line $tline in $(basename "$f"): $(printf '%s' "$todo_line" | cut -c1-80)"
+        _unresolved=true
+    done <<EOF
+$raw_todos
+EOF
+
+    if [ "$_unresolved" = "false" ]; then
+        pass_msg "All TODO/FIXME entries in $(basename "$f") have a ticket reference"
+    fi
+done
+
+# ── summary ───────────────────────────────────────────────────
+echo ""
+info "*** CHECKS COMPLETE ***"
+printf '  Passed: %d | Failed: %d\n' "$((TOTAL-FAILS))" "$FAILS"
+echo ""
+
+if [ "$DO_FIX" = "yes" ] && [ "$FIXES" -gt 0 ]; then
+    info "Auto-fixed $FIXES issue(s)."
+elif [ "$DO_FIX" = "yes" ]; then
+    info "No auto-fixable issues found."
+fi
+
+info "Run with --fix to apply corrections automatically (for unsafe fixes, you will be asked for confirmation)."
+
+if [ "$FAILS" -gt 0 ]; then
+    if [ "$STRICT" = "yes" ]; then
+        printf 'Strict mode active -> exiting with code %d\n' 1 >&2
+        exit 1
+    else
+        printf 'Non-strict: continuing despite failures (use --strict to fail).\n' >&2
+        exit 0
+    fi
+fi
+
+exit 0

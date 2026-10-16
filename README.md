@@ -243,6 +243,7 @@ Alternatively, run it manually from your host:
 | `tests/` | Unit tests for the `lab` launcher script. | [Testing section above](#testing) |
 | `run-tests.sh` | Helper to run Bats tests inside the agent container. | [Testing section above](#testing) |
 | `SECURITY.md` | **Security model, network isolation, and AI interaction boundaries.** | [Security & AI Interaction Boundaries](#security--ai-interaction-boundaries) |
+| `scripts/` | Automation tools — validate-tickets, ticket-lifecycle, commit-helper, sync-helper, ticket-new, check-syntax. | [scripts/README.md](scripts/README.md) |
 | `my-agent/` | *Planned.* Build your own agent loop from scratch. | [my-agent/README.md](my-agent/README.md) |
 | `evals/` | *Planned.* Pass/fail tasks to compare models and prompts. | [evals/README.md](evals/README.md) |
 | `red-team/` | *Planned.* Attacks against your own sandbox. | [red-team/README.md](red-team/README.md) |
