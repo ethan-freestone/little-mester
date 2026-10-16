@@ -113,6 +113,104 @@ Failure to create a valid ticket is treated as a refusal condition: little-meste
 
 ---
 
+## Ticket lifecycle
+
+Tickets move through a defined set of states — they never just "hang around" clogging context forever. Completed work gets documented properly elsewhere, then the ticket migrates up the chain into archival.
+
+### States
+
+| State | Marker | Validation | Visibility |
+|-------|--------|-----------|------------|
+| `active` | `NNN-name.md` (default) | Checked by validate-tickets | Daily context |
+| `merged` | `[MERGED] NNN-name.md` | Skipped validation | Visible, linked to merge commit |
+| `superseded` | `[SUPERS] NNN-name.md` | Skipped + notes why | Archived, one-line reference only |
+
+### Naming convention for non-active tickets
+
+Files in either `merged` or `supreserved` state get a bracket prefix:
+- Merged work: `[MERGED] NNN-description.md`
+- Superseded: `[SUPERS] NNN-description.md`
+
+The number still gets zero-padded. The merge commit hash (or PR URL) MUST appear as the first line of the `[MERGED]` ticket so it's always traceable.
+
+### Lifecycle transitions
+
+```
+active ──(work merged to main)──→ [MERGED]
+[Mergered] ──(older than 30 days)──→ move to `docs/tickets/archive/area/`
+[Superseded by NNN for reason.] ──→ [SUPERS] (one line, then archive after 7 days)
+```
+
+- **Merged**: When a ticket's work is merged to `main`, add `[MERGED] <commit-or-pr-hash>` prefix and mark it in-place. The validation script will ignore it going forward.
+- **Superseded**: If another ticket replaces this one entirely (e.g., changed scope, new approach), the original ticket gets marked `[SUPERS] NNN — reason` and validation stops immediately.
+
+### Archive structure
+
+Archived tickets are grouped under `docs/tickets/archive/area/<feature-area>/` so that dormant features can be easily reconstituted:
+```
+docs/tickets/
+├── 006-new-feature.md           ← active ticket in main directory
+├── [MERGED] 001-bats-inside-agent.md   ← merged, moved to archive after 30 days
+├── [SUPERS] 002-default-access.md      ← superseded, moved to archive after 7 days
+└── archive/
+    └── egress-area/             ← "area" group for a feature or work stream
+        ├── 001-bats-inside-agent.md   ← [MERGED] prefix was dropped in archive
+        ├── 002-default-access.md      ← [SUPERS] prefix also stripped there
+        └── 015-egress-refactor.md     ← archived while dormant, easily reactivated
+```
+
+#### Archive rules
+
+1. **When archiving**: Move `[MERGED]` tickets to archive after >30 days since merge date. Move `[SUPERS]` tickets after >7 days.
+2. **Area naming**: Each area is a feature- or work-stream-level grouping, named by the primary focus (e.g., `egress-area`, `testing-area`, `access-control`). The name must be chosen when the archive directory is first created and can be reused across different work streams even if they were initially planned differently.
+3. **Reactivation**: If a dormant feature in an area's backlog is reopened, all its archived tickets can be restored to the active directory:
+   - `scripts/lab-dev-work tickets restore --area egress-area` restores all from that area.
+   - Active ticket numbers get re-established (renumbered to fill gaps).
+4. **Historical queries**: `scripts/lab-dev-work tickets list --archived --area egress-area` lists what's archived under a specific area without cluttering active context.
+5. **Count continuity**: Only files matching `ticket-NNN-*` are counted for number-gaps validation. `[MERGED]`, `[SUPERS]`, and files in `archive/` are excluded from gap checks — the next active ticket gets assigned the natural continuation of that numbering (e.g., if last active is 014, next creates 015).
+
+### Merging a completed ticket
+
+When a feature's tickets are merged:
+1. Update each `[MERGED] <commit/PR>` line with merge reference.
+2. The `sync` command auto-tracks merge date for 30-day archival scheduling.
+3. Run `scripts/lab-dev-work tickets cleanup` to move eligible merged/superseded tickets into archive (respects area grouping).
+
+Run `cleanup` every sprint or before major releases to keep active context lean.
+
+---
+
+## Script architecture pattern
+
+All little-mester tooling follows a modular, single-responsibility design. Each script is callable independently as `scripts/<name> --flag value` regardless of context. No script reads another via subprocess — each is self-contained with its own arg parsing, validation, and output format.
+
+### Rules
+
+1. **One purpose per script.** Validation lives in `validate-tickets`. Lifecycle management (`list`, `restore`, `cleanup`) lives in `ticket-lifecycle`. Each tool does one thing well and can be called standalone by opencode or CI.
+2. **CLI convention:** Every script parses `--flag value` args (short `-f val` supported), outputs structured results to stdout, errors to stderr, and exits non-zero on failure. Exit codes: 0=success, 1=failure/validation error, 2=bad input, 3=config not found.
+3. **No shared state between scripts.** Each discovers its own working directory from `SCRIPT_DIR`. Scripts discover the repo root by walking up to find `.git/`, not by assuming `$REPO_ROOT=../..` (which breaks when called from different CWDs).
+4. **Common utilities** (shared logging/colors/die) live in `scripts/lib/common.sh` and are sourced via `source "$(dirname "$0")/lib/common.sh"` — but this is an *optional* optimization, not required. Simple scripts can just define their own helpers inline.
+5. **No orchestration shell.** There is no single "master" script that calls all others. Each tool is called directly by its user (opencode session, human operator, CI job). If composition is needed, the *caller* orchestrates, not a middle-layer script.
+
+### Script inventory (planned)
+
+| Script | Purpose | Called from |
+|--------|---------|-------------|
+| `validate-tickets` | Validate ticket conformance against schema rules | Opencode pre-commit, CI gate |
+| `ticket-lifecycle` | list/restore/cleanup tickets per lifecycle states | Manual cleanup, opencode workflow |
+| `commit-helper` | Wrap git commit with validation gate + ticket update | Opencode post-work flow |
+| `sync-helper` | Wrap PR open + validate-tickets pre-merge guard | Opencode sync phase |
+| `ticket-new` | Scaffold a new valid ticket file (number, header, sections) | Opencode self-ticket creation |
+
+### Draft / out-of-scope items
+
+These are planned but not numbered — they track ideas without polluting the active ticket sequence:
+
+- **CI workflow integration** — auto-detect `.github/workflows/` existence and scaffold a `validate-tickets.yml` gate. Out of scope for today, implement when someone explicitly requests CI setup.
+- **Ticket search** (`ticket-search`) — fuzzy find archived tickets by keyword. Useful but low priority until archival has accumulated enough entries to matter.
+
+---
+
 ## Enforcing enforcement of ticket standards
 
 There are TWO layers that validate each other:
