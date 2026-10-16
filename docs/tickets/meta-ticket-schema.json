@@ -1,85 +1,151 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/little-mester/ticket-schema",
-  "title": "ticket-conformance",
-  "description": "Validates that a ticket under docs/tickets/ follows all required conventions.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ticket-system/schema/ticket-000",
+  "title": "Ticket Schema - ticket-000-ticket-system",
+  "description": "Machine-readable validation rules from ticket-000-ticket-system.md for the ticket system.",
   "type": "object",
-  "required": ["heading", "objective", "scope_boundaries", "steps", "verification", "files"],
-
+  "required": ["ticket_number", "objective", "scope_boundaries", "steps", "verification", "files", "dependencies"],
   "properties": {
-    "heading": {
-      "description": "Line-1 heading: # Ticket NNN — description",
-      "type": "string",
-      "pattern": "^# Ticket (0[0-9]|[1-9][0-9]+) \u2014 .+$"
-    },
-
-    "number_padded": {
-      "description": "Zero-padded 3-digit ticket number",
-      "type": "string",
-      "pattern": "^\\d{3}$"
-    },
-
-    "objective_length_max": {
-      "description": "Objective section must be ≤ 1 sentence (≤ 200 chars)",
+    "ticket_number": {
       "type": "integer",
-      "maximum": 200
+      "minimum": 0,
+      "description": "Sequential ticket number matching # Ticket NNN heading"
     },
-
-    "has_do_not": {
-      "description": "Scope & Boundaries MUST contain at least one 'Do not' line",
-      "type": "boolean"
+    "title": {
+      "type": "string",
+      "pattern": "^[a-z][a-z-]*$",
+      "minLength": 3,
+      "maxLength": 64,
+      "description": "Lowercase kebab-case title derived from description in heading"
     },
-
-    "sections_ordered": {
-      "description": "Section headings appear in a required order",
+    "heading": {
+      "type": "string",
+      "pattern": "^# Ticket [0-9]+ -- .+",
+      "description": "Full first-line heading must match '# Ticket NNN — description'"
+    },
+    "filename": {
+      "type": "string",
+      "pattern": "^ticket-[0-9]{3,}-[a-z][a-z0-9-]+\\.md$",
+      "description": "Filename must be ticket-NNN-title.md with leading zeros and kebab-case"
+    },
+    "objective": {
       "type": "array",
+      "minItems": 1,
       "items": {
         "type": "string",
-        "enum": ["# Ticket", "## Objective", "## Scope & Boundaries", "### Part", "### Steps", "### Verification", "### Files", "## Dependencies"]
+        "minLength": 10,
+        "maxLength": 256
       },
-      "uniqueItems": true
+      "description": "One or more objective lines in present/future tense. No bullets."
     },
-
-    "max_section_lines": {
-      "description": "No section block may exceed this many lines",
+    "scope_boundaries": {
+      "type": "object",
+      "required": ["do_not"],
+      "properties": {
+        "sections": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "string",
+            "description": "Scoped file/directory entries"
+          }
+        },
+        "do_not": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "(?i)do\\s*(not|n?t)?",
+            "description": "At least one 'Do not' or 'Do NOT' constraint line"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "description": "Scope and Boundaries section with at least one 'Do not' constraint"
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "required": ["number", "description"],
+        "properties": {
+          "number": { "type": "integer", "minimum": 1 },
+          "description": {
+            "type": "string",
+            "minLength": 5,
+            "maxLength": 200
+          }
+        },
+        "description": "Each step must reference a specific file or command"
+      }
+    },
+    "verification": {
+      "type": "object",
+      "required": ["commands"],
+      "properties": {
+        "commands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 3
+          }
+        },
+        "expected_output_contains": {
+          "type": "array",
+          "description": "Expected output patterns to grep for"
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "role"],
+        "properties": {
+          "path": { "type": "string" },
+          "role": { "type": "string" }
+        }
+      },
+      "description": "Files table: all referenced paths must be listed, and vice versa"
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "List of dependencies (other tickets or external tools)"
+    },
+    "continuity": {
+      "type": "object",
+      "properties": {
+        "prev_number": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Previous ticket number for continuity check"
+        }
+      }
+    },
+    "sections_order": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "enum": ["objective", "scope", "steps", "verification", "files", "dependencies"]
+      },
+      "description": "Required section order: objective < scope < steps < verification < files < dependencies"
+    },
+    "unresolved_todos": {
       "type": "integer",
-      "maximum": 100
+      "enum": [0],
+      "description": "No unresolved TODO/FIXME entries allowed — must be exactly 0"
     },
-
-    "files_table_complete": {
-      "description": "Every file referenced in steps appears in the Files table",
-      "type": "boolean"
-    },
-
-    "no_unresolved_todos": {
-      "description": "Must not contain uncompleted TODO/FIXME unless tagged to a ticket",
-      "type": "boolean"
+    "max_section_lines": {
+      "type": "integer",
+      "default": 256,
+      "description": "Maximum lines per section block"
     }
   },
-
-  "validation_errors": [
-    "HEADING_FORMAT_REQUIRED: Line 1 must match '# Ticket NNN \u2014 description'",
-    "NUMBER_GAP: Ticket numbers must start at 0 or 1 with no gaps",
-    "FILENAME_MISMATCH: ticket-NNN-* filename number must match heading number",
-    "MISSING_SCOPE_DO_NOT: Scope & Boundaries must contain 'Do not' or 'Do NOT'",
-    "SECTIONS_OUT_OF_ORDER: Sections must appear in the documented order",
-    "MISSING_VERIFICATION: Every ticket must have a 'Verification' section or test command",
-    "FILES_INCOMPLETE: All referenced files must be listed in the Files table",
-    "SECTION_TOO_LONG: No section block exceeds 100 lines",
-    "UNRESOLVED_TODO: Found uncompleted TODO/FIXME without a ticket reference"
-  ],
-
-  "auto_fixes": [
-    {
-      "check": "HEADING_FORMAT_REQUIRED",
-      "fix_description": "Add en-dash separator and zero-pad number if needed",
-      "safe": true
-    },
-    {
-      "check": "SECTIONS_OUT_OF_ORDER",
-      "fix_description": "Move sections into documented order (scaffolding only)",
-      "safe": false,
-      "requires_confirmation": true
-    }
-  ]
+  "additionalProperties": false
 }
