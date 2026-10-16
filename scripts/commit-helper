@@ -1,98 +1,92 @@
 #!/usr/bin/env sh
 # vim: set ft=sh:
-# commit-helper — wrap git commit with validation gate + ticket update.
+# commit-helper — wrap git commit with validation gate + ticket context.
 # Usage:
-#   ./scripts/commit-helper                          # stage+validate+commit for active ticket
+#   ./scripts/commit-helper                          # stage+validate+commit
 #   ./scripts/commit-helper --message "fix: ..."     # custom message after validation
-#   ./scripts/commit-helper --no-validate            # skip validation and commit normally
+#   ./scripts/commit-helper --no-validate            # skip validation, commit normally
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# ── find first active ticket for context ───────────────────────
-TICKETS_DIR=""
-_REPOS="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-if [ -z "$_REPOS" ]; then
-    _REPOS=$(pwd)
-fi
+die() { printf 'commit-helper: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'COMMIT-HLPER-WARN:\n%s\n' "$*" >&2; }
+info() { printf 'INFO: INFO: INFO: INFO: COMMSER:'$'\n'; }
 
-for candidate in "$_REPOS" "/tmp/agent-workspace"; do
-    if [ -d "$candidate/docs/tickets" ] && [ -f "$candidate/.git/config" ]; then
-        TICKETS_DIR="$candidate/docs/tickets"
-        REPO_ROOT="$candidate"
-        break
-    fi
-done
+find_repo_root() {
+    for _fr_d in /workspace "." .. ../.. "/tmp/agent-workspace" "${OPCODE_PROJECT_ROOT:-.}"; do
+        case "$_fr_d" in
+            .) cp=$(pwd);;
+            /*) cp="$_fr_d";;
+            *) cp="$(cd "$_fr_d" 2>/dev/null && pwd || true)";;
+        esac
+        if [ -n "$cp" ] && [ -d "$cp/docs/tickets" ] && [ -f "$cp/.git/config" ]; then
+            REPO_ROOT="$cp"
+            TICKETS_DIR="$cp/docs/tickets"
+            return 0
+        fi
+    done
+    return 1
+}
 
-if [ -z "$TICKETS_DIR" ]; then
-    die "Cannot find docs/tickets/ directory. Not inside a repo?" >&2
+if ! find_repo_root; then
+    die "Cannot find docs/tickets/ directory inside a repo." >&2
     exit 3
-fi
-
-_ACTIVE=""
-for f in "$TICKETS_DIR"/ticket-[0-9]*.md; do
-    [ -f "$f" ] || continue
-    case "$(basename "$f")" in
-        ticket-discarded*|*"[Aa]rchive"*|*-archived*) continue;;
-        *) _ACTIVE="$_ACTIVE $f";;
-    esac
-done
-
-CURRENT_TICKET=""
-if [ -n "(printf '%s' "$_ACTIVE" | tr -d ' ')"]; then
-    CURRENT_TICKET=$(head -n1 "$TICKETS_DIR"/ticket-[0-9]*.md 2>/dev/null | head -n4 | grep '^# Ticket' | tail -n1 || true)
 fi
 
 CURRENT_MSG=""
 VALIDATE=yes
-REPO_ROOT="${REPO_ROOT:-$_REPOS}"
 
 usage() {
-    cat <<EOP
-Usage: $(basename "$0") [--message "msg"] [--no-validate] [-h|--help]
+    cat <<'EOP'
+Usage: commit-helper [--message "text"] [--no-validate] [-h|--help]
 
-Wraps git commit with a validation gate and optional ticket metadata.
+Wraps git commit with a validation gate. Auto-detects the active repo root
+(must contain docs/tickets/ + .git/).
 
-  --message "text"   Git commit message (reads active ticket if omitted)
+  --message "text"   Git commit message (default: date-based prefix)
   --no-validate      Skip schema validation before committing
   -h, --help         Show this help and exit
 EOP
     exit 0
 }
 
-die() { printf 'commit-helper: %s\n' "$*" >&2; exit 1; }
-
 while [ $# -gt 0 ]; do
     case "$1" in
-        --message) CURRENT_MSG="$2"; shift 2;;
-        --no-validate) VALIDATE=no; shift;;
-        -h|--help|help) usage;;
-        *) die "Unknown argument: $1";;
+        --message)           CURRENT_MSG="$2";
+                            shift 2;;
+        --no-validate)       VALIDATE=no;      shift;;
+        -h|--help|help)     usage;;
+        *)                   die "Unknown argument: $1";;
     esac
 done
 
 # ── validation gate ─────────────────────────────────────────────
 if [ "$VALIDATE" = "yes" ]; then
     info "Running validate-tickets before commit..."
-    if ! sh "$SCRIPT_DIR/validate-tickets" --strict 3>&1 1>&2 2>&3; then
-        warn "Validation failed — use --no-validate to skip."
+    _v_rc=0
+    # stdin/stdout/stderr swap trick: capture stderr from validate (exit code) without mashing user output.
+    if sh "$SCRIPT_DIR/validate-tickets" --strict 3>&1 1>&2 2>&3; then
+        info "Validation passed — proceeding with commit."
     else
-        info "Validation passed."
+        _v_rc=$?
+        warn "Validation failed (exit $_v_rc) — use --no-validate to skip."
     fi
 fi
 
 # ── prepare commit message ──────────────────────────────────────
 if [ -z "$CURRENT_MSG" ]; then
+    # nothing staged => nothing to commit
     if [ "$(git status --porcelain 2>/dev/null | head -n1)" = "" ]; then
         warn "No staged changes. Nothing to commit."
         exit 0
     fi
-    CURRENT_MSG="commit: $(date +%Y-%m-%d) — ticket work"
+    CURRENT_MSG="commit: $(date +%Y-%m-%d) — ticket-system work"
 fi
 
-# ── stage, commit ───────────────────────────────────────────────
+# ── stage & commit ──────────────────────────────────────────────
 if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
     git add -A
 fi
 git commit -m "$CURRENT_MSG"
-info "Committed with message: $CURRENT_MSG"
+info "Committed: $CURRENT_MSG"
