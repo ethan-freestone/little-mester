@@ -1,0 +1,118 @@
+#!/usr/bin/env sh
+# vim: set ft=sh:
+# sync-helper — wrap PR open + validate-tickets pre-merge guard.
+# Usage:
+#   ./scripts/sync-helper                          # create PR + validate tickets first
+#   ./scripts/sync-helper --target main            # specify target branch
+#   ./scripts/sync-helper --dry-run                # simulate without creating PR
+
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+die() { printf 'sync-helper: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'SYNC-WARN:\n%s\n' "$*" >&2; }
+info() { printf 'INFO: %s\n' "$*" >&2; }
+
+find_repo_root() {
+    for _sr_d in "." .. ../.. "/tmp/agent-workspace" "${OPCODE_PROJECT_ROOT:-.}"; do
+        case "$_sr_d" in
+            .) cp=$(pwd);;
+            /*) cp="$_sr_d";;
+            *) cp="$(cd "$_sr_d" 2>/dev/null && pwd || true)";;
+        esac
+        if [ -n "$cp" ] && [ -d "$cp/docs/tickets" ]; then
+            REPO_ROOT="$cp"
+            TICKETS_DIR="$cp/docs/tickets"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if ! find_repo_root; then
+    die "Cannot find docs/tickets/ directory inside a repo." >&2
+    exit 3
+fi
+
+TARGET_BRANCH="main"
+DRY_RUN=no
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --target)      TARGET_BRANCH="$2"; shift 2;;
+        --dry-run)     DRY_RUN=yes; shift;;
+        -h|--help|help)
+            cat <<'EOP'
+Usage: sync-helper [--target main] [--dry-run] [-h|--help]
+
+Validates all tickets, creates a PR to the target branch, and runs
+validate-tickets again as a pre-merge guard.
+
+  --target main   Target branch for the PR (default: main)
+  --dry-run       Show what would happen without creating the PR
+  -h, --help      Show this help and exit
+EOP
+            exit 0;;
+        *) die "Unknown argument: $1";;
+    esac
+done
+
+CURRENT_BRANCH=""
+if ! CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null); then
+    warn "Could not detect current branch — PR creation may fail."
+fi
+
+# ── pre-validation gate ────────────────────────────────────────
+info "Validating all tickets before sync..."
+_PRE_RC=0
+sh "$SCRIPT_DIR/validate-tickets" --strict 3>&1 1>&2 2>&3 || _PRE_RC=$?
+
+if [ "$_PRE_RC" -ne 0 ]; then
+    warn "Validation failed (exit $_PRE_RC) — cannot sync."
+    info "Fix issues in tickets before attempting sync, or use a separate branch for ticket edits."
+    exit 1
+fi
+info "All tickets validated successfully."
+
+# ── check for unpushed changes ─────────────────────────────────
+if [ "$(git rev-list "@{u}"..HEAD 2>/dev/null | wc -l)" != "0" ] 2>/dev/null; then
+    warn "Local commits not yet pushed to remote."
+    info "Push first with: git push origin $CURRENT_BRANCH"
+fi
+
+# ── create PR or simulate ──────────────────────────────────────
+if [ "$DRY_RUN" = "yes" ]; then
+    printf '[DRY-RUN] Would create PR:\n'
+    printf '  Source: %s\n' "$CURRENT_BRANCH"
+    printf '  Target: %s\n' "$TARGET_BRANCH"
+    exit 0
+fi
+
+if ! command -v gh >/dev/null 2>&1; then
+    die "gh CLI not found. Install it: https://cli.github.com/" >&2
+    exit 2
+fi
+
+# Check if a PR already exists for this branch
+if gh pr list --head "$CURRENT_BRANCH" 2>/dev/null | grep -q .; then
+    info "PR already exists for branch '$CURRENT_BRANCH':"
+    gh pr list --head "$CURRENT_BRANCH" --json url --jq '.[].url'
+    exit 0
+fi
+
+# Create PR using gh CLI
+info "Creating PR from $CURRENT_BRANCH -> $TARGET_BRANCH..."
+if ! _pr_out=$(gh pr create \
+    --base "$TARGET_BRANCH" \
+    --head "$CURRENT_BRANCH" \
+    --title "sync: current changes from $CURRENT_BRANCH" \
+    --body "Automatically created by sync-helper. All tickets pass validate-tickets before this sync." \
+    2>&1); then
+    
+    warn "gh pr create failed:"
+    info "$_pr_out"
+    die "Check the output above and try again. Make sure you're authenticated with gh auth login." >&2
+    exit 1
+fi
+
+info "PR created successfully:"
+printf '%s' "$_pr_out" | tail -3
