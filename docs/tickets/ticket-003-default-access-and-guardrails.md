@@ -1,4 +1,4 @@
-# Ticket 002 — Default access, guardrails & --unsafe-recurse
+# Ticket 003 — Default access, guardrails & --unsafe-recurse
 
 ## Objective
 Shift default agent to `opencode` (with internet enabled), strictly prohibit edits inside little-mester by default, and introduce `--unsafe-recurse` for the rare cases where self-modification is deliberate.

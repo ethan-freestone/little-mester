@@ -1,4 +1,4 @@
-# Ticket 005 — Document workflow & update checklists
+# Ticket 006 — Document workflow & update checklists
 
 ## Objective
 Update all relevant documentation so users understand the new defaults, guardrails, and how to safely improve little-mester itself.

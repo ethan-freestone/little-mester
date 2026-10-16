@@ -1,4 +1,4 @@
-# Ticket 001 — bats-core inside agent + host fallback
+# Ticket 002 — bats-core inside agent + host fallback
 
 ## Objective
 Enable test execution both inside and outside the agent container so that little-mester can validate itself ("little-mester against little-mester").

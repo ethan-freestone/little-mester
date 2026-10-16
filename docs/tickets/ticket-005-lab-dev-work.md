@@ -1,4 +1,4 @@
-# Ticket 003 — lab-dev-work safe self-edit helper
+# Ticket 005 — lab-dev-work safe self-edit helper
 
 ## Objective
 Create a script that lets little-mester modify itself safely via git ops (no workspace mounting inside the container), then sync changes back through the standard `./lab` flow.
