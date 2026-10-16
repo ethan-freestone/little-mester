@@ -1,0 +1,166 @@
+#!/usr/bin/env sh
+# vim: set ft=sh:
+# ticket-new -- scaffold a new valid ticket file following schema rules.
+# Usage:
+#   ./scripts/ticket-new <NNN> <short-description>
+#   ./scripts/ticket-new 015 add-featureX
+
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+die() { printf 'ticket-new: %s\n' "$*" >&2; exit 1; }
+info() { printf 'INFO: %s\n' "$*" >&2; }
+warn() { printf 'TICKET-WARN:\n%s\n' "$*" >&2; }
+
+TARGET_NUM=""
+DESCRIPTION=""
+REPO_ROOT=""
+TICKETS_DIR=""
+
+# find repo root
+for _tn_d in "." .. ../.. "/tmp/agent-workspace" "${OPCODE_PROJECT_ROOT:-.}"; do
+    case "$_tn_d" in
+        .) cp=$(pwd);;
+        /*) cp="$_tn_d";;
+        *) cp="$(cd "$_tn_d" 2>/dev/null && pwd || true)";;
+    esac
+    if [ -n "$cp" ] && [ -d "$cp/docs/tickets" ]; then
+        REPO_ROOT="$cp"
+        TICKETS_DIR="$cp/docs/tickets"
+        break
+    fi
+done
+
+if [ -z "$TICKETS_DIR" ]; then
+    die "Cannot find docs/tickets/ directory inside a repo." >&2
+    exit 3
+fi
+
+# parse args
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -n|--number)
+            TARGET_NUM="$2"; shift 2;;
+        -d|--desc)
+            DESCRIPTION="$2"; shift 2;;
+        -h|--help|help)
+            cat <<'EOP'
+Usage: ticket-new [--number NNN] <description>
+
+Scaffolds a new ticket file following all schema validation rules.
+
+  --number NNN    The ticket number (auto-detects next available if omitted)
+  -d, --desc      Description text
+  -h, --help      Show this help and exit
+
+Examples:
+  ./scripts/ticket-new 015 add-featureX
+  ./scripts/ticket-new "add feature X"    (auto-numbers the next ticket)
+EOP
+            exit 0;;
+        *)
+            if [ -z "$TARGET_NUM" ]; then
+                TARGET_NUM="$1"; shift
+            elif [ -z "$DESCRIPTION" ]; then
+                DESCRIPTION="$1"; shift
+            else
+                die "Unexpected argument: $1"
+            fi;;
+    esac
+done
+
+if [ -z "$DESCRIPTION" ]; then
+    die "A description is required. Run --help for usage." >&2
+    exit 2
+fi
+
+# get highest ticket number
+_get_highest() {
+    _gh_last=0
+    for _f in "$TICKETS_DIR"/ticket-[0-9]*.md; do
+        [ -f "$_f" ] || continue
+        _gh_num=$(head -n1 "$_f" 2>/dev/null | sed -n 's/^# *Ticket *\([0-9][0-9]*\).*/\1/p')
+        if [ -n "$_gh_num" ]; then
+            case "$_gh_num" in
+                [0-9]*) _gh_cur=$((10#${_gh_num}))
+                    if [ "$_gh_cur" -gt "$_gh_last" ]; then
+                        _gh_last=$_gh_cur
+                    fi;;
+            esac
+        fi
+    done
+    printf '%d' "$_gh_last"
+}
+
+if [ -n "$TARGET_NUM" ]; then
+    _next_raw=$((10#$TARGET_NUM))
+else
+    _next_raw=$((_get_highest + 1))
+fi
+
+# if user specified a number, use max of their input and auto-detected next
+_get_next=$(printf '%d' "$_get_highest")
+if [ -n "$TARGET_NUM" ]; then
+    if [ $_next_raw -ge $((_get_next + 1)) ]; then
+        _next=$_next_raw
+    else
+        _next=$((_get_next + 1))
+    fi
+else
+    _next=$_get_next+1
+fi
+
+TARGET_PAD=$(printf '%03d' "$_next") DESC_CLEAN="$(printf '%s' "$DESCRIPTION" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9 -]/-/g; s/-\+/-/g; s/- *$/ /; s/^ *//' | tr ' ' '-' | cut -c1-48)"
+FILENAME="ticket-${TARGET_PAD}-${DESC_CLEAN}"
+FILEPATH="$TICKETS_DIR/${FILENAME}.md"
+
+if [ -f "$FILEPATH" ]; then
+    die "File already exists: $FILEPATH. Remove it first or use --number with a higher value." >&2
+    exit 1
+fi
+
+info "Creating ticket $TARGET_PAD in $FILEPATH..."
+mkdir -p "$TICKETS_DIR"
+
+cat > "$FILEPATH" << EOF
+# Ticket ${TARGET_PAD} -- $(printf '%s' "$DESCRIPTION" | head -c 64)
+
+## Objective
+Write a one-sentence objective here using present or future tense. No bullets.
+
+## Scope & Boundaries
+
+Do not modify files outside the explicitly listed scope.
+Do not introduce dependencies beyond what is documented.
+
+### File
+- \`docs/tickets/${FILENAME}.md\` (new) — this ticket file
+
+### Steps
+
+1. Describe the first concrete action with a target file or command.
+2. Describe the second step. Each step must reference a specific file or command.
+3. Continue numbering steps as needed.
+
+### Verification
+
+Verify the work by running:
+\`\`\`bash
+./scripts/validate-tickets
+\`\`\`
+
+Expected: all checks pass for this ticket.
+
+## Files
+
+| File | Role |
+|------|------|
+| \`docs/tickets/${FILENAME}.md\` (new) | This ticket file |
+
+## Dependencies
+
+(none)
+EOF
+
+info "Created: $FILEPATH"
+info "Ticket number: $TARGET_PAD ($_next_raw if user-specified)"
+info "Edit the Objective, Steps, and Verification before running validate-tickets --strict."
