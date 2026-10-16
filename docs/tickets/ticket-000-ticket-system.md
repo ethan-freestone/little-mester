@@ -229,4 +229,25 @@ If a developer (or AI agent) tries to bypass validation:
 | File | Role |
 |------|------|
 | `docs/tickets/ticket-000-ticket-system.md` (new) | This meta-ticket — defines the system and all rules |
+
+---
+
+## Session State
+
+### Current todos (active)
+1. [ ] Create `meta-ticket-schema.json` — machine-readable validation schema
+2. [ ] Create `scripts/lib/common.sh` — shared logging/colors/die helpers (bash + fish compatible)
+3. [ ] Create `scripts/validate-tickets` — validate ticket conformance against schema rules (bash + fish compatible)
+4. [ ] Create `scripts/ticket-lifecycle` — list/restore/cleanup per lifecycle states (bash + fish compatible)
+5. [ ] Create `scripts/commit-helper` — wrap git commit with validation gate + ticket update (bash + fish compatible)
+6. [ ] Verify all scripts work with both bash and fish
+
+### Pre-implementation analysis (completed)
+- Discarded uncommitted scripts (`scripts/lab-dev-work`, `workspace/scripts/lab-dev-work`) due to: bash-only syntax, multiple shell-breaking errors on lines 68/123/179/192, stub commands for commit/sync, arrays using `local -a` (bash-only), non-portable shift patterns.
+- Analysis committed under `docs(tickets): document discarded uncommitted scripts analysis`.
+
+### Key conventions enforced by this ticket
+- **All scripts must work in BOTH bash AND fish** — test with both interpreters before committing
+- **Conventional commits are mandatory** — all commit messages use `type(scope): description` format (e.g. `feat(scripts): add validate-tickets`)
+- **Cross-reference against tickets before implementation** — ensure script logic matches `docs/tickets/` specs
 | `docs/tickets/meta-ticket-schema.json` (new) | Machine-readable schema for validation script to consume |
