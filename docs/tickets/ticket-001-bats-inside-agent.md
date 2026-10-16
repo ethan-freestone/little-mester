@@ -1,0 +1,61 @@
+# Ticket 001 — bats-core inside agent + host fallback
+
+## Objective
+Enable test execution both inside and outside the agent container so that little-mester can validate itself ("little-mester against little-mester").
+
+## Scope & Boundaries
+- **Do not** mount `.$LAB_DIR` as workspace (already blocked in `check_workspace`).
+- All manifests use `.mester-egress` key-value format: `permission=true|false`, `allowed_domains=`, `intent=`.
+
+---
+
+## Part A — Bake bats-core into agent Dockerfile
+
+### File to edit
+`agent/Dockerfile`
+
+### Steps
+1. Add `bats` to the existing `apt-get install` block.
+2. If `apt-get install bats` fails on bookworm (python:3.12-slim → Debian), fall back to GitHub clone:
+   ```dockerfile
+   RUN git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats \
+       && bash /tmp/bats/install.sh /usr/local \
+       && rm -rf /tmp/bats
+   ```
+3. Build locally:
+   ```bash
+   sudo docker compose --project-directory . build agent
+   ```
+4. Confirm bats is present:
+   ```bash
+   docker run --rm workspace_agent bats --version
+   ```
+
+### Verification inside container
+```bash
+docker run -it --rm workspace_agent bash -c 'bats --version && bats /workspace/tests/'
+```
+
+---
+
+## Part B — Standalone install-bats.sh fallback
+
+### File to create
+`scripts/install-bats.sh`
+
+### Purpose
+- Host-side fallback when user doesn't have pacman or native package manager.
+- Safe idempotent: skips if bats already present.
+- No root required for clone-and-install path (installs to `~/.bats`), falls back to `/usr/local/bin` with sudo when writable.
+
+### Steps
+1. Detect OS (`pacman`, `apt`, `yum`/`dnf`, `brew`).
+2. Try native package first; if absent, clone bats-core from GitHub and run its install script.
+3. Follow repo conventions: `set -euo pipefail`, `die()` helper, verbose flag support.
+
+### Verification
+```bash
+bash scripts/install-bats.sh
+bats --version
+bats tests/lab.bats   # all 13 assertions pass
+```
