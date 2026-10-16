@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/little-mester/ticket-schema",
+  "title": "ticket-conformance",
+  "description": "Validates that a ticket under docs/tickets/ follows all required conventions.",
+  "type": "object",
+  "required": ["heading", "objective", "scope_boundaries", "steps", "verification", "files"],
+
+  "properties": {
+    "heading": {
+      "description": "Line-1 heading: # Ticket NNN — description",
+      "type": "string",
+      "pattern": "^# Ticket (0[0-9]|[1-9][0-9]+) \u2014 .+$"
+    },
+
+    "number_padded": {
+      "description": "Zero-padded 3-digit ticket number",
+      "type": "string",
+      "pattern": "^\\d{3}$"
+    },
+
+    "objective_length_max": {
+      "description": "Objective section must be ≤ 1 sentence (≤ 200 chars)",
+      "type": "integer",
+      "maximum": 200
+    },
+
+    "has_do_not": {
+      "description": "Scope & Boundaries MUST contain at least one 'Do not' line",
+      "type": "boolean"
+    },
+
+    "sections_ordered": {
+      "description": "Section headings appear in a required order",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["# Ticket", "## Objective", "## Scope & Boundaries", "### Part", "### Steps", "### Verification", "### Files", "## Dependencies"]
+      },
+      "uniqueItems": true
+    },
+
+    "max_section_lines": {
+      "description": "No section block may exceed this many lines",
+      "type": "integer",
+      "maximum": 100
+    },
+
+    "files_table_complete": {
+      "description": "Every file referenced in steps appears in the Files table",
+      "type": "boolean"
+    },
+
+    "no_unresolved_todos": {
+      "description": "Must not contain uncompleted TODO/FIXME unless tagged to a ticket",
+      "type": "boolean"
+    }
+  },
+
+  "validation_errors": [
+    "HEADING_FORMAT_REQUIRED: Line 1 must match '# Ticket NNN \u2014 description'",
+    "NUMBER_GAP: Ticket numbers must start at 0 or 1 with no gaps",
+    "FILENAME_MISMATCH: ticket-NNN-* filename number must match heading number",
+    "MISSING_SCOPE_DO_NOT: Scope & Boundaries must contain 'Do not' or 'Do NOT'",
+    "SECTIONS_OUT_OF_ORDER: Sections must appear in the documented order",
+    "MISSING_VERIFICATION: Every ticket must have a 'Verification' section or test command",
+    "FILES_INCOMPLETE: All referenced files must be listed in the Files table",
+    "SECTION_TOO_LONG: No section block exceeds 100 lines",
+    "UNRESOLVED_TODO: Found uncompleted TODO/FIXME without a ticket reference"
+  ],
+
+  "auto_fixes": [
+    {
+      "check": "HEADING_FORMAT_REQUIRED",
+      "fix_description": "Add en-dash separator and zero-pad number if needed",
+      "safe": true
+    },
+    {
+      "check": "SECTIONS_OUT_OF_ORDER",
+      "fix_description": "Move sections into documented order (scaffolding only)",
+      "safe": false,
+      "requires_confirmation": true
+    }
+  ]
+}
