@@ -28,30 +28,27 @@ Shift default agent to `opencode` (with internet enabled), strictly prohibit edi
 
 ---
 
-## ═══════════════════════════════════════════════════
-## STATUS TRACKER  (mark [x] as you go)
-## ═══════════════════════════════════════════════════
-
 ### Phase 1: I make edits, you commit them
 | Step | What I do (in this session) | What YOU do in your terminal | Status |
 |------|----------------------------|------------------------------|--------|
-| 1A | Write Part A changes to `./lab` (add --opencode / --aider flags if not done) | Nothing yet — wait for my edit confirmation | [ ] |
-| 1B | Write Part C changes to `./lab` (UNSAFE_RECURSE var, flag parsing, conditional guard, confirm() line, help text) | Same as above | [ ] |
-| 1C | Confirm I'm done editing — files exist in session memory only | **Run:** `git add lab agent/ && git commit -m "..."` — verify with `git diff HEAD` that changes appear | [ ] |
-| 1D | — | **Push:** `git push origin recurse-work` (or wait for PR review) | [ ] |
+| 1A ✅ | Write Part A changes to `./lab` (add --opencode / --aider flags done) | Nothing yet — wait for my edit confirmation | ✅ DONE |
+| 1B ✅ | Write Part C changes to `./lab` (UNSAFE_RECURSE var, flag parsing, conditional guard, confirm() line, help text) | Same as above | ✅ DONE |
+| 1C ✅ | Confirm edits are done — files committed | **Run:** `git add lab README.md && git commit -m "..."` | ✅ DONE (cf8077d) |
+| 1D | Push to remote | **Run:** `git push origin recurse-work` | [ ] |
 
 ### Phase 2: You test from your terminal
 | Step | Command | Expected result | Status |
 |------|---------|-----------------|--------|
-| 2A | `cd /workspace/little-mester && ./lab ./lab 2>&1; echo "exit=$?"` | Output contains `die("Workspace path would expose the little-mester repo itself...)`, **exit=1** (guard fires — expected!) | [ ] |
-| 2B | `cd /workspace/little-mester && ./lab --unsafe-recurse ./lab 2>&1; echo "exit=$?"` | Confirm output shows `Unsaferecurse : 1`. With `y`: agent launches into itself. Without confirmation: still exits normally — no error | [ ] |
-| 2C | `./lab --opencode /tmp` and `./lab --aider /tmp` (brief test) | Confirm output shows `Agent: opencode` vs `Agent: aider` appropriately | [ ] |
-| 2D | `./lab /tmp 2>&1` (normal workspace, no flags) | Works normally; EGRESS shown as true in confirm output | [ ] |
+| 2A | `cd /workspace && ./lab --help` (check help text) | `--unsafe-recurse` appears in flag list with DANGEROUS tag | [ ] |
+| 2B | `./lab . 2>&1; echo "exit=$?"` (guard MUST fire) | `REFUSED: Workspace path would expose the little-mester repo itself. Use --unsafe-recurse to override` — exit=1 (NOTE: uses `.` not `./lab`) | [ ] |
+| 2C | `./lab --unsafe-recuse . 2>&1; echo "exit=$?"` (guard lifted) | Confirm shows `Unsaferecurse : 1`. With 'y': agent launches, no error from guard | [ ] |
+| 2D | `./lab --opencode /tmp 2>&1 | grep Agent && ./lab --aider /tmp 2>&1 | grep Agent` (agent flags) | First: `Agent: opencode`, Second: `Agent: aider` | [ ] |
+| 2E | `./lab /tmp 2>&1` (normal workspace, defaults) | EGRESS: true; normal confirmation flow, no guard error | [ ] |
 
 ### Phase 3: Close out
 | Step | Action | Status |
 |------|--------|--------|
-| 3A | Run tests if any exist: `./run-tests.sh` or `bats tests/` | [ ] |
+| 3A | Run Bats tests: `cd /workspace && bats tests/` | All pass | [ ] |
 | 3B | Commit & push (if not done in step 1D) | [ ] |
 | 3C | Report back here that testing passed; mark ticket complete | [ ] |
 
@@ -61,16 +58,17 @@ Shift default agent to `opencode` (with internet enabled), strictly prohibit edi
 ## Part A — Default agent + convenience flags
 ## ═══════════════════════════════════════════════════
 
-### Current state: ALREADY DONE ✅
-- `lab` line 12: `AGENT="opencode"` ← correct.
-- Help text already says `(default: opencode)`.
+### Current state: DONE ✅
+All Part A changes implemented and committed:
+- ✅ `AGENT="opencode"` already set (was done before this ticket)
+- ✅ `--agent` help text updated earlier
+- ✅ Added `--opencode)` / `--aider)` flags at ~line 189-190 in the while-case block
 
-### Remaining work (I will make these edits here):
-
-Add to the while-loop case block (~line 183, before `*) \`):
+### What was done:
 ```bash
+      --unsafe-recurse) UNSAFE_RECURSE=1; shift ;;
       --opencode) AGENT="opencode"; shift ;;
-      --aider)    AGENT="aider"; shift ;;
+      --aider) AGENT="aider"; shift ;;
 ```
 
 ---
@@ -90,69 +88,53 @@ Add to the while-loop case block (~line 183, before `*) \`):
 ## Part C --unsafe-recurse flag & self-edit guard
 ## ═══════════════════════════════════════════════════
 
-### Current state: NOT IMPLEMENTED ❌
+### Current state: DONE ✅ (committed at cf8077d)
 
-The current `check_workspace` guard at lines 65-68 is a hard-coded die():
+All Part C changes have been implemented in `/workspace/lab` and committed.
+
+The current `check_workspace` guard at lines 65-68 was:
 ```bash
 if [[ "$ws" == "$LAB_DIR" || "$LAB_DIR" == "$ws"/* ]]; then
     die "Workspace path would expose the little-mester repo itself"
 fi
 ```
 
-This ALWAYS blocks. Must be made conditional on `UNSAFE_RECURSE`.
+**All edits completed and committed (cf8077d):**
 
-### What I need to do in this session (edit ./lab):
+| Edit | Location in lab | What changed |
+|------|-----------------|--------------|
+| C1 | ~line 18 | Added `UNSAFE_RECURSE=0` variable |
+| C2 | ~line 189 (case block) | Added `--unsafe-recurse`, `--opencode`, `--aider` case lines |
+| C3 | Lines 67-72 (`check_workspace`) | Guard now checks `${UNSAFE_RECURSE:-0} != "1"` before die() |
+| C4 | ~line 154 (confirm()) | Added `Unsaferecurse: ${UNSAFE_RECURSE:-0}` output line |
+| C5 | Help text block | Added `--unsafe-recurse` documentation via sed insert |
 
-#### C1-A: Add UNSAFE_RECURSE=0 variable at top of script
-**Where:** After line 15 (`EGRESS="${EGRESS:-true}"`)
+### Testing from host terminal after push:
+
 ```bash
-UNSAFE_RECURSE=0   # Default: deny self-editing
+cd /workspace && ./lab --help | grep unsafe
+# Verify: --unsafe-recuse appears in help output
+
+./lab . 2>&1; echo "exit=$?"
+# Must exit=1 with guard message (UNSAFE_RECURSE not set)
+# NOTE: uses `.` — realpath resolves to $LAB_DIR just like './.lab' would
+
+./lab --unsafe-recurse . 2>&1 || true
+# Confirm shows Unsaferecurse : 1, no REFUSED message
 ```
 
-#### C1-B: Add --unsafe-recurse flag parsing
-**Where:** In the while-case block (~line 183), before `*) \` case line:
-```bash
-      --unsafe-recurse) UNSAFE_RECURSE=1; shift ;;
-```
-
-#### C1-C: Harden check_workspace — conditional guard
-**Replace** lines 65-68:
-```bash
-# Before:
-if [[ "$ws" == "$LAB_DIR" || "$LAB_DIR" == "$ws"/* ]]; then
-    die "Workspace path would expose the little-mester repo itself"
-fi
-
-# After:
-if [[ "$ws" == "$LAB_DIR" || "$LAB_DIR" == "$ws"/* ]]; then
-    if [[ "${UNSAFE_RECURSE:-0}" != "1" ]]; then
-        die "Workspace path would expose the little-mester repo itself. Use --unsafe-recurse to override (requires awareness of the risks)."
-    fi
-fi
-```
-
-#### C1-D: Update confirm() output — add unsaferecurse line
-**Insert into confirm()** (before the dashed-line footer):
-```bash
-    echo " Unsaferecurse : ${UNSAFE_RECURSE:-0}"
-```
-
-#### C1-E: Add --unsafe-recurse to help text
-**In the `-h|--help)` block** (~line 227+), add within the flags section:
-```bash
-  --unsafe-recurse    Allow the agent to edit inside the little-mester repo (DANGEROUS: enables self-modification)
-```
 
 ---
 
 ## ═══════════════════════════════════════════════════
-## Files I will modify in this session (/workspace paths)
+## Files modified in this ticket (/workspace paths)
 ## ═══════════════════════════════════════════════════
 
-| File | What changes | Reason it's critical |
-|------|-------------|---------------------|
-| `/workspace/lab` | ~5 edits (variable, 3 case lines, 1 guard wrap, 1 confirm line, 1 help line) | ALL logic changes for this ticket live here |
-| *(review only)* `/workspace/agent/opencode/opencode.json` | No changes needed | Share disabled doesn't block internet; otel: {} is empty |
+| File | What changed | Committed |
+|------|-------------|-----------|
+| `/workspace/lab` | 5 edits (variable, 3 case lines, guard wrap, confirm line, help line) | ✅ cf8077d |
+| `/workspace/README.md` | Self-modification section + `--unsafe-recurse` docs + example fix (`./lab` → `.` ) | ✅ cf8077d |
+| `agent/opencode/opencode.json` | Reviewed; no changes needed (share disabled doesn't block internet) | — |
 
 ---
 
