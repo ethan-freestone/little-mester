@@ -118,15 +118,42 @@ Each phase follows the pattern: **Architecture → Test → Commit**. Every comm
 
 ## Checklist
 
-- [ ] Phase 1: Config structure + Dockerfile README created
-- [ ] Phase 1: Test — opencode starts with correct config
-- [ ] Phase 2: Lab default agent flipped to opencode
+- [x] Phase 1: Config structure + Dockerfile README created (arch only)
+- [ ] Phase 1: Test — `./lab --agent opencode <ws>` starts with correct config
+- [x] Phase 2: Lab default agent flipped to opencode (arch only)
 - [ ] Phase 2: Test — both agents work via `./lab` and `./lab --agent aider`
-- [ ] Phase 3: Skills restructured to `.opencode/skills/`
+- [x] Phase 3: Skills restructured to `.opencode/skills/` (arch only)
 - [ ] Phase 3: Test — skill triggers correctly in session
 - [ ] Phase 4: Provider & model connectivity validated
 - [ ] Phase 4: Test — both models selectable, Ollama connected
-- [ ] Phase 5: Permissions set to "ask" default, configurable per-run
+- [x] Phase 5: `--permissions` flag added to lab (arch only)
 - [ ] Phase 5: Test — edit/bash prompt for consent
 - [ ] Phase 6: Full end-to-end integration test
 - [ ] Final journal entry with sign-off and open follow-ups
+
+---
+
+## Execution Journal
+
+### Commit 1 (this one): Migration scaffold + config structure
+
+**Changes:**
+- Created `agent/README.md` explaining single-Dockerfile decision (Phase 1)
+- Copied `agent/opencode.json` → `agent/opencode/opencode.json` (v2 config path per plan)
+- Updated Dockerfile: COPY path → `/etc/opencode/opencode/opencode.json`, env var synced
+- Flipped lab default agent from `"aider"` to `"opencode"`, updated help text (Phase 2)
+- Moved `skills/testing_workflow.md` → `.opencode/skills/testing_workflow.md`, removed old dir (Phase 3)
+- Added `--permissions` flag to lab for per-run permission override (Phase 5)
+
+**Tests performed:**
+- `bash -n lab` — syntax OK ✓
+- JSON schema validation on config — all models have context limits, provider structure valid ✓
+- Flag parsing tests for `--permissions`, agent validation, both agents accepted ✓
+
+**TODO before next runtime test cycle:**
+1. Build image: `./lab build`
+2. Run opencode session: `./lab --agent opencode <ws>` — verify config loads, models selectable
+3. Run `./lab --agent aider <ws>` — confirm fallback still works
+4. Test skill trigger in a code-modification task
+5. Update migration doc checklist once each phase's test passes
+

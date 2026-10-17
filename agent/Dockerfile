@@ -13,13 +13,13 @@ RUN python -m venv /opt/venv \
 # OpenCode. The version check makes the BUILD fail loudly if the binary isn't usable.
 RUN npm install -g opencode-ai && opencode --version
 
-COPY opencode.json /etc/opencode/opencode.json
+COPY opencode/opencode.json /etc/opencode/opencode/opencode.json
 
 RUN groupadd -g ${LAB_GID} agent && useradd -m -u ${LAB_UID} -g ${LAB_GID} agent
 
 ENV PATH="/opt/venv/bin:$PATH" \
     HOME=/home/agent \
-    OPENCODE_CONFIG=/etc/opencode/opencode.json
+    OPENCODE_CONFIG=/etc/opencode/opencode/opencode.json
 
 WORKDIR /workspace
-CMD ["aider"]
+CMD ["opencode"]
