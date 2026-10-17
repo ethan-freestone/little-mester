@@ -2,7 +2,7 @@
 
 A **locked-down, fully local sandbox for learning agentic coding.**
 
-A local LLM (via Ollama, on the GPU) drives a coding agent (Aider to start with) that can
+A local LLM (via Ollama, on the GPU) drives a coding agent (**opencode by default, or aider** via `--agent`) that can
 read and edit files in **one folder you choose**, and nothing else. No internet by default.
 No access to your home directory, keys, or other projects.
 
@@ -18,14 +18,14 @@ The goal of this repo is twofold:
 
 ## Build status (tick these off as you go)
 
-- [ ] 0. Host NVIDIA driver works (`nvidia-smi`)
-- [ ] 1. Repo skeleton, `.gitignore`, `models.txt`
-- [ ] 2. `compose.yaml`
-- [ ] 3. `agent/Dockerfile`, `ollama/pull-models.sh`
-- [ ] 4. `lab` launcher with path guard rails
-- [ ] 5. `./lab setup` completes (packages, image build, models pulled)
-- [ ] 6. `./verify-sandbox.sh` all green
-- [ ] 7. First Aider session on a throwaway repo
+- ~~[ ] 0. Host NVIDIA driver works (`nvidia-smi`)~~ — done
+- ~~[ ] 1. Repo skeleton, `.gitignore`, `models.txt`~~ — done
+- ~~[ ] 2. `compose.yaml`~~ — done
+- ~~[ ] 3. `agent/Dockerfile`, `ollama/pull-models.sh`~~ — done
+- ~~[ ] 4. `lab` launcher with path guard rails & egress gate~~ — done (includes `.mester-egress`)
+- ~~[ ] 5. `./lab setup` completes (packages, image build, models pulled)~~ — done
+- ~~[ ] 6. `./verify-sandbox.sh` all green~~ — done
+- ~~[ ] 7. First opencode session on a throwaway repo~~ — done
 - [ ] 8. Multi-repo workspace tested
 - [ ] 9. Own agent loop (`my-agent/`)
 - [ ] 10. Evals (`evals/`)
@@ -43,23 +43,23 @@ The goal of this repo is twofold:
  │                                                                      │
  │  ./lab ──► docker compose                                            │
  │                                                                      │
- │   ┌──────────── network: internal (no route to internet) ──────────┐ │
+ │   ┌──────────── network: [internal] [+ optional egress] ──────────┐ │
  │   │                                                                │ │
  │   │  ┌───────────────┐   http://ollama:11434   ┌────────────────┐  │ │
  │   │  │ agent         │ ──────────────────────► │ ollama         │  │ │
- │   │  │ (Aider, git,  │                         │ (model server, │  │ │
- │   │  │  python)      │                         │  uses the GPU) │  │ │
- │   │  │ non-root      │                         │ no ports       │  │ │
- │   │  │ read-only fs  │                         │ published      │  │ │
- │   │  │ no caps       │                         └───────┬────────┘  │ │
- │   │  └──────┬────────┘                                 │           │ │
- │   └─────────┼──────────────────────────────────────────┼───────────┘ │
+ │   │  │ (opencode/    │                         │ (model server, │  │ │
+ │   │  │  Aider, git,  │                         │  uses the GPU) │  │ │
+ │   │  │  python)      │                         │ no ports       │  │ │
+ │   │  │ non-root      │                         │ published      │  │ │
+ │   │  │ read-only fs  │                         └───────┬────────┘  │ │
+ │   │  │ no caps)      │                                 │           │ │
+ │   └─────────┼────────┘                                 │           │ │
  │             │ bind mount (read-write)                  │ named volume│
  │             ▼                                          ▼             │
  │   ~/…/little-mester/workspaces/<project>        ollama-models        │
  │   (the ONLY host folder the agent sees)         (model weights)      │
  │                                                                      │
- │   setup only:  ollama-pull ──► network: egress ──► internet          │
+ │   --egress / .mester-egress ──► optional egress network ──► internet │
  └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -68,8 +68,8 @@ Three ideas to hold onto:
 | Idea | How it's done here |
 |---|---|
 | The model can't touch files | Ollama only turns text into text. It's in its own container with no mounts except its model volume. |
-| The agent can only touch one folder | The agent container sees exactly one bind mount, `/workspace`. |
-| The agent can't phone home | The agent and Ollama share an `internal: true` network. Only the one-shot `ollama-pull` container ever has internet, and only during setup. |
+| The agent can only touch one folder | The agent container sees exactly one bind mount, `/workspace`, gated by `lab`'s path checks. |
+| The agent can't phone home | By default the agent and Ollama share an `internal: true` network. Egress is opt-in via `--egress`/`.mester-egress`. Only `ollama-pull` has it during setup. |
 
 ---
 
@@ -88,7 +88,7 @@ Full technical details, network isolation diagrams, capability drops, and immuta
 **Key Guarantees:**
 - ✅ **Zero Host Shell Access:** The AI operates strictly inside the container.
 - ✅ **Immutable Security Configs:** Security settings in `compose.yaml` and `lab` cannot be altered by the AI. Any changes require manual review and confirmation.
-- ✅ **Network Air-Gap:** No outbound internet access during runtime. Only `ollama-pull` has temporary egress during setup.
+- ✅ **Network Air-Gap by default:** No outbound internet during runtime. Optional egress via `--egress` or `.mester-egress` manifest per workspace. Only `ollama-pull` has temporary egress during setup.
 - ✅ **Privilege Dropping:** Runs as non-root, drops all Linux capabilities, enforces `no-new-privileges`, and limits memory/PIDs.
 
 ---
@@ -120,17 +120,18 @@ Models are managed via `models.txt` and the `ollama` service.
 3.  Run `./lab setup`. This triggers the `ollama-pull` container to download the new model over the internet.
 
 #### Switching Models
-By default, Ollama uses the first model listed in `models.txt` or the one you last ran. To switch:
+By default, Ollama serves whichever is first in `models.txt` (or last ran). To switch:
 1.  Ensure the target model is downloaded (see above).
-2.  When starting a session, you can specify the model if your version of Aider supports it, or simply rely on Ollama's default behavior.
+2.  If your agent supports explicit model selection (opencode: via config; Aider: via command-line flag), pass it. Otherwise rely on Ollama's default behavior.
 3.  **VRAM Check**: If the agent stalls or falls back to CPU, check `nvidia-smi`. If VRAM is full, switch to a smaller quantization (e.g., `q4_K_M`) or a smaller model (e.g., `phi3` instead of `llama3`).
 
 #### Monitoring Models
 *   **List Models**: Run `docker exec ollama ollama list` inside the container.
 *   **Check VRAM**: On your host, run `nvidia-smi`. Look for the `ollama` process. If it's using CPU (high memory usage in RAM instead of VRAM), your model is too large for your GPU.
 
-### 3. Monitoring the Agent (`little-mester`)
-Since the agent runs inside a container, you need to monitor it from the host.
+### 3. Monitoring the Agent
+
+The agent (opencode by default) runs inside a container. Monitor it from the host:
 
 *   **Container Logs**: View the agent's output and errors:
     ```bash
@@ -160,7 +161,7 @@ Since the agent runs inside a container, you need to monitor it from the host.
 Requirements: Arch/CachyOS (other distros: see [docs/01-host-setup.md](docs/01-host-setup.md)),
 a working NVIDIA driver, `sudo`.
 
-```fish
+```bash
 git clone <this-repo> little-mester
 cd little-mester
 ./lab setup                       # installs docker + GPU toolkit, builds image, pulls models
@@ -172,59 +173,85 @@ mkdir -p workspaces/demo          # make or clone a project here
 Models to download are listed in [`models.txt`](models.txt). Edit it, then re-run
 `./lab setup`.
 
-## Daily use
+## Everyday use (works in bash or fish — tested in both)
 
-```fish
-./lab <path-to-workspace>           # start Aider on that folder
-./lab <path-to-workspace> --help    # extra args are passed through to aider
-./lab shell <path-to-workspace>     # plain bash inside the sandbox (to poke around)
-./lab stop                          # stop the Ollama container
-./verify-sandbox.sh                 # re-run after ANY change to compose.yaml or the Dockerfile
+```bash
+./lab <workspace>               # start opencode (default agent)
+./lab --aider    <workspace>    # switch to Aider for this session
+./lab --agent opencode <path>   # explicitly pick opencode
+./lab <workspace> --help        # all flags: .lab --unsafe-recurse, --egress, --isolated…
+./lab shell <workspace>         # plain bash inside the sandbox
+./lab stop                      # stop Docker compose
+./verify-sandbox.sh             # re-run after any change to compose.yaml / Dockerfile
 ```
 
-`<path-to-workspace>` can be a single repo, or a parent folder holding several repos.
+`<workspace>` can be a single repo, or a parent folder holding several repos.
 The launcher refuses `/`, `$HOME`, anything you don't own, anything overlapping
-`~/.ssh`, `~/.config` and similar, and anything that would expose this lab repo itself.
+`~/.ssh`, `~/.config` and similar, and **by default** any path that would expose this
+lab repo itself (use `--unsafe-recurse` to override — see below).
+
+### Self-modification (ticket 002)
+
+When you want the agent to edit little-mester itself, use `--unsafe-recurse`:
+
+```bash
+# From any little-mester checkout (e.g. ~/Development/little-mester-working on recurse-work):
+cd <path-to-little-mester-checkout>
+./lab --unsafe-recurse    # allows opencode to read/write the current directory
+```
+
+You do not need to append `.` — it is implicit when using `--unsafe-recurse`.
+
+This is off by design — it tells the agent "I know what I'm doing." Without `--unsafe-recurse`, the guard always blocks self-mapping. This makes recursive improvement possible **without making it the default**.
 
 ---
 
-## Working on this repo (development workflow)
+## Repo map
 
-Currently, the way to work on little-mester itself is: **clone a second working copy** alongside your main checkout.  This is needed because `lab` refuses to mount paths that would expose the repository it lives in.
+| Path | What it is | Read this |
+|---|---|---|
+| `lab` | Launcher script. Validates paths, egress, then runs compose. | [Security & AI Interaction Boundaries](#security--ai-interaction-boundaries)|
+| `compose.yaml` | Defines services, networks, volumes and hardening flags. | [agent/README.md](agent/README.md) |
+| `models.txt` | List of models to download during setup. | — |
+| `verify-sandbox.sh` | Regression tests for sandbox network/host guarantees. | — |
+| `./agent/` | Dockerfile + opencode config for the agent container. | [agent/README.md](agent/README.md) |
+| `./ollama/` | Model-pulling script and VRAM notes. | — |
+| `./workspaces/` | Where projects the agent works on live (gitignored). | — |
+| `docs/` | Journal, tickets, host setup notes, threat model. | [docs/journal.md](docs/journal.md) |
+| `docs/tickets/` | Tickets with goals, steps, and progress tracking. | [ticket-001](docs/tickets/ticket-001-bats-inside-agent.md) |
+| `tests/` | Unit tests for the `lab` launcher script (Bats). | — |
+| `run-tests.sh` | Runs Bats inside the agent container via `lab exec`. | — |
+| `SECURITY.md` | Full security model, network isolation, capabilities. | [Security & AI Interaction Boundaries](#security--ai-interaction-boundaries) |
+| `scripts/` | Automation (regen-configs, check-syntax, ticket helpers). | [scripts/README.md](scripts/README.md) |
 
-```fish
-# 1. Create a separate working checkout
-git clone <this-repo> ~/Development/little-mester-working
-cd ~/Development/little-mester-working
-git checkout -b my-branch       # make all changes here
+---
 
-# 2. Edit files (scripts, Dockerfile, compose.yaml, docs…)
+## How a session works
 
-# 3. Rebuild & test from your main checkout (not the one you just edited):
-cd <path-to-main-checkout>
-./lab build --no-cache          # rebuild image; regen-configs runs first
-./verify-sandbox.sh             # sanity check after any change
-```
+1. You run `./lab workspaces/demo`.
+2. `lab` resolves the path, runs safety checks, and asks you to confirm the mount.
+3. `lab` (via compose) waits for ollama then starts the `agent` container:
+   non-root, read-only filesystem, zero Linux capabilities, `/workspace` mounted read-write.
+4. **By default, opencode** sends your prompt to `http://ollama:11434/v1`.
+5. The agent edits files in `/workspace`, runs commands in the container, and commits via git.
+6. When you quit, the container is removed (`--rm`) and `lab` warns if it finds git hooks.
+7. **You review on the host** with `git log` and `git diff`.
 
-**When switching branches or starting fresh:** stop everything and tear down containers before building/running again, so nothing is left in an inconsistent state.
-
-```fish
-./lab stop                      # stop & remove the agent / Ollama containers
-docker compose down             # also removes lingering images & networks
-```
-
-Then you can rebuild on the new branch or after pulling changes from main:
-
-```fish
-./lab build --no-cache          # rebuild
-./verify-sandbox.sh             # verify safety guarantees still hold
-```
-
-We plan to remove this constraint later and allow working on the repo in-place.
+Understanding steps 4 to 6 *is* agentic coding: a loop where a model proposes actions,
+a program carries them out, and the results go back to the model. [my-agent/](#learning-path) is
+where you build it yourself from scratch.
 
 ---
 
 ## Testing
+
+> **Testing context:** Run tests from `little-mester-working` (the working
+> checkout on recurse-work), NOT the main repo. You test changes here before merging
+to MAIN.
+>
+> **Shell compatibility:** All commands below run identically in both bash and fish.
+> Use `;` as separator (works in both); fish users should use `$status` not `$?` for
+> exit status.
 
 This project uses [Bats](https://bats-core.readthedocs.io/) for unit testing the `lab` launcher script. Tests validate path guards, security checks, and helper functions without requiring Docker or GPU access.
 
@@ -239,7 +266,7 @@ brew install bats-core
 ```
 
 ### Running Tests (Host)
-```fish
+```bash
 bats tests/
 ```
 
@@ -258,7 +285,7 @@ You can instruct the agent to run the test suite inside the sandbox itself. This
 4. The agent will execute `./run-tests.sh`, which safely invokes `bats` inside the container via `./lab exec`.
 
 Alternatively, run it manually from your host:
-```fish
+```bash
 ./run-tests.sh workspaces/demo
 ```
 
@@ -268,44 +295,45 @@ Alternatively, run it manually from your host:
 
 | Path | What it is | Read this |
 |---|---|---|
-| `lab` | Launcher script. Validates the workspace path, then runs compose. | [docs/usage-guide.md](docs/usage-guide.md) |
-| `compose.yaml` | Defines the services, networks, volumes and hardening flags. | [agent/README.md](agent/README.md) |
-| `models.txt` | List of models to download during setup. | [ollama/README.md](ollama/README.md) |
-| `verify-sandbox.sh` | Regression tests for the sandbox properties. | [docs/threat-model.md](docs/threat-model.md) |
+| `lab` | Launcher script. Validates paths, egress permissions, then runs compose. | [Security & AI Interaction Boundaries](#security--ai-interaction-boundaries) |
+| `compose.yaml` | Defines services, networks, volumes and hardening flags. | [agent/README.md](agent/README.md) |
+| `agent/opencode/opencode.json` | OpenCode agent config — model routing, permission defaults (ask/edit, ask/bash). | — |
+| `models.txt` | List of models to download during setup. | — |
+| `verify-sandbox.sh` | Regression tests for sandbox network/host guarantees. | — |
 | `agent/` | Dockerfile for the container the agent runs in. | [agent/README.md](agent/README.md) |
-| `ollama/` | Model-pulling script and notes on running models on 8 GB VRAM. | [ollama/README.md](ollama/README.md) |
-| `workspaces/` | Where the projects the agent works on live (gitignored). | [workspaces/README.md](workspaces/README.md) |
-| `docs/` | Journal, host setup notes, threat model. | [docs/README.md](docs/README.md) |
-| `tests/` | Unit tests for the `lab` launcher script. | [Testing section above](#testing) |
-| `run-tests.sh` | Helper to run Bats tests inside the agent container. | [Testing section above](#testing) |
-| `SECURITY.md` | **Security model, network isolation, and AI interaction boundaries.** | [Security & AI Interaction Boundaries](#security--ai-interaction-boundaries) |
-| `scripts/` | Automation tools — validate-tickets, ticket-lifecycle, commit-helper, sync-helper, ticket-new, check-syntax. | [scripts/README.md](scripts/README.md) |
-| `my-agent/` | *Planned.* Build your own agent loop from scratch. | [my-agent/README.md](my-agent/README.md) |
-| `evals/` | *Planned.* Pass/fail tasks to compare models and prompts. | [evals/README.md](evals/README.md) |
-| `red-team/` | *Planned.* Attacks against your own sandbox. | [red-team/README.md](red-team/README.md) |
-| `proxy/` | *Planned.* Opt-in, allowlisted web access. | [proxy/README.md](proxy/README.md) |
-| `mcp/` | *Planned.* Tool servers for your agent. | [mcp/README.md](mcp/README.md) |
+| `ollama/` | Model-pulling script + notes on running models on 8 GB VRAM. | — |
+| `workspaces/` | Where the projects the agent works on live (gitignored). | — |
+| `docs/` | Journal, host setup notes, tickets. | [docs/journal.md](docs/journal.md) |
+| `docs/tickets/` | Tickets with goals, steps, and progress tracking. | See individual ticket files |
+| `tests/` | Unit tests for the `lab` launcher script (Bats). | — |
+| `run-tests.sh` | Runs Bats inside the agent container via `./lab exec`. | — |
+| `SECURITY.md` | **Security model, network isolation, capabilities.** | [Security & AI Interaction Boundaries](#security--ai-interaction-boundaries) |
+| `scripts/` | Automation (regen-configs, check-syntax, ticket helpers). | [scripts/README.md](scripts/README.md) |
+
+| Path | Status |
+|---|---|
+| `my-agent/` | *Planned.* Build your own agent loop from scratch. |
+| `evals/` | *Planned.* Pass/fail tasks to compare models and prompts. |
+| `red-team/` | *Planned.* Attacks against your own sandbox. |
+| `proxy/` | *Planned.* Opt-in allowlisted web access. |
+| `mcp/` | *Planned.* Tool servers for your agent. |
 
 ---
 
 ## How a session works
 
 1. You run `./lab workspaces/demo`.
-2. `lab` resolves the path, runs the safety checks, and asks you to confirm the mount.
-3. `lab` runs `docker compose` with `WORKSPACE`, `LAB_UID` and `LAB_GID` set. It uses `sudo`
-   because the docker daemon is root-owned.
-4. Compose starts `ollama` if needed and waits for its healthcheck.
-5. Compose starts the `agent` container: non-root, read-only filesystem, zero Linux
-   capabilities, `/workspace` mounted read-write.
-6. Aider sends your request and the files you've added to `http://ollama:11434`.
-7. Ollama runs the model on the GPU and returns text.
-8. Aider edits files in `/workspace` and commits to git, as the author `little-mester-agent`.
-9. When you quit, the container is removed (`--rm`) and `lab` warns if it finds git hooks.
-10. **You review on the host** with `git log` and `git diff`.
+2. `lab` resolves the path, runs safety and egress checks, and asks you to confirm the mount.
+3. `lab` runs `docker compose` with `WORKSPACE`, `LAB_UID` and `LAB_GID` set. It uses `sudo` because the docker daemon is root-owned.
+4. Compose starts `ollama` if needed (health-checked) then starts the `agent` container: non-root, read-only fs, no Linux capabilities, `/workspace` mounted read-write, network gated by egress settings.
+5. **By default opencode** sends your prompt to ollama (`http://ollama:11434/v1`). With `--aider`, Aider sends its request instead.
+6. The agent edits files in `/workspace`, runs commands in the container, and commits as `little-mester-agent` via git.
+7. When you quit, the container is removed (`--rm`) and `lab` warns if it finds git hooks.
+8. **You review on the host** with `git log` and `git diff`.
 
-Understanding steps 6 to 8 *is* agentic coding: a loop where a model proposes actions,
-a program carries them out, and the results go back to the model. Aider hides the loop;
-[my-agent/](my-agent/README.md) is where you build it yourself.
+Understanding steps 5 to 7 *is* agentic coding: a loop where a model proposes actions,
+a program carries them out, and the results go back to the model. [my-agent/](#learning-path) is
+where you build it yourself from scratch.
 
 ---
 
@@ -351,7 +379,7 @@ Read this twice.
 | One-shot `ollama-pull` on a separate network | Keeps internet access out of the long-lived services | Extra service to understand |
 | Docker over Podman | Most documentation and tooling assume it | Daemon runs as root. Rootless Podman is a good later hardening exercise |
 | Agent commits as `little-mester-agent` | Easy to audit and revert agent changes | None really |
-| Small 7B model | Fits in 8 GB VRAM | Weaker tool calling. You will see it fail, which is educational |
+| Large local model (qwen3:8b / qwen3.6:35b-a3b) | Fits in available VRAM with proper quantization | Models need Docker volume; first setup re-downloads them |
 
 ---
 
@@ -364,7 +392,7 @@ Read this twice.
 | `ollama ps` shows part CPU | Model plus context doesn't fit in VRAM. Lower `OLLAMA_CONTEXT_LENGTH` or use a smaller model/quantization. |
 | Agent can't reach `ollama` | Ollama not healthy yet, or the services aren't on the same network. |
 | Files created by the agent are owned by root | `LAB_UID`/`LAB_GID` weren't passed through. Run via `./lab`, not `docker compose` directly. |
-| Aider tries to reach the internet and stalls | Expected with no network. It should fall back. Note how long it takes in your journal. |
+| Agent (or Aider) tries to reach the internet and stalls | Expected with no network. It should fall back. Note how long it takes in your journal. |
 
 ---
 
@@ -373,7 +401,7 @@ Read this twice.
 Do these in order. Each has its own README with goals, exercises and "you should be able to explain" questions.
 
 1. Get the sandbox running and make `verify-sandbox.sh` pass. Read [SECURITY.md](SECURITY.md).
-2. Use Aider on a small project. Review every diff. Journal what the model gets right and wrong.
+2. Use opencode (or `--agent aider`) on a small project. Review every diff. Journal what the model gets right and wrong.
 3. Build your own agent loop: [my-agent/](my-agent/README.md).
 4. Measure it: [evals/](evals/README.md).
 5. Attack it: [red-team/](red-team/README.md).
