@@ -13,14 +13,12 @@
       },
       "models": {
         "qwen3.6:35b-a3b": {
-          "name": "Qwen3.6 35B-A3B (slow, default)",
           "limit": {
             "context": 131072,
             "output": 32768
           }
         },
         "qwen3:8b": {
-          "name": "Qwen3 8B (fast)",
           "limit": {
             "context": 65536,
             "output": 16384

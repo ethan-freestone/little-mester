@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""regen-configs [--dry-run] [path-to-models.txt]
+
+Reads models.txt and regenerates opencode.json + updates compose.yaml
+OLLAMA_CONTEXT_LENGTH from model data. Called automatically by ./lab build/setup.
+
+models.txt format (space or tab separated, no headers needed):
+  <model_name>    <context_size>    [output_ratio_or_absolute]
+  
+  output defaults to 0.25 if omitted or <= 1. Values > 1 are treated as absolute integers.
+"""
+import sys
+import json
+import os
+import re
+
+def parse_models(path):
+    """Parse models.txt, return list of dicts with name/context/output."""
+    models = []
+    default_ratio = 0.25
+    
+    if not os.path.isfile(path):
+        print(f"ERROR: {path} not found.", file=sys.stderr)
+        sys.exit(1)
+    
+    with open(path) as f:
+        for line in f:
+            line = line.split("#")[0].strip()  # strip comments
+            if not line:
+                continue
+            
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+                
+            name = parts[0]
+            try:
+                ctx = int(parts[1])
+            except ValueError:
+                print(f"WARNING: bad context for {name}: '{parts[1]}'", file=sys.stderr)
+                continue
+            
+            # Determine output: ratio (<=1 or floats like 0.25) vs absolute (>1 integer)
+            out = 0
+            if len(parts) >= 3:
+                val = parts[2]
+                try:
+                    float_val = float(val)
+                    if float_val > 0 and float_val <= 1:
+                        # Treat as ratio
+                        out = int(ctx * float_val)
+                    else:
+                        # Treat as absolute
+                        out = int(float_val)
+                except ValueError:
+                    pass
+            
+            models.append({
+                "name": name,
+                "context": ctx,
+                "output": out
+            })
+    
+    return models
+
+
+def gen_opencode_json(models):
+    """Generate the opencode.json content string."""
+    cfg = {
+        "$schema": "https://opencode.ai/config.json",
+        "autoupdate": False,
+        "share": "disabled",
+        "provider": {
+            "ollama": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Ollama (local)",
+                "options": {
+                    "baseURL": "http://ollama:11434/v1",
+                    "timeout": 900000,
+                    "chunkTimeout": 600000
+                },
+                "models": {}
+            }
+        },
+        "model": f"ollama/{models[0]['name']}",
+        "small_model": f"ollama/{models[-1]['name']}",
+        "permission": {
+            "edit": "ask",
+            "bash": "ask"
+        },
+        "otel": {}
+    }
+    
+    for m in models:
+        cfg["provider"]["ollama"]["models"][m["name"]] = {
+            "limit": {
+                "context": m["context"],
+                "output": m["output"]
+            }
+        }
+    
+    return json.dumps(cfg, indent=2)
+
+
+def get_max_context(models):
+    """Return max context across all models."""
+    return max(m["context"] for m in models)
+
+
+def update_compose(lab_dir, ctx_value):
+    """Update OLLAMA_CONTEXT_LENGTH in compose.yaml."""
+    compose_path = os.path.join(lab_dir, "compose.yaml")
+    
+    if not os.path.isfile(compose_path):
+        print(f"WARNING: {compose_path} not found, skipping compose update.", file=sys.stderr)
+        return
+    
+    with open(compose_path) as f:
+        lines = f.readlines()
+    
+    new_lines = []
+    updated = False
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("OLLAMA_CONTEXT_LENGTH"):
+            # Replace the numeric value (keep indentation, comments, quotes)
+            new_line = re.sub(r':\s*\d+', f': "{ctx_value}"', line)
+            new_lines.append(new_line)
+            updated = True
+        else:
+            new_lines.append(line)
+    
+    if updated and "".join(new_lines) != "".join(lines):
+        with open(compose_path, "w") as f:
+            f.writelines(new_lines)
+        return True
+    
+    return False
+
+
+def compare_files(content, path):
+    """Compare content string against a file byte-by-byte."""
+    try:
+        with open(path, "rb") as fp:
+            return content.encode() == fp.read()
+    except FileNotFoundError:
+        return False
+
+
+def main():
+    dry_run = False
+    models_file = None
+    
+    args = sys.argv[1:]
+    
+    # Parse non-file arguments
+    remaining = []
+    for arg in args:
+        if arg == "--dry-run":
+            dry_run = True
+        else:
+            remaining.append(arg)
+    
+    # Get paths
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    lab_dir = os.path.dirname(script_dir)  # one level up from scripts/
+    
+    if remaining:
+        models_file = remaining[0]
+    else:
+        models_file = os.path.join(lab_dir, "models.txt")
+    
+    # Parse
+    models = parse_models(models_file)
+    
+    if not models:
+        print("ERROR: no models parsed from", file=sys.stderr)
+        sys.exit(1)
+    
+    print("=== Regen configs ===")
+    for m in models:
+        print(f"  {m['name']}: ctx={m['context']}, out={m['output']}")
+    
+    if dry_run:
+        max_ctx = get_max_context(models)
+        print(f"  max context -> OLLAMA_CONTEXT_LENGTH: {max_ctx}")
+        print("  (dry run - no files modified)")
+        
+        # Show what opencode.json would look like
+        expected = gen_opencode_json(models) + "\n"
+        actual_path = os.path.join(lab_dir, "agent/opencode", "opencode.json")
+        
+        with open(actual_path, "rb") as f:
+            current = f.read()
+        if expected.encode("utf-8") == current:
+            print("  [unchanged] agent/opencode/opencode.json")
+        else:
+            print("  [would update] agent/opencode/opencode.json")
+        return
+    
+    # Generate opencode.json content
+    predicted = gen_opencode_json(models)
+    actual_path = os.path.join(lab_dir, "agent/opencode", "opencode.json")
+    
+    with open(actual_path, "rb") as f:
+        current = f.read()
+    if predicted.encode("utf-8") + b"\n" == current:
+        print("  [unchanged] agent/opencode/opencode.json")
+    else:
+        with open(actual_path, "w") as f:
+            f.write(predicted + "\n")
+        print("  [updated] agent/opencode/opencode.json")
+    
+    # Update compose.yaml
+    max_ctx = get_max_context(models)
+    updated = update_compose(lab_dir, max_ctx)
+    if updated:
+        print(f"  [updated] compose.yaml OLLAMA_CONTEXT_LENGTH -> {max_ctx}")
+    else:
+        print(f"  [unchanged] compose.yaml OLLAMA_CONTEXT_LENGTH={max_ctx}")
+    
+    print("=== Done ===")
+
+
+if __name__ == "__main__":
+    main()
