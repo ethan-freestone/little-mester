@@ -100,7 +100,54 @@ This ensures TDD is not optional when improving little-mester itself.
 
 ---
 
-## Verification
+## Acceptance Criteria — Docker-in-Docker Testing Capability
+
+This ticket's work is **not complete** until the following acceptance criteria are met. These tests were originally documented in **ticket-002 Phase 2** but belong here because they require Docker-in-Docker (running agent containers from within the OpenCode session) — capability not available during ticket-002's implementation.
+
+### A1: `--unsafe-recurse` guard fires by default
+```bash
+./lab . 2>&1; echo "exit=$?"
+# Expected: exit=1, message="REFUSED: Workspace path would expose the little-mester repo itself. Use --unsafe-recurse to override"
+```
+
+### A2: `--unsafe-recurse` lifts the guard
+```bash
+./lab --unsafe-recurse . 2>&1 || true
+# Expected: confirm output includes "Unsaferecurse: 1", no REFUSED message. Agent launches if 'y'.
+```
+
+### A3: `--opencode` and `--aider` agent flags route correctly
+```bash
+./lab --opencode /tmp 2>&1 | grep "Agent"    # → "Agent: opencode"
+./lab --aider   /tmp 2>&1 | grep "Agent"     # → "Agent: aider"
+```
+
+### A4: Normal workspace works with defaults
+```bash
+mkdir -p /tmp/test-ws && ./lab /tmp/test-ws 2>&1 | grep -E "Mounting|Egress|Agent"
+# Expected: EGRESS: true shown, no guard error
+```
+
+### A5: Help text includes `--unsafe-recurse`
+```bash
+./lab --help | grep unsafe
+# Expected: "--unsafe-recurse" appears with DANGEROUS/awareness tag
+```
+
+### A6: Bats test suite passes
+```bash
+bats tests/
+# All existing + any new test files must pass (0 failures)
+```
+
+### A7: Scripts work in both bash and fish
+- Every command above runs identically under `bash` and `fish`.
+- Shell-specific exit status (`$?` vs `$status`) is handled correctly.
+- No bash-only constructs leak into the test expectations.
+
+---
+
+## Verification (TDD Gate)
 ```bash
 # After ticket-001 and ticket-003:
 ./scripts/lab-dev-work init
