@@ -8,7 +8,8 @@ WORKSPACE=""
 MOUNT_MODE="rw"  # Default mount mode
 WORKFLOW=""      # Default workflow (default, tdd, regression)
 VERBOSE=0        # Enable verbose logging
-AGENT="aider"    # Which agent to launch: aider | opencode
+PERMISSIONS=""    # Optional: per-run permission override (deny|ask|auto)
+AGENT="opencode"    # Which agent to launch: opencode | aider (fallback)
 
 # Network mode: egress=true by default; --isolated flips to false
 EGRESS="${EGRESS:-true}"
@@ -179,6 +180,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       --egress) EGRESS="${2:?--egress needs true/false}"; shift 2 ;;
       --egress-false|--isolated) EGRESS="false"; shift ;;
       --egress-true) EGRESS="true"; shift ;;
+      --permissions) PERMISSIONS="${2:?--permissions needs deny/ask/auto}"; shift 2 ;;
       *) break ;;
     esac
   done
@@ -227,13 +229,14 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       echo
       echo "Flags (before path):"
       echo "  --ro / --rw        Mount mode (default: rw)"
-      echo "  --agent name       Agent to launch (aider|opencode, default: aider)"
+      echo "  --agent name       Agent to launch (opencode|aider, default: opencode)"
       echo "  --workflow name    Workflow profile (default: default)"
       echo "  --verbose          Show verbose logging in stderr"
       echo "  --egress true|false Override egress default (default: true)"
       echo "  --egress-false     Short alias for --egress false / --isolated"
       echo "  --egress-true      Short alias for --egress true"
-      echo "  --isolated         Same as --egress-false"
+      echo "  --isolated         Same as --egress-false
+  --permissions P    Per-run permission mode (deny/ask/auto, default: from config)"
       echo
       echo "Any remaining arguments after the path are passed to the agent."
       ;;
