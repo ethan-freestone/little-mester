@@ -36,12 +36,36 @@ Shift default agent to `opencode` (with internet enabled), strictly prohibit edi
 | 1C ✅ | Confirm edits are done — files committed | **Run:** `git add lab README.md && git commit -m "..."` | ✅ DONE (cf8077d) |
 | 1D | Push to remote | **Run:** `git push origin recurse-work` | [ ] |
 
+## ⚠️ IMPORTANT CONTEXTS
+
+### Testing from `little-mester-working` not the repo itself
+All Phase 2 testing below runs against **`~/Development/little-mester-working`** (the working checkout that has all changes). The agent will NOT merge this to MAIN yet — you'll test here first, then merge to little-mester and verify.
+
+### ALL scripts MUST work in both fish AND bash
+Every command shown uses only POSIX sh constructs (`;`, `echo`, standard pipes) that work identically in both fish and bash. **Never use `$?` (bash-only); always check if the user is on fish and adapt.** The testing section below notes shell-specific syntax where needed:
+
+| Shell | Separator | Exit status variable |
+|-------|-----------|---------------------|
+| bash / sh | `;` or newline | `$?` |
+| fish | `;` or Enter | `$status` |
+
+Examples that work in BOTH:
+```bash
+# Both shells support these identically:
+./lab . 2>&1
+echo "exit=$?"          # or echo "exit=" $status in fish
+./lab --help | grep unsafe
+./lab /tmp               (pipe works identically in both)
+```
+
+---
+
 ### Phase 2: You test from your terminal
 | Step | Command | Expected result | Status |
 |------|---------|-----------------|--------|
-| 2A | `cd /workspace && ./lab --help` (check help text) | `--unsafe-recurse` appears in flag list with DANGEROUS tag | [ ] |
-| 2B | `./lab . 2>&1; echo "exit=$?"` (guard MUST fire) | `REFUSED: Workspace path would expose the little-mester repo itself. Use --unsafe-recurse to override` — exit=1 (NOTE: uses `.` not `./lab`) | [ ] |
-| 2C | `./lab --unsafe-recuse . 2>&1; echo "exit=$?"` (guard lifted) | Confirm shows `Unsaferecurse : 1`. With 'y': agent launches, no error from guard | [ ] |
+| 2A | `cd ~/Development/little-mester-working && ./lab --help` (check help text) | `--unsafe-recurse` appears in flag list with DANGEROUS tag | [ ] |
+| 2B | `./lab . 2>&1; echo "exit=" $status` (guard MUST fire — fish uses $status, bash uses `$?`) | `REFUSED: Workspace path would expose the little-mester repo itself. Use --unsafe-recurse to override` — non-zero exit (NOTE: uses `.` not `./lab`) | [ ] |
+| 2C | `./lab --unsafe-recurse . 2>&1; echo "exit=" $status` (guard lifted) | Confirm shows `Unsaferecurse : 1`. With 'y': agent launches, no error from guard | [ ] |
 | 2D | `./lab --opencode /tmp 2>&1 | grep Agent && ./lab --aider /tmp 2>&1 | grep Agent` (agent flags) | First: `Agent: opencode`, Second: `Agent: aider` | [ ] |
 | 2E | `./lab /tmp 2>&1` (normal workspace, defaults) | EGRESS: true; normal confirmation flow, no guard error | [ ] |
 
