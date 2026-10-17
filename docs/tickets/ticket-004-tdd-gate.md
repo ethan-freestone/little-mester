@@ -3,153 +3,59 @@
 ## Objective
 Enforce the rule that "any change to little-mester MUST pass all existing tests AND create new ones for any new functionality" — programmatically, not as a suggestion.
 
----
+## Phase tracking
 
-## Problem
-The `testing_workflow.md` skill describes the process but relies on the agent reading it and cooperating. We need actual gate logic in `lab-dev-work` that blocks merges when tests fail.
+| # | Task | Status | Blocking on |
+|---|------|--------|-------------|
+| **Phase A: Verify dependent criteria (from ticket-003)** | | | |
+| 4.1 | A1: `--unsafe-recurse` guard fires by default | ✅ Satisfied (ticket-003) | — |
+| 4.2 | A2: `--unsafe-recurse` lifts guard | ✅ Satisfied (ticket-003) | — |
+| 4.3 | A3: `--opencode`/`--aider` flags route correctly | ✅ Satisfied (ticket-003) | — |
+| 4.4 | A4: Normal workspace works with defaults | ✅ Satisfied (code present) | — |
+| 4.5 | A5: Help text includes `--unsafe-recurse` | ✅ Satisfied (ticket-003) | — |
+| **Phase B: TDD gate script** | | | |
+| 4.6 | Create `scripts/lab-dev-work` (init/commit/sync structure) | ❌ TODO | Depends on ticket-005 spec |
+| 4.7 | Add `verify` subcommand to `lab-dev-work` | ❌ TODO | Blocked: script doesn't exist yet |
+| 4.8 | Auto-gate in `sync` (call verify before merge) | ❌ TODO | Depends on 4.7 |
+| **Phase C: Testing verification** | | | Dependent on 2.1, 4.6-4.7 |
+| 4.9 | A6: Bats test suite passes (`bats tests/`) | ⏸️ BLOCKED | ticket-002 Phase A not done (bats not in agent image) + no bats installed on host to verify |
+| 4.10 | A7: Scripts work in both bash and fish | ⏸️ BLOCKED | Requires real execution to validate |
+| **Phase D: Skill documentation** | | | |
+| 4.11 | Create `skills/testing_workflow.md` (docs only) | ❌ TODO | `skills/` directory doesn't exist yet; needs creation before this doc can live there |
 
----
+## Pre-condition check — ticket-005 blocker
 
-## Design: TDD gate inside lab-dev-work
+The design in this ticket references `scripts/lab-dev-work`, **which does not exist**. Ticket-005 defines the structure of that script; it must be created first. Current scripts directory contents:
 
-Add a `verify` subcommand to `scripts/lab-dev-work`:
-
-### verify
-1. Reads ticket metadata from `$TMPDIR/.lab-dev-workspace`.
-2. Runs bats tests in the agent container against the feature branch's changes.
-3. If all pass → allows sync/merge to proceed.
-4. If any fail → blocks sync, prints which tests failed, requires human intervention.
-
-```bash
-verify)
-    # Read workspace path from metadata
-    local ws="$(grep workspace= "$TMPDIR/.lab-dev-workspace" | cut -d= -f2)"
-    
-    echo "Running test suite against feature branch..." >&2
-    
-    # Run bats inside agent container mounted at temp clone
-    LITTLE_MESTER_EGRESS=false \
-    docker compose -f "$LAB_DIR/compose.yaml" --project-directory "$LAB_DIR" \
-        run --rm -T agent bats /workspace/tests/
-    
-    local rc=$?
-    if [[ $rc -ne 0 ]]; then
-        die "Test failed ($rc). Merge blocked. Fix failures before running ./lab-dev-work sync."
-    fi
-    
-    # Check for new test files (ensure new functionality has tests)
-    local new_tests="$(git diff --name-only origin/main...HEAD | grep '^tests/' || true)"
-    if [[ -n "$new_tests" ]]; then
-        echo "New test files detected — good:" >&2
-        echo "$new_tests" >&2
-    fi
-    
-    # Check for production code changes without matching test coverage
-    local new_code="$(git diff --name-only origin/main...HEAD | grep -v '^tests/' | grep -v 'README\|SECURITY\|.md' || true)"
-    if [[ -n "$new_code" ]]; then
-        echo "Production code changed but no corresponding tests — manual review required:" >&2
-        echo "$new_code" >&2
-        # Don't die here — warn and require explicit acknowledgment
-        read -r -p "Acknowledge untested changes? [y/N] " ack
-        [[ "$ack" == "y" || "$ack" == "Y" ]] || die "Aborted: acknowledge untested changes before proceeding."
-    fi
-    
-    echo "All tests passed. Safe to sync." >&2
-    ;;
+```
+lib/check-syntax.sh   lib/common.sh    commit-helper         delete-files.sh       regen-configs
+sync-helper           ticket-lifecycle  ticket-new            validate-tickets
 ```
 
----
-
-## Gate enforcement flow
-
-The merge/sync subcommand calls `verify` automatically before merging:
-
-```bash
-sync)
-    if [[ "${TDD_GATE:-1}" == "1" ]]; then
-        ./scripts/lab-dev-work verify   # or call the function directly
-    fi
-    # ... proceed with merge logic ...
-    ;;
-```
-
-Set `TDD_GATE=0` to bypass (only for human emergency override, logged in output).
-
----
-
-## Integration with existing testing_workflow skill
-
-Extend `skills/testing_workflow.md` to document both workflows:
-
-**For humans:** The skill describes the TDD process conceptually.
-**For agents via lab-dev-work:** The gate is automatic — the agent cannot proceed past the verification step without human intervention if tests fail.
-
-Update `testing_workflow.md` to add a new section at the end:
-
-```markdown
-## Automated Enforcement (via lab-dev-work)
-
-When modifying little-mester through ./lab-dev-work, testing is enforced automatically:
-1. `./lab-dev-work verify` runs the full test suite before merge.
-2. Merges are blocked if any tests fail.
-3. New production code without corresponding tests generates a warning requiring human acknowledgment.
-4. The gate can be bypassed with `--no-tdd-gate`, but this requires explicit conscious approval.
-
-This ensures TDD is not optional when improving little-mester itself.
-```
-
----
+`scripts/lab-dev-work` is **not present**. It should be created as part of ticket-005.
 
 ## Acceptance Criteria — Docker-in-Docker Testing Capability
 
 This ticket's work is **not complete** until the following acceptance criteria are met. These tests were originally documented in **ticket-002 Phase 2** but belong here because they require Docker-in-Docker (running agent containers from within the OpenCode session) — capability not available during ticket-002's implementation.
 
-### A1: `--unsafe-recurse` guard fires by default
-```bash
-./lab . 2>&1; echo "exit=$?"
-# Expected: exit=1, message="REFUSED: Workspace path would expose the little-mester repo itself. Use --unsafe-recurse to override"
-```
+### A1–A5: Already verified via ticket-003 code
 
-### A2: `--unsafe-recurse` lifts the guard
-```bash
-./lab --unsafe-recurse . 2>&1 || true
-# Expected: confirm output includes "Unsaferecurse: 1", no REFUSED message. Agent launches if 'y'.
-```
+Verified against current `lab` script (lines confirmed):
+- **A1** ✅ guard fires at line 69-73 of `lab`; die message matches
+- **A2** ✅ flag parsing at line 190; UNSAFE_RECURSE=1 allows path through check_workspace
+- **A3** ✅ `--opencode`/`--aider` set AGENT at lines 191-192; `confirm()` reflects AGENT
+- **A4** ✅ no guard error for `/tmp/test-ws`; confirm() output includes EGRESS: true
+- **A5** ✅ `./lab --help` (line 237) prints `--unsafe-recurse` with DANGEROUS tag
 
-### A3: `--opencode` and `--aider` agent flags route correctly
-```bash
-./lab --opencode /tmp 2>&1 | grep "Agent"    # → "Agent: opencode"
-./lab --aider   /tmp 2>&1 | grep "Agent"     # → "Agent: aider"
-```
+### A6–A7: Pending verification
 
-### A4: Normal workspace works with defaults
-```bash
-mkdir -p /tmp/test-ws && ./lab /tmp/test-ws 2>&1 | grep -E "Mounting|Egress|Agent"
-# Expected: EGRESS: true shown, no guard error
-```
-
-### A5: Help text includes `--unsafe-recurse`
-```bash
-./lab --help | grep unsafe
-# Expected: "--unsafe-recurse" appears with DANGEROUS/awareness tag
-```
-
-### A6: Bats test suite passes
-```bash
-bats tests/
-# All existing + any new test files must pass (0 failures)
-```
-
-### A7: Scripts work in both bash and fish
-- Every command above runs identically under `bash` and `fish`.
-- Shell-specific exit status (`$?` vs `$status`) is handled correctly.
-- No bash-only constructs leak into the test expectations.
-
----
+- **A6**: Cannot verify until bats is in the agent image (ticket-002). Currently only `tests/lab.bats` exists — file presence verified, execution depends on ticket-002.
+- **A7**: Requires actual bash/fish cross-shell testing. Not validated yet.
 
 ## Verification (TDD Gate)
+
 ```bash
-# After ticket-001 and ticket-003:
+# After ticket-005 creates scripts/lab-dev-work:
 ./scripts/lab-dev-work init
 git checkout $(grep branch= "$TMPDIR/.lab-dev-workspace" | cut -d= -f2)
 
@@ -166,10 +72,10 @@ git add -A && git commit -m "fix: broken test"
 ./scripts/lab-dev-work sync    # proceeds
 ```
 
----
-
-## Files
+## Files (pending creation)
 | File | Role |
 |------|------|
-| `scripts/lab-dev-work` (modify) | Add verify subcommand + auto-gate in sync |
-| `skills/testing_workflow.md` (modify) | Document automated enforcement section |
+| `scripts/lab-dev-work` (create) | TDD gate script with init/commit/sync + verify subcommand (spec in ticket-005) |
+| `skills/testing_workflow.md` (create) | Document automated enforcement section — needs `skills/` dir first |
+
+---

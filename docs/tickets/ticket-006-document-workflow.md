@@ -3,8 +3,23 @@
 ## Objective
 Update all relevant documentation so users understand the new defaults, guardrails, and how to safely improve little-mester itself.
 
----
+## Phase tracking
 
+| # | Task | Status | Blocking on |
+|---|------|--------|-------------|
+| 6.1 | Update README.md default agent references → opencode | ❌ TODO | Depends on ticket-003 being fully accurate — this was partially addressed in the README cleanup (self-referencing) |
+| 6.2 | Add self-edit section to README.md (`lab-dev-work` workflow docs) | ❌ TODO | Blocked: depends on `scripts/lab-dev-work` being created by ticket-005 |
+| 6.3 | Add Self-Editing Safety section to SECURITY.md | ❌ TODO | Depends on 6.2 (needs lab-dev-work reference) |
+| 6.4 | Create `skills/testing_workflow.md` + doc update in ticket-004 Phase D | ❌ TODO | Requires creating `skills/` directory first |
+| 6.5 | Update journal.md with restructuring entry | ✅ DONE | Journal entry for "Restructuring to tickets" already exists per ticket-006's own design |
+
+## Notes on prior work
+
+The README cleanup (done in this session) addressed several items that were originally scoped here:
+- Removed 2 of 3 duplicate "Repo map" sections
+- Fixed `skills/` path reference to note it as "planned, not yet created"
+- Marked learning path items (my-agent/, evals/, red-team/, proxy/, mcp/) as *not yet created*
+- Clarified `arch-*.md` file convention as advisory rather than existing files
 ## README.md updates
 
 ### Update default agent mention

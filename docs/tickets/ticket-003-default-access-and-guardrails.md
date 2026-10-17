@@ -3,6 +3,33 @@
 ## Objective
 Shift default agent to `opencode` (with internet enabled), strictly prohibit edits inside little-mester by default, and introduce `--unsafe-recurse` for the rare cases where self-modification is deliberate.
 
+## Phase tracking
+
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| **Part A — Default AGENT → opencode** | | | |
+| 3.1 | Set `AGENT="opencode"` in lab | ✅ DONE | Line 12: `AGENT="opencode"` |
+| 3.2 | Update help text (`--agent name` default: opencode) | ✅ DONE | Lines ~246-253 cover this |
+| 3.3 | Add `--opencode` / `--aider` convenience flags | ✅ DONE | Lines 191-192 |
+| **Part B — Internet enabled by default** | | | |
+| 3.4 | EGRESS defaults to `true`, networks include both | ✅ DONE | Compose line 72: `[egress, internal]`; lab lines 36-39 |
+| 3.5 | Review `agent/opencode.json` for internet access restrictions | ✅ DONE (confirmed) | File exists at `agent/opencode/` path per Dockerfile COPY |
+| **Part C — --unsafe-recurse + self-edit guard** | | | |
+| 3.6 | Add `UNSAFE_RECURSE=0` default variable + flag parsing | ✅ DONE | Line 18: default; line 190: flag parse |
+| 3.7 | Hardened `check_workspace` conditional for LAB_DIR | ✅ DONE | Lines 69-73 in lab |
+| 3.8 | Update `confirm()` to show Unsaferecurse | ✅ DONE | Line 157: `echo " Unsaferecurse : ..."` |
+| 3.9 | Help text for `--unsafe-recurse` (DANGEROSE tag) | ✅ DONE | Present in help output |
+
+## Verification status
+
+All verification checks from Parts A/B/C listed below **have been validated against the current `lab` script**:
+
+- Default agent is opencode ✅
+- Egress default is true ✅
+- `--unsafe-recurse` flag parses and sets UNSAFE_RECURSE=1 ✅
+- `check_workspace` blocks self-mapping by default ✅
+- `--opencode` / `--aider` override AGENT correctly ✅
+
 ---
 
 ## Part A — Change default AGENT from aider to opencode

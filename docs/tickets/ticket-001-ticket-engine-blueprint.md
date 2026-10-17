@@ -7,7 +7,7 @@ Engine lives in `ticket-engine-mcp/`. This ticket tracks Phase A work.
 | # | Task | Status | Notes |
 |---|------|--------|-------|
 | **Phase A: Foundation** | | | |
-| 0.1 | Archive old tickets, remove deprecated schema files | ✅ DONE | `docs/tickets/archive/` + meta-ticket-schema.json dropped |
+| 0.1 | Archive old tickets, remove deprecated schema files | ✅ DONE | Archived to `docs/tickets/archive/` (2 files); `meta-ticket-schema.json` status unclear — may have been dropped; if needed elsewhere, relocate and update reference |
 | 0.2 | Create ticket-001 (engine = priority 1) | ✅ DONE | This file |
 | 1   | Rewrite docs/workflows.md → JSON-first format + routing modes + conventional commits rule | ✅ DONE | Updated to match SCHEMA.md and blueprint routing modes |
 | **Phase B: Engine** | | |

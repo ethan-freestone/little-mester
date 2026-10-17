@@ -3,7 +3,23 @@
 ## Objective
 Create a script that lets little-mester modify itself safely via git ops (no workspace mounting inside the container), then sync changes back through the standard `./lab` flow.
 
----
+## Phase tracking
+
+| # | Task | Status | Blocking on |
+|---|------|--------|-------------|
+| **Phase A: Script scaffolding** | | | |
+| 5.1 | Create `scripts/lab-dev-work` with shebang, conventions, variables | ❌ TODO | This ticket |
+| 5.2 | Implement `init` subcommand (temp clone + branch creation) | ❌ TODO | Depends on 5.1 |
+| **Phase B: Git workflow subcommands** | | | |
+| 5.3 | Implement `commit` subcommand (stage + conventional commit) | ❌ TODO | Depends on 5.2 |
+| 5.4 | Implement `push` subcommand (+ optional `--pr`) | ❌ TODO | Depends on 5.3 |
+| 5.5 | Implement `pull`/`sync` subcommands (normal + PR + dry-run) | ❌ TODO | Depends on 5.4 |
+| **Phase C: Integration** | | | |
+| 5.6 | TDD gate hooks: integrate with ticket-004 `verify` flow | ⏸️ PENDING | ticket-004 Phase B needs completion first |
+
+## Pre-condition for ticket-004
+
+Ticket-004's acceptance criteria (A6-A7) and Design section reference `scripts/lab-dev-work`, which **does not exist**. This ticket creates it. See ticket-004 "Pre-condition check" for details.
 
 ## Problem this solves
 The agent cannot edit `./lab` directly because `check_workspace` blocks it — which is correct and desired for safety. But how does little-mester improve itself? This script provides the bridge.

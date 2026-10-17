@@ -4,92 +4,20 @@
 
 Every opencode session should automatically have SSH access configured for git operations, while requiring explicit user permission before any GitHub action is executed. The lab script must support an `--ssh` flag to enable host SSH key injection (optional, opt-in) versus relying on the container's default credentials.
 
----
+## Phase tracking
 
-## Problem
-
-Currently:
-- Git push fails because no SSH client exists in the Docker container (`cannot run ssh: No such file or directory`)
-- There is no automatic SSH key loading per session — users must manually configure git credentials
-- GitHub actions (push, PR create) happen without explicit user confirmation, which conflicts with the security-first design
-- The host's SSH keys are not accessible to the container by default for security reasons
-
----
-
-## Design: Session-based SSH + Per-operation Confirmation
-
-### Mode 1: Container-native SSH (default, no host key exposure)
-
-By default, the agent runs without access to host SSH keys. Git operations use:
-- HTTPS with credential helper or token-based auth
-- Environment variables like `GIT_SSH_COMMAND` configured at runtime
-- No host filesystem mounting of private keys
-
-This is the safe default — no risk of accidentally exposing SSH keys into containers or logs.
-
-### Mode 2: Host SSH key injection (optional, `--ssh` flag)
-
-When enabled via `./lab --ssh <workspace>`:
-- Mounts `$HOME/.ssh/id_ed25519` (or configured key path) into the container
-- Starts an ssh-agent inside the container and loads the key
-- Only active for the duration of that session; keys are not persisted
-
-Requires user confirmation because it exposes host credentials.
-
-### Per-operation Confirmation Gate
-
-Regardless of SSH mode, before ANY GitHub operation:
-
-```
-[GitHub Action Required] User must explicitly confirm each action:
-  ┌──────────────────────────────────────┐
-  │ Action: push                         │
-  │ Remote: git@github.com:user/repo.git │
-  │ Branch: opencode-v2                  │
-  │ What will happen: Push 1 commit(s)   │
-  └──────────────────────────────────────┘
-  Proceed? [y/N]
-
-  Action: create PR
-  Remote: git@github.com:user/repo.git  
-  Base: main → opencode-v2
-  What will happen: Create pull request
-  ──────────────────────────────────────
-  Proceed? [y/N]
-```
-
----
-
-## Implementation Phases
-
-### Phase 1: Default behavior — container-native git auth
-
-Add a `.git-credentials` or `GIT_TOKEN` flow inside the agent config path for HTTPS-based git. The agent should be instructed to prompt for credentials when needed, and lab should accept `--token <file-or-env>` to inject GitHub tokens.
-
-### Phase 2: Host SSH key injection (`--ssh` flag)
-
-In `lab`:
-- Add `--ssh` flag that sets `LITTLE_MESTER_SSH=1`
-- Pass SSH key path as env var (e.g., `SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"`)
-- If `LITTLE_MESTER_SSH=1`, dynamically mount the host SSH private key volume into the container: `-v "${SSH_KEY_PATH}:/root/.ssh/deploy_key:ro"` (read-only for safety)
-- Start ssh-agent + add-key in the compose env or Dockerfile RUN
-
-### Phase 3: Per-operation confirmation before GitHub actions
-
-In an opencode session, when the agent detects a remote GitHub URL (e.g., `git@github.com/...`), it should:
-1. Print the pending action to stderr with full details
-2. Wait for user response via stdin or prompt
-3. Only proceed if explicitly confirmed
-4. Log every action with timestamp in `journal.md` for audit trail
-
-This is not a `lab` flag — it's runtime behavior of the agent itself, configured via `.mester-confirmation` manifest in workspace root:
-```
-github_confirmation=true    # show confirmation before every GH action (default)
-github_auto_approve=false   # override all confirmations (DANGEROUS)
-```
-
----
-
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| **Phase 1: Container-native git auth (default)** | | | |
+| 9.1 | Verify HTTPS/git credential flow works in agent image | ❌ TODO | Agent has `git` installed; needs token/env var injection path |
+| 9.2 | Accept `--token <file-or-env>` flag in lab to inject GitHub tokens | ❌ TODO | New flag needed in lab's argument parsing |
+| **Phase 2: Host SSH key injection (`--ssh` flag)** | | | |
+| 9.3 | Add `--ssh` flag → sets `LITTLE_MESTER_SSH=1` env var | ❌ TODO | New flag in lab; compose supports dynamic mounts |
+| 9.4 | Dynamic volume mount of host SSH key into container (read-only) | ❌ TODO | Requires compose template/container config work |
+| 9.5 | Start ssh-agent + load key in container entrypoint | ❌ TODO | Dockerfile RUN or compose environment setup |
+| **Phase 3: Per-operation confirmation gate** | | | |
+| 9.6 | Implement runtime confirmation prompt before GitHub actions (agent-side) | ❌ TODO | Agent-side logic; not lab feature |
+| 9.7 | Create workspace `.mester-confirmation` manifest schema | ❌ TODO | New manifest format for per-workspace policy |
 ## Verification
 
 ```bash

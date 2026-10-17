@@ -7,8 +7,18 @@ Enable test execution both inside and outside the agent container so that little
 - **Do not** mount `.$LAB_DIR` as workspace (already blocked in `check_workspace`).
 - All manifests use `.mester-egress` key-value format: `permission=true|false`, `allowed_domains=`, `intent=`.
 
----
+## Phase tracking
 
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| **Phase A — Bake bats into agent Dockerfile** | | | |
+| 2.1 | Add `bats` to `agent/Dockerfile` apt-get install block | ❌ TODO | Not yet implemented; current Dockerfile has git curl ripgrep ca-certificates nodejs npm only |
+| 2.2 | Verify bats present inside container image | ❌ TODO | `docker run --rm workspace_agent bats --version` |
+| **Phase B — Host fallback installer** | | | |
+| 2.3 | Create `scripts/install-bats.sh` (OS detect + native pkg or clone) | ❌ TODO | Script doesn't exist yet; referenced in ticket but never written |
+| 2.4 | Validate bats available on host (`bats tests/lab.bats → all pass`) | ❌ TODO | Depends on 2.3 |
+
+---
 ## Part A — Bake bats-core into agent Dockerfile
 
 ### File to edit
@@ -59,3 +69,13 @@ bash scripts/install-bats.sh
 bats --version
 bats tests/lab.bats   # all 13 assertions pass
 ```
+
+---
+
+## Notes — Docker-in-Docker (DinD)
+
+**DinD is out of scope for ticket-002.** The current `tests/lab.bats` runs host-side by sourcing `lab` directly — no Docker needed. Dind capability (spinning up new little-mester instances from within the sandbox) may require:
+- Mounting the host Docker socket into a future container run with appropriate flag
+- Running a `docker:dind` sidecar service
+- Either approach is documented as future work in ticket-004 Phase C.
+
