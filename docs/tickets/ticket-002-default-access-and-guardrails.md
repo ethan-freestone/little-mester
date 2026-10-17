@@ -47,16 +47,16 @@ Every command shown uses only POSIX sh constructs (`;`, `echo`, standard pipes) 
 | Shell | Separator | Exit status variable |
 |-------|-----------|---------------------|
 | bash / sh | `;` or newline | `$?` |
-| fish | `;` or Enter | `$status` |
+| fish | `;` or Enter (new line) | `$status` |
 
 Examples that work in BOTH:
 ```bash
 # Both shells support these identically:
-./lab . 2>&1
-echo "exit=$?"          # or echo "exit=" $status in fish
-./lab --help | grep unsafe
-./lab /tmp               (pipe works identically in both)
+./lab . 2>&1          # pipe works the same
+echo "exit=" $status  # fish native
 ```
+
+For bash users: `echo "exit=$?"`. For fish users: replace `$?` with `$status`.
 
 ---
 
@@ -72,9 +72,7 @@ echo "exit=$?"          # or echo "exit=" $status in fish
 ### Phase 3: Close out
 | Step | Action | Status |
 |------|--------|--------|
-| 3A | Run Bats tests: `cd /workspace && bats tests/` | All pass | [ ] |
-| 3B | Commit & push (if not done in step 1D) | [ ] |
-| 3C | Report back here that testing passed; mark ticket complete | [ ] |
+| 3A | Run Bats tests: `cd ~/Development/little-mester-working && bats tests/` | All pass | [ ] || 3B | From `~/Development/little-mester-working`: `git add -A && git commit -m "..." && git push origin recurse-work` | Remote updated | [ ] || 3C | Report back here that testing passed; mark ticket complete | [ ] |
 
 ---
 

@@ -161,7 +161,7 @@ The agent (opencode by default) runs inside a container. Monitor it from the hos
 Requirements: Arch/CachyOS (other distros: see [docs/01-host-setup.md](docs/01-host-setup.md)),
 a working NVIDIA driver, `sudo`.
 
-```fish
+```bash
 git clone <this-repo> little-mester
 cd little-mester
 ./lab setup                       # installs docker + GPU toolkit, builds image, pulls models
@@ -242,6 +242,14 @@ where you build it yourself from scratch.
 
 ## Testing
 
+> **Testing context:** Run tests from `little-mester-working` (the working
+> checkout on recurse-work), NOT the main repo. You test changes here before merging
+to MAIN.
+>
+> **Shell compatibility:** All commands below run identically in both bash and fish.
+> Use `;` as separator (works in both); fish users should use `$status` not `$?` for
+> exit status.
+
 This project uses [Bats](https://bats-core.readthedocs.io/) for unit testing the `lab` launcher script. Tests validate path guards, security checks, and helper functions without requiring Docker or GPU access.
 
 ### Prerequisites
@@ -255,7 +263,7 @@ brew install bats-core
 ```
 
 ### Running Tests (Host)
-```fish
+```bash
 bats tests/
 ```
 
@@ -274,7 +282,7 @@ You can instruct the agent to run the test suite inside the sandbox itself. This
 4. The agent will execute `./run-tests.sh`, which safely invokes `bats` inside the container via `./lab exec`.
 
 Alternatively, run it manually from your host:
-```fish
+```bash
 ./run-tests.sh workspaces/demo
 ```
 
