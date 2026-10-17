@@ -19,6 +19,11 @@ Shift default agent to `opencode` (with internet enabled), strictly prohibit edi
 2. **Human user:** Must run all `git`, SSH, and Docker commands manually from their terminal.
 3. **Testing:** Must happen from a terminal outside the OpenCode container (Docker-in-Docker is not available).
 
+### Architecture note: OpenCode runs in a container
+**little-mester does not have an "agent running on the host".** When you call `./lab`, it invokes Docker Compose to start an isolated agent container with the workspace mounted into it. The agent (opencode or aider) executes inside that container — file edits, shell commands, commits all happen within the container's filesystem and git context. This is intentional: it keeps whatever edits the agent makes from your host machine untouched. **There is no "home agent opencode" outside this pipeline; everything flows through `./lab` → Docker Compose → agent container.**
+
+A key implication for recursive self-editing: little-mester SHOULD be able to work on itself and even launch new copies of itself inside the container for testing purposes. But it must **never** break out to the host filesystem, modify host files, or access host credentials. The `--unsafe-recurse` guard exists because mounting the little-mester repo as the workspace gives the agent read/write access to its own source code — which is desired for self-modification but dangerous if unchecked.
+
 ### Critical constraint:
 - The AI cannot commit or push. Every time I make edits, **you must commit them** before they exist as actual files on disk in your git working tree.
 - Until you run `git add` + `git commit`, the changed files exist only inside the OpenCode session's memory layer / overlay — **not yet in your real filesystem**.
