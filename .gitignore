@@ -1,3 +1,4 @@
+node_modules/
 workspaces/*
 !workspaces/.gitkeep
 .aider*
