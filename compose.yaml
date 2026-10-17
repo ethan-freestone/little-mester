@@ -58,13 +58,14 @@ services:
     tmpfs:
       - /tmp:exec,mode=1777,size=512m
       - /home/agent:uid=${LAB_UID:-1000},gid=${LAB_GID:-1000},mode=0700
+      - /aider-data:mode=0755
     mem_limit: 8g
     pids_limit: 512
     environment:
       HOME: /home/agent
       OLLAMA_API_BASE: http://ollama:11434
-      # Swap out AIDER models
-      #AIDER_MODEL: ollama_chat/qwen2.5-coder:7b
+      # Aider session data lives here, outside any mounted workspace
+      AIDER_WORKSPACE: /aider-data
       AIDER_MODEL: ollama_chat/qwen3.6:35b-a3b
       AIDER_CHECK_UPDATE: "false"
       AIDER_ANALYTICS_DISABLE: "true"
