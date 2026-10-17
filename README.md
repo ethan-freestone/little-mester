@@ -188,16 +188,19 @@ Models to download are listed in [`models.txt`](models.txt). Edit it, then re-ru
 `<workspace>` can be a single repo, or a parent folder holding several repos.
 The launcher refuses `/`, `$HOME`, anything you don't own, anything overlapping
 `~/.ssh`, `~/.config` and similar, and **by default** any path that would expose this
-lab repo itself (use `--unsafe-recurse .` to override — see below).
+lab repo itself (use `--unsafe-recurse` to override — see below).
 
 ### Self-modification (ticket 002)
 
-When you want the agent to edit little-mester itself, use `--unsafe-recuse`:
+When you want the agent to edit little-mester itself, use `--unsafe-recurse`:
 
 ```bash
 # From any little-mester checkout (e.g. ~/Development/little-mester-working on recurse-work):
 cd <path-to-little-mester-checkout>
-./lab --unsafe-recurse .    # allows opencode to read/write this repo
+./lab --unsafe-recurse    # allows opencode to read/write the current directory
+```
+
+You do not need to append `.` — it is implicit when using `--unsafe-recurse`.
 
 This is off by design — it tells the agent "I know what I'm doing." Without `--unsafe-recurse`, the guard always blocks self-mapping. This makes recursive improvement possible **without making it the default**.
 

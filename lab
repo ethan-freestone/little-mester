@@ -233,7 +233,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       dc run --rm agent bash
       warn_hooks
       ;;
-    ""|-h|--help)
+# --help shortcut (prints help text and exits)
+    -h|--help)
       echo "Usage:"
       echo "  ./lab [flags] <path-to-workspace> [agent args]"
       echo "  ./lab [flags] shell <path-to-workspace>"
@@ -248,10 +249,44 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       echo "  --egress true|false Override egress default (default: true)"
       echo "  --egress-false     Short alias for --egress false / --isolated"
       echo "  --egress-true      Short alias for --egress true"
-      echo "  --isolated         Same as --egress-false
-  --permissions P    Per-run permission mode (deny/ask/auto, default: from config)"
-      echo
-      echo "Any remaining arguments after the path are passed to the agent."
+      echo "  --isolated         Same as --egress-false"
+      echo "  --permissions P    Per-run permission mode (deny/ask/auto, default: from config)"
+      ;;
+
+    # No subcommand or workspace path given. When --unsafe-recurse was set, mount the
+    # current directory as the workspace (the primary use-case for this flag).
+    "")
+      if [[ "${UNSAFE_RECURSE:-0}" == "1" ]]; then
+        check_workspace "."
+        if [[ "$EGRESS" == "true" ]]; then
+          if ! check_egress_permission; then
+            die "Egress denied: agent is not permitted to access the internet in this workspace"
+          fi
+        fi
+        confirm
+        dc run --rm agent "$AGENT"
+        warn_hooks
+      else
+        # No subcommand, no path → show help.
+        echo "Usage:"
+        echo "  ./lab [flags] <path-to-workspace> [agent args]"
+        echo "  ./lab [flags] shell <path-to-workspace>"
+        echo "  ./lab exec <path-to-workspace> '<command>'"
+        echo "  ./lab setup | build | pull | stop"
+        echo
+        echo "Flags (before path):"
+        echo "  --ro / --rw        Mount mode (default: rw)"
+        echo "  --agent name       Agent to launch (opencode|aider, default: opencode)"
+        echo "  --workflow name    Workflow profile (default: default)"
+        echo "  --verbose          Show verbose logging in stderr"
+        echo "  --egress true|false Override egress default (default: true)"
+        echo "  --egress-false     Short alias for --egress false / --isolated"
+        echo "  --egress-true      Short alias for --egress true"
+        echo "  --isolated         Same as --egress-false"
+        echo "  --permissions P    Per-run permission mode (deny/ask/auto, default: from config)"
+        echo
+        echo "Any remaining arguments after the path are passed to the agent."
+      fi
       ;;
     *)
       case "$AGENT" in
