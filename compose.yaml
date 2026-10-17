@@ -9,7 +9,7 @@ services:
       OLLAMA_FLASH_ATTENTION: "1"
       OLLAMA_KV_CACHE_TYPE: q8_0
       #OLLAMA_CONTEXT_LENGTH: "32768"
-      OLLAMA_CONTEXT_LENGTH: "65536"
+      OLLAMA_CONTEXT_LENGTH: "131072"
       OLLAMA_KEEP_ALIVE: "-1"        # keep the model loaded; reloading 24GB is slow
       OLLAMA_MAX_LOADED_MODELS: "1"  # only one model resident at a time
     deploy:
