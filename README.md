@@ -188,6 +188,42 @@ The launcher refuses `/`, `$HOME`, anything you don't own, anything overlapping
 
 ---
 
+## Working on this repo (development workflow)
+
+Currently, the way to work on little-mester itself is: **clone a second working copy** alongside your main checkout.  This is needed because `lab` refuses to mount paths that would expose the repository it lives in.
+
+```fish
+# 1. Create a separate working checkout
+git clone <this-repo> ~/Development/little-mester-working
+cd ~/Development/little-mester-working
+git checkout -b my-branch       # make all changes here
+
+# 2. Edit files (scripts, Dockerfile, compose.yaml, docs…)
+
+# 3. Rebuild & test from your main checkout (not the one you just edited):
+cd <path-to-main-checkout>
+./lab build --no-cache          # rebuild image; regen-configs runs first
+./verify-sandbox.sh             # sanity check after any change
+```
+
+**When switching branches or starting fresh:** stop everything and tear down containers before building/running again, so nothing is left in an inconsistent state.
+
+```fish
+./lab stop                      # stop & remove the agent / Ollama containers
+docker compose down             # also removes lingering images & networks
+```
+
+Then you can rebuild on the new branch or after pulling changes from main:
+
+```fish
+./lab build --no-cache          # rebuild
+./verify-sandbox.sh             # verify safety guarantees still hold
+```
+
+We plan to remove this constraint later and allow working on the repo in-place.
+
+---
+
 ## Testing
 
 This project uses [Bats](https://bats-core.readthedocs.io/) for unit testing the `lab` launcher script. Tests validate path guards, security checks, and helper functions without requiring Docker or GPU access.
