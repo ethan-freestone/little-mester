@@ -14,6 +14,9 @@ AGENT="opencode"    # Which agent to launch: opencode | aider (fallback)
 # Network mode: egress=true by default; --isolated flips to false
 EGRESS="${EGRESS:-true}"
 
+# Self-edit guard toggle (default: deny)
+UNSAFE_RECURSE=0
+
 # Load user config if present (gitignored; put your real identity here)
 if [[ -f "$LAB_DIR/.little-mester.conf" ]]; then
   set -a
@@ -64,7 +67,9 @@ check_workspace() {
 
   # Prevent exposing the lab repo itself
   if [[ "$ws" == "$LAB_DIR" || "$LAB_DIR" == "$ws"/* ]]; then
-    die "Workspace path would expose the little-mester repo itself"
+    if [[ "${UNSAFE_RECURSE:-0}" != "1" ]]; then
+      die "Workspace path would expose the little-mester repo itself. Use --unsafe-recurse to override (requires awareness of the risks)."
+    fi
   fi
 
   # Blacklist sensitive credential/config paths
@@ -149,6 +154,7 @@ confirm() {
   echo " Agent         : $AGENT"
   echo " Workflow      : ${WORKFLOW:-default}"
   echo " Verbose       : $VERBOSE"
+  echo " Unsaferecurse : ${UNSAFE_RECURSE:-0}"
   echo "--------------------------------------------------------"
   read -r -p "Continue? [y/N] " a
   [[ "$a" == "y" || "$a" == "Y" ]] || exit 1
@@ -181,6 +187,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       --egress-false|--isolated) EGRESS="false"; shift ;;
       --egress-true) EGRESS="true"; shift ;;
       --permissions) PERMISSIONS="${2:?--permissions needs deny/ask/auto}"; shift 2 ;;
+      --unsafe-recurse) UNSAFE_RECURSE=1; shift ;;
+      --opencode) AGENT="opencode"; shift ;;
+      --aider) AGENT="aider"; shift ;;
       *) break ;;
     esac
   done

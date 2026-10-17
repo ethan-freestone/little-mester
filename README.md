@@ -188,7 +188,7 @@ Models to download are listed in [`models.txt`](models.txt). Edit it, then re-ru
 `<path-to-workspace>` can be a single repo, or a parent folder holding several repos.
 The launcher refuses `/`, `$HOME`, anything you don't own, anything overlapping
 `~/.ssh`, `~/.config` and similar, and **by default** any path that would expose this
-lab repo itself (use `--unsafe-recurse ./lab` to override — see below).
+lab repo itself (use `--unsafe-recurse .` to override — see below).
 
 ### Self-modification (ticket 002)
 
