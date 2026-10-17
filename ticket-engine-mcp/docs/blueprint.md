@@ -2,10 +2,10 @@
 
 ## Architecture overview
 
-### Core design principle: Markdown-first, SQLite as indexer only
-- Tickets = `.md` files on disk (always the source of truth)
-- SQLite indexes frontmatter for fast queries across area/status/type
-- No bloated DB to commit; index is tiny + rebuildable from markdown
+### Core design principle: JSON-first, _index.json as indexer only
+- Tickets = `.json` files on disk (always the source of truth)
+- `_index.json` stores metadata for fast cross-workspace queries by area/status/type
+- No SQLite; index is tiny + rebuildable from ticket JSON files
 
 ### 3 Storage Routing Modes
 
@@ -28,7 +28,7 @@ Each AC maps to exactly one test. We proceed in strict order: test FAIL → impl
 ### Phase 1: Scaffolding
 | # | TODO | Description | Status |
 |---|------|-------------|--------|
-| 0  | Setup package.json | Scope `@little-mester/ticket-engine-mcp`, add deps (sql.js for pure-JS SQLite, @modelcontextprotocol/sdk) | DONE |
+| 0  | Setup package.json | Scope `@little-mester/ticket-engine-mcp`, add deps (`zod` for validation, `_index.json` as metadata store) | DONE |
 | 0.1 | tsconfig + jest setup | Target ES2021, commonjs, strict; jest w/ ts-jest | DONE |
 | 0.2 | node_modules.gitignore | Workspace `.gitignore` covers `node_modules/`; ticket-engine-mcp has its own if needed | DONE |
 
@@ -39,11 +39,11 @@ Each AC maps to exactly one test. We proceed in strict order: test FAIL → impl
 | 2  | AC-01 impl | _(implement create())_ | _(pass AC-01 test)_ | ❌ |
 | 3  | AC-02 test | `'create rejects invalid type value'` | AC-02: throw on bad type (only feature/bug/infra/pause valid) | ❌ |
 | 4  | AC-02 impl | _(implement validation)_ | _(pass AC-02 test)_ | ❌ |
-| 5  | AC-03 test | `'list() returns all tickets from index'` | AC-03: list with no args = SELECT * FROM index, return array of Ticket | ❌ |
+| 5  | AC-03 test | `'list() returns all tickets from _index.json'` | AC-03: list with no args = read _index.json, return array of Ticket | ❌ |
 | 6  | AC-03 impl | _(implement list())_ | _(pass AC-03 test)_ | ❌ |
-| 7  | AC-04 test | `'update(number, patch) modifies ticket fields correctly'` | AC-04: update specific frontmatter fields; updates updated_at | ❌ |
+| 7  | AC-04 test | `'update(number, patch) modifies ticket fields correctly'` | AC-04: update specific JSON fields; updates updated_at | ❌ |
 | 8  | AC-05 test | `'archive(number) sets status = "archived"'` | AC-05: archive calls update with status=archived + archived_at | ❌ |
-| 9  | AC-06 test | `'validate() checks index against filesystem'` | AC-06: validate returns {synced, missing?, extra?} | ❌ |
+| 9  | AC-06 test | `'validate() checks _index.json against filesystem'` | AC-06: validate returns {synced, missing?, extra?} | ❌ |
 
 ### Phase 3: CLI (MC-01 through MC-02)
 | # | TODO | Description | Status |
@@ -64,33 +64,34 @@ Each AC maps to exactly one test. We proceed in strict order: test FAIL → impl
 |---|------|-------------|--------|
 | 16 | SC-01 Config opencode mcp.json | `mcpServers.little-mester-ticket-engine` pointing to `npm run server` | ❌ |
 | 17 | SC-02 Deprecation messages | Update `ticket-new`, `validate-tickets`, `ticket-lifecycle` → emit deprecation hints + call ticket-engine | ❌ |
-| 18 | SC-03 Migration script | Parse existing `docs/tickets/*.md`, seed SQLite index | ❌ |
+| 18 | SC-03 Migration script | Parse existing `docs/tickets/*.md`, seed _index.json | ❌ |
 
 ---
 
-## Schema (SQLite indexer — pure frontmatter pointers)
+## Metadata schema (`_index.json`)
 
-```sql
-CREATE TABLE IF NOT EXISTS index_tickets (
-    id INTEGER PRIMARY KEY,                    -- matches file's number field
-    file_path TEXT NOT NULL UNIQUE,            -- path to .md file
-    area TEXT DEFAULT '',                      -- e.g., "infra/tools"
-    type TEXT DEFAULT 'feature',               -- feature|bug|infra|pause
-    status TEXT DEFAULT 'draft',               -- draft|active|resolved|archived
-    title TEXT,                                -- extracted from frontmatter or heading
-    objective TEXT,                            -- optional
-    created_at DATETIME,
-    updated_at DATETIME,
-    archived_at DATETIME
-);
-
-CREATE INDEX idx_status ON index_tickets(status);
+```json
+{
+  "version": 1,
+  "tickets": [
+    {
+      "number": 42,
+      "file": "ticket-042.json",
+      "area": "auth",
+      "type": "feature",
+      "status": "draft",
+      "title": "Implement OAuth2 flow for user registration"
+    }
+  ],
+  "next_number": 43,
+  "updated_at": "2026-10-15T09:00:00Z"
+}
 ```
 
-Schema notes:
-- `id == file number`. No separate PK.
-- `file_path` = canonical ref to `.md` on disk.
-- Every field is re-extractable from the markdown source → index is rebuildable.
+Notes:
+- `number == file number`. No separate PK.
+- `file` = canonical ref to `.json` on disk (relative to ticket dir).
+- Every field is re-extractable from the JSON source → index is rebuildable.
 - Index lives wherever routing config specifies (per-mode).
 
 ---
@@ -110,8 +111,7 @@ export interface Ticket {
 }
 
 export interface TicketEngine {
-    ticketDir: string;          // where .md files live
-    indexPath: string;           // path to SQLite index DB
+    ticketDir: string;          // where .json files live
     
     create(params: { area?: string; type?: string; title: string; objective?: string }): Ticket;
     list(area?: string, status?: string): Ticket[];
@@ -120,7 +120,7 @@ export interface TicketEngine {
     validate(): { synced: boolean; missing_files?: string[]; extra_files?: string[] };
 }
 
-export function createTicketEngine({ ticketDir, indexPath }: { ticketDir: string; indexPath: string }): TicketEngine;
+export function createTicketEngine({ ticketDir }: { ticketDir: string }): TicketEngine;
 ```
 
 ---
@@ -144,10 +144,24 @@ export function createTicketEngine({ ticketDir, indexPath }: { ticketDir: string
 
 ---
 
-## Session handoff (2026-10-16)
+## Session handoff (2026-10-17)
 
-### Completed today
-1. Renamed `little-mester-ticket-engine/` → `/workspace/ticket-engine-mcp/`
-2. Created package.json scoped `@little-mester/ticket-engine-mcp`
-3. Installed deps: sql.js (pure JS, no native build), @modelcontextprotocol/sdk
-4. Set up tsconfig (ES2021, commo
+### Completed Phases A–B
+1. Phase A: Foundation complete
+   - Archived old tickets, removed deprecated schema files (`docs/tickets/archive/`)
+   - Renumbered active tickets by priority order and fixed internal markdown headings
+   - Rewrote `docs/workflows.md` → JSON-first format with routing modes and status transitions
+   - Added conventional commits rule to workflows.md (all commits must follow `type: description` format)
+   - Fixed README.md — now explains pointing `./lab <workspace-path>` at one folder, default egress=true, how to disable
+   - Updated this blueprint to JSON-first architecture (removed SQLite section, updated `_index.json` metadata schema)
+2. Phase B: Engine spec complete
+   - JSON Schema draft documented in ticket-001 and `SCHEMA.md`
+   - TypeScript interface frozen in engine.ts
+3. Session handoff doc added to this file — user is done for the day
+
+### Remaining work
+4. Phase C: Implementation (next session) — write engine.ts core with _index.json routing, TDD tests
+5. Phase D: Monitor script (`scripts/monitor`) for GPU/RAM/CPU/temps — need to add before Phase C per A.5 ticket
+6. Formal JSON Schema file generation from SCHEMA.md
+
+### Blocked on nothing — all files committed to `feat/ticket-context` branch

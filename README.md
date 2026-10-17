@@ -2,7 +2,7 @@
 
 A **locked-down, fully local sandbox for learning agentic coding.**
 
-A local LLM (via Ollama) drives a coding agent that reads and edits files in **one folder you choose**, and nothing else. No access to your home directory, keys, or other projects. Agent has internet by default — see [How to disable](#how-to-disable-internet).
+Run `./lab <workspace-path>` to point the agent at one folder on your machine. The agent (Aider or opencode) inside the container reads and edits only that folder — nothing else. No access to your home directory, keys, or other projects. Agent has internet by default — see [How to disable](#how-to-disable-internet).
 
 The goal: two things in one repo.
 
