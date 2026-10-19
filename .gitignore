@@ -1,6 +1,9 @@
 node_modules/
 workspaces/*
+
 !workspaces/.gitkeep
+# Build artifacts
+dist/
 # Aider session data (hidden dot-prefixed files)
 .aider*
 .little-mester.conf
