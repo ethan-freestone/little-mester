@@ -163,7 +163,7 @@ Read this twice.
 | `workspaces/` | Where projects the agent works on live (gitignored) | — |
 | `docs/workflows.md` | **Development process and discipline** | — |
 | `docs/journal.md` | Development journal | — |
-| `docs/tickets/` | Tickets by mode (area, lab, engine) | [Working conventions](#working-conventions) |
+| `docs/tickets/` | Tickets by area/engine (JSON-first) | See DECISIONS.md for decision log |
 | `ticket-engine-mcp/` | Lightweight MCP-first ticketing system | `ticket-engine-mcp/docs/blueprint.md` |
 | `scripts/` | Automation tools — tickets, hooks, sync | [Scripts](#scripts-and-automation) above |
 | `tests/lab.bats` | Bats tests for the `lab` launcher | [Testing](#testing) below |
@@ -202,10 +202,14 @@ cd ticket-engine-mcp && npm test  # Jest suite for the JSON ticket engine
 
 Follow [docs/workflows.md](docs/workflows.md) for:
 - The **doc → test → code → commit** cycle (no skipping stages)
-- How architecture decisions are recorded (use `arch-*.md` format when creating them)
+- How architecture decisions are recorded — see below
 - Ticket format and status transitions
 - MCP development workflow
 - Session handoff template
+
+> ⚠️ **Important: Decision logs have different scopes — read BOTH before working:**
+> - **[docs/DECISIONS.md](docs/DECISIONS.md)** → How to **use** little-mester (workflow, --unsafe-recurse, security, testing). Read before ANY session on this repo.
+> - **(engine decisions)** [docs/tickets/engine-plan.md](tickets/engine-plan.md) → engineering designs for building the ticket engine (schema, epics, search, labels, routing). Read before any `ticket-engine-mcp/` change.
 
 ---
 

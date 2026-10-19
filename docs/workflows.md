@@ -13,20 +13,18 @@ If a stage blocks you, you do not skip ahead. You write down *why* in the doc an
 
 ## Documenting architecture decisions
 
-Every major architectural direction gets one file inside `docs/` named `arch-<name>.md`.
+Every major architectural direction gets one entry in **one of two files** depending on scope:
 
-Each includes:
-- Context — what problem we're solving
-- Decision — what was chosen and why
-- Consequences — trade-offs, what it blocks or enables
-- Related docs — links to any tickets, blueprints, or specs that inform this
+| Scope | File | When to write here |
+|-------|------|-------------------|
+| **How to USE little-mester** (workflow, defaults, guard rails, testing strategy, session handoff) | [docs/DECISIONS.md](../DECISIONS.md) | Whenever a user decision affects how the product is used or improved |
+| **How to BUILD** everything in little-mester | [docs/tickets/engine-plan.md](tickets/engine-plan.md) | Engineering designs for `ticket-engine-mcp/`. For other subsystems: separate scope files when needed. Per-ticket plans go in ticket docs themselves. |
 
-Any time a new arch decision is made, the following files are **always** updated as part of the same commit:
-- The `arch-*.md` for the new decision itself
-- `README.md` (top-level architecture section)
-- Any `blueprint.md` or schema doc that references the old approach
+**If you're unsure which one:** If the answer affects `./lab`, `--unsafe-recurse`, security, testing, or daily workflow → `docs/DECISIONS.md`. If it affects `engine.ts`, `_index.json`, JSON schema, MCP tools, or ticket data model → `docs/tickets/architecture/DECISIONS.md`.
 
-The rule: **grep first.** Before committing any arch change, search (`grep`) every markdown file in the repo for references to outdated concepts. Update all of them. Failure to update a stale reference is itself a bug.
+Each entry includes a timestamp so future sessions can distinguish current from historical decisions. If you disagree with a recorded entry, add your objection as a new section with justification — do NOT silently overwrite it.
+
+**Read the correct decision log before ANY session.** For product work: both files (see README working conventions).
 
 ## Ticket format and workflow (JSON-first — the engine's truth)
 
