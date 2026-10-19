@@ -53,6 +53,8 @@ export function scanTicketDir(ticketDir: string): IndexEntry[] {
     return files.map(f => ({
         number: parseInt(f.match(/\d+/)?.[0] || '0', 10),
         file_path: f,
+        status: 'draft' as string,
+        area: '' as string,
     }));
 }
 

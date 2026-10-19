@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { readIndex, writeIndex, reconstructIndex } from './index';
 
-const VALID_TYPES = new Set(['feature', 'bug', 'infra', 'pause']);
+const VALID_TYPES = new Set(['spike', 'feature', 'bug', 'improvement', 'doc', 'infra']);
 const STATUS_TRANSITIONS: Record<string, string[]> = {
     draft: ['active'],
     active: ['resolved', 'draft'],
@@ -14,7 +14,7 @@ export interface Ticket {
     file_path: string;
     number: number;
     area: string;
-    type: 'feature' | 'bug' | 'infra' | 'pause';
+    type: 'spike' | 'feature' | 'bug' | 'improvement' | 'doc' | 'infra';
     status: 'draft' | 'active' | 'resolved' | 'archived';
     title?: string;
     objective?: string;
@@ -35,7 +35,7 @@ export interface TicketEngine {
 
 function validateType(type: unknown): void {
     if (typeof type !== 'string' || !VALID_TYPES.has(type)) {
-        throw new Error(`Invalid ticket type '${type}'. Must be one of: feature, bug, infra, pause`);
+        throw new Error(`Invalid ticket type '${type}'. Must be one of: spike, feature, bug, improvement, doc, infra`);
     }
 }
 
@@ -49,7 +49,7 @@ function assertTransition(from: string, to: string): void {
     }
 }
 
-function validateData(data: Record<string, unknown>): void {
+function validateData(data: Record<string, unknown> | Ticket): void {
     if (typeof data.number !== 'number') throw new TypeError('ticket.number missing');
     if (typeof data.area !== 'string' || !data.area) throw new TypeError('ticket.area required');
     if (!VALID_TYPES.has(data.type as string)) throw new TypeError(`Invalid type '${data.type}'`);
@@ -126,13 +126,16 @@ export function createTicketEngine({
         indexPath,
 
         create(
-            params:
+            params: { area?: string; type?: string; title: string; objective?: string }
         ): Ticket {
             const area       = params.area          || '';
             const typeRaw     = params.type;
             let   typeVal: Ticket['type'] = 'feature';
 
-            if (typeRaw) validateType(typeRaw);
+            if (typeRaw) {
+                validateType(typeRaw);
+                typeVal = typeRaw as Ticket['type'];
+            }
 
             const now  = new Date().toISOString();
             const num  = nextNumber();
@@ -160,7 +163,7 @@ export function createTicketEngine({
             let entries = [...idx.tickets];
 
             if (area)   entries = entries.filter(e => e.area === area);
-            if (status) entries = entries.filter(e => e.status === 'draft' || e.status === status));
+            if (status) entries = entries.filter(e => e.status === 'draft' || e.status === status);
 
             return entries
                 .filter(e => fs.existsSync(path.join(ticketDir, ticketFileName(e.number))))
@@ -187,10 +190,10 @@ export function createTicketEngine({
             for (const key of Object.keys(patch)) {
                 if ((patch as Record<string, unknown>)[key] != null &&
                     key !== 'id'          &&
-                    key !== 'file_path')  &&
+                    key !== 'file_path'   &&
                     key !== 'number')
                 {
-                    (data as Record<string, unknown>)[key] = (patch as Record<string, unknown>)[key];
+                    (data as unknown as Record<string, unknown>)[key] = (patch as Record<string, unknown>)[key];
                 }
             }
 
@@ -204,7 +207,7 @@ export function createTicketEngine({
             if (!fs.existsSync(file)) return undefined;
 
             const raw     = fs.readFileSync(file, 'utf-8');
-            const data:   = JSON.parse(raw) as Ticket;
+            const data: Ticket = JSON.parse(raw);
             validateData(data);
 
             data.status      = 'archived';
@@ -221,7 +224,7 @@ export function createTicketEngine({
             const indexedNums = idx.tickets.map(e => e.number);
 
             const missing: number[] = [];
-            for (const n of fileNuns) {
+            for (const n of fileNums) {
                 if (!indexedNums.includes(n)) missing.push(n);
             }
 
@@ -230,7 +233,7 @@ export function createTicketEngine({
                 if (!fileNums.has(entry.number)) extra.push(entry.file_path);
             }
 
-            return { synced: missing.length === 0, missing_files: !missing ? undefined : missing.map(n => path.join(ticketDir, ticketFileName(n)));
+            return { synced: missing.length === 0, missing_files: missing.length ? undefined : missing.map(n => path.join(ticketDir, ticketFileName(n))) };
         },
     };
 }
