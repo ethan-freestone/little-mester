@@ -14,8 +14,8 @@
       "models": {
         "qwen3.6:35b-a3b": {
           "limit": {
-            "context": 262144,
-            "output": 65536
+            "context": 196608,
+            "output": 49152
           }
         },
         "qwen3:8b": {
