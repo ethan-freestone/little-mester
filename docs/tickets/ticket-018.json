@@ -1,0 +1,50 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 18,
+  "area": "engine",
+  "type": "feature",
+  "status": "draft",
+  "title": "Implement subticket system — schema, engine code, migration pass",
+  "objective": "This is the implementation ticket for all the design in ticket-017. Ordered work list with explicit execution dependencies: Phase 1 cannot start until Phase 0 completes and schema is validated. Phase 2 needs a working link API before computing ready_work or blocking_chain. Phase 3 can run in parallel with Phase 2 if migration script has its own tests.",
+  "subtickets": [
+    {
+      "id": 1,
+      "title": "Phase 0: Update ticket-v1.json with subtickets[] + links[] schema (ticket-017 task 3)",
+      "objective": "Open ticket-engine-mcp/docs/ticket-v1.json. Add each new field to the properties object with explicit type definition and keep additionalProperties:false for the whole thing (only whitelist explicitly). Must validate: create a minimal test .json with all fields, run ajv-cli or node script against v1 schema."
+    },
+    {
+      "id": 2,
+      "title": "Phase 0b: Update _index.json format spec in SCHEMA.md",
+      "objective": "Update ticket-engine-mcp/docs/SCHEMA.md to document the new entries+links format. Cross-reference ticket-017 for design rationale. Add index file example showing both entries and links."
+    },
+    {
+      "id": 3,
+      "title": "Phase 1: Engine link management API with cycle detection",
+      "objective": "Add to engine.ts (TicketEngine interface in index.d.ts too): addLink(from:number, to:number, type:link_type): void — validates types against enum, runs DFS cycle detection BEFORE writing, writes forward + reverse edge atomically. unlink(from, to, type): void. getLinks(number): links[] returning all edges on a ticket. getIncomingLinks(number): only incoming edges (who points AT this one). getOutgoingLinks(number): only outgoing edges (what this one points TO). DFS cycle detection: track visited set across recursive calls; if revisit = cycle found, return error with full path string like 'cycle detected: A->B->C->A'. No sub-ticket creation until phase 2 passes tests."
+    },
+    {
+      "id": 4,
+      "title": "Phase 1b: Engine subticket lifecycle methods",
+      "objective": "addSubticket(ticketNum:number, subId:number, data:{title:string, type?, objective?, status?:draft|active|resolved|archived}): Ticket — creates a subticket entry in the target ticket's index entry AND creates/updates the subticket file itself (if it doesn't exist). getSubtickets(number): subticket[] returned from parent ticket's entries. updateSubticket(ticketNum:number, subId:number, patch:{title?, type?, objective?}): void — only changes allowed fields. removeSubticket(ticketNum:number, subId:number): void — deletes reference from parent but not necessarily the file (that's a separate concern for the delete flow). These all use _index.json entries[] as the source of truth; each entry has parent_ticket field if it's a subticket."
+    },
+    {
+      "id": 5,
+      "title": "Phase 2: ready_work + blocking_chain computation (engine computed fields)",
+      "objective": "These are computed on read, not persisted. readyWork(ticketNum:number): Ticket[] — starts at the ticket, reads all subtickets and all links where from==ticketNum or link.type is incoming. For each entry, walks its links for any unresolved blockers (status != resolved). Filters to entries with no unresolved blockers. Returns list of ready-to-work tickets. blockingChain(ticketNum:number): {number, status}[] — DFS through blocks+blocked_by/depends_on links; collect transitive blockers with their statuses. Short-circuit on visited set to prevent infinite loops (even though cycle detection exists at write time). epicHealth(epicNum?): {resolved:int, total:int, pct:number} — recursively walk subtree counting resolved vs total; pct = resolved/total*100 rounded to 2 decimals."
+    },
+    {
+      "id": 6,
+      "title": "Phase 3: Second migration pass — extract subtickets + links from MDs",
+      "objective": "Update ticket-engine-mcp/src/migrate-tickets.ts. For each migrated .json file, open the corresponding .md (same dir, same base name but with .md extension). Extract phase tables: for each row in table -> create subticket entry with id = task number column. 'depends on X' or 'blocked by X' text patterns -> link entries. Use regex to match ticket references (#N, ticket-NNN, refs #N patterns). For cross-area deps (e.g., 'see ticket-engine-mcp/docs/') resolve area by matching file location. Output a summary of links created so user can review before committing."
+    },
+    {
+      "id": 7,
+      "title": "Phase 4: Write engine tests for subticket + link features",
+      "objective": "Add to ticket-engine-mcp/tests/engine.test.ts: (1) cycle detection test — create A->B->C->A chain, assert error during addLink. (2) reverse registration test — addLink(A,B,type='blocks') then verify B has corresponding blocked_by link pointing at A. (3) ready_work test — multiple deps across statuses filter to only unblocked ones correctly. (4) blocking_chain transitive traversal test — A->B->C where C unresolved -> blockingChain for A returns [B+C]. (5) subticket lifecycle CRUD tests matching the 28-test coverage style of existing engine.test.ts."
+    }
+  ],
+  "links": [
+    {"type": "depends_on", "number": 17, "bidirectional": true}
+  ],
+  "notes": "Implementation ticket for the design in ticket-017. Execute in order: Phase 0 -> Phase 1 (linked subtasks 3+4 can go in parallel) -> Phase 2 -> Phase 3 + test migration in isolation -> Phase 4 (tests). If any phase finds blockers during implementation, that becomes a new subtask with appropriate dependency links."
+}

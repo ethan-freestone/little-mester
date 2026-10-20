@@ -1,0 +1,39 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 17,
+  "area": "engine",
+  "type": "feature",
+  "status": "draft",
+  "title": "Typed subticket system — link types, cycle detection, index format, schema changes",
+  "objective": "Design and document the typed relationship edges + first-class subticket hierarchy in its entirety. This tickets covers: (A) Link type enum with directionality rules for all 8 types, (B) Cycle detection requirement details, (C) Schema changes to ticket-v1.json — exact addictions needed, (D) _index.json update spec vs separate _links.json format decision, (E) Migration plan for second pass extracting phase tables -> subtickets from MDs.",
+  "created_at": "2026-10-20T13:00:00Z",
+  "updated_at": "2026-10-20T13:00:00Z",
+  "subtickets": [
+    {
+      "id": 1,
+      "title": "Design typed link type enum with reverse-edge auto-registration semantics for each",
+      "objective": "Formalize all 8 types: blocks (unidirectional A->B prevents B from starting; triggers blocked_by reverse), blocked_by (same semantic as blocks inverted edge), depends_on (semantic dependency, does NOT gate transitions so parallel execution is possible), triggers (resolving A enables/transitions B but doesn't prevent it — the enable-invert of blocks), references (bidirectional context-only), duplicates (bidirectional, keep-one-archive-the-rest workflow), spans (parent->child epic-style spanning relationship), supersedes (this replaces that; preserve history not delete). Each directional type must auto-register reverse edge in target during link creation. All stored atomically."
+    },
+    {
+      "id": 2,
+      "title": "Design cycle detection requirement and DFS algorithm for recursive subtickets",
+      "objective": "Before any link or subtree assignment, engine traverses the chain starting at new parent through all linked entries via DFS with visited set. If you visit a node twice = forward edge to ancestor, that's a cycle -> reject immediately. Error message must include full cycle path (e.g., 'cycle detected: A->B->C->A'). This must cover both directions because subtickets are bidirectional references — check parent-to-children chain AND descendant-to-ancestor chain."
+    },
+    {
+      "id": 3,
+      "title": "Write schema additions to ticket-v1.json for subtickets[] and links[] + computed fields",
+      "objective": "Add exactly these properties to ticket-v1.json under properties (keep additionalProperties:false, whitelist explicitly): 'subtickets': array of objects {id:int required, title:string required, status:enum[draft|active|resolved|archived]|optional, type: enum[spike|feature|bug|improvement|doc|infra]|optional, objective:str|null|optional, created_at:date-time|optional, updated_at:date-time|optional} plus 'global_ref' field for cross-area reference {ticket_number:int, area:string}. Each subticket is a full first-class entry in its own area's directory. 'links': array of objects {type: enum[blocks|blocked_by|depends_on|triggers|references|duplicates|spans|supersedes] required, number:int required, bidirectional:bool default:true optional} plus reverse-edge registration docs. Compute-only read fields not persisted: ready_work[] (unblocked entries), blocking_chain[] (transitive blockers with status), epic_health {resolved:int, total:int, pct:number}. These four pieces must be explicitly whitelisted in additionalProperties: false."
+    },
+    {
+      "id": 4,
+      "title": "_index.json or separate _links.json — format spec for global edge table",
+      "objective": "Decision: one global _links.json per ticket-system root alongside _index.json (not one per directory because links span areas). _index.json gets 'entries' array of {number:int/file_path:str/status:str/area:str} plus 'links' array of edges. Alternative considered merging into single _system.json but rejecting for now: fault isolation — if one corrupts, recovery is simpler when concerns are separated. Cross-area edges reference by number with area in link metadata. Entries list stays flat — any ticket (original or subticket across areas) gets one entry."
+    },
+    {
+      "id": 5,
+      "title": "Migration plan: extract phase tables from MDs into subtickets + links",
+      "objective": "Second migration pass on the 14 migrated .json files. For each phase table row -> creates subticket entry with id=phase task number. 'Depends on X' / 'Blocked by X' text patterns become typed link entries (e.g., 'depends_on' for soft dep, 'blocked_by' for hard gate). 'See ticket-010/X' or similar becomes 'references'. Phase tables are scoped to the parent ticket; cross-references between files in the same directory use local refs while files in different areas need cross-area global_ref. Migration must output a list of links it created so user can review before committing."
+    }
+  ],
+  "notes": "This ticket captures all detailed design decisions from session 2026-10-20 that were discussed but only stored in conversation. The handoff file (HANDOFF.md) was deleted per earlier instruction; this is now the canonical record of today's work."
+}
