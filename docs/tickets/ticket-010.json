@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 10,
+  "area": "general",
+  "type": "feature",
+  "status": "draft",
+  "title": "Multi-field search, ticket dependencies, epics (real tickets), and label system",
+  "objective": "",
+  "created_at": "2026-10-20T09:09:49.607Z",
+  "updated_at": "2026-10-20T09:09:49.607Z"
+}

@@ -11,6 +11,12 @@ The schema version is stored in `_index.json` under `schemaVersion`. When upgrad
 
 All transforms are idempotent — running them twice produces no additional changes.
 
+## Schema source of truth
+
+The **authoritative** validation definition is `ticket-engine-mcp/docs/ticket-v1.json`. 
+Keep this spec (`SCHEMA.md`) as a human-readable reference, but always treat the `.json` file 
+as the ground truth — it is used by runtime validators and migration tools.
+
 ## Ticket File Format (`ticket-NNN.json`)
 
 Each ticket is a single JSON file:
@@ -35,7 +41,7 @@ Each ticket is a single JSON file:
 |----------------|--------|----------|-----------------------------------------|------------------------------------------------|
 | `number`       | number | yes      | unique integer                          | Auto-incremented ticket identifier             |
 | `area`         | string | yes      | any                                     | Domain area the ticket belongs to              |
-| `type`         | string | yes      | `feature`, `bug`, `infra`, `pause`      | Categorization of work type                    |
+| `type`         | string | yes      | `feature`, `bug`, `spike`, `improvement`, `doc`, `infra`   | Categorization of work type                    |
 | `status`       | string | yes      | `draft`, `active`, `resolved`, `archived` | Current lifecycle state                       |
 | `title`        | string | yes      | any                                     | One-line human-readable summary                |
 | `objective`    | string | no       | any                                     | Detailed objective in present/future tense     |
