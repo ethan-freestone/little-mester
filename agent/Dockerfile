@@ -14,12 +14,15 @@ RUN python -m venv /opt/venv \
 RUN npm install -g @opencode/cli && opencode --version
 
 COPY opencode/opencode.json /etc/opencode/opencode/opencode.json
+COPY opencode/ /etc/opencode/opencode/
 
 RUN groupadd -g ${LAB_GID} agent && useradd -m -u ${LAB_UID} -g ${LAB_GID} agent
 
 ENV PATH="/opt/venv/bin:$PATH" \
     HOME=/home/agent \
-    OPENCODE_CONFIG=/etc/opencode/opencode/opencode.json
+    OPENCODE_CONFIG=/etc/opencode/opencode/opencode.json \
+    OPENCODE_CLI_CONFIG=/etc/opencode/opencode/cli.json \
+    OPENCODE_TUI_CONFIG=/etc/opencode/opencode/tui.json
 
 WORKDIR /workspace
 CMD ["opencode"]

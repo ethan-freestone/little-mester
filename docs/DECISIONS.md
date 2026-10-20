@@ -10,6 +10,15 @@ Always read both this file and the per-subsystem decision logs before starting w
 1. This file — constraints about how you use little-mester, what's true NOW
 2. Sub-system files (`docs/tickets/engine-plan.md`, `docs/tickets/architecture/DECISIONS.md`) — engineering designs scoped to each area
 
+### Meta rule: Document before acting
+**Before doing ANY work** (code, config, tests, scripts, installs, or changes to agent behavior):
+1. **Check for existing decisions** — Read `docs/DECISIONS.md` and relevant subsystem decision logs first.
+2. **If it's architectural/structural** — Any decision about architecture, defaults, conventions, file layout, dependencies, or agent configuration MUST be discussed with the user first. Do NOT guess or make assumptions.
+3. **Write it up** — After discussion/clarification, write the decision to the appropriate DECISIONS file (this one for usage/product workflow, or `docs/tickets/architecture/DECISIONS.md` for engineering/subsystem design) BEFORE implementing. Include rationale, trade-offs if relevant.
+4. **Follow the doc→test→code→commit cycle** as stated in workflows — documentation comes first.
+
+This rule applies to all future sessions. No implementation without prior written decision when the choice is non-obvious or architectural.
+
 ---
 
 ## A. How to use little-mester
@@ -25,6 +34,15 @@ cd /path/to/little-mester
 - `--unsafe-recurse` lifts the guard that blocks self-mounting (`check_workspace`)
 - Agent edits, runs tests (`bats tests/`, `npm test`), and commits — all within its session
 - No temp clone bridge needed
+
+### A.4 Container environment — everything must live in the repo
+**Critical constraint:** The sandbox container is ephemeral and gets recreated from the built image. Any changes made inside the running container that aren't persisted will be lost on the next run.
+
+- **`/home/agent` is a tmpfs mount** — writable at runtime but completely wiped when the container is recreated. Do NOT put persistent configs, plugins, or customizations there. They will not survive.
+- **All persistent configuration must live in the little-mester repo** (or be baked into the agent Docker image). Files in the repo can be copied during image build or mounted in via compose.
+- **The workspace mount** (`/workspace`) persists as long as it's the host directory you choose — that's the only host filesystem the agent sees by design. But configs for the agent/tui/opencode itself need to go in the repo, not in `/home/agent`.
+- **When customizing the agent (logos, themes, plugins, TUI config),** put them in the repo (e.g., under `agent/` or a tracked location) and wire them up in `agent/Dockerfile` or compose so they persist across container rebuilds.
+- **Avoid duplication** — when adding assets like logos, keep the canonical copy in a single tracked location (ideally under `agent/`) and symlink or copy from there as needed. Do not create multiple scattered copies without documenting why.
 
 ### A.2 Default configuration values
 | Setting | Value | How to change |
