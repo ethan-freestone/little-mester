@@ -73,10 +73,14 @@ export function createTicketEngine({
     fs.mkdirSync(ticketDir, { recursive: true });
     fs.mkdirSync(path.dirname(indexPath), { recursive: true });
 
-    // Guard against corrupt index → auto-reconstruct
-    const sanity = readIndex(indexPath);
-    if (!sanity.schemaVersion) {
+    // Guard against missing/corrupt index → auto-reconstruct from disk
+    if (!fs.existsSync(indexPath)) {
         writeFromScratch();
+    } else {
+        const sanity = readIndex(indexPath);
+        if (!sanity || !sanity.schemaVersion) {
+            writeFromScratch();
+        }
     }
 
     function writeFromScratch(): void {
@@ -163,7 +167,15 @@ export function createTicketEngine({
             let entries = [...idx.tickets];
 
             if (area)   entries = entries.filter(e => e.area === area);
-            if (status) entries = entries.filter(e => e.status === 'draft' || e.status === status);
+            if (status) {
+                // When filtering by a specific non-draft status, only return matching files
+                // When filtering for 'draft', include all drafts (may be missing from disk)
+                if (status === 'draft') {
+                    entries = entries.filter(e => e.status === 'draft');
+                } else {
+                    entries = entries.filter(e => e.status === status);
+                }
+            }
 
             return entries
                 .filter(e => fs.existsSync(path.join(ticketDir, ticketFileName(e.number))))
@@ -233,7 +245,7 @@ export function createTicketEngine({
                 if (!fileNums.has(entry.number)) extra.push(entry.file_path);
             }
 
-            return { synced: missing.length === 0, missing_files: missing.length ? undefined : missing.map(n => path.join(ticketDir, ticketFileName(n))) };
+            return { synced: missing.length === 0 && extra.length === 0, missing_files: missing.length ? missing.map(n => path.join(ticketDir, ticketFileName(n))) : undefined, extra_files: extra.length ? extra : undefined };
         },
     };
 }
