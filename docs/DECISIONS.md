@@ -292,26 +292,76 @@ The ticket tree visualization (future-ticket system, ticket-015 stretch goal) re
 
 ---
 
-## J. OpenCode Customisation
+## J. OpenCode customisation (v2)
 
-### J.1 Logo — Why the Little Mester Logo Must Be a TUI Plugin (and why it might still not show up)
+### Current status
+- Done: logo plugin rewritten to the v2 plugin contract; config wiring moved to v2 mechanisms (J.2).
+- Not confirmed: whether the logo actually renders on the home screen (see J.4).
+- Rule: record test results in J.4. Do not add assumptions to this section.
 
-**Decision:** The custom ASCII logo is implemented as a TUI plugin (`agent/opencode/plugins/little-mester-logo.tsx`) instead of via opencode config, because OpenCode v2.1.0 **does not expose any non-plugin mechanism to set a custom logo**.
+### J.1 We run OpenCode v2. Do not use v1 docs or examples.
 
-**History:** PR #[12017](https://github.com/anomalyco/opencode/pull/12017) added a `"logo"` config field (accepting `false` or a file path) and merged it. An OpenCode maintainer then closed PR #[12016](https://github.com/anomalyco/opencode/pull/12016), saying *"these types of things are best done via plugins"* and pointed to the [oc-plugin-vault-tec](https://github.com/kommander/oc-plugin-vault-tec) repo as an example. The custom logo config was removed from `dev`. It has **never been re-added** as of v2.1.0.
+We install `@opencode/cli` (v2). The `opencode-ai` package is v1. Most search results, blog posts and plugin repos describe v1, and **v1 plugin code does not run in v2**.
 
-**Current approach uses `home_logo` TUI slot (via `TuiPluginModule` with `{ id, tui }` export)** — the only documented/working mechanism OpenCode exposes for customizing the home screen logo. This is more fragile than a pure config file would be because:
-- The plugin API surface (`api.slots`, `ctx.theme.current`) may change between OpenCode versions with no migration path or schema validation
-- If `home_logo` slot mode defaults differently or is removed, this plugin silently has no effect
+| | v1 (do NOT use) | v2 (use this) |
+|---|---|---|
+| TUI/CLI config file | `tui.json` | `cli.json` (global only, no project-local file) |
+| Plugin list key | `"plugin": [...]` | `"plugins": [...]` |
+| Config location override | `OPENCODE_TUI_CONFIG` | `OPENCODE_CLI_CONFIG_CONTENT` (inline JSON) |
+| Package import | `@opencode-ai/plugin/tui` | `@opencode/plugin/tui` |
+| Entry point | `export default { id, tui(api) }` | `export default Plugin.define({ id, setup(context) })` |
+| Slot registration | `api.slots.register({ slots: { home_logo } })` | `context.ui.slot({ <placement>: "<slot>", render })` |
+| Slot names | `home_logo`, `sidebar_content` | dotted: `home.footer`, `sidebar.content`, ... |
 
-**Verification limitation (testing):**
-- There is no programmatic way to verify TUI-visible customizations today. OpenCode renders the logo in the terminal UI home screen at startup — no CLI command (`--help`, `opencode --mini`, etc.) outputs it.
-- You cannot build+test logo changes without at minimum a brief interactive run of the agent container. The container image build can bake the TSX in but **cannot** validate whether OpenCode actually renders it.
+**Before changing any plugin or TUI config, read the v2 docs (not the v1 docs):**
+- https://opencode.ai/v2/docs/build/plugins/cli (writing TUI plugins, slot list)
+- https://opencode.ai/v2/docs/cli/plugins (loading plugins, discovery paths)
+- https://opencode.ai/v2/docs/cli/config (every `cli.json` setting)
+- https://opencode.ai/v2/docs/build/plugins/migrate-v1 (what changed from v1)
 
-**Possible future refactors (no ticket — noted for awareness):**
-1. **If OpenCode re-adds a `logo` config field upstream** (watch PR #[12017](https://github.com/anomalyco/opencode/pull/12016)), you could replace the entire TSX plugin with a single text file reference in `opencode.json`.
-2. **Build an MCP tool or CLI mode that serializes loaded TUI config** to validate plugins and slots without needing a live TUI session — useful for CI-style pre-merge checks if this becomes important later.
+### J.2 Where config lives in the container
 
----
+- **Server config** (`opencode.json`: providers, models, permissions): baked to `/etc/opencode/opencode/opencode.json`, selected by `OPENCODE_CONFIG`. This works. Local models appear.
+- **CLI/TUI config** (`cli.json`, plugin list): supplied by the `OPENCODE_CLI_CONFIG_CONTENT` env var in the Dockerfile.
+- **Plugin files**: baked to `/etc/opencode/plugins/<plugin-name>/`.
+- **Never put OpenCode config or plugins under `/home/agent` or `~/.config/opencode`.** `/home/agent` is a tmpfs (see A.4), so anything copied there at build time is hidden at runtime. Observed when we tried it: local models disappeared. The tmpfs shadowing is the likely cause.
+- Check that `compose.yaml` does not override or unset `OPENCODE_CONFIG` or `OPENCODE_CLI_CONFIG_CONTENT`.
 
-## J. Sub-system decision logs
+Dockerfile:
+```dockerfile
+RUN npm install -g @opencode/cli && opencode --version
+
+COPY opencode/opencode.json /etc/opencode/opencode/opencode.json
+COPY opencode/plugins/little-mester-logo/ /etc/opencode/plugins/little-mester-logo/
+
+ENV OPENCODE_CONFIG=/etc/opencode/opencode/opencode.json \
+    OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-logo"]}'
+```
+
+### J.3 Logo plugin
+
+Canonical source (single copy, no duplicates):
+```
+agent/opencode/plugins/little-mester-logo/
+  package.json    { "name": "little-mester-logo", "type": "module", "exports": { "./tui": "./tui.tsx" } }
+  tui.tsx         Plugin.define({ id: "little-mester.logo", setup(context) { return context.ui.slot({...}) } })
+```
+
+- `agent/opencode/tui.json` and the loose `.txt` copies under `plugins/` are obsolete and should be deleted.
+- Colors come from `context.theme` tokens (the docs use `context.theme.text.base`), not string names like `"primary"`.
+- `render` must return JSX, not a component reference.
+- `setup` returns the unregister function from `context.ui.slot(...)`.
+
+### J.4 Unverified. Test, then record the result here.
+
+1. **Home-logo slot.** The documented v2 slots are `app`, `home.footer`, `home.footer.status`, `prompt.footer`, `prompt.footer.status`, `prompt.footer.file`, `session.composer.top`, `sidebar.content`, `sidebar.footer`. There is no documented logo slot. The plugin currently uses `prepend: "home.footer"`, which shows our logo but does **not** replace the built-in one. To test replacing it, try `replace: "home.logo"` (guessed name). If it fails, check `packages/plugin/src/tui/` in https://github.com/anomalyco/opencode for the real slot list, or ask upstream for one.
+2. **`context.theme.text.subdued`.** Used for the lower logo lines. Not in the docs. Falls back to the default color if undefined.
+3. **JSX pragma.** `tui.tsx` has no `@jsxImportSource` pragma because the v2 docs' JSX examples do not use one. If JSX fails to resolve, restore `/** @jsxImportSource @opentui/solid */`.
+4. **Directory-path plugin form** (`/etc/opencode/plugins/<name>` in `plugins`) with a `.tsx` entry. The docs show directory paths and `./tui` exports, but not `.tsx` entries specifically.
+
+### J.5 Verifying and debugging
+
+- There is no automated check for TUI rendering. Verify by running `./lab` interactively and looking at the home screen.
+- To confirm the plugin loads at all (separately from whether the slot renders), add `context.ui.toast.show({ message: "little-mester logo plugin loaded" })` at the top of `setup`.
+- The v2 docs say to confirm a plugin's ID and source appear in the active plugin list.
+- `console.log` from a TUI plugin may not appear in server logs.

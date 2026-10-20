@@ -14,12 +14,14 @@ RUN python -m venv /opt/venv \
 RUN npm install -g @opencode/cli && opencode --version
 
 COPY opencode/opencode.json /etc/opencode/opencode/opencode.json
-
-RUN groupadd -g ${LAB_GID} agent && useradd -m -u ${LAB_UID} -g ${LAB_GID} agent
+COPY opencode/plugins/little-mester-logo/ /etc/opencode/plugins/little-mester-logo/
 
 ENV PATH="/opt/venv/bin:$PATH" \
     HOME=/home/agent \
-    OPENCODE_CONFIG=/etc/opencode/opencode/opencode.json
+    OPENCODE_CONFIG=/etc/opencode/opencode/opencode.json \
+    OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-logo"]}'
+
+RUN groupadd -g ${LAB_GID} agent && useradd -m -u ${LAB_UID} -g ${LAB_GID} agent
 
 WORKDIR /workspace
 CMD ["opencode"]
