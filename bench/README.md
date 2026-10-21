@@ -12,6 +12,8 @@ A lightweight, fast iteration system for tuning llama.cpp parameters without ful
 | `./lab restart-llama` | Restart server with new params | After editing compose.yaml llamacpp command | ~20s |
 | `./lab restart-llama --cache` | Restart with KV cache persistence | Iterating fast between tests (same model) | ~3s |
 | `./lab tune` | Sweep parameters, produce comparison table | When you want to find optimal settings | 5-30 min |
+| `./lab tune --analyse` | Full sweep + AI analysis of results | One-command optimal config find | 5-30 min |
+| `./lab ai-analyze` | Analyze benchmark JSON with AI | When you have results and want recommendations | ~30s |
 
 ## The Three Benchmark Modes
 
@@ -57,6 +59,32 @@ table. Best for initial hardware setup.
 - You just want a quick single measurement (use `./lab bench`)
 - You only need to test one specific parameter (use `./lab bench --native -t 10`)
 
+### 4. AI Analysis (`./lab tune --analyse` or `./lab ai-analyze`)
+
+> `--ai` is accepted as a shorthand alias for `--analyse`.
+
+After running a benchmark sweep, the AI analyzes the results and tells you
+exactly what settings to use — with reasoning, trade-offs, and warnings.
+
+**Use when:**
+- You want the AI to pick optimal settings for your hardware
+- You're new to llama.cpp tuning and need guidance
+- You have benchmark JSON and want expert analysis
+
+**How it works:**
+1. Reads benchmark results (from JSON file or piped via stdin)
+2. Reads your `machine.conf` for hardware context
+3. Sends both to Ollama's local AI model
+4. Returns: optimal config + reasoning + trade-offs + compose.yaml changes
+
+**Requirements:**
+- Ollama must be running (inside the `little-mester` stack)
+- A small model loaded (default: `qwen2.5:1.5b`)
+
+**Don't use when:**
+- Ollama isn't running (AI won't be available)
+- You want to make a quick manual decision without AI input
+
 ## Workflow
 
 ### Baseline measurement
@@ -87,6 +115,23 @@ table. Best for initial hardware setup.
 
 # Save results for AI analysis
 ./lab tune --json > tune-results-$(date +%Y%m%d).json
+```
+
+### One-command sweep + AI analysis
+
+```bash
+# Sweep + AI analysis in one command (requires Ollama running)
+./lab tune --analyse
+
+# Same thing, two steps (useful if Ollama isn't running)
+./lab tune --json > tune-results.json
+./lab ai-analyze < tune-results.json
+
+# Pipe results directly to AI
+./lab tune --json | ./lab ai-analyze
+
+# Use a different model for analysis
+./lab tune --json | ./lab ai-analyze --model phi3:mini
 ```
 
 ## JSON Output for AI Analysis
@@ -163,8 +208,44 @@ Copy `machine.conf.example` to `machine.conf` and fill in your hardware:
 cp machine.conf.example machine.conf
 ```
 
-This file is `.gitignore`'d and stores your machine-specific specs. The AI reads
-this to give informed tuning advice.
+This file is `.gitignore`'d and stores your machine-specific specs. It's used by
+`./lab ai-analyze` to give context-aware recommendations — the AI needs to know
+your GPU, VRAM, and CPU to suggest sensible thread counts, micro-batch sizes, etc.
+
+### What the AI returns
+
+When you run `./lab tune --analyse` or `./lab ai-analyze`, the AI responds with:
+
+```
+## RECOMMENDATION (JSON)
+{
+  "threads": 10,
+  "n_cpu_moe": 32,
+  "micro_batch": 2048,
+  "context": 65536,
+  "gpu_layers": 99,
+  "reasoning": "10 threads maximizes throughput without CPU contention",
+  "confidence": "high"
+}
+
+## ANALYSIS
+### Optimal Settings
+
+Based on your benchmark results:
+- **Threads: 10** — 10 out of 12 cores gives best throughput
+  (2 cores reserved for system prevents throttling)
+- **CPU-MoE: 32** — Good balance between GPU and CPU expert routing
+- **Micro-batch: 2048** — Safe for 8GB VRAM headroom
+
+### Trade-offs
+- Going to 4096 micro-batch would give ~5% more TPS but risks KV cache OOM
+- Using all 12 threads hurts system responsiveness and may cause throttling
+
+### Next Steps
+Edit compose.yaml llamacpp command:
+  -t 10 --n-cpu-moe 32 -ub 2048 -c 65536
+Then run: ./lab restart-llama && ./lab bench
+```
 
 ## Understanding the Metrics
 
@@ -183,3 +264,8 @@ this to give informed tuning advice.
 3. **Use native mode for quick iteration.** Changing `-t` or `-ub` between native bench runs is instant (no model reload).
 4. **Use HTTP mode for production-like tests.** This measures the full request/response cycle including the HTTP layer.
 5. **Save JSON results.** Compare different machines or model versions with `--json` output.
+6. **Use `./lab tune --analyse`** for one-command optimal config discovery. The AI reads your
+   `machine.conf` and benchmark results to give tailored recommendations.
+7. **Always verify AI suggestions** with `./lab bench` after applying them — the AI's
+   recommendation is a starting point, but actual performance may vary based on your
+   specific workload patterns.

@@ -1,72 +1,75 @@
-# machine.conf — Your hardware profile for this machine
+# machine.conf — Your hardware profile for little-mester
 #
 # Copy this file to machine.conf and fill in your specs:
 #   cp machine.conf.example machine.conf
 #
-# This file is .gitignore'd (never committed). It exists so AI assistants
-# and the benchmarking tools know what hardware they're working with,
-# which enables smarter tuning recommendations.
+# This file is .gitignore'd (never committed). It serves two purposes:
+#   1. Tells AI assistants what hardware they're working with
+#   2. Lets the benchmarking tools suggest optimal starting points
 #
 # ─────────────────────────────────────────────────────────────────────────────
-# GPU
+# Hardware (required)
 # ─────────────────────────────────────────────────────────────────────────────
-# What GPU is this machine? (e.g. "NVIDIA RTX 4090", "Radeon 780M", "Apple M3 Pro")
+# GPU name as reported by nvidia-smi or your OS
+#   NVIDIA: `nvidia-smi --query-gpu=name --format=csv,noheader`
+#   AMD:   `rocm-smi` or `lspci | grep -i vga`
 GPU_NAME=""
-# How much VRAM does the GPU have? In GB (e.g. 24, 8, 16)
-GPU_VRAM_GB=""
-# How many CUDA cores (NVIDIA) or Compute Units (AMD)?
-#   NVIDIA: see nvidia-smi — e.g. RTX 4090 has 16384
-#   AMD: see "cu" count via rocm-smi or the number of shader units / 64
-GPU_CORES=""
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CPU
-# ─────────────────────────────────────────────────────────────────────────────
-# How many physical cores? (not threads — use nproc --all or lscpu for this)
+# Total GPU VRAM in GB (integer). This is the hard limit for model + KV cache.
+#   NVIDIA: `nvidia-smi` shows it in the header
+#   AMD:   check your GPU spec sheet
+GPU_VRAM_GB=""
+
+# Number of physical CPU cores (not logical threads).
+#   Run `nproc --all` or `lscpu | grep "^CPU(s):"`
+#   For tuning, we care about cores because each thread needs a core.
 CPU_CORES=""
-# CPU model name (helps AI understand memory bandwidth)
+
+# CPU model name (helps AI understand memory bandwidth and architecture).
+#   Run `cat /proc/cpuinfo | grep "model name" | head -1`
 #   e.g. "AMD Ryzen AI 9 HX 370 (Strix Point)"
+#   Memory bandwidth matters a LOT for CPU inference on MoE models.
 CPU_MODEL=""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Recommended defaults — AI uses these to suggest tuning parameters
-# ────────────────────────────────────────────────────────────────────────��─
-# These are starting points. Run ./lab tune to find optimal values.
-# You'll see why these were chosen below.
-#
+# Recommended tuning defaults (optional — AI uses these as starting points)
+# ─────────────────────────────────────────────────────────────────────────────
+# These are educated guesses. Run ./lab tune to find your actual optimum.
+
 # Threads (-t):
-#   Start with your physical core count.
-#   For MoE models, too many threads can cause CPU contention.
-#   For dense models, you can go higher (up to 1.5x physical cores).
-#   Our HX 370: 12 physical cores → try 8-12 (leave room for system)
+#   How many CPU threads llama.cpp uses.
+#   Start at 2/3 of your physical cores — leave room for the system.
+#   On MoE models, threads also handle expert routing overhead.
+#   Rule of thumb: physical_cores * 0.66 to physical_cores * 0.85
 DEFAULT_THREADS=""
-#
+
 # CPU MoE experts (--n-cpu-moe):
-#   MoE models split expert layers across GPU and CPU.
-#   Lower values = more on GPU (faster if VRAM allows).
-#   Higher values = more on CPU (slower but fits more models in VRAM).
-#   Our HX 370: 16-CU Radeon 890M with 8GB VRAM → 32 is a good start
-#   (the model needs ~20GB at Q4; everything beyond what fits in VRAM goes to CPU)
+#   How many of the model's expert layers run on CPU.
+#   MoE models split experts: some on GPU, some on CPU.
+#   Lower = more GPU pressure (faster if VRAM allows).
+#   Higher = less GPU pressure (slower, but fits in less VRAM).
+#   For 8GB VRAM with a ~20GB model: most experts go to CPU anyway.
+#   Start at 32 and adjust based on results.
 DEFAULT_CPU_MOE=""
-#
-# Micro-batch size (-b / -ub):
-#   How many tokens to process in each KV-cache update step.
-#   Larger = better throughput (fewer KV updates per batch).
-#   Too large = VRAM pressure (KV cache grows).
-#   Our HX 370: 2048 is safe; 4096 may work if VRAM allows
+
+# Micro-batch size (-ub):
+#   Tokens processed per KV-cache update step.
+#   Larger = higher throughput (fewer KV updates per batch).
+#   Too large = VRAM pressure (KV cache grows with context).
+#   Start at 2048. If VRAM headroom is good, try 4096.
 DEFAULT_MICRO_BATCH=""
-#
+
 # Context window (-c):
-#   Maximum context length. Larger = more memory, slower initial load.
-#   Match your use case: 65536 for long documents, 8192-16384 for chat.
+#   Maximum sequence length. Larger = more memory, slower load.
+#   Match to your use case: 65536 for long documents, 8192-16384 for chat.
+#   Your model's native max is probably 32768 or 65536.
 DEFAULT_CONTEXT_LENGTH=""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Example filled-in for our machine:
+# Example filled-in for your machine:
 # ─────────────────────────────────────────────────────────────────────────────
 # GPU_NAME="AMD Radeon 890M (16 CU)"
 # GPU_VRAM_GB=8
-# GPU_CORES=16
 # CPU_CORES=12
 # CPU_MODEL="AMD Ryzen AI 9 HX 370 (Strix Point)"
 # DEFAULT_THREADS=10
