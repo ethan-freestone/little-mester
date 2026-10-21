@@ -1,0 +1,7 @@
+{
+  "name": "little-mester-host-metrics-tui",
+  "type": "module",
+  "exports": {
+    "./tui": "./tui.tsx"
+  }
+}

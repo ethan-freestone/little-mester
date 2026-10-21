@@ -84,6 +84,10 @@ def gen_opencode_json(models):
         },
         "model": f"ollama/{models[0]['name']}",
         "small_model": f"ollama/{models[-1]['name']}",
+        "plugins": [
+            "/etc/opencode/plugins/host-metrics",
+            "/etc/opencode/plugins/host-metrics-tui"
+        ],
         "permission": {
             "edit": "ask",
             "bash": "ask"
