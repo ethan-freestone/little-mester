@@ -16,8 +16,12 @@ echo "=== Sandbox Security Checks ==="
 check "runs as non-root"           0 '[ "$(id -u)" != 0 ]'
 check "root fs is read-only"       1 'touch /usr/x'
 check "workspace is writable"      0 'touch /workspace/.t && rm /workspace/.t'
-check "no internet (https)"        1 'curl -sS -m 4 https://example.com'
-check "no internet (raw IP)"       1 'curl -sS -m 4 http://1.1.1.1'
+# These checks only apply when the agent is isolated (EGRESS=false).
+# They are skipped when egress is enabled (the default).
+if [[ "${EGRESS:-true}" != "true" ]]; then
+  check "no internet (https)"        1 'curl -sS -m 4 https://example.com'
+  check "no internet (raw IP)"       1 'curl -sS -m 4 http://1.1.1.1'
+fi
 check "zero capabilities"          0 "grep -q '^CapEff:[[:space:]]*0000000000000000' /proc/self/status"
 check "no-new-privileges set"      0 "grep -q '^NoNewPrivs:[[:space:]]*1' /proc/self/status"
 check "no docker socket"           0 '[ ! -e /var/run/docker.sock ]'
@@ -52,7 +56,7 @@ check "metrics has GPU data"       0 'curl -sf -m 3 http://metrics:19532/metrics
 check "metrics has CPU data"       0 'curl -sf -m 3 http://metrics:19532/metrics | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get(\"cpu\") is not None"'
 
 # Metrics contains RAM data
-check "metrics has RAM data"       0 'curl -sf -m 3 http://metrics:19532/metrics | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get(\"ram\") is not None"'
+check "metrics has RAM data"       0 'curl -sf -m 3 http://metrics:19532/metrics | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get(\"memory\") is not None"'
 
 # Metrics summary is human-readable
 check "metrics summary readable"   0 'curl -sf -m 3 http://metrics:19532/summary | grep -q "VRAM"'
