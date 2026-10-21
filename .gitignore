@@ -9,8 +9,11 @@ dist/
 .little-mester.conf
 # Node modules (covers all repos in workspace)
 node_modules/
-# Collated repo pass-off file
-.REPO_COLLATION.MD
+# Collated repo pass-off / analysis dumps (all safe to re-run)
+_COLLATED_OUTPUT.MD
+COLLATED_OUTPUT.MD
+WORKSPACE-ALL.md
+*.collated.md
 # Python bytecode
 __pycache__/
 *.pyc
