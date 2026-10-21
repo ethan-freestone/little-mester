@@ -355,13 +355,16 @@ agent/opencode/plugins/little-mester-logo/
 ### J.4 Unverified. Test, then record the result here.
 
 1. **Home-logo slot.** The documented v2 slots are `app`, `home.footer`, `home.footer.status`, `prompt.footer`, `prompt.footer.status`, `prompt.footer.file`, `session.composer.top`, `sidebar.content`, `sidebar.footer`. There is no documented logo slot. The plugin currently uses `prepend: "home.footer"`, which shows our logo but does **not** replace the built-in one. To test replacing it, try `replace: "home.logo"` (guessed name). If it fails, check `packages/plugin/src/tui/` in https://github.com/anomalyco/opencode for the real slot list, or ask upstream for one.
-2. **`context.theme.text.subdued`.** Used for the lower logo lines. Not in the docs. Falls back to the default color if undefined.
+2. **`context.theme.text.subdued`.** Used for the lower logo lines. Not in the docs. Falls back to the default color if undefined. **Verified:** the resolved theme (`@opencode/theme` 2.1.2) exposes `text.base`, `text.muted` and `text.faint` — there is no `text.subdued`. The metrics plugin uses `text.muted` (with a literal fallback).
 3. **JSX pragma.** `tui.tsx` has no `@jsxImportSource` pragma because the v2 docs' JSX examples do not use one. If JSX fails to resolve, restore `/** @jsxImportSource @opentui/solid */`.
 4. **Directory-path plugin form** (`/etc/opencode/plugins/<name>` in `plugins`) with a `.tsx` entry. The docs show directory paths and `./tui` exports, but not `.tsx` entries specifically.
 
 ### J.5 Verifying and debugging
 
-- There is no automated check for TUI rendering. Verify by running `./lab` interactively and looking at the home screen.
+- TUI rendering is guarded statically by `scripts/check-tui-jsx.py` (see §J.9) — it catches the JSX
+  mistakes that make a slot die at render time. It is run by `tests/tui-jsx.bats` in the normal
+  `bats /workspace/tests/` suite. It cannot prove that a slot *looks* right; for that, drive the
+  real TUI (see §J.9) or render the slot headlessly.
 - To confirm the plugin loads at all (separately from whether the slot renders), add `context.ui.toast.show({ message: "little-mester logo plugin loaded" })` at the top of `setup`.
 - The v2 docs say to confirm a plugin's ID and source appear in the active plugin list.
 - `console.log` from a TUI plugin may not appear in server logs.
@@ -382,3 +385,69 @@ agent/opencode/plugins/little-mester-logo/
 - `0.0.0.0` inside the container netns is **not** "exposed to the host": exposure to the host is controlled by `ports:` in compose, which we deliberately do not set. The `internal: true` network has no route off the Docker network.
 - Consequence for verification: host-side scripts cannot `curl 127.0.0.1:19532`. They must run a client container attached to the compose network — see `scripts/verify-metrics.sh`.
 - Host paths mounted into the sidecar must match the constants in `gather.py` exactly (`/host/proc`, `/host/hwmon`, `/host/thermal`). A mismatch fails silently and yields empty readings, so `scripts/verify-metrics.sh` audits the mounts (criterion A9).
+### J.8 Metrics sidecar ring buffer + TUI sparkline (ticket-011)
+
+- The old 2s TTL cache meant that polling at sub-TTL intervals always returned stale data.
+  Replaced it with a **daemon sampler thread** that runs `_aggregate()` every 500ms and feeds both
+  a `_latest` snapshot and a rolling-ring (max 240 entries) of historical samples.
+- New `GET /history?n=N` endpoint returns the last N ring-buffer samples as JSON, used by the TUI
+  plugin to seed charts immediately on mount instead of starting blank.
+- The TUI plugin (`host-metrics-tui`) renders in `append: "sidebar.footer"` — a compact one-line
+  sparkline (GPU util + VRAM bars) by default; clicking toggles an expanded detail view with GPU
+  util / VRAM % time-series charts, temperature, and system overview.
+- The plugin is baked to `/etc/opencode/plugins/host-metrics-tui/` via Dockerfile and listed in the
+  `plugins` array of both `opencode.json` and `scripts/regen-configs`.
+- V2 TUI reactivity (how data changes trigger render updates) is **confirmed** — see §J.9. The plugin
+  keeps its data in a `createSignal<State>` and reads `props.state()` **inside the JSX expressions**
+  (never hoisted into a local), so Solid re-renders the slot on every poll.
+- The compact view is **two short lines** (`GPU 98% ▁▃██████████████` / `VRAM 7.2/8.0G 58°C`), sized
+  for the narrow sidebar; the expanded view stacks one row per metric plus CPU/RAM overview.
+
+### J.9 OpenTUI text rules (verified — a `<text>` inside a `<text>` kills the slot)
+
+**The crash.** The v2 TUI renders plugin JSX through `@opentui/solid`. A `<text>` element is a
+`TextRenderable`; a `<text>`'s children may only be **strings, `TextNodeRenderable` instances or
+`StyledText`**. A `TextRenderable` is none of those, so nesting one inside another makes the
+renderer call `TextNodeRenderable.add()` with an illegal value and throw:
+
+```
+TextNodeRenderable only accepts strings, TextNodeRenderable instances, or StyledText instances
+    at add (TextNode.ts:126)
+    at _insertNode (reconciler.ts:112)
+```
+
+OpenCode catches that and shows `little-mester.host-metrics-tui crashed in slot sidebar.footer: …`.
+The slot then renders **nothing at all** — the plugin does not "look wrong", it is simply absent.
+
+**The rules.**
+
+| # | Rule | Consequence |
+|---|------|-------------|
+| R1 | Inline fragments inside a `<text>` must be `<span>` | `<span>` is a `TextNodeRenderable`; a nested `<text>` is not |
+| R2 | A `<span>` takes its colour from `style={{ fg: "#rrggbb" }}` | a bare `fg=` prop on a span is **silently ignored** (only `<text>` understands it) |
+| R3 | Bold is `<strong>` (or `<b>`) | `style={{ fontWeight: "bold" }}` is **silently ignored** — the style object understands `bold`/`italic`/`underline`/`dim`, not `fontWeight` |
+
+The full inline catalogue is `box, text, input, select, textarea, ascii_font, tab_select, scrollbox,
+code, diff, line_number, markdown, image, span, strong, b, em, i, u, br, a` — `span`/`strong`/`b`/`em`/`i`/`u`
+are the inline ones. There is no `<bold>` element (the ticket-011 sketch used one).
+
+**Why a static check.** These mistakes do **not** fail at plugin load time — they fail while the slot
+renders, i.e. only in a running TUI. So `scripts/check-tui-jsx.py` checks them statically (R1/R2/R3)
+and `tests/tui-jsx.bats` runs it over every `agent/opencode/plugins/*/tui.tsx`. On the pre-fix file it
+reports all 10 nested-`<text>` sites and all 5 `fontWeight` sites.
+
+**How it was verified** (OpenCode 2.1.2, `@opentui/core` 0.6.x):
+
+1. *Headless* — render the slot in a real `@opentui/solid` renderer (`testRender`) with bun + FFI:
+   the old file throws the exact error above, the new file renders both compact and expanded views.
+2. *Live* — run the real TUI in a pty, type a prompt, press `<leader>b` (`ctrl+x`, then `b`) to toggle
+   the sidebar, and read the screen:
+   - old plugin → `crashed in slot … TextNodeRenderable only accepts …`, no metrics at all
+   - new plugin → `GPU 98% ▁▃██████████████` / `VRAM 7.2/8.0G 58°C`, no crash
+
+**Gotcha for live tests:** OpenCode auto-discovers every plugin directory under the global plugin
+dir, so a "fixed" copy outside `/etc/opencode/plugins` does *not* replace the baked-in one — the old
+plugin still loads and still crashes. Point `OPENCODE_CONFIG` at a private config directory whose
+`plugins` array lists only the copy under test.
+
+

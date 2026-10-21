@@ -8,19 +8,23 @@ containers on the compose `internal` network can reach it via Docker DNS
 outside the Docker network -- see compose.yaml (no `ports:` entry) and
 scripts/verify-metrics.sh acceptance criterion A7.
 
-Exposes two endpoints:
-    GET /metrics -- JSON blob with all four metric categories
-    GET /summary -- one-line human-readable string
+Exposes three endpoints:
+    GET /metrics  -- JSON blob with all four metric categories
+    GET /summary  -- one-line human-readable string
+    GET /history?n=N -- last N ring-buffer samples (default 120 = 60s)
 """
 
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
+import collections
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 # Host paths (mounted via compose bind mounts as :ro).
 # These MUST match the mount destinations in compose.yaml:
@@ -40,30 +44,134 @@ BIND_PORT = int(os.environ.get("METRICS_BIND_PORT", "19532"))
 
 
 # ---------------------------------------------------------------------------
-# TTL cache - collapses repeated nvidia-smi /proc reads into one per window
+# Ring-buffer sampler - replaces TTL cache for low-latency live sampling
 # ---------------------------------------------------------------------------
 
-class _TTLCache:
-    __slots__ = ("_value", "_expires", "ttl")
-
-    def __init__(self, ttl: float = 2.0):
-        self.ttl = ttl
-        self._value = None
-        self._expires = -999.0
-
-    def get_or_set(self, factory):
-        if time.monotonic() >= self._expires:
-            self._value = factory()
-            self._expires = time.monotonic() + self.ttl
-        return self._value
+_lock = threading.Lock()
+_latest: dict | None = None          # Current snapshot (served by GET /metrics)
+_history: collections.deque = collections.deque(maxlen=240)  # 120 s at 2 Hz
 
 
-_cache = _TTLCache(ttl=2.0)
+def _collect_gpu():
+    """Collect GPU metrics via NVML or nvidia-smi fallback."""
+    if not (_NVML_OK or _HAS_SMI):
+        return []
+    if _NVML_OK:
+        try:
+            return _collect_gpu_nvml()
+        except Exception:
+            pass
+    if _HAS_SMI:
+        return _collect_gpu_smi()
+    return []
+
+
+def _collect_cpu():
+    """Read /host/proc/loadavg and return load averages + core count."""
+    try:
+        with open(f"{HOST_PROC}/loadavg", "r") as fh:
+            parts = fh.read().strip().split()
+        load_1 = float(parts[0])
+        load_5 = float(parts[1])
+        load_15 = float(parts[2])
+    except (OSError, IndexError, ValueError):
+        load_1 = load_5 = load_15 = 0.0
+
+    try:
+        num_cpus = os.cpu_count() or 1
+    except Exception:
+        num_cpus = 1
+
+    return {
+        "model": _collect_cpu_model(),
+        "load_avg_1m": round(load_1, 2),
+        "load_avg_5m": round(load_5, 2),
+        "load_avg_15m": round(load_15, 2),
+        "num_cpus": num_cpus,
+    }
+
+
+def _aggregate():
+    """Collect *all* hardware metrics and return as a single dict."""
+    return {
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "cpu": _collect_cpu(),
+        "memory": _collect_ram(),
+        "gpu": _collect_gpu(),
+        "temperatures": _collect_temperatures(),
+    }
+
+
+def _format_summary(data: dict):
+    """Create a compact one-liner for the /summary endpoint."""
+    cpu = data.get("cpu", {})
+    mem = data.get("memory", {})
+    gpus = data.get("gpu", [])
+    temps = data.get("temperatures", [])
+
+    load_str = f"load {cpu.get('load_avg_1m', 0)}/{cpu.get('load_avg_5m', 0)}"
+    ram_str = f"RAM {mem.get('used_gb', '?')}/{mem.get('total_gb', '?')}GB ({mem.get('percent', '?')}%)"
+
+    gpu_parts = []
+    for g in gpus:
+        name_short = g["name"][:12]
+        used_gb = int(g.get("memory_used_mb", 0)) >> 10
+        total_gb = int(g.get("memory_total_mb", 0) >> 10)
+        gpu_parts.append(
+            f"{g['index']} {name_short}: "
+            f"util={g['utilization_percent']}%, "
+            f"VRAM {used_gb}/{total_gb}GB, "
+            f"{g.get('temperature_c', '?')}C"
+        )
+
+    temp_parts = [
+        f"{t['chip']}/{t['sensor']}={t['temperature_c']}C"
+        for t in temps
+        if t.get("temperature_c") is not None
+    ]
+
+    gpu_str = " | ".join(gpu_parts) if gpu_parts else "no GPU data"
+    temp_str = f" | T: {' / '.join(temp_parts)}" if temp_parts else ""
+
+    return (
+        f"[{data['timestamp']}] CPU: {load_str}  |  {ram_str}  |  "
+        f"{gpu_str}{temp_str}"
+    )
+
+
+def _sampler():
+    """Background thread that polls _aggregate() every 500 ms and maintains
+    the `_latest` snapshot plus a rolling-ring of recent samples."""
+    global _latest
+    while True:
+        with _lock:
+            snap = _aggregate()
+            g = (snap["gpu"] or [{}])[0]   # first GPU, empty dict if no data
+            vram_pct = round(
+                100 * g.get("memory_used_mb", 0)
+                / max(g.get("memory_total_mb", 1), 1), 4
+            )
+
+        history_entry = collections.OrderedDict([
+            ("t", snap["timestamp"]),
+            ("ts", time.monotonic()),       # monotonic for interval logic
+            ("gpu_util", g.get("utilization_percent", 0)),
+            ("vram_pct", vram_pct),
+            ("gpu_temp", int(g.get("temperature_c", 0))),
+            ("cpu_load", snap["cpu"]["load_avg_1m"]),
+        ])
+        with _lock:
+            _latest = snap
+            _history.append(history_entry)
+
+        time.sleep(0.5)
 
 
 # ---------------------------------------------------------------------------
-# Metric collectors
+# GPU collectors (NVML first, nvidia-smi fallback)
 # ---------------------------------------------------------------------------
+
+_safe_int_count_lock = threading.Lock()
 
 def _safe_int(value, default: int = 0):
     """Parse a string as int; return *default* on any failure."""
@@ -74,12 +182,31 @@ def _safe_int(value, default: int = 0):
     except (ValueError, TypeError):
         return default
 
+
+# Probe NVML at import time — if pynvml isn't available or the device
+# nodes aren't readable, we fall back to nvidia-smi subprocess calls.
+_NVML_OK = False
 try:
     import pynvml
     pynvml.nvmlInit()
     _NVML_OK = True
 except Exception:
-    _NVML_OK = False
+    pass
+
+# Probe for nvidia-smi binary at import time (avoids a subprocess check
+# on every call).
+_HAS_SMI = False
+try:
+    result = subprocess.run(
+        ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
+        capture_output=True, text=True, check=True, timeout=5,
+    )
+    _HAS_SMI = bool(result.stdout.strip())
+except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+    pass
+
+# ── Start sampler thread ─────────────────────────────────────
+threading.Thread(target=_sampler, daemon=True).start()
 
 
 def _collect_gpu_nvml():
@@ -102,8 +229,9 @@ def _collect_gpu_nvml():
         })
     return gpus
 
+
 def _collect_gpu_smi():
-    """:class `nvidia-smi --query-gpu` CSV and return list of per-GPU dicts."""
+    """Parse `nvidia-smi --query-gpu` CSV output and return list of per-GPU dicts."""
     try:
         result = subprocess.run(
             [
@@ -149,38 +277,6 @@ def _collect_gpu_smi():
             "memory_free_mb": mem_free_mb,
         })
     return gpus
-
-def _collect_gpu():
-    if _NVML_OK:
-        try:
-            return _collect_gpu_nvml()
-        except Exception:
-            pass
-    return _collect_gpu_smi()   # rename your current function
-
-def _collect_cpu():
-    """Read /host/proc/loadavg and return load averages + core count."""
-    try:
-        with open(f"{HOST_PROC}/loadavg", "r") as fh:
-            parts = fh.read().strip().split()
-        load_1 = float(parts[0])
-        load_5 = float(parts[1])
-        load_15 = float(parts[2])
-    except (OSError, IndexError, ValueError):
-        load_1 = load_5 = load_15 = 0.0
-
-    try:
-        num_cpus = os.cpu_count() or 1
-    except Exception:
-        num_cpus = 1
-
-    return {
-        "model": _collect_cpu_model(),
-        "load_avg_1m": round(load_1, 2),
-        "load_avg_5m": round(load_5, 2),
-        "load_avg_15m": round(load_15, 2),
-        "num_cpus": num_cpus,
-    }
 
 
 def _collect_cpu_model():
@@ -269,71 +365,35 @@ def _collect_temperatures():
 
 
 # ---------------------------------------------------------------------------
-# Aggregation & formatting
-# ---------------------------------------------------------------------------
-
-def _aggregate():
-    """Collect *all* hardware metrics and return as a single dict."""
-    return {
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "cpu": _collect_cpu(),
-        "memory": _collect_ram(),
-        "gpu": _collect_gpu(),
-        "temperatures": _collect_temperatures(),
-    }
-
-
-def _format_summary(data: dict):
-    """Create a compact one-liner for the /summary endpoint."""
-    cpu = data.get("cpu", {})
-    mem = data.get("memory", {})
-    gpus = data.get("gpu", [])
-    temps = data.get("temperatures", [])
-
-    load_str = f"load {cpu.get('load_avg_1m', 0)}/{cpu.get('load_avg_5m', 0)}"
-    ram_str = f"RAM {mem.get('used_gb', '?')}/{mem.get('total_gb', '?')}GB ({mem.get('percent', '?')}%)"
-
-    gpu_parts = []
-    for g in gpus:
-        name_short = g["name"][:12]
-        used_gb = int(g.get("memory_used_mb", 0)) >> 10
-        total_gb = int(g.get("memory_total_mb", 0) >> 10)
-        gpu_parts.append(
-            f"{g['index']} {name_short}: "
-            f"util={g['utilization_percent']}%, "
-            f"VRAM {used_gb}/{total_gb}GB, "
-            f"{g.get('temperature_c', '?')}C"
-        )
-
-    temp_parts = [
-        f"{t['chip']}/{t['sensor']}={t['temperature_c']}C"
-        for t in temps
-        if t.get("temperature_c") is not None
-    ]
-
-    gpu_str = " | ".join(gpu_parts) if gpu_parts else "no GPU data"
-    temp_str = f" | T: {' / '.join(temp_parts)}" if temp_parts else ""
-
-    return (
-        f"[{data['timestamp']}] CPU: {load_str}  |  {ram_str}  |  "
-        f"{gpu_str}{temp_str}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# HTTP server - loopback only (127.0.0.1)
+# HTTP server - binds to 0.0.0.0:19532 inside this container's netns
 # ---------------------------------------------------------------------------
 
 class _MetricsHandler(BaseHTTPRequestHandler):
-    """- /metrics JSON blob   - /summary one-liner   - anything else 404."""
+    """- /metrics JSON blob   - /summary one-liner   - /history last N samples   - anything else 404."""
 
     def do_GET(self):
-        if self.path == "/metrics":
-            payload = json.dumps(_cache.get_or_set(_aggregate), indent=2)
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+
+        if parsed.path == "/metrics":
+            with _lock:
+                data = dict(_latest) if _latest else _aggregate()
+            payload = json.dumps(data, indent=2)
             content_type = "application/json"
-        elif self.path == "/summary":
-            payload = _format_summary(_cache.get_or_set(_aggregate))
+
+        elif parsed.path == "/summary":
+            with _lock:
+                data = dict(_latest) if _latest else _aggregate()
+            payload = _format_summary(data)
             content_type = "text/plain"
+
+        elif parsed.path == "/history":
+            n = int(query.get("n", ["120"])[0])
+            with _lock:
+                recent = list(_history)[-n:]
+            payload = json.dumps(recent, indent=2)
+            content_type = "application/json"
+
         else:
             self.send_response(404)
             self.send_header("Content-Type", "text/plain")
