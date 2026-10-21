@@ -48,6 +48,8 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
+      metrics:
+        condition: service_healthy
     user: "${LAB_UID:-1000}:${LAB_GID:-1000}"
     working_dir: /workspace
     volumes:
@@ -72,6 +74,39 @@ services:
     networks: [egress, internal]    # default egress=true → both; false → [internal]
     stdin_open: true
     tty: true
+
+  # Lightweight sidecar: exposes host GPU / CPU / RAM / temperature data via HTTP (loopback only).
+  # The agent queries it programmatically; the TUI polls /summary for the live status bar.
+  metrics:
+    build: ./agent/metrics
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ utility ]
+    networks: [internal]              # internal only — no ports published to host
+    user: root                      # needed to read from /proc and device nodes
+    cap_drop: [ALL]                 # drop all Linux capabilities
+    security_opt: ["no-new-privileges:true"]
+    read_only: true                 # immutable filesystem
+    tmpfs:
+      - /tmp:size=16m               # minimal writable space for cache/sockets
+    volumes:
+      - ./agent/metrics:/app:ro     # source code (read-only even to this container)
+      - /proc:/host/proc:ro         # CPU stats, load averages, meminfo
+      - /sys/class/hwmon:/host/hwmon:ro   # temperature sensors (chip die, chipset)
+      - /sys/class/thermal:/host/thermal:ro   # thermal zones (GPU die, VRAM junction)
+    # Healthcheck lives in compose (not the image) so it applies on every
+    # `docker compose run` without requiring an image rebuild.
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:19532/summary', timeout=2).status == 200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      start_period: 3s
+      retries: 5
+    restart: unless-stopped
 
 networks:
   internal:

@@ -105,6 +105,43 @@ Run `./lab setup` to configure docker, build the agent image, and pull models. T
 
 Full usage is in [docs/workflows.md](docs/workflows.md).
 
+### Host metrics sidecar
+
+A lightweight metrics sidecar runs alongside `ollama` and the agent, exposing live GPU, CPU, RAM, and
+temperature data from inside the container — so the agent has *real* hardware visibility without breaking
+the sandbox or requiring the user to leave their terminal.
+
+*   **Detailed JSON**: `curl -s http://metrics:19532/metrics` → structured data with all four metric domains (GPU, CPU, RAM, temperatures).
+*   **Quick summary**: `curl -s http://metrics:19532/summary` → one human-readable line (`[timestamp] CPU load ... | RAM X/Y GB (%) | GPU0 RTXxxx util=ZZ% VRAM A/BGB C°C`).
+*   **History**: `curl -s 'http://metrics:19532/history?n=60'` → the last N samples from a 500 ms sampler ring buffer, used by the TUI sparkline to seed charts immediately.
+*   The service publishes **no host port** — `metrics` is a Docker DNS name on the compose `internal` network, so it resolves only from inside the stack.
+
+> **Agent query tool**: `get_host_metrics` is registered by the [`host-metrics` plugin](agent/opencode/plugins/host-metrics/) and documented in [`agent/README.md`](agent/README.md). The agent calls it whenever it needs to know VRAM availability before proposing large model operations, or to diagnose unexpected behavior (e.g., CPU fallback). One call returns a formatted report.
+>
+> **Live TUI view**: the [`host-metrics-tui` plugin](agent/opencode/plugins/host-metrics-tui/) renders a compact GPU/VRAM sparkline in the sidebar footer, expandable for full time-series detail.
+>
+> **Acceptance verification**: Run `./scripts/verify-metrics.sh` on the host after starting up.
+
+### Monitoring the agent
+
+The agent (opencode by default) runs inside a container. Monitor it from the host:
+
+*   **Container logs**: view the agent's output and errors:
+    ```bash
+    docker logs -f little-mester-agent-1
+    ```
+*   **Resource usage**: monitor CPU/RAM of the agent container:
+    ```bash
+    docker stats little-mester-agent-1
+    ```
+*   **Interactive shell**: if the agent hangs or you need to debug file permissions:
+    ```bash
+    ./lab shell workspaces/my-experiment
+    # You are now inside the container as a non-root user
+    ls -la /workspace
+    exit
+    ```
+
 ### Ticket engine (`ticket-engine-mcp`)
 
 A lightweight MCP module for ticket lifecycle management. It stores tickets as `.json` files on disk backed by a tiny `_index.json` — no SQLite, no WASM, no schema migrations. Designed to eventually be a standalone hosted service, but currently managed alongside the repo.
@@ -147,6 +184,7 @@ Read this twice.
 - **Traps that run on your host later.** Git hooks, `Makefile`, `package.json` scripts, shell scripts written by the agent run with *your* privileges if you run them on the host. Review before executing.
 - **Container escape.** Containers share the host kernel. Unlikely from a small local model making mistakes, but real against deliberately hostile code. A VM is the next level up.
 - **Docker group = root.** Anyone who can run `docker` can effectively become root.
+- **Bad output.** A sandboxed agent can still write wrong or insecure code. Review it.
 
 ---
 
@@ -174,18 +212,57 @@ Read this twice.
 
 ## Testing
 
+> **Testing context:** run tests from the working checkout (e.g. `little-mester-working` on `recurse-work`), NOT the main repo. You test changes there before merging to `main`.
+>
+> **Shell compatibility:** all commands below run identically in both bash and fish. Use `;` as separator (works in both); fish users should use `$status` not `$?` for exit status.
+
+This project uses [Bats](https://bats-core.readthedocs.io/) for unit testing the `lab` launcher script. Tests validate path guards, security checks, and helper functions without requiring Docker or GPU access.
+
+### Prerequisites
+
+Install Bats on your host:
+```bash
+# Arch/CachyOS
+sudo pacman -S bats
+
+# macOS
+brew install bats-core
+```
+
+### Running tests (host)
+
+```fish
+bats tests/
+```
+
+The test suite includes regression checks for:
+- Valid workspace path acceptance
+- Rejection of sensitive paths (`$HOME`, `$HOME/.ssh`, etc.)
+- Ownership verification logic
+- Git hook warning detection
+
 #### Switching Models
 By default, Ollama serves whichever is first in `models.txt` (or last ran). To switch:
 1.  Ensure the target model is downloaded (see above).
 2.  If your agent supports explicit model selection (opencode: via config; Aider: via command-line flag), pass it. Otherwise rely on Ollama's default behavior.
 3.  **VRAM Check**: If the agent stalls or falls back to CPU, check `nvidia-smi`. If VRAM is full, switch to a smaller quantization (e.g., `q4_K_M`) or a smaller model (e.g., `phi3` instead of `llama3`).
 
-```fish
-bats tests/
-```
+To **add** a model: open `models.txt`, add the model name (e.g., `llama3.2:latest`, `mistral`), then run `./lab setup`. This triggers the `ollama-pull` container to download the new model over the internet.
+
+To **monitor** loaded models:
+*   **List models**: `docker exec ollama ollama list` inside the container.
+*   **Check VRAM**: on your host, run `nvidia-smi` and look for the `ollama` process. If it is using CPU (high memory usage in RAM instead of VRAM), your model is too large for your GPU.
 
 ### Agent tests (inside sandbox)
 
+You can instruct the agent to run the test suite inside the sandbox itself. This is useful for verifying that code changes don't break the launcher's security guards from within the container environment.
+
+1. Ensure your workspace is set up (e.g., `workspaces/demo`).
+2. Start a session: `./lab workspaces/demo`
+3. Prompt the agent: *"Run the unit tests for the lab script using the provided helper script."*
+4. The agent will execute `./run-tests.sh`, which safely invokes `bats` inside the container via `./lab exec`.
+
+Alternatively, run it manually from your host:
 ```fish
 ./run-tests.sh workspaces/demo    # runs bats inside the container via ./lab exec
 ```
@@ -246,6 +323,21 @@ The launcher refuses `/`, `$HOME`, anything you don't own, anything overlapping
 `~/.ssh`, `~/.config` and similar, and **by default** any path that would expose this
 lab repo itself (use `--unsafe-recurse` to override — see below).
 
+### Workspace management
+
+The `lab` script enforces strict path rules to ensure security.
+
+*   **Valid paths**: must be an absolute path (or relative to the current dir) pointing to a directory you own.
+*   **Invalid paths**: `/`, `$HOME`, anything overlapping `~/.ssh`, `~/.config`, or the `little-mester` repo itself.
+*   **Multi-repo workspaces**: you can point `./lab` at a parent folder containing multiple git repos. The agent will see all files in that tree.
+
+**Tip**: create a dedicated folder for your experiments:
+```bash
+mkdir -p workspaces/my-experiment
+cd workspaces/my-experiment
+git init # Initialize your project here
+```
+
 ### Self-modification (`--unsafe-recurse`)
 
 When you want the agent to edit little-mester itself, use `--unsafe-recurse`:
@@ -276,6 +368,12 @@ This is off by design — it tells the agent "I know what I'm doing." Without `-
 Understanding steps 4 to 6 *is* agentic coding: a loop where a model proposes actions,
 a program carries them out, and the results go back to the model. [my-agent/](#learning-path) is
 where you build it yourself from scratch.
+
+### Agentic workflow tips
+
+*   **Context window**: the model has a limited context window. If your workspace is huge, the agent might forget earlier instructions. Use `git add` to stage specific files you want it to focus on.
+*   **Git hooks**: the agent writes code that runs on your host if you execute hooks (like `Makefile` or `.envrc`). **Always review** these before running them.
+*   **Iterative prompts**: break complex tasks into small steps. "Refactor the login module" is better than "Fix the app".
 
 ---
 
