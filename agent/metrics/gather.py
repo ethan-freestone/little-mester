@@ -74,8 +74,35 @@ def _safe_int(value, default: int = 0):
     except (ValueError, TypeError):
         return default
 
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    _NVML_OK = True
+except Exception:
+    _NVML_OK = False
 
-def _collect_gpu():
+
+def _collect_gpu_nvml():
+    gpus = []
+    for i in range(pynvml.nvmlDeviceGetCount()):
+        h = pynvml.nvmlDeviceGetHandleByIndex(i)
+        name = pynvml.nvmlDeviceGetName(h)
+        if isinstance(name, bytes):
+            name = name.decode()
+        util = pynvml.nvmlDeviceGetUtilizationRates(h)
+        mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+        gpus.append({
+            "index": i,
+            "name": name,
+            "temperature_c": pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU),
+            "utilization_percent": util.gpu,
+            "memory_total_mb": mem.total // 2**20,
+            "memory_used_mb": mem.used // 2**20,
+            "memory_free_mb": mem.free // 2**20,
+        })
+    return gpus
+
+def _collect_gpu_smi():
     """:class `nvidia-smi --query-gpu` CSV and return list of per-GPU dicts."""
     try:
         result = subprocess.run(
@@ -123,6 +150,13 @@ def _collect_gpu():
         })
     return gpus
 
+def _collect_gpu():
+    if _NVML_OK:
+        try:
+            return _collect_gpu_nvml()
+        except Exception:
+            pass
+    return _collect_gpu_smi()   # rename your current function
 
 def _collect_cpu():
     """Read /host/proc/loadavg and return load averages + core count."""

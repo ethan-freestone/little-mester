@@ -78,6 +78,13 @@ services:
   # The agent queries it programmatically; the TUI polls /summary for the live status bar.
   metrics:
     build: ./agent/metrics
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ utility ]
     networks: [internal]              # internal only — no ports published to host
     user: root                      # needed to read from /proc and device nodes
     cap_drop: [ALL]                 # drop all Linux capabilities
