@@ -1,0 +1,51 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 21,
+  "area": "sandbox",
+  "type": "feature",
+  "status": "draft",
+  "title": "Verify metrics sidecar integrity on merged branch (host-gpu-vram-monitoring)",
+  "objective": "After the merge completes, validate that all pieces of the host-metrics stack are correctly wired together: metrics service in compose.yaml (healthcheck, networks, bind mounts), agent/metrics/gather.py (ring buffer + /history endpoint), opencode v2 plugin registration (get_host_metrics tool + host-metrics-tui plugin), Dockerfile bake ordering, and verify-metrics.sh integration. This is a verification ticket — if any piece is broken by the merge, it becomes an implementation subtask.",
+  "created_at": "2026-10-21T00:00:00Z",
+  "updated_at": "2026-10-21T00:00:00Z",
+  "links": [
+    {
+      "type": "references",
+      "number": 11,
+      "bidirectional": true
+    },
+    {
+      "type": "supersedes",
+      "number": 10,
+      "bidirectional": false
+    }
+  ],
+  "subtickets": [
+    {
+      "id": 1,
+      "title": "Audit compose.yaml for metrics service (healthcheck, networks, mounts)",
+      "objective": "Verify: metrics binds to 0.0.0.0 on port 19532, has no ports published to host, is on the internal network only (not egress), mount paths match gather.py constants (/host/proc, /host/hwmon, /host/thermal, /sys/class/dmi/id). After merge, check if compose.yaml had any conflict markers or if main's version was auto-accepted."
+    },
+    {
+      "id": 2,
+      "title": "Verify Dockerfile COPY lines for all three plugin directories",
+      "objective": "Confirm: agent/opencode/plugins/little-mester-logo/, host-metrics/, and host-metrics-tui/ are all baked into /etc/opencode/plugins/. Confirm OPENCODE_CLI_CONFIG_CONTENT env var lists plugins in the correct v2 format (no OPENCODE_TUI_CONFIG). Confirm OPENCODE_CONFIG points to /etc/opencode/opencode/opencode.json."
+    },
+    {
+      "id": 3,
+      "title": "Verify openconfig.json has both plugins listed",
+      "objective": "Check agent/podencode/podencode.json (or wherever it's generated): host-metrics plugin should be in the servers/plugins array (for get_host_metrics tool). Host-metrics-tui should be in cli.json or OPENCODE_CLI_CONFIG_CONTENT."
+    },
+    {
+      "id": 4,
+      "title": "Validate verify-metrics.sh works against Docker network",
+      "objective": "The script runs a client container attached to the compose internal network and curls http://metrics:19532/summary. Check it still works post-merge. If broken (wrong hostname, port changed), fix."
+    },
+    {
+      "id": 5,
+      "title": "Verify metrics sidecar DDEcision section in DECISIONS.md J.7 complete",
+      "objective": "Ensure docs/DECISIONS.md J.7 and J.8 are accurate after merge: the ring buffer (500ms), the /history endpoint, the 0.0.0.0 binding in container netns, the verify-metrics.sh approach."
+    }
+  ],
+  "notes": "Linked to ticket-011 (board/dashboard sparkline) since metrics sidecar is its data source. Supersedes legacy ticket-legacy-10 — this new ticket covers the same scope in v1 schema format. This must be verified on a host with NVIDIA GPU; container-only verification is config-level only."
+}
