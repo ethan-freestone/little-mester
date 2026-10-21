@@ -15,6 +15,7 @@ RUN npm install -g @opencode/cli && opencode --version
 
 COPY opencode/opencode.json /etc/opencode/opencode/opencode.json
 COPY opencode/plugins/little-mester-logo/ /etc/opencode/plugins/little-mester-logo/
+COPY opencode/plugins/host-metrics/ /etc/opencode/plugins/host-metrics/
 
 ENV PATH="/opt/venv/bin:$PATH" \
     HOME=/home/agent \

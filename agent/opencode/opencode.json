@@ -29,6 +29,9 @@
   },
   "model": "ollama/qwen3.6:35b-a3b",
   "small_model": "ollama/qwen3:8b",
+  "plugins": [
+    "/etc/opencode/plugins/host-metrics"
+  ],
   "permission": {
     "edit": "ask",
     "bash": "ask"

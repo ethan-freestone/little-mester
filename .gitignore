@@ -9,3 +9,6 @@ dist/
 .little-mester.conf
 # Node modules (covers all repos in workspace)
 node_modules/
+# Python bytecode
+__pycache__/
+*.pyc

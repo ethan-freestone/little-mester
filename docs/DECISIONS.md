@@ -365,3 +365,20 @@ agent/opencode/plugins/little-mester-logo/
 - To confirm the plugin loads at all (separately from whether the slot renders), add `context.ui.toast.show({ message: "little-mester logo plugin loaded" })` at the top of `setup`.
 - The v2 docs say to confirm a plugin's ID and source appear in the active plugin list.
 - `console.log` from a TUI plugin may not appear in server logs.
+- For **server-side** plugins, the log line `loading plugin id=<path> entrypoint=file://<path>/index.ts` confirms the plugin was picked up. The server also hot-reloads: a new file under `<project>/.opencode/plugins/` or `<global-config>/plugins/` is picked up without a restart.
+
+### J.6 Custom tools in v2 are plugins, not markdown files
+
+- There is **no** `tools/` directory convention in v2. A markdown file in `tools/` (the v1 way) registers nothing — opencode v2 silently ignores it.
+- Custom tools are registered from a plugin via `ctx.tool.transform((editor) => editor.add({ name, description, input, execute }))`. See <https://opencode.ai/v2/docs/build/plugins/> (section "Tools").
+- Plugin discovery paths: `<global-config>/plugins/<name>/index.ts` and `<project>/.opencode/plugins/<name>/index.ts`. A plugin package keeps its server entry (`index.ts`) and optional TUI entry (`tui.ts`) together.
+- **Server-side** plugins (tools, commands, transforms) belong in the **server** config's `plugins` array (`opencode.json`). **TUI-only** plugins belong in the CLI plugin list (`cli.json` / `OPENCODE_CLI_CONFIG_CONTENT`).
+- `agent/opencode/opencode.json` is **generated** by `scripts/regen-configs` — anything added to it by hand is lost on the next regen. Add it to `gen_opencode_json()` instead.
+- Our implementation: `agent/opencode/plugins/host-metrics/` → baked to `/etc/opencode/plugins/host-metrics/` → listed in the generated `opencode.json`. It registers the `get_host_metrics` tool.
+
+### J.7 The metrics sidecar must bind 0.0.0.0 in its own netns
+
+- A container binding `127.0.0.1` is reachable **only from inside that container**. Sibling containers reach it by container IP / Docker DNS, which requires a bind on `0.0.0.0` (or the container IP).
+- `0.0.0.0` inside the container netns is **not** "exposed to the host": exposure to the host is controlled by `ports:` in compose, which we deliberately do not set. The `internal: true` network has no route off the Docker network.
+- Consequence for verification: host-side scripts cannot `curl 127.0.0.1:19532`. They must run a client container attached to the compose network — see `scripts/verify-metrics.sh`.
+- Host paths mounted into the sidecar must match the constants in `gather.py` exactly (`/host/proc`, `/host/hwmon`, `/host/thermal`). A mismatch fails silently and yields empty readings, so `scripts/verify-metrics.sh` audits the mounts (criterion A9).
