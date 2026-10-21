@@ -106,7 +106,7 @@ interface State {
 
 function initialState(): State {
   return {
-    mode: "compact",
+    mode: "expanded",
     history: [],
     vramHistory: [],
     tempVals: [],
