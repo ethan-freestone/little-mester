@@ -149,7 +149,22 @@ The agent (opencode by default) runs inside a container. Monitor it from the hos
     exit
     ```
 
-### 4. Agentic Workflow Tips
+### 4. Monitoring the Host Hardware
+
+A lightweight metrics sidecar runs alongside `ollama` and the agent, exposing live GPU, CPU, RAM, and
+temperature data from inside the container — so the agent has *real* hardware visibility without breaking
+the sandbox or requiring the user to leave their terminal.
+
+*   **Detailed JSON**: `curl -s http://metrics:19532/metrics` → structured data with all four metric domains (GPU, CPU, RAM, temperatures).
+*   **Quick summary**: `curl -s http://metrics:19532/summary` → one human-readable line (`[timestamp] CPU load ... | RAM X/Y GB (%) | GPU0 RTXxxx util=ZZ% VRAM A/BGB C°C`).
+*   The sidecar caches values with a **2-second TTL** so repeated polls are cheap.
+*   The service publishes **no host port** — `metrics` is a Docker DNS name on the compose `internal` network, so it resolves only from inside the stack.
+
+> **Agent query tool**: `get_host_metrics` is registered by the [`host-metrics` plugin](agent/opencode/plugins/host-metrics/) and documented in [`agent/README.md`](agent/README.md). The agent calls it whenever it needs to know VRAM availability before proposing large model operations, or to diagnose unexpected behavior (e.g., CPU fallback). One call returns a formatted report.
+>
+> **Acceptance verification**: Run `./scripts/verify-metrics.sh` on the host after starting up.
+
+### 5. Agentic Workflow Tips
 *   **Context Window**: The model has a limited context window. If your workspace is huge, the agent might forget earlier instructions. Use `git add` to stage specific files you want it to focus on.
 *   **Git Hooks**: The agent writes code that runs on your host if you execute hooks (like `Makefile` or `.envrc`). **Always review** these before running them.
 *   **Iterative Prompts**: Break complex tasks into small steps. "Refactor the login module" is better than "Fix the app".
