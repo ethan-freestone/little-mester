@@ -17,6 +17,9 @@ EGRESS="${EGRESS:-true}"
 # Self-edit guard toggle (default: deny)
 UNSAFE_RECURSE=0
 
+# Docker build cache (default: use cache)
+NO_CACHE=0
+
 # Load user config if present (gitignored; put your real identity here)
 if [[ -f "$LAB_DIR/.little-mester.conf" ]]; then
   set -a
@@ -188,6 +191,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       --egress-true) EGRESS="true"; shift ;;
       --permissions) PERMISSIONS="${2:?--permissions needs deny/ask/auto}"; shift 2 ;;
       --unsafe-recurse) UNSAFE_RECURSE=1; shift ;;
+      --no-cache) NO_CACHE=1; shift ;;
       --opencode) AGENT="opencode"; shift ;;
       --aider) AGENT="aider"; shift ;;
       *) break ;;
@@ -203,10 +207,18 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       sudo nvidia-ctk runtime configure --runtime=docker
       sudo systemctl restart docker
       sudo docker run --rm --gpus all ubuntu:24.04 nvidia-smi -L
-      dc build agent metrics
+      # Build with optional --no-cache
+      if [[ "$NO_CACHE" -eq 1 ]]; then
+        dc build --no-cache agent metrics
+      else
+        dc build agent metrics
+      fi
       ( cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && ./scripts/regen-configs ) 2>&1
+      echo ">> Pulling Ollama models..."
       dc --profile setup run --rm ollama-pull
-      echo "Setup complete. Next: ./verify-sandbox.sh, then ./lab <workspace>"
+      echo ">> Pulling llama.cpp GGUF models..."
+      dc --profile setup run --rm llamacpp-pull
+      echo "Setup complete. Next: ./verify-lab.sh, then ./lab <workspace>"
       ;;
     build)
       shift
@@ -216,7 +228,10 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       ;;
     pull)
       ( cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/scripts" && ./regen-configs ) 2>&1
+      echo ">> Pulling Ollama models..."
       dc --profile setup run --rm ollama-pull
+      echo ">> Pulling llama.cpp GGUF models..."
+      dc --profile setup run --rm llamacpp-pull
       ;;
     stop)
       dc down
@@ -251,6 +266,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       echo "  --egress-true      Short alias for --egress true"
       echo "  --isolated         Same as --egress-false"
       echo "  --permissions P    Per-run permission mode (deny/ask/auto, default: from config)"
+      echo "  --no-cache         Disable Docker build cache (for setup/build)"
       ;;
 
     # No subcommand or workspace path given. When --unsafe-recurse was set, mount the
