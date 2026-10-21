@@ -156,8 +156,17 @@ Single model at a time, restart to switch (like Ollama with MAX_LOADED_MODELS=1)
 ---
 
 ## TICKET-008: Performance tuning and validation
-**Status**: PENDING (requires hardware)
+**Status**: IN PROGRESS
 **Priority**: HIGH
+
+### Benchmark tool: `./lab bench`
+- [x] `bench/bench.py` — lightweight benchmark runner
+- [x] `bench/Dockerfile` — python:3.12-slim, no GPU needed
+- [x] `compose.yaml` bench service (internal network, connects to llamacpp:11434)
+- [x] `./lab bench` subcommand — builds in ~2s, no model reload
+- [x] Tests 3 prompt lengths (short/medium/long) × 2 APIs (completion/chat)
+- [x] Reports: tokens/sec, latency, prompt throughput, ±std deviation
+- [x] `--json` flag for machine-readable output
 
 ### After setup on target hardware:
 - [ ] Test `--n-cpu-moe` values (start high, lower until VRAM ~7-7.4GB)

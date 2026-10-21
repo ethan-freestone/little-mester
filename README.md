@@ -29,6 +29,7 @@ The goal of this repo is twofold:
 - [ ] 8. Multi-repo workspace tested
 - [ ] 9. Own agent loop (`my-agent/`)
 - [ ] 10. Evals (`evals/`)
+- [ ] 11. Benchmarking (`bench/`)
 - [ ] 11. Red-team the sandbox (`red-team/`)
 - [ ] 12. Opt-in web access via proxy (`proxy/`)
 - [ ] 13. MCP (`mcp/`)

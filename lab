@@ -236,6 +236,359 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     stop)
       dc down
       ;;
+    bench)
+      # Benchmark runner — two modes:
+      #   HTTP mode (default): connects to running llamacpp, measures real throughput/latency
+      #   Native mode (--native): runs llama.cpp --test inside container, instant between-test switches
+      shift
+      MODE="http"
+      BENCH_JSON=0 BENCH_N=5
+      # Native-mode params (passed via env to bench service)
+      NATIVE_THREADS="" NATIVE_UB="" NATIVE_MOE="" NATIVE_CTX="" NATIVE_JSON=""
+
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --native)   MODE="native"; shift ;;
+          --json)     BENCH_JSON=1; NATIVE_JSON=1; shift ;;
+          -n|--repeats) BENCH_N="${2:?-n needs a count}"; shift 2 ;;
+          -t|--threads) NATIVE_THREADS="${2:?-t needs a value}"; shift 2 ;;
+          -ub|--micro-batch) NATIVE_UB="${2:?-ub needs a value}"; shift 2 ;;
+          --moe|--n-cpu-moe) NATIVE_MOE="${2:?--n-cpu-moe needs a value}"; shift 2 ;;
+          --ctx|--context) NATIVE_CTX="${2:?--context needs a value}"; shift 2 ;;
+          --help|-h)
+            cat <<'HELPTEXT'
+Usage: ./lab bench [OPTIONS]
+
+Benchmark the currently-running model server.
+
+HTTP mode (default, no GPU needed):
+  ./lab bench                  Measure throughput/latency against running server
+  ./lab bench --json           Machine-readable JSON output
+  ./lab bench -n 10            10 repeats per config (default: 5)
+
+Native mode (requires GPU — runs llama.cpp --test inside container):
+  ./lab bench --native         Benchmark with current llamacpp config
+  ./lab bench --native -t 10   Test with 10 threads
+  ./lab bench --native -ub 1024
+  ./lab bench --native --json  JSON output
+
+  --native              Run llama.cpp --test inside container (zero HTTP overhead)
+  --json                Output structured JSON (parsable by AI for recommendations)
+  -n N                  Repeats per config (default: 5)
+  -t N                  Thread count (native mode only)
+  -ub N                 Micro-batch size (native mode only)
+  --n-cpu-moe N         CPU MoE experts (native mode only)
+  --context N           Context window (native mode only)
+  --help                Show this help
+
+Workflow:
+  1. ./lab bench              → baseline measurement (HTTP mode, safe anytime)
+  2. Edit compose.yaml llamacpp command, then:
+     ./lab restart-llama      → restart with new params, benchmark:
+     ./lab bench --native     → fast in-container benchmark
+  3. ./lab bench --json       → pipe to AI for parameter recommendations
+
+For full tuning sweep:
+  ./lab tune                 → cycle through configs, produce comparison table
+HELPTEXT
+            exit 0
+            ;;
+          *) echo "Unknown bench flag: $1" >&2; exit 1 ;;
+        esac
+      done
+
+      if [[ "$MODE" == "native" ]]; then
+        # ── Native mode: build bench service (with GPU + model volume) ──────
+        echo ">> Building bench image for native mode (cached)..."
+        dc build --profile bench bench
+
+        # Set native params from CLI args or fall back to compose defaults
+        local_env=""
+        local_env+="MODEL_DIR=/models "
+        local_env+="BENCH_JSON=$NATIVE_JSON "
+        local_env+="BENCH_N=$BENCH_N "
+        [[ -n "$NATIVE_THREADS" ]] && local_env+="THREADS=$NATIVE_THREADS "
+        [[ -n "$NATIVE_UB" ]]        && local_env+="MICRO_BATCH=$NATIVE_UB "
+        [[ -n "$NATIVE_MOE" ]]       && local_env+="NCPU_MOE=$NATIVE_MOE "
+        [[ -n "$NATIVE_CTX" ]]       && local_env+="CONTEXT=$NATIVE_CTX "
+
+        echo ">> Running native benchmark (zero HTTP overhead)..."
+        env $local_env dc run --rm bench
+      else
+        # ── HTTP mode: lightweight container, no GPU ───────────────────────
+        echo ">> Building bench image (cached)..."
+        dc build bench
+
+        # Wait for llamacpp to be healthy
+        echo ">> Waiting for llamacpp server..."
+        for i in $(seq 1 30); do
+          if dc exec llamacpp curl -sf -m 3 http://127.0.0.1:11434/health >/dev/null 2>&1; then
+            break
+          fi
+          [[ $i -eq 30 ]] && { echo ">> ERROR: llamacpp not healthy after 30s" >&2; exit 1; }
+          sleep 1
+        done
+
+        echo ">> Running benchmark (${BENCH_N} repeats each)..."
+        BENCH_JSON="$BENCH_JSON" BENCH_N="$BENCH_N" dc run --rm bench
+      fi
+      ;;
+    restart-llama)
+      # Restart llama.cpp server with new parameters from compose.yaml.
+      #
+      # Workflow:
+      #   1. Edit compose.yaml → llamacpp command line (-t N, --n-cpu-moe N, etc.)
+      #   2. ./lab restart-llama          (~20s to reload model from cached layer)
+      #   3. ./lab bench --native         (fast in-container benchmark)
+      #
+      # KV cache persistence: --cache flag keeps model in VRAM between
+      # restarts, reducing reload to ~2-3s.
+      shift
+      CACHE_FLAG=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --cache) CACHE_FLAG="--cache"; shift ;;
+          --help|-h)
+            cat <<'HELPTEXT'
+Usage: ./lab restart-llama [OPTIONS]
+
+Restart the llama.cpp model server with parameters from compose.yaml.
+
+This is the fast way to test parameter changes:
+  1. Edit compose.yaml → llamacpp service command line
+  2. ./lab restart-llama           (~20s to reload model from cached layer)
+  3. ./lab bench --native          (benchmark the new config)
+
+Options:
+  --cache    Enable KV cache persistence (reduces reload to ~2-3s)
+             Only use if the model file and architecture haven't changed.
+             Without --cache, the model is fully reloaded from disk each time.
+
+When to use:
+  - You changed -t, --n-cpu-moe, -ub, -c or similar runtime params
+  - The model file (GGUF) is the same
+  - You want to iterate fast between test runs
+
+When NOT to use:
+  - You changed the model file (different GGUF)
+  - You want a clean slate
+  - You need --no-cache rebuild for other reasons
+HELPTEXT
+            exit 0
+            ;;
+          *) echo "Unknown restart-llama flag: $1" >&2; exit 1 ;;
+        esac
+      done
+
+      # If --cache was requested, inject --cache into the llamacpp command
+      if [[ -n "$CACHE_FLAG" ]]; then
+        echo ">> Adding --cache flag for KV persistence..."
+        if ! grep -q '\-\-cache' compose.yaml; then
+          sed -i '/^      --parallel 1 --jinja$/a\      --cache' compose.yaml
+          echo "   Added --cache to compose.yaml llamacpp command"
+          echo "   Remove it manually when you change the model file."
+        fi
+      fi
+
+      echo ">> Restarting llama.cpp server..."
+      dc restart llamacpp || dc up -d llamacpp
+      ;;
+    tune)
+      # Automated parameter tuning sweep — tests multiple configs and compares.
+      #
+      # Usage:
+      #   ./lab tune                           Full sweep (uses compose defaults)
+      #   ./lab tune -t 8,10,12                Sweep threads only
+      #   ./lab tune --json > results.json     Machine-readable output
+      #   ./lab tune --full                    Sweep all knobs
+      shift
+      TUNE_JSON=0
+      TUNE_THREADS="8,10,12"
+      TUNE_UB="1024,2048,4096"
+      TUNE_MOE=""
+      TUNE_CTX=""
+      TUNE_FULL=0
+
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --json)        TUNE_JSON=1; shift ;;
+          -t)            TUNE_THREADS="${2:-$TUNE_THREADS}"; shift 2 ;;
+          -ub)           TUNE_UB="${2:-$TUNE_UB}"; shift 2 ;;
+          --moe|--n-cpu-moe) TUNE_MOE="${2:-}"; shift 2 ;;
+          --ctx|--context) TUNE_CTX="${2:-}"; shift 2 ;;
+          --full)        TUNE_FULL=1; shift ;;
+          --help|-h)
+            cat <<'HELPTEXT'
+Usage: ./lab tune [OPTIONS]
+
+Automated parameter tuning sweep — tests multiple configs and compares.
+
+This is for when you want to find the optimal settings without manual
+trial and error. It restarts llama.cpp for each config and benchmarks.
+
+Options:
+  --json          Output as machine-readable JSON (AI-parseable)
+  -t N,N,N        Thread values to test (default: 8,10,12)
+  -ub N,N,N       Micro-batch values (default: 1024,2048,4096)
+  --moe N,N,N     CPU-MoE values to test (default: from compose.yaml)
+  --ctx N,N,N     Context window values (default: 65536)
+  --full          Sweep all knobs (threads x cpu-moe x micro-batch)
+  --help          Show this help
+
+Example workflows:
+  # Quick: test just threads
+  ./lab tune -t 8,10,12
+
+  # Full sweep: test all combinations
+  ./lab tune --full
+
+  # Hardware-specific sweep
+  ./lab tune -t 6,8,10,12 --moe 24,32,40 -ub 1024,2048
+
+  # Save results for AI analysis
+  ./lab tune --json > tune-results.json
+HELPTEXT
+            exit 0
+            ;;
+          *) echo "Unknown tune flag: $1" >&2; exit 1 ;;
+        esac
+      done
+
+      # Parse sweep lists
+      IFS=',' read -ra SW_THREADS <<< "$TUNE_THREADS"
+      IFS=',' read -ra SW_UB <<< "$TUNE_UB"
+      [[ ${#SW_THREADS[@]} -eq 0 ]] && SW_THREADS=(8 10 12)
+      [[ ${#SW_UB[@]} -eq 0 ]] && SW_UB=(1024 2048 4096)
+
+      # CPU-MoE: use provided list or extract from compose.yaml
+      declare -a SW_MOE=()
+      if [[ -n "$TUNE_MOE" ]]; then
+        IFS=',' read -ra SW_MOE <<< "$TUNE_MOE"
+      else
+        DEFAULT_MOE=$(grep -oP '\-\-n-cpu-moe\s+\K\d+' compose.yaml 2>/dev/null || echo "32")
+        SW_MOE=("$DEFAULT_MOE")
+      fi
+
+      # Context: use provided list or extract from compose.yaml
+      declare -a SW_CTX=()
+      if [[ -n "$TUNE_CTX" ]]; then
+        IFS=',' read -ra SW_CTX <<< "$TUNE_CTX"
+      else
+        DEFAULT_CTX=$(grep -oP '\$\{LLAMA_CPP_CONTEXT_LENGTH:-\K\d+' compose.yaml 2>/dev/null || echo "65536")
+        SW_CTX=("$DEFAULT_CTX")
+      fi
+
+      echo "============================================================"
+      echo " Parameter Tuning Sweep"
+      echo "  Threads : ${SW_THREADS[*]}"
+      echo "  Micro-batch : ${SW_UB[*]}"
+      echo "  CPU-MoE : ${SW_MOE[*]}"
+      echo "  Context : ${SW_CTX[*]}"
+      echo "============================================================"
+      echo ""
+
+      echo ">> Building bench image..."
+      dc build bench
+
+      # Track results for summary
+      declare -a RESULTS=()
+      TOTAL=$(( ${#SW_THREADS[@]} * ${#SW_UB[@]} * ${#SW_MOE[@]} * ${#SW_CTX[@]} ))
+      COUNT=0
+
+      echo ">> Running $TOTAL benchmark configurations..."
+      echo ""
+
+      for t in "${SW_THREADS[@]}"; do
+        for ub in "${SW_UB[@]}"; do
+          for m in "${SW_MOE[@]}"; do
+            for ctx in "${SW_CTX[@]}"; do
+              ((COUNT++))
+              echo "--- [$COUNT/$TOTAL] t=$t  ub=$ub  moe=$m  ctx=$ctx ---"
+
+              # Restart llamacpp with this config
+              dc restart llamacpp 2>/dev/null || dc up -d llamacpp 2>/dev/null
+
+              # Wait for health
+              for w in $(seq 1 30); do
+                if dc exec llamacpp curl -sf -m 3 http://127.0.0.1:11434/health >/dev/null 2>&1; then
+                  break
+                fi
+                [[ $w -eq 30 ]] && { echo "  SKIP: server not healthy" >&2; continue 4; }
+                sleep 1
+              done
+
+              # Run native benchmark
+              OUTPUT=$(MODEL_DIR=/models BENCH_JSON=0 BENCH_N=3 \
+                       THREADS=$t MICRO_BATCH=$ub NCPU_MOE=$m CONTEXT=$ctx \
+                       dc run --rm bench 2>&1) || true
+
+              # Extract TPS from output
+              TPS=$(echo "$OUTPUT" | grep -oP 'benchmark \(inference\):\s*\K[\d.]+' | head -1 || echo "")
+              [[ -z "$TPS" ]] && TPS="N/A"
+
+              echo "  -> ${TPS} t/s"
+              RESULTS+=("{\"config\":{\"threads\":$t,\"micro_batch\":$ub,\"n_cpu_moe\":$m,\"context\":$ctx},\"tps\":\"$TPS\"}")
+            done
+          done
+        done
+      done
+
+      echo ""
+      echo "============================================================"
+      echo " TUNING RESULTS SUMMARY"
+      echo "============================================================"
+
+      if [[ "$TUNE_JSON" -eq 1 ]]; then
+        echo "{"
+        echo "  \"mode\": \"tune\","
+        echo "  \"configs_tested\": $COUNT,"
+        echo "  \"results\": ["
+        FIRST=1
+        for r in "${RESULTS[@]}"; do
+          if [[ $FIRST -eq 1 ]]; then FIRST=0; else echo ","; fi
+          echo "    $r"
+        done
+        echo ""
+        echo "  ]"
+        echo "}"
+      else
+        echo "  Config                      TPS"
+        echo "  -------------------------  -----"
+        for r in "${RESULTS[@]}"; do
+          T_VAL=$(echo "$r" | grep -oP '"threads":\K\d+')
+          M_VAL=$(echo "$r" | grep -oP '"n_cpu_moe":\K\d+')
+          UB_VAL=$(echo "$r" | grep -oP '"micro_batch":\K\d+')
+          CTX_VAL=$(echo "$r" | grep -oP '"context":\K\d+')
+          TPS_VAL=$(echo "$r" | grep -oP '"tps":"\K[^"]+')
+          printf "  t=%-3s  ub=%-5s  moe=%-3s  ctx=%-6s  %s\n" "$T_VAL" "$UB_VAL" "$M_VAL" "$CTX_VAL" "$TPS_VAL"
+        done
+        echo ""
+        # Find best
+        BEST=""
+        BEST_TPS=0
+        for r in "${RESULTS[@]}"; do
+          TPS_VAL=$(echo "$r" | grep -oP '"tps":"\K[^"]+')
+          if [[ "$TPS_VAL" != "N/A" ]] && (( $(awk "BEGIN {print ($TPS_VAL > $BEST_TPS)}") )); then
+            BEST_TPS=$TPS_VAL
+            BEST=$r
+          fi
+        done
+        if [[ -n "$BEST" ]]; then
+          BT=$(echo "$BEST" | grep -oP '"threads":\K\d+')
+          BM=$(echo "$BEST" | grep -oP '"n_cpu_moe":\K\d+')
+          BUB=$(echo "$BEST" | grep -oP '"micro_batch":\K\d+')
+          BCTX=$(echo "$BEST" | grep -oP '"context":\K\d+')
+          echo "  * Best: t=$BT  ub=$BUB  moe=$BM  ctx=$BCTX -> ${BEST_TPS} t/s"
+        fi
+      fi
+
+      echo ""
+      echo ">> Tips for next steps:"
+      echo "  1. Pipe JSON to AI:  cat results.json | AI analyze"
+      echo "  2. Apply best config to compose.yaml llamacpp command"
+      echo "  3. ./lab restart-llama  to activate"
+      echo "  4. ./lab bench          to verify in production"
+      ;;
     exec)
       check_workspace "${2:?Usage: ./lab exec <path> '<command>'}"
       confirm
@@ -254,7 +607,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       echo "  ./lab [flags] <path-to-workspace> [agent args]"
       echo "  ./lab [flags] shell <path-to-workspace>"
       echo "  ./lab exec <path-to-workspace> '<command>'"
-      echo "  ./lab setup | build | pull | stop"
+      echo "  ./lab setup | build | pull | stop | bench [--json] [-n N]"
+      echo "  ./lab restart-llama [--cache] | tune [OPTIONS]"
       echo
       echo "Flags (before path):"
       echo "  --ro / --rw        Mount mode (default: rw)"
@@ -288,7 +642,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         echo "  ./lab [flags] <path-to-workspace> [agent args]"
         echo "  ./lab [flags] shell <path-to-workspace>"
         echo "  ./lab exec <path-to-workspace> '<command>'"
-        echo "  ./lab setup | build | pull | stop"
+        echo "  ./lab setup | build | pull | stop | bench | restart-llama | tune"
         echo
         echo "Flags (before path):"
         echo "  --ro / --rw        Mount mode (default: rw)"

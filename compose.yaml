@@ -169,6 +169,49 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # ─────────────────────────────────────────────────────────────────
+  # One-shot benchmark runner
+  #
+  # HTTP mode (default, no GPU): benchmarks against a running llamacpp
+  #   ./lab bench
+  #   Fast, no model reload, measures real server throughput/latency
+  #
+  # Native mode (requires GPU): runs llama.cpp --test inside container
+  #   ./lab bench --native -t 10 -ub 1024
+  #   Zero HTTP overhead, instant between-test switches
+  #   Blocks the container (can't serve requests during bench)
+  # ─────────────────────────────────────────────────────────────────
+  bench:
+    build: ./bench
+    profiles: [bench]
+    # Native mode gets GPU + model volume (HTTP mode does not)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - llamacpp-models:/models:ro
+    environment:
+      # HTTP mode (default)
+      BENCH_HOST: "llamacpp"
+      BENCH_PORT: "11434"
+      BENCH_N: "5"
+      BENCH_JSON: "0"
+      # Native mode overrides (only used when MODEL_DIR is set)
+      MODEL_DIR: ""           # set to /models to enable native mode
+      MODEL_FILE: "/models/qwen3.6-35b-a3b-q4_k_m.gguf"
+      NGPU_LAYERS: "99"
+      NCPU_MOE: "32"
+      THREADS: "8"
+      MICRO_BATCH: "2048"
+      CONTEXT: "65536"
+      K_TYPE: "q8_0"
+      V_TYPE: "q8_0"
+      N_PROMPTS: "4"
+
 networks:
   internal:
     internal: true
