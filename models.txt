@@ -13,7 +13,7 @@ qwen3:14b             65536     0.25
 
 [llamacpp]
 # local-name                  ctx    out   hf-repo                                     hf-filename
-qwen3.6-35b-a3b-q4_k_m        65536  0.25  unsloth/Qwen3.6-35B-A3B-GGUF               Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+qwen3.6-35b-a3b-q4_k_m        98304  0.33  unsloth/Qwen3.6-35B-A3B-GGUF               Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
 qwen3-coder-30b-a3b-q4_k_m    65536  0.25  unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF  Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf
 gpt-oss-20b-mxfp4             65536  0.25  ggml-org/gpt-oss-20b-GGUF                  gpt-oss-20b-mxfp4.gguf
 =======

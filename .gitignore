@@ -18,3 +18,9 @@ WORKSPACE-ALL.md
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Bench artifacts (large model files, extracted binaries)
+.bench-models/
+.llama-bench
+# Tune sweep results
+.tune-results/
