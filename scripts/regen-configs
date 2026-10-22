@@ -2,11 +2,13 @@
 """regen-configs [--dry-run] [path-to-models.txt]
 
 Reads models.txt and regenerates opencode.json + updates compose.yaml
-OLLAMA_CONTEXT_LENGTH from model data. Called automatically by ./lab build/setup.
+CONTEXT_LENGTH from model data. Called automatically by ./lab build/setup.
 
-models.txt format (space or tab separated, no headers needed):
+models.txt format:
+  [backend]
   <model_name>    <context_size>    [output_ratio_or_absolute]
   
+  Backends: ollama | llamacpp
   output defaults to 0.25 if omitted or <= 1. Values > 1 are treated as absolute integers.
 """
 import sys
@@ -15,29 +17,44 @@ import os
 import re
 
 def parse_models(path):
-    """Parse models.txt, return list of dicts with name/context/output."""
-    models = []
-    default_ratio = 0.25
+    """Parse models.txt with backend sections, return dict of backend->list of models."""
+    models_by_backend = {"ollama": [], "llamacpp": []}
+    current_backend = None
     
     if not os.path.isfile(path):
         print(f"ERROR: {path} not found.", file=sys.stderr)
         sys.exit(1)
     
     with open(path) as f:
-        for line in f:
+        for line_num, line in enumerate(f, 1):
             line = line.split("#")[0].strip()  # strip comments
             if not line:
                 continue
             
+            # Check for backend section header
+            if line.startswith("[") and line.endswith("]"):
+                backend = line[1:-1].lower()
+                if backend not in models_by_backend:
+                    print(f"WARNING: line {line_num}: unknown backend '{backend}', skipping", file=sys.stderr)
+                    current_backend = None
+                else:
+                    current_backend = backend
+                continue
+            
+            if current_backend is None:
+                print(f"WARNING: line {line_num}: no backend section active, skipping: {line}", file=sys.stderr)
+                continue
+            
             parts = line.split()
             if len(parts) < 2:
+                print(f"WARNING: line {line_num}: insufficient fields, skipping: {line}", file=sys.stderr)
                 continue
                 
             name = parts[0]
             try:
                 ctx = int(parts[1])
             except ValueError:
-                print(f"WARNING: bad context for {name}: '{parts[1]}'", file=sys.stderr)
+                print(f"WARNING: line {line_num}: bad context for {name}: '{parts[1]}'", file=sys.stderr)
                 continue
             
             # Determine output: ratio (<=1 or floats like 0.25) vs absolute (>1 integer)
@@ -55,35 +72,22 @@ def parse_models(path):
                 except ValueError:
                     pass
             
-            models.append({
+            models_by_backend[current_backend].append({
                 "name": name,
                 "context": ctx,
                 "output": out
             })
     
-    return models
+    return models_by_backend
 
 
-def gen_opencode_json(models):
-    """Generate the opencode.json content string."""
+def gen_opencode_json(models_by_backend):
+    """Generate the opencode.json content string with both providers."""
     cfg = {
         "$schema": "https://opencode.ai/config.json",
         "autoupdate": False,
         "share": "disabled",
-        "provider": {
-            "ollama": {
-                "npm": "@ai-sdk/openai-compatible",
-                "name": "Ollama (local)",
-                "options": {
-                    "baseURL": "http://ollama:11434/v1",
-                    "timeout": 900000,
-                    "chunkTimeout": 600000
-                },
-                "models": {}
-            }
-        },
-        "model": f"ollama/{models[0]['name']}",
-        "small_model": f"ollama/{models[-1]['name']}",
+        "provider": {},
         "plugins": [
             "/etc/opencode/plugins/host-metrics",
             "/etc/opencode/plugins/host-metrics-tui"
@@ -95,29 +99,85 @@ def gen_opencode_json(models):
         "otel": {}
     }
     
-    for m in models:
-        cfg["provider"]["ollama"]["models"][m["name"]] = {
-            "limit": {
-                "context": m["context"],
-                "output": m["output"]
-            }
+    # Configure Ollama provider if models exist
+    ollama_models = models_by_backend.get("ollama", [])
+    if ollama_models:
+        cfg["provider"]["ollama"] = {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Ollama (local)",
+            "options": {
+                "baseURL": "http://ollama:11434/v1",
+                "timeout": 900000,
+                "chunkTimeout": 600000
+            },
+            "models": {}
         }
+        for m in ollama_models:
+            cfg["provider"]["ollama"]["models"][m["name"]] = {
+                "limit": {
+                    "context": m["context"],
+                    "output": m["output"]
+                }
+            }
+    
+    # Configure llama.cpp provider if models exist
+    llamacpp_models = models_by_backend.get("llamacpp", [])
+    if llamacpp_models:
+        cfg["provider"]["llamacpp"] = {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "llama.cpp (local)",
+            "options": {
+                "baseURL": "http://llamacpp:11434/v1",
+                "timeout": 900000,
+                "chunkTimeout": 600000
+            },
+            "models": {}
+        }
+        for m in llamacpp_models:
+            cfg["provider"]["llamacpp"]["models"][m["name"]] = {
+                "limit": {
+                    "context": m["context"],
+                    "output": m["output"]
+                }
+            }
+    
+    # Set default model: prefer llamacpp first model, then ollama first model
+    default_model = None
+    if llamacpp_models:
+        default_model = f"llamacpp/{llamacpp_models[0]['name']}"
+    elif ollama_models:
+        default_model = f"ollama/{ollama_models[0]['name']}"
+    
+    if default_model:
+        cfg["model"] = default_model
+        cfg["small_model"] = default_model  # Same as main to prevent eviction thrashing
     
     return json.dumps(cfg, indent=2)
 
 
-def get_max_context(models):
-    """Return max context across all models."""
-    return max(m["context"] for m in models)
+def get_max_context(models_by_backend):
+    """Return max context across all models in all backends."""
+    all_models = []
+    for backend_models in models_by_backend.values():
+        all_models.extend(backend_models)
+    if not all_models:
+        return 65536
+    return max(m["context"] for m in all_models)
 
 
-def update_compose(lab_dir, ctx_value):
-    """Update OLLAMA_CONTEXT_LENGTH in compose.yaml."""
+def update_compose(lab_dir, ctx_value, models_by_backend):
+    """Update CONTEXT_LENGTH env vars and MODEL_FILE in compose.yaml for both backends."""
     compose_path = os.path.join(lab_dir, "compose.yaml")
     
     if not os.path.isfile(compose_path):
         print(f"WARNING: {compose_path} not found, skipping compose update.", file=sys.stderr)
         return
+    
+    # Determine default llama.cpp model file (first llamacpp model)
+    llamacpp_models = models_by_backend.get("llamacpp", [])
+    model_file = None
+    if llamacpp_models:
+        model_file = f"/models/{llamacpp_models[0]['name']}.gguf"
     
     with open(compose_path) as f:
         lines = f.readlines()
@@ -126,9 +186,16 @@ def update_compose(lab_dir, ctx_value):
     updated = False
     for line in lines:
         stripped = line.lstrip()
-        if stripped.startswith("OLLAMA_CONTEXT_LENGTH"):
-            # Replace the numeric value (keep indentation, comments, quotes)
+        # Update any OLLAMA_CONTEXT_LENGTH or LLAMA_CPP_CONTEXT_LENGTH
+        if stripped.startswith("OLLAMA_CONTEXT_LENGTH") or stripped.startswith("LLAMA_CPP_CONTEXT_LENGTH"):
             new_line = re.sub(r':\s*\d+', f': "{ctx_value}"', line)
+            new_lines.append(new_line)
+            updated = True
+        # Update MODEL_FILE for llama.cpp
+        elif stripped.startswith("MODEL_FILE:") and model_file:
+            # Preserve original indentation
+            indent = line[:len(line) - len(stripped)]
+            new_line = f'{indent}MODEL_FILE: "{model_file}"\n'
             new_lines.append(new_line)
             updated = True
         else:
@@ -175,23 +242,26 @@ def main():
         models_file = os.path.join(lab_dir, "models.txt")
     
     # Parse
-    models = parse_models(models_file)
+    models_by_backend = parse_models(models_file)
     
-    if not models:
+    total_models = sum(len(m) for m in models_by_backend.values())
+    if total_models == 0:
         print("ERROR: no models parsed from", file=sys.stderr)
         sys.exit(1)
     
     print("=== Regen configs ===")
-    for m in models:
-        print(f"  {m['name']}: ctx={m['context']}, out={m['output']}")
+    for backend, models in models_by_backend.items():
+        if models:
+            print(f"  [{backend}]")
+            for m in models:
+                print(f"    {m['name']}: ctx={m['context']}, out={m['output']}")
     
     if dry_run:
-        max_ctx = get_max_context(models)
-        print(f"  max context -> OLLAMA_CONTEXT_LENGTH: {max_ctx}")
+        max_ctx = get_max_context(models_by_backend)
+        print(f"  max context -> CONTEXT_LENGTH: {max_ctx}")
         print("  (dry run - no files modified)")
         
-        # Show what opencode.json would look like
-        expected = gen_opencode_json(models) + "\n"
+        expected = gen_opencode_json(models_by_backend) + "\n"
         actual_path = os.path.join(lab_dir, "agent/opencode", "opencode.json")
         
         with open(actual_path, "rb") as f:
@@ -203,7 +273,7 @@ def main():
         return
     
     # Generate opencode.json content
-    predicted = gen_opencode_json(models)
+    predicted = gen_opencode_json(models_by_backend)
     actual_path = os.path.join(lab_dir, "agent/opencode", "opencode.json")
     
     with open(actual_path, "rb") as f:
@@ -216,12 +286,12 @@ def main():
         print("  [updated] agent/opencode/opencode.json")
     
     # Update compose.yaml
-    max_ctx = get_max_context(models)
-    updated = update_compose(lab_dir, max_ctx)
+    max_ctx = get_max_context(models_by_backend)
+    updated = update_compose(lab_dir, max_ctx, models_by_backend)
     if updated:
-        print(f"  [updated] compose.yaml OLLAMA_CONTEXT_LENGTH -> {max_ctx}")
+        print(f"  [updated] compose.yaml CONTEXT_LENGTH -> {max_ctx}")
     else:
-        print(f"  [unchanged] compose.yaml OLLAMA_CONTEXT_LENGTH={max_ctx}")
+        print(f"  [unchanged] compose.yaml CONTEXT_LENGTH={max_ctx}")
     
     print("=== Done ===")
 
