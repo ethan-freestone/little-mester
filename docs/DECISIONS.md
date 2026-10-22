@@ -55,7 +55,7 @@ cd /path/to/little-mester
 
 ### A.3 How to verify the sandbox
 ```bash
-./verify-sandbox.sh    # proves security guarantees hold
+./verify-lab.sh    # proves security guarantees hold
 ./lab shell <workspace>  # plain bash inside the sandbox for debugging
 ```
 

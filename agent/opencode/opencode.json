@@ -12,13 +12,42 @@
         "chunkTimeout": 600000
       },
       "models": {
-        "qwen3.6:35b-a3b": {
+        "qwen3:8b": {
           "limit": {
-            "context": 196608,
-            "output": 49152
+            "context": 65536,
+            "output": 16384
           }
         },
-        "qwen3:8b": {
+        "qwen3:14b": {
+          "limit": {
+            "context": 65536,
+            "output": 16384
+          }
+        }
+      }
+    },
+    "llamacpp": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llama.cpp (local)",
+      "options": {
+        "baseURL": "http://llamacpp:11434/v1",
+        "timeout": 900000,
+        "chunkTimeout": 600000
+      },
+      "models": {
+        "qwen3.6-35b-a3b-q4_k_m": {
+          "limit": {
+            "context": 65536,
+            "output": 16384
+          }
+        },
+        "qwen3-coder-30b-a3b-q4_k_m": {
+          "limit": {
+            "context": 65536,
+            "output": 16384
+          }
+        },
+        "gpt-oss-20b-mxfp4": {
           "limit": {
             "context": 65536,
             "output": 16384
@@ -27,8 +56,6 @@
       }
     }
   },
-  "model": "ollama/qwen3.6:35b-a3b",
-  "small_model": "ollama/qwen3:8b",
   "plugins": [
     "/etc/opencode/plugins/host-metrics",
     "/etc/opencode/plugins/host-metrics-tui"
@@ -37,5 +64,7 @@
     "edit": "ask",
     "bash": "ask"
   },
-  "otel": {}
+  "otel": {},
+  "model": "llamacpp/qwen3.6-35b-a3b-q4_k_m",
+  "small_model": "llamacpp/qwen3.6-35b-a3b-q4_k_m"
 }

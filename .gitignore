@@ -7,6 +7,7 @@ dist/
 # Aider session data (hidden dot-prefixed files)
 .aider*
 .little-mester.conf
+machine.conf
 # Node modules (covers all repos in workspace)
 node_modules/
 # Collated repo pass-off / analysis dumps (all safe to re-run)

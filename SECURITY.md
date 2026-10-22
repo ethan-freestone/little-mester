@@ -44,7 +44,7 @@
 **This sandbox's security posture is intentionally rigid.** 
 - The AI agent (`little-mester`) is **never** granted shell access to the host. Interaction occurs strictly via the mounted workspace directory or the container's internal shell (`./lab shell`).
 - **Security configurations are immutable without explicit user review.** Any modification to `compose.yaml`, `agent/Dockerfile`, or `lab` launcher security flags requires manual inspection and confirmation by the human operator. The AI will never auto-modify security boundaries.
-- If you need to change security settings, you must do so manually in the source files and re-run `./verify-sandbox.sh`.
+- If you need to change security settings, you must do so manually in the source files and re-run `./verify-lab.sh`.
 
 ## 7. What This Does NOT Protect Against
 See [README.md#what-this-does-not-protect-against](README.md#what-this-does-not-protect-against) for limitations (e.g., workspace corruption, host-side script execution, container escape via kernel vulns).

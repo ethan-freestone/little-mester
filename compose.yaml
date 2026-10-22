@@ -1,6 +1,9 @@
 name: little-mester
 
 services:
+  # ─────────────────────────────────────────────────────────────────
+  # Ollama model server (for dense models that fit in VRAM)
+  # ─────────────────────────────────────────────────────────────────
   ollama:
     image: ollama/ollama:latest
     volumes:
@@ -8,9 +11,9 @@ services:
     environment:
       OLLAMA_FLASH_ATTENTION: "1"
       OLLAMA_KV_CACHE_TYPE: q8_0
-      #OLLAMA_CONTEXT_LENGTH: "32768"
-      OLLAMA_CONTEXT_LENGTH: "131072"
-      OLLAMA_KEEP_ALIVE: "-1"        # keep the model loaded; reloading 24GB is slow
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_CONTEXT_LENGTH: "65536"
+      OLLAMA_KEEP_ALIVE: "-1"        # keep the model loaded; reloading is slow
       OLLAMA_MAX_LOADED_MODELS: "1"  # only one model resident at a time
     deploy:
       resources:
@@ -27,7 +30,47 @@ services:
       timeout: 5s
       retries: 30
 
-  # One-shot: the ONLY service with internet. Used by `./lab setup`.
+  # ─────────────────────────────────────────────────────────────────
+  # llama.cpp model server (for MoE models with expert offload)
+  # ─────────────────────────────────────────────────────────────────
+  llamacpp:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    # Model is specified via MODEL_FILE env var (set by regen-configs / lab pull)
+    # Default falls back to first llamacpp model in models.txt
+    environment:
+      MODEL_FILE: "/models/qwen3.6-35b-a3b-q4_k_m.gguf"
+      LLAMA_CPP_CONTEXT_LENGTH: "65536"
+    command: >
+      -m ${MODEL_FILE:-/models/qwen3.6-35b-a3b-q4_k_m.gguf}
+      --host 0.0.0.0 --port 11434 --alias llamacpp-main
+      -ngl 99 --n-cpu-moe 32
+      -c ${LLAMA_CPP_CONTEXT_LENGTH:-65536} -fa on
+      --cache-type-k q8_0 --cache-type-v q8_0
+      -t 8 -b 2048 -ub 2048
+      --parallel 1 --jinja
+    ulimits:
+      memlock: -1
+    volumes:
+      - llamacpp-models:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    security_opt: ["no-new-privileges:true"]
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:11434/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # ─────────────────────────────────────────────────────────────────
+  # One-shot: Ollama model pull (internet access ONLY for this service)
+  # ─────────────────────────────────────────────────────────────────
   ollama-pull:
     image: ollama/ollama:latest
     profiles: [setup]
@@ -38,6 +81,24 @@ services:
       - ./models.txt:/models.txt:ro
     networks: [egress]
 
+  # ─────────────────────────────────────────────────────────────────
+  # One-shot: llama.cpp GGUF model pull from HuggingFace
+  # ─────────────────────────────────────────────────────────────────
+  llamacpp-pull:
+    image: python:3.12-slim
+    profiles: [setup]
+    entrypoint: ["/bin/sh", "/pull-gguf.sh"]
+    volumes:
+      - llamacpp-models:/models
+      - ./llamacpp/pull-gguf.sh:/pull-gguf.sh:ro
+      - ./models.txt:/models.txt:ro
+    networks: [egress]
+    environment:
+      HF_HUB_ENABLE_HF_TRANSFER: "1"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Agent container (opencode / aider)
+  # ─────────────────────────────────────────────────────────────────
   agent:
     build:
       context: ./agent
@@ -47,6 +108,8 @@ services:
     profiles: [agent]
     depends_on:
       ollama:
+        condition: service_healthy
+      llamacpp:
         condition: service_healthy
       metrics:
         condition: service_healthy
@@ -66,17 +129,18 @@ services:
     environment:
       HOME: /home/agent
       OLLAMA_API_BASE: http://ollama:11434
-      # Aider session data lives here, outside any mounted workspace
-      AIDER_WORKSPACE: /aider-data
-      AIDER_MODEL: ollama_chat/qwen3.6:35b-a3b
+      LLAMACPP_API_BASE: http://llamacpp:11434
+      # Default model (overridden by opencode.json)
+      AIDER_MODEL: ollama_chat/qwen3:8b
       AIDER_CHECK_UPDATE: "false"
       AIDER_ANALYTICS_DISABLE: "true"
     networks: [egress, internal]    # default egress=true → both; false → [internal]
     stdin_open: true
     tty: true
 
-  # Lightweight sidecar: exposes host GPU / CPU / RAM / temperature data via HTTP (loopback only).
-  # The agent queries it programmatically; the TUI polls /summary for the live status bar.
+  # ─────────────────────────────────────────────────────────────────
+  # Lightweight sidecar: exposes host GPU / CPU / RAM / temperature
+  # ─────────────────────────────────────────────────────────────────
   metrics:
     build: ./agent/metrics
     deploy:
@@ -98,8 +162,6 @@ services:
       - /proc:/host/proc:ro         # CPU stats, load averages, meminfo
       - /sys/class/hwmon:/host/hwmon:ro   # temperature sensors (chip die, chipset)
       - /sys/class/thermal:/host/thermal:ro   # thermal zones (GPU die, VRAM junction)
-    # Healthcheck lives in compose (not the image) so it applies on every
-    # `docker compose run` without requiring an image rebuild.
     healthcheck:
       test: ["CMD", "python3", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:19532/summary', timeout=2).status == 200 else 1)"]
       interval: 5s
@@ -108,6 +170,49 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # ─────────────────────────────────────────────────────────────────
+  # One-shot benchmark runner
+  #
+  # HTTP mode (default, no GPU): benchmarks against a running llamacpp
+  #   ./lab bench
+  #   Fast, no model reload, measures real server throughput/latency
+  #
+  # Native mode (requires GPU): runs llama.cpp --test inside container
+  #   ./lab bench --native -t 10 -ub 1024
+  #   Zero HTTP overhead, instant between-test switches
+  #   Blocks the container (can't serve requests during bench)
+  # ─────────────────────────────────────────────────────────────────
+  bench:
+    build: ./bench
+    profiles: [bench]
+    # Native mode gets GPU + model volume (HTTP mode does not)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - llamacpp-models:/models:ro
+    environment:
+      # HTTP mode (default)
+      BENCH_HOST: "llamacpp"
+      BENCH_PORT: "11434"
+      BENCH_N: "5"
+      BENCH_JSON: "0"
+      # Native mode overrides (only used when MODEL_DIR is set)
+      MODEL_DIR: ""           # set to /models to enable native mode
+      MODEL_FILE: "/models/qwen3.6-35b-a3b-q4_k_m.gguf"
+      NGPU_LAYERS: "99"
+      NCPU_MOE: "32"
+      THREADS: "8"
+      MICRO_BATCH: "2048"
+      CONTEXT: "65536"
+      K_TYPE: "q8_0"
+      V_TYPE: "q8_0"
+      N_PROMPTS: "4"
+
 networks:
   internal:
     internal: true
@@ -115,3 +220,4 @@ networks:
 
 volumes:
   ollama-models:
+  llamacpp-models:

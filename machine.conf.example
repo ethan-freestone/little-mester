@@ -1,0 +1,78 @@
+# machine.conf — Your hardware profile for little-mester
+#
+# Copy this file to machine.conf and fill in your specs:
+#   cp machine.conf.example machine.conf
+#
+# This file is .gitignore'd (never committed). It serves two purposes:
+#   1. Tells AI assistants what hardware they're working with
+#   2. Lets the benchmarking tools suggest optimal starting points
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Hardware (required)
+# ─────────────────────────────────────────────────────────────────────────────
+# GPU name as reported by nvidia-smi or your OS
+#   NVIDIA: `nvidia-smi --query-gpu=name --format=csv,noheader`
+#   AMD:   `rocm-smi` or `lspci | grep -i vga`
+GPU_NAME=""
+
+# Total GPU VRAM in GB (integer). This is the hard limit for model + KV cache.
+#   NVIDIA: `nvidia-smi` shows it in the header
+#   AMD:   check your GPU spec sheet
+GPU_VRAM_GB=""
+
+# Number of physical CPU cores (not logical threads).
+#   Run `nproc --all` or `lscpu | grep "^CPU(s):"`
+#   For tuning, we care about cores because each thread needs a core.
+CPU_CORES=""
+
+# CPU model name (helps AI understand memory bandwidth and architecture).
+#   Run `cat /proc/cpuinfo | grep "model name" | head -1`
+#   e.g. "AMD Ryzen AI 9 HX 370 (Strix Point)"
+#   Memory bandwidth matters a LOT for CPU inference on MoE models.
+CPU_MODEL=""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Recommended tuning defaults (optional — AI uses these as starting points)
+# ─────────────────────────────────────────────────────────────────────────────
+# These are educated guesses. Run ./lab tune to find your actual optimum.
+
+# Threads (-t):
+#   How many CPU threads llama.cpp uses.
+#   Start at 2/3 of your physical cores — leave room for the system.
+#   On MoE models, threads also handle expert routing overhead.
+#   Rule of thumb: physical_cores * 0.66 to physical_cores * 0.85
+DEFAULT_THREADS=""
+
+# CPU MoE experts (--n-cpu-moe):
+#   How many of the model's expert layers run on CPU.
+#   MoE models split experts: some on GPU, some on CPU.
+#   Lower = more GPU pressure (faster if VRAM allows).
+#   Higher = less GPU pressure (slower, but fits in less VRAM).
+#   For 8GB VRAM with a ~20GB model: most experts go to CPU anyway.
+#   Start at 32 and adjust based on results.
+DEFAULT_CPU_MOE=""
+
+# Micro-batch size (-ub):
+#   Tokens processed per KV-cache update step.
+#   Larger = higher throughput (fewer KV updates per batch).
+#   Too large = VRAM pressure (KV cache grows with context).
+#   Start at 2048. If VRAM headroom is good, try 4096.
+DEFAULT_MICRO_BATCH=""
+
+# Context window (-c):
+#   Maximum sequence length. Larger = more memory, slower load.
+#   Match to your use case: 65536 for long documents, 8192-16384 for chat.
+#   Your model's native max is probably 32768 or 65536.
+DEFAULT_CONTEXT_LENGTH=""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Example filled-in for your machine:
+# ─────────────────────────────────────────────────────────────────────────────
+# GPU_NAME="AMD Radeon 890M (16 CU)"
+# GPU_VRAM_GB=8
+# CPU_CORES=12
+# CPU_MODEL="AMD Ryzen AI 9 HX 370 (Strix Point)"
+# DEFAULT_THREADS=10
+# DEFAULT_CPU_MOE=32
+# DEFAULT_MICRO_BATCH=2048
+# DEFAULT_CONTEXT_LENGTH=65536
