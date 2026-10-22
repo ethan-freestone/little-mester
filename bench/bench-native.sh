@@ -21,7 +21,7 @@ vlog2() [[ "$VERBOSE" == "1" ]] && echo "[verbose]   $*" >&2 || true;
 
 LAB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAB_COMPOSE="$LAB_DIR/compose.yaml"
-WORKSPACE="${WORKSPACE:-$LAB_DIR}"
+export WORKSPACE="${WORKSPACE:-$LAB_DIR}"
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 THREADS="${THREADS:-8}"
@@ -136,40 +136,51 @@ if [[ -z "$MODEL_FILE" ]] || [[ ! -f "$MODEL_FILE" ]]; then
     echo "  --keep-running mode: container should be managed externally."
     vlog "KEEP_CONTAINER=1 — will not start/stop container"
 
-    # Verify the container is actually running
-    local_container_status=$(docker compose -f "$LAB_COMPOSE" --project-directory "$LAB_DIR" ps llamacpp 2>&1 || true)
-    vlog "Container status check: $local_container_status"
+    # Resolve container name using docker ps directly (docker compose ps fails without WORKSPACE)
+    CONTAINER_NAME=$(docker ps --filter "name=llamacpp" --format '{{.Names}}' 2>/dev/null | head -1)
+    if [[ -z "$CONTAINER_NAME" ]]; then
+      CONTAINER_NAME="llamacpp"
+    fi
 
-    if ! docker compose -f "$LAB_COMPOSE" --project-directory "$LAB_DIR" ps llamacpp 2>/dev/null | grep -q "Up"; then
+    # Verify the container is actually running
+    if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
       echo "  ERROR: llamacpp container is not running (keep-running mode requires it to be up)" >&2
       echo "  Run: docker compose -f compose.yaml up -d llamacpp" >&2
       exit 1
     fi
-    vlog "Container is running — proceeding to copy model"
+    vlog "Container is running ($CONTAINER_NAME) — proceeding to copy model"
 
     # List files in container model dir for debugging
     vlog "Listing /models/ in container..."
-    ls_models=$(docker compose -f "$LAB_COMPOSE" --project-directory "$LAB_DIR" exec -T llamacpp ls -la /models/ 2>&1 || true)
+    ls_models=$(docker exec "$CONTAINER_NAME" sh -c 'ls -la /models/' 2>&1 || true)
     vlog2 "$ls_models"
 
-    # Copy model files from container to host
+    # Copy model files using docker cp (not docker compose cp — which hangs)
     echo "  Copying model files from container..."
-    local_copy_err=$(docker compose -f "$LAB_COMPOSE" --project-directory "$LAB_DIR" cp \
-      llamacpp:/models/*.gguf "$MODEL_HOST_DIR/" 2>&1 || true)
-    local_copy_ok=$?
+    local_copy_err=""
+    local_copy_ok=0
+    # Use sh -c so glob expands inside the container, not on the host
+    local_gguf_list=$(docker exec "$CONTAINER_NAME" sh -c 'ls /models/*.gguf' 2>/dev/null || true)
 
-    if [[ $local_copy_ok -ne 0 ]]; then
-      vlog "  Wildcard cp failed ($local_copy_ok): $local_copy_err"
-      vlog "  Trying full directory copy..."
-      local_copy_err=$(docker compose -f "$LAB_COMPOSE" --project-directory "$LAB_DIR" cp \
-        llamacpp:/models/ "$MODEL_HOST_DIR/" 2>&1 || true)
-      local_copy_ok=$?
+    if [[ -n "$local_gguf_list" ]]; then
+      while IFS= read -r gguf_path; do
+        gguf_basename=$(basename "$gguf_path")
+        if ! docker cp "$CONTAINER_NAME:$gguf_path" "$MODEL_HOST_DIR/" 2>&1; then
+          local_copy_err="${local_copy_err}Failed to copy $gguf_basename\n"
+          local_copy_ok=1
+        else
+          vlog "  Copied $gguf_basename"
+        fi
+      done <<< "$local_gguf_list"
+    else
+      local_copy_err="No .gguf files found in /models/ inside container\n"
+      local_copy_ok=1
     fi
 
     if [[ $local_copy_ok -ne 0 ]]; then
       echo "  ERROR: Failed to copy model from llamacpp container" >&2
       echo "  Copy error output:" >&2
-      echo "$local_copy_err" | sed 's/^/    /' >&2
+      echo -e "$local_copy_err" | sed 's/^/    /' >&2
       echo "  Tip: Check container is running with: docker compose ps llamacpp" >&2
       exit 1
     fi
@@ -203,7 +214,9 @@ if [[ -z "$MODEL_FILE" ]] || [[ ! -f "$MODEL_FILE" ]]; then
       local_started=0
       for i in $(seq 1 60); do
         vlog2 "  Waiting... (attempt $i/60)"
-        if docker compose -f "$LAB_COMPOSE" --project-directory "$LAB_DIR" exec -T llamacpp ls /models/*.gguf 2>/dev/null | head -1 >/dev/null; then
+        # Use docker ps (not compose) + docker exec sh -c (glob expands in container)
+        if docker ps --filter "name=llamacpp" --format '{{.Names}}' | grep -q llamacpp && \
+           docker exec "$(docker ps --filter "name=llamacpp" --format '{{.Names}}' | head -1)" sh -c 'ls /models/*.gguf' >/dev/null 2>&1; then
           local_started=1
           vlog2 "  Model files detected after $i attempts"
           break
@@ -217,23 +230,35 @@ if [[ -z "$MODEL_FILE" ]] || [[ ! -f "$MODEL_FILE" ]]; then
       echo "  llamacpp already running, extracting model..."
     fi
 
-    # Copy model files from container to host
-    echo "  Copying model files from container..."
-    local_copy_err=$(docker compose -f "$LAB_COMPOSE" --project-directory "$LAB_DIR" cp \
-      llamacpp:/models/*.gguf "$MODEL_HOST_DIR/" 2>&1 || true)
-    local_copy_ok=$?
+    # Resolve container name using docker ps directly (not docker compose)
+    CONTAINER_NAME=$(docker ps --filter "name=llamacpp" --format '{{.Names}}' 2>/dev/null | head -1 || echo "llamacpp")
 
-    if [[ $local_copy_ok -ne 0 ]]; then
-      vlog "  Wildcard cp failed ($local_copy_ok), trying full directory..."
-      local_copy_err=$(docker compose -f "$LAB_COMPOSE" --project-directory "$LAB_DIR" cp \
-        llamacpp:/models/ "$MODEL_HOST_DIR/" 2>&1 || true)
-      local_copy_ok=$?
+    # Copy model files using docker cp (not docker compose cp — which hangs)
+    echo "  Copying model files from container..."
+    local_copy_err=""
+    local_copy_ok=0
+    # Use sh -c so glob expands inside the container, not on the host
+    local_gguf_list=$(docker exec "$CONTAINER_NAME" sh -c 'ls /models/*.gguf' 2>/dev/null || true)
+
+    if [[ -n "$local_gguf_list" ]]; then
+      while IFS= read -r gguf_path; do
+        gguf_basename=$(basename "$gguf_path")
+        if ! docker cp "$CONTAINER_NAME:$gguf_path" "$MODEL_HOST_DIR/" 2>&1; then
+          local_copy_err="${local_copy_err}Failed to copy $gguf_basename\n"
+          local_copy_ok=1
+        else
+          vlog "  Copied $gguf_basename"
+        fi
+      done <<< "$local_gguf_list"
+    else
+      local_copy_err="No .gguf files found in /models/ inside container\n"
+      local_copy_ok=1
     fi
 
     if [[ $local_copy_ok -ne 0 ]]; then
       echo "  ERROR: Failed to copy model from llamacpp container" >&2
       echo "  Copy error output:" >&2
-      echo "$local_copy_err" | sed 's/^/    /' >&2
+      echo -e "$local_copy_err" | sed 's/^/    /' >&2
       exit 1
     fi
     vlog "  Copy succeeded"
@@ -255,16 +280,37 @@ vlog2 "  Keep container mode: $( [[ $KEEP_CONTAINER -eq 1 ]] && echo "YES" || ec
 vlog2 "  Container started by this script: $CONTAINER_STARTED"
 
 # ── Extract llama-bench from Docker image (idempotent) ───────────────────────
-if [[ ! -f "$LLAMA_BENCH" ]]; then
-  echo "  Extracting llama-bench from $LLAMA_BENCH_IMAGE..."
-  vlog "Running: docker run --rm $LLAMA_BENCH_IMAGE cat /usr/local/bin/llama-bench"
-  docker run --rm "$LLAMA_BENCH_IMAGE" cat /usr/local/bin/llama-bench > "$LLAMA_BENCH" || {
-    echo "ERROR: Failed to extract llama-bench from $LLAMA_BENCH_IMAGE" >&2
+# Check if cached llama-bench exists AND is executable AND has reasonable size
+if [[ ! -f "$LLAMA_BENCH" ]] || [[ ! -x "$LLAMA_BENCH" ]] || [[ ! -s "$LLAMA_BENCH" ]]; then
+  echo "  Extracting llama-bench..."
+  # Try multiple image tags that might contain llama-bench
+  BENCH_IMAGES=(
+    "ghcr.io/ggml-org/llama.cpp:full-cuda"
+    "ghcr.io/ggml-org/llama.cpp:light-cuda"
+    "ghcr.io/ggml-org/llama.cpp:server-cuda"
+  )
+  EXTRACTED=0
+  for img in "${BENCH_IMAGES[@]}"; do
+    vlog "Trying image: $img"
+    TEMP_BENCH=$(mktemp)
+    # Override entrypoint to use sh, then cat the binary
+    if docker run --rm --entrypoint sh "$img" -c 'cat /usr/local/bin/llama-bench 2>/dev/null || cat /usr/bin/llama-bench 2>/dev/null || find / -name llama-bench -exec cat {} \; 2>/dev/null' > "$TEMP_BENCH" 2>&1; then
+      if [[ -s "$TEMP_BENCH" ]] && file "$TEMP_BENCH" | grep -q "executable"; then
+        mv "$TEMP_BENCH" "$LLAMA_BENCH"
+        chmod +x "$LLAMA_BENCH"
+        echo "  llama-bench extracted from $img → $LLAMA_BENCH"
+        vlog "  llama-bench binary size: $(du -h "$LLAMA_BENCH" | cut -f1)"
+        EXTRACTED=1
+        break
+      fi
+    fi
+    rm -f "$TEMP_BENCH"
+  done
+  if [[ $EXTRACTED -eq 0 ]]; then
+    echo "ERROR: Could not extract llama-bench from any image" >&2
+    echo "  Tried: ${BENCH_IMAGES[*]}" >&2
     exit 1
-  }
-  chmod +x "$LLAMA_BENCH"
-  echo "  llama-bench extracted → $LLAMA_BENCH"
-  vlog "  llama-bench binary size: $(du -h "$LLAMA_BENCH" | cut -f1)"
+  fi
 else
   vlog "Using cached llama-bench: $LLAMA_BENCH"
   vlog2 "  Binary size: $(du -h "$LLAMA_BENCH" | cut -f1)"

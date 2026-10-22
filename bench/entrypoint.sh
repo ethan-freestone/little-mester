@@ -46,7 +46,7 @@ if [[ -n "${MODEL_DIR:-}" ]]; then
     --cache-type-v "$V_TYPE" \
     -ub "$MICRO_BATCH" \
     --n-prompt "$N_PROMPTS" \
-    --repeat "$N_REPEATS" \
+    --repetitions "$N_REPEATS" \
     --json 2>&1) || true
 
   echo ""
@@ -60,15 +60,44 @@ if [[ -n "${MODEL_DIR:-}" ]]; then
   PROMPT_TPS=""
   AVG_LATENCY=""
 
-  # Try jq first, fall back to grep
+  # llama-bench --json outputs a JSON array of test entries, one per (test, repetition)
+  # Each entry has fields like: n_prompt, n_gen, avg_ts, stddev_ts, etc.
+  # For inference TPS we want the generation test (n_gen > 0).
+
+  # Verbose: show parsing diagnostics
+  if [[ "${LITTLE_MESTER_VERBOSE:-0}" == "1" ]]; then
+    echo "[verbose] llama-bench JSON length: ${#BENCH_JSON_RAW} bytes"
+    # Check if JSON looks valid (starts with [)
+    FIRST_CHAR=$(echo "$BENCH_JSON_RAW" | head -c 1)
+    echo "[verbose] First char of JSON: '$FIRST_CHAR'"
+    # Count entries (rough heuristic)
+    ENTRY_COUNT=$(echo "$BENCH_JSON_RAW" | grep -co '"n_gen"' || true)
+    echo "[verbose] Lines containing 'n_gen': $ENTRY_COUNT"
+    echo "[verbose] jq available: $(command -v jq >/dev/null 2>&1 && echo 'yes' || echo 'no')"
+  fi
+
+  # Try jq first (most reliable)
   if command -v jq >/dev/null 2>&1; then
-    TPS=$(echo "$BENCH_JSON_RAW" | jq -r '.result.eval.avg // empty' 2>/dev/null || true)
-    PROMPT_TPS=$(echo "$BENCH_JSON_RAW" | jq -r '.result.prompt_eval.avg // empty' 2>/dev/null || true)
-    AVG_LATENCY=$(echo "$BENCH_JSON_RAW" | jq -r '.result.eval.latency_avg_ms // empty' 2>/dev/null || true)
+    # --slurp handles both JSON array and JSONL (multiple objects) output
+    if [[ "${LITTLE_MESTER_VERBOSE:-0}" == "1" ]]; then
+      echo "[verbose] Using jq to extract avg_ts for n_gen > 0..."
+    fi
+    TPS=$(echo "$BENCH_JSON_RAW" | jq -r --slurp '.[] | select(.n_gen > 0) | .avg_ts' 2>/dev/null | head -1 || true)
+    if [[ "${LITTLE_MESTER_VERBOSE:-0}" == "1" ]]; then
+      echo "[verbose] jq TPS result: '${TPS:-<empty>}'"
+    fi
+    PROMPT_TPS=$(echo "$BENCH_JSON_RAW" | jq -r --slurp '.[] | select(.n_prompt > 0) | .avg_ts' 2>/dev/null | head -1 || true)
+    AVG_LATENCY=$(echo "$BENCH_JSON_RAW" | jq -r --slurp '.[] | select(.n_gen > 0) | .avg_ms // empty' 2>/dev/null | head -1 || true)
   else
-    # Fallback: parse with grep/sed
-    TPS=$(echo "$BENCH_JSON_RAW" | grep -oP '"eval".*"avg"\s*:\s*\K[\d.]+' | head -1 || true)
-    PROMPT_TPS=$(echo "$BENCH_JSON_RAW" | grep -oP '"prompt_eval".*"avg"\s*:\s*\K[\d.]+' | head -1 || true)
+    # Fallback: parse avg_ts from JSON output (llama-bench always outputs numeric values)
+    if [[ "${LITTLE_MESTER_VERBOSE:-0}" == "1" ]]; then
+      echo "[verbose] jq not available, using grep fallback..."
+    fi
+    TPS=$(echo "$BENCH_JSON_RAW" | grep -oP '"avg_ts"\s*:\s*\K[\d.]+' | head -1 || true)
+    PROMPT_TPS=$(echo "$BENCH_JSON_RAW" | grep -oP '"avg_ts"\s*:\s*\K[\d.]+' | tail -1 || true)
+    if [[ "${LITTLE_MESTER_VERBOSE:-0}" == "1" ]]; then
+      echo "[verbose] grep TPS result: '${TPS:-<empty>}'"
+    fi
   fi
 
   echo "  ██████  INFERENCE THROUGHPUT: ${TPS:-N/A} tokens/sec"

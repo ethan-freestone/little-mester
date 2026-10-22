@@ -425,6 +425,7 @@ HELPTEXT
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --json)        TUNE_JSON=1; shift ;;
+          --verbose)     VERBOSE=1; shift ;;
           -t)            TUNE_THREADS="${2:-$TUNE_THREADS}"; shift 2 ;;
           -ub)           TUNE_UB="${2:-$TUNE_UB}"; shift 2 ;;
           --moe|--n-cpu-moe) TUNE_MOE="${2:-}"; shift 2 ;;
@@ -442,6 +443,7 @@ trial and error. It restarts llama.cpp for each config and benchmarks.
 
 Options:
   --json          Output as machine-readable JSON (AI-parseable)
+  --verbose       Print detailed debug output to stderr
   -t N,N,N        Thread values to test (default: 8,10,12)
   -ub N,N,N       Micro-batch values (default: 1024,2048,4096)
   --moe N,N,N     CPU-MoE values to test (default: from compose.yaml)
@@ -509,22 +511,66 @@ HELPTEXT
       echo "============================================================"
       echo ""
 
-      echo ">> Building bench image${NO_CACHE:+ (no cache)}..."
-      if [[ "$NO_CACHE" -eq 1 ]]; then
-        dc build --no-cache bench
-      else
-        dc build bench
-      fi
-
-      echo ">> Stopping llamacpp to free VRAM for sweep..."
-      dc stop llamacpp 2>/dev/null || true
-
       # Track results for summary
       declare -a RESULTS=()
       TOTAL=$(( ${#SW_THREADS[@]} * ${#SW_UB[@]} * ${#SW_MOE[@]} * ${#SW_CTX[@]} ))
       COUNT=0
 
-      echo ">> Running $TOTAL benchmark configurations..."
+      echo ">> Starting llamacpp container for model access..."
+      dc up -d llamacpp || { echo "ERROR: Failed to start llamacpp" >&2; exit 1; }
+      echo "  Waiting for llamacpp to start..."
+      for i in $(seq 1 60); do
+        if docker compose -f "$LAB_DIR/compose.yaml" --project-directory "$LAB_DIR" exec -T llamacpp ls /models/*.gguf 2>/dev/null | head -1 >/dev/null; then
+          break
+        fi
+        sleep 2
+      done
+
+      # Pre-populate host model cache so bench-native.sh skips container extraction per-run
+      echo ">> Pre-populating model cache from container..."
+      MODEL_CACHE_DIR="$LAB_DIR/.bench-models"
+      mkdir -p "$MODEL_CACHE_DIR"
+
+      # Get the actual container name (compose prefixes with project name)
+      # Use docker ps directly — docker compose ps fails without WORKSPACE env var
+      LLAMACPP_CONTAINER=$(docker ps --filter "name=llamacpp" --format '{{.Names}}' 2>/dev/null | head -1)
+      if [[ -z "$LLAMACPP_CONTAINER" ]]; then
+        echo "  WARNING: llamacpp container not found — skipping pre-population" >&2
+        echo ""
+        echo ">> Running $TOTAL benchmark configurations (native)..."
+        echo ""
+        # ... fall through to benchmark loop ...
+      else
+        COPY_ERR=""
+        COPY_COUNT=0
+
+        # Use docker cp directly (not docker compose cp — which hangs on invalid paths)
+        # Use sh -c so the glob expands inside the container, not on the host
+        GGUF_LIST=$(docker exec "$LLAMACPP_CONTAINER" sh -c 'ls /models/*.gguf' 2>/dev/null || true)
+        if [[ -n "$GGUF_LIST" ]]; then
+          while IFS= read -r gguf_path; do
+            gguf_basename=$(basename "$gguf_path")
+            echo "  Copying $gguf_basename..."
+            if ! docker cp "$LLAMACPP_CONTAINER:$gguf_path" "$MODEL_CACHE_DIR/" 2>&1; then
+              COPY_ERR="$COPY_ERR Failed to copy $gguf_basename\n"
+            else
+              COPY_COUNT=$((COPY_COUNT + 1))
+            fi
+          done <<< "$GGUF_LIST"
+        fi
+
+        if [[ $COPY_COUNT -gt 0 ]]; then
+          echo "  Copied $COPY_COUNT model file(s) to $MODEL_CACHE_DIR"
+        else
+          echo "  WARNING: No model files found in container or copy failed — bench-native.sh will retry per-run" >&2
+          if [[ -n "$COPY_ERR" ]]; then
+            echo "  Copy errors: $COPY_ERR" >&2
+          fi
+        fi
+      fi
+      echo ""
+
+      echo ">> Running $TOTAL benchmark configurations (native)..."
       echo ""
 
       for t in "${SW_THREADS[@]}"; do
@@ -534,13 +580,20 @@ HELPTEXT
               COUNT=$((COUNT + 1))
               echo "--- [$COUNT/$TOTAL] t=$t  ub=$ub  moe=$m  ctx=$ctx ---"
 
-              # Run native benchmark (llamacpp is already stopped, no VRAM clash)
-              OUTPUT=$(MODEL_DIR=/models BENCH_JSON=0 BENCH_N=3 \
-                       THREADS=$t MICRO_BATCH=$ub NCPU_MOE=$m CONTEXT=$ctx \
-                       dc run --rm bench 2>&1) || true
+              # Run native benchmark via bench-native.sh with --keep-running
+              # (llamacpp is already started; bench-native.sh won't touch the container)
+              local_verbose_flag=""
+              [[ "$VERBOSE" == "1" ]] && local_verbose_flag="--verbose"
+              BENCH_OUTPUT=$("$LAB_DIR/bench/bench-native.sh" \
+                --keep-running -t "$t" -ub "$ub" --moe "$m" -c "$ctx" -nr 3 --json ${local_verbose_flag} 2>&1) || true
 
-              # Extract TPS from output
-              TPS=$(echo "$OUTPUT" | grep -oP '\b\d+\.\d+\s*tokens/?\s*(per\s+)?sec' | grep -oP '[\d.]+' | head -1 || echo "")
+              if [[ "$VERBOSE" == "1" ]]; then
+                echo "  [verbose] bench-native.sh output:"
+                echo "$BENCH_OUTPUT" | sed 's/^/  [verbose]   /'
+              fi
+
+              # Extract TPS from bench-native.sh JSON output ("inference_tps" field)
+              TPS=$(echo "$BENCH_OUTPUT" | grep -oP '"inference_tps"\s*:\s*\K[\d.]+' | head -1 || true)
               [[ -z "$TPS" ]] && TPS="N/A"
 
               echo "  -> ${TPS} t/s"
@@ -550,8 +603,8 @@ HELPTEXT
         done
       done
 
-      echo ">> Restarting llamacpp..."
-      dc up -d llamacpp
+      echo ">> Stopping llamacpp container..."
+      dc stop llamacpp 2>/dev/null || true
 
       echo ""
       echo "============================================================"
@@ -628,8 +681,14 @@ HELPTEXT
         AI_JSON+="]"
         AI_JSON+="}"
 
+        # Verbose: show the JSON being sent to the AI
+        if [[ "$VERBOSE" == "1" ]]; then
+          echo "  [verbose] JSON sent to AI analysis:"
+          echo "$AI_JSON" | sed 's/^/  [verbose]   /'
+        fi
+
         # Pipe to ai-analyze
-        echo "$AI_JSON" | ./lab ai-analyze
+        echo "$AI_JSON" | VERBOSE=$VERBOSE ./lab ai-analyze
       fi
       ;;
     ai-analyze)
@@ -659,6 +718,7 @@ HELPTEXT
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --model)     AI_MODEL="${2:?--model needs a model name}"; shift 2 ;;
+          --verbose)   VERBOSE=1; shift ;;
           --help|-h)
             cat <<'HELPTEXT'
 Usage: ./lab ai-analyze [OPTIONS] [FILE]
@@ -670,6 +730,7 @@ Sends it to Ollama for analysis of optimal llama.cpp parameters.
 
 Options:
   --model NAME   Ollama model to use (default: qwen2.5:1.5b)
+  --verbose      Print detailed debug output to stderr
   --help         Show this help
 
 How it works:
@@ -719,9 +780,19 @@ HELPTEXT
           exit 1
         fi
         BENCH_JSON=$(cat "$AI_FILE")
+        if [[ "$VERBOSE" == "1" ]]; then
+          echo "  [verbose] Reading benchmark JSON from file: $AI_FILE"
+          echo "  [verbose] JSON length: ${#BENCH_JSON} bytes"
+          echo "$BENCH_JSON" | sed 's/^/  [verbose]   /'
+        fi
       elif [[ ! -t 0 ]]; then
         # Read from stdin (piped)
         BENCH_JSON=$(cat)
+        if [[ "$VERBOSE" == "1" ]]; then
+          echo "  [verbose] Reading benchmark JSON from stdin"
+          echo "  [verbose] JSON length: ${#BENCH_JSON} bytes"
+          echo "$BENCH_JSON" | sed 's/^/  [verbose]   /'
+        fi
       else
         echo ">> ERROR: No input provided." >&2
         echo "   Usage: ./lab ai-analyze < results.json" >&2
@@ -733,7 +804,9 @@ HELPTEXT
       # Get machine specs from machine.conf if it exists
       MACHINE_SPECS=""
       if [[ -f "machine.conf" ]]; then
-        echo ">> Reading machine specs from machine.conf..."
+        if [[ "$VERBOSE" == "1" ]]; then
+          echo "  [verbose] Reading machine specs from machine.conf..."
+        fi
         # Extract key fields
         GPU_NAME=$(grep '^GPU_NAME=' machine.conf 2>/dev/null | cut -d= -f2- | tr -d '" ')
         GPU_VRAM=$(grep '^GPU_VRAM_GB=' machine.conf 2>/dev/null | cut -d= -f2- | tr -d '" ')
@@ -753,9 +826,18 @@ HELPTEXT
           [[ -n "$DEFAULT_CPU_MOE" ]] && MACHINE_SPECS+="  default cpu-moe: $DEFAULT_CPU_MOE"
           [[ -n "$DEFAULT_UB" ]]    && MACHINE_SPECS+="  default micro-batch: $DEFAULT_UB"
         fi
+
+        if [[ "$VERBOSE" == "1" ]]; then
+          echo "  [verbose] Machine specs to send:"
+          echo "$MACHINE_SPECS" | sed 's/^/  [verbose]   /'
+        fi
       fi
 
-      echo ">> Sending benchmark results to Ollama ($AI_MODEL)..."
+      if [[ "$VERBOSE" == "1" ]]; then
+        echo "  [verbose] Sending benchmark results to Ollama ($AI_MODEL)..."
+      else
+        echo ">> Sending benchmark results to Ollama ($AI_MODEL)..."
+      fi
 
       # Call Ollama's chat API
       # The Ollama service runs inside Docker on port 11434 (internal) or host (localhost:11434)
@@ -809,6 +891,14 @@ EOF
 )
 
       # Try host Ollama first
+      if [[ "$VERBOSE" == "1" ]]; then
+        echo "  [verbose] Ollama URL: $OLLAMA_URL/api/chat"
+        echo "  [verbose] Request body (truncated to first 500 bytes):"
+        echo "$OLLAMA_BODY" | head -c 500 | sed 's/^/  [verbose]   /'
+        if [[ ${#OLLAMA_BODY} -gt 500 ]]; then
+          echo "  [verbose]   ... (${#OLLAMA_BODY} bytes total)"
+        fi
+      fi
       HTTP_CODE=$(curl -sf -m 30 -X POST "$OLLAMA_URL/api/chat" \
         -H "Content-Type: application/json" \
         -d "$OLLAMA_BODY" \
@@ -817,7 +907,11 @@ EOF
 
       # If host fails, try Docker internal network
       if [[ "$HTTP_CODE" != "200" ]]; then
-        echo ">> Ollama not on localhost, trying Docker internal network..."
+        if [[ "$VERBOSE" == "1" ]]; then
+          echo "  [verbose] HTTP $HTTP_CODE on localhost, trying Docker internal network..."
+        else
+          echo ">> Ollama not on localhost, trying Docker internal network..."
+        fi
         OLLAMA_URL="http://ollama:11434"
         HTTP_CODE=$(curl -sf -m 30 -X POST "$OLLAMA_URL/api/chat" \
           -H "Content-Type: application/json" \
@@ -827,6 +921,14 @@ EOF
       fi
 
       if [[ "$HTTP_CODE" == "200" ]] && [[ -s /tmp/ollama-response.json ]]; then
+        if [[ "$VERBOSE" == "1" ]]; then
+          echo "  [verbose] Ollama HTTP response: $HTTP_CODE"
+          echo "  [verbose] Raw response (truncated):"
+          head -c 1000 /tmp/ollama-response.json | sed 's/^/  [verbose]   /'
+          if [[ $(wc -c < /tmp/ollama-response.json) -gt 1000 ]]; then
+            echo "  [verbose]   ... ($(wc -c < /tmp/ollama-response.json) bytes total)"
+          fi
+        fi
         # Extract the message content from the response
         AI_CONTENT=$(jq -r '.message.content // empty' /tmp/ollama-response.json 2>/dev/null || \
                      grep -oP '"content":"\K[^"]+' /tmp/ollama-response.json 2>/dev/null || \
@@ -840,9 +942,16 @@ EOF
           echo ">> WARNING: Ollama responded but content was unexpected format." >&2
           echo "   Raw response:" >&2
           cat /tmp/ollama-response.json >&2
+          if [[ "$VERBOSE" == "1" ]]; then
+            echo "  [verbose] Full response file: /tmp/ollama-response.json" >&2
+          fi
         fi
       else
-        echo ">> WARNING: Could not reach Ollama at $OLLAMA_URL (HTTP $HTTP_CODE)" >&2
+        if [[ "$VERBOSE" == "1" ]]; then
+          echo "  [verbose] Ollama not reachable at $OLLAMA_URL (HTTP $HTTP_CODE)" >&2
+        else
+          echo ">> WARNING: Could not reach Ollama at $OLLAMA_URL (HTTP $HTTP_CODE)" >&2
+        fi
         echo "" >&2
         echo ">> Manual analysis options:" >&2
         echo "   1. Start Ollama and try again:  ./lab start ollama" >&2
