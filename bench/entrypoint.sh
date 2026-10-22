@@ -7,7 +7,7 @@
 set -euo pipefail
 
 if [[ -n "${MODEL_DIR:-}" ]]; then
-  # ── Native mode: run llama.cpp --test inside the model container ──────────
+  # ── Native mode: run llama-bench inside the model container ──────────────
   # Benefits: zero HTTP overhead, instant between-test switches, same process
   # Cost: blocks the container (can't serve requests during benchmark)
 
@@ -35,76 +35,45 @@ if [[ -n "${MODEL_DIR:-}" ]]; then
   echo "  Repeats   : $N_REPEATS"
   echo "============================================================"
 
-  # Run llama.cpp --test (this is the built-in benchmark mode)
-  # We capture both stdout and stderr, parse the timing info
-  OUTPUT=$(llama.cpp \
+  # Run llama-bench (dedicated benchmarking binary shipped with server-cuda)
+  BENCH_JSON_RAW=$(llama-bench \
     -m "$MODEL" \
-    --threads "$THREADS" \
-    --threads-batch "$THREADS" \
+    -t "$THREADS" \
     --n-gpu-layers "$N_GPU_LAYERS" \
     --n-cpu-moe "$N_CPU_MOE" \
     --ctx-size "$CONTEXT" \
     --cache-type-k "$K_TYPE" \
     --cache-type-v "$V_TYPE" \
-    --mlock \
-    --log-disable \
-    --no-warmup \
-    -ngl "$N_GPU_LAYERS" \
-    -n "$N_PROMPTS" \
-    --repeat-penalty 1.1 \
     -ub "$MICRO_BATCH" \
-    2>&1) || true
+    --n-prompt "$N_PROMPTS" \
+    --repeat "$N_REPEATS" \
+    --json 2>&1) || true
 
-  # Parse llama.cpp --test output for timing stats
-  # The output contains lines like:
-  #   "prompt eval time =    xx.x ms / N tokens"
-  #   "        eval time =    xx.x ms / N tokens"
-  #   "         total time =    xx.x s"
-  #   "benchmark (inference): request sent, waiting for completion..."
-  #   "benchmark (inference): xx.xx tokens per second"
-
-  # Extract key metrics
   echo ""
-  echo "--- Raw Output ---"
-  echo "$OUTPUT"
+  echo "--- Raw JSON Output ---"
+  echo "$BENCH_JSON_RAW"
   echo "--- End Raw ---"
   echo ""
 
-  # Try to parse structured info
-  parse_and_report() {
-    local output="$1"
+  # Parse JSON output from llama-bench
+  TPS=""
+  PROMPT_TPS=""
+  AVG_LATENCY=""
 
-    # Total inference tokens per second (the key metric)
-    local tps
-    tps=$(echo "$output" | grep -oP 'benchmark \(inference\):\s*[\d.]+\s*tokens per second' | grep -oP '[\d.]+' | head -1 || echo "")
+  # Try jq first, fall back to grep
+  if command -v jq >/dev/null 2>&1; then
+    TPS=$(echo "$BENCH_JSON_RAW" | jq -r '.result.eval.avg // empty' 2>/dev/null || true)
+    PROMPT_TPS=$(echo "$BENCH_JSON_RAW" | jq -r '.result.prompt_eval.avg // empty' 2>/dev/null || true)
+    AVG_LATENCY=$(echo "$BENCH_JSON_RAW" | jq -r '.result.eval.latency_avg_ms // empty' 2>/dev/null || true)
+  else
+    # Fallback: parse with grep/sed
+    TPS=$(echo "$BENCH_JSON_RAW" | grep -oP '"eval".*"avg"\s*:\s*\K[\d.]+' | head -1 || true)
+    PROMPT_TPS=$(echo "$BENCH_JSON_RAW" | grep -oP '"prompt_eval".*"avg"\s*:\s*\K[\d.]+' | head -1 || true)
+  fi
 
-    if [[ -n "$tps" ]]; then
-      echo "  ██████  INFERENCE THROUGHPUT: ${tps} tokens/sec"
-    fi
-
-    # Prompt eval time
-    local prompt_ms
-    prompt_ms=$(echo "$output" | grep 'prompt eval time' | tail -1 | grep -oP '[\d.]+\s*ms' || echo "")
-    if [[ -n "$prompt_ms" ]]; then
-      echo "  Prompt eval: $prompt_ms"
-    fi
-
-    # Eval time
-    local eval_ms
-    eval_ms=$(echo "$output" | grep 'eval time' | tail -1 | grep -oP '[\d.]+\s*ms' || echo "")
-    if [[ -n "$eval_ms" ]]; then
-      echo "  Decode:      $eval_ms"
-    fi
-
-    # Total time
-    local total_s
-    total_s=$(echo "$output" | grep 'total time' | tail -1 | grep -oP '[\d.]+\s*s' || echo "")
-    if [[ -n "$total_s" ]]; then
-      echo "  Total:       $total_s"
-    fi
-  }
-
-  parse_and_report "$OUTPUT"
+  echo "  ██████  INFERENCE THROUGHPUT: ${TPS:-N/A} tokens/sec"
+  [[ -n "$PROMPT_TPS" ]] && echo "  Prompt eval:     ${PROMPT_TPS} tokens/sec"
+  [[ -n "$AVG_LATENCY" ]] && echo "  Gen latency:     ${AVG_LATENCY} ms avg"
 
   if [[ "$OUTPUT_JSON" == "1" ]]; then
     echo ""
@@ -119,8 +88,8 @@ if [[ -n "${MODEL_DIR:-}" ]]; then
     echo "    \"gpu_layers\": $N_GPU_LAYERS"
     echo "  },"
     echo "  \"results\": {"
-    if [[ -n "$tps" ]]; then
-      echo "    \"inference_tps\": $tps"
+    if [[ -n "$TPS" ]]; then
+      echo "    \"inference_tps\": $TPS"
     fi
     echo "  }"
     echo "}"

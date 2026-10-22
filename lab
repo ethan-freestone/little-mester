@@ -41,18 +41,18 @@ dc() {
     networks="[internal]"
   fi
 
-  sudo env "WORKSPACE=${WORKSPACE:-$LAB_DIR}" \
-             "LAB_UID=$LAB_UID" \
-             "LAB_GID=$LAB_GID" \
-             "MOUNT_MODE=$MOUNT_MODE" \
-             "LITTLE_MESTER_WORKFLOW=${WORKFLOW:-default}" \
-             "LITTLE_MESTER_VERBOSE=$VERBOSE" \
-             "LITTLE_MESTER_EGRESS=${EGRESS}" \
-             "NETWORKS=${networks}" \
-             "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME" \
-             "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL" \
-             "GIT_COMMITTER_NAME=$GIT_COMMITTER_NAME" \
-             "GIT_COMMITTER_EMAIL=$GIT_COMMITTER_EMAIL" \
+  env "WORKSPACE=${WORKSPACE:-$LAB_DIR}" \
+        "LAB_UID=$LAB_UID" \
+        "LAB_GID=$LAB_GID" \
+        "MOUNT_MODE=$MOUNT_MODE" \
+        "LITTLE_MESTER_WORKFLOW=${WORKFLOW:-default}" \
+        "LITTLE_MESTER_VERBOSE=$VERBOSE" \
+        "LITTLE_MESTER_EGRESS=${EGRESS}" \
+        "NETWORKS=${networks}" \
+        "GIT_AUTHOR_NAME=$GIT_AUTHOR_NAME" \
+        "GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL" \
+        "GIT_COMMITTER_NAME=$GIT_COMMITTER_NAME" \
+        "GIT_COMMITTER_EMAIL=$GIT_COMMITTER_EMAIL" \
       docker compose -f "$LAB_DIR/compose.yaml" --project-directory "$LAB_DIR" "$@"
 }
 
@@ -224,7 +224,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       shift
       # Regenerate opencode.json from models.txt before building the image
       ( cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/scripts" && ./regen-configs ) 2>&1
-      dc build "$@" agent metrics
+      if [[ "$NO_CACHE" -eq 1 ]]; then
+        dc build --no-cache "$@" agent metrics
+      else
+        dc build "$@" agent metrics
+      fi
       ;;
     pull)
       ( cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/scripts" && ./regen-configs ) 2>&1
@@ -299,8 +303,12 @@ HELPTEXT
 
       if [[ "$MODE" == "native" ]]; then
         # ── Native mode: build bench service (with GPU + model volume) ──────
-        echo ">> Building bench image for native mode (cached)..."
-        dc build --profile bench bench
+        echo ">> Building bench image for native mode${NO_CACHE:+ (no cache)}..."
+        if [[ "$NO_CACHE" -eq 1 ]]; then
+          dc --profile bench build --no-cache bench
+        else
+          dc --profile bench build bench
+        fi
 
         # Set native params from CLI args or fall back to compose defaults
         local_env=""
@@ -316,8 +324,12 @@ HELPTEXT
         env $local_env dc run --rm bench
       else
         # ── HTTP mode: lightweight container, no GPU ───────────────────────
-        echo ">> Building bench image (cached)..."
-        dc build bench
+        echo ">> Building bench image (cached)${NO_CACHE:+ (no cache)}..."
+        if [[ "$NO_CACHE" -eq 1 ]]; then
+          dc build --no-cache bench
+        else
+          dc build bench
+        fi
 
         # Wait for llamacpp to be healthy
         echo ">> Waiting for llamacpp server..."
@@ -403,6 +415,7 @@ HELPTEXT
       #   ./lab tune --full                    Sweep all knobs
       shift
       TUNE_JSON=0
+      TUNE_ANALYSE=0
       TUNE_THREADS="8,10,12"
       TUNE_UB="1024,2048,4096"
       TUNE_MOE=""
@@ -496,8 +509,15 @@ HELPTEXT
       echo "============================================================"
       echo ""
 
-      echo ">> Building bench image..."
-      dc build bench
+      echo ">> Building bench image${NO_CACHE:+ (no cache)}..."
+      if [[ "$NO_CACHE" -eq 1 ]]; then
+        dc build --no-cache bench
+      else
+        dc build bench
+      fi
+
+      echo ">> Stopping llamacpp to free VRAM for sweep..."
+      dc stop llamacpp 2>/dev/null || true
 
       # Track results for summary
       declare -a RESULTS=()
@@ -511,28 +531,16 @@ HELPTEXT
         for ub in "${SW_UB[@]}"; do
           for m in "${SW_MOE[@]}"; do
             for ctx in "${SW_CTX[@]}"; do
-              ((COUNT++))
+              COUNT=$((COUNT + 1))
               echo "--- [$COUNT/$TOTAL] t=$t  ub=$ub  moe=$m  ctx=$ctx ---"
 
-              # Restart llamacpp with this config
-              dc restart llamacpp 2>/dev/null || dc up -d llamacpp 2>/dev/null
-
-              # Wait for health
-              for w in $(seq 1 30); do
-                if dc exec llamacpp curl -sf -m 3 http://127.0.0.1:11434/health >/dev/null 2>&1; then
-                  break
-                fi
-                [[ $w -eq 30 ]] && { echo "  SKIP: server not healthy" >&2; continue 4; }
-                sleep 1
-              done
-
-              # Run native benchmark
+              # Run native benchmark (llamacpp is already stopped, no VRAM clash)
               OUTPUT=$(MODEL_DIR=/models BENCH_JSON=0 BENCH_N=3 \
                        THREADS=$t MICRO_BATCH=$ub NCPU_MOE=$m CONTEXT=$ctx \
                        dc run --rm bench 2>&1) || true
 
               # Extract TPS from output
-              TPS=$(echo "$OUTPUT" | grep -oP 'benchmark \(inference\):\s*\K[\d.]+' | head -1 || echo "")
+              TPS=$(echo "$OUTPUT" | grep -oP '\b\d+\.\d+\s*tokens/?\s*(per\s+)?sec' | grep -oP '[\d.]+' | head -1 || echo "")
               [[ -z "$TPS" ]] && TPS="N/A"
 
               echo "  -> ${TPS} t/s"
@@ -541,6 +549,9 @@ HELPTEXT
           done
         done
       done
+
+      echo ">> Restarting llamacpp..."
+      dc up -d llamacpp
 
       echo ""
       echo "============================================================"
