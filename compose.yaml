@@ -198,19 +198,19 @@ services:
       # HTTP mode (default)
       BENCH_HOST: "llamacpp"
       BENCH_PORT: "11434"
-      BENCH_N: "5"
-      BENCH_JSON: "0"
+      BENCH_N: "${BENCH_N:-5}"
+      BENCH_JSON: "${BENCH_JSON:-0}"
       # Native mode overrides (only used when MODEL_DIR is set)
-      MODEL_DIR: ""           # set to /models to enable native mode
+      # MODEL_DIR: ""           # native mode (bench container mounts volume)
       MODEL_FILE: "/models/qwen3.6-35b-a3b-q4_k_m.gguf"
-      NGPU_LAYERS: "99"
-      NCPU_MOE: "32"
-      THREADS: "8"
-      MICRO_BATCH: "2048"
-      CONTEXT: "65536"
-      K_TYPE: "q8_0"
-      V_TYPE: "q8_0"
-      N_PROMPTS: "4"
+      NGPU_LAYERS: "${NGPU_LAYERS:-99}"
+      NCPU_MOE: "${NCPU_MOE:-32}"
+      THREADS: "${THREADS:-8}"
+      MICRO_BATCH: "${MICRO_BATCH:-2048}"
+      CONTEXT: "${CONTEXT:-65536}"
+      K_TYPE: "${K_TYPE:-q8_0}"
+      V_TYPE: "${V_TYPE:-q8_0}"
+      N_PROMPTS: "${N_PROMPTS:-4}"
 
 networks:
   internal:

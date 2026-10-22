@@ -239,3 +239,50 @@ Document the failure and adopt a three-mode strategy:
 | Container | Strong | No | None | None |
 | Sysbox | Stronger | Yes | 15 min | Minimal |
 | Incus VM | Strongest | Yes | 45-60 min | Patch workflow |
+
+---
+
+## DECISION-012: `./lab` subcommand delegation to scripts in `bench/`
+
+**Date**: 2026-10-22
+**Status**: ACCEPTED, IMPLEMENTED
+
+### Context
+`./lab` had grown to 500+ lines with two deeply nested subcommand handlers (`tune` and `ai-analyze`) each containing 200–500 lines of logic inline. This made the script:
+- Hard to read and reason about (deep nesting, multiple layers of indentation)
+- Hard to test (every subcommand requires the full `./lab` environment)
+- Hard to extend (adding a new subcommand means editing the monolith)
+- A single point of failure (any syntax error in one handler can break all commands)
+
+The `tune` handler was the worst offender (~550 lines inline), duplicating logic already present in `bench-native.sh` and re-implementing docker compose orchestration.
+
+### Decision
+- Each `./lab` subcommand that has substantial logic (more than a few lines of setup) MUST delegate to a standalone script via `exec`.
+- The `./lab` file acts as a thin router: flag parsing, environment setup, then `exec env "$VAR=val" "$LAB_DIR/path/to/script.sh" "$@"`.
+- Standalone scripts live under `bench/` (for benchmark/tuning) or an appropriate subdirectory.
+- `exec` replaces the subshell — the script inherits the PID, so signals (SIGINT/SIGTERM) propagate correctly.
+- `VERBOSE` is forwarded via env so both `lab` and the delegated script share verbosity control.
+
+### Implementation
+- `lab` tune → `exec env VERBOSE="$VERBOSE" "$LAB_DIR/bench/tune.sh" "$@"`
+- `lab` ai-analyze → `exec env VERBOSE="$VERBOSE" "$LAB_DIR/bench/ai-analyze.sh" "$@"`
+- Removed ~550 lines of inline handlers from `lab`
+- `bench/tune.sh` — standalone llama-bench parameter sweep (170 lines)
+- `bench/ai-analyse.sh` — standalone AI analysis via llamacpp container (142 lines)
+
+### Benefits
+- `./lab` shrank from ~560 lines to ~505 lines (and still has more subcommands to extract)
+- Each subcommand script is independently testable, readable, and maintainable
+- New subcommands can be added without touching the monolith
+- Errors in one handler can't break unrelated commands
+
+### Alternatives Considered
+- Subdirectory per subcommand (e.g., `lab/tune/`, `lab/bench/`) — rejected as over-engineering for the current number of scripts
+- Rewrite `./lab` in a different language — rejected; bash is sufficient and consistent with the rest of the stack
+- Keep inline but extract helper functions — rejected; functions still live in the same file, same problems
+
+### Future
+- Extract `bench` subcommand handler from `./lab` into a script (current `bench` handler is ~60 lines)
+- Extract `exec`, `shell`, and the agent launcher into a script
+- Consider a `scripts/` directory for general-purpose automation tools
+- Set a hard limit: no subcommand handler in `./lab` should exceed 50 lines
