@@ -1,6 +1,6 @@
 # TICKET-017: `./lab tune` fails — `WORKSPACE` not exported in `bench-native.sh`, model extraction broken, no model cache
 
-**Status**: IMPLEMENTED
+**Status**: RESOLVED
 **Priority**: HIGH
 **Date**: 2026-10-22
 

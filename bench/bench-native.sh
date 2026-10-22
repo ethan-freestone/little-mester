@@ -279,10 +279,10 @@ vlog2 "  Size: $(du -h "$MODEL_FILE" | cut -f1)"
 vlog2 "  Keep container mode: $( [[ $KEEP_CONTAINER -eq 1 ]] && echo "YES" || echo "NO" )"
 vlog2 "  Container started by this script: $CONTAINER_STARTED"
 
-# ── Extract llama-bench from Docker image (idempotent) ───────────────────────
+# ── Extract llama-bench + required .so files from Docker image (idempotent) ─────
 # Check if cached llama-bench exists AND is executable AND has reasonable size
 if [[ ! -f "$LLAMA_BENCH" ]] || [[ ! -x "$LLAMA_BENCH" ]] || [[ ! -s "$LLAMA_BENCH" ]]; then
-  echo "  Extracting llama-bench..."
+  echo "  Extracting llama-bench and shared libraries..."
   # Try multiple image tags that might contain llama-bench
   BENCH_IMAGES=(
     "ghcr.io/ggml-org/llama.cpp:full-cuda"
@@ -292,19 +292,29 @@ if [[ ! -f "$LLAMA_BENCH" ]] || [[ ! -x "$LLAMA_BENCH" ]] || [[ ! -s "$LLAMA_BEN
   EXTRACTED=0
   for img in "${BENCH_IMAGES[@]}"; do
     vlog "Trying image: $img"
-    TEMP_BENCH=$(mktemp)
-    # Override entrypoint to use sh, then cat the binary
-    if docker run --rm --entrypoint sh "$img" -c 'cat /usr/local/bin/llama-bench 2>/dev/null || cat /usr/bin/llama-bench 2>/dev/null || find / -name llama-bench -exec cat {} \; 2>/dev/null' > "$TEMP_BENCH" 2>&1; then
-      if [[ -s "$TEMP_BENCH" ]] && file "$TEMP_BENCH" | grep -q "executable"; then
-        mv "$TEMP_BENCH" "$LLAMA_BENCH"
+    TEMP_DIR=$(mktemp -d)
+    # Extract binary
+    if docker run --rm --entrypoint sh "$img" -c 'cat /app/llama-bench 2>/dev/null || cat /usr/local/bin/llama-bench 2>/dev/null || cat /usr/bin/llama-bench 2>/dev/null || find / -name llama-bench -exec cat {} \; 2>/dev/null' > "$TEMP_DIR/llama-bench" 2>&1; then
+      if [[ -s "$TEMP_DIR/llama-bench" ]] && file "$TEMP_DIR/llama-bench" | grep -q "executable"; then
+        # Extract ALL llama shared libraries from /app/
+        vlog "  Extracting shared libraries..."
+        for lib in libllama.so libllama-bench-impl.so libllama-batched-bench-impl.so libllama-cli-impl.so libllama-common.so libllama-completion-impl.so libllama-fit-params-impl.so libllama-perplexity-impl.so libllama-quantize-impl.so libllama-server-impl.so; do
+          docker run --rm --entrypoint sh "$img" -c "cat /app/$lib" > "$TEMP_DIR/$lib" 2>&1 || true
+        done
+        # Copy all to cache dir
+        mv "$TEMP_DIR/llama-bench" "$LLAMA_BENCH"
         chmod +x "$LLAMA_BENCH"
-        echo "  llama-bench extracted from $img → $LLAMA_BENCH"
+        for so in "$TEMP_DIR"/*.so; do
+          [[ -f "$so" && -s "$so" ]] && cp "$so" "$(dirname "$LLAMA_BENCH")/"
+        done
+        echo "  llama-bench + libraries extracted from $img"
         vlog "  llama-bench binary size: $(du -h "$LLAMA_BENCH" | cut -f1)"
         EXTRACTED=1
+        rm -rf "$TEMP_DIR"
         break
       fi
     fi
-    rm -f "$TEMP_BENCH"
+    rm -rf "$TEMP_DIR"
   done
   if [[ $EXTRACTED -eq 0 ]]; then
     echo "ERROR: Could not extract llama-bench from any image" >&2
@@ -335,7 +345,8 @@ vlog "Running llama-bench with config:"
 vlog2 "  Command: $LLAMA_BENCH -m $MODEL_FILE -t $THREADS --n-gpu-layers $NGPU_LAYERS --n-cpu-moe $NCPU_MOE --ctx-size $CONTEXT --cache-type-k $K_TYPE --cache-type-v $V_TYPE -ub $MICRO_BATCH --n-prompt $N_PROMPTS --repetitions $N_REPEATS --json"
 vlog2 "  (llama-bench will take ~1-3 minutes per run)"
 vlog "Executing llama-bench (this may take a while)..."
-LLAMA_BENCH_OUTPUT=$("$LLAMA_BENCH" \
+BENCH_DIR=$(dirname "$LLAMA_BENCH")
+LLAMA_BENCH_OUTPUT=$(LD_LIBRARY_PATH="$BENCH_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$LLAMA_BENCH" \
   -m "$MODEL_FILE" \
   -t "$THREADS" \
   --n-gpu-layers "$NGPU_LAYERS" \

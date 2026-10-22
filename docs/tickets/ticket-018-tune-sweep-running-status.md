@@ -1,6 +1,6 @@
 # TICKET-018: `./lab tune --verbose --analyse` — tuning sweep execution and documentation
 
-**Status**: FIX APPLIED v2 — awaiting user retest
+**Status**: RESOLVED
 **Priority**: HIGH
 **Date**: 2026-10-22
 
@@ -161,7 +161,7 @@ Once the sweep completes and the best config is identified:
 ## Related Tickets
 
 - **TICKET-016**: Fixed `WORKSPACE` env var missing in `bench-native.sh` — RESOLVED
-- **TICKET-017**: Fixed model cache pre-population and model extraction — IMPLEMENTED
+- **TICKET-017**: Fixed model cache pre-population and model extraction — RESOLVED
 - **TICKET-008**: Performance tuning — initial decisions about MoE offload
 
 ---

@@ -22,3 +22,5 @@ __pycache__/
 # Bench artifacts (large model files, extracted binaries)
 .bench-models/
 .llama-bench
+# Tune sweep results
+.tune-results/
