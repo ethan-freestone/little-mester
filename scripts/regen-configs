@@ -188,7 +188,7 @@ def update_compose(lab_dir, ctx_value, models_by_backend):
         stripped = line.lstrip()
         # Update any OLLAMA_CONTEXT_LENGTH or LLAMA_CPP_CONTEXT_LENGTH
         if stripped.startswith("OLLAMA_CONTEXT_LENGTH") or stripped.startswith("LLAMA_CPP_CONTEXT_LENGTH"):
-            new_line = re.sub(r':\s*\d+', f': "{ctx_value}"', line)
+            new_line = re.sub(r':\s*"?[\d]+"?', f': "{ctx_value}"', line)
             new_lines.append(new_line)
             updated = True
         # Update MODEL_FILE for llama.cpp

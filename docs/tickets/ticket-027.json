@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 27,
+  "area": "infra",
+  "type": "bug",
+  "status": "resolved",
+  "title": "Fix WORKSPACE env var missing in bench-native.sh",
+  "objective": "Fix bench-native.sh failing when called directly because it invokes docker compose without the WORKSPACE environment variable set. Added WORKSPACE=${WORKSPACE:-$LAB_DIR} after LAB_DIR assignment so all docker compose calls have the variable available, matching the dc() wrapper pattern used by ./lab.",
+  "created_at": "2026-10-22T00:00:00.000Z",
+  "updated_at": "2026-10-22T00:00:00.000Z"
+}

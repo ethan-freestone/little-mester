@@ -1,0 +1,39 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 12,
+  "area": "general",
+  "type": "feature",
+  "status": "draft",
+  "title": "MCP Server tools + Opencode config integration + deprecation of legacy scripts",
+  "objective": "Wire all ticket-engine methods into a runnable MCP server with clear tool descriptions, configure opencode to load it, and deprecate the legacy shell scripts. The end state: every ticket operation (create, update, transition, link, query) goes through the MCP server — manual hand-editing of ticket JSON is transitional only and must stop once the MCP path is live and tested.",
+  "created_at": "2026-10-20T09:09:49.607Z",
+  "updated_at": "2026-10-21T00:00:00Z",
+  "subtickets": [
+    {
+      "id": 1,
+      "title": "Create MCP server skeleton (mcp-server.ts) with stdio transport",
+      "objective": "Register all tool handlers and implement the stdio protocol framing per the MCP spec (JSON-RPC over stdout/stderr)."
+    },
+    {
+      "id": 2,
+      "title": "Register all ticket-engine endpoints as MCP tools (create/update/transition/link/search)",
+      "objective": "Expose the full engine API — including the typed-link and subticket operations from tickets 017/018 — with natural-language descriptions the agent can reason about."
+    },
+    {
+      "id": 3,
+      "title": "Add mcpServers config to agent/opencode/opencode.json and prove it loads in v2",
+      "objective": "Wire the MCP server into the generated opencode config (via scripts/regen-configs, not by hand) and verify the tools appear in a live session."
+    },
+    {
+      "id": 4,
+      "title": "Deprecate legacy scripts (ticket-new, ticket-lifecycle, validate-tickets): warn and redirect",
+      "objective": "Scripts stay functional but emit a deprecation warning pointing at the MCP server as the recommended (eventually required) path. No new workflow docs should instruct users to create tickets manually."
+    },
+    {
+      "id": 5,
+      "title": "Enforce MCP-only ticket creation once the MCP path is tested",
+      "objective": "Add CI/validator check (or remove manual-create instructions) so that new tickets are created through the engine/MCP. This is the final gate that fulfils the 'all ticket creation MUST go through the MCP server' rule."
+    }
+  ],
+  "notes": "Requirement recorded explicitly by the user (2026-10-21): 'all ticket creation MUST go through the MCP server internally and NOT be handled manually'. Until subtask 4/5 land, manual JSON creation (like tickets 020-023) is transitional only. The MD version of this ticket is docs/tickets/ticket-012-mcp-server-opencode-integration.md."
+}

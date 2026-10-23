@@ -1,0 +1,46 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 23,
+  "area": "infra",
+  "type": "infra",
+  "status": "draft",
+  "title": "Unblock test execution: bats-core in agent image + Jest engine suite on host",
+  "objective": "DECISIONS.md section C.1 states testing is NOT happening because bats-core is not in the agent image and no Jest engine test suite exists. After merge, add bats-core to agent/Dockerfile (from source if distro package missing), confirm the verify-sandbox.sh and tests/lab.bats run inside the container, and create a minimal Jest setup for ticket-engine-mcp tests so `./run-tests.sh` and host-side validation both pass green.",
+  "created_at": "2026-10-21T0:00:00Z",
+  "updated_at": "2026-10-21T0:00:00Z",
+  "links": [
+    {
+      "type": "blocks",
+      "number": 2,
+      "bidirectional": true
+    },
+    {
+      "type": "blocks",
+      "number": 14,
+      "bidirectional": true
+    }
+  ],
+  "subtickets": [
+    {
+      "id": 1,
+      "title": "Add bats-core to agent/Dockerfile build layers",
+      "objective": "Check if python:3.12-slim has bats via apt (likely not — it only has version 1.10 which is ancient). Use the git-clone-from-source method documented on line 8-12 of Dockerfile or add a dedicated stage. The current file already has bats-core install logic but it was conditional (the || fallback). Make it unconditional and verify the build completes."
+    },
+    {
+      "id": 2,
+      "title": "Run tests/lab.bats inside agent container post-build",
+      "objective": "Test that `./run-tests.sh workspaces/demo` works after merge — this runs bats inside the sandbox via `./lab exec bats /workspace/tests/`. Verify all existing lab launcher assertions pass (workspace path validation, network mode checks, security constraints)."
+    },
+    {
+      "id": 3,
+      "title": "Create Jest setup for ticket-engine-mcp",
+      "objective": "ticket-engine-mcp has jest.config.js and tests/engine.test.ts already created on the branch. Ensure they pass by checking/adding necessary devDependencies (jest-ts, @types/node). This is a one-time host-only setup — does not need to run in agent container. Goal: `npx jest` succeeds in ticket-engine-mcp directory."
+    },
+    {
+      "id": 4,
+      "title": "Update README.md Testing section (M1-C merge point) to include bats verification steps",
+      "objective": "After merging the README sections from both branches, add a 'Testing infrastructure' subsection that clearly documents: (a) bats is now in the agent image, (b) how to run `./run-tests.sh`, (c) how to run Jest host-side. Move section C.1 'Testing is NOT happening right now' from DECISIONS.md to reflect this update."
+    }
+  ],
+  "notes": "This is the highest-priority infra work because without bats-core in the agent image, we cannot validate ANY future ticket's implementation. Blocker for tickets: 002 (testing framework), 014 (testing strategy). The Dockerfile merge conflict on main vs branch must be resolved first — accept main's explicit plugin COPY lines, then add bats-core verification to this ticket."
+}

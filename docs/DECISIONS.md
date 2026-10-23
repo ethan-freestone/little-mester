@@ -152,7 +152,7 @@ Each status has three things defined: its **meaning**, what **transition gates**
 draft ──► active ──► resolved ──► archived
   ▲         ╲       ↗             ^
   └────────━━┘────/              │
-                                any status ──/
+                               any status ──/
 ```
 
 **Key design decision:** Status is a simple state machine ONLY. No dependency chains or business logic in the transitions themselves (dependency checks happen BEFORE entering `active`, not as part of the transition). The lifecycle path is intentionally flat: forward, backward to draft once, and terminal at archived. Anything more complex belongs in epics + dependencies, not status itself.
@@ -289,6 +289,18 @@ Sections archived when: **(1)** >90 days old without new context, **(2)** all as
 - Manual sort parameters in search queries
 
 The ticket tree visualization (future-ticket system, ticket-015 stretch goal) renders structure via dependencies and epic parent-child relationships, NOT via ticket numbers.
+
+---
+
+## I. Sub-system decision logs
+
+| Subsystem | Location | Scope | Per-ticket plans point to... |
+|-----------|----------|-------|------------------------------|
+| **How to use** (this file) | `docs/DECISIONS.md` | What's true NOW about little-mester as a product | All decisions in this file are facts — no designs |
+| **ticket-engine subsystem** | `docs/tickets/engine-plan.md` + docs/tickets/architecture/DECISIONS.md | Engineering designs scoped to ticket-engine v1 build | The engine tickets (008, 007, 014, etc.) |
+| **future-ticket system** | (not yet) | When we redesign the ticketing system entirely (rebuild from scratch) | Separate — not yet needed |
+
+Per-ticket decisions go in each ticket file itself. When a decision spans multiple tickets or subsystem, write it in the appropriate sub-system file above.
 
 ---
 
@@ -449,5 +461,4 @@ reports all 10 nested-`<text>` sites and all 5 `fontWeight` sites.
 dir, so a "fixed" copy outside `/etc/opencode/plugins` does *not* replace the baked-in one — the old
 plugin still loads and still crashes. Point `OPENCODE_CONFIG` at a private config directory whose
 `plugins` array lists only the copy under test.
-
 

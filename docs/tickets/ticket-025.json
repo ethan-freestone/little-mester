@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 25,
+  "area": "infra",
+  "type": "feature",
+  "status": "resolved",
+  "title": "Dual-backend support: Ollama AND llama.cpp simultaneously",
+  "objective": "Support both Ollama and llama.cpp simultaneously with CLI model switching between any model on either backend. models.txt uses section headers [ollama] and [llamacpp]; scripts/regen-configs generates dual-provider opencode.json; compose.yaml has both ollama and llamacpp services; lab script runs both pull services; OpenCode /model command works across both providers.",
+  "created_at": "2026-10-21T00:00:00.000Z",
+  "updated_at": "2026-10-21T00:00:00.000Z"
+}
