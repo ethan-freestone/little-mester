@@ -5,7 +5,7 @@
   "type": "feature",
   "status": "draft",
   "title": "Board views, dashboards, statistics + export formatting",
-  "objective": "",
+  "objective": "Add aggregate queries and visualization-ready outputs to the engine — board views, dashboards, statistics, and export formatting (JSON/CSV/markdown-table).",
   "created_at": "2026-10-20T09:09:49.607Z",
   "updated_at": "2026-10-20T09:09:49.607Z"
 }

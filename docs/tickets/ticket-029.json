@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 29,
+  "area": "infra",
+  "type": "improvement",
+  "status": "active",
+  "title": "Extract remaining lab handlers into subscripts",
+  "objective": "Extract bench handler into bench/bench-runner.sh and restart-llama handler into scripts/restart-llama.sh, update ./lab to use exec delegation for both with VERBOSE and subcommand-specific env var forwarding, and update help text. Depends on ticket-028 (tech debt audit).",
+  "created_at": "2026-10-22T00:00:00.000Z",
+  "updated_at": "2026-10-22T00:00:00.000Z"
+}

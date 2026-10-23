@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 28,
+  "area": "infra",
+  "type": "improvement",
+  "status": "active",
+  "title": "Tech debt: lab is too big and hard to maintain",
+  "objective": "Reduce ./lab file size and complexity by extracting all remaining inline subcommand handlers into standalone scripts, enforcing a maximum of 50 lines per handler in the main file. Target: ./lab under 400 lines, no single handler over 50 lines.",
+  "created_at": "2026-10-22T00:00:00.000Z",
+  "updated_at": "2026-10-22T00:00:00.000Z"
+}
