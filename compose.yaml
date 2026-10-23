@@ -12,7 +12,7 @@ services:
       OLLAMA_FLASH_ATTENTION: "1"
       OLLAMA_KV_CACHE_TYPE: q8_0
       OLLAMA_NUM_PARALLEL: "1"
-      OLLAMA_CONTEXT_LENGTH: "65536"
+      OLLAMA_CONTEXT_LENGTH: "98304"
       OLLAMA_KEEP_ALIVE: "-1"        # keep the model loaded; reloading is slow
       OLLAMA_MAX_LOADED_MODELS: "1"  # only one model resident at a time
     deploy:
@@ -39,7 +39,7 @@ services:
     # Default falls back to first llamacpp model in models.txt
     environment:
       MODEL_FILE: "/models/qwen3.6-35b-a3b-q4_k_m.gguf"
-      LLAMA_CPP_CONTEXT_LENGTH: "65536"
+      LLAMA_CPP_CONTEXT_LENGTH: "98304"
     command: >
       -m ${MODEL_FILE:-/models/qwen3.6-35b-a3b-q4_k_m.gguf}
       --host 0.0.0.0 --port 11434 --alias llamacpp-main
@@ -208,7 +208,7 @@ services:
       NCPU_MOE: "${NCPU_MOE:-32}"
       THREADS: "${THREADS:-8}"
       MICRO_BATCH: "${MICRO_BATCH:-2048}"
-      CONTEXT: "${CONTEXT:-65536}"
+      CONTEXT: "${CONTEXT:-98304}"
       K_TYPE: "${K_TYPE:-q8_0}"
       V_TYPE: "${V_TYPE:-q8_0}"
       N_PROMPTS: "${N_PROMPTS:-4}"
