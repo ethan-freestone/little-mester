@@ -22,6 +22,25 @@ export interface Ticket {
     created_at?: string;
     updated_at?: string;
     priority?: 'trivial' | 'minor' | 'major' | 'critical';
+    // Model tracking fields (per DECISIONS.md E)
+    suggested_model?: string;
+    estimated_models?: { model: string; subtask_hint: string }[];
+    models_used?: { model: string; thinking_time_seconds: number; idle_time_seconds: number; cost_estimate_usd: number; context_window_used_pct: number }[];
+    // Other extended fields
+    estimated_model?: string;
+    estimate?: number;
+    labels?: string[];
+    links?: { target: number; type: string }[];
+    subtickets?: { id: number; title: string; status: string }[];
+    notes?: string;
+    comments?: { timestamp: string; author: string; body: string }[];
+    attachments?: string[];
+    spans?: { start: string; end: string };
+    assigned_to?: string;
+    parent?: number;
+    is_epic?: boolean;
+    blocked_by?: number[];
+    dependencies?: number[];
     [key: string]: unknown;
 }
 
@@ -133,7 +152,24 @@ export function createTicketEngine({
         indexPath,
 
         create(
-            params: { area?: string; type?: string; title: string; objective?: string }
+            params: {
+                area?: string;
+                type?: string;
+                title: string;
+                objective?: string;
+                // Model tracking fields
+                suggested_model?: string;
+                estimated_models?: { model: string; subtask_hint: string }[];
+                estimated_model?: string;
+                // Other extended fields
+                estimate?: number;
+                priority?: 'trivial' | 'minor' | 'major' | 'critical';
+                labels?: string[];
+                parent?: number;
+                is_epic?: boolean;
+                assigned_to?: string;
+                spans?: { start: string; end: string };
+            }
         ): Ticket {
             const area       = params.area          || '';
             const typeRaw     = params.type;
@@ -159,6 +195,19 @@ export function createTicketEngine({
                 objective: params.objective || '',
                 created_at: now,
                 updated_at: now,
+                // Model tracking fields
+                suggested_model: params.suggested_model,
+                estimated_models: params.estimated_models,
+                estimated_model: params.estimated_model,
+                // Other extended fields
+                estimate: params.estimate,
+                priority: params.priority,
+                labels: params.labels,
+                parent: params.parent,
+                is_epic: params.is_epic,
+                assigned_to: params.assigned_to,
+                spans: params.spans,
+                models_used: [],
             };
 
             persist(ticket);

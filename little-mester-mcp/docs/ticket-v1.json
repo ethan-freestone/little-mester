@@ -6,7 +6,7 @@
 
   "type": "object",
   "required": ["number", "area", "type", "status", "title", "created_at", "updated_at"],
-  "additionalProperties": false,
+  "additionalProperties": true,
   "properties": {
     "$schema": {
       "type": "string",
@@ -180,6 +180,37 @@
     "assigned_to": {
       "type": ["string", "null"],
       "description": "Who is responsible (user or agent identifier). Free-form — not a lookup against a user directory."
+    },
+    "links": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "required": ["target", "type"],
+        "properties": {
+          "target": { "type": "integer", "description": "Target ticket number" },
+          "type": { "type": "string", "description": "Relationship type (blocks, blocked-by, relates-to, duplicates, etc.)" }
+        },
+        "additionalProperties": false
+      },
+      "description": "Typed relationships to other tickets. Per DECISIONS D.3."
+    },
+    "subtickets": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "status"],
+        "properties": {
+          "id": { "type": "integer" },
+          "title": { "type": "string" },
+          "status": { "type": "string", "enum": ["draft", "active", "resolved", "archived"] }
+        },
+        "additionalProperties": false
+      },
+      "description": "Subticket tree for hierarchical decomposition. Each subticket is a lightweight child entry."
+    },
+    "notes": {
+      "type": ["string", "null"],
+      "description": "Free-form notes on the ticket. Distinct from comments which are timestamped with author."
     }
   },
 

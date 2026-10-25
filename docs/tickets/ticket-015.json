@@ -12,28 +12,33 @@
     {
       "id": 1,
       "title": "Extend Ticket interface in engine.ts with model tracking fields",
-      "objective": "Add `suggested_model?: string`, `estimated_models?: { model: string; subtask_hint: string }[]`, `models_used?: { model: string; thinking_time_seconds: number; idle_time_seconds: number; cost_estimate_usd: number; context_window_used_pct: number }[]` to the Ticket interface. Ensure type enum already has 6 values (verify: spike, feature, bug, improvement, doc, infra)."
+      "objective": "Add `suggested_model?: string`, `estimated_models?: { model: string; subtask_hint: string }[]`, `models_used?: { model: string; thinking_time_seconds: number; idle_time_seconds: number; cost_estimate_usd: number; context_window_used_pct: number }[]` to the Ticket interface. Ensure type enum already has 6 values (verify: spike, feature, bug, improvement, doc, infra).",
+      "status": "done"
     },
     {
       "id": 2,
       "title": "Update create() to accept and persist model tracking fields",
-      "objective": "Allow create() params to include optional `suggested_model` and `estimated_models`. Persist them to ticket JSON. `models_used` starts empty and is auto-populated later by opencode."
+      "objective": "Allow create() params to include optional `suggested_model` and `estimated_models`. Persist them to ticket JSON. `models_used` starts empty and is auto-populated later by opencode.",
+      "status": "done"
     },
     {
       "id": 3,
       "title": "Update update() to allow modifying model tracking fields",
-      "objective": "Allow update() to patch `suggested_model` and `estimated_models`. `models_used` should be append-only (engine doesn't modify it; opencode does at session end)."
+      "objective": "Allow update() to patch `suggested_model` and `estimated_models`. `models_used` should be append-only (engine doesn't modify it; opencode does at session end).",
+      "status": "done"
     },
     {
       "id": 4,
       "title": "Update ticket-v1.json schema with model tracking fields",
-      "objective": "Add the three fields to the JSON Schema with proper types. Ensure additionalProperties allows all documented extended fields (fixes schema mismatch with existing tickets)."
+      "objective": "Add the three fields to the JSON Schema with proper types. Ensure additionalProperties allows all documented extended fields (fixes schema mismatch with existing tickets).",
+      "status": "done"
     },
     {
       "id": 5,
       "title": "Add computeSuggestedModel() utility (for future auto-computation)",
-      "objective": "Add a helper that computes suggested_model from historical models_used[] data across tickets in the same area. Not wired to create() yet — just the utility function for later use."
+      "objective": "Add a helper that computes suggested_model from historical models_used[] data across tickets in the same area. Not wired to create() yet — just the utility function for later use.",
+      "status": "todo"
     }
   ],
-  "notes": "Per DECISIONS.md E: suggested_model = auto-computed recommendation from area history (overridable at creation). estimated_models[] = ticket-specific projection split by subtask. models_used[] = actual measured data auto-populated by opencode at session end. Type enum expansion to 6 values was already done in ticket-008 (engine.ts has all 6). Schema mismatch: ticket-v1.json has additionalProperties:false but existing tickets use priority, labels, links, subtickets, notes, estimate, suggested_model, estimated_models, models_used, comments, attachments, spans, assigned_to, parent, is_epic, blocked_by, dependencies — must update schema to allow these."
+  "notes": "Per DECISIONS.md E: suggested_model = auto-computed recommendation from area history (overridable at creation). estimated_models[] = ticket-specific projection split by subtask. models_used[] = actual measured data auto-populated by opencode at session end. Type enum expansion to 6 values was already done in ticket-008 (engine.ts has all 6). Schema mismatch: ticket-v1.json had additionalProperties:false but existing tickets use priority, labels, links, subtickets, notes, estimate, suggested_model, estimated_models, models_used, comments, attachments, spans, assigned_to, parent, is_epic, blocked_by, dependencies — FIXED: changed to additionalProperties:true and added explicit definitions for links, subtickets, notes. Subtasks 1-4 complete; subtask 5 (computeSuggestedModel utility) remaining."
 }
