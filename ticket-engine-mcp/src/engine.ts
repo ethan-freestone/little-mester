@@ -4,9 +4,10 @@ import { readIndex, writeIndex, reconstructIndex } from './index';
 
 const VALID_TYPES = new Set(['spike', 'feature', 'bug', 'improvement', 'doc', 'infra']);
 const STATUS_TRANSITIONS: Record<string, string[]> = {
-    draft: ['active'],
+    draft: ['active', 'archived'],
     active: ['resolved', 'draft'],
-    resolved: ['draft'],
+    resolved: ['draft', 'archived'],
+    archived: ['draft'],
 };
 
 export interface Ticket {
@@ -20,6 +21,8 @@ export interface Ticket {
     objective?: string;
     created_at?: string;
     updated_at?: string;
+    priority?: 'trivial' | 'minor' | 'major' | 'critical';
+    [key: string]: unknown;
 }
 
 export interface TicketEngine {
@@ -196,7 +199,8 @@ export function createTicketEngine({
             validateData(data);
 
             if (patch.status && patch.status !== data.status) {
-                assertTransition(data.status, patch.status);
+                const newStatus = patch.status as string;
+                assertTransition(data.status, newStatus);
             }
 
             for (const key of Object.keys(patch)) {

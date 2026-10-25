@@ -117,6 +117,33 @@ Most users will set both to the same value. That's intentional: `priority` is th
 
 ---
 
+## C.9 Little Mester MCP — Single Server, Multiple Modules
+
+**Decision:** The product is **Little Mester MCP** — a single MCP server (`@little-mester/mcp`) with the ticket engine as its **first implementation module** (`@little-mester/ticket-engine-mcp`). Future modules (file search, notes, etc.) will register their tools on the **same server process**.
+
+| Aspect | Decision |
+|---|---|
+| **Package name** | `@little-mester/mcp` (the server) |
+| **Module name** | `@little-mester/ticket-engine-mcp` (this package) |
+| **Server name** | `little-mester` (as sent in MCP handshake) |
+| **Tool prefix** | `mester_<module>_<action>` — e.g., `mester_tickets_create`, `mester_tickets_list` |
+| **Module registration** | All modules import the same `McpServer` instance and call `server.registerTool()` |
+
+**Why single server?**
+- Running multiple MCP servers from one opencode session is wasteful (multiple stdio transports, multiple process overhead)
+- Modules share the same transport and connection
+- Tools are namespaced by prefix, so no collision
+- opencode config (`mcpServers` in opencode.json) points to ONE server binary
+
+**Implementation:** The `ticket-engine-mcp` package exports:
+- `createTicketEngine()` — the core engine (usable standalone or via MCP)
+- `registerTicketTools(server)` — registers all `mester_tickets_*` tools on a passed `McpServer` instance
+- `main()` — standalone server entry point (for direct testing / dev)
+
+Future modules follow the same pattern: import the server, register their `mester_<module>_*` tools.
+
+---
+
 ## D. Routing Modes (all three supported)
 
 | Mode | Description | Config key | Override via lab |

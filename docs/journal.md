@@ -47,6 +47,7 @@ Analyzed full project state, identified critical blockers, mapped analysis to pr
 3. **Status transitions**: Add `archived: ['draft']` to STATUS_TRANSITIONS to match DECISIONS D.3
 4. **Board sorting**: Fix to priority (critical→major→minor→trivial) then updated_at desc per DECISIONS D.4/H
 5. **Archived `engine-plan.md`** — redundant with `architecture/DECISIONS.md`; all unique content already captured there
+6. **Little Mester MCP architecture**: Single server (`@little-mester/mcp`) with ticket engine as first module (`@little-mester/ticket-engine-mcp`). Server name: `little-mester`. Tool prefix: `mester_tickets_*`. Future modules register on same server — no multiple MCP servers per session. Documented in `architecture/DECISIONS.md` C.9 and `DECISIONS.md` subsystem table.
 
 ### Next Session Priorities (Tier 1 + Tier 2)
 1. Create `src/cli.ts` stub

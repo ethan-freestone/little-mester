@@ -300,6 +300,8 @@ The ticket tree visualization (future-ticket system, ticket-015 stretch goal) re
 | **ticket-engine subsystem** | `docs/tickets/architecture/DECISIONS.md` | Engineering designs scoped to ticket-engine v1 build | The engine tickets (008, 007, 014, etc.) |
 | **future-ticket system** | (not yet) | When we redesign the ticketing system entirely (rebuild from scratch) | Separate — not yet needed |
 
+**Architecture decision (C.9 in architecture/DECISIONS.md):** Little Mester MCP is a **single MCP server** (`@little-mester/mcp`) with the ticket engine as its **first module** (`@little-mester/ticket-engine-mcp`). All tools use the `mester_tickets_<action>` prefix. Future modules (file search, notes, etc.) register on the same server — no multiple MCP servers per session.
+
 Per-ticket decisions go in each ticket file itself. When a decision spans multiple tickets or subsystem, write it in the appropriate sub-system file above.
 
 ---

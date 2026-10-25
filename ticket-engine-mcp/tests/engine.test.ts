@@ -124,9 +124,17 @@ describe('TicketEngine', () => {
             // active → resolved allowed
             engine.update(1, { status: 'resolved' });
 
-            // But cannot go resolved → archived directly (must go through draft? no)
-            // Actually from the transitions: resolved can only go to draft
-            expect(() => engine.update(1, { status: 'archived' })).toThrow();
+            // resolved → archived IS allowed per DECISIONS.md D.3
+            engine.update(1, { status: 'archived' });
+
+            // archived → draft IS allowed per DECISIONS.md D.3
+            engine.update(1, { status: 'draft' });
+
+            // But draft → archived is allowed (archive from any status)
+            engine.update(1, { status: 'archived' });
+
+            // archived → active should throw (not allowed)
+            expect(() => engine.update(1, { status: 'active' })).toThrow();
         });
     });
 
@@ -212,10 +220,19 @@ describe('TicketEngine', () => {
             engine.update(1, { status: 'draft' });
         });
 
-        it('archived has no outgoing transitions', () => {
+        it('archived can only transition to draft', () => {
             engine.create({ area: 'a', title: 'T1' });
             engine.archive(1);
+
+            // archived → active should throw
             expect(() => engine.update(1, { status: 'active' })).toThrow();
+
+            // archived → resolved should throw
+            expect(() => engine.update(1, { status: 'resolved' })).toThrow();
+
+            // archived → draft IS allowed per DECISIONS.md D.3
+            const reopened = engine.update(1, { status: 'draft' });
+            expect(reopened?.status).toBe('draft');
         });
     });
 
