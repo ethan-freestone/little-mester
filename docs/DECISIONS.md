@@ -8,7 +8,7 @@
 
 Always read both this file and the per-subsystem decision logs before starting work:
 1. This file — constraints about how you use little-mester, what's true NOW
-2. Sub-system files (`docs/tickets/engine-plan.md`, `docs/tickets/architecture/DECISIONS.md`) — engineering designs scoped to each area
+2. Sub-system files (`docs/tickets/architecture/DECISIONS.md`) — engineering designs scoped to each area
 
 ### Meta rule: Document before acting
 **Before doing ANY work** (code, config, tests, scripts, installs, or changes to agent behavior):
@@ -297,7 +297,7 @@ The ticket tree visualization (future-ticket system, ticket-015 stretch goal) re
 | Subsystem | Location | Scope | Per-ticket plans point to... |
 |-----------|----------|-------|------------------------------|
 | **How to use** (this file) | `docs/DECISIONS.md` | What's true NOW about little-mester as a product | All decisions in this file are facts — no designs |
-| **ticket-engine subsystem** | `docs/tickets/engine-plan.md` + docs/tickets/architecture/DECISIONS.md | Engineering designs scoped to ticket-engine v1 build | The engine tickets (008, 007, 014, etc.) |
+| **ticket-engine subsystem** | `docs/tickets/architecture/DECISIONS.md` | Engineering designs scoped to ticket-engine v1 build | The engine tickets (008, 007, 014, etc.) |
 | **future-ticket system** | (not yet) | When we redesign the ticketing system entirely (rebuild from scratch) | Separate — not yet needed |
 
 Per-ticket decisions go in each ticket file itself. When a decision spans multiple tickets or subsystem, write it in the appropriate sub-system file above.

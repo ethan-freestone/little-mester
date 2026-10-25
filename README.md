@@ -301,7 +301,7 @@ Follow [docs/workflows.md](docs/workflows.md) for:
 
 > ⚠️ **Important: Decision logs have different scopes — read BOTH before working:**
 > - **[docs/DECISIONS.md](docs/DECISIONS.md)** → How to **use** little-mester (workflow, --unsafe-recurse, security, testing). Read before ANY session on this repo.
-> - **(engine decisions)** [docs/tickets/engine-plan.md](tickets/engine-plan.md) → engineering designs for building the ticket engine (schema, epics, search, labels, routing). Read before any `ticket-engine-mcp/` change.
+> - **(engine decisions)** [docs/tickets/architecture/DECISIONS.md](tickets/architecture/DECISIONS.md) → engineering designs for building the ticket engine (schema, epics, search, labels, routing). Read before any `ticket-engine-mcp/` change.
 =======
 | The model can't touch files | Ollama/llama.cpp only turn text into text. They're in their own containers with no mounts except their model volumes. |
 | The agent can only touch one folder | The agent container sees exactly one bind mount, `/workspace`, gated by `lab`'s path checks. |

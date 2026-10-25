@@ -17,15 +17,19 @@
 
 ## All tickets referencing this engine-plan
 
-| # | Title | Scope (updated per latest DECISIONS) |
-|---|-------|------|
-| **008** | Fix engine TypeScript compile errors | P0 blocker — 5 syntax fixes in engine.ts, remove stale SQLite dep; also update type enum to 6 values per DECISIONS D.2 |
-| **007** | Generate formal JSON Schema + migration script | P1 — `ticket-v1.json` schema file (uses next_number from index format decision G) |
-| **014** | Testing strategy resolution — get testing running | P0 blocker — bats-core in container, Jest engine tests, run-tests.sh; NO testing happening currently (docs/DECISIONS.md C.1) |
-| **010** | Multi-field search, dependencies, epics as real tickets, enum labels | P2 — dependency graph engine, epic lifecycle, label validation via scope/severity prefixes per DECISIONS D.3, `search()` method; also add models_used tracking + suggested_model + estimated_models fields to extended schema (gap G.2) |
-| **011** | Board views, dashboards, statistics + export formatting | P2 — status counts, resolution rates, aging reports, rank/summary by priority per DECISIONS H decision; use priority as primary sort |
-| **012** | MCP server tools + opencode integration + deprecation of legacy scripts | P3 — all `mesterTickets_*` endpoints (removed git auth tools from scope since deferred to future-ticket system); mcpServers config in opencode.json |
-| **013** | External deployment mode (co-located + dedicated remote) | P4 — git sync with conflict strategies, offline cache; SSH-based auth deferred per DECISIONS C.2 / G.12 |
+| # | Title | Scope (updated per latest DECISIONS) | Status (2026-10-25) |
+|---|-------|------|---------------------|
+| **008** | Fix engine TypeScript compile errors | P0 blocker — 5 syntax fixes in engine.ts, remove stale SQLite dep; also update type enum to 6 values per DECISIONS D.2 | ✅ DONE |
+| **007** | Generate formal JSON Schema + migration script | P1 — `ticket-v1.json` schema file (uses next_number from index format decision G) | ✅ DONE |
+| **014** | Testing strategy resolution — get testing running | P0 blocker — bats-core in container, Jest engine tests, run-tests.sh; NO testing happening currently (docs/DECISIONS.md C.1) | 🔴 NEEDS: MCP server tool tests + migration tests |
+| **015** | Model tracking fields + type enum expansion (6 values) + field semantics lock | P1 — Add `suggested_model`, `estimated_models[]`, `models_used[]` to engine + schema; ensure type enum = 6 values; lock field semantics per DECISIONS D.2/E | 🔴 DRAFT — schema has fields, engine doesn't implement them |
+| **010** | Multi-field search, dependencies, epics as real tickets, enum labels | P2 — dependency graph engine, epic lifecycle, label validation via scope/severity prefixes per DECISIONS D.3, `search()` method; also add models_used tracking + suggested_model + estimated_models fields to extended schema (gap G.2) | 🔴 DRAFT — basic search only; no deps, no label validation |
+| **011** | Board views, dashboards, statistics + export formatting | P2 — status counts, resolution rates, aging reports, rank/summary by priority per DECISIONS H decision; use priority as primary sort | 🟡 PARTIAL — board exists but sorts by number not priority+updated_at |
+| **012** | MCP server tools + opencode integration + deprecation of legacy scripts | P3 — all `mesterTickets_*` endpoints (removed git auth tools from scope since deferred to future-ticket system); mcpServers config in opencode.json | 🔴 DRAFT — server works, no opencode config, no deprecation warnings |
+| **013** | External deployment mode (co-located + dedicated remote) | P4 — git sync with conflict strategies, offline cache; SSH-based auth deferred per DECISIONS C.2 / G.12 | 🔴 DRAFT |
+| **016** | Subticket tree system + cross-area typed links | P2 — First-class subticket hierarchy + typed links (blocks/depends_on/triggers/references/duplicates/spans/supersedes), cycle detection, `_links.json` edge table | 🔴 DRAFT — **TYPO: ~number** |
+| **017** | Typed subticket system — link types, cycle detection, index format, schema changes | P2 — Design all 8 link types with reverse-edge semantics, cycle detection, schema additions, `_index.json` vs `_links.json` decision | 🔴 DRAFT |
+| **018** | Implement subticket system — schema, engine code, migration pass | P2 — Implementation of 017 design; ordered phases with explicit execution dependencies | 🔴 DRAFT |
 
 ## Design decisions for present-engine work
 
@@ -127,3 +131,33 @@ None of this is coded or documented yet. See GAP_AUDIT.md entry G.5 for current 
 ## F. Archive policy for subsystem documents
 
 Sections archived when: **(1)** >90 days old without new context, **(2)** all associated tickets done, **(3)** superseded by later decision. Archives are append-only — never rewritten. Redirect link left in place.
+
+---
+
+## G. Immediate Blockers & This Session's Plan (2026-10-25)
+
+### G.1 Critical fixes (Tier 1 — must fix before anything else)
+| # | Issue | File | Fix |
+|---|-------|------|-----|
+| 1 | Ticket-016 typo: `~number` instead of `number` | `docs/tickets/ticket-016.json` | Change `"~number": 16` → `"number": 16` |
+| 2 | Missing `src/cli.ts` — `npm run dev` fails | `package.json` references it | Create stub `src/cli.ts` |
+| 3 | Board view sorts by number, not priority+updated_at | `src/mcp-server.ts` line 405 | Fix sort to: priority (critical→major→minor→trivial) then updated_at desc |
+| 4 | Archived→draft transition not allowed | `engine.ts` STATUS_TRANSITIONS | Add `archived: ['draft']` per DECISIONS D.3 "archiving from any status is always allowed" implies archived→draft should work |
+
+### G.2 Core engine tickets to close (Tier 2 — this session if time)
+| Ticket | Work | Files |
+|--------|------|-------|
+| **014** | Add MCP server tests (8 tools) | `tests/mcp-server.test.ts` |
+| **012** subtasks 1–3 | Wire opencode.json mcpServers config; add deprecation warnings to `ticket-new`, `ticket-lifecycle`, `validate-tickets` | `scripts/regen-configs`, legacy scripts |
+| **015** | Implement model tracking fields in engine (`suggested_model`, `estimated_models[]`, `models_used[]`) + extend schema | `src/engine.ts`, `docs/ticket-v1.json` |
+
+### G.3 Subticket/Dependency system (Tier 3 — next session)
+| Ticket | Work |
+|--------|------|
+| **017** | Finalize link type enum (8 types), reverse-edge semantics, cycle detection algorithm, `_links.json` format |
+| **018** | Implement Phase 0 (schema), Phase 1 (engine), Phase 2 (link API), Phase 3 (migration) |
+| **010** | Full multi-field search (priority, labels, date ranges), dependency filters, label validation |
+
+### G.4 Schema mismatch to resolve
+- `ticket-v1.json` has `additionalProperties: false` but 8/18 existing tickets use fields it rejects: `links`, `subtickets`, `notes`, `priority`, `labels`, `estimate`, `suggested_model`, `estimated_models`, `models_used`, `comments`, `attachments`, `spans`, `assigned_to`, `parent`, `is_epic`, `blocked_by`, `dependencies`
+- Fix: update schema to allow all documented extended fields (see engine-plan.md E)

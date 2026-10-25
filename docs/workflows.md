@@ -18,7 +18,7 @@ Every major architectural direction gets one entry in **one of two files** depen
 | Scope | File | When to write here |
 |-------|------|-------------------|
 | **How to USE little-mester** (workflow, defaults, guard rails, testing strategy, session handoff) | [docs/DECISIONS.md](../DECISIONS.md) | Whenever a user decision affects how the product is used or improved |
-| **How to BUILD** everything in little-mester | [docs/tickets/engine-plan.md](tickets/engine-plan.md) | Engineering designs for `ticket-engine-mcp/`. For other subsystems: separate scope files when needed. Per-ticket plans go in ticket docs themselves. |
+| **How to BUILD** everything in little-mester | [docs/tickets/architecture/DECISIONS.md](tickets/architecture/DECISIONS.md) | Engineering designs for `ticket-engine-mcp/`. For other subsystems: separate scope files when needed. Per-ticket plans go in ticket docs themselves. |
 
 **If you're unsure which one:** If the answer affects `./lab`, `--unsafe-recurse`, security, testing, or daily workflow → `docs/DECISIONS.md`. If it affects `engine.ts`, `_index.json`, JSON schema, MCP tools, or ticket data model → `docs/tickets/architecture/DECISIONS.md`.
 

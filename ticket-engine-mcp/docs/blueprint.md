@@ -1,4 +1,6 @@
-# ticket-engine-mcp — Implementation Plan & Blueprint
+# Little Mester MCP — Ticketing Module Implementation Plan & Blueprint
+
+> **Note:** This is the ticketing module of the **Little Mester MCP** server. The MCP server is designed as a generic extensible host — the ticketing engine is the first module. Future modules (file search, notes) will coexist.
 
 ## Architecture overview
 
@@ -6,6 +8,18 @@
 - Tickets = `.json` files on disk (always the source of truth)
 - `_index.json` stores metadata for fast cross-workspace queries by area/status/type
 - No SQLite; index is tiny + rebuildable from ticket JSON files
+
+### Server architecture: Little Mester MCP
+
+```
+little-mester (MCP server)
+├── tickets module (THIS — mester_tickets_*)
+│   ├── engine.ts    — core CRUD + index + validate
+│   ├── index.ts     — index management (read/write/scan/reconstruct)
+│   └── mcp-server.ts — MCP tool registrations
+├── files module     (future — mester_files_*)
+└── notes module     (future — mester_notes_*)
+```
 
 ### 3 Storage Routing Modes
 

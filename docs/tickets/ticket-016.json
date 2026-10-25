@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
-  "~number": 16,
+  "number": 16,
   "area": "engine",
   "type": "feature",
   "status": "draft",

@@ -1,6 +1,20 @@
-# little-mester — Ticketing System Engineering Plan
+# Little Mester MCP — Server Architecture
 
-> **DECISION LOG:** All engineering decisions spanning all engine tickets are in [docs/tickets/engine-plan.md](../../../docs/tickets/engine-plan.md). Product usage constraints are in [docs/DECISIONS.md](../../docs/DECISIONS.md). Read both — new sessions MUST read the decision files first.
+> **DECISION LOG:** All engineering decisions spanning all engine tickets are in [docs/tickets/architecture/DECISIONS.md](../../../docs/tickets/architecture/DECISIONS.md). Product usage constraints are in [docs/DECISIONS.md](../../docs/DECISIONS.md). Read both — new sessions MUST read the decision files first.
+
+## What is Little Mester MCP?
+
+`@little-mester/ticket-engine-mcp` is the first module of **Little Mester MCP** — a generic MCP server designed to be extensible. The ticketing engine is the first implementation module. Future modules (file search, notes, etc.) will live alongside in the same server.
+
+### Tool naming convention
+
+All MCP tools follow `mester_<module>_<action>`:
+
+| Module | Tool prefix | Examples |
+|--------|------------|----------|
+| `tickets` (current) | `mester_tickets_*` | `mester_tickets_create`, `mester_tickets_search`, `mester_tickets_board` |
+| `files` (future) | `mester_files_*` | `mester_files_search`, `mester_files_read` |
+| `notes` (future) | `mester_notes_*` | `mester_notes_create`, `mester_notes_list` |
 
 ---
 
@@ -50,8 +64,25 @@
 
 ---
 
+## MCP Tools (ticketing module)
+
+All tools are registered under the `mester_tickets_` prefix:
+
+| Tool | Description |
+|------|-------------|
+| `mester_tickets_create` | Create a new ticket with area, type, title, objective |
+| `mester_tickets_list` | List tickets with optional area/status/priority filters |
+| `mester_tickets_get` | Get a single ticket by number |
+| `mester_tickets_update` | Update ticket fields (status transitions enforced) |
+| `mester_tickets_archive` | Archive a ticket (removes from active cycle) |
+| `mester_tickets_search` | Multi-field search across tickets |
+| `mester_tickets_board` | Board view — sorted by priority then updated_at |
+| `mester_tickets_validate` | Check index/files sync state |
+
+---
+
 ## Ticket JSON Schema
 
-Full field spec in [docs/tickets/engine-plan.md](../../../docs/tickets/engine-plan.md) — see label enum sets, estimate fields, epic design.
+Full field spec in [docs/tickets/architecture/DECISIONS.md](../../../docs/tickets/architecture/DECISIONS.md) — see label enum sets, estimate fields, epic design.
 
 Schema version file: `ticket-v1.json` (generated from this plan).
