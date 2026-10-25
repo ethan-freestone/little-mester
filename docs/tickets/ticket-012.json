@@ -25,7 +25,7 @@
       "id": 3,
       "title": "Add mcpServers config to agent/opencode/opencode.json and prove it loads in v2",
       "objective": "Wire the MCP server into the generated opencode config (via scripts/regen-configs, not by hand) and verify the tools appear in a live session.",
-      "status": "todo"
+      "status": "done"
     },
     {
       "id": 4,
@@ -40,5 +40,5 @@
       "status": "todo"
     }
   ],
-  "notes": "Requirement recorded explicitly by the user (2026-10-21): 'all ticket creation MUST go through the MCP server internally and NOT be handled manually'. Until subtask 4/5 land, manual JSON creation (like tickets 020-023) is transitional only. The MD version of this ticket is docs/tickets/ticket-012-mcp-server-opencode-integration.md. As of 2026-10-25: MCP server is implemented with 8 tools (create, list, get, update, archive, search, board, validate) — subtasks 1-2 complete. Subtasks 3-5 are the remaining work for this ticket.\n\nArchitecture decision (2026-10-25): Little Mester MCP is a single server (@little-mester/mcp) with the ticket engine as its first module (@little-mester/ticket-engine-mcp). Server name: 'little-mester'. Tool prefix: 'mester_tickets_*'. Future modules register on the same server process — no multiple MCP servers per opencode session."
+  "notes": "Requirement recorded explicitly by the user (2026-10-21): 'all ticket creation MUST go through the MCP server internally and NOT be handled manually'. Until subtask 4/5 land, manual JSON creation (like tickets 020-023) is transitional only. The MD version of this ticket is docs/tickets/ticket-012-mcp-server-opencode-integration.md. As of 2026-10-25: MCP server is implemented with 8 tools (create, list, get, update, archive, search, board, validate) — subtasks 1-2 complete. Subtask 3 (mcpServers config in opencode.json) done. Subtasks 4-5 (deprecate legacy scripts, enforce MCP-only creation) remain.\n\nArchitecture decision (2026-10-25): Little Mester MCP is a single server (@little-mester/mcp) with the ticket engine as its first module (@little-mester/ticket-engine-mcp). Server name: 'little-mester'. Tool prefix: 'mester_tickets_*'. Future modules register on the same server process — no multiple MCP servers per opencode session."
 }
