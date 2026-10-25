@@ -4,6 +4,43 @@
 
 ---
 
+## 2026-10-25 — Auto-Discovery Design + Ticket Updates (Session 2)
+
+### Session Summary
+Designed the auto-discovery mechanism for the MCP server to work across any worktree/project directory. Documented full design in ticket-012 (subtasks 6-9) and architecture/DECISIONS.md (C.10). Updated ticket-015 with computeSuggestedModel integration notes. Identified 5 open questions requiring resolution before implementation.
+
+### Work Completed
+- ✅ Renamed `ticket-engine-mcp/` → `little-mester-mcp/` + updated all references (README, workflows, journal, DECISIONS)
+- ✅ Wired little-mester MCP server into opencode.json (ticket-012 subtask 3)
+- ✅ Added MCP server tests (32 tests, ticket-014 subtask 2)
+- ✅ Implemented model tracking fields in engine + fixed ticket-v1.json schema (ticket-015 subtasks 1-4)
+- ✅ **Designed auto-discovery + cross-project context** (ticket-012 subtasks 6-9, architecture C.10)
+- ✅ Documented 5 open questions in ticket-012 notes
+
+### Design Decisions
+1. **Auto-discovery on startup**: MCP server scans cwd → parents for `.little-mester.conf`, `docs/tickets/`, `DECISIONS.md`
+2. **DiscoveryResult** passed to `registerTicketTools(server, discovery)` for module registration
+3. **Context injection**: DECISIONS.md + schema loaded at startup, key constraints injected into tool descriptions
+4. **Enforcement**: schema validation, index integrity, explicit tool descriptions
+5. **Container/VM parity**: same discovery logic works in both
+
+### Open Questions (Must Resolve Before Implementing Subtasks 6-9)
+1. **Fallback behavior**: Fail fast vs. fallback to `/workspace` (little-mester repo)?
+2. **Multiple projects**: cwd wins → parents → fallback?
+3. **Enforcement scope**: Agent-only (enforceable) or also user (workflow convention)?
+4. **opencode.json `cwd`**: Active worktree or always `/workspace`? Does opencode restart MCP server on worktree switch?
+5. **Context freshness**: Startup-only or per-call?
+
+### Next Session Priorities
+1. Resolve open questions (likely requires user input on Q1, Q3, Q4)
+2. Implement subtask 6: `discoverProject()` in mcp-server.ts
+3. Implement subtask 7: Load DECISIONS.md + schema, inject into tool descriptions
+4. Implement subtask 8: Export `registerTicketTools(server, discovery)` pattern
+5. Implement subtask 9: Update opencode.json to use discovery
+6. Ticket-015 subtask 5: `computeSuggestedModel()` utility
+
+---
+
 ## 2026-10-25 — Analysis, Planning & Critical Fixes
 
 ### Session Summary

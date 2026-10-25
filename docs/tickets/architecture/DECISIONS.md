@@ -144,6 +144,74 @@ Future modules follow the same pattern: import the server, register their `meste
 
 ---
 
+## C.10 Auto-Discovery + Cross-Project Context (2026-10-25)
+
+**Problem:** The MCP server must work when opencode points at ANY directory — the little-mester repo, a different project, or a worktree. It should IMMEDIATELY act as a fully qualified project manager without manual configuration.
+
+**Decision:** The MCP server performs **auto-discovery on startup** by scanning the current working directory (and parents) for project markers.
+
+**Discovery Algorithm:**
+
+```typescript
+function discoverProject(cwd: string): DiscoveryResult {
+    // 1. Scan upward from cwd for markers (highest priority first)
+    for (let dir = cwd; dir !== path.dirname(dir); dir = path.dirname(dir)) {
+        if (fs.existsSync(path.join(dir, '.little-mester.conf'))) {
+            return { ticketDir: path.join(dir, 'docs/tickets'), isLittleMesterProject: true, ... };
+        }
+        if (fs.existsSync(path.join(dir, 'docs/tickets'))) {
+            return { ticketDir: path.join(dir, 'docs/tickets'), isLittleMesterProject: false, ... };
+        }
+        if (fs.existsSync(path.join(dir, 'DECISIONS.md'))) {
+            // Found a project with decisions but no tickets dir yet
+        }
+    }
+    // 2. Fallback: the little-mester repo's tickets
+    return {
+        ticketDir: '/workspace/docs/tickets',
+        schemaPath: '/workspace/little-mester-mcp/docs/ticket-v1.json',
+        decisionsPaths: ['/workspace/DECISIONS.md', '/workspace/docs/tickets/architecture/DECISIONS.md'],
+        isLittleMesterProject: true,
+    };
+}
+```
+
+**DiscoveryResult** includes:
+- `ticketDir`: where tickets live
+- `schemaPath`: where `ticket-v1.json` lives  
+- `decisionsPaths`: all `DECISIONS.md` files found
+- `indexPath`: `_index.json` location
+- `isLittleMesterProject`: boolean
+
+**Context Loading:** On startup, server reads all discovered DECISIONS.md files and the schema. Key constraints are **injected into tool descriptions** so the agent has immediate context:
+
+| Source | Injected into tool descriptions |
+|--------|---------------------------------|
+| `DECISIONS.md` | Status transitions (D.3), field semantics (D.2/E), priority order (H) |
+| `ticket-v1.json` | Schema constraints for validation errors |
+| `architecture/DECISIONS.md` | Engineering constraints (status transitions, field semantics) |
+
+**Module Registration Pattern:** The package exports:
+- `createTicketEngine(config)` — core engine
+- `registerTicketTools(server, discovery)` — registers all `mester_tickets_*` tools
+- `main()` — standalone entry: runs discovery, creates server, registers tools, starts stdio
+
+**Enforcement of "No Manual Edits":**
+- Schema validation in tools: every create/update calls `validateData()` — rejects if not following DECISIONS.md
+- Index integrity: `validate` tool detects orphan files — manual edits show as mismatches
+- Tool descriptions explicitly state: "All ticket operations must go through these MCP tools"
+
+**Container → VM Future-Proofing:** Same discovery logic works in both environments. The MCP server doesn't care where it runs, only that files are on disk.
+
+**Open Questions (Documented in Ticket-012):**
+1. Fallback behavior: fail fast vs. fallback to `/workspace`?
+2. Multiple projects: cwd wins, then parents, then fallback?
+3. Enforcement scope: agent-only or also user?
+4. opencode.json `cwd`: active worktree or always `/workspace`?
+5. Context freshness: startup-only or per-call?
+
+---
+
 ## D. Routing Modes (all three supported)
 
 | Mode | Description | Config key | Override via lab |
