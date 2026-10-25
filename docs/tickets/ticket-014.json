@@ -17,7 +17,8 @@
     {
       "id": 2,
       "title": "Implement MCP server tool tests",
-      "objective": "Create `tests/mcp-server.test.ts` with Jest tests for all 8 MCP tools (create, list, get, update, archive, search, board, validate). Test happy paths + error cases. Target: run via `npm test` in ticket-engine-mcp."
+      "objective": "Create `tests/mcp-server.test.ts` with Jest tests for all 8 MCP tools (create, list, get, update, archive, search, board, validate). Test happy paths + error cases. Target: run via `npm test` in ticket-engine-mcp.",
+      "status": "done"
     },
     {
       "id": 3,
@@ -35,5 +36,5 @@
       "objective": "Test full MCP server lifecycle: start server via stdio, send JSON-RPC requests, verify responses. Use `@modelcontextprotocol/sdk` test utilities."
     }
   ],
-  "notes": "As of 2026-10-25: Engine tests (28 passing) exist in `ticket-engine-mcp/tests/engine.test.ts`. Missing: MCP server tests, migration tests, bats-core in container, integration tests. Per docs/DECISIONS.md C.1: testing is NOT happening because bats-core is not in the agent image and no Jest MCP test suite exists."
+  "notes": "As of 2026-10-25: Engine tests (28 passing) exist in `little-mester-mcp/tests/engine.test.ts`. MCP server tests (32 passing) added in `little-mester-mcp/tests/mcp-server.test.ts` — subtask 2 complete. Missing: bats-core in container (subtask 1), migration tests (subtask 3), run-tests.sh wiring (subtask 4), integration tests (subtask 5). Per docs/DECISIONS.md C.1: testing is NOT happening because bats-core is not in the agent image and no Jest MCP test suite exists."
 }
