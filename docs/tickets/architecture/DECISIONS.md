@@ -1,9 +1,9 @@
-# Architecture Decisions Log — Building the Ticketing System (ticket-engine-mcp)
+# Architecture Decisions Log — Building the Ticketing System (little-mester-mcp)
 
 > **Last updated:** 2026-10-19  
 > **Purpose:** Capture architectural decisions for building the ticketing engine itself. NOT about how to use little-mester the product — that's in [docs/DECISIONS.md](../DECISIONS.md).
 >
-> **Read this before making any engineering change to `ticket-engine-mcp/`.** Read [docs/DECISIONS.md](../DECISIONS.md) for usage/workflow constraints and field semantics (D.1-D.4, E).
+> **Read this before making any engineering change to `little-mester-mcp/`.** Read [docs/DECISIONS.md](../DECISIONS.md) for usage/workflow constraints and field semantics (D.1-D.4, E).
 
 ---
 
@@ -135,7 +135,7 @@ Most users will set both to the same value. That's intentional: `priority` is th
 - Tools are namespaced by prefix, so no collision
 - opencode config (`mcpServers` in opencode.json) points to ONE server binary
 
-**Implementation:** The `ticket-engine-mcp` package exports:
+**Implementation:** The `little-mester-mcp` package (module: `@little-mester/ticket-engine-mcp`) exports:
 - `createTicketEngine()` — the core engine (usable standalone or via MCP)
 - `registerTicketTools(server)` — registers all `mester_tickets_*` tools on a passed `McpServer` instance
 - `main()` — standalone server entry point (for direct testing / dev)

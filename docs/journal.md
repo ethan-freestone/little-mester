@@ -10,7 +10,7 @@
 Analyzed full project state, identified critical blockers, mapped analysis to proper decision/ticket files, and prepared for implementation of Tier 1 fixes.
 
 ### Work Completed
-- ✅ Full codebase exploration: `/workspace/ticket-engine-mcp/`, `/workspace/docs/`, all 31 tickets
+- ✅ Full codebase exploration: `/workspace/little-mester-mcp/`, `/workspace/docs/`, all 31 tickets
 - ✅ Identified 4 critical blockers (Tier 1) and 3 core engine tickets to close (Tier 2)
 - ✅ Archived `engine-plan.md` (redundant with architecture/DECISIONS.md) → `docs/tickets/archive/engine-plan-v1-2026-10-25.md`
 - ✅ Fixed ticket-016 typo (`~number` → `number`)
@@ -64,7 +64,7 @@ Analyzed full project state, identified critical blockers, mapped analysis to pr
 Complete documentation of the entire Little Mester MCP project state after building the ticketing engine and MCP server. All source code, schemas, decisions, and tickets have been explored and cataloged.
 
 ### Work Completed
-- ✅ Explored entire `/workspace/ticket-engine-mcp/` codebase (source, tests, config)
+- ✅ Explored entire `/workspace/little-mester-mcp/` codebase (source, tests, config)
 - ✅ Explored all root `/workspace/docs/` decision and workflow files
 - ✅ Explored all ticket files in `/workspace/docs/tickets/` (31 tickets + index)
 - ✅ Verified ticket-016 `~number` typo exists and needs fixing
@@ -176,14 +176,14 @@ The following is reconstructed from git history, ticket files, and decision logs
 
 ## File Inventory
 
-### /workspace/ticket-engine-mcp/
+### /workspace/little-mester-mcp/
 ```
 ├── src/
 │   ├── engine.ts          (251 lines) — Core ticket CRUD + validation
 │   ├── index.ts           (76 lines)  — Index read/write/scan/reconstruct
 │   ├── mcp-server.ts      (500 lines) — 7 MCP tools over stdio
 │   ├── migrate-tickets.ts (289 lines) — MD→JSON migration with validation
-│   └── cli.ts             (MISSING)  — Referenced in package.json:dev
+│   └── cli.ts             — CLI stub for `npm run dev`
 ├── tests/
 │   └── engine.test.ts     (261 lines) — 28 Jest tests, all passing
 ├── docs/
@@ -214,10 +214,10 @@ The following is reconstructed from git history, ticket files, and decision logs
 ## Commands Reference
 
 ```bash
-# In /workspace/ticket-engine-mcp/
+# In /workspace/little-mester-mcp/
 npm run build        # TypeScript compile → dist/
 npm run server       # Run MCP server (stdio) — ts-node src/mcp-server.ts
-npm run dev          # FAILS — src/cli.ts doesn't exist
+npm run dev          # CLI stub — ts-node src/cli.ts
 npm test             # 28 tests pass
 npm run test:watch   # Watch mode
 npm run test:coverage # With coverage report

@@ -4,7 +4,8 @@
  *
  * Central Jira-like ticketing hub for both humans and agents.
  *
- * This is the FIRST MODULE of Little Mester MCP (@little-mester/ticket-engine-mcp).
+ * This is the FIRST MODULE of Little Mester MCP.
+ * Package: @little-mester/ticket-engine-mcp (this directory: little-mester-mcp/)
  * Future modules (file search, notes, etc.) will live alongside in the same server process.
  *
  * Configuration:

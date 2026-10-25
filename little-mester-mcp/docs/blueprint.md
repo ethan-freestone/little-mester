@@ -44,7 +44,7 @@ Each AC maps to exactly one test. We proceed in strict order: test FAIL → impl
 |---|------|-------------|--------|
 | 0  | Setup package.json | Scope `@little-mester/ticket-engine-mcp`, add deps (`zod` for validation, `_index.json` as metadata store) | DONE |
 | 0.1 | tsconfig + jest setup | Target ES2021, commonjs, strict; jest w/ ts-jest | DONE |
-| 0.2 | node_modules.gitignore | Workspace `.gitignore` covers `node_modules/`; ticket-engine-mcp has its own if needed | DONE |
+| 0.2 | node_modules.gitignore | Workspace `.gitignore` covers `node_modules/`; little-mester-mcp has its own if needed | DONE |
 
 ### Phase 2: Unit Tests + Engine (AC-01 through AC-06)
 | # | TODO | Test Name (exact) | Acceptance Cr. | Status |

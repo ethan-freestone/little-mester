@@ -297,7 +297,7 @@ The ticket tree visualization (future-ticket system, ticket-015 stretch goal) re
 | Subsystem | Location | Scope | Per-ticket plans point to... |
 |-----------|----------|-------|------------------------------|
 | **How to use** (this file) | `docs/DECISIONS.md` | What's true NOW about little-mester as a product | All decisions in this file are facts — no designs |
-| **ticket-engine subsystem** | `docs/tickets/architecture/DECISIONS.md` | Engineering designs scoped to ticket-engine v1 build | The engine tickets (008, 007, 014, etc.) |
+| **little-mester-mcp subsystem** | `docs/tickets/architecture/DECISIONS.md` | Engineering designs scoped to ticket-engine v1 build | The engine tickets (008, 007, 014, etc.) |
 | **future-ticket system** | (not yet) | When we redesign the ticketing system entirely (rebuild from scratch) | Separate — not yet needed |
 
 **Architecture decision (C.9 in architecture/DECISIONS.md):** Little Mester MCP is a **single MCP server** (`@little-mester/mcp`) with the ticket engine as its **first module** (`@little-mester/ticket-engine-mcp`). All tools use the `mester_tickets_<action>` prefix. Future modules (file search, notes, etc.) register on the same server — no multiple MCP servers per session.

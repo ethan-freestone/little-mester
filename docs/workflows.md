@@ -18,7 +18,7 @@ Every major architectural direction gets one entry in **one of two files** depen
 | Scope | File | When to write here |
 |-------|------|-------------------|
 | **How to USE little-mester** (workflow, defaults, guard rails, testing strategy, session handoff) | [docs/DECISIONS.md](../DECISIONS.md) | Whenever a user decision affects how the product is used or improved |
-| **How to BUILD** everything in little-mester | [docs/tickets/architecture/DECISIONS.md](tickets/architecture/DECISIONS.md) | Engineering designs for `ticket-engine-mcp/`. For other subsystems: separate scope files when needed. Per-ticket plans go in ticket docs themselves. |
+| **How to BUILD** everything in little-mester | [docs/tickets/architecture/DECISIONS.md](tickets/architecture/DECISIONS.md) | Engineering designs for `little-mester-mcp/` (the server). For other subsystems: separate scope files when needed. Per-ticket plans go in ticket docs themselves. |
 
 **If you're unsure which one:** If the answer affects `./lab`, `--unsafe-recurse`, security, testing, or daily workflow → `docs/DECISIONS.md`. If it affects `engine.ts`, `_index.json`, JSON schema, MCP tools, or ticket data model → `docs/tickets/architecture/DECISIONS.md`.
 
@@ -32,7 +32,7 @@ Tickets are stored as JSON in one of these locations depending on routing mode:
 
 | Mode | Path example | Managed via lab |
 |---|---|---|
-| Same repo (default) | `docs/tickets/` inside the workspace | `ticket-engine-mcp` local engine |
+| Same repo (default) | `docs/tickets/` inside the workspace | `little-mester-mcp` local engine |
 | Any directory | `/any/path/on/disk` — external to git repo, mounted at lab start | `lab --override ticket_engine_dir=/path` |
 | Separate repo | `/path/to/other-repo/docs/tickets/` — different git repo, synced via lab flag | `lab --override ticket_engine_repo=/path --sync` |
 
@@ -87,7 +87,7 @@ Tickets are numbered **globally** across all routing modes. Number collision is 
 
 Old markdown-format tickets remain in `docs/tickets/archive/` for reference only. They are NOT processed by the engine. New work gets JSON format.
 
-## MCP development workflow (for building modules like ticket-engine-mcp)
+## MCP development workflow (for building modules like @little-mester/ticket-engine-mcp)
 
 When building or updating an MCP module:
 

@@ -106,7 +106,7 @@ The repo is split into two conceptual layers:
 | Layer | Where | Purpose |
 |---|---|---|
 | **Sandbox** | root (`lab`, `compose.yaml`, `agent/`, `ollama/`) | Safe execution environment for the agent |
-| **Ticket engine** | `ticket-engine-mcp/` | Lightweight MCP-first ticketing system using JSON files + in-memory index (no SQLite) |
+| **Ticket engine** | `little-mester-mcp/` | Lightweight MCP-first ticketing system using JSON files + in-memory index (no SQLite) |
 
 ### Sandbox (root)
 
@@ -157,11 +157,11 @@ The agent (opencode by default) runs inside a container. Monitor it from the hos
     exit
     ```
 
-### Ticket engine (`ticket-engine-mcp`)
+### Ticket engine (`little-mester-mcp`)
 
 A lightweight MCP module for ticket lifecycle management. It stores tickets as `.json` files on disk backed by a tiny `_index.json` — no SQLite, no WASM, no schema migrations. Designed to eventually be a standalone hosted service, but currently managed alongside the repo.
 
-See `ticket-engine-mcp/docs/blueprint.md` for implementation plan.
+See `little-mester-mcp/docs/blueprint.md` for implementation plan.
 
 ### Scripts and automation
 
@@ -217,7 +217,7 @@ Read this twice.
 | `docs/workflows.md` | **Development process and discipline** | — |
 | `docs/journal.md` | Development journal | — |
 | `docs/tickets/` | Tickets by area/engine (JSON-first) | See DECISIONS.md for decision log |
-| `ticket-engine-mcp/` | Lightweight MCP-first ticketing system | `ticket-engine-mcp/docs/blueprint.md` |
+| `little-mester-mcp/` | Lightweight MCP-first ticketing system | `little-mester-mcp/docs/blueprint.md` |
 | `scripts/` | Automation tools — tickets, hooks, sync | [Scripts](#scripts-and-automation) above |
 | `tests/lab.bats` | Bats tests for the `lab` launcher | [Testing](#testing) below |
 | `skills/` | *Planned.* Reusable workflow skills (not yet created) | — |
@@ -285,7 +285,7 @@ Alternatively, run it manually from your host:
 ### Ticket engine tests
 
 ```fish
-cd ticket-engine-mcp && npm test  # Jest suite for the JSON ticket engine
+cd little-mester-mcp && npm test  # Jest suite for the JSON ticket engine
 ```
 
 ---
@@ -301,7 +301,7 @@ Follow [docs/workflows.md](docs/workflows.md) for:
 
 > ⚠️ **Important: Decision logs have different scopes — read BOTH before working:**
 > - **[docs/DECISIONS.md](docs/DECISIONS.md)** → How to **use** little-mester (workflow, --unsafe-recurse, security, testing). Read before ANY session on this repo.
-> - **(engine decisions)** [docs/tickets/architecture/DECISIONS.md](tickets/architecture/DECISIONS.md) → engineering designs for building the ticket engine (schema, epics, search, labels, routing). Read before any `ticket-engine-mcp/` change.
+> - **(engine decisions)** [docs/tickets/architecture/DECISIONS.md](tickets/architecture/DECISIONS.md) → engineering designs for building the ticket engine (schema, epics, search, labels, routing). Read before any `little-mester-mcp/` change.
 =======
 | The model can't touch files | Ollama/llama.cpp only turn text into text. They're in their own containers with no mounts except their model volumes. |
 | The agent can only touch one folder | The agent container sees exactly one bind mount, `/workspace`, gated by `lab`'s path checks. |
