@@ -400,6 +400,21 @@ describe('TicketEngine', () => {
                 expect(t.number).toBe(1); // or 2 depending on whether old index was preserved
             }).not.toThrow();
         });
+
+        it('reconstructs index after an unresolved merge leaves conflict markers', () => {
+            const corruptPath = path.join(tmpDir, '_index.json');
+            fs.writeFileSync(corruptPath, '<<<<<<< HEAD\n{"schemaVersion": 1}\n=======\n{"schemaVersion": 1}\n>>>>>>> branch\n');
+
+            const fresh = createTicketEngine({ ticketDir: tmpDir, indexPath: corruptPath });
+            const ticket = fresh.create({
+                acceptance_criteria: ['Criterion met'],
+                area: 'test',
+                title: 'rebuilt after conflict',
+            });
+
+            expect(ticket.number).toBe(1);
+            expect(fresh.validate().synced).toBe(true);
+        });
     });
 
     describe('archived files from validate', () => {

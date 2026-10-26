@@ -194,13 +194,13 @@ Schema: [`little-mester-mcp/docs/SCHEMA.md`](../little-mester-mcp/docs/SCHEMA.md
 **Resolving the two generated files:**
 
 ```bash
+# Index: derived, so delete it and let the engine rebuild from ticket files.
+rm docs/tickets/_index.json
+
 # Audit: keep your side, then merge the other branch's entries through the engine.
 git checkout --ours docs/tickets/_audit.json
 git show :3:docs/tickets/_audit.json > /tmp/theirs-audit.json
 ./little-mester-mcp/scripts/ticket-engine audit --merge /tmp/theirs-audit.json
-
-# Index: derived, so delete it and let the engine rebuild from ticket files.
-rm docs/tickets/_index.json
 ./little-mester-mcp/scripts/ticket-engine validate
 ```
 

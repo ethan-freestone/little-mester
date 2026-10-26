@@ -909,14 +909,19 @@ export function createTicketEngine({
     fs.mkdirSync(ticketDir, { recursive: true });
     fs.mkdirSync(path.dirname(indexPath), { recursive: true });
 
-    // Guard against missing/corrupt index → auto-reconstruct from disk
-    if (!fs.existsSync(indexPath)) {
-        writeFromScratch();
-    } else {
-        const sanity = readIndex(indexPath);
-        if (!sanity || !sanity.schemaVersion) {
-            writeFromScratch();
+    // Guard against missing/corrupt index → auto-reconstruct from disk.
+    // Corruption includes JSON parse failures from an unresolved merge.
+    function indexIsUsable(): boolean {
+        try {
+            const sanity = readIndex(indexPath);
+            return Boolean(sanity && sanity.schemaVersion);
+        } catch {
+            return false;
         }
+    }
+
+    if (!fs.existsSync(indexPath) || !indexIsUsable()) {
+        writeFromScratch();
     }
 
     function writeFromScratch(): void {
