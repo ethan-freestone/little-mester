@@ -219,6 +219,16 @@ def compare_files(content, path):
         return False
 
 
+def load_mcp_servers(path):
+    """Load existing mcpServers section from opencode.json if present."""
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return data.get("mcpServers")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
 def main():
     dry_run = False
     models_file = None
@@ -257,34 +267,36 @@ def main():
             for m in models:
                 print(f"    {m['name']}: ctx={m['context']}, out={m['output']}")
     
+    actual_path = os.path.join(lab_dir, "agent/opencode", "opencode.json")
+    existing_mcp = load_mcp_servers(actual_path)
+
+    # Generate opencode.json content as dict, preserving the hand-maintained
+    # mcpServers block. regen-configs must never drop it.
+    predicted = json.loads(gen_opencode_json(models_by_backend))
+    if existing_mcp:
+        predicted["mcpServers"] = existing_mcp
+    rendered = json.dumps(predicted, indent=2) + "\n"
+
     if dry_run:
         max_ctx = get_max_context(models_by_backend)
         print(f"  max context -> CONTEXT_LENGTH: {max_ctx}")
         print("  (dry run - no files modified)")
-        
-        expected = gen_opencode_json(models_by_backend) + "\n"
-        actual_path = os.path.join(lab_dir, "agent/opencode", "opencode.json")
-        
-        with open(actual_path, "rb") as f:
+        with open(actual_path, "r") as f:
             current = f.read()
-        if expected.encode("utf-8") == current:
+        if rendered == current:
             print("  [unchanged] agent/opencode/opencode.json")
         else:
             print("  [would update] agent/opencode/opencode.json")
         return
-    
-    # Generate opencode.json content
-    predicted = gen_opencode_json(models_by_backend)
-    actual_path = os.path.join(lab_dir, "agent/opencode", "opencode.json")
-    
-    with open(actual_path, "rb") as f:
+
+    with open(actual_path, "r") as f:
         current = f.read()
-    if predicted.encode("utf-8") + b"\n" == current:
+    if rendered == current:
         print("  [unchanged] agent/opencode/opencode.json")
     else:
         with open(actual_path, "w") as f:
-            f.write(predicted + "\n")
-        print("  [updated] agent/opencode/opencode.json")
+            f.write(rendered)
+        print("  [updated] agent/opencode/opencode.json (mcpServers preserved)")
     
     # Update compose.yaml
     max_ctx = get_max_context(models_by_backend)

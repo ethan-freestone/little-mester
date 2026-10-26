@@ -480,6 +480,10 @@ We install `@opencode/cli` (v2). The `opencode-ai` package is v1. Most search re
 | Slot registration | `api.slots.register({ slots: { home_logo } })` | `context.ui.slot({ <placement>: "<slot>", render })` |
 | Slot names | `home_logo`, `sidebar_content` | dotted: `home.footer`, `sidebar.content`, ... |
 
+A legacy `tui.json` is read **only once by the migration routine** to populate `cli.json`
+(`packages/cli/src/config/migrate.ts`); it is not a live config file. Shipping one has no effect on
+plugin loading and must not be used to register plugins or keybinds.
+
 **Before changing any plugin or TUI config, read the v2 docs (not the v1 docs):**
 - https://opencode.ai/v2/docs/build/plugins/cli (writing TUI plugins, slot list)
 - https://opencode.ai/v2/docs/cli/plugins (loading plugins, discovery paths)
