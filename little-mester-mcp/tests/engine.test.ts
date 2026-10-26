@@ -567,6 +567,50 @@ describe('TicketEngine', () => {
             expect(result.messages.some(m => m.includes('not a JSON array'))).toBe(true);
         });
 
+        it('merges another branch audit log without dropping entries', () => {
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'local' });
+
+            const otherDir = fs.mkdtempSync('/tmp/engine-merge-');
+            const otherIndex = path.join(otherDir, '_index.json');
+            const other = createTicketEngine({ ticketDir: otherDir, indexPath: otherIndex });
+            other.create({
+                acceptance_criteria: ['Criterion met'],
+                area: 'a',
+                title: 'incoming one',
+            });
+            other.create({
+                acceptance_criteria: ['Criterion met'],
+                area: 'a',
+                title: 'incoming two',
+            });
+            // Use the second entry so it is distinct even if both stores wrote
+            // in the same millisecond.
+            const incoming = other.getAuditLog().slice(-1);
+
+            try {
+                const result = engine.mergeAuditLog(incoming);
+                expect(result).toEqual({ added: 1, total: 2 });
+                expect(engine.getAuditLog().map(entry => entry.ticket_number)).toEqual([1, 2]);
+
+                // Merging the same log again is idempotent.
+                expect(engine.mergeAuditLog(incoming)).toEqual({ added: 0, total: 2 });
+                expect(engine.getEnforcement().audit.valid).toBe(true);
+            } finally {
+                fs.rmSync(otherDir, { recursive: true, force: true });
+            }
+        });
+
+        it('refuses to merge an audit log with an invalid hash', () => {
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'local' });
+
+            const incoming = engine.getAuditLog().map(entry => ({ ...entry }));
+            incoming[0].hash = '0'.repeat(64);
+
+            expect(() => engine.mergeAuditLog(incoming))
+                .toThrow(/incoming audit log is invalid.*hash mismatch/i);
+            expect(engine.getAuditLog()).toHaveLength(1);
+        });
+
         it('baseline adopts un-audited files, is idempotent, and clears orphans', () => {
             // Simulate a store that predates the audit log.
             const makeTicket = (number: number) => JSON.stringify({

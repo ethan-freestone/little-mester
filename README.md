@@ -278,9 +278,24 @@ Two equivalent front-ends share one engine (`src/engine.ts`):
 
 The full rationale and invariants are in
 [`docs/tickets/architecture/DECISIONS.md`](docs/tickets/architecture/DECISIONS.md) §I–J,
-the product rule is in [`docs/DECISIONS.md`](docs/DECISIONS.md) §C.3–C.4, and usage is in
+the product rule is in [`docs/DECISIONS.md`](docs/DECISIONS.md) §C.3–C.5, and usage is in
 [`little-mester-mcp/docs/README.md`](little-mester-mcp/docs/README.md)
 and [`little-mester-mcp/docs/CLI.md`](little-mester-mcp/docs/CLI.md).
+
+### Ticket engine build and package check
+
+```bash
+cd little-mester-mcp
+npm ci
+npm run build          # tsc → dist/
+npm run check:package  # entry points, CLI --help, tarball contents
+npm test
+./scripts/ticket-engine validate
+```
+
+CI (`.github/workflows/ticket-engine.yml`) runs the same steps on Node 20 for every push
+and pull request. The ticket store is validated after the build, and the job fails if any
+step mutates tracked files.
 
 ---
 

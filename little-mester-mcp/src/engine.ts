@@ -294,15 +294,7 @@ function appendAuditEntry(
 }
 
 /** Verify all audit entries have valid hashes and non-decreasing timestamps. */
-function verifyAuditLog(ticketDir: string): AuditStatus {
-    let entries: AuditEntry[];
-    try {
-        entries = readAuditLog(ticketDir);
-    } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { valid: false, entries: 0, messages: [`Audit log unreadable/corrupt: ${msg}`] };
-    }
-
+function verifyAuditEntries(entries: AuditEntry[]): AuditStatus {
     if (entries.length === 0) {
         return { valid: true, entries: 0, messages: ['Audit log empty — no write operations recorded yet'] };
     }
@@ -348,6 +340,17 @@ function verifyAuditLog(ticketDir: string): AuditStatus {
     }
 
     return { valid: true, entries: entries.length, messages: [`Audit log intact (${entries.length} entries)`] };
+}
+
+function verifyAuditLog(ticketDir: string): AuditStatus {
+    let entries: AuditEntry[];
+    try {
+        entries = readAuditLog(ticketDir);
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { valid: false, entries: 0, messages: [`Audit log unreadable/corrupt: ${msg}`] };
+    }
+    return verifyAuditEntries(entries);
 }
 
 // ── Public types ──────────────────────────────────────────────────
@@ -497,6 +500,12 @@ export interface TicketEngine {
     getEnforcement(): EnforcementResult;
     /** All audit entries, oldest first. Throws if the log is corrupt. */
     getAuditLog(): AuditEntry[];
+    /**
+     * Merge another branch's audited entries into this log, preserving the
+     * append-only history. Entries are de-duplicated and re-ordered by
+     * timestamp, then the merged log is verified before it is written.
+     */
+    mergeAuditLog(entries: AuditEntry[]): { added: number; total: number };
     /** Adopt un-audited ticket files as `baseline` entries. Idempotent.
      *  Returns only the entries added by this call. Refuses if the audit
      *  log is already invalid. */
@@ -1179,6 +1188,52 @@ export function createTicketEngine({
 
         getAuditLog(): AuditEntry[] {
             return readAuditLog(this.ticketDir);
+        },
+
+        mergeAuditLog(incoming: AuditEntry[]): { added: number; total: number } {
+            if (!Array.isArray(incoming)) {
+                throw new Error('incoming audit log must be a JSON array');
+            }
+
+            return withLock(this.ticketDir, () => {
+                const current = readAuditLog(this.ticketDir);
+                const currentStatus = verifyAuditEntries(current);
+                if (!currentStatus.valid) {
+                    throw new Error(`Refusing merge: local audit log is invalid (${currentStatus.messages.join('; ')})`);
+                }
+
+                const incomingStatus = verifyAuditEntries(incoming);
+                if (!incomingStatus.valid) {
+                    throw new Error(`Refusing merge: incoming audit log is invalid (${incomingStatus.messages.join('; ')})`);
+                }
+
+                const key = (entry: AuditEntry) =>
+                    `${entry.timestamp}\u0000${entry.operation}\u0000${entry.ticket_number}\u0000${entry.hash}`;
+                const seen = new Set(current.map(key));
+                const merged = [...current];
+                let added = 0;
+
+                for (const entry of incoming) {
+                    const entryKey = key(entry);
+                    if (seen.has(entryKey)) continue;
+                    seen.add(entryKey);
+                    merged.push(entry);
+                    added++;
+                }
+
+                // Stable sort: equal timestamps keep local entries before incoming ones.
+                merged.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+
+                const mergedStatus = verifyAuditEntries(merged);
+                if (!mergedStatus.valid) {
+                    throw new Error(`Refusing merge: merged audit log is invalid (${mergedStatus.messages.join('; ')})`);
+                }
+
+                if (added > 0) {
+                    writeAuditLog(this.ticketDir, merged);
+                }
+                return { added, total: merged.length };
+            });
         },
 
         baseline(): AuditEntry[] {

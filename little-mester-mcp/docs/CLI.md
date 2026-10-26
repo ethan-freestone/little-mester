@@ -208,7 +208,7 @@ Exit codes: `0` archived, `1` not found.
 Read the append-only audit log (`_audit.json`), or adopt pre-existing tickets.
 
 ```
-ticket-engine audit [--limit N] [--json] [--baseline]
+ticket-engine audit [--limit N] [--json] [--baseline] [--merge <file>]
 ```
 
 | Flag | Description |
@@ -216,6 +216,11 @@ ticket-engine audit [--limit N] [--json] [--baseline]
 | `--limit N` | Show only the last N entries (positive integer) |
 | `--json` | Print the raw JSON array instead of a table |
 | `--baseline` | Adopt every ticket file with no audit entry as a `baseline` entry |
+| `--merge <file>` | Merge another branch's audit log into this one; verifies both, de-duplicates, and never drops an entry |
+
+`--merge` is the supported way to resolve an `_audit.json` conflict. It refuses a source
+with an invalid hash and writes nothing on failure. `--merge` and `--baseline` cannot be
+combined. See [`SCHEMA.md`](SCHEMA.md#merging-ticket-stores) for the full merge runbook.
 
 Each entry is lean:
 

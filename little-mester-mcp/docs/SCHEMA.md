@@ -264,6 +264,36 @@ Rules:
 
 Rationale and invariants: [`architecture/DECISIONS.md` §I](../../docs/tickets/architecture/DECISIONS.md).
 
+### Merging ticket stores
+
+| File | Merge rule |
+|---|---|
+| `ticket-NNN.json` | Normal three-way merge. Never delete a ticket to resolve a conflict; rerun `validate` after resolving content. |
+| `_index.json` | Derived cache. **Do not hand-merge.** Delete it and run any engine command (e.g. `validate`) to rebuild it from the ticket files. |
+| `_audit.json` | Append-only evidence. On conflict, keep **both** sides' entries ordered by non-decreasing timestamp. Never delete or rewrite an entry. |
+| `.engine.lock` | Transient. Never commit; it is gitignored. `validate` reports a crash-left lock as stale. |
+
+After resolving a merge, run `ticket-engine validate`. A ticket file without an audit
+entry is an orphan, not something to paper over with `audit --baseline`. Baseline adoption
+is only for a store that predates enforcement (see `docs/DECISIONS.md` §C.5).
+
+**Resolving an audit conflict through the engine:**
+
+```bash
+# Keep your side of the conflicted log, then merge the other branch's entries.
+git checkout --ours docs/tickets/_audit.json
+git show :3:docs/tickets/_audit.json > /tmp/theirs-audit.json
+./little-mester-mcp/scripts/ticket-engine audit --merge /tmp/theirs-audit.json
+
+# _index.json is derived: delete it and let the engine rebuild it.
+rm docs/tickets/_index.json
+./little-mester-mcp/scripts/ticket-engine validate
+```
+
+`audit --merge` verifies both logs, adds only entries that are not already present, sorts
+by timestamp, and refuses to write if either side has an invalid hash. It never drops an
+entry. If a ticket is still an orphan after the merge, stop and ask a human.
+
 ---
 
 ## Lock file (`.engine.lock`)

@@ -181,6 +181,44 @@ Schema: [`little-mester-mcp/docs/SCHEMA.md`](../little-mester-mcp/docs/SCHEMA.md
 [`ticket-v1.json`](../little-mester-mcp/docs/ticket-v1.json). Engineering invariants:
 [`docs/tickets/architecture/DECISIONS.md`](tickets/architecture/DECISIONS.md) §J.
 
+### C.5 Merging the ticket store (2026-10-26)
+**Rule:** Ticket content merges like normal source. Derived files have their own rules.
+
+| File | Merge rule |
+|---|---|
+| `ticket-NNN.json` | Normal three-way merge. Resolve content conflicts in the file, then run `validate`. Never resolve a conflict by deleting a ticket. |
+| `_index.json` | **Never hand-merge.** It is derived. Delete it and run any engine command (for example `ticket-engine validate`) to reconstruct it from the ticket files, then commit the rebuilt index. |
+| `_audit.json` | **Append-only.** On conflict, keep the entries from both sides with `ticket-engine audit --merge <their-log>`. The command verifies both logs, de-duplicates, orders by timestamp, and refuses to write an invalid log. Do not delete, edit, or renumber entries by hand. |
+| `.engine.lock` | Never commit. It is a transient PID lock; `.gitignore` excludes it. A lock present after a crash is reported as stale by `validate`. |
+
+**Resolving the two generated files:**
+
+```bash
+# Audit: keep your side, then merge the other branch's entries through the engine.
+git checkout --ours docs/tickets/_audit.json
+git show :3:docs/tickets/_audit.json > /tmp/theirs-audit.json
+./little-mester-mcp/scripts/ticket-engine audit --merge /tmp/theirs-audit.json
+
+# Index: derived, so delete it and let the engine rebuild from ticket files.
+rm docs/tickets/_index.json
+./little-mester-mcp/scripts/ticket-engine validate
+```
+
+**After a ticket-store merge:**
+1. Run `./little-mester-mcp/scripts/ticket-engine validate`.
+2. If an audit entry is missing, treat the ticket file as an **orphan**. Stop and ask a
+   human. Do not run `audit --baseline` to hide a dropped entry; that command is only for
+   adopting a store that predates enforcement.
+3. Commit the rebuilt `_index.json` and the unioned `_audit.json` with the content merge.
+
+**Why:** `_index.json` is a cache and must never be a source of truth. `_audit.json` is
+evidence and must never lose a branch's writes silently. This keeps a merge auditable
+instead of producing a plausible-looking but incomplete history.
+
+**Why:** `_index.json` is a cache and must never be a source of truth. `_audit.json` is
+evidence and must never lose a branch's writes silently. This keeps a merge auditable
+instead of producing a plausible-looking but incomplete history.
+
 ---
 
 ## D. Fields & categories — what each means and when to use it

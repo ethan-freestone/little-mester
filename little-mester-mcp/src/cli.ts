@@ -20,9 +20,11 @@ import {
     createTicketEngine,
     type AcceptanceCriteriaInput,
     type AcceptanceCriterionInput,
+    type AuditEntry,
     type Ticket,
     type TicketPatch,
 } from './engine';
+import * as fs from 'fs';
 import * as path from 'path';
 
 type CliArgs = {
@@ -50,6 +52,8 @@ type CliArgs = {
     limit?: number;
     json?: boolean;
     baseline?: boolean;
+    /** Merge another branch's audit log into this one. */
+    auditMerge?: string;
 };
 
 const PRIORITIES = ['trivial', 'minor', 'major', 'critical'] as const;
@@ -97,7 +101,7 @@ Usage:
                        [--ac "<criterion>"] [--ac-status <id>=<status>] [--ac-evidence <id>=<evidence>]
                        [--test-needed "..."] [--test-created "..."] [--test-case "..."] [--comment "..."]
   ticket-engine archive <number>
-  ticket-engine audit [--limit N] [--json] [--baseline]
+  ticket-engine audit [--limit N] [--json] [--baseline] [--merge <file>]
   ticket-engine validate
 
 Options:
@@ -113,6 +117,7 @@ Options:
   --limit <n>          audit: show only the last N entries
   --json               audit: print the raw JSON array
   --baseline           audit: adopt un-audited ticket files as baseline entries
+  --merge <file>       audit: merge another branch's audit log without dropping entries
   -h, --help           Show this help
 `;
 }
@@ -155,6 +160,7 @@ function parseArgs(argv: string[]): CliArgs {
             else if (key === 'limit') args.limit = Number.parseInt(String(val), 10);
             else if (key === 'json') args.json = true;
             else if (key === 'baseline') args.baseline = true;
+            else if (key === 'merge') args.auditMerge = String(val);
         } else {
             args.positionals.push(arg);
         }
@@ -370,7 +376,24 @@ async function main() {
                 console.error('Error: --limit requires a positive integer');
                 process.exit(1);
             }
+            if (args.auditMerge && args.baseline) {
+                console.error('Error: --merge and --baseline cannot be combined');
+                process.exit(1);
+            }
             try {
+                if (args.auditMerge) {
+                    const sourcePath = path.resolve(args.auditMerge);
+                    const parsed: unknown = JSON.parse(fs.readFileSync(sourcePath, 'utf-8'));
+                    if (!Array.isArray(parsed)) {
+                        throw new Error(`'${sourcePath}' does not contain a JSON array`);
+                    }
+                    const result = engine.mergeAuditLog(parsed as AuditEntry[]);
+                    console.log(
+                        `✅ Merged audit log: added ${result.added} entr${result.added === 1 ? 'y' : 'ies'}; ` +
+                        `${result.total} total.`
+                    );
+                }
+
                 if (args.baseline) {
                     const added = engine.baseline();
                     if (added.length === 0) {

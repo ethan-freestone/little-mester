@@ -538,6 +538,32 @@ describe('audit', () => {
         expect(validate.stdout).toContain('✅ Orphans: none.');
     });
 
+    it('merges a branch audit log with --merge', () => {
+        runCli(['create', '--ac', 'Criterion met', '--area', 'a', 'T'], { TICKET_DIR: tmpDir });
+
+        const otherDir = createTempDir();
+        runCli(['create', '--ac', 'Criterion met', '--area', 'a', 'Other 1'], { TICKET_DIR: otherDir });
+        runCli(['create', '--ac', 'Criterion met', '--area', 'a', 'Other 2'], { TICKET_DIR: otherDir });
+        const incomingPath = path.join(tmpDir, 'incoming-audit.json');
+        const otherAudit = JSON.parse(fs.readFileSync(path.join(otherDir, '_audit.json'), 'utf-8'));
+        fs.writeFileSync(incomingPath, JSON.stringify(otherAudit.slice(-1), null, 2));
+        cleanup(otherDir);
+
+        const result = runCli(['audit', '--merge', incomingPath], { TICKET_DIR: tmpDir });
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('added 1 entry');
+        expect(result.stdout).toContain('2 total');
+
+        const json = JSON.parse(runCli(['audit', '--json'], { TICKET_DIR: tmpDir }).stdout);
+        expect(json).toHaveLength(2);
+    });
+
+    it('rejects --merge combined with --baseline', () => {
+        const result = runCli(['audit', '--merge', 'x.json', '--baseline'], { TICKET_DIR: tmpDir });
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain('cannot be combined');
+    });
+
     it('exits 1 when the audit log is corrupt', () => {
         runCli(['create', '--ac', 'Criterion met', '--area', 'a', 'T'], { TICKET_DIR: tmpDir });
         fs.writeFileSync(path.join(tmpDir, '_audit.json'), '{ not json');

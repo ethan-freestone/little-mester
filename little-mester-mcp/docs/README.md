@@ -47,10 +47,15 @@ engine cannot prevent it, but `validate` makes it visible.
 
 ```bash
 cd little-mester-mcp
-npm install
-npm run build      # tsc → dist/
-npm test           # Jest: engine + CLI + MCP
+npm ci
+npm run build          # tsc → dist/
+npm run check:package  # entry points, built CLI, tarball contents
+npm test               # Jest: engine + CLI + MCP
 ```
+
+The published entry points are `dist/engine.js` (`main`), `dist/engine.d.ts` (`types`),
+and `dist/cli.js` (`ticket-engine` bin). `files` whitelists `dist/` and `docs/`, so the
+tarball never falls back to shipping TypeScript sources or tests.
 
 Run the CLI during development without building:
 
@@ -78,7 +83,8 @@ little-mester-mcp/
 │   ├── cli.ts          command-line front-end
 │   └── mcp-server.ts   MCP tool registrations (mester_tickets_*)
 ├── scripts/
-│   └── ticket-engine   shell wrapper → src/cli.ts
+│   ├── ticket-engine   shell wrapper → src/cli.ts
+│   └── check-package.js  post-build package/tarball smoke test
 ├── docs/
 │   ├── README.md       this file
 │   ├── CLI.md          command reference
@@ -147,6 +153,10 @@ rationale and invariants: [`architecture/DECISIONS.md` §I](../../docs/tickets/a
 - **Orphans.** A `ticket-NNN.json` with no audit entry is an orphan. It is flagged for
   human review and never auto-deleted or auto-adopted. `audit --baseline` is the explicit
   one-time adoption path for stores created before enforcement.
+- **Merging branches.** `_index.json` is deleted and rebuilt; `_audit.json` conflicts are
+  resolved with `audit --merge <their-log>`, which verifies both logs and never drops an
+  entry. Runbook: [`SCHEMA.md`](SCHEMA.md#merging-ticket-stores) and
+  [`docs/DECISIONS.md` §C.5](../../docs/DECISIONS.md).
 - **Fail-open writes, loud validation.** Writes still work if the store is suspicious.
   `validate` exits `1` for out-of-sync index, tampered audit, stale lock, or orphans.
 
