@@ -1,0 +1,90 @@
+{
+  "id": 39,
+  "file_path": "/workspace/docs/tickets/ticket-039.json",
+  "number": 39,
+  "area": "engine",
+  "type": "feature",
+  "status": "draft",
+  "title": "Expand ticket engine to include epic lifecycle support",
+  "objective": "Expand the Little Mester ticket engine to support full epic lifecycle management: epic grouping through the existing is_epic flag, child ticket relationship traversal, composite status computation, circular reference detection, and CLI/MCP tooling for epic queries.",
+  "created_at": "2026-10-26T20:32:39.025Z",
+  "updated_at": "2026-10-26T20:39:18.848Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Epic grouping uses the existing `is_epic: true` flag on regular tickets; no new `type` value is added, preserving the 6-value enum in docs/DECISIONS.md D.2 and architecture/DECISIONS.md C.1.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Engine.getChildren(epicNumber) returns all tickets with parent=epicNumber, sorted by updated_at desc",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Engine.getEpicStatus(epicNumber) computes composite status: 'resolved' only when ALL children are 'resolved' or 'archived'; 'active' when any child is 'active'; otherwise 'draft'",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Engine.update() rejects parent assignments that would create circular references (A→B→C→A)",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Engine.create() validates that a parent ticket exists before linking; returns error for non-existent parent",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "CLI gains 'list-children <epic-number>' command that prints children with their status and titles",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "CLI gains 'epic-status <epic-number>' command that prints composite status + breakdown per child",
+      "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "MCP server exposes listChildren(ticket_dir, epic_number) and getEpicStatus(ticket_dir, epic_number) tools",
+      "status": "pending"
+    },
+    {
+      "id": "A9",
+      "text": "Index gains 'next_number' field for deterministic ID allocation under concurrent writes (per engine-plan D.10)",
+      "status": "pending"
+    },
+    {
+      "id": "A10",
+      "text": "validate() checks that no ticket has a parent pointing to a non-existent ticket number",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "unit tests for getChildren and getEpicStatus engine methods",
+      "circular reference detection tests",
+      "CLI list-children and epic-status command tests",
+      "MCP tool integration tests for epic queries",
+      "end-to-end: create epic, add children, verify composite status",
+      "is_epic flag round-trips; type \"epic\" is rejected with a clear error"
+    ],
+    "created": [],
+    "cases": []
+  },
+  "priority": "major",
+  "models_used": [],
+  "comments": [
+    {
+      "timestamp": "2026-10-26T20:32:51.576Z",
+      "author": "cli",
+      "body": "Design reference: engine-plan.md section D.2 already documents epics as 'real tickets with lifecycle'. This ticket converts those design decisions into actual implementation. Key design points to implement: composite status auto-computed on read (not persisted), epics independently queryable, children depend upon parent. See docs/tickets/archive/engine-plan-v1-2026-10-25.md §D.2."
+    },
+    {
+      "timestamp": "2026-10-26T20:39:18.848Z",
+      "author": "cli",
+      "body": "RECONCILED 2026-10-26: A1 originally proposed adding \"epic\" as a seventh type. That conflicts with docs/DECISIONS.md D.2 (6-value type enum) and architecture/DECISIONS.md C.1 (epics are regular tickets flagged `is_epic: true`, with composite status computed on read). A1 now matches the documented design: no new type value, the engine must reject `type: \"epic\"` and rely on `is_epic`. This ticket enables the hierarchy used by epic #35 but is not part of its completion criteria."
+    }
+  ]
+}

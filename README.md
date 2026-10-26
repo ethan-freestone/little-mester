@@ -4,13 +4,15 @@ A **locked-down, fully local sandbox for learning agentic coding.**
 
 A local LLM (via **Ollama** and/or **llama.cpp**, on the GPU) drives a coding agent
 (**opencode** by default, or **aider** via `--agent`) that can read and edit files in
-**one folder you choose**, and nothing else. No internet by default. No access to your
-home directory, keys, or other projects.
+**one folder you choose**, and nothing else. The agent reaches the internet through an
+egress network by default; `--isolated` removes that route. It has no access to your home
+directory, keys, or other projects.
 
-**IMPORTANT: You are always in a container.** The agent runs inside a Docker container.
-The model server (Ollama or llama.cpp) runs in a separate container. Your workspace is
-bind-mounted at `/workspace` inside the agent container. The host filesystem is NOT
-accessible except for that one mount.
+**IMPORTANT: You are always in a container.** Today the agent runs in a Docker container on
+the host daemon. The target harness (epic #35) moves that container into a disposable local
+QEMU/KVM VM with rootless Docker, so the host daemon is not shared. Either way, the
+workspace is mounted/exported at `/workspace` and the rest of the host filesystem is not
+accessible. See [`docs/vm-architecture.md`](docs/vm-architecture.md).
 
 The goal of this repo is twofold:
 
@@ -38,13 +40,22 @@ ticket explaining why.
 
 ---
 
+## VM harness status (epic #35, in progress)
+
+The target is a local, `./lab`-managed QEMU/KVM VM: **rootless Docker** under a dedicated
+user, a **virtiofs** workspace export, model servers on the host behind narrow `guestfwd`
+ports, a host-side egress proxy, and no host ports. It is **not implemented yet**; #41–#43
+carry the work and evidence. Until then, `./lab` uses host Docker as described below.
+Read [`docs/vm-architecture.md`](docs/vm-architecture.md) before changing `lab`,
+`compose.yaml`, or the agent image boundaries.
+
 ## Build status
 
 - ✅ 0. Host NVIDIA driver works (`nvidia-smi`)
 - ✅ 1. Repo skeleton, `.gitignore`, `models.txt`
 - ✅ 2. `compose.yaml` (dual backend: ollama + llama.cpp)
 - ✅ 3. `agent/Dockerfile`, model pull scripts
-- ✅ 4. `lab` launcher with path guard rails & egress gate (includes `.mester-egress`)
+- ✅ 4. `lab` launcher with path guard rails and egress toggle (`--isolated` / `.mester-egress`); domain-allowlist *enforcement* is tracked in #43
 - ✅ 5. `./lab setup` completes (packages, image build, models pulled)
 - ✅ 6. `./verify-lab.sh` all green
 - ✅ 7. First opencode session on a throwaway repo
@@ -60,7 +71,9 @@ ticket explaining why.
 
 ## Architecture
 
-Default networking (no overrides):
+This diagram is the **current host-Docker mode**. The target VM harness (epic #35) is in
+[`docs/vm-architecture.md`](docs/vm-architecture.md); this section will be replaced when #41
+lands. Default networking (no overrides):
 
 ```
  HOST (your machine — CachyOS/Arch recommended)
@@ -68,7 +81,7 @@ Default networking (no overrides):
  │                                                                              │
  │  ./lab ──► docker compose                                                    │
  │                                                                              │
- │   ┌──────────── network: internal [+ optional egress] ───────────────────┐  │
+ │   ┌──── networks: egress + internal (default), internal only (--isolated) ┐  │
  │   │                                                                       │  │
  │   │  ┌─────────────┐                                                      │  │
  │   │  │ agent       │  http://ollama:11434/v1   ┌─────────────────────┐   │  │
@@ -90,7 +103,7 @@ Default networking (no overrides):
  │   │  │ (sidecar)   │   read-only host hw     │ (GGUF files)      │   │  │
  │   │  └─────────────┘                         └───────────────────┘   │  │
  │   │                                                                    │  │
- │   │  --egress / .mester-egress ──► optional egress network ──► internet│  │
+ │   │  default ──► egress ──► internet; --isolated ──► internal only     │  │
  │   └────────────────────────────────────────────────────────────────────┘
  │                                                                              │
  └──────────────────────────────────────────────────────────────────────────────┘
@@ -111,7 +124,7 @@ isolated sub-agents):
 |---|---|
 | The model can't touch files | Ollama/llama.cpp only turn text into text. They're in their own containers with no mounts except their model volumes. |
 | The agent can only touch one folder | The agent container sees exactly one bind mount, `/workspace`, gated by `lab`'s path checks. |
-| The agent can't phone home | By default the agent and model servers share an `internal: true` network. Egress is opt-in via `--egress`/`.mester-egress`. Only `ollama-pull` / `llamacpp-pull` have it during setup. |
+| The agent can't phone home when you say so | The agent is on `egress` + `internal` by default. `--isolated` (or `.mester-egress` `permission=false`) removes the egress route, leaving only `internal`. Domain-allowlist enforcement is tracked in #43. |
 
 ---
 
@@ -155,8 +168,9 @@ Edit `models.txt`, then run `./lab setup` (or `./lab pull`).
 
 ## Quick start (new machine)
 
-**Requirements:** Arch/CachyOS (other distros: see `docs/01-host-setup.md`), working
-NVIDIA driver, `sudo`.
+**Requirements:** Arch/CachyOS (other distros: install Docker, the NVIDIA container
+toolkit, and the usual build tools), working NVIDIA driver, `sudo` for the one-time setup.
+The VM harness will replace this host-Docker setup when #41 lands.
 
 ```bash
 git clone <this-repo> little-mester
@@ -431,10 +445,12 @@ docker stats little-mester-agent-1       # CPU/RAM usage
 
 1. You run `./lab workspaces/demo`.
 2. `lab` resolves the path, runs safety checks, asks you to confirm the mount.
-3. `lab` runs `docker compose` with `WORKSPACE`, `LAB_UID`, `LAB_GID`. Uses `sudo`
-   (the Docker daemon is root-owned).
+3. `lab` runs `docker compose` with `WORKSPACE`, `LAB_UID`, `LAB_GID` against the host
+   daemon (root-owned by default). Your user needs Docker access, typically via the
+   `docker` group; the one-time setup uses `sudo` to install/configure Docker.
 4. Compose starts `ollama` + `llamacpp` (health-checked), then the `agent` container:
-   non-root, read-only fs, no caps, `/workspace` mounted rw, network gated by egress.
+   non-root, read-only fs, no caps, `/workspace` mounted rw, `egress` + `internal` by default
+   (`--isolated` for internal only).
 5. **opencode** sends prompts to `http://ollama:11434/v1` OR
    `http://llamacpp:11434/v1` (configurable per model).
 6. The agent edits files in `/workspace`, runs commands in the container, and commits
@@ -462,10 +478,10 @@ Full version: [SECURITY.md](SECURITY.md).
 
 | Channel | Control |
 |---|---|
-| Your files | Only one bind mount. Path guards in `lab`. No home dir, no Docker socket. |
+| Your files | Only one bind mount/export. Path guards in `lab`. No home dir, no host Docker socket. The VM target mounts only the in-VM rootless socket when Docker access is enabled (#42). |
 | Credentials | None mounted or passed in. |
-| Network | `internal: true` network. No proxy. |
-| Privileges | Non-root, `cap_drop: ALL`, `no-new-privileges`, read-only root fs. |
+| Network | `egress` + `internal` by default; `--isolated` leaves `internal` only. Domain-allowlist enforcement is #43. |
+| Privileges | Non-root, `cap_drop: ALL`, `no-new-privileges`, read-only root fs. Target: rootless Docker inside the VM. |
 | Resources | `mem_limit: 8g`, `pids_limit: 512` on agent. |
 | Model server exposure | No published ports. |
 
@@ -478,11 +494,15 @@ Full version: [SECURITY.md](SECURITY.md).
 - **Traps that run on your host later.** Git hooks, `Makefile`, `package.json` scripts,
   `.envrc`, `.vscode/tasks.json`, shell scripts written by the agent run with *your*
   privileges if you execute them. **Read agent-written code before running it on the host.**
-- **Container escape.** Containers share the host kernel. A kernel/runtime vuln could
-  break out. Unlikely from a local model making mistakes, but real against deliberately
-  hostile code. A VM is the next level up.
-- **Docker group = root.** Anyone who can run `docker` can effectively become root on the
-  host. `lab` uses `sudo` instead of adding you to the group.
+- **Container escape.** In the current host-Docker mode, containers share the host kernel.
+  A kernel/runtime vuln could break out. Unlikely from a local model making mistakes, but
+  real against deliberately hostile code. The target VM harness (#35) moves the agent into
+  a disposable VM with rootless Docker, which raises this bar; it is still not a
+  security-audited product.
+- **Docker group = root.** Anyone who can run `docker` on the host can effectively become
+  root there. The current mode requires host Docker access (group or `sudo`); the one-time
+  setup uses `sudo` rather than silently adding you to the group. The VM target does not
+  use the host Docker daemon for the agent at all.
 - **Bad output.** A sandboxed agent can still write wrong or insecure code. Review it.
 
 ---
@@ -493,9 +513,9 @@ Full version: [SECURITY.md](SECURITY.md).
 |---|---|---|
 | Dual backend (Ollama + llama.cpp) | Learning, comparison, best tool per model | More complex compose, two pull services |
 | llama.cpp with `--n-cpu-moe` for MoE | Only way to run 35B-A3B on 8 GB VRAM efficiently | Requires GGUF download from HF, not Ollama registry |
-| Internet off at runtime | Closes "send data out" channel | Dependencies baked in image or in workspace |
+| Egress enabled by default, isolatable | Package installs and web work out of the box | The agent can send data out unless `--isolated`; domain allowlist enforcement is #43 |
 | One-shot pull services on separate network | Keeps internet out of long-lived services | Extra services to understand |
-| Docker over Podman | Most docs/tooling assume it | Daemon runs as root. Rootless Podman = later hardening |
+| Docker over Podman | Most docs/tooling assume it; compose compatibility is the priority | Host daemon runs as root today; the VM target uses rootless Docker under a dedicated user (#35). Rootless Podman remains future scope (#46). |
 | Agent commits as `little-mester-agent` | Easy to audit/revert agent changes | None |
 | Q4_K_M quantization | Speed/quality sweet spot; Q6/Q8 slows decode ~2x | Slight quality loss vs Q8 |
 | Context = 64k (not 196k) | 196k forces layers off GPU, kills prefill speed | Less context for huge files |
@@ -535,6 +555,16 @@ Regression checks include: valid workspace path acceptance, rejection of sensiti
 (`$HOME`, `$HOME/.ssh`, …), ownership verification, git-hook warning detection, and the
 TUI JSX rules.
 
+Documentation drift check (also called by `./verify-lab.sh`):
+
+```fish
+python3 scripts/check-docs-consistency.py
+```
+
+It fails when `SECURITY.md`/`README.md` disagree with `compose.yaml` about the egress
+default or the agent's memory/PID limits, when the root `DECISIONS.md` grows back into a
+second log, or when a local markdown link no longer resolves.
+
 ### Ticket engine tests
 
 ```fish
@@ -560,7 +590,7 @@ cd little-mester-mcp && npm test
 | `ollama ps` / llama.cpp shows CPU fallback | Model + context doesn't fit in VRAM. Lower context, smaller quantization, or smaller model. |
 | Agent can't reach model server | Server not healthy yet, or services not on same network. Check `docker compose ps`. |
 | Files created by agent owned by root | `LAB_UID`/`LAB_GID` not passed. Run via `./lab`, not `docker compose` directly. |
-| Agent stalls trying to reach internet | Expected with no egress. It should fall back. Note latency in journal. |
+| Agent stalls trying to reach internet | Check `--isolated` and `.mester-egress` (`permission=false` denies egress). A non-empty `allowed_domains` is not enforced yet (#43). |
 | llama.cpp fails to start | Check the GGUF file exists in the `llamacpp-models` volume. Check `docker logs llamacpp`. |
 | Out of memory (OOM) on host | Too many apps open. Close browsers. Check `docker stats`. |
 | Throttling / low t/s | **Cooling!** Check temps in metrics. Fan/stand mandatory for sustained load. |

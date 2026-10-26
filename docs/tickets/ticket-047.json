@@ -1,0 +1,86 @@
+{
+  "id": 47,
+  "file_path": "/workspace/docs/tickets/ticket-047.json",
+  "number": 47,
+  "area": "infra",
+  "type": "feature",
+  "status": "draft",
+  "title": "Opt-in remote Linux host target for ./lab (follow-up to epic #35)",
+  "objective": "Add an explicit remote-target mode so ./lab can run the agent container on an existing Linux host over SSH, while local QEMU/KVM stays the default. This is deliberately outside epic #35's completion criteria: it is the second topology the owner asked to track, not the one being implemented now.",
+  "created_at": "2026-10-26T20:45:14.103Z",
+  "updated_at": "2026-10-26T20:45:14.105Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Local QEMU/KVM remains the default: a plain ./lab <dir> never touches a remote host, and remote mode requires an explicit --vm-target remote (or equivalent config) plus a visible confirmation.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Connection details (host, user, port, key path) come from gitignored config/env; no key or credential is copied into the workspace, image or ticket, and git status --short is clean after a session.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "The same host-side check_workspace() guards run before anything is sent to the remote host: /, $HOME, the lab repo without --unsafe-recurse, and credential directories are refused and never exported.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Workspace transport is explicit (sshfs preferred, rsync fallback), exports only the selected directory, and documents latency, conflict and copy-back behaviour; the remote host sees no other local path.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "The remote host runs the agent container with the same hardening and can run the workspace compose dependencies; no host ports are published, .mester-egress is enforced, and teardown removes labelled containers, networks, volumes and the transport mount.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "./lab remote status/down is idempotent and a failed connection gives an actionable error; there is no silent fallback that starts the agent on the local host.",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "SECURITY.md and README state that remote mode shares the target host Docker daemon and is weaker isolation than the local VM, and recommend the local VM for untrusted code.",
+      "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "Tests cover local-default regression, remote provisioning, refused paths, transport round-trip, no-published-ports, egress deny, teardown residue and docs review.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "local default regression (remote mode not entered)",
+      "remote provisioning against a clean Linux host",
+      "refused workspace paths",
+      "sshfs/rsync round-trip and conflict behaviour",
+      "no-published-ports check on the remote host",
+      "egress deny check",
+      "teardown residue check",
+      "docs review of the weaker-isolation warning"
+    ],
+    "created": [],
+    "cases": []
+  },
+  "priority": "major",
+  "comments": [
+    {
+      "timestamp": "2026-10-26T20:45:14.102Z",
+      "author": "cli",
+      "body": "Created 2026-10-26 as the follow-up the owner asked for when choosing local QEMU/KVM: option 1 is the implementation target for epic #35, and this ticket tracks option 2 (local default + remote override) separately. It is intentionally NOT a child of #35, so it does not block the epic."
+    },
+    {
+      "timestamp": "2026-10-26T20:45:14.104Z",
+      "author": "cli",
+      "body": "Depends on #40 (control channel/transport decision) and #41 (VM lifecycle commands) so the remote target reuses the same path guards, labels, teardown and egress contract instead of growing a second harness. The engine stores dependencies but does not yet gate status transitions on them; that is #39."
+    }
+  ],
+  "models_used": [],
+  "dependencies": [
+    40,
+    41
+  ]
+}

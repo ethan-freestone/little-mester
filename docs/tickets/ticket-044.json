@@ -1,0 +1,85 @@
+{
+  "id": 44,
+  "file_path": "/workspace/docs/tickets/ticket-044.json",
+  "number": 44,
+  "area": "docs",
+  "type": "improvement",
+  "status": "resolved",
+  "title": "Housekeeping: SECURITY/README drift and root DECISIONS sync",
+  "objective": "Remove documentation drift that misstates the security model: align SECURITY.md and README with actual compose defaults, and replace or sync the stale root DECISIONS.md so there is one live decision log. Enforcement of .mester-egress allowed_domains lives in the workspace Docker ticket.",
+  "created_at": "2026-10-26T20:39:18.838Z",
+  "updated_at": "2026-10-26T20:49:19.623Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "SECURITY.md matches compose.yaml: egress default, mem_limit 8g, no host ports, capabilities, and the Docker-in-VM access model once #42 defines it.",
+      "status": "passing",
+      "evidence": "SECURITY.md rewritten against compose.yaml: §2 records egress enabled by default ([egress, internal]), --isolated / .mester-egress permission=false, setup-only pull egress, no published ports, and that allowed_domains is parsed but not yet enforced (#43). §3 keeps the single workspace mount and adds the target virtiofs export plus the no-host-Docker-socket rule. §4 records rootless Docker inside the VM (#42) and the no-privileged-container override. §5 states mem_limit 8g and pids_limit 512. The Docker-in-VM target is docs/DECISIONS.md §C.8 and docs/vm-architecture.md.",
+      "note": "The target access model is recorded; #42 implements and tests it. This ticket fixes the documentation drift."
+    },
+    {
+      "id": "A2",
+      "text": "README matches the same facts and the VM workflow; no 'no internet by default' or '4g' claim remains unless it is true.",
+      "status": "passing",
+      "evidence": "README.md intro no longer says \"No internet by default\"; it states egress is enabled by default and --isolated removes it. A \"VM harness status (epic #35, in progress)\" section points at docs/vm-architecture.md and says host Docker is still the current mode. The architecture diagram is labelled current mode; the egress table, security table (8g/512), design-decision row, troubleshooting and Docker-group note now match compose/C.8. Stale \"4g\", \"egress is opt-in\" and \"internet off at runtime\" claims are gone and the drift check enforces that.",
+      "note": "The full VM provisioning runbook remains #41 A8; this ticket corrects the current facts and labels the target."
+    },
+    {
+      "id": "A3",
+      "text": "Root DECISIONS.md is either a thin pointer to docs/DECISIONS.md or a verified synced copy; DECISION-011 references point to existing ticket/file numbers, and a link check passes.",
+      "status": "passing",
+      "evidence": "Root DECISIONS.md is now a thin pointer to docs/DECISIONS.md and docs/tickets/architecture/DECISIONS.md. The former 12-entry log is frozen at docs/tickets/archive/root-decisions-v1-2026-10-21.md with a banner saying it is not current guidance; DECISION-011 links were repaired to ../ticket-014.json and ../ticket-015.json (the old ticket-014-docker-in-docker-failure.md and ticket-015-agent-security-modes.md files did not exist)."
+    },
+    {
+      "id": "A4",
+      "text": "A repeatable check (script or bats test) fails when SECURITY.md/README drift from compose defaults again, or the check is explicitly added to verify-lab.",
+      "status": "passing",
+      "evidence": "scripts/check-docs-consistency.py parses the compose agent service (mem_limit, pids_limit, networks, read_only, cap_drop, no-new-privileges), compares SECURITY.md/README.md, rejects the known stale claims, verifies the root DECISIONS pointer, and checks local markdown links + conflict markers. verify-lab.sh calls it before the sandbox checks; bash -n verify-lab.sh passes. The script reports 88/88 checks passing."
+    },
+    {
+      "id": "A5",
+      "text": "All links in README, SECURITY.md and both decision logs resolve; no stale paths or conflict markers.",
+      "status": "passing",
+      "evidence": "All local links in README.md, SECURITY.md, root DECISIONS.md, docs/DECISIONS.md, docs/tickets/architecture/DECISIONS.md, docs/vm-architecture.md and the archived root log resolve (same script). No conflict markers in those files. The only pre-existing broken links were the two DECISION-011 paths, now repaired."
+    }
+  ],
+  "tests": {
+    "needed": [
+      "SECURITY/README drift check against compose.yaml",
+      "docs link check",
+      "verify-lab run"
+    ],
+    "created": [
+      "docs drift check (scripts/check-docs-consistency.py; 88 checks pass)",
+      "docs link check (same script: README, SECURITY, both decision logs, root pointer, archive)",
+      "verify-lab integration (call added; bash -n passes; full Docker run deferred to #41)"
+    ],
+    "cases": [
+      "Compose facts mirrored in SECURITY/README: mem_limit 8g, pids_limit 512, [egress, internal], read_only, cap_drop ALL, no-new-privileges.",
+      "Stale claims removed: \"No internet by default\", \"mem_limit: 4g\", \"Egress is opt-in\", \"Internet off at runtime\", \"zero route\", \"No proxy.\"",
+      "Root DECISIONS.md is a pointer; DECISION-011 archive links resolve to ticket-014.json and ticket-015.json.",
+      "Local markdown links and conflict markers checked across README, SECURITY, root/docs/architecture decision logs and the archived log: all resolve.",
+      "Full verify-lab run is deferred because this environment has no Docker CLI/daemon; #41 carries the clean-VM run."
+    ]
+  },
+  "priority": "minor",
+  "parent": 35,
+  "comments": [
+    {
+      "timestamp": "2026-10-26T20:39:18.838Z",
+      "author": "cli",
+      "body": "Created through the ticket engine API (createTicketEngine.create) with parent=35. The CLI has no --parent flag until #39 lands; no ticket JSON was hand-written."
+    },
+    {
+      "timestamp": "2026-10-26T20:49:19.619Z",
+      "author": "cli",
+      "body": "Housekeeping executed 2026-10-26. Rewrote SECURITY.md around actual compose defaults and the §C.8 VM target; corrected README egress/limit/VM-status claims; replaced root DECISIONS.md with a pointer and archived the old log; added scripts/check-docs-consistency.py and wired it into verify-lab.sh. No ticket JSON was hand-edited."
+    },
+    {
+      "timestamp": "2026-10-26T20:49:19.622Z",
+      "author": "cli",
+      "body": "RESOLVED 2026-10-26. Remaining related work is deliberately elsewhere: #42 implements/tests the in-VM Docker socket and updates its own docs; #43 implements allowed_domains enforcement (SECURITY.md says so explicitly); #41 A8 owns the full VM runbook. The drift check will fail if these docs regress."
+    }
+  ],
+  "models_used": []
+}

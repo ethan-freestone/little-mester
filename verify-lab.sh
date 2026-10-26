@@ -5,6 +5,14 @@ export LAB_YES=1
 WS="$PWD/workspaces/.verify"; mkdir -p "$WS"
 pass=0; fail=0
 
+echo "=== Documentation Drift Checks ==="
+if python3 scripts/check-docs-consistency.py; then
+  echo "PASS  docs match compose defaults and local links resolve"; ((pass++))
+else
+  echo "FAIL  docs drift from compose defaults or a local link is broken"; ((fail++))
+fi
+echo ""
+
 # check <name> <0=should succeed | 1=should fail> <shell command run inside container>
 check() {
   local got=1
