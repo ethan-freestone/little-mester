@@ -7,7 +7,7 @@
   "title": "Unblock test execution: bats-core in agent image + Jest engine suite on host",
   "objective": "DECISIONS.md section C.1 states testing is NOT happening because bats-core is not in the agent image and no Jest engine test suite exists. After merge, add bats-core to agent/Dockerfile (from source if distro package missing), confirm the verify-sandbox.sh and tests/lab.bats run inside the container, and create a minimal Jest setup for ticket-engine-mcp tests so `./run-tests.sh` and host-side validation both pass green.",
   "created_at": "2026-10-21T0:00:00Z",
-  "updated_at": "2026-10-21T0:00:00Z",
+  "updated_at": "2026-10-26T17:39:50.081Z",
   "links": [
     {
       "type": "blocks",
@@ -42,5 +42,12 @@
       "objective": "After merging the README sections from both branches, add a 'Testing infrastructure' subsection that clearly documents: (a) bats is now in the agent image, (b) how to run `./run-tests.sh`, (c) how to run Jest host-side. Move section C.1 'Testing is NOT happening right now' from DECISIONS.md to reflect this update."
     }
   ],
-  "notes": "This is the highest-priority infra work because without bats-core in the agent image, we cannot validate ANY future ticket's implementation. Blocker for tickets: 002 (testing framework), 014 (testing strategy). The Dockerfile merge conflict on main vs branch must be resolved first — accept main's explicit plugin COPY lines, then add bats-core verification to this ticket."
+  "notes": "This is the highest-priority infra work because without bats-core in the agent image, we cannot validate ANY future ticket's implementation. Blocker for tickets: 002 (testing framework), 014 (testing strategy). The Dockerfile merge conflict on main vs branch must be resolved first — accept main's explicit plugin COPY lines, then add bats-core verification to this ticket.",
+  "comments": [
+    {
+      "timestamp": "2026-10-26T17:39:50.081Z",
+      "author": "cli",
+      "body": "ACCEPTANCE CRITERIA ADDENDUM (2026-10-26). Jest and bats must run green in the VM-backed Docker environment from ticket #35, not only on the host filesystem. The run must not create files outside the disposable workspace and must leave no containers, networks, or volumes behind. Update docs/DECISIONS.md C.1 with the verified status."
+    }
+  ]
 }

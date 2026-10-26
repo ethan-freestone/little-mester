@@ -64,7 +64,7 @@
     {
       "number": 12,
       "file_path": "ticket-012.json",
-      "status": "draft",
+      "status": "active",
       "area": "general"
     },
     {
@@ -76,7 +76,7 @@
     {
       "number": 14,
       "file_path": "ticket-014.json",
-      "status": "draft",
+      "status": "active",
       "area": "general"
     },
     {
@@ -198,7 +198,19 @@
       "file_path": "ticket-034.json",
       "status": "draft",
       "area": "infra"
+    },
+    {
+      "number": 35,
+      "file_path": "ticket-035.json",
+      "status": "draft",
+      "area": "infra"
+    },
+    {
+      "number": 36,
+      "file_path": "ticket-036.json",
+      "status": "draft",
+      "area": "engine"
     }
   ],
-  "updated_at": "2026-10-26T17:32:00.319Z"
+  "updated_at": "2026-10-26T17:39:53.391Z"
 }

@@ -7,7 +7,7 @@
   "title": "Testing strategy: decide and implement (resolving \"testing is not happening\")",
   "objective": "Define and implement an actual testing pipeline for little-mester — what gets tested, how tests run, and how the agent executes them during sessions.",
   "created_at": "2026-10-20T09:09:49.608Z",
-  "updated_at": "2026-10-25T00:00:00Z",
+  "updated_at": "2026-10-26T17:39:48.745Z",
   "subtickets": [
     {
       "id": 1,
@@ -36,5 +36,12 @@
       "objective": "Test full MCP server lifecycle: start server via stdio, send JSON-RPC requests, verify responses. Use `@modelcontextprotocol/sdk` test utilities."
     }
   ],
-  "notes": "As of 2026-10-25: Engine tests (28 passing) exist in `little-mester-mcp/tests/engine.test.ts`. MCP server tests (32 passing) added in `little-mester-mcp/tests/mcp-server.test.ts` — subtask 2 complete. Missing: bats-core in container (subtask 1), migration tests (subtask 3), run-tests.sh wiring (subtask 4), integration tests (subtask 5). Per docs/DECISIONS.md C.1: testing is NOT happening because bats-core is not in the agent image and no Jest MCP test suite exists."
+  "notes": "As of 2026-10-25: Engine tests (28 passing) exist in `little-mester-mcp/tests/engine.test.ts`. MCP server tests (32 passing) added in `little-mester-mcp/tests/mcp-server.test.ts` — subtask 2 complete. Missing: bats-core in container (subtask 1), migration tests (subtask 3), run-tests.sh wiring (subtask 4), integration tests (subtask 5). Per docs/DECISIONS.md C.1: testing is NOT happening because bats-core is not in the agent image and no Jest MCP test suite exists.",
+  "comments": [
+    {
+      "timestamp": "2026-10-26T17:39:48.744Z",
+      "author": "cli",
+      "body": "ACCEPTANCE CRITERIA ADDENDUM (2026-10-26). The testing pipeline must execute on the Docker-capable VM from ticket #35 and in CI: engine/CLI/MCP Jest suites, bats suites, ticket-engine validate, and the lab end-to-end smoke test. Docker-dependent tests are required, not optional. Failure logs/artifacts are retained."
+    }
+  ]
 }

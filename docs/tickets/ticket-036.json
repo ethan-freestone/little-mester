@@ -1,0 +1,21 @@
+{
+  "id": 36,
+  "file_path": "/workspace/docs/tickets/ticket-036.json",
+  "number": 36,
+  "area": "engine",
+  "type": "improvement",
+  "status": "draft",
+  "title": "Ticket engine: merge-to-main readiness (clean clone, CI, packaging, generated files)",
+  "objective": "Make the ticket engine module safe and repeatable to merge to main: green tests from a clean clone, correct package entry points, no committed transient lock, an explicit policy for the tracked generated index/audit files, and a CI/pre-merge gate. Excludes unrelated branch work unless the merge scope says otherwise.",
+  "created_at": "2026-10-26T17:39:38.620Z",
+  "updated_at": "2026-10-26T17:39:38.620Z",
+  "priority": "major",
+  "comments": [
+    {
+      "timestamp": "2026-10-26T17:39:38.620Z",
+      "author": "cli",
+      "body": "ACCEPTANCE CRITERIA (2026-10-26).\n\nA1 — From a clean clone on Node 20: npm ci && npm test is green (120 tests), and the CLI suite runtime is documented. No reliance on the developer's local node_modules or a pre-built dist/.\n\nA2 — npm run build emits dist/engine.js (actual layout), and package.json main/types/bin point at files that exist after build. A require() of the package entry and `ticket-engine --help` from the built output both work.\n\nA3 — docs/tickets/.engine.lock is gitignored. Creating/updating/archiving tickets (and a simulated crashed write) leaves git status --short clean; validate reports a crash lock as stale rather than the file being committed.\n\nA4 — The tracked _index.json / _audit.json policy is documented and exercised: how to reconcile the files after a merge or rebase, how baseline adoption works, and how to avoid dropping audit entries. A script or runbook is tested against two divergent branches.\n\nA5 — In a clean clone, ./little-mester-mcp/scripts/ticket-engine validate exits 0 against the committed audit log, with index synced and no orphans.\n\nA6 — CI or a committed pre-merge script runs build + test + validate on push/PR. The gate is not a manual checklist.\n\nA7 — Merge scope is decided and recorded: merge the whole feat/ticket-context branch, or extract an engine-only set of commits. If extracting, list the commits and prove the module builds without unrelated agent/metrics/lab changes.\n\nA8 — Docs are current: root README, module README, CLI.md, SCHEMA.md, both decision logs. No stale paths, broken relative links, or conflict markers.\n\nA9 — A clean-clone smoke test covers CLI create -> update -> archive -> audit -> validate and MCP create -> validate against a temp dir, leaving no stray store under little-mester-mcp/docs/tickets."
+    }
+  ],
+  "models_used": []
+}

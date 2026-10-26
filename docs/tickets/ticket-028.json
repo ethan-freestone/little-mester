@@ -7,5 +7,12 @@
   "title": "Tech debt: lab is too big and hard to maintain",
   "objective": "Reduce ./lab file size and complexity by extracting all remaining inline subcommand handlers into standalone scripts, enforcing a maximum of 50 lines per handler in the main file. Target: ./lab under 400 lines, no single handler over 50 lines.",
   "created_at": "2026-10-22T00:00:00.000Z",
-  "updated_at": "2026-10-22T00:00:00.000Z"
+  "updated_at": "2026-10-26T17:39:51.421Z",
+  "comments": [
+    {
+      "timestamp": "2026-10-26T17:39:51.421Z",
+      "author": "cli",
+      "body": "ACCEPTANCE CRITERIA ADDENDUM (2026-10-26). After the refactor, every extracted lab handler is verified by the VM end-to-end run from ticket #35 (up, --unsafe-recurse write, stop/down). A handler is not done because --help prints or the script exits 0; the AC is the observed container/service/file effect."
+    }
+  ]
 }
