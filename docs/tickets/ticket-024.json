@@ -1,0 +1,142 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 24,
+  "area": "observability",
+  "type": "feature",
+  "status": "draft",
+  "title": "AI token metrics, AMD GPU stats, CPU temps, and readable CPU usage in the metrics plugins",
+  "objective": "Extend the little-mester metrics surface in two directions. (1) AI/agent token metrics: OpenCode already knows its own token usage (TokenUsage.Info = input/output/reasoning/cache.read/cache.write, plus per-message cost and per-model breakdown via session stats), and that data lives in the OpenCode server process, not on the host -- so it needs NO sidecar and NO extra host passthrough, unlike the /proc and /sys hardware data. Expose it through a new internal tool. (2) Hardware coverage gaps: the AMD Strix Halo iGPU is invisible (gather.py only knows NVML/nvidia-smi), CPU temps are empty because /sys/class/hwmon is bind-mounted such that hwmon symlinks resolve outside the mount, and the CPU 'load' readout (Linux load average: EWMA of runnable + uninterruptible-sleeping tasks over 1/5/15m, NOT a percentage and NOT normalized by core count) is unreadable without dividing by the core count. Fix all three. Everything must keep the sidecar's no-host-ports security posture (DECISIONS J.7) and must not regress the existing get_host_metrics tool or the host-metrics-tui sidebar slot (DECISIONS J.9 OpenTUI text rules).",
+  "created_at": "2026-10-21T17:00:00Z",
+  "updated_at": "2026-10-26T18:01:24.150Z",
+  "priority": "major",
+  "labels": [
+    "scope/agent",
+    "scope/infra",
+    "scope/performance"
+  ],
+  "comments": [
+    {
+      "author": "agent",
+      "created_at": "2026-10-21T00:00:00Z",
+      "body": "PHASE 0 — VERIFY THE INTERNAL API SURFACE (do this first; everything in Phase 1 depends on it). In the installed OpenCode 2.1.2, confirm from a live plugin: (a) whether the plugin client exposes the aggregate stats endpoint as ctx.session.stats({ from, to, project, timezone, tools }) -- the v2 API documents GET /api/experimental/session/stats returning SessionStats.Info (tokens, cost, steps, prompts, sessions, subagents, activeDays, streak, activity[], models[] with per-model tokens+cost); the 2.1.2 binary contains both the route string and a 'session.stats' symbol, but the documented SessionContext interface does not list it; (b) that ctx.session.context({ sessionID }) returns SessionMessageInfo[] whose assistant entries carry tokens: TokenUsage.Info {input, output, reasoning, cache:{read,write}} and cost; (c) that Model.Info.limit.context is readable via ctx.model.list() (196608 for ollama/qwen3.6:35b-a3b, 65536 for ollama/qwen3:8b); (d) that the tool execute context carries context.sessionID and context.messageID. Record what works in docs/DECISIONS.md as a new subsection (J.10) before implementing -- if ctx.session.stats is NOT on the client, fall back to summing tokens over ctx.session.context() and say so in the DECISIONS entry."
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-10-21T00:00:00Z",
+      "body": "PHASE 1 — AI TOKEN METRICS TOOL (internal, no sidecar). New plugin dir agent/opencode/plugins/ai-metrics/ (package.json + index.ts + README.md), id little-mester.ai-metrics, registered via scripts/regen-configs and COPY'd in agent/Dockerfile (per DECISIONS J.2/J.6). Register a tool get_ai_token_metrics in a ctx.tool.transform. Report: session totals (input / output / reasoning / cache read / cache write / total tokens), cost in USD, per-model breakdown (model, steps, tokens, cost), steps and prompts count, and context-window utilisation % (estimated from the latest assistant message's input tokens divided by the active model's limit.context -- verify this estimate against the TUI's own context readout before publishing it). Include a detail option mirroring get_host_metrics: summary (formatted report) and full (raw JSON). DEFAULT SCOPE = the calling session (context.sessionID). If a project/date-range aggregate is wanted, expose it as a separate optional input on the same tool rather than a separate tool. If the TUI plugin context turns out to expose no session access, Phase 3 covers the relay."
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-10-21T00:00:00Z",
+      "body": "PHASE 2 — SHARED usage.ts MODULE AND models_used BRIDGE. Extract the token aggregation into agent/opencode/plugins/ai-metrics/usage.ts exporting a computeSessionUsage(sessionID) function. Shape the per-model output EXACTLY like the engine's models_used[] entry per DECISIONS section E: { model, thinking_time_seconds, idle_time_seconds, cost_estimate_usd, context_window_used_pct }. Derive thinking_time from per-assistant-message time.created/time.completed; derive idle_time from the gaps between messages; map cost from the per-message cost field. This module is the intended future source for the ticket engine's auto-populated models_used field (ticket-015 Phase A) -- keep it importable and side-effect free, but do NOT touch the engine from this ticket. That coupling is a separate decision for the engine area."
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-10-21T00:00:00Z",
+      "body": "PHASE 3 — TUI SURFACE FOR TOKEN METRICS (optional; decide scope before starting). The host-metrics-tui plugin currently reaches data only over sidecar HTTP, and token usage must NOT be relayed through the sidecar (that would reintroduce the external passthrough this ticket exists to avoid). Preferred: the server-side ai-metrics plugin publishes the latest usage snapshot via ctx.storage.set(...) and the TUI plugin reads it with ctx.storage.get(...); VERIFY FIRST that a server entry and a TUI entry in the same package share one storage namespace -- if they do not, alternatives are (a) the TUI plugin calls the OpenCode HTTP API directly, or (b) skip the TUI surface for tokens entirely and keep them in the tool output only. Whichever is chosen, record it in DECISIONS J.10. Any JSX added must obey the OpenTUI text rules in DECISIONS J.9 (no nested <text>, span colours via style={{ fg }}, bold via <strong>) and pass scripts/check-tui-jsx.py via tests/tui-jsx.bats."
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-10-21T00:00:00Z",
+      "body": "PHASE 4 — AMD GPU COLLECTION. The host is an AMD Ryzen AI 9 HX 370 (Strix Halo) with a Radeon 890M iGPU alongside the NVIDIA GPU; gather.py's _collect_gpu() only tries NVML then nvidia-smi, so the AMD device never appears. Add a sysfs collector reading /sys/class/drm/card*/device/: gpu_busy_percent, mem_info_vram_used, mem_info_vram_total, mem_info_gtt_used, mem_info_gtt_total. Use rocm-smi only as an optional fallback (it would require ROCm in the sidecar image -- avoid unless sysfs is insufficient). CRITICAL SEMANTIC NOTE: Strix Halo is a unified-memory APU, so its 'VRAM' is carved out of system RAM and the GPU shares the same physical pool. Report it as shared memory, not as a dedicated VRAM budget, and do not present a used/total percentage that can exceed 100% as if it were a dedicated GPU (the ticket-011 sketch's 'VRAM 12.1/8.0 GB (151%)' is exactly the bug to avoid). Normalise the GPU entry schema across vendors by adding a vendor field ('nvidia' | 'amd') and a memory object { kind: 'dedicated' | 'shared', used_mb, total_mb, free_mb }, and keep index/name/utilization_percent/temperature_c at the top level so existing consumers still work."
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-10-21T00:00:00Z",
+      "body": "PHASE 5 — FIX THE HWMON SYMLINK BREAKAGE (this unblocks CPU temps AND the AMD GPU temp). compose.yaml currently bind-mounts /sys/class/hwmon -> /host/hwmon and /sys/class/thermal -> /host/thermal. hwmon's tempN_input is a symlink to ../device/..., which points OUTSIDE the mounted tree, so the symlink dangles and _collect_temperatures() returns nothing. Replace both narrow mounts with a single read-only mount of /sys -> /host/sys, update the gather.py constants (HOST_HWMON / HOST_THERMAL) accordingly, and update scripts/verify-metrics.sh's mount audit (acceptance criterion A9) plus the DECISIONS J.7 note. Keep the mounts :ro -- this must not weaken the sidecar's no-caps, read-only-rootfs posture. After the fix, expect k10temp sensors (Tctl/Tdie) for the CPU and an amdgpu junction sensor for the iGPU. Also improve the sensor labelling: prefer tempN_label when present over the current tempN -> N truncation, so the TUI can show 'Tctl' and 'Tdie' instead of '1' and '2'."
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-10-21T00:00:00Z",
+      "body": "PHASE 6 — READABLE CPU USAGE. Replace the bare 'load 0.42 / 0.51 / 1.49' with: (a) TRUE CPU BUSY PERCENT computed from two consecutive /host/proc/stat samples (busy% = 1 - idle_delta/total_delta across user+nice+system+irq+softirq+steal); the sidecar already samples every 500 ms, so keep the previous sample and compute the delta per tick -- no extra cost. (b) NORMALISED LOAD, i.e. load as a percentage of core count, shown alongside the raw load so nothing is hidden. (c) CORRECT CORE COUNT: derive it from the number of 'processor' lines in /host/proc/cpuinfo (the HOST's count) instead of os.cpu_count() (the sidecar container's count), because the load average is read from the host's /host/proc/loadavg and the two must share a denominator. (d) optionally per-core busy% from the cpu0..cpuN lines in /host/proc/stat, so a busy single core is visible on a 24-core box. Suggested rendering: 'CPU 34% busy | load 8.2/7.9/6.4 of 24 cores'."
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-10-21T00:00:00Z",
+      "body": "PHASE 7 — CONSUMER UPDATES AND SCHEMA COMPATIBILITY. Updating the GPU/temperature/cpu sections changes the /metrics payload, so update all consumers in the same change: scripts/schema-check-metrics.py (validate the new vendor and memory fields), agent/metrics/TOOLS.md (the /metrics schema table), agent/opencode/plugins/host-metrics/index.ts (the summary formatter and the detail:'full' raw JSON), agent/opencode/plugins/host-metrics/README.md, agent/opencode/plugins/host-metrics-tui/tui.tsx (it reads gpu[0] only -- make it iterate all GPUs and label the vendor), and agent/README.md. The host-metrics-tui sidebar footer is narrow: with two GPUs the compact two-line layout must still fit -- plan for one line per GPU or a vendor short-label."
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-10-21T00:00:00Z",
+      "body": "ACCEPTANCE CRITERIA. A1 -- get_ai_token_metrics returns a non-empty usage report for the calling session: input/output/reasoning/cache read/cache write, total tokens, cost USD, per-model breakdown, steps, and context-window %. A2 -- it works with the metrics sidecar STOPPED (docker compose stop metrics), proving no sidecar dependency and no host passthrough. A3 -- /metrics now reports BOTH GPUs with a vendor field; the AMD entry reports shared memory and never presents a >100% dedicated-style percentage. A4 -- /metrics reports at least one CPU temperature sensor (k10temp) and the AMD GPU junction temp. A5 -- the CPU line shows a busy percentage AND a core-normalised load; a deliberate CPU load (e.g. stress) visibly moves the busy% within 2 seconds. A6 -- no new host-exposed ports: docker port still returns nothing for every service, and the sidecar still binds 0.0.0.0 only inside its own netns (DECISIONS J.7). A7 -- scripts/verify-metrics.sh still passes, including its mount audit; scripts/check-tui-jsx.py reports no problems. A8 -- the host-metrics-tui sidebar slot still renders (no 'crashed in slot' message) in both compact and expanded modes. A9 -- docs updated: agent/metrics/TOOLS.md, both plugin READMEs, agent/README.md, and a new DECISIONS.md subsection recording the token-metrics source, the plugin split decision, and the /sys mount change."
+    },
+    {
+      "author": "agent",
+      "created_at": "2026-10-21T00:00:00Z",
+      "body": "NOTES / HAZARDS. (1) Schema vs convention mismatch: ticket-v1.json has additionalProperties:false and rejects links/subtickets/notes; 8 of the existing 18 tickets in docs/tickets are invalid against it. This ticket is schema-valid (no links/subtickets/notes keys). The mismatch is a separate engine-area cleanup. (2) _index.json was non-existent -- the index design was never persisted, so creating via the engine would return number 1. This ticket writes directly to disk; _index.json has been created with next_number:24. (3) This extends the metrics stack from ticket-011 (sparkline) and verified by ticket-021 (sidecar integrity). Not blocked on either resolving. (4) The ai-metrics plugin is a separate package -- see open questions: new plugin dir vs folded-in, TUI token surface scope."
+    },
+    {
+      "timestamp": "2026-10-26T18:01:24.150Z",
+      "author": "migration",
+      "body": "Structured acceptance criteria and test ledger backfilled from the 2026-10-26 acceptance-criteria addendum. The original addendum above is retained as history; the structured fields are now the source of truth."
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "get_ai_token_metrics returns a non-empty report for the calling session: tokens, cost, per-model breakdown, steps, and context-window %.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "The token tool works with the metrics sidecar stopped, proving no sidecar dependency or host passthrough.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "/metrics reports both GPUs with a vendor field; the AMD entry reports shared memory and never a >100% dedicated-style percentage.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "/metrics reports at least one CPU temperature sensor (k10temp) and the AMD GPU junction temperature.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "The CPU line shows busy percentage and core-normalised load; deliberate load moves the busy % within 2 seconds.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "No new host-exposed ports; every service shows no published port and the sidecar still binds only inside its netns.",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "scripts/verify-metrics.sh passes including its mount audit, and scripts/check-tui-jsx.py reports no problems.",
+      "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "The host-metrics-tui sidebar slot renders in compact and expanded modes without a 'crashed in slot' message.",
+      "status": "pending"
+    },
+    {
+      "id": "A9",
+      "text": "agent/metrics/TOOLS.md, both plugin READMEs, agent/README.md, and a new DECISIONS J.10 subsection are updated.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "token-report test in a live session",
+      "sidecar-stopped test",
+      "GPU vendor/shared-memory test",
+      "temperature sensor test",
+      "CPU busy/load test",
+      "host-port audit",
+      "verify-metrics + check-tui-jsx run",
+      "TUI compact/expanded render check",
+      "docs review"
+    ],
+    "created": [
+      "scripts/verify-metrics.sh",
+      "tests/tui-jsx.bats"
+    ],
+    "cases": [
+      "verify-metrics",
+      "TUI JSX rules"
+    ]
+  }
+}

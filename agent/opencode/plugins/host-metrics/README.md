@@ -35,7 +35,7 @@ The plugin is baked into the agent image at `/etc/opencode/plugins/host-metrics/
 listed in the generated `opencode.json` (`plugins` array) by `scripts/regen-configs`.
 
 > A markdown file in a `tools/` directory does **not** register a tool in v2 — that was
-> the v1 mechanism. See [docs/DECISIONS.md](../../../docs/DECISIONS.md) section J.1.
+> the v1 mechanism. See [docs/DECISIONS.md](../../../../docs/DECISIONS.md) section J.1.
 
 ## Arguments
 
@@ -57,7 +57,7 @@ TEMP  acpitz/1 46C | nvme/1 25.9C | amdgpu/1 43C | k10temp/1 46.4C
 ```
 
 `detail: "full"` returns the raw JSON documented in
-[`agent/metrics/TOOLS.md`](../../metrics/TOOLS.md).
+[`agent/metrics/TOOLS.md`](../../../metrics/TOOLS.md).
 
 ## When to Use
 

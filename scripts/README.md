@@ -22,9 +22,11 @@ All scripts use `#!/usr/bin/env sh` (POSIX sh). Sourced files in `lib/` are neve
 ## Ticket directory
 
 - Active tickets: `docs/tickets/ticket-[NNN]-*.md`
-- Archived: `docs/tickets/*[Aa]rchive/*/`
-- Discarded analysis: `docs/tickets/ticket-discarded-scripts-analysis.md`
-- Schema: `docs/tickets/meta-ticket-schema.json`
+- Archived: `docs/tickets/archive/*/` (contains early-ticket specs + archived guardrail ticket)
+- Schema: `_resources/` — JSON Schema file generated from SCHEMA.md (pending: see ticket-001 item 4)
+
+<!-- NOTE: meta-ticket-schema.json status unclear — may have been dropped during restructuring.
+NOTE: ticket-discarded-scripts-analysis.md does not exist -- should it be created or removed from docs? -->
 
 ## Workflow for agents (little-mester)
 

@@ -1,131 +1,267 @@
 #!/usr/bin/env sh
 # vim: set ft=sh:
-# ticket-new -- scaffold a new valid ticket file following schema rules.
+# ticket-new -- scaffold a new valid ticket file in an area directory.
 # Usage:
-#   ./scripts/ticket-new <NNN> <short-description>
-#   ./scripts/ticket-new 015 add-featureX
+#   ./scripts/ticket-new <area-key> <type> <description>
+#   ./scripts/ticket-new infra/tools feature "add validation"
+#
+# Options:
+#   -n, --number NNN         Override number (or use last+1)
+#   -a, --area KEY           Area key (overrides catalog lookup)
+#   -h, --help               Show this help
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 die() { printf 'ticket-new: %s\n' "$*" >&2; exit 1; }
 info() { printf 'INFO: %s\n' "$*" >&2; }
-warn() { printf 'TICKET-WARN:\n%s\n' "$*" >&2; }
 
+# Defaults
 TARGET_NUM=""
 DESCRIPTION=""
+AREA_KEY=""
 REPO_ROOT=""
 TICKETS_DIR=""
+CATALOG_FILE=""
 
-# find repo root
+# Find repo root and catalog
 for _tn_d in "." .. ../.. "/tmp/agent-workspace" "${OPCODE_PROJECT_ROOT:-.}"; do
     case "$_tn_d" in
         .) cp=$(pwd);;
         /*) cp="$_tn_d";;
         *) cp="$(cd "$_tn_d" 2>/dev/null && pwd || true)";;
     esac
-    if [ -n "$cp" ] && [ -d "$cp/docs/tickets" ]; then
-        REPO_ROOT="$cp"
-        TICKETS_DIR="$cp/docs/tickets"
-        break
+    if [ -n "$cp" ]; then
+        if [ -d "$cp/docs/tickets" ]; then
+            REPO_ROOT="$cp"
+            TICKETS_DIR="$cp/docs/tickets"
+            break
+        fi
+        if [ -f "$cp/docs/tickets/catalog.json" ]; then
+            REPO_ROOT="$cp"
+            TICKETS_DIR="$cp/docs/tickets"
+            break
+        fi
     fi
 done
 
-if [ -z "$TICKETS_DIR" ]; then
-    die "Cannot find docs/tickets/ directory inside a repo." >&2
-    exit 3
-fi
+[ -z "$REPO_ROOT" ] && die "Cannot find docs/tickets/ directory inside a repo." >&2
+CATALOG_FILE="$TICKETS_DIR/catalog.json"
 
-# parse args
+# Parse args
 while [ $# -gt 0 ]; do
     case "$1" in
-        -n|--number)
-            TARGET_NUM="$2"; shift 2;;
-        -d|--desc)
-            DESCRIPTION="$2"; shift 2;;
+        -n|--number)   TARGET_NUM="$2"; shift 2;;
+        -a|--area)     AREA_KEY="$2"; shift 2;;
         -h|--help|help)
-            cat <<'EOP'
-Usage: ticket-new [--number NNN] <description>
+            cat <<EOP
+Usage: ticket-new <area-key> <type> <description>
+       ticket-new [--number NNN] -a <area-key> <type> <description>
 
-Scaffolds a new ticket file following all schema validation rules.
+Scaffold a new ticket in an area directory.
 
-  --number NNN    The ticket number (auto-detects next available if omitted)
-  -d, --desc      Description text
-  -h, --help      Show this help and exit
+Arguments:
+  area-key    Area path like "infra/tools" or "feat/wibble"
+  type        One of: feature, bug, infra, pause
+  description Short description for the ticket title
 
 Examples:
-  ./scripts/ticket-new 015 add-featureX
-  ./scripts/ticket-new "add feature X"    (auto-numbers the next ticket)
+  ./scripts/ticket-new infra/tools infra "area-based-tickets"
+  ./scripts/ticket-new feat/wibble feature "add validation" --number 3
 EOP
             exit 0;;
+        -*) printf 'ticket-new: unknown flag %s\n' "$1" >&2; exit 2;;
         *)
-            if [ -z "$TARGET_NUM" ]; then
-                TARGET_NUM="$1"; shift
+            if [ -z "$AREA_KEY" ]; then
+                AREA_KEY="$1"; shift
             elif [ -z "$DESCRIPTION" ]; then
-                DESCRIPTION="$1"; shift
+                # Check if it's a type keyword or description prefix
+                case "$1" in
+                    feature|bug|infra|pause)
+                        DESCRIPTION="$1"
+                        shift
+                        # Description starts next arg
+                        AREA_KEY="${AREA_KEY} $1" 2>/dev/null || true
+                        ;;
+                    *)
+                        if [ -z "$TARGET_NUM" ]; then
+                            TARGET_NUM="$1"; shift
+                        else
+                            die "Unexpected argument: $1"
+                        fi;;
+                esac
+            elif [ -z "$TARGET_NUM" ]; then
+                # area_key was split across args
+                AREA_KEY="${AREA_KEY} $1"; shift
             else
                 die "Unexpected argument: $1"
             fi;;
     esac
 done
 
-if [ -z "$DESCRIPTION" ]; then
-    die "A description is required. Run --help for usage." >&2
-    exit 2
-fi
-
-# get highest ticket number
-_get_highest() {
-    _gh_last=0
-    for _f in "$TICKETS_DIR"/ticket-[0-9]*.md; do
-        [ -f "$_f" ] || continue
-        _gh_num=$(head -n1 "$_f" 2>/dev/null | sed -n 's/^# *Ticket *\([0-9][0-9]*\).*/\1/p')
-        if [ -n "$_gh_num" ]; then
-            case "$_gh_num" in
-                [0-9]*) _gh_cur=$((10#${_gh_num}))
-                    if [ "$_gh_cur" -gt "$_gh_last" ]; then
-                        _gh_last=$_gh_cur
-                    fi;;
-            esac
-        fi
-    done
-    printf '%d' "$_gh_last"
+# Parse the remaining arguments: area type description
+_set() {
+    if [ -z "$AREA_KEY" ]; then
+        AREA_KEY="$1"
+    elif [ -z "$DESCRIPTION" ] && echo "$1" | grep -qE '^(feature|bug|infra|pause)$'; then
+        DESCRIPTION="$1"
+    else
+        die "Unexpected argument: $1 (expected area, type, description)"
+    fi
 }
 
-if [ -n "$TARGET_NUM" ]; then
-    _next_raw=$((10#$TARGET_NUM))
-else
-    _next_raw=$((_get_highest + 1))
+# Re-parse for clarity: first non-flag arg = area-key, second = type, rest = description
+_AREA_ARGS=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        *) _AREA_ARGS="$_AREA_ARGS $1";;
+    esac
+    shift
+done
+
+set -- $_AREA_ARGS
+if [ $# -ge 3 ]; then
+    AREA_KEY="$1"
+    DESCRIPTION="$2"
 fi
 
-# if user specified a number, use max of their input and auto-detected next
-_get_next=$(printf '%d' "$_get_highest")
-if [ -n "$TARGET_NUM" ]; then
-    if [ $_next_raw -ge $((_get_next + 1)) ]; then
-        _next=$_next_raw
+[ -z "$AREA_KEY" ] && die "Area key is required." >&2
+[ -z "$DESCRIPTION" ] && die "Type and description are required. Run --help for usage." >&2
+
+# Ensure area is tracked in catalog
+if [ ! -d "$REPO_ROOT/active/$AREA_KEY" ]; then
+    info "New area '$AREA_KEY' detected — adding to catalog..."
+    if [ -f "$CATALOG_FILE" ]; then
+        # Check if area already listed
+        if ! grep -q "\"$AREA_KEY\"" "$CATALOG_FILE" 2>/dev/null; then
+            # Add area to existing JSON array
+            _area_json=$(cat "$CATALOG_FILE")
+            sed "s/^\(\s*\"areas\":\s*\[.*\)\(\)]/\1, \"$AREA_KEY\"\)/" "$CATALOG_FILE" > "${CATALOG_FILE}.tmp" && mv "${CATALOG_FILE}.tmp" "$CATALOG_FILE"
+        fi
     else
-        _next=$((_get_next + 1))
+        info "Creating new catalog at $CATALOG_FILE"
+        echo "{ \"areas\": [\"$AREA_KEY\"] }" > "$CATALOG_FILE"
     fi
+    # Create the active area directory
+    mkdir -p "$REPO_ROOT/active/$AREA_KEY"
+fi
+
+# Directory to create ticket in
+TGT_DIR="$REPO_ROOT/active/$AREA_KEY"
+INDEX_FILE="$TGT_DIR/_index.json"
+
+# Get next number from _index.json or highest file
+_get_next_in_area() {
+    # Find max number in _index.json or from existing ticket files
+    local max_num=0
+    if [ -f "$INDEX_FILE" ]; then
+        # Extract all numbers and find the maximum
+        while read -r num; do
+            [ -n "$num" ] && case "$num" in [0-9]*) max_num=$((max_num > num ? max_num : num)) ;; esac
+        done < <(grep '"number"' "$INDEX_FILE" 2>/dev/null | grep -oE '[0-9]+' || true)
+    fi
+    # Also check existing files for the highest numbered ticket in this area
+    for _f in "$TGT_DIR"/ticket-*.md; do
+        [ -f "$_f" ] || continue
+        local fn_num=$(basename "$_f" | sed -n 's/^ticket-\([0-9][0-9]*\)\.md/\1/p')
+        [ -z "$fn_num" ] && continue
+        # strip leading zeros for numeric comparison
+        _fn_num=$((10#$fn_num))
+        [ "$_fn_num" -gt "$max_num" ] && max_num=$_fn_num
+    done
+    printf '%d' "$((max_num + 1))"
+}
+
+_get_global_next() {
+    local highest=0
+    # Check active area directories (era 2)
+    for _area_dir in "$REPO_ROOT/active/"*/ ; do
+        [ -d "$_area_dir" ] || continue
+        for _idx in "$_area_dir"*"_index.json"; do
+            [ -f "$_idx" ] || continue
+            for n in $(grep '"number"' "$_idx" 2>/dev/null | grep -oE '[0-9]+' || true); do
+                [ "$n" -gt "$highest" ] && highest=$n
+            done
+        done
+    done
+    # Also check docs/tickets/ dir for legacy tickets (era 1)
+    for _f in "$TICKETS_DIR"/ticket-[0-9]*.md; do
+        [ -f "$_f" ] || continue
+        case "$(basename "$_f")" in ticket-discarded*) continue;; esac
+        local h=$(head -n1 "$_f" 2>/dev/null | sed -n 's/^# *Ticket *\([0-9][0-9]*\).*/\1/p')
+        [ -z "$h" ] && continue
+        _hn=$((10#$h))
+        [ "$_hn" -gt "$highest" ] && highest=$_hn
+    done
+    printf '%d' "$((highest + 1))"
+}
+
+_get_highest_in_area() {
+    local max_num=0
+    for _f in "$TGT_DIR"/ticket-*.md; do
+        [ -f "$_f" ] || continue
+        local fn=$(basename "$_f" | sed -n 's/^ticket-\([0-9][0-9]*\)\.md/\1/p')
+        [ -z "$fn" ] && continue
+        local h=$((10#$((10#$fn))))
+        [ "$h" -gt "$max_num" ] && max_num=$h
+    done
+    printf '%d' "$max_num"
+}
+
+# Determine number (local per-area + global check)
+if [ -n "$TARGET_NUM" ]; then
+    _next=$((10#$TARGET_NUM))
 else
-    _next=$_get_next+1
+    _area_next=$(_get_next_in_area)
+    if [ "$_area_next" -ge 1 ]; then
+        _last_local=$(_get_highest_in_area)
+        _next=$((_last_local + 1))
+    else
+        # First ticket in this area — start from scratch
+        _global_next=$(_get_global_next)
+        if [ "$_area_next" -eq 0 ]; then
+            _next=0
+        elif [ "$_next" -lt "$_global_next" ]; then
+            _next=$_global_next
+        fi
+    fi
 fi
 
-TARGET_PAD=$(printf '%03d' "$_next") DESC_CLEAN="$(printf '%s' "$DESCRIPTION" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9 -]/-/g; s/-\+/-/g; s/- *$/ /; s/^ *//' | tr ' ' '-' | cut -c1-48)"
-FILENAME="ticket-${TARGET_PAD}-${DESC_CLEAN}"
-FILEPATH="$TICKETS_DIR/${FILENAME}.md"
-
-if [ -f "$FILEPATH" ]; then
-    die "File already exists: $FILEPATH. Remove it first or use --number with a higher value." >&2
-    exit 1
+if [ "$_next" -eq 0 ]; then
+    # Special: first ticket (T-0)
+    _pad="0"
+else
+    _pad=$(printf '%d' "$_next")
 fi
 
-info "Creating ticket $TARGET_PAD in $FILEPATH..."
-mkdir -p "$TICKETS_DIR"
+# Clean description for filename
+DESC_CLEAN="$(printf '%s' "$DESCRIPTION" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9 -]/-/g; s/-\+/-/g; s/- *$/ /; s/^ *//' | tr ' ' '-' | cut -c1-48)"
+FILENAME="ticket-${_pad}"
+FILEPATH="$TGT_DIR/${FILENAME}.md"
 
-cat > "$FILEPATH" << EOF
-# Ticket ${TARGET_PAD} -- $(printf '%s' "$DESCRIPTION" | head -c 64)
+[ -f "$FILEPATH" ] && die "Ticket already exists at $FILEPATH. Remove it first or specify a different --number." >&2
+
+info "Creating ticket ${_pad} in area '${AREA_KEY}' → $FILEPATH"
+mkdir -p "$TGT_DIR"
+
+# Write the ticket
+cat > "$FILEPATH" <<EOF
+# Ticket T-${_pad} — $(printf '%s' "$DESCRIPTION" | head -c 64)
+
+## Status: DRAFT
+
+## Type: <type>
 
 ## Objective
 Write a one-sentence objective here using present or future tense. No bullets.
+
+---
+
+## Area context
+
+Area: ${AREA_KEY}
+Local number within area: ${_pad}
+
+---
 
 ## Scope & Boundaries
 
@@ -133,7 +269,8 @@ Do not modify files outside the explicitly listed scope.
 Do not introduce dependencies beyond what is documented.
 
 ### File
-- \`docs/tickets/${FILENAME}.md\` (new) — this ticket file
+
+- \`${FILENAME}.md\` (new) — this ticket file
 
 ### Steps
 
@@ -154,13 +291,60 @@ Expected: all checks pass for this ticket.
 
 | File | Role |
 |------|------|
-| \`docs/tickets/${FILENAME}.md\` (new) | This ticket file |
+| \`${FILENAME}.md\` (new) | This ticket file |
 
 ## Dependencies
 
 (none)
 EOF
 
-info "Created: $FILEPATH"
-info "Ticket number: $TARGET_PAD ($_next_raw if user-specified)"
-info "Edit the Objective, Steps, and Verification before running validate-tickets --strict."
+# Update _index.json — read existing array entries into a temp variable
+if [ -f "$INDEX_FILE" ]; then
+    # Get existing entries, check if this number already exists
+    _existing=false
+    while IFS= read -r num; do
+        if [ "$num" = "$_pad" ]; then
+            _existing=true
+            break
+        fi
+    done < <(grep '"number"' "$INDEX_FILE" 2>/dev/null | grep -oE '[0-9]+' || true)
+
+    # Write the new entry to _index.json using a temp file approach
+    _tmp_idx="${INDEX_FILE}.new"
+    
+    if [ "$_existing" = "true" ]; then
+        # Update existing entry's status if it differs
+        sed -i "s/\({\"number\":\s${_pad},)/{\"number\": ${_pad}, \"status\": \"ACTIVE\",/" "$INDEX_FILE" 2>/dev/null || true
+    else
+        # Append new entry to _index.json
+        _tmp_content=$(cat "$INDEX_FILE")
+        # Check if it's empty (new area) or has content
+        _last_entry=$(echo "$_tmp_content" | grep -c '}"' 2>/dev/null || echo "0")
+        
+        if [ "$_last_entry" -eq 0 ] || echo "$_tmp_content" | grep -q '\[\s*\]' 2>/dev/null; then
+            # Empty or just opened/empty array
+            printf '[\n  { "number": %d, "title": "%s", "status": "DRAFT" }\n]\n' \
+                "$_pad" "$(printf '%s' "$DESCRIPTION" | head -c 48)" > "$INDEX_FILE"
+        else
+            # Remove trailing ], add comma, append new entry
+            awk 'BEGIN { first = 1 }
+                /^\]$/ { print "  { \"number\": '"$_pad"', \"title\": \""DESC_CLEAN"\", \"status\": \"DRAFT\" }\n]" 
+                      exit }
+                { if (!first) printf ",\n"; first=0; print }' "$INDEX_FILE" > "$_tmp_idx" && mv "$_tmp_idx" "$INDEX_FILE" >> /dev/null 2>&1 || true
+            
+            # Simpler fallback for awk issues
+            _tmp_content="$(cat "$INDEX_FILE")"
+            echo "${_tmp_content%" }]"}," > "$_tmp_idx"
+            echo "  { \"number\": $_pad, \"title\": \"$DESC_CLEAN\", \"status\": \"DRAFT\" }" >> "$_tmp_idx"
+            echo "]" >> "$_tmp_idx"
+            mv "$_tmp_idx" "$INDEX_FILE"
+        fi
+    fi
+else
+    # Create _index.json for new area
+    printf '[\n  { "number": %d, "title": "%s", "status": "DRAFT" }\n]\n' \
+        "$_pad" "$(printf '%s' "$DESCRIPTION" | head -c 48)" > "$INDEX_FILE"
+fi
+
+info "Created: $FILEPATH (ticket T-${_pad}, area: ${AREA_KEY})"
+info "Edit the Status, Type, Objective, Steps, and Verification."

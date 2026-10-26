@@ -1,0 +1,82 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 15,
+  "area": "engine",
+  "type": "feature",
+  "status": "active",
+  "title": "Model tracking fields + type enum expansion (6 values) + field semantics lock",
+  "objective": "Implement the three model-tracking fields in the engine (suggested_model, estimated_models[], models_used[]) per DECISIONS E+H, ensure type enum has all 6 values (spike, feature, bug, improvement, doc, infra), and lock field semantics so engine validation matches docs/DECISIONS.md D.2/E.",
+  "created_at": "2026-10-20T09:09:49.608Z",
+  "updated_at": "2026-10-26T18:01:24.140Z",
+  "subtickets": [
+    {
+      "id": 1,
+      "title": "Extend Ticket interface in engine.ts with model tracking fields",
+      "objective": "Add `suggested_model?: string`, `estimated_models?: { model: string; subtask_hint: string }[]`, `models_used?: { model: string; thinking_time_seconds: number; idle_time_seconds: number; cost_estimate_usd: number; context_window_used_pct: number }[]` to the Ticket interface. Ensure type enum already has 6 values (verify: spike, feature, bug, improvement, doc, infra).",
+      "status": "done"
+    },
+    {
+      "id": 2,
+      "title": "Update create() to accept and persist model tracking fields",
+      "objective": "Allow create() params to include optional `suggested_model` and `estimated_models`. Persist them to ticket JSON. `models_used` starts empty and is auto-populated later by opencode.",
+      "status": "done"
+    },
+    {
+      "id": 3,
+      "title": "Update update() to allow modifying model tracking fields",
+      "objective": "Allow update() to patch `suggested_model` and `estimated_models`. `models_used` should be append-only (engine doesn't modify it; opencode does at session end).",
+      "status": "done"
+    },
+    {
+      "id": 4,
+      "title": "Update ticket-v1.json schema with model tracking fields",
+      "objective": "Add the three fields to the JSON Schema with proper types. Ensure additionalProperties allows all documented extended fields (fixes schema mismatch with existing tickets).",
+      "status": "done"
+    },
+    {
+      "id": 5,
+      "title": "Add computeSuggestedModel() utility (for future auto-computation)",
+      "objective": "Add a helper that computes suggested_model from historical models_used[] data across tickets in the same area. Not wired to create() yet — just the utility function for later use.",
+      "status": "todo"
+    }
+  ],
+  "notes": "Per DECISIONS.md E: suggested_model = auto-computed recommendation from area history (overridable at creation). estimated_models[] = ticket-specific projection split by subtask. models_used[] = actual measured data auto-populated by opencode at session end. Type enum expansion to 6 values was already done in ticket-008 (engine.ts has all 6). Schema mismatch: ticket-v1.json had additionalProperties:false but existing tickets use priority, labels, links, subtickets, notes, estimate, suggested_model, estimated_models, models_used, comments, attachments, spans, assigned_to, parent, is_epic, blocked_by, dependencies — FIXED: changed to additionalProperties:true and added explicit definitions for links, subtickets, notes. Subtasks 1-4 complete; subtask 5 (computeSuggestedModel utility) remaining.\n\n---\n\n### Integration with Auto-Discovery (Ticket-012 Subtask 6-7)\n\nWhen the MCP server runs `discoverProject()` and loads context, `computeSuggestedModel()` becomes relevant:\n\n1. Server discovers `ticketDir` (from current project or fallback)\n2. Server loads all tickets in that area\n3. `computeSuggestedModel(area)` reads historical `models_used[]` across tickets in the same `area`\n4. Result injected into `mester_tickets_create` tool description: \"Suggested model for 'auth' area: qwen3:14b (based on 12 prior tickets)\"\n5. Agent sees recommendation and can override via `suggested_model` param\n\nThis makes the MCP server a true project manager: it knows the project's model preferences from history.",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "suggested_model, estimated_models[], and models_used[] persist and round-trip through the engine.",
+      "status": "test-needed"
+    },
+    {
+      "id": "A2",
+      "text": "The type enum accepts exactly the six documented values.",
+      "status": "passing",
+      "evidence": "tests/engine.test.ts › rejects invalid type; tests/cli.test.ts › accepts all valid types"
+    },
+    {
+      "id": "A3",
+      "text": "Engine validation matches the field semantics in docs/DECISIONS.md D.2/E.",
+      "status": "test-needed"
+    },
+    {
+      "id": "A4",
+      "text": "Model-tracking fields have explicit round-trip tests.",
+      "status": "test-needed"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "round-trip test for suggested_model/estimated_models/models_used",
+      "docs-to-validation parity check",
+      "models_used auto-population contract test"
+    ],
+    "created": [
+      "tests/engine.test.ts",
+      "tests/cli.test.ts"
+    ],
+    "cases": [
+      "invalid type rejected",
+      "all six types accepted"
+    ]
+  }
+}

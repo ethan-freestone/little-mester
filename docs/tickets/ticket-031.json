@@ -1,0 +1,61 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 31,
+  "area": "infra",
+  "type": "feature",
+  "status": "resolved",
+  "title": "Host metrics sidecar: lightweight hardware monitoring for the agent container",
+  "objective": "Add a minimal metrics sidecar that exposes GPU, CPU, RAM, and temperature data via HTTP so the agent can read host-level statistics from inside its sandbox. Implementation includes: (1) agent/metrics/gather.py — Python HTTP service polling /proc and parsing nvidia-smi with 2s TTL cache; (2) agent/metrics/Dockerfile + compose.yaml metrics service (internal network only, no host ports, read-only rootfs, all capabilities dropped); (3) agent/opencode/plugins/host-metrics/ — v2 plugin registering the get_host_metrics() tool for on-demand queries; (4) agent/opencode/plugins/host-metrics-tui/ — bonus sparkline plugin that renders live GPU/VRAM/RAM gauges in the TUI sidebar footer. Security: no host port published, cap_drop ALL, no-new-privileges, read-only filesystem, only /proc and /sys/class/{hwmon,thermal} mounted :ro.",
+  "created_at": "2026-10-21T00:00:00.000Z",
+  "updated_at": "2026-10-26T18:01:24.156Z",
+  "comments": [
+    {
+      "author": "agent",
+      "created_at": "2026-10-21T00:00:00Z",
+      "body": "CONVERTED from ticket-legacy-10-host-metrics-sidecar.md (749-line legacy spec). All 4 parts implemented and verified: (A) gather.py HTTP service, (B) Dockerfile + compose.yaml, (C) host-metrics opencode plugin with get_host_metrics() tool, (D) host-metrics-tui sparkline plugin (bonus beyond original scope). Verified via README.md documentation, DECISIONS.md references, and agent/README.md integration docs. Legacy MD deleted as part of ticket cleanup."
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "gather.py provides the HTTP metrics service.",
+      "status": "waived",
+      "note": "Resolved: implemented and manually verified at completion; regression coverage is tracked by #21/#24."
+    },
+    {
+      "id": "A2",
+      "text": "The metrics service uses no host ports, read-only rootfs, and dropped capabilities.",
+      "status": "waived",
+      "note": "Resolved: manually verified at completion (docker port/verify-metrics); regression coverage is tracked by #21/#24."
+    },
+    {
+      "id": "A3",
+      "text": "The host-metrics v2 plugin exposes get_host_metrics().",
+      "status": "waived",
+      "note": "Resolved: implemented and manually verified at completion."
+    },
+    {
+      "id": "A4",
+      "text": "The host-metrics-tui sparkline plugin renders in the sidebar.",
+      "status": "waived",
+      "note": "Resolved: implemented and manually verified at completion; JSX rules are covered by tests/tui-jsx.bats."
+    },
+    {
+      "id": "A5",
+      "text": "README/DECISIONS/agent README document the integration.",
+      "status": "waived",
+      "note": "Resolved: documentation exists and was reviewed at completion."
+    }
+  ],
+  "tests": {
+    "needed": [],
+    "created": [
+      "scripts/verify-metrics.sh",
+      "tests/tui-jsx.bats"
+    ],
+    "cases": [
+      "verify-metrics",
+      "TUI JSX rules"
+    ]
+  }
+}

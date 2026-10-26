@@ -1,0 +1,122 @@
+{
+  "id": 36,
+  "file_path": "/workspace/docs/tickets/ticket-036.json",
+  "number": 36,
+  "area": "engine",
+  "type": "improvement",
+  "status": "draft",
+  "title": "Ticket engine: merge-to-main readiness (clean clone, CI, packaging, generated files)",
+  "objective": "Make the ticket engine module safe and repeatable to merge to main: green tests from a clean clone, correct package entry points, no committed transient lock, an explicit policy for the tracked generated index/audit files, and a CI/pre-merge gate. Excludes unrelated branch work unless the merge scope says otherwise.",
+  "created_at": "2026-10-26T17:39:38.620Z",
+  "updated_at": "2026-10-26T18:36:16.713Z",
+  "priority": "major",
+  "comments": [
+    {
+      "timestamp": "2026-10-26T17:39:38.620Z",
+      "author": "cli",
+      "body": "ACCEPTANCE CRITERIA (2026-10-26).\n\nA1 — From a clean clone on Node 20: npm ci && npm test is green (120 tests), and the CLI suite runtime is documented. No reliance on the developer's local node_modules or a pre-built dist/.\n\nA2 — npm run build emits dist/engine.js (actual layout), and package.json main/types/bin point at files that exist after build. A require() of the package entry and `ticket-engine --help` from the built output both work.\n\nA3 — docs/tickets/.engine.lock is gitignored. Creating/updating/archiving tickets (and a simulated crashed write) leaves git status --short clean; validate reports a crash lock as stale rather than the file being committed.\n\nA4 — The tracked _index.json / _audit.json policy is documented and exercised: how to reconcile the files after a merge or rebase, how baseline adoption works, and how to avoid dropping audit entries. A script or runbook is tested against two divergent branches.\n\nA5 — In a clean clone, ./little-mester-mcp/scripts/ticket-engine validate exits 0 against the committed audit log, with index synced and no orphans.\n\nA6 — CI or a committed pre-merge script runs build + test + validate on push/PR. The gate is not a manual checklist.\n\nA7 — Merge scope is decided and recorded: merge the whole feat/ticket-context branch, or extract an engine-only set of commits. If extracting, list the commits and prove the module builds without unrelated agent/metrics/lab changes.\n\nA8 — Docs are current: root README, module README, CLI.md, SCHEMA.md, both decision logs. No stale paths, broken relative links, or conflict markers.\n\nA9 — A clean-clone smoke test covers CLI create -> update -> archive -> audit -> validate and MCP create -> validate against a temp dir, leaving no stray store under little-mester-mcp/docs/tickets."
+    },
+    {
+      "timestamp": "2026-10-26T18:01:24.160Z",
+      "author": "migration",
+      "body": "Structured acceptance criteria and test ledger backfilled from the 2026-10-26 acceptance-criteria addendum. The original addendum above is retained as history; the structured fields are now the source of truth."
+    },
+    {
+      "timestamp": "2026-10-26T18:33:57.722Z",
+      "author": "cli",
+      "body": "Merge-readiness evidence recorded (2026-10-26). Clean clone @684fc78 passes npm ci, build, check:package, 143 Jest tests, and validate. The two-branch simulation reconciles _audit.json via audit --merge, rebuilds _index.json, and retains both branches' comments (80 audit entries). A6 is test-created, not passing: the workflow is committed but has never run because this environment has no push/gh/ssh access. A7 stays pending until the merge scope is chosen."
+    },
+    {
+      "timestamp": "2026-10-26T18:36:16.712Z",
+      "author": "cli",
+      "body": "Merge scope decided (2026-10-26): merge the whole feat/ticket-context branch into main, recorded in docs/DECISIONS.md §C.7. A7 is passing. A6 remains test-created because the committed CI workflow has not run in this environment; the local clean-clone gate is green."
+    }
+  ],
+  "models_used": [],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "From a clean clone on Node 20, npm ci && npm test is green for the full Jest suite, and CLI suite runtime is documented without relying on local node_modules or a pre-built dist/.",
+      "status": "passing",
+      "evidence": "clean clone @684fc78: npm ci + npm test -> 143 passed (engine 54, CLI ~171s, MCP 32); no reuse of local node_modules or prebuilt dist"
+    },
+    {
+      "id": "A2",
+      "text": "npm run build emits dist/engine.js; package.json main/types/bin point at files that exist after build; require(entry) and built ticket-engine --help both work.",
+      "status": "passing",
+      "evidence": "clean clone @684fc78: npm run build emits dist/engine.js; npm run check:package verifies main/types/bin and built --help; tarball has 26 files (dist + docs)"
+    },
+    {
+      "id": "A3",
+      "text": "docs/tickets/.engine.lock is gitignored; create/update/archive and a simulated crashed write leave git status --short clean; validate reports a crash lock as stale rather than committing it.",
+      "status": "passing",
+      "evidence": "tests/engine.test.ts lock/stale-lock tests; .engine.lock gitignored; writes leave git status clean; validate reports a crash-left lock as stale"
+    },
+    {
+      "id": "A4",
+      "text": "The tracked _index.json/_audit.json reconciliation policy is documented and exercised against two divergent branches, including baseline adoption and avoiding dropped audit entries.",
+      "status": "passing",
+      "evidence": "/tmp/opencode/merge-sim: two branches updated tickets; rm _index.json + audit --merge -> 80 entries, both comments retained, validate exit 0"
+    },
+    {
+      "id": "A5",
+      "text": "In a clean clone, ticket-engine validate exits 0 against the committed audit log, with index synced and no orphans.",
+      "status": "passing",
+      "evidence": "clean clone @684fc78: ticket-engine validate exit 0 (index synced, 78 audit entries, no orphans, 35 tickets with AC/test ledgers)"
+    },
+    {
+      "id": "A6",
+      "text": "CI or a committed pre-merge script runs build + test + validate on push/PR; the gate is not a manual checklist.",
+      "status": "test-created",
+      "evidence": ".github/workflows/ticket-engine.yml committed (push/PR, Node 20, build -> package -> test -> validate -> git diff --exit-code); not yet executed because this environment cannot push or authenticate to GitHub"
+    },
+    {
+      "id": "A7",
+      "text": "Merge scope is decided and recorded (whole branch or an extracted engine-only commit set), with proof the module builds without unrelated changes.",
+      "status": "passing",
+      "evidence": "docs/DECISIONS.md §C.7: merge the whole feat/ticket-context branch (not an engine-only extraction). Clean clone @684fc78 builds and tests the module independently: npm ci, build, check:package, 143 tests, validate exit 0."
+    },
+    {
+      "id": "A8",
+      "text": "Root README, module README, CLI.md, SCHEMA.md, and both decision logs are current: no stale paths, broken relative links, or conflict markers.",
+      "status": "passing",
+      "evidence": "relative-link check over README + 6 docs: all links resolve; no conflict markers; package/CI/merge sections added"
+    },
+    {
+      "id": "A9",
+      "text": "A clean-clone smoke test covers CLI create -> update -> archive -> audit -> validate and MCP create -> validate against a temp dir, leaving no stray store under little-mester-mcp/docs/tickets.",
+      "status": "passing",
+      "evidence": "clean clone CLI create->update->archive->audit->validate in /tmp/opencode/smoke-tickets exit 0, no little-mester-mcp/docs/tickets; MCP create/validate in tests/mcp-server.test.ts"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "clean-clone npm ci/test job",
+      "package-entry/build smoke test",
+      "gitignore/crash-lock test",
+      "index/audit reconciliation runbook test",
+      "clean-clone validate",
+      "CI/pre-merge gate",
+      "scope record review",
+      "docs link check",
+      "clean-clone CLI+MCP smoke",
+      "first GitHub Actions run (requires push access)",
+      "merge scope decision (A7) requires owner input"
+    ],
+    "created": [
+      "tests/engine.test.ts",
+      "tests/cli.test.ts",
+      "tests/mcp-server.test.ts",
+      ".github/workflows/ticket-engine.yml",
+      "little-mester-mcp/scripts/check-package.js",
+      "two-branch merge simulation (/tmp/opencode/merge-sim)"
+    ],
+    "cases": [
+      "engine/CLI/MCP suites",
+      "validate on the live store",
+      "clean-clone build/package/validate/143 tests",
+      "audit --merge conflict resolution keeps both branches",
+      "CLI create->update->archive->audit->validate smoke"
+    ]
+  }
+}

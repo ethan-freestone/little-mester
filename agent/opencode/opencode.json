@@ -56,6 +56,16 @@
       }
     }
   },
+  "mcpServers": {
+    "little-mester": {
+      "command": "ts-node",
+      "args": ["src/mcp-server.ts"],
+      "cwd": "/workspace/little-mester-mcp",
+      "env": {
+        "TICKET_DIR": "/workspace/docs/tickets"
+      }
+    }
+  },
   "plugins": [
     "/etc/opencode/plugins/host-metrics",
     "/etc/opencode/plugins/host-metrics-tui"

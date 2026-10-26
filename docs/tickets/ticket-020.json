@@ -1,0 +1,72 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 20,
+  "area": "infra",
+  "type": "infra",
+  "status": "draft",
+  "title": "Clean up obsolete little-mester logo assets (v1→v2 migration)",
+  "objective": "Remove the legacy ASCII logo file and v1 config artifacts that are superseded by the v2 plugin system. After merging main into feat/ticket-context, verify whether agent/opencode/little-mester-logo.txt is still used or has been fully replaced by the tui.tsx plugin in agent/opencode/plugins/little-mester-logo/. If confirmed obsolete (no remaining references in Dockerfile, README, DECISIONS.md, or any other tracked file), delete it along with agent/opencode/tui.json and confirm all opencode config now uses OPENCODE_CLI_CONFIG_CONTENT (inlined JSON) rather than external tui.json files.",
+  "created_at": "2026-10-21T00:00:00Z",
+  "updated_at": "2026-10-26T18:01:24.145Z",
+  "links": [
+    {
+      "type": "depends_on",
+      "number": 0,
+      "bidirectional": false
+    }
+  ],
+  "subtickets": [
+    {
+      "id": 1,
+      "title": "Determine if little-mester-logo.txt is still referenced after merge",
+      "objective": "After M1 conflict resolution, run: grep -rl 'little-mester-logo.txt' --include='*.md' --include='*.json' --include='*.sh' --include='Dockerfile' --include='compose.yaml' across the repo. If zero matches and nothing references it in DECISIONS.md J.3 or README, mark for deletion."
+    },
+    {
+      "id": 2,
+      "title": "Remove agent/opencode/little-mester-logo.txt if confirmed obsolete",
+      "objective": "Delete the file and any related gitkeep files (e.g., agent/opencode/plugins/little-mester-logo.txt) with a commit message referencing ticket-020. Update any docs that mention it as reference."
+    },
+    {
+      "id": 3,
+      "title": "Remove agent/opencode/tui.json and update all references",
+      "objective": "Delete the v1-style tui.json file (superseded by OPENCODE_CLI_CONFIG_CONTENT). Update docs/DECISIONS.md section J.2 to confirm OPENCODE_CLI_CONFIG_CONTENT is the only mechanism. Verify no scripts or README entries reference tui.json."
+    },
+    {
+      "id": 4,
+      "title": "Cross-check all plugin directories for consistency",
+      "objective": "List every directory under agent/opencode/plugins/ and confirm each has: (1) a package.json with name matching dir name, (2) a tui.tsx or index.ts entry point, (3) corresponding COPY lines in Dockerfile if baked into image, (4) a section in DECISIONS.md J. (5) No stray .txt files or tui.json copies lingering anywhere."
+    }
+  ],
+  "notes": "This ticket must be addressed after the merge completes so we can accurately determine what is still referenced. The little-mester-logo.txt legacy file currently has an add/add conflict during merge — this ticket resolves that decision. The v2 plugin system in agent/opencode/plugins/little-mester-logo/ is canonical; anything else is dead weight.",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Remaining references to the legacy ASCII logo and tui.json are confirmed (or found absent) in tracked files.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Obsolete logo assets and tui.json are deleted.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "All opencode config uses inlined OPENCODE_CLI_CONFIG_CONTENT.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Docs/config references are updated after removal.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "grep for old logo/tui.json references",
+      "agent image build/config render check",
+      "docs link check"
+    ],
+    "created": [],
+    "cases": []
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 25,
+  "area": "infra",
+  "type": "feature",
+  "status": "resolved",
+  "title": "Dual-backend support: Ollama AND llama.cpp simultaneously",
+  "objective": "Support both Ollama and llama.cpp simultaneously with CLI model switching between any model on either backend. models.txt uses section headers [ollama] and [llamacpp]; scripts/regen-configs generates dual-provider opencode.json; compose.yaml has both ollama and llamacpp services; lab script runs both pull services; OpenCode /model command works across both providers.",
+  "created_at": "2026-10-21T00:00:00.000Z",
+  "updated_at": "2026-10-26T18:01:24.151Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "models.txt uses [ollama] and [llamacpp] sections.",
+      "status": "waived",
+      "note": "Resolved: implemented and merged before the acceptance-criteria policy; verified by config inspection, no automated regression test existed."
+    },
+    {
+      "id": "A2",
+      "text": "scripts/regen-configs generates a dual-provider opencode.json.",
+      "status": "waived",
+      "note": "Resolved: implemented and merged before the policy; verified by generated-config inspection."
+    },
+    {
+      "id": "A3",
+      "text": "compose.yaml defines both ollama and llamacpp services.",
+      "status": "waived",
+      "note": "Resolved: implemented and merged before the policy; verified by compose inspection."
+    },
+    {
+      "id": "A4",
+      "text": "./lab setup and ./lab pull run both pull services.",
+      "status": "waived",
+      "note": "Resolved: implemented and merged before the policy; verified manually."
+    },
+    {
+      "id": "A5",
+      "text": "The OpenCode /model command switches across both providers.",
+      "status": "waived",
+      "note": "Resolved: manually verified before the policy; no automated test."
+    }
+  ],
+  "tests": {
+    "needed": [],
+    "created": [],
+    "cases": []
+  }
+}

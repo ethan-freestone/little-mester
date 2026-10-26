@@ -1,0 +1,39 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 8,
+  "area": "engine",
+  "type": "feature",
+  "status": "resolved",
+  "title": "Fix engine.ts syntax errors to make project compilable",
+  "objective": "",
+  "created_at": "2026-10-20T09:09:49.606Z",
+  "updated_at": "2026-10-26T18:01:24.132Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "The ticket-engine TypeScript sources compile with no type errors.",
+      "status": "passing",
+      "evidence": "cd little-mester-mcp && npx tsc --noEmit (2026-10-26): no output"
+    },
+    {
+      "id": "A2",
+      "text": "The engine, CLI, and MCP suites execute successfully.",
+      "status": "passing",
+      "evidence": "npx jest (2026-10-26): 138 passed / 138 total"
+    }
+  ],
+  "tests": {
+    "needed": [],
+    "created": [
+      "tests/engine.test.ts",
+      "tests/cli.test.ts",
+      "tests/mcp-server.test.ts"
+    ],
+    "cases": [
+      "TypeScript compile",
+      "engine CRUD/validation",
+      "CLI commands",
+      "MCP-layer engine operations"
+    ]
+  }
+}

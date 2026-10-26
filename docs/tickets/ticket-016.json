@@ -1,0 +1,49 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 16,
+  "area": "engine",
+  "type": "feature",
+  "status": "draft",
+  "title": "Subticket tree system + cross-area typed links",
+  "objective": "Replace flat ticket list model with a first-class subticket hierarchy and explicit typed relationship edges between any tickets across areas. This enables: 1) Subtickets as independent tickets with full lifecycle that can be referenced from any other ticket (not just local phases in MDs), 2) Cross-area linking so ticket A in area/engine can legitimately be a subticket of ticket B in area/sandbox, 3) Explicit typed links (blocks/blocked_by/depends_on/triggers/references/duplicates/spans/supersedes) with automatic reverse-edge registration, 4) Cycle detection to prevent infinite traversal in recursive subtickets, 5) Global _links.json edge table for O(1) lookup vs per-file parsing.",
+  "created_at": "2026-10-20T12:00:00Z",
+  "updated_at": "2026-10-26T18:01:24.141Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Subtickets are first-class tickets with independent lifecycles.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Cross-area parent/subticket relationships are supported.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Eight typed link kinds register reverse edges automatically.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Cycle detection prevents infinite subticket/link traversal.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "A global link index gives O(1) edge lookup.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "subticket lifecycle test",
+      "cross-area link test",
+      "reverse-edge test",
+      "cycle-detection test",
+      "link-index lookup test"
+    ],
+    "created": [],
+    "cases": []
+  }
+}

@@ -4,6 +4,8 @@ workspaces/*
 !workspaces/.gitkeep
 # Build artifacts
 dist/
+# Ticket-engine transient write lock (exists only during a write)
+.engine.lock
 # Aider session data (hidden dot-prefixed files)
 .aider*
 .little-mester.conf

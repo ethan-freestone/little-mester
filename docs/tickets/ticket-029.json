@@ -1,0 +1,59 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 29,
+  "area": "infra",
+  "type": "improvement",
+  "status": "active",
+  "title": "Extract remaining lab handlers into subscripts",
+  "objective": "Extract bench handler into bench/bench-runner.sh and restart-llama handler into scripts/restart-llama.sh, update ./lab to use exec delegation for both with VERBOSE and subcommand-specific env var forwarding, and update help text. Depends on ticket-028 (tech debt audit).",
+  "created_at": "2026-10-22T00:00:00.000Z",
+  "updated_at": "2026-10-26T18:01:24.154Z",
+  "comments": [
+    {
+      "timestamp": "2026-10-26T17:39:52.488Z",
+      "author": "cli",
+      "body": "ACCEPTANCE CRITERIA ADDENDUM (2026-10-26). bench and restart-llama are verified on the VM from ticket #35 with real containers/models: VERBOSE output and subcommand-specific env vars are forwarded, model restart is observed, and behavior matches the pre-refactor lab path. Teardown leaves no containers or temp files."
+    },
+    {
+      "timestamp": "2026-10-26T18:01:24.154Z",
+      "author": "migration",
+      "body": "Structured acceptance criteria and test ledger backfilled from the 2026-10-26 acceptance-criteria addendum. The original addendum above is retained as history; the structured fields are now the source of truth."
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "The bench handler is extracted to bench/bench-runner.sh and delegated with VERBOSE and subcommand env forwarding.",
+      "status": "in-progress"
+    },
+    {
+      "id": "A2",
+      "text": "The restart-llama handler is extracted to scripts/restart-llama.sh with the same forwarding.",
+      "status": "in-progress"
+    },
+    {
+      "id": "A3",
+      "text": "bench and restart-llama are verified on the #35 VM with real containers/models and match pre-refactor behaviour.",
+      "status": "test-needed"
+    },
+    {
+      "id": "A4",
+      "text": "Teardown leaves no containers or temp files.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "bench VERBOSE/env-forwarding test",
+      "restart-llama observation test",
+      "pre/post behaviour comparison",
+      "teardown residue check"
+    ],
+    "created": [
+      "tests/lab.bats"
+    ],
+    "cases": [
+      "lab smoke"
+    ]
+  }
+}

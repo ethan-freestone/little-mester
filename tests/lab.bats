@@ -9,7 +9,7 @@ source "$(dirname "$BATS_TEST_FILENAME")/../lab"
 
 setup() {
   # Ensure LAB_DIR is set correctly for sourcing context
-  LAB_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME}")/..")"
+  LAB_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
   
   # Create a temporary directory owned by current user for workspace tests
   WORKSPACE_TMPDIR=$(mktemp -d)

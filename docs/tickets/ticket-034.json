@@ -1,0 +1,62 @@
+{
+  "id": 34,
+  "file_path": "/workspace/docs/tickets/ticket-034.json",
+  "number": 34,
+  "area": "infra",
+  "type": "feature",
+  "status": "draft",
+  "title": "Opencode TUI plugin: sidebar Jira-like ticket view",
+  "objective": "Build an opencode v2 TUI plugin that renders the current ticketing context in the sidebar — active ticket with phased todo list, related ticket statuses, and an expandable board view (all tickets and context-filtered). The plugin auto-detects which tickets the agent is working on from the opencode session context and filters accordingly.",
+  "created_at": "2026-10-26T17:32:00.318Z",
+  "updated_at": "2026-10-26T18:01:24.158Z",
+  "priority": "major",
+  "comments": [
+    {
+      "timestamp": "2026-10-26T17:32:00.317Z",
+      "author": "cli",
+      "body": "Promoted from the stray store at little-mester-mcp/docs/tickets/ticket-001.json, created 2026-10-26T15:52 by the old cwd-relative CLI wrapper. This is an earlier, thinner draft of the TUI plugin idea; ticket #33 is the fuller version with the Create button and acceptance criteria."
+    }
+  ],
+  "models_used": [],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "The sidebar renders the current ticket and its phased todo list.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Related ticket statuses are visible alongside the active ticket.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "The board view expands to all tickets, with context filtering.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "The plugin auto-detects active tickets from the opencode session context.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Added JSX passes tests/tui-jsx.bats.",
+      "status": "test-needed"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "render test",
+      "related-status test",
+      "board-expansion test",
+      "context-detection test"
+    ],
+    "created": [
+      "tests/tui-jsx.bats"
+    ],
+    "cases": [
+      "TUI JSX rules"
+    ]
+  }
+}

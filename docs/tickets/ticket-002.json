@@ -1,0 +1,66 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 2,
+  "area": "general",
+  "type": "feature",
+  "status": "active",
+  "title": "bats-core inside agent + host fallback",
+  "objective": "Enable test execution both inside and outside the agent container using bats-core, with host fallback installation, so that the project can validate itself ('little-mester against little-mester').",
+  "created_at": "2026-10-20T09:09:49.606Z",
+  "updated_at": "2026-10-26T18:01:24.127Z",
+  "comments": [
+    {
+      "timestamp": "2026-10-26T17:39:43.413Z",
+      "author": "cli",
+      "body": "ACCEPTANCE CRITERIA ADDENDUM (2026-10-26). The bats suite must run in two places: (a) inside the agent image and (b) on the Docker-capable VM test host from ticket #35. Both runs use a disposable workspace, never the repo checkout as the target. A failing command must fail the suite with its real exit code/output, not be skipped or swallowed. tests/lab.bats and the sandbox verification pass after an image rebuild on the VM."
+    },
+    {
+      "timestamp": "2026-10-26T18:01:24.126Z",
+      "author": "migration",
+      "body": "Structured acceptance criteria and test ledger backfilled from the 2026-10-26 acceptance-criteria addendum. The original addendum above is retained as history; the structured fields are now the source of truth."
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "The bats suite runs inside the agent image.",
+      "status": "in-progress"
+    },
+    {
+      "id": "A2",
+      "text": "The same bats suite runs on the Docker-capable VM test host from #35.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Both runs target a disposable workspace, never the repo checkout.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "A failing command fails the suite with its real exit code and output; nothing is skipped or swallowed.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "tests/lab.bats and the sandbox verification pass after an image rebuild on the VM.",
+      "status": "test-needed"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "run the bats suite inside the rebuilt agent image",
+      "verify host fallback installation",
+      "assert failure propagation with a deliberately failing case",
+      "rerun tests/lab.bats and sandbox verification on the #35 VM"
+    ],
+    "created": [
+      "tests/lab.bats",
+      "tests/tui-jsx.bats"
+    ],
+    "cases": [
+      "lab smoke",
+      "TUI JSX rules"
+    ]
+  }
+}

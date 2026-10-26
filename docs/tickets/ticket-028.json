@@ -1,0 +1,64 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 28,
+  "area": "infra",
+  "type": "improvement",
+  "status": "active",
+  "title": "Tech debt: lab is too big and hard to maintain",
+  "objective": "Reduce ./lab file size and complexity by extracting all remaining inline subcommand handlers into standalone scripts, enforcing a maximum of 50 lines per handler in the main file. Target: ./lab under 400 lines, no single handler over 50 lines.",
+  "created_at": "2026-10-22T00:00:00.000Z",
+  "updated_at": "2026-10-26T18:01:24.154Z",
+  "comments": [
+    {
+      "timestamp": "2026-10-26T17:39:51.421Z",
+      "author": "cli",
+      "body": "ACCEPTANCE CRITERIA ADDENDUM (2026-10-26). After the refactor, every extracted lab handler is verified by the VM end-to-end run from ticket #35 (up, --unsafe-recurse write, stop/down). A handler is not done because --help prints or the script exits 0; the AC is the observed container/service/file effect."
+    },
+    {
+      "timestamp": "2026-10-26T18:01:24.153Z",
+      "author": "migration",
+      "body": "Structured acceptance criteria and test ledger backfilled from the 2026-10-26 acceptance-criteria addendum. The original addendum above is retained as history; the structured fields are now the source of truth."
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Remaining inline lab handlers are extracted into standalone scripts.",
+      "status": "in-progress"
+    },
+    {
+      "id": "A2",
+      "text": "No single handler exceeds 50 lines and ./lab is under 400 lines.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Every extracted handler is verified by the #35 VM end-to-end run (up, --unsafe-recurse write, stop/down).",
+      "status": "test-needed"
+    },
+    {
+      "id": "A4",
+      "text": "'not done' means the observed container/service/file effect, not just --help or exit 0.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Help text matches the extracted commands.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "line-count check for ./lab and handlers",
+      "per-handler VM end-to-end run",
+      "teardown/residue check",
+      "help-text review"
+    ],
+    "created": [
+      "tests/lab.bats"
+    ],
+    "cases": [
+      "lab smoke"
+    ]
+  }
+}

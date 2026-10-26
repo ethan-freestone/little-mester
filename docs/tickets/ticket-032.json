@@ -1,0 +1,45 @@
+{
+  "id": 32,
+  "file_path": "/workspace/docs/tickets/ticket-032.json",
+  "number": 32,
+  "area": "engine",
+  "type": "feature",
+  "status": "draft",
+  "title": "User-defined draft pipeline",
+  "objective": "Implement a user-defined draft concept that the engine can put through a pair use-case-gathering mode and project management mode to turn into a full ticket tree of Little Mester tickets ready for development",
+  "created_at": "2026-10-26T16:01:00.042Z",
+  "updated_at": "2026-10-26T18:01:24.157Z",
+  "models_used": [],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "A user-defined draft concept is supported by the engine.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "A use-case-gathering mode turns a draft into scoped requirements.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "A project-management mode turns scoped requirements into a ticket tree.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "The output ticket tree is created through the ticket engine.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "draft pipeline flow test",
+      "use-case-gathering output test",
+      "ticket-tree generation test",
+      "engine-only write check"
+    ],
+    "created": [],
+    "cases": []
+  }
+}
