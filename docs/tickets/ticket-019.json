@@ -7,9 +7,35 @@
   "title": "Subticket system design — superseded by ticket-017 and 018",
   "objective": "Superseded: detailed design moved to ticket-017.json (design decisions) and ticket-018.json implementation plan. Keep this as a redirect/pointer for anyone who searches for 'subticket'. The full design is captured in ticket-017; the execution plan in ticket-018. See those tickets instead.",
   "links": [
-    {"type": "supersedes", "number": 16, "bidirectional": false},
-    {"type": "references", "number": 17, "bidirectional": true},
-    {"type": "references", "number": 18, "bidirectional": true}
+    {
+      "type": "supersedes",
+      "number": 16,
+      "bidirectional": false
+    },
+    {
+      "type": "references",
+      "number": 17,
+      "bidirectional": true
+    },
+    {
+      "type": "references",
+      "number": 18,
+      "bidirectional": true
+    }
   ],
-  "notes": "Originally intended to contain the subticket design, but expanded beyond what fits in one ticket's objective field. Split into: ticket-017 = all design decisions (typed links, cycle detection, schema format), ticket-018 = ordered implementation tasks."
+  "notes": "Originally intended to contain the subticket design, but expanded beyond what fits in one ticket's objective field. Split into: ticket-017 = all design decisions (typed links, cycle detection, schema format), ticket-018 = ordered implementation tasks.",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Anyone searching for 'subticket' is redirected to #17 (design) and #18 (implementation).",
+      "status": "waived",
+      "note": "Archived pointer ticket: no executable behaviour to test."
+    }
+  ],
+  "tests": {
+    "needed": [],
+    "created": [],
+    "cases": []
+  },
+  "updated_at": "2026-10-26T18:01:24.144Z"
 }

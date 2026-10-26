@@ -44,7 +44,44 @@
     }
   ],
   "links": [
-    {"type": "depends_on", "number": 17, "bidirectional": true}
+    {
+      "type": "depends_on",
+      "number": 17,
+      "bidirectional": true
+    }
   ],
-  "notes": "Implementation ticket for the design in ticket-017. Execute in order: Phase 0 -> Phase 1 (linked subtasks 3+4 can go in parallel) -> Phase 2 -> Phase 3 + test migration in isolation -> Phase 4 (tests). If any phase finds blockers during implementation, that becomes a new subtask with appropriate dependency links."
+  "notes": "Implementation ticket for the design in ticket-017. Execute in order: Phase 0 -> Phase 1 (linked subtasks 3+4 can go in parallel) -> Phase 2 -> Phase 3 + test migration in isolation -> Phase 4 (tests). If any phase finds blockers during implementation, that becomes a new subtask with appropriate dependency links.",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Phase 0 lands the validated schema changes from #17.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Phase 1 implements subticket CRUD with independent lifecycles.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Phase 2 implements the link API, ready_work, and blocking_chain.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Phase 3 migrates existing phase tables into subtickets.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "schema-change tests",
+      "subticket CRUD tests",
+      "link/ready-work/blocking tests",
+      "migration idempotency test"
+    ],
+    "created": [],
+    "cases": []
+  },
+  "updated_at": "2026-10-26T18:01:24.143Z"
 }

@@ -38,6 +38,23 @@ One ticket per file. Example:
   "objective": "Users can register and log in via Google OAuth without manual credential entry",
   "priority": "major",
   "labels": ["scope/security", "severity/major"],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "A user can register and log in via Google OAuth",
+      "status": "test-needed"
+    },
+    {
+      "id": "A2",
+      "text": "The flow does not duplicate an existing account",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": ["integration test for the OAuth callback"],
+    "created": [],
+    "cases": []
+  },
   "created_at": "2026-10-15T09:00:00.000Z",
   "updated_at": "2026-10-15T09:00:00.000Z",
   "models_used": []
@@ -46,7 +63,8 @@ One ticket per file. Example:
 
 Older tickets may omit `$schema`, `id`, `file_path`, or `models_used`; the engine treats
 `number` as the identity and `file_path` as derived. New engine-written tickets include
-them.
+them. `acceptance_criteria` and `tests` are required for every ticket — older tickets were
+backfilled through the engine (see the migration note below).
 
 ### Required fields
 
@@ -57,6 +75,8 @@ them.
 | `type` | enum | `spike`, `feature`, `bug`, `improvement`, `doc`, `infra` |
 | `status` | enum | `draft`, `active`, `resolved`, `archived` |
 | `title` | string | One-line summary |
+| `acceptance_criteria` | criterion[] | At least one; see [Acceptance criteria](#acceptance-criteria) |
+| `tests` | object | `{needed[], created[], cases[]}`; arrays may be empty |
 | `created_at` | ISO-8601 | Immutable creation time |
 | `updated_at` | ISO-8601 | Last modification time |
 
@@ -84,8 +104,80 @@ them.
 | `id` / `file_path` | number / string | Convenience copies written by the engine |
 
 `additionalProperties` is allowed so the schema can grow without invalidating old
-tickets. The engine's `validateData()` only enforces `number`, `area`, `type`, `status`,
-and `title` on read.
+tickets. The engine's `validateData()` enforces `number`, `area`, `type`, `status`, and
+`title` on read, and additionally checks the shape of `acceptance_criteria` and `tests`
+when present. Full policy checks run in `validate` (see below).
+
+---
+
+## Acceptance criteria
+
+Every ticket has at least one criterion. Criteria are objects, not prose:
+
+```json
+"acceptance_criteria": [
+  {
+    "id": "A1",
+    "text": "A valid login returns a session token",
+    "status": "passing",
+    "evidence": "tests/auth.test.ts › valid credentials"
+  },
+  {
+    "id": "A2",
+    "text": "An invalid password does not reveal account existence",
+    "status": "waived",
+    "note": "Requires browser-level timing checks; manual QA for now"
+  }
+]
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `id` | yes | `^[A-Za-z][A-Za-z0-9_-]{0,15}$`; unique per ticket. Auto-assigned `A1`, `A2`, … when omitted on input |
+| `text` | yes | What must be true for the criterion to be met |
+| `status` | yes | One of the six statuses below; defaults to `pending` when omitted on input |
+| `evidence` | when `passing` | Test path/case, command + result, or observed artifact |
+| `note` | when `waived` | Why no test is needed or possible |
+
+| Status | Meaning |
+|---|---|
+| `pending` | Not started; nothing verified yet |
+| `in-progress` | Implementation underway |
+| `test-needed` | Implemented; a test still needs to be written |
+| `test-created` | A test exists but has not been confirmed passing |
+| `passing` | Verified; `evidence` required |
+| `waived` | No test needed/possible; `note` required |
+
+## Test ledger
+
+```json
+"tests": {
+  "needed": ["test that an empty password is rejected"],
+  "created": ["tests/auth.test.ts"],
+  "cases": ["valid credentials", "wrong password", "empty password"]
+}
+```
+
+All three arrays are required (they may be empty) and contain non-empty strings.
+`needed` is the to-write list, `created` lists existing test files/cases, and `cases`
+names the concrete scenarios covered, including manual observations.
+
+**Write semantics:**
+
+- `create` requires `acceptance_criteria`; `tests` defaults to `{needed: [], created: [], cases: []}`.
+- `update` replaces the acceptance-criteria array. The CLI patches criteria by id
+  (`--ac-status`, `--ac-evidence`) instead of resending the whole array.
+- `update` merges the three test arrays with the stored values, so the paper trail is
+  append-only from the API's point of view.
+
+### Migration note (2026-10-26)
+
+Acceptance criteria and the test ledger became required after the store already held
+tickets. Every existing ticket was backfilled **through the engine** (`update` calls, so
+each change is audited), not by hand-editing files. Historical/archived tickets whose work
+predates the policy use `status: "waived"` with a note explaining the backfill; tickets
+with active work got criteria derived from their objectives and a `needed`/`created` ledger
+matching the real tests.
 
 ---
 
@@ -213,7 +305,16 @@ write does.
 | Required ticket fields | engine read/write | `number`, `area`, `type`, `status`, or `title` missing/invalid |
 | Type enum | `create` / `update` | type not in the 6 allowed values |
 | Status transition | `update` | transition not in the lifecycle table |
+| Acceptance criteria required | `create` / `validate` | no criteria on create, or an empty/missing array in a stored ticket |
+| Criterion shape | engine read/write + `validate` | missing/invalid/duplicate id, missing text, invalid status |
+| Evidence / note | normalizer + `validate` | `passing` without `evidence`, or `waived` without `note` |
+| Test ledger | `validate` | missing `tests` object, or a `needed`/`created`/`cases` value that is not a string[] |
+| Policy drift (warning) | `validate` | `test-needed` with empty `needed`; `test-created`/`passing` with empty `created`; resolved with unverified criteria |
 | Index sync | `validate` | file without index entry, or index entry without file |
 | Audit hashes/shape | `validate` | tampered entry, malformed entry, corrupt JSON, out-of-order timestamps |
 | Lock | `validate` | stale lock (dead PID) or corrupt lock |
 | Orphans | `validate` | ticket file has no audit entry |
+
+Policy errors make `validate` exit `1`. Drift warnings are printed but do not fail.
+Details: [`docs/DECISIONS.md`](../../docs/DECISIONS.md) §C.4 and
+[`architecture/DECISIONS.md`](../../docs/tickets/architecture/DECISIONS.md) §J.

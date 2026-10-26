@@ -22,6 +22,7 @@ two front-ends: a CLI and an MCP server.
 | Store | `docs/tickets/` (JSON files, `_index.json`, `_audit.json`) |
 | Writes | **Engine only** — CLI or `mester_tickets_*` MCP tools |
 | Enforcement | Transient PID lock + per-entry SHA-256 audit + orphan detection |
+| Quality gate | Every ticket has acceptance criteria + a test ledger (`validate` fails without them) |
 
 ---
 
@@ -30,10 +31,12 @@ two front-ends: a CLI and an MCP server.
 1. **Do not hand-write ticket data.** Never create, edit, move, or delete
    `ticket-NNN.json`, `_index.json`, or `_audit.json` directly.
 2. Use `little-mester-mcp/scripts/ticket-engine ...` or the `mester_tickets_*` tools.
-3. If `validate` reports an **orphan** or a **stale lock**, stop and ask a human. Do not
+3. Every ticket needs **at least one acceptance criterion** and a test ledger. Put the
+   criterion in `acceptance_criteria`, never in `objective` or a comment.
+4. If `validate` reports an **orphan** or a **stale lock**, stop and ask a human. Do not
    delete or "fix" the files yourself.
-4. `audit --baseline` is the only adoption path, and only when a human asks for it.
-5. Follow `doc → test → code → commit` (see [`docs/workflows.md`](../../docs/workflows.md)).
+5. `audit --baseline` is the only adoption path, and only when a human asks for it.
+6. Follow `doc → test → code → commit` (see [`docs/workflows.md`](../../docs/workflows.md)).
 
 Why: the index and audit log are derived data. A hand edit silently drifts them. The
 engine cannot prevent it, but `validate` makes it visible.
@@ -103,6 +106,30 @@ the ticket files. The ticket files themselves are never regenerated from the ind
 
 Full field list: [`SCHEMA.md`](SCHEMA.md) and [`ticket-v1.json`](ticket-v1.json).
 
+### Acceptance criteria & tests
+
+Two required fields define "done":
+
+```json
+"acceptance_criteria": [
+  { "id": "A1", "text": "Login returns a session token", "status": "passing",
+    "evidence": "tests/auth.test.ts › valid credentials" },
+  { "id": "A2", "text": "Wrong password leaks nothing", "status": "test-needed" }
+],
+"tests": {
+  "needed": ["test wrong-password timing"],
+  "created": ["tests/auth.test.ts"],
+  "cases": ["valid credentials"]
+}
+```
+
+`status` is the test-tracking state: `pending`, `in-progress`, `test-needed`,
+`test-created`, `passing` (needs `evidence`), or `waived` (needs `note`). `create`
+requires ≥1 criterion; `update` replaces criteria but **merges** the three test arrays so
+the paper trail cannot be erased by an edit. `validate` fails on policy errors and warns
+on drift. Details: [`docs/DECISIONS.md` §C.4](../../docs/DECISIONS.md) and
+[`architecture/DECISIONS.md` §J](../../docs/tickets/architecture/DECISIONS.md).
+
 ---
 
 ## Enforcement model (summary)
@@ -130,9 +157,13 @@ rationale and invariants: [`architecture/DECISIONS.md` §I](../../docs/tickets/a
 ### CLI
 
 ```bash
-./little-mester-mcp/scripts/ticket-engine create --area infra --type feature "Add CI" --priority major
+./little-mester-mcp/scripts/ticket-engine create --area infra --type feature \
+  --ac "CI runs on every push" --ac "Failures block merge" \
+  --test-needed "workflow smoke test" --priority major "Add CI"
 ./little-mester-mcp/scripts/ticket-engine list --area infra --status active
 ./little-mester-mcp/scripts/ticket-engine update 12 --status active --comment "Started"
+./little-mester-mcp/scripts/ticket-engine update 12 --ac-status A1=passing \
+  --ac-evidence "A1=.github/workflows/ci.yml run 123"
 ./little-mester-mcp/scripts/ticket-engine archive 12
 ./little-mester-mcp/scripts/ticket-engine audit --limit 20
 ./little-mester-mcp/scripts/ticket-engine validate
@@ -146,14 +177,14 @@ All tools use the `mester_<module>_<action>` naming convention:
 
 | Tool | Purpose |
 |---|---|
-| `mester_tickets_create` | Create a draft ticket |
+| `mester_tickets_create` | Create a draft ticket (requires ≥1 acceptance criterion) |
 | `mester_tickets_list` | List tickets (area/status filters) |
 | `mester_tickets_get` | Read one ticket by number |
-| `mester_tickets_update` | Update fields (status transitions enforced) |
+| `mester_tickets_update` | Update fields, criteria, and test ledger (status transitions enforced) |
 | `mester_tickets_archive` | Archive a ticket |
-| `mester_tickets_search` | Multi-field search |
+| `mester_tickets_search` | Multi-field search (includes criterion text) |
 | `mester_tickets_board` | Board view (priority, then `updated_at`) |
-| `mester_tickets_validate` | Index sync state |
+| `mester_tickets_validate` | Index + enforcement + acceptance-criteria/test policy |
 
 The MCP server calls the same `createTicketEngine()`; there is no duplicated business
 logic. Start it with `npm run server` (stdio transport).

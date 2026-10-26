@@ -7,5 +7,18 @@
   "title": "Fix WORKSPACE env var missing in bench-native.sh",
   "objective": "Fix bench-native.sh failing when called directly because it invokes docker compose without the WORKSPACE environment variable set. Added WORKSPACE=${WORKSPACE:-$LAB_DIR} after LAB_DIR assignment so all docker compose calls have the variable available, matching the dc() wrapper pattern used by ./lab.",
   "created_at": "2026-10-22T00:00:00.000Z",
-  "updated_at": "2026-10-22T00:00:00.000Z"
+  "updated_at": "2026-10-26T18:01:24.153Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "bench-native.sh works when called directly by defaulting WORKSPACE to LAB_DIR.",
+      "status": "waived",
+      "note": "Resolved: one-line fix implemented and merged before the acceptance-criteria policy; verified manually."
+    }
+  ],
+  "tests": {
+    "needed": [],
+    "created": [],
+    "cases": []
+  }
 }

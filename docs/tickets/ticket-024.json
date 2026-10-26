@@ -7,9 +7,13 @@
   "title": "AI token metrics, AMD GPU stats, CPU temps, and readable CPU usage in the metrics plugins",
   "objective": "Extend the little-mester metrics surface in two directions. (1) AI/agent token metrics: OpenCode already knows its own token usage (TokenUsage.Info = input/output/reasoning/cache.read/cache.write, plus per-message cost and per-model breakdown via session stats), and that data lives in the OpenCode server process, not on the host -- so it needs NO sidecar and NO extra host passthrough, unlike the /proc and /sys hardware data. Expose it through a new internal tool. (2) Hardware coverage gaps: the AMD Strix Halo iGPU is invisible (gather.py only knows NVML/nvidia-smi), CPU temps are empty because /sys/class/hwmon is bind-mounted such that hwmon symlinks resolve outside the mount, and the CPU 'load' readout (Linux load average: EWMA of runnable + uninterruptible-sleeping tasks over 1/5/15m, NOT a percentage and NOT normalized by core count) is unreadable without dividing by the core count. Fix all three. Everything must keep the sidecar's no-host-ports security posture (DECISIONS J.7) and must not regress the existing get_host_metrics tool or the host-metrics-tui sidebar slot (DECISIONS J.9 OpenTUI text rules).",
   "created_at": "2026-10-21T17:00:00Z",
-  "updated_at": "2026-10-21T17:00:00Z",
+  "updated_at": "2026-10-26T18:01:24.150Z",
   "priority": "major",
-  "labels": ["scope/agent", "scope/infra", "scope/performance"],
+  "labels": [
+    "scope/agent",
+    "scope/infra",
+    "scope/performance"
+  ],
   "comments": [
     {
       "author": "agent",
@@ -60,6 +64,79 @@
       "author": "agent",
       "created_at": "2026-10-21T00:00:00Z",
       "body": "NOTES / HAZARDS. (1) Schema vs convention mismatch: ticket-v1.json has additionalProperties:false and rejects links/subtickets/notes; 8 of the existing 18 tickets in docs/tickets are invalid against it. This ticket is schema-valid (no links/subtickets/notes keys). The mismatch is a separate engine-area cleanup. (2) _index.json was non-existent -- the index design was never persisted, so creating via the engine would return number 1. This ticket writes directly to disk; _index.json has been created with next_number:24. (3) This extends the metrics stack from ticket-011 (sparkline) and verified by ticket-021 (sidecar integrity). Not blocked on either resolving. (4) The ai-metrics plugin is a separate package -- see open questions: new plugin dir vs folded-in, TUI token surface scope."
+    },
+    {
+      "timestamp": "2026-10-26T18:01:24.150Z",
+      "author": "migration",
+      "body": "Structured acceptance criteria and test ledger backfilled from the 2026-10-26 acceptance-criteria addendum. The original addendum above is retained as history; the structured fields are now the source of truth."
     }
-  ]
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "get_ai_token_metrics returns a non-empty report for the calling session: tokens, cost, per-model breakdown, steps, and context-window %.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "The token tool works with the metrics sidecar stopped, proving no sidecar dependency or host passthrough.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "/metrics reports both GPUs with a vendor field; the AMD entry reports shared memory and never a >100% dedicated-style percentage.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "/metrics reports at least one CPU temperature sensor (k10temp) and the AMD GPU junction temperature.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "The CPU line shows busy percentage and core-normalised load; deliberate load moves the busy % within 2 seconds.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "No new host-exposed ports; every service shows no published port and the sidecar still binds only inside its netns.",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "scripts/verify-metrics.sh passes including its mount audit, and scripts/check-tui-jsx.py reports no problems.",
+      "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "The host-metrics-tui sidebar slot renders in compact and expanded modes without a 'crashed in slot' message.",
+      "status": "pending"
+    },
+    {
+      "id": "A9",
+      "text": "agent/metrics/TOOLS.md, both plugin READMEs, agent/README.md, and a new DECISIONS J.10 subsection are updated.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "token-report test in a live session",
+      "sidecar-stopped test",
+      "GPU vendor/shared-memory test",
+      "temperature sensor test",
+      "CPU busy/load test",
+      "host-port audit",
+      "verify-metrics + check-tui-jsx run",
+      "TUI compact/expanded render check",
+      "docs review"
+    ],
+    "created": [
+      "scripts/verify-metrics.sh",
+      "tests/tui-jsx.bats"
+    ],
+    "cases": [
+      "verify-metrics",
+      "TUI JSX rules"
+    ]
+  }
 }

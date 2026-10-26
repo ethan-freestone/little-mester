@@ -75,29 +75,42 @@ $T validate              # index + lock + audit + orphans
 Create a ticket. New tickets start in `draft` status.
 
 ```
-ticket-engine create --area <area> --type <type> "Title" \
-  [--objective "..."] [--priority <priority>] [--comment "..."]
+ticket-engine create --area <area> --type <type> --ac "<criterion>" \
+  [--ac "<criterion>" ...] [--objective "..."] [--priority <priority>] \
+  [--test-needed "..."] [--test-created "..."] [--test-case "..."] [--comment "..."] \
+  "Title"
 ```
 
 | Flag | Required | Description |
 |---|---|---|
 | `--area` | recommended | Domain area (`auth`, `infra`, `billing`, …) |
 | `--type` | no | `spike`, `feature`, `bug`, `improvement`, `doc`, `infra`. Default `feature` |
+| `--ac` | **yes** | Acceptance criterion. Repeat for more than one. Bare text gets an auto id and `pending` |
 | `--priority` | no | `trivial`, `minor`, `major`, `critical` |
 | `--objective` | no | Detailed objective (present/future tense) |
+| `--test-needed` | no | Test still to write (repeatable) |
+| `--test-created` | no | Test file/case that exists (repeatable) |
+| `--test-case` | no | Named case covered, including manual checks (repeatable) |
 | `--comment` | no | Add an initial comment (author `cli`) |
 
-Invalid `--type` or `--priority` values exit `1` with a clear error.
+At least one `--ac` is required. Invalid `--type` or `--priority` values exit `1` with a
+clear error.
 
 ```bash
 $ $T create --area auth --type bug "Login fails on empty password" \
-    --objective "Reject empty passwords at the auth layer" --priority critical
+    --ac "An empty password is rejected at the auth layer" \
+    --ac "The error does not reveal whether the account exists" \
+    --objective "Reject empty passwords at the auth layer" --priority critical \
+    --test-needed "test empty password rejection"
 ✅ Created ticket #42
   #42 [DRAFT] bug — auth — Login fails on empty password
    Objective: Reject empty passwords at the auth layer
+   Acceptance criteria: 2
+   Tests: 1 needed, 0 created, 0 cases
 ```
 
-Exit codes: `0` created, `1` error (missing title, invalid type/priority).
+Exit codes: `0` created, `1` error (missing title, missing `--ac`, invalid type/priority,
+invalid criterion).
 
 ---
 
@@ -128,7 +141,10 @@ Update fields on an existing ticket. Status changes follow the lifecycle table b
 ```
 ticket-engine update <number> [--status <status>] [--title <title>] \
   [--objective <obj>] [--area <area>] [--type <type>] \
-  [--priority <priority>] [--comment "..."]
+  [--priority <priority>] [--ac "<criterion>"] \
+  [--ac-status <id>=<status>] [--ac-evidence <id>=<text>] \
+  [--test-needed "..."] [--test-created "..."] [--test-case "..."] \
+  [--comment "..."]
 ```
 
 | Flag | Description |
@@ -137,18 +153,32 @@ ticket-engine update <number> [--status <status>] [--title <title>] \
 | `--status` | New status (transition validated) |
 | `--title` / `--objective` / `--area` / `--type` | Update those fields |
 | `--priority` | `trivial`, `minor`, `major`, `critical` |
+| `--ac` | Append a new criterion (auto id continues the sequence) |
+| `--ac-status <id>=<status>` | Set one criterion's status: `pending`, `in-progress`, `test-needed`, `test-created`, `passing`, `waived` |
+| `--ac-evidence <id>=<text>` | Set evidence for one criterion (required when status is `passing`) |
+| `--test-needed` / `--test-created` / `--test-case` | Append to the test ledger (repeatable) |
 | `--comment` | Append a timestamped comment (author `cli`) |
 
-`--comment` is appended, not replaced; existing comments are preserved.
+`--comment` is appended, not replaced; existing comments are preserved. Acceptance
+criteria are patched by id, so existing criteria are kept unless you append a new one.
+The three test-ledger arrays are merged with the stored values, never replaced.
 
 ```bash
 $ $T update 42 --status active --priority critical
 ✏️ Ticket #42 updated:
   #42 [ACTIVE] bug — auth — Login fails on empty password
+   Acceptance criteria: 2 (pending=2)
    Comment: …            # only if --comment was passed
+
+$ $T update 42 --ac-status A1=passing \
+    --ac-evidence "A1=tests/auth.test.ts › empty password" \
+    --test-created "tests/auth.test.ts"
+✏️ Ticket #42 updated:
+   Acceptance criteria: 2 (passing=1, pending=1)
 ```
 
-Exit codes: `0` updated, `1` not found / invalid transition / invalid type or priority.
+Exit codes: `0` updated, `1` not found / invalid transition / invalid type or priority /
+invalid criterion (unknown id, invalid status, `passing` without evidence).
 
 ---
 
@@ -229,12 +259,15 @@ agent session.
 ticket-engine validate
 ```
 
-It reports four independent things:
+It reports five independent things:
 
 1. **Index sync** — every ticket file has an index entry and vice versa.
 2. **Lock** — absent (normal), held by a live writer, or stale (dead PID).
 3. **Audit** — hashes valid, entries well-formed, timestamps non-decreasing.
 4. **Orphans** — ticket files with no audit entry (reported, never deleted).
+5. **Acceptance criteria + tests** — every ticket has ≥1 criterion and a complete
+   `{needed, created, cases}` ledger; statuses are valid; `passing` has evidence;
+   `waived` has a note. Drift warnings are reported without failing.
 
 Example (clean):
 
@@ -243,6 +276,7 @@ Example (clean):
 ✅ Lock: No lock held (normal — the lock only exists during writes)
 ✅ Audit: Audit log intact (57 entries)
 ✅ Orphans: none.
+✅ Acceptance criteria: 57 ticket(s) checked; all have criteria + test ledgers.
 ```
 
 Example (needs attention):
@@ -254,12 +288,18 @@ Example (needs attention):
 ❌ Audit: Audit hash mismatch at entry #3 — entry was manually edited
 ❌ Orphans: 1 ticket file(s) on disk with no audit entry — human review required.
    ↳ ticket-099.json
+❌ Acceptance criteria: 1 error(s) across 57 ticket(s).
+   ❌ #042 [acceptance_criteria] Criterion A1 is passing but has no evidence
+   ⚠️ #043 [tests] Criterion A2 is test-needed but tests.needed is empty
 ```
+
+Errors fail validation; warnings (⚠️) do not.
 
 Exit codes:
 
-- `0` — index synced, audit valid, no stale lock, no orphans
-- `1` — any of: out-of-sync index, tampered/corrupt audit, stale lock, orphans
+- `0` — index synced, audit valid, no stale lock, no orphans, no policy errors
+- `1` — any of: out-of-sync index, tampered/corrupt audit, stale lock, orphans,
+  acceptance-criteria/test policy errors
 
 Validation has **no side effects**. It does not clear locks, adopt orphans, or rewrite the
 index. `audit --baseline` is the only adoption command.

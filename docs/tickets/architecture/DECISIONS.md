@@ -380,22 +380,28 @@ idempotent: tickets already present in the log are skipped.
 
 ### I.5 `validate` semantics
 
-`validate()` reports two independent things:
+`validate()` reports three independent things:
 
 1. **Index sync** — every file has an index entry and every index entry has a file
    (`synced`).
 2. **Enforcement** — audit hashes are valid, the lock is not stale, and orphans are
    listed (`enforcement`).
+3. **Acceptance-criteria/test policy** — every ticket has at least one criterion and a
+   complete test ledger, statuses are valid, and `passing`/`waived` carry their required
+   evidence/note (`quality`, see §J).
 
 The CLI exits `1` if any of these is true, so scripts and agents notice:
 
 - index is out of sync,
 - an audit hash is invalid or the log is corrupt,
 - a stale lock from a dead PID exists,
-- orphan files exist.
+- orphan files exist,
+- the acceptance-criteria/test policy has an error.
 
 Engine writes themselves stay fail-open: enforcement problems do not block create/update/
-archive. Only validation raises the alarm.
+archive. Only validation raises the alarm. Policy errors at write time (missing criteria,
+invalid status, missing evidence/note) do throw, because they would create invalid data
+rather than merely suspicious state.
 
 ### I.6 CLI surface
 
@@ -416,3 +422,113 @@ ticket-engine validate                  # index + lock + audit + orphans; exit 1
 5. Orphans are reported, never silently deleted or adopted by a normal write.
 6. The hash covers exactly `{timestamp, operation, ticket_number}` in that key order.
 7. `validate` has no side effects; `audit --baseline` is the only adoption path.
+
+---
+
+## J. Acceptance criteria + test ledger (2026-10-26)
+
+Product rule: [`docs/DECISIONS.md`](../../DECISIONS.md) §C.4. This section records the
+engineering model and the invariants a future change must preserve.
+
+### J.1 Data model
+
+Two first-class ticket fields:
+
+```ts
+interface AcceptanceCriterion {
+    id: string;          // /^[A-Za-z][A-Za-z0-9_-]{0,15}$/, unique per ticket
+    text: string;
+    status: 'pending' | 'in-progress' | 'test-needed' | 'test-created' | 'passing' | 'waived';
+    evidence?: string;   // required when status = 'passing'
+    note?: string;       // required when status = 'waived'
+}
+
+interface TicketTests {
+    needed: string[];    // tests still to write
+    created: string[];   // test files/cases that exist
+    cases: string[];     // named cases, including manual observations
+}
+```
+
+`acceptance_criteria` and `tests` are required fields on every ticket. JSON Schema:
+[`little-mester-mcp/docs/ticket-v1.json`](../../../little-mester-mcp/docs/ticket-v1.json).
+
+### J.2 Normalization rules
+
+Input may be a bare string or an object. `normalizeAcceptanceCriteria()`:
+
+1. Rejects a non-array, an empty array, and a missing `text`.
+2. Auto-assigns `A1`, `A2`, … for criteria without an `id`, skipping ids already used.
+3. Rejects duplicate ids and ids that fail the id pattern.
+4. Defaults `status` to `pending`.
+5. Rejects a status outside the six-value enum.
+6. Rejects `passing` without non-empty `evidence`.
+7. Rejects `waived` without non-empty `note`.
+
+`tests` may be a string[] shorthand for `needed`, or an object. Missing arrays become
+empty arrays. Every entry is trimmed, non-empty, and de-duplicated within its array.
+
+### J.3 Create and update semantics
+
+- `create` requires `acceptance_criteria`; omitting it throws. `tests` defaults to three
+  empty arrays.
+- `update` **replaces** the whole acceptance-criteria array when provided. The CLI builds
+  that array from the existing criteria plus `--ac` and patches it by id with
+  `--ac-status` / `--ac-evidence`, so callers do not have to resend every criterion.
+- `update` **merges** each test-ledger array into the existing one. The trail is
+  append-only: removing an entry requires a deliberate future decision, not an ordinary
+  update.
+- `validateData()` checks the shape of already-stored criteria/tests on every read/write.
+  It is stricter than the old `number/area/type/status/title` check, but it never rewrites
+  a ticket.
+
+### J.4 Quality gate
+
+`checkQuality()` runs over every `ticket-NNN.json` on disk and returns
+`{ok, tickets_checked, issues[]}`. `ValidateResult.quality` carries it, and
+`ValidateResult.ok` is now:
+
+```
+synced && enforcement.enforced && !enforcement.has_orphans && quality.ok
+```
+
+**Errors (fail validation):**
+
+- missing/empty `acceptance_criteria`, or criteria that are not objects;
+- missing/invalid id, duplicate id, missing text;
+- invalid status;
+- `passing` without `evidence`;
+- `waived` without `note`;
+- missing `tests` object, or a `needed`/`created`/`cases` value that is not a string[].
+
+**Warnings (reported, do not fail):**
+
+- `test-needed` while `tests.needed` is empty;
+- `test-created` or `passing` while `tests.created` is empty;
+- a `resolved` ticket with criteria that are neither `passing` nor `waived`.
+
+The split is deliberate: a ticket can be valid while its verification is incomplete
+(warning), but it cannot be structurally invalid (error). This lets the store carry honest
+work-in-progress instead of forcing false `passing` claims.
+
+### J.5 CLI and MCP surface
+
+CLI flags: repeatable `--ac`, `--test-needed`, `--test-created`, `--test-case`, plus
+`--ac-status <id>=<status>` and `--ac-evidence <id>=<text>`. `create` requires `--ac`.
+
+MCP: `mester_tickets_create` requires `acceptance_criteria` (`min(1)`), both create and
+update accept `acceptance_criteria` + `tests`, ticket formatting shows the criteria/test
+summary, search includes criterion text, and `validate` returns `quality` in
+`structuredContent`.
+
+### J.6 Invariants a future change must preserve
+
+1. Every ticket written by the engine has ≥1 acceptance criterion and a complete
+   `{needed, created, cases}` ledger.
+2. Replacing criteria must not silently drop a test-ledger entry; ledger arrays merge.
+3. `passing` always carries evidence and `waived` always carries a note — in storage and
+   in the schema, not only in the CLI.
+4. Quality errors fail `validate`; warnings never do.
+5. `validate` remains side-effect free; it must not "fix" criteria or tests.
+6. The schema (`ticket-v1.json`), engine normalizer, CLI, and MCP stay in lockstep. A new
+   status is added in all four places or nowhere.

@@ -7,5 +7,30 @@
   "title": "Update lab script for dual-backend setup",
   "objective": "Update the lab script to run both Ollama and llama.cpp pull services (./lab setup and ./lab pull), regenerate configs before building (./lab build), and use egress network for both pull services (HuggingFace + Ollama registry).",
   "created_at": "2026-10-21T00:00:00.000Z",
-  "updated_at": "2026-10-21T00:00:00.000Z"
+  "updated_at": "2026-10-26T18:01:24.152Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "./lab setup and ./lab pull run both Ollama and llama.cpp pull services.",
+      "status": "waived",
+      "note": "Resolved: implemented and merged before the acceptance-criteria policy; verified manually."
+    },
+    {
+      "id": "A2",
+      "text": "./lab build regenerates configs before building.",
+      "status": "waived",
+      "note": "Resolved: implemented and merged before the policy; verified manually."
+    },
+    {
+      "id": "A3",
+      "text": "Both pull services use the egress network.",
+      "status": "waived",
+      "note": "Resolved: implemented and merged before the policy; verified by compose inspection."
+    }
+  ],
+  "tests": {
+    "needed": [],
+    "created": [],
+    "cases": []
+  }
 }

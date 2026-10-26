@@ -7,7 +7,7 @@
   "title": "Verify metrics sidecar integrity on merged branch (host-gpu-vram-monitoring)",
   "objective": "After the merge completes, validate that all pieces of the host-metrics stack are correctly wired together: metrics service in compose.yaml (healthcheck, networks, bind mounts), agent/metrics/gather.py (ring buffer + /history endpoint), opencode v2 plugin registration (get_host_metrics tool + host-metrics-tui plugin), Dockerfile bake ordering, and verify-metrics.sh integration. This is a verification ticket — if any piece is broken by the merge, it becomes an implementation subtask.",
   "created_at": "2026-10-21T00:00:00Z",
-  "updated_at": "2026-10-21T00:00:00Z",
+  "updated_at": "2026-10-26T18:01:24.146Z",
   "links": [
     {
       "type": "references",
@@ -47,5 +47,47 @@
       "objective": "Ensure docs/DECISIONS.md J.7 and J.8 are accurate after merge: the ring buffer (500ms), the /history endpoint, the 0.0.0.0 binding in container netns, the verify-metrics.sh approach."
     }
   ],
-  "notes": "Linked to ticket-011 (board/dashboard sparkline) since metrics sidecar is its data source. Supersedes legacy ticket-legacy-10 — this new ticket covers the same scope in v1 schema format. This must be verified on a host with NVIDIA GPU; container-only verification is config-level only."
+  "notes": "Linked to ticket-011 (board/dashboard sparkline) since metrics sidecar is its data source. Supersedes legacy ticket-legacy-10 — this new ticket covers the same scope in v1 schema format. This must be verified on a host with NVIDIA GPU; container-only verification is config-level only.",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "compose.yaml wires the metrics service with healthcheck, networks, and read-only mounts.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "gather.py exposes the ring buffer and /history endpoint.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "The v2 plugin registration exposes get_host_metrics and the TUI plugin.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Dockerfile bake ordering preserves the metrics files.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "verify-metrics.sh passes against the merged branch.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "compose health/network/mount smoke",
+      "/history endpoint test",
+      "tool-call plugin test",
+      "image bake-order check",
+      "verify-metrics.sh run"
+    ],
+    "created": [
+      "scripts/verify-metrics.sh"
+    ],
+    "cases": [
+      "verify-metrics"
+    ]
+  }
 }

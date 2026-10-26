@@ -2,10 +2,10 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/anonymous/little-mester/ticket-engine/v1.0/ticket-v1.json",
   "title": "Ticket v1 Schema",
-  "description": "Validates ticket-NNN.json files against the current little-mester ticketing engine schema per SCHEMA.md and DECISIONS field semantics (D.1-D.4, E). type is a top-level enum with 6 values, NOT a label set (per D.2 resolution). priority is the primary triage signal (per H decision). labels use prefix/value format with scope/severity predefined sets plus user/* free-form.",
+  "description": "Validates ticket-NNN.json files against the current little-mester ticketing engine schema per SCHEMA.md and DECISIONS field semantics (D.1-D.4, E, C.4). type is a top-level enum with 6 values, NOT a label set (per D.2 resolution). priority is the primary triage signal (per H decision). labels use prefix/value format with scope/severity predefined sets plus user/* free-form. Every ticket requires at least one acceptance criterion and a complete test ledger per DECISIONS C.4 and architecture DECISIONS J.",
 
   "type": "object",
-  "required": ["number", "area", "type", "status", "title", "created_at", "updated_at"],
+  "required": ["number", "area", "type", "status", "title", "acceptance_criteria", "tests", "created_at", "updated_at"],
   "additionalProperties": true,
   "properties": {
     "$schema": {
@@ -55,6 +55,79 @@
       "type": ["string", "null"],
       "enum": ["trivial", "major", "minor", "critical"],
       "description": "Primary triage signal for sorting and board views (DECISIONS H). Different from severity label: priority controls machine-readable sort order; severity/critical label composes with other labels in multi-criteria queries."
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Required definition of done. Each criterion carries its own verification status; the ticket-level test ledger records the paper trail. Per DECISIONS C.4 and architecture DECISIONS J.",
+      "items": {
+        "type": "object",
+        "required": ["id", "text", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,15}$",
+            "description": "Stable short id, unique per ticket. The engine auto-assigns A1, A2, … when omitted on input."
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What must be true for this criterion to be met."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "in-progress", "test-needed", "test-created", "passing", "waived"],
+            "description": "Verification state. pending=nothing verified, in-progress=implementation underway, test-needed=implemented but test still to write, test-created=test exists but not confirmed passing, passing=verified (evidence required), waived=no test needed/possible (note required)."
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Test path/case, command + result, or observed artifact. Required when status is 'passing'."
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Why no test is needed or possible. Required when status is 'waived'."
+          }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "status": { "const": "passing" } } },
+            "then": { "required": ["evidence"] }
+          },
+          {
+            "if": { "properties": { "status": { "const": "waived" } } },
+            "then": { "required": ["note"] }
+          }
+        ]
+      }
+    },
+    "tests": {
+      "type": "object",
+      "required": ["needed", "created", "cases"],
+      "additionalProperties": false,
+      "description": "Required test paper trail. Arrays may be empty. On update the engine merges arrays rather than replacing them, so a later edit cannot erase the trail.",
+      "properties": {
+        "needed": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "description": "Tests that still need to be written."
+        },
+        "created": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "description": "Test files/cases that exist."
+        },
+        "cases": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "description": "Named cases covered, including manual observations."
+        }
+      }
     },
     "labels": {
       "type": ["array", "null"],

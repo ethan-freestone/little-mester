@@ -7,7 +7,7 @@
   "title": "Typed subticket system — link types, cycle detection, index format, schema changes",
   "objective": "Design and document the typed relationship edges + first-class subticket hierarchy in its entirety. This tickets covers: (A) Link type enum with directionality rules for all 8 types, (B) Cycle detection requirement details, (C) Schema changes to ticket-v1.json — exact addictions needed, (D) _index.json update spec vs separate _links.json format decision, (E) Migration plan for second pass extracting phase tables -> subtickets from MDs.",
   "created_at": "2026-10-20T13:00:00Z",
-  "updated_at": "2026-10-20T13:00:00Z",
+  "updated_at": "2026-10-26T18:01:24.142Z",
   "subtickets": [
     {
       "id": 1,
@@ -35,5 +35,40 @@
       "objective": "Second migration pass on the 14 migrated .json files. For each phase table row -> creates subticket entry with id=phase task number. 'Depends on X' / 'Blocked by X' text patterns become typed link entries (e.g., 'depends_on' for soft dep, 'blocked_by' for hard gate). 'See ticket-010/X' or similar becomes 'references'. Phase tables are scoped to the parent ticket; cross-references between files in the same directory use local refs while files in different areas need cross-area global_ref. Migration must output a list of links it created so user can review before committing."
     }
   ],
-  "notes": "This ticket captures all detailed design decisions from session 2026-10-20 that were discussed but only stored in conversation. The handoff file (HANDOFF.md) was deleted per earlier instruction; this is now the canonical record of today's work."
+  "notes": "This ticket captures all detailed design decisions from session 2026-10-20 that were discussed but only stored in conversation. The handoff file (HANDOFF.md) was deleted per earlier instruction; this is now the canonical record of today's work.",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "The eight link types and their directionality rules are specified.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Cycle-detection requirements are specified.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Required ticket-v1.json schema changes are enumerated exactly.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "The _index.json vs separate _links.json decision is recorded.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "A migration plan extracts phase tables from markdown into subtickets.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "design review against SCHEMA.md and ticket-v1.json",
+      "dry-run of the markdown-to-subticket migration"
+    ],
+    "created": [],
+    "cases": []
+  }
 }

@@ -23,7 +23,7 @@ describe('TicketEngine', () => {
 
     describe('create', () => {
         it('creates a ticket with default type and status draft', () => {
-            const t = engine.create({ area: 'auth', title: 'Add login' });
+            const t = engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'Add login' });
             expect(t.number).toBe(1);
             expect(t.area).toBe('auth');
             expect(t.title).toBe('Add login');
@@ -32,31 +32,31 @@ describe('TicketEngine', () => {
         });
 
         it('creates a ticket with explicit type', () => {
-            const t = engine.create({ area: 'infra', title: 'Setup CI', type: 'infra' });
+            const t = engine.create({ acceptance_criteria: ['Criterion met'], area: 'infra', title: 'Setup CI', type: 'infra' });
             expect(t.type).toBe('infra');
         });
 
         it('rejects invalid type', () => {
-            expect(() => engine.create({ area: 'test', title: 'x', type: 'invalid' as any }))
+            expect(() => engine.create({ acceptance_criteria: ['Criterion met'], area: 'test', title: 'x', type: 'invalid' as any }))
                 .toThrow("Invalid ticket type 'invalid'. Must be one of: spike, feature, bug, improvement, doc, infra");
         });
 
         it('increments ticket numbers sequentially', () => {
-            const t1 = engine.create({ area: 'a', title: 'T1' });
-            const t2 = engine.create({ area: 'b', title: 'T2' });
+            const t1 = engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' });
+            const t2 = engine.create({ acceptance_criteria: ['Criterion met'], area: 'b', title: 'T2' });
             expect(t1.number).toBe(1);
             expect(t2.number).toBe(2);
         });
 
         it('sets created_at and updated_at timestamps', () => {
-            const t = engine.create({ area: 'test', title: 'time test' });
+            const t = engine.create({ acceptance_criteria: ['Criterion met'], area: 'test', title: 'time test' });
             expect(t.created_at).toBeDefined();
             // ISO-8601 strings are comparable lexicographically — ensure non-empty valid ISO format
             expect(t.created_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
         });
 
         it('persists ticket file to disk', () => {
-            engine.create({ area: 'test', title: 'disk test' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'test', title: 'disk test' });
             const filePath = path.join(tmpDir, 'ticket-001.json');
             expect(fs.existsSync(filePath)).toBe(true);
             const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
@@ -64,26 +64,160 @@ describe('TicketEngine', () => {
         });
     });
 
+    describe('acceptance criteria + test ledger', () => {
+        it('requires at least one criterion on create', () => {
+            expect(() => engine.create({ area: 'a', title: 'No criteria' } as any))
+                .toThrow(/acceptance_criteria is required/);
+            expect(() => engine.create({ area: 'a', title: 'Empty criteria', acceptance_criteria: [] }))
+                .toThrow(/at least one criterion/);
+        });
+
+        it('normalizes bare strings to auto ids with pending status', () => {
+            const t = engine.create({
+                area: 'a',
+                title: 'Normalize',
+                acceptance_criteria: ['first criterion', 'second criterion'],
+            });
+            expect(t.acceptance_criteria).toEqual([
+                { id: 'A1', text: 'first criterion', status: 'pending' },
+                { id: 'A2', text: 'second criterion', status: 'pending' },
+            ]);
+            expect(t.tests).toEqual({ needed: [], created: [], cases: [] });
+        });
+
+        it('accepts explicit ids, statuses, evidence, and notes', () => {
+            const t = engine.create({
+                area: 'a',
+                title: 'Full criteria',
+                acceptance_criteria: [
+                    { id: 'A1', text: 'Verified', status: 'passing', evidence: 'jest tests/engine.test.ts' },
+                    { id: 'A2', text: 'Not testable', status: 'waived', note: 'Visual check only' },
+                ],
+                tests: {
+                    needed: ['write a test'],
+                    created: ['tests/engine.test.ts'],
+                    cases: ['normalizes input'],
+                },
+            });
+            expect(t.acceptance_criteria?.[0].evidence).toBe('jest tests/engine.test.ts');
+            expect(t.acceptance_criteria?.[1].note).toBe('Visual check only');
+            expect(t.tests).toEqual({
+                needed: ['write a test'],
+                created: ['tests/engine.test.ts'],
+                cases: ['normalizes input'],
+            });
+        });
+
+        it('rejects invalid criteria', () => {
+            const base = { area: 'a', title: 'Bad criteria' };
+            expect(() => engine.create({
+                ...base,
+                acceptance_criteria: [{ text: 'bad', status: 'done' }],
+            })).toThrow(/invalid status 'done'/);
+
+            expect(() => engine.create({
+                ...base,
+                acceptance_criteria: [
+                    { id: 'A1', text: 'one' },
+                    { id: 'A1', text: 'two' },
+                ],
+            })).toThrow(/Duplicate acceptance criterion id 'A1'/);
+
+            expect(() => engine.create({
+                ...base,
+                acceptance_criteria: [{ id: 'A1', text: 'passing', status: 'passing' }],
+            })).toThrow(/has no evidence/);
+
+            expect(() => engine.create({
+                ...base,
+                acceptance_criteria: [{ id: 'A1', text: 'waived', status: 'waived' }],
+            })).toThrow(/has no note/);
+        });
+
+        it('replaces criteria and merges the test ledger on update', () => {
+            engine.create({
+                area: 'a',
+                title: 'Update policy',
+                acceptance_criteria: ['original'],
+                tests: { needed: ['first test'], created: [], cases: [] },
+            });
+
+            const updated = engine.update(1, {
+                acceptance_criteria: [
+                    { id: 'A1', text: 'original', status: 'test-created' },
+                    { id: 'A2', text: 'added later', status: 'test-needed' },
+                ],
+                tests: {
+                    needed: ['second test'],
+                    created: ['tests/engine.test.ts'],
+                    cases: ['case one'],
+                },
+            });
+
+            expect(updated?.acceptance_criteria?.map(ac => ac.id)).toEqual(['A1', 'A2']);
+            expect(updated?.tests).toEqual({
+                needed: ['first test', 'second test'],
+                created: ['tests/engine.test.ts'],
+                cases: ['case one'],
+            });
+        });
+
+        it('validate fails when a ticket has no acceptance criteria', () => {
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'Legacy' });
+            const ticketPath = path.join(tmpDir, 'ticket-001.json');
+            const data = JSON.parse(fs.readFileSync(ticketPath, 'utf-8'));
+            delete data.acceptance_criteria;
+            fs.writeFileSync(ticketPath, JSON.stringify(data, null, 2));
+
+            const result = engine.validate();
+            expect(result.quality.ok).toBe(false);
+            expect(result.quality.issues.some(i => i.severity === 'error' && /Missing acceptance_criteria/.test(i.message))).toBe(true);
+            expect(result.ok).toBe(false);
+        });
+
+        it('validate reports drift warnings without failing', () => {
+            engine.create({
+                acceptance_criteria: [{ id: 'A1', text: 'needs a test', status: 'test-needed' }],
+                area: 'a',
+                title: 'Drift',
+            });
+
+            const result = engine.validate();
+            expect(result.quality.ok).toBe(true);
+            expect(result.quality.issues.some(i => i.severity === 'warning' && /test-needed/.test(i.message))).toBe(true);
+        });
+
+        it('validate warns when a resolved ticket still has unverified criteria', () => {
+            engine.create({ acceptance_criteria: ['not verified'], area: 'a', title: 'Resolved early' });
+            engine.update(1, { status: 'active' });
+            engine.update(1, { status: 'resolved' });
+
+            const result = engine.validate();
+            expect(result.quality.ok).toBe(true);
+            expect(result.quality.issues.some(i => i.severity === 'warning' && /resolved but 1 criterion/.test(i.message))).toBe(true);
+        });
+    });
+
     describe('list', () => {
         it('lists all tickets with no filters', () => {
-            engine.create({ area: 'a', title: 'T1' });
-            engine.create({ area: 'b', title: 'T2' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'b', title: 'T2' });
             const list = engine.list();
             expect(list.length).toBe(2);
         });
 
         it('filters by area', () => {
-            engine.create({ area: 'auth', title: 'login' });
-            engine.create({ area: 'auth', title: 'register' });
-            engine.create({ area: 'billing', title: 'checkout' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'login' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'register' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'billing', title: 'checkout' });
             const list = engine.list('auth');
             expect(list.length).toBe(2);
             expect(list.every(t => t.area === 'auth')).toBe(true);
         });
 
         it('excludes drafts when filtering by non-draft status', () => {
-            engine.create({ area: 'a', title: 'T1' }); // draft
-            engine.create({ area: 'b', title: 'T2' }); // draft
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' }); // draft
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'b', title: 'T2' }); // draft
             // update one to active
             engine.update(1, { status: 'active' });
             const list = engine.list(undefined, 'active');
@@ -91,7 +225,7 @@ describe('TicketEngine', () => {
         });
 
         it('returns draft tickets in all-status list when filtering by status=draft', () => {
-            engine.create({ area: 'a', title: 'T1' }); // draft
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' }); // draft
             const list = engine.list(undefined, 'draft');
             expect(list.length).toBe(1);
         });
@@ -99,14 +233,14 @@ describe('TicketEngine', () => {
 
     describe('update', () => {
         it('updates ticket fields', () => {
-            engine.create({ area: 'a', title: 'Original' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'Original' });
             const updated = engine.update(1, { title: 'Updated', objective: 'New obj' });
             expect(updated?.title).toBe('Updated');
             expect(updated?.objective).toBe('New obj');
         });
 
         it('updates updated_at timestamp on change', () => {
-            engine.create({ area: 'a', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' });
             const t = fs.readFileSync(path.join(tmpDir, 'ticket-001.json'), 'utf-8');
             const beforeUpdate = JSON.parse(t).updated_at;
             // Force time to differ (not likely in quick test, but logic is there)
@@ -119,7 +253,7 @@ describe('TicketEngine', () => {
         });
 
         it('enforces status transitions', () => {
-            engine.create({ area: 'a', title: 'T1' }); // draft → active allowed
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' }); // draft → active allowed
             engine.update(1, { status: 'active' });
 
             // active → resolved allowed
@@ -141,13 +275,13 @@ describe('TicketEngine', () => {
 
     describe('archive', () => {
         it('archives a ticket from draft', () => {
-            engine.create({ area: 'a', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' });
             const archived = engine.archive(1);
             expect(archived?.status).toBe('archived');
         });
 
         it('archives a ticket from active', () => {
-            engine.create({ area: 'active-tosource', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'active-tosource', title: 'T1' });
             engine.update(1, { status: 'active' });
             const archived = engine.archive(1);
             expect(archived?.status).toBe('archived');
@@ -159,7 +293,7 @@ describe('TicketEngine', () => {
         });
 
         it('makes archived tickets invisible to update', () => {
-            engine.create({ area: 'a', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' });
             engine.archive(1);
             // We CAN still read them back, but they should be searchable
             const list = engine.list(undefined, 'archived');
@@ -169,7 +303,7 @@ describe('TicketEngine', () => {
 
     describe('validate', () => {
         it('returns synced=true when index and files match', () => {
-            engine.create({ area: 'a', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' });
             const result = engine.validate();
             expect(result.synced).toBe(true);
             expect(result.ok).toBe(true);
@@ -201,7 +335,7 @@ describe('TicketEngine', () => {
 
     describe('status lifecycle', () => {
         it('enforces draft → active only from draft', () => {
-            engine.create({ area: 'a', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' });
             // Cannot go directly from draft to resolved
             expect(() => engine.update(1, { status: 'resolved' })).toThrow();
 
@@ -211,21 +345,21 @@ describe('TicketEngine', () => {
         });
 
         it('active → draft is allowed', () => {
-            engine.create({ area: 'a', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' });
             engine.update(1, { status: 'active' });
             engine.update(1, { status: 'draft' });
             expect(engine.list(undefined, 'draft')).toHaveLength(1);
         });
 
         it('resolved → draft is allowed', () => {
-            engine.create({ area: 'a', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' });
             engine.update(1, { status: 'active' });
             engine.update(1, { status: 'resolved' });
             engine.update(1, { status: 'draft' });
         });
 
         it('archived can only transition to draft', () => {
-            engine.create({ area: 'a', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' });
             engine.archive(1);
 
             // archived → active should throw
@@ -242,10 +376,10 @@ describe('TicketEngine', () => {
 
     describe('index integration', () => {
         it('reads index on creation for monotonic numbering', () => {
-            engine.create({ area: 'a', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' });
             // Re-read from a fresh engine instance — should pick up next_number from index
             const fresh = createTicketEngine({ ticketDir: tmpDir, indexPath });
-            const newTicket = fresh.create({ area: 'b', title: 'T2 continued' });
+            const newTicket = fresh.create({ acceptance_criteria: ['Criterion met'], area: 'b', title: 'T2 continued' });
             expect(newTicket.number).toBe(2);
         });
 
@@ -262,7 +396,7 @@ describe('TicketEngine', () => {
             const fresh = createTicketEngine({ ticketDir: tmpDir, indexPath: corruptPath });
             expect(() => {
                 // Access internal state silently — the engine must have reconstructed
-                const t = fresh.create({ area: 'test', title: 'post-repair' });
+                const t = fresh.create({ acceptance_criteria: ['Criterion met'], area: 'test', title: 'post-repair' });
                 expect(t.number).toBe(1); // or 2 depending on whether old index was preserved
             }).not.toThrow();
         });
@@ -271,7 +405,7 @@ describe('TicketEngine', () => {
     describe('archived files from validate', () => {
         it('reports extra files in index not on disk', () => {
             // Create a ticket via engine then delete its file
-            engine.create({ area: 'a', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' });
             const ticketPath = path.join(tmpDir, 'ticket-001.json');
             fs.unlinkSync(ticketPath);
 
@@ -296,7 +430,7 @@ describe('TicketEngine', () => {
         }
 
         it('getEnforcement returns enforced=true after fresh create', () => {
-            engine.create({ area: 'auth', title: 'Add login' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'Add login' });
 
             const result = engine.getEnforcement();
             expect(result.enforced).toBe(true);
@@ -307,8 +441,8 @@ describe('TicketEngine', () => {
         it('audit entries have valid per-entry hashes', () => {
             const crypto = require('crypto');
 
-            engine.create({ area: 'auth', title: 'T1' });
-            engine.create({ area: 'infra', title: 'T2' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'infra', title: 'T2' });
 
             const auditPath = path.join(tmpDir, '_audit.json');
             const audit: Array<{ timestamp: string; operation: string; ticket_number: number; hash: string }> =
@@ -326,7 +460,7 @@ describe('TicketEngine', () => {
         });
 
         it('getEnforcement detects tampered audit hash', () => {
-            engine.create({ area: 'auth', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'T1' });
 
             const auditPath = path.join(tmpDir, '_audit.json');
             const audit = JSON.parse(fs.readFileSync(auditPath, 'utf-8'));
@@ -341,7 +475,7 @@ describe('TicketEngine', () => {
 
         it('getEnforcement detects orphan files (on disk, not in audit)', () => {
             // Create one ticket via engine
-            engine.create({ area: 'auth', title: 'EngineTicket' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'EngineTicket' });
 
             // Create another ticket file directly on disk (bypassing engine)
             const orphanContent = JSON.stringify({
@@ -367,7 +501,7 @@ describe('TicketEngine', () => {
         it('lock is transient: released after a successful write', () => {
             expect(fs.existsSync(lockPath())).toBe(false);
 
-            engine.create({ area: 'auth', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'T1' });
 
             // The lock only exists during the write window.
             expect(fs.existsSync(lockPath())).toBe(false);
@@ -376,7 +510,7 @@ describe('TicketEngine', () => {
         it('refuses to write while a live process holds the lock', () => {
             writeLock(process.pid); // this test process is definitely alive
 
-            expect(() => engine.create({ area: 'auth', title: 'T1' }))
+            expect(() => engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'T1' }))
                 .toThrow(/locked by live process/);
 
             // No partial write occurred.
@@ -386,7 +520,7 @@ describe('TicketEngine', () => {
         it('clears a stale lock from a dead PID and proceeds', () => {
             writeLock(deadPid());
 
-            const ticket = engine.create({ area: 'auth', title: 'T1' });
+            const ticket = engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'T1' });
 
             expect(ticket.number).toBe(1);
             expect(fs.existsSync(lockPath())).toBe(false);
@@ -411,8 +545,8 @@ describe('TicketEngine', () => {
         });
 
         it('accepts audit entries that revisit an older ticket number', () => {
-            engine.create({ area: 'a', title: 'T1' });   // #1
-            engine.create({ area: 'a', title: 'T2' });   // #2
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' });   // #1
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T2' });   // #2
             engine.update(1, { title: 'T1 updated' });   // back to #1
 
             const result = engine.getEnforcement();
@@ -445,6 +579,10 @@ describe('TicketEngine', () => {
                 title: `Legacy ${number}`,
                 created_at: new Date().toISOString(),
                 updated_at: new Date().toISOString(),
+                acceptance_criteria: [
+                    { id: 'A1', text: 'Legacy behaviour preserved', status: 'waived', note: 'Historical ticket predates the acceptance-criteria policy' },
+                ],
+                tests: { needed: [], created: [], cases: [] },
             }, null, 2);
             fs.writeFileSync(path.join(tmpDir, 'ticket-001.json'), makeTicket(1));
             fs.writeFileSync(path.join(tmpDir, 'ticket-002.json'), makeTicket(2));
@@ -468,7 +606,7 @@ describe('TicketEngine', () => {
         });
 
         it('baseline refuses to append to a tampered audit log', () => {
-            engine.create({ area: 'auth', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'T1' });
             const auditPath = path.join(tmpDir, '_audit.json');
             const audit = JSON.parse(fs.readFileSync(auditPath, 'utf-8'));
             audit[0].ticket_number = 42;
@@ -483,14 +621,14 @@ describe('TicketEngine', () => {
             expect(fs.existsSync(auditPath)).toBe(false);
 
             // After creating a ticket, audit file exists with 1 entry
-            engine.create({ area: 'auth', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'T1' });
             expect(fs.existsSync(auditPath)).toBe(true);
             const audit = JSON.parse(fs.readFileSync(auditPath, 'utf-8'));
             expect(audit.length).toBe(1);
         });
 
         it('audit log records create and update operations', () => {
-            engine.create({ area: 'auth', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'T1' });
             engine.update(1, { title: 'Updated title' });
 
             const auditPath = path.join(tmpDir, '_audit.json');
@@ -504,7 +642,7 @@ describe('TicketEngine', () => {
         });
 
         it('audit log records archive operation', () => {
-            engine.create({ area: 'auth', title: 'T1' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'T1' });
             engine.archive(1);
 
             const auditPath = path.join(tmpDir, '_audit.json');

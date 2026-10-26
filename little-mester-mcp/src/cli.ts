@@ -16,7 +16,13 @@
  *   -h, --help           Show this help
  */
 
-import { createTicketEngine, type Ticket } from './engine';
+import {
+    createTicketEngine,
+    type AcceptanceCriteriaInput,
+    type AcceptanceCriterionInput,
+    type Ticket,
+    type TicketPatch,
+} from './engine';
 import * as path from 'path';
 
 type CliArgs = {
@@ -31,6 +37,16 @@ type CliArgs = {
     objective?: string;
     priority?: string;
     comment?: string;
+    /** Repeatable --ac "<criterion>" (append on update). */
+    ac: string[];
+    /** Repeatable --ac-status <id>=<status>. */
+    acStatus: string[];
+    /** Repeatable --ac-evidence <id>=<evidence>. */
+    acEvidence: string[];
+    /** Repeatable test-ledger flags (append on update). */
+    testNeeded: string[];
+    testCreated: string[];
+    testCase: string[];
     limit?: number;
     json?: boolean;
     baseline?: boolean;
@@ -48,19 +64,50 @@ function parsePriority(value?: string): Priority | undefined {
     return value as Priority;
 }
 
+/** Parse `id=value` flags used by --ac-status / --ac-evidence. */
+function parseKeyValue(value: string, flag: string): { key: string; value: string } {
+    const eq = value.indexOf('=');
+    if (eq <= 0) {
+        throw new Error(`${flag} expects <criterion-id>=<value>, got '${value}'`);
+    }
+    return { key: value.slice(0, eq), value: value.slice(eq + 1) };
+}
+
+function testsPatch(args: CliArgs): { needed: string[]; created: string[]; cases: string[] } | undefined {
+    if (args.testNeeded.length === 0 && args.testCreated.length === 0 && args.testCase.length === 0) {
+        return undefined;
+    }
+    return {
+        needed: args.testNeeded,
+        created: args.testCreated,
+        cases: args.testCase,
+    };
+}
+
 function usage(): string {
     return `Little Mester Ticket Engine CLI
 
 Usage:
-  ticket-engine create --area <area> --type <type> "Title" [--objective "..."] [--priority <priority>] [--comment "..."]
+  ticket-engine create --area <area> --type <type> --ac "<criterion>" "Title"
+                       [--ac "<criterion>" ...] [--objective "..."] [--priority <priority>]
+                       [--test-needed "..."] [--test-created "..."] [--test-case "..."] [--comment "..."]
   ticket-engine list [--area <area>] [--status <status>]
-  ticket-engine update <number> [--status <status>] [--title <title>] [--objective <obj>] [--area <area>] [--type <type>] [--priority <priority>] [--comment "..."]
+  ticket-engine update <number> [--status <status>] [--title <title>] [--objective <obj>]
+                       [--area <area>] [--type <type>] [--priority <priority>]
+                       [--ac "<criterion>"] [--ac-status <id>=<status>] [--ac-evidence <id>=<evidence>]
+                       [--test-needed "..."] [--test-created "..."] [--test-case "..."] [--comment "..."]
   ticket-engine archive <number>
   ticket-engine audit [--limit N] [--json] [--baseline]
   ticket-engine validate
 
 Options:
   --ticket-dir <dir>   Directory containing ticket JSON files (default: ./docs/tickets or TICKET_DIR env)
+  --ac <text>          Acceptance criterion (repeatable; at least one required on create)
+  --ac-status <id>=<s> Update one criterion's status (pending|in-progress|test-needed|test-created|passing|waived)
+  --ac-evidence <id>=<text>  Set evidence for a criterion (required when status=passing)
+  --test-needed <text> Add a test that still needs to be written (repeatable)
+  --test-created <text> Add a test that exists (repeatable)
+  --test-case <text>   Add a named test case/observed check (repeatable)
   --comment <text>     Add a comment to the ticket (create or update)
   --priority <p>       trivial | minor | major | critical
   --limit <n>          audit: show only the last N entries
@@ -71,7 +118,15 @@ Options:
 }
 
 function parseArgs(argv: string[]): CliArgs {
-    const args: CliArgs = { positionals: [] };
+    const args: CliArgs = {
+        positionals: [],
+        ac: [],
+        acStatus: [],
+        acEvidence: [],
+        testNeeded: [],
+        testCreated: [],
+        testCase: [],
+    };
     let i = 0;
     while (i < argv.length) {
         const arg = argv[i];
@@ -90,6 +145,12 @@ function parseArgs(argv: string[]): CliArgs {
             else if (key === 'objective') args.objective = val as string;
             else if (key === 'priority') args.priority = val as string;
             else if (key === 'comment')  args.comment = val as string;
+            else if (key === 'ac')       args.ac.push(String(val));
+            else if (key === 'ac-status') args.acStatus.push(String(val));
+            else if (key === 'ac-evidence') args.acEvidence.push(String(val));
+            else if (key === 'test-needed') args.testNeeded.push(String(val));
+            else if (key === 'test-created') args.testCreated.push(String(val));
+            else if (key === 'test-case') args.testCase.push(String(val));
             else if (key === 'ticket-dir') args.ticketDir = val as string;
             else if (key === 'limit') args.limit = Number.parseInt(String(val), 10);
             else if (key === 'json') args.json = true;
@@ -140,6 +201,11 @@ async function main() {
                 console.log(usage());
                 process.exit(1);
             }
+            if (args.ac.length === 0) {
+                console.error('Error: create requires at least one --ac "<acceptance criterion>"');
+                console.log(usage());
+                process.exit(1);
+            }
             try {
                 const ticket = engine.create({
                     area: args.area,
@@ -147,6 +213,8 @@ async function main() {
                     title: title,
                     objective: args.objective || undefined,
                     priority: parsePriority(args.priority),
+                    acceptance_criteria: args.ac,
+                    tests: testsPatch(args),
                     comments: args.comment ? [{
                         timestamp: new Date().toISOString(),
                         author: 'cli',
@@ -157,6 +225,13 @@ async function main() {
                 console.log(formatTicket(ticket));
                 if (ticket.objective) {
                     console.log(`   Objective: ${ticket.objective}`);
+                }
+                console.log(`   Acceptance criteria: ${ticket.acceptance_criteria?.length ?? 0}`);
+                if (ticket.tests && (ticket.tests.needed.length || ticket.tests.created.length || ticket.tests.cases.length)) {
+                    console.log(
+                        `   Tests: ${ticket.tests.needed.length} needed, ` +
+                        `${ticket.tests.created.length} created, ${ticket.tests.cases.length} cases`
+                    );
                 }
                 if (args.comment) {
                     console.log(`   Comment: ${args.comment}`);
@@ -189,7 +264,8 @@ async function main() {
                 process.exit(1);
             }
             try {
-                const patch: Partial<Omit<Ticket, 'id' | 'file_path' | 'number'>> = {};
+                const existing = engine.list().find(t => t.number === number);
+                const patch: TicketPatch = {};
                 if (args.status)   patch.status = args.status as Ticket['status'];
                 if (args.title)    patch.title = args.title;
                 if (args.objective) patch.objective = args.objective;
@@ -197,10 +273,42 @@ async function main() {
                 if (args.type)     patch.type = args.type as Ticket['type'];
                 const priority = parsePriority(args.priority);
                 if (priority)      patch.priority = priority;
+
+                if (args.ac.length || args.acStatus.length || args.acEvidence.length) {
+                    if (!existing) {
+                        console.error(`❌ Ticket #${number} not found`);
+                        process.exit(1);
+                    }
+                    const criteria: AcceptanceCriteriaInput = existing.acceptance_criteria
+                        ? [...existing.acceptance_criteria]
+                        : [];
+
+                    if (args.ac.length) criteria.push(...args.ac);
+                    for (const spec of args.acStatus) {
+                        const { key, value } = parseKeyValue(spec, '--ac-status');
+                        const idx = criteria.findIndex(c =>
+                            typeof c === 'object' && c !== null && c.id === key
+                        );
+                        if (idx < 0) throw new Error(`Acceptance criterion '${key}' not found`);
+                        criteria[idx] = { ...(criteria[idx] as AcceptanceCriterionInput), status: value };
+                    }
+                    for (const spec of args.acEvidence) {
+                        const { key, value } = parseKeyValue(spec, '--ac-evidence');
+                        const idx = criteria.findIndex(c =>
+                            typeof c === 'object' && c !== null && c.id === key
+                        );
+                        if (idx < 0) throw new Error(`Acceptance criterion '${key}' not found`);
+                        criteria[idx] = { ...(criteria[idx] as AcceptanceCriterionInput), evidence: value };
+                    }
+                    patch.acceptance_criteria = criteria;
+                }
+
+                const tests = testsPatch(args);
+                if (tests) patch.tests = tests;
+
                 if (args.comment) {
                     // Append a comment to existing comments array
-                    const existing = engine.list().find(t => t.number === number)?.comments ?? [];
-                    patch.comments = [...existing, {
+                    patch.comments = [...(existing?.comments ?? []), {
                         timestamp: new Date().toISOString(),
                         author: 'cli',
                         body: args.comment,
@@ -213,6 +321,17 @@ async function main() {
                 }
                 console.log(`✏️ Ticket #${number} updated:`);
                 console.log(formatTicket(ticket));
+                if (ticket.acceptance_criteria?.length) {
+                    const counts = ticket.acceptance_criteria.reduce<Record<string, number>>((acc, c) => {
+                        acc[c.status] = (acc[c.status] ?? 0) + 1;
+                        return acc;
+                    }, {});
+                    console.log(
+                        `   Acceptance criteria: ${ticket.acceptance_criteria.length} (` +
+                        Object.entries(counts).map(([status, count]) => `${status}=${count}`).join(', ') +
+                        ')'
+                    );
+                }
                 if (args.comment) {
                     console.log(`   Comment: ${args.comment}`);
                 }
@@ -325,6 +444,22 @@ async function main() {
                 }
             } else {
                 console.log('✅ Orphans: none.');
+            }
+
+            const quality = result.quality;
+            const errors = quality.issues.filter(issue => issue.severity === 'error');
+            const warnings = quality.issues.filter(issue => issue.severity === 'warning');
+            if (errors.length === 0) {
+                console.log(`✅ Acceptance criteria: ${quality.tickets_checked} ticket(s) checked; all have criteria + test ledgers.`);
+            } else {
+                console.log(`❌ Acceptance criteria: ${errors.length} error(s) across ${quality.tickets_checked} ticket(s).`);
+            }
+            for (const issue of quality.issues) {
+                const icon = issue.severity === 'error' ? '❌' : '⚠️';
+                console.log(`   ${icon} #${String(issue.ticket_number).padStart(3, '0')} [${issue.field}] ${issue.message}`);
+            }
+            if (warnings.length > 0 && errors.length === 0) {
+                console.log(`   ⚠️ ${warnings.length} warning(s) — drift is visible but not blocking.`);
             }
 
             if (!result.ok) process.exit(1);

@@ -52,6 +52,39 @@ const server = new McpServer({
 
 // ── Helpers ────────────────────────────────────────────────────────
 
+const acceptanceCriterionSchema = z.object({
+    id: z.string().min(1).optional().describe('Stable criterion id (A1, A2, …). Auto-assigned when omitted.'),
+    text: z.string().min(1).describe('What must be true for this criterion to be met'),
+    status: z.enum(['pending', 'in-progress', 'test-needed', 'test-created', 'passing', 'waived'])
+        .optional()
+        .describe('Verification state. passing requires evidence; waived requires note.'),
+    evidence: z.string().min(1).optional().describe('Test path/case, command + result, or observed artifact (required for passing)'),
+    note: z.string().min(1).optional().describe('Why no test is needed/possible (required for waived)'),
+});
+
+const testsSchema = z.object({
+    needed: z.array(z.string().min(1)).optional().describe('Tests that still need to be written'),
+    created: z.array(z.string().min(1)).optional().describe('Test files/cases that exist'),
+    cases: z.array(z.string().min(1)).optional().describe('Named cases covered, including manual observations'),
+});
+
+function formatAcceptanceCriteria(ticket: Ticket): string {
+    const criteria = ticket.acceptance_criteria ?? [];
+    if (criteria.length === 0) return '';
+    const lines = [`\nAcceptance criteria (${criteria.length}):`];
+    for (const ac of criteria) {
+        lines.push(`  ${ac.id} [${ac.status}] ${ac.text}`);
+    }
+    return lines.join('\n');
+}
+
+function formatTests(ticket: Ticket): string {
+    const tests = ticket.tests;
+    if (!tests) return '';
+    const counts = `needed ${tests.needed.length} | created ${tests.created.length} | cases ${tests.cases.length}`;
+    return `\nTests: ${counts}`;
+}
+
 function formatTicket(ticket: Ticket): string {
     const num = ticket.number ?? ticket.id ?? '?';
     const status = ticket.status ?? '?';
@@ -65,6 +98,8 @@ function formatTicket(ticket: Ticket): string {
     line += `${title}\n`;
     if (ticket.objective) line += `> ${ticket.objective}\n`;
     line += `Created: ${created}  |  Updated: ${updated}`;
+    line += formatAcceptanceCriteria(ticket);
+    line += formatTests(ticket);
     return line;
 }
 
@@ -87,18 +122,22 @@ server.registerTool(
             area: z.string().optional().describe('Area or subsystem (e.g. "auth", "frontend", "infra")'),
             type: z.enum(['spike', 'feature', 'bug', 'improvement', 'doc', 'infra']).optional().describe('Ticket type'),
             title: z.string().min(1).describe('Short descriptive title for the ticket'),
-            objective: z.string().optional().describe('One-sentence objective or acceptance criteria'),
+            objective: z.string().optional().describe('One-sentence objective'),
+            acceptance_criteria: z.array(z.union([z.string().min(1), acceptanceCriterionSchema]))
+                .min(1)
+                .describe('Required: at least one acceptance criterion. Strings get auto ids and pending status.'),
+            tests: testsSchema.optional().describe('Test ledger: needed/created/cases. Arrays may be empty.'),
             ticket_dir: z.string().optional().describe('Optional override: directory containing ticket JSON files (absolute or relative path)'),
         }),
     },
-    async ({ area, type, title, objective, ticket_dir }) => {
+    async ({ area, type, title, objective, acceptance_criteria, tests, ticket_dir }) => {
         const engine = createTicketEngine({
             ticketDir: resolveDir(ticket_dir || BASE_TICKET_DIR),
             indexPath: path.join(resolveDir(ticket_dir || BASE_TICKET_DIR), '_index.json'),
         });
 
         try {
-            const ticket = engine.create({ area, type, title, objective });
+            const ticket = engine.create({ area, type, title, objective, acceptance_criteria, tests });
             return {
                 content: [{
                     type: 'text',
@@ -206,7 +245,7 @@ server.registerTool(
     'mester_tickets_update',
     {
         title: 'Update Ticket',
-        description: 'Update fields on an existing ticket. Only provided fields are changed; others remain as-is. Validates status transitions per DECISIONS.md D.3.',
+        description: 'Update fields on an existing ticket. Only provided fields are changed; others remain as-is. Status transitions follow DECISIONS.md D.3. acceptance_criteria replaces the array; tests arrays are merged into the existing ledger.',
         inputSchema: z.object({
             number: z.number().int().positive().describe('Ticket number to update'),
             title: z.string().min(1).optional().describe('New title'),
@@ -215,6 +254,11 @@ server.registerTool(
             area: z.string().optional().describe('New area'),
             type: z.enum(['spike', 'feature', 'bug', 'improvement', 'doc', 'infra']).optional().describe('New type'),
             priority: z.enum(['trivial', 'minor', 'major', 'critical']).optional().describe('New priority'),
+            acceptance_criteria: z.array(z.union([z.string().min(1), acceptanceCriterionSchema]))
+                .min(1)
+                .optional()
+                .describe('Replace the full acceptance-criteria array. Include existing criteria to keep them.'),
+            tests: testsSchema.optional().describe('Test ledger entries to add; arrays are merged, not replaced.'),
             ticket_dir: z.string().optional().describe('Optional override: directory containing ticket JSON files'),
         }),
     },
@@ -327,7 +371,8 @@ server.registerTool(
                     const title = String(t.title ?? '').toLowerCase();
                     const objective = String(t.objective ?? '').toLowerCase();
                     const area = String(t.area ?? '').toLowerCase();
-                    return title.includes(kw) || objective.includes(kw) || area.includes(kw);
+                    const criteria = (t.acceptance_criteria ?? []).map(ac => ac.text).join(' ').toLowerCase();
+                    return title.includes(kw) || objective.includes(kw) || area.includes(kw) || criteria.includes(kw);
                 });
             }
 
@@ -434,7 +479,7 @@ server.registerTool(
     'mester_tickets_validate',
     {
         title: 'Validate',
-        description: 'Validate the ticket index against the actual ticket files on disk. Reports sync status, missing files, and extra index entries.',
+        description: 'Validate the ticket store: index-file sync, audit/lock/orphan enforcement, and the acceptance-criteria/test-ledger policy. Returns isError when any check fails.',
         inputSchema: z.object({
             ticket_dir: z.string().optional().describe('Optional override: directory containing ticket JSON files'),
         }),
@@ -445,25 +490,55 @@ server.registerTool(
 
         try {
             const result = engine.validate();
+            const lines: string[] = [];
+
             if (result.synced) {
-                return {
-                    content: [{ type: 'text', text: '✅ Index is in sync with ticket files on disk.' }],
-                    structuredContent: { synced: true },
-                };
+                lines.push('✅ Index is in sync with ticket files on disk.');
             } else {
-                const lines = ['❌ Index is OUT OF SYNC with ticket files on disk.', ''];
+                lines.push('❌ Index is OUT OF SYNC with ticket files on disk.', '');
                 if (result.missing_files?.length) {
                     lines.push(`Missing files (on disk but not in index): ${result.missing_files.join(', ')}`);
                 }
                 if (result.extra_files?.length) {
                     lines.push(`Extra index entries (in index but not on disk): ${result.extra_files.join(', ')}`);
                 }
-                return {
-                    content: [{ type: 'text', text: lines.join('\n') }],
-                    isError: true,
-                    structuredContent: { synced: false, missing: result.missing_files, extra: result.extra_files },
-                };
             }
+
+            lines.push(`Lock: ${result.enforcement.lock.message}`);
+            lines.push(`Audit: ${result.enforcement.audit.messages.join(' ')}`);
+            if (result.enforcement.has_orphans) {
+                lines.push(`Orphans: ${result.enforcement.orphan_files.length} ticket file(s) with no audit entry — human review required.`);
+            } else {
+                lines.push('Orphans: none.');
+            }
+
+            const quality = result.quality;
+            const errors = quality.issues.filter(issue => issue.severity === 'error');
+            const warnings = quality.issues.filter(issue => issue.severity === 'warning');
+            lines.push(
+                errors.length === 0
+                    ? `Acceptance criteria: ${quality.tickets_checked} ticket(s) checked; all have criteria + test ledgers.`
+                    : `Acceptance criteria: ${errors.length} error(s) across ${quality.tickets_checked} ticket(s).`
+            );
+            for (const issue of quality.issues) {
+                lines.push(`  ${issue.severity === 'error' ? '❌' : '⚠️'} #${String(issue.ticket_number).padStart(3, '0')} [${issue.field}] ${issue.message}`);
+            }
+            if (warnings.length > 0 && errors.length === 0) {
+                lines.push(`⚠️ ${warnings.length} warning(s) — drift is visible but not blocking.`);
+            }
+
+            return {
+                content: [{ type: 'text', text: lines.join('\n') }],
+                isError: !result.ok,
+                structuredContent: {
+                    ok: result.ok,
+                    synced: result.synced,
+                    missing: result.missing_files,
+                    extra: result.extra_files,
+                    enforcement: result.enforcement as unknown as Record<string, unknown>,
+                    quality: result.quality as unknown as Record<string, unknown>,
+                },
+            };
         } catch (err: unknown) {
             return {
                 content: [{ type: 'text', text: `❌ Failed to validate: ${err instanceof Error ? err.message : String(err)}` }],

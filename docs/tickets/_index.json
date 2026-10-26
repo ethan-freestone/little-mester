@@ -82,8 +82,8 @@
     {
       "number": 15,
       "file_path": "ticket-015.json",
-      "status": "draft",
-      "area": "general"
+      "status": "active",
+      "area": "engine"
     },
     {
       "number": 16,
@@ -212,5 +212,5 @@
       "area": "engine"
     }
   ],
-  "updated_at": "2026-10-26T17:39:53.391Z"
+  "updated_at": "2026-10-26T18:01:24.160Z"
 }

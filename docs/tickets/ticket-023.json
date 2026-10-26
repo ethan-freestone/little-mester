@@ -7,7 +7,7 @@
   "title": "Unblock test execution: bats-core in agent image + Jest engine suite on host",
   "objective": "DECISIONS.md section C.1 states testing is NOT happening because bats-core is not in the agent image and no Jest engine test suite exists. After merge, add bats-core to agent/Dockerfile (from source if distro package missing), confirm the verify-sandbox.sh and tests/lab.bats run inside the container, and create a minimal Jest setup for ticket-engine-mcp tests so `./run-tests.sh` and host-side validation both pass green.",
   "created_at": "2026-10-21T0:00:00Z",
-  "updated_at": "2026-10-26T17:39:50.081Z",
+  "updated_at": "2026-10-26T18:01:24.149Z",
   "links": [
     {
       "type": "blocks",
@@ -48,6 +48,55 @@
       "timestamp": "2026-10-26T17:39:50.081Z",
       "author": "cli",
       "body": "ACCEPTANCE CRITERIA ADDENDUM (2026-10-26). Jest and bats must run green in the VM-backed Docker environment from ticket #35, not only on the host filesystem. The run must not create files outside the disposable workspace and must leave no containers, networks, or volumes behind. Update docs/DECISIONS.md C.1 with the verified status."
+    },
+    {
+      "timestamp": "2026-10-26T18:01:24.148Z",
+      "author": "migration",
+      "body": "Structured acceptance criteria and test ledger backfilled from the 2026-10-26 acceptance-criteria addendum. The original addendum above is retained as history; the structured fields are now the source of truth."
     }
-  ]
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "bats-core is installed in the agent image and the bats suites run inside the container.",
+      "status": "test-needed"
+    },
+    {
+      "id": "A2",
+      "text": "A Jest suite for the ticket-engine module exists and passes on the host.",
+      "status": "passing",
+      "evidence": "npx jest (2026-10-26): 138 passed / 138 total"
+    },
+    {
+      "id": "A3",
+      "text": "Jest and bats run green in the VM-backed Docker environment from #35.",
+      "status": "test-needed"
+    },
+    {
+      "id": "A4",
+      "text": "The run creates no files outside the disposable workspace and leaves no containers, networks, or volumes behind.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "docs/DECISIONS.md C.1 records the verified status.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "bats-core in agent image",
+      "VM-backed Jest+bats run",
+      "residue check (docker ps/network/volume, workspace diff)",
+      "C.1 verification note"
+    ],
+    "created": [
+      "tests/engine.test.ts",
+      "tests/cli.test.ts",
+      "tests/mcp-server.test.ts"
+    ],
+    "cases": [
+      "Jest suites"
+    ]
+  }
 }

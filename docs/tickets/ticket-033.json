@@ -8,6 +8,53 @@
   "title": "TUI plugin: sidebar Jira-like view with create button",
   "objective": "Build an opencode v2 plugin rendering into the sidebar: Jira-like ticket view, context detection for tickets being worked on, phased todo list, expanded board view, and a prominent Create button for users to quickly set up draft tickets",
   "created_at": "2026-10-26T16:01:59.846Z",
-  "updated_at": "2026-10-26T16:01:59.846Z",
-  "models_used": []
+  "updated_at": "2026-10-26T18:01:24.158Z",
+  "models_used": [],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "The plugin renders a Jira-like ticket view in the sidebar.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "The plugin detects which tickets the agent is working on from session context.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "The active ticket shows a phased todo list and related ticket statuses.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "The board view expands to show all tickets and context-filtered tickets.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "A prominent Create button sets up draft tickets.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "Added JSX obeys the OpenTUI text rules and passes tests/tui-jsx.bats.",
+      "status": "test-needed"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "plugin render test",
+      "session-context detection test",
+      "phased-todo render test",
+      "board-expansion test",
+      "create-button flow test"
+    ],
+    "created": [
+      "tests/tui-jsx.bats"
+    ],
+    "cases": [
+      "TUI JSX rules"
+    ]
+  }
 }

@@ -53,6 +53,7 @@ describe('MCP Server Tools', () => {
     describe('mester_tickets_create', () => {
         it('creates a ticket with required fields', () => {
             const ticket = engine.create({
+                acceptance_criteria: ['Criterion met'],
                 area: 'auth',
                 type: 'feature',
                 title: 'Add login endpoint',
@@ -70,7 +71,7 @@ describe('MCP Server Tools', () => {
         });
 
         it('creates ticket with defaults when optional fields omitted', () => {
-            const ticket = engine.create({ title: 'Minimal ticket' });
+            const ticket = engine.create({ acceptance_criteria: ['Criterion met'], title: 'Minimal ticket' });
 
             expect(ticket.number).toBe(1);
             expect(ticket.area).toBe('');
@@ -80,15 +81,15 @@ describe('MCP Server Tools', () => {
         });
 
         it('increments ticket numbers sequentially', () => {
-            engine.create({ title: 'First' });
-            engine.create({ title: 'Second' });
-            const third = engine.create({ title: 'Third' });
+            engine.create({ acceptance_criteria: ['Criterion met'], title: 'First' });
+            engine.create({ acceptance_criteria: ['Criterion met'], title: 'Second' });
+            const third = engine.create({ acceptance_criteria: ['Criterion met'], title: 'Third' });
 
             expect(third.number).toBe(3);
         });
 
         it('persists ticket file to disk', () => {
-            const ticket = engine.create({ title: 'Persisted' });
+            const ticket = engine.create({ acceptance_criteria: ['Criterion met'], title: 'Persisted' });
             const file = path.join(ticketDir, `ticket-${String(ticket.number).padStart(3, '0')}.json`);
 
             expect(fs.existsSync(file)).toBe(true);
@@ -97,16 +98,16 @@ describe('MCP Server Tools', () => {
         });
 
         it('rejects invalid type', () => {
-            expect(() => engine.create({ title: 'Bad', type: 'invalid' })).toThrow();
+            expect(() => engine.create({ acceptance_criteria: ['Criterion met'], title: 'Bad', type: 'invalid' })).toThrow();
         });
     });
 
     describe('mester_tickets_list', () => {
         beforeEach(() => {
-            const t1 = engine.create({ area: 'auth', type: 'feature', title: 'Auth feature' });
-            const t2 = engine.create({ area: 'auth', type: 'bug', title: 'Auth bug' });
+            const t1 = engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', type: 'feature', title: 'Auth feature' });
+            const t2 = engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', type: 'bug', title: 'Auth bug' });
             engine.update(t2.number, { status: 'active' });
-            const t3 = engine.create({ area: 'ui', type: 'feature', title: 'UI feature' });
+            const t3 = engine.create({ acceptance_criteria: ['Criterion met'], area: 'ui', type: 'feature', title: 'UI feature' });
             engine.update(t3.number, { status: 'active' });
             engine.update(t3.number, { status: 'resolved' });
         });
@@ -146,7 +147,7 @@ describe('MCP Server Tools', () => {
         let ticket1: ReturnType<typeof engine.create>;
 
         beforeEach(() => {
-            ticket1 = engine.create({ area: 'auth', title: 'Test ticket' });
+            ticket1 = engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'Test ticket' });
         });
 
         it('returns ticket by number', () => {
@@ -167,7 +168,7 @@ describe('MCP Server Tools', () => {
         let ticket1: ReturnType<typeof engine.create>;
 
         beforeEach(() => {
-            ticket1 = engine.create({ area: 'auth', title: 'Original', objective: 'Original obj' });
+            ticket1 = engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'Original', objective: 'Original obj' });
         });
 
         it('updates title', () => {
@@ -223,7 +224,7 @@ describe('MCP Server Tools', () => {
         let ticket1: ReturnType<typeof engine.create>;
 
         beforeEach(() => {
-            ticket1 = engine.create({ area: 'auth', title: 'To archive' });
+            ticket1 = engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'To archive' });
         });
 
         it('archives a ticket from draft', () => {
@@ -252,9 +253,9 @@ describe('MCP Server Tools', () => {
 
     describe('mester_tickets_search', () => {
         beforeEach(() => {
-            engine.create({ area: 'auth', type: 'feature', title: 'Login endpoint', objective: 'Add login' });
-            engine.create({ area: 'auth', type: 'bug', title: 'Token refresh', objective: 'Fix refresh' });
-            engine.create({ area: 'ui', type: 'feature', title: 'Dashboard', objective: 'Build dashboard' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', type: 'feature', title: 'Login endpoint', objective: 'Add login' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', type: 'bug', title: 'Token refresh', objective: 'Fix refresh' });
+            engine.create({ acceptance_criteria: ['Criterion met'], area: 'ui', type: 'feature', title: 'Dashboard', objective: 'Build dashboard' });
         });
 
         it('filters by keyword in title', () => {
@@ -298,16 +299,16 @@ describe('MCP Server Tools', () => {
 
     describe('mester_tickets_board', () => {
         beforeEach(() => {
-            const t1 = engine.create({ area: 'auth', title: 'Draft 1' });
+            const t1 = engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'Draft 1' });
             engine.update(t1.number, { status: 'draft', priority: 'critical' });
-            const t2 = engine.create({ area: 'auth', title: 'Draft 2' });
+            const t2 = engine.create({ acceptance_criteria: ['Criterion met'], area: 'auth', title: 'Draft 2' });
             engine.update(t2.number, { status: 'draft', priority: 'minor' });
-            const t3 = engine.create({ area: 'ui', title: 'Active 1' });
+            const t3 = engine.create({ acceptance_criteria: ['Criterion met'], area: 'ui', title: 'Active 1' });
             engine.update(t3.number, { status: 'active', priority: 'major' });
-            const t4 = engine.create({ area: 'ui', title: 'Resolved 1' });
+            const t4 = engine.create({ acceptance_criteria: ['Criterion met'], area: 'ui', title: 'Resolved 1' });
             engine.update(t4.number, { status: 'active' });
             engine.update(t4.number, { status: 'resolved', priority: 'trivial' });
-            const t5 = engine.create({ area: 'infra', title: 'Archived 1' });
+            const t5 = engine.create({ acceptance_criteria: ['Criterion met'], area: 'infra', title: 'Archived 1' });
             engine.update(t5.number, { status: 'active' });
             engine.update(t5.number, { status: 'resolved' });
             engine.update(t5.number, { status: 'archived', priority: 'critical' });
@@ -344,7 +345,7 @@ describe('MCP Server Tools', () => {
 
     describe('mester_tickets_validate', () => {
         it('returns synced=true when index and files match', () => {
-            engine.create({ title: 'Test' });
+            engine.create({ acceptance_criteria: ['Criterion met'], title: 'Test' });
             // validate is not directly exposed on engine, but we can test via index
             const indexPath = path.join(ticketDir, '_index.json');
             const index = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));

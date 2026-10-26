@@ -247,9 +247,13 @@ Two equivalent front-ends share one engine (`src/engine.ts`):
 
 ```bash
 # Create, list, update, archive
-./little-mester-mcp/scripts/ticket-engine create --area infra --type feature "Add CI pipeline" --priority major
+./little-mester-mcp/scripts/ticket-engine create --area infra --type feature \
+  --ac "CI runs on every push" --ac "Failures block merge" \
+  --test-needed "workflow smoke test" --priority major "Add CI pipeline"
 ./little-mester-mcp/scripts/ticket-engine list --area infra --status active
 ./little-mester-mcp/scripts/ticket-engine update 12 --status active --comment "Started work"
+./little-mester-mcp/scripts/ticket-engine update 12 --ac-status A1=passing \
+  --ac-evidence "A1=.github/workflows/ci.yml run 123"
 ./little-mester-mcp/scripts/ticket-engine archive 12
 
 # Inspect the audit trail and validate the store
@@ -261,6 +265,9 @@ Two equivalent front-ends share one engine (`src/engine.ts`):
 
 - All ticket writes **must** go through the engine (CLI or MCP tools). Never hand-edit
   `ticket-NNN.json`, `_index.json`, or `_audit.json`.
+- Every ticket **must** have at least one acceptance criterion and a
+  `{needed, created, cases}` test ledger. Criteria are structured (`id`, `text`,
+  `status`, `evidence`, `note`) — not prose in the objective or a comment.
 - A transient lock (`.engine.lock`) protects each write window; stale locks from dead
   processes are detected by PID and can be cleared safely.
 - Every engine write appends one lean entry to `_audit.json` with a SHA-256 hash of the
@@ -270,8 +277,9 @@ Two equivalent front-ends share one engine (`src/engine.ts`):
   whether to adopt them (`audit --baseline`) or remove them.
 
 The full rationale and invariants are in
-[`docs/tickets/architecture/DECISIONS.md`](docs/tickets/architecture/DECISIONS.md) §I,
-and usage is in [`little-mester-mcp/docs/README.md`](little-mester-mcp/docs/README.md)
+[`docs/tickets/architecture/DECISIONS.md`](docs/tickets/architecture/DECISIONS.md) §I–J,
+the product rule is in [`docs/DECISIONS.md`](docs/DECISIONS.md) §C.3–C.4, and usage is in
+[`little-mester-mcp/docs/README.md`](little-mester-mcp/docs/README.md)
 and [`little-mester-mcp/docs/CLI.md`](little-mester-mcp/docs/CLI.md).
 
 ---

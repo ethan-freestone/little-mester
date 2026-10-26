@@ -95,12 +95,28 @@ export interface EnforcementResult {
     messages: string[];
 }
 
+export interface QualityIssue {
+    ticket_number: number;
+    field: 'acceptance_criteria' | 'tests';
+    severity: 'error' | 'warning';
+    message: string;
+}
+
+export interface QualityResult {
+    /** true when there are no policy errors. Warnings do not fail the gate. */
+    ok: boolean;
+    tickets_checked: number;
+    issues: QualityIssue[];
+}
+
 export interface ValidateResult {
     synced: boolean;
     missing_files?: string[];
     extra_files?: string[];
     enforcement: EnforcementResult;
-    /** true only when index is synced, enforcement is valid, and no orphans exist.
+    quality: QualityResult;
+    /** true only when index is synced, enforcement is valid, no orphans exist,
+     *  and every ticket passes the acceptance-criteria/test policy.
      *  The CLI exits 1 when this is false. */
     ok: boolean;
 }
@@ -336,6 +352,101 @@ function verifyAuditLog(ticketDir: string): AuditStatus {
 
 // ── Public types ──────────────────────────────────────────────────
 
+/**
+ * Acceptance-criterion lifecycle. The status is the single place to track
+ * whether a criterion is implemented and whether it has a test, because
+ * "tests needed / not needed / created / passing" are all states of the
+ * same acceptance criterion.
+ *
+ *   pending      — not started / nothing verified yet
+ *   in-progress  — implementation underway
+ *   test-needed  — implemented, verification still required
+ *   test-created — a test exists, but has not been confirmed passing
+ *   passing      — verified; `evidence` is required
+ *   waived       — no test needed/possible; `note` is required
+ */
+export const ACCEPTANCE_CRITERIA_STATUSES = [
+    'pending',
+    'in-progress',
+    'test-needed',
+    'test-created',
+    'passing',
+    'waived',
+] as const;
+
+export type AcceptanceCriterionStatus = typeof ACCEPTANCE_CRITERIA_STATUSES[number];
+
+const AC_STATUS_SET = new Set<string>(ACCEPTANCE_CRITERIA_STATUSES);
+const AC_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,15}$/;
+
+export interface AcceptanceCriterion {
+    /** Stable short id (A1, A2, … or another identifier). Unique per ticket. */
+    id: string;
+    text: string;
+    status: AcceptanceCriterionStatus;
+    /** Required when status = 'passing'. Test path/case, command + result, or artifact. */
+    evidence?: string;
+    /** Required when status = 'waived'. Why no test is needed/possible. */
+    note?: string;
+}
+
+/** Accepted input for create/update. Bare strings get an auto id and `pending`. */
+export interface AcceptanceCriterionInput {
+    id?: string;
+    text: string;
+    status?: AcceptanceCriterionStatus | string;
+    evidence?: string;
+    note?: string;
+}
+
+export type AcceptanceCriteriaInput = Array<string | AcceptanceCriterionInput>;
+
+/**
+ * The ticket-level test ledger. `needed` and `created` are the paper trail;
+ * `cases` names the concrete cases (automated or observed manually).
+ *
+ * On update, the three arrays are merged with the existing values rather
+ * than replaced, so a later edit cannot silently erase the trail.
+ */
+export interface TicketTests {
+    needed: string[];
+    created: string[];
+    cases: string[];
+}
+
+export type TicketTestsInput = Partial<TicketTests> | string[] | null;
+
+export interface CreateTicketParams {
+    area?: string;
+    type?: string;
+    title: string;
+    objective?: string;
+    /** At least one is required on create. */
+    acceptance_criteria: AcceptanceCriteriaInput;
+    tests?: TicketTestsInput;
+    // Model tracking fields
+    suggested_model?: string;
+    estimated_models?: { model: string; subtask_hint: string }[];
+    estimated_model?: string;
+    // Other extended fields
+    estimate?: number;
+    priority?: 'trivial' | 'minor' | 'major' | 'critical';
+    labels?: string[];
+    parent?: number;
+    is_epic?: boolean;
+    assigned_to?: string;
+    spans?: { start: string; end: string };
+    comments?: { timestamp: string; author: string; body: string }[];
+}
+
+export type TicketPatch =
+    Partial<Omit<Ticket, 'id' | 'file_path' | 'number' | 'acceptance_criteria' | 'tests'>> & {
+        /** Replaces the acceptance-criteria array. Use the CLI id flags to patch in place. */
+        acceptance_criteria?: AcceptanceCriteriaInput;
+        /** Arrays are merged with the existing ledger on update. */
+        tests?: TicketTestsInput;
+    };
+
 export interface Ticket {
     id?: number;
     file_path: string;
@@ -348,6 +459,10 @@ export interface Ticket {
     created_at?: string;
     updated_at?: string;
     priority?: 'trivial' | 'minor' | 'major' | 'critical';
+    /** Every ticket must carry at least one criterion. */
+    acceptance_criteria?: AcceptanceCriterion[];
+    /** Every ticket must carry the test ledger (arrays may be empty). */
+    tests?: TicketTests;
     // Model tracking fields (per DECISIONS.md E)
     suggested_model?: string;
     estimated_models?: { model: string; subtask_hint: string }[];
@@ -374,9 +489,9 @@ export interface TicketEngine {
     ticketDir: string;
     indexPath: string;
 
-    create(params: { area?: string; type?: string; title: string; objective?: string; priority?: 'trivial' | 'minor' | 'major' | 'critical'; comments?: { timestamp: string; author: string; body: string }[] }): Ticket;
+    create(params: CreateTicketParams): Ticket;
     list(area?: string, status?: string): Ticket[];
-    update(number: number, patch: Partial<Omit<Ticket, 'id' | 'file_path' | 'number'>>): Ticket | undefined;
+    update(number: number, patch: TicketPatch): Ticket | undefined;
     archive(number: number): Ticket | undefined;
     validate(): ValidateResult;
     getEnforcement(): EnforcementResult;
@@ -391,6 +506,175 @@ export interface TicketEngine {
 function validateType(type: unknown): void {
     if (typeof type !== 'string' || !VALID_TYPES.has(type)) {
         throw new Error(`Invalid ticket type '${type}'. Must be one of: spike, feature, bug, improvement, doc, infra`);
+    }
+}
+
+function normalizeStringList(value: unknown, field: string): string[] {
+    if (value === undefined || value === null) return [];
+    if (!Array.isArray(value)) {
+        throw new Error(`${field} must be an array of strings`);
+    }
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of value) {
+        if (typeof item !== 'string') {
+            throw new Error(`${field} must contain only strings`);
+        }
+        const trimmed = item.trim();
+        if (!trimmed) {
+            throw new Error(`${field} must not contain empty strings`);
+        }
+        if (!seen.has(trimmed)) {
+            seen.add(trimmed);
+            out.push(trimmed);
+        }
+    }
+    return out;
+}
+
+function normalizeAcceptanceCriteria(input: unknown): AcceptanceCriterion[] {
+    if (!Array.isArray(input)) {
+        throw new Error('acceptance_criteria must be an array');
+    }
+    if (input.length === 0) {
+        throw new Error('acceptance_criteria must contain at least one criterion');
+    }
+
+    const used = new Set<string>();
+    let auto = 1;
+
+    return input.map((raw, index) => {
+        let text: unknown;
+        let id: string | undefined;
+        let status: unknown;
+        let evidence: unknown;
+        let note: unknown;
+
+        if (typeof raw === 'string') {
+            text = raw;
+        } else if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+            const obj = raw as Record<string, unknown>;
+            text = obj.text;
+            id = typeof obj.id === 'string' ? obj.id.trim() : undefined;
+            status = obj.status;
+            evidence = obj.evidence;
+            note = obj.note;
+        } else {
+            throw new Error(`acceptance_criteria[${index}] must be a string or an object`);
+        }
+
+        if (typeof text !== 'string' || !text.trim()) {
+            throw new Error(`acceptance_criteria[${index}].text is required`);
+        }
+
+        if (id) {
+            if (!AC_ID_PATTERN.test(id)) {
+                throw new Error(`acceptance_criteria[${index}].id '${id}' is invalid (letters, digits, underscore, hyphen; must start with a letter)`);
+            }
+            if (used.has(id)) {
+                throw new Error(`Duplicate acceptance criterion id '${id}'`);
+            }
+        } else {
+            while (used.has(`A${auto}`)) auto++;
+            id = `A${auto++}`;
+        }
+        used.add(id);
+
+        const statusValue = status === undefined ? 'pending' : status;
+        if (typeof statusValue !== 'string' || !AC_STATUS_SET.has(statusValue)) {
+            throw new Error(
+                `acceptance criterion '${id}' has invalid status '${String(statusValue)}'. ` +
+                `Must be one of: ${ACCEPTANCE_CRITERIA_STATUSES.join(', ')}`
+            );
+        }
+
+        const evidenceValue = typeof evidence === 'string' ? evidence.trim() : '';
+        const noteValue = typeof note === 'string' ? note.trim() : '';
+
+        if (statusValue === 'passing' && !evidenceValue) {
+            throw new Error(`acceptance criterion '${id}' is passing but has no evidence (test path/case, command, or observed artifact)`);
+        }
+        if (statusValue === 'waived' && !noteValue) {
+            throw new Error(`acceptance criterion '${id}' is waived but has no note explaining why no test is needed`);
+        }
+
+        const criterion: AcceptanceCriterion = {
+            id,
+            text: text.trim(),
+            status: statusValue as AcceptanceCriterionStatus,
+        };
+        if (evidenceValue) criterion.evidence = evidenceValue;
+        if (noteValue) criterion.note = noteValue;
+        return criterion;
+    });
+}
+
+function normalizeTests(input: unknown): TicketTests {
+    if (input === undefined || input === null) {
+        return { needed: [], created: [], cases: [] };
+    }
+    // A bare array is shorthand for `needed`.
+    if (Array.isArray(input)) {
+        return { needed: normalizeStringList(input, 'tests.needed'), created: [], cases: [] };
+    }
+    if (typeof input !== 'object') {
+        throw new Error('tests must be an object with needed/created/cases arrays');
+    }
+    const obj = input as Record<string, unknown>;
+    return {
+        needed: normalizeStringList(obj.needed, 'tests.needed'),
+        created: normalizeStringList(obj.created, 'tests.created'),
+        cases: normalizeStringList(obj.cases, 'tests.cases'),
+    };
+}
+
+/** Merge two test ledgers without dropping existing entries. */
+function mergeTests(existing: TicketTests, incoming: TicketTests): TicketTests {
+    return {
+        needed: normalizeStringList([...existing.needed, ...incoming.needed], 'tests.needed'),
+        created: normalizeStringList([...existing.created, ...incoming.created], 'tests.created'),
+        cases: normalizeStringList([...existing.cases, ...incoming.cases], 'tests.cases'),
+    };
+}
+
+function assertAcceptanceCriteriaShape(value: unknown): void {
+    if (value === undefined) return;
+    if (!Array.isArray(value)) {
+        throw new TypeError('ticket.acceptance_criteria must be an array');
+    }
+    const ids = new Set<string>();
+    value.forEach((raw, index) => {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+            throw new TypeError(`ticket.acceptance_criteria[${index}] must be an object`);
+        }
+        const obj = raw as Record<string, unknown>;
+        if (typeof obj.id !== 'string' || !AC_ID_PATTERN.test(obj.id)) {
+            throw new TypeError(`ticket.acceptance_criteria[${index}].id is invalid`);
+        }
+        if (ids.has(obj.id)) {
+            throw new TypeError(`ticket.acceptance_criteria has duplicate id '${obj.id}'`);
+        }
+        ids.add(obj.id);
+        if (typeof obj.text !== 'string' || !obj.text.trim()) {
+            throw new TypeError(`ticket.acceptance_criteria[${index}].text is required`);
+        }
+        if (typeof obj.status !== 'string' || !AC_STATUS_SET.has(obj.status)) {
+            throw new TypeError(`ticket.acceptance_criteria[${index}].status is invalid`);
+        }
+    });
+}
+
+function assertTestsShape(value: unknown): void {
+    if (value === undefined) return;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new TypeError('ticket.tests must be an object');
+    }
+    const obj = value as Record<string, unknown>;
+    for (const key of ['needed', 'created', 'cases'] as const) {
+        if (obj[key] === undefined) continue;
+        if (!Array.isArray(obj[key]) || (obj[key] as unknown[]).some(v => typeof v !== 'string')) {
+            throw new TypeError(`ticket.tests.${key} must be an array of strings`);
+        }
     }
 }
 
@@ -410,6 +694,8 @@ function validateData(data: Record<string, unknown> | Ticket): void {
     if (!VALID_TYPES.has(data.type as string)) throw new TypeError(`Invalid type '${data.type}'`);
     if (typeof data.status !== 'string') throw new TypeError('ticket.status missing');
     if (typeof data.title !== 'string' || !data.title) throw new TypeError('ticket.title required');
+    assertAcceptanceCriteriaShape(data.acceptance_criteria);
+    assertTestsShape(data.tests);
 }
 
 function ticketFileName(number: number): string {
@@ -427,6 +713,179 @@ function detectOrphanFiles(ticketDir: string): string[] {
         }
     }
     return orphanFiles;
+}
+
+/**
+ * Check the acceptance-criteria + test-ledger policy for every ticket.
+ *
+ * Errors fail `validate` (missing fields, invalid status, `passing` with no
+ * evidence, `waived` with no note). Warnings surface drift but do not block:
+ * a test-needed criterion with an empty `needed` list, a created/passing
+ * criterion with no test in `created`, or a resolved ticket with unverified
+ * criteria.
+ */
+function checkQuality(ticketDir: string): QualityResult {
+    const issues: QualityIssue[] = [];
+    const files = fs.readdirSync(ticketDir)
+        .filter(f => /^ticket-\d+\.json$/.test(f))
+        .sort();
+
+    for (const file of files) {
+        const number = parseInt(file.match(/\d+/)![0], 10);
+        let data: Ticket;
+        try {
+            data = JSON.parse(fs.readFileSync(path.join(ticketDir, file), 'utf-8')) as Ticket;
+        } catch {
+            issues.push({
+                ticket_number: number,
+                field: 'acceptance_criteria',
+                severity: 'error',
+                message: 'Ticket file is not valid JSON',
+            });
+            continue;
+        }
+
+        const criteria = data.acceptance_criteria;
+        if (!Array.isArray(criteria) || criteria.length === 0) {
+            issues.push({
+                ticket_number: number,
+                field: 'acceptance_criteria',
+                severity: 'error',
+                message: 'Missing acceptance_criteria (at least one criterion is required)',
+            });
+        } else {
+            const ids = new Set<string>();
+            criteria.forEach((raw, index) => {
+                const label = raw && typeof raw === 'object' && typeof raw.id === 'string'
+                    ? raw.id
+                    : `#${index + 1}`;
+                if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+                    issues.push({
+                        ticket_number: number,
+                        field: 'acceptance_criteria',
+                        severity: 'error',
+                        message: `Criterion ${label} is not an object`,
+                    });
+                    return;
+                }
+                const ac = raw as unknown as Record<string, unknown>;
+                if (typeof ac.id !== 'string' || !AC_ID_PATTERN.test(ac.id)) {
+                    issues.push({
+                        ticket_number: number,
+                        field: 'acceptance_criteria',
+                        severity: 'error',
+                        message: `Criterion ${label} has a missing or invalid id`,
+                    });
+                } else if (ids.has(ac.id)) {
+                    issues.push({
+                        ticket_number: number,
+                        field: 'acceptance_criteria',
+                        severity: 'error',
+                        message: `Duplicate acceptance criterion id '${ac.id}'`,
+                    });
+                } else {
+                    ids.add(ac.id);
+                }
+                if (typeof ac.text !== 'string' || !ac.text.trim()) {
+                    issues.push({
+                        ticket_number: number,
+                        field: 'acceptance_criteria',
+                        severity: 'error',
+                        message: `Criterion ${label} has no text`,
+                    });
+                }
+                if (typeof ac.status !== 'string' || !AC_STATUS_SET.has(ac.status)) {
+                    issues.push({
+                        ticket_number: number,
+                        field: 'acceptance_criteria',
+                        severity: 'error',
+                        message: `Criterion ${label} has invalid status '${String(ac.status)}'`,
+                    });
+                }
+                if (ac.status === 'passing' && (typeof ac.evidence !== 'string' || !ac.evidence.trim())) {
+                    issues.push({
+                        ticket_number: number,
+                        field: 'acceptance_criteria',
+                        severity: 'error',
+                        message: `Criterion ${label} is passing but has no evidence`,
+                    });
+                }
+                if (ac.status === 'waived' && (typeof ac.note !== 'string' || !ac.note.trim())) {
+                    issues.push({
+                        ticket_number: number,
+                        field: 'acceptance_criteria',
+                        severity: 'error',
+                        message: `Criterion ${label} is waived but has no note`,
+                    });
+                }
+            });
+        }
+
+        if (!data.tests || typeof data.tests !== 'object' || Array.isArray(data.tests)) {
+            issues.push({
+                ticket_number: number,
+                field: 'tests',
+                severity: 'error',
+                message: 'Missing tests ledger (needed/created/cases arrays are required)',
+            });
+        } else {
+            const tests = data.tests as unknown as Record<string, unknown>;
+            for (const key of ['needed', 'created', 'cases'] as const) {
+                if (!Array.isArray(tests[key]) || (tests[key] as unknown[]).some(v => typeof v !== 'string')) {
+                    issues.push({
+                        ticket_number: number,
+                        field: 'tests',
+                        severity: 'error',
+                        message: `tests.${key} must be an array of strings`,
+                    });
+                }
+            }
+
+            if (Array.isArray(criteria)) {
+                const needed = Array.isArray(tests.needed) ? tests.needed.length : 0;
+                const created = Array.isArray(tests.created) ? tests.created.length : 0;
+                for (const ac of criteria) {
+                    if (!ac || typeof ac !== 'object') continue;
+                    if (ac.status === 'test-needed' && needed === 0) {
+                        issues.push({
+                            ticket_number: number,
+                            field: 'tests',
+                            severity: 'warning',
+                            message: `Criterion ${ac.id} is test-needed but tests.needed is empty`,
+                        });
+                    }
+                    if ((ac.status === 'test-created' || ac.status === 'passing') && created === 0) {
+                        issues.push({
+                            ticket_number: number,
+                            field: 'tests',
+                            severity: 'warning',
+                            message: `Criterion ${ac.id} is ${ac.status} but tests.created is empty`,
+                        });
+                    }
+                }
+            }
+        }
+
+        if (data.status === 'resolved' && Array.isArray(criteria)) {
+            const unverified = criteria.filter(ac =>
+                ac && typeof ac === 'object' && ac.status !== 'passing' && ac.status !== 'waived'
+            );
+            if (unverified.length > 0) {
+                issues.push({
+                    ticket_number: number,
+                    field: 'acceptance_criteria',
+                    severity: 'warning',
+                    message: `Ticket is resolved but ${unverified.length} criterion/criteria are not passing or waived`,
+                });
+            }
+        }
+    }
+
+    return {
+        ok: !issues.some(issue => issue.severity === 'error'),
+        tickets_checked: files.length,
+        issues,
+    };
 }
 
 // ────────────────────────────── engine ──────────────────────────────
@@ -497,27 +956,7 @@ export function createTicketEngine({
         ticketDir,
         indexPath,
 
-        create(
-            params: {
-                area?: string;
-                type?: string;
-                title: string;
-                objective?: string;
-                // Model tracking fields
-                suggested_model?: string;
-                estimated_models?: { model: string; subtask_hint: string }[];
-                estimated_model?: string;
-                // Other extended fields
-                estimate?: number;
-                priority?: 'trivial' | 'minor' | 'major' | 'critical';
-                labels?: string[];
-                parent?: number;
-                is_epic?: boolean;
-                assigned_to?: string;
-                spans?: { start: string; end: string };
-                comments?: { timestamp: string; author: string; body: string }[];
-            }
-        ): Ticket {
+        create(params: CreateTicketParams): Ticket {
             const area       = params.area          || '';
             const typeRaw     = params.type;
             let   typeVal: Ticket['type'] = 'feature';
@@ -526,6 +965,12 @@ export function createTicketEngine({
                 validateType(typeRaw);
                 typeVal = typeRaw as Ticket['type'];
             }
+
+            if (params.acceptance_criteria === undefined || params.acceptance_criteria === null) {
+                throw new Error('acceptance_criteria is required: every ticket must have at least one criterion');
+            }
+            const acceptanceCriteria = normalizeAcceptanceCriteria(params.acceptance_criteria);
+            const tests = normalizeTests(params.tests);
 
             return withLock(ticketDir, () => {
                 const now  = new Date().toISOString();
@@ -543,6 +988,8 @@ export function createTicketEngine({
                     objective: params.objective || '',
                     created_at: now,
                     updated_at: now,
+                    acceptance_criteria: acceptanceCriteria,
+                    tests,
                     // Model tracking fields
                     suggested_model: params.suggested_model,
                     estimated_models: params.estimated_models,
@@ -595,7 +1042,7 @@ export function createTicketEngine({
             });
         },
 
-        update(number: number, patch: Partial<Omit<Ticket, 'id' | 'file_path' | 'number'>>): Ticket | undefined {
+        update(number: number, patch: TicketPatch): Ticket | undefined {
             const file = path.join(ticketDir, ticketFileName(number));
             if (!fs.existsSync(file)) return undefined;
 
@@ -609,13 +1056,23 @@ export function createTicketEngine({
                     assertTransition(data.status, newStatus);
                 }
 
-                for (const key of Object.keys(patch)) {
-                    if ((patch as Record<string, unknown>)[key] != null &&
+                // Normalise policy fields before assignment. ACs replace the
+                // array; test ledger arrays merge so the trail is append-only.
+                const normalized: Record<string, unknown> = { ...patch };
+                if (patch.acceptance_criteria !== undefined) {
+                    normalized.acceptance_criteria = normalizeAcceptanceCriteria(patch.acceptance_criteria);
+                }
+                if (patch.tests !== undefined) {
+                    normalized.tests = mergeTests(normalizeTests(data.tests), normalizeTests(patch.tests));
+                }
+
+                for (const key of Object.keys(normalized)) {
+                    if (normalized[key] != null &&
                         key !== 'id'          &&
                         key !== 'file_path'   &&
                         key !== 'number')
                     {
-                        (data as unknown as Record<string, unknown>)[key] = (patch as Record<string, unknown>)[key];
+                        (data as unknown as Record<string, unknown>)[key] = normalized[key];
                     }
                 }
 
@@ -674,14 +1131,16 @@ export function createTicketEngine({
 
             const synced = missing.length === 0 && extra.length === 0;
             const enforcement = this.getEnforcement();
+            const quality = checkQuality(ticketDir);
 
             return {
                 synced,
                 missing_files: missing.length ? missing.map(n => path.join(ticketDir, ticketFileName(n))) : undefined,
                 extra_files: extra.length ? extra : undefined,
                 enforcement,
-                // Orphans are fail-open for writes, but validation raises them.
-                ok: synced && enforcement.enforced && !enforcement.has_orphans,
+                quality,
+                // Policy errors fail validation just like index/audit drift.
+                ok: synced && enforcement.enforced && !enforcement.has_orphans && quality.ok,
             };
         },
 

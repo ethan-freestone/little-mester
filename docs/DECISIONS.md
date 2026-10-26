@@ -86,7 +86,7 @@ Next session reads that first — never re-implement already-completed work.
 ## C. Constraints (what's true, not designs)
 
 ### C.1 Testing status (updated 2026-10-26)
-The ticket engine now has a working Jest suite: **120 tests** (44 engine, 44 CLI, 32 MCP) under `little-mester-mcp/tests/`. Run it with `cd little-mester-mcp && npm test`. This resolves the earlier engine-testing blocker. Host-side Bats tests still require `bats-core` (see the root README's Testing section).
+The ticket engine now has a working Jest suite: **138 tests** (52 engine, 54 CLI, 32 MCP) under `little-mester-mcp/tests/`. Run it with `cd little-mester-mcp && npm test`. This resolves the earlier engine-testing blocker. Host-side Bats tests still require `bats-core` (see the root README's Testing section).
 
 ### C.2 SSH / git auth — OUT OF SCOPE (now)
 Container-native SSH not managed here. Token-based or GitHub CLI auth is recommended path for any external git operations. Separate future ticket when needed.
@@ -114,6 +114,72 @@ stale lock, or an orphan file.
    dead-PID locks itself on the next write.
 
 Engineering details and invariants: [docs/tickets/architecture/DECISIONS.md](tickets/architecture/DECISIONS.md) §I.
+
+### C.4 Acceptance criteria and tests are first-class (2026-10-26)
+**Rule:** Every ticket MUST have at least one **acceptance criterion** and a **test ledger**.
+The engine enforces this at create/update time and `validate` fails when it is missing.
+
+Acceptance criteria are an array of objects, not prose in `objective` or a comment:
+
+```json
+"acceptance_criteria": [
+  {
+    "id": "A1",
+    "text": "A user with valid credentials receives a session token",
+    "status": "passing",
+    "evidence": "tests/auth.test.ts › valid credentials"
+  },
+  {
+    "id": "A2",
+    "text": "A wrong password is rejected without leaking whether the account exists",
+    "status": "waived",
+    "note": "Requires a browser session; manual QA only for now"
+  }
+]
+```
+
+The criterion **status is the single place to track testing**, because "test needed",
+"test created", and "test passing" are states of the same criterion:
+
+| Status | Meaning |
+|---|---|
+| `pending` | Not started; nothing verified yet |
+| `in-progress` | Implementation underway |
+| `test-needed` | Implemented; a test still needs to be written |
+| `test-created` | A test exists but has not been confirmed passing |
+| `passing` | Verified. `evidence` is **required** (test path/case, command + result, or artifact) |
+| `waived` | No test is needed or possible. `note` is **required** explaining why |
+
+The ticket-level test ledger records the paper trail:
+
+```json
+"tests": {
+  "needed": ["test that an empty password is rejected"],
+  "created": ["tests/auth.test.ts"],
+  "cases": ["valid credentials", "wrong password", "empty password"]
+}
+```
+
+**Write rules:**
+- `create` requires at least one criterion. Bare strings are normalized to
+  `{id: "A1"…, status: "pending"}`.
+- `update` replaces the acceptance-criteria array (so send the full array when editing
+  through the API). `tests.needed`, `tests.created`, and `tests.cases` are **merged**,
+  never replaced: a later edit cannot erase the paper trail.
+- Tests may drift from reality, but the trail must remain. A stale `passing` claim is
+  corrected by changing the status and evidence — not by deleting the criterion.
+- `validate` **fails** on missing criteria/ledger, invalid/duplicate ids, invalid status,
+  `passing` without evidence, or `waived` without a note. It **warns** (does not fail) on
+  drift: `test-needed` with an empty `needed` list, `test-created`/`passing` with an empty
+  `created` list, or a `resolved` ticket with unverified criteria.
+
+**Why:** "Done" becomes checkable by a human or an agent. Without a criterion there is no
+definition of done; without a test ledger there is no way to tell whether the work was
+verified or merely claimed.
+
+Schema: [`little-mester-mcp/docs/SCHEMA.md`](../little-mester-mcp/docs/SCHEMA.md) and
+[`ticket-v1.json`](../little-mester-mcp/docs/ticket-v1.json). Engineering invariants:
+[`docs/tickets/architecture/DECISIONS.md`](tickets/architecture/DECISIONS.md) §J.
 
 ---
 

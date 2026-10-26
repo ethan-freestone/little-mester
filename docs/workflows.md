@@ -46,6 +46,23 @@ Tickets are stored as JSON in one of these locations depending on routing mode:
   "status": "draft",
   "title": "Implement OAuth2 flow for user registration",
   "objective": "Users can register via Google OAuth on first visit without manual credentials",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "A first-time visitor can register with Google in one flow",
+      "status": "test-needed"
+    },
+    {
+      "id": "A2",
+      "text": "An existing account is linked instead of duplicated",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": ["integration test for the Google callback"],
+    "created": [],
+    "cases": []
+  },
   "created_at": "2026-10-15T09:00:00Z",
   "updated_at": "2026-10-15T09:00:00Z"
 }
@@ -55,29 +72,77 @@ Tickets are stored as JSON in one of these locations depending on routing mode:
 |---|---|---|---|
 | `number` | number | yes | Auto-incremented, unique across all routing modes |
 | `area` | string | yes | Domain area grouping (e.g. `auth`, `infra`, `engine`) |
-| `type` | string | yes | `feature` \| `bug` \| `infra` \| `pause` |
+| `type` | string | yes | `feature` \| `bug` \| `improvement` \| `spike` \| `doc` \| `infra` |
 | `status` | string | yes | Lifecycle state — see transitions below |
 | `title` | string | yes | One-line human-readable summary |
 | `objective` | string | no | Detailed objective in present/future tense |
+| `acceptance_criteria` | object[] | yes | At least one criterion; ids unique; status is the test-tracking state |
+| `tests` | object | yes | `{needed[], created[], cases[]}` paper trail |
 | `created_at` | ISO-8601 | yes | Immutable creation timestamp |
 | `updated_at` | ISO-8601 | yes | Last modification timestamp |
+
+### Acceptance criteria and tests (required)
+
+Every ticket carries its own definition of done and its test paper trail. **Do not put
+acceptance criteria in `objective`, `notes`, or a comment** — they are structured fields
+so `validate`, the board, and agents can read them.
+
+Each criterion has `{id, text, status, evidence?, note?}`. The status doubles as the
+testing state:
+
+| Status | Meaning | Required |
+|---|---|---|
+| `pending` | Not started / nothing verified | — |
+| `in-progress` | Implementation underway | — |
+| `test-needed` | Implemented, test still to write | — |
+| `test-created` | Test exists, not confirmed passing | — |
+| `passing` | Verified | `evidence` |
+| `waived` | No test needed or possible | `note` |
+
+The ticket-level ledger is append-only in spirit: `needed` lists tests to write, `created`
+lists test files/cases that exist, and `cases` names the concrete cases (automated or
+manually observed). Tests may drift, but never delete the trail — change the criterion
+status and evidence instead.
+
+```bash
+# Create with criteria and a test ledger
+./little-mester-mcp/scripts/ticket-engine create --area auth --type feature \
+  --ac "A first-time visitor can register with Google" \
+  --ac "An existing account is linked, not duplicated" \
+  --test-needed "integration test for the Google callback" \
+  "Implement OAuth2 registration"
+
+# Record what changed during implementation
+./little-mester-mcp/scripts/ticket-engine update 42 \
+  --ac-status A1=passing \
+  --ac-evidence "A1=tests/auth.test.ts › google callback" \
+  --test-created "tests/auth.test.ts" \
+  --test-case "first-time registration"
+```
+
+`create` fails without at least one `--ac`. `update` replaces the criteria array through
+the CLI patch flags and merges the three test-ledger arrays. `validate` fails on policy
+errors and warns on drift (see `docs/DECISIONS.md` §C.4).
 
 ### Status transitions
 
 ```
 draft ──► active ──► resolved ──► archived
-  ▲         ╲       ↗
-   └─────────┘────/
+  ▲         │            │            │
+  └─────────┘            └────────────┘
 ```
 
 Valid transitions:
 | From → To | Valid? | Notes |
 |---|---|---|
 | `draft → active` | ✅ | Start work |
+| `draft → archived` | ✅ | Drop unstarted work |
 | `active → resolved` | ✅ | Complete work |
+| `active → draft` | ✅ | Return to backlog |
 | `resolved → draft` | ✅ | Reopen if needed |
-| any → `archived` | ✅ | Terminal — read-only from this point |
-| `draft ↔ active` | ✅ | Bidirectional toggle for unstarted work |
+| `resolved → archived` | ✅ | Close for good |
+| `archived → draft` | ✅ | Reopen an archived ticket |
+| everything else | ❌ | `archive` command force-sets `archived` |
 
 ### Ticket numbering
 

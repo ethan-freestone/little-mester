@@ -7,12 +7,62 @@
   "title": "Reframe as Little Mester MCP with modular ticketing",
   "objective": "Reframe the ticketing engine as a generic MCP server ('Little Mester MCP') with a ticketing module as the first implementation. Support multiple routing modes (same-repo: point at workspace/docs/tickets/, any-directory: point at any path, separate-repo: git-synced separate repo). MCP tools named mester_tickets_create, mester_tickets_search, mester_tickets_board, etc. — generic enough that mester_files_search or mester_notes could live alongside.",
   "created_at": "2026-10-23T00:00:00.000Z",
-  "updated_at": "2026-10-26T17:39:53.391Z",
+  "updated_at": "2026-10-26T18:01:24.155Z",
   "comments": [
     {
       "timestamp": "2026-10-26T17:39:53.391Z",
       "author": "cli",
       "body": "ACCEPTANCE CRITERIA ADDENDUM (2026-10-26). From a clean clone on the VM from ticket #35: npm ci, npm run build, npm test, and ./little-mester-mcp/scripts/ticket-engine validate all succeed; CLI create/update/archive and MCP create/validate work; no stray store appears under little-mester-mcp/docs/tickets; the committed _audit.json still validates after clone."
+    },
+    {
+      "timestamp": "2026-10-26T18:01:24.155Z",
+      "author": "migration",
+      "body": "Structured acceptance criteria and test ledger backfilled from the 2026-10-26 acceptance-criteria addendum. The original addendum above is retained as history; the structured fields are now the source of truth."
     }
-  ]
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "A clean clone on the #35 VM passes npm ci, npm run build, npm test, and ticket-engine validate.",
+      "status": "test-needed"
+    },
+    {
+      "id": "A2",
+      "text": "CLI create/update/archive work from that clone.",
+      "status": "test-created"
+    },
+    {
+      "id": "A3",
+      "text": "MCP create/validate work from a live session.",
+      "status": "test-created"
+    },
+    {
+      "id": "A4",
+      "text": "No stray ticket store appears under little-mester-mcp/docs/tickets.",
+      "status": "passing",
+      "evidence": "git ls-files little-mester-mcp/docs/tickets (2026-10-26): empty"
+    },
+    {
+      "id": "A5",
+      "text": "The committed _audit.json still validates after cloning.",
+      "status": "test-needed"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "clean-clone build/test/validate run",
+      "committed-audit validation after clone",
+      "live-session MCP create/validate"
+    ],
+    "created": [
+      "tests/engine.test.ts",
+      "tests/cli.test.ts",
+      "tests/mcp-server.test.ts"
+    ],
+    "cases": [
+      "CLI CRUD",
+      "MCP-layer operations",
+      "no stray store check"
+    ]
+  }
 }

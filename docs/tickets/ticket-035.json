@@ -8,14 +8,81 @@
   "title": "Docker-capable VM test environment + disposable workspaces",
   "objective": "Stand up a reproducible Docker-capable development/test host (VM or remote Docker daemon) outside the Little Mester agent container, plus a disposable-workspace workflow, so ./lab, compose, --unsafe-recurse and the ticket CLI/MCP can be exercised end-to-end without the environment under test also being the environment doing the testing.",
   "created_at": "2026-10-26T17:39:37.714Z",
-  "updated_at": "2026-10-26T17:39:37.714Z",
+  "updated_at": "2026-10-26T18:01:24.159Z",
   "priority": "major",
   "comments": [
     {
       "timestamp": "2026-10-26T17:39:37.714Z",
       "author": "cli",
       "body": "ACCEPTANCE CRITERIA (2026-10-26).\n\nA1 — Topology chosen and recorded in docs/DECISIONS.md: a full Linux VM running Docker + opencode, or a remote Docker daemon used from the dev container. Record the isolation trade-offs and why the Little Mester repo itself is never the test target.\n\nA2 — Fresh provisioning is one documented command/runbook from a clean host: installs Docker (and NVIDIA container toolkit when GPU is enabled), checks out the repo, and builds the agent image. A CPU-only mode works without a GPU.\n\nA3 — ./verify-lab.sh (or its replacement) passes from a clean clone on the new host, including image build, compose health checks, and the no-host-ports check.\n\nA4 — A disposable test workspace can be created outside the repo checkout (workspaces/test-<id> or a fresh clone), and ./lab <workspace> --unsafe-recurse starts with the agent able to write only inside that workspace.\n\nA5 — Every tooling command is exercised against the disposable workspace and its documented effect observed: lab up/down/stop, docker compose ps/port, ticket-engine create/update/archive/audit/validate, scripts/regen-configs, scripts/verify-metrics.sh, and the mester_tickets_* MCP tools from a live session. \"Observed\" means the expected file, service, port, or exit code, not just a zero exit.\n\nA6 — Negative cases are tested: the self-mapping guard blocks the repo without --unsafe-recurse; no host ports are published; a stale lock and an orphan file each make validate exit 1 without deleting anything.\n\nA7 — Teardown removes containers, networks, volumes, and the disposable workspace; git status --short in the repo is empty afterwards.\n\nA8 — The repo checkout is never the test target, so destructive cases cannot damage the developer's working tree.\n\nA9 — CI (or a committed pre-merge script) runs the engine/CLI/MCP suites and the lab smoke test in the VM/Docker environment, with results recorded on this ticket before merge."
+    },
+    {
+      "timestamp": "2026-10-26T18:01:24.159Z",
+      "author": "migration",
+      "body": "Structured acceptance criteria and test ledger backfilled from the 2026-10-26 acceptance-criteria addendum. The original addendum above is retained as history; the structured fields are now the source of truth."
     }
   ],
-  "models_used": []
+  "models_used": [],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Topology is chosen and recorded in docs/DECISIONS.md: a full Linux VM with Docker + opencode, or a remote Docker daemon; isolation trade-offs and why the repo is never the test target are recorded.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Fresh provisioning is one documented command/runbook from a clean host: Docker (and NVIDIA toolkit when GPU-enabled), repo checkout, agent image build; CPU-only mode works without a GPU.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "./verify-lab.sh (or replacement) passes from a clean clone on the new host, including image build, compose health checks, and the no-host-ports check.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "A disposable test workspace exists outside the repo checkout (workspaces/test-<id> or a fresh clone), and ./lab <workspace> --unsafe-recurse starts with writes confined to that workspace.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Every tooling command is exercised against the disposable workspace with its documented effect observed: lab up/down/stop, docker compose ps/port, ticket-engine create/update/archive/audit/validate, scripts/regen-configs, scripts/verify-metrics.sh, and mester_tickets_* from a live session.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "Negative cases pass: the self-mapping guard blocks the repo without --unsafe-recurse; no host ports are published; a stale lock and an orphan file each make validate exit 1 without deleting anything.",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "Teardown removes containers, networks, volumes, and the disposable workspace; git status --short in the repo is empty afterwards.",
+      "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "The repo checkout is never the test target, so destructive cases cannot damage the developer's working tree.",
+      "status": "pending"
+    },
+    {
+      "id": "A9",
+      "text": "CI or a committed pre-merge script runs the engine/CLI/MCP suites and the lab smoke test in the VM/Docker environment, with results recorded on this ticket before merge.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "topology decision review",
+      "clean-host provisioning run",
+      "verify-lab clean-clone run",
+      "workspace isolation test",
+      "command matrix observed effects",
+      "negative-case suite",
+      "teardown/residue check",
+      "repo-integrity check",
+      "VM CI run recorded on ticket"
+    ],
+    "created": [],
+    "cases": []
+  }
 }
