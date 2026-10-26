@@ -22,11 +22,12 @@ COPY opencode/opencode.json /etc/opencode/opencode/opencode.json
 COPY opencode/plugins/little-mester-logo/ /etc/opencode/plugins/little-mester-logo/
 COPY opencode/plugins/host-metrics/ /etc/opencode/plugins/host-metrics/
 COPY opencode/plugins/host-metrics-tui/ /etc/opencode/plugins/host-metrics-tui/
+COPY opencode/plugins/little-mester-exit-confirm/ /etc/opencode/plugins/little-mester-exit-confirm/
 
 ENV PATH="/opt/venv/bin:$PATH" \
     HOME=/home/agent \
     OPENCODE_CONFIG=/etc/opencode/opencode/opencode.json \
-    OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-logo","/etc/opencode/plugins/host-metrics-tui"]}'
+    OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-logo","/etc/opencode/plugins/host-metrics-tui","/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}'
 
 RUN groupadd -g ${LAB_GID} agent && useradd -m -u ${LAB_UID} -g ${LAB_GID} agent
 

@@ -26,3 +26,5 @@ __pycache__/
 .llama-bench
 # Tune sweep results
 .tune-results/
+
+secrets.env

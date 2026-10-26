@@ -480,6 +480,10 @@ We install `@opencode/cli` (v2). The `opencode-ai` package is v1. Most search re
 | Slot registration | `api.slots.register({ slots: { home_logo } })` | `context.ui.slot({ <placement>: "<slot>", render })` |
 | Slot names | `home_logo`, `sidebar_content` | dotted: `home.footer`, `sidebar.content`, ... |
 
+A legacy `tui.json` is read **only once by the migration routine** to populate `cli.json`
+(`packages/cli/src/config/migrate.ts`); it is not a live config file. Shipping one has no effect on
+plugin loading and must not be used to register plugins or keybinds.
+
 **Before changing any plugin or TUI config, read the v2 docs (not the v1 docs):**
 - https://opencode.ai/v2/docs/build/plugins/cli (writing TUI plugins, slot list)
 - https://opencode.ai/v2/docs/cli/plugins (loading plugins, discovery paths)
@@ -616,4 +620,49 @@ reports all 10 nested-`<text>` sites and all 5 `fontWeight` sites.
 dir, so a "fixed" copy outside `/etc/opencode/plugins` does *not* replace the baked-in one — the old
 plugin still loads and still crashes. Point `OPENCODE_CONFIG` at a private config directory whose
 `plugins` array lists only the copy under test.
+
+### J.10 Exit confirmation (ticket #37)
+
+**Decision.** Ctrl+C is the only keyboard exit trigger, and it opens a visible confirmation dialog.
+There is **no instant quit**: Ctrl+D, `<leader>q` and single-letter keys do not exit. While the
+dialog is open, `Y`/`y` or `Q`/`q` confirms; `Esc`, `N`/`n` or Ctrl+C cancels; every other key is
+swallowed so nothing leaks into the prompt. While the dialog is closed the plugin captures **only**
+Ctrl+C — `y`, `Y`, `q`, `n` etc. type normally.
+
+A literal "Ctrl+C+Q" chord is impossible: a terminal sends Ctrl+C as one control byte. The close
+sequence is therefore **Ctrl+C, then Q** (Q presses the dialog's confirm action).
+
+**Why the first implementation failed (verified against OpenCode 2.1.4 source).**
+
+1. The overlay used slot `"root"`, which is not in the v2 `SlotMap` (`app`, `home.footer.*`,
+   `prompt.footer.*`, `session.composer.top`, `session.panel`, `sidebar.content`, `sidebar.footer`).
+   `"root"` is never mounted, so `setShow(true)` rendered nothing.
+2. The plugin registered `y`, `Y`, `q` and `escape` as always-on global commands, so those letters
+   were swallowed even with the dialog closed.
+3. `agent/opencode/tui.json` is v1 config and is not loaded by v2, so its `app_exit: "q"` never
+   applied — and OpenCode's default `app.exit` (`ctrl+c,ctrl+d,<leader>q`) stayed live, which is why
+   Ctrl+D still quit instantly.
+
+**Implementation contract.**
+
+- Use `context.ui.dialog.show(...)` (a real modal dialog), not a slot overlay. `DialogProvider`
+  pushes the `modal` input mode for the dialog's lifetime.
+- Confirm/cancel keys live in a `mode: "modal"` keymap layer that is also `enabled: () => open()`.
+  They are unreachable unless this specific dialog is open.
+- The only global command is `ctrl+c` with `priority: 100`, which beats the prompt's own
+  `prompt.clear` (`ctrl+c`) binding. That layer is disabled while the dialog is open so Ctrl+C
+  cancels instead of reopening.
+- `app.exit` is set to `"none"` and `prompt.clear` to `"none"` in
+  `OPENCODE_CLI_CONFIG_CONTENT` (`agent/Dockerfile`). `app.exit` remains dispatchable **by command
+  id**, so confirming calls `context.keymap.dispatch("app.exit")`; no keybinding is needed.
+- Consequence: Ctrl+C no longer clears the prompt (owner accepted the workflow change). `/exit` and
+  the other slash aliases still exist as deliberate, typed commands.
+- `agent/opencode/tui.json` is deleted: dead v1 config that would have bound exit to a single `q`.
+
+**Verification.** Static checks: `tests/tui-jsx.bats`, `tests/exit-confirm.bats` (26 tests total in
+`bats tests/`, one unrelated skip). Live check: `scripts/verify-exit-confirm.py` drives a private
+standalone TUI through a pty and asserts Ctrl+D is inert, `yq` types with the dialog closed, Ctrl+C
+opens the dialog, Esc/N/Ctrl+C cancel without exiting, and q exits. It passed on OpenCode 2.1.4 in
+the agent container; the run is recorded on ticket #37. The image must be rebuilt/restarted for the
+baked `/etc/opencode` copy to replace any stale running copy.
 

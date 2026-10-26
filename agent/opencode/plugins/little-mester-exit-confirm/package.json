@@ -1,0 +1,7 @@
+{
+  "name": "little-mester-exit-confirm",
+  "type": "module",
+  "exports": {
+    "./tui": "./tui.tsx"
+  }
+}
