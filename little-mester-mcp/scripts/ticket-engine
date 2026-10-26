@@ -1,0 +1,21 @@
+#!/usr/bin/env sh
+# ticket-engine — Little Mester Ticket Engine CLI
+# Wires create/list/update/archive/validate to src/engine.ts via ts-node.
+#
+# Usage:
+#   ./scripts/ticket-engine create --area <area> --type <type> "Title" [--objective "..."]
+#   ./scripts/ticket-engine list [--area <area>] [--status <status>]
+#   ./scripts/ticket-engine update <number> [--status <status>] [--title <title>] ...
+#   ./scripts/ticket-engine archive <number>
+#   ./scripts/ticket-engine validate
+#
+# Options:
+#   --ticket-dir <dir>   Directory containing ticket JSON files
+#   -h, --help           Show this help
+#
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+exec npx ts-node "$REPO_ROOT/src/cli.ts" "$@"

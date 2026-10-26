@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "number": 32,
+  "area": "infra",
+  "type": "feature",
+  "status": "active",
+  "title": "Opencode TUI plugin: sidebar Jira-like ticket view",
+  "objective": "Build an opencode v2 TUI plugin that renders the current ticketing context in the sidebar — active ticket with phased todo list, related ticket statuses, and an expandable board view (all tickets and context-filtered). The plugin auto-detects which tickets the agent is working on from the opencode session context and filters accordingly.",
+  "created_at": "2026-10-26T00:00:00.000Z",
+  "updated_at": "2026-10-26T00:00:00.000Z",
+  "priority": "major",
+  "comments": [
+    {
+      "author": "user",
+      "created_at": "2026-10-26T00:00:00Z",
+      "body": "Requirements from user: sidebar Jira view, context detection, phased todo list, expanded board for all + context-filtered."
+    }
+  ]
+}
