@@ -6,7 +6,7 @@
  * Ticket dir is always a fresh temp directory.
  */
 
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -26,6 +26,12 @@ function createTempDir(): string {
 
 function cleanup(dir: string): void {
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+}
+
+/** A PID that is guaranteed dead (the child has already exited). */
+function deadPid(): number {
+    const child = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+    return child.pid ?? 999999;
 }
 
 function runCli(args: string[], env: Record<string, string> = {}): { stdout: string; stderr: string; exitCode: number } {
@@ -128,6 +134,30 @@ describe('create', () => {
         expect(result.stdout).toContain('feature');
     });
 
+    it('creates a ticket with --priority', () => {
+        const result = runCli(['create', '--area', 'auth', '--priority', 'critical', 'Auth breach fix'], { TICKET_DIR: tmpDir });
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('Created ticket #1');
+        const data = JSON.parse(fs.readFileSync(path.join(tmpDir, 'ticket-001.json'), 'utf-8'));
+        expect(data.priority).toBe('critical');
+    });
+
+    it('rejects an invalid --priority', () => {
+        const result = runCli(['create', '--area', 'auth', '--priority', 'urgent', 'Bad priority'], { TICKET_DIR: tmpDir });
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain("Invalid priority 'urgent'");
+    });
+
+    it('creates a ticket with --comment', () => {
+        const result = runCli(['create', '--area', 'auth', '--comment', 'Blocker for sprint', 'Auth fix'], { TICKET_DIR: tmpDir });
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('Comment: Blocker for sprint');
+        const data = JSON.parse(fs.readFileSync(path.join(tmpDir, 'ticket-001.json'), 'utf-8'));
+        expect(data.comments).toHaveLength(1);
+        expect(data.comments[0].body).toBe('Blocker for sprint');
+        expect(data.comments[0].author).toBe('cli');
+    });
+
     it('persists ticket file to disk', () => {
         runCli(['create', '--area', 'infra', 'CI pipeline'], { TICKET_DIR: tmpDir });
         expect(fs.existsSync(path.join(tmpDir, 'ticket-001.json'))).toBe(true);
@@ -214,6 +244,31 @@ describe('update', () => {
         expect(result.stdout).toContain('[ACTIVE]');
     });
 
+    it('updates priority', () => {
+        runCli(['create', '--area', 'a', 'T'], { TICKET_DIR: tmpDir });
+        const result = runCli(['update', '1', '--priority', 'major'], { TICKET_DIR: tmpDir });
+        expect(result.exitCode).toBe(0);
+        const data = JSON.parse(fs.readFileSync(path.join(tmpDir, 'ticket-001.json'), 'utf-8'));
+        expect(data.priority).toBe('major');
+    });
+
+    it('rejects an invalid --priority', () => {
+        runCli(['create', '--area', 'a', 'T'], { TICKET_DIR: tmpDir });
+        const result = runCli(['update', '1', '--priority', 'urgent'], { TICKET_DIR: tmpDir });
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain("Invalid priority 'urgent'");
+    });
+
+    it('appends comment via --comment', () => {
+        runCli(['create', '--area', 'a', 'T'], { TICKET_DIR: tmpDir });
+        const result = runCli(['update', '1', '--comment', 'Review needed'], { TICKET_DIR: tmpDir });
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('Comment: Review needed');
+        const data = JSON.parse(fs.readFileSync(path.join(tmpDir, 'ticket-001.json'), 'utf-8'));
+        expect(data.comments).toHaveLength(1);
+        expect(data.comments[0].body).toBe('Review needed');
+    });
+
     it('updates multiple fields', () => {
         runCli(['create', '--area', 'a', 'T'], { TICKET_DIR: tmpDir });
         const result = runCli(['update', '1', '--status', 'active', '--priority', 'critical'], { TICKET_DIR: tmpDir });
@@ -270,6 +325,97 @@ describe('archive', () => {
     });
 });
 
+// ── audit ────────────────────────────────────────────────────────
+
+describe('audit', () => {
+    let tmpDir: string;
+
+    beforeEach(() => { tmpDir = createTempDir(); });
+    afterEach(() => { cleanup(tmpDir); });
+
+    it('prints the audit trail', () => {
+        runCli(['create', '--area', 'a', 'T'], { TICKET_DIR: tmpDir });
+        runCli(['update', '1', '--priority', 'major'], { TICKET_DIR: tmpDir });
+
+        const result = runCli(['audit'], { TICKET_DIR: tmpDir });
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('Audit log (2 entries)');
+        expect(result.stdout).toContain('create');
+        expect(result.stdout).toContain('update');
+        expect(result.stdout).toContain('#001');
+    });
+
+    it('prints raw JSON with --json', () => {
+        runCli(['create', '--area', 'a', 'T'], { TICKET_DIR: tmpDir });
+
+        const result = runCli(['audit', '--json'], { TICKET_DIR: tmpDir });
+        expect(result.exitCode).toBe(0);
+
+        const entries = JSON.parse(result.stdout);
+        expect(entries).toHaveLength(1);
+        expect(entries[0].operation).toBe('create');
+        expect(entries[0].ticket_number).toBe(1);
+        expect(entries[0].hash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('limits output with --limit', () => {
+        runCli(['create', '--area', 'a', 'T1'], { TICKET_DIR: tmpDir });
+        runCli(['create', '--area', 'a', 'T2'], { TICKET_DIR: tmpDir });
+        runCli(['update', '1', '--title', 'T1 updated'], { TICKET_DIR: tmpDir });
+
+        const result = runCli(['audit', '--limit', '1'], { TICKET_DIR: tmpDir });
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain('last 1 of 3 entries');
+        expect(result.stdout).toContain('update');
+    });
+
+    it('rejects a non-positive --limit', () => {
+        const result = runCli(['audit', '--limit', '0'], { TICKET_DIR: tmpDir });
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain('positive integer');
+    });
+
+    it('adopts pre-existing files with --baseline', () => {
+        // Simulate a ticket that predates the audit log.
+        fs.writeFileSync(path.join(tmpDir, 'ticket-001.json'), JSON.stringify({
+            id: 1,
+            file_path: 'ticket-001.json',
+            number: 1,
+            area: 'legacy',
+            type: 'feature',
+            status: 'draft',
+            title: 'Legacy ticket',
+        }, null, 2));
+        // Remove the seeded index so the engine rebuilds it from disk.
+        fs.unlinkSync(path.join(tmpDir, '_index.json'));
+
+        const baseline = runCli(['audit', '--baseline'], { TICKET_DIR: tmpDir });
+        expect(baseline.exitCode).toBe(0);
+        expect(baseline.stdout).toContain('Adopted 1 ticket file(s) as baseline');
+
+        const json = JSON.parse(runCli(['audit', '--json'], { TICKET_DIR: tmpDir }).stdout);
+        expect(json).toHaveLength(1);
+        expect(json[0].operation).toBe('baseline');
+        expect(json[0].ticket_number).toBe(1);
+
+        // Baseline clears the orphan, so validate is clean.
+        const validate = runCli(['validate'], { TICKET_DIR: tmpDir });
+        expect(validate.exitCode).toBe(0);
+        expect(validate.stdout).toContain('✅ Orphans: none.');
+    });
+
+    it('exits 1 when the audit log is corrupt', () => {
+        runCli(['create', '--area', 'a', 'T'], { TICKET_DIR: tmpDir });
+        fs.writeFileSync(path.join(tmpDir, '_audit.json'), '{ not json');
+
+        const result = runCli(['audit'], { TICKET_DIR: tmpDir });
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain('Failed to read audit log');
+    });
+});
+
 // ── validate ─────────────────────────────────────────────────────
 
 describe('validate', () => {
@@ -283,6 +429,8 @@ describe('validate', () => {
         const result = runCli(['validate'], { TICKET_DIR: tmpDir });
         expect(result.exitCode).toBe(0);
         expect(result.stdout).toContain('✅ Index is in sync');
+        expect(result.stdout).toContain('✅ Audit:');
+        expect(result.stdout).toContain('✅ Orphans: none.');
     });
 
     it('detects out-of-sync when extra file exists', () => {
@@ -303,5 +451,59 @@ describe('validate', () => {
         expect(result.exitCode).toBe(1);
         expect(result.stdout).toContain('OUT OF SYNC');
         expect(result.stdout).toContain('Extra index entries');
+    });
+
+    it('exits 1 and flags orphans (never deletes them)', () => {
+        runCli(['create', '--area', 'a', 'T1'], { TICKET_DIR: tmpDir });
+
+        // A hand-written ticket that also updated the index: sync is fine, but
+        // there is no audit entry, so it is an orphan.
+        fs.writeFileSync(path.join(tmpDir, 'ticket-002.json'), JSON.stringify({
+            id: 2,
+            file_path: 'ticket-002.json',
+            number: 2,
+            area: 'handmade',
+            type: 'bug',
+            status: 'draft',
+            title: 'Hand written',
+        }, null, 2));
+        const indexPath = path.join(tmpDir, '_index.json');
+        const index = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
+        index.tickets.push({ number: 2, file_path: 'ticket-002.json', status: 'draft', area: 'handmade' });
+        fs.writeFileSync(indexPath, JSON.stringify(index, null, 2));
+
+        const result = runCli(['validate'], { TICKET_DIR: tmpDir });
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout).toContain('✅ Index is in sync');
+        expect(result.stdout).toContain('Orphans: 1 ticket file(s)');
+        // The file is still there: orphans are reported, not cleaned up.
+        expect(fs.existsSync(path.join(tmpDir, 'ticket-002.json'))).toBe(true);
+    });
+
+    it('exits 1 on a stale lock from a dead process', () => {
+        runCli(['create', '--area', 'a', 'T'], { TICKET_DIR: tmpDir });
+        fs.writeFileSync(path.join(tmpDir, '.engine.lock'), JSON.stringify({
+            pid: deadPid(),
+            acquired_at: new Date().toISOString(),
+        }, null, 2));
+
+        const result = runCli(['validate'], { TICKET_DIR: tmpDir });
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout).toContain('❌ Lock: Stale lock');
+    });
+
+    it('exits 1 when an audit entry was tampered with', () => {
+        runCli(['create', '--area', 'a', 'T'], { TICKET_DIR: tmpDir });
+        const auditPath = path.join(tmpDir, '_audit.json');
+        const audit = JSON.parse(fs.readFileSync(auditPath, 'utf-8'));
+        audit[0].ticket_number = 99;
+        fs.writeFileSync(auditPath, JSON.stringify(audit, null, 2));
+
+        const result = runCli(['validate'], { TICKET_DIR: tmpDir });
+
+        expect(result.exitCode).toBe(1);
+        expect(result.stdout).toContain('❌ Audit: Audit hash mismatch');
     });
 });

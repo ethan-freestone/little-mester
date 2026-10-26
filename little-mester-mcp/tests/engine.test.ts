@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { spawnSync } from 'child_process';
 import { createTicketEngine } from '../src/engine';
 
 describe('TicketEngine', () => {
@@ -171,6 +172,9 @@ describe('TicketEngine', () => {
             engine.create({ area: 'a', title: 'T1' });
             const result = engine.validate();
             expect(result.synced).toBe(true);
+            expect(result.ok).toBe(true);
+            expect(result.enforcement.audit.valid).toBe(true);
+            expect(result.enforcement.has_orphans).toBe(false);
         });
 
         it('detects missing files not in index', () => {
@@ -273,6 +277,242 @@ describe('TicketEngine', () => {
 
             const result = engine.validate();
             expect(result.synced).toBe(false);
+        });
+    });
+
+    describe('enforcement: lock + audit + orphans', () => {
+        const lockPath = () => path.join(tmpDir, '.engine.lock');
+
+        function writeLock(pid: number): void {
+            fs.writeFileSync(lockPath(), JSON.stringify({
+                pid,
+                acquired_at: new Date().toISOString(),
+            }, null, 2));
+        }
+
+        function deadPid(): number {
+            const child = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+            return child.pid ?? 999999;
+        }
+
+        it('getEnforcement returns enforced=true after fresh create', () => {
+            engine.create({ area: 'auth', title: 'Add login' });
+
+            const result = engine.getEnforcement();
+            expect(result.enforced).toBe(true);
+            expect(result.has_orphans).toBe(false);
+            expect(result.messages.some(m => m.includes('intact'))).toBe(true);
+        });
+
+        it('audit entries have valid per-entry hashes', () => {
+            const crypto = require('crypto');
+
+            engine.create({ area: 'auth', title: 'T1' });
+            engine.create({ area: 'infra', title: 'T2' });
+
+            const auditPath = path.join(tmpDir, '_audit.json');
+            const audit: Array<{ timestamp: string; operation: string; ticket_number: number; hash: string }> =
+                JSON.parse(fs.readFileSync(auditPath, 'utf-8'));
+
+            for (const entry of audit) {
+                const canonical = JSON.stringify({
+                    timestamp: entry.timestamp,
+                    operation: entry.operation,
+                    ticket_number: entry.ticket_number,
+                }, null, 0);
+                const expectedHash = crypto.createHash('sha256').update(canonical).digest('hex');
+                expect(entry.hash).toBe(expectedHash);
+            }
+        });
+
+        it('getEnforcement detects tampered audit hash', () => {
+            engine.create({ area: 'auth', title: 'T1' });
+
+            const auditPath = path.join(tmpDir, '_audit.json');
+            const audit = JSON.parse(fs.readFileSync(auditPath, 'utf-8'));
+            // Tamper with the hash
+            audit[0].hash = 'deadbeef' + audit[0].hash.slice(8);
+            fs.writeFileSync(auditPath, JSON.stringify(audit, null, 2));
+
+            const result = engine.getEnforcement();
+            expect(result.enforced).toBe(false);
+            expect(result.messages.some(m => m.includes('hash mismatch'))).toBe(true);
+        });
+
+        it('getEnforcement detects orphan files (on disk, not in audit)', () => {
+            // Create one ticket via engine
+            engine.create({ area: 'auth', title: 'EngineTicket' });
+
+            // Create another ticket file directly on disk (bypassing engine)
+            const orphanContent = JSON.stringify({
+                id: 99,
+                file_path: 'ticket-099.json',
+                number: 99,
+                area: 'hacked',
+                type: 'bug',
+                status: 'active',
+                title: 'ManualFile',
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+            }, null, 2);
+            fs.writeFileSync(path.join(tmpDir, 'ticket-099.json'), orphanContent);
+
+            const result = engine.getEnforcement();
+            expect(result.has_orphans).toBe(true);
+            expect(result.messages.some(m => m.includes('Orphan files'))).toBe(true);
+            // Orphans don't break enforcement (fail open)
+            expect(result.enforced).toBe(true);
+        });
+
+        it('lock is transient: released after a successful write', () => {
+            expect(fs.existsSync(lockPath())).toBe(false);
+
+            engine.create({ area: 'auth', title: 'T1' });
+
+            // The lock only exists during the write window.
+            expect(fs.existsSync(lockPath())).toBe(false);
+        });
+
+        it('refuses to write while a live process holds the lock', () => {
+            writeLock(process.pid); // this test process is definitely alive
+
+            expect(() => engine.create({ area: 'auth', title: 'T1' }))
+                .toThrow(/locked by live process/);
+
+            // No partial write occurred.
+            expect(fs.existsSync(path.join(tmpDir, 'ticket-001.json'))).toBe(false);
+        });
+
+        it('clears a stale lock from a dead PID and proceeds', () => {
+            writeLock(deadPid());
+
+            const ticket = engine.create({ area: 'auth', title: 'T1' });
+
+            expect(ticket.number).toBe(1);
+            expect(fs.existsSync(lockPath())).toBe(false);
+        });
+
+        it('getEnforcement reports a stale lock as a problem', () => {
+            writeLock(deadPid());
+
+            const result = engine.getEnforcement();
+
+            expect(result.lock.state).toBe('stale');
+            expect(result.enforced).toBe(false);
+            expect(result.messages.some(m => m.includes('Stale lock'))).toBe(true);
+        });
+
+        it('getEnforcement treats a missing lock as normal (fail-open)', () => {
+            const result = engine.getEnforcement();
+
+            expect(result.lock.state).toBe('absent');
+            expect(result.enforced).toBe(true);
+            expect(result.messages.some(m => m.includes('No lock held'))).toBe(true);
+        });
+
+        it('accepts audit entries that revisit an older ticket number', () => {
+            engine.create({ area: 'a', title: 'T1' });   // #1
+            engine.create({ area: 'a', title: 'T2' });   // #2
+            engine.update(1, { title: 'T1 updated' });   // back to #1
+
+            const result = engine.getEnforcement();
+            const audit = JSON.parse(fs.readFileSync(path.join(tmpDir, '_audit.json'), 'utf-8'));
+
+            expect(audit.map((e: { ticket_number: number }) => e.ticket_number)).toEqual([1, 2, 1]);
+            expect(result.audit.valid).toBe(true);
+            expect(result.enforced).toBe(true);
+        });
+
+        it('rejects a corrupt (non-array) audit log', () => {
+            fs.writeFileSync(path.join(tmpDir, '_audit.json'), JSON.stringify({ nope: true }));
+
+            const result = engine.getEnforcement();
+
+            expect(result.audit.valid).toBe(false);
+            expect(result.enforced).toBe(false);
+            expect(result.messages.some(m => m.includes('not a JSON array'))).toBe(true);
+        });
+
+        it('baseline adopts un-audited files, is idempotent, and clears orphans', () => {
+            // Simulate a store that predates the audit log.
+            const makeTicket = (number: number) => JSON.stringify({
+                id: number,
+                file_path: `ticket-${String(number).padStart(3, '0')}.json`,
+                number,
+                area: 'legacy',
+                type: 'feature',
+                status: 'draft',
+                title: `Legacy ${number}`,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+            }, null, 2);
+            fs.writeFileSync(path.join(tmpDir, 'ticket-001.json'), makeTicket(1));
+            fs.writeFileSync(path.join(tmpDir, 'ticket-002.json'), makeTicket(2));
+            // Drop the index so a fresh engine reconstructs it from disk.
+            fs.unlinkSync(indexPath);
+            const fresh = createTicketEngine({ ticketDir: tmpDir, indexPath });
+
+            expect(fresh.getEnforcement().has_orphans).toBe(true);
+
+            const added = fresh.baseline();
+            expect(added.map(e => e.operation)).toEqual(['baseline', 'baseline']);
+            expect(added.map(e => e.ticket_number)).toEqual([1, 2]);
+
+            const after = fresh.getEnforcement();
+            expect(after.has_orphans).toBe(false);
+            expect(after.audit.valid).toBe(true);
+            expect(fresh.validate().ok).toBe(true);
+
+            // Running again adds nothing.
+            expect(fresh.baseline()).toHaveLength(0);
+        });
+
+        it('baseline refuses to append to a tampered audit log', () => {
+            engine.create({ area: 'auth', title: 'T1' });
+            const auditPath = path.join(tmpDir, '_audit.json');
+            const audit = JSON.parse(fs.readFileSync(auditPath, 'utf-8'));
+            audit[0].ticket_number = 42;
+            fs.writeFileSync(auditPath, JSON.stringify(audit, null, 2));
+
+            expect(() => engine.baseline()).toThrow(/Refusing baseline/);
+        });
+
+        it('audit log is created on first operation, not at init', () => {
+            const auditPath = path.join(tmpDir, '_audit.json');
+            // Audit file doesn't exist until first engine operation
+            expect(fs.existsSync(auditPath)).toBe(false);
+
+            // After creating a ticket, audit file exists with 1 entry
+            engine.create({ area: 'auth', title: 'T1' });
+            expect(fs.existsSync(auditPath)).toBe(true);
+            const audit = JSON.parse(fs.readFileSync(auditPath, 'utf-8'));
+            expect(audit.length).toBe(1);
+        });
+
+        it('audit log records create and update operations', () => {
+            engine.create({ area: 'auth', title: 'T1' });
+            engine.update(1, { title: 'Updated title' });
+
+            const auditPath = path.join(tmpDir, '_audit.json');
+            const audit = JSON.parse(fs.readFileSync(auditPath, 'utf-8'));
+
+            expect(audit.length).toBe(2);
+            expect(audit[0].operation).toBe('create');
+            expect(audit[0].ticket_number).toBe(1);
+            expect(audit[1].operation).toBe('update');
+            expect(audit[1].ticket_number).toBe(1);
+        });
+
+        it('audit log records archive operation', () => {
+            engine.create({ area: 'auth', title: 'T1' });
+            engine.archive(1);
+
+            const auditPath = path.join(tmpDir, '_audit.json');
+            const audit = JSON.parse(fs.readFileSync(auditPath, 'utf-8'));
+
+            expect(audit.length).toBe(2);
+            expect(audit[1].operation).toBe('archive');
+            expect(audit[1].ticket_number).toBe(1);
         });
     });
 });

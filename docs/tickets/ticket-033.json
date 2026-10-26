@@ -1,0 +1,13 @@
+{
+  "id": 33,
+  "file_path": "/workspace/docs/tickets/ticket-033.json",
+  "number": 33,
+  "area": "infra",
+  "type": "spike",
+  "status": "draft",
+  "title": "TUI plugin: sidebar Jira-like view with create button",
+  "objective": "Build an opencode v2 plugin rendering into the sidebar: Jira-like ticket view, context detection for tickets being worked on, phased todo list, expanded board view, and a prominent Create button for users to quickly set up draft tickets",
+  "created_at": "2026-10-26T16:01:59.846Z",
+  "updated_at": "2026-10-26T16:01:59.846Z",
+  "models_used": []
+}

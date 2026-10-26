@@ -1,0 +1,21 @@
+{
+  "id": 34,
+  "file_path": "/workspace/docs/tickets/ticket-034.json",
+  "number": 34,
+  "area": "infra",
+  "type": "feature",
+  "status": "draft",
+  "title": "Opencode TUI plugin: sidebar Jira-like ticket view",
+  "objective": "Build an opencode v2 TUI plugin that renders the current ticketing context in the sidebar — active ticket with phased todo list, related ticket statuses, and an expandable board view (all tickets and context-filtered). The plugin auto-detects which tickets the agent is working on from the opencode session context and filters accordingly.",
+  "created_at": "2026-10-26T17:32:00.318Z",
+  "updated_at": "2026-10-26T17:32:00.318Z",
+  "priority": "major",
+  "comments": [
+    {
+      "timestamp": "2026-10-26T17:32:00.317Z",
+      "author": "cli",
+      "body": "Promoted from the stray store at little-mester-mcp/docs/tickets/ticket-001.json, created 2026-10-26T15:52 by the old cwd-relative CLI wrapper. This is an earlier, thinner draft of the TUI plugin idea; ticket #33 is the fuller version with the Create button and acceptance criteria."
+    }
+  ],
+  "models_used": []
+}

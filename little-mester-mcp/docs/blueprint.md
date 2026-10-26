@@ -1,6 +1,33 @@
 # Little Mester MCP — Ticketing Module Implementation Plan & Blueprint
 
-> **Note:** This is the ticketing module of the **Little Mester MCP** server. The MCP server is designed as a generic extensible host — the ticketing engine is the first module. Future modules (file search, notes) will coexist.
+> ## ⚠️ HISTORICAL DOCUMENT
+>
+> This is the **implementation plan as written on 2026-10-17**, kept as a record of how the
+> module was designed. The `Status` columns below are a snapshot of that plan, not current
+> truth. The engine, CLI, MCP server, index, audit log, and tests are now implemented.
+>
+> **For current behaviour use:**
+> - [`README.md`](README.md) — module overview and layout
+> - [`CLI.md`](CLI.md) — commands, flags, exit codes
+> - [`SCHEMA.md`](SCHEMA.md) — ticket/index/audit formats
+> - [`../../docs/tickets/architecture/DECISIONS.md`](../../docs/tickets/architecture/DECISIONS.md) — decisions, especially §I (enforcement)
+>
+> Treat the rest of this file as design history. If it conflicts with the docs above, the
+> docs above win.
+
+## As built (2026-10-26)
+
+| Area | State |
+|---|---|
+| Engine (`src/engine.ts`) | Implemented: create/list/update/archive, lifecycle, index, enforcement, validate |
+| Index (`src/index.ts`) | Implemented: read/write/scan/reconstruct |
+| CLI (`src/cli.ts` + `scripts/ticket-engine`) | Implemented: create/list/update/archive/audit/validate |
+| MCP server (`src/mcp-server.ts`) | Implemented: 8 `mester_tickets_*` tools |
+| Tests (`tests/`) | 120 Jest tests: engine 44, CLI 44, MCP 32 |
+| Enforcement | Transient PID lock, per-entry SHA-256 audit, orphan detection, baseline adoption |
+| Schema | `ticket-v1.json` exists; `SCHEMA.md` is the human reference |
+
+---
 
 ## Architecture overview
 
@@ -14,8 +41,9 @@
 ```
 little-mester (MCP server)
 ├── tickets module (THIS — mester_tickets_*)
-│   ├── engine.ts    — core CRUD + index + validate
-│   ├── index.ts     — index management (read/write/scan/reconstruct)
+│   ├── engine.ts     — core CRUD + index + enforcement + validate
+│   ├── index.ts      — index management (read/write/scan/reconstruct)
+│   ├── cli.ts        — command-line front-end
 │   └── mcp-server.ts — MCP tool registrations
 ├── files module     (future — mester_files_*)
 └── notes module     (future — mester_notes_*)

@@ -1,9 +1,9 @@
 # Architecture Decisions Log — Building the Ticketing System (little-mester-mcp)
 
-> **Last updated:** 2026-10-19  
-> **Purpose:** Capture architectural decisions for building the ticketing engine itself. NOT about how to use little-mester the product — that's in [docs/DECISIONS.md](../DECISIONS.md).
+> **Last updated:** 2026-10-26  
+> **Purpose:** Capture architectural decisions for building the ticketing engine itself. NOT about how to use little-mester the product — that's in [docs/DECISIONS.md](../../DECISIONS.md).
 >
-> **Read this before making any engineering change to `little-mester-mcp/`.** Read [docs/DECISIONS.md](../DECISIONS.md) for usage/workflow constraints and field semantics (D.1-D.4, E).
+> **Read this before making any engineering change to `little-mester-mcp/`.** Read [docs/DECISIONS.md](../../DECISIONS.md) for usage/workflow constraints and field semantics (D.1-D.4, E).
 
 ---
 
@@ -288,3 +288,131 @@ All files in `docs/tickets/architecture/` — including this one — follow the 
 - Superseded: a new decision explicitly overrides it (marked in the entry itself)
 
 **Process:** Move to `docs/tickets/architecture/archive/DECISIONS-vN-archive.md` with timestamped filename. Leave a redirect link in place. Archives are append-only — never rewritten.
+
+---
+
+## I. Structural enforcement — lock, audit log, orphans (2026-10-26)
+
+**Decision:** Ticket files are only written by the engine (`src/engine.ts`), reached through
+the CLI (`src/cli.ts`) or the MCP tools (`src/mcp-server.ts`). The engine makes bypasses
+*visible* with three cheap mechanisms: a transient lock, an append-only audit log with a
+per-entry hash, and orphan detection. It does **not** try to make bypasses impossible.
+
+> **TL;DR for a future agent:** Never hand-write `ticket-NNN.json`, `_index.json`, or
+> `_audit.json`. Use `ticket-engine` or the `mester_tickets_*` tools. If `validate` reports
+> an orphan or a stale lock, stop and ask a human — do not delete anything.
+
+### I.1 Why enforce at all?
+
+The index (`_index.json`) is derived data. If a ticket file is edited or added by hand,
+the index silently drifts and every later query is wrong. The engine cannot prevent a
+human or agent from using a text editor. What it *can* do is leave a trail that makes a
+bypass obvious during `validate`, so drift is caught before it spreads.
+
+This is **detection, not prevention**:
+- We do not sign entries. Anyone with write access could forge the log.
+- We do not chain hashes. A chain adds complexity without a meaningful threat-model gain
+  for a single-user local tool.
+- We do not fail closed. A suspicious store still works; the human is asked to look.
+
+### I.2 The lock is transient
+
+`.engine.lock` exists **only while a write is in progress**:
+
+```
+acquire → write ticket file → update index → append audit entry → release
+```
+
+- The file contains `{ "pid": <process id>, "acquired_at": "<ISO-8601>" }`.
+- `acquireLock()` refuses to proceed if the lock belongs to a **live** process
+  (`process.kill(pid, 0)` succeeds or returns `EPERM`).
+- If the owning PID is **dead** (`ESRCH`), the lock is stale: the engine logs that it is
+  clearing it and continues. This is the recovery path after a crash or `kill -9`.
+- A corrupt/unparseable lock is treated as stale and cleared. It cannot protect anything.
+- `releaseLock()` removes the lock only if it still belongs to this process.
+- Release always happens in a `finally` block, so a thrown error does not leave a lock
+  behind.
+
+A lock present at `validate` time is therefore either a live write (informational) or a
+stale lock (an error worth raising). A **missing** lock is normal.
+
+### I.3 Audit log format
+
+`_audit.json` is a JSON array, append-only by convention. Each entry is deliberately lean:
+
+```json
+{
+  "timestamp": "2026-10-26T16:12:03.456Z",
+  "operation": "create",
+  "ticket_number": 34,
+  "hash": "<64 lowercase hex chars>"
+}
+```
+
+- `operation` is `create`, `update`, `archive`, or `baseline`.
+- `hash = sha256(canonical_json({timestamp, operation, ticket_number}))`, where
+  `canonical_json` is `JSON.stringify(value)` with no extra whitespace and keys in the
+  order shown above.
+- The hash covers only those three fields. It is **not** a chain and does not cover the
+  ticket content. Its job is narrow: if someone edits an entry's timestamp, operation, or
+  ticket number, the stored hash no longer matches and `validate` says so.
+- Entries may legitimately refer to lower ticket numbers than earlier entries (for
+  example: create #32, create #33, update #32). Ordering is checked by non-decreasing
+  `timestamp`, never by ticket number.
+
+The intent is written here and echoed in a comment block at the top of `engine.ts` so the
+next reader does not mistake the hash for a blockchain.
+
+### I.4 Orphans and baseline adoption
+
+An **orphan** is a `ticket-NNN.json` file on disk with no audit entry. Orphans are:
+
+- **flagged** by `validate` and `getEnforcement()`;
+- **never auto-deleted or auto-adopted** by normal operations (fail-open);
+- resolved only by a human choosing one of:
+  - `ticket-engine audit --baseline` — adopt every currently un-audited ticket file as a
+    `baseline` entry (one-time migration for stores created before enforcement); or
+  - deliberate removal of the file (the human's call, outside the engine).
+
+`baseline` entries use the same shape and hash as normal entries. They record that the
+file existed before the audit log did, not who created it. Baseline adoption is
+idempotent: tickets already present in the log are skipped.
+
+### I.5 `validate` semantics
+
+`validate()` reports two independent things:
+
+1. **Index sync** — every file has an index entry and every index entry has a file
+   (`synced`).
+2. **Enforcement** — audit hashes are valid, the lock is not stale, and orphans are
+   listed (`enforcement`).
+
+The CLI exits `1` if any of these is true, so scripts and agents notice:
+
+- index is out of sync,
+- an audit hash is invalid or the log is corrupt,
+- a stale lock from a dead PID exists,
+- orphan files exist.
+
+Engine writes themselves stay fail-open: enforcement problems do not block create/update/
+archive. Only validation raises the alarm.
+
+### I.6 CLI surface
+
+```bash
+ticket-engine audit                     # human-readable audit trail
+ticket-engine audit --limit 20          # last N entries
+ticket-engine audit --json              # raw JSON array
+ticket-engine audit --baseline          # adopt un-audited files as baseline entries
+ticket-engine validate                  # index + lock + audit + orphans; exit 1 on any problem
+```
+
+### I.7 Invariants a future change must preserve
+
+1. Every create/update/archive path goes through `withLock()` and then `appendAuditEntry()`.
+2. The lock is released even when the write throws.
+3. A live lock is never stolen; a dead lock is always recoverable.
+4. Audit entries are never rewritten in place by the engine (append only).
+5. Orphans are reported, never silently deleted or adopted by a normal write.
+6. The hash covers exactly `{timestamp, operation, ticket_number}` in that key order.
+7. `validate` has no side effects; `audit --baseline` is the only adoption path.

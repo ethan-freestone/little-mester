@@ -1,196 +1,323 @@
 # Ticket Engine CLI
 
-The **Ticket Engine CLI** (`ticket-engine`) provides a command-line interface for managing Jira-like tickets stored as JSON files. It is the programmatic front-end for the ticketing engine (`src/engine.ts`) and is also exposed via the MCP server (`src/mcp-server.ts`).
+`ticket-engine` is the command-line front-end for the ticketing engine
+(`src/engine.ts`). It delegates every operation to the engine — there is no duplicate
+business logic — and the MCP server (`src/mcp-server.ts`) uses the same engine.
 
-## Installation
+**Never edit ticket JSON, the index, or the audit log by hand.** Use this CLI or the
+`mester_tickets_*` MCP tools. See [`docs/DECISIONS.md` §C.3](../../docs/DECISIONS.md) and
+[`architecture/DECISIONS.md` §I](../../docs/tickets/architecture/DECISIONS.md).
+
+## Where it lives
+
+```
+little-mester-mcp/scripts/ticket-engine   # wrapper → src/cli.ts (ts-node)
+little-mester-mcp/src/cli.ts              # implementation
+```
+
+Run it from the repo root:
+
+```bash
+./little-mester-mcp/scripts/ticket-engine <command> ...
+```
+
+Or from the module directory:
 
 ```bash
 cd little-mester-mcp
-npm install        # install deps
-npm run build      # compile TypeScript
+./scripts/ticket-engine <command> ...
 ```
+
+The wrapper sets `TICKET_DIR` to the repo's `docs/tickets` unless it is already set. This
+means the location you run it from does **not** change which store is written. Override
+deliberately with `TICKET_DIR=...` or `--ticket-dir <dir>`.
+
+## Install / dev
+
+```bash
+cd little-mester-mcp
+npm install
+npm run build     # compile to dist/
+npm run dev -- list
+```
+
+---
 
 ## Quick start
 
 ```bash
-# Create a ticket
-./scripts/ticket-engine create --area infra --type feature "Add CI pipeline" --objective "Automated builds on push"
+T=./little-mester-mcp/scripts/ticket-engine
 
-# List all tickets
-./scripts/ticket-engine list
+$T create --area infra --type feature "Add CI pipeline" \
+  --objective "Automated builds on push" --priority major
 
-# List tickets in a specific area
-./scripts/ticket-engine list --area auth
+$T list
+$T list --area infra --status active
 
-# List only active (non-draft) tickets
-./scripts/ticket-engine list --status active
+$T update 12 --status active --comment "Started work"
+$T update 12 --priority critical
 
-# Update a ticket
-./scripts/ticket-engine update 1 --status active --priority critical
+$T archive 12
 
-# Archive a ticket
-./scripts/ticket-engine archive 1
+$T audit                 # recent write trail
+$T audit --json          # raw JSON
+$T audit --baseline      # adopt pre-engine ticket files (one-time, human-approved)
 
-# Validate index/files sync
-./scripts/ticket-engine validate
+$T validate              # index + lock + audit + orphans
 ```
+
+---
 
 ## Commands
 
 ### `create`
 
-Create a new ticket (starts in `draft` status).
+Create a ticket. New tickets start in `draft` status.
 
 ```
-ticket-engine create --area <area> --type <type> "Title" [--objective "..."]
+ticket-engine create --area <area> --type <type> "Title" \
+  [--objective "..."] [--priority <priority>] [--comment "..."]
 ```
 
-| Flag | Required? | Description |
-|------|-----------|-------------|
-| `--area` | Yes | Domain area (e.g. `auth`, `infra`, `billing`) |
-| `--type` | No | Type: `spike`, `feature`, `bug`, `improvement`, `doc`, `infra`. Defaults to `feature` |
-| `--objective` | No | Detailed objective in present/future tense |
+| Flag | Required | Description |
+|---|---|---|
+| `--area` | recommended | Domain area (`auth`, `infra`, `billing`, …) |
+| `--type` | no | `spike`, `feature`, `bug`, `improvement`, `doc`, `infra`. Default `feature` |
+| `--priority` | no | `trivial`, `minor`, `major`, `critical` |
+| `--objective` | no | Detailed objective (present/future tense) |
+| `--comment` | no | Add an initial comment (author `cli`) |
 
-**Exit codes:**
-- `0` — ticket created successfully
-- `1` — error (missing title, invalid type, etc.)
+Invalid `--type` or `--priority` values exit `1` with a clear error.
 
-**Example:**
 ```bash
-$ ticket-engine create --area auth --type bug "Login fails on empty password" --objective "Reject empty passwords at the auth layer"
+$ $T create --area auth --type bug "Login fails on empty password" \
+    --objective "Reject empty passwords at the auth layer" --priority critical
 ✅ Created ticket #42
   #42 [DRAFT] bug — auth — Login fails on empty password
    Objective: Reject empty passwords at the auth layer
 ```
 
-### `list`
+Exit codes: `0` created, `1` error (missing title, invalid type/priority).
 
-List tickets with optional filters.
+---
+
+### `list`
 
 ```
 ticket-engine list [--area <area>] [--status <status>]
 ```
 
-| Flag | Required? | Description |
-|------|-----------|-------------|
-| `--area` | No | Filter by area key |
-| `--status` | No | Filter by status: `draft`, `active`, `resolved`, `archived` |
+| Flag | Description |
+|---|---|
+| `--area` | Filter by area |
+| `--status` | `draft`, `active`, `resolved`, `archived` |
 
-**Example:**
 ```bash
-$ ticket-engine list --area auth --status active
+$ $T list --area auth --status active
 Found 2 ticket(s):
   #42 [ACTIVE] bug — auth — Login fails on empty password
   #43 [ACTIVE] feature — auth — Add OAuth2 login
 ```
 
+---
+
 ### `update`
 
-Update fields on an existing ticket. Status transitions are enforced per [DECISIONS.md D.3](../../../docs/DECISIONS.md).
+Update fields on an existing ticket. Status changes follow the lifecycle table below.
 
 ```
-ticket-engine update <number> [--status <status>] [--title <title>] [--objective <obj>] [--area <area>] [--type <type>] [--priority <priority>]
+ticket-engine update <number> [--status <status>] [--title <title>] \
+  [--objective <obj>] [--area <area>] [--type <type>] \
+  [--priority <priority>] [--comment "..."]
 ```
 
-| Flag | Required? | Description |
-|------|-----------|-------------|
-| `<number>` | Yes | Ticket number (integer) |
-| `--status` | No | New status (validated by lifecycle rules) |
-| `--title` | No | New title |
-| `--objective` | No | New objective |
-| `--area` | No | New area |
-| `--type` | No | New type |
-| `--priority` | No | New priority: `trivial`, `minor`, `major`, `critical` |
+| Flag | Description |
+|---|---|
+| `<number>` | Ticket number (required) |
+| `--status` | New status (transition validated) |
+| `--title` / `--objective` / `--area` / `--type` | Update those fields |
+| `--priority` | `trivial`, `minor`, `major`, `critical` |
+| `--comment` | Append a timestamped comment (author `cli`) |
 
-**Status transition rules:**
-- `draft → active` (start work)
-- `draft ↔ active` (bidirectional toggle)
-- `active → resolved` (complete work)
-- `resolved → draft` (reopen)
-- any → `archived` (remove from active cycle)
+`--comment` is appended, not replaced; existing comments are preserved.
 
-**Example:**
 ```bash
-$ ticket-engine update 42 --status active --priority critical
+$ $T update 42 --status active --priority critical
 ✏️ Ticket #42 updated:
   #42 [ACTIVE] bug — auth — Login fails on empty password
+   Comment: …            # only if --comment was passed
 ```
+
+Exit codes: `0` updated, `1` not found / invalid transition / invalid type or priority.
+
+---
 
 ### `archive`
 
-Archive a ticket (remove from active cycle). Archiving is always allowed from any status.
+Force a ticket to `archived`, regardless of its current status.
 
 ```
 ticket-engine archive <number>
 ```
 
-**Example:**
 ```bash
-$ ticket-engine archive 42
+$ $T archive 42
 📦 Ticket #42 archived:
   #42 [ARCHIVED] bug — auth — Login fails on empty password
 ```
 
+Exit codes: `0` archived, `1` not found.
+
+> `archive` sets the status directly. `update --status archived` follows the transition
+> table and therefore rejects `active → archived`; use `archive` for that case.
+
+---
+
+### `audit`
+
+Read the append-only audit log (`_audit.json`), or adopt pre-existing tickets.
+
+```
+ticket-engine audit [--limit N] [--json] [--baseline]
+```
+
+| Flag | Description |
+|---|---|
+| `--limit N` | Show only the last N entries (positive integer) |
+| `--json` | Print the raw JSON array instead of a table |
+| `--baseline` | Adopt every ticket file with no audit entry as a `baseline` entry |
+
+Each entry is lean:
+
+```json
+{
+  "timestamp": "2026-10-26T16:12:03.456Z",
+  "operation": "create",
+  "ticket_number": 34,
+  "hash": "<64 hex chars>"
+}
+```
+
+`operation` is `create`, `update`, `archive`, or `baseline`.
+
+```bash
+$ $T audit --limit 3
+Audit log (last 3 of 57 entries):
+  2026-10-26T16:12:03.456Z  create   #034  a1b2c3d4e5f6…
+  2026-10-26T16:13:10.001Z  update   #034  9f8e7d6c5b4a…
+  2026-10-26T16:14:22.900Z  archive  #012  0123456789ab…
+```
+
+**`--baseline` is the only adoption path** for tickets created before enforcement
+existed. It:
+
+- adds `baseline` entries for un-audited ticket files;
+- does **not** modify the ticket files;
+- is idempotent (already-audited numbers are skipped);
+- refuses to run if the existing audit log is already invalid.
+
+Exit codes: `0` success, `1` unreadable/corrupt audit log or invalid `--limit`.
+
+---
+
 ### `validate`
 
-Check that `_index.json` is in sync with the actual ticket files on disk.
+Check the store end-to-end. This is the command to run before committing or after an
+agent session.
 
 ```
 ticket-engine validate
 ```
 
-**Exit codes:**
-- `0` — index and files are in sync
-- `1` — index is out of sync (reports `Missing files` or `Extra index entries`)
+It reports four independent things:
 
-## Options (global)
+1. **Index sync** — every ticket file has an index entry and vice versa.
+2. **Lock** — absent (normal), held by a live writer, or stale (dead PID).
+3. **Audit** — hashes valid, entries well-formed, timestamps non-decreasing.
+4. **Orphans** — ticket files with no audit entry (reported, never deleted).
 
-| Flag | Description |
-|------|-------------|
-| `--ticket-dir <dir>` | Override the ticket directory. Defaults to `./docs/tickets` or the `TICKET_DIR` environment variable |
-| `-h`, `--help` | Show help and exit (exit code 0) |
+Example (clean):
 
-## Environment variables
+```
+✅ Index is in sync with ticket files on disk.
+✅ Lock: No lock held (normal — the lock only exists during writes)
+✅ Audit: Audit log intact (57 entries)
+✅ Orphans: none.
+```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TICKET_DIR` | `./docs/tickets` | Directory containing ticket JSON files and `_index.json` |
+Example (needs attention):
 
-## File format
+```
+❌ Index is OUT OF SYNC with ticket files on disk.
+   Missing files: /workspace/docs/tickets/ticket-099.json
+❌ Lock: Stale lock from dead PID 12345 (acquired …) — safe to clear
+❌ Audit: Audit hash mismatch at entry #3 — entry was manually edited
+❌ Orphans: 1 ticket file(s) on disk with no audit entry — human review required.
+   ↳ ticket-099.json
+```
 
-Each ticket is stored as `docs/tickets/ticket-NNN.json` (zero-padded to 3 digits). The index file `docs/tickets/_index.json` stores metadata for fast queries. See [docs/SCHEMA.md](../docs/SCHEMA.md) for the full JSON schema.
+Exit codes:
+
+- `0` — index synced, audit valid, no stale lock, no orphans
+- `1` — any of: out-of-sync index, tampered/corrupt audit, stale lock, orphans
+
+Validation has **no side effects**. It does not clear locks, adopt orphans, or rewrite the
+index. `audit --baseline` is the only adoption command.
+
+---
+
+## Global options
+
+| Option | Description |
+|---|---|
+| `--ticket-dir <dir>` | Override the store directory |
+| `TICKET_DIR` (env) | Same, but via environment. The wrapper sets it to `<repo>/docs/tickets` |
+| `-h`, `--help` | Show help; exit `0` |
+
+Precedence: `--ticket-dir` > `TICKET_DIR` > `./docs/tickets`.
 
 ## Architecture
 
 ```
-ticket-engine CLI
-├── parseArgs()       — argv → CliArgs (no library needed)
-├── getTicketDir()    — --ticket-dir > TICKET_DIR > default
-├── main()            — command router → engine call
-│   ├── create → engine.create()
-│   ├── list   → engine.list(area?, status?)
-│   ├── update → engine.update(number, patch)
-│   ├── archive→ engine.archive(number)
-│   └── validate→ engine.validate()
-└── formatTicket()    — human-readable one-line summary
+ticket-engine (sh wrapper)
+└── src/cli.ts
+    ├── parseArgs()      argv → CliArgs
+    ├── getTicketDir()   --ticket-dir > TICKET_DIR > ./docs/tickets
+    ├── main()           command router
+    │   ├── create   → engine.create()
+    │   ├── list     → engine.list(area?, status?)
+    │   ├── update   → engine.update(number, patch)
+    │   ├── archive  → engine.archive(number)
+    │   ├── audit    → engine.getAuditLog() / engine.baseline()
+    │   └── validate → engine.validate()
+    └── formatTicket()   one-line human summary
 ```
 
-The CLI delegates all business logic to `src/engine.ts` — there is no duplicate logic. The MCP server (`src/mcp-server.ts`) uses the same engine.
+All writes go through the engine's transient lock and append an audit entry. See
+[`README.md`](README.md) and [`architecture/DECISIONS.md` §I](../../docs/tickets/architecture/DECISIONS.md).
+
+## File format
+
+Tickets are `ticket-NNN.json` (zero-padded to 3 digits). The index is `_index.json`; the
+audit log is `_audit.json`. Full formats: [`SCHEMA.md`](SCHEMA.md).
 
 ## Testing
 
-Run CLI tests with:
-
 ```bash
+cd little-mester-mcp
 npm test -- cli.test.ts
 ```
 
-## Migration from legacy scripts
+CLI tests spawn `ts-node` per invocation, so they are slower than the engine suite. They
+cover create/list/update/archive, `--priority`, `--comment`, `audit` (including
+`--baseline`, `--json`, `--limit`), and `validate` exit codes.
 
-The following legacy shell scripts are deprecated and point to the CLI:
+## Legacy scripts
+
+These remain for historical reference but are deprecated in favour of the CLI:
 
 | Legacy script | CLI equivalent |
-|---------------|---------------|
+|---|---|
 | `scripts/ticket-new` | `ticket-engine create` |
 | `scripts/validate-tickets` | `ticket-engine validate` |
 | `scripts/ticket-lifecycle list` | `ticket-engine list --status <status>` |

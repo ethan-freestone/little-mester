@@ -10,6 +10,332 @@ const STATUS_TRANSITIONS: Record<string, string[]> = {
     archived: ['draft'],
 };
 
+// ── Structural enforcement: lock + audit trail ───────────────────
+//
+// INTENT: Every create/update/archive MUST go through the engine.
+//
+// This is DETECTION, not prevention. A human or agent with file write
+// access can bypass it. The goal is to make a bypass obvious during
+// `validate` before index/audit drift spreads.
+//
+// How it works:
+//   1. Lock file (.engine.lock) — exists ONLY while a write is running.
+//      It records the owning PID. A live PID blocks other writers; a
+//      dead PID means the previous writer crashed, so the lock is stale
+//      and is cleared automatically. No lock present is the normal state.
+//   2. Audit log (_audit.json) — append-only JSON array, one lean entry
+//      per engine write. Each entry has a SHA-256 hash of its own
+//      timestamp+operation+ticket_number. If those fields are edited by
+//      hand, the hash no longer matches. We verify on every validate().
+//   3. Orphan detection — ticket files on disk with no audit entry.
+//      These are flagged for human review; never auto-deleted or
+//      auto-adopted (fail-open). `audit --baseline` is the one explicit
+//      adoption path.
+//
+// Why not a hash chain? A chain (each entry hashes the previous) is
+// unnecessary overhead for a single-user local tool. One hash per entry
+// is enough to detect manual edits. Lock + orphan detection + per-entry
+// hashes together make engine bypasses visible.
+//
+// Why not signatures? We don't need to stop a motivated insider who
+// already has file write access. We need accidental or convenient edits
+// to be *discoverable*.
+//
+// INTENT (continued): Keep it lean. Each audit entry is 3 fields + 1 hash.
+// No param snapshots, no merkle trees, no genesis blocks. The exact
+// invariants are documented in docs/tickets/architecture/DECISIONS.md §I.
+
+import * as crypto from 'crypto';
+
+const LOCK_FILENAME = '.engine.lock';
+const AUDIT_FILENAME = '_audit.json';
+
+export type AuditOperation = 'create' | 'update' | 'archive' | 'baseline';
+
+const AUDIT_OPERATIONS = new Set<AuditOperation>(['create', 'update', 'archive', 'baseline']);
+
+/** A lean audit entry — one line per engine write, with per-entry hash. */
+export interface AuditEntry {
+    /** ISO-8601 timestamp */
+    timestamp: string;
+    /** Operation performed ('baseline' = one-time adoption of a pre-existing file) */
+    operation: AuditOperation;
+    /** Ticket number affected */
+    ticket_number: number;
+    /** SHA-256 of canonical JSON of timestamp+operation+ticket_number.
+     *  Verifies the entry wasn't manually edited after creation. */
+    hash: string;
+}
+
+export type LockState = 'absent' | 'held' | 'stale';
+
+export interface LockStatus {
+    state: LockState;
+    pid?: number;
+    acquired_at?: string;
+    message: string;
+}
+
+export interface AuditStatus {
+    valid: boolean;
+    entries: number;
+    messages: string[];
+}
+
+export interface EnforcementResult {
+    /** true = audit hashes are valid and the lock is not stale.
+     *  Orphans do NOT make this false: enforcement is fail-open. */
+    enforced: boolean;
+    /** true = ticket files on disk with no audit entry — flagged for human review */
+    has_orphans: boolean;
+    /** Absolute paths of orphan files */
+    orphan_files: string[];
+    lock: LockStatus;
+    audit: AuditStatus;
+    messages: string[];
+}
+
+export interface ValidateResult {
+    synced: boolean;
+    missing_files?: string[];
+    extra_files?: string[];
+    enforcement: EnforcementResult;
+    /** true only when index is synced, enforcement is valid, and no orphans exist.
+     *  The CLI exits 1 when this is false. */
+    ok: boolean;
+}
+
+// ── Lock management ───────────────────────────────────────────────
+// The lock is TRANSIENT: acquired immediately before a write, released
+// in a finally block. If the process dies mid-write, the next writer
+// sees a dead PID and clears the stale lock.
+
+/** True if a process with this PID exists (EPERM also means it exists). */
+function isPidAlive(pid: number): boolean {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'EPERM';
+    }
+}
+
+function readLockFile(lockPath: string): { pid?: number; acquired_at?: string } | null {
+    try {
+        return JSON.parse(fs.readFileSync(lockPath, 'utf-8'));
+    } catch {
+        return null;
+    }
+}
+
+function acquireLock(ticketDir: string): void {
+    const lockPath = path.join(ticketDir, LOCK_FILENAME);
+    const payload = JSON.stringify({
+        pid: process.pid,
+        acquired_at: new Date().toISOString(),
+    }, null, 2);
+
+    // Two attempts: 'wx' fails if another writer won the race. On EEXIST we
+    // either refuse (live owner) or clear the stale/corrupt file and retry.
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            fs.writeFileSync(lockPath, payload, { encoding: 'utf-8', flag: 'wx' });
+            return;
+        } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+
+            const existing = readLockFile(lockPath);
+            if (existing && typeof existing.pid === 'number' && isPidAlive(existing.pid)) {
+                throw new Error(
+                    `Ticket directory is locked by live process PID ${existing.pid}` +
+                    (existing.acquired_at ? ` (acquired ${existing.acquired_at})` : '')
+                );
+            }
+
+            // Dead PID or corrupt lock: clear it and retry once.
+            try {
+                fs.unlinkSync(lockPath);
+            } catch (unlinkErr) {
+                if ((unlinkErr as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkErr;
+            }
+        }
+    }
+
+    throw new Error('Could not acquire the ticket engine lock (unexpected contention)');
+}
+
+function releaseLock(ticketDir: string): void {
+    const lockPath = path.join(ticketDir, LOCK_FILENAME);
+    const existing = readLockFile(lockPath);
+    // Never remove a lock owned by another live writer.
+    if (!existing || existing.pid !== process.pid) return;
+    try {
+        fs.unlinkSync(lockPath);
+    } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+}
+
+/** Run `fn` inside the write lock, always releasing it afterwards. */
+function withLock<T>(ticketDir: string, fn: () => T): T {
+    acquireLock(ticketDir);
+    try {
+        return fn();
+    } finally {
+        releaseLock(ticketDir);
+    }
+}
+
+function inspectLock(ticketDir: string): LockStatus {
+    const lockPath = path.join(ticketDir, LOCK_FILENAME);
+    if (!fs.existsSync(lockPath)) {
+        return {
+            state: 'absent',
+            message: 'No lock held (normal — the lock only exists during writes)',
+        };
+    }
+
+    const data = readLockFile(lockPath);
+    if (!data || typeof data.pid !== 'number') {
+        return {
+            state: 'stale',
+            message: 'Stale/corrupt lock file (no valid PID) — safe to clear',
+        };
+    }
+
+    if (isPidAlive(data.pid)) {
+        return {
+            state: 'held',
+            pid: data.pid,
+            acquired_at: data.acquired_at,
+            message: `Write in progress by live PID ${data.pid}` +
+                (data.acquired_at ? ` (since ${data.acquired_at})` : ''),
+        };
+    }
+
+    return {
+        state: 'stale',
+        pid: data.pid,
+        acquired_at: data.acquired_at,
+        message: `Stale lock from dead PID ${data.pid}` +
+            (data.acquired_at ? ` (acquired ${data.acquired_at})` : '') +
+            ' — safe to clear',
+    };
+}
+
+// ── Audit log management ──────────────────────────────────────────
+
+/** Read the audit log. Missing file = empty log; corrupt file throws. */
+function readAuditLog(ticketDir: string): AuditEntry[] {
+    const auditPath = path.join(ticketDir, AUDIT_FILENAME);
+    if (!fs.existsSync(auditPath)) return [];
+    const parsed = JSON.parse(fs.readFileSync(auditPath, 'utf-8'));
+    if (!Array.isArray(parsed)) {
+        throw new Error('Audit log is not a JSON array');
+    }
+    return parsed as AuditEntry[];
+}
+
+/** Read the audit log, treating any problem as an empty log (for orphan detection). */
+function tryReadAuditLog(ticketDir: string): AuditEntry[] {
+    try {
+        return readAuditLog(ticketDir);
+    } catch {
+        return [];
+    }
+}
+
+function writeAuditLog(ticketDir: string, entries: AuditEntry[]): void {
+    const auditPath = path.join(ticketDir, AUDIT_FILENAME);
+    fs.writeFileSync(auditPath, JSON.stringify(entries, null, 2), 'utf-8');
+}
+
+/** Compute SHA-256 of the canonical JSON (no whitespace) of an entry's non-hash fields. */
+function entryHash(entry: Omit<AuditEntry, 'hash'>): string {
+    const { timestamp, operation, ticket_number } = entry;
+    // Key order is part of the contract: timestamp, operation, ticket_number.
+    return crypto.createHash('sha256')
+        .update(JSON.stringify({ timestamp, operation, ticket_number }))
+        .digest('hex');
+}
+
+function makeAuditEntry(operation: AuditOperation, ticketNumber: number, timestamp?: string): AuditEntry {
+    const base: Omit<AuditEntry, 'hash'> = {
+        timestamp: timestamp ?? new Date().toISOString(),
+        operation,
+        ticket_number: ticketNumber,
+    };
+    return { ...base, hash: entryHash(base) };
+}
+
+function appendAuditEntry(
+    ticketDir: string,
+    entry: { operation: Exclude<AuditOperation, 'baseline'>; ticket_number: number }
+): void {
+    const entries = readAuditLog(ticketDir);
+    entries.push(makeAuditEntry(entry.operation, entry.ticket_number));
+    writeAuditLog(ticketDir, entries);
+}
+
+/** Verify all audit entries have valid hashes and non-decreasing timestamps. */
+function verifyAuditLog(ticketDir: string): AuditStatus {
+    let entries: AuditEntry[];
+    try {
+        entries = readAuditLog(ticketDir);
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { valid: false, entries: 0, messages: [`Audit log unreadable/corrupt: ${msg}`] };
+    }
+
+    if (entries.length === 0) {
+        return { valid: true, entries: 0, messages: ['Audit log empty — no write operations recorded yet'] };
+    }
+
+    for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        const where = `entry #${i + 1}`;
+
+        if (!entry || typeof entry !== 'object') {
+            return { valid: false, entries: entries.length, messages: [`Audit ${where} is not an object`] };
+        }
+        if (typeof entry.timestamp !== 'string' || Number.isNaN(Date.parse(entry.timestamp))) {
+            return { valid: false, entries: entries.length, messages: [`Audit ${where} has an invalid timestamp`] };
+        }
+        if (!AUDIT_OPERATIONS.has(entry.operation)) {
+            return { valid: false, entries: entries.length, messages: [`Audit ${where} has an invalid operation '${entry.operation}'`] };
+        }
+        if (!Number.isInteger(entry.ticket_number) || entry.ticket_number <= 0) {
+            return { valid: false, entries: entries.length, messages: [`Audit ${where} has an invalid ticket number`] };
+        }
+        if (typeof entry.hash !== 'string' || !/^[0-9a-f]{64}$/.test(entry.hash)) {
+            return { valid: false, entries: entries.length, messages: [`Audit ${where} has a malformed hash`] };
+        }
+
+        const expected = entryHash({
+            timestamp: entry.timestamp,
+            operation: entry.operation,
+            ticket_number: entry.ticket_number,
+        });
+        if (entry.hash !== expected) {
+            return {
+                valid: false,
+                entries: entries.length,
+                messages: [`Audit hash mismatch at ${where} — entry was manually edited`],
+            };
+        }
+
+        // Ticket numbers may go backwards (update an older ticket), so order
+        // is checked by timestamp only.
+        if (i > 0 && Date.parse(entry.timestamp) < Date.parse(entries[i - 1].timestamp)) {
+            return { valid: false, entries: entries.length, messages: [`Audit ${where} is older than the previous entry`] };
+        }
+    }
+
+    return { valid: true, entries: entries.length, messages: [`Audit log intact (${entries.length} entries)`] };
+}
+
+// ── Public types ──────────────────────────────────────────────────
+
 export interface Ticket {
     id?: number;
     file_path: string;
@@ -48,11 +374,18 @@ export interface TicketEngine {
     ticketDir: string;
     indexPath: string;
 
-    create(params: { area?: string; type?: string; title: string; objective?: string }): Ticket;
+    create(params: { area?: string; type?: string; title: string; objective?: string; priority?: 'trivial' | 'minor' | 'major' | 'critical'; comments?: { timestamp: string; author: string; body: string }[] }): Ticket;
     list(area?: string, status?: string): Ticket[];
     update(number: number, patch: Partial<Omit<Ticket, 'id' | 'file_path' | 'number'>>): Ticket | undefined;
     archive(number: number): Ticket | undefined;
-    validate(): { synced: boolean; missing_files?: string[]; extra_files?: string[] };
+    validate(): ValidateResult;
+    getEnforcement(): EnforcementResult;
+    /** All audit entries, oldest first. Throws if the log is corrupt. */
+    getAuditLog(): AuditEntry[];
+    /** Adopt un-audited ticket files as `baseline` entries. Idempotent.
+     *  Returns only the entries added by this call. Refuses if the audit
+     *  log is already invalid. */
+    baseline(): AuditEntry[];
 }
 
 function validateType(type: unknown): void {
@@ -81,6 +414,19 @@ function validateData(data: Record<string, unknown> | Ticket): void {
 
 function ticketFileName(number: number): string {
     return `ticket-${String(number).padStart(3, '0')}.json`;
+}
+
+function detectOrphanFiles(ticketDir: string): string[] {
+    const auditedNumbers = new Set(tryReadAuditLog(ticketDir).map(e => e.ticket_number));
+    const files = fs.readdirSync(ticketDir).filter(f => /^ticket-\d+\.json$/.test(f));
+    const orphanFiles: string[] = [];
+    for (const file of files) {
+        const num = parseInt(file.match(/\d+/)![0], 10);
+        if (!auditedNumbers.has(num)) {
+            orphanFiles.push(path.join(ticketDir, file));
+        }
+    }
+    return orphanFiles;
 }
 
 // ────────────────────────────── engine ──────────────────────────────
@@ -169,6 +515,7 @@ export function createTicketEngine({
                 is_epic?: boolean;
                 assigned_to?: string;
                 spans?: { start: string; end: string };
+                comments?: { timestamp: string; author: string; body: string }[];
             }
         ): Ticket {
             const area       = params.area          || '';
@@ -180,38 +527,47 @@ export function createTicketEngine({
                 typeVal = typeRaw as Ticket['type'];
             }
 
-            const now  = new Date().toISOString();
-            const num  = nextNumber();
-            const file = path.join(ticketDir, ticketFileName(num));
+            return withLock(ticketDir, () => {
+                const now  = new Date().toISOString();
+                const num  = nextNumber();
+                const file = path.join(ticketDir, ticketFileName(num));
 
-            const ticket: Ticket = {
-                id: num,
-                file_path: file,
-                number:    num,
-                area,
-                type:     typeVal,
-                status:   'draft',
-                title:    params.title,
-                objective: params.objective || '',
-                created_at: now,
-                updated_at: now,
-                // Model tracking fields
-                suggested_model: params.suggested_model,
-                estimated_models: params.estimated_models,
-                estimated_model: params.estimated_model,
-                // Other extended fields
-                estimate: params.estimate,
-                priority: params.priority,
-                labels: params.labels,
-                parent: params.parent,
-                is_epic: params.is_epic,
-                assigned_to: params.assigned_to,
-                spans: params.spans,
-                models_used: [],
-            };
+                const ticket: Ticket = {
+                    id: num,
+                    file_path: file,
+                    number:    num,
+                    area,
+                    type:     typeVal,
+                    status:   'draft',
+                    title:    params.title,
+                    objective: params.objective || '',
+                    created_at: now,
+                    updated_at: now,
+                    // Model tracking fields
+                    suggested_model: params.suggested_model,
+                    estimated_models: params.estimated_models,
+                    estimated_model: params.estimated_model,
+                    // Other extended fields
+                    estimate: params.estimate,
+                    priority: params.priority,
+                    labels: params.labels,
+                    parent: params.parent,
+                    is_epic: params.is_epic,
+                    assigned_to: params.assigned_to,
+                    spans: params.spans,
+                    comments: params.comments,
+                    models_used: [],
+                };
 
-            persist(ticket);
-            return ticket;
+                // Enforcement: persist + audit inside one locked write window.
+                persist(ticket);
+                appendAuditEntry(ticketDir, {
+                    operation: 'create',
+                    ticket_number: num,
+                });
+
+                return ticket;
+            });
         },
 
         list(area?: string, status?: string): Ticket[] {
@@ -243,45 +599,63 @@ export function createTicketEngine({
             const file = path.join(ticketDir, ticketFileName(number));
             if (!fs.existsSync(file)) return undefined;
 
-            const raw      = fs.readFileSync(file, 'utf-8');
-            const data:    Ticket              = JSON.parse(raw);
-            validateData(data);
+            return withLock(ticketDir, () => {
+                const raw      = fs.readFileSync(file, 'utf-8');
+                const data:    Ticket              = JSON.parse(raw);
+                validateData(data);
 
-            if (patch.status && patch.status !== data.status) {
-                const newStatus = patch.status as string;
-                assertTransition(data.status, newStatus);
-            }
-
-            for (const key of Object.keys(patch)) {
-                if ((patch as Record<string, unknown>)[key] != null &&
-                    key !== 'id'          &&
-                    key !== 'file_path'   &&
-                    key !== 'number')
-                {
-                    (data as unknown as Record<string, unknown>)[key] = (patch as Record<string, unknown>)[key];
+                if (patch.status && patch.status !== data.status) {
+                    const newStatus = patch.status as string;
+                    assertTransition(data.status, newStatus);
                 }
-            }
 
-            data.updated_at = new Date().toISOString();
-            persist(data);
-            return data;
+                for (const key of Object.keys(patch)) {
+                    if ((patch as Record<string, unknown>)[key] != null &&
+                        key !== 'id'          &&
+                        key !== 'file_path'   &&
+                        key !== 'number')
+                    {
+                        (data as unknown as Record<string, unknown>)[key] = (patch as Record<string, unknown>)[key];
+                    }
+                }
+
+                data.updated_at = new Date().toISOString();
+
+                // Enforcement: persist + audit inside one locked write window.
+                persist(data);
+                appendAuditEntry(ticketDir, {
+                    operation: 'update',
+                    ticket_number: number,
+                });
+
+                return data;
+            });
         },
 
         archive(number: number): Ticket | undefined {
             const file = path.join(ticketDir, ticketFileName(number));
             if (!fs.existsSync(file)) return undefined;
 
-            const raw     = fs.readFileSync(file, 'utf-8');
-            const data: Ticket = JSON.parse(raw);
-            validateData(data);
+            return withLock(ticketDir, () => {
+                const raw     = fs.readFileSync(file, 'utf-8');
+                const data: Ticket = JSON.parse(raw);
+                validateData(data);
 
-            data.status      = 'archived';
-            data.updated_at  = new Date().toISOString();
-            persist(data);
-            return data;
+                data.status      = 'archived';
+                data.updated_at  = new Date().toISOString();
+
+                // Enforcement: persist + audit inside one locked write window.
+                persist(data);
+                appendAuditEntry(ticketDir, {
+                    operation: 'archive',
+                    ticket_number: number,
+                });
+
+                return data;
+            });
         },
 
-        validate(): { synced: boolean; missing_files?: string[]; extra_files?: string[] } {
+        validate(): ValidateResult {
             const idx = readIndex(indexPath);
             const files = fs.readdirSync(ticketDir).filter(f => /^ticket-\d+\.json$/.test(f));
 
@@ -298,7 +672,85 @@ export function createTicketEngine({
                 if (!fileNums.has(entry.number)) extra.push(entry.file_path);
             }
 
-            return { synced: missing.length === 0 && extra.length === 0, missing_files: missing.length ? missing.map(n => path.join(ticketDir, ticketFileName(n))) : undefined, extra_files: extra.length ? extra : undefined };
+            const synced = missing.length === 0 && extra.length === 0;
+            const enforcement = this.getEnforcement();
+
+            return {
+                synced,
+                missing_files: missing.length ? missing.map(n => path.join(ticketDir, ticketFileName(n))) : undefined,
+                extra_files: extra.length ? extra : undefined,
+                enforcement,
+                // Orphans are fail-open for writes, but validation raises them.
+                ok: synced && enforcement.enforced && !enforcement.has_orphans,
+            };
+        },
+
+        getEnforcement(): EnforcementResult {
+            const messages: string[] = [];
+
+            // Check 1: Lock state. Missing is normal; stale (dead PID) is a problem.
+            const lock = inspectLock(this.ticketDir);
+            messages.push(`Lock: ${lock.message}`);
+
+            // Check 2: Audit log hashes and shape. A non-decreasing ticket
+            // number is NOT required (updates can target older tickets).
+            const audit = verifyAuditLog(this.ticketDir);
+            messages.push(...audit.messages);
+
+            // Check 3: Orphan files (on disk but not in audit — flagged for
+            // review, never auto-deleted).
+            const orphanFiles = detectOrphanFiles(this.ticketDir);
+            const hasOrphans = orphanFiles.length > 0;
+            if (hasOrphans) {
+                messages.push(`⚠️ Orphan files detected (${orphanFiles.length}): on disk but not in audit log — requires human review before any action`);
+                for (const f of orphanFiles) {
+                    messages.push(`   ↳ ${path.basename(f)}`);
+                }
+            }
+
+            return {
+                enforced: lock.state !== 'stale' && audit.valid,
+                has_orphans: hasOrphans,
+                orphan_files: orphanFiles,
+                lock,
+                audit,
+                messages,
+            };
+        },
+
+        getAuditLog(): AuditEntry[] {
+            return readAuditLog(this.ticketDir);
+        },
+
+        baseline(): AuditEntry[] {
+            return withLock(this.ticketDir, () => {
+                // Never append to a log we cannot trust.
+                const audit = verifyAuditLog(this.ticketDir);
+                if (!audit.valid) {
+                    throw new Error(`Refusing baseline: audit log is invalid (${audit.messages.join('; ')})`);
+                }
+
+                const entries = readAuditLog(this.ticketDir);
+                const audited = new Set(entries.map(e => e.ticket_number));
+                const files = fs.readdirSync(this.ticketDir)
+                    .filter(f => /^ticket-\d+\.json$/.test(f))
+                    .sort();
+
+                const added: AuditEntry[] = [];
+                const timestamp = new Date().toISOString();
+                for (const file of files) {
+                    const number = parseInt(file.match(/\d+/)![0], 10);
+                    if (audited.has(number)) continue;
+                    const entry = makeAuditEntry('baseline', number, timestamp);
+                    entries.push(entry);
+                    added.push(entry);
+                }
+
+                if (added.length > 0) {
+                    writeAuditLog(this.ticketDir, entries);
+                }
+                return added;
+            });
         },
     };
 }

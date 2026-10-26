@@ -1,19 +1,13 @@
 {
-  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "id": 32,
+  "file_path": "/workspace/docs/tickets/ticket-032.json",
   "number": 32,
-  "area": "infra",
+  "area": "engine",
   "type": "feature",
-  "status": "active",
-  "title": "Opencode TUI plugin: sidebar Jira-like ticket view",
-  "objective": "Build an opencode v2 TUI plugin that renders the current ticketing context in the sidebar — active ticket with phased todo list, related ticket statuses, and an expandable board view (all tickets and context-filtered). The plugin auto-detects which tickets the agent is working on from the opencode session context and filters accordingly.",
-  "created_at": "2026-10-26T00:00:00.000Z",
-  "updated_at": "2026-10-26T00:00:00.000Z",
-  "priority": "major",
-  "comments": [
-    {
-      "author": "user",
-      "created_at": "2026-10-26T00:00:00Z",
-      "body": "Requirements from user: sidebar Jira view, context detection, phased todo list, expanded board for all + context-filtered."
-    }
-  ]
+  "status": "draft",
+  "title": "User-defined draft pipeline",
+  "objective": "Implement a user-defined draft concept that the engine can put through a pair use-case-gathering mode and project management mode to turn into a full ticket tree of Little Mester tickets ready for development",
+  "created_at": "2026-10-26T16:01:00.042Z",
+  "updated_at": "2026-10-26T16:01:00.042Z",
+  "models_used": []
 }

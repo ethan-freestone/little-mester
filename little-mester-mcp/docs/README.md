@@ -1,88 +1,238 @@
-# Little Mester MCP — Server Architecture
+# Little Mester MCP — Ticket Engine Module
 
-> **DECISION LOG:** All engineering decisions spanning all engine tickets are in [docs/tickets/architecture/DECISIONS.md](../../../docs/tickets/architecture/DECISIONS.md). Product usage constraints are in [docs/DECISIONS.md](../../docs/DECISIONS.md). Read both — new sessions MUST read the decision files first.
+The ticketing module of **Little Mester MCP**. Tickets are plain JSON files on disk, with a
+small rebuildable index and an append-only audit log. One engine (`src/engine.ts`) serves
+two front-ends: a CLI and an MCP server.
 
-## What is Little Mester MCP?
-
-`@little-mester/ticket-engine-mcp` is the first module of **Little Mester MCP** — a generic MCP server designed to be extensible. The ticketing engine is the first implementation module. Future modules (file search, notes, etc.) will live alongside in the same server.
-
-### Tool naming convention
-
-All MCP tools follow `mester_<module>_<action>`:
-
-| Module | Tool prefix | Examples |
-|--------|------------|----------|
-| `tickets` (current) | `mester_tickets_*` | `mester_tickets_create`, `mester_tickets_search`, `mester_tickets_board` |
-| `files` (future) | `mester_files_*` | `mester_files_search`, `mester_files_read` |
-| `notes` (future) | `mester_notes_*` | `mester_notes_create`, `mester_notes_list` |
+> **Read the decision logs first.**
+> - Usage/workflow constraints: [`docs/DECISIONS.md`](../../docs/DECISIONS.md)
+> - Engineering design + invariants: [`docs/tickets/architecture/DECISIONS.md`](../../docs/tickets/architecture/DECISIONS.md) — especially §I (enforcement)
+>
+> New sessions and AI agents: read both before changing anything here.
 
 ---
 
-## What to implement (ordered by priority)
+## At a glance
 
-### Phase 0: Make the engine compile
-1. Fix 5 syntax errors in `engine.ts`
-2. Remove stale SQLite dep from `package.json`
-3. Get `npm run build` + `npm test` green
-
-### Phase 1: Ticket migration + schema enforcement
-4. Generate formal `ticket-v1.json` (JSON Schema) from SCHEMA.md
-5. Write migration script — convert ALL `.md` tickets to JSON
-6. Add schema validation to engine on every write
-
-### Phase 2: Search, dependencies, epics, labels
-7. Dependency graph (transitive blocking chains)
-8. Epics as REAL tickets with lifecycle
-9. Enum label system (predefined sets + user/custom namespace)
-10. Full multi-field search API
-
-### Phase 3: Visualization-ready outputs
-11. Board view, dashboard stats, export (JSON/CSV/markdown-table)
-
-### Phase 4: MCP server + opencode integration
-12. Server skeleton — all tools registered with descriptions
-13. `opencode.json` mcpServers config
-14. Deprecation warnings in legacy scripts
-
-### Phase 5: External deployment
-15. Remote routing protocol (co-located + separate repo modes)
-16. Git sync engine with 3 conflict strategies
-17. MCP tools for sync operations
-
-### Phase 6: Documentation cleanup
-18. README, workflows.md, SECURITY.md — all updated per session answers
+| | |
+|---|---|
+| Package | `@little-mester/ticket-engine-mcp` |
+| Language | TypeScript (CommonJS) |
+| Tests | Jest (`npm test`) — engine, CLI, MCP |
+| Store | `docs/tickets/` (JSON files, `_index.json`, `_audit.json`) |
+| Writes | **Engine only** — CLI or `mester_tickets_*` MCP tools |
+| Enforcement | Transient PID lock + per-entry SHA-256 audit + orphan detection |
 
 ---
 
-## Routing Modes (all three supported)
+## For AI agents (hard rules)
 
-| Mode | Config key | Override via lab |
-|------|------------|------------------|
-| Same repo (default) | `ticket_engine_dir=docs/tickets` | `--override ticket_engine_dir=<custom>` |
-| Any directory | `ticket_engine_dir=/any/path/on/disk` | same override |
-| Separate repo | `ticket_engine_repo=<path>` | `--override ticket_engine_repo=<path> --sync` |
+1. **Do not hand-write ticket data.** Never create, edit, move, or delete
+   `ticket-NNN.json`, `_index.json`, or `_audit.json` directly.
+2. Use `little-mester-mcp/scripts/ticket-engine ...` or the `mester_tickets_*` tools.
+3. If `validate` reports an **orphan** or a **stale lock**, stop and ask a human. Do not
+   delete or "fix" the files yourself.
+4. `audit --baseline` is the only adoption path, and only when a human asks for it.
+5. Follow `doc → test → code → commit` (see [`docs/workflows.md`](../../docs/workflows.md)).
 
----
-
-## MCP Tools (ticketing module)
-
-All tools are registered under the `mester_tickets_` prefix:
-
-| Tool | Description |
-|------|-------------|
-| `mester_tickets_create` | Create a new ticket with area, type, title, objective |
-| `mester_tickets_list` | List tickets with optional area/status/priority filters |
-| `mester_tickets_get` | Get a single ticket by number |
-| `mester_tickets_update` | Update ticket fields (status transitions enforced) |
-| `mester_tickets_archive` | Archive a ticket (removes from active cycle) |
-| `mester_tickets_search` | Multi-field search across tickets |
-| `mester_tickets_board` | Board view — sorted by priority then updated_at |
-| `mester_tickets_validate` | Check index/files sync state |
+Why: the index and audit log are derived data. A hand edit silently drifts them. The
+engine cannot prevent it, but `validate` makes it visible.
 
 ---
 
-## Ticket JSON Schema
+## Install, build, test
 
-Full field spec in [docs/tickets/architecture/DECISIONS.md](../../../docs/tickets/architecture/DECISIONS.md) — see label enum sets, estimate fields, epic design.
+```bash
+cd little-mester-mcp
+npm install
+npm run build      # tsc → dist/
+npm test           # Jest: engine + CLI + MCP
+```
 
-Schema version file: `ticket-v1.json` (generated from this plan).
+Run the CLI during development without building:
+
+```bash
+# From the repo root (targets docs/tickets automatically)
+./little-mester-mcp/scripts/ticket-engine list
+
+# Or inside the module (the wrapper still targets the repo's docs/tickets)
+cd little-mester-mcp
+./scripts/ticket-engine list
+```
+
+The wrapper pins `TICKET_DIR` to the repo's `docs/tickets` unless you override it. That
+prevents the classic mistake of writing a second store under `little-mester-mcp/docs/tickets`.
+
+---
+
+## Layout
+
+```
+little-mester-mcp/
+├── src/
+│   ├── engine.ts       core CRUD, lifecycle, index, enforcement, validate
+│   ├── index.ts        index read/write/scan/reconstruct
+│   ├── cli.ts          command-line front-end
+│   └── mcp-server.ts   MCP tool registrations (mester_tickets_*)
+├── scripts/
+│   └── ticket-engine   shell wrapper → src/cli.ts
+├── docs/
+│   ├── README.md       this file
+│   ├── CLI.md          command reference
+│   ├── SCHEMA.md       human-readable schema
+│   ├── ticket-v1.json  machine-readable JSON Schema
+│   └── blueprint.md    historical implementation plan
+└── tests/              engine / cli / mcp-server
+```
+
+---
+
+## Data model
+
+A ticket directory contains:
+
+| File | What it is | Written by |
+|---|---|---|
+| `ticket-NNN.json` | One ticket. Source of truth for ticket content. | engine |
+| `_index.json` | Rebuildable metadata index (`schemaVersion`, `tickets[]`, `updated_at`). | engine |
+| `_audit.json` | Append-only array of lean write records with per-entry hashes. | engine |
+| `.engine.lock` | Transient PID lock while a write is in progress. Normally absent. | engine |
+
+`_index.json` is derived. If it is missing or corrupt, the engine reconstructs it from
+the ticket files. The ticket files themselves are never regenerated from the index.
+
+Full field list: [`SCHEMA.md`](SCHEMA.md) and [`ticket-v1.json`](ticket-v1.json).
+
+---
+
+## Enforcement model (summary)
+
+The engine makes bypasses **visible**, it does not try to make them impossible. Full
+rationale and invariants: [`architecture/DECISIONS.md` §I](../../docs/tickets/architecture/DECISIONS.md).
+
+- **Transient lock.** A write acquires `.engine.lock` (PID + timestamp), does its work,
+  and releases it in `finally`. A live PID blocks other writers. A dead PID is stale and
+  is cleared automatically on the next write.
+- **Audit log.** Every create/update/archive appends one entry:
+  `{ timestamp, operation, ticket_number, hash }`. `hash` is
+  `sha256(canonical_json({timestamp, operation, ticket_number}))`. Editing those fields
+  breaks the hash. It is not a chain.
+- **Orphans.** A `ticket-NNN.json` with no audit entry is an orphan. It is flagged for
+  human review and never auto-deleted or auto-adopted. `audit --baseline` is the explicit
+  one-time adoption path for stores created before enforcement.
+- **Fail-open writes, loud validation.** Writes still work if the store is suspicious.
+  `validate` exits `1` for out-of-sync index, tampered audit, stale lock, or orphans.
+
+---
+
+## Two front-ends, one engine
+
+### CLI
+
+```bash
+./little-mester-mcp/scripts/ticket-engine create --area infra --type feature "Add CI" --priority major
+./little-mester-mcp/scripts/ticket-engine list --area infra --status active
+./little-mester-mcp/scripts/ticket-engine update 12 --status active --comment "Started"
+./little-mester-mcp/scripts/ticket-engine archive 12
+./little-mester-mcp/scripts/ticket-engine audit --limit 20
+./little-mester-mcp/scripts/ticket-engine validate
+```
+
+Details, flags, exit codes: [`CLI.md`](CLI.md).
+
+### MCP server
+
+All tools use the `mester_<module>_<action>` naming convention:
+
+| Tool | Purpose |
+|---|---|
+| `mester_tickets_create` | Create a draft ticket |
+| `mester_tickets_list` | List tickets (area/status filters) |
+| `mester_tickets_get` | Read one ticket by number |
+| `mester_tickets_update` | Update fields (status transitions enforced) |
+| `mester_tickets_archive` | Archive a ticket |
+| `mester_tickets_search` | Multi-field search |
+| `mester_tickets_board` | Board view (priority, then `updated_at`) |
+| `mester_tickets_validate` | Index sync state |
+
+The MCP server calls the same `createTicketEngine()`; there is no duplicated business
+logic. Start it with `npm run server` (stdio transport).
+
+---
+
+## Lifecycle
+
+```
+draft ──► active ──► resolved ──► archived
+  ▲         │            │            │
+  └─────────┘            └────────────┘
+       (active → draft)     (resolved → draft, archived → draft)
+```
+
+Allowed transitions in the engine:
+
+| From | To |
+|---|---|
+| `draft` | `active`, `archived` |
+| `active` | `resolved`, `draft` |
+| `resolved` | `draft`, `archived` |
+| `archived` | `draft` |
+
+The `archive` command always sets `archived` directly. `update --status` follows the table
+above, so `active → archived` via update is rejected; use `archive` for that.
+
+---
+
+## Routing modes
+
+| Mode | Where tickets live | Config |
+|---|---|---|
+| Same repo (default) | `<workspace>/docs/tickets` | default / `TICKET_DIR` |
+| Any directory | anywhere on disk | `--ticket-dir <path>` or `TICKET_DIR` |
+| Separate repo | another checkout | point `TICKET_DIR` at it, sync with git |
+
+The engine never assumes the module directory is the store. The wrapper's default is the
+repo root's `docs/tickets`, not the module's.
+
+---
+
+## Testing
+
+```bash
+npm test                      # all suites
+npm test -- engine.test.ts    # engine only
+npm test -- cli.test.ts       # CLI only (slower: spawns ts-node per command)
+npm test -- mcp-server.test.ts
+```
+
+The suites cover:
+
+- CRUD, numbering, index reconstruction, status transitions;
+- transient lock release, live-PID refusal, stale-PID recovery;
+- per-entry audit hashes, tamper detection, ordering with revisits;
+- orphan detection and baseline adoption;
+- CLI flags (`--priority`, `--comment`, `--limit`, `--json`, `--baseline`) and exit codes;
+- `validate` failing on out-of-sync, tampered audit, stale lock, and orphans.
+
+---
+
+## Troubleshooting
+
+| Symptom | Meaning | What to do |
+|---|---|---|
+| `validate` → `Orphans: N ticket file(s)` | Files exist with no audit entry (likely hand-written). | Review them. Ask a human. Adopt with `audit --baseline` or remove deliberately. Never blind-delete. |
+| `validate` → `❌ Lock: Stale lock from dead PID` | A writer crashed. | Safe to clear; the next write clears it automatically. |
+| `validate` → `❌ Audit: Audit hash mismatch` | An audit entry was edited by hand. | Stop. Investigate. Do not append. |
+| `validate` → `OUT OF SYNC` | Index and files disagree. | Run `list` and inspect; the engine will reconcile on the next write, but find out why first. |
+| Ticket written to `little-mester-mcp/docs/tickets/` | Ran the CLI from the module dir with an old wrapper. | Use the wrapper (it pins `TICKET_DIR`) or pass `--ticket-dir`. |
+
+---
+
+## Related docs
+
+- [`CLI.md`](CLI.md) — every command and flag
+- [`SCHEMA.md`](SCHEMA.md) — ticket, index, and audit formats
+- [`blueprint.md`](blueprint.md) — historical plan (not current behaviour)
+- [`docs/DECISIONS.md`](../../docs/DECISIONS.md) — product usage rules
+- [`docs/tickets/architecture/DECISIONS.md`](../../docs/tickets/architecture/DECISIONS.md) — engineering decisions (§I = enforcement)
+- [`docs/workflows.md`](../../docs/workflows.md) — development cycle and conventions

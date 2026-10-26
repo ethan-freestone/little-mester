@@ -1,72 +1,118 @@
-# Ticket Schema Specification v1.0
+# Ticket Schema Specification
 
-## Version Management
+Human-readable reference for the data the ticket engine reads and writes. The machine
+definition is [`ticket-v1.json`](ticket-v1.json) (JSON Schema draft-07). If they disagree,
+`ticket-v1.json` wins for validation; this file explains intent. Field semantics come from
+[`docs/DECISIONS.md`](../../docs/DECISIONS.md) §D–E and
+[`architecture/DECISIONS.md`](../../docs/tickets/architecture/DECISIONS.md) §E.
 
-The schema version is stored in `_index.json` under `schemaVersion`. When upgrading to a new schema version:
-1. The engine reads all existing ticket `.json` files
-2. For each file, apply the necessary transforms for the current schema version
-3. Write back the transformed file
-4. Regenerate the index
-5. Update `_index.json.schemaVersion`
+## Version management
 
-All transforms are idempotent — running them twice produces no additional changes.
+The schema version is stored in `_index.json` as `schemaVersion` (currently `1`). When a
+new version is introduced:
 
-## Schema source of truth
+1. Read every `ticket-NNN.json`.
+2. Apply the transform for the new version.
+3. Write the transformed files back **through the engine**.
+4. Regenerate the index.
+5. Update `schemaVersion`.
 
-The **authoritative** validation definition is `ticket-engine-mcp/docs/ticket-v1.json`. 
-Keep this spec (`SCHEMA.md`) as a human-readable reference, but always treat the `.json` file 
-as the ground truth — it is used by runtime validators and migration tools.
+Transforms must be idempotent: running twice produces no further changes.
 
-## Ticket File Format (`ticket-NNN.json`)
+---
 
-Each ticket is a single JSON file:
+## Ticket file (`ticket-NNN.json`)
+
+One ticket per file. Example:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/anonymous/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "$schema": "https://raw.githubusercontent.com/little-mester/ticket-engine/v1.0/docs/SCHEMA.md",
+  "id": 42,
+  "file_path": "/workspace/docs/tickets/ticket-042.json",
   "number": 42,
   "area": "auth",
   "type": "feature",
   "status": "draft",
   "title": "Implement OAuth2 flow for user registration",
-  "objective": "Users can register and login via Google OAuth during their first visit without manual credential entry",
-  "created_at": "2026-10-15T09:00:00Z",
-  "updated_at": "2026-10-15T09:00:00Z"
+  "objective": "Users can register and log in via Google OAuth without manual credential entry",
+  "priority": "major",
+  "labels": ["scope/security", "severity/major"],
+  "created_at": "2026-10-15T09:00:00.000Z",
+  "updated_at": "2026-10-15T09:00:00.000Z",
+  "models_used": []
 }
 ```
 
-### Field Definitions
+Older tickets may omit `$schema`, `id`, `file_path`, or `models_used`; the engine treats
+`number` as the identity and `file_path` as derived. New engine-written tickets include
+them.
 
-| Field          | Type   | Required | Allowed Values                          | Description                                    |
-|----------------|--------|----------|-----------------------------------------|------------------------------------------------|
-| `number`       | number | yes      | unique integer                          | Auto-incremented ticket identifier             |
-| `area`         | string | yes      | any                                     | Domain area the ticket belongs to              |
-| `type`         | string | yes      | `feature`, `bug`, `spike`, `improvement`, `doc`, `infra`   | Categorization of work type                    |
-| `status`       | string | yes      | `draft`, `active`, `resolved`, `archived` | Current lifecycle state                       |
-| `title`        | string | yes      | any                                     | One-line human-readable summary                |
-| `objective`    | string | no       | any                                     | Detailed objective in present/future tense     |
-| `created_at`   | string | yes      | ISO-8601 datetime                       | Immutable creation timestamp                   |
-| `updated_at`   | string | yes      | ISO-8601 datetime                       | Last modification timestamp                    |
+### Required fields
 
-### Lifecycle Transitions
+| Field | Type | Notes |
+|---|---|---|
+| `number` | integer ≥ 1 | Unique ID. Never recycled; gaps are allowed. |
+| `area` | string | Human grouping. Set at creation; prefer creating a new ticket over moving areas. |
+| `type` | enum | `spike`, `feature`, `bug`, `improvement`, `doc`, `infra` |
+| `status` | enum | `draft`, `active`, `resolved`, `archived` |
+| `title` | string | One-line summary |
+| `created_at` | ISO-8601 | Immutable creation time |
+| `updated_at` | ISO-8601 | Last modification time |
+
+### Optional fields
+
+| Field | Type | Purpose |
+|---|---|---|
+| `objective` | string | Detailed objective |
+| `priority` | enum | `trivial`, `minor`, `major`, `critical` — primary sort signal |
+| `labels` | string[] | `prefix/value` tags. Predefined `scope/*`, `severity/*`; otherwise `user/*` |
+| `dependencies` / `blocked_by` | number[] | Dependency graph |
+| `parent` / `is_epic` | number / boolean | Epic grouping |
+| `estimate` | number | Effort (hours or points) |
+| `estimated_model` | string | Model used when the estimate was made |
+| `suggested_model` | string | Recommended model for this work type |
+| `estimated_models` | `{model, subtask_hint}[]` | Projected model split |
+| `models_used` | usage records[] | Actual model usage, populated automatically |
+| `comments` | `{timestamp, author, body}[]` | Timestamped notes (CLI appends here) |
+| `attachments` | string[] | Linked file paths |
+| `spans` | `{start, end}` | Date range |
+| `assigned_to` | string | Responsible user/agent |
+| `links` | `{target, type}[]` | Typed relationships |
+| `subtickets` | `{id, title, status}[]` | Lightweight child entries |
+| `notes` | string | Free-form notes |
+| `id` / `file_path` | number / string | Convenience copies written by the engine |
+
+`additionalProperties` is allowed so the schema can grow without invalidating old
+tickets. The engine's `validateData()` only enforces `number`, `area`, `type`, `status`,
+and `title` on read.
+
+---
+
+## Lifecycle
 
 ```
-draft → active → resolved → archived
-    ↘          ↗
-     ────────/
-(draft ↔ active allowed, resolved → active NOT allowed)
+draft ──► active ──► resolved ──► archived
+  ▲         │            │            │
+  └─────────┘            └────────────┘
+       (active → draft)     (resolved → draft, archived → draft)
 ```
 
-Valid transitions:
-- `draft → active` (start work)
-- `active → resolved` (complete work)  
-- `resolved → draft` (reopen if needed)
-- any → `archived` (remove from active cycle)
-- `draft ↔ active` (bidirectional toggle)
+| From | Allowed next states |
+|---|---|
+| `draft` | `active`, `archived` |
+| `active` | `resolved`, `draft` |
+| `resolved` | `draft`, `archived` |
+| `archived` | `draft` |
 
-## Index File (`_index.json`)
+`archive` (the command/tool) sets `archived` directly and bypasses the table.
+`update --status` enforces the table.
 
-A single index file per ticket directory:
+---
+
+## Index file (`_index.json`)
+
+Derived metadata; safe to rebuild. It is **not** the source of truth for ticket content.
 
 ```json
 {
@@ -74,12 +120,100 @@ A single index file per ticket directory:
   "tickets": [
     { "number": 42, "file_path": "ticket-042.json", "status": "draft", "area": "auth" }
   ],
-  "updated_at": "2026-10-15T09:30:00Z"
+  "updated_at": "2026-10-15T09:30:00.000Z"
 }
 ```
 
-The index file is generated automatically by the engine — no manual editing needed.
+| Field | Description |
+|---|---|
+| `schemaVersion` | Schema generation (currently `1`) |
+| `tickets[]` | One entry per ticket: `number`, `file_path` (relative), `status`, `area` |
+| `updated_at` | Last index write |
 
-## File Naming Convention
+If the index is missing or has no `schemaVersion`, the engine reconstructs it from the
+ticket files on startup. `validate` reports drift between index and disk.
 
-Ticket files: `ticket-NNN.json` where NNN is zero-padded to 3 digits (e.g. `ticket-042.json`).
+---
+
+## Audit file (`_audit.json`)
+
+Append-only by convention, written only by the engine. One lean entry per write:
+
+```json
+[
+  {
+    "timestamp": "2026-10-26T16:12:03.456Z",
+    "operation": "create",
+    "ticket_number": 34,
+    "hash": "0f1e2d3c4b5a69788796a5b4c3d2e1f0a1b2c3d4e5f60718293a4b5c6d7e8f90"
+  }
+]
+```
+
+| Field | Description |
+|---|---|
+| `timestamp` | ISO-8601, when the write happened |
+| `operation` | `create`, `update`, `archive`, or `baseline` |
+| `ticket_number` | Ticket affected |
+| `hash` | `sha256(canonical_json({timestamp, operation, ticket_number}))` as 64 lowercase hex chars |
+
+Rules:
+
+- The hash covers **only** those three fields, in that key order. It is not a chain and
+  does not cover ticket content.
+- Editing `timestamp`, `operation`, or `ticket_number` breaks the hash. `validate` reports
+  `Audit hash mismatch`.
+- Ticket numbers may go backwards (for example `create #32`, `create #33`,
+  `update #32`). Ordering is checked by non-decreasing `timestamp`, not ticket number.
+- `baseline` entries record pre-existing files at enforcement startup. They are created
+  only by `ticket-engine audit --baseline`.
+- A ticket file with no entry here is an **orphan**: reported by `validate`, never
+  auto-deleted or auto-adopted.
+
+Rationale and invariants: [`architecture/DECISIONS.md` §I](../../docs/tickets/architecture/DECISIONS.md).
+
+---
+
+## Lock file (`.engine.lock`)
+
+Transient. Exists only while a write is running:
+
+```json
+{
+  "pid": 12345,
+  "acquired_at": "2026-10-26T16:12:03.400Z"
+}
+```
+
+| State | Meaning |
+|---|---|
+| Absent | Normal — no write in progress |
+| Present, live PID | A write is in progress; other writers refuse to start |
+| Present, dead PID | Stale lock from a crash; cleared automatically on the next write |
+| Corrupt/unparseable | Treated as stale; cleared |
+
+`validate` reports a stale lock as an error (exit `1`) but does not remove it. The next
+write does.
+
+---
+
+## File naming
+
+- Ticket files: `ticket-NNN.json`, zero-padded to at least 3 digits (`ticket-042.json`).
+- `_index.json`, `_audit.json`, and `.engine.lock` are reserved names.
+- Other files (for example `architecture/DECISIONS.md`, `archive/*.md`) are ignored by the
+  engine's ticket scan.
+
+---
+
+## Validation summary
+
+| Check | Where | Fails when |
+|---|---|---|
+| Required ticket fields | engine read/write | `number`, `area`, `type`, `status`, or `title` missing/invalid |
+| Type enum | `create` / `update` | type not in the 6 allowed values |
+| Status transition | `update` | transition not in the lifecycle table |
+| Index sync | `validate` | file without index entry, or index entry without file |
+| Audit hashes/shape | `validate` | tampered entry, malformed entry, corrupt JSON, out-of-order timestamps |
+| Lock | `validate` | stale lock (dead PID) or corrupt lock |
+| Orphans | `validate` | ticket file has no audit entry |

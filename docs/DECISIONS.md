@@ -85,11 +85,35 @@ Next session reads that first — never re-implement already-completed work.
 
 ## C. Constraints (what's true, not designs)
 
-### C.1 Testing is NOT happening right now (2026-10-19)
-No bats-core in the agent image, no host fallback installed, no Jest engine test suite written. This is a blocker for all validation of future work.
+### C.1 Testing status (updated 2026-10-26)
+The ticket engine now has a working Jest suite: **120 tests** (44 engine, 44 CLI, 32 MCP) under `little-mester-mcp/tests/`. Run it with `cd little-mester-mcp && npm test`. This resolves the earlier engine-testing blocker. Host-side Bats tests still require `bats-core` (see the root README's Testing section).
 
 ### C.2 SSH / git auth — OUT OF SCOPE (now)
 Container-native SSH not managed here. Token-based or GitHub CLI auth is recommended path for any external git operations. Separate future ticket when needed.
+
+### C.3 Ticket writes go through the engine (2026-10-26)
+**Rule:** Never create, edit, move, or delete ticket data by hand. Use the engine:
+
+- CLI: `./little-mester-mcp/scripts/ticket-engine ...` (`create`, `update`, `archive`, `audit`, `validate`)
+- MCP: the `mester_tickets_*` tools
+
+This covers `docs/tickets/ticket-NNN.json`, `_index.json`, and `_audit.json`. The engine
+owns the write window, updates the index, and appends an audit entry.
+
+**Why:** The index and audit log are derived data. A hand edit makes them silently wrong.
+The engine cannot stop you, but `validate` will show the drift, a tampered audit entry, a
+stale lock, or an orphan file.
+
+**If `validate` complains:**
+1. **Do not delete anything automatically.**
+2. Read the report. Orphans are ticket files with no audit entry — they need a human
+   decision.
+3. To adopt a pre-existing batch once, run `./little-mester-mcp/scripts/ticket-engine audit --baseline`.
+   This records them as `baseline` entries; it does not change the ticket files.
+4. A stale lock is safe to clear only after checking the PID is gone. The engine clears
+   dead-PID locks itself on the next write.
+
+Engineering details and invariants: [docs/tickets/architecture/DECISIONS.md](tickets/architecture/DECISIONS.md) §I.
 
 ---
 
