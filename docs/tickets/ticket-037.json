@@ -8,7 +8,7 @@
   "title": "Opencode TUI plugin: confirm before exit on Ctrl+C",
   "objective": "Add an OpenCode v2 TUI plugin that intercepts Ctrl+C in the Little Mester opencode session and shows a confirmation dialog asking 'are you sure you want to close Little Mester?' before exiting, only closing on confirmed intent.",
   "created_at": "2026-10-26T19:13:23.833Z",
-  "updated_at": "2026-10-26T19:58:56.870Z",
+  "updated_at": "2026-10-26T20:01:46.810Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -125,6 +125,11 @@
       "timestamp": "2026-10-26T19:58:56.870Z",
       "author": "cli",
       "body": "COMMITTED 2026-10-26 as e549562 ('fix(exit-confirm): use modal dialog and remove instant quit paths') on branch feat/ctrl-c-capture-plugin. Includes plugin rewrite, Dockerfile keybinds, tui.json removal, DECISIONS J.10, tests/exit-confirm.bats, and scripts/verify-exit-confirm.py. Unrelated pre-existing workspace changes (.gitignore, agent/opencode/opencode.json, scripts/regen-configs) were deliberately left out of the commit."
+    },
+    {
+      "timestamp": "2026-10-26T20:01:46.809Z",
+      "author": "cli",
+      "body": "TREE CLEAN 2026-10-26: the previously uncommitted mcpServers/regen work was completed and committed as 6fe8940 (preserve mcpServers in scripts/regen-configs, regenerate agent/opencode/opencode.json, ignore secrets.env). regen-configs --dry-run and a real run both report opencode.json unchanged; the working tree is clean. DECISIONS J.1 now records that tui.json is migration-only."
     }
   ]
 }
