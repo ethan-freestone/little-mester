@@ -1,0 +1,50 @@
+{
+  "id": 37,
+  "file_path": "/workspace/docs/tickets/ticket-037.json",
+  "number": 37,
+  "area": "infra",
+  "type": "feature",
+  "status": "active",
+  "title": "Opencode TUI plugin: confirm before exit on Ctrl+C",
+  "objective": "Add an OpenCode v2 TUI plugin that intercepts Ctrl+C in the Little Mester opencode session and shows a confirmation dialog asking 'are you sure you want to close Little Mester?' before exiting, only closing on confirmed intent.",
+  "created_at": "2026-10-26T19:00:00.000Z",
+  "updated_at": "2026-10-26T19:30:00.000Z",
+  "priority": "minor",
+  "models_used": [],
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "A new TUI plugin at agent/opencode/plugins/little-mester-exit-confirm/ intercepts Ctrl+C in the opencode TUI.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Pressing Ctrl+C shows a confirmation dialog asking whether to close Little Mester; confirming exits, cancelling returns to the session.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "The plugin is baked into the agent image (Dockerfile COPY) and registered in opencode.json + tui.json via regen-configs / generated config.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "JSX passes tests/tui-jsx.bats (no nested <text>, no bare span fg, no fontWeight style).",
+      "status": "test-created",
+      "evidence": "tests/tui-jsx.bats passes (5/5) including the new plugin JSX"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "manual check that Ctrl+C triggers confirmation in live opencode session"
+    ],
+    "created": [
+      "tests/tui-jsx.bats (JSX rule validation for all TUI plugins)"
+    ],
+    "cases": [
+      "no nested <text> elements",
+      "no bare span fg prop",
+      "no fontWeight style"
+    ]
+  }
+}

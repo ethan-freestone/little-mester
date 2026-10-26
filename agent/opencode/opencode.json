@@ -68,7 +68,8 @@
   },
   "plugins": [
     "/etc/opencode/plugins/host-metrics",
-    "/etc/opencode/plugins/host-metrics-tui"
+    "/etc/opencode/plugins/host-metrics-tui",
+    "/etc/opencode/plugins/little-mester-exit-confirm"
   ],
   "permission": {
     "edit": "ask",

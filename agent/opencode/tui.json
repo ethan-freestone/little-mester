@@ -1,6 +1,10 @@
 {
   "$schema": "https://opencode.ai/v2/cli.json",
   "plugin": [
-    "/etc/opencode/opencode/plugins/little-mester-logo.tsx"
-  ]
+    "/etc/opencode/opencode/plugins/little-mester-logo.tsx",
+    "/etc/opencode/opencode/plugins/little-mester-exit-confirm/tui.tsx"
+  ],
+  "keybinds": {
+    "app_exit": "ctrl+d,q"
+  }
 }

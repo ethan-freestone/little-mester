@@ -210,6 +210,18 @@
       "file_path": "ticket-036.json",
       "status": "draft",
       "area": "engine"
+    },
+    {
+      "number": 37,
+      "file_path": "ticket-037.json",
+      "status": "draft",
+      "area": "infra"
+    },
+    {
+      "number": 38,
+      "file_path": "ticket-038.json",
+      "status": "draft",
+      "area": "engine"
     }
   ],
   "updated_at": "2026-10-26T18:36:56.119Z"
