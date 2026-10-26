@@ -4,13 +4,11 @@
   "number": 37,
   "area": "infra",
   "type": "feature",
-  "status": "active",
+  "status": "draft",
   "title": "Opencode TUI plugin: confirm before exit on Ctrl+C",
   "objective": "Add an OpenCode v2 TUI plugin that intercepts Ctrl+C in the Little Mester opencode session and shows a confirmation dialog asking 'are you sure you want to close Little Mester?' before exiting, only closing on confirmed intent.",
-  "created_at": "2026-10-26T19:00:00.000Z",
-  "updated_at": "2026-10-26T19:30:00.000Z",
-  "priority": "minor",
-  "models_used": [],
+  "created_at": "2026-10-26T19:13:23.833Z",
+  "updated_at": "2026-10-26T19:13:23.833Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -30,8 +28,7 @@
     {
       "id": "A4",
       "text": "JSX passes tests/tui-jsx.bats (no nested <text>, no bare span fg, no fontWeight style).",
-      "status": "test-created",
-      "evidence": "tests/tui-jsx.bats passes (5/5) including the new plugin JSX"
+      "status": "pending"
     }
   ],
   "tests": {
@@ -46,5 +43,7 @@
       "no bare span fg prop",
       "no fontWeight style"
     ]
-  }
+  },
+  "priority": "minor",
+  "models_used": []
 }
