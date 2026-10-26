@@ -8,7 +8,7 @@
   "title": "Docker-capable VM test environment + disposable workspaces",
   "objective": "Stand up a reproducible Docker-capable development/test host (VM or remote Docker daemon) outside the Little Mester agent container, plus a disposable-workspace workflow, so ./lab, compose, --unsafe-recurse and the ticket CLI/MCP can be exercised end-to-end without the environment under test also being the environment doing the testing.",
   "created_at": "2026-10-26T17:39:37.714Z",
-  "updated_at": "2026-10-26T18:34:05.733Z",
+  "updated_at": "2026-10-26T18:36:23.867Z",
   "priority": "major",
   "comments": [
     {
@@ -25,6 +25,11 @@
       "timestamp": "2026-10-26T18:34:05.732Z",
       "author": "cli",
       "body": "VM/Docker environment status (2026-10-26). The current container has no Docker CLI, daemon socket, or podman, so A2-A9 cannot be provisioned or observed here. A1 (topology choice) needs an owner decision: a full Linux VM with Docker + opencode, or a remote Docker daemon. The disposable-workspace and teardown criteria remain test-needed until such a host exists. No ticket data was hand-edited; this update went through the engine."
+    },
+    {
+      "timestamp": "2026-10-26T18:36:16.706Z",
+      "author": "cli",
+      "body": "Topology recorded and VM work deferred (2026-10-26). A1 is passing: the decision is in docs/DECISIONS.md §C.6 (full Linux VM + Docker + opencode; repo checkout is never the target). A2-A9 stay pending for a separate session on a Docker-capable host. This environment has no Docker CLI, socket, or podman, so no provisioning or command-matrix evidence was produced."
     }
   ],
   "models_used": [],
@@ -32,8 +37,9 @@
     {
       "id": "A1",
       "text": "Topology is chosen and recorded in docs/DECISIONS.md: a full Linux VM with Docker + opencode, or a remote Docker daemon; isolation trade-offs and why the repo is never the test target are recorded.",
-      "status": "pending",
-      "note": "Owner decision required: full Linux VM with Docker + opencode vs remote Docker daemon. This container has no docker CLI, no /var/run/docker.sock, and no podman, so no topology can be provisioned or observed here."
+      "status": "passing",
+      "evidence": "docs/DECISIONS.md §C.6: full Linux VM with Docker + opencode; DinD and shared remote daemon rejected for isolation reasons; repo checkout is never the test target. User selected this topology on 2026-10-26.",
+      "note": "Provisioning and A2-A9 are deferred to a new session; do not start VM work yet."
     },
     {
       "id": "A2",
@@ -88,7 +94,11 @@
       "repo-integrity check",
       "VM CI run recorded on ticket"
     ],
-    "created": [],
-    "cases": []
+    "created": [
+      "docs/DECISIONS.md §C.6 topology decision"
+    ],
+    "cases": [
+      "topology decision review (full Linux VM + Docker)"
+    ]
   }
 }

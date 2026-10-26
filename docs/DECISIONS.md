@@ -86,7 +86,7 @@ Next session reads that first — never re-implement already-completed work.
 ## C. Constraints (what's true, not designs)
 
 ### C.1 Testing status (updated 2026-10-26)
-The ticket engine now has a working Jest suite: **138 tests** (52 engine, 54 CLI, 32 MCP) under `little-mester-mcp/tests/`. Run it with `cd little-mester-mcp && npm test`. This resolves the earlier engine-testing blocker. Host-side Bats tests still require `bats-core` (see the root README's Testing section).
+The ticket engine now has a working Jest suite: **143 tests** (54 engine, 57 CLI, 32 MCP) under `little-mester-mcp/tests/`. Run it with `cd little-mester-mcp && npm test`. This resolves the earlier engine-testing blocker. Host-side Bats tests still require `bats-core` (see the root README's Testing section).
 
 ### C.2 SSH / git auth — OUT OF SCOPE (now)
 Container-native SSH not managed here. Token-based or GitHub CLI auth is recommended path for any external git operations. Separate future ticket when needed.
@@ -215,9 +215,34 @@ git show :3:docs/tickets/_audit.json > /tmp/theirs-audit.json
 evidence and must never lose a branch's writes silently. This keeps a merge auditable
 instead of producing a plausible-looking but incomplete history.
 
-**Why:** `_index.json` is a cache and must never be a source of truth. `_audit.json` is
-evidence and must never lose a branch's writes silently. This keeps a merge auditable
-instead of producing a plausible-looking but incomplete history.
+### C.6 VM/Docker test environment (2026-10-26)
+**Decision:** The disposable test environment is a **full Linux VM** with Docker, the
+repo checkout, and opencode installed inside it. Docker-in-Docker and a shared remote
+daemon were rejected: DinD needs privileged mode, and a remote daemon gives weaker
+isolation because its containers, networks, and volumes are shared with other work.
+
+- The **repo checkout is never the test target**. Tests run in a disposable workspace
+  (`workspaces/test-<id>` or a fresh clone) so `--unsafe-recurse`, compose, and
+  destructive lab cases cannot touch the developer's working tree.
+- Fresh provisioning is one documented runbook: install Docker (and the NVIDIA toolkit
+  when GPU-enabled), clone the repo, build the agent image, then run `./verify-lab.sh`.
+  A CPU-only host is supported; GPU tooling is optional.
+- Teardown removes the workspace's containers, networks, and volumes, then deletes the
+  disposable workspace. `git status --short` in the real checkout must be empty.
+- The VM supplies the Docker daemon that this development container lacks. Provisioning,
+  command-matrix, negative-case, and teardown evidence belongs on ticket #35.
+
+### C.7 Merge scope for `feat/ticket-context` (2026-10-26)
+**Decision:** Merge the **whole `feat/ticket-context` branch** into `main` rather than
+extracting an engine-only commit set. The branch is the reviewed unit: it carries the
+engine, the ticket store, the AC policy, CI, and the config/docs work that depends on
+them. Extracting a subset would split related history and make the ticket-store merge
+harder to audit.
+
+The module still has to build **independently** from its own package directory. A clean
+clone of the branch passes `npm ci`, `npm run build`, `npm run check:package`, the full
+Jest suite, and `ticket-engine validate`; those results are recorded on ticket #36.
+Merge is blocked until #35's VM evidence and #36's remaining criteria are complete.
 
 ---
 

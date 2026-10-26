@@ -152,6 +152,25 @@ Tickets are numbered **globally** across all routing modes. Number collision is 
 
 Old markdown-format tickets remain in `docs/tickets/archive/` for reference only. They are NOT processed by the engine. New work gets JSON format.
 
+## VM/Docker test environment (deferred)
+
+The disposable test environment will be a **full Linux VM with Docker and opencode**
+(decision: `docs/DECISIONS.md` §C.6). It is not provisioned yet: the current development
+container has no Docker CLI, no daemon socket, and no podman. Ticket #35 owns the
+provisioning runbook, the command matrix, the negative cases, and teardown evidence.
+
+Rules for that future work:
+
+- Run everything against a disposable workspace (`workspaces/test-<id>` or a fresh
+  clone), never the real checkout.
+- Exercise `./lab`, compose, `--unsafe-recurse`, the ticket-engine CLI, and the MCP tools
+  end to end; record the observed effect on #35.
+- Tear down containers, networks, volumes, and the workspace, then confirm
+  `git status --short` is empty in the real checkout.
+
+Do not start the VM work until a Docker-capable host is available and #35 is picked up
+as its own session.
+
 ## MCP development workflow (for building modules like @little-mester/ticket-engine-mcp)
 
 When building or updating an MCP module:
