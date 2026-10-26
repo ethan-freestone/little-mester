@@ -8,7 +8,7 @@
   "title": "Ticket engine: merge-to-main readiness (clean clone, CI, packaging, generated files)",
   "objective": "Make the ticket engine module safe and repeatable to merge to main: green tests from a clean clone, correct package entry points, no committed transient lock, an explicit policy for the tracked generated index/audit files, and a CI/pre-merge gate. Excludes unrelated branch work unless the merge scope says otherwise.",
   "created_at": "2026-10-26T17:39:38.620Z",
-  "updated_at": "2026-10-26T18:36:16.713Z",
+  "updated_at": "2026-10-26T18:36:56.119Z",
   "priority": "major",
   "comments": [
     {
@@ -30,6 +30,11 @@
       "timestamp": "2026-10-26T18:36:16.712Z",
       "author": "cli",
       "body": "Merge scope decided (2026-10-26): merge the whole feat/ticket-context branch into main, recorded in docs/DECISIONS.md §C.7. A7 is passing. A6 remains test-created because the committed CI workflow has not run in this environment; the local clean-clone gate is green."
+    },
+    {
+      "timestamp": "2026-10-26T18:36:56.117Z",
+      "author": "cli",
+      "body": "Whole branch merged into local main as 3700031 (2026-10-26). Working tree is clean and validate passes on main (84 audit entries, 35 tickets with AC/test ledgers). Not pushed: this environment has no gh or ssh and origin is git@github.com. The first GitHub Actions run will happen after a push; A6 therefore stays test-created."
     }
   ],
   "models_used": [],
