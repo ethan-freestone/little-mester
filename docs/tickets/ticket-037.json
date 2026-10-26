@@ -4,46 +4,122 @@
   "number": 37,
   "area": "infra",
   "type": "feature",
-  "status": "draft",
+  "status": "resolved",
   "title": "Opencode TUI plugin: confirm before exit on Ctrl+C",
   "objective": "Add an OpenCode v2 TUI plugin that intercepts Ctrl+C in the Little Mester opencode session and shows a confirmation dialog asking 'are you sure you want to close Little Mester?' before exiting, only closing on confirmed intent.",
   "created_at": "2026-10-26T19:13:23.833Z",
-  "updated_at": "2026-10-26T19:13:23.833Z",
+  "updated_at": "2026-10-26T19:58:17.551Z",
   "acceptance_criteria": [
     {
       "id": "A1",
       "text": "A new TUI plugin at agent/opencode/plugins/little-mester-exit-confirm/ intercepts Ctrl+C in the opencode TUI.",
-      "status": "pending"
+      "status": "passing",
+      "evidence": "Live PTY on OpenCode 2.1.4 (scripts/verify-exit-confirm.py): Ctrl+C opened the confirmation dialog; opencode plugin list resolved the local plugin path."
     },
     {
       "id": "A2",
       "text": "Pressing Ctrl+C shows a confirmation dialog asking whether to close Little Mester; confirming exits, cancelling returns to the session.",
-      "status": "pending"
+      "status": "passing",
+      "evidence": "Live PTY: Ctrl+C showed 'Close Little Mester?'; q and uppercase Y exited; Esc, n and Ctrl+C cancelled and the app stayed alive."
     },
     {
       "id": "A3",
       "text": "The plugin is baked into the agent image (Dockerfile COPY) and registered in opencode.json + tui.json via regen-configs / generated config.",
-      "status": "pending"
+      "status": "waived",
+      "note": "Superseded in part by A11: v1 tui.json is deleted, so the tui.json half of this criterion can no longer apply. The plugin is baked in by Dockerfile COPY, listed in OPENCODE_CLI_CONFIG_CONTENT, and still included by scripts/regen-configs. Static checks cover the surviving parts."
     },
     {
       "id": "A4",
       "text": "JSX passes tests/tui-jsx.bats (no nested <text>, no bare span fg, no fontWeight style).",
-      "status": "pending"
+      "status": "passing",
+      "evidence": "bats tests/tui-jsx.bats: all 5 checks pass."
+    },
+    {
+      "id": "A5",
+      "text": "While the dialog is closed, y/Y/q/n type normally into the prompt; the plugin registers no always-on single-letter bindings.",
+      "status": "passing",
+      "evidence": "Live PTY: typed yq with the dialog closed; the text reached the prompt and the app stayed alive. Global plugin layer binds only ctrl+c; checked by tests/exit-confirm.bats."
+    },
+    {
+      "id": "A6",
+      "text": "Ctrl+D does not exit the app; app.exit has no single-key binding.",
+      "status": "passing",
+      "evidence": "Live PTY: Ctrl+D left the app alive. Dockerfile sets app.exit to none; tests/exit-confirm.bats rejects any ctrl+c/ctrl+d/q single-key exit."
+    },
+    {
+      "id": "A7",
+      "text": "Ctrl+C opens a visible confirmation dialog; Y or Q confirms and closes; Esc/N/Ctrl+C cancels; other keys do not reach the prompt while it is open.",
+      "status": "passing",
+      "evidence": "Live PTY: dialog visible after Ctrl+C; uppercase Y and q closed it; Esc, n and Ctrl+C cancelled; app stayed alive after every cancel."
+    },
+    {
+      "id": "A8",
+      "text": "Ctrl+C uses a real ui.dialog modal with a modal-mode keymap layer, so Y/Q are only captured while the dialog is open.",
+      "status": "passing",
+      "evidence": "Plugin uses context.ui.dialog.show and a mode:modal keymap layer enabled only while open() is true; tests/exit-confirm.bats checks both."
+    },
+    {
+      "id": "A9",
+      "text": "The exit confirmation uses a documented v2 dialog/slot (not root); any slot uses app.",
+      "status": "passing",
+      "evidence": "No slot is claimed at all; the invalid root slot is gone. tests/exit-confirm.bats asserts no append:'root' and no append:'app'."
+    },
+    {
+      "id": "A10",
+      "text": "app.exit remains dispatchable by command ID even when unbound, so confirmation can close the app.",
+      "status": "passing",
+      "evidence": "Live PTY: confirming closed the app even though app.exit has no binding, via context.keymap.dispatch('app.exit'). OpenCode source resolves active commands by id regardless of bindings."
+    },
+    {
+      "id": "A11",
+      "text": "Keybinds are sourced from OPENCODE_CLI_CONFIG_CONTENT in the Dockerfile; the obsolete v1 tui.json is removed.",
+      "status": "passing",
+      "evidence": "Dockerfile OPENCODE_CLI_CONFIG_CONTENT has app.exit=none and prompt.clear=none; agent/opencode/tui.json is deleted; tests/exit-confirm.bats checks both."
     }
   ],
   "tests": {
     "needed": [
-      "manual check that Ctrl+C triggers confirmation in live opencode session"
+      "manual check that Ctrl+C triggers confirmation in live opencode session",
+      "live TUI: type y/Y/q/n in the prompt with dialog closed",
+      "live TUI: Ctrl+D does nothing; Ctrl+C opens dialog; Y/Q closes; Esc/N/Ctrl+C cancels"
     ],
     "created": [
-      "tests/tui-jsx.bats (JSX rule validation for all TUI plugins)"
+      "tests/tui-jsx.bats (JSX rule validation for all TUI plugins)",
+      "tests/exit-confirm.bats",
+      "scripts/verify-exit-confirm.py (live PTY behaviour check)"
     ],
     "cases": [
       "no nested <text> elements",
       "no bare span fg prop",
-      "no fontWeight style"
+      "no fontWeight style",
+      "no always-on single-letter binds in exit-confirm plugin",
+      "dialog uses mode modal and documented app slot",
+      "Dockerfile app.exit has no ctrl+c/ctrl+d single-key exit",
+      "live PTY: Ctrl+D inert, yq types while closed, Ctrl+C opens dialog, Esc/n/Ctrl+C cancel, q exits"
     ]
   },
   "priority": "minor",
-  "models_used": []
+  "models_used": [],
+  "comments": [
+    {
+      "timestamp": "2026-10-26T19:51:36.150Z",
+      "author": "cli",
+      "body": "2026-10-26 live report: Ctrl+C did nothing, Ctrl+D exited instantly, lowercase y (and other letters) could not be typed. Root causes verified against OpenCode 2.1.4 source: (1) slot 'root' is not mounted; only 'app' etc. exist, so the overlay never rendered; (2) the plugin registered y, Y, q and escape as always-on global commands, capturing them even when the dialog was closed; (3) tui.json is v1/dead and is not copied or loaded by the agent image, so its app_exit change never applied and the default app.exit (ctrl+c, ctrl+d, <leader>q) stayed active."
+    },
+    {
+      "timestamp": "2026-10-26T19:51:43.759Z",
+      "author": "cli",
+      "body": "DECISION 2026-10-26 (recorded in docs/DECISIONS.md J.10): Ctrl+C is the only exit trigger and it opens a visible confirmation dialog. Ctrl+D and every other single-key exit are unbound; there is no instant quit. 'Ctrl+C then Q' is the deliberate two-step close chord, implemented inside the dialog, because a terminal delivers Ctrl+C as one control byte and cannot be combined into a literal three-key chord. While the dialog is open Y or Q confirms; Esc, N or Ctrl+C cancels. No letter keys are captured while the dialog is closed: the dialog-bound keys live in a modal-mode keymap layer that only exists for the dialog's lifetime. app.exit stays unbound but is still dispatchable by ID, which the dialog uses to close the app. Config source of truth is OPENCODE_CLI_CONFIG_CONTENT in agent/Dockerfile (verified v2 CLI config merges inline content over ~/.config/opencode/cli.json); agent/opencode/tui.json is dead v1 config and is being removed."
+    },
+    {
+      "timestamp": "2026-10-26T19:58:12.013Z",
+      "author": "cli",
+      "body": "TRACEABILITY NOTE 2026-10-26: A3 is marked waived, not passing. Its tui.json half is obsolete because v1 tui.json was deleted (A11); the surviving Dockerfile COPY, OPENCODE_CLI_CONFIG_CONTENT registration and regen-configs listing are covered by tests/exit-confirm.bats. No criterion was marked passing before the live PTY run above."
+    },
+    {
+      "timestamp": "2026-10-26T19:58:17.551Z",
+      "author": "cli",
+      "body": "RESOLVED 2026-10-26: Ctrl+C now opens a real ui.dialog confirmation; Ctrl+D and every instant keyboard quit are unbound; letter keys are captured only inside the dialog. Live PTY and static verification recorded above. Remaining operational step: rebuild the agent image / restart the TUI so the baked /etc/opencode copy replaces the stale running copy."
+    }
+  ]
 }

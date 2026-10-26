@@ -214,7 +214,7 @@
     {
       "number": 37,
       "file_path": "ticket-037.json",
-      "status": "draft",
+      "status": "resolved",
       "area": "infra"
     },
     {
@@ -224,5 +224,5 @@
       "area": "engine"
     }
   ],
-  "updated_at": "2026-10-26T19:13:30.250Z"
+  "updated_at": "2026-10-26T19:58:17.551Z"
 }

@@ -27,7 +27,7 @@ COPY opencode/plugins/little-mester-exit-confirm/ /etc/opencode/plugins/little-m
 ENV PATH="/opt/venv/bin:$PATH" \
     HOME=/home/agent \
     OPENCODE_CONFIG=/etc/opencode/opencode/opencode.json \
-    OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-logo","/etc/opencode/plugins/host-metrics-tui","/etc/opencode/plugins/little-mester-exit-confirm"]}'
+    OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-logo","/etc/opencode/plugins/host-metrics-tui","/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}'
 
 RUN groupadd -g ${LAB_GID} agent && useradd -m -u ${LAB_UID} -g ${LAB_GID} agent
 
