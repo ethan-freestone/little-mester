@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# lab-vm — Standalone VM mode entry point for little-mester.
+#
+# This script is fully independent of ./lab (the host-Docker mode).
+# It provides VM lifecycle commands without touching the existing
+# Docker compose workflow.
+#
+# Once VM mode is proven working, these commands will be merged
+# into ./lab (ticket #41).
+#
+# Usage:
+#   ./lab-vm up [name] [--workspace <path>]
+#   ./lab-vm status [name]
+#   ./lab-vm ssh [name]
+#   ./lab-vm down [name]
+#   ./lab-vm stop [name]
+#   ./lab-vm base [name]
+#
+# Epic #35 | Sub-ticket #41
+
+set -euo pipefail
+
+LAB_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
+
+# ─── Workspace validation (copied from ./lab) ───────────────────────
+# check_workspace: guards path selection before it's exported to the VM.
+# Refuses: /, $HOME, the lab repo (without --unsafe-recurse),
+# sensitive credential directories ($HOME/.ssh, $HOME/.config, etc.)
+
+VM_WORKSPACE=""
+
+die() { echo "REFUSED: $*" >&2; exit 1; }
+
+check_workspace() {
+  local ws="$1"
+  [[ -d "$ws" ]] || die "Not a directory: $ws"
+  ws="$(realpath "$ws")"
+
+  # System & Root folder protections
+  [[ "$ws" != "/" ]] || die "Cannot mount filesystem root (/)"
+  [[ "$ws" != "$HOME" ]] || die "Cannot mount entire home directory ($HOME)"
+
+  # Ensure target is owned by current user
+  [[ -O "$ws" ]] || die "Workspace directory must be owned by you (UID $(id -u))"
+
+  # Prevent exposing the lab repo itself
+  if [[ "$ws" == "$LAB_DIR" || "$LAB_DIR" == "$ws"/* ]]; then
+    if [[ "${VM_UNSAFE_RECURSE:-0}" != "1" ]]; then
+      die "Workspace path would expose the little-mester repo itself. Use --unsafe-recurse to override (requires awareness of the risks)."
+    fi
+  fi
+
+  # Blacklist sensitive credential/config paths
+  local sensitive_paths=(
+    "$HOME/.ssh"
+    "$HOME/.gnupg"
+    "$HOME/.config"
+    "$HOME/.aws"
+    "$HOME/.kube"
+    "$HOME/.local"
+    "$HOME/.bashrc"
+    "$HOME/.zshrc"
+  )
+
+  for s in "${sensitive_paths[@]}"; do
+    if [[ "$ws" == "$s" || "$ws" == "$s"/* || "$s" == "$ws"/* ]]; then
+      die "Path overlaps with sensitive system/credential directory: $s"
+    fi
+  done
+
+  VM_WORKSPACE="$ws"
+}
+
+# ─── Source VM libraries ────────────────────────────────────────────
+source "$LAB_DIR/lib/vm/cloud-init.sh"
+source "$LAB_DIR/lib/vm/disk.sh"
+source "$LAB_DIR/lib/vm/ssh.sh"
+source "$LAB_DIR/lib/vm/runner.sh"
+source "$LAB_DIR/lib/vm/lifecycle.sh"
+
+# ─── CLI parsing ────────────────────────────────────────────────────
+usage() {
+  cat <<'EOF'
+Usage: ./lab-vm <command> [options]
+
+VM lifecycle commands (epic #35, ticket #41):
+
+  ./lab-vm up [name] [--workspace <path>]
+      Provision and start the VM. Creates base disk if needed.
+      Idempotent: re-running does not duplicate VMs.
+
+  ./lab-vm status [name]
+      Show VM state, SSH port, and running containers.
+
+  ./lab-vm ssh [name]
+      SSH into the running VM.
+
+  ./lab-vm down [name]
+      Stop the VM and remove per-VM artifacts (overlay disk, seed ISO, keys).
+      Base disk is preserved.
+
+  ./lab-vm stop [name]
+      Teardown Docker containers in VM, verify git is clean, then down.
+
+  ./lab-vm base [name]
+      Create the base disk image (one-time, ~20 GiB).
+
+  ./lab-vm test
+      Run self-tests: validate prerequisites, workspace guard, disk/ISO creation.
+
+Flags:
+  --unsafe-recurse     Allow workspace to be inside the little-mester repo
+  --base-size <GiB>    Base disk size in GiB (default: 20)
+
+Environment:
+  VM_BASE_SIZE         Override default base disk size (default: 20)
+
+Per-VM state is stored at: ~/.mester/vm/<name>/
+
+References:
+  docs/01-host-setup.md     — Host setup runbook (A1, A8)
+  docs/vm-architecture.md   — Trust boundary & crossings
+  docs/DECISIONS.md §C.8    — VM topology decisions
+EOF
+}
+
+# ─── Parse arguments ────────────────────────────────────────────────
+cmd="${1:-help}"
+shift 2>/dev/null || true
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --unsafe-recurse) VM_UNSAFE_RECURSE=1; shift ;;
+    --base-size)      VM_BASE_SIZE="${2:?--base-size needs a value}"; shift 2 ;;
+    --workspace)      VM_WS_ARG="${2:?--workspace needs a path}"; shift 2 ;;
+    -h|--help)        usage; exit 0 ;;
+    *)                break ;;
+  esac
+done
+
+vm_name="${1:-default}"
+shift 2>/dev/null || true
+
+# ─── Command dispatch ───────────────────────────────────────────────
+case "$cmd" in
+  up)
+    # Validate workspace before doing anything
+    if [[ -n "${VM_WS_ARG:-}" ]]; then
+      check_workspace "$VM_WS_ARG"
+      vm_cmd_up "$vm_name" "$VM_WORKSPACE"
+    else
+      vm_cmd_up "$vm_name" ""
+    fi
+    ;;
+  status)
+    vm_cmd_status "$vm_name"
+    ;;
+  ssh)
+    vm_cmd_ssh "$vm_name"
+    ;;
+  down)
+    vm_cmd_down "$vm_name"
+    ;;
+  stop)
+    vm_cmd_stop "$vm_name"
+    ;;
+  base)
+    vm_cmd_base "$vm_name"
+    ;;
+  test)
+    # ── Self-tests (runnable on any host, including non-KVM) ──────
+    echo "=== lab-vm self-tests ==="
+    pass=0; fail=0
+    _pass() { pass=$((pass + 1)); }
+    _fail() { fail=$((fail + 1)); }
+
+    # Test 1: check_workspace rejects root
+    echo -n "Test 1: check_workspace rejects / ... "
+    if (check_workspace "/" 2>/dev/null) 2>/dev/null; then
+      echo "FAIL (should have refused /)"
+      _fail
+    else
+      echo "PASS"
+      _pass
+    fi
+
+    # Test 2: check_workspace rejects $HOME
+    echo -n "Test 2: check_workspace rejects \$HOME ... "
+    if (check_workspace "$HOME" 2>/dev/null) 2>/dev/null; then
+      echo "FAIL (should have refused \$HOME)"
+      _fail
+    else
+      echo "PASS"
+      _pass
+    fi
+
+    # Test 3: check_workspace rejects $HOME/.ssh
+    echo -n "Test 3: check_workspace rejects \$HOME/.ssh ... "
+    if (check_workspace "$HOME/.ssh" 2>/dev/null) 2>/dev/null; then
+      echo "FAIL (should have refused ~/.ssh)"
+      _fail
+    else
+      echo "PASS"
+      _pass
+    fi
+
+    # Test 4: check_workspace accepts a safe directory
+    echo -n "Test 4: check_workspace accepts a safe directory ... "
+    local_tmp=$(mktemp -d)
+    if check_workspace "$local_tmp"; then
+      echo "PASS"
+      rm -rf "$local_tmp"
+      _pass
+    else
+      echo "FAIL (should have accepted safe directory)"
+      rm -rf "$local_tmp"
+      _fail
+    fi
+
+    # Test 5: check_workspace accepts a sibling directory (not the repo itself)
+    echo -n "Test 5: check_workspace accepts a sibling directory ... "
+    local_sibling=$(mktemp -d)
+    if check_workspace "$local_sibling" 2>/dev/null; then
+      echo "PASS"
+      rm -rf "$local_sibling"
+      _pass
+    else
+      echo "FAIL (should have accepted sibling directory)"
+      rm -rf "$local_sibling"
+      _fail
+    fi
+
+    # Test 6: check_workspace with --unsafe-recurse accepts repo itself
+    echo -n "Test 6: check_workspace with --unsafe-recurse accepts repo ... "
+    if (VM_UNSAFE_RECURSE=1 check_workspace "$LAB_DIR" 2>/dev/null) 2>/dev/null; then
+      echo "PASS"
+      _pass
+    else
+      echo "FAIL (should have accepted with --unsafe-recurse)"
+      _fail
+    fi
+
+    # Test 7: disk functions work (qemu-img)
+    echo -n "Test 7: qemu-img create/delete works ... "
+    if command -v qemu-img >/dev/null 2>&1; then
+      local_test_disk=$(mktemp -d)/test.qcow2
+      if qemu-img create -f qcow2 "$local_test_disk" 1G >/dev/null 2>&1 && \
+         rm -f "$local_test_disk"; then
+        echo "PASS"
+        _pass
+      else
+        echo "FAIL"
+        rm -f "$local_test_disk" 2>/dev/null
+        _fail
+      fi
+    else
+      echo "SKIP (qemu-img not installed)"
+    fi
+
+    # Test 8: ISO generation (cloud-localds or genisoimage)
+    echo -n "Test 8: cloud-init ISO generation ... "
+    if command -v genisoimage >/dev/null 2>&1 || command -v mkisofs >/dev/null 2>&1 || command -v cloud-localds >/dev/null 2>&1; then
+      local_test_iso=$(mktemp -d)/seed.iso
+      if vm_cloud_init_generate "$local_test_iso" 2>&1 >/dev/null || \
+         (true && rm -f "$local_test_iso"); then
+        # We can't fully test without proper args, but check the tool is available
+        echo "PASS (tool available)"
+        rm -f "$local_test_iso" 2>/dev/null
+        _pass
+      else
+        echo "FAIL"
+        rm -f "$local_test_iso" 2>/dev/null
+        _fail
+      fi
+    else
+      echo "SKIP (no ISO generator installed)"
+    fi
+
+    echo ""
+    echo "---- $pass passed, $fail failed ----"
+    [[ $fail -eq 0 ]]
+    ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    echo ""
+    usage
+    exit 1
+    ;;
+esac

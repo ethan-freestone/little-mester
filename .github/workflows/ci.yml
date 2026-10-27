@@ -85,3 +85,23 @@ jobs:
       - run: npm run build
       - run: ./scripts/ticket-engine validate
       - run: git diff --exit-code
+
+  # ── 5. VM mode — self-tests (no KVM required) ────────────────────
+  # These tests validate workspace guards, disk functions, and ISO
+  # generation tooling. They run on every push/PR and DO NOT require
+  # a KVM-capable host. Actual VM lifecycle tests (up/status/down)
+  # are run manually on a KVM host and reported as acceptance evidence.
+  # See docs/tickets/ticket-041.json for the full testing pathway.
+  vm-tests:
+    name: VM mode (self-tests, no KVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install prerequisites (qemu, cloud-init tools)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            qemu-utils genisoimage virtiofsd
+      - name: Run lab-vm self-tests
+        run: ./lab-vm test

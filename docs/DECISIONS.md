@@ -81,6 +81,76 @@ When ending a session mid-work, include at the top of relevant docs:
 
 Next session reads that first — never re-implement already-completed work.
 
+### B.4 Ticket edits — MCP/CLI only, enforced across ALL agent implementations
+
+**Rule:** Ticket data (`docs/tickets/*.json`, `_index.json`, `_audit.json`, `.engine.lock`) MUST
+ONLY be created, modified, or deleted through the ticket-engine CLI or the MCP server tools.
+Direct file edits are forbidden for every agent — opencode, Claude Code, Codex, or any other
+system that may be pointed at this workspace.
+
+- **CLI:** `./little-mester-mcp/scripts/ticket-engine <action> ...`
+- **MCP tools:** `mester_tickets_create`, `mester_tickets_update`, `mester_tickets_archive`,
+  `mester_tickets_validate`, `mester_tickets_audit`, etc.
+
+This is the same rule as C.3, but elevated to a **cross-agent architecture constraint**. The
+ticket engine is the sole write authority. Every agent implementation that touches this workspace
+must respect it, regardless of its native permissions or capabilities.
+
+**Why (one architecture, multiple implementations):**
+
+| Concern | What happens without the rule | What happens with it |
+|---|---|---|
+| **Index consistency** | `_index.json` drifts from ticket files — `next_number` resets, stale status/area snapshots | Engine recomputes atomically on every write |
+| **Audit trail** | Silent edits — no one knows who changed what, when, or why | Every write appends to `_audit.json` with timestamp and actor |
+| **Locking** | Two agents write the same ticket simultaneously, data loss | Engine holds a PID lock; conflicting writers get a clear error |
+| **Cross-agent consistency** | Opencode denies via permissions, Claude Code ignores it, Codex overwrites — the workspace becomes unreliable | All agents share the same contract; the workspace stays correct regardless of which agent runs |
+
+The workspace is the shared data store. The agent is just a transient reader/writer. The rule
+exists because the workspace cannot tolerate inconsistent writers — and different agents have
+different permission models that make it easy to bypass restrictions on one platform while
+enforcing them on another.
+
+**Enforcement per agent platform:**
+
+| Platform | Mechanism | Location in repo |
+|---|---|---|
+| **OpenCode** | `permission` deny rules on `docs/tickets/**/*.json` + `instructions` array reminder | `agent/opencode/opencode.json` |
+| **Claude Code** | `CLAUDE.md` system prompt (read at session start) | `CLAUDE.md` (in workspace root) |
+| **Codex** | `CODING.md` or agent config directive | `CODING.md` (in workspace root) |
+| **Any agent with file access** | Instruction file at workspace root; agents that read docs on session start will see it | `docs/tickets/README.md` or a top-level `AGENT-INSTRUCTIONS.md` |
+
+Every new agent integration must add the same constraint to its platform-specific config. The
+rule is not optional per-agent — it is a workspace invariant. If a platform does not support
+permission denies, the instruction must be prominent in the system prompt and the rationale
+(links to this decision) must be included so the agent understands it is an architecture
+constraint, not a preference.
+
+**What counts as a "ticket edit" (every action below requires the engine):**
+- Creating a new ticket file (use `ticket-engine create` or `mester_tickets_create`)
+- Changing any field in an existing ticket (use `ticket-engine update` or `mester_tickets_update`)
+- Changing a ticket's status (use `mester_tickets_update` — **not** a JSON edit)
+- Updating acceptance criteria, tests, evidence, or comments
+- Archiving a ticket (use `ticket-engine archive` or `mester_tickets_archive`)
+- Running `validate` or `audit` (safe — these are reads, not writes)
+
+**What does NOT require the engine:**
+- Reading ticket files (`cat`, `grep`, editor views) — reading is always allowed
+- Editing files outside `docs/tickets/` — product code, agent configs, docs, scripts, etc.
+- Deleting `_index.json` and letting the engine rebuild it (this is how you fix drift)
+
+**If a ticket file is already corrupted by a direct edit:**
+1. Do NOT attempt to repair it by hand.
+2. Run `./little-mester-mcp/scripts/ticket-engine validate` to see the extent of drift.
+3. If `_index.json` is out of sync, delete it and run `validate` to rebuild.
+4. If `_audit.json` is missing entries, treat affected tickets as orphans — stop and ask a
+   human before running `audit --baseline`.
+5. After repair, commit the fix with a conventional commit noting the repair.
+
+**Cross-agent note:** This is a deliberate architecture decision. The workspace is the contract;
+agents are transient. Whether you run opencode, Claude Code, Codex, or a future agent platform,
+the ticket store remains consistent because all paths converge on the same write authority.
+Enforcement is per-platform, but the rule is universal.
+
 ---
 
 ## C. Constraints (what's true, not designs)
