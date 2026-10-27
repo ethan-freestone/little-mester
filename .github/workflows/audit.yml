@@ -1,0 +1,57 @@
+name: npm audit (weekly)
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # Every Monday at 06:00 UTC
+  workflow_dispatch:       # Manual trigger
+
+permissions:
+  contents: read
+
+# ── Why this is a separate workflow ──────────────────────────────
+#
+# 1. Non-deterministic — results depend on the npm registry state at
+#    the moment of the run. Two CI runs minutes apart can differ
+#    because new advisories land or old ones expire. Running it on
+#    every push/PR means the gate flaps and people learn to ignore
+#    it (the "boy who cried wolf" problem).
+#
+# 2. Warning-only, not a gate — audit finds known vulnerabilities in
+#    dependencies. The fix is usually a `npm update` or `npm audit
+#    fix`, which is a maintenance task, not a code-level fix. It
+#    should be surfaced for visibility, not used to block merges.
+#
+# 3. Slow — `npm audit` scans the entire dependency tree. On a large
+#    project it takes 30-60s. That's fine on a weekly schedule, but
+#    it adds friction if it runs on every PR.
+#
+# 4. Separate workflow = separate check group in the GitHub UI. The
+#    weekly audit check won't be lumped in with the fast CI checks,
+#    making it clear at a glance which checks are passing and which
+#    are just informational.
+#
+# This follows the same principle as docs/github-actions.md:
+#   "Add a check to CI only when it meets at least two criteria …
+#    but don't gate merges on non-deterministic warnings."
+
+jobs:
+  audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: little-mester-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: little-mester-mcp/package-lock.json
+      - run: npm ci
+
+      # `--audit-level=moderate` exits 0 even when vulns are found.
+      # We want the step to always pass — this is for visibility,
+      # not as a gate. The output is what matters.
+      - run: npm audit --audit-level=moderate

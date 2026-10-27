@@ -98,7 +98,7 @@ def read_tag(src, i):
 def attrs_of(tag_text):
     """Attribute names of an opening tag, lowercased."""
     body = tag_text[1:-1]  # drop < and >
-    body = re.sub(r"\{\{.*?\}\}", " ", body, flags=re.S)  # drop {...} expressions
+    body = re.sub(r"\{\{.*?\}\}", " ", body, flags=re.DOTALL)  # drop {...} expressions
     names = []
     for m in re.finditer(r"([A-Za-z_][\w:-]*)\s*(=|\s|$)", body):
         name = m.group(1)
@@ -110,7 +110,7 @@ def attrs_of(tag_text):
 
 def style_body(tag_text):
     """The object literal of a style={{ ... }} attribute, if present."""
-    m = re.search(r"style\s*=\s*\{\s*\{(.*?)\}\s*\}", tag_text, flags=re.S)
+    m = re.search(r"style\s*=\s*\{\s*\{(.*?)\}\s*\}", tag_text, flags=re.DOTALL)
     return m.group(1) if m else None
 
 

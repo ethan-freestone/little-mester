@@ -1,0 +1,87 @@
+name: little-mester checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# ── Parallel jobs ──────────────────────────────────────────────────
+# Each job is independent and runs on ubuntu-latest.
+# They start simultaneously and report together, so future
+# aggregate reporting (PR checks, dashboards) just works.
+
+jobs:
+  # ── 1. TypeScript / Node ─────────────────────────────────────────
+  node:
+    name: Build & test (TypeScript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: little-mester-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: little-mester-mcp/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm run check:package
+      - run: npm test
+
+  # ── 2. Bats — lab script, TUI JSX guard, exit-confirm static ────
+  bats:
+    name: Bats (lab, TUI JSX, exit-confirm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats && sudo /tmp/bats/install.sh /usr/local && rm -rf /tmp/bats
+      - run: bats tests/
+
+  # ── 3. Hygiene — ShellCheck, Python compile, ruff lint ───────────
+  hygiene:
+    name: Hygiene (shellcheck, py_compile, ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
+      - name: ShellCheck (lab + shell scripts)
+        run: shellcheck lab scripts/*.sh
+
+      - name: Python compile check (scripts/*.py)
+        run: python3 -m py_compile scripts/*.py
+
+      - name: Install ruff and lint Python
+        run: pip install --target=/tmp/.ruff ruff && /tmp/.ruff/bin/ruff check scripts/*.py agent/metrics/gather.py bench/bench.py
+
+  # ── 4. Ticket store ──────────────────────────────────────────────
+  ticket-store:
+    name: Ticket store validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: little-mester-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: little-mester-mcp/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: ./scripts/ticket-engine validate
+      - run: git diff --exit-code

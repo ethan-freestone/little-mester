@@ -20,9 +20,9 @@
     "check:package": "node scripts/check-package.js",
     "dev": "ts-node src/cli.ts",
     "server": "ts-node src/mcp-server.ts",
-    "test": "jest --verbose --detectOpenHandles --forceExit",
-    "test:watch": "jest --watch --verbose --detectOpenHandles",
-    "test:coverage": "jest --verbose --coverage --detectOpenHandles --forceExit"
+    "test": "npm run build && jest --verbose",
+    "test:watch": "jest --watch --verbose",
+    "test:coverage": "jest --verbose --coverage"
   },
   "keywords": [
     "tickets",

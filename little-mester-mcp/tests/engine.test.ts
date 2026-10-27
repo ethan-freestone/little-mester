@@ -440,7 +440,11 @@ describe('TicketEngine', () => {
         }
 
         function deadPid(): number {
-            const child = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+            // Spawn a tiny process and kill it — far faster than spawning Node.
+            spawnSync('timeout', ['0.001', 'true']);
+            // Return the PID of the child we just waited on (it's definitely dead now).
+            // If spawnSync returned null (e.g. timeout not found), fall back to a safe high number.
+            const child = spawnSync('true');
             return child.pid ?? 999999;
         }
 
