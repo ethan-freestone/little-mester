@@ -201,28 +201,82 @@ warn_hooks() {
   fi
 }
 
-# Parse flags (they must come BEFORE the subcommand or workspace path)
+# Parse flags in any order (before OR after subcommand/path).
+# Strategy: single pass over all args — extract known flags,
+# capture the first non-flag as the subcommand or workspace path,
+# then restore the remaining args for subcommand-specific parsers.
 # shellcheck disable=SC2034
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  while [[ $# -gt 0 ]]; do
-    case "${1:-}" in
-      --ro) MOUNT_MODE="ro"; shift ;;
-      --rw) MOUNT_MODE="rw"; shift ;;
-      --workflow) WORKFLOW="${2:-default}"; shift 2 ;;
-      --verbose) VERBOSE=1; shift ;;
-      --agent) AGENT="${2:?--agent needs a name (aider|opencode)}"; shift 2 ;;
-      --egress) EGRESS="${2:?--egress needs true/false}"; shift 2 ;;
-      --egress-false|--isolated) EGRESS="false"; shift ;;
-      --egress-true) EGRESS="true"; shift ;;
-      --permissions) PERMISSIONS="${2:?--permissions needs deny/ask/auto}"; shift 2 ;;
-      -y|--yes|--auto-accept) AUTO_ACCEPT=1; LAB_YES=1; shift ;;
-      --unsafe-recurse) UNSAFE_RECURSE=1; shift ;;
-      --no-cache) NO_CACHE=1; shift ;;
-      --opencode) AGENT="opencode"; shift ;;
-      --aider) AGENT="aider"; shift ;;
-      *) break ;;
+  # ── 1. Extract known global flags from $@ (any position) ─────────
+  _flags=()
+  for _i in "$@"; do
+    case "$_i" in
+      --ro)                 MOUNT_MODE="ro" ;;
+      --rw)                 MOUNT_MODE="rw" ;;
+      --verbose)            VERBOSE=1 ;;
+      --egress-false|--isolated) EGRESS="false" ;;
+      --egress-true)        EGRESS="true" ;;
+      -y|--yes|--auto-accept) AUTO_ACCEPT=1; LAB_YES=1 ;;
+      --unsafe-recurse)     UNSAFE_RECURSE=1 ;;
+      --no-cache)           NO_CACHE=1 ;;
+      --opencode)           AGENT="opencode" ;;
+      --aider)              AGENT="aider" ;;
+      --help|-h)            ;; # handled below
+      --workflow|--agent|--egress|--permissions) ;; # value consumed next iteration
+      *) ;; # not a global flag
+    esac
+    _flags+=("$_i")
+  done
+
+  # ── 2. Re-parse with value-attached flags resolved ───────────────
+  for (( _fi=0; _fi<${#_flags[@]}; _fi++ )); do
+    case "${_flags[$_fi]}" in
+      --workflow)  WORKFLOW="${_flags[$((_fi+1))]:-default}"; _fi=$(( _fi+1 )) ;;
+      --agent)     AGENT="${_flags[$((_fi+1))]:-opencode}"; _fi=$(( _fi+1 )) ;;
+      --egress)    EGRESS="${_flags[$((_fi+1))]:-true}"; _fi=$(( _fi+1 )) ;;
+      --permissions) PERMISSIONS="${_flags[$((_fi+1))]:-ask}"; _fi=$(( _fi+1 )) ;;
     esac
   done
+
+  # ── 3. Find subcommand / workspace path (first non-flag arg) ─────
+  # Only known flags are skipped; unknown --flags are passed through to
+  # subcommand-specific parsers (e.g. bench --json).
+  SUBCMD=""
+  for (( _fi=0; _fi<${#_flags[@]}; _fi++ )); do
+    case "${_flags[$_fi]}" in
+      -h|--help)
+        SUBCMD="${_flags[$_fi]}"
+        shift "$((_fi+1))"
+        set -- "${_flags[@]:$((_fi+1))}"
+        break
+        ;;
+      --workflow|--agent|--egress|--permissions)
+        _fi=$(( _fi + 1 ))  # skip the value; outer loop also increments
+        ;;
+      --ro|--rw|--verbose|--egress-false|--isolated|--egress-true) ;;
+      -y|--yes|--auto-accept|--unsafe-recurse|--no-cache) ;;
+      --opencode|--aider) ;;
+      --*) ;;  # any other --flag (unknown to global parser): skip but keep
+      -*) ;;   # single-dash unknown flags: skip but keep
+      *)
+        SUBCMD="${_flags[$_fi]}"
+        shift "$((_fi+1))"
+        set -- "${_flags[@]:$((_fi+1))}"
+        break
+        ;;
+    esac
+  done
+
+  # If no non-flag arg found but --help/-h is in flags, treat it as help
+  if [[ -z "$SUBCMD" ]]; then
+    for _hf in "${_flags[@]}"; do
+      if [[ "$_hf" == "--help" || "$_hf" == "-h" ]]; then
+        SUBCMD="$_hf"
+        break
+      fi
+    done
+  fi
+  [[ -z "$SUBCMD" ]] && set -- "${_flags[@]}"
 
   # Save real TTY before tee redirect (restored before interactive agent)
   exec 3>&1 4>&2
@@ -237,7 +291,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   fi
   exec 1> >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2)
 
-  case "${1:-}" in
+  case "$SUBCMD" in
     setup)
       command -v pacman >/dev/null || die "automated setup is Arch/CachyOS only; see docs/01-host-setup.md"
       nvidia-smi -L || die "NVIDIA driver not working on host (fix this first)"
@@ -260,7 +314,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       echo "Setup complete. Next: ./verify-lab.sh, then ./lab <workspace>"
       ;;
     build)
-      shift
       # Regenerate opencode.json from models.txt before building the image
       ( cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/scripts" && ./regen-configs ) 2>&1
       if [[ "$NO_CACHE" -eq 1 ]]; then
@@ -283,7 +336,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       # Benchmark runner — two modes:
       #   HTTP mode (default): connects to running llamacpp, measures real throughput/latency
       #   Native mode (--native): runs llama.cpp --test inside container, instant between-test switches
-      shift
       MODE="http"
       BENCH_JSON=0 BENCH_N=5
       # Native-mode params (passed via env to bench service)
@@ -394,7 +446,6 @@ HELPTEXT
       #
       # KV cache persistence: --cache flag keeps model in VRAM between
       # restarts, reducing reload to ~2-3s.
-      shift
       CACHE_FLAG=""
       while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -445,21 +496,19 @@ HELPTEXT
       dc restart llamacpp || dc up -d llamacpp
       ;;
     tune)
-      shift
       exec env VERBOSE="$VERBOSE" "$LAB_DIR/bench/tune.sh" "$@"
       ;;
     ai-analyze)
-      shift
       exec env VERBOSE="$VERBOSE" "$LAB_DIR/bench/ai-analyze.sh" "$@"
       ;;
     exec)
-      check_workspace "${2:?Usage: ./lab exec <path> '<command>'}"
+      check_workspace "${1:?Usage: ./lab exec <path> '<command>'}"
       confirm
       # On exec, pass egress status via env so compose knows how to route
-      LITTLE_MESTER_EGRESS="$EGRESS" dc run --rm -T agent sh -c "${3:?Missing command}"
+      LITTLE_MESTER_EGRESS="$EGRESS" dc run --rm -T agent sh -c "${2:?Missing command}"
       ;;
     shell)
-      check_workspace "${2:?Usage: ./lab shell [--ro|--rw] <path>}"
+      check_workspace "${1:?Usage: ./lab shell <path>}"
       confirm
       dc run --rm agent bash
       warn_hooks
@@ -473,7 +522,7 @@ HELPTEXT
       echo "  ./lab setup | build | pull | stop | bench [--json] [-n N]"
       echo "  ./lab restart-llama [--cache] | tune [--analyse] | ai-analyze [OPTIONS]"
       echo
-      echo "Flags (before path):"
+      echo "Flags:"
       echo "  --ro / --rw        Mount mode (default: rw)"
       echo "  --agent name       Agent to launch (opencode|aider, default: opencode)"
       echo "  --workflow name    Workflow profile (default: default)"
@@ -510,7 +559,7 @@ HELPTEXT
         echo "  ./lab exec <path-to-workspace> '<command>'"
         echo "  ./lab setup | build | pull | stop | bench | restart-llama | tune | ai-analyze"
         echo
-        echo "Flags (before path):"
+        echo "Flags (any order):"
         echo "  --ro / --rw        Mount mode (default: rw)"
         echo "  --agent name       Agent to launch (opencode|aider, default: opencode)"
         echo "  --workflow name    Workflow profile (default: default)"
@@ -530,7 +579,7 @@ HELPTEXT
         aider|opencode) ;;
         *) die "unknown agent: $AGENT (expected aider or opencode)" ;;
       esac
-      check_workspace "$1"
+      check_workspace "$SUBCMD"
 
       # Per-call egress authorization gate before confirming
       if [[ "$EGRESS" == "true" ]]; then
@@ -540,7 +589,6 @@ HELPTEXT
       fi
 
       confirm
-      shift
       # Restore real TTY for interactive agent — tee pipe breaks container TTY
       exec 1>&3 2>&4
       agent_run "$@"
