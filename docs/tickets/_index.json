@@ -276,7 +276,19 @@
       "file_path": "ticket-047.json",
       "status": "draft",
       "area": "infra"
+    },
+    {
+      "number": 48,
+      "file_path": "ticket-048.json",
+      "status": "draft",
+      "area": "infra"
+    },
+    {
+      "number": 49,
+      "file_path": "ticket-049.json",
+      "status": "draft",
+      "area": "infra"
     }
   ],
-  "updated_at": "2026-10-27T11:53:12.058Z"
+  "updated_at": "2026-10-27T12:49:19.443Z"
 }
