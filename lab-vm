@@ -162,6 +162,7 @@ Flags:
   --unsafe-recurse     Allow workspace to be inside the little-mester repo
   --base-size <GiB>    Base disk size in GiB (default: 20)
   -y, --yes            Auto-accept all prompts (same as VM_YES=1)
+  --auto-accept        Alias for --yes
   -v, --verbose        Extra progress info (SSH commands, qemu/virtiofsd output)
   -d, --debug          Everything from --verbose plus raw output and timing
 
@@ -189,7 +190,7 @@ while [[ $# -gt 0 ]]; do
     --unsafe-recurse) VM_UNSAFE_RECURSE=1; shift ;;
     --base-size)      VM_BASE_SIZE="${2:?--base-size needs a value}"; shift 2 ;;
     --workspace)      VM_WS_ARG="${2:?--workspace needs a path}"; shift 2 ;;
-    -y|--yes)         VM_YES=1; LAB_YES=1; shift ;;
+    -y|--yes|--auto-accept) VM_YES=1; LAB_YES=1; shift ;;
     -v|--verbose)     VM_VERBOSE=1; shift ;;
     -d|--debug)       VM_VERBOSE=1; VM_DEBUG=1; shift ;;
     -h|--help)        usage; exit 0 ;;
