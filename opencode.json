@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["INSTRUCTIONS.md"],
+  "mcp": {
+    "servers": {
+      "little-mester": {
+        "type": "local",
+        "command": [
+          "node",
+          "/workspace/little-mester-mcp/dist/mcp-server.js"
+        ]
+      }
+    }
+  }
+}
