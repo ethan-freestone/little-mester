@@ -117,8 +117,7 @@ _vm_start() {
     -drive file="$vm_dir/seed.iso",format=raw,if=none,id=cloud_disk,readonly=on
     -device virtio-scsi-pci,id=scsi0
     -device scsi-cd,drive=cloud_disk
-    -drive file="$overlay_disk",format=qcow2,if=virtio,aio=native,direct-sync
-    -drive file="$base_disk",format=qcow2,if=virtio,read-only=on,id=base
+    -drive file="$overlay_disk",format=qcow2,if=virtio
 
     # Virtiofs workspace export
     -chardev socket,id=charfs,path="$virtiofs_sock"
@@ -181,7 +180,27 @@ _vm_start() {
     sleep 1
   done
 
-  log "ERROR: SSH not ready after 60s. Check $vm_dir/qemu.log"
+  log "ERROR: SSH not ready after 60s"
+  if [[ -f "$vm_dir/qemu.pid" ]]; then
+    local _qpid
+    _qpid=$(cat "$vm_dir/qemu.pid" 2>/dev/null)
+    if kill -0 "$_qpid" 2>/dev/null; then
+      log "QEMU process $_qpid is still alive (guest may be booting but SSH not reachable)"
+    else
+      log "QEMU process $_qpid has exited (see qemu.log for crash details)"
+      local _qemu_status
+      wait "$_qpid" 2>/dev/null
+      _qemu_status=$?
+      log "QEMU exited with status $_qemu_status"
+    fi
+  else
+    log "No QEMU PID file found — QEMU may have failed to start"
+  fi
+  if [[ -f "$vm_dir/qemu.log" ]]; then
+    log "Last 150 lines of qemu.log:"
+    tail -n 150 "$vm_dir/qemu.log" | while IFS= read -r line; do log "  $line"; done
+  fi
+  log "To debug: qemu-img info $vm_dir/disk.qcow2 && ss -ltnp | grep ':$ssh_port'"
   return 1
 }
 

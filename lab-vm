@@ -276,9 +276,8 @@ case "$cmd" in
   up)
     # --clean: run 'stop' then 'down' before 'up'
     if [[ $VM_CLEAN -eq 1 ]]; then
-      echo "=== VM Clean: running stop + down before up ==="
+      echo "=== VM Clean: running stop (includes down) before up ==="
       vm_cmd_stop "$vm_name" || true
-      vm_cmd_down "$vm_name" || true
       echo "Clean teardown complete. Starting fresh VM..."
       echo ""
     fi
