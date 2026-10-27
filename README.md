@@ -1,87 +1,39 @@
 # little-mester
 
-A **locked-down, fully local sandbox for learning agentic coding.**
+```
+ ▄▄▄▄▄▄▄▄▄▄▄▄▄   ██        ██████  ██████████  ██████████  ██        ████████
+ █████████████░  ██▒        ▒██▒▒▒  ▒▒▒██▒▒▒▒▒  ▒▒▒██▒▒▒▒▒ ██▒       ██▒▒▒▒▒▒▒
+ █▒█▒█▒█▒█▒█▒█░  ██▒         ██▒       ██▒         ██▒     ██▒       ██████
+ █▒█▒█▒█▒█▒█▒█░  ██▒         ██▒       ██▒         ██▒     ██▒       ██▒▒▒▒▒
+ █████████████░  ████████  ██████      ██▒         ██▒     ████████  ████████
+ █▒█▒█▒█▒█▒█▒█░   ▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒      ▒▒          ▒▒      ▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒▒▒
+ █▒█▒█▒█▒█▒█▒█░
+ █████████████░  ██      ██  ████████    ██████  ██████████  ████████  ██████
+ █▒█▒█▒█▒█▒█▒█░  ████  ████▒ ██▒▒▒▒▒▒▒ ██ ▒▒▒▒▒▒  ▒▒▒██▒▒▒▒▒ ██▒▒▒▒▒▒▒ ██▒▒▒▒██
+ █▒█▒█▒█▒█▒█▒█░  ██▒▒██ ▒██▒ ██████    ████          ██▒     ██████    ██████ ▒▒
+ ▐▓▓▓▓▓▓▓▓▓▓▓▓▓▌  ██▒  ▒▒ ██▒ ██▒▒▒▒▒    ▒▒▒▒ ██      ██▒     ██▒▒▒▒▒   ██▒▒██▒
+ █  █  ▐▌  █  █  ██▒     ██▒ ████████  ██████ ▒▒     ██▒     ████████  ██▒  ▒██
+ █  █  ▐▌  █  █   ▒▒      ▒▒  ▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒        ▒▒      ▒▒▒▒▒▒▒▒  ▒▒    ▒▒
+ ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔  Made in Sheffield
+```
 
-A local LLM (via **Ollama** and/or **llama.cpp**, on the GPU) drives a coding agent
-(**opencode** by default, or **aider** via `--agent`) that can read and edit files in
-**one folder you choose**, and nothing else. The agent reaches the internet through an
-egress network by default; `--isolated` removes that route. It has no access to your home
-directory, keys, or other projects.
+A locked-down, fully local sandbox for learning agentic coding.
 
-**IMPORTANT: You are always in a container.** Today the agent runs in a Docker container on
-the host daemon. The target harness (epic #35) moves that container into a disposable local
-QEMU/KVM VM with rootless Docker, so the host daemon is not shared. Either way, the
-workspace is mounted/exported at `/workspace` and the rest of the host filesystem is not
-accessible. See [`docs/vm-architecture.md`](docs/vm-architecture.md).
+A local LLM (Ollama or llama.cpp) drives a coding agent (**opencode** by default, **aider** via `--agent`) that edits files in **one folder you choose**, nothing else. No internet by default. No host shell access. No access to your keys, home directory, or other projects.
 
-The goal of this repo is twofold:
+**The core ethos:** little-mester is a single tool built from MCP modules to allow multiple interfaces (opencode today, potentially codex or claude-code later) to act in a single well-defined, sandboxed way. Security is first. Consistency second. Human readability third.
 
-1. Be a safe place to point an AI agent at code without worrying about your machine.
-2. Be a **learning lab**: every piece is small enough to read, break, and rebuild.
+> Status: personal learning project. Not security-audited. Treat the sandbox as strong guard rails, not a guarantee. See [SECURITY.md](SECURITY.md).
 
-> Status: personal learning project. Nothing here has been security-audited.
-> Treat the sandbox as strong *guard rails*, not a guarantee. See
-> [What this does NOT protect against](#what-this-does-not-protect-against).
-
----
-
-## Read this first (humans and AI agents)
-
-This repo has **two decision logs with different scopes**. Read both before making changes:
-
-| File | Scope | Read before |
-|---|---|---|
-| [`docs/DECISIONS.md`](docs/DECISIONS.md) | How to **use** little-mester: workflow, container rules, field semantics, testing constraints | Any session |
-| [`docs/tickets/architecture/DECISIONS.md`](docs/tickets/architecture/DECISIONS.md) | **Engineering** designs for the ticket engine: schema, lifecycle, enforcement, routing | Any `little-mester-mcp/` change |
-
-The default development cycle is **doc → test → code → commit**. See
-[`docs/workflows.md`](docs/workflows.md). Do not skip stages or reorder them without a
-ticket explaining why.
-
----
-
-## VM harness status (epic #35, in progress)
-
-The target is a local, `./lab`-managed QEMU/KVM VM: **rootless Docker** under a dedicated
-user, a **virtiofs** workspace export, model servers on the host behind narrow `guestfwd`
-ports, a host-side egress proxy, and no host ports. It is **not implemented yet**; #41–#43
-carry the work and evidence. Until then, `./lab` uses host Docker as described below.
-Read [`docs/vm-architecture.md`](docs/vm-architecture.md) before changing `lab`,
-`compose.yaml`, or the agent image boundaries.
-
-## Build status
-
-- ✅ 0. Host NVIDIA driver works (`nvidia-smi`)
-- ✅ 1. Repo skeleton, `.gitignore`, `models.txt`
-- ✅ 2. `compose.yaml` (dual backend: ollama + llama.cpp)
-- ✅ 3. `agent/Dockerfile`, model pull scripts
-- ✅ 4. `lab` launcher with path guard rails and egress toggle (`--isolated` / `.mester-egress`); domain-allowlist *enforcement* is tracked in #43
-- ✅ 5. `./lab setup` completes (packages, image build, models pulled)
-- ✅ 6. `./verify-lab.sh` all green
-- ✅ 7. First opencode session on a throwaway repo
-- [ ] 8. Multi-repo workspace tested
-- [ ] 9. Own agent loop (`my-agent/`)
-- [ ] 10. Evals (`evals/`)
-- [ ] 11. Benchmarking (`bench/`)
-- [ ] 11. Red-team the sandbox (`red-team/`)
-- [ ] 12. Opt-in web access via proxy (`proxy/`)
-- [ ] 13. MCP (`mcp/`)
-
----
-
-## Architecture
-
-This diagram is the **current host-Docker mode**. The target VM harness (epic #35) is in
-[`docs/vm-architecture.md`](docs/vm-architecture.md); this section will be replaced when #41
-lands. Default networking (no overrides):
+### Architecture
 
 ```
- HOST (your machine — CachyOS/Arch recommended)
+ HOST (any Linux / macOS with Docker)
  ┌──────────────────────────────────────────────────────────────────────────────┐
  │                                                                              │
  │  ./lab ──► docker compose                                                    │
  │                                                                              │
- │   ┌──── networks: egress + internal (default), internal only (--isolated) ┐  │
+ │   ┌──────────── network: internal [+ optional egress] ───────────────────┐  │
  │   │                                                                       │  │
  │   │  ┌─────────────┐                                                      │  │
  │   │  │ agent       │  http://ollama:11434/v1   ┌─────────────────────┐   │  │
@@ -91,7 +43,7 @@ lands. Default networking (no overrides):
  │   │  │ non-root    │ ──────────────────────► │ no published ports  │   │  │
  │   │  │ read-only   │                         └─────────┬───────────┘   │  │
  │   │  │ no caps     │                                   │               │  │
- │   │  └──────┬──────┘                                   │ named volume  │  │
+ │   │  └──────┬──────┘                                   │               │  │
  │   │         │ bind mount (rw)                          ▼               │  │
  │   │         ▼                              ┌───────────────────┐       │  │
  │   │  /workspace (YOUR PROJECT)             │ ollama-models     │       │  │
@@ -103,533 +55,154 @@ lands. Default networking (no overrides):
  │   │  │ (sidecar)   │   read-only host hw     │ (GGUF files)      │   │  │
  │   │  └─────────────┘                         └───────────────────┘   │  │
  │   │                                                                    │  │
- │   │  default ──► egress ──► internet; --isolated ──► internal only     │  │
+ │   │  --egress / .mester-egress ──► optional egress network ──► internet│  │
  │   └────────────────────────────────────────────────────────────────────┘
  │                                                                              │
  └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Agent internet is **enabled by default** (`[egress, internal]`). To disable (e.g. for
-isolated sub-agents):
-
-| Method | Compose override | Effect |
-|---|---|---|
-| Lab flag | `--isolated` | Sets agent networks to `[internal]` only — no outbound internet |
-| Lab flag | `--egress-false` or `--egress false` | Same as `--isolated` |
-| Direct compose | `-e NETWORKS_AGENT=internal` + omit egress from `networks.agent` | Same effect, more explicit but requires editing compose |
+Agent internet is **enabled by default** (`[egress, internal]`). Disable with `--isolated` for an offline session. When egress is on, outbound traffic is filtered against `.mester-egress` (one hostname per line) or allowed unconditionally with `--egress-true`.
 
 ### Three ideas to hold onto
 
 | Idea | How it's done here |
 |---|---|
-| The model can't touch files | Ollama/llama.cpp only turn text into text. They're in their own containers with no mounts except their model volumes. |
-| The agent can only touch one folder | The agent container sees exactly one bind mount, `/workspace`, gated by `lab`'s path checks. |
-| The agent can't phone home when you say so | The agent is on `egress` + `internal` by default. `--isolated` (or `.mester-egress` `permission=false`) removes the egress route, leaving only `internal`. Domain-allowlist enforcement is tracked in #43. |
+| The model can't touch files | Ollama/llama.cpp only produce text. No filesystem mounts except their own model volumes. |
+| The agent touches only one folder | One bind mount (`/workspace`), gated by `lab`'s path checks. |
+| The agent can't phone home | Model + agent share `internal: true`. Egress is opt-in. Only pull services have internet, briefly, during setup. |
 
 ---
 
-## Dual backend: Ollama + llama.cpp
+## Read this first (humans and AI agents)
 
-This system runs **both** backends simultaneously. You choose per model.
+This repo has **two decision logs**. Read both before making changes:
 
-| Backend | Best for | Model format | How it works |
-|---|---|---|---|
-| **Ollama** | Small dense models that fit entirely in VRAM | Ollama format (auto-pulled) | Layer-wise GPU offload |
-| **llama.cpp** | Large MoE models (35B-A3B, 30B-A3B, 20B) | GGUF (downloaded from HuggingFace) | **Expert-level offload** (`--n-cpu-moe`) |
+| File | Scope | Read before |
+|---|---|---|
+| [`docs/DECISIONS.md`](docs/DECISIONS.md) | How to use, configure, test, and improve little-mester | Any session |
+| [`docs/tickets/architecture/DECISIONS.md`](docs/tickets/architecture/DECISIONS.md) | Engineering designs for the ticket engine | Any `little-mester-mcp/` change |
 
-### Why llama.cpp for MoE?
+`docs/DECISIONS.md` is split into focused sub-logs:
+- **§A** — How to use · **§K** — Design decisions · **§L** — Security caveats
+- [`docs/testing.md`](docs/testing.md) — Testing policy
+- [`docs/ticketing.md`](docs/ticketing.md) — Ticket schema & workflow
+- [`docs/opencode.md`](docs/opencode.md) — OpenCode customisation
+- [`docs/github-actions.md`](docs/github-actions.md) — CI/CD decisions
 
-Your hardware: **Strix Point (HX 370)**, 12 cores, 16-CU Radeon 890M, **8 GB VRAM**,
-~120 GB/s system RAM bandwidth.
-
-- Ollama splits MoE by **layer** (not expert) → worst case for 35B-A3B on 8 GB
-- llama.cpp supports `--n-cpu-moe` → **expert-level offload**:
-  - **GPU**: attention, shared layers, KV cache, active experts (~3B params)
-  - **CPU (RAM)**: remaining experts (~20 GB at Q4, paged from system RAM)
-- Theoretical: 3B active @ Q4 = ~1.8 GB read/token ÷ 120 GB/s = **~60 t/s ceiling**
-- Expected: **20–35 t/s** in practice
-
-### Model selection in `models.txt`
-
-```
-[ollama]
-qwen3:8b              65536     0.25   # fits entirely in 8GB VRAM, very fast
-qwen3:14b             65536     0.25   # may fit with reduced context
-
-[llamacpp]
-qwen3-35b-a3b-q4_k_m  65536     0.25   # main coder, expert offload
-qwen3-coder-30b-a3b-q4_k_m  65536     0.25   # coding-tuned variant
-gpt-oss-20b-q4_k_m    65536     0.25   # MXFP4, ~12GB, ~3.6B active, great tool calling
-```
-
-Edit `models.txt`, then run `./lab setup` (or `./lab pull`).
+The default development cycle is **doc → test → code → commit**. See [`docs/workflows.md`](docs/workflows.md). Do not skip stages or reorder them without a ticket explaining why.
 
 ---
 
-## Quick start (new machine)
-
-**Requirements:** Arch/CachyOS (other distros: install Docker, the NVIDIA container
-toolkit, and the usual build tools), working NVIDIA driver, `sudo` for the one-time setup.
-The VM harness will replace this host-Docker setup when #41 lands.
+## Setup
 
 ```bash
 git clone <this-repo> little-mester
 cd little-mester
 
-# One-time setup: installs Docker + GPU toolkit, builds images, pulls models
+# One-time setup: install Docker + GPU toolkit, build images, pull models
 ./lab setup
 
-# Verify sandbox properties (network isolation, caps, etc.)
+# Verify sandbox properties (network isolation, capabilities, etc.)
 ./verify-lab.sh
 
 # Create a project workspace
-mkdir -p workspaces/demo
-cd workspaces/demo
+mkdir -p workspaces/my-project
+cd workspaces/my-project
 git init
 
-# Start the agent (opencode by default)
-./lab workspaces/demo
+# Start the agent
+./lab .
 ```
+
+**Requirements:** Docker with GPU support (`nvidia-smi` works on host), `sudo`, and a working GPU driver. Other distros and GPU vendors may need adjustments to `./lab setup` — see [`docs/`](docs/).
+
+Hardware configuration lives in [`machine.conf.example`](machine.conf.example). Copy it to `machine.conf` (gitignored) and fill in your specs. The benchmark tools use it to suggest optimal starting points.
 
 ---
 
 ## Everyday use
 
 ```bash
-./lab <workspace>               # start opencode (default agent)
-./lab --aider    <workspace>    # use Aider for this session
-./lab --agent opencode <path>   # explicitly pick opencode
-./lab <workspace> --help        # all flags: --unsafe-recurse, --egress, --isolated…
-./lab shell <workspace>         # plain bash inside the sandbox (non-root)
-./lab stop                      # stop Docker compose
-./verify-lab.sh                 # re-run after any change to compose.yaml / Dockerfile
-./lab pull                      # re-pull models after editing models.txt
-./lab build                     # rebuild agent image after config changes
+./lab <workspace>                   # start opencode (default agent)
+./lab --aider    <workspace>        # use Aider for this session
+./lab shell <workspace>             # plain bash inside the sandbox
+./lab stop                          # stop all containers
+./lab pull                          # re-pull models after editing models.txt
+./lab build                         # rebuild agent image
+./verify-lab.sh                     # re-verify sandbox guarantees
 ```
 
-`<workspace>` can be a single repo, or a parent folder holding several repos. The
-launcher refuses `/`, `$HOME`, anything you don't own, anything overlapping `~/.ssh`,
-`~/.config`, and **by default** any path that would expose this lab repo itself (use
-`--unsafe-recurse` to override).
+`<workspace>` can be a single repo or a parent folder holding several repos. The launcher refuses `/`, `$HOME`, sensitive paths (`~/.ssh`, `~/.config`, etc.), and by default any path that would expose the little-mester repo itself.
 
-### Workspace management
+### Key flags
 
-The `lab` script enforces strict path rules to ensure security.
-
-- **Valid paths**: must be an absolute path (or relative to the current dir) pointing
-  to a directory you own.
-- **Invalid paths**: `/`, `$HOME`, anything overlapping `~/.ssh`, `~/.config`, or the
-  `little-mester` repo itself.
-- **Multi-repo workspaces**: you can point `./lab` at a parent folder containing
-  multiple git repos. The agent will see all files in that tree.
-
-**Tip**: create a dedicated folder for your experiments:
-
-```bash
-mkdir -p workspaces/my-experiment
-cd workspaces/my-experiment
-git init
-```
-
-### Self-modification (`--unsafe-recurse`)
-
-When you want the agent to edit little-mester itself:
-
-```bash
-cd <path-to-little-mester-checkout>
-./lab --unsafe-recurse    # allows opencode to read/write the current directory
-```
-
-You do not need to append `.` — it is implicit when using `--unsafe-recurse`.
-
-This is off by design — it tells the agent "I know what I'm doing." Without
-`--unsafe-recurse`, the guard always blocks self-mapping. This makes recursive
-improvement possible **without making it the default**.
-
----
-
-## Ticket engine (`little-mester-mcp`)
-
-A lightweight, MCP-first ticketing system. Tickets are plain JSON files on disk
-(`docs/tickets/ticket-NNN.json`) with a tiny rebuildable index (`_index.json`) — no
-SQLite, no WASM, no migrations.
-
-Two equivalent front-ends share one engine (`src/engine.ts`):
-
-- **CLI** — `little-mester-mcp/scripts/ticket-engine` (source: `little-mester-mcp/src/cli.ts`)
-- **MCP server** — tools named `mester_tickets_*` (source: `little-mester-mcp/src/mcp-server.ts`)
-
-```bash
-# Create, list, update, archive
-./little-mester-mcp/scripts/ticket-engine create --area infra --type feature \
-  --ac "CI runs on every push" --ac "Failures block merge" \
-  --test-needed "workflow smoke test" --priority major "Add CI pipeline"
-./little-mester-mcp/scripts/ticket-engine list --area infra --status active
-./little-mester-mcp/scripts/ticket-engine update 12 --status active --comment "Started work"
-./little-mester-mcp/scripts/ticket-engine update 12 --ac-status A1=passing \
-  --ac-evidence "A1=.github/workflows/ci.yml run 123"
-./little-mester-mcp/scripts/ticket-engine archive 12
-
-# Inspect the audit trail and validate the store
-./little-mester-mcp/scripts/ticket-engine audit
-./little-mester-mcp/scripts/ticket-engine validate
-```
-
-**Structural enforcement (important):**
-
-- All ticket writes **must** go through the engine (CLI or MCP tools). Never hand-edit
-  `ticket-NNN.json`, `_index.json`, or `_audit.json`.
-- Every ticket **must** have at least one acceptance criterion and a
-  `{needed, created, cases}` test ledger. Criteria are structured (`id`, `text`,
-  `status`, `evidence`, `note`) — not prose in the objective or a comment.
-- A transient lock (`.engine.lock`) protects each write window; stale locks from dead
-  processes are detected by PID and can be cleared safely.
-- Every engine write appends one lean entry to `_audit.json` with a SHA-256 hash of the
-  entry. Editing the audit log is detectable.
-- Ticket files that exist on disk but have no audit entry are **orphans**. They are
-  flagged for human review and **never auto-deleted** (fail-open). A human decides
-  whether to adopt them (`audit --baseline`) or remove them.
-
-The full rationale and invariants are in
-[`docs/tickets/architecture/DECISIONS.md`](docs/tickets/architecture/DECISIONS.md) §I–J,
-the product rule is in [`docs/DECISIONS.md`](docs/DECISIONS.md) §C.3–C.5, and usage is in
-[`little-mester-mcp/docs/README.md`](little-mester-mcp/docs/README.md)
-and [`little-mester-mcp/docs/CLI.md`](little-mester-mcp/docs/CLI.md).
-
-### Ticket engine build and package check
-
-```bash
-cd little-mester-mcp
-npm ci
-npm run build          # tsc → dist/
-npm run check:package  # entry points, CLI --help, tarball contents
-npm test
-./scripts/ticket-engine validate
-```
-
-CI (`.github/workflows/ticket-engine.yml`) runs the same steps on Node 20 for every push
-and pull request. The ticket store is validated after the build, and the job fails if any
-step mutates tracked files.
-
----
-
-## Model management
-
-### Adding / changing models
-
-1. Edit `models.txt` (see format above)
-2. Run `./lab pull` — this starts the appropriate pull service:
-   - `ollama-pull` for `[ollama]` models (downloads from Ollama registry)
-   - `llamacpp-pull` for `[llamacpp]` models (downloads GGUF from HuggingFace)
-
-### Switching models at runtime
-
-**In opencode:** Use `/model <provider>/<model>`, e.g.:
-
-- `/model ollama/qwen3:8b`
-- `/model llamacpp/qwen3-35b-a3b-q4_k_m`
-
-**In Aider:** Pass `--model` when starting, or restart with a different model.
-
-### VRAM monitoring
-
-```bash
-# Host-side
-nvidia-smi -l 1
-
-# Inside agent container (via metrics sidecar)
-curl -s http://metrics:19532/summary
-# Or use the get_host_metrics tool from opencode
-```
-
-If you see the model process using **system RAM instead of VRAM**, it has fallen back to
-CPU. Reduce context, use a smaller quantization, or switch to a smaller model.
-
----
-
-## Hardware & performance tuning
-
-### Critical for sustained runs (laptop)
-
-| Setting | Why |
+| Flag | Effect |
 |---|---|
-| **Plugged in + performance profile** | Prevents throttling |
-| **dGPU in discrete/MUX mode** | Prevents 5070 routing through iGPU |
-| **Cooling stand / external fan** | **Throttling costs more than any flag** |
-| **Close browsers, Electron apps** | Frees system RAM for CPU-side experts |
-| **Don't set `mem_limit` on model container** | Agent's 8 GB limit is fine; model container needs flexibility |
+| `--agent aider\|opencode` | Pick agent for this session |
+| `--isolated` or `--egress-false` | No outbound internet |
+| `--egress-true` | Allow internet (checked against `.mester-egress`) |
+| `--unsafe-recurse` | Allow the agent to edit little-mester itself |
+| `--ro` / `--rw` | Read-only or read-write mount |
+| `--workflow <name>` | Select a workflow profile (see [`docs/workflows.md`](docs/workflows.md)) |
 
-### llama.cpp flags (in `compose.yaml`)
+### Self-editing
 
-| Flag | Purpose | Tune? |
-|---|---|---|
-| `-ngl 99` | Offload all possible layers to GPU | No |
-| `--n-cpu-moe 40` | Expert offload: start high, lower until VRAM ~7–7.4 GB | **YES** — primary tuning knob |
-| `-c 65536` | Context window (64k) | Per-model in `models.txt` |
-| `--cache-type-k q8_0 --cache-type-v q8_0` | Quantized KV cache (saves VRAM) | No |
-| `-t 8` | Threads (8–12, NOT 24 — decode is bandwidth-bound) | Benchmark with `llama-bench` |
-| `-ub 2048` | Micro-batch for faster prefill | Try 1024/2048 |
-| `--mlock` | Prevent CPU experts from paging to swap | Keep on |
-| `--parallel 1` | Single parallel slot (multiplies KV memory) | Keep 1 |
-
-### Ollama env vars (if using Ollama)
-
-```yaml
-OLLAMA_FLASH_ATTENTION: "1"
-OLLAMA_KV_CACHE_TYPE: q8_0
-OLLAMA_NUM_PARALLEL: "1"
-OLLAMA_CONTEXT_LENGTH: "65536"
-OLLAMA_MAX_LOADED_MODELS: "1"
-OLLAMA_KEEP_ALIVE: "-1"
-```
-
----
-
-## Monitoring
-
-### Metrics sidecar (runs automatically)
-
-A lightweight sidecar exposes live GPU, CPU, RAM, and temperature data from inside the
-container, so the agent has real hardware visibility without breaking the sandbox.
-
-- **Detailed JSON**: `curl -s http://metrics:19532/metrics`
-- **Quick summary**: `curl -s http://metrics:19532/summary`
-  - Example: `[2026-10-21 14:32:11] CPU load 2.1/4.3/5.8 | RAM 12.3/31.7 GB (39%) | GPU0 RTX 5070 util=87% VRAM 7.2/8.0 GB 68°C`
-- **History**: `curl -s 'http://metrics:19532/history?n=60'` → last N samples from a
-  500 ms sampler ring buffer, used by the TUI sparkline.
-- The service publishes **no host port** — `metrics` is a Docker DNS name on the
-  `internal` network.
-
-> **Agent query tool**: `get_host_metrics` is registered by the
-> [`host-metrics` plugin](agent/opencode/plugins/host-metrics/). It returns a formatted
-> report the agent can call before large model operations.
->
-> **Live TUI view**: [`host-metrics-tui`](agent/opencode/plugins/host-metrics-tui/)
-> renders a compact GPU/VRAM sparkline in the sidebar footer, expandable for detail.
->
-> **Acceptance verification**: run `./scripts/verify-metrics.sh` on the host.
-
-### Monitoring the agent
+To let the agent modify the little-mester repo:
 
 ```bash
-docker logs -f little-mester-agent-1     # agent output and errors
-docker stats little-mester-agent-1       # CPU/RAM usage
-./lab shell workspaces/my-experiment     # interactive shell inside the sandbox
+cd /path/to/little-mester
+./lab --unsafe-recurse    # allows opencode to read/write this directory
 ```
 
----
-
-## Repo map
-
-| Path | What it is | Read this |
-|---|---|---|
-| `lab` | Launcher script — validates workspace path, runs compose | [docs/workflows.md](docs/workflows.md) |
-| `compose.yaml` | Services, networks, volumes, hardening flags | — |
-| `models.txt` | Model list with `[ollama]` / `[llamacpp]` sections | — |
-| `scripts/regen-configs` | Generates `opencode.json` + updates compose from `models.txt` | — |
-| `agent/` | Agent container Dockerfile + opencode config + plugins | [agent/README.md](agent/README.md) |
-| `ollama/pull-models.sh` | Pulls Ollama models during setup | — |
-| `llamacpp/pull-models.sh` | Pulls GGUF from HuggingFace during setup | — |
-| `verify-lab.sh` | Regression tests for sandbox guarantees | [Testing](#testing) |
-| `workspaces/` | Your projects live here (gitignored) | — |
-| `docs/` | Journal, tickets, workflows, decisions | — |
-| `docs/tickets/` | Ticket JSON files + index + audit log | [DECISIONS](docs/tickets/architecture/DECISIONS.md) |
-| `little-mester-mcp/` | Ticket engine (CLI + MCP server) | [little-mester-mcp/docs/README.md](little-mester-mcp/docs/README.md) |
-| `scripts/` | Automation tools — tickets, hooks, sync | [scripts/README.md](scripts/README.md) |
-| `tests/` | Bats tests for `lab` and the TUI JSX guard | [Testing](#testing) |
-| `SECURITY.md` | Full security model, network isolation, capabilities | [Security](#security-model-brief) |
+This is off by design — it signals "I know what I'm doing." Without `--unsafe-recurse`, the guard always blocks self-mapping.
 
 ---
 
-## How a session works
-
-1. You run `./lab workspaces/demo`.
-2. `lab` resolves the path, runs safety checks, asks you to confirm the mount.
-3. `lab` runs `docker compose` with `WORKSPACE`, `LAB_UID`, `LAB_GID` against the host
-   daemon (root-owned by default). Your user needs Docker access, typically via the
-   `docker` group; the one-time setup uses `sudo` to install/configure Docker.
-4. Compose starts `ollama` + `llamacpp` (health-checked), then the `agent` container:
-   non-root, read-only fs, no caps, `/workspace` mounted rw, `egress` + `internal` by default
-   (`--isolated` for internal only).
-5. **opencode** sends prompts to `http://ollama:11434/v1` OR
-   `http://llamacpp:11434/v1` (configurable per model).
-6. The agent edits files in `/workspace`, runs commands in the container, and commits
-   via git as `little-mester-agent`.
-7. When you quit, the container is removed (`--rm`), and `lab` warns if it finds git hooks.
-8. **You review on the host** with `git log` and `git diff`.
-
-Understanding steps 5–7 *is* agentic coding: a loop where a model proposes actions, a
-program carries them out, and the results go back to the model.
-
-### Agentic workflow tips
-
-- **Context window**: the model has a limited context window. If your workspace is huge,
-  the agent may forget earlier instructions. Stage specific files with `git add` to focus it.
-- **Git hooks**: the agent writes code that runs on your host if you execute hooks (like
-  `Makefile` or `.envrc`). **Always review** these before running them.
-- **Iterative prompts**: break complex tasks into small steps. "Refactor the login
-  module" is better than "Fix the app".
-
----
-
-## Security model (brief)
-
-Full version: [SECURITY.md](SECURITY.md).
+## What the sandbox protects
 
 | Channel | Control |
 |---|---|
-| Your files | Only one bind mount/export. Path guards in `lab`. No home dir, no host Docker socket. The VM target mounts only the in-VM rootless socket when Docker access is enabled (#42). |
-| Credentials | None mounted or passed in. |
-| Network | `egress` + `internal` by default; `--isolated` leaves `internal` only. Domain-allowlist enforcement is #43. |
-| Privileges | Non-root, `cap_drop: ALL`, `no-new-privileges`, read-only root fs. Target: rootless Docker inside the VM. |
-| Resources | `mem_limit: 8g`, `pids_limit: 512` on agent. |
-| Model server exposure | No published ports. |
+| Your files | Only one bind mount. Path guards in `lab`. |
+| Network | `internal: true` network. No published ports. Egress defaults to on; filtered by `.mester-egress` or `--egress-true`. |
+| Privileges | Non-root, `cap_drop: ALL`, `no-new-privileges`, read-only root fs. |
+| Resources | Memory and PID limits on the agent container. |
 
-### What this does NOT protect against
-
-**Read this twice.**
-
-- **The agent can delete or corrupt everything inside the mounted workspace, `.git`
-  included.** Keep backups or push to a remote *before* sessions.
-- **Traps that run on your host later.** Git hooks, `Makefile`, `package.json` scripts,
-  `.envrc`, `.vscode/tasks.json`, shell scripts written by the agent run with *your*
-  privileges if you execute them. **Read agent-written code before running it on the host.**
-- **Container escape.** In the current host-Docker mode, containers share the host kernel.
-  A kernel/runtime vuln could break out. Unlikely from a local model making mistakes, but
-  real against deliberately hostile code. The target VM harness (#35) moves the agent into
-  a disposable VM with rootless Docker, which raises this bar; it is still not a
-  security-audited product.
-- **Docker group = root.** Anyone who can run `docker` on the host can effectively become
-  root there. The current mode requires host Docker access (group or `sudo`); the one-time
-  setup uses `sudo` rather than silently adding you to the group. The VM target does not
-  use the host Docker daemon for the agent at all.
-- **Bad output.** A sandboxed agent can still write wrong or insecure code. Review it.
+Full details: [SECURITY.md](SECURITY.md).
 
 ---
 
-## Design decisions and trade-offs
+## Workflows
 
-| Decision | Why | Cost |
-|---|---|---|
-| Dual backend (Ollama + llama.cpp) | Learning, comparison, best tool per model | More complex compose, two pull services |
-| llama.cpp with `--n-cpu-moe` for MoE | Only way to run 35B-A3B on 8 GB VRAM efficiently | Requires GGUF download from HF, not Ollama registry |
-| Egress enabled by default, isolatable | Package installs and web work out of the box | The agent can send data out unless `--isolated`; domain allowlist enforcement is #43 |
-| One-shot pull services on separate network | Keeps internet out of long-lived services | Extra services to understand |
-| Docker over Podman | Most docs/tooling assume it; compose compatibility is the priority | Host daemon runs as root today; the VM target uses rootless Docker under a dedicated user (#35). Rootless Podman remains future scope (#46). |
-| Agent commits as `little-mester-agent` | Easy to audit/revert agent changes | None |
-| Q4_K_M quantization | Speed/quality sweet spot; Q6/Q8 slows decode ~2x | Slight quality loss vs Q8 |
-| Context = 64k (not 196k) | 196k forces layers off GPU, kills prefill speed | Less context for huge files |
-| `small_model = model` | Prevents eviction thrashing on title/summary calls | Slightly more VRAM for small tasks |
-| JSON tickets + rebuildable index | No SQLite/migrations; files are the source of truth | Index must be kept in sync (validate catches drift) |
-| Engine-only writes + audit trail | Makes bypasses visible and reviewable | Slightly more machinery per write |
+The [`docs/workflows.md`](docs/workflows.md) file describes these in detail:
 
----
-
-## Testing
-
-> **Testing context:** run tests from a working checkout, not the main repo.
->
-> **Shell compatibility:** commands run identically in bash and fish. Use `;` as a
-> separator (works in both); fish users should use `$status` not `$?`.
-
-This project uses [Bats](https://bats-core.readthedocs.io/) for unit-testing the `lab`
-launcher, and Jest for the ticket engine.
-
-### Prerequisites
-
-```bash
-# Arch/CachyOS
-sudo pacman -S bats
-
-# macOS
-brew install bats-core
-```
-
-### Running the sandbox tests (host)
-
-```fish
-bats tests/
-```
-
-Regression checks include: valid workspace path acceptance, rejection of sensitive paths
-(`$HOME`, `$HOME/.ssh`, …), ownership verification, git-hook warning detection, and the
-TUI JSX rules.
-
-Documentation drift check (also called by `./verify-lab.sh`):
-
-```fish
-python3 scripts/check-docs-consistency.py
-```
-
-It fails when `SECURITY.md`/`README.md` disagree with `compose.yaml` about the egress
-default or the agent's memory/PID limits, when the root `DECISIONS.md` grows back into a
-second log, or when a local markdown link no longer resolves.
-
-### Ticket engine tests
-
-```fish
-cd little-mester-mcp && npm test
-```
-
-### Agent tests (inside the sandbox)
-
-1. Ensure your workspace is set up (e.g. `workspaces/demo`).
-2. Start a session: `./lab workspaces/demo`
-3. Ask the agent to run the test suite.
-4. It executes `./run-tests.sh`, which safely invokes `bats` inside the container via
-   `./lab exec`.
-
----
-
-## Troubleshooting
-
-| Symptom | Likely cause / Fix |
+| Workflow | When to use |
 |---|---|
-| `nvidia-smi` fails on host | Driver problem. RTX 50-series needs open kernel modules. Fix first. |
-| `docker run --gpus all ... nvidia-smi` fails | NVIDIA container toolkit not configured. `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker` |
-| `ollama ps` / llama.cpp shows CPU fallback | Model + context doesn't fit in VRAM. Lower context, smaller quantization, or smaller model. |
-| Agent can't reach model server | Server not healthy yet, or services not on same network. Check `docker compose ps`. |
-| Files created by agent owned by root | `LAB_UID`/`LAB_GID` not passed. Run via `./lab`, not `docker compose` directly. |
-| Agent stalls trying to reach internet | Check `--isolated` and `.mester-egress` (`permission=false` denies egress). A non-empty `allowed_domains` is not enforced yet (#43). |
-| llama.cpp fails to start | Check the GGUF file exists in the `llamacpp-models` volume. Check `docker logs llamacpp`. |
-| Out of memory (OOM) on host | Too many apps open. Close browsers. Check `docker stats`. |
-| Throttling / low t/s | **Cooling!** Check temps in metrics. Fan/stand mandatory for sustained load. |
-| `validate` reports orphan ticket files | A ticket was written outside the engine. Review it, then `audit --baseline` to adopt or remove it deliberately. Never delete blindly. |
-| `validate` reports a stale lock | A previous engine process crashed. Remove `docs/tickets/.engine.lock` (check the PID first). |
+| **Pair programming** (default) | Agent writes code you review. Most common mode. |
+| **Chat** | Ask questions, explore code, get explanations. |
+| **Teaching/Learning** | Agent explains concepts, walks through patterns. |
+| **Testing** | Agent writes and runs tests against your codebase. |
+| **Ticket-driven** | Create tickets first, implement incrementally. |
+
+Select a workflow with `--workflow <name>`.
 
 ---
 
-## Learning path
+## Where to go from here
 
-Do these in order. Each has its own README with goals, exercises, and "you should be able
-to explain" questions.
-
-1. Get the sandbox running and make `./verify-lab.sh` pass. Read [SECURITY.md](SECURITY.md).
-2. Use opencode (or `--agent aider`) on a small project. Review every diff. Journal what
-   the model gets right and wrong.
-3. Build your own agent loop: `my-agent/` (planned).
-4. Measure it: `evals/` (planned).
-5. Attack it: `red-team/` (planned).
-6. Add controlled web access: `proxy/` (planned).
-7. Add tool servers: `mcp/` (planned).
-
-Keep `docs/journal.md` updated throughout. **What broke and why is the most valuable
-thing you'll produce here.**
+| What you need | Go to |
+|---|---|
+| **Getting started** | [docs/DECISIONS.md](docs/DECISIONS.md) §A · [Workflows](docs/workflows.md) |
+| Design decisions & trade-offs | [docs/DECISIONS.md](docs/DECISIONS.md) §K |
+| Security caveats (what's NOT protected) | [docs/DECISIONS.md](docs/DECISIONS.md) §L · [SECURITY.md](SECURITY.md) |
+| Testing policy & ticket workflow | [docs/testing.md](docs/testing.md) |
+| Ticket schema & workflow decisions | [docs/ticketing.md](docs/ticketing.md) |
+| OpenCode customisation | [docs/opencode.md](docs/opencode.md) |
+| GitHub Actions / CI decisions | [docs/github-actions.md](docs/github-actions.md) |
+| Ticket engine internals | [docs/tickets/architecture/DECISIONS.md](docs/tickets/architecture/DECISIONS.md) |
+| Scripts reference | [scripts/README.md](scripts/README.md) |
+| Agent container details | [agent/README.md](agent/README.md) |
+| MCP server docs | [little-mester-mcp/docs/README.md](little-mester-mcp/docs/README.md) |
 
 ---
 
-## Glossary
-
-- **Agent**: Program that loops: ask the model what to do, do it, show the model the result.
-- **Tool call**: Structured request from the model like "run `read_file` with path=x".
-- **Context window**: How much text the model can consider at once. Costs VRAM.
-- **Quantization**: Storing model weights at lower precision to fit in less memory.
-- **Prompt injection**: Untrusted text (README, web page, issue) that tries to give the model instructions.
-- **Bind mount**: Host folder made visible inside a container.
-- **Capabilities**: Slices of root's power in Linux. Dropped to zero here.
-- **MoE (Mixture of Experts)**: Architecture where only a subset of parameters ("experts") are active per token.
-- **Expert offload (`--n-cpu-moe`)**: llama.cpp feature to keep inactive experts in system RAM, only active experts on GPU.
-- **GGUF**: Model file format used by llama.cpp (single file, contains all weights + metadata).
-- **KV cache**: Key-Value cache storing attention state for each token. Grows with context length.
-- **Orphan ticket**: A `ticket-NNN.json` on disk with no entry in the engine's audit log. Flagged for human review; never auto-deleted.
-- **Baseline**: A one-time audit entry that adopts pre-existing tickets into the audit trail when enforcement is first enabled.
+*The agent runs inside a Docker container. Your workspace is bind-mounted at `/workspace`. The model servers (Ollama + llama.cpp) run in separate containers on an internal network. Egress is on by default (filtered by `.mester-egress`); use `--isolated` to disable or `--egress-true` for unconditional allow.*

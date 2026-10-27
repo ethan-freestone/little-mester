@@ -92,9 +92,10 @@ fi
 # Strip the ROOT prefix from each path.
 REL_PATHS=()
 for p in "${FILES[@]}"; do
-  REL_PATHS+=( "${p#$ROOT/}" )
+  REL_PATHS+=( "${p#"$ROOT"/}" )
 done
 
+# shellcheck disable=SC2094
 {
 cat <<'HEADER'
 # Workspace Collation – Complete File Collection
