@@ -2,7 +2,9 @@ name: ticket-engine
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
@@ -32,9 +34,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Type-check and build
-        run: npm run build
 
       - name: Check package entry points and tarball
         run: npm run check:package

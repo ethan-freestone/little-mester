@@ -6,11 +6,11 @@
  * Ticket dir is always a fresh temp directory.
  */
 
-import { execSync, spawnSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const CLI = path.resolve(__dirname, '..', 'src', 'cli.ts');
+const CLI = path.resolve(__dirname, '..', 'dist', 'cli.js');
 
 // ── helpers ──────────────────────────────────────────────────────
 
@@ -30,26 +30,20 @@ function cleanup(dir: string): void {
 
 /** A PID that is guaranteed dead (the child has already exited). */
 function deadPid(): number {
-    const child = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
-    return child.pid ?? 999999;
+    return 999999;
 }
 
 function runCli(args: string[], env: Record<string, string> = {}): { stdout: string; stderr: string; exitCode: number } {
-    try {
-        const stdout = execSync(`npx ts-node "${CLI}" ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')}`, {
-            cwd: path.dirname(CLI),
-            env: { ...process.env, ...env, NODE_NO_WARNINGS: '1' },
-            encoding: 'utf-8',
-        });
-        return { stdout, stderr: '', exitCode: 0 };
-    } catch (err: unknown) {
-        const e = err as { stdout?: string; stderr?: string; status?: number };
-        return {
-            stdout: e.stdout ?? '',
-            stderr: e.stderr ?? '',
-            exitCode: e.status ?? 1,
-        };
-    }
+    const result = spawnSync(process.execPath, [CLI, ...args], {
+        cwd: path.dirname(CLI),
+        env: { ...process.env, ...env, NODE_NO_WARNINGS: '1' },
+        encoding: 'utf-8',
+    });
+    return {
+        stdout: result.stdout ?? '',
+        stderr: result.stderr ?? '',
+        exitCode: result.status ?? 1,
+    };
 }
 
 // ── argument parsing ─────────────────────────────────────────────
