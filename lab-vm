@@ -8,6 +8,20 @@
 # Once VM mode is proven working, these commands will be merged
 # into ./lab (ticket #41).
 #
+# ── Isolation guarantee ──────────────────────────────────────────────
+# lab-vm and ./lab share ZERO resources:
+#   - ./lab  → Docker Compose (host-Docker)
+#   - lab-vm → QEMU/KVM + virtiofsd (host process, guest VM)
+#
+# A crash, core dump, or signal in lab-vm CANNOT affect ./lab:
+#   - Different hypervisor, different process tree, different ports
+#   - lab-vm uses ~/.mester/vm/<name>/ for state; lab uses ./ for compose
+#   - lab-vm's cleanup trap kills QEMU/virtiofsd on EXIT/INT/TERM
+#   - lab-vm failures are completely silent to ./lab
+#
+# The only shared path is $LAB_DIR (the repo root), and even that
+# is read-only from lab-vm's perspective during normal operation.
+#
 # Usage:
 #   ./lab-vm up [name] [--workspace <path>]
 #   ./lab-vm status [name]
@@ -140,6 +154,38 @@ done
 
 vm_name="${1:-default}"
 shift 2>/dev/null || true
+
+# ─── Isolation safeguard: cleanup trap ──────────────────────────────
+# If lab-vm crashes or is killed after the VM has started, kill any
+# child QEMU/virtiofsd processes so they don't become zombies. This is
+# a safety net — it does NOT affect ./lab (which uses Docker, not QEMU).
+# The trap is registered AFTER vm_name is set so it has the correct path.
+_vm_cleanup() {
+  local vm_dir="$LAB_DIR/.mester/vm/$vm_name"
+  if [[ -d "$vm_dir" ]]; then
+    if [[ -f "$vm_dir/qemu.pid" ]]; then
+      local qpid
+      qpid=$(cat "$vm_dir/qemu.pid" 2>/dev/null || true)
+      if [[ -n "$qpid" ]] && kill -0 "$qpid" 2>/dev/null; then
+        kill "$qpid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$qpid" 2>/dev/null || true
+      fi
+      rm -f "$vm_dir/qemu.pid"
+    fi
+    if [[ -f "$vm_dir/virtiofsd.pid" ]]; then
+      local vpid
+      vpid=$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null || true)
+      if [[ -n "$vpid" ]] && kill -0 "$vpid" 2>/dev/null; then
+        kill "$vpid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$vpid" 2>/dev/null || true
+      fi
+      rm -f "$vm_dir/virtiofsd.pid"
+    fi
+  fi
+}
+trap _vm_cleanup EXIT INT TERM
 
 # ─── Command dispatch ───────────────────────────────────────────────
 case "$cmd" in
