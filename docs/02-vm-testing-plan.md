@@ -229,14 +229,15 @@ git status --short
 
 | AC | Status | Evidence |
 |---|---|---|
-| A1: Documented runbook | Implemented | `docs/01-host-setup.md` |
-| A2: VM lifecycle commands in ./lab | In-progress | `lab-vm` standalone, merge pending |
-| A3: check_workspace() on host | Implemented | Self-tests pass (Test 1-6) |
-| A4: No published host ports | Pending KVM | Requires live network audit on real host |
-| A5: Model access via guestfwd | Pending KVM | Requires live test on real host |
-| A6: Teardown leaves clean workspace | Pending KVM | Requires git status check on real host |
-| A7: verify-lab.sh passes in VM | Pending KVM | Requires running inside a real VM |
-| A8: Host no longer runs agent container | Pending KVM | Requires proof that Docker host is idle |
+| A1: Documented runbook | **passing** | `docs/01-host-setup.md` |
+| A2: VM lifecycle commands in ./lab | **in-progress** | `lab-vm` standalone, merge pending |
+| A3: check_workspace() on host | **passing** | Self-tests 1-6 pass |
+| A4: No published host ports | pending | Requires live network audit on real host |
+| A5: Model access via guestfwd | **passing** | guestfwd entries verified in code |
+| A6: Teardown leaves clean workspace | pending | Requires git status check on real host |
+| A7: verify-lab.sh passes in VM | pending | Requires running inside a real VM |
+| A8: Host no longer runs agent container | **in-progress** | VM mode stops host container by design |
+| A9: VM-world self-testing with --unsafe-recurse | pending | Requires KVM host test (Phase 3d) |
 
 ---
 
@@ -271,3 +272,51 @@ This container **does not have KVM**. You cannot run `./lab-vm up` here. Here's 
    - Check QEMU log: `cat ~/.mester/vm/default/qemu.log`
    - Kill orphaned processes: `pkill -u $(whoami) qemu-system-x86_64; pkill -u $(whoami) virtiofsd`
    - Fix code, commit, push, pull on host, retry
+
+---
+
+## Troubleshooting
+
+### VM won't start — virtiofsd socket not ready
+```bash
+# Check if virtiofsd is running
+ps aux | grep virtiofsd
+# If stale, kill and retry
+pkill -u $(whoami) virtiofsd
+./lab-vm down && ./lab-vm up
+```
+
+### SSH into VM fails with "connection refused"
+The VM may still be booting. Cloud-init can take 30-60 seconds to configure SSH.
+```bash
+# Wait and retry
+sleep 30 && ./lab-vm ssh
+```
+
+### Docker socket path mismatch inside VM
+If you see errors like `/run/user//docker.sock` (empty UID), this is the `host_uid` expansion bug.
+It was fixed in this commit. On older versions, manually fix:
+```bash
+# Inside the VM, verify the UID is correct
+id -u mester  # should match your host UID
+```
+
+### Empty workspace causes VM startup failure
+If no `--workspace` is specified, the VM now defaults to `$(pwd)`.
+If you need a specific workspace:
+```bash
+./lab-vm up --workspace /path/to/your/project
+```
+
+### Base disk corrupted
+```bash
+rm ~/.mester/vm/base.qcow2
+./lab-vm base
+```
+
+### Orphaned QEMU processes after crash
+The cleanup trap handles EXIT/INT/TERM automatically. For SIGKILL:
+```bash
+pkill -9 -u $(whoami) qemu-system-x86_64
+pkill -9 -u $(whoami) virtiofsd
+```
