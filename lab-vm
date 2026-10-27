@@ -472,6 +472,11 @@ case "$cmd" in
     echo "---- $pass passed, $fail failed ----"
     [[ $fail -eq 0 ]]
     ;;
+  --help|-h)
+    echo ""
+    usage
+    exit 0
+    ;;
   *)
     echo "Unknown command: $cmd" >&2
     echo ""
