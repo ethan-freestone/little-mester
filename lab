@@ -164,6 +164,7 @@ check_egress_permission() {
 
 confirm() {
   [[ "${LAB_YES:-}" == "1" ]] && return 0
+  [[ "${PERMISSIONS:-}" == "auto" ]] && return 0
   local perm="${PERMISSIONS:-default}"
   echo "--------------------------------------------------------"
   echo " Mounting path : $WORKSPACE"

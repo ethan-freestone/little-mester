@@ -48,21 +48,19 @@ _vm_start() {
   local overlay_disk="$5"
   local ssh_host_key_pub="$6"
 
-  # Get SSH ephemeral host-forward port
+  # Get SSH ephemeral host-forward port (find first free port in range)
   local ssh_port
   log_verbose "Finding free SSH port in range 20000-30000..."
-  ssh_port=$(comm -23 <(seq 20000 30000 | sort) <(ss -tlnH 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -un) | head -1)
-  if [[ -z "$ssh_port" ]]; then
+  for p in $(seq 20000 20100); do
+    if ! ss -tln 2>/dev/null | grep -qE ":[[:space:]]*${p}$|:[[:space:]]*0\.0\.0\.0:${p}$|:[[:space:]]*\*:${p}$|:[[:space:]]*\[::\]:${p}$"; then
+      ssh_port=$p
+      log_verbose "Found free port: $p"
+      break
+    fi
+  done
+  if [[ -z "${ssh_port:-}" ]]; then
     ssh_port=20000
-    log_verbose "No port found via comm; scanning 20000-30000 for free port..."
-    # Fallback loop to find a free port
-    for p in $(seq 20000 30000); do
-      if ! ss -tlnH 2>/dev/null | grep -q ":${p} "; then
-        ssh_port=$p
-        log_verbose "Found free port: $p"
-        break
-      fi
-    done
+    log_verbose "No free port found in 20000-20100; defaulting to $ssh_port"
   fi
   log ">>> Starting VM '$vm_name' (SSH port: $ssh_port)"
 
