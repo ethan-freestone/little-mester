@@ -449,6 +449,22 @@ is for decisions that outlive any single ticket.
 The `docs/VM-TESTING-PLAN.md` created during this session was moved into ticket-041 as
 AC; the file was deleted.
 
+#### C.9.10 Log rotation — last 5 runs in `.mester/logs/` (2026-10-27)
+
+**Decision:** Both `./lab` and `./lab-vm` rotate their stdout/stderr logs, keeping the
+last 5 timestamped runs in `$LAB_DIR/.mester/logs/`. Logs are gitignored by the
+`.mester/` pattern in `.gitignore`.
+
+Implementation: each script defines `rotate_logs()` which creates the log directory,
+generates a timestamped filename, and prunes to 5 files. The script then uses
+`exec 1> >(tee -a "$LOG_FILE")` and `exec 2> >(tee -a "$LOG_FILE" >&2)` to tee all
+output to both stdout and the log file.
+
+**Why:** Without log rotation, repeated runs accumulate indefinitely in the repo or
+get lost when the container is recreated. A 5-run window captures enough history for
+debugging while keeping disk usage bounded. The `.mester/logs/` path ensures logs are
+never committed by accident.
+
 ---
 
 ### C.8 VM harness topology, transport and isolation (2026-10-26)
@@ -1284,4 +1300,42 @@ standalone TUI through a pty and asserts Ctrl+D is inert, `yq` types with the di
 opens the dialog, Esc/N/Ctrl+C cancel without exiting, and q exits. It passed on OpenCode 2.1.4 in
 the agent container; the run is recorded on ticket #37. The image must be rebuilt/restarted for the
 baked `/etc/opencode` copy to replace any stale running copy.
+
+### J.11 Auto-accept: remove hardcoded permission block, rely on `--auto` CLI flag (2026-10-27)
+
+**Decision:** Remove the hardcoded `"permission": {"edit": "ask", "bash": "ask"}` block from
+`agent/opencode/opencode.json` and from `scripts/regen-configs`. Use the `opencode --auto`
+CLI flag at runtime to control permission mode, NOT config file modification.
+
+**Why:** The `opencode.json` config file is baked into the Docker image and sets permissions
+as a default. When the config file explicitly specifies `"ask"`, the `--auto` CLI flag does
+not override it — the config takes precedence. This makes `--auto` unusable for per-run
+permission control.
+
+Three rejected alternatives:
+
+| Approach | Why rejected |
+|----------|-------------|
+| `sed` live-patch of `opencode.json` before/after agent run | Modifies a tracked config file at runtime; leaves artifacts; race condition on restore |
+| `OPENCODE_CLI_CONFIG_CONTENT` env var override in `--env` | Overwrites the entire CLI config (plugins, keybinds); fragile — any future config change breaks the override |
+| Regenerate `opencode.json` with `regen-configs` per-run | Heavyweight; requires Python; breaks the "agent-only" loop since regen-configs touches config files outside the agent |
+
+**Chosen approach:**
+- Remove the `"permission"` block from the baked config. OpenCode's **default** (when no
+  `permission` block is present) is `ask` for tools that don't explicitly allow themselves.
+- In `./lab`, add `--auto-accept` / `-y` flag (alias for `--auto`). When set and
+  `AGENT=opencode`, run `opencode --auto "$@"` instead of just `$AGENT "$@"`.
+- Same pattern in `./lab-vm` for the `--auto-accept` alias on `lab-vm up`.
+- No config files are modified at runtime. No env var overrides. Clean and reversible.
+
+**Runtime behavior:**
+| Invocation | Permission mode | How |
+|---|---|---|
+| `./lab <workspace>` (no flags) | `ask` (default) | No hardcoded block → OpenCode's default `ask` |
+| `./lab --auto-accept <workspace>` | `auto` | `--auto` CLI flag overrides the default |
+| `./lab-vm up --auto-accept` | `auto` | Same `--auto` flag passed inside the VM |
+
+**Files changed:** `agent/opencode/opencode.json`, `scripts/regen-configs`, `./lab`,
+`./lab-vm` (the `--auto-accept` flag alias wiring). The Dockerfile is **not** changed —
+it already sets `OPENCODE_CLI_CONFIG_CONTENT` for plugins/keybinds, which is unaffected.
 

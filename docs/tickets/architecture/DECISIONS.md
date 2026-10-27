@@ -535,6 +535,23 @@ summary, search includes criterion text, and `validate` returns `quality` in
 
 ## K. VM harness boundaries (2026-10-26)
 
+### K.1 QEMU overlay disk must use `direct-sync` for `aio=native` (2026-10-27)
+
+**Decision:** The QEMU command in `lib/vm/runner.sh` must append `direct-sync` to the
+overlay disk drive arguments (after `format=qcow2,overlay=base_disk`).
+
+**Why:** The QEMU command uses `aio=native` for performance. Linux `aio=native` requires
+`cache.direct=on`. The overlay qcow2 format's `direct-sync` cache mode satisfies this
+requirement. Without it, QEMU refuses to start with the error:
+
+```
+aio=native was specified, but it requires cache.direct=on
+```
+
+This is a one-line fix in the drive args string in `lib/vm/runner.sh`.
+
+---
+
 **Decision:** The agent runs in a Docker container inside a local, `./lab`-managed
 QEMU/KVM VM, not on the host. Rootless Docker runs under a dedicated VM user. The selected
 workspace is shared with virtiofs; model servers stay on the host and are reached only
