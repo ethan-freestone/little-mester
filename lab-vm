@@ -160,7 +160,7 @@ VM lifecycle commands (epic #35, ticket #41):
   ./lab-vm test
       Run self-tests: validate prerequisites, workspace guard, disk/ISO creation.
 
-Flags:
+Flags (any order):
   --unsafe-recurse     Allow workspace to be inside the little-mester repo
   --base-size <GiB>    Base disk size in GiB (default: 20)
   -y, --yes            Auto-accept all prompts (same as VM_YES=1)
@@ -184,26 +184,76 @@ References:
 EOF
 }
 
-# ─── Parse arguments ────────────────────────────────────────────────
+# ─── Parse arguments in any order ───────────────────────────────────
+# Extract known global flags from any position, identify cmd + vm_name
+# as the first two non-flag arguments (skipping flag-pair values).
+# shellcheck disable=SC2034
 cmd="${1:-help}"
 shift 2>/dev/null || true
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --unsafe-recurse) VM_UNSAFE_RECURSE=1; shift ;;
-    --base-size)      VM_BASE_SIZE="${2:?--base-size needs a value}"; shift 2 ;;
-    --workspace)      VM_WS_ARG="${2:?--workspace needs a path}"; shift 2 ;;
-    -y|--yes|--auto-accept) VM_YES=1; LAB_YES=1; shift ;;
-    --clean)                VM_CLEAN=1; shift ;;
-    -v|--verbose)     VM_VERBOSE=1; shift ;;
-    -d|--debug)       VM_VERBOSE=1; VM_DEBUG=1; shift ;;
-    -h|--help)        usage; exit 0 ;;
-    *)                break ;;
+# ── 1. Extract known global flags from $@ ──────────────────────────
+_flags=()
+for _i in "$@"; do
+  case "$_i" in
+    --unsafe-recurse)         VM_UNSAFE_RECURSE=1 ;;
+    --base-size|--workspace)  ;; # value consumed next iteration
+    -y|--yes|--auto-accept)   VM_YES=1; LAB_YES=1 ;;
+    --clean)                  VM_CLEAN=1 ;;
+    -v|--verbose)             VM_VERBOSE=1 ;;
+    -d|--debug)               VM_VERBOSE=1; VM_DEBUG=1 ;;
+    --help|-h)                ;;
+    *) ;; # not a global flag
+  esac
+  _flags+=("$_i")
+done
+
+# ── 2. Resolve value-attached flags (--base-size, --workspace) ─────
+for ((_fi=0; _fi<${#_flags[@]}; _fi++ )); do
+  case "${_flags[$_fi]}" in
+    --base-size)    VM_BASE_SIZE="${_flags[$((_fi+1))]:-${VM_BASE_SIZE:-20}}"; _fi=$(( _fi+1 )) ;;
+    --workspace)    VM_WS_ARG="${_flags[$((_fi+1))]}"; _fi=$(( _fi+1 )) ;;
   esac
 done
 
-vm_name="${1:-default}"
-shift 2>/dev/null || true
+# ── 3. Ensure defaults if env vars not set ─────────────────────────
+: "${VM_BASE_SIZE:=${VM_BASE_SIZE:-20}}"
+: "${VM_YES:=${VM_YES:-0}}"
+: "${LAB_YES:=${LAB_YES:-0}}"
+
+# ── 4. Find cmd (first non-flag) and vm_name (second non-flag) ─────
+remaining=()
+for (( _fi=0; _fi<${#_flags[@]}; _fi++ )); do
+  case "${_flags[$_fi]}" in
+    -h|--help) ;;
+    --base-size|--workspace) _fi=$(( _fi + 1 )) ;; # skip flag-pair
+    --unsafe-recurse|--clean) ;;
+    -v|--verbose|-d|--debug) ;;
+    -y|--yes|--auto-accept) ;;
+    --*) ;; # unknown flag
+    *) remaining+=("${_flags[$_fi]}") ;;
+  esac
+done
+
+_cmd_found=0
+vm_name="default"
+
+for (( _fi=0; _fi<${#remaining[@]}; _fi++ )); do
+  if [[ $_cmd_found -eq 0 ]]; then
+    cmd="${remaining[$_fi]}"
+    _cmd_found=1
+  elif [[ $_cmd_found -eq 1 ]]; then
+    vm_name="${remaining[$_fi]}"
+    break
+  fi
+done
+
+# Check for --help/-h among flags
+for _hf in "${_flags[@]}"; do
+  if [[ "$_hf" == "--help" || "$_hf" == "-h" ]]; then
+    cmd="--help"
+    break
+  fi
+done
 
 # ─── Prerequisite check (auto-install on demand) ────────────────────
 # Only runs for commands that actually need the tools.
