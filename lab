@@ -23,6 +23,7 @@ NO_CACHE=0
 # Load user config if present (gitignored; put your real identity here)
 if [[ -f "$LAB_DIR/.little-mester.conf" ]]; then
   set -a
+  # shellcheck disable=SC1091
   source "$LAB_DIR/.little-mester.conf"
   set +a
 fi
@@ -118,6 +119,7 @@ check_egress_permission() {
 
   # Read manifest values (supports inline comments with #)
   local perm domains intent
+  # shellcheck disable=SC2034
   while IFS='=' read -r key value; do
     # Strip leading/trailing whitespace and comments
     key="$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^#' || true)"
@@ -164,7 +166,9 @@ confirm() {
 }
 
 print_verbose() {
-  [[ "$VERBOSE" == "1" ]] && echo "[verbose] $*" >&2 || true
+  if [[ "$VERBOSE" == "1" ]]; then
+    echo "[verbose] $*" >&2
+  fi
 }
 
 warn_hooks() {
@@ -189,6 +193,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       --egress) EGRESS="${2:?--egress needs true/false}"; shift 2 ;;
       --egress-false|--isolated) EGRESS="false"; shift ;;
       --egress-true) EGRESS="true"; shift ;;
+      # shellcheck disable=SC2034
       --permissions) PERMISSIONS="${2:?--permissions needs deny/ask/auto}"; shift 2 ;;
       --unsafe-recurse) UNSAFE_RECURSE=1; shift ;;
       --no-cache) NO_CACHE=1; shift ;;
@@ -321,7 +326,7 @@ HELPTEXT
         [[ -n "$NATIVE_CTX" ]]       && local_env+="CONTEXT=$NATIVE_CTX "
 
         echo ">> Running native benchmark (zero HTTP overhead)..."
-        env $local_env dc run --rm bench
+        env "$local_env" dc run --rm bench
       else
         # ── HTTP mode: lightweight container, no GPU ───────────────────────
         echo ">> Building bench image (cached)${NO_CACHE:+ (no cache)}..."

@@ -73,5 +73,5 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - run: ./scripts/ticket-engine validate
+      - run: little-mester-mcp/scripts/ticket-engine validate
       - run: git diff --exit-code

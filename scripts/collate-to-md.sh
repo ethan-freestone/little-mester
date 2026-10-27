@@ -92,7 +92,7 @@ fi
 # Strip the ROOT prefix from each path.
 REL_PATHS=()
 for p in "${FILES[@]}"; do
-  REL_PATHS+=( "${p#$ROOT/}" )
+  REL_PATHS+=( "${p#"$ROOT"/}" )
 done
 
 {
@@ -167,6 +167,7 @@ for rel in "${REL_PATHS[@]}"; do
   fi
 
 done
+# shellcheck disable=SC2094
 } > "$OUTPUT"
 
 echo "Wrote $OUTPUT ($(wc -l < "$OUTPUT") lines, $(stat --printf='%s' "$OUTPUT") bytes)."
