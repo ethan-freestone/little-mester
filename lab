@@ -167,6 +167,8 @@ check_egress_permission() {
 
 confirm() {
   [[ "${LAB_YES:-}" == "1" ]] && return 0
+  [[ "${AUTO_ACCEPT:-0}" == "1" ]] && return 0
+  [[ "${VM_YES:-0}" == "1" ]] && return 0
   [[ "${PERMISSIONS:-}" == "auto" ]] && return 0
   local perm="${PERMISSIONS:-default}"
   echo "--------------------------------------------------------"
@@ -228,7 +230,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   # ─── Log rotation + tee (last 5 runs) ──────────────────────────────
   LOG_FILE="$LAB_DIR/.mester/logs/lab_$(date '+%Y%m%d_%H%M%S').log"
   mkdir -p "$LAB_DIR/.mester/logs"
-  local -a old
+
   mapfile -t old < <(ls -1t "$LAB_DIR/.mester/logs"/lab_*.log 2>/dev/null || true)
   if (( ${#old[@]} > 4 )); then
     rm -f "${old[@]:4}"

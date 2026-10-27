@@ -84,6 +84,7 @@ _vm_prereqs_map_packages() {
           qemu-img)            _map_required["qemu-img"]="qemu" ;;
           virtiofsd)           _map_required["virtiofsd"]="libvirt" ;;
           genisoimage|mkisofs) _map_required["genisoimage"]="cdrtools" ;;
+          ssh|ssh-keyscan)     _map_required["ssh"]="openssh" ;;
         esac
       done
       if [[ ! -f /usr/share/OVMF/OVMF.fd ]]; then
@@ -157,7 +158,7 @@ _vm_prereqs_fix_virtiofsd_path() {
 _vm_prereqs_detect_missing() {
   local _c
   local _c2
-  for _c in qemu-system-x86_64 qemu-img virtiofsd; do
+  for _c in qemu-system-x86_64 qemu-img virtiofsd ssh ssh-keyscan; do
     command -v "$_c" >/dev/null 2>&1 || echo "$_c"
   done
   # genisoimage or mkisofs — report only if neither exists
