@@ -131,13 +131,15 @@ METADATA
 
   # --- Generate ISO ─────────────────────────────────────────────
   if command -v genisoimage >/dev/null 2>&1; then
-    genisoimage -output "$seed_iso" -V cidata -jolio "$seed_dir/meta-data" "$seed_dir/user-data" 2>&1
+    log_verbose "Generating cloud-init ISO with genisoimage..."
+    genisoimage -output "$seed_iso" -V cidata -joliet "$seed_dir/meta-data" "$seed_dir/user-data" 2>&1
   elif command -v mkisofs >/dev/null 2>&1; then
-    mkisofs -output "$seed_iso" -V cidata -jolio "$seed_dir/meta-data" "$seed_dir/user-data" 2>&1
+    log_verbose "Generating cloud-init ISO with mkisofs..."
+    mkisofs -output "$seed_iso" -V cidata -joliet "$seed_dir/meta-data" "$seed_dir/user-data" 2>&1
   else
-    echo "ERROR: Neither genisoimage nor mkisofs found. Install one to generate cloud-init ISO." >&2
+    log "ERROR: Neither genisoimage nor mkisofs found. Install one to generate cloud-init ISO."
     return 1
   fi
 
-  echo "Seed ISO created: $seed_iso"
+  log "Seed ISO created: $seed_iso"
 }

@@ -13,29 +13,21 @@
 #   vm_run_stop <vm_dir>
 #   vm_run_status <vm_dir>    # prints "running" or "stopped"
 
-set -euo pipefail
-
-: "${LAB_DIR:=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")/..")" && pwd)}"
-
-# PIDs for cleanup
-VM_PID=""
-VIRTIOFSD_PID=""
-
 # ─── Prerequisite checks ────────────────────────────────────────────
 _vm_check_prereqs() {
   local missing=0
-  for cmd in qemu-system-x86_64 qemu-img; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-      echo "ERROR: $cmd not found. Install QEMU packages." >&2
+  for _cmd in qemu-system-x86_64 qemu-img; do
+    if ! command -v "$_cmd" >/dev/null 2>&1; then
+      log "ERROR: $_cmd not found. Install QEMU packages."
       missing=1
     fi
   done
   if ! command -v virtiofsd >/dev/null 2>&1; then
-    echo "ERROR: virtiofsd not found. Install libvirt-daemon-config-network or spice-vdagent." >&2
+    log "ERROR: virtiofsd not found. Install libvirt-daemon-config-network or spice-vdagent."
     missing=1
   fi
   if ! command -v cloud-localds >/dev/null 2>&1 && ! command -v genisoimage >/dev/null 2>&1 && ! command -v mkisofs >/dev/null 2>&1; then
-    echo "ERROR: cloud-localds, genisoimage, or mkisofs not found." >&2
+    log "ERROR: cloud-localds, genisoimage, or mkisofs not found."
     missing=1
   fi
   [[ $missing -eq 1 ]] && return 1
@@ -58,19 +50,21 @@ _vm_start() {
 
   # Get SSH ephemeral host-forward port
   local ssh_port
+  log_verbose "Finding free SSH port in range 20000-30000..."
   ssh_port=$(comm -23 <(seq 20000 30000 | sort) <(ss -tlnH 2>/dev/null | awk '{print $4}' | grep -oE '[0-9]+$' | sort -un) | head -1)
   if [[ -z "$ssh_port" ]]; then
     ssh_port=20000
+    log_verbose "No port found via comm; scanning 20000-30000 for free port..."
     # Fallback loop to find a free port
     for p in $(seq 20000 30000); do
       if ! ss -tlnH 2>/dev/null | grep -q ":${p} "; then
         ssh_port=$p
+        log_verbose "Found free port: $p"
         break
       fi
     done
   fi
-
-  echo ">>> Starting VM '$vm_name' (SSH port: $ssh_port)"
+  log ">>> Starting VM '$vm_name' (SSH port: $ssh_port)"
 
   # ── Start virtiofsd (workspace export) ───────────────────────────
   local virtiofs_sock="$vm_dir/virtiofs.sock"
@@ -83,21 +77,25 @@ _vm_start() {
     --rlimit-nofile=1048576 \
     --announce-submounts \
     -f /dev/null &
-  VIRTIOFSD_PID=$!
-  echo "virtiofsd started (PID: $VIRTIOFSD_PID)"
+  local _virtiofsd_pid=$!
+  log_verbose "virtiofsd started (PID: $_virtiofsd_pid, socket: $virtiofs_sock)"
 
   # Wait for virtiofsd socket
   for i in $(seq 1 30); do
     [[ -S "$virtiofs_sock" ]] && break
     sleep 0.5
   done
-  [[ -S "$virtiofs_sock" ]] || { echo "ERROR: virtiofsd socket not ready"; return 1; }
+  [[ -S "$virtiofs_sock" ]] || { log "ERROR: virtiofsd socket not ready after 15s"; return 1; }
 
   # ── Build QEMU command ───────────────────────────────────────────
-  local kvm_flag="-enable-kvm"
-  if ! _vm_kvm_available; then
-    kvm_flag=""
-    echo "WARNING: /dev/kvm not available — running in TCG (CPU emulation) mode"
+  local kvm_flag=""
+  local machine_accel="tcg"
+  if _vm_kvm_available; then
+    kvm_flag="-enable-kvm"
+    machine_accel="kvm"
+    log_verbose "KVM acceleration available"
+  else
+    log "WARNING: /dev/kvm not available — running in TCG (CPU emulation) mode"
   fi
 
   # ── Determine BIOS (must be outside the array since || is a shell
@@ -105,6 +103,7 @@ _vm_start() {
   local bios_opt=""
   if [[ -f /usr/share/OVMF/OVMF.fd ]]; then
     bios_opt="-bios /usr/share/OVMF/OVMF.fd"
+    log_verbose "Using OVMF UEFI BIOS"
   fi
 
   local cmdline=(
@@ -142,40 +141,40 @@ _vm_start() {
     # Stop on crash
     -no-reboot
 
-    # Machine type
-    -machine type=q35,accel=kvm
+    # Machine type — accel is conditional (kvm when available, tcg fallback)
+    -machine type=q35,accel=$machine_accel
 
     # BIOS (OVMF) — conditional; SeaBIOS is the fallback
     $bios_opt
-
-    # Work as a daemon
-    -daemonize
-    -pidfile "$vm_dir/qemu.pid"
   )
 
-  "${cmdline[@]}" 2>"$vm_dir/qemu.log" &
-  VM_PID=$!
-  disown $VM_PID 2>/dev/null || true
+  log_debug "QEMU command: ${cmdline[*]}"
 
-  echo "QEMU started (PID: $VM_PID, log: $vm_dir/qemu.log)"
-  echo "$VM_PID" > "$vm_dir/qemu.pid"
+  # Start QEMU in background (&); capture PID from $! (not -daemonize).
+  # All output (stdout + stderr) goes to the log file for inspection.
+  "${cmdline[@]}" >> "$vm_dir/qemu.log" 2>&1 &
+  local _qemu_pid=$!
+
+  log "QEMU started (PID: $_qemu_pid, log: $vm_dir/qemu.log)"
+  echo "$_qemu_pid" > "$vm_dir/qemu.pid"
 
   # Save SSH port for later
   echo "$ssh_port" > "$vm_dir/ssh_port"
-  echo "$VIRTIOFSD_PID" > "$vm_dir/virtiofsd.pid"
+  echo "$_virtiofsd_pid" > "$vm_dir/virtiofsd.pid"
 
   # ── Wait for SSH to become available ─────────────────────────────
-  echo "Waiting for SSH..."
+  log "Waiting for SSH..."
   for i in $(seq 1 60); do
+    log_verbose "SSH check attempt $i/60..."
     if ssh-keyscan -p "$ssh_port" -H 127.0.0.1 2>/dev/null | grep -q ssh-ed25519; then
       ssh-keyscan -p "$ssh_port" -H 127.0.0.1 2>/dev/null > "$vm_dir/known_hosts"
-      echo "SSH ready on 127.0.0.1:$ssh_port"
+      log "SSH ready on 127.0.0.1:$ssh_port"
       return 0
     fi
     sleep 1
   done
 
-  echo "ERROR: SSH not ready after 60s. Check $vm_dir/qemu.log" >&2
+  log "ERROR: SSH not ready after 60s. Check $vm_dir/qemu.log"
   return 1
 }
 
@@ -188,7 +187,7 @@ _vm_stop() {
     local pid
     pid=$(cat "$vm_dir/qemu.pid")
     if kill -0 "$pid" 2>/dev/null; then
-      echo "Stopping QEMU (PID: $pid)..."
+      log "Stopping QEMU (PID: $pid)..."
       kill "$pid" 2>/dev/null || true
       for i in $(seq 1 15); do
         kill -0 "$pid" 2>/dev/null || break
@@ -204,7 +203,7 @@ _vm_stop() {
     local pid
     pid=$(cat "$vm_dir/virtiofsd.pid")
     if kill -0 "$pid" 2>/dev/null; then
-      echo "Stopping virtiofsd (PID: $pid)..."
+      log "Stopping virtiofsd (PID: $pid)..."
       kill "$pid" 2>/dev/null || true
       for i in $(seq 1 5); do
         kill -0 "$pid" 2>/dev/null || break
@@ -218,7 +217,7 @@ _vm_stop() {
   # Clean up stale socket
   rm -f "$vm_dir/virtiofs.sock" "$vm_dir/mgmt.sock"
 
-  echo "VM stopped."
+  log "VM stopped."
 }
 
 # ─── Check VM status ────────────────────────────────────────────────

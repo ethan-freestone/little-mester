@@ -5,6 +5,9 @@
 # prompts the user before installing anything. Optional components
 # (KVM, UEFI BIOS) fall back gracefully without prompting.
 #
+# Auto-accept: if VM_YES=1 (via -y / --yes flag or env var), the
+# install prompt is skipped and packages are installed automatically.
+#
 # Usage: source this file, then call _vm_prereqs_check
 #   returns 0 = all good
 #   returns 1 = missing required deps (install prompted)
@@ -88,9 +91,9 @@ _vm_prereqs_map_packages() {
       fi
       ;;
     *)
-      echo "WARNING: Unsupported package manager ($_map_pkg_mgr). Cannot auto-install." >&2
-      echo "Please install these manually:" >&2
-      for _dep in "${_map_missing[@]}"; do echo "  - $_dep"; done
+      log "WARNING: Unsupported package manager ($_map_pkg_mgr). Cannot auto-install."
+      log "Please install these manually:"
+      for _dep in "${_map_missing[@]}"; do log "  - $_dep"; done
       return 1
       ;;
   esac
@@ -142,7 +145,7 @@ _vm_prereqs_fix_virtiofsd_path() {
     if [[ ! -f /usr/local/bin/virtiofsd ]]; then
       sudo ln -sf "$_found" /usr/local/bin/virtiofsd
     fi
-    echo "Fixed: virtiofsd -> $_found (symlinked to /usr/local/bin/)" >&2
+    log "Fixed: virtiofsd -> $_found (symlinked to /usr/local/bin/)"
     return 0
   fi
 
@@ -203,26 +206,29 @@ _vm_prereqs_install() {
   echo "  genisoimage/mkisofs - Cloud-init seed ISO generation"
   echo ""
 
-  read -r -p "Install these packages? [y/N] " _inst_choice
-  if [[ "$_inst_choice" != [yY] && "$_inst_choice" != [yY][eE][sS] ]]; then
-    echo "Aborted. Install manually and re-run." >&2
-    return 1
+  # Respect VM_YES for auto-accept (ticket #48, A7-A8)
+  if [[ "${VM_YES:-0}" != "1" ]]; then
+    read -r -p "Install these packages? [y/N] " _inst_choice
+    if [[ "$_inst_choice" != [yY] && "$_inst_choice" != [yY][eE][sS] ]]; then
+      log "Aborted. Install manually and re-run."
+      return 1
+    fi
+  else
+    echo "Auto-accept enabled (VM_YES=1) — installing without prompt."
   fi
 
   echo "Installing..."
 
   if ! command -v sudo >/dev/null 2>&1; then
-    echo "" >&2
-    echo "ERROR: sudo is not found. Cannot auto-install packages." >&2
-    echo "" >&2
-    echo "Please install the following manually:" >&2
-    echo "" >&2
-    echo "  Required packages: ${_all_pkgs[*]}" >&2
-    echo "" >&2
-    echo "  Debian/Ubuntu:  sudo apt-get install ${_all_pkgs[*]}" >&2
-    echo "  Fedora/RHEL:    sudo dnf install ${_all_pkgs[*]}" >&2
-    echo "  Arch/Manjaro:   sudo pacman -S ${_all_pkgs[*]}" >&2
-    echo "" >&2
+    log "ERROR: sudo is not found. Cannot auto-install packages."
+    log ""
+    log "Please install the following manually:"
+    log "  Required packages: ${_all_pkgs[*]}"
+    log ""
+    log "  Debian/Ubuntu:  sudo apt-get install ${_all_pkgs[*]}"
+    log "  Fedora/RHEL:    sudo dnf install ${_all_pkgs[*]}"
+    log "  Arch/Manjaro:   sudo pacman -S ${_all_pkgs[*]}"
+    log ""
     return 1
   fi
 
@@ -241,7 +247,7 @@ _vm_prereqs_install() {
       sudo pacman -S --noconfirm "${_all_pkgs[@]}"
       ;;
     *)
-      echo "ERROR: Cannot install on $_inst_pkg_mgr (unsupported)." >&2
+      log "ERROR: Cannot install on $_inst_pkg_mgr (unsupported)."
       return 1
       ;;
   esac
@@ -256,7 +262,7 @@ _vm_prereqs_install() {
 _vm_prereqs_check() {
   local _check_cmd="${1:-}"
 
-  echo "Checking VM prerequisites..."
+  log "Checking VM prerequisites..."
 
   # Auto-fix: on Arch/CachyOS virtiofsd lives at /usr/lib/qemu/ not on PATH
   _vm_prereqs_fix_virtiofsd_path || true
@@ -265,16 +271,16 @@ _vm_prereqs_check() {
   _check_missing="$(_vm_prereqs_detect_missing)"
 
   if [[ -z "$_check_missing" ]]; then
-    echo "All VM dependencies found. OK"
+    log "All VM dependencies found. OK"
     return 0
   fi
 
-  echo "Some dependencies are missing:"
+  log "Some dependencies are missing:"
   local _dep
   while IFS= read -r _dep; do
-    echo "  - $_dep"
+    log "  - $_dep"
   done <<< "$_check_missing"
-  echo ""
+  log ""
 
   return 1
 }

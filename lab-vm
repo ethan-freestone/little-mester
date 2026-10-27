@@ -29,6 +29,7 @@
 #   ./lab-vm down [name]
 #   ./lab-vm stop [name]
 #   ./lab-vm base [name]
+#   ./lab-vm rebuild [name]
 #
 # Epic #35 | Sub-ticket #41
 
@@ -36,7 +37,37 @@ set -euo pipefail
 
 LAB_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 
-# ─── Workspace validation (copied from ./lab) ───────────────────────
+# ─── Verbosity levels ───────────────────────────────────────────────
+# VM_DEBUG=2 > VM_VERBOSE=1 > VM_VERBOSE=0 (default)
+#
+# --verbose / -v : extra progress info (SSH commands, qemu/virtiofsd
+#                  output, genisoimage stdout, port discovery)
+# --debug / -d   : everything from --verbose plus raw command output,
+#                  timing, and internal variable values
+#
+# ─── Auto-accept ────────────────────────────────────────────────────
+# -y / --yes     : auto-accept all prompts (same as LAB_YES=1 / VM_YES=1)
+VM_YES="${VM_YES:-${LAB_YES:-0}}"
+VM_VERBOSE=0
+VM_DEBUG=0
+
+# ─── Logging helpers ────────────────────────────────────────────────
+# log      — always printed (normal status lines)
+# log_verbose — printed with -v or -d
+# log_debug  — printed with -d only
+
+log() { echo "$@"; }
+
+log_verbose() {
+  [[ $VM_VERBOSE -ge 1 ]] && echo "[verbose] $@"
+}
+
+log_debug() {
+  [[ $VM_DEBUG -ge 1 ]] && echo "[debug] $(date '+%H:%M:%S') $@"
+}
+
+# Export for sourced library files
+export VM_VERBOSE VM_DEBUG
 # check_workspace: guards path selection before it's exported to the VM.
 # Refuses: /, $HOME, the lab repo (without --unsafe-recurse),
 # sensitive credential directories ($HOME/.ssh, $HOME/.config, etc.)
@@ -120,15 +151,25 @@ VM lifecycle commands (epic #35, ticket #41):
   ./lab-vm base [name]
       Create the base disk image (one-time, ~20 GiB).
 
+  ./lab-vm rebuild [name]
+      Delete and recreate the base disk (destructive, requires confirmation).
+      Removes overlay disk as well. A new base is created in its place.
+
   ./lab-vm test
       Run self-tests: validate prerequisites, workspace guard, disk/ISO creation.
 
 Flags:
   --unsafe-recurse     Allow workspace to be inside the little-mester repo
   --base-size <GiB>    Base disk size in GiB (default: 20)
+  -y, --yes            Auto-accept all prompts (same as VM_YES=1)
+  -v, --verbose        Extra progress info (SSH commands, qemu/virtiofsd output)
+  -d, --debug          Everything from --verbose plus raw output and timing
 
 Environment:
   VM_BASE_SIZE         Override default base disk size (default: 20)
+  VM_YES=1 / LAB_YES=1 Auto-accept all prompts (same as --yes)
+  VM_VERBOSE=1         Equivalent to --verbose
+  VM_DEBUG=1           Equivalent to --debug (implies --verbose)
 
 Per-VM state is stored at: ./.mester/vm/<name>/
 
@@ -148,6 +189,9 @@ while [[ $# -gt 0 ]]; do
     --unsafe-recurse) VM_UNSAFE_RECURSE=1; shift ;;
     --base-size)      VM_BASE_SIZE="${2:?--base-size needs a value}"; shift 2 ;;
     --workspace)      VM_WS_ARG="${2:?--workspace needs a path}"; shift 2 ;;
+    -y|--yes)         VM_YES=1; LAB_YES=1; shift ;;
+    -v|--verbose)     VM_VERBOSE=1; shift ;;
+    -d|--debug)       VM_VERBOSE=1; VM_DEBUG=1; shift ;;
     -h|--help)        usage; exit 0 ;;
     *)                break ;;
   esac
@@ -161,7 +205,7 @@ shift 2>/dev/null || true
 # status, ssh, and test don't need anything.
 _prereqs_needed=0
 case "$cmd" in
-  base|up|stop|down) _prereqs_needed=1 ;;
+  base|up|stop|down|rebuild) _prereqs_needed=1 ;;
 esac
 
 if [[ $_prereqs_needed -eq 1 ]]; then
@@ -233,6 +277,9 @@ case "$cmd" in
     ;;
   base)
     vm_cmd_base "$vm_name"
+    ;;
+  rebuild)
+    vm_cmd_rebuild "$vm_name"
     ;;
   test)
     # ── Self-tests (runnable on any host, including non-KVM) ──────

@@ -18,11 +18,11 @@ vm_disk_create_base() {
   local base_disk="$1"
   local size="${2:-$VM_BASE_SIZE}"
 
-  [[ -f "$base_disk" ]] && { echo "Base disk already exists: $base_disk"; return 0; }
+  [[ -f "$base_disk" ]] && { log "Base disk already exists: $base_disk"; return 0; }
 
   mkdir -p "$(dirname "$base_disk")"
   qemu-img create -f qcow2 "$base_disk" "${size}G"
-  echo "Base disk created: $base_disk (${size}G)"
+  log "Base disk created: $base_disk (${size}G)"
 }
 
 vm_disk_create_overlay() {
@@ -31,27 +31,27 @@ vm_disk_create_overlay() {
   local size="${3:-$VM_BASE_SIZE}"
 
   if [[ -f "$overlay_disk" ]]; then
-    echo "Overlay already exists: $overlay_disk"
+    log "Overlay already exists: $overlay_disk"
     return 0
   fi
 
   if [[ ! -f "$base_disk" ]]; then
-    echo "ERROR: Base disk not found: $base_disk" >&2
+    log "ERROR: Base disk not found: $base_disk"
     return 1
   fi
 
   mkdir -p "$(dirname "$overlay_disk")"
   qemu-img create -f qcow2 -b "$base_disk" -F qcow2 "$overlay_disk" "${size}G"
-  echo "Overlay created: $overlay_disk (backing: $(basename "$base_disk"))"
+  log "Overlay created: $overlay_disk (backing: $(basename "$base_disk"))"
 }
 
 vm_disk_delete() {
   local disk="$1"
   if [[ -f "$disk" ]]; then
     rm -f "$disk"
-    echo "Disk deleted: $disk"
+    log "Disk deleted: $disk"
   else
-    echo "Disk not found (skipping): $disk"
+    log "Disk not found (skipping): $disk"
   fi
 }
 

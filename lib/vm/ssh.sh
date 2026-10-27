@@ -19,12 +19,12 @@ vm_ssh_init_keys() {
   local host_key="$vm_dir/id_vm_control"
 
   if [[ -f "$host_key" ]]; then
-    echo "SSH key already exists: $host_key (reusing)"
+    log "SSH key already exists: $host_key (reusing)"
     return 0
   fi
 
   ssh-keygen -t ed25519 -f "$host_key" -N '' -C "mester-vm-control" -q
-  echo "SSH key pair generated: $host_key"
+  log "SSH key pair generated: $host_key"
 }
 
 vm_ssh_get_host_key() {
@@ -33,7 +33,7 @@ vm_ssh_get_host_key() {
   if [[ -f "${host_key}.pub" ]]; then
     cat "${host_key}.pub"
   else
-    echo "ERROR: SSH host key not found. Run vm_ssh_init_keys first." >&2
+    log "ERROR: SSH host key not found. Run vm_ssh_init_keys first."
     return 1
   fi
 }
@@ -42,5 +42,5 @@ vm_ssh_clean() {
   local vm_dir="$1"
   rm -f "$vm_dir/id_vm_control" "$vm_dir/id_vm_control.pub"
   rm -f "$vm_dir/known_hosts"
-  echo "SSH keys cleaned: $vm_dir"
+  log "SSH keys cleaned: $vm_dir"
 }

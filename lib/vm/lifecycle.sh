@@ -25,6 +25,13 @@ source "$LAB_DIR/lib/vm/disk.sh"
 source "$LAB_DIR/lib/vm/ssh.sh"
 source "$LAB_DIR/lib/vm/runner.sh"
 
+# ─── Logging helpers (sourced from lab-vm's main script) ────────────
+# If log() is not defined by the caller, provide no-op stubs so
+# library files can safely call them without errors.
+: "${log:=echo}"
+: "${log_verbose:=:}"
+: "${log_debug:=:}"
+
 # ─── Resolve VM name and directory ──────────────────────────────────
 _vm_resolve() {
   local name="${1:-default}"
@@ -341,18 +348,74 @@ vm_cmd_stop() {
   vm_cmd_down "$vm_name"
 }
 
+# ─── vm rebuild: remove and recreate base disk ───────────────────────
+vm_cmd_rebuild() {
+  local vm_name="${1:-default}"
+  local base_disk="$VM_DIR_BASE/base.qcow2"
+
+  # Safety: never proceed without explicit confirmation
+  if [[ -f "$base_disk" ]]; then
+    local size
+    size=$(du -sh "$base_disk" 2>/dev/null | awk '{print $1}' || echo '?')
+    echo "=== VM Rebuild: $vm_name ==="
+    echo ""
+    echo "WARNING: This will DELETE the base disk and all data inside it."
+    echo "  Base disk: $base_disk ($size)"
+    echo ""
+    echo "A new base disk will be created in its place. Any running"
+    echo "VMs must be stopped first (./lab-vm down)."
+    echo ""
+
+    # Respect VM_YES for auto-accept (ticket #48, A7-A8)
+    if [[ "${VM_YES:-0}" != "1" ]]; then
+      read -r -p "Proceed with rebuild? [y/N] " _rebuild_choice
+      if [[ "$_rebuild_choice" != [yY] && "$_rebuild_choice" != [yY][eE][sS] ]]; then
+        log "Rebuild cancelled."
+        return 0
+      fi
+    else
+      echo "Auto-accept enabled (VM_YES=1) — proceeding."
+    fi
+  fi
+
+  # Stop any running VMs that use this base disk
+  local vm_dir
+  vm_dir="$(_vm_resolve "$vm_name")"
+  if echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    log "VM '$vm_name' is running. Stopping it first..."
+    vm_run_stop "$vm_dir"
+  fi
+
+  # Remove base disk (and any existing overlay that depends on it)
+  if vm_disk_exists "$base_disk"; then
+    log "Removing base disk: $base_disk"
+    vm_disk_delete "$base_disk"
+  fi
+  # Remove overlay if it exists (it references the old base)
+  local overlay_disk="$vm_dir/disk.qcow2"
+  if vm_disk_exists "$overlay_disk"; then
+    log "Removing overlay disk: $overlay_disk"
+    vm_disk_delete "$overlay_disk"
+  fi
+
+  # Recreate base disk
+  echo "Creating new base disk image ($VM_BASE_SIZE GiB)..."
+  vm_disk_create_base "$base_disk" "${VM_BASE_SIZE:-20}"
+  echo "Base disk recreated. Next step: ./lab-vm up $vm_name"
+}
+
 # ─── vm base: create the base image (one-time) ──────────────────────
 vm_cmd_base() {
   local vm_name="${1:-default}"
   local base_disk="$VM_DIR_BASE/base.qcow2"
 
   if vm_disk_exists "$base_disk"; then
-    echo "Base disk already exists: $base_disk"
-    echo "To recreate: rm $base_disk && ./lab-vm base"
+    log "Base disk already exists: $base_disk"
+    log "To recreate: rm $base_disk && ./lab-vm base"
     return 0
   fi
 
-  echo "Creating base disk image ($VM_BASE_SIZE GiB)..."
+  log "Creating base disk image (${VM_BASE_SIZE:-20} GiB)..."
   vm_disk_create_base "$base_disk" "${VM_BASE_SIZE:-20}"
-  echo "Base disk created. Next step: ./lab-vm up $vm_name"
+  log "Base disk created. Next step: ./lab-vm up $vm_name"
 }
