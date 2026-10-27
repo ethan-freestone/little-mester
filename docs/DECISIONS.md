@@ -320,6 +320,137 @@ clone of the branch passes `npm ci`, `npm run build`, `npm run check:package`, t
 Jest suite, and `ticket-engine validate`; those results are recorded on ticket #36.
 Merge is blocked until #35's VM evidence and #36's remaining criteria are complete.
 
+### C.9 VM harness implementation details (2026-10-26)
+
+These decisions cover the `./lab-vm` scripts, `lib/vm/` modules, and the CachyOS testing
+work. They are tactical choices that don't change the topology in §C.8 but affect how the
+code is structured and what to watch for on other distros.
+
+#### C.9.1 VM state stored in-repo, not in `$HOME`
+
+**Decision:** All VM artifacts (overlay disk, seed ISO, SSH keys, virtiofs sockets, PID
+files) live under `$LAB_DIR/.mester/vm/<name>/` — inside the workspace repository, not
+`~/.mester/vm/`.
+
+**Why:** The `--unsafe-recurse` flag needs to target the repo itself. If VM state lived
+under `~/.mester/`, `--unsafe-recurse` wouldn't reach it and the agent couldn't inspect
+its own VM state. Storing in-repo keeps everything scoped to the workspace.
+
+**Consequence:** `.mester/` must be gitignored. The directory is gitignored globally
+(see `.gitignore`) so no VM state accidentally leaks to the remote. The agent can use
+`git status --short` to verify no uncommitted files remain after `down`.
+
+#### C.9.2 Prereq check runs only for state-changing commands
+
+**Decision:** The `_vm_prereqs_check()` function runs before `base`, `up`, `stop`, and
+`down`. It is skipped for `status`, `ssh`, and `test`.
+
+**Why:** `status` and `ssh` are read-only / interactive; running `pacman -S` or `apt install`
+mid-session is disruptive and unnecessary. `test` is a convenience wrapper that calls `up`
+internally, which will trigger prereqs.
+
+#### C.9.3 Distro auto-detection for package names
+
+**Decision:** `_vm_prereqs_resolve_packages()` maps each missing command to distro-specific
+package names using `/etc/os-release` (ID + VERSION_ID):
+
+| Distro | `virtiofsd` package | `qemu-img` package | `genisoimage` package |
+|---|---|---|---|
+| Debian/Ubuntu | `libvirt-daemon-system` | `qemu-utils` | `genisoimage` |
+| Fedora | `libvirt-daemon-config-nwfilter` | `qemu-img` | `genisoimage` |
+| RHEL/CentOS | `libvirt-daemon-config-nwfilter` | `qemu-img` | `genisoimage` |
+| Arch/CachyOS | `virtiofsd` | `qemu-img` | `genisoimage` |
+
+**Why:** The same command maps to different packages across distros. Hard-coding a single
+package name would break on half the distros.
+
+#### C.9.4 Loop variables prefixed with `_` to avoid caller clobbering
+
+**Decision:** All loop variables inside `lib/vm/prereqs.sh` use the `_` prefix
+(e.g. `_c`, `_c2`, `_miss`, `_clean`, `_pkg`, `_id`).
+
+**Why:** `prereqs.sh` is sourced (not executed), so its variables share the caller's
+namespace. Without the `_` prefix, a variable like `$cmd` inside the script would overwrite
+the caller's `$cmd` — and the main dispatch loop in `lab-vm` uses `$cmd` for the command
+argument. This caused silent command corruption in early iterations.
+
+#### C.9.5 `command -v` for binary detection (with Arch caveat)
+
+**Decision:** Use `command -v <name>` to check for required binaries. If a binary was
+installed but `command -v` returns nothing, the binary may live at a non-standard path
+(e.g. `/usr/lib/qemu/qemu-virtiofsd` on Arch). The fallback is to search with `find` or
+`pacman -Ql <pkg> | grep bin` to locate it, then either add a PATH extension or use the
+full path in the check.
+
+**CachyOS / Arch caveat:** The `virtiofsd` package may provide the binary as
+`/usr/lib/qemu/qemu-virtiofsd` rather than `/usr/bin/virtiofsd`. On Arch-derived distros,
+`command -v virtiofsd` will fail even though the package is installed. Workaround: check
+both `command -v virtiofsd` and `command -v qemu-virtiofsd`, or search with `find`.
+
+#### C.9.6 ISO generator: report only if *neither* exists
+
+**Decision:** `genisoimage` / `mkisofs` are reported as a pair — only if **both** are
+missing is the pair reported. If either exists, neither is flagged.
+
+**Why:** These two packages are interchangeable; the script tries `genisoimage` first and
+falls back to `mkisofs`. Reporting both when only one is missing would be redundant.
+
+#### C.9.7 Full lifecycle test sequence
+
+**Decision:** The canonical test sequence for verifying a working VM is:
+
+```
+base → up → status → ssh → [lab --unsafe-recurse] → git status --short → stop → down
+```
+
+- `base`: download/verify base image
+- `up`: start the VM
+- `status`: verify running
+- `ssh`: open interactive shell (verify cloud-init completed, Docker running)
+- `lab --unsafe-recurse`: run the agent with full workspace access
+- `git status --short`: confirm no uncommitted files (agent didn't leave artifacts)
+- `stop`: graceful shutdown
+- `down`: teardown
+
+This sequence exercises the full flow: image management, VM startup, cloud-init, SSH,
+agent execution, and clean teardown.
+
+#### C.9.8 User permission prompt before package installation
+
+**Decision:** Before running `sudo pacman -S`, `sudo apt install`, etc., the script
+prints the list of packages and prompts `[y/N]`. The default is `N` (no install).
+
+**Why:** The agent must never unilaterally install packages on the host. The user must
+explicitly confirm each installation. This is a security boundary: the VM harness is
+powerful enough to modify the host, but it asks before doing so.
+
+#### C.9.9 Ticket-level AC and procedures live on the ticket, not in separate docs
+
+**Decision:** Acceptance criteria and testing procedures that are specific to a single
+ticket belong in the ticket's `acceptance_criteria` and `tests` fields. Long-lived
+architecture decisions, topology, trade-offs, and cross-ticket patterns belong in
+`docs/DECISIONS.md` and `docs/vm-architecture.md`.
+
+**Why:** A separate testing plan doc drifts from the ticket state. When the ticket is
+closed, the doc becomes stale. Keeping procedures on the ticket means the AC status,
+evidence, and test steps are always co-located and reviewed together. The separate doc
+is for decisions that outlive any single ticket.
+
+**What goes where:**
+
+| Lives on the ticket | Lives in DECISIONS.md / vm-architecture.md |
+|---|---|
+| Per-ticket acceptance criteria with evidence | Cross-ticket architecture and topology |
+| Step-by-step testing procedures for that ticket | Design trade-off rationale |
+| Current status: pass / in-progress / pending | Rejected alternatives |
+| Session-specific notes and outcomes | Conventions and non-goals |
+| | Distro-specific implementation caveats (as reference) |
+
+The `docs/VM-TESTING-PLAN.md` created during this session was moved into ticket-041 as
+AC; the file was deleted.
+
+---
+
 ### C.8 VM harness topology, transport and isolation (2026-10-26)
 **Decision:** Little Mester runs the agent in a Docker container inside a **local,
 `./lab`-managed QEMU/KVM VM**. The host stays outside the blast radius: it runs QEMU and
