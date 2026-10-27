@@ -11,6 +11,15 @@
 
 set -euo pipefail
 
+vm_ssh() {
+  local vm_dir="$1"
+  shift
+  ssh -o BatchMode=yes -o ConnectTimeout=10 \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$vm_dir/known_hosts" \
+    -i "$vm_dir/id_vm_control" -p "$(cat "$vm_dir/ssh_port")" \
+    mester@127.0.0.1 "$@"
+}
+
 vm_ssh_init_keys() {
   local vm_dir="$1"
 

@@ -8,7 +8,7 @@
   "title": "VM provisioning and ./lab VM lifecycle",
   "objective": "Make the VM reproducible and controllable from the host: ./lab can provision or connect to the VM per #40, install Docker, transport the workspace, and run VM lifecycle commands idempotently. The host stops running the agent container itself.",
   "created_at": "2026-10-26T20:39:18.836Z",
-  "updated_at": "2026-10-27T11:53:12.057Z",
+  "updated_at": "2026-10-27T17:15:26.272Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -34,9 +34,9 @@
     },
     {
       "id": "A5",
-      "text": "Model access follows #40: host-side ollama/llamacpp are reachable only through the narrow guestfwd ports; GPU passthrough is not required, and a CPU-only host starts with the same flow and a clear message.",
-      "status": "passing",
-      "evidence": "guestfwd entries configured for 11434, 8080, 3128 (code verified; live KVM test pending)"
+      "text": "Model access follows #40: host-side ollama/llamacpp are reachable only through syntactically valid, narrow QEMU guestfwd ports; GPU passthrough is not required, and a CPU-only host starts with the same flow and a clear message.",
+      "status": "in-progress",
+      "evidence": "2026-10-27: tests/vm.bats verifies narrow cmd:socat guestfwd targets for 11434/8080/3128; extracted QEMU 10.0.13 accepted the generated netdev argument and stayed alive until an intentional timeout. Live model connectivity on the CachyOS KVM host is still required."
     },
     {
       "id": "A6",
@@ -97,6 +97,12 @@
       "id": "A17",
       "text": "A13: Stale state cleanup — manually killed QEMU, ./lab-vm status detects stale PID, ./lab-vm down cleans sockets/PIDs, no orphaned processes, fresh base+up works",
       "status": "pending"
+    },
+    {
+      "id": "A18",
+      "text": "QEMU startup uses a valid end-to-end device configuration: guestfwd destinations use QEMU character-device syntax and host loopback targets, virtiofsd is paired with vhost-user-fs-pci plus shareable guest memory, the `workspace` tag is mounted at /workspace, and an immediate QEMU exit fails fast with the real exit status and qemu.log instead of waiting for the SSH timeout.",
+      "status": "in-progress",
+      "evidence": "2026-10-27: tests/vm.bats covers cmd:socat guestfwd, vhost-user-fs-pci, shareable memfd RAM, and workspace mount tag. QEMU 10.0.13 parser test passed; generated cloud-init seed ISO was built and extracted successfully. End-to-end KVM boot remains pending."
     }
   ],
   "tests": {
@@ -110,18 +116,32 @@
       "verify-lab inside the VM",
       "docs review",
       "full lifecycle on KVM host: base → up → ssh → test → stop → down",
-      "test little-mester behavior within VM world (self-editing with --unsafe-recurse)"
+      "test little-mester behavior within VM world (self-editing with --unsafe-recurse)",
+      "QEMU argv regression test: guestfwd uses -tcp:127.0.0.1 targets for 11434/8080/3128",
+      "QEMU argv regression test: virtiofs uses vhost-user-fs-pci with shareable memory and tag=workspace",
+      "cloud-init regression test: workspace tag is mounted at /workspace",
+      "early QEMU-exit test reports status/log without waiting 60 seconds",
+      "repeat full lifecycle on CachyOS KVM host after QEMU argv fix",
+      "CachyOS KVM proof after corrected cmd:socat guestfwd and vhost-user-fs changes"
     ],
     "created": [
       "self-tests: workspace guard rejection tests",
-      "CI vm-tests job validates lab-vm on every push"
+      "CI vm-tests job validates lab-vm on every push",
+      "tests/vm.bats: QEMU guestfwd, vhost-user-fs/shareable-memory, cloud-init mount/rootless Docker, pinned image checksum, UID/GID build args, and workspace teardown regression tests",
+      "tests/test_vm_proxy.py: egress policy parsing, allowlist subdomain boundary, and private-address rejection",
+      "lab-vm self-test 8: generate a real cloud-init seed ISO with production arguments"
     ],
     "cases": [
       "check_workspace rejects /",
       "check_workspace rejects $HOME",
       "check_workspace rejects $HOME/.ssh",
       "check_workspace accepts safe directory",
-      "check_workspace with --unsafe-recurse accepts repo"
+      "check_workspace with --unsafe-recurse accepts repo",
+      "52 Bats tests passed locally on 2026-10-27",
+      "4 Python proxy tests passed locally on 2026-10-27",
+      "lab-vm self-tests passed 8/8 using extracted qemu-img and genisoimage on 2026-10-27",
+      "QEMU 10.0.13 accepted corrected cmd:socat guestfwd syntax and remained alive until intentional timeout",
+      "Generated cidata ISO contains #cloud-config, expected hostname, and runcmd"
     ]
   },
   "priority": "major",

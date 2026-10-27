@@ -8,7 +8,7 @@
   "title": "Epic: VM-based Docker agent environment (all-in-one, model-agnostic harness)",
   "objective": "Deliver an all-in-one, model-agnostic harness: point Little Mester at a directory and run an agent there, with real Docker capability for the workspace's dependencies, while keeping the agent's blast radius inside a disposable VM. The agent runs in a Docker container inside a full Linux VM (not on the host), with a Docker CLI that can run the workspace's compose files; ./lab on the host orchestrates VM lifecycle, workspace transport, the agent container and teardown. Works with local models and no subscription, and can use cloud providers (Kimi, Claude, OpenAI) when available. Includes documentation, egress and decision-log housekeeping.",
   "created_at": "2026-10-26T17:39:37.714Z",
-  "updated_at": "2026-10-26T20:50:56.495Z",
+  "updated_at": "2026-10-27T16:49:39.838Z",
   "priority": "critical",
   "comments": [
     {
@@ -140,7 +140,7 @@
     },
     {
       "id": "A15",
-      "text": "Child #45 (model-agnostic local/cloud harness) is resolved.",
+      "text": "Child #45 (model-agnostic local/cloud harness) is resolved, including the secure opt-in VM credential-forwarding configuration and proof that a fresh VM can start already connected to an available selected provider without putting secrets in the repo, workspace, seed or images.",
       "status": "pending"
     },
     {
@@ -169,7 +169,8 @@
       "negative-case suite",
       "teardown/residue check",
       "repo-integrity check",
-      "VM CI run recorded on ticket"
+      "VM CI run recorded on ticket",
+      "fresh-VM selected-provider auto-connect through #45 without secret residue"
     ],
     "created": [
       "docs/DECISIONS.md §C.6 topology decision"

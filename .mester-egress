@@ -2,6 +2,6 @@
 # Format: key=value  Lines without '=' are ignored; comments start with #
 
 permission=true     # Set to "false" to deny all internet access for the agent
-allowed_domains=pypi.org,github.com,npmjs.com,ubuntu.com,deb.debian.org  # comma-separated; blank = allow all domains
+allowed_domains=pypi.org,pythonhosted.org,github.com,npmjs.com,ubuntu.com,deb.debian.org,docker.com,docker.io,cloudflarestorage.com  # comma-separated; blank = allow all domains
 intent=install and run application dependencies; fetch packages from package repositories
 # Note: permission=false overrides all other settings. Use with caution.

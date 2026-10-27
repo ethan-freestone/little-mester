@@ -21,7 +21,7 @@ host-Docker workflow that's already working.
 
 ## Phase 1: Self-tests (CI — done ✓)
 
-**What:** `./lab-vm test` — workspace guards, disk functions, ISO generation tooling.  
+**What:** `./lab-vm test`, `bats tests`, and `python3 tests/test_vm_proxy.py` — workspace guards, CLI parsing, QEMU arguments, disk/ISO generation, and proxy policy.
 **Where:** Runs on any host, including non-KVM CI runners.  
 **Status:** Implemented in CI (`.github/workflows/ci.yml` → `vm-tests` job).
 
@@ -29,7 +29,9 @@ host-Docker workflow that's already working.
 # Run locally (any host):
 ./lab-vm test
 
-# CI runs this automatically on every push/PR.
+bats tests
+python3 tests/test_vm_proxy.py
+# CI runs these automatically on every push/PR.
 ```
 
 **Expected output:**
@@ -51,7 +53,7 @@ Test 8: cloud-init ISO generation ... [PASS|SKIP]
 
 ## Phase 2: Base disk creation (KVM host)
 
-**What:** One-time creation of the shared base qcow2 image (~20 GiB).  
+**What:** One-time download and verification of the shared Ubuntu qcow2 image (roughly 600 MiB download, resized to 20 GiB virtual capacity).
 **Where:** Your KVM-capable Linux host (not the development container).  
 **How often:** Once per host. The base disk is cached and reused across VM sessions.
 
@@ -59,27 +61,25 @@ Test 8: cloud-init ISO generation ... [PASS|SKIP]
 
 ```bash
 # 1. Ensure prerequisites are installed (see docs/01-host-setup.md)
-#    Arch:  sudo pacman -S qemu-system-x86 qemu-utils ovmf virtiofsd cloud-utils
-#    Debian: sudo apt install qemu-system-x86 ovmf virtiofsd cloud-image-utils genisoimage
+#    Arch/CachyOS: ./lab-vm -y base can install detected missing packages
+#    Debian/Ubuntu: ./lab-vm -y base can install detected missing packages
 
 # 2. Clone and enter the repo (if not already done)
 git clone <this-repo> little-mester
 cd little-mester
 
-# 3. Create the base disk (ONE TIME, ~20 GiB download + install)
+# 3. Download, checksum, and convert the base disk (ONE TIME)
 ./lab-vm base
 ```
 
 **Cache guidance:**
 - **Use cache (default):** The base disk image is downloaded and cached. Subsequent `./lab-vm base` runs on the same host are fast (the base already exists).
-- **`--no-cache` equivalent:** Delete the base disk (`rm ~/.mester/vm/base.qcow2`) to force a fresh download and install. Use this when the base image is suspected to be corrupted.
+- **Fresh base:** Run `./lab-vm rebuild --yes`. State is repository-local under `.mester/vm/`.
 
 **Expected output:**
 ```
->>> Downloading cloud image...
->>> Creating base qcow2 disk (20 GiB)...
->>> Installing cloud-init packages...
->>> Base disk created: ~/.mester/vm/base.qcow2
+Downloading pinned Ubuntu 24.04 cloud image...
+Verified bootable base disk: .../.mester/vm/base.qcow2 (20 GiB virtual)
 ```
 
 ---
@@ -94,12 +94,12 @@ cd little-mester
 
 ```bash
 # Start a new VM (idempotent — safe to re-run)
-./lab-vm up
+./lab-vm up --clean --debug --unsafe-recurse --auto-accept
 ```
 
 **Cache guidance:**
-- **Use cache (default):** Docker images inside the VM are cached across sessions.
-- **No cache inside VM:** SSH in and manually rebuild: `./lab-vm ssh` then `docker build --no-cache -t mester-agent .`
+- Re-running `up` while the VM is running is idempotent.
+- `stop`/`down` deletes the writable overlay, so a later fresh VM rebuilds the agent image; only the verified Ubuntu base is retained.
 
 ### 3b. Verify state:
 
@@ -151,8 +151,7 @@ git status --short
 # Remove all VM artifacts (overlay, seed ISO, keys)
 ./lab-vm down
 
-# Base disk is preserved — free ~20 GiB only if you want to
-# rm ~/.mester/vm/base.qcow2
+# Base disk is preserved; use ./lab-vm rebuild --yes only when replacing it
 ```
 
 ---
@@ -206,10 +205,10 @@ git status --short
 | Scenario | Cache? | Command |
 |---|---|---|
 | **Base disk creation** (first time) | N/A (nothing to cache yet) | `./lab-vm base` |
-| **Base disk creation** (recreate) | No cache | `rm ~/.mester/vm/base.qcow2 && ./lab-vm base` |
-| **VM up** (normal day) | Cache (Docker images cached in VM) | `./lab-vm up` |
-| **VM up** (after base disk rebuild) | Cache (Docker images rebuild from cached layers) | `./lab-vm up` |
-| **Fresh Docker build** inside VM | No cache | `./lab-vm ssh` then `docker build --no-cache -t mester-agent .` |
+| **Base disk creation** (recreate) | No cache | `./lab-vm rebuild --yes` |
+| **VM up** (already running) | Existing guest | `./lab-vm up` |
+| **VM up** (after `stop`/`down`) | Fresh overlay | `./lab-vm up` |
+| **Fresh agent image** | Automatic in fresh overlay | `./lab-vm up --clean` |
 | **CI pipeline** | Always no-cache for base image | Handled by CI config |
 
 ---
@@ -218,7 +217,7 @@ git status --short
 
 | Component | Resource | Impact on ./lab if broken |
 |---|---|---|
-| `lab-vm` + QEMU | `/dev/kvm`, QEMU binaries, `~/.mester/vm/` | **None** — completely separate |
+| `lab-vm` + QEMU | `/dev/kvm`, QEMU binaries, repository-local `.mester/vm/` | **None** — completely separate |
 | `./lab` + Docker Compose | Docker daemon, `compose.yaml`, `./` | **None** — VM crashes don't touch Docker |
 | Workspace mount | Shared directory (virtiofs / bind mount) | Both see the same files, but `lab`'s guard runs first |
 | `docs/tickets/` | Read by both | Neither writes directly (both use CLI/MCP) |
@@ -233,7 +232,7 @@ git status --short
 | A2: VM lifecycle commands in ./lab | **in-progress** | `lab-vm` standalone, merge pending |
 | A3: check_workspace() on host | **passing** | Self-tests 1-6 pass |
 | A4: No published host ports | pending | Requires live network audit on real host |
-| A5: Model access via guestfwd | **passing** | guestfwd entries verified in code |
+| A5: Model access via guestfwd | **in-progress** | QEMU 10.0.13 accepts the corrected `cmd:socat` arguments; live host connectivity pending |
 | A6: Teardown leaves clean workspace | pending | Requires git status check on real host |
 | A7: verify-lab.sh passes in VM | pending | Requires running inside a real VM |
 | A8: Host no longer runs agent container | **in-progress** | VM mode stops host container by design |
@@ -258,8 +257,8 @@ This container **does not have KVM**. You cannot run `./lab-vm up` here. Here's 
 3. **On your KVM-capable host (when ready):**
    ```bash
    git pull
-   ./lab-vm base      # One-time, ~20 GiB
-   ./lab-vm up        # Provision and start
+   ./lab-vm base      # One-time, roughly 600 MiB download / 20 GiB virtual
+   ./lab-vm up --clean --debug --unsafe-recurse --auto-accept
    ./lab-vm status    # Verify running
    ./lab-vm ssh       # Enter the VM
    # ... test little-mester behavior ...
@@ -269,8 +268,8 @@ This container **does not have KVM**. You cannot run `./lab-vm up` here. Here's 
 
 4. **If `./lab-vm up` fails:**
    - `./lab` is **NOT affected** — your Docker workflow continues normally
-   - Check QEMU log: `cat ~/.mester/vm/default/qemu.log`
-   - Kill orphaned processes: `pkill -u $(whoami) qemu-system-x86_64; pkill -u $(whoami) virtiofsd`
+   - Check QEMU log: `cat .mester/vm/default/qemu.log`
+   - Run `./lab-vm down` to clean managed QEMU, virtiofsd, proxy, PID, and socket state
    - Fix code, commit, push, pull on host, retry
 
 ---
@@ -310,8 +309,7 @@ If you need a specific workspace:
 
 ### Base disk corrupted
 ```bash
-rm ~/.mester/vm/base.qcow2
-./lab-vm base
+./lab-vm rebuild --yes
 ```
 
 ### Orphaned QEMU processes after crash

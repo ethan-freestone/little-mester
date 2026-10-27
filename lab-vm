@@ -16,7 +16,7 @@
 # A crash, core dump, or signal in lab-vm CANNOT affect ./lab:
 #   - Different hypervisor, different process tree, different ports
 #   - lab-vm uses $LAB_DIR/.mester/vm/<name>/ for state; lab uses ./ for compose
-#   - lab-vm's cleanup trap kills QEMU/virtiofsd on EXIT/INT/TERM
+#   - failed startup cleanup kills only the QEMU/virtiofsd/proxy it started
 #   - lab-vm failures are completely silent to ./lab
 #
 # The only shared path is $LAB_DIR (the repo root), and even that
@@ -61,11 +61,11 @@ VM_DEBUG=0
 log() { echo "$@"; }
 
 log_verbose() {
-  [[ $VM_VERBOSE -ge 1 ]] && echo "[verbose] $@"
+  if [[ $VM_VERBOSE -ge 1 ]]; then echo "[verbose] $@"; fi
 }
 
 log_debug() {
-  [[ $VM_DEBUG -ge 1 ]] && echo "[debug] $(date '+%H:%M:%S') $@"
+  if [[ $VM_DEBUG -ge 1 ]]; then echo "[debug] $(date '+%H:%M:%S') $@"; fi
 }
 
 # Export for sourced library files
@@ -151,7 +151,7 @@ VM lifecycle commands (epic #35, ticket #41):
       Teardown Docker containers in VM, verify git is clean, then down.
 
   ./lab-vm base [name]
-      Create the base disk image (one-time, ~20 GiB).
+      Download and verify the base image (about 600 MiB; 20 GiB virtual size).
 
   ./lab-vm rebuild [name]
       Delete and recreate the base disk (destructive, requires confirmation).
@@ -192,8 +192,8 @@ cmd="${1:-help}"
 shift 2>/dev/null || true
 
 # ── 1. Extract known global flags from $@ ──────────────────────────
-_flags=()
-for _i in "$@"; do
+_flags=("$cmd" "$@")
+for _i in "${_flags[@]}"; do
   case "$_i" in
     --unsafe-recurse)         VM_UNSAFE_RECURSE=1 ;;
     --base-size|--workspace)  ;; # value consumed next iteration
@@ -204,7 +204,6 @@ for _i in "$@"; do
     --help|-h)                ;;
     *) ;; # not a global flag
   esac
-  _flags+=("$_i")
 done
 
 # ── 2. Resolve value-attached flags (--base-size, --workspace) ─────
@@ -260,7 +259,7 @@ done
 # status, ssh, and test don't need anything.
 _prereqs_needed=0
 case "$cmd" in
-  base|up|stop|down|rebuild) _prereqs_needed=1 ;;
+  base|up|rebuild) _prereqs_needed=1 ;;
 esac
 
 if [[ $_prereqs_needed -eq 1 ]]; then
@@ -281,6 +280,9 @@ fi
 # a safety net — it does NOT affect ./lab (which uses Docker, not QEMU).
 # The trap is registered AFTER vm_name is set so it has the correct path.
 _vm_cleanup() {
+  # Only a failed startup owns cleanup. status/help/normal up completion must
+  # never kill a running VM. The runner sets this when it starts children.
+  [[ "${VM_STARTING:-0}" == 1 ]] || return 0
   local vm_dir="$VM_DIR_BASE/$vm_name"
   if [[ -d "$vm_dir" ]]; then
     if [[ -f "$vm_dir/qemu.pid" ]]; then
@@ -303,9 +305,15 @@ _vm_cleanup() {
       fi
       rm -f "$vm_dir/virtiofsd.pid"
     fi
+    if [[ -f "$vm_dir/proxy.pid" ]]; then
+      kill "$(cat "$vm_dir/proxy.pid")" 2>/dev/null || true
+      rm -f "$vm_dir/proxy.pid" "$vm_dir/proxy_port"
+    fi
   fi
 }
-trap _vm_cleanup EXIT INT TERM
+trap _vm_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ─── Command dispatch ───────────────────────────────────────────────
 
@@ -327,7 +335,7 @@ case "$cmd" in
     # --clean: run 'stop' then 'down' before 'up'
     if [[ $VM_CLEAN -eq 1 ]]; then
       echo "=== VM Clean: running stop (includes down) before up ==="
-      vm_cmd_stop "$vm_name" || true
+      vm_cmd_stop "$vm_name"
       echo "Clean teardown complete. Starting fresh VM..."
       echo ""
     fi
@@ -449,19 +457,19 @@ case "$cmd" in
       echo "SKIP (qemu-img not installed)"
     fi
 
-    # Test 8: ISO generation (cloud-localds or genisoimage)
+    # Test 8: generate the real cloud-init seed ISO
     echo -n "Test 8: cloud-init ISO generation ... "
-    if command -v genisoimage >/dev/null 2>&1 || command -v mkisofs >/dev/null 2>&1 || command -v cloud-localds >/dev/null 2>&1; then
-      local_test_iso=$(mktemp -d)/seed.iso
-      if vm_cloud_init_generate "$local_test_iso" 2>&1 >/dev/null || \
-         (true && rm -f "$local_test_iso"); then
-        # We can't fully test without proper args, but check the tool is available
-        echo "PASS (tool available)"
-        rm -f "$local_test_iso" 2>/dev/null
+    if command -v genisoimage >/dev/null 2>&1 || command -v mkisofs >/dev/null 2>&1; then
+      local_test_dir=$(mktemp -d)
+      if vm_cloud_init_generate "$local_test_dir/vm" test-vm 12345 12345 \
+           "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC5nKZi71f3wIkZ7O/H1QVYW2ZBL6szPqts1yWc6fD8j test" \
+           >/dev/null 2>&1 && [[ -s "$local_test_dir/vm/seed.iso" ]]; then
+        echo "PASS"
+        rm -rf "$local_test_dir"
         _pass
       else
         echo "FAIL"
-        rm -f "$local_test_iso" 2>/dev/null
+        rm -rf "$local_test_dir"
         _fail
       fi
     else

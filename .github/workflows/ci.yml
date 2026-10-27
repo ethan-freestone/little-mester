@@ -102,6 +102,9 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            qemu-utils genisoimage virtiofsd
+            qemu-utils genisoimage virtiofsd socat
       - name: Run lab-vm self-tests
-        run: ./lab-vm test
+        run: |
+          ./lab-vm test
+          bats tests/vm.bats
+          python3 tests/test_vm_proxy.py

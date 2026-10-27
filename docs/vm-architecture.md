@@ -63,19 +63,28 @@ The workspace is the data boundary, the VM is the execution boundary, and rootle
 is the privilege boundary inside the VM. A compromised agent can corrupt the workspace it
 was pointed at; that is the same authority the owner granted by choosing that directory.
 
-## 4. Lifecycle
+## 4. Target lifecycle
 
-1. `./lab <dir>` validates the path on the host, resolves the pinned base image, and
+The VM primitives currently live in standalone `./lab-vm`; merging them into `./lab` and
+launching the agent there remain ticket #41 A2. The intended integrated lifecycle is:
+
+1. `./lab-vm up --workspace <dir>` validates the path on the host, resolves the pinned base image, and
    creates `.mester/vm/<name>/` (overlay, seed, keys, sockets; gitignored).
 2. `qemu-system-x86_64` starts with KVM, the virtiofs device, SSH on a loopback ephemeral
    port, model/egress `guestfwd` entries, and `restrict=on`.
+
+The concrete QEMU wiring is `vhost-user-fs-pci` with shareable memfd-backed guest RAM and
+the mount tag `workspace`. `guestfwd` targets use QEMU's per-connection `cmd:` character
+device form (`socat` to host loopback); a bare `-10.0.2.2:PORT` target is invalid QEMU syntax.
+The egress target is a loopback-only launcher proxy that rejects private/reserved addresses
+and applies `.mester-egress`; it is not a general route to host loopback.
 3. cloud-init creates `mester`, installs Docker/compose and configures rootless mode,
    proxy settings and the workspace mount.
-4. `./lab` starts the agent container with the workspace mount and (optionally) the
-   rootless Docker socket.
+4. `lab-vm` builds the agent image in the guest. Starting that agent through the integrated
+   `./lab` VM command is still pending A2.
 5. The agent runs `docker compose` for the workspace; containers are labelled with the
    workspace path and project name.
-6. `./lab stop` runs the workspace/agent teardown, stops QEMU cleanly, and removes the
+6. `./lab-vm stop` runs the workspace/agent teardown, stops QEMU cleanly, and removes the
    overlay, seed and sockets. The base image stays cached; nothing workspace-specific does.
 
 ## 5. Deliberate non-goals

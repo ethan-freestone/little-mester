@@ -117,10 +117,8 @@ vm_cmd_up() {
   # ── 4. Create base disk if needed (one-time) ────────────────────
   if ! vm_disk_exists "$base_disk"; then
     echo "Creating base disk image..."
-    vm_disk_create_base "$base_disk" "${VM_BASE_SIZE:-20}"
-  else
-    echo "Base disk exists: $base_disk"
   fi
+  vm_disk_create_base "$base_disk" "${VM_BASE_SIZE:-20}"
 
   # ── 5. Check if VM already running (idempotency, A2) ───────────
   local status
@@ -142,51 +140,25 @@ vm_cmd_up() {
   echo "Starting VM..."
   vm_run_start "$vm_dir" "$vm_name" "$workspace" "$base_disk" "$overlay_disk" "$ssh_pubkey"
 
-  # ── 9. Install agent image inside VM ────────────────────────────
-  echo "Building agent image inside VM..."
-  if [[ -n "$workspace" ]]; then
-    local ssh_port
-    ssh_port=$(cat "$vm_dir/ssh_port")
-    local vm_user="mester"
-    # Use $(id -u) — the host user's UID. Since cloud-init creates the
-    # 'mester' user with the same UID as the host user, this matches
-    # the rootless Docker socket path inside the VM.
-    local host_uid
-    host_uid="$(id -u)"
-    ssh -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile="$vm_dir/known_hosts" \
-        -i "$vm_dir/id_vm_control" \
-        -p "$ssh_port" \
-        "$vm_user@127.0.0.1" \
-        "cd /workspace && \
-         if [[ -f Dockerfile ]]; then \
-           docker -H unix:///run/user/${host_uid}/docker.sock build -t little-mester-agent . 2>&1; \
-         else \
-           echo 'No Dockerfile found in workspace; skipping image build.'; \
-         fi" 2>&1 || {
-      echo "WARNING: Agent image build may have failed. Check VM logs." >&2
-    }
+  # SSH may become ready long before first-boot package installation finishes.
+  log "Waiting for cloud-init (package downloads use host proxy 127.0.0.1:3128)..."
+  if ! vm_ssh "$vm_dir" "sudo timeout ${VM_PROVISION_TIMEOUT:-1800} cloud-init status --wait"; then
+    vm_ssh "$vm_dir" 'sudo tail -100 /var/log/cloud-init-output.log' || true
+    return 1
   fi
+  vm_ssh "$vm_dir" 'test -f /var/lib/mester-provisioned && mountpoint -q /workspace' || return 1
+  vm_ssh "$vm_dir" "docker -H unix:///run/user/$(id -u)/docker.sock info --format '{{json .SecurityOptions}}'" | grep -q rootless || {
+    log "ERROR: guest Docker is not running rootless"
+    return 1
+  }
 
-  # ── 10. Wait for Docker to be ready ─────────────────────────────
-  local ssh_port
-  ssh_port=$(cat "$vm_dir/ssh_port")
-  local host_uid
-  host_uid="$(id -u)"
-  echo "Waiting for Docker to be ready..."
-  for i in $(seq 1 30); do
-    if ssh -o StrictHostKeyChecking=no \
-           -o UserKnownHostsFile="$vm_dir/known_hosts" \
-           -i "$vm_dir/id_vm_control" \
-           -p "$ssh_port" \
-           mester@127.0.0.1 \
-           "docker -H unix:///run/user/${host_uid}/docker.sock info >/dev/null 2>&1" 2>/dev/null; then
-      echo "Docker ready in VM."
-      break
-    fi
-    [[ $i -eq 30 ]] && { echo "WARNING: Docker not ready after 30s"; break; }
-    sleep 1
-  done
+  # Build the harness image from the harness, not an arbitrary workspace Dockerfile.
+  # Transfer only its build context; the host checkout is not another guest mount.
+  log "Building agent image inside VM..."
+  tar -C "$LAB_DIR/agent" --exclude=node_modules --exclude=.git -cf - . | \
+    vm_ssh "$vm_dir" "docker -H unix:///run/user/$(id -u)/docker.sock build --build-arg LAB_UID=$(id -u) --build-arg LAB_GID=$(id -g) --build-arg HTTP_PROXY=http://10.0.2.100:3128 --build-arg HTTPS_PROXY=http://10.0.2.100:3128 --build-arg NO_PROXY=localhost,127.0.0.1,10.0.2.100 -t little-mester-agent -" || return 1
+
+  VM_STARTING=0
 
   echo ""
   echo "VM '$vm_name' is up and running."
@@ -225,14 +197,14 @@ vm_cmd_status() {
     # Check Docker inside VM
     local host_uid
     host_uid="$(id -u)"
-    if ssh -o StrictHostKeyChecking=no \
+    if ssh -o StrictHostKeyChecking=yes \
            -o UserKnownHostsFile="$vm_dir/known_hosts" \
            -i "$vm_dir/id_vm_control" \
            -p "$ssh_port" \
            mester@127.0.0.1 \
            "docker -H unix:///run/user/${host_uid}/docker.sock ps --format '{{.Names}}' 2>/dev/null" 2>/dev/null | grep -q .; then
       echo "  Docker: running"
-      ssh -o StrictHostKeyChecking=no \
+      ssh -o StrictHostKeyChecking=yes \
           -o UserKnownHostsFile="$vm_dir/known_hosts" \
           -i "$vm_dir/id_vm_control" \
           -p "$ssh_port" \
@@ -249,6 +221,7 @@ vm_cmd_status() {
 # ─── vm ssh: SSH into the VM ────────────────────────────────────────
 vm_cmd_ssh() {
   local vm_name="${1:-default}"
+  if [[ $# -gt 0 ]]; then shift; fi
   local vm_dir
   vm_dir="$(_vm_resolve "$vm_name")"
 
@@ -265,7 +238,7 @@ vm_cmd_ssh() {
 
   echo "SSH into VM '$vm_name' on 127.0.0.1:$ssh_port"
   exec ssh \
-    -o StrictHostKeyChecking=no \
+    -o StrictHostKeyChecking=yes \
     -o UserKnownHostsFile="$vm_dir/known_hosts" \
     -i "$vm_dir/id_vm_control" \
     -p "$ssh_port" \
@@ -318,19 +291,19 @@ vm_cmd_stop() {
     local host_uid
     host_uid="$(id -u)"
     echo "Tearing down containers in VM..."
-    ssh -o StrictHostKeyChecking=no \
+    ssh -o StrictHostKeyChecking=yes \
         -o UserKnownHostsFile="$vm_dir/known_hosts" \
         -i "$vm_dir/id_vm_control" \
         -p "$ssh_port" \
         mester@127.0.0.1 \
-        "docker -H unix:///run/user/${host_uid}/docker.sock compose down -v --remove-orphans 2>&1" 2>&1 || {
+        "cd /workspace && docker -H unix:///run/user/${host_uid}/docker.sock compose down -v --remove-orphans 2>&1" 2>&1 || {
       echo "WARNING: Container teardown may have failed. Check VM logs." >&2
     }
 
     # Verify git status is clean (A6)
     echo "Checking git status..."
     local git_status
-    git_status=$(ssh -o StrictHostKeyChecking=no \
+    git_status=$(ssh -o StrictHostKeyChecking=yes \
       -o UserKnownHostsFile="$vm_dir/known_hosts" \
       -i "$vm_dir/id_vm_control" \
       -p "$ssh_port" \
@@ -408,12 +381,6 @@ vm_cmd_rebuild() {
 vm_cmd_base() {
   local vm_name="${1:-default}"
   local base_disk="$VM_DIR_BASE/base.qcow2"
-
-  if vm_disk_exists "$base_disk"; then
-    log "Base disk already exists: $base_disk"
-    log "To recreate: rm $base_disk && ./lab-vm base"
-    return 0
-  fi
 
   log "Creating base disk image (${VM_BASE_SIZE:-20} GiB)..."
   vm_disk_create_base "$base_disk" "${VM_BASE_SIZE:-20}"

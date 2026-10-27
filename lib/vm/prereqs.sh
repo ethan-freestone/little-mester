@@ -2,8 +2,8 @@
 # prereqs.sh - Auto-detect and install VM dependencies for ./lab-vm.
 #
 # Detects the host OS, checks for required/optional commands, and
-# prompts the user before installing anything. Optional components
-# (KVM, UEFI BIOS) fall back gracefully without prompting.
+# prompts the user before installing anything. KVM availability is checked at
+# runtime and falls back to TCG without adding host firmware dependencies.
 #
 # Auto-accept: if VM_YES=1 (via -y / --yes flag or env var), the
 # install prompt is skipped and packages are installed automatically.
@@ -48,48 +48,44 @@ _vm_prereqs_map_packages() {
   shift 2
   local -a _map_missing=("$@")
   local -A _map_required=()
-  local -A _map_optional=()
 
   case "$_map_pkg_mgr" in
     apt)
       for _dep in "${_map_missing[@]}"; do
         case "$_dep" in
-          qemu-system-x86_64)  _map_required+=("qemu-system-x86 qemu-arch-extra") ;;
+          qemu-system-x86_64)  _map_required["qemu-system-x86_64"]="qemu-system-x86" ;;
           qemu-img)            _map_required["qemu-img"]="qemu-utils" ;;
-          virtiofsd)           _map_required["virtiofsd"]="libvirt-daemon-system" ;;
+          virtiofsd)           _map_required["virtiofsd"]="virtiofsd" ;;
+          ssh|ssh-keyscan)     _map_required["ssh"]="openssh-client" ;;
+          curl|python3|socat)  _map_required["$_dep"]="$_dep" ;;
           genisoimage|mkisofs) _map_required["genisoimage"]="genisoimage" ;;
         esac
       done
-      if [[ ! -f /usr/share/OVMF/OVMF.fd ]]; then
-        _map_optional["OVMF"]="ovmf"
-      fi
       ;;
     dnf|yum)
       for _dep in "${_map_missing[@]}"; do
         case "$_dep" in
-          qemu-system-x86_64)  _map_required+=("qemu-system-x86") ;;
+          qemu-system-x86_64)  _map_required["qemu-system-x86_64"]="qemu-system-x86" ;;
           qemu-img)            _map_required["qemu-img"]="qemu-img" ;;
-          virtiofsd)           _map_required["virtiofsd"]="libvirt-daemon-config" ;;
+          virtiofsd)           _map_required["virtiofsd"]="virtiofsd" ;;
+          ssh|ssh-keyscan)     _map_required["ssh"]="openssh-clients" ;;
+          curl|python3|socat)  _map_required["$_dep"]="$_dep" ;;
           genisoimage|mkisofs) _map_required["genisoimage"]="genisoimage" ;;
         esac
       done
-      if [[ ! -f /usr/share/OVMF/OVMF.fd ]]; then
-        _map_optional["OVMF"]="edk2-ovmf"
-      fi
       ;;
     pacman)
       for _dep in "${_map_missing[@]}"; do
         case "$_dep" in
-          qemu-system-x86_64)  _map_required+=("qemu") ;;
-          qemu-img)            _map_required["qemu-img"]="qemu" ;;
-          virtiofsd)           _map_required["virtiofsd"]="libvirt" ;;
+          qemu-system-x86_64)  _map_required["qemu-system-x86_64"]="qemu-system-x86" ;;
+          qemu-img)            _map_required["qemu-img"]="qemu-img" ;;
+          virtiofsd)           _map_required["virtiofsd"]="virtiofsd" ;;
+          python3)            _map_required["python3"]="python" ;;
+          curl|socat)         _map_required["$_dep"]="$_dep" ;;
           genisoimage|mkisofs) _map_required["genisoimage"]="cdrtools" ;;
           ssh|ssh-keyscan)     _map_required["ssh"]="openssh" ;;
         esac
       done
-      if [[ ! -f /usr/share/OVMF/OVMF.fd ]]; then
-        _map_optional["OVMF"]="edk2-ovmf"
-      fi
       ;;
     *)
       log "WARNING: Unsupported package manager ($_map_pkg_mgr). Cannot auto-install."
@@ -105,13 +101,6 @@ _vm_prereqs_map_packages() {
   done
   echo "REQUIRED:$_all_required"
 
-  local _all_optional=""
-  for _key in "${!_map_optional[@]}"; do
-    _all_optional+=" ${_map_optional[$_key]}"
-  done
-  if [[ -n "$_all_optional" ]]; then
-    echo "OPTIONAL:$_all_optional"
-  fi
 }
 
 # --- Resolve virtiofsd on Arch (binary at /usr/lib/qemu/ instead of PATH) ---
@@ -122,7 +111,7 @@ _vm_prereqs_fix_virtiofsd_path() {
   local _found=""
 
   # Common non-standard locations for virtiofsd on Arch-derived distros
-  for _cand in /usr/lib/qemu/qemu-virtiofsd /usr/bin/virtiofsd; do
+  for _cand in /usr/lib/qemu/virtiofsd /usr/lib/qemu/qemu-virtiofsd /usr/libexec/virtiofsd /usr/bin/virtiofsd; do
     if [[ -x "$_cand" ]]; then
       _found="$_cand"
       break
@@ -141,12 +130,11 @@ _vm_prereqs_fix_virtiofsd_path() {
     done
   fi
 
-  # Symlink into /usr/local/bin so it's on PATH without PATH manipulation
+  # Use the installed binary without requiring a privileged host mutation.
   if [[ -n "$_found" && -x "$_found" ]]; then
-    if [[ ! -f /usr/local/bin/virtiofsd ]]; then
-      sudo ln -sf "$_found" /usr/local/bin/virtiofsd
-    fi
-    log "Fixed: virtiofsd -> $_found (symlinked to /usr/local/bin/)"
+    virtiofsd() { "$_VM_VIRTIOFSD" "$@"; }
+    _VM_VIRTIOFSD="$_found"
+    log_verbose "Using virtiofsd at $_found"
     return 0
   fi
 
@@ -158,7 +146,7 @@ _vm_prereqs_fix_virtiofsd_path() {
 _vm_prereqs_detect_missing() {
   local _c
   local _c2
-  for _c in qemu-system-x86_64 qemu-img virtiofsd ssh ssh-keyscan; do
+  for _c in qemu-system-x86_64 qemu-img virtiofsd ssh ssh-keyscan curl python3 socat; do
     command -v "$_c" >/dev/null 2>&1 || echo "$_c"
   done
   # genisoimage or mkisofs — report only if neither exists

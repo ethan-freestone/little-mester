@@ -13,10 +13,92 @@
 #   vm_run_stop <vm_dir>
 #   vm_run_status <vm_dir>    # prints "running" or "stopped"
 
+: "${VM_VERBOSE:=0}"
+: "${VM_DEBUG:=0}"
+
+# Build the user-mode network argument in one place so its syntax can be
+# regression-tested without starting QEMU. guestfwd's right-hand side is a
+# per-connection command, so optional model services need not be up at boot.
+# A persistent tcp chardev connects at QEMU startup and fails if absent.
+_vm_netdev_arg() {
+  local ssh_port="$1"
+  printf '%s' "user,id=net0,hostfwd=tcp:127.0.0.1:${ssh_port}-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434,guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:${VM_PROXY_PORT:-3128},restrict=on"
+}
+
+# Populate VM_QEMU_CMD. Keeping this separate from process launch lets tests
+# inspect every argv entry and catches invalid device combinations early.
+_vm_build_qemu_command() {
+  local vm_dir="$1"
+  local vm_name="$2"
+  local overlay_disk="$3"
+  local virtiofs_sock="$4"
+  local ssh_port="$5"
+  local machine_accel="$6"
+  local kvm_enabled="$7"
+  local bios_path="${8:-}"
+  local netdev_arg
+  netdev_arg="$(_vm_netdev_arg "$ssh_port")"
+
+  VM_QEMU_CMD=(qemu-system-x86_64)
+  [[ "$kvm_enabled" == "1" ]] && VM_QEMU_CMD+=(-enable-kvm)
+
+  VM_QEMU_CMD+=(
+    # Identity and shareable RAM required by vhost-user/virtiofs.
+    -name "$vm_name"
+    -m 4096
+    -smp 2
+    -object memory-backend-memfd,id=mem,size=4G,share=on
+    -numa node,memdev=mem
+
+    # Disks: cloud-init seed + writable overlay.
+    -drive file="$vm_dir/seed.iso",format=raw,if=none,id=cloud_disk,readonly=on
+    -device virtio-scsi-pci,id=scsi0
+    -device scsi-cd,drive=cloud_disk
+    -drive file="$overlay_disk",format=qcow2,if=virtio
+
+    # virtiofsd is a vhost-user backend, not a 9p fsdev.
+    -chardev socket,id=charfs,path="$virtiofs_sock"
+    -device vhost-user-fs-pci,chardev=charfs,tag=workspace
+
+    # Capture the guest serial console in qemu.log without allocating a TTY.
+    -display none
+    -serial stdio
+    -monitor none
+
+    # Narrow host crossings only: SSH, model APIs and the egress proxy.
+    -netdev "$netdev_arg"
+    -device virtio-net-pci,netdev=net0
+
+    -no-reboot
+    -machine type=q35,accel="$machine_accel"
+  )
+
+  [[ -n "$bios_path" ]] && VM_QEMU_CMD+=(-bios "$bios_path")
+  return 0
+}
+
+_vm_report_qemu_exit() {
+  local vm_dir="$1"
+  local qemu_pid="$2"
+  local qemu_status
+
+  if wait "$qemu_pid" 2>/dev/null; then
+    qemu_status=0
+  else
+    qemu_status=$?
+  fi
+
+  log "ERROR: QEMU exited before SSH became ready (status $qemu_status)"
+  if [[ -f "$vm_dir/qemu.log" ]]; then
+    log "Last 150 lines of qemu.log:"
+    tail -n 150 "$vm_dir/qemu.log" | while IFS= read -r line; do log "  $line"; done
+  fi
+}
+
 # ─── Prerequisite checks ────────────────────────────────────────────
 _vm_check_prereqs() {
   local missing=0
-  for _cmd in qemu-system-x86_64 qemu-img; do
+  for _cmd in qemu-system-x86_64 qemu-img socat; do
     if ! command -v "$_cmd" >/dev/null 2>&1; then
       log "ERROR: $_cmd not found. Install QEMU packages."
       missing=1
@@ -36,7 +118,7 @@ _vm_check_prereqs() {
 
 # ─── Check KVM availability ─────────────────────────────────────────
 _vm_kvm_available() {
-  [[ -e /dev/kvm ]] && ls -la /dev/kvm 2>/dev/null | grep -q 'crw'
+  [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]
 }
 
 # ─── Start QEMU VM (background) ─────────────────────────────────────
@@ -48,23 +130,27 @@ _vm_start() {
   local overlay_disk="$5"
   local ssh_host_key_pub="$6"
 
-  # Get SSH ephemeral host-forward port (find first free port in range)
+  # Ask the kernel for an available loopback port.
   local ssh_port
-  log_verbose "Finding free SSH port in range 20000-30000..."
-  for p in $(seq 20000 20100); do
-    if ! ss -tln 2>/dev/null | grep -qE ":[[:space:]]*${p}$|:[[:space:]]*0\.0\.0\.0:${p}$|:[[:space:]]*\*:${p}$|:[[:space:]]*\[::\]:${p}$"; then
-      ssh_port=$p
-      log_verbose "Found free port: $p"
-      break
-    fi
-  done
-  if [[ -z "${ssh_port:-}" ]]; then
-    ssh_port=20000
-    log_verbose "No free port found in 20000-20100; defaulting to $ssh_port"
-  fi
+  ssh_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
   log ">>> Starting VM '$vm_name' (SSH port: $ssh_port)"
 
   # ── Start virtiofsd (workspace export) ───────────────────────────
+  VM_STARTING=1
+  rm -f "$vm_dir/proxy_port"
+  python3 "$LAB_DIR/lib/vm/proxy.py" --workspace "$workspace" --port-file "$vm_dir/proxy_port" \
+    </dev/null > "$vm_dir/proxy.log" 2>&1 &
+  echo "$!" > "$vm_dir/proxy.pid"
+  for i in $(seq 1 30); do
+    [[ -s "$vm_dir/proxy_port" ]] && break
+    sleep 0.1
+  done
+  if [[ ! -s "$vm_dir/proxy_port" ]]; then
+    log "ERROR: egress proxy failed to start; see $vm_dir/proxy.log"
+    _vm_stop "$vm_dir"
+    return 1
+  fi
+  VM_PROXY_PORT=$(cat "$vm_dir/proxy_port")
   local virtiofs_sock="$vm_dir/virtiofs.sock"
   rm -f "$virtiofs_sock"
 
@@ -76,6 +162,7 @@ _vm_start() {
     --announce-submounts \
     >> "$vm_dir/virtiofsd.log" 2>&1 &
   local _virtiofsd_pid=$!
+  echo "$_virtiofsd_pid" > "$vm_dir/virtiofsd.pid"
   log_verbose "virtiofsd started (PID: $_virtiofsd_pid, socket: $virtiofs_sock)"
 
   # Wait for virtiofsd socket
@@ -83,73 +170,34 @@ _vm_start() {
     [[ -S "$virtiofs_sock" ]] && break
     sleep 0.5
   done
-  [[ -S "$virtiofs_sock" ]] || { log "ERROR: virtiofsd socket not ready after 15s"; return 1; }
+  if [[ ! -S "$virtiofs_sock" ]]; then
+    log "ERROR: virtiofsd socket not ready after 15s"
+    tail -50 "$vm_dir/virtiofsd.log"
+    _vm_stop "$vm_dir"
+    return 1
+  fi
 
   # ── Build QEMU command ───────────────────────────────────────────
-  local kvm_flag=""
   local machine_accel="tcg"
+  local kvm_enabled=0
   if _vm_kvm_available; then
-    kvm_flag="-enable-kvm"
+    kvm_enabled=1
     machine_accel="kvm"
     log_verbose "KVM acceleration available"
   else
     log "WARNING: /dev/kvm not available — running in TCG (CPU emulation) mode"
   fi
 
-  # ── Determine BIOS (must be outside the array since || is a shell
-  #    operator, not an array element) ────────────────────────────────
-  local bios_opt=""
-  if [[ -f /usr/share/OVMF/OVMF.fd ]]; then
-    bios_opt="-bios /usr/share/OVMF/OVMF.fd"
-    log_verbose "Using OVMF UEFI BIOS"
-  fi
+  _vm_build_qemu_command \
+    "$vm_dir" "$vm_name" "$overlay_disk" "$virtiofs_sock" \
+    "$ssh_port" "$machine_accel" "$kvm_enabled" ""
 
-  local cmdline=(
-    qemu-system-x86_64
-    $kvm_flag
-
-    # Identity
-    -name "$vm_name"
-    -m 4096
-    -smp 2
-
-    # Disks: cloud-init seed + base/overlay
-    -drive file="$vm_dir/seed.iso",format=raw,if=none,id=cloud_disk,readonly=on
-    -device virtio-scsi-pci,id=scsi0
-    -device scsi-cd,drive=cloud_disk
-    -drive file="$overlay_disk",format=qcow2,if=virtio
-
-    # Virtiofs workspace export
-    -chardev socket,id=charfs,path="$virtiofs_sock"
-    -device virtio-9p-pci,id=fs0,fsdev=charfs,mount_tag=host-workspace
-
-    # Cloud-init: serial console for logging
-    -serial stdio
-    -nographic
-
-    # Network: user-mode with guestfwd for model APIs and egress proxy
-    -netdev user,id=net0,hostfwd=tcp:127.0.0.1:${ssh_port}-:22,guestfwd=tcp:10.0.2.100:11434-10.0.2.2:11434,guestfwd=tcp:10.0.2.100:8080-10.0.2.2:8080,guestfwd=tcp:10.0.2.100:3128-10.0.2.2:3128,restrict=on
-    -device virtio-net-pci,netdev=net0
-
-    # virtio console for guest-host communication
-    -chardev socket,id=mgmt,path="$vm_dir/mgmt.sock",server=on,wait=off
-    -device virtserialport,chardev=mgmt,name=mester.mgmt
-
-    # Stop on crash
-    -no-reboot
-
-    # Machine type — accel is conditional (kvm when available, tcg fallback)
-    -machine type=q35,accel=$machine_accel
-
-    # BIOS (OVMF) — conditional; SeaBIOS is the fallback
-    $bios_opt
-  )
-
-  log_debug "QEMU command: ${cmdline[*]}"
+  log_debug "QEMU command: ${VM_QEMU_CMD[*]}"
 
   # Start QEMU in background (&); capture PID from $! (not -daemonize).
   # All output (stdout + stderr) goes to the log file for inspection.
-  "${cmdline[@]}" >> "$vm_dir/qemu.log" 2>&1 &
+  : > "$vm_dir/qemu.log"
+  "${VM_QEMU_CMD[@]}" </dev/null >> "$vm_dir/qemu.log" 2>&1 &
   local _qemu_pid=$!
 
   log "QEMU started (PID: $_qemu_pid, log: $vm_dir/qemu.log)"
@@ -161,11 +209,23 @@ _vm_start() {
 
   # ── Wait for SSH to become available ─────────────────────────────
   log "Waiting for SSH..."
-  for i in $(seq 1 60); do
+  local ssh_timeout="${VM_SSH_TIMEOUT:-300}"
+  local deadline=$((SECONDS + ssh_timeout))
+  local i=0
+  while (( SECONDS < deadline )); do
+    i=$((i + 1))
+    # Syntax/device errors terminate QEMU immediately. Report those errors now
+    # rather than hiding the real cause behind a 60-second SSH timeout.
+    if ! kill -0 "$_qemu_pid" 2>/dev/null; then
+      _vm_report_qemu_exit "$vm_dir" "$_qemu_pid"
+      _vm_stop "$vm_dir"
+      return 1
+    fi
+
     if [[ $VM_VERBOSE -ge 1 ]]; then
       # Print attempt count: every attempt in first 10s, then every 10th
       if [[ $i -le 10 ]] || [[ $((i % 10)) -eq 0 ]]; then
-        echo "[verbose] SSH check attempt $i/60..."
+        echo "[verbose] SSH check attempt $i (timeout ${ssh_timeout}s)..."
       fi
     fi
     # Try ssh-keyscan with a 2s timeout to avoid hanging on closed ports
@@ -180,7 +240,7 @@ _vm_start() {
     sleep 1
   done
 
-  log "ERROR: SSH not ready after 60s"
+  log "ERROR: SSH not ready after ${ssh_timeout}s"
   if [[ -f "$vm_dir/qemu.pid" ]]; then
     local _qpid
     _qpid=$(cat "$vm_dir/qemu.pid" 2>/dev/null)
@@ -188,10 +248,7 @@ _vm_start() {
       log "QEMU process $_qpid is still alive (guest may be booting but SSH not reachable)"
     else
       log "QEMU process $_qpid has exited (see qemu.log for crash details)"
-      local _qemu_status
-      wait "$_qpid" 2>/dev/null
-      _qemu_status=$?
-      log "QEMU exited with status $_qemu_status"
+      _vm_report_qemu_exit "$vm_dir" "$_qpid"
     fi
   else
     log "No QEMU PID file found — QEMU may have failed to start"
@@ -241,6 +298,10 @@ _vm_stop() {
   fi
 
   # Clean up stale socket
+  if [[ -f "$vm_dir/proxy.pid" ]]; then
+    kill "$(cat "$vm_dir/proxy.pid")" 2>/dev/null || true
+    rm -f "$vm_dir/proxy.pid" "$vm_dir/proxy_port"
+  fi
   rm -f "$vm_dir/virtiofs.sock" "$vm_dir/mgmt.sock"
 
   log "VM stopped."

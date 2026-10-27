@@ -6,9 +6,9 @@
   "type": "feature",
   "status": "draft",
   "title": "Model-agnostic harness: local models and cloud providers",
-  "objective": "Keep 'point me at a directory' working with no subscription (local models via opencode) while allowing paid providers (Kimi, Claude, OpenAI) when the user has them, with secrets kept out of the repo and image and provider switching documented.",
+  "objective": "Keep 'point me at a directory' working with no subscription (local models via opencode) while allowing paid providers (Kimi, Claude, OpenAI) when available, including opt-in automatic credential handoff into disposable VMs, with secrets kept out of the repo, workspace, seed and images.",
   "created_at": "2026-10-26T20:39:18.839Z",
-  "updated_at": "2026-10-26T20:50:56.509Z",
+  "updated_at": "2026-10-27T16:49:31.671Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -22,7 +22,7 @@
     },
     {
       "id": "A3",
-      "text": "Credentials are supplied at runtime from a gitignored env/secret file or host keychain and never baked into the image or committed; git status --short is clean after a session and an image inspection finds no keys.",
+      "text": "Cloud credentials, including saved OAuth accounts, are supplied at runtime from a host-only credential escrow or keychain and never baked into the image, cloud-init ISO, shared base image, workspace, or Git; git status is clean after a session and image/seed inspection finds no secrets.",
       "status": "pending"
     },
     {
@@ -44,6 +44,26 @@
       "id": "A7",
       "text": "Tests cover config generation, secret non-persistence, one provider call (live or stubbed) and an egress-denied cloud call.",
       "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "A documented VM configuration option controls credential forwarding with secure defaults: `off` imports nothing, `auto` imports every supported credential found in the host escrow, and an explicit provider list imports only named integrations. The configuration contains selectors/paths only, never secret values.",
+      "status": "pending"
+    },
+    {
+      "id": "A9",
+      "text": "With forwarding enabled and a supported host credential available, a fresh disposable VM starts the agent already connected without another browser login or pasted key. OpenAI ChatGPT Plus is proven via OpenCode `auth export`/`auth import`; API-key providers such as Anthropic/Kimi use their supported runtime credential mechanism.",
+      "status": "pending"
+    },
+    {
+      "id": "A10",
+      "text": "OpenCode's data directory is persisted outside the agent container's `/home/agent` tmpfs for the VM lifetime, and `lab-vm stop/down` securely exports refreshed OAuth state back to the host escrow atomically before deleting the overlay. A failed export does not silently destroy the last usable credential state.",
+      "status": "pending"
+    },
+    {
+      "id": "A11",
+      "text": "Credential forwarding is provider-agnostic, auditable without logging secrets, uses the existing SSH control channel or an equivalent non-workspace channel, preserves mode 0600/0700, and exposes no broad host credential directory to the VM.",
+      "status": "pending"
     }
   ],
   "tests": {
@@ -53,7 +73,14 @@
       "secret non-persistence check",
       "local/cloud switch",
       "failure messages",
-      "egress-denied cloud call"
+      "egress-denied cloud call",
+      "VM auth forwarding config matrix: off/auto/explicit provider list",
+      "fresh VM auto-connect with an exported OpenAI ChatGPT account",
+      "missing or malformed host escrow fails safely without exposing secret content",
+      "agent container restart retains OpenCode auth for the VM lifetime",
+      "VM down atomically saves refreshed OAuth state before overlay deletion",
+      "seed ISO/image/workspace/git scan confirms no credential material",
+      "provider selection imports only requested integrations"
     ],
     "created": [],
     "cases": []

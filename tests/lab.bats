@@ -356,3 +356,10 @@ teardown() {
   [ $status -eq 0 ]
   [[ "$output" != *"Unknown flag"* ]]
 }
+
+@test "lab-vm preserves a named VM argument after the command" {
+  run ./lab-vm status named-parser-test
+  [ "$status" -eq 1 ]
+  [[ "$output" == *".mester/vm/named-parser-test"* ]]
+  [[ "$output" != *"Unknown command: named-parser-test"* ]]
+}

@@ -40,15 +40,16 @@ If a tool fails or is unavailable, report the error — do not fall back to dire
 - **Auto-accept flag**: `-y`/`--yes` added to both `lab-vm` and `./lab`, sets `VM_YES` and `LAB_YES`
 - **ChatGPT Plus login**: `opencode auth login openai --method chatgpt-headless` was verified inside the current agent container; `opencode auth list` reported OpenAI as `stored`
 - **Auth runbook**: `docs/chatgpt-auth.md` records the verified device flow, secure export/import procedure, and required VM persistence design
+- **VM boot fixes (pending real-host proof)**: QEMU now uses valid `guestfwd` command targets, `vhost-user-fs-pci`, shareable RAM, a pinned/checksummed Ubuntu cloud image, rootless-Docker cloud-init, fail-fast QEMU diagnostics, and a loopback egress proxy
 - **Ticket #48**: AC updated to include `-y`/`--yes` (A7-A8)
-- **Ticket #41**: VM provisioning/lifecycle — A1/A3/A5 passing, A2/A8 in-progress, rest pending KVM evidence
+- **Ticket #41**: VM provisioning/lifecycle — A1/A3 passing; A2/A5/A8/A18 in-progress; full lifecycle remains pending KVM evidence
 
 ### What's not done
 - `./lab vm up` doesn't exist — VM commands only live in `./lab-vm`
 - Library files (`cloud-init.sh`, `lifecycle.sh`, `prereqs.sh`, `disk.sh`, `ssh.sh`, `runner.sh`) not yet updated to use `log()`/`log_verbose()`/`log_debug()`
 - Ticket #48 AC A1-A6 status not yet marked passing after testing
-- No commits for the verbose/debug/yes changes yet
 - ChatGPT credentials are still container-local under `/home/agent/.local/share/opencode/opencode.db`; automatic host escrow, VM import, guest data persistence, and export-before-VM-deletion are documented but not implemented
+- This container cannot provide KVM evidence. Re-run `./lab-vm up --clean --debug --unsafe-recurse --auto-accept` on the CachyOS host and record the first real-host result on ticket #41
 
 ### Immediate next step: Prove the VM works on your CachyOS host
 
