@@ -182,6 +182,7 @@ warn_hooks() {
 }
 
 # Parse flags (they must come BEFORE the subcommand or workspace path)
+# shellcheck disable=SC2034
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   while [[ $# -gt 0 ]]; do
     case "${1:-}" in
@@ -193,7 +194,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       --egress) EGRESS="${2:?--egress needs true/false}"; shift 2 ;;
       --egress-false|--isolated) EGRESS="false"; shift ;;
       --egress-true) EGRESS="true"; shift ;;
-      # shellcheck disable=SC2034
       --permissions) PERMISSIONS="${2:?--permissions needs deny/ask/auto}"; shift 2 ;;
       --unsafe-recurse) UNSAFE_RECURSE=1; shift ;;
       --no-cache) NO_CACHE=1; shift ;;

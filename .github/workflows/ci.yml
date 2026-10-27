@@ -71,7 +71,17 @@ jobs:
     name: Ticket store validation
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: little-mester-mcp
     steps:
       - uses: actions/checkout@v4
-      - run: little-mester-mcp/scripts/ticket-engine validate
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: little-mester-mcp/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: ./scripts/ticket-engine validate
       - run: git diff --exit-code

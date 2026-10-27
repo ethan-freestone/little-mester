@@ -95,6 +95,7 @@ for p in "${FILES[@]}"; do
   REL_PATHS+=( "${p#"$ROOT"/}" )
 done
 
+# shellcheck disable=SC2094
 {
 cat <<'HEADER'
 # Workspace Collation – Complete File Collection
@@ -167,7 +168,6 @@ for rel in "${REL_PATHS[@]}"; do
   fi
 
 done
-# shellcheck disable=SC2094
 } > "$OUTPUT"
 
 echo "Wrote $OUTPUT ($(wc -l < "$OUTPUT") lines, $(stat --printf='%s' "$OUTPUT") bytes)."
