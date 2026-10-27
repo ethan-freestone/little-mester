@@ -8,7 +8,7 @@
   "title": "VM provisioning and ./lab VM lifecycle",
   "objective": "Make the VM reproducible and controllable from the host: ./lab can provision or connect to the VM per #40, install Docker, transport the workspace, and run VM lifecycle commands idempotently. The host stops running the agent container itself.",
   "created_at": "2026-10-26T20:39:18.836Z",
-  "updated_at": "2026-10-27T11:12:33.209Z",
+  "updated_at": "2026-10-27T11:53:12.057Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -61,54 +61,42 @@
     {
       "id": "A10",
       "text": "Full lifecycle test on real KVM host passes end-to-end: base → up → status → ssh → agent test → stop → down",
-      "status": "pending",
-      "procedure": [
-        "1. Verify host KVM: grep -c svm /proc/cpuinfo (AMD) or grep -c vmx /proc/cpuinfo (Intel) > 0",
-        "2. Verify /dev/kvm exists and is accessible",
-        "3. ./lab-vm base — downloads base image, verifies hash",
-        "4. ./lab-vm up — creates overlay, seed ISO, starts virtiofsd + QEMU, waits for boot",
-        "5. ./lab-vm status — confirms running state, PID, SSH port",
-        "6. ./lab-vm ssh — opens shell, verifies /workspace mount (virtiofs), docker info works",
-        "7. Inside VM: cd /workspace && ./lab --unsafe-recurse (run agent with full access)",
-        "8. Inside VM: git status --short should be clean (no agent artifacts left behind)",
-        "9. ./lab-vm stop — graceful shutdown via qemu-guest-agent",
-        "10. ./lab-vm down — teardown, verify no leftover processes"
-      ]
+      "status": "pending"
     },
     {
       "id": "A11",
       "text": "Prereq check auto-detects distro, maps packages correctly, and prompts before installing",
-      "status": "pending",
-      "procedure": [
-        "1. ./lab-vm base on host with missing deps — should detect distro, list missing tools",
-        "2. Should display package names mapped to distro (Arch: qemu/libvirt/edk2-ovmf, etc.)",
-        "3. Should prompt [y/N] — verify default is N (no install without confirmation)",
-        "4. On Arch: verify virtiofsd symlink fallback works if binary is at /usr/lib/qemu/qemu-virtiofsd",
-        "5. After install: re-run base — should show 'All VM dependencies found. OK'"
-      ]
+      "status": "pending"
     },
     {
       "id": "A12",
       "text": "Idempotent lifecycle: re-running up/status/stop does not duplicate VMs or leave stale state",
-      "status": "pending",
-      "procedure": [
-        "1. Run ./lab-vm up twice — second run should not create a second VM",
-        "2. Run ./lab-vm stop twice — second stop should be a no-op (VM already stopped)",
-        "3. Verify ps aux | grep qemu-system-x86_64 shows at most one VM process",
-        "4. Verify ps aux | grep virtiofsd shows at most one virtiofsd process"
-      ]
+      "status": "pending"
     },
     {
       "id": "A13",
       "text": "Troubleshooting: stale state is cleaned up correctly, orphaned processes are detected",
-      "status": "pending",
-      "procedure": [
-        "1. Manually kill QEMU process (simulate crash)",
-        "2. Run ./lab-vm status — should detect stale PID",
-        "3. Run ./lab-vm down — should clean up stale socket/PID files",
-        "4. Verify no orphaned qemu-system-x86_64 or virtiofsd processes remain",
-        "5. Run ./lab-vm base && ./lab-vm up — should work after cleanup (fresh start)"
-      ]
+      "status": "pending"
+    },
+    {
+      "id": "A14",
+      "text": "A10: Full lifecycle test on real KVM host passes end-to-end: base → up → status → ssh → agent test → stop → down. Procedure: 1) Verify host KVM: grep -c svm /proc/cpuinfo > 0; 2) Verify /dev/kvm accessible; 3) ./lab-vm base (downloads image, verifies hash); 4) ./lab-vm up (creates overlay, seed ISO, starts virtiofsd + QEMU); 5) ./lab-vm status (confirms PID, port); 6) ./lab-vm ssh (opens shell, verify /workspace virtiofs mount, docker info); 7) cd /workspace && ./lab --unsafe-recurse; 8) git status --short clean; 9) ./lab-vm stop (graceful shutdown); 10) ./lab-vm down (teardown)",
+      "status": "pending"
+    },
+    {
+      "id": "A15",
+      "text": "A11: Prereq check auto-detects distro, maps packages correctly, prompts before installing. Procedure: 1) ./lab-vm base with missing deps — detect distro, list missing tools; 2) Display distro-mapped package names; 3) Verify [y/N] prompt, default N; 4) On Arch: verify virtiofsd symlink fallback for /usr/lib/qemu/qemu-virtiofsd; 5) After install, re-run: 'All VM dependencies found. OK'",
+      "status": "pending"
+    },
+    {
+      "id": "A16",
+      "text": "A12: Idempotent lifecycle — re-running up/status/stop does not duplicate VMs or stale state. Procedure: 1) Run ./lab-vm up twice, no second VM; 2) Run ./lab-vm stop twice, second is no-op; 3) ps aux | grep qemu-system-x86_64 ≤ 1; 4) ps aux | grep virtiofsd ≤ 1",
+      "status": "pending"
+    },
+    {
+      "id": "A17",
+      "text": "A13: Stale state cleanup — manually killed QEMU, ./lab-vm status detects stale PID, ./lab-vm down cleans sockets/PIDs, no orphaned processes, fresh base+up works",
+      "status": "pending"
     }
   ],
   "tests": {
@@ -168,6 +156,11 @@
       "timestamp": "2026-10-27T12:00:00.000Z",
       "author": "agent",
       "body": "2026-10-27: Restructured AC for ticket-level testing. Added A10 (full lifecycle procedure), A11 (prereq auto-detect + Arch virtiofsd symlink fix), A12 (idempotent lifecycle), A13 (stale state cleanup). Removed docs/VM-TESTING-PLAN.md — all ticket-level procedures now live on the ticket as AC with step-by-step procedures. See DECISIONS.md §C.9.9."
+    },
+    {
+      "timestamp": "2026-10-27T11:53:03.578Z",
+      "author": "cli",
+      "body": "2026-10-27: Added A10-A13 with full lifecycle testing procedures. These replace the former docs/VM-TESTING-PLAN.md — all ticket-level procedures now live on the ticket per DECISIONS.md §C.9.9."
     }
   ],
   "models_used": [],
