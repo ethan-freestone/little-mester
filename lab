@@ -20,19 +20,6 @@ UNSAFE_RECURSE=0
 # Docker build cache (default: use cache)
 NO_CACHE=0
 
-# ─── Log rotation (last 5 runs) ──────────────────────────────────────
-LOG_FILE=""
-rotate_logs() {
-  local log_dir="$LAB_DIR/.mester/logs"
-  mkdir -p "$log_dir"
-  LOG_FILE="$log_dir/lab_$(date '+%Y%m%d_%H%M%S').log"
-  local -a old
-  mapfile -t old < <(ls -1t "$log_dir"/lab_*.log 2>/dev/null || true)
-  if (( ${#old[@]} > 4 )); then
-    rm -f "${old[@]:4}"
-  fi
-}
-
 # ─── Auto-accept (alias for --auto on opencode CLI) ─────────────────
 AUTO_ACCEPT=0
 
@@ -235,10 +222,18 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     esac
   done
 
-  # Log rotation + tee (last 5 runs, gitignored in .mester/logs/)
-  rotate_logs
-  exec 1> >(tee -a "$LOG_FILE")
-  exec 2> >(tee -a "$LOG_FILE" >&2)
+  # Save real TTY before tee redirect (restored before interactive agent)
+  exec 3>&1 4>&2
+
+  # ─── Log rotation + tee (last 5 runs) ──────────────────────────────
+  LOG_FILE="$LAB_DIR/.mester/logs/lab_$(date '+%Y%m%d_%H%M%S').log"
+  mkdir -p "$LAB_DIR/.mester/logs"
+  local -a old
+  mapfile -t old < <(ls -1t "$LAB_DIR/.mester/logs"/lab_*.log 2>/dev/null || true)
+  if (( ${#old[@]} > 4 )); then
+    rm -f "${old[@]:4}"
+  fi
+  exec 1> >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2)
 
   case "${1:-}" in
     setup)
@@ -501,6 +496,8 @@ HELPTEXT
           fi
         fi
         confirm
+        # Restore real TTY for interactive agent — tee pipe breaks container TTY
+        exec 1>&3 2>&4
         agent_run
         warn_hooks
       else
@@ -542,6 +539,8 @@ HELPTEXT
 
       confirm
       shift
+      # Restore real TTY for interactive agent — tee pipe breaks container TTY
+      exec 1>&3 2>&4
       agent_run "$@"
       warn_hooks
       ;;

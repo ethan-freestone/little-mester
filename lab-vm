@@ -53,19 +53,6 @@ VM_CLEAN=0
 VM_VERBOSE=0
 VM_DEBUG=0
 
-# ─── Log rotation (last 5 runs) ──────────────────────────────────────
-VM_LOG_FILE=""
-rotate_logs() {
-  local log_dir="$LAB_DIR/.mester/logs"
-  mkdir -p "$log_dir"
-  VM_LOG_FILE="$log_dir/lab-vm_$(date '+%Y%m%d_%H%M%S').log"
-  local -a old
-  mapfile -t old < <(ls -1t "$log_dir"/lab-vm_*.log 2>/dev/null || true)
-  if (( ${#old[@]} > 4 )); then
-    rm -f "${old[@]:4}"
-  fi
-}
-
 # ─── Logging helpers ────────────────────────────────────────────────
 # log      — always printed (normal status lines)
 # log_verbose — printed with -v or -d
@@ -271,10 +258,20 @@ _vm_cleanup() {
 trap _vm_cleanup EXIT INT TERM
 
 # ─── Command dispatch ───────────────────────────────────────────────
-# Log rotation + tee (last 5 runs, gitignored in .mester/logs/)
-rotate_logs
-exec 1> >(tee -a "$VM_LOG_FILE")
-exec 2> >(tee -a "$VM_LOG_FILE" >&2)
+
+# ─── Log rotation + tee (last 5 runs) ──────────────────────────────
+# Save real TTY before tee redirect (restored before interactive commands)
+exec 3>&1 4>&2
+
+VM_LOG_FILE="$LAB_DIR/.mester/logs/lab-vm_$(date '+%Y%m%d_%H%M%S').log"
+mkdir -p "$LAB_DIR/.mester/logs"
+local -a vm_old
+mapfile -t vm_old < <(ls -1t "$LAB_DIR/.mester/logs"/lab-vm_*.log 2>/dev/null || true)
+if (( ${#vm_old[@]} > 4 )); then
+  rm -f "${vm_old[@]:4}"
+fi
+exec 1> >(tee -a "$VM_LOG_FILE") 2> >(tee -a "$VM_LOG_FILE" >&2)
+
 case "$cmd" in
   up)
     # --clean: run 'stop' then 'down' before 'up'
@@ -297,6 +294,8 @@ case "$cmd" in
     vm_cmd_status "$vm_name"
     ;;
   ssh)
+    # Restore real TTY for interactive SSH session
+    exec 1>&3 2>&4
     vm_cmd_ssh "$vm_name"
     ;;
   down)
