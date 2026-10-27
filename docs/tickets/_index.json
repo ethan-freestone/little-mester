@@ -222,7 +222,13 @@
       "file_path": "ticket-038.json",
       "status": "draft",
       "area": "engine"
+    },
+    {
+      "number": 39,
+      "file_path": "ticket-039.json",
+      "status": "draft",
+      "area": "infra"
     }
   ],
-  "updated_at": "2026-10-26T20:01:46.811Z"
+  "updated_at": "2026-10-26T23:55:28.491Z"
 }

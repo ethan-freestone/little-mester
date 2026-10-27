@@ -1,0 +1,42 @@
+{
+  "id": 39,
+  "file_path": "/workspace/docs/tickets/ticket-039.json",
+  "number": 39,
+  "area": "infra",
+  "type": "bug",
+  "status": "draft",
+  "title": "Fix tune script: currently not working",
+  "objective": "",
+  "created_at": "2026-10-26T23:55:28.491Z",
+  "updated_at": "2026-10-26T23:55:28.491Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "tune script runs to completion with a valid setup (docker, model, GPU)",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "tune script reports helpful errors when prerequisites are missing (no docker, no volume, no model)",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "tune script --help shows usage and default values",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Results JSON is parseable and contains at least one valid config entry",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "e2e test: run ./lab tune with a dummy model and validate output"
+    ],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}
