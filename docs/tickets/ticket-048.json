@@ -1,0 +1,60 @@
+{
+  "id": 48,
+  "file_path": "/workspace/docs/tickets/ticket-048.json",
+  "number": 48,
+  "area": "infra",
+  "type": "improvement",
+  "status": "draft",
+  "title": "Add --verbose and --debug flags to lab-vm",
+  "objective": "Add --verbose (-v) and --debug (-d) flags to lab-vm for progressive verbosity. --verbose prints extra progress information (SSH commands, qemu args, genisoimage output). --debug prints everything including raw command output, timing, and internal state.",
+  "created_at": "2026-10-27T12:13:43.750Z",
+  "updated_at": "2026-10-27T12:46:45.416Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "lab-vm accepts --verbose (-v) and --debug (-d) flags at any position after the command",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Default (no flag): same output as today — status lines for each phase",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "--verbose: prints extra progress info (SSH commands, qemu virtiofsd output, genisoimage stdout/stderr, port discovery details)",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "--debug: prints everything from --verbose plus raw command output, timing, and internal variable values",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Usage text documents -v/--verbose, -d/--debug, and -y/--yes flags",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "Verbose/debug flags are passed through to sourced library files via VM_VERBOSE/VM_DEBUG env vars",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "lab-vm accepts -y/--yes flag that auto-accepts all interactive prompts (package install, confirmation summary), matching the LAB_YES=1 env var pattern",
+      "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "-y/--yes sets both VM_YES and LAB_YES env vars for cross-script compatibility",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}
