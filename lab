@@ -35,6 +35,9 @@ rotate_logs() {
   fi
 }
 
+# ─── Auto-accept (alias for --auto on opencode CLI) ─────────────────
+AUTO_ACCEPT=0
+
 # Load user config if present (gitignored; put your real identity here)
 if [[ -f "$LAB_DIR/.little-mester.conf" ]]; then
   set -a
@@ -73,58 +76,14 @@ dc() {
       docker compose -f "$LAB_DIR/compose.yaml" --project-directory "$LAB_DIR" "$@"
 }
 
-update_opencode_permissions() {
-  # Dynamically set opencode permission mode based on PERMISSIONS variable.
-  # The baked-in opencode.json always has "ask" — we override it per-run.
-  local cfg="$LAB_DIR/agent/opencode/opencode.json"
-
-  if [[ ! -f "$cfg" ]]; then
-    echo "WARNING: opencode.json not found at $cfg, skipping permission override" >&2
-    return
-  fi
-
-  local mode="${PERMISSIONS:-ask}"
-  [[ -z "$mode" ]] && mode="ask"
-
-  local key old_val
-  if [[ "$mode" == "auto" ]]; then
-    key='auto'
-  elif [[ "$mode" == "deny" ]]; then
-    key='deny'
-  else
-    key='ask'
-  fi
-
-  # Apply permission overrides for edit and bash tools
-  sed -i "s/\"edit\": *\"ask\"/\"edit\": \"${key}\"/" "$cfg"
-  sed -i "s/\"bash\": *\"ask\"/\"bash\": \"${key}\"/" "$cfg"
-
-  if [[ "$mode" != "ask" ]]; then
-    echo ">> Permissions set to: ${key} (edit + bash)"
-  fi
-}
-
-restore_opencode_permissions() {
-  local cfg="$LAB_DIR/agent/opencode/opencode.json"
-  if [[ -f "$cfg" ]] && [[ "${PERMISSIONS:-ask}" != "ask" ]]; then
-    sed -i 's/"edit": *"[^"]*"/"edit": "ask"/' "$cfg"
-    sed -i 's/"bash": *"[^"]*"/"bash": "ask"/' "$cfg"
-    echo ">> Restored opencode.json permissions to default (ask)"
-  fi
-}
-
 agent_run() {
-  # When PERMISSIONS is set and running opencode, dynamically override
-  # opencode.json permission settings before the agent starts.
-  # For aider, we skip the config change (aider has its own permission model).
-  if [[ "$AGENT" == "opencode" && -n "${PERMISSIONS:-}" && "${PERMISSIONS}" != "ask" ]]; then
-    update_opencode_permissions
-  fi
-  dc run --rm agent "$AGENT" "$@"
-
-  # Restore permissions after agent finishes (if we changed them)
-  if [[ "$AGENT" == "opencode" && -n "${PERMISSIONS:-}" && "${PERMISSIONS}" != "ask" ]]; then
-    restore_opencode_permissions
+  # When AUTO_ACCEPT is set and running opencode, pass --auto to the CLI
+  # so it auto-approves all tool calls (respecting explicit deny rules).
+  # For aider, --auto is meaningless so we skip it.
+  if [[ "$AUTO_ACCEPT" -eq 1 && "$AGENT" == "opencode" ]]; then
+    dc run --rm agent opencode --auto "$@"
+  else
+    dc run --rm agent "$AGENT" "$@"
   fi
 }
 
@@ -258,10 +217,6 @@ warn_hooks() {
 # Parse flags (they must come BEFORE the subcommand or workspace path)
 # shellcheck disable=SC2034
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  # Log rotation + tee (last 5 runs, gitignored in .mester/logs/)
-  rotate_logs
-  exec 1> >(tee -a "$LOG_FILE")
-  exec 2> >(tee -a "$LOG_FILE" >&2)
   while [[ $# -gt 0 ]]; do
     case "${1:-}" in
       --ro) MOUNT_MODE="ro"; shift ;;
@@ -273,7 +228,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       --egress-false|--isolated) EGRESS="false"; shift ;;
       --egress-true) EGRESS="true"; shift ;;
       --permissions) PERMISSIONS="${2:?--permissions needs deny/ask/auto}"; shift 2 ;;
-      -y|--yes|--auto-accept) PERMISSIONS="auto"; LAB_YES=1; shift ;;
+      -y|--yes|--auto-accept) AUTO_ACCEPT=1; LAB_YES=1; shift ;;
       --unsafe-recurse) UNSAFE_RECURSE=1; shift ;;
       --no-cache) NO_CACHE=1; shift ;;
       --opencode) AGENT="opencode"; shift ;;
@@ -281,6 +236,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       *) break ;;
     esac
   done
+
+  # Log rotation + tee (last 5 runs, gitignored in .mester/logs/)
+  rotate_logs
+  exec 1> >(tee -a "$LOG_FILE")
+  exec 2> >(tee -a "$LOG_FILE" >&2)
 
   case "${1:-}" in
     setup)
@@ -527,7 +487,7 @@ HELPTEXT
       echo "  --egress-false     Short alias for --egress false / --isolated"
       echo "  --egress-true      Short alias for --egress true"
       echo "  --isolated         Same as --egress-false"
-      echo "  --auto-accept      Shorthand for --permissions auto (all tools auto-approved)"
+      echo "  --auto-accept      Enable --auto on opencode CLI (all tools auto-approved)"
       echo "  --permissions P    Per-run permission mode (deny/ask/auto, default: from config)"
       echo "  --no-cache         Disable Docker build cache (for setup/build)"
       ;;
@@ -562,7 +522,7 @@ HELPTEXT
         echo "  --egress-false     Short alias for --egress false / --isolated"
         echo "  --egress-true      Short alias for --egress true"
         echo "  --isolated         Same as --egress-false"
-        echo "  --auto-accept      Shorthand for --permissions auto (all tools auto-approved)"
+        echo "  --auto-accept      Enable --auto on opencode CLI (all tools auto-approved)"
         echo "  --permissions P    Per-run permission mode (deny/ask/auto, default: from config)"
         echo
         echo "Any remaining arguments after the path are passed to the agent."
