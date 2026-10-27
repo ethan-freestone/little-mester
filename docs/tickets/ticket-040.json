@@ -1,0 +1,96 @@
+{
+  "id": 40,
+  "file_path": "/workspace/docs/tickets/ticket-040.json",
+  "number": 40,
+  "area": "infra",
+  "type": "spike",
+  "status": "resolved",
+  "title": "Spike: VM topology, workspace transport and isolation boundary",
+  "objective": "Decide the concrete VM architecture for the Docker-capable agent harness before implementation: where the VM runs, how the workspace is transported into it, how GPU-backed model servers are hosted, whether the in-VM Docker daemon is rootful or rootless, and how ./lab controls the VM. Output is a written decision plus a trust-boundary diagram, not code.",
+  "created_at": "2026-10-26T20:39:18.830Z",
+  "updated_at": "2026-10-26T20:45:14.115Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Candidate topologies are compared on isolation, GPU support, startup time, workspace I/O and one-command ergonomics: local QEMU/KVM managed by ./lab, an existing remote Linux host over SSH, and a cloud VM. A recommendation is recorded.",
+      "status": "passing",
+      "evidence": "docs/DECISIONS.md §C.8 compares local QEMU/KVM (chosen), remote Linux host over SSH (#47, follow-up), cloud VM, Docker-in-Docker and a shared remote daemon. Local QEMU/KVM won on isolation, one-command startup, live workspace I/O and no privileged host service; owner confirmed it on 2026-10-26."
+    },
+    {
+      "id": "A2",
+      "text": "Workspace transport is chosen from virtiofs, 9p, sshfs or copy/rsync, with an explicit statement of what a compromised VM or agent can reach on the host through that transport and the mitigations that make the workspace the boundary.",
+      "status": "passing",
+      "evidence": "docs/DECISIONS.md §C.8 and docs/vm-architecture.md §2-3: virtiofsd exports exactly the selected workspace, mounted at /workspace; the guest gets no other host path. A compromised VM therefore reaches only that workspace export (and its own containers), not $HOME, sockets or the host Docker daemon. The export is narrowed by the existing host-side check_workspace() guards."
+    },
+    {
+      "id": "A3",
+      "text": "GPU strategy is decided: GPU passthrough/VFIO into the VM, model servers remain on the host behind a private API, CPU-only in the VM first, or cloud models. Placement of ollama, llamacpp and the metrics sidecar is recorded, including the no-GPU fallback.",
+      "status": "passing",
+      "evidence": "docs/DECISIONS.md §C.8: ollama and llamacpp stay on the host bound to loopback and are reached only through guestfwd ports 10.0.2.100:11434 and :8080. No VFIO/GPU passthrough; a CPU-only host uses the same flow and gets a clear message. Model placement and the no-GPU fallback are recorded in docs/vm-architecture.md §1/§2."
+    },
+    {
+      "id": "A4",
+      "text": "The in-VM Docker daemon model is decided: rootful Docker, rootless Docker under a dedicated user, or rootless Podman. The decision states what VM-level access a compromised agent gains and why that is acceptable, or what hardening is required.",
+      "status": "passing",
+      "evidence": "docs/DECISIONS.md §C.8: rootless Docker under the dedicated mester user (subuid/subgid, systemd lingering, unix:///run/user/<uid>/docker.sock). A container escape lands as an unprivileged VM user, not VM root; the VM is disposable. Rootful Docker is an explicit escape hatch, never the default. Hardening evidence belongs to #42; docs/tickets/architecture/DECISIONS.md §K records the invariant."
+    },
+    {
+      "id": "A5",
+      "text": "The host-to-VM control channel is decided: how ./lab runs commands (SSH, a small guest agent, or libvirt), how environment and workspace paths are passed, and how host credentials are kept out of the VM.",
+      "status": "passing",
+      "evidence": "docs/DECISIONS.md §C.8: SSH over a QEMU hostfwd bound to 127.0.0.1:<ephemeral>; per-VM ed25519 key in the gitignored .mester/vm/<name>/ state and a per-VM known_hosts; qemu-guest-agent for lifecycle. Host keys, cloud credentials and ~/.ssh are never copied into the VM. No libvirt daemon or host control service."
+    },
+    {
+      "id": "A6",
+      "text": "The decision is written to docs/DECISIONS.md, with engineering invariants in docs/tickets/architecture/DECISIONS.md, plus a one-page trust-boundary diagram covering host, VM, agent container, workspace and model APIs.",
+      "status": "passing",
+      "evidence": "Written: docs/DECISIONS.md §C.8 (decision + comparison + follow-ups), docs/tickets/architecture/DECISIONS.md §K (nine invariants), docs/vm-architecture.md (one-page trust-boundary diagram, crossing table, lifecycle). C.6 carries a refinement note so the old entry is not a second source of truth."
+    },
+    {
+      "id": "A7",
+      "text": "Remaining questions that need the owner are listed with recommended defaults, and #41, #42, #43 and #45 cite this decision.",
+      "status": "passing",
+      "evidence": "docs/DECISIONS.md §C.8 \"Follow-ups\" and docs/vm-architecture.md §6 list the remote target (#47), rootless Docker limits (#42/#43), guestfwd+restrict=on and virtiofs validation (#41), DNS/non-HTTP egress (#43), and GPU passthrough as out of scope. #41, #42, #43, #45 and #47 cite the §C.8 decision; #46 stays future scope."
+    }
+  ],
+  "tests": {
+    "needed": [
+      "topology comparison review",
+      "threat-model review of the chosen workspace transport",
+      "owner sign-off on GPU and daemon decisions",
+      "docs link and diagram check"
+    ],
+    "created": [
+      "topology comparison review (docs/DECISIONS.md §C.8)",
+      "threat-model/crossing review (docs/vm-architecture.md §2-3)",
+      "owner sign-off on topology, GPU, daemon and transport (2026-10-26)",
+      "docs link and diagram check (C.8 + architecture §K + vm-architecture.md resolve)"
+    ],
+    "cases": [
+      "Owner chose local QEMU/KVM + host-side model API + rootless Docker + virtiofs on 2026-10-26; remote override deferred to #47.",
+      "Comparison table covers local QEMU/KVM, remote host, cloud, DinD and shared remote daemon, with a recommendation.",
+      "Crossing/threat table names what a compromised agent, workspace container and VM can reach, and what they cannot.",
+      "C.6 carries a refinement note pointing to C.8; architecture §K records the invariants; vm-architecture.md carries the diagram."
+    ]
+  },
+  "priority": "major",
+  "parent": 35,
+  "comments": [
+    {
+      "timestamp": "2026-10-26T20:39:18.829Z",
+      "author": "cli",
+      "body": "Created through the ticket engine API (createTicketEngine.create) with parent=35. The CLI has no --parent flag until #39 lands; no ticket JSON was hand-written."
+    },
+    {
+      "timestamp": "2026-10-26T20:45:14.113Z",
+      "author": "cli",
+      "body": "Owner decisions recorded 2026-10-26 via a direct question: (1) local QEMU/KVM managed by ./lab is the implementation target, with a separate follow-up ticket for a remote override; (2) host-side model API (no GPU passthrough); (3) rootless Docker under a dedicated user; (4) virtiofs workspace transport. Remote override is #47."
+    },
+    {
+      "timestamp": "2026-10-26T20:45:14.115Z",
+      "author": "cli",
+      "body": "RESOLVED 2026-10-26. The spike output is the written decision, not code: docs/DECISIONS.md §C.8, docs/tickets/architecture/DECISIONS.md §K, and docs/vm-architecture.md. Implementation and proof of the guestfwd/restrict=on, virtiofs and rootless assumptions belong to #41-#43; if a mechanism fails there, the fallback is recorded in §C.8, not a silent change to the boundary."
+    }
+  ],
+  "models_used": []
+}

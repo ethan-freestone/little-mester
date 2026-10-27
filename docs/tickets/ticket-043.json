@@ -1,0 +1,97 @@
+{
+  "id": 43,
+  "file_path": "/workspace/docs/tickets/ticket-043.json",
+  "number": 43,
+  "area": "security",
+  "type": "feature",
+  "status": "draft",
+  "title": "Workspace Docker capability, isolation and egress enforcement",
+  "objective": "When the target directory declares Docker dependencies, ./lab and the agent run them predictably and safely: detection and approval at launch, a generated safe compose overlay, workspace labels for teardown, explicit approval for extra context mounts, and enforced egress rules.",
+  "created_at": "2026-10-26T20:39:18.837Z",
+  "updated_at": "2026-10-26T20:50:56.507Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "At launch ./lab detects compose files in the workspace (docker-compose.yml/.yaml, compose.yaml/.yml and override files) and shows them in the existing confirmation summary before anything runs.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "A generated override enforces: no published host ports, a workspace-scoped compose project name, com.little-mester.workspace=<path> labels, no privileged mode, no host network/PID/IPC, and no bind mounts outside the workspace.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "The agent can run compose commands for the workspace in-session; containers it starts are labelled and removed by ./lab stop, with no orphan containers, volumes or networks left behind.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": ".mester-egress allowed_domains is enforced by the host-side allowlisting proxy described in §C.8, not advisory: a non-empty list restricts agent egress and image pulls to those domains, and permission=false denies all egress. A blank list keeps the documented allow-all behaviour.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Negative cases are refused with a clear message: published ports, privileged mode, host networking, bind mounts outside the workspace, and pulls from an unapproved registry where policy disallows them.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "When the agent needs a host path outside the workspace (for example fixtures or a second checkout), it can request it; ./lab shows the exact path and requires explicit owner approval before mounting it read-only. Nothing outside the workspace is mounted silently.",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "Mid-session Docker needs (a new image or service) follow an explicit approval step; the agent can write a request but cannot grant it. The flow is documented.",
+      "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "Tests cover the allow/deny matrix, override generation, extra-mount approval and teardown; results are recorded on the ticket.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "compose file detection at launch",
+      "generated override content",
+      "egress allow/deny matrix",
+      "each negative case is refused",
+      "extra context mount approval",
+      "mid-session Docker request approval",
+      "teardown residue check"
+    ],
+    "created": [],
+    "cases": []
+  },
+  "priority": "critical",
+  "parent": 35,
+  "comments": [
+    {
+      "timestamp": "2026-10-26T20:39:18.837Z",
+      "author": "cli",
+      "body": "Created through the ticket engine API (createTicketEngine.create) with parent=35. The CLI has no --parent flag until #39 lands; no ticket JSON was hand-written."
+    },
+    {
+      "timestamp": "2026-10-26T20:39:18.842Z",
+      "author": "cli",
+      "body": "Depends on #40, #41, #42. The engine stores dependencies but does not yet gate status transitions on them; that is part of #39."
+    },
+    {
+      "timestamp": "2026-10-26T20:45:14.122Z",
+      "author": "cli",
+      "body": "Reconciled with decision docs/DECISIONS.md §C.8 (2026-10-26): local QEMU/KVM, virtiofs workspace, rootless Docker under a dedicated VM user, host-side model API. This ticket cites #40 for the boundary."
+    },
+    {
+      "timestamp": "2026-10-26T20:50:56.493Z",
+      "author": "cli",
+      "body": "BLOCKED 2026-10-26 by #41/#42 and the execution environment: no Docker or VM to exercise compose overlays, workspace containers or the host-side egress proxy. The target enforcement model (proxy + .mester-egress allowed_domains) is recorded in docs/DECISIONS.md §C.8 and docs/vm-architecture.md."
+    }
+  ],
+  "models_used": [],
+  "dependencies": [
+    40,
+    41,
+    42
+  ]
+}

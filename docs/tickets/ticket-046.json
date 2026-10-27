@@ -1,0 +1,51 @@
+{
+  "id": 46,
+  "file_path": "/workspace/docs/tickets/ticket-046.json",
+  "number": 46,
+  "area": "infra",
+  "type": "spike",
+  "status": "draft",
+  "title": "Spike: alternative container runtimes for the VM harness (future scope)",
+  "objective": "Evaluate whether a runtime other than Docker (rootless Podman, containerd/nerdctl, systemd-nspawn, etc.) would better serve the VM-based harness. This is future scope and does not block epic #35; no implementation is done here.",
+  "created_at": "2026-10-26T20:39:18.843Z",
+  "updated_at": "2026-10-26T20:39:18.843Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Docker, rootless Podman, containerd/nerdctl and at least one OS-level alternative are compared on compose compatibility, rootless support, Docker API/socket compatibility, GPU support, image tooling and Arch/CachyOS packaging.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Migration cost from the current compose.yaml and ./lab model is stated, including what would break (compose semantics, socket API, volumes and networking).",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "A go/no-go recommendation with prerequisites and an explicit risk list is recorded in a decision log.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "No code changes are made under this ticket; it stays out of epic #35's completion criteria.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "runtime comparison review",
+      "owner go/no-go decision"
+    ],
+    "created": [],
+    "cases": []
+  },
+  "priority": "minor",
+  "comments": [
+    {
+      "timestamp": "2026-10-26T20:39:18.843Z",
+      "author": "cli",
+      "body": "Future scope, deliberately outside epic #35. The owner likes Docker as the mechanism inside the VM for now; this ticket exists so alternatives are evaluated deliberately rather than by accident."
+    }
+  ],
+  "models_used": []
+}

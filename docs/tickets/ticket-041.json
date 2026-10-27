@@ -1,0 +1,96 @@
+{
+  "id": 41,
+  "file_path": "/workspace/docs/tickets/ticket-041.json",
+  "number": 41,
+  "area": "infra",
+  "type": "feature",
+  "status": "draft",
+  "title": "VM provisioning and ./lab VM lifecycle",
+  "objective": "Make the VM reproducible and controllable from the host: ./lab can provision or connect to the VM per #40, install Docker, transport the workspace, and run VM lifecycle commands idempotently. The host stops running the agent container itself.",
+  "created_at": "2026-10-26T20:39:18.836Z",
+  "updated_at": "2026-10-26T20:50:56.504Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "One documented command/runbook takes a clean host to a working VM (Docker plus compose plugin, repo checkout, agent image) with a CPU-only path that works without a GPU.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "./lab gains VM lifecycle commands (names fixed by #40, for example vm up/status/ssh/down) that are idempotent: re-running does not duplicate VMs, disks or networks.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "check_workspace() validation still runs on the host before a path is sent to the VM; /, $HOME, the lab repo without --unsafe-recurse, and sensitive credential directories are refused and never mounted.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "The VM publishes no host ports by default; an automated check confirms the agent and workspace services are reachable only on the VM's internal Docker networks.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Model access follows #40: host-side ollama/llamacpp are reachable only through the narrow guestfwd ports; GPU passthrough is not required, and a CPU-only host starts with the same flow and a clear message.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "./lab stop removes agent containers plus workspace containers, networks and volumes and VM-side state; git status --short in the real checkout is empty afterwards.",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "./verify-lab.sh passes from a clean clone inside the VM, and the run is recorded on this ticket.",
+      "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "The host no longer runs the agent container; any host-side Docker use is limited to a documented service (for example model servers) if #40 chooses that option. README and docs/01-host-setup.md describe the VM flow and remove dev-container-only instructions.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "clean CPU-only provisioning run",
+      "GPU-backed provisioning run or documented waiver",
+      "idempotent vm up/status/down",
+      "refused workspace paths",
+      "no-published-ports check",
+      "teardown residue check",
+      "verify-lab inside the VM",
+      "docs review"
+    ],
+    "created": [],
+    "cases": []
+  },
+  "priority": "major",
+  "parent": 35,
+  "comments": [
+    {
+      "timestamp": "2026-10-26T20:39:18.836Z",
+      "author": "cli",
+      "body": "Created through the ticket engine API (createTicketEngine.create) with parent=35. The CLI has no --parent flag until #39 lands; no ticket JSON was hand-written."
+    },
+    {
+      "timestamp": "2026-10-26T20:39:18.840Z",
+      "author": "cli",
+      "body": "Depends on #40. The engine stores dependencies but does not yet gate status transitions on them; that is part of #39."
+    },
+    {
+      "timestamp": "2026-10-26T20:45:14.117Z",
+      "author": "cli",
+      "body": "Reconciled with decision docs/DECISIONS.md §C.8 (2026-10-26): local QEMU/KVM, virtiofs workspace, rootless Docker under a dedicated VM user, host-side model API. This ticket cites #40 for the boundary."
+    },
+    {
+      "timestamp": "2026-10-26T20:50:56.493Z",
+      "author": "cli",
+      "body": "ENVIRONMENT CHECK 2026-10-26: this container has no qemu-system-x86_64, virtiofsd, docker, podman, virsh, cloud-localds/genisoimage, or /dev/kvm. The #40 decisions are recorded and this ticket is ready, but VM provisioning and lifecycle evidence must run on a KVM-capable host. No code was written or claimed here."
+    }
+  ],
+  "models_used": [],
+  "dependencies": [
+    40
+  ]
+}

@@ -216,6 +216,12 @@ evidence and must never lose a branch's writes silently. This keeps a merge audi
 instead of producing a plausible-looking but incomplete history.
 
 ### C.6 VM/Docker test environment (2026-10-26)
+> **Refined 2026-10-26 by C.8.** C.6 records the original VM-vs-remote-daemon call. C.8
+> now fixes the concrete topology, transport, daemon and model placement. Where the two
+> differ, C.8 wins: the repo is *not* checked out inside the VM by default, the workspace
+> is shared with virtiofs, and the agent runs in a container inside the VM rather than
+> running opencode directly on the VM.
+
 **Decision:** The disposable test environment is a **full Linux VM** with Docker, the
 repo checkout, and opencode installed inside it. Docker-in-Docker and a shared remote
 daemon were rejected: DinD needs privileged mode, and a remote daemon gives weaker
@@ -243,6 +249,89 @@ The module still has to build **independently** from its own package directory. 
 clone of the branch passes `npm ci`, `npm run build`, `npm run check:package`, the full
 Jest suite, and `ticket-engine validate`; those results are recorded on ticket #36.
 Merge is blocked until #35's VM evidence and #36's remaining criteria are complete.
+
+### C.8 VM harness topology, transport and isolation (2026-10-26)
+**Decision:** Little Mester runs the agent in a Docker container inside a **local,
+`./lab`-managed QEMU/KVM VM**. The host stays outside the blast radius: it runs QEMU and
+`virtiofsd` as the invoking user, not an agent container. The VM runs **rootless Docker**
+under a dedicated `mester` user, so the agent gets a real Docker CLI and compose plugin
+without root in the VM. The workspace enters the VM through **virtiofs**; model servers
+stay on the host and are reached through narrow, explicitly forwarded channels.
+
+This refines C.6. The agent container, not opencode-on-the-VM, is the unit that runs; the
+workspace is shared live rather than checked out inside the VM.
+
+**Why this shape:**
+
+| Candidate | Isolation | GPU / models | Startup | Workspace I/O | Verdict |
+|---|---|---|---|---|---|
+| Local QEMU/KVM, `./lab`-managed | VM boundary + rootless Docker; no host ports; one exported path | Host-side model API, no VFIO | One command, image cached | virtiofs, live edits | **Chosen** |
+| Local default + remote Linux host over SSH | Same container hardening, but shares the remote host's daemon/network | Depends on host | Fast after provisioning | sshfs/rsync, extra moving parts | Follow-up: #47 |
+| Cloud VM | Strong, but provider credentials and cost | GPU SKUs available | Slowest | Network filesystem or copy | Not now |
+| Docker-in-Docker on the host | Needs privileged containers; weak boundary | Host Docker | Fast | bind mount | Rejected (C.6) |
+| Shared remote Docker daemon | Containers/networks/volumes shared with other work | Host Docker | Fast | bind mount | Rejected (C.6) |
+
+**Concrete choices:**
+
+- **Hypervisor:** `qemu-system-x86_64` driven directly by `./lab`, running as the invoking
+  user with KVM (`/dev/kvm`). No libvirt daemon. This keeps the VM lifecycle scriptable,
+  makes `virtiofsd` ownership match the workspace, and avoids a privileged host service.
+  If KVM is unavailable, `./lab` refuses rather than silently falling back to unusably slow
+  TCG emulation.
+- **Guest:** a pinned cloud image with a per-VM qcow2 overlay and a cloud-init NoCloud
+  seed (user, SSH key, packages). The base image is cached; the overlay is disposable.
+  `qemu-guest-agent` provides clean shutdown.
+- **Workspace transport:** `virtiofsd` exports exactly the directory selected on the host
+  (`--shared-dir`, sandboxed with its namespace mode where the host permits it, otherwise
+  the narrowest mode available) and QEMU exposes it as a `vhost-user-fs-pci` device.
+  The guest mounts tag `workspace` at `/workspace`. The agent and workspace containers see
+  that mount; nothing else from the host is exported. `check_workspace()` still runs on the
+  host before export, so `/`, `$HOME`, the lab repo without `--unsafe-recurse`, and
+  credential directories never reach the VM.
+- **Docker daemon:** rootless Docker under `mester` (`subuid`/`subgid`, systemd user
+  lingering, `DOCKER_HOST=unix:///run/user/<uid>/docker.sock`). A container escape lands as
+  an unprivileged VM user, not VM root; the VM is disposable regardless. The agent socket is
+  mounted only when Docker access is enabled (opt-in and visible), and the daemon is never
+  rootful by default. Rootful Docker is an explicit escape hatch, not the default.
+- **Control channel:** SSH over a QEMU user-network forward bound to `127.0.0.1` on an
+  ephemeral host port. `./lab vm` generates a per-VM ed25519 key under the gitignored
+  `.mester/vm/<name>/` state directory, uses a per-VM `known_hosts`, and never copies host
+  keys, cloud credentials, or `~/.ssh` into the VM. `qemu-guest-agent` handles lifecycle;
+  SSH handles commands and `./lab shell`.
+- **Model APIs:** ollama and llamacpp stay on the host, bound to loopback. The VM reaches
+  only their ports through QEMU `guestfwd` entries (`10.0.2.100:11434` and `:8080`), not
+  through a general host route. No model weights or GPUs enter the VM, and a CPU-only host
+  still works with the same flow.
+- **Egress:** QEMU user networking runs with `restrict=on`; the only way out is a host-side
+  allowlisting HTTP(S) proxy exposed through `guestfwd` (`10.0.2.100:3128`). Docker, apt,
+  npm and pip are configured to use it. This is where `.mester-egress` `allowed_domains`
+  is enforced (#43), instead of the current advisory parsing. A blank list keeps allow-all
+  at the *domain* level; non-HTTP protocols and DNS outside the proxy are follow-ups, not
+  silently allowed.
+- **No host ports:** the harness adds only the loopback SSH forward. The model servers
+  already listen on host loopback and are exposed to the VM only through their `guestfwd`
+  entries. Agent and workspace services are reachable only on the VM's internal Docker
+  networks. Nothing is published to the host LAN.
+- **Teardown:** `./lab stop` removes the agent and workspace containers/networks/volumes
+  inside the VM, then stops QEMU and deletes the overlay, seed and virtiofs sockets. The
+  cached base image and `./lab` state are the only things that survive. A VM is never
+  reused across unrelated workspaces without an explicit reset.
+
+**Follow-ups (with defaults):**
+
+- A remote Linux host target is **#47**: opt-in, off by default, and documented as weaker
+  isolation because it shares that host's Docker daemon. Default remains local QEMU/KVM.
+- Rootless Docker restrictions (ports <1024, some images, cgroup v2 delegation) are handled
+  per workspace by #42/#43; the default is to keep rootless and fix the workspace, not to
+  switch to rootful.
+- GPU passthrough into the VM is explicitly out of scope; model servers stay on the host.
+- `guestfwd` + `restrict=on` behaviour and virtiofs mount semantics must be proven in #41;
+  the fallback is a host-side firewall/proxy pair with the same crossings, not opening a
+  general host route.
+- Alternative container runtimes remain future scope in #46.
+
+The trust-boundary diagram and crossing table live in `docs/vm-architecture.md`; the
+engineering invariants are in `docs/tickets/architecture/DECISIONS.md` §K.
 
 ---
 

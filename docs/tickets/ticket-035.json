@@ -3,13 +3,13 @@
   "file_path": "/workspace/docs/tickets/ticket-035.json",
   "number": 35,
   "area": "infra",
-  "type": "feature",
-  "status": "draft",
-  "title": "Docker-capable VM test environment + disposable workspaces",
-  "objective": "Stand up a reproducible Docker-capable development/test host (VM or remote Docker daemon) outside the Little Mester agent container, plus a disposable-workspace workflow, so ./lab, compose, --unsafe-recurse and the ticket CLI/MCP can be exercised end-to-end without the environment under test also being the environment doing the testing.",
+  "type": "infra",
+  "status": "active",
+  "title": "Epic: VM-based Docker agent environment (all-in-one, model-agnostic harness)",
+  "objective": "Deliver an all-in-one, model-agnostic harness: point Little Mester at a directory and run an agent there, with real Docker capability for the workspace's dependencies, while keeping the agent's blast radius inside a disposable VM. The agent runs in a Docker container inside a full Linux VM (not on the host), with a Docker CLI that can run the workspace's compose files; ./lab on the host orchestrates VM lifecycle, workspace transport, the agent container and teardown. Works with local models and no subscription, and can use cloud providers (Kimi, Claude, OpenAI) when available. Includes documentation, egress and decision-log housekeeping.",
   "created_at": "2026-10-26T17:39:37.714Z",
-  "updated_at": "2026-10-26T18:36:23.867Z",
-  "priority": "major",
+  "updated_at": "2026-10-26T20:50:56.495Z",
+  "priority": "critical",
   "comments": [
     {
       "timestamp": "2026-10-26T17:39:37.714Z",
@@ -30,6 +30,36 @@
       "timestamp": "2026-10-26T18:36:16.706Z",
       "author": "cli",
       "body": "Topology recorded and VM work deferred (2026-10-26). A1 is passing: the decision is in docs/DECISIONS.md §C.6 (full Linux VM + Docker + opencode; repo checkout is never the target). A2-A9 stay pending for a separate session on a Docker-capable host. This environment has no Docker CLI, socket, or podman, so no provisioning or command-matrix evidence was produced."
+    },
+    {
+      "timestamp": "2026-10-26T20:39:18.846Z",
+      "author": "cli",
+      "body": "EXPANDED 2026-10-26 — scope change recorded through the engine. #35 is now an epic: a full Linux VM hosts a Docker daemon and an agent container with a real Docker CLI, so a workspace that needs `docker compose` (for example postgres) can be served without exposing the host. This supersedes the earlier 'VM test host only' framing. Existing A1 (topology) is kept; A2-A9 stay as integration/verification criteria; A10-A18 add the child and end-to-end criteria. Children: #40 topology/isolation spike, #41 VM provisioning + ./lab lifecycle, #42 agent Docker CLI, #43 workspace Docker capability/isolation/egress, #44 docs drift + root DECISIONS sync, #45 model-agnostic harness. #46 (alternative runtimes) is deliberately outside the epic."
+    },
+    {
+      "timestamp": "2026-10-26T20:39:18.846Z",
+      "author": "cli",
+      "body": "Owner constraints recorded 2026-10-26. (a) Little Mester is an all-in-one harness: point it at directory X and start agentic coding. (b) It must work regardless of subscription: local models by default, cloud providers (Kimi, Claude, OpenAI) only when the owner has them. (c) Docker remains the container mechanism inside the VM; evaluating other runtimes is future scope (#46). (d) Housekeeping is in scope: SECURITY/README drift, root DECISIONS sync, and enforcement of `.mester-egress` `allowed_domains` (split into the workspace Docker and docs children). (e) Claude's 2026-10-26 review is addressed by splitting VM-host work from agent Docker capability, but they are kept in one epic with explicit children rather than leaving the capability untracked."
+    },
+    {
+      "timestamp": "2026-10-26T20:39:18.846Z",
+      "author": "cli",
+      "body": "Creation method: #39 was created with the CLI. The epic/children data was written through createTicketEngine because the CLI lacks --parent/--is-epic until #39 lands. No ticket JSON was hand-edited."
+    },
+    {
+      "timestamp": "2026-10-26T20:45:14.124Z",
+      "author": "cli",
+      "body": "DECISIONS CONFIRMED 2026-10-26 — the four open architecture choices are now recorded in docs/DECISIONS.md §C.8: local QEMU/KVM managed by ./lab, virtiofs workspace transport, rootless Docker under a dedicated VM user, host-side ollama/llamacpp behind narrow guestfwd ports. #40 is resolved with the comparison and trust-boundary diagram (docs/vm-architecture.md). A2 no longer asks for NVIDIA toolkit inside the VM. Remote-host override is #47, deliberately outside this epic. A1 evidence is updated; the earlier 'do not start VM ' +\n        'work yet' note is superseded by this decision and epic activation."
+    },
+    {
+      "timestamp": "2026-10-26T20:49:19.630Z",
+      "author": "cli",
+      "body": "CHILD PROGRESS 2026-10-26: #40 (topology/transport/isolation spike) and #44 (documentation drift + root DECISIONS sync) are resolved, so epic A10 and A14 are passing. A11-A13/A15 stay pending until #41-#43/#45 land; A2-A9 remain provisioning/verification criteria. #47 (remote override) is outside this epic."
+    },
+    {
+      "timestamp": "2026-10-26T20:50:56.493Z",
+      "author": "cli",
+      "body": "IMPLEMENTATION STATUS 2026-10-26: #40 (topology/transport/isolation) and #44 (docs drift + root DECISIONS sync) are resolved, so A10/A14 pass. #41-#43 are blocked here: the environment has no qemu-system-x86_64, virtiofsd, docker, podman, virsh, cloud-init tooling, or /dev/kvm. #45 can start (local default/config generation) but live cloud verification needs credentials. #47 is outside this epic. No ticket JSON was hand-edited."
     }
   ],
   "models_used": [],
@@ -38,12 +68,12 @@
       "id": "A1",
       "text": "Topology is chosen and recorded in docs/DECISIONS.md: a full Linux VM with Docker + opencode, or a remote Docker daemon; isolation trade-offs and why the repo is never the test target are recorded.",
       "status": "passing",
-      "evidence": "docs/DECISIONS.md §C.6: full Linux VM with Docker + opencode; DinD and shared remote daemon rejected for isolation reasons; repo checkout is never the test target. User selected this topology on 2026-10-26.",
-      "note": "Provisioning and A2-A9 are deferred to a new session; do not start VM work yet."
+      "evidence": "docs/DECISIONS.md §C.6 (full Linux VM) refined by §C.8: local QEMU/KVM managed by ./lab, virtiofs workspace, rootless Docker under a dedicated VM user, host-side model API. DinD and a shared remote daemon remain rejected; the repo checkout is still never the test target.",
+      "note": "Owner confirmed the concrete choices on 2026-10-26; implementation proceeds in #41-#43. The remote-host override is tracked separately in #47."
     },
     {
       "id": "A2",
-      "text": "Fresh provisioning is one documented command/runbook from a clean host: Docker (and NVIDIA toolkit when GPU-enabled), repo checkout, agent image build; CPU-only mode works without a GPU.",
+      "text": "Fresh provisioning is one documented command/runbook from a clean host: installs Docker and the compose plugin, checks out or builds the agent image, and supports a CPU-only host without a GPU. NVIDIA toolkit installation is not part of the VM path (models stay on the host per §C.8).",
       "status": "pending"
     },
     {
@@ -80,6 +110,53 @@
       "id": "A9",
       "text": "CI or a committed pre-merge script runs the engine/CLI/MCP suites and the lab smoke test in the VM/Docker environment, with results recorded on this ticket before merge.",
       "status": "pending"
+    },
+    {
+      "id": "A10",
+      "text": "Child #40 (VM topology, workspace transport and isolation spike) is resolved and its decisions are recorded.",
+      "status": "passing",
+      "evidence": "Child #40 resolved 2026-10-26. Decisions are in docs/DECISIONS.md §C.8, docs/tickets/architecture/DECISIONS.md §K and docs/vm-architecture.md; comparison and owner sign-off are recorded on #40."
+    },
+    {
+      "id": "A11",
+      "text": "Child #41 (VM provisioning and ./lab VM lifecycle) is resolved.",
+      "status": "pending"
+    },
+    {
+      "id": "A12",
+      "text": "Child #42 (agent Docker CLI and controlled daemon access) is resolved.",
+      "status": "pending"
+    },
+    {
+      "id": "A13",
+      "text": "Child #43 (workspace Docker capability, isolation and egress enforcement) is resolved.",
+      "status": "pending"
+    },
+    {
+      "id": "A14",
+      "text": "Child #44 (SECURITY/README drift and root DECISIONS sync) is resolved.",
+      "status": "passing",
+      "evidence": "Child #44 resolved 2026-10-26. SECURITY/README now match compose defaults, root DECISIONS.md is a pointer, and scripts/check-docs-consistency.py (wired into verify-lab.sh) guards against drift."
+    },
+    {
+      "id": "A15",
+      "text": "Child #45 (model-agnostic local/cloud harness) is resolved.",
+      "status": "pending"
+    },
+    {
+      "id": "A16",
+      "text": "End to end on a clean VM: ./lab <workspace> starts the agent, the agent runs the workspace's compose dependencies, tests run, and ./lab stop leaves no workspace containers/volumes and a clean git status in the checkout.",
+      "status": "pending"
+    },
+    {
+      "id": "A17",
+      "text": "The host no longer runs the agent container or needs Docker for the agent; any remaining host-side service (for example a model API) is documented, justified and unreachable from the agent beyond its explicit API.",
+      "status": "pending"
+    },
+    {
+      "id": "A18",
+      "text": "Every plan change from the 2026-10-26 rework is recorded in one live decision log (docs/DECISIONS.md) and in ticket comments/audit entries; root DECISIONS.md is not a second source of truth.",
+      "status": "pending"
     }
   ],
   "tests": {
@@ -100,5 +177,6 @@
     "cases": [
       "topology decision review (full Linux VM + Docker)"
     ]
-  }
+  },
+  "is_epic": true
 }

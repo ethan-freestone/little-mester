@@ -532,3 +532,41 @@ summary, search includes criterion text, and `validate` returns `quality` in
 5. `validate` remains side-effect free; it must not "fix" criteria or tests.
 6. The schema (`ticket-v1.json`), engine normalizer, CLI, and MCP stay in lockstep. A new
    status is added in all four places or nowhere.
+
+## K. VM harness boundaries (2026-10-26)
+
+**Decision:** The agent runs in a Docker container inside a local, `./lab`-managed
+QEMU/KVM VM, not on the host. Rootless Docker runs under a dedicated VM user. The selected
+workspace is shared with virtiofs; model servers stay on the host and are reached only
+through explicit `guestfwd` ports. Full rationale: `docs/DECISIONS.md` §C.8. Reviewer
+diagram: `docs/vm-architecture.md`.
+
+**Invariants a future change must preserve:**
+
+1. **No agent on the host.** `./lab` may run QEMU, `virtiofsd`, a model server and the
+   egress proxy on the host. It must not start the agent or workspace containers there.
+2. **One exported workspace.** The only host directory shared into the VM is the one the
+   owner selected, after the existing path guards. Adding a second mount requires the
+   explicit, recorded approval flow in #43; no silent `$HOME`, socket, or repo mounts.
+3. **No published ports.** Agent and workspace services are not reachable from the host
+   LAN. The harness adds only the loopback SSH control forward; model APIs listen on host
+   loopback and cross only through their `guestfwd` entries. A change that adds a published
+   port is a security regression, not a feature.
+4. **Rootless by default.** The in-VM daemon is rootless under a dedicated user. Rootful
+   Docker is an explicit, documented escape hatch; the agent never gets the host daemon.
+5. **Credentials stay out.** Host keys, cloud keys, git credentials and the owner's
+   `~/.ssh` are never copied into the VM, the image, or a ticket. Runtime secrets come from
+   a gitignored source.
+6. **Egress is mediated.** The VM has no general host route. Internet access goes through
+   the allowlisting proxy, and `.mester-egress` `allowed_domains` is enforced there rather
+   than parsed and ignored. A blank list keeps the documented allow-all behaviour at the
+   domain level; protocol coverage is a separate, explicit decision.
+7. **Disposable VM.** Stopping a session removes workspace containers, networks, volumes,
+   the overlay, seed and sockets. The cached base image and harness state are the only
+   survivors.
+8. **Remote mode is weaker and not default.** A remote Linux host target (#47) shares that
+   host's daemon; `SECURITY.md` must say so and local QEMU/KVM remains the default.
+9. **Every boundary change is a decision.** Changing any crossing above needs an entry in
+   `docs/DECISIONS.md`/this log and a ticket with acceptance criteria and test evidence.
+   Hand-editing a boundary into `lab`, `compose.yaml` or the agent image is a validation
+   failure.

@@ -202,7 +202,7 @@
     {
       "number": 35,
       "file_path": "ticket-035.json",
-      "status": "draft",
+      "status": "active",
       "area": "infra"
     },
     {
@@ -227,8 +227,56 @@
       "number": 39,
       "file_path": "ticket-039.json",
       "status": "draft",
+      "area": "engine"
+    },
+    {
+      "number": 40,
+      "file_path": "ticket-040.json",
+      "status": "resolved",
+      "area": "infra"
+    },
+    {
+      "number": 41,
+      "file_path": "ticket-041.json",
+      "status": "draft",
+      "area": "infra"
+    },
+    {
+      "number": 42,
+      "file_path": "ticket-042.json",
+      "status": "draft",
+      "area": "infra"
+    },
+    {
+      "number": 43,
+      "file_path": "ticket-043.json",
+      "status": "draft",
+      "area": "security"
+    },
+    {
+      "number": 44,
+      "file_path": "ticket-044.json",
+      "status": "resolved",
+      "area": "docs"
+    },
+    {
+      "number": 45,
+      "file_path": "ticket-045.json",
+      "status": "draft",
+      "area": "infra"
+    },
+    {
+      "number": 46,
+      "file_path": "ticket-046.json",
+      "status": "draft",
+      "area": "infra"
+    },
+    {
+      "number": 47,
+      "file_path": "ticket-047.json",
+      "status": "draft",
       "area": "infra"
     }
   ],
-  "updated_at": "2026-10-26T23:55:28.491Z"
+  "updated_at": "2026-10-26T20:50:56.509Z"
 }

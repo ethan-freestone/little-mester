@@ -63,6 +63,14 @@ A local LLM (Ollama or llama.cpp) drives a coding agent (**opencode** by default
 
 Agent internet is **enabled by default** (`[egress, internal]`). Disable with `--isolated` for an offline session. When egress is on, outbound traffic is filtered against `.mester-egress` (one hostname per line) or allowed unconditionally with `--egress-true`.
 
+### Three ideas to hold onto
+
+| Idea | How it's done here |
+|---|---|
+| The model can't touch files | Ollama/llama.cpp only produce text. No filesystem mounts except their own model volumes. |
+| The agent touches only one folder | One bind mount (`/workspace`), gated by `lab`'s path checks. |
+| The agent can't phone home | Model + agent share `internal: true`. Egress is opt-in. Only pull services have internet, briefly, during setup. |
+
 ---
 
 ## Read this first (humans and AI agents)
@@ -73,6 +81,13 @@ This repo has **two decision logs**. Read both before making changes:
 |---|---|---|
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | How to use, configure, test, and improve little-mester | Any session |
 | [`docs/tickets/architecture/DECISIONS.md`](docs/tickets/architecture/DECISIONS.md) | Engineering designs for the ticket engine | Any `little-mester-mcp/` change |
+
+`docs/DECISIONS.md` is split into focused sub-logs:
+- **§A** — How to use · **§K** — Design decisions · **§L** — Security caveats
+- [`docs/testing.md`](docs/testing.md) — Testing policy
+- [`docs/ticketing.md`](docs/ticketing.md) — Ticket schema & workflow
+- [`docs/opencode.md`](docs/opencode.md) — OpenCode customisation
+- [`docs/github-actions.md`](docs/github-actions.md) — CI/CD decisions
 
 The default development cycle is **doc → test → code → commit**. See [`docs/workflows.md`](docs/workflows.md). Do not skip stages or reorder them without a ticket explaining why.
 
@@ -176,9 +191,13 @@ Select a workflow with `--workflow <name>`.
 
 | What you need | Go to |
 |---|---|
-| Full security model | [SECURITY.md](SECURITY.md) |
-| Workflows & discipline | [docs/workflows.md](docs/workflows.md) |
-| How to use & improve | [docs/DECISIONS.md](docs/DECISIONS.md) |
+| **Getting started** | [docs/DECISIONS.md](docs/DECISIONS.md) §A · [Workflows](docs/workflows.md) |
+| Design decisions & trade-offs | [docs/DECISIONS.md](docs/DECISIONS.md) §K |
+| Security caveats (what's NOT protected) | [docs/DECISIONS.md](docs/DECISIONS.md) §L · [SECURITY.md](SECURITY.md) |
+| Testing policy & ticket workflow | [docs/testing.md](docs/testing.md) |
+| Ticket schema & workflow decisions | [docs/ticketing.md](docs/ticketing.md) |
+| OpenCode customisation | [docs/opencode.md](docs/opencode.md) |
+| GitHub Actions / CI decisions | [docs/github-actions.md](docs/github-actions.md) |
 | Ticket engine internals | [docs/tickets/architecture/DECISIONS.md](docs/tickets/architecture/DECISIONS.md) |
 | Scripts reference | [scripts/README.md](scripts/README.md) |
 | Agent container details | [agent/README.md](agent/README.md) |
