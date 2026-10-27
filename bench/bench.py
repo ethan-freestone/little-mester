@@ -169,7 +169,7 @@ def health():
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
             return data.get("status") == "ok"
-    except Exception as e:
+    except (OSError, ConnectionError, json.JSONDecodeError) as e:
         print(f"FAIL: server unreachable at {BASE_URL} — {e}", file=sys.stderr)
         return False
 
@@ -181,7 +181,7 @@ def main():
         sys.exit(1)
 
     print("=" * 60)
-    print(f"llama.cpp Benchmark Runner")
+    print("llama.cpp Benchmark Runner")
     print(f"  Server : {BASE_URL}")
     print(f"  Repeats: {N_REPEATS} per config")
     print("=" * 60)

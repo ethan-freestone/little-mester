@@ -69,7 +69,7 @@ class Driver:
             timeout=20,
         )
         self.log_path = os.path.join(home, "pty.log")
-        self.log = open(self.log_path, "w", encoding="utf-8")
+        self.log = open(self.log_path, "w", encoding="utf-8")  # noqa: SIM115
         self.buffer = ""
         self.wait(10)
 

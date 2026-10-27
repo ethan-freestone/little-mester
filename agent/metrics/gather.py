@@ -14,17 +14,17 @@ Exposes three endpoints:
     GET /history?n=N -- last N ring-buffer samples (default 120 = 60s)
 """
 
+import collections
 import json
 import os
 import subprocess
 import sys
 import threading
 import time
-import collections
-from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
 # Host paths (mounted via compose bind mounts as :ro).
 # These MUST match the mount destinations in compose.yaml:
@@ -59,7 +59,7 @@ def _collect_gpu():
     if _NVML_OK:
         try:
             return _collect_gpu_nvml()
-        except Exception:
+        except Exception:  # noqa: S110, BLE001 — hardware probing
             pass
     if _HAS_SMI:
         return _collect_gpu_smi()
@@ -77,10 +77,7 @@ def _collect_cpu():
     except (OSError, IndexError, ValueError):
         load_1 = load_5 = load_15 = 0.0
 
-    try:
-        num_cpus = os.cpu_count() or 1
-    except Exception:
-        num_cpus = 1
+    num_cpus = os.cpu_count() or 1
 
     return {
         "model": _collect_cpu_model(),
@@ -94,7 +91,7 @@ def _collect_cpu():
 def _aggregate():
     """Collect *all* hardware metrics and return as a single dict."""
     return {
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "timestamp": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "cpu": _collect_cpu(),
         "memory": _collect_ram(),
         "gpu": _collect_gpu(),
@@ -190,7 +187,7 @@ try:
     import pynvml
     pynvml.nvmlInit()
     _NVML_OK = True
-except Exception:
+except Exception:  # noqa: S110, BLE001 — pynvml may not be installed
     pass
 
 # Probe for nvidia-smi binary at import time (avoids a subprocess check
@@ -236,13 +233,13 @@ def _collect_gpu_smi():
         result = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu="
+                ("--query-gpu="
                 "name,"
                 "temperature.gpu,"
                 "utilization.gpu,"
                 "memory.total,"
                 "memory.used,"
-                "memory.free",
+                "memory.free"),
                 "--format=csv,noheader,nounits",
             ],
             capture_output=True,
