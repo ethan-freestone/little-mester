@@ -54,6 +54,7 @@ vm_cmd_up() {
   echo "VM directory: $vm_dir"
 
   # ── 1. Workspace resolution & validation (A3) ───────────────────
+  # Use the workspace passed from lab-vm (set via --workspace flag).
   # If no workspace is specified, default to the current working dir.
   # An empty workspace would break virtiofsd, so we must always have
   # a valid directory.
@@ -61,12 +62,41 @@ vm_cmd_up() {
   # Resolve to absolute path
   workspace="$(realpath "$workspace" 2>/dev/null || echo "$workspace")"
 
-  if [[ -f "$LAB_DIR/lab" ]]; then
-    # Source check_workspace from lab and validate
-    source <(sed -n '/^check_workspace/,/^}/p' "$LAB_DIR/lab")
-    check_workspace "$workspace"
-    workspace="$WORKSPACE"
+  # Use the local check_workspace (from lab-vm) which properly checks
+  # VM_UNSAFE_RECURSE — not the UNSAFE_RECURSE from ./lab.
+  source "$LAB_DIR/lib/vm/prereqs.sh" 2>/dev/null || true
+  # check_workspace is defined in lab-vm's main script; if sourced
+  # from lifecycle.sh standalone it may not be available. Define a
+  # minimal fallback that matches lab-vm's behavior:
+  if ! declare -f check_workspace >/dev/null 2>&1; then
+    check_workspace() {
+      local ws="$1"
+      [[ -d "$ws" ]] || { echo "REFUSED: Not a directory: $ws" >&2; exit 1; }
+      ws="$(realpath "$ws")"
+      [[ "$ws" != "/" ]] || { echo "REFUSED: Cannot mount filesystem root (/)" >&2; exit 1; }
+      [[ "$ws" != "$HOME" ]] || { echo "REFUSED: Cannot mount entire home directory ($HOME)" >&2; exit 1; }
+      [[ -O "$ws" ]] || { echo "REFUSED: Workspace directory must be owned by you" >&2; exit 1; }
+      if [[ "$ws" == "$LAB_DIR" || "$LAB_DIR" == "$ws"/* ]]; then
+        if [[ "${VM_UNSAFE_RECURSE:-0}" != "1" ]]; then
+          echo "REFUSED: Workspace path would expose the little-mester repo itself. Use --unsafe-recurse to override." >&2
+          exit 1
+        fi
+      fi
+      VM_WORKSPACE="$ws"
+      local sensitive_paths=(
+        "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.config" "$HOME/.aws"
+        "$HOME/.kube" "$HOME/.local" "$HOME/.bashrc" "$HOME/.zshrc"
+      )
+      for s in "${sensitive_paths[@]}"; do
+        if [[ "$ws" == "$s" || "$ws" == "$s"/* || "$s" == "$ws"/* ]]; then
+          echo "REFUSED: Path overlaps with sensitive system/credential directory: $s" >&2
+          exit 1
+        fi
+      done
+    }
   fi
+  check_workspace "$workspace"
+  workspace="$VM_WORKSPACE"
   echo "Workspace: $workspace"
 
   # ── 2. Create VM directory ──────────────────────────────────────
@@ -153,8 +183,8 @@ vm_cmd_up() {
 
   echo ""
   echo "VM '$vm_name' is up and running."
-  echo "  SSH:  ./lab vm ssh $vm_name"
-  echo "  Stop: ./lab vm down $vm_name"
+  echo "  SSH:  ./lab-vm ssh $vm_name"
+  echo "  Stop: ./lab-vm down $vm_name"
   echo ""
 
   # A8: Confirm host no longer runs the agent container
@@ -220,7 +250,7 @@ vm_cmd_ssh() {
   fi
 
   if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
-    die "VM '$vm_name' is not running. Start it with: ./lab vm up $vm_name"
+    die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
   fi
 
   local ssh_port
@@ -318,11 +348,11 @@ vm_cmd_base() {
 
   if vm_disk_exists "$base_disk"; then
     echo "Base disk already exists: $base_disk"
-    echo "To recreate: rm $base_disk && ./lab vm base"
+    echo "To recreate: rm $base_disk && ./lab-vm base"
     return 0
   fi
 
   echo "Creating base disk image ($VM_BASE_SIZE GiB)..."
   vm_disk_create_base "$base_disk" "${VM_BASE_SIZE:-20}"
-  echo "Base disk created. Next step: ./lab vm up $vm_name"
+  echo "Base disk created. Next step: ./lab-vm up $vm_name"
 }
