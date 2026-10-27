@@ -95,6 +95,8 @@ The default development cycle is **doc → test → code → commit**. See [`doc
 
 ## Setup
 
+> **Using a ChatGPT Plus/Pro account from a container or VM?** Use the callback-free device flow and persistence runbook in [ChatGPT authentication](docs/chatgpt-auth.md). Do not use an API-key setup unless you have separate OpenAI API billing.
+
 ```bash
 git clone <this-repo> little-mester
 cd little-mester
@@ -197,6 +199,7 @@ Select a workflow with `--workflow <name>`.
 | Testing policy & ticket workflow | [docs/testing.md](docs/testing.md) |
 | Ticket schema & workflow decisions | [docs/ticketing.md](docs/ticketing.md) |
 | OpenCode customisation | [docs/opencode.md](docs/opencode.md) |
+| ChatGPT login in containers/VMs | [docs/chatgpt-auth.md](docs/chatgpt-auth.md) |
 | GitHub Actions / CI decisions | [docs/github-actions.md](docs/github-actions.md) |
 | Ticket engine internals | [docs/tickets/architecture/DECISIONS.md](docs/tickets/architecture/DECISIONS.md) |
 | Scripts reference | [scripts/README.md](scripts/README.md) |

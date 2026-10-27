@@ -10,6 +10,8 @@
 
 ### Current status
 - Done: logo plugin rewritten to the v2 plugin contract; config wiring moved to v2 mechanisms (J.2).
+- Verified: ChatGPT Plus device-code authentication works from the agent container with `chatgpt-headless` (J.2.1).
+- Not implemented: secure export/import and persistence of that credential across disposable VM recreation (J.2.1).
 - Not confirmed: whether the logo actually renders on the home screen (see J.4).
 - Rule: record test results in J.4. Do not add assumptions to this section.
 
@@ -45,6 +47,8 @@ plugin loading and must not be used to register plugins or keybinds.
 - **Never put OpenCode config or plugins under `/home/agent` or `~/.config/opencode`.** `/home/agent` is a tmpfs (see [DECISIONS.md](DECISIONS.md) §A.4), so anything copied there at build time is hidden at runtime. Observed when we tried it: local models disappeared. The tmpfs shadowing is the likely cause.
 - Check that `compose.yaml` does not override or unset `OPENCODE_CONFIG` or `OPENCODE_CLI_CONFIG_CONTENT`.
 
+Saved provider credentials are different from configuration. OpenCode stores them in its data database, which currently resolves to `/home/agent/.local/share/opencode/opencode.db` and is erased when the `/home/agent` tmpfs is recreated. See J.2.1 before changing this behavior.
+
 Dockerfile:
 ```dockerfile
 RUN npm install -g @opencode/cli && opencode --version
@@ -55,6 +59,20 @@ COPY opencode/plugins/little-mester-logo/ /etc/opencode/plugins/little-mester-lo
 ENV OPENCODE_CONFIG=/etc/opencode/opencode/opencode.json \
     OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-logo"]}'
 ```
+
+### J.2.1 ChatGPT Plus authentication in containers and VMs
+
+The verified callback-free login command is:
+
+```bash
+opencode auth login openai --method chatgpt-headless
+```
+
+It displays a device code for `https://auth.openai.com/codex/device`. The user completes authorization in a host browser while the container polls OpenAI, so no localhost callback or API key is required.
+
+This login is currently container-local because provider credentials live in the OpenCode database under `/home/agent`, which is tmpfs. The VM implementation must use OpenCode's supported `auth export`/`auth import` commands, persist the narrow OpenCode data directory outside the agent tmpfs, and save the latest refreshed credential before deleting the VM overlay. Credentials must never be placed in the workspace, Git, cloud-init ISO, shared base image, or logs.
+
+The complete operator procedure, verified observations, security requirements, and pending VM lifecycle design are in [`docs/chatgpt-auth.md`](chatgpt-auth.md). Treat that document as the runbook for the next implementation session.
 
 ### J.3 Logo plugin
 

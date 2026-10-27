@@ -87,6 +87,8 @@ qemu-system-x86_64 -enable-kvm -machine q35 -m 512 -drive file=/dev/null,format=
 
 ## 2. One-command bootstrap
 
+If the agent will use a ChatGPT Plus or Pro subscription, complete the one-time device login and host credential escrow described in [`docs/chatgpt-auth.md`](chatgpt-auth.md). Automatic import into a disposable VM is not implemented yet; do not assume a login stored in the current container will follow the VM.
+
 After installing prerequisites, run:
 
 ```bash
@@ -247,6 +249,7 @@ If you've been using the current host-Docker mode:
 ## 8. References
 
 - **Architecture:** [`docs/vm-architecture.md`](docs/vm-architecture.md)
+- **ChatGPT authentication:** [`docs/chatgpt-auth.md`](chatgpt-auth.md)
 - **Decisions:** [`docs/DECISIONS.md` §C.8](docs/DECISIONS.md#c8-vm-harness-topology-transport-and-isolation-2026-10-26)
 - **Security:** [`SECURITY.md`](SECURITY.md)
 - **Epic:** [#35](docs/tickets/ticket-035.json)
