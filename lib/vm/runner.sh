@@ -74,7 +74,7 @@ _vm_start() {
     --socket-path "$virtiofs_sock" \
     --rlimit-nofile=1048576 \
     --announce-submounts \
-    > /dev/null 2>&1 &
+    >> "$vm_dir/virtiofsd.log" 2>&1 &
   local _virtiofsd_pid=$!
   log_verbose "virtiofsd started (PID: $_virtiofsd_pid, socket: $virtiofs_sock)"
 
@@ -170,8 +170,7 @@ _vm_start() {
       fi
     fi
     # Try ssh-keyscan with a 2s timeout to avoid hanging on closed ports
-    if timeout 2 ssh-keyscan -p "$ssh_port" -H 127.0.0.1 2>/dev/null | grep -q ssh-ed25519; then
-      ssh-keyscan -p "$ssh_port" -H 127.0.0.1 2>/dev/null > "$vm_dir/known_hosts"
+    if timeout 2 ssh-keyscan -p "$ssh_port" -H 127.0.0.1 2>/dev/null | tee "$vm_dir/known_hosts" | grep -q ssh-ed25519; then
       log "SSH ready on 127.0.0.1:$ssh_port"
       return 0
     fi

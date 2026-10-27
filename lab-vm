@@ -265,7 +265,7 @@ exec 3>&1 4>&2
 
 VM_LOG_FILE="$LAB_DIR/.mester/logs/lab-vm_$(date '+%Y%m%d_%H%M%S').log"
 mkdir -p "$LAB_DIR/.mester/logs"
-local -a vm_old
+
 mapfile -t vm_old < <(ls -1t "$LAB_DIR/.mester/logs"/lab-vm_*.log 2>/dev/null || true)
 if (( ${#vm_old[@]} > 4 )); then
   rm -f "${vm_old[@]:4}"
