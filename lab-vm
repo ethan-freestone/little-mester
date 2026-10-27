@@ -15,7 +15,7 @@
 #
 # A crash, core dump, or signal in lab-vm CANNOT affect ./lab:
 #   - Different hypervisor, different process tree, different ports
-#   - lab-vm uses ~/.mester/vm/<name>/ for state; lab uses ./ for compose
+#   - lab-vm uses $LAB_DIR/.mester/vm/<name>/ for state; lab uses ./ for compose
 #   - lab-vm's cleanup trap kills QEMU/virtiofsd on EXIT/INT/TERM
 #   - lab-vm failures are completely silent to ./lab
 #
@@ -90,6 +90,7 @@ source "$LAB_DIR/lib/vm/cloud-init.sh"
 source "$LAB_DIR/lib/vm/disk.sh"
 source "$LAB_DIR/lib/vm/ssh.sh"
 source "$LAB_DIR/lib/vm/runner.sh"
+source "$LAB_DIR/lib/vm/prereqs.sh"
 source "$LAB_DIR/lib/vm/lifecycle.sh"
 
 # ─── CLI parsing ────────────────────────────────────────────────────
@@ -129,7 +130,7 @@ Flags:
 Environment:
   VM_BASE_SIZE         Override default base disk size (default: 20)
 
-Per-VM state is stored at: ~/.mester/vm/<name>/
+Per-VM state is stored at: ./.mester/vm/<name>/
 
 References:
   docs/01-host-setup.md     — Host setup runbook (A1, A8)
@@ -155,13 +156,33 @@ done
 vm_name="${1:-default}"
 shift 2>/dev/null || true
 
+# ─── Prerequisite check (auto-install on demand) ────────────────────
+# Only runs for commands that actually need the tools.
+# status, ssh, and test don't need anything.
+_prereqs_needed=0
+case "$cmd" in
+  base|up|stop|down) _prereqs_needed=1 ;;
+esac
+
+if [[ $_prereqs_needed -eq 1 ]]; then
+  _saved_cmd="$cmd"
+  if ! _vm_prereqs_check "$cmd"; then
+    _vm_prereqs_install || exit 1
+    # After install, re-check. If still missing, the user needs to
+    # re-run (install was cancelled or failed).
+    if ! _vm_prereqs_check "$cmd"; then
+      exit 1
+    fi
+  fi
+fi
+
 # ─── Isolation safeguard: cleanup trap ──────────────────────────────
 # If lab-vm crashes or is killed after the VM has started, kill any
 # child QEMU/virtiofsd processes so they don't become zombies. This is
 # a safety net — it does NOT affect ./lab (which uses Docker, not QEMU).
 # The trap is registered AFTER vm_name is set so it has the correct path.
 _vm_cleanup() {
-  local vm_dir="$LAB_DIR/.mester/vm/$vm_name"
+  local vm_dir="$VM_DIR_BASE/$vm_name"
   if [[ -d "$vm_dir" ]]; then
     if [[ -f "$vm_dir/qemu.pid" ]]; then
       local qpid

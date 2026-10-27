@@ -16,7 +16,7 @@
 set -euo pipefail
 
 : "${LAB_DIR:=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")/..")" && pwd)}"
-MESTER_DIR="$HOME/.mester"
+MESTER_DIR="$LAB_DIR/.mester"
 VM_DIR_BASE="$MESTER_DIR/vm"
 
 # Source library functions
