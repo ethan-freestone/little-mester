@@ -20,6 +20,21 @@ UNSAFE_RECURSE=0
 # Docker build cache (default: use cache)
 NO_CACHE=0
 
+# ─── Log rotation (last 5 runs) ──────────────────────────────────────
+LOG_FILE=""
+rotate_logs() {
+  local log_dir="$LAB_DIR/.mester/logs"
+  mkdir -p "$log_dir"
+  local ts
+  ts=$(date '+%Y%m%d_%H%M%S')
+  LOG_FILE="$log_dir/lab_${ts}.log"
+  local count
+  count=$(ls "$log_dir"/lab_*.log 2>/dev/null | wc -l)
+  if [[ $count -gt 5 ]]; then
+    ls -1t "$log_dir"/lab_*.log | tail -n $((count - 5)) | xargs rm -f
+  fi
+}
+
 # Load user config if present (gitignored; put your real identity here)
 if [[ -f "$LAB_DIR/.little-mester.conf" ]]; then
   set -a
@@ -58,14 +73,58 @@ dc() {
       docker compose -f "$LAB_DIR/compose.yaml" --project-directory "$LAB_DIR" "$@"
 }
 
-agent_run() {
-  # When PERMISSIONS=auto and running opencode, pass --auto to the CLI
-  # so it auto-approves all tool calls (respecting explicit deny rules).
-  # For aider, --auto is meaningless so we skip it.
-  if [[ "$PERMISSIONS" == "auto" && "$AGENT" == "opencode" ]]; then
-    dc run --rm agent opencode --auto "$@"
+update_opencode_permissions() {
+  # Dynamically set opencode permission mode based on PERMISSIONS variable.
+  # The baked-in opencode.json always has "ask" — we override it per-run.
+  local cfg="$LAB_DIR/agent/opencode/opencode.json"
+
+  if [[ ! -f "$cfg" ]]; then
+    echo "WARNING: opencode.json not found at $cfg, skipping permission override" >&2
+    return
+  fi
+
+  local mode="${PERMISSIONS:-ask}"
+  [[ -z "$mode" ]] && mode="ask"
+
+  local key old_val
+  if [[ "$mode" == "auto" ]]; then
+    key='auto'
+  elif [[ "$mode" == "deny" ]]; then
+    key='deny'
   else
-    dc run --rm agent "$AGENT" "$@"
+    key='ask'
+  fi
+
+  # Apply permission overrides for edit and bash tools
+  sed -i "s/\"edit\": *\"ask\"/\"edit\": \"${key}\"/" "$cfg"
+  sed -i "s/\"bash\": *\"ask\"/\"bash\": \"${key}\"/" "$cfg"
+
+  if [[ "$mode" != "ask" ]]; then
+    echo ">> Permissions set to: ${key} (edit + bash)"
+  fi
+}
+
+restore_opencode_permissions() {
+  local cfg="$LAB_DIR/agent/opencode/opencode.json"
+  if [[ -f "$cfg" ]] && [[ "${PERMISSIONS:-ask}" != "ask" ]]; then
+    sed -i 's/"edit": *"[^"]*"/"edit": "ask"/' "$cfg"
+    sed -i 's/"bash": *"[^"]*"/"bash": "ask"/' "$cfg"
+    echo ">> Restored opencode.json permissions to default (ask)"
+  fi
+}
+
+agent_run() {
+  # When PERMISSIONS is set and running opencode, dynamically override
+  # opencode.json permission settings before the agent starts.
+  # For aider, we skip the config change (aider has its own permission model).
+  if [[ "$AGENT" == "opencode" && -n "${PERMISSIONS:-}" && "${PERMISSIONS}" != "ask" ]]; then
+    update_opencode_permissions
+  fi
+  dc run --rm agent "$AGENT" "$@"
+
+  # Restore permissions after agent finishes (if we changed them)
+  if [[ "$AGENT" == "opencode" && -n "${PERMISSIONS:-}" && "${PERMISSIONS}" != "ask" ]]; then
+    restore_opencode_permissions
   fi
 }
 
@@ -199,6 +258,10 @@ warn_hooks() {
 # Parse flags (they must come BEFORE the subcommand or workspace path)
 # shellcheck disable=SC2034
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  # Log rotation + tee (last 5 runs, gitignored in .mester/logs/)
+  rotate_logs
+  exec 1> >(tee -a "$LOG_FILE")
+  exec 2> >(tee -a "$LOG_FILE" >&2)
   while [[ $# -gt 0 ]]; do
     case "${1:-}" in
       --ro) MOUNT_MODE="ro"; shift ;;

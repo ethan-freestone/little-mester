@@ -117,7 +117,7 @@ _vm_start() {
     -drive file="$vm_dir/seed.iso",format=raw,if=none,id=cloud_disk,readonly=on
     -device virtio-scsi-pci,id=scsi0
     -device scsi-cd,drive=cloud_disk
-    -drive file="$overlay_disk",format=qcow2,if=virtio,aio=native
+    -drive file="$overlay_disk",format=qcow2,if=virtio,aio=native,direct-sync
     -drive file="$base_disk",format=qcow2,if=virtio,read-only=on,id=base
 
     # Virtiofs workspace export

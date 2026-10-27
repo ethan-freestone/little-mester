@@ -53,6 +53,21 @@ VM_CLEAN=0
 VM_VERBOSE=0
 VM_DEBUG=0
 
+# ─── Log rotation (last 5 runs) ──────────────────────────────────────
+VM_LOG_FILE=""
+rotate_logs() {
+  local log_dir="$LAB_DIR/.mester/logs"
+  mkdir -p "$log_dir"
+  local ts
+  ts=$(date '+%Y%m%d_%H%M%S')
+  VM_LOG_FILE="$log_dir/lab-vm_${ts}.log"
+  local count
+  count=$(ls "$log_dir"/lab-vm_*.log 2>/dev/null | wc -l)
+  if [[ $count -gt 5 ]]; then
+    ls -1t "$log_dir"/lab-vm_*.log | tail -n $((count - 5)) | xargs rm -f
+  fi
+}
+
 # ─── Logging helpers ────────────────────────────────────────────────
 # log      — always printed (normal status lines)
 # log_verbose — printed with -v or -d
@@ -258,6 +273,10 @@ _vm_cleanup() {
 trap _vm_cleanup EXIT INT TERM
 
 # ─── Command dispatch ───────────────────────────────────────────────
+# Log rotation + tee (last 5 runs, gitignored in .mester/logs/)
+rotate_logs
+exec 1> >(tee -a "$VM_LOG_FILE")
+exec 2> >(tee -a "$VM_LOG_FILE" >&2)
 case "$cmd" in
   up)
     # --clean: run 'stop' then 'down' before 'up'
