@@ -126,8 +126,6 @@ _vm_start() {
     # Virtiofs workspace export
     -chardev socket,id=charfs,path="$virtiofs_sock"
     -device virtio-9p-pci,id=fs0,fsdev=charfs,mount_tag=host-workspace
-    -device virtio-9p-pci,id=fs-base,fsdev=charfs-base,mount_tag=base-root,readonly=on
-    -chardev socket,id=charfs-base,path="$virtiofs_sock"
 
     # Cloud-init: serial console for logging
     -serial stdio
@@ -140,10 +138,6 @@ _vm_start() {
     # virtio console for guest-host communication
     -chardev socket,id=mgmt,path="$vm_dir/mgmt.sock",server=on,wait=off
     -device virtserialport,chardev=mgmt,name=mester.mgmt
-
-    # Cloud-init metadata: inject SSH pubkey
-    -drive file="$vm_dir/seed.iso",format=raw,if=none,id=ci,readonly=on
-    -device ide-cd,drive=ci
 
     # Stop on crash
     -no-reboot

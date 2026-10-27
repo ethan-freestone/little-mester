@@ -53,17 +53,21 @@ vm_cmd_up() {
   echo "=== VM Up: $vm_name ==="
   echo "VM directory: $vm_dir"
 
-  # ── 1. Workspace validation (A3) ────────────────────────────────
-  if [[ -n "$workspace" ]]; then
-    # Source check_workspace from lab or call it directly
-    if [[ -f "$LAB_DIR/lab" ]]; then
-      # Extract and run check_workspace
-      source <(sed -n '/^check_workspace/,/^}/p' "$LAB_DIR/lab")
-      check_workspace "$workspace"
-      workspace="$WORKSPACE"
-    fi
-    echo "Workspace validated: $workspace"
+  # ── 1. Workspace resolution & validation (A3) ───────────────────
+  # If no workspace is specified, default to the current working dir.
+  # An empty workspace would break virtiofsd, so we must always have
+  # a valid directory.
+  workspace="${workspace:-$(pwd)}"
+  # Resolve to absolute path
+  workspace="$(realpath "$workspace" 2>/dev/null || echo "$workspace")"
+
+  if [[ -f "$LAB_DIR/lab" ]]; then
+    # Source check_workspace from lab and validate
+    source <(sed -n '/^check_workspace/,/^}/p' "$LAB_DIR/lab")
+    check_workspace "$workspace"
+    workspace="$WORKSPACE"
   fi
+  echo "Workspace: $workspace"
 
   # ── 2. Create VM directory ──────────────────────────────────────
   mkdir -p "$vm_dir"
@@ -107,6 +111,11 @@ vm_cmd_up() {
     local ssh_port
     ssh_port=$(cat "$vm_dir/ssh_port")
     local vm_user="mester"
+    # Use $(id -u) — the host user's UID. Since cloud-init creates the
+    # 'mester' user with the same UID as the host user, this matches
+    # the rootless Docker socket path inside the VM.
+    local host_uid
+    host_uid="$(id -u)"
     ssh -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile="$vm_dir/known_hosts" \
         -i "$vm_dir/id_vm_control" \
@@ -114,7 +123,7 @@ vm_cmd_up() {
         "$vm_user@127.0.0.1" \
         "cd /workspace && \
          if [[ -f Dockerfile ]]; then \
-           docker -H unix:///run/user/$(id -u mester)/docker.sock build -t little-mester-agent . 2>&1; \
+           docker -H unix:///run/user/${host_uid}/docker.sock build -t little-mester-agent . 2>&1; \
          else \
            echo 'No Dockerfile found in workspace; skipping image build.'; \
          fi" 2>&1 || {
@@ -125,6 +134,8 @@ vm_cmd_up() {
   # ── 10. Wait for Docker to be ready ─────────────────────────────
   local ssh_port
   ssh_port=$(cat "$vm_dir/ssh_port")
+  local host_uid
+  host_uid="$(id -u)"
   echo "Waiting for Docker to be ready..."
   for i in $(seq 1 30); do
     if ssh -o StrictHostKeyChecking=no \
@@ -132,7 +143,7 @@ vm_cmd_up() {
            -i "$vm_dir/id_vm_control" \
            -p "$ssh_port" \
            mester@127.0.0.1 \
-           "docker -H unix:///run/user/$(id -u mester)/docker.sock info >/dev/null 2>&1" 2>/dev/null; then
+           "docker -H unix:///run/user/${host_uid}/docker.sock info >/dev/null 2>&1" 2>/dev/null; then
       echo "Docker ready in VM."
       break
     fi
@@ -175,19 +186,21 @@ vm_cmd_status() {
     echo "  SSH:   127.0.0.1:$ssh_port"
 
     # Check Docker inside VM
+    local host_uid
+    host_uid="$(id -u)"
     if ssh -o StrictHostKeyChecking=no \
            -o UserKnownHostsFile="$vm_dir/known_hosts" \
            -i "$vm_dir/id_vm_control" \
            -p "$ssh_port" \
            mester@127.0.0.1 \
-           "docker -H unix:///run/user/$(id -u mester)/docker.sock ps --format '{{.Names}}' 2>/dev/null" 2>/dev/null | grep -q .; then
+           "docker -H unix:///run/user/${host_uid}/docker.sock ps --format '{{.Names}}' 2>/dev/null" 2>/dev/null | grep -q .; then
       echo "  Docker: running"
       ssh -o StrictHostKeyChecking=no \
           -o UserKnownHostsFile="$vm_dir/known_hosts" \
           -i "$vm_dir/id_vm_control" \
           -p "$ssh_port" \
           mester@127.0.0.1 \
-          "docker -H unix:///run/user/$(id -u mester)/docker.sock ps --format 'table {{.Names}}\t{{.Status}}' 2>/dev/null" 2>/dev/null || true
+          "docker -H unix:///run/user/${host_uid}/docker.sock ps --format 'table {{.Names}}\t{{.Status}}' 2>/dev/null" 2>/dev/null || true
     else
       echo "  Docker: no containers running"
     fi
@@ -265,13 +278,15 @@ vm_cmd_stop() {
   if echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
     local ssh_port
     ssh_port=$(cat "$vm_dir/ssh_port")
+    local host_uid
+    host_uid="$(id -u)"
     echo "Tearing down containers in VM..."
     ssh -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile="$vm_dir/known_hosts" \
         -i "$vm_dir/id_vm_control" \
         -p "$ssh_port" \
         mester@127.0.0.1 \
-        "docker -H unix:///run/user/$(id -u mester)/docker.sock compose down -v --remove-orphans 2>&1" 2>&1 || {
+        "docker -H unix:///run/user/${host_uid}/docker.sock compose down -v --remove-orphans 2>&1" 2>&1 || {
       echo "WARNING: Container teardown may have failed. Check VM logs." >&2
     }
 

@@ -61,14 +61,14 @@ runcmd:
   - |
     # subuid/subgid: allocate 65536 ids for mester
     if ! grep -q '^mester:' /etc/subuid 2>/dev/null; then
-      echo "mester:$(id -u mester):65536" >> /etc/subuid
-      echo "mester:$(id -u mester):65536" >> /etc/subgid
+      echo "mester:${uid}:65536" >> /etc/subuid
+      echo "mester:${uid}:65536" >> /etc/subgid
     fi
 
   - |
     # Create rootless Docker socket directory
-    mkdir -p /run/user/$(id -u mester)
-    chown mester:mester /run/user/$(id -u mester)
+    mkdir -p /run/user/${uid}
+    chown mester:mester /run/user/${uid}
 
   # ── Set proxy env vars for model/guestfwd endpoints ─────────
   - |
@@ -106,9 +106,9 @@ write_files:
       After=network.target
 
       [Socket]
-      ListenStream=/run/user/$(id -u mester)/docker.sock
-      SocketUser=$(id -u mester)
-      SocketGroup=$(id -g mester)
+      ListenStream=/run/user/${uid}/docker.sock
+      SocketUser=${uid}
+      SocketGroup=${gid}
 
       [Install]
       WantedBy=multi-user.target
