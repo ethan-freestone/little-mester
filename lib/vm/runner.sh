@@ -74,7 +74,7 @@ _vm_start() {
     --socket-path "$virtiofs_sock" \
     --rlimit-nofile=1048576 \
     --announce-submounts \
-    -f /dev/null &
+    > /dev/null 2>&1 &
   local _virtiofsd_pid=$!
   log_verbose "virtiofsd started (PID: $_virtiofsd_pid, socket: $virtiofs_sock)"
 
@@ -163,11 +163,21 @@ _vm_start() {
   # ── Wait for SSH to become available ─────────────────────────────
   log "Waiting for SSH..."
   for i in $(seq 1 60); do
-    log_verbose "SSH check attempt $i/60..."
-    if ssh-keyscan -p "$ssh_port" -H 127.0.0.1 2>/dev/null | grep -q ssh-ed25519; then
+    if [[ $VM_VERBOSE -ge 1 ]]; then
+      # Print attempt count: every attempt in first 10s, then every 10th
+      if [[ $i -le 10 ]] || [[ $((i % 10)) -eq 0 ]]; then
+        echo "[verbose] SSH check attempt $i/60..."
+      fi
+    fi
+    # Try ssh-keyscan with a 2s timeout to avoid hanging on closed ports
+    if timeout 2 ssh-keyscan -p "$ssh_port" -H 127.0.0.1 2>/dev/null | grep -q ssh-ed25519; then
       ssh-keyscan -p "$ssh_port" -H 127.0.0.1 2>/dev/null > "$vm_dir/known_hosts"
       log "SSH ready on 127.0.0.1:$ssh_port"
       return 0
+    fi
+    if [[ $VM_DEBUG -ge 1 && $((i % 10)) -eq 0 && -f "$vm_dir/qemu.log" ]]; then
+      log_debug "Last QEMU output (tail -5):"
+      log_debug "$(tail -5 "$vm_dir/qemu.log" 2>/dev/null || echo '(empty)')"
     fi
     sleep 1
   done

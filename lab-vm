@@ -47,7 +47,9 @@ LAB_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 #
 # ─── Auto-accept ────────────────────────────────────────────────────
 # -y / --yes     : auto-accept all prompts (same as LAB_YES=1 / VM_YES=1)
+# --clean        : before up, run stop + down to fully teardown first
 VM_YES="${VM_YES:-${LAB_YES:-0}}"
+VM_CLEAN=0
 VM_VERBOSE=0
 VM_DEBUG=0
 
@@ -163,6 +165,7 @@ Flags:
   --base-size <GiB>    Base disk size in GiB (default: 20)
   -y, --yes            Auto-accept all prompts (same as VM_YES=1)
   --auto-accept        Alias for --yes
+  --clean              Before 'up': run 'stop' then 'down' to fully teardown first
   -v, --verbose        Extra progress info (SSH commands, qemu/virtiofsd output)
   -d, --debug          Everything from --verbose plus raw output and timing
 
@@ -191,6 +194,7 @@ while [[ $# -gt 0 ]]; do
     --base-size)      VM_BASE_SIZE="${2:?--base-size needs a value}"; shift 2 ;;
     --workspace)      VM_WS_ARG="${2:?--workspace needs a path}"; shift 2 ;;
     -y|--yes|--auto-accept) VM_YES=1; LAB_YES=1; shift ;;
+    --clean)                VM_CLEAN=1; shift ;;
     -v|--verbose)     VM_VERBOSE=1; shift ;;
     -d|--debug)       VM_VERBOSE=1; VM_DEBUG=1; shift ;;
     -h|--help)        usage; exit 0 ;;
@@ -256,6 +260,14 @@ trap _vm_cleanup EXIT INT TERM
 # ─── Command dispatch ───────────────────────────────────────────────
 case "$cmd" in
   up)
+    # --clean: run 'stop' then 'down' before 'up'
+    if [[ $VM_CLEAN -eq 1 ]]; then
+      echo "=== VM Clean: running stop + down before up ==="
+      vm_cmd_stop "$vm_name" || true
+      vm_cmd_down "$vm_name" || true
+      echo "Clean teardown complete. Starting fresh VM..."
+      echo ""
+    fi
     # Validate workspace before doing anything
     if [[ -n "${VM_WS_ARG:-}" ]]; then
       check_workspace "$VM_WS_ARG"

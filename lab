@@ -210,7 +210,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       --egress-false|--isolated) EGRESS="false"; shift ;;
       --egress-true) EGRESS="true"; shift ;;
       --permissions) PERMISSIONS="${2:?--permissions needs deny/ask/auto}"; shift 2 ;;
-      --auto-accept) PERMISSIONS="auto"; shift ;;
+      -y|--yes|--auto-accept) PERMISSIONS="auto"; LAB_YES=1; shift ;;
       --unsafe-recurse) UNSAFE_RECURSE=1; shift ;;
       --no-cache) NO_CACHE=1; shift ;;
       --opencode) AGENT="opencode"; shift ;;

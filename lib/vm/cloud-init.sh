@@ -46,6 +46,13 @@ users:
 ssh_genkeytypes: ['ed25519', 'rsa']
 
 runcmd:
+  # ── Ensure SSH daemon is enabled and running ────────────────────
+  # Enable both sshd.service (direct) and sshd.socket (socket-activated)
+  - systemctl enable sshd
+  - systemctl enable sshd.socket || true
+  - systemctl start sshd || true
+  - systemctl start sshd.socket || true
+
   # ── Install Docker + compose plugin ──────────────────────────
   - |
     if command -v pacman >/dev/null 2>&1; then
@@ -66,9 +73,12 @@ runcmd:
     fi
 
   - |
-    # Create rootless Docker socket directory
+    # Create rootless Docker socket directory (must exist BEFORE
+    # socket activation tries to bind here)
     mkdir -p /run/user/${uid}
     chown mester:mester /run/user/${uid}
+    # Ensure permissions so root can create the socket too
+    chmod 0755 /run/user/${uid}
 
   # ── Set proxy env vars for model/guestfwd endpoints ─────────
   - |
@@ -90,28 +100,32 @@ runcmd:
     mkdir -p /home/mester/.local/share/docker
     chown mester:mester /home/mester/.local/share/docker
 
+  # ── Start dockerd as rootless mester user ───────────────────
+  - |
+    # Start dockerd in the background for the mester user.
+    # Use the rootless socket path that we configured above.
+    su - mester -c "
+      mkdir -p /run/user/${uid}
+      dockerd --host unix:///run/user/${uid}/docker.sock --storage-driver vfs &
+    " 2>/dev/null || true
+    # Give dockerd a moment to start
+    sleep 2
+
 write_files:
-  - path: /etc/systemd/system/docker.socket.d/override.conf
-    content: |
-      [Socket]
-      ListenStream=
-      ListenStream=/run/user/%i/docker.sock
-      SocketUser=%i
-    owner: root:root
-    permissions: '0644'
   - path: /etc/systemd/system/multi-user.target.wants/docker.socket
     content: |
       [Unit]
       Description=Docker Socket for the rootless Docker daemon
-      After=network.target
+      After=network.target local-fs.target
 
       [Socket]
-      ListenStream=/run/user/${uid}/docker.sock
-      SocketUser=${uid}
-      SocketGroup=${gid}
+      ListenStream=/run/user/%i/docker.sock
+      SocketUser=%i
+      SocketGroup=%i
+      DirectoryMode=0755
 
       [Install]
-      WantedBy=multi-user.target
+      WantedBy=sockets.target
     owner: root:root
     permissions: '0644'
 
@@ -119,6 +133,8 @@ poweroff:
   date: '-1'
 
 bootcmd:
+  # Ensure /run/user/<uid> exists BEFORE socket activation tries to bind
+  - [ sh, -c, 'mkdir -p /run/user/${uid} && chown mester:mester /run/user/${uid} && chmod 0755 /run/user/${uid}' ]
   # Ensure /workspace is mounted by virtiofs before cloud-init finishes
   - [ sh, -c, 'mkdir -p /workspace && mountpoint -q /workspace || true' ]
 USERDATA
@@ -132,10 +148,10 @@ METADATA
   # --- Generate ISO ─────────────────────────────────────────────
   if command -v genisoimage >/dev/null 2>&1; then
     log_verbose "Generating cloud-init ISO with genisoimage..."
-    genisoimage -output "$seed_iso" -V cidata -joliet "$seed_dir/meta-data" "$seed_dir/user-data" 2>&1
+    genisoimage -rock -output "$seed_iso" -V cidata -joliet "$seed_dir/meta-data" "$seed_dir/user-data" 2>&1
   elif command -v mkisofs >/dev/null 2>&1; then
     log_verbose "Generating cloud-init ISO with mkisofs..."
-    mkisofs -output "$seed_iso" -V cidata -joliet "$seed_dir/meta-data" "$seed_dir/user-data" 2>&1
+    mkisofs -rock -output "$seed_iso" -V cidata -joliet "$seed_dir/meta-data" "$seed_dir/user-data" 2>&1
   else
     log "ERROR: Neither genisoimage nor mkisofs found. Install one to generate cloud-init ISO."
     return 1

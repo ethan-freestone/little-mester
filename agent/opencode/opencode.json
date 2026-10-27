@@ -65,31 +65,6 @@
     "edit": "ask",
     "bash": "ask"
   },
-  "instructions": [
-    "TICKET EDIT RULE (MANDATORY): NEVER directly edit, create, or write files under docs/tickets/*.json. All ticket operations MUST go through the MCP server tools (mester_tickets_* tools) or the ticket-engine CLI (./little-mester-mcp/scripts/ticket-engine). This includes create, update, archive, validate, and any status/criterion/test/comment changes. Direct file edits bypass the audit log and lock mechanism. If you need to modify a ticket, use the MCP tool or CLI — not the edit/write tool."
-  ],
-  "permissions": [
-    {
-      "action": "edit",
-      "resource": "docs/tickets/**/*.json",
-      "effect": "deny"
-    },
-    {
-      "action": "edit",
-      "resource": "docs/tickets/*.json",
-      "effect": "deny"
-    },
-    {
-      "action": "write",
-      "resource": "docs/tickets/**/*.json",
-      "effect": "deny"
-    },
-    {
-      "action": "write",
-      "resource": "docs/tickets/*.json",
-      "effect": "deny"
-    }
-  ],
   "otel": {},
   "model": "llamacpp/qwen3.6-35b-a3b-q4_k_m",
   "small_model": "llamacpp/qwen3.6-35b-a3b-q4_k_m",
