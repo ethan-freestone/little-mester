@@ -6,6 +6,7 @@
  *   - package.json entries point at files that the build actually emits
  *   - the built CLI runs without ts-node
  *   - the published tarball contains dist/ and docs/, not tests/src/
+ *   - AGPL metadata and licence text stay consistent and ship in the tarball
  */
 'use strict';
 
@@ -27,6 +28,20 @@ function expectFile(relative, label) {
         fail(`${label} '${relative}' does not exist (run npm run build first)`);
     }
     return absolute;
+}
+
+if (pkg.license !== 'AGPL-3.0-only') fail('package.json license must be AGPL-3.0-only');
+const lock = require(path.join(root, 'package-lock.json'));
+if (lock.packages?.['']?.license !== pkg.license) {
+    fail('package-lock.json root license does not match package.json');
+}
+const licensePath = expectFile('LICENSE', 'package license');
+const license = fs.readFileSync(licensePath, 'utf-8');
+if (!license.startsWith('GNU AFFERO GENERAL PUBLIC LICENSE\nVersion 3, 19 November 2007\n')) {
+    fail('LICENSE must contain the GNU Affero General Public License version 3');
+}
+if (license !== fs.readFileSync(path.join(root, '..', 'LICENSE'), 'utf-8')) {
+    fail('package LICENSE does not match the repository LICENSE');
 }
 
 for (const field of ['main', 'types']) {
@@ -72,7 +87,7 @@ try {
 }
 const files = new Set((packInfo[0]?.files ?? []).map(file => file.path));
 
-for (const required of ['dist/engine.js', 'dist/cli.js', 'dist/mcp-server.js', 'docs/SCHEMA.md']) {
+for (const required of ['LICENSE', 'dist/engine.js', 'dist/cli.js', 'dist/mcp-server.js', 'docs/SCHEMA.md']) {
     if (!files.has(required)) fail(`published tarball is missing '${required}'`);
 }
 for (const forbidden of ['src/engine.ts', 'tests/engine.test.ts', 'package-lock.json']) {
@@ -82,4 +97,5 @@ for (const forbidden of ['src/engine.ts', 'tests/engine.test.ts', 'package-lock.
 console.log(`✅ package entry points exist (${pkg.main}, ${pkg.types}, ${pkg.bin['ticket-engine']})`);
 console.log('✅ main entry exports createTicketEngine');
 console.log('✅ built CLI runs --help');
-console.log(`✅ tarball contains dist/ and docs/ (${files.size} files)`);
+console.log(`✅ tarball contains LICENSE, dist/ and docs/ (${files.size} files)`);
+console.log('✅ AGPL-3.0-only metadata and licence copies match');
