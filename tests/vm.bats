@@ -239,6 +239,15 @@ DOCKER
   [[ "$diagnostics" == *'network-diagnostics.log'* ]]
 }
 
+@test "agent Dockerfile prints sanitized npm diagnostics when OpenCode install fails" {
+  dockerfile="$REPO_ROOT/agent/Dockerfile"
+  grep -Fq 'npm install -g @opencode/cli || {' "$dockerfile"
+  grep -Fq '/root/.npm/_logs/*-debug-0.log' "$dockerfile"
+  grep -Fq 'grep -viE '\''authorization|_auth|token|password'\''' "$dockerfile"
+  grep -Fq 'tail -n 160' "$dockerfile"
+  grep -Fq 'exit "$status"' "$dockerfile"
+}
+
 @test "missing guest proxy profile blocks build instead of falling back to direct egress" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   mock_guest_build

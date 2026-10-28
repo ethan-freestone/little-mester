@@ -16,7 +16,18 @@ RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --no-cache-dir aider-chat pytest
 
 # OpenCode. The version check makes the BUILD fail loudly if the binary isn't usable.
-RUN npm install -g @opencode/cli && opencode --version
+RUN npm install -g @opencode/cli || { \
+      status=$?; \
+      echo "OpenCode npm install failed (status ${status}); sanitized npm diagnostic tail follows:"; \
+      log="$(ls -t /root/.npm/_logs/*-debug-0.log 2>/dev/null | head -n 1)"; \
+      if [ -n "$log" ]; then \
+        grep -viE 'authorization|_auth|token|password' "$log" | tail -n 160; \
+      else \
+        echo "No npm debug log found under /root/.npm/_logs"; \
+      fi; \
+      exit "$status"; \
+    } \
+ && opencode --version
 
 COPY opencode/opencode.json /etc/opencode/opencode/opencode.json
 COPY opencode/plugins/little-mester-logo/ /etc/opencode/plugins/little-mester-logo/
