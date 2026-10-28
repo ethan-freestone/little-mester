@@ -78,13 +78,14 @@ if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
   sudo apt-get update
   sudo apt-get install -y nodejs npm
 fi
-current="$(opencode --version 2>/dev/null | awk '{print $2}' || true)"
+current="$(opencode --version 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/) {sub(/^v/, "", $i); print $i; exit}}' || true)"
 if [[ "$current" != "v$version" ]]; then
   sudo env HTTP_PROXY="$HTTP_PROXY" HTTPS_PROXY="$HTTPS_PROXY" \
     http_proxy="$http_proxy" https_proxy="$https_proxy" \
     npm install --global "@opencode/cli@$version"
 fi
-test "$(opencode --version | awk '{print $2}')" = "v$version"
+installed="$(opencode --version | awk '{for (i=1; i<=NF; i++) if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/) {sub(/^v/, "", $i); print $i; exit}}')"
+test "$installed" = "$version"
 install -d -o root -g root -m 0755 /etc/opencode/opencode /etc/opencode/plugins
 GUEST_OPENCODE_INSTALL
 
@@ -387,8 +388,15 @@ vm_cmd_agent() {
     die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
   fi
 
-  _vm_install_guest_harness "$vm_dir"
   local version="${VM_OPENCODE_VERSION:-2.2.0}"
+  local installed_version
+  installed_version="$(vm_ssh "$vm_dir" "opencode --version" | awk '{for (i=1; i<=NF; i++) if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/) {sub(/^v/, \"\", $i); print $i; exit}}')"
+  if [[ "$installed_version" != "$version" ]]; then
+    die "OpenCode $version is not installed in VM '$vm_name' (found ${installed_version:-none}). Run ./lab-vm up $vm_name to install/update it."
+  fi
+  if ! vm_ssh "$vm_dir" "test -r /etc/opencode/opencode/opencode.json && test -d /etc/opencode/plugins"; then
+    die "OpenCode guest configuration is missing in VM '$vm_name'. Run ./lab-vm up $vm_name to provision it."
+  fi
   echo "Launching OpenCode $version directly in VM '$vm_name' at /workspace."
   exec ssh -t \
     -o BatchMode=yes -o ConnectTimeout=10 \

@@ -259,10 +259,11 @@ ss -tlnp | grep "$(cat .mester/vm/<name>/ssh_port)"
 ## 7. Migration status
 
 VM mode is still under acceptance testing. **Do not stop or replace the working
-host-Docker session yet.** The VM currently provisions guest Docker and the launcher now
-installs and offers to launch OpenCode directly in the guest, but direct TUI, provider
-auth, Compose feedback, permissions, nested virtualization and full lifecycle gates still
-need live verification.
+host-Docker session yet.** The VM provisions guest Docker and `./lab-vm up` installs
+OpenCode directly in the guest. Run `./lab-vm agent` to open its TUI; this command checks
+the install and launches OpenCode without reinstalling it. TUI operation, provider auth,
+Compose feedback, permissions, nested virtualization and full lifecycle gates still need
+live verification.
 The current sequence and stop conditions are tracked on tickets #41–#45. Integration into
 `./lab` and retiring host-Docker mode happen only after those gates pass.
 

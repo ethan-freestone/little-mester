@@ -72,6 +72,14 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "agent launch checks installed runtime and does not reinstall it" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  body="$(declare -f vm_cmd_agent)"
+  [[ "$body" == *'opencode --version'* ]]
+  [[ "$body" == *'Run ./lab-vm up'* ]]
+  [[ "$body" != *'_vm_install_guest_harness'* ]]
+}
+
 @test "guest compose teardown runs from the mounted workspace" {
   run grep -F 'cd /workspace && docker -H' "$REPO_ROOT/lib/vm/lifecycle.sh"
   [ "$status" -eq 0 ]
