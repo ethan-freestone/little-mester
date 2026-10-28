@@ -1,5 +1,6 @@
 """Exercise generated cloud-init scripts without provisioning the test machine."""
 import os
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -48,18 +49,27 @@ class CloudInitTests(unittest.TestCase):
                         provision.index("dockerd-rootless-setuptool.sh install"))
         self.assertLess(provision.index("docker.service.d/proxy.conf"),
                         provision.index("dockerd-rootless-setuptool.sh install"))
+        self.assertLess(provision.index("/home/mester/.config/docker/daemon.json"),
+                        provision.index("dockerd-rootless-setuptool.sh install"))
         self.assertEqual(self.content("/etc/modules-load.d/mester-rootless.conf"), "nf_tables\n")
         self.assertIn("kmod iptables", provision)
         self.assertNotIn("--skip-iptables", provision)
         self.assertNotIn("--iptables=false", provision)
-        self.assertIn("systemctl --user enable --now docker", provision)
-        self.assertNotIn("systemctl --user restart docker", provision)
+        self.assertIn("systemctl --user enable docker", provision)
+        self.assertIn("systemctl --user restart docker", provision)
         self.assertLess(provision.index("mester-configure-subids mester"),
                         provision.index("dockerd-rootless-setuptool.sh install"))
         helper = self.content("/usr/local/sbin/mester-configure-subids")
         self.assertIn("usermod \"$option\"", helper)
         self.assertIn("overlaps another account", helper)
         subprocess.run(["bash", "-n"], input=helper, text=True, check=True)
+        proxy_match = re.search(
+            r"cat > /home/mester/\.config/docker/daemon\.json <<'DOCKER_PROXY'\n(.*?)\nDOCKER_PROXY\n",
+            provision, re.DOTALL)
+        self.assertIsNotNone(proxy_match, "rootless Docker daemon proxy config")
+        proxy_config = json.loads(proxy_match[1])
+        self.assertEqual(proxy_config["proxies"]["http-proxy"], "http://10.0.2.100:3128")
+        self.assertEqual(proxy_config["proxies"]["https-proxy"], "http://10.0.2.100:3128")
 
     def test_generated_helper_loads_nf_tables_and_propagates_failure(self):
         helper = self.content("/usr/local/sbin/mester-load-netfilter")

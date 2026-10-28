@@ -8,7 +8,7 @@
   "title": "Honor lab permission controls and verify OpenCode auto mode",
   "objective": "Fix lab argument/environment propagation and diagnose reported prompt mode under ./lab --unsafe-recurse --auto-accept without weakening explicit deny rules.",
   "created_at": "2026-10-28T11:43:02.111Z",
-  "updated_at": "2026-10-28T11:48:34.114Z",
+  "updated_at": "2026-10-28T13:52:59.916Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -46,7 +46,8 @@
       "2026-10-28 owner reports prompt mode under ./lab --unsafe-recurse --auto-accept. /proc inspection in this container confirms PID 1 argv is opencode --auto; version v2.2.0; shared server PID 16. Therefore missing --auto is NOT established as cause of the current UI symptom.",
       "Code inspection: lab dc exports LITTLE_MESTER_PERMISSIONS into docker compose environment but compose agent environment never forwards it; PERMISSIONS is not used to construct agent CLI flags. Lab retains consumed flags after a workspace path. Existing Bats ordering tests swallow exit codes and do not capture actual argv.",
       "2026-10-28 implementation: replaced multipass lab parser with consuming single pass so post-path globals do not leak to OpenCode; agent args after -- preserved even in no-path --unsafe-recurse launch. Removed unused LITTLE_MESTER_PERMISSIONS compose-host export. --permissions auto uses supported client --auto; ask+auto conflicts; unsupported deny mode fails actionably (explicit OpenCode deny rules remain supported). No image/config or current-session permissions changed.",
-      "2026-10-28 7 permission Bats cases pass; full 61-case suite passes. These prove wrapper propagation, NOT reported UI fix. PID 1 already has opencode --auto under v2.2.0; no upstream bug root cause is asserted. No billed provider call or live permission mutation was performed."
+      "2026-10-28 7 permission Bats cases pass; full 61-case suite passes. These prove wrapper propagation, NOT reported UI fix. PID 1 already has opencode --auto under v2.2.0; no upstream bug root cause is asserted. No billed provider call or live permission mutation was performed.",
+      "2026-10-28 GitHub Actions hygiene failure: owner reported ShellCheck SC2317 on `return 1` after `die` in lab permission validation; die() calls exit 1, so unreachable returns removed. ShellCheck SC1091 in schema-validation script reported sourced lib/vm/cloud-init.sh not listed as an input; hygiene command now includes that source file. Local tests/lint equivalent pending actual ShellCheck binary/CI run; GitHub Actions rerun still required."
     ]
   },
   "models_used": []

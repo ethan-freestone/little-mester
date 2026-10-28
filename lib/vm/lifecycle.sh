@@ -95,6 +95,10 @@ getent group mester
 stat -c '%a %U:%G %n' /etc/subuid /etc/subgid
 cat -n /etc/subuid /etc/subgid
 if command -v getsubids >/dev/null 2>&1; then getsubids mester; else echo 'getsubids command unavailable'; fi
+echo '=== Docker proxy configuration ==='
+cat /home/mester/.config/docker/daemon.json
+cat /home/mester/.config/systemd/user/docker.service.d/proxy.conf
+sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" systemctl --user show docker -p Environment
 echo '=== rootless Docker user service ==='
 sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" systemctl --user is-enabled docker; echo "docker_enabled_status=$?"
 sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" systemctl --user status docker --no-pager
@@ -112,7 +116,22 @@ _vm_ensure_rootless_docker() {
   local vm_dir="$1" uid
   uid="$(id -u)"
   vm_cloud_init_subid_script | vm_ssh "$vm_dir" "sudo bash -s -- mester" || return $?
-  vm_ssh "$vm_dir" "sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user enable --now docker"
+  vm_ssh "$vm_dir" "sudo bash -s -- '$uid'" <<'GUEST_DOCKER_PROXY' || return $?
+set -euo pipefail
+uid="$1"
+install -d -o mester -g mester /home/mester/.config/docker
+cat > /home/mester/.config/docker/daemon.json <<'DOCKER_PROXY'
+{
+  "proxies": {
+    "http-proxy": "http://10.0.2.100:3128",
+    "https-proxy": "http://10.0.2.100:3128",
+    "no-proxy": "localhost,127.0.0.1,10.0.2.100"
+  }
+}
+DOCKER_PROXY
+chown mester:mester /home/mester/.config/docker/daemon.json
+GUEST_DOCKER_PROXY
+  vm_ssh "$vm_dir" "sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user daemon-reload && sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user enable docker && sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user restart docker"
 }
 
 # ─── vm up: provision and start VM ──────────────────────────────────

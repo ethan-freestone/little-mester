@@ -40,7 +40,7 @@ If a tool fails or is unavailable, report the error — do not fall back to dire
 - **Auto-accept flag**: `-y`/`--yes` added to both `lab-vm` and `./lab`, sets `VM_YES` and `LAB_YES`
 - **ChatGPT Plus login**: `opencode auth login openai --method chatgpt-headless` was verified inside the current agent container; `opencode auth list` reported OpenAI as `stored`
 - **Auth runbook**: `docs/chatgpt-auth.md` records the verified device flow, secure export/import procedure, and required VM persistence design
-- **VM host-test status**: CachyOS provisioning reaches SSH and clean cloud-init, but the latest run fails when RootlessKit cannot find subordinate UID/GID ranges for `mester`; the image build and full lifecycle remain unverified. Ticket #41 is the source of truth for attempt history, logs, implementation evidence and the current retry handoff.
+- **VM host-test status**: Latest CachyOS run reaches rootless Docker and starts the image build, but BuildKit fails resolving `registry-1.docker.io`; full image and lifecycle remain unverified. Ticket #41 is the source of truth for attempt history, logs, implementation evidence and the current retry handoff.
 - **Ticket #48**: AC updated to include `-y`/`--yes` (A7-A8)
 - **Ticket #41**: Active VM provisioning/lifecycle; partial host evidence is not a full pass. Exact retry and handoff steps live in its test ledger. Project-wide workflow/auth constraints: docs/DECISIONS.md §C.9.12–13.
 

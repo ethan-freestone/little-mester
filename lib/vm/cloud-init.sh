@@ -131,12 +131,24 @@ $(printf '%s\n' "$subid_script" | sed 's/^/      /')
       # Install the drop-in BEFORE the installer starts Docker for the first time.
       install -d -o mester -g mester /home/mester/.config/systemd/user/docker.service.d
       printf '[Service]\nEnvironment=HTTP_PROXY=http://10.0.2.100:3128\nEnvironment=HTTPS_PROXY=http://10.0.2.100:3128\nEnvironment=NO_PROXY=localhost,127.0.0.1,10.0.2.100\nEnvironment=DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS=--cidr=10.0.3.0/24\n' > /home/mester/.config/systemd/user/docker.service.d/proxy.conf
+      install -d -o mester -g mester /home/mester/.config/docker
+      cat > /home/mester/.config/docker/daemon.json <<'DOCKER_PROXY'
+      {
+        "proxies": {
+          "http-proxy": "http://10.0.2.100:3128",
+          "https-proxy": "http://10.0.2.100:3128",
+          "no-proxy": "localhost,127.0.0.1,10.0.2.100"
+        }
+      }
+      DOCKER_PROXY
       chown -R mester:mester /home/mester/.config
       sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user daemon-reload
       sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus dockerd-rootless-setuptool.sh install
       # Restart only starts the daemon in this boot. Ensure the lingered user
       # manager starts it on every subsequent VM boot too.
-      sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user enable --now docker
+      sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user daemon-reload
+      sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user enable docker
+      sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user restart docker
       touch /var/lib/mester-provisioned
 runcmd:
   - [bash, /usr/local/sbin/mester-provision]

@@ -63,13 +63,13 @@ dc() {
 agent_run() {
   case "$PERMISSIONS" in
     ""|ask|auto) ;;
-    *) die "Unsupported --permissions '$PERMISSIONS'; use ask or auto. Configure explicit deny rules in OpenCode, not a silent lab override."; return 1 ;;
+    *) die "Unsupported --permissions '$PERMISSIONS'; use ask or auto. Configure explicit deny rules in OpenCode, not a silent lab override." ;;
   esac
   if [[ "$AUTO_ACCEPT" -eq 1 && "$PERMISSIONS" == "ask" ]]; then
-    die "--auto-accept conflicts with --permissions ask"; return 1
+    die "--auto-accept conflicts with --permissions ask"
   fi
   if [[ -n "$PERMISSIONS" && "$AGENT" != "opencode" ]]; then
-    die "--permissions is supported only for OpenCode"; return 1
+    die "--permissions is supported only for OpenCode"
   fi
   # --auto is a client approval mode, NOT a blanket allow configuration.
   # Explicit denies remain enforced. Aider never receives this OpenCode flag.
