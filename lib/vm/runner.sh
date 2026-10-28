@@ -36,8 +36,12 @@ _vm_build_qemu_command() {
   local machine_accel="$6"
   local kvm_enabled="$7"
   local bios_path="${8:-}"
+  local cpu_model="Westmere"
   local netdev_arg
   netdev_arg="$(_vm_netdev_arg "$ssh_port")"
+  # OpenCode's Bun executable requires SSE4.2 even for its baseline build.
+  # KVM should expose the actual host CPU; TCG uses a named model with SSE4.2.
+  [[ "$kvm_enabled" == "1" ]] && cpu_model="host"
 
   VM_QEMU_CMD=(qemu-system-x86_64)
   [[ "$kvm_enabled" == "1" ]] && VM_QEMU_CMD+=(-enable-kvm)
@@ -47,6 +51,7 @@ _vm_build_qemu_command() {
     -name "$vm_name"
     -m 4096
     -smp 2
+    -cpu "$cpu_model"
     -object memory-backend-memfd,id=mem,size=4G,share=on
     -numa node,memdev=mem
 

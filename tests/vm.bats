@@ -19,10 +19,18 @@ setup() {
   VM_PROXY_PORT=45678
   _vm_build_qemu_command /state demo /state/disk.qcow2 /state/virtiofs.sock 22222 tcg 0 ""
   joined="$(printf '%s\n' "${VM_QEMU_CMD[@]}")"
+  [[ "$joined" == *$'-cpu\nWestmere'* ]]
   [[ "$joined" == *"memory-backend-memfd,id=mem,size=4G,share=on"* ]]
   [[ "$joined" == *"vhost-user-fs-pci,chardev=charfs,tag=workspace"* ]]
   [[ "$joined" != *"virtio-9p"* ]]
   [[ "$joined" != *"host-workspace"* ]]
+}
+
+@test "KVM QEMU command passes host CPU features through to the guest" {
+  _vm_build_qemu_command /state demo /state/disk.qcow2 /state/virtiofs.sock 22222 kvm 1 ""
+  joined="$(printf '%s\n' "${VM_QEMU_CMD[@]}")"
+  [[ "$joined" == *$'-cpu\nhost'* ]]
+  [[ "$joined" == *"-enable-kvm"* ]]
 }
 
 @test "cloud-init mounts the matching workspace tag and provisions rootless Docker" {
