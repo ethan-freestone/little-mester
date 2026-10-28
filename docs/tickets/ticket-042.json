@@ -8,7 +8,7 @@
   "title": "Agent image: real Docker CLI with controlled daemon access",
   "objective": "Give the agent container a working Docker CLI and compose plugin so it can run a workspace's compose dependencies, while keeping the existing sandbox hardening and making daemon access opt-in and visible.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-10-26T20:50:56.506Z",
+  "updated_at": "2026-10-28T12:51:12.838Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -44,6 +44,11 @@
       "id": "A7",
       "text": "SECURITY.md and agent/README state exactly what Docker access the agent has when enabled and what it cannot reach.",
       "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "OpenCode has an explicit reproducible version and documented image-only upgrade path: normal launches reuse the installed agent image, updating OpenCode does not require downloading/reprovisioning the VM, and Docker build-cache behavior cannot silently retain an older requested version. Read-only container self-update is not relied on; replacement is coordinated with #45 credential persistence/export and #50 regression checks.",
+      "status": "pending"
     }
   ],
   "tests": {
@@ -53,10 +58,15 @@
       "no-daemon failure mode",
       "hardening assertions",
       "plugin, metrics and model connectivity regression",
-      "docs review"
+      "docs review",
+      "After #41 clean provisioning/image build passes, verify first-start Docker proxy/CIDR settings, rootless security option and reboot persistence; then build/test agent Docker CLI in disposable workspace before requesting owner session migration.",
+      "OpenCode update procedure: select version, rebuild/pull agent image only (not VM/base), prove installed version changes despite Docker cache; normal relaunch does not rebuild/re-download CLI; credential export/import or persistent data survives replacement (#45)."
     ],
     "created": [],
-    "cases": []
+    "cases": [
+      "2026-10-28 prerequisite feedback: real CachyOS guest boots and installs Docker packages but rootless installer fails on unloaded nf_tables. #41 now loads/persists the guest module and sets service drop-in before installer starts Docker; no rootful or --skip-iptables fallback. Agent CLI/daemon capability AC remain pending until live guest verification. Existing ./lab compose has GPU-local model dependencies, so running it unmodified inside CPU-only VM is not evidence of #42 completion.",
+      "2026-10-28 owner asks whether every OpenCode update needs a rebuild: current agent/Dockerfile npm-installs @opencode/cli into the image; container root is read-only. Current updates require replacing/rebuilding agent image, not full VM provisioning. Plain builds may reuse cached npm layer; no automatic version-refresh path is implemented. Version selection/targeted update remains pending A8. No image rebuild or session restart performed."
+    ]
   },
   "priority": "major",
   "parent": 35,

@@ -44,14 +44,12 @@ teardown() {
 }
 
 @test "check_workspace rejects sensitive paths like .ssh" {
+  local HOME="$WORKSPACE_TMPDIR/home"
   local ssh_dir="$HOME/.ssh"
-  if [[ -d "$ssh_dir" ]]; then
-    run check_workspace "$ssh_dir"
-    [ $status -ne 0 ]
-    [[ $output == *"overlaps with sensitive"* ]]
-  else
-    skip "No .ssh directory found"
-  fi
+  mkdir -p "$ssh_dir"
+  run check_workspace "$ssh_dir"
+  [ $status -ne 0 ]
+  [[ $output == *"overlaps with sensitive"* ]]
 }
 
 @test "check_workspace rejects paths overlapping lab repo" {

@@ -39,6 +39,43 @@ _vm_resolve() {
   echo "$vm_dir"
 }
 
+# Capture first-boot diagnostics before lab-vm's failure trap stops the guest.
+_vm_wait_for_cloud_init() {
+  local vm_dir="$1" rc
+  log "Waiting for cloud-init (guest proxy 10.0.2.100:3128 via host loopback proxy)..."
+  if vm_ssh "$vm_dir" "sudo timeout ${VM_PROVISION_TIMEOUT:-1800} cloud-init status --wait --long"; then
+    return 0
+  else
+    rc=$?
+    log "ERROR: cloud-init status/SSH exited with status $rc (done can still include recoverable errors)."
+    # A final output tail can omit early schema warnings. Keep structured status
+    # and schema diagnostics too; do not turn exit 2 into unconditional success.
+    vm_ssh "$vm_dir" 'sudo cloud-init status --format json' > "$vm_dir/cloud-init-status.json" 2>&1 || true
+    vm_ssh "$vm_dir" 'sudo cloud-init schema --system' > "$vm_dir/cloud-init-schema.log" 2>&1 || true
+    cat "$vm_dir/cloud-init-status.json" "$vm_dir/cloud-init-schema.log"
+    vm_ssh "$vm_dir" 'sudo tail -200 /var/log/cloud-init-output.log' > "$vm_dir/provision.log" 2>&1 || true
+    cat "$vm_dir/provision.log"
+    log "ERROR: VM readiness blocked; diagnostics saved to $vm_dir/{cloud-init-status.json,cloud-init-schema.log,provision.log}. Preserve logs before --clean deletes the overlay."
+    return "$rc"
+  fi
+}
+
+_vm_build_agent_image() {
+  local vm_dir="$1" rc
+  log "Building agent image inside VM..."
+  # SSH commands are non-login shells: profile.d is not sourced automatically.
+  # BuildKit's client-side registry auth needs proxy env too, not just RUN args.
+  # Forward both cases to build steps from the explicitly loaded guest profile.
+  if tar -C "$LAB_DIR/agent" --exclude=node_modules --exclude=.git -cf - . | \
+    vm_ssh "$vm_dir" ". /etc/profile.d/mester.sh && docker -H unix:///run/user/$(id -u)/docker.sock build --build-arg LAB_UID=$(id -u) --build-arg LAB_GID=$(id -g) --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg http_proxy --build-arg https_proxy --build-arg NO_PROXY --build-arg no_proxy -t little-mester-agent -" 2>&1 | tee "$vm_dir/build.log"; then
+    return 0
+  else
+    rc=$?
+    log "ERROR: agent image build failed (status $rc); see $vm_dir/build.log. Preserve the overlay; retry without --clean."
+    return "$rc"
+  fi
+}
+
 # ─── vm up: provision and start VM ──────────────────────────────────
 vm_cmd_up() {
   local vm_name="${1:-default}"
@@ -141,11 +178,7 @@ vm_cmd_up() {
   vm_run_start "$vm_dir" "$vm_name" "$workspace" "$base_disk" "$overlay_disk" "$ssh_pubkey"
 
   # SSH may become ready long before first-boot package installation finishes.
-  log "Waiting for cloud-init (package downloads use host proxy 127.0.0.1:3128)..."
-  if ! vm_ssh "$vm_dir" "sudo timeout ${VM_PROVISION_TIMEOUT:-1800} cloud-init status --wait"; then
-    vm_ssh "$vm_dir" 'sudo tail -100 /var/log/cloud-init-output.log' || true
-    return 1
-  fi
+  _vm_wait_for_cloud_init "$vm_dir" || return $?
   vm_ssh "$vm_dir" 'test -f /var/lib/mester-provisioned && mountpoint -q /workspace' || return 1
   vm_ssh "$vm_dir" "docker -H unix:///run/user/$(id -u)/docker.sock info --format '{{json .SecurityOptions}}'" | grep -q rootless || {
     log "ERROR: guest Docker is not running rootless"
@@ -154,9 +187,7 @@ vm_cmd_up() {
 
   # Build the harness image from the harness, not an arbitrary workspace Dockerfile.
   # Transfer only its build context; the host checkout is not another guest mount.
-  log "Building agent image inside VM..."
-  tar -C "$LAB_DIR/agent" --exclude=node_modules --exclude=.git -cf - . | \
-    vm_ssh "$vm_dir" "docker -H unix:///run/user/$(id -u)/docker.sock build --build-arg LAB_UID=$(id -u) --build-arg LAB_GID=$(id -g) --build-arg HTTP_PROXY=http://10.0.2.100:3128 --build-arg HTTPS_PROXY=http://10.0.2.100:3128 --build-arg NO_PROXY=localhost,127.0.0.1,10.0.2.100 -t little-mester-agent -" || return 1
+  _vm_build_agent_image "$vm_dir" || return $?
 
   VM_STARTING=0
 

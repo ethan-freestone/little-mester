@@ -8,7 +8,7 @@
   "title": "Model-agnostic harness: local models and cloud providers",
   "objective": "Keep 'point me at a directory' working with no subscription (local models via opencode) while allowing paid providers (Kimi, Claude, OpenAI) when available, including opt-in automatic credential handoff into disposable VMs, with secrets kept out of the repo, workspace, seed and images.",
   "created_at": "2026-10-26T20:39:18.839Z",
-  "updated_at": "2026-10-27T16:49:31.671Z",
+  "updated_at": "2026-10-28T11:43:02.121Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -64,6 +64,16 @@
       "id": "A11",
       "text": "Credential forwarding is provider-agnostic, auditable without logging secrets, uses the existing SSH control channel or an equivalent non-workspace channel, preserves mode 0600/0700, and exposes no broad host credential directory to the VM.",
       "status": "pending"
+    },
+    {
+      "id": "A12",
+      "text": "Fresh VM supports a currently supported non-device-code OpenCode ChatGPT browser OAuth login (including Sign in with ChatGPT/token-sharing if offered), not only legacy Codex device code: discover actual methods/version and callback location, open URL in host browser, route required callback across host→VM→agent/server using explicit loopback-only SSH/relay forwarding, verify auth list and one provider request. Repeat with device code unavailable; no API-key substitution or broad/LAN port exposure.",
+      "status": "pending"
+    },
+    {
+      "id": "A13",
+      "text": "Human auth gate is planned and fed back through the engine before container/VM teardown: export existing login privately first; test browser callback success/cancellation/occupied port, egress denied, container recreation, VM deletion/re-import and refreshed token persistence. Record redacted results and exact version/method; never log URL state, codes or tokens.",
+      "status": "pending"
     }
   ],
   "tests": {
@@ -80,10 +90,13 @@
       "agent container restart retains OpenCode auth for the VM lifetime",
       "VM down atomically saves refreshed OAuth state before overlay deletion",
       "seed ISO/image/workspace/git scan confirms no credential material",
-      "provider selection imports only requested integrations"
+      "provider selection imports only requested integrations",
+      "#45 browser auth human gate after #41 provisioning passes: list opencode auth methods/version without starting an unattended login; implement loopback-only callback transport to the actual server namespace, test provider login/call with device flow disabled, then persistence/teardown. Requires owner browser interaction; remain pending until observed."
     ],
     "created": [],
-    "cases": []
+    "cases": [
+      "2026-10-28 owner requirement: Codex device code may be removed; browser/non-device-code auth is a release gate, not an optional future fallback. docs/chatgpt-auth.md previously required headless and advised cancelling browser login; that guidance must be superseded. Automatic credential escrow/import/persistence is still NOT implemented."
+    ]
   },
   "priority": "major",
   "parent": 35,

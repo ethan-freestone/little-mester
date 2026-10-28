@@ -8,7 +8,7 @@
   "title": "Epic: VM-based Docker agent environment (all-in-one, model-agnostic harness)",
   "objective": "Deliver an all-in-one, model-agnostic harness: point Little Mester at a directory and run an agent there, with real Docker capability for the workspace's dependencies, while keeping the agent's blast radius inside a disposable VM. The agent runs in a Docker container inside a full Linux VM (not on the host), with a Docker CLI that can run the workspace's compose files; ./lab on the host orchestrates VM lifecycle, workspace transport, the agent container and teardown. Works with local models and no subscription, and can use cloud providers (Kimi, Claude, OpenAI) when available. Includes documentation, egress and decision-log housekeeping.",
   "created_at": "2026-10-26T17:39:37.714Z",
-  "updated_at": "2026-10-27T16:49:39.838Z",
+  "updated_at": "2026-10-28T13:22:50.030Z",
   "priority": "critical",
   "comments": [
     {
@@ -157,6 +157,16 @@
       "id": "A18",
       "text": "Every plan change from the 2026-10-26 rework is recorded in one live decision log (docs/DECISIONS.md) and in ticket comments/audit entries; root DECISIONS.md is not a second source of truth.",
       "status": "pending"
+    },
+    {
+      "id": "A19",
+      "text": "Non-device-code OpenCode ChatGPT browser sign-in works from the VM agent with the owner browser on the host, including supported token-sharing or explicit temporary loopback callback transport across both namespaces; legacy Codex device code is not a dependency. #45 A12/A13 success, secret-safe persistence and human evidence are required.",
+      "status": "pending"
+    },
+    {
+      "id": "A20",
+      "text": "Permission-mode bug #50 is verified in the host-Docker transition and VM agent: --auto-accept does not prompt for permitted harmless tools and does not bypass explicit denies; displayed mode and actual behavior both recorded. Human retry/rebuild/teardown gates and returned evidence are tracked through MCP; do not retire host-Docker until lifecycle/auth/permissions pass.",
+      "status": "pending"
     }
   ],
   "tests": {
@@ -170,13 +180,20 @@
       "teardown/residue check",
       "repo-integrity check",
       "VM CI run recorded on ticket",
-      "fresh-VM selected-provider auto-connect through #45 without secret residue"
+      "fresh-VM selected-provider auto-connect through #45 without secret residue",
+      "Browser/non-device-code ChatGPT login in VM with device-code flow unavailable (#45 A12/A13)",
+      "Host-Docker and VM permission-mode behavior proof (#50); staged human handoff before teardown"
     ],
     "created": [
       "docs/DECISIONS.md §C.6 topology decision"
     ],
     "cases": [
-      "topology decision review (full Linux VM + Docker)"
+      "topology decision review (full Linux VM + Docker)",
+      "2026-10-28 host attempt at 7b54d26 achieved KVM boot/SSH/proxied apt but failed rootless Docker prerequisites (nf_tables). #41 active; local repair tests are not a full lifecycle pass. No ./lab VM migration or host-Docker retirement yet.",
+      "2026-10-28 owner scope captured: browser auth must survive device-flow removal; all human rebuild/restart/retry steps and feedback must live on implementing tickets via engine and cross-ticket rationale in docs/DECISIONS.md C.9.11–13. #50 tracks reported prompt-mode bug, distinct from #48 wrapper yes flags.",
+      "2026-10-28 second host feedback: patched VM boots, rootless Docker 29.9.2 installs/starts and provisioning script completes. Agent image build still blocked by nonzero cloud-init result; console reveals schema warning. #41 now captures numeric/JSON/system-schema diagnostics; next human gate reuses overlay without --clean. No integrated lifecycle/auth/permissions pass claimed. Owner performance and OpenCode update questions recorded in docs/DECISIONS.md C.9.14–15; image-only versioned update path is #42 A8, not yet implemented.",
+      "2026-10-28 third host diagnostic run confirms cloud-init status2/degraded done caused by invalid groups.0.mester: [] user-data, not rootless Docker failure. #41 fixes group renderer, adds actual cloud-init CLI CI gate and single-Ed25519 readiness diagnostics; next clean reprovision justified because cached old instance data will not change on non-clean restart. Guest boot/cloud-init =7.62s but SSH wait caused total2m48; no speed/lifecycle pass claimed. Decisions/handoff updated in docs/DECISIONS.md C.9.16 and #41.",
+      "2026-10-28 fourth clean host run passes schema/cloud-init with no recoverable errors and rootless/workspace checks; SSH ready~10s. Full up stops at Docker Hub anonymous token fetch because build client lacks explicit proxy environment. #41 now fixes non-login CLI proxy scope, forwards both-case RUN args and retains build.log; owner approved npmjs.org for OpenCode npm install. Next retry preserves valid overlay without --clean. No full image, integrated lifecycle, auth or permissions pass claimed."
     ]
   },
   "is_epic": true

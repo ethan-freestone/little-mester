@@ -1,10 +1,10 @@
 # ChatGPT Plus authentication in containers and disposable VMs
 
-> **Status (2026-10-27):** Manual headless login is verified in the current agent container. Automatic credential transfer into a new VM is a required design described below, but is **not implemented yet**.
+> **Status (2026-10-28):** Manual legacy device-code login is verified in the current agent container. Non-device-code browser sign-in is a **required acceptance gate** (#45 A12/A13), not yet verified across the VM/agent boundary. Automatic credential transfer/persistence is also **not implemented yet**. Export existing auth privately before recreating its container or deleting its VM.
 
 Use this runbook when OpenCode runs without a browser, especially inside the agent container or the planned disposable VM. It uses a ChatGPT Plus or Pro subscription; it does not require an OpenAI API key or separate API billing.
 
-## Quick answer
+## Currently verified login (legacy device code)
 
 Run this where OpenCode is running:
 
@@ -28,7 +28,15 @@ opencode auth list
 
 The OpenAI entry should report `stored`.
 
-## Why this method is required
+## Browser sign-in must also work (required, not yet implemented)
+
+Do not make the VM depend on Codex device code remaining available. OpenCode V2
+documents **Sign in with ChatGPT** and legacy Codex methods. Inspect the methods
+offered by the installed version with an interactive `opencode auth login openai`
+or `/connect`; use the supported non-device-code method when testing #45. Method
+IDs and callback ports are not a stable harness contract.
+
+The existing device-code proof below does **not** satisfy the browser gate.
 
 The normal browser method starts a callback listener and supplies a redirect such as:
 
@@ -36,7 +44,19 @@ The normal browser method starts a callback listener and supplies a redirect suc
 http://127.0.0.1:<random-port>/auth/callback
 ```
 
-When the browser is on the host but OpenCode is in a container, the browser's `127.0.0.1` is the host, not the container. The callback therefore cannot reach OpenCode unless that random port is forwarded correctly.
+When the browser is on the host but OpenCode is in a container, the browser's `127.0.0.1` is the host, not the container. If the selected method uses a callback, it cannot reach OpenCode unless that port is forwarded correctly. The listener belongs to the **server doing auth**, which may be a shared service, not the CLI process.
+
+Required implementation: use supported token-sharing when offered, or create a
+temporary loopback-only path **host browser → control SSH → VM → agent/server
+listener**. SSH forwarding to guest localhost alone does not reach container
+localhost. No general host networking, LAN port publishing, or relaxation of
+the egress proxy's private-address rejection is acceptable. Cancel/finish must
+remove temporary forwarding. Outbound provider traffic still obeys egress policy.
+
+Ticket #45 owns the exact human procedure and results: browser success with
+device-code unavailable, cancellation, occupied callback port, denied egress,
+`auth list`, one provider request, container recreation and VM export/re-import.
+Do not start an unattended OAuth flow or put auth URLs/state/codes in tickets.
 
 `chatgpt-headless` uses a device-code flow instead. Both sides communicate with OpenAI, so it works across the container or VM boundary without a forwarded callback port.
 
@@ -49,7 +69,7 @@ chatgpt-headless
 key
 ```
 
-Use `chatgpt-headless` for this architecture. The `key` method requires separately billed OpenAI API credentials and is not a replacement for a ChatGPT Plus subscription.
+`chatgpt-headless` remains a verified option while available, **not the only supported architecture**. The `key` method requires separately billed OpenAI API credentials and is not a replacement for a ChatGPT Plus subscription or the browser acceptance gate.
 
 ## What was verified
 
@@ -112,7 +132,7 @@ opencode auth export openai > /secure/host/path/openai-auth.json
 A disposable VM cannot be instantly connected without receiving persistent OAuth state. The intended lifecycle is:
 
 ```text
-One-time login: ChatGPT device flow -> host credential escrow
+One-time login: supported ChatGPT browser or device flow -> host credential escrow
 VM up:          host escrow -> control SSH/stdin -> opencode auth import
 Agent restart:  guest OpenCode data directory persists outside agent tmpfs
 VM down:        latest opencode auth export -> atomic host escrow update
@@ -215,7 +235,11 @@ If the database is under `/home/agent`, the tmpfs was probably recreated. Import
 
 ### Browser waits on a localhost callback
 
-The browser-based method was selected. Cancel it and use `chatgpt-headless`; port forwarding is unnecessary for the device flow.
+The browser-based method may be correct. Identify the callback port and the
+server namespace; both VM and agent-container hops must be reachable from host
+loopback. Do not open a LAN listener or substitute device code and call the
+browser test passing. If forwarding is not implemented, record #45 as blocked;
+the legacy device flow can be a temporary workaround only while available.
 
 ### Verify export/import commands
 

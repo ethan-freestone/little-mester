@@ -8,7 +8,7 @@
   "title": "Workspace Docker capability, isolation and egress enforcement",
   "objective": "When the target directory declares Docker dependencies, ./lab and the agent run them predictably and safely: detection and approval at launch, a generated safe compose overlay, workspace labels for teardown, explicit approval for extra context mounts, and enforced egress rules.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-10-27T16:49:35.799Z",
+  "updated_at": "2026-10-28T13:22:50.025Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -68,8 +68,12 @@
       "credential-forwarding boundary test: no host secret directory mount and no credential when disabled",
       "selected cloud provider auth works only when its required egress is allowed"
     ],
-    "created": [],
-    "cases": []
+    "created": [
+      "tests/test_vm_proxy.py: current project build-registry allowlist and npm lookalike-domain refusal"
+    ],
+    "cases": [
+      "2026-10-28 owner explicitly approved adding npmjs.org to .mester-egress for registry.npmjs.org required by agent/OpenCode npm install. Existing entries preserved; public-only proxy enforcement unchanged; no allow-all or provider domains granted. #41 build fix loads CLI/auth-helper proxy env separately from daemon/RUN arguments; live registry build retry still pending."
+    ]
   },
   "priority": "critical",
   "parent": 35,

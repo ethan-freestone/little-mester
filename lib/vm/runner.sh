@@ -121,6 +121,23 @@ _vm_kvm_available() {
   [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]
 }
 
+# Probe only the key type we use. Avoid a pipeline: grep -q can close it early,
+# and a multi-key scan can time out despite having already emitted our key.
+_vm_scan_ssh_host_key() {
+  local vm_dir="$1" ssh_port="$2" host_keys rc
+  if host_keys=$(timeout 3 ssh-keyscan -T 2 -t ed25519 -p "$ssh_port" -H 127.0.0.1 2> "$vm_dir/ssh-keyscan.log"); then
+    if grep -q ' ssh-ed25519 ' <<< "$host_keys"; then
+      printf '%s\n' "$host_keys" > "$vm_dir/known_hosts"
+      return 0
+    fi
+    log_debug "SSH host-key probe returned no ed25519 key; see $vm_dir/ssh-keyscan.log"
+  else
+    rc=$?
+    log_debug "SSH host-key probe exited with status $rc; see $vm_dir/ssh-keyscan.log"
+  fi
+  return 1
+}
+
 # ─── Start QEMU VM (background) ─────────────────────────────────────
 _vm_start() {
   local vm_dir="$1"
@@ -228,8 +245,7 @@ _vm_start() {
         echo "[verbose] SSH check attempt $i (timeout ${ssh_timeout}s)..."
       fi
     fi
-    # Try ssh-keyscan with a 2s timeout to avoid hanging on closed ports
-    if timeout 2 ssh-keyscan -p "$ssh_port" -H 127.0.0.1 2>/dev/null | tee "$vm_dir/known_hosts" | grep -q ssh-ed25519; then
+    if _vm_scan_ssh_host_key "$vm_dir" "$ssh_port"; then
       log "SSH ready on 127.0.0.1:$ssh_port"
       return 0
     fi

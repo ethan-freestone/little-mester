@@ -8,7 +8,7 @@
   "title": "Add --verbose and --debug flags to lab-vm",
   "objective": "Add --verbose (-v) and --debug (-d) flags to lab-vm for progressive verbosity. --verbose prints extra progress information (SSH commands, qemu args, genisoimage output). --debug prints everything including raw command output, timing, and internal state.",
   "created_at": "2026-10-27T12:13:43.750Z",
-  "updated_at": "2026-10-27T15:50:09.649Z",
+  "updated_at": "2026-10-28T11:49:31.233Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -72,7 +72,10 @@
       "help flag mixed with other flags in lab",
       "help flag mixed with other flags in lab-vm"
     ],
-    "created": [],
+    "created": [
+      "tests/lab.bats: help/flag ordering and LAB_YES/AUTO_ACCEPT/VM_YES confirmation regressions (existing suite)",
+      "tests/lab-permissions.bats: mocked final OpenCode argv for auto-accept before/after workspace; permission UI evidence remains #50"
+    ],
     "cases": [
       "flag_ordering: -y before command",
       "flag_ordering: -y after command",
@@ -83,7 +86,9 @@
       "auto_accept: confirm() with AUTO_ACCEPT=1 skips prompt",
       "auto_accept: confirm() with VM_YES=1 skips prompt",
       "help_flag: --help mixed with --verbose in lab",
-      "help_flag: --help mixed with --yes in lab-vm"
+      "help_flag: --help mixed with --yes in lab-vm",
+      "2026-10-28 clarification: -y/--yes/--auto-accept wrapper confirmation and flag parsing are separate from actual OpenCode permission mode. Owner reports prompt UI even with PID 1 argv opencode --auto (v2.2.0). Keep A1–A8 existing wrapper evidence; live permission regression is #50 and epic #35 A20. Do not treat wrapper tests as permission UI proof.",
+      "2026-10-28 validator backtrack: store validation passed audit/index/orphans but warned that #48 passing criteria had an empty tests.created ledger. Registered the existing Bats coverage through MCP instead of suppressing validator warnings or editing JSON."
     ]
   },
   "models_used": []

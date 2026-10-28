@@ -1,0 +1,53 @@
+{
+  "id": 50,
+  "file_path": "/workspace/docs/tickets/ticket-050.json",
+  "number": 50,
+  "area": "infra",
+  "type": "bug",
+  "status": "active",
+  "title": "Honor lab permission controls and verify OpenCode auto mode",
+  "objective": "Fix lab argument/environment propagation and diagnose reported prompt mode under ./lab --unsafe-recurse --auto-accept without weakening explicit deny rules.",
+  "created_at": "2026-10-28T11:43:02.111Z",
+  "updated_at": "2026-10-28T11:48:34.114Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Lab flags are consumed before/after a workspace path, exactly one --auto reaches OpenCode under --auto-accept, and unrelated agent arguments are preserved.",
+      "status": "passing",
+      "evidence": "tests/lab-permissions.bats: mocked Docker argv identical for --auto-accept before/after path, exactly one injected --auto, no leaked lab flags; no-path unsafe-recurse preserves agent arguments; aider gets no --auto; bench --help still reaches its subcommand."
+    },
+    {
+      "id": "A2",
+      "text": "--permissions auto maps to OpenCode --auto; ask/deny modes have explicit supported behavior or fail clearly rather than silently being ignored; conflicting auto-accept and restrictive permissions are refused.",
+      "status": "passing",
+      "evidence": "tests/lab-permissions.bats: --permissions auto injects --auto; ask adds none; ask+auto-accept conflicts, unsupported deny/missing mode fail clearly before Docker. No config blanket-allow rules added."
+    },
+    {
+      "id": "A3",
+      "text": "On rebuilt host-Docker agent and subsequently the VM agent, user launches ./lab --unsafe-recurse --auto-accept, inspects the permission mode and requests a harmless tool call: no approval prompt; an explicit deny remains denied. Record OpenCode version, exact argv, UI mode, and actual behavior. A correct argv alone is not passing evidence.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Shared-service versus --standalone reproduction isolates any upstream OpenCode 2.2.0 behavior; document findings/workaround without writing blanket allow rules or changing the live coding session permissions.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "mock Docker captures final argv/env for flags before/after path, no-path --unsafe-recurse, aider, explicit permission modes and conflict rejection",
+      "human permission UI plus harmless tool and explicit-deny checks after rebuild; compare standalone if --auto still shows prompt",
+      "HUMAN PERMISSION GATE #50: preserve the existing container's auth export BEFORE recreating it (#45 runbook). On host with patch, ./lab --unsafe-recurse --auto-accept (launcher-only changes do not require an image rebuild; current Dockerfile unchanged). In the NEW owner-controlled session record opencode --version and the displayed permission mode, request only a harmless read or pwd, and observe whether actual approval is requested. Use a disposable project with one narrow configured deny (do not touch live repo policy) to prove deny is not bypassed. If UI still shows prompt or action asks despite --auto, compare a NEW disposable opencode --standalone --auto session in same image/config; record exact argv, shared-versus-private result and UI/action separately. Do not change the active working session, reset DB, or add blanket allow rules. Repeat only after #41/#42 provide a working VM agent; until then A3/A4 remain pending. No rebuild/restart/exit is requested in this coding session."
+    ],
+    "created": [
+      "tests/lab-permissions.bats: final Docker argv, permission mapping, conflict/invalid value, aider, no-path and nonzero exit propagation"
+    ],
+    "cases": [
+      "2026-10-28 owner reports prompt mode under ./lab --unsafe-recurse --auto-accept. /proc inspection in this container confirms PID 1 argv is opencode --auto; version v2.2.0; shared server PID 16. Therefore missing --auto is NOT established as cause of the current UI symptom.",
+      "Code inspection: lab dc exports LITTLE_MESTER_PERMISSIONS into docker compose environment but compose agent environment never forwards it; PERMISSIONS is not used to construct agent CLI flags. Lab retains consumed flags after a workspace path. Existing Bats ordering tests swallow exit codes and do not capture actual argv.",
+      "2026-10-28 implementation: replaced multipass lab parser with consuming single pass so post-path globals do not leak to OpenCode; agent args after -- preserved even in no-path --unsafe-recurse launch. Removed unused LITTLE_MESTER_PERMISSIONS compose-host export. --permissions auto uses supported client --auto; ask+auto conflicts; unsupported deny mode fails actionably (explicit OpenCode deny rules remain supported). No image/config or current-session permissions changed.",
+      "2026-10-28 7 permission Bats cases pass; full 61-case suite passes. These prove wrapper propagation, NOT reported UI fix. PID 1 already has opencode --auto under v2.2.0; no upstream bug root cause is asserted. No billed provider call or live permission mutation was performed."
+    ]
+  },
+  "models_used": []
+}

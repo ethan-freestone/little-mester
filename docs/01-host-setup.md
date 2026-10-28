@@ -1,6 +1,6 @@
 # Host Setup — VM Mode (Epic #35)
 
-> **Last updated:** 2026-10-27  
+> **Last updated:** 2026-10-28
 > **Target:** A clean Linux host bootstrapped to run the disposable QEMU/KVM VM that hosts the agent sandbox.  
 > **Epic:** [#35](tickets/ticket-035.json) — VM-based Docker agent environment.
 > **Architectural reference:** [`vm-architecture.md`](vm-architecture.md), [`DECISIONS.md` §C.8](DECISIONS.md#c8-vm-harness-topology-transport-and-isolation-2026-10-26).
@@ -85,7 +85,27 @@ qemu-system-x86_64 -enable-kvm -machine q35 -m 512 -drive file=/dev/null,format=
 
 ## 2. One-command bootstrap
 
-If the agent will use a ChatGPT Plus or Pro subscription, complete the one-time device login and host credential escrow described in [`docs/chatgpt-auth.md`](chatgpt-auth.md). Automatic import into a disposable VM is not implemented yet; do not assume a login stored in the current container will follow the VM.
+If the agent will use a ChatGPT Plus or Pro subscription, preserve existing auth using the host credential escrow procedure in [the auth runbook](chatgpt-auth.md). Browser/non-device-code login is a required #45 acceptance gate; only legacy device login has been verified so far. Automatic import into a disposable VM is not implemented yet; do not assume a login stored in the current container will follow the VM.
+
+**Current host gate:** The 2026-10-28 CachyOS run booted with KVM and reached SSH,
+then cloud-init failed on missing `nf_tables` before rootless Docker setup. A
+second run with the fix started rootless Docker and completed the script, but
+cloud-init reported a nonzero result despite `status: done`. A third non-clean
+diagnostic run confirmed exit 2 and `groups.0.mester: [] is too short`. The
+generator now uses the supported string group form. The fourth clean run passed
+cloud-init with no errors/warnings and reached SSH in ~10s, then failed building
+the agent while fetching a Docker Hub auth token through unconfigured client
+networking. The build command now sources the guest proxy profile for the Docker
+CLI as well as configuring daemon/build-step proxies, with output in `build.log`.
+The next #41 retry uses **no `--clean`**: installed guest state is valid. Do not
+repeat provisioning just for a host-side build-command fix. The owner also approved
+`npmjs.org` in the manifest for OpenCode's npm installation. Single-type SSH probing
+retains `ssh-keyscan.log`; warm-restart performance still needs measurement.
+Follow ticket #41's current test ledger before `--clean`,
+`stop`, or `down` (all can delete guest state). Failure diagnostics are saved to
+`.mester/vm/<name>/provision.log`, `cloud-init-status.json` and
+`cloud-init-schema.log` by the updated launcher. `./lab` still uses host
+Docker; a successful `lab-vm up` is not yet an integrated-agent acceptance pass.
 
 After installing prerequisites, run:
 

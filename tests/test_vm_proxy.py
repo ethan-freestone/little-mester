@@ -33,6 +33,12 @@ class ProxyTests(unittest.TestCase):
         for value in ("127.0.0.1", "10.0.2.2", "169.254.1.1", "::1"):
             self.assertFalse(ipaddress.ip_address(value).is_global)
 
+    def test_project_policy_permits_build_registries_without_lookalike_domains(self):
+        enabled, domains = proxy.policy(Path(__file__).parents[1] / ".mester-egress")
+        for host in ("auth.docker.io", "registry-1.docker.io", "registry.npmjs.org"):
+            self.assertTrue(proxy.allowed(host, enabled, domains), host)
+        self.assertFalse(proxy.allowed("registry.npmjs.org.attacker.invalid", enabled, domains))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,13 +19,15 @@
 
 A locked-down, fully local sandbox for learning agentic coding.
 
-A local LLM (Ollama or llama.cpp) drives a coding agent (**opencode** by default, **aider** via `--agent`) that edits files in **one folder you choose**, nothing else. No internet by default. No host shell access. No access to your keys, home directory, or other projects.
+A local LLM (Ollama or llama.cpp) drives a coding agent (**opencode** by default, **aider** via `--agent`) that edits files in **one folder you choose**. Agent internet is enabled by default; use `--isolated` to request offline mode. No host shell access. No access to your keys, home directory, or other projects unless explicitly supplied.
 
 **The core ethos:** little-mester is a single tool built from MCP modules to allow multiple interfaces (opencode today, potentially codex or claude-code later) to act in a single well-defined, sandboxed way. Security is first. Consistency second. Human readability third.
 
 > Status: personal learning project. Not security-audited. Treat the sandbox as strong guard rails, not a guarantee. See [SECURITY.md](SECURITY.md).
 
 ### Architecture
+
+**Current mode:** `./lab` still uses host Docker. The disposable VM is being proven under `./lab-vm`; see [VM architecture](docs/vm-architecture.md). Do not retire host-Docker mode until tickets #41–#45 pass the real-host gates.
 
 ```
  HOST (any Linux / macOS with Docker)
@@ -61,7 +63,7 @@ A local LLM (Ollama or llama.cpp) drives a coding agent (**opencode** by default
  └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Agent internet is **enabled by default** (`[egress, internal]`). Disable with `--isolated` for an offline session. When egress is on, outbound traffic is filtered against `.mester-egress` (one hostname per line) or allowed unconditionally with `--egress-true`.
+Agent internet is **enabled by default** (`[egress, internal]`). Disable with `--isolated` for an offline session. `.mester-egress` uses `key=value` fields; `permission=false` refuses egress-enabled launches. Host-Docker `allowed_domains` parsing is advisory; enforced proxy policy for the VM is tracked in #43. Agent limits are `mem_limit: 8g` and `pids_limit: 512`.
 
 ### Three ideas to hold onto
 
@@ -69,7 +71,7 @@ Agent internet is **enabled by default** (`[egress, internal]`). Disable with `-
 |---|---|
 | The model can't touch files | Ollama/llama.cpp only produce text. No filesystem mounts except their own model volumes. |
 | The agent touches only one folder | One bind mount (`/workspace`), gated by `lab`'s path checks. |
-| The agent can't phone home | Model + agent share `internal: true`. Egress is opt-in. Only pull services have internet, briefly, during setup. |
+| Internet access is explicit | Egress is enabled by default; `--isolated` requests offline mode. Do not treat the host-Docker domain list as an enforced firewall. |
 
 ---
 

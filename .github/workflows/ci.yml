@@ -102,9 +102,11 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            qemu-utils genisoimage virtiofsd socat
+            qemu-utils genisoimage virtiofsd socat cloud-init openssh-client
+      - name: Validate generated cloud-config with cloud-init (no provisioning)
+        run: bash scripts/check-vm-cloud-init-schema.sh
       - name: Run lab-vm self-tests
         run: |
           ./lab-vm test
           bats tests/vm.bats
-          python3 tests/test_vm_proxy.py
+          python3 -m unittest discover -s tests -p 'test_vm_*.py' -v
