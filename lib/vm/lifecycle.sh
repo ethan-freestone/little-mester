@@ -76,17 +76,17 @@ version="$1"
 export DEBIAN_FRONTEND=noninteractive
 if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
   sudo apt-get update
-  sudo apt-get install -y nodejs npm
+  sudo apt-get install -y -qq nodejs npm
 fi
 current="$(opencode --version 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/) {sub(/^v/, "", $i); print $i; exit}}' || true)"
-if [[ "$current" != "v$version" ]]; then
+if [[ "$current" != "$version" ]]; then
   sudo env HTTP_PROXY="$HTTP_PROXY" HTTPS_PROXY="$HTTPS_PROXY" \
     http_proxy="$http_proxy" https_proxy="$https_proxy" \
     npm install --global "@opencode/cli@$version"
 fi
 installed="$(opencode --version | awk '{for (i=1; i<=NF; i++) if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/) {sub(/^v/, "", $i); print $i; exit}}')"
 test "$installed" = "$version"
-install -d -o root -g root -m 0755 /etc/opencode/opencode /etc/opencode/plugins
+  install -d -o root -g root -m 0755 /etc/opencode /etc/opencode/plugins
 GUEST_OPENCODE_INSTALL
 
   if ! tar -C "$LAB_DIR/agent/opencode" -cf - opencode.json plugins | \
@@ -98,7 +98,7 @@ GUEST_OPENCODE_INSTALL
   vm_ssh "$vm_dir" "sudo sed -i \
     -e 's#http://ollama:11434#http://10.0.2.100:11434#g' \
     -e 's#http://llamacpp:11434#http://10.0.2.100:8080#g' \
-    /etc/opencode/opencode/opencode.json && \
+    /etc/opencode/opencode.json && \
     sudo chown -R root:root /etc/opencode && \
     sudo chmod -R a+rX /etc/opencode && \
     sudo -iu mester opencode --version"
@@ -390,11 +390,11 @@ vm_cmd_agent() {
 
   local version="${VM_OPENCODE_VERSION:-2.2.0}"
   local installed_version
-  installed_version="$(vm_ssh "$vm_dir" "opencode --version" | awk '{for (i=1; i<=NF; i++) if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/) {sub(/^v/, \"\", $i); print $i; exit}}')"
+  installed_version="$(vm_ssh "$vm_dir" "opencode --version" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
   if [[ "$installed_version" != "$version" ]]; then
     die "OpenCode $version is not installed in VM '$vm_name' (found ${installed_version:-none}). Run ./lab-vm up $vm_name to install/update it."
   fi
-  if ! vm_ssh "$vm_dir" "test -r /etc/opencode/opencode/opencode.json && test -d /etc/opencode/plugins"; then
+  if ! vm_ssh "$vm_dir" "test -r /etc/opencode/opencode.json && test -d /etc/opencode/plugins"; then
     die "OpenCode guest configuration is missing in VM '$vm_name'. Run ./lab-vm up $vm_name to provision it."
   fi
   echo "Launching OpenCode $version directly in VM '$vm_name' at /workspace."
@@ -403,7 +403,7 @@ vm_cmd_agent() {
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$vm_dir/known_hosts" \
     -i "$vm_dir/id_vm_control" -p "$(cat "$vm_dir/ssh_port")" \
     mester@127.0.0.1 \
-    "cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode/opencode.json && export OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-logo","/etc/opencode/plugins/host-metrics-tui","/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}' && exec opencode"
+    "cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json && export OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-logo","/etc/opencode/plugins/host-metrics-tui","/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}' && exec opencode"
 }
 
 # ─── vm down: stop and remove VM ────────────────────────────────────

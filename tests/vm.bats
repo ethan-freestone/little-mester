@@ -78,6 +78,18 @@ setup() {
   [[ "$body" == *'opencode --version'* ]]
   [[ "$body" == *'Run ./lab-vm up'* ]]
   [[ "$body" != *'_vm_install_guest_harness'* ]]
+  [[ "$body" == *'grep -Eo'* ]]
+  [[ "$body" != *'sub(/^v/, \\"'* ]]
+  [[ "$body" == *'/etc/opencode/opencode.json'* ]]
+  [[ "$body" != *'/etc/opencode/opencode/opencode.json'* ]]
+}
+
+@test "guest install copies config to the same path used by the launcher" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  installer="$(declare -f _vm_install_guest_harness)"
+  [[ "$installer" == *'tar -C "$LAB_DIR/agent/opencode" -cf - opencode.json plugins'* ]]
+  [[ "$installer" == *'/etc/opencode/opencode.json'* ]]
+  [[ "$installer" != *'/etc/opencode/opencode/opencode.json'* ]]
 }
 
 @test "guest compose teardown runs from the mounted workspace" {
