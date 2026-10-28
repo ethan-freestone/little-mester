@@ -17,6 +17,7 @@ two front-ends: a CLI and an MCP server.
 | | |
 |---|---|
 | Package | `@little-mester/ticket-engine-mcp` |
+| License | GNU Affero General Public License, version 3 only (`AGPL-3.0-only`) — see [`LICENSE`](../LICENSE) |
 | Language | TypeScript (CommonJS) |
 | Tests | Jest (`npm test`) — engine, CLI, MCP |
 | Store | `docs/tickets/` (JSON files, `_index.json`, `_audit.json`) |
@@ -56,6 +57,14 @@ npm test               # Jest: engine + CLI + MCP
 The published entry points are `dist/engine.js` (`main`), `dist/engine.d.ts` (`types`),
 and `dist/cli.js` (`ticket-engine` bin). `files` whitelists `dist/` and `docs/`, so the
 tarball never falls back to shipping TypeScript sources or tests.
+
+The package includes the complete AGPL text in `LICENSE` (identical to the repo's
+root licence). Copyright (c) 2026 Ethan Freestone. Unless otherwise noted, this
+licence applies to the module's code and documentation. Third-party dependencies
+retain their own licences. The software is provided without warranty, as described
+in the licence. Using the module as a tool for an independent project does not by
+itself change that project's licence. Commercial use and compliant resale are
+permitted without licence fees or company-size limits.
 
 Run the CLI during development without building:
 

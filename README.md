@@ -187,6 +187,29 @@ Select a workflow with `--workflow <name>`.
 
 ---
 
+## License
+
+Copyright (c) 2026 Ethan Freestone.
+
+Unless otherwise noted, little-mester, including `little-mester-mcp`, is licensed
+under the **GNU Affero General Public License, version 3 only**
+(`AGPL-3.0-only`). See [LICENSE](LICENSE) for the complete terms.
+
+- Personal and commercial use, including selling copies, is permitted without
+  licence fees, revenue limits, or team-size limits, subject to the AGPL.
+- Distributing covered versions requires providing corresponding source under the
+  AGPL. Modified versions supporting remote network interaction must prominently
+  offer their corresponding source to users interacting with them remotely.
+- Purely private, local modifications do not have to be published.
+- Merely using this tool to develop an independent project does not place that
+  project under the AGPL; incorporating covered code may create obligations.
+
+The software comes **without warranty**, as described in the licence. Third-party
+software and model weights retain their respective licences. This change does not
+withdraw permissions already granted for versions published under MIT or ISC.
+
+---
+
 ## Where to go from here
 
 | What you need | Go to |
