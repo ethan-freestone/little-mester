@@ -12,7 +12,152 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"hostfwd=tcp:127.0.0.1:22222-:22"* ]]
   [[ "$output" == *"guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:45678"* ]]
+  [[ "$output" == *"guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532"* ]]
   [[ "$output" != *"-10.0.2.2:"* ]]
+}
+
+@test "VM-only local model forwarders bind host ports to loopback" {
+  local compose="$REPO_ROOT/compose.vm-model-api.yaml"
+  [ "$(grep -c '127.0.0.1:' "$compose")" -eq 3 ]
+  grep -Fq '127.0.0.1:11434:11434' "$compose"
+  grep -Fq '127.0.0.1:8080:8080' "$compose"
+  grep -Fq 'TCP:ollama:11434' "$compose"
+  grep -Fq 'TCP:llamacpp:11434' "$compose"
+  grep -Fq '127.0.0.1:19532:19532' "$compose"
+  grep -Fq 'TCP:metrics:19532' "$compose"
+  grep -Fq 'profiles: [vm-model-api]' "$compose"
+  ! grep -Eq '0\.0\.0\.0:(8080|11434|19532)' "$compose"
+}
+
+@test "llama.cpp public model alias matches the direct guest model configuration" {
+  grep -Fq -- '--alias qwen3.6-35b-a3b-q4_k_m' "$REPO_ROOT/compose.yaml"
+  grep -Fq '"model": "llamacpp/qwen3.6-35b-a3b-q4_k_m"' "$REPO_ROOT/agent/opencode/opencode.json"
+  grep -Fq 'http://llamacpp:11434/v1' "$REPO_ROOT/agent/opencode/opencode.json"
+}
+
+@test "guest agent preflights the selected local model forwarder before OpenCode" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  body="$(declare -f vm_cmd_agent)"
+  [[ "$body" == *'http://10.0.2.100:8080/health'* ]]
+  [[ "$body" == *'http://10.0.2.100:11434/api/tags'* ]]
+  [[ "$body" == *'curl --noproxy 10.0.2.100'* ]]
+  [[ "$body" == *'python3 -c'* ]]
+  [[ "$body" == *'./lab-vm models up ${model_provider}'* ]]
+  [[ "$body" == *'METRICS_URL=http://10.0.2.100:19532'* ]]
+}
+
+@test "guest agent remote command preserves CLI JSON quotes and TUI plugin wiring" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  body="$(declare -f vm_cmd_agent)"
+  [[ "$body" == *"printf -v cli_config_quoted '%q' \"\$cli_config\""* ]]
+  [[ "$body" == *'/etc/opencode/plugins/host-metrics-tui/package.json'* ]]
+  [[ "$body" == *'/etc/opencode/plugins/little-mester-exit-confirm/package.json'* ]]
+  [[ "$body" == *'OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted'* ]]
+  remote='export OPENCODE_CLI_CONFIG_CONTENT='"$(printf '%q' '{"plugins":["/etc/opencode/plugins/host-metrics-tui"],"keybinds":{"app.exit":"none"}}')"
+  bash -n -c "$remote"
+  [[ "$remote" == *'\"plugins\"'* ]]
+  [[ "$remote" == *'\"app.exit\":\"none\"'* ]]
+  actual="$(bash -c "$remote; printf '%s' \"\$OPENCODE_CLI_CONFIG_CONTENT\"")"
+  [ "$actual" = '{"plugins":["/etc/opencode/plugins/host-metrics-tui"],"keybinds":{"app.exit":"none"}}' ]
+}
+
+@test "metrics TUI uses configurable VM endpoint and surfaces transport failure" {
+  local plugin="$REPO_ROOT/agent/opencode/plugins/host-metrics-tui/tui.tsx"
+  grep -Fq 'process.env.METRICS_URL || "http://metrics:19532"' "$plugin"
+  grep -Fq 'host metrics unavailable' "$plugin"
+  grep -Fq '`${metricsBase()}/history?n=60`' "$plugin"
+  grep -Fq '`${metricsBase()}/metrics`' "$plugin"
+}
+
+@test "lab-vm models up uses standard loopback-only Compose API publication" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  docker() {
+    case "$*" in
+      info*) return 0 ;;
+      *llama-id*|*metrics-id*) echo '{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}' ;;
+    esac
+  }
+  compose_source="$(declare -f vm_model_compose)"
+  [[ "$compose_source" == *'WORKSPACE="${WORKSPACE:-$LAB_DIR}" docker compose'* ]]
+  vm_model_compose() {
+    if [[ "$*" == 'config --format json' ]]; then
+      cat <<'JSON'
+{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"127.0.0.1"}]},"metrics-vm-api":{"ports":[{"target":19532,"published":"19532","host_ip":"127.0.0.1"}]}}}
+JSON
+    else printf 'compose:%s\n' "$*"; fi
+  }
+  curl() { return 0; }
+  run vm_cmd_models up
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'compose:config -q'* ]]
+  [[ "$output" == *'compose:up -d llamacpp-vm-api metrics-vm-api'* ]]
+  [[ "$output" == *'127.0.0.1:8080'* ]]
+  [[ "$output" == *'127.0.0.1:19532'* ]]
+  [[ "$output" == *'reachable through Docker loopback-only published ports'* ]]
+}
+
+@test "VM host-service debug traces do not corrupt captured Compose JSON" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  VM_DEBUG=1
+  log_debug() { echo "debug:$*"; }
+  docker() { echo '{"services":{"llamacpp-vm-api":{"ports":[]}}}'; }
+  local debug_output
+  debug_output="$(vm_model_compose config --format json 2>"$BATS_TEST_TMPDIR/compose-debug.log")"
+  [ "$debug_output" = '{"services":{"llamacpp-vm-api":{"ports":[]}}}' ]
+  grep -q 'debug:docker compose' "$BATS_TEST_TMPDIR/compose-debug.log"
+}
+
+@test "VM API ports are validated as loopback-only and live probes gate success" {
+  grep -Fq '_vm_validate_api_publish_config "$service" 127.0.0.1 8080' "$REPO_ROOT/lib/vm/host-services.sh"
+  grep -Fq '_vm_probe_published_api "$service" 8080 /health' "$REPO_ROOT/lib/vm/host-services.sh"
+  grep -Fq 'docker port "$container"' "$REPO_ROOT/lib/vm/host-services.sh"
+  grep -Fq 'configured_bindings={{json .HostConfig.PortBindings}} actual_bindings={{json .NetworkSettings.Ports}}' "$REPO_ROOT/lib/vm/host-services.sh"
+  ! grep -Eq 'TCP-LISTEN:|TCP:\$target_ip|socat.*relay' "$REPO_ROOT/lib/vm/host-services.sh"
+}
+
+@test "VM API publication validation rejects non-loopback bindings" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  die() { echo "REFUSED: $*" >&2; return 1; }
+  vm_model_compose() {
+    cat <<'JSON'
+{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"0.0.0.0"}]}}}
+JSON
+  }
+  run _vm_validate_api_publish_config llamacpp-vm-api 127.0.0.1 8080
+  [ "$status" -ne 0 ]
+}
+
+@test "failed published API probe is reported as failure, not success" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  VM_DEBUG=0
+  curl() { return 7; }
+  sleep() { :; }
+  _vm_api_diagnostics() { echo "diagnostic:$*"; }
+  run _vm_probe_published_api llamacpp-vm-api 8080 /health
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'diagnostic:llamacpp-vm-api 8080 /health'* ]]
+}
+
+@test "lab-vm extra delegates to the temporary script with a removal marker" {
+  grep -Fq 'exec bash "$LAB_DIR/scripts/vm-extra.sh" "${remaining[@]:1}"' "$REPO_ROOT/lab-vm"
+  grep -Fq 'MUST BE REMOVED once ticket #42' "$REPO_ROOT/scripts/vm-extra.sh"
+  grep -Fq 'diagnose-model-api' "$REPO_ROOT/scripts/vm-extra.sh"
+  grep -Fq 'repair-model-api' "$REPO_ROOT/scripts/vm-extra.sh"
+  grep -Fq 'docker inspect --format' "$REPO_ROOT/scripts/vm-extra.sh"
+  grep -Fq 'docker logs --tail 40' "$REPO_ROOT/scripts/vm-extra.sh"
+  grep -Fq 'VM_DEBUG' "$REPO_ROOT/scripts/vm-extra.sh"
+  grep -Fq 'VM_VERBOSE' "$REPO_ROOT/scripts/vm-extra.sh"
+  grep -Fq 'VM_VERBOSE="${VM_VERBOSE:-0}"' "$REPO_ROOT/lab-vm"
+  grep -Fq 'VM_DEBUG="${VM_DEBUG:-0}"' "$REPO_ROOT/lab-vm"
+}
+
+@test "default host-Docker compose publishes no model ports" {
+  ! grep -Eq '^\s*ports:' "$REPO_ROOT/compose.yaml"
 }
 
 @test "QEMU command pairs virtiofsd with vhost-user and shareable memory" {
@@ -82,6 +227,8 @@ setup() {
   [[ "$body" != *'sub(/^v/, \\"'* ]]
   [[ "$body" == *'/etc/opencode/opencode.json'* ]]
   [[ "$body" != *'/etc/opencode/opencode/opencode.json'* ]]
+  [[ "$body" == *'/etc/opencode/plugins/little-mester-exit-confirm'* ]]
+  [[ "$body" == *'"app.exit":"none"'* ]]
 }
 
 @test "guest install copies config to the same path used by the launcher" {

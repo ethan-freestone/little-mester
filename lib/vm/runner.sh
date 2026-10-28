@@ -22,7 +22,7 @@
 # A persistent tcp chardev connects at QEMU startup and fails if absent.
 _vm_netdev_arg() {
   local ssh_port="$1"
-  printf '%s' "user,id=net0,hostfwd=tcp:127.0.0.1:${ssh_port}-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434,guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:${VM_PROXY_PORT:-3128},restrict=on"
+  printf '%s' "user,id=net0,hostfwd=tcp:127.0.0.1:${ssh_port}-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434,guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080,guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:${VM_PROXY_PORT:-3128},restrict=on"
 }
 
 # Populate VM_QEMU_CMD. Keeping this separate from process launch lets tests

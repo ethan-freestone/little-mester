@@ -390,20 +390,33 @@ vm_cmd_agent() {
 
   local version="${VM_OPENCODE_VERSION:-2.2.0}"
   local installed_version
+  local model_provider model_url
   installed_version="$(vm_ssh "$vm_dir" "opencode --version" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
   if [[ "$installed_version" != "$version" ]]; then
     die "OpenCode $version is not installed in VM '$vm_name' (found ${installed_version:-none}). Run ./lab-vm up $vm_name to install/update it."
   fi
-  if ! vm_ssh "$vm_dir" "test -r /etc/opencode/opencode.json && test -d /etc/opencode/plugins"; then
+  if ! vm_ssh "$vm_dir" "test -r /etc/opencode/opencode.json && test -r /etc/opencode/plugins/host-metrics-tui/package.json && test -r /etc/opencode/plugins/little-mester-exit-confirm/package.json && test -r /etc/opencode/plugins/little-mester-logo/package.json"; then
     die "OpenCode guest configuration is missing in VM '$vm_name'. Run ./lab-vm up $vm_name to provision it."
   fi
+  model_provider="$(vm_ssh "$vm_dir" "python3 -c 'import json; print(json.load(open(\"/etc/opencode/opencode.json\"))[\"model\"].split(\"/\", 1)[0])'")"
+  case "$model_provider" in
+    llamacpp) model_url="http://10.0.2.100:8080/health" ;;
+    ollama) model_url="http://10.0.2.100:11434/api/tags" ;;
+    *) die "OpenCode model provider '$model_provider' has no configured VM host forwarder." ;;
+  esac
+  if ! vm_ssh "$vm_dir" "curl --noproxy 10.0.2.100 --fail --silent --show-error --max-time 5 '$model_url' >/dev/null"; then
+    die "$model_provider is not reachable from VM '$vm_name'. Start its host API forwarder and metrics with: ./lab-vm models up ${model_provider}"
+  fi
   echo "Launching OpenCode $version directly in VM '$vm_name' at /workspace."
+  local cli_config cli_config_quoted
+  cli_config='{"plugins":["/etc/opencode/plugins/little-mester-logo","/etc/opencode/plugins/host-metrics-tui","/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}'
+  printf -v cli_config_quoted '%q' "$cli_config"
   exec ssh -t \
     -o BatchMode=yes -o ConnectTimeout=10 \
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$vm_dir/known_hosts" \
     -i "$vm_dir/id_vm_control" -p "$(cat "$vm_dir/ssh_port")" \
     mester@127.0.0.1 \
-    "cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json && export OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-logo","/etc/opencode/plugins/host-metrics-tui","/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}' && exec opencode"
+    "cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=http://10.0.2.100:19532 && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && exec opencode"
 }
 
 # ─── vm down: stop and remove VM ────────────────────────────────────

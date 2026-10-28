@@ -538,20 +538,24 @@ browser callback endpoint (#45).
   `.mester/vm/<name>/` state directory, uses a per-VM `known_hosts`, and never copies host
   keys, cloud credentials, or `~/.ssh` into the VM. `qemu-guest-agent` handles lifecycle;
   SSH handles commands and `./lab shell`.
-- **Model APIs:** ollama and llamacpp stay on the host, bound to loopback. The VM reaches
-  only their ports through QEMU `guestfwd` entries (`10.0.2.100:11434` and `:8080`), not
-  through a general host route. No model weights or GPUs enter the VM, and a CPU-only host
-  still works with the same flow.
+- **Model APIs:** Model service is optional and configured independently of the VM runtime.
+  When selected, the VM may reach exactly one configured host-loopback API endpoint through
+  an explicit QEMU `guestfwd` mapping, not through a general host route. A native host
+  service or user-managed container may provide it; host Docker is not a prerequisite and
+  `lab-vm` does not implicitly install/manage a host model server. No model weights or GPUs
+  enter the VM; a VM without a model endpoint remains usable for shell/workload tasks.
 - **Egress:** QEMU user networking runs with `restrict=on`; the only way out is a host-side
   allowlisting HTTP(S) proxy exposed through `guestfwd` (`10.0.2.100:3128`). Docker, apt,
   npm and pip are configured to use it. This is where `.mester-egress` `allowed_domains`
   is enforced (#43), instead of the current advisory parsing. A blank list keeps allow-all
   at the *domain* level; non-HTTP protocols and DNS outside the proxy are follow-ups, not
   silently allowed.
-- **No host ports:** the harness adds only the loopback SSH forward. The model servers
-  already listen on host loopback and are exposed to the VM only through their `guestfwd`
-  entries. Guest services remain guest-local unless deliberately exposed through a
-  separately reviewed loopback-only forward; nothing is published to the host LAN.
+- **No host LAN ports:** the harness adds only loopback SSH control and any explicitly
+  configured loopback model endpoint. That endpoint crosses to the guest only through its
+  matching `guestfwd` entry. Guest services remain guest-local unless separately reviewed;
+  nothing is published to the host LAN. Setup must never modify host firewall, NAT, routing,
+  sysctl, or Docker daemon policy to make a crossing work; a profile that cannot satisfy
+  the contract without such changes is unsupported.
 - **Teardown and recursion:** guest workloads and nested VM state belong to the guest
   lifecycle. Cleanup must be explicit and must not silently destroy a live recursive test
   loop or its evidence. Separate/reused VM policy and snapshot/overlay retention require
@@ -568,10 +572,32 @@ browser callback endpoint (#45).
   ports within the guest, volumes and test start/stop cycles); the guest Docker daemon may be
   rootful because it is contained by the outer VM. Never expose the host daemon.
 - GPU passthrough into the VM is explicitly out of scope; model servers stay on the host.
-- `guestfwd` + `restrict=on` behaviour and virtiofs mount semantics must be proven in #41;
-  the fallback is a host-side firewall/proxy pair with the same crossings, not opening a
-  general host route.
+- `guestfwd` + `restrict=on` behaviour and workspace-sharing semantics must be proven in
+  #41. There is no firewall or general-route fallback; an unsupported host profile must
+  fail clearly rather than weaken isolation.
 - Alternative container runtimes remain future scope in #46.
+
+#### C.9.15 Host portability and optional model services (2026-10-28)
+
+**Decision:** The VM product must not be coupled to one host's Docker Engine, firewall,
+networking setup, or model-serving container. Guest Docker/Compose remains an optional
+workload capability for project integration tests; it is not the agent wrapper and the host
+daemon/socket is never shared. Model inference is an optional provider configured through a
+stable API endpoint contract; when local to the host, only that endpoint's loopback port may
+be forwarded to the guest. Default setup/agent launch must not require any model server.
+
+“Any Unix” is a portability goal, not a claim that all Unix variants share VM and filesystem
+APIs. Publish explicit tested OS/architecture profiles. Each profile must pass hypervisor,
+selected-workspace share, control/network isolation, and teardown gates. Unknown profiles
+fail with actionable prerequisites; setup must not alter firewall/routing policy or silently
+select weaker isolation. The current Linux x86_64/QEMU/virtiofs profile remains experimental
+until its acceptance evidence is complete; macOS and BSD support must not be claimed before
+their own profile tests.
+
+**Reason:** A host Docker port-publication failure must be diagnosed as an implementation or
+support-profile failure, not worked around with host-specific relays or firewall changes.
+Keeping the host model provider and guest workload runtime behind optional interfaces allows
+the same VM flow to work with native host services and across tested Unix profiles.
 
 The trust-boundary diagram and crossing table live in `docs/vm-architecture.md`; the
 engineering invariants are in `docs/tickets/architecture/DECISIONS.md` §K.

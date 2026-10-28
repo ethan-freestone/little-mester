@@ -8,7 +8,7 @@
   "title": "Honor lab permission controls and verify OpenCode auto mode",
   "objective": "Fix lab argument/environment propagation and diagnose reported prompt mode under ./lab --unsafe-recurse --auto-accept without weakening explicit deny rules.",
   "created_at": "2026-10-28T11:43:02.111Z",
-  "updated_at": "2026-10-28T13:53:41.134Z",
+  "updated_at": "2026-10-28T16:55:51.863Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -37,7 +37,8 @@
     "needed": [
       "mock Docker captures final argv/env for flags before/after path, no-path --unsafe-recurse, aider, explicit permission modes and conflict rejection",
       "human permission UI plus harmless tool and explicit-deny checks after rebuild; compare standalone if --auto still shows prompt",
-      "HUMAN PERMISSION GATE #50: preserve the existing container's auth export BEFORE recreating it (#45 runbook). On host with patch, ./lab --unsafe-recurse --auto-accept (launcher-only changes do not require an image rebuild; current Dockerfile unchanged). In the NEW owner-controlled session record opencode --version and the displayed permission mode, request only a harmless read or pwd, and observe whether actual approval is requested. Use a disposable project with one narrow configured deny (do not touch live repo policy) to prove deny is not bypassed. If UI still shows prompt or action asks despite --auto, compare a NEW disposable opencode --standalone --auto session in same image/config; record exact argv, shared-versus-private result and UI/action separately. Do not change the active working session, reset DB, or add blanket allow rules. Repeat only after #41/#42 provide a working VM agent; until then A3/A4 remain pending. No rebuild/restart/exit is requested in this coding session."
+      "HUMAN PERMISSION GATE #50: preserve the existing container's auth export BEFORE recreating it (#45 runbook). On host with patch, ./lab --unsafe-recurse --auto-accept (launcher-only changes do not require an image rebuild; current Dockerfile unchanged). In the NEW owner-controlled session record opencode --version and the displayed permission mode, request only a harmless read or pwd, and observe whether actual approval is requested. Use a disposable project with one narrow configured deny (do not touch live repo policy) to prove deny is not bypassed. If UI still shows prompt or action asks despite --auto, compare a NEW disposable opencode --standalone --auto session in same image/config; record exact argv, shared-versus-private result and UI/action separately. Do not change the active working session, reset DB, or add blanket allow rules. Repeat only after #41/#42 provide a working VM agent; until then A3/A4 remain pending. No rebuild/restart/exit is requested in this coding session.",
+      "Per parent #35 A21, do the live VM permission UI test only after local model requests and the VM TUI/plugin/key handling work. Keep host-Docker as active path meanwhile. In the VM record OpenCode version, displayed mode and actual allowed/denied harmless tool behavior; do not add blanket allow rules or recreate the existing host container for this test."
     ],
     "created": [
       "tests/lab-permissions.bats: final Docker argv, permission mapping, conflict/invalid value, aider, no-path and nonzero exit propagation"

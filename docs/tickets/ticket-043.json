@@ -8,7 +8,7 @@
   "title": "Guest Docker workloads, recursive VMs and host isolation",
   "objective": "Give a directly running guest agent ordinary Docker/Compose control for arbitrary project test services and recursive Little Mester VMs where nested virtualization is supported, while the outer VM continues to isolate the host and the existing egress allowlist/no-host-route policy remains enforced.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-10-28T16:22:13.586Z",
+  "updated_at": "2026-10-28T16:55:57.215Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -62,7 +62,8 @@
       "Host Docker/filesystem/socket isolation negative tests",
       "Current egress allow/deny matrix without policy widening",
       "Nested VM boot/test/stop and unsupported-host behavior",
-      "Outer VM teardown confirmation and nested-state/evidence handling"
+      "Outer VM teardown confirmation and nested-state/evidence handling",
+      "VM model API forwarder boundary check coordinated with #42: host Docker version >=28, host publishes only 127.0.0.1:8080/11434, separate LAN host cannot connect, guest can reach only configured forwarded model APIs, and QEMU restrict=on remains set. Do not broaden networking or expose ports on 0.0.0.0."
     ],
     "created": [
       "tests/test_vm_proxy.py: current project build-registry allowlist and npm lookalike-domain refusal"

@@ -87,6 +87,7 @@ function resolveTheme(theme: any): Theme {
 
 interface State {
   mode: "compact" | "expanded"
+  metricsError: string
   history: number[]    // GPU util % values
   vramHistory: number[] // VRAM % values
   tempVals: number[]   // GPU temps (only positive readings)
@@ -107,6 +108,7 @@ interface State {
 function initialState(): State {
   return {
     mode: "expanded",
+    metricsError: "",
     history: [],
     vramHistory: [],
     tempVals: [],
@@ -207,9 +209,16 @@ function ramText(s: State): string {
 
 const SPARK_WIDTH = 16
 
+function metricsBase(): string {
+  return (process.env.METRICS_URL || "http://metrics:19532").replace(/\/+$/, "")
+}
+
 function MetricsView(props: { state: () => State; theme: Theme; onToggle: () => void }) {
   return (
     <box flexDirection="column" gap={0} onMouseUp={props.onToggle}>
+      <Show when={props.state().metricsError}>
+        <text fg="#ea4c73">{props.state().metricsError}</text>
+      </Show>
       <Show when={props.state().mode === "expanded"} fallback={<CompactView state={props.state} theme={props.theme} />}>
         <ExpandedView state={props.state} theme={props.theme} />
       </Show>
@@ -303,7 +312,7 @@ export default Plugin.define({
 
     /* Poll /history (first time) → seeds the data arrays. */
     function seedHistory() {
-      return fetch("http://metrics:19532/history?n=60")
+      return fetch(`${metricsBase()}/history?n=60`)
         .then(r => r.json())
         .then((data: Array<{ gpu_util?: number; vram_pct?: number; gpu_temp?: number }>) => {
           if (isDisposed || !Array.isArray(data) || !data.length) return
@@ -317,15 +326,18 @@ export default Plugin.define({
               .slice(-20),
           }))
         })
-        .catch(() => {})
+      .catch(() => {
+        if (!isDisposed) setState(prev => ({ ...prev, metricsError: "host metrics unavailable" }))
+      })
     }
 
     /* Poll /metrics → push latest data point. */
     function pollMetrics() {
-      fetch("http://metrics:19532/metrics")
+      fetch(`${metricsBase()}/metrics`)
         .then(r => r.json())
         .then((d: MetricsPayload) => {
           if (isDisposed) return
+          setState(prev => ({ ...prev, metricsError: "" }))
           const g = d.gpu?.[0]
           setState(prev => {
             const history = [...prev.history]
@@ -365,7 +377,9 @@ export default Plugin.define({
             }
           })
         })
-        .catch(() => {})
+        .catch(() => {
+          if (!isDisposed) setState(prev => ({ ...prev, metricsError: "host metrics unavailable" }))
+        })
     }
 
     // Start polling (500ms cadence)

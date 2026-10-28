@@ -1,7 +1,7 @@
 # Host Setup — VM Mode (Epic #35)
 
 > **Last updated:** 2026-10-28
-> **Target:** A clean Linux host bootstrapped to run the disposable QEMU/KVM VM that hosts the agent sandbox.  
+> **Target:** Experimental Linux x86_64 host profile for the disposable QEMU VM that hosts the agent sandbox. This is not yet a claim of support for every Unix system.
 > **Epic:** [#35](tickets/ticket-035.json) — VM-based Docker agent environment.
 > **Architectural reference:** [`vm-architecture.md`](vm-architecture.md), [`DECISIONS.md` §C.8](DECISIONS.md#c8-vm-harness-topology-transport-and-isolation-2026-10-26).
 
@@ -37,7 +37,7 @@ sudo apt-get install -y \
   python3
 ```
 
-Host Docker, libvirt, and OVMF are not required. `lab-vm` launches QEMU directly with its default firmware, and cloud-init installs Docker plus the Compose plugin inside the guest.
+Host Docker, libvirt, and OVMF are not required to boot the VM. `lab-vm` launches QEMU directly with its default firmware, and cloud-init installs the guest workload runtime. **Current limitation:** the experimental `./lab-vm models up` path still uses host Docker Compose for optional model API forwarders; removing that host-Docker dependency is part of the portability work, not a host requirement for the agent/VM itself.
 
 ### 1.3 Kernel requirements
 
@@ -57,9 +57,9 @@ sudo usermod -aG kvm $(whoami)
 # Log out and back in for group membership to take effect
 ```
 
-### 1.4 Model servers (host-side)
+### 1.4 Optional model service (host-side)
 
-Ollama and/or llama.cpp may run on the host. They are reachable from inside the VM through narrow `guestfwd` ports — **not** through published agent ports. The model servers do not need to be running when QEMU starts.
+An OpenAI-compatible Ollama or llama.cpp service may run natively on the host and listen on loopback. The target design treats it as an optional, user-configured endpoint, reached through one narrow QEMU `guestfwd` mapping—not a required host Docker service or a LAN-published port. The current experimental management command still starts Compose forwarders and is not yet the portable setup path. No firewall, route, NAT, or host daemon changes are an acceptable prerequisite.
 
 ```bash
 # Example: run ollama on host
@@ -162,17 +162,24 @@ The `check_workspace()` guard runs on the host **before** the workspace is expor
 
 ---
 
-## 4. Isolation guarantees
+## 4. Isolation guarantees and current support limits
 
 | Guarantee | How it's enforced |
 |---|---|
 | **No published host ports** | QEMU uses `restrict=on`; only `guestfwd` and `hostfwd` for loopback SSH are allowed |
 | **Workspace isolation** | Only the single directory passed to `./lab-vm` is exported via `virtiofsd` |
 | **No host filesystem access** | The guest has an isolated writable qcow2 overlay; the selected workspace is its only host filesystem export |
-| **Model API via guestfwd** | Ollama (`:11434`) and llama.cpp (`:8080`) are reachable at `10.0.2.100` from inside the VM |
+| **Optional model API via guestfwd** | A configured local API endpoint is intended to be reachable at one explicit `10.0.2.100:<port>` guest address; current fixed-port prototype is still under test |
 | **Egress proxy** | HTTP(S) outbound goes through `10.0.2.100:3128` (allowlist enforcement — #43) |
 | **Guest authority** | OpenCode runs directly as `mester`; it can use guest Docker/Compose and administer the guest. The outer VM is the host boundary. |
 | **Per-VM SSH keys** | Each VM has its own key pair under `.mester/vm/<name>/` |
+
+The current implementation is tested only as an experimental Linux/QEMU profile. macOS,
+BSD, and other Unix systems need explicit hypervisor, architecture, workspace-sharing,
+networking and lifecycle profiles before support is claimed. Setup may detect prerequisites
+and ask before installing userland packages; it must not require firewall or host-network
+policy changes. See [`vm-architecture.md`](vm-architecture.md) for the use cases and target
+portability contract.
 
 ---
 

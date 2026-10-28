@@ -1,0 +1,43 @@
+# Optional, loopback-only host endpoints for the direct guest VM.
+# The default host-Docker workflow does not start these forwarders or publish
+# either model service. QEMU's existing guestfwd entries reach these ports with
+# restrict=on; the forwarders then connect to the model containers on `internal`.
+services:
+  ollama-vm-api:
+    image: alpine/socat:latest
+    entrypoint: ["socat"]
+    command: ["TCP-LISTEN:11434,fork,reuseaddr", "TCP:ollama:11434"]
+    profiles: [vm-model-api]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:11434:11434"
+    networks: [internal]
+    restart: unless-stopped
+
+  llamacpp-vm-api:
+    image: alpine/socat:latest
+    entrypoint: ["socat"]
+    command: ["TCP-LISTEN:8080,fork,reuseaddr", "TCP:llamacpp:11434"]
+    profiles: [vm-model-api]
+    depends_on:
+      llamacpp:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks: [internal]
+    restart: unless-stopped
+
+  metrics-vm-api:
+    image: alpine/socat:latest
+    entrypoint: ["socat"]
+    command: ["TCP-LISTEN:19532,fork,reuseaddr", "TCP:metrics:19532"]
+    profiles: [vm-model-api]
+    depends_on:
+      metrics:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:19532:19532"
+    networks: [internal]
+    restart: unless-stopped

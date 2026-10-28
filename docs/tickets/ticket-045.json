@@ -8,7 +8,7 @@
   "title": "Model-agnostic harness: local models and cloud providers",
   "objective": "Keep the harness model-agnostic while supporting native provider authentication from the guest where the harness actually runs. OpenCode ChatGPT login must use a currently supported browser-based flow with its callback reaching the real guest OpenCode server; optional secure host escrow/import/export must not replace or block native login. Keep secrets out of the image, workspace, seed and Git.",
   "created_at": "2026-10-26T20:39:18.839Z",
-  "updated_at": "2026-10-28T16:22:13.586Z",
+  "updated_at": "2026-10-28T16:55:49.335Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -91,7 +91,8 @@
       "VM down atomically saves refreshed OAuth state before overlay deletion",
       "seed ISO/image/workspace/git scan confirms no credential material",
       "provider selection imports only requested integrations",
-      "#45 browser auth human gate after #41 provisioning passes: list opencode auth methods/version without starting an unattended login; implement loopback-only callback transport to the actual server namespace, test provider login/call with device flow disabled, then persistence/teardown. Requires owner browser interaction; remain pending until observed."
+      "#45 browser auth human gate after #41 provisioning passes: list opencode auth methods/version without starting an unattended login; implement loopback-only callback transport to the actual server namespace, test provider login/call with device flow disabled, then persistence/teardown. Requires owner browser interaction; remain pending until observed.",
+      "Sequence per parent #35 A21: native VM browser auth and persistence is a required gate before moving actual work to the VM; it follows successful local model connectivity and core guest TUI checks. Existing host-Docker auth remains the rollback and is not proof of VM auth. Do not copy the Docker OpenCode database into the guest or recreate the existing host container. Run the browser callback/cancel/occupied-port/provider-call/restart-persistence handoff only in the VM and keep secrets redacted/private."
     ],
     "created": [],
     "cases": [

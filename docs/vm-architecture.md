@@ -12,10 +12,10 @@ Host (your machine) — ./lab runs here as you, not as a service
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  ./lab                                                                       │
 │   ├─ check_workspace()            path guards run BEFORE anything is shared   │
-│   ├─ qemu-system-x86_64          KVM, per-VM qcow2 overlay, cloud-init seed   │
+│   ├─ VM host adapter              QEMU + supported host acceleration          │
 │   ├─ virtiofsd                   exports ONLY the selected workspace          │
 │   ├─ egress proxy (allowlist)    exposed at 10.0.2.100:3128 via guestfwd      │
-│   └─ ollama / llamacpp           127.0.0.1:11434 / :8080 via guestfwd         │
+│   └─ optional model API          user-configured loopback endpoint via guestfwd│
 │                                                                              │
 │   ┌────────────────────────── disposable VM ───────────────────────────────┐ │
 │   │  systemd                                                                │ │
@@ -24,7 +24,7 @@ Host (your machine) — ./lab runs here as you, not as a service
 │   │    native guest auth + browser callback to the guest agent              │ │
 │   │    /workspace (virtiofs, rw)                                            │ │
 │   │                                                                         │ │
-│   │  guest Docker + Compose (agent has guest-level control)                 │ │
+│   │  optional guest Docker + Compose (project workload capability)          │ │
 │   │    postgres, redis, arbitrary project services                          │ │
 │   │    optional nested Little Mester QEMU/KVM VMs                           │ │
 │   └─────────────────────────────────────────────────────────────────────────┘ │
@@ -41,7 +41,7 @@ no general host route.
 |---|---|---|---|
 | `virtiofsd` → guest `/workspace` | host → VM | Exactly the directory passed to `./lab`, read/write | `$HOME`, `~/.ssh`, `~/.config`, the lab repo without `--unsafe-recurse`, Docker sockets, other checkouts |
 | SSH control | host → VM | `127.0.0.1:<ephemeral>` → guest `:22`, per-VM key, per-VM `known_hosts` | Host keys/credentials inside the VM; VM listening on the host LAN |
-| Model API `guestfwd` | VM → host | ollama `:11434`, llamacpp `:8080` only | General host loopback, host filesystem, host Docker |
+| Optional model API `guestfwd` | VM → one configured host endpoint | One explicitly selected local API port | General host loopback, host filesystem, host Docker |
 | Egress proxy `guestfwd` | VM → internet | HTTP(S) destinations allowed by `.mester-egress` | Unlisted domains, non-HTTP protocols (until added deliberately), raw host routing |
 | Guest runtime | agent in guest → VM | Guest Docker/Compose, guest processes, optional nested VMs | Host Docker daemon, host filesystem outside the selected workspace |
 
@@ -75,7 +75,8 @@ the mount tag `workspace`. `guestfwd` targets use QEMU's per-connection `cmd:` c
 device form (`socat` to host loopback); a bare `-10.0.2.2:PORT` target is invalid QEMU syntax.
 The egress target is a loopback-only launcher proxy that rejects private/reserved addresses
 and applies `.mester-egress`; it is not a general route to host loopback.
-3. cloud-init provisions the guest user, direct harness runtime, Docker/Compose, native
+3. cloud-init provisions the guest user, direct harness runtime, optional guest workload
+   runtime (Docker/Compose), native
    auth prerequisites, proxy settings and the workspace mount.
 4. `./lab-vm agent [name]` attaches the selected harness directly in the guest (not in a
    container) to the invoking terminal.
@@ -95,17 +96,90 @@ and applies `.mester-egress`; it is not a general route to host loopback.
   as weaker isolation.
 - Alternative runtimes. They are evaluated in #46, not smuggled in here.
 
+## 6. Use cases, support contract, and portability
+
+### Use cases
+
+| Use case | Required capability | Must not depend on |
+|---|---|---|
+| Run an agent with broad project access inside a host-isolated guest | Supported VM backend, one guarded workspace share, SSH/control, native guest agent | Host Docker, a host agent container, host credentials or general host routing |
+| Test a project with services such as PostgreSQL/Redis | Optional workload runtime inside the guest (Docker/Compose is the first supported implementation) | The host's Docker daemon/socket or host-side Compose |
+| Use a local model | Optional configured OpenAI-compatible host endpoint, reached through one explicit guestfwd mapping | A particular host Docker installation, published LAN port, or auto-managed host model container |
+| Use hosted model APIs / approved package registries | Explicit provider credentials in the guest and mediated, configured egress | Unrestricted guest networking or implicit firewall edits |
+| Work without a model service | Direct agent/runtime and project shell tools | A model server being installed or started by `lab-vm` |
+
+Guest Docker/Compose is a **workload capability**, not the agent's wrapper or security
+boundary. It may be installed in the guest for the project-testing use case, but the core
+VM/agent launch path must not require the Docker CLI on the host. Host Docker may be one
+user-chosen way to run a local model server, but it is not part of the VM contract.
+
+### Host portability contract
+
+“Unix” is not one virtualization ABI. A usable profile needs working implementations for
+all of: hypervisor/acceleration, safe single-directory sharing, loopback-only control and
+guestfwd networking, guest image architecture, and setup/package detection. The project
+must therefore advertise explicit **tested host profiles**, not claim every Unix host works
+because QEMU happens to build there. Unknown hosts must fail with missing capabilities and
+supported alternatives; they must not silently fall back to weaker isolation or ask users
+to change firewall/routing policy.
+
+The current implementation is an **experimental Linux x86_64 profile**: QEMU, KVM when
+available, a Linux guest, `virtiofsd`, cloud-init, and QEMU user networking. Linux distro
+variation is handled by setup detection, but the VM acceptance gates remain incomplete.
+macOS (Intel/Apple Silicon) and BSD are not currently supported claims: each needs its own
+guest architecture/image, acceleration, workspace-sharing, and lifecycle acceptance tests.
+TCG, where available, is a performance choice and is not evidence that the security or
+workspace contract works on an otherwise unsupported host.
+
+The intended setup flow is host-adapter based:
+
+1. Detect OS, architecture, existing VM tools and available accelerators.
+2. Explain the selected support profile and required userland packages; ask before any host
+   package installation. Never install a daemon/service or alter firewall, NAT, routing,
+   sysctl, or host Docker configuration as an implicit setup step.
+3. Create a local config for the selected workspace, VM profile, optional guest workload
+   runtime, and optional model endpoint. Defaults should work without a model endpoint.
+4. Validate every host crossing before boot: exactly one selected workspace, loopback-only
+   SSH, `restrict=on`, allowlisted egress, and—only when configured—one loopback model API
+   port. Refuse startup if the host platform cannot enforce these invariants.
+
+The configuration contract should separate independent choices rather than derive host
+behavior from the development Compose stack:
+
+```yaml
+host_profile: auto                 # resolves to an installed, tested adapter
+workload_runtime: docker-compose   # guest-only; also supports none for shell-only use
+model:
+  provider: none                   # none | local-openai-compatible | configured-remote
+  local_port: 8080                 # optional host-loopback port, forwarded by QEMU
+metrics: off                       # optional; must not be required to launch the agent
+```
+
+This is a design shape, not a committed config schema. The VM's guest address/port is a
+stable logical endpoint; the host adapter maps it to the configured `127.0.0.1` service
+using QEMU's supported `guestfwd` command target. It does not create a host listener,
+publish a Docker port, or expose a host network. Remote providers are a separate explicit
+egress mode: their domain must be approved by the egress policy and credentials remain in
+the guest auth store. Metrics are optional and need a separately specified data source; the
+agent must still start if metrics are disabled/unavailable.
+
+Initial portability work should preserve the Linux profile while extracting interfaces for
+VM lifecycle, workspace sharing, network forwarding, and model-provider configuration.
+Additional Unix profiles are enabled only after CI/manual host evidence for each capability;
+they do not get host-specific firewall workarounds.
+
 ## 6. Open items to prove in implementation
 
-- `restrict=on` must still allow the explicit `guestfwd` entries and SSH `hostfwd`; if it
-  does not, the fallback is a host-side firewall + proxy with the same crossings, never a
-  general host route.
+- `restrict=on` must still allow explicit `guestfwd` entries and SSH `hostfwd`. If a
+  supported host cannot provide them without firewall/routing changes, that profile is
+  unsupported; do not add a host firewall fallback.
 - virtiofs mount/permission behaviour for the directly running guest agent and its
   guest-local workloads (#41–#43).
 - Nested KVM availability and recursive VM lifecycle are unverified; host and guest CPU,
   kernel and QEMU configuration must prove the capability before it is advertised.
 - Guest Docker/Compose behavior and the direct-agent execution model are implementation
-  work; Docker is a guest workload tool, not the agent's security wrapper (#41–#43).
+  work; Docker is a guest workload tool, not the agent's security wrapper (#41–#43). Host
+  Docker is not a VM prerequisite.
 - DNS and non-HTTP egress: only the proxy path is allowed initially; anything else is a
   documented follow-up, not an accidental hole (#43).
 - Remote host mode (#47) must repeat the same path guards, labels, teardown and egress
