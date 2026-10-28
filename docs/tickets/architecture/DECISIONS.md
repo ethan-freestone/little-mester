@@ -552,11 +552,13 @@ This is a one-line fix in the drive args string in `lib/vm/runner.sh`.
 
 ---
 
-**Decision:** The agent runs in a Docker container inside a local, `./lab`-managed
-QEMU/KVM VM, not on the host. Rootless Docker runs under a dedicated VM user. The selected
-workspace is shared with virtiofs; model servers stay on the host and are reached only
-through explicit `guestfwd` ports. Full rationale: `docs/DECISIONS.md` §C.8. Reviewer
-diagram: `docs/vm-architecture.md`.
+**Decision:** Little Mester runs directly in a local,
+`./lab`-managed QEMU/KVM VM guest, not in a Docker container. The outer VM is the host
+isolation boundary. The harness has broad guest-level authority, including guest
+Docker/Compose and, where nested virtualization is available, nested QEMU/KVM. The selected
+workspace is shared with virtiofs; model servers stay on the host behind explicit
+`guestfwd` ports. Full rationale: `docs/DECISIONS.md` §C.8. Reviewer diagram:
+`docs/vm-architecture.md`.
 
 **Invariants a future change must preserve:**
 
@@ -569,8 +571,9 @@ diagram: `docs/vm-architecture.md`.
    LAN. The harness adds only the loopback SSH control forward; model APIs listen on host
    loopback and cross only through their `guestfwd` entries. A change that adds a published
    port is a security regression, not a feature.
-4. **Rootless by default.** The in-VM daemon is rootless under a dedicated user. Rootful
-   Docker is an explicit, documented escape hatch; the agent never gets the host daemon.
+4. **Guest authority is intentional.** The agent may administer the guest and its Docker
+   daemon; rootful guest Docker is acceptable because the outer VM is the boundary. The
+   agent never gets the host daemon. Rootless guest Docker is not a security requirement.
 5. **Credentials stay out.** Host keys, cloud keys, git credentials and the owner's
    `~/.ssh` are never copied into the VM, the image, or a ticket. Runtime secrets come from
    a gitignored source.
@@ -578,12 +581,19 @@ diagram: `docs/vm-architecture.md`.
    the allowlisting proxy, and `.mester-egress` `allowed_domains` is enforced there rather
    than parsed and ignored. A blank list keeps the documented allow-all behaviour at the
    domain level; protocol coverage is a separate, explicit decision.
-7. **Disposable VM.** Stopping a session removes workspace containers, networks, volumes,
-   the overlay, seed and sockets. The cached base image and harness state are the only
-   survivors.
+7. **Lifecycle is explicit and recursion-safe.** Cleanup must not silently destroy a live
+   agent/test loop, nested VM state or evidence. Persistence/reset semantics require
+   explicit lifecycle behavior and acceptance tests.
 8. **Remote mode is weaker and not default.** A remote Linux host target (#47) shares that
    host's daemon; `SECURITY.md` must say so and local QEMU/KVM remains the default.
 9. **Every boundary change is a decision.** Changing any crossing above needs an entry in
    `docs/DECISIONS.md`/this log and a ticket with acceptance criteria and test evidence.
    Hand-editing a boundary into `lab`, `compose.yaml` or the agent image is a validation
    failure.
+
+10. **No agent container as outer sandbox.** The selected harness runs directly in the VM;
+    Docker/Compose are guest workload capabilities, not a required container boundary around
+    the agent.
+11. **Nested virtualization is not presumed.** Recursive VM support is not advertised until
+    host VMX/SVM nesting, guest virtualization features and a nested QEMU boot/lifecycle have
+    been verified. Unsupported hosts must fail clearly without weakening the outer boundary.

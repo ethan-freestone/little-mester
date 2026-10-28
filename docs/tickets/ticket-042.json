@@ -5,49 +5,44 @@
   "area": "infra",
   "type": "feature",
   "status": "draft",
-  "title": "Agent image: real Docker CLI with controlled daemon access",
-  "objective": "Give the agent container a working Docker CLI and compose plugin so it can run a workspace's compose dependencies, while keeping the existing sandbox hardening and making daemon access opt-in and visible.",
+  "title": "Direct guest harness runtime and guest workload control",
+  "objective": "Install and run the model-agnostic Little Mester harness directly inside the outer VM guest, with native guest auth and broad guest-level control. Docker/Compose are available to the agent for arbitrary project workloads; no Docker container wraps the agent. Preserve the outer VM host-isolation boundary and existing restricted egress/secret rules.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-10-28T12:51:12.838Z",
+  "updated_at": "2026-10-28T16:22:13.585Z",
   "acceptance_criteria": [
     {
       "id": "A1",
-      "text": "agent/Dockerfile installs the Docker CLI and compose v2 plugin without breaking the existing image; docker --version and docker compose version pass in the built image.",
+      "text": "A selected harness (initially OpenCode) is installed and launched as a native guest process in the VM, not as a Docker container; it opens the TUI in the invoking session and operates on the selected workspace.",
       "status": "pending"
     },
     {
       "id": "A2",
-      "text": "The daemon endpoint is supplied by ./lab at run time (socket mount or DOCKER_HOST), never baked into the image. Without it, docker commands fail with a clear, documented error and no retry loop.",
+      "text": "The guest agent can use Docker CLI and Compose against the guest daemon to start, inspect, stop and remove a representative project service (including PostgreSQL) and run tests in a repeated feedback loop.",
       "status": "pending"
     },
     {
       "id": "A3",
-      "text": "Existing agent protections are preserved or explicitly re-decided with evidence: non-root user, cap_drop ALL, no-new-privileges, read-only rootfs, tmpfs homes, and memory/PID limits.",
+      "text": "Guest authority is documented accurately: the agent can administer its guest and guest Docker; this is not treated as host isolation. No host Docker socket, host filesystem outside the selected workspace, host credentials, or LAN access is exposed.",
       "status": "pending"
     },
     {
       "id": "A4",
-      "text": "With access enabled, docker compose -f <workspace>/compose.yaml up -d and down work from inside the agent session against the VM daemon.",
+      "text": "Guest Docker/Compose supports ordinary project workflows without a restrictive generated wrapper silently rewriting compose files or blocking normal guest-local service ports; guest workloads remain inside the outer VM boundary.",
       "status": "pending"
     },
     {
       "id": "A5",
-      "text": "The #40 daemon model is implemented: rootless Docker under the dedicated mester user, with socket ownership, subuid/subgid and group handling documented and reproducible from a clean VM build. Rootful mode stays an explicit, documented escape hatch only.",
+      "text": "Nested VM support is explicitly tested: report host KVM nested VMX/SVM capability, guest CPU virtualization flags and /dev/kvm availability, then boot and stop a nested test VM. Unsupported hosts report a clear limitation; no nested support is claimed without a live pass.",
       "status": "pending"
     },
     {
       "id": "A6",
-      "text": "Existing agent checks still pass: verify-lab, tui-jsx, exit-confirm, metrics sidecar connectivity and model server connectivity.",
+      "text": "Existing harness checks that apply to direct guest execution (verify-lab, TUI exit-confirm, metrics/model connectivity where configured) pass, and the same runner interface can select another supported harness without changing the VM trust boundary.",
       "status": "pending"
     },
     {
       "id": "A7",
-      "text": "SECURITY.md and agent/README state exactly what Docker access the agent has when enabled and what it cannot reach.",
-      "status": "pending"
-    },
-    {
-      "id": "A8",
-      "text": "OpenCode has an explicit reproducible version and documented image-only upgrade path: normal launches reuse the installed agent image, updating OpenCode does not require downloading/reprovisioning the VM, and Docker build-cache behavior cannot silently retain an older requested version. Read-only container self-update is not relied on; replacement is coordinated with #45 credential persistence/export and #50 regression checks.",
+      "text": "OpenCode version selection/update is reproducible and updates guest software without destroying the VM overlay or workspace; credential state is preserved or exported/imported through the #45 flow.",
       "status": "pending"
     }
   ],
@@ -60,7 +55,13 @@
       "plugin, metrics and model connectivity regression",
       "docs review",
       "After #41 clean provisioning/image build passes, verify first-start Docker proxy/CIDR settings, rootless security option and reboot persistence; then build/test agent Docker CLI in disposable workspace before requesting owner session migration.",
-      "OpenCode update procedure: select version, rebuild/pull agent image only (not VM/base), prove installed version changes despite Docker cache; normal relaunch does not rebuild/re-download CLI; credential export/import or persistent data survives replacement (#45)."
+      "OpenCode update procedure: select version, rebuild/pull agent image only (not VM/base), prove installed version changes despite Docker cache; normal relaunch does not rebuild/re-download CLI; credential export/import or persistent data survives replacement (#45).",
+      "Build and launch OpenCode directly in the VM guest with an interactive TUI attached",
+      "Compose PostgreSQL service start/test/stop/restart loop from the guest agent",
+      "Verify no agent container is started",
+      "Nested KVM host/guest capability and nested VM boot/stop test on supported host",
+      "Direct guest native auth callback and persistence coordinated with #45",
+      "Agent adapter selection smoke tests"
     ],
     "created": [],
     "cases": [

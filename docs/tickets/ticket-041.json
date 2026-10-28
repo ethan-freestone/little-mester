@@ -6,15 +6,15 @@
   "type": "feature",
   "status": "active",
   "title": "VM provisioning and ./lab VM lifecycle",
-  "objective": "Make the VM reproducible and controllable from the host: ./lab can provision or connect to the VM per #40, install Docker, transport the workspace, and run VM lifecycle commands idempotently. The host stops running the agent container itself.",
+  "objective": "Provision and control a local QEMU/KVM VM that is the host-isolation boundary for Little Mester. Run the selected harness directly in the guest (not in a guest Docker container), provide guest Docker/Compose and investigate nested QEMU/KVM, transport only the explicitly selected workspace, and preserve host isolation, restricted egress and secret boundaries.",
   "created_at": "2026-10-26T20:39:18.836Z",
-  "updated_at": "2026-10-28T16:15:57.002Z",
+  "updated_at": "2026-10-28T16:25:03.451Z",
   "acceptance_criteria": [
     {
       "id": "A1",
-      "text": "One documented command/runbook takes a clean host to a working VM (Docker plus compose plugin, repo checkout, agent image) with a CPU-only path that works without a GPU.",
+      "text": "A documented host command provisions the outer VM, mounts the selected workspace, installs the direct-in-guest Little Mester harness and its guest Docker/Compose runtime, and supports a CPU-only host without a GPU.",
       "status": "in-progress",
-      "evidence": "Sixth 2026-10-28 non-clean CachyOS retry confirms enabled rootless user service still fails: RootlessKit reports no subuid ranges for mester; image build not reached. User-manager/linger/socket setup is valid. New subid helper validates/repairs exact mappings on each start and fails on overlap; KVM retry pending."
+      "evidence": "2026-10-28 CachyOS non-clean run passed VM boot, workspace virtiofs mount, rootless Docker/Compose checks and the previous agent-image build (OpenCode v2.2.0). That container image build is provisioning evidence only and is not the target runtime. Direct guest harness installation/launch remains pending under #42; clean-host reproducibility also remains pending."
     },
     {
       "id": "A2",
@@ -29,7 +29,7 @@
     },
     {
       "id": "A4",
-      "text": "The VM publishes no host ports by default; an automated check confirms the agent and workspace services are reachable only on the VM's internal Docker networks.",
+      "text": "The outer VM exposes no guest service to the host LAN; only loopback-bound SSH control and explicitly approved model/egress channels cross the host boundary. Guest-local Compose ports remain usable by the guest agent.",
       "status": "pending"
     },
     {
@@ -40,17 +40,17 @@
     },
     {
       "id": "A6",
-      "text": "./lab stop removes agent containers plus workspace containers, networks and volumes and VM-side state; git status --short in the real checkout is empty afterwards.",
+      "text": "Outer VM stop/down behavior is explicit and tested: guest workloads and nested VM activity are handled without silently destroying an active test loop or evidence; host workspace and host state are not removed.",
       "status": "pending"
     },
     {
       "id": "A7",
-      "text": "./verify-lab.sh passes from a clean clone inside the VM, and the run is recorded on this ticket.",
+      "text": "The selected harness runs directly in the VM guest against the selected workspace, and the relevant verify-lab checks pass without launching an agent container.",
       "status": "pending"
     },
     {
       "id": "A8",
-      "text": "The host no longer runs the agent container; any host-side Docker use is limited to a documented service (for example model servers) if #40 chooses that option. README and docs/01-host-setup.md describe the VM flow and remove dev-container-only instructions.",
+      "text": "The host does not run the agent. The agent runs directly in the VM guest; any host Docker use is limited to explicitly documented services such as model servers. README and setup docs describe this topology.",
       "status": "in-progress"
     },
     {
@@ -60,7 +60,7 @@
     },
     {
       "id": "A10",
-      "text": "Full lifecycle test on real KVM host passes end-to-end: base → up → status → ssh → agent test → stop → down",
+      "text": "Full lifecycle passes on a real KVM host: base → up → status → ssh → direct guest agent → guest Docker/Compose feedback loop → stop → down, with native auth and nested VM gates tracked separately until proven.",
       "status": "pending"
     },
     {
@@ -80,7 +80,7 @@
     },
     {
       "id": "A14",
-      "text": "A10: Full lifecycle test on real KVM host passes end-to-end: base → up → status → ssh → agent test → stop → down. Procedure: 1) Verify host KVM: grep -c svm /proc/cpuinfo > 0; 2) Verify /dev/kvm accessible; 3) ./lab-vm base (downloads image, verifies hash); 4) ./lab-vm up (creates overlay, seed ISO, starts virtiofsd + QEMU); 5) ./lab-vm status (confirms PID, port); 6) ./lab-vm ssh (opens shell, verify /workspace virtiofs mount, docker info); 7) cd /workspace && ./lab --unsafe-recurse; 8) git status --short clean; 9) ./lab-vm stop (graceful shutdown); 10) ./lab-vm down (teardown)",
+      "text": "A10 procedure: verify host /dev/kvm and nested VMX/SVM capability; run ./lab-vm base and ./lab-vm up; verify status and SSH; in the guest verify /workspace virtiofs, direct harness availability and Docker/Compose; launch harness directly (no agent container), run a disposable Compose service/test loop, then verify safe stop/down and no host workspace damage. Do not use --clean or destroy the existing overlay for this verification.",
       "status": "pending"
     },
     {
@@ -100,15 +100,15 @@
     },
     {
       "id": "A18",
-      "text": "QEMU startup uses a valid end-to-end device configuration: guestfwd destinations use QEMU character-device syntax and host loopback targets, virtiofsd is paired with vhost-user-fs-pci plus shareable guest memory, the `workspace` tag is mounted at /workspace, and an immediate QEMU exit fails fast with the real exit status and qemu.log instead of waiting for the SSH timeout.",
-      "status": "in-progress",
-      "evidence": "2026-10-28 owner CachyOS log at 7b54d26 proves QEMU KVM boot and SSH after corrected guestfwd/vhost-user-fs/shareable-memory argv. Provisioning then failed on nf_tables; generated mount code has regression coverage, but findmnt /workspace and full device/lifecycle proof remain pending."
+      "text": "QEMU startup uses a valid end-to-end device configuration: guestfwd destinations use QEMU character-device syntax and host loopback targets, virtiofsd is paired with vhost-user-fs-pci plus shareable memory, the workspace tag is mounted at /workspace, and immediate QEMU exit reports the real status/log.",
+      "status": "passing",
+      "evidence": "Owner's 2026-10-28 CachyOS run on the existing overlay booted with QEMU `-enable-kvm -cpu host`, reached SSH/cloud-init, mounted /workspace as virtiofs, and completed the image build. QEMU argv regression tests cover guestfwd and vhost-user-fs/shareable memory. Full direct-agent lifecycle remains separately pending."
     },
     {
       "id": "A19",
-      "text": "Clean pinned-Ubuntu provisioning loads guest nf_tables before unprivileged Docker setup and persists it across reboot; Docker proxy/non-overlapping CIDR config exists before first start. No --skip-iptables, disabled firewall or rootful fallback. Failed cloud-init saves provision.log before cleanup and propagates status. Procedure: run the recorded clean CachyOS retry, inspect findmnt, systemctl --user status docker and rootless Docker info; retain failure logs and record outcome.",
+      "text": "Guest Docker/Compose is usable by the directly running agent; rootless or rootful is an implementation choice, not a security boundary. Host proxy policy and restrict=on remain enforced.",
       "status": "in-progress",
-      "evidence": "Sixth retry proves Linger=yes, user@1000 active/Ready, Docker enabled; rootlesskit fails `no subuid ranges found for user 1000 (mester)`. Diagnostics did not print current /etc/subuid,/etc/subgid, so underlying absence/reason unconfirmed. Current change adds exact mapping validation/repair and file/getsubids diagnostics before cleanup. Verify no overlap and rootless API on non-clean retry; persistence remains pending."
+      "evidence": "Owner verified in guest: Docker service active, docker info includes name=rootless, Compose v5.6.1, and the guest agent image exists. This proves guest Docker setup, not direct-agent Compose use or broad project compatibility; those are next under #42/#43."
     },
     {
       "id": "A20",
@@ -118,9 +118,9 @@
     },
     {
       "id": "A21",
-      "text": "Cloud-init done-with-errors remains blocked until diagnosed: launcher prints original status/SSH exit code, requests long status and saves JSON status plus cloud-init schema --system output before cleanup, even when diagnostics themselves fail. No generic exit-2 bypass. Real guest schema warning is identified and corrected before clean up/image build can pass.",
+      "text": "Cloud-init provisioning completes without schema/recoverable errors and the guest is ready for the selected direct-in-guest harness; failures preserve status and diagnostics.",
       "status": "passing",
-      "evidence": "2026-10-28 fourth clean CachyOS run proves schema correction: cloud-init status done, extended_status done, errors=[], recoverable_errors={}, then readiness checks passed and agent image build began. Earlier diagnostic run identified groups.0.mester: [] defect and retained status2. No warning bypass used; original-status/diagnostic and generated-shape regressions pass. Image build is independently blocked on registry auth networking."
+      "evidence": "2026-10-28 owner CachyOS successful run: cloud-init status done, extended_status done, errors=[], recoverable_errors={}; workspace and guest Docker checks passed and image build completed. Earlier schema failure was diagnosed and fixed; detailed historical evidence remains in tests.cases."
     },
     {
       "id": "A22",
@@ -130,9 +130,8 @@
     },
     {
       "id": "A23",
-      "text": "Non-interactive guest agent-image builds explicitly load client/auth-helper proxy environment, retain daemon proxy configuration and forward all six upper/lower-case build proxy arguments without baking proxy ENV into the image. Missing profile fails closed; build.log retains output and original pipeline status. Live Docker Hub base pull/auth, RUN package installation and completed agent image must succeed under restrict=on and the approved manifest.",
-      "status": "in-progress",
-      "evidence": "tests/vm.bats executes actual remote build command under env -i with isolated guest profile/mocked Docker: client env, six args, context exclusions, status37 through tee, missing-profile refusal. Real Docker Hub/image retry pending."
+      "text": "Direct guest harness setup and any package install retain restrict=on and the approved egress policy; runtime does not require building or launching an agent container image.",
+      "status": "pending"
     }
   ],
   "tests": {
@@ -172,7 +171,9 @@
       "On CachyOS, retry non-clean after diagnostics implementation and review network-diagnostics.log to establish whether the nested rootless network can reach guestfwd 10.0.2.100:3128 before selecting a relay or other network fix; do not call image/lifecycle passed until a full build succeeds.",
       "Next non-clean CachyOS retry after current patch: preserve overlay and do not use --clean/stop/down. Run `./lab-vm up --debug --unsafe-recurse --auto-accept`; on build failure inspect automatically emitted network-diagnostics.log. Verify user Docker drop-in contains proxy settings plus DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS=--cidr=10.0.3.0/24 and RootlessKit argv reflects that CIDR. Review BuildKit RUN probe route, proxy_tcp_errno, proxy_http_status or traceback. This should validate both existing-VM repair and the same network namespace as failing apt-get. Preserve restrict=on and current allowlist. Do not implement a relay or claim lifecycle/image success until probe/build results reviewed.",
       "Current next build blocker is OpenCode npm install: after the automatic proxy/CIDR repair, Debian apt and pip steps succeeded, but `npm install -g @opencode/cli` failed in postinstall at Dockerfile step 4/11, before opencode --version and image completion. Before another full provisioning attempt, inspect/retain enough npm postinstall diagnostics to identify why the platform binary package was not installed (registry fetch, optional dependency resolution, unsupported platform or package script). Do not change egress policy or claim image/VM running; preserve overlay and use non-clean retry after the targeted fix.",
-      "After the npm debug-tail change is committed/shared, retry `./lab-vm up --debug --unsafe-recurse --auto-accept` WITHOUT --clean. It should reuse current overlay and emit up to 160 sanitized lines from npm's latest debug log if @opencode/cli postinstall fails; record the first meaningful package-resolution/postinstall error. Do not recreate the host agent container, change allowlists, or treat QEMU/SSH/apt success as a passing VM lifecycle."
+      "After the npm debug-tail change is committed/shared, retry `./lab-vm up --debug --unsafe-recurse --auto-accept` WITHOUT --clean. It should reuse current overlay and emit up to 160 sanitized lines from npm's latest debug log if @opencode/cli postinstall fails; record the first meaningful package-resolution/postinstall error. Do not recreate the host agent container, change allowlists, or treat QEMU/SSH/apt success as a passing VM lifecycle.",
+      "CURRENT NEXT GATE (supersedes earlier historical retry procedures): do not run --clean, stop or down on the currently working VM/overlay. Implement #42 direct-in-guest harness installation and interactive launch; the agent must not run as a Docker container. Then from that guest process run a disposable PostgreSQL Compose start → test → stop/restart loop. Keep #45 native browser auth and #43 host-boundary/egress tests as subsequent gates; nested virtualization requires its own #43 host/guest probe and nested boot test. Before any owner action, preserve overlay and current Docker-host credentials/session; no auth export is needed unless recreating that existing host container.",
+      "Before claiming recursive VM support, collect host KVM nested VMX/SVM setting, guest CPU virtualization flags, guest /dev/kvm access and a nested QEMU VM boot/stop result; report unsupported cleanly if absent."
     ],
     "created": [
       "self-tests: workspace guard rejection tests",
@@ -280,7 +281,8 @@
       "2026-10-28 next CachyOS retry with postinstall source diagnostics: cloud-init/rootless/proxy all pass; BuildKit proxy probe succeeds TCP errno 0 / HTTP 200. All four Linux x64 optional package directories exist with `bin/opencode` and package.json, so neither egress nor missing downloads explain the failure. OpenCode's postinstall source shows it tries `require.resolve(<package>/package.json)`, copies the binary, then silently validates it by spawning `opencode --version` with stdio ignored; on any error it falls back to a temporary npm install and repeats. The generic final message therefore hides the cause (likely package resolution or binary execution); no specific cause is proven yet. QEMU was stopped by failure cleanup; overlay preserved. Follow-up local diagnostic now checks package.json resolution and executes each installed variant's `--version`, reporting spawn status/signal/error and output plus AVX2. No host rerun until this diagnostic patch is committed/shared; preserve policy and do not clean.",
       "2026-10-28 CachyOS retry with commit dc5e896 provides the decisive cause: guest Node v20.19.2 reports Linux x64, glibc 2.41, `cpu_avx2=false`; OpenCode's baseline and regular Bun binaries both exit 134 with `this CPU is missing SSE4.2 support, which Bun requires. If this is a VM, enable host CPU passthrough (e.g. -cpu host for QEMU/KVM).` Both musl variants are not runnable due to ENOENT (expected for glibc host). Package resolution succeeds and all four tarballs/files exist. Root cause is QEMU's default KVM guest CPU model not exposing SSE4.2, not npm, registry or proxy. Targeted fix adds `-cpu host` for KVM (pass host features including SSE4.2) and Westmere for TCG (SSE4.2 without AVX2 to select baseline); adds argv tests. This preserves existing overlay, `restrict=on`, proxy, and allowlist. Local test/syntax validation pending; host verification must use existing overlay without --clean and only claim image success if opencode --version and build complete.",
       "2026-10-28 owner CachyOS retry after QEMU CPU model fix `2d390d1`: existing overlay reused; QEMU argv includes `-enable-kvm -cpu host`; SSH/cloud-init/rootless Docker reached image build. The guest now reports `cpu_avx2=true`; OpenCode baseline and x64 binaries both execute `opencode v2.2.0`. npm postinstall succeeds, Dockerfile continues through all remaining COPY/user setup steps, exports `docker.io/library/little-mester-agent:latest`, and `./lab-vm up` reports `VM 'default' is up and running`. This is the first complete agent image build and `up` gate under current `restrict=on`/proxy policy. VM is currently running. This is not yet the full status/ssh/agent-workspace/stop/down lifecycle acceptance; keep host-Docker mode until those later gates pass.",
-      "2026-10-28 owner post-build verification: `./lab-vm status` reports VM running (QEMU PID 268539, SSH 37967), and `./lab-vm ssh` opens an Ubuntu guest shell. Inside: `findmnt /workspace` reports `workspace virtiofs rw,relatime`; `systemctl --user is-active docker` = active; `docker info --format '{{json .SecurityOptions}}'` includes `name=rootless`; `docker compose version` = v5.6.1; `docker image inspect little-mester-agent` returns sha256:98a47866c08e1bd3057f48a6d9f859eb2f19980e2b1769aae22613f99fc4ccbd. `lab-vm status` says Docker: no containers running. This is expected: `lab-vm up` provisions the VM and builds the image, it does not launch an OpenCode container/TUI. Full agent execution is still gated on #42/#43 and the agreed integration steps; do not blindly run the existing host/GPU compose stack inside this VM or teardown the live VM."
+      "2026-10-28 owner post-build verification: `./lab-vm status` reports VM running (QEMU PID 268539, SSH 37967), and `./lab-vm ssh` opens an Ubuntu guest shell. Inside: `findmnt /workspace` reports `workspace virtiofs rw,relatime`; `systemctl --user is-active docker` = active; `docker info --format '{{json .SecurityOptions}}'` includes `name=rootless`; `docker compose version` = v5.6.1; `docker image inspect little-mester-agent` returns sha256:98a47866c08e1bd3057f48a6d9f859eb2f19980e2b1769aae22613f99fc4ccbd. `lab-vm status` says Docker: no containers running. This is expected: `lab-vm up` provisions the VM and builds the image, it does not launch an OpenCode container/TUI. Full agent execution is still gated on #42/#43 and the agreed integration steps; do not blindly run the existing host/GPU compose stack inside this VM or teardown the live VM.",
+      "Architecture correction 2026-10-28: ticket #41's existing image-build and guest rootless Docker checks prove provisioning components only; they do not establish the target direct-in-guest harness model. Do not mark agent execution or lifecycle complete until the harness runs directly in the guest and guest Docker/Compose and nested virtualization gates are appropriately tested."
     ]
   },
   "priority": "major",

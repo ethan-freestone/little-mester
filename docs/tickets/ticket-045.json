@@ -6,9 +6,9 @@
   "type": "feature",
   "status": "draft",
   "title": "Model-agnostic harness: local models and cloud providers",
-  "objective": "Keep 'point me at a directory' working with no subscription (local models via opencode) while allowing paid providers (Kimi, Claude, OpenAI) when available, including opt-in automatic credential handoff into disposable VMs, with secrets kept out of the repo, workspace, seed and images.",
+  "objective": "Keep the harness model-agnostic while supporting native provider authentication from the guest where the harness actually runs. OpenCode ChatGPT login must use a currently supported browser-based flow with its callback reaching the real guest OpenCode server; optional secure host escrow/import/export must not replace or block native login. Keep secrets out of the image, workspace, seed and Git.",
   "created_at": "2026-10-26T20:39:18.839Z",
-  "updated_at": "2026-10-28T11:43:02.121Z",
+  "updated_at": "2026-10-28T16:22:13.586Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -95,7 +95,8 @@
     ],
     "created": [],
     "cases": [
-      "2026-10-28 owner requirement: Codex device code may be removed; browser/non-device-code auth is a release gate, not an optional future fallback. docs/chatgpt-auth.md previously required headless and advised cancelling browser login; that guidance must be superseded. Automatic credential escrow/import/persistence is still NOT implemented."
+      "2026-10-28 owner requirement: Codex device code may be removed; browser/non-device-code auth is a release gate, not an optional future fallback. docs/chatgpt-auth.md previously required headless and advised cancelling browser login; that guidance must be superseded. Automatic credential escrow/import/persistence is still NOT implemented.",
+      "Architecture clarification 2026-10-28: native OpenAI/OpenCode browser sign-in is required in the guest itself; host credential escrow/import is optional convenience and must not turn the guest into a containerized agent or substitute legacy device-code/API-key auth for the required browser flow."
     ]
   },
   "priority": "major",

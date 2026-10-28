@@ -292,28 +292,11 @@ git show :3:docs/tickets/_audit.json > /tmp/theirs-audit.json
 evidence and must never lose a branch's writes silently. This keeps a merge auditable
 instead of producing a plausible-looking but incomplete history.
 
-### C.6 VM/Docker test environment (2026-10-26)
-> **Refined 2026-10-26 by C.8.** C.6 records the original VM-vs-remote-daemon call. C.8
-> now fixes the concrete topology, transport, daemon and model placement. Where the two
-> differ, C.8 wins: the repo is *not* checked out inside the VM by default, the workspace
-> is shared with virtiofs, and the agent runs in a container inside the VM rather than
-> running opencode directly on the VM.
+### C.6 VM test environment
 
-**Decision:** The disposable test environment is a **full Linux VM** with Docker, the
-repo checkout, and opencode installed inside it. Docker-in-Docker and a shared remote
-daemon were rejected: DinD needs privileged mode, and a remote daemon gives weaker
-isolation because its containers, networks, and volumes are shared with other work.
-
-- The **repo checkout is never the test target**. Tests run in a disposable workspace
-  (`workspaces/test-<id>` or a fresh clone) so `--unsafe-recurse`, compose, and
-  destructive lab cases cannot touch the developer's working tree.
-- Fresh provisioning is one documented runbook: install Docker (and the NVIDIA toolkit
-  when GPU-enabled), clone the repo, build the agent image, then run `./verify-lab.sh`.
-  A CPU-only host is supported; GPU tooling is optional.
-- Teardown removes the workspace's containers, networks, and volumes, then deletes the
-  disposable workspace. `git status --short` in the real checkout must be empty.
-- The VM supplies the Docker daemon that this development container lacks. Provisioning,
-  command-matrix, negative-case, and teardown evidence belongs on ticket #35.
+The current VM trust boundary and operating model are defined in [C.8](#c8-vm-harness-topology-transport-and-isolation).
+Ticket-specific provisioning, test, and teardown procedures belong on #41–#45, not in
+this decision log.
 
 ### C.7 Merge scope for `feat/ticket-context` (2026-10-26)
 **Decision:** Merge the **whole `feat/ticket-context` branch** into `main` rather than
@@ -506,23 +489,23 @@ nothing. Do not patch generated permissions into blanket allow rules.
 
 ---
 
-### C.8 VM harness topology, transport and isolation (2026-10-26)
-**Decision:** Little Mester runs the agent in a Docker container inside a **local,
-`./lab`-managed QEMU/KVM VM**. The host stays outside the blast radius: it runs QEMU and
-`virtiofsd` as the invoking user, not an agent container. The VM runs **rootless Docker**
-under a dedicated `mester` user, so the agent gets a real Docker CLI and compose plugin
-without root in the VM. The workspace enters the VM through **virtiofs**; model servers
-stay on the host and are reached through narrow, explicitly forwarded channels.
-
-This refines C.6. The agent container, not opencode-on-the-VM, is the unit that runs; the
-workspace is shared live rather than checked out inside the VM.
+### C.8 VM harness topology, transport and isolation (current)
+**Decision:** Little Mester is the
+harness and runs **directly in a local, `./lab`-managed QEMU/KVM VM guest**. The guest VM,
+not a Docker container, is the host-isolation boundary. The agent is intentionally given
+guest-level control: it can use Docker/Compose for arbitrary project services, install and
+configure guest software, and launch nested Little Mester QEMU/KVM VMs when supported.
+Docker is a workload tool inside the guest, never the outer agent sandbox. The selected
+workspace enters through virtiofs; model APIs and egress remain on narrowly forwarded,
+policy-controlled channels. Native provider auth belongs to the guest agent and its actual
+browser callback endpoint (#45).
 
 **Why this shape:**
 
 | Candidate | Isolation | GPU / models | Startup | Workspace I/O | Verdict |
 |---|---|---|---|---|---|
-| Local QEMU/KVM, `./lab`-managed | VM boundary + rootless Docker; no host ports; one exported path | Host-side model API, no VFIO | One command, image cached | virtiofs, live edits | **Chosen** |
-| Local default + remote Linux host over SSH | Same container hardening, but shares the remote host's daemon/network | Depends on host | Fast after provisioning | sshfs/rsync, extra moving parts | Follow-up: #47 |
+| Local QEMU/KVM, `./lab`-managed | VM boundary; agent has broad guest control; no host ports; one exported path | Host-side model API, no VFIO | One command, image cached | virtiofs, live edits | **Chosen** |
+| Local default + remote Linux host over SSH | Shares the remote host's VM/daemon/network rather than this local VM boundary | Depends on host | Fast after provisioning | sshfs/rsync, extra moving parts | Follow-up: #47 |
 | Cloud VM | Strong, but provider credentials and cost | GPU SKUs available | Slowest | Network filesystem or copy | Not now |
 | Docker-in-Docker on the host | Needs privileged containers; weak boundary | Host Docker | Fast | bind mount | Rejected (C.6) |
 | Shared remote Docker daemon | Containers/networks/volumes shared with other work | Host Docker | Fast | bind mount | Rejected (C.6) |
@@ -544,11 +527,11 @@ workspace is shared live rather than checked out inside the VM.
   that mount; nothing else from the host is exported. `check_workspace()` still runs on the
   host before export, so `/`, `$HOME`, the lab repo without `--unsafe-recurse`, and
   credential directories never reach the VM.
-- **Docker daemon:** rootless Docker under `mester` (`subuid`/`subgid`, systemd user
-  lingering, `DOCKER_HOST=unix:///run/user/<uid>/docker.sock`). A container escape lands as
-  an unprivileged VM user, not VM root; the VM is disposable regardless. The agent socket is
-  mounted only when Docker access is enabled (opt-in and visible), and the daemon is never
-  rootful by default. Rootful Docker is an explicit escape hatch, not the default.
+- **Guest authority:** the harness runs directly as a guest user with the ability to
+  administer the guest and control its Docker daemon. Rootful-in-guest Docker or equivalent
+  guest admin access is acceptable because the outer VM is the isolation boundary; guest
+  root is not claimed as a security boundary from the agent. Host Docker and host privilege
+  are never exposed.
 - **Control channel:** SSH over a QEMU user-network forward bound to `127.0.0.1` on an
   ephemeral host port. `./lab vm` generates a per-VM ed25519 key under the gitignored
   `.mester/vm/<name>/` state directory, uses a per-VM `known_hosts`, and never copies host
@@ -566,20 +549,23 @@ workspace is shared live rather than checked out inside the VM.
   silently allowed.
 - **No host ports:** the harness adds only the loopback SSH forward. The model servers
   already listen on host loopback and are exposed to the VM only through their `guestfwd`
-  entries. Agent and workspace services are reachable only on the VM's internal Docker
-  networks. Nothing is published to the host LAN.
-- **Teardown:** `./lab stop` removes the agent and workspace containers/networks/volumes
-  inside the VM, then stops QEMU and deletes the overlay, seed and virtiofs sockets. The
-  cached base image and `./lab` state are the only things that survive. A VM is never
-  reused across unrelated workspaces without an explicit reset.
+  entries. Guest services remain guest-local unless deliberately exposed through a
+  separately reviewed loopback-only forward; nothing is published to the host LAN.
+- **Teardown and recursion:** guest workloads and nested VM state belong to the guest
+  lifecycle. Cleanup must be explicit and must not silently destroy a live recursive test
+  loop or its evidence. Separate/reused VM policy and snapshot/overlay retention require
+  lifecycle acceptance tests; no automatic destructive teardown is assumed.
 
 **Follow-ups (with defaults):**
 
 - A remote Linux host target is **#47**: opt-in, off by default, and documented as weaker
   isolation because it shares that host's Docker daemon. Default remains local QEMU/KVM.
-- Rootless Docker restrictions (ports <1024, some images, cgroup v2 delegation) are handled
-  per workspace by #42/#43; the default is to keep rootless and fix the workspace, not to
-  switch to rootful.
+- Nested virtualization is a requirement to investigate and prove, not an assumed feature:
+  test host nested-VMX/SVM exposure, guest `/dev/kvm`, and a nested boot/lifecycle before
+  claiming recursive support. Provide a clear unsupported/fallback result when unavailable.
+- Guest Docker/Compose must support normal project workflows (including Compose services,
+  ports within the guest, volumes and test start/stop cycles); the guest Docker daemon may be
+  rootful because it is contained by the outer VM. Never expose the host daemon.
 - GPU passthrough into the VM is explicitly out of scope; model servers stay on the host.
 - `guestfwd` + `restrict=on` behaviour and virtiofs mount semantics must be proven in #41;
   the fallback is a host-side firewall/proxy pair with the same crossings, not opening a
