@@ -591,6 +591,23 @@ engineering invariants are in `docs/tickets/architecture/DECISIONS.md` §K.
 
 ---
 
+### C.9.14 Diagnostics are part of the workflow (2026-10-28)
+
+**Decision:** Software setup and lifecycle workflows must gather and present actionable
+diagnostics as part of the normal workflow, especially on failure. A user must not need to
+race a short-lived process with a separate SSH/debug command to collect evidence needed to
+diagnose a failure. `--verbose` and `--debug` may add progressively more detail, but the
+failure path must automatically capture the minimum useful context, preserve it in the
+workflow's existing state/log directory, print its location, and retain the original failure
+status. Diagnostics should be configurable when their volume or cost makes routine capture
+excessive, with the default still sufficient to explain common setup failures.
+
+**Safety:** Diagnostics must not print secrets (credentials, tokens, private keys), weaken
+security boundaries, or run unrelated/destructive commands. Bound noisy command output where
+appropriate, identify unavailable probes rather than silently omitting them, and keep raw
+artifacts in gitignored state/log locations. Implementations and evidence belong on their
+ticket; this is the cross-project product/workflow rule. See #41 for VM failure diagnostics.
+
 ## Licensing — standard AGPL (2026-10-28)
 
 **Decision:** Replace the root MIT licence and the MCP package's ISC declaration

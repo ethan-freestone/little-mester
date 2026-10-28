@@ -72,8 +72,56 @@ _vm_build_agent_image() {
   else
     rc=$?
     log "ERROR: agent image build failed (status $rc); see $vm_dir/build.log. Preserve the overlay; retry without --clean."
+    _vm_build_network_diagnostics "$vm_dir"
     return "$rc"
   fi
+}
+
+_vm_build_network_diagnostics() {
+  local vm_dir="$1"
+  log "Collecting guest and rootless-container network diagnostics before VM cleanup..."
+  log "Saving network diagnostics to $vm_dir/network-diagnostics.log"
+  vm_ssh "$vm_dir" 'sudo bash -s' <<'GUEST_NETWORK_DIAGNOSTICS' 2>&1 | tee "$vm_dir/network-diagnostics.log" || true
+set +e
+uid="$(id -u mester 2>/dev/null || echo 1000)"
+echo '=== Guest identity, routes, and listeners ==='
+id
+ip route || echo 'ip route unavailable'
+ss -ltnp || echo 'ss unavailable'
+echo '=== Guest proxy request as mester ==='
+sudo -iu mester curl -sv --connect-timeout 4 \
+  -x http://10.0.2.100:3128 http://deb.debian.org/ -o /dev/null
+echo "guest_proxy_curl_status=$?"
+echo '=== Docker proxy configuration ==='
+cat /home/mester/.config/docker/daemon.json || true
+cat /home/mester/.config/systemd/user/docker.service.d/proxy.conf || true
+echo '=== Rootless Docker service and RootlessKit arguments ==='
+sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" \
+  "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" systemctl --user cat docker
+ps -ww -u mester -o args= | grep '[r]ootlesskit' || echo 'RootlessKit process not found'
+echo '=== BuildKit RUN network probe (same network path as Dockerfile apt-get) ==='
+sudo -iu mester env \
+  "DOCKER_HOST=unix:///run/user/${uid}/docker.sock" \
+  HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 \
+  http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128 \
+  NO_PROXY=localhost,127.0.0.1,10.0.2.100 \
+  no_proxy=localhost,127.0.0.1,10.0.2.100 \
+  docker build --pull=false --no-cache --progress=plain \
+    --build-arg HTTP_PROXY --build-arg HTTPS_PROXY \
+    --build-arg http_proxy --build-arg https_proxy \
+    --build-arg NO_PROXY --build-arg no_proxy \
+    -t mester-network-diagnostic - <<'NETWORK_PROBE_DOCKERFILE'
+FROM python:3.12-slim
+RUN python -c "import socket,urllib.request; print(open('/proc/net/route').read()); s=socket.socket(); print('proxy_tcp_errno=',s.connect_ex(('10.0.2.100',3128))); print('proxy_http_status=',urllib.request.build_opener(urllib.request.ProxyHandler({'http':'http://10.0.2.100:3128'})).open('http://deb.debian.org/',timeout=4).status)"
+NETWORK_PROBE_DOCKERFILE
+probe_status=$?
+echo "buildkit_network_probe_status=$probe_status"
+if [ "$probe_status" -eq 0 ]; then
+  sudo -iu mester env "DOCKER_HOST=unix:///run/user/${uid}/docker.sock" \
+    docker image rm mester-network-diagnostic
+fi
+GUEST_NETWORK_DIAGNOSTICS
+  log "Network diagnostics saved to $vm_dir/network-diagnostics.log"
 }
 
 _vm_rootless_diagnostics() {
@@ -120,6 +168,7 @@ _vm_ensure_rootless_docker() {
 set -euo pipefail
 uid="$1"
 install -d -o mester -g mester /home/mester/.config/docker
+install -d -o mester -g mester /home/mester/.config/systemd/user/docker.service.d
 cat > /home/mester/.config/docker/daemon.json <<'DOCKER_PROXY'
 {
   "proxies": {
@@ -130,6 +179,14 @@ cat > /home/mester/.config/docker/daemon.json <<'DOCKER_PROXY'
 }
 DOCKER_PROXY
 chown mester:mester /home/mester/.config/docker/daemon.json
+cat > /home/mester/.config/systemd/user/docker.service.d/proxy.conf <<'DOCKER_SERVICE_PROXY'
+[Service]
+Environment=HTTP_PROXY=http://10.0.2.100:3128
+Environment=HTTPS_PROXY=http://10.0.2.100:3128
+Environment=NO_PROXY=localhost,127.0.0.1,10.0.2.100
+Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS=--cidr=10.0.3.0/24
+DOCKER_SERVICE_PROXY
+chown mester:mester /home/mester/.config/systemd/user/docker.service.d/proxy.conf
 GUEST_DOCKER_PROXY
   vm_ssh "$vm_dir" "sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user daemon-reload && sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user enable docker && sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user restart docker"
 }

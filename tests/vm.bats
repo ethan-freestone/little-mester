@@ -210,12 +210,33 @@ DOCKER
 @test "image build failure is logged and its original status survives tee" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   mock_guest_build
+  _vm_build_network_diagnostics() {
+    touch "$1/diagnostic-called"
+    echo 'network diagnostics captured'
+  }
   MOCK_DOCKER_EXIT=37
   run _vm_build_agent_image "$vm_dir"
   [ "$status" -eq 37 ]
   [[ "$output" == *"retry without --clean"* ]]
+  [[ "$output" == *"network diagnostics captured"* ]]
+  [ -f "$vm_dir/diagnostic-called" ]
   grep -q 'mock Docker build output' "$vm_dir/build.log"
   rm -rf "$vm_dir"
+}
+
+@test "build network diagnostics include guest and BuildKit RUN proxy probes" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  diagnostics="$(declare -f _vm_build_network_diagnostics)"
+  [[ "$diagnostics" == *'ip route'* ]]
+  [[ "$diagnostics" == *'ss -ltnp'* ]]
+  [[ "$diagnostics" == *'curl -sv --connect-timeout'* ]]
+  [[ "$diagnostics" == *'--pull=false --no-cache'* ]]
+  [[ "$diagnostics" == *'FROM python:3.12-slim'* ]]
+  [[ "$diagnostics" == *"open('/proc/net/route')"* ]]
+  [[ "$diagnostics" == *'proxy_tcp_errno='* ]]
+  [[ "$diagnostics" == *'proxy_http_status='* ]]
+  [[ "$diagnostics" == *'10.0.2.100:3128'* ]]
+  [[ "$diagnostics" == *'network-diagnostics.log'* ]]
 }
 
 @test "missing guest proxy profile blocks build instead of falling back to direct egress" {
@@ -246,5 +267,8 @@ DOCKER
   ensure="$(declare -f _vm_ensure_rootless_docker)"
   [[ "$ensure" == *'vm_cloud_init_subid_script | vm_ssh'* ]]
   [[ "$ensure" == *'/home/mester/.config/docker/daemon.json'* ]]
+  [[ "$ensure" == *'/home/mester/.config/systemd/user/docker.service.d/proxy.conf'* ]]
+  [[ "$ensure" == *'DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS=--cidr=10.0.3.0/24'* ]]
+  [[ "$ensure" == *'Environment=HTTP_PROXY=http://10.0.2.100:3128'* ]]
   [[ "$ensure" == *'systemctl --user restart docker'* ]]
 }
