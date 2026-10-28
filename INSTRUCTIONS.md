@@ -40,14 +40,9 @@ If a tool fails or is unavailable, report the error — do not fall back to dire
 - **Auto-accept flag**: `-y`/`--yes` added to both `lab-vm` and `./lab`, sets `VM_YES` and `LAB_YES`
 - **ChatGPT Plus login**: `opencode auth login openai --method chatgpt-headless` was verified inside the current agent container; `opencode auth list` reported OpenAI as `stored`
 - **Auth runbook**: `docs/chatgpt-auth.md` records the verified device flow, secure export/import procedure, and required VM persistence design
-- **2026-10-28 host proof (partial)**: KVM boot, SSH, and proxied package downloads succeeded at `7b54d26`; cloud-init then failed because rootless Docker required `nf_tables`. The fix explicitly installs kmod/iptables, loads/persists guest nf_tables, and installs Docker proxy/CIDR settings before first service start. Clean host retest remains required.
-- **Second host attempt (12:05–12:06 UTC)**: The patched script successfully installed/started rootless Docker 29.9.2 and touched the completion marker. Launcher still rejected cloud-init's nonzero result despite `status: done`; QEMU log shows an early schema-validation warning. Exact failing field/exit code remain unknown. Updated diagnostics capture numeric status, long/JSON status and `cloud-init schema --system`; next retry must preserve/reuse overlay, **without --clean**, to obtain those details. See #41 and docs/DECISIONS.md §C.9.14–15.
-- **Third host attempt (12:55 UTC; supersedes diagnostic-only handoff above)**: Confirmed exit 2 and schema error `groups.0.mester: [] is too short`. Generator now uses string group `mester`; regression coverage added and CI validates production-rendered YAML using cloud-init CLI. Old overlay caches invalid first-boot data, so next acceptance run requires **--clean**, after evidence archival. Warm guest cloud-init finished at 7.62s but SSH discovery took ~2m40s; single-type bounded keyscan replaces multi-key/pipeline probe and retains diagnostics, with actual speed improvement still pending host proof.
-- **Fourth host attempt (13:08 UTC; superseded)**: SSH ready in ~10s, cloud-init clean with no recoverable errors, rootless/workspace checks passed. Agent image build failed resolving auth.docker.io during anonymous token retrieval. Build now explicitly sources guest proxy profile for the non-login Docker CLI/auth helper and forwards all six upper/lower-case build proxy args; build output/status retained in build.log. Owner approved adding npmjs.org to the project allowlist. See #41 and docs/DECISIONS.md §C.9.17; full image/lifecycle/auth/permissions remain pending.
-- **Fifth host attempt (13:24 UTC; superseded)**: Non-clean retry reused the overlay; SSH ready after five probes and cloud-init reported done/errors empty. Rootless Docker socket `/run/user/1000/docker.sock` was absent, so launcher failed before image build (`build.log` absent as expected). Launcher cleanup stopped QEMU. Current QEMU/keyscan logs archived under `.mester/logs/vm-host-rootless-attempt5-20261028_132400/`; old provision/status files are historical and must not be treated as attempt-5 diagnostics. The boot enablement hypothesis was tested in the sixth run and disproved. See #41 and DECISIONS C.9.18.
-- **Sixth host attempt (13:34 UTC; current gate)**: The new enable/start runs, linger is yes, user manager is active, and Docker service is enabled, but RootlessKit fails with `no subuid ranges found for user 1000 ("mester")`. Rootless Docker socket is absent and image build was not reached. Diagnostics omit `/etc/subuid` and `/etc/subgid` contents, so why the provisioned mappings are unavailable is not yet known. Logs are archived under `.mester/logs/vm-host-rootless-subuid-20261028_133440/`. The patch now validates/repairs `mester` mappings using `usermod`, refuses overlapping allocations, runs against existing overlay before starting Docker, and adds mapping details to failure diagnostics. Next run without `--clean`; see #41 and DECISIONS C.9.19.
+- **VM host-test status**: CachyOS provisioning reaches SSH and clean cloud-init, but the latest run fails when RootlessKit cannot find subordinate UID/GID ranges for `mester`; the image build and full lifecycle remain unverified. Ticket #41 is the source of truth for attempt history, logs, implementation evidence and the current retry handoff.
 - **Ticket #48**: AC updated to include `-y`/`--yes` (A7-A8)
-- **Ticket #41**: Active VM provisioning/lifecycle; partial host evidence is not a full pass. Exact retry and handoff steps live in its test ledger. Decisions/backtracks: docs/DECISIONS.md §C.9.11–13.
+- **Ticket #41**: Active VM provisioning/lifecycle; partial host evidence is not a full pass. Exact retry and handoff steps live in its test ledger. Project-wide workflow/auth constraints: docs/DECISIONS.md §C.9.12–13.
 
 ### What's not done
 - `./lab vm up` doesn't exist — VM commands only live in `./lab-vm`
@@ -57,39 +52,13 @@ If a tool fails or is unavailable, report the error — do not fall back to dire
 - #50: launcher argument/mode fixes have mock regression coverage, but this running v2.2.0 container already has `opencode --auto` and the reported “prompt” UI is unresolved. Do not claim the UI bug fixed from argv tests.
 - This container has no /dev/kvm or Docker daemon. Host testing must be coordinated, never simulated as a passing lifecycle result.
 
-### Immediate next step: Verify subordinate IDs for rootless Docker without --clean
+### Immediate next step: Follow the current #41 host gate
 
-Read #41/#45/#50 through MCP before asking the owner to exit/rebuild/retry.
-Export the current container login privately using docs/chatgpt-auth.md **before
-container recreation**. Do not stop the working host-Docker session merely to
-test the standalone VM. Preserve failed-run logs outside `.mester/vm/default`
-before `--clean`/`stop`/`down`; failed startup cleanup may already have stopped
-the guest. Fourth-attempt logs were archived under
-`.mester/logs/vm-host-attempt4-20261028_131237/` (attempts 2/3 also retained).
-Full command procedures and expected observations belong on #41. The current
-overlay is provisioned; this patch sends the subid helper on each start and does
-not require a clean reinstall. Do not confuse historical provision/status files
-with current-run evidence. Agent image build has not yet been reached.
-
-```bash
-# 1. On the host, inspect the shared checkout/revision
-git status --short
-git log -1 --oneline
-
-# 2. Reuse installed overlay; startup validates mappings and enables Docker
-./lab-vm up --debug --unsafe-recurse --auto-accept
-# Stop on any failure; return rootless-diagnostics.log including subuid/subgid.
-
-# 4. Verify
-./lab-vm status
-./lab-vm ssh    # drops you inside the VM
-
-# 5. Inside: verify provisioning only first
-findmnt /workspace
-docker info --format '{{json .SecurityOptions}}' # must include rootless
-docker compose version
-# Return output to #41 before agent/integration tests or teardown.
-```
+Before requesting another host action, read #41/#45/#50 through MCP. Preserve the
+working host-Docker session and export credentials privately before any container
+recreation. Exact commands, expected results, diagnostics to preserve and stop
+conditions belong to ticket #41 `tests.needed`; do not duplicate or follow a
+superseded procedure from this file.
 
 **Gate: `./lab-vm up` must complete provisioning and build the image.** SSH alone is not success. Do not retire host-Docker mode until the full lifecycle, auth and permission gates pass.
 

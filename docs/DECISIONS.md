@@ -1,8 +1,15 @@
 # DECISIONS — How to use & improve little-mester (the product)
 
-> **What goes in here:** Decisions about how you use, configure, test, and modify little-mester the product day-to-day. This covers constraints that affect any session — not specific engineering designs.
+> **What goes in here:** Durable, project-wide product/workflow decisions and constraints intended to apply across tickets and sessions. Keep entries concise, state the rationale, and link to the implementing ticket when applicable.
 >
-> **Not here:** Engineering designs for subsystems (those go in their own scope — see below). Per-ticket planning (goes in ticket docs themselves).
+> **Not here:** Per-ticket plans, implementation details, test results, host-run transcripts, diagnostics, acceptance progress, retry commands, or handoffs. Those belong on the implementing ticket, maintained through the ticket engine. Cross-ticket engineering architecture belongs in `docs/tickets/architecture/DECISIONS.md`; ticket-specific engineering and delivery evidence belongs in that ticket. Do not duplicate a ticket's execution log here. Add a rule here only when it is a durable project-wide decision, not merely because implementation work changed code.
+
+### Documentation boundaries (required)
+
+- **Project decisions (`docs/DECISIONS.md`):** durable, cross-ticket policy, product workflow, and constraints. Record the decision and why; link to the ticket for implementation and evidence.
+- **Subsystem architecture (`docs/tickets/architecture/DECISIONS.md`):** durable technical architecture/conventions that govern multiple tickets in that subsystem.
+- **Implementing ticket:** scope, alternatives considered for that work, implementation plan, changes made, test evidence, host/CI attempts, failures/diagnosis, acceptance-criteria status, exact retry/handoff steps, and commit references. Use the ticket engine MCP/CLI; do not edit ticket JSON directly.
+- **Schema changes:** use existing ticket fields (`objective`, `acceptance_criteria[].evidence`, and `tests.needed/created/cases`) when they fit. If an actual gap requires a new field, first plan and discuss the schema change as a separate ticketed change, update the ticket schema/engine/validation/CLI/MCP together, and migrate/test it before using the field. Do not invent ad-hoc fields or move evidence into this file as a workaround.
 
 ## ⚠️ Read before every session
 
@@ -465,66 +472,15 @@ get lost when the container is recreated. A 5-run window captures enough history
 debugging while keeping disk usage bounded. The `.mester/logs/` path ensures logs are
 never committed by accident.
 
-#### C.9.11 First host proof, provisioning failure and recovery (2026-10-28)
-
-**Observed, not assumed:** The owner ran commit `7b54d26` on CachyOS with
-`./lab-vm up --clean --debug --unsafe-recurse --auto-accept`. The pinned image
-download/hash, overlay/seed generation, KVM boot, SSH and proxied apt downloads
-succeeded. Rootless Docker installation then stopped because `nf_tables` was not
-loaded. This is **partial boot evidence, not a working harness or lifecycle pass**.
-The `policy-rc.d` messages were deliberate suppression of rootful Docker startup,
-not the failure. The rootless installer explicitly requested `modprobe nf_tables`.
-
-**Decision:** Provision `kmod`/`iptables`, load `nf_tables` as guest root before
-invoking the rootless installer, and persist that prerequisite through
-`/etc/modules-load.d/mester-rootless.conf`. A load failure reports the **guest**
-kernel and stops provisioning. Do not load host modules, use `--skip-iptables`,
-disable Docker firewalling, or silently fall back to rootful Docker. No missing
-module package is inferred from this log: try loading the installed module first.
-If it fails on the real guest, investigate matching kernel/module packages with
-that diagnostic rather than suppressing the error.
-
-**Adjacent ordering correction:** Docker's user-service proxy and non-overlapping
-RootlessKit CIDR drop-in must exist **before** the setup tool starts Docker for
-the first time, not only before a later restart. This prevents the first start
-using different networking/proxy settings from the final service.
-
-**Evidence retention:** Failed startup cleanup stops QEMU/virtiofsd; it does not
-leave a guest available for SSH debugging. Capture the cloud-init tail to
-`.mester/vm/<name>/provision.log` while SSH still works. Copy all relevant logs
-outside that VM directory before `--clean`, `stop` or `down` deletes the overlay.
-Old runs without this capture may have only the lab-vm/QEMU logs and the owner's
-transcript; do not claim to have recovered a guest log from a stopped guest.
-
-**Backtrack:** Existing Bats tests only searched for provisioning strings and
-swallowed some launcher exits. Add generated-cloud-init execution tests with a
-mocked module loader (success/failure), startup ordering checks, and real final
-Docker argv assertions. These are local regressions, **not KVM proof**. During
-validation the existing docs checker also exposed eight pre-existing README/link
-failures at `7b54d26`; reopen #44 and correct them rather than repeat its stale
-passing claim. Detailed commands/results and subsequent host attempts live on
-#41/#44, through the ticket engine.
-
 #### C.9.12 Human gates and session handoff (2026-10-28)
 
-**Decision:** Before asking the owner to exit, rebuild, recreate a container, or
-retry a VM, record through MCP on the implementing ticket: current revision and
-failure stage, changes/alternatives rejected, automated results and limits, exact
-human commands, expected observations, logs to preserve, credential export
-requirements, and the stop/return condition. Record the returned result on the
-same ticket before planning the next attempt. `tests.cases` is the append-only
-progress journal exposed by the current MCP tool; do not hand-edit ticket comments
-or replace existing criteria to manufacture a pass.
-
-Gate order: **#41 clean provisioning/image build → #42/#43 in-VM agent,
-Docker/isolation verification → #45 browser auth/persistence → #35 integrated
-`./lab` lifecycle and retirement of host-Docker mode.** #50 separately tracks
-permission-mode behavior in both topologies. Keep an existing working host-Docker
-session available until its credentials are exported privately and the next
-environment is usable. No session shutdown, image rebuild or teardown is needed
-just to inspect this patch or run the local mock tests. Config changes alone do
-not require restarting OpenCode; rebuilding/relaunching is for launcher/image
-changes and must be coordinated with the owner.
+**Project-wide workflow decision:** Before requesting an owner-operated test or a
+potentially destructive/environment-changing action, put the exact procedure,
+expected observations, stop conditions, evidence/secret safeguards, and current
+revision on the implementing ticket. Record the returned result there before
+planning a follow-up. Ticket fields, not this log, hold execution history and
+handoffs. Keep an existing working session available until its replacement path
+is verified; do not expose credentials in tickets or logs.
 
 #### C.9.13 Browser OAuth is required; auto approval is not a policy bypass (2026-10-28)
 
@@ -547,236 +503,6 @@ lab flags regardless of position and pass agent arguments unchanged. `ask` and
 auto-accept conflict; unsupported modes must fail clearly, not silently do
 nothing. Do not patch generated permissions into blanket allow rules.
 
-**Unresolved observation (#50):** The owner sees “prompt” even though this
-container's PID 1 is already `opencode --auto` (v2.2.0, shared server). Fixing lab
-argument propagation alone cannot establish that the UI issue is solved. Verify
-both the displayed mode and an actual harmless tool request, plus an explicit
-deny; compare a disposable standalone session if needed. Do not change the
-running coding session's permissions or launch a billed request to manufacture
-evidence. CLI help and V2 permissions/config/provider documentation were checked;
-the exact UI cause remains unproven.
-
-#### C.9.14 `status: done` is not a clean cloud-init result (2026-10-28)
-
-**Second host attempt:** With the netfilter/order patch applied, the owner's
-12:05–12:06 UTC CachyOS run completed the provisioning script, started rootless
-Docker 29.9.2 with the proxy/CIDR drop-in, and touched the completion marker.
-The launcher nevertheless took its cloud-init nonzero-exit branch before image
-build. The QEMU console log reveals an **early cloud-config schema-validation
-warning**, omitted by the final 200-line provisioning tail. Docker's `io.max`
-warnings are not established as the cause.
-
-Cloud-init [documents](https://docs.cloud-init.io/en/latest/explanation/return_codes.html)
-that since 23.4, exit 2 can mean recoverable errors even when status says `done`.
-The original launcher did not print the numeric exit code, so exit 2 is a likely
-explanation, **not yet an observed value** for this run. Do not label this merely
-a false failure or accept every exit 2: invalid configuration may be significant.
-
-**Diagnostic correction:** Keep nonzero status fail-closed. Request long status,
-log the original status/SSH exit code, and save `cloud-init-status.json` plus
-`cloud-init-schema.log` (`cloud-init schema --system`) before cleanup stops the
-guest, in addition to `provision.log`. Diagnostic command failures must not mask
-the original crash/timeout/SSH status. Once the concrete error is identified,
-correct its source and prove a clean result; no generic warning bypass.
-
-**Backtrack/limit:** Generated YAML passed local PyYAML/jsonschema validation
-against upstream cloud-init 26.1, including format checks. That does not establish
-that the guest's merged system configuration validates. The exact failing field
-therefore remains unknown until guest diagnostics return. Preserve the existing
-overlay and retry **without `--clean`** to collect those diagnostics; changing a
-seed does not rerun once-per-instance provisioning in an existing overlay.
-The implementing ticket #41 records the archived log path, retry commands and
-returned results; a successful installer still does not prove image build or
-the integrated agent lifecycle.
-
-#### C.9.15 Cold-boot cost and OpenCode image updates (2026-10-28)
-
-The second host run took about 80 seconds; SSH was available after six checks
-(roughly 15–20 seconds), and guest provisioning finished at uptime 76.69 seconds.
-Most elapsed time was first-boot apt/Docker setup, not firmware/kernel boot.
-`--clean` discards the overlay and repeats that setup. The downloaded base is
-cached, but currently contains no preinstalled harness packages. Reusing a
-preserved overlay should skip once-per-instance provisioning; this still needs
-timing evidence. Current `stop`/`down` also delete the overlay, so they are **not**
-a warm restart path. Pre-provisioned secret-free image caching is a possible
-follow-up, not implemented or promised as a current performance fix.
-
-OpenCode is currently installed by `npm install -g @opencode/cli` in the agent
-Dockerfile. The container root is read-only, so in-place self-updating is not
-the update mechanism. An OpenCode upgrade requires an updated **agent image**,
-not a new VM/base image or repeated guest provisioning. Ordinary launches reuse
-the image. A plain build may reuse the npm installation layer and keep an old
-version; explicit version selection and a cache-correct image-only update path
-are required under #42 A8, but not yet implemented. Container replacement must
-be coordinated with #45 auth export/persistence and #50 permission regressions;
-do not close the working session merely to investigate updates.
-
-#### C.9.16 Guest schema defect confirmed; SSH readiness is a separate delay (2026-10-28)
-
-**Third host result:** The non-clean diagnostic run at 12:55 UTC confirmed
-cloud-init exit **2**, `extended_status: degraded done`, no fatal errors, and
-`groups.0.mester: [] is too short` from `cloud-init schema --system`.
-This is no longer a suspected warning or unexplained launcher failure. The
-generated empty-membership group mapping is invalid for the actual guest.
-
-**Fix:** Use the supported string entry `groups: [mester]` to create the empty
-group, retaining `primary_group: mester` and the provisioning GID adjustment.
-Do not downgrade schema errors, edit cached guest result/status files, or treat
-all exit-2 results as success. A generated-YAML regression asserts this exact
-shape. The production user-data renderer is separated from ISO construction so
-CI can run `cloud-init schema --config-file` on its output without booting or
-provisioning the CI machine. Generic upstream JSON Schema validation previously
-missed the guest's rejection; it is not a substitute for the cloud-init CLI.
-The new CLI gate requires cloud-init and is wired into the disposable CI runner;
-it is not a new prerequisite installed on the developer's host.
-
-**Necessary backtrack:** The non-clean retry was for diagnosis, not application
-of first-boot changes. That overlay caches the invalid instance config; another
-non-clean retry will not apply the group fix. After archiving third-attempt
-diagnostics, the next acceptance run therefore uses `--clean` and repeats package
-provisioning. Do not rewrite the old cached config to make validation appear to
-pass. The implementing ticket #41 owns the exact commands and evidence.
-
-**Performance evidence:** Cloud-init finished at uptime **7.62s** on the reused
-overlay, proving the first-boot package work was skipped. Total launch still took
-**2m48s**, mostly waiting for SSH key discovery. Thus the earlier expectation of
-a faster overall warm launch is not yet proven. The old probe scanned default
-multiple key types under a two-second timeout and piped through `tee | grep -q`
-under `pipefail`; a scan timeout or early-closing consumer can reject a probe even
-after a matching key has been emitted. The updated probe scans only Ed25519 with
-bounded native/outer timeouts, saves stderr/exit diagnostics, avoids that pipeline,
-and writes `known_hosts` only after a successful complete scan. Partial output or
-the wrong key type is never trusted. This addresses a plausible mechanism, **not
-a proven cause** of this host's delay; retain measurements and `ssh-keyscan.log`
-on the next run. No SSH authentication/host-key checks or network restrictions
-are disabled to improve timing.
-
-#### C.9.17 Docker build needs three proxy scopes (2026-10-28)
-
-**Fourth host result:** The clean 13:08 UTC run reached SSH on attempt 6 (about
-10 seconds after QEMU start). Cloud-init then completed cleanly with
-`extended_status: done`, `errors: []`, and `recoverable_errors: {}`; workspace,
-marker and rootless-daemon checks passed. The agent build reached
-`FROM python:3.12-slim` but registry authentication failed resolving
-`auth.docker.io` through guest DNS. This proves the schema/provisioning fix, not
-a completed image build or lifecycle. Clean-run SSH readiness improved in this
-observation; warm-overlay timing after the probe change is still unverified.
-
-**Diagnosis and correction:** A remote SSH command is not a login shell and does
-not automatically read `/etc/profile.d/mester.sh`. Previously proxy settings were
-supplied to the daemon service and Dockerfile build steps, but not explicitly to
-the Docker client process. BuildKit can fetch registry tokens through the client's
-auth session, so configuring only `--build-arg` is insufficient. Docker's
-[proxy documentation](https://docs.docker.com/engine/cli/proxy/) distinguishes
-client-process, daemon and container/build settings.
-
-The build command now explicitly sources the existing guest profile before
-launching Docker. It forwards all six upper/lower-case proxy build arguments
-from that environment, so both registry-auth helpers and RUN tools receive their
-appropriate settings. Keep the daemon drop-in too. A missing profile stops the
-build; do not silently try direct egress. Keep QEMU `restrict=on`, the public-only
-allowlisting proxy, rootless Docker and strict SSH checks; opening guest DNS or
-general Internet networking is not the fix. The missing client environment is
-established by code inspection; live resolution of the registry failure still
-needs the next host retry.
-
-**Evidence and retry:** Stream build output to `build.log` and retain the original
-pipeline failure status even with `tee`. Preserve the installed overlay and retry
-**without `--clean`**: this correction changes the host's remote build command,
-not first-boot data. Do not repeat the already successful package provisioning.
-Tests execute the actual remote command under an empty, non-login environment
-with an isolated profile and mocked Docker, checking proxy variables, both-case
-arguments, context exclusions, failure propagation and missing-profile refusal.
-They do not replace a real Docker Hub build. The implementing ticket #41 records
-the archived fourth-attempt logs, exact retry and stop/feedback conditions.
-
-**Owner-approved egress change:** The project manifest listed `npmjs.com`, but
-OpenCode's npm install uses `registry.npmjs.org`. The owner explicitly approved
-adding `npmjs.org` (and its subdomains) through the permission question before the
-manifest was changed. Retain the existing entries; do not replace the list with
-allow-all. Policy tests cover Docker Hub auth/registry and the npm registry plus
-lookalike-domain rejection. No OpenAI/provider domains are implicitly granted.
-
-**Commit handoff:** The owner requested commits after the work/tests are complete.
-Commit the reviewed implementation/docs/tests and engine-produced ticket/audit
-changes, then record the implementation commit through MCP. No push, host
-container recreation or VM start is implied by this authorization.
-
-#### C.9.18 Rootless Docker must be enabled across VM boots (2026-10-28)
-
-**Fifth owner retry:** The non-clean `./lab-vm up --debug --unsafe-recurse
---auto-accept` reused the provisioned overlay, SSH became ready after five
-probes, and cloud-init reported `done` with empty errors. The rootless Docker
-socket `/run/user/1000/docker.sock` was absent; the launcher stopped before the
-agent image build, so `build.log` is correctly absent. QEMU's current log ends
-with termination by the launcher's EXIT cleanup. The host's `provision.log` and
-cloud-init JSON timestamps were 12:58 and belong to the previous run; do not
-use them as this attempt's diagnostics. Current QEMU/keyscan evidence is
-preserved under `.mester/logs/vm-host-rootless-attempt5-20261028_132400/`.
-
-**Diagnosis status:** This was a reboot of a previously provisioned overlay,
-not a new cloud-init installation. Existing provisioning ran
-`systemctl --user restart docker`, which proves only that it was started in the
-provisioning boot; the script did not explicitly enable the user service for
-later boots. That is a plausible explanation, not a confirmed root cause:
-there is no live `systemctl --user is-enabled`, user journal, linger/runtime or
-socket diagnostic from this attempt, and the guest was stopped during failure
-cleanup. Do not claim the failure is resolved until a retry verifies service
-enablement and rootless `docker info`.
-
-**Correction and evidence collection:** Provisioning now uses
-`systemctl --user enable --now docker`. On every VM start the host also issues
-that idempotent command after cloud-init/workspace checks, so an already
-provisioned overlay can be repaired without a clean reprovision. If enabling
-or the rootless API check fails, collect `loginctl` linger/runtime state,
-`user@UID.service`, `/run/user/UID` and socket state, Docker user-service
-enabled/status/unit data, and the current-boot user journal to
-`rootless-diagnostics.log` before the startup EXIT trap stops QEMU. Do not
-silently fall back to rootful Docker or loosen guest networking.
-
-**Next gate:** After committing this targeted change, retry on CachyOS with
-`./lab-vm up --debug --unsafe-recurse --auto-accept` and **without `--clean`**.
-The existing overlay contains the Docker user unit; the new host-side
-`enable --now` repairs its boot enablement if that was the issue. If it fails,
-stop and return the first error plus `rootless-diagnostics.log` and the latest
-QEMU log. Do not clean/stop/down before preserving diagnostics. If it succeeds,
-verify `systemctl --user is-enabled docker`, active user service, rootless
-`docker info`, and only then expect the image build (which remains a separate
-pending gate).
-
-#### C.9.19 RootlessKit needs verified subordinate ID mappings (2026-10-28)
-
-**Sixth owner retry:** On the existing overlay, SSH and cloud-init were clean;
-the new enable/start call ran. Captured diagnostics prove this is not a service
-enablement or linger failure: `Linger=yes`, `user@1000.service` is active and
-Ready, `/run/user/1000` and its bus exist, Docker is enabled with the expected
-`default.target.wants/docker.service` symlink. Docker repeatedly exits in
-RootlessKit with `failed to compute uid/gid map: no subuid ranges found for user
-1000 ("mester")`; the socket is absent and the image build was not reached.
-The previous boot-enable hypothesis is disproved.
-
-The original provisioner did write `mester:100000:65536` into `/etc/subuid` and
-`/etc/subgid`, but those current files were not printed in this attempt's
-diagnostic output. Therefore the precise reason RootlessKit cannot see the
-entries remains unknown. QEMU, rootless diagnostics, SSH scan and launcher logs
-are preserved under `.mester/logs/vm-host-rootless-subuid-20261028_133440/`.
-
-**Correction:** Factor subordinate range setup into a generated helper that
-checks the exact user/range in both files, adds missing values with `usermod`
-only when no other account overlaps the reserved range, and validates the
-result before Docker setup. The host runs that same helper over the existing
-guest before enabling Docker, allowing a non-clean retry. Failure diagnostics
-now include account resolution, file modes/owners, full subuid/subgid contents
-and `getsubids` output when available. This is fail-closed: do not replace a
-conflicting range, fall back to rootful Docker or broaden network access.
-
-**Next gate:** Commit the change, then retry without `--clean`:
-`./lab-vm up --debug --unsafe-recurse --auto-accept`. This should ensure the
-reserved subordinate mappings before starting the enabled user service. If it
-fails, preserve/return `rootless-diagnostics.log`, especially the exact
-`/etc/subuid` and `/etc/subgid` lines, plus the service journal; do not clean or
-repeat until those values and any overlap are reviewed. Success still requires
-rootless `docker info` and the agent image build.
 
 ---
 
