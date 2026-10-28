@@ -1,0 +1,55 @@
+{
+  "id": 51,
+  "file_path": "/workspace/docs/tickets/ticket-051.json",
+  "number": 51,
+  "area": "engine",
+  "type": "feature",
+  "status": "draft",
+  "title": "Add a first-class per-ticket testing plan field",
+  "objective": "Add a structured test_plan field to tickets so each ticket carries its planned verification steps separately from acceptance criteria and the append-only tests execution ledger. Keep ticket-specific plans on the ticket rather than in parallel testing-plan documents.",
+  "created_at": "2026-10-28T16:33:46.307Z",
+  "updated_at": "2026-10-28T16:34:05.793Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "The test_plan field has a documented structure for host/guest test-environment setup (OS, hardware, prerequisites, workspace and credential safeguards), planned commands, expected results and stop conditions, clearly separate from acceptance criteria and tests.needed/created/cases. It defines how distinct test contexts can be assigned to subtickets when independently owned.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Ticket create, update, get/list/search and MCP tool schemas expose test_plan consistently; the design explicitly states whether/how independently testable subtickets can own their own setup and plan.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "The engine defines compatibility for existing tickets and enforces the agreed requirement for newly created tickets without making legacy ticket reads/validation fail unexpectedly.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Automated engine, CLI and MCP tests cover creating, updating, validating and reading test_plan, including malformed or empty plans.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Documentation says ticket-specific test plans live on their tickets and execution evidence remains in the test ledger; no separate per-ticket plan document is introduced.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Decide structured test_plan shape and whether it is required on new tickets",
+      "Update ticket-v1.json schema and engine normalizer/validation",
+      "Expose test_plan through CLI and MCP create/update/get surfaces",
+      "Add engine/CLI/MCP tests and legacy-ticket compatibility validation",
+      "Review ticket docs and remove conflicting guidance",
+      "Define host/environment setup as part of each test_plan, including separate host vs guest vs nested VM prerequisites when relevant",
+      "Decide whether subtickets need independent test_plan fields or reference a parent plan; current subtickets are not full tickets and do not yet have this field"
+    ],
+    "created": [],
+    "cases": [
+      "Owner clarification 2026-10-28: host setup/environment prerequisites belong on the ticket's test plan, not in a parallel setup document. Distinct, independently owned test contexts may be represented by subtickets, but the engine's current subtickets lack full ticket fields; #51 must decide and specify this."
+    ]
+  },
+  "models_used": []
+}

@@ -4,11 +4,11 @@
   "number": 42,
   "area": "infra",
   "type": "feature",
-  "status": "draft",
+  "status": "active",
   "title": "Direct guest harness runtime and guest workload control",
   "objective": "Install and run the model-agnostic Little Mester harness directly inside the outer VM guest, with native guest auth and broad guest-level control. Docker/Compose are available to the agent for arbitrary project workloads; no Docker container wraps the agent. Preserve the outer VM host-isolation boundary and existing restricted egress/secret rules.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-10-28T16:22:13.585Z",
+  "updated_at": "2026-10-28T16:30:53.865Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -61,12 +61,19 @@
       "Verify no agent container is started",
       "Nested KVM host/guest capability and nested VM boot/stop test on supported host",
       "Direct guest native auth callback and persistence coordinated with #45",
-      "Agent adapter selection smoke tests"
+      "Agent adapter selection smoke tests",
+      "Implement guest installer from the committed harness configuration and selected OpenCode version, without building/running little-mester-agent container.",
+      "Add ./lab-vm agent command that attaches an interactive TTY to a native guest OpenCode process rooted at /workspace.",
+      "Test install idempotence/version check and failure diagnostics without destroying overlay.",
+      "Run a disposable PostgreSQL Compose loop in the guest: up -d, readiness/test query, down, up again, down."
     ],
-    "created": [],
+    "created": [
+      "tests/vm.bats: pinned semantic-version validation, direct guest CLI installation path and interactive `lab-vm agent` command wiring."
+    ],
     "cases": [
       "2026-10-28 prerequisite feedback: real CachyOS guest boots and installs Docker packages but rootless installer fails on unloaded nf_tables. #41 now loads/persists the guest module and sets service drop-in before installer starts Docker; no rootful or --skip-iptables fallback. Agent CLI/daemon capability AC remain pending until live guest verification. Existing ./lab compose has GPU-local model dependencies, so running it unmodified inside CPU-only VM is not evidence of #42 completion.",
-      "2026-10-28 owner asks whether every OpenCode update needs a rebuild: current agent/Dockerfile npm-installs @opencode/cli into the image; container root is read-only. Current updates require replacing/rebuilding agent image, not full VM provisioning. Plain builds may reuse cached npm layer; no automatic version-refresh path is implemented. Version selection/targeted update remains pending A8. No image rebuild or session restart performed."
+      "2026-10-28 owner asks whether every OpenCode update needs a rebuild: current agent/Dockerfile npm-installs @opencode/cli into the image; container root is read-only. Current updates require replacing/rebuilding agent image, not full VM provisioning. Plain builds may reuse cached npm layer; no automatic version-refresh path is implemented. Version selection/targeted update remains pending A8. No image rebuild or session restart performed.",
+      "Implementation started 2026-10-28 after architecture reconciliation commit 2ba3773: `lab-vm up` now provisions OpenCode natively in guest OS with a pinned version (default 2.2.0), syncs project config/plugins, rewrites local model endpoints to the existing guestfwd host API, and no longer invokes the Docker agent-image build in the up path. Existing running VMs take the same idempotent install path without overlay recreation. `lab-vm agent [name]` attaches an SSH TTY and execs OpenCode in /workspace as mester with guest proxy/Docker environment. New Bats cases cover version pin guard and command wiring. Local validation: full Bats 75/75, VM Python tests 12/12, docs 110/110, shell syntax and git diff --check pass. No live KVM/guest runtime available in this workspace; direct TUI, auth, Docker Compose and nested KVM remain unverified."
     ]
   },
   "priority": "major",

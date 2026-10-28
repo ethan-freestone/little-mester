@@ -244,7 +244,7 @@
     {
       "number": 42,
       "file_path": "ticket-042.json",
-      "status": "draft",
+      "status": "active",
       "area": "infra"
     },
     {
@@ -294,7 +294,13 @@
       "file_path": "ticket-050.json",
       "status": "active",
       "area": "infra"
+    },
+    {
+      "number": 51,
+      "file_path": "ticket-051.json",
+      "status": "draft",
+      "area": "engine"
     }
   ],
-  "updated_at": "2026-10-28T16:25:03.452Z"
+  "updated_at": "2026-10-28T16:34:05.794Z"
 }

@@ -60,68 +60,47 @@ _vm_wait_for_cloud_init() {
   fi
 }
 
-_vm_build_agent_image() {
-  local vm_dir="$1" rc
-  log "Building agent image inside VM..."
-  # SSH commands are non-login shells: profile.d is not sourced automatically.
-  # BuildKit's client-side registry auth needs proxy env too, not just RUN args.
-  # Forward both cases to build steps from the explicitly loaded guest profile.
-  if tar -C "$LAB_DIR/agent" --exclude=node_modules --exclude=.git -cf - . | \
-    vm_ssh "$vm_dir" ". /etc/profile.d/mester.sh && docker -H unix:///run/user/$(id -u)/docker.sock build --build-arg LAB_UID=$(id -u) --build-arg LAB_GID=$(id -g) --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg http_proxy --build-arg https_proxy --build-arg NO_PROXY --build-arg no_proxy -t little-mester-agent -" 2>&1 | tee "$vm_dir/build.log"; then
-    return 0
-  else
-    rc=$?
-    log "ERROR: agent image build failed (status $rc); see $vm_dir/build.log. Preserve the overlay; retry without --clean."
-    _vm_build_network_diagnostics "$vm_dir"
-    return "$rc"
-  fi
-}
-
-_vm_build_network_diagnostics() {
+_vm_install_guest_harness() {
   local vm_dir="$1"
-  log "Collecting guest and rootless-container network diagnostics before VM cleanup..."
-  log "Saving network diagnostics to $vm_dir/network-diagnostics.log"
-  vm_ssh "$vm_dir" 'sudo bash -s' <<'GUEST_NETWORK_DIAGNOSTICS' 2>&1 | tee "$vm_dir/network-diagnostics.log" || true
-set +e
-uid="$(id -u mester 2>/dev/null || echo 1000)"
-echo '=== Guest identity, routes, and listeners ==='
-id
-ip route || echo 'ip route unavailable'
-ss -ltnp || echo 'ss unavailable'
-echo '=== Guest proxy request as mester ==='
-sudo -iu mester curl -sv --connect-timeout 4 \
-  -x http://10.0.2.100:3128 http://deb.debian.org/ -o /dev/null
-echo "guest_proxy_curl_status=$?"
-echo '=== Docker proxy configuration ==='
-cat /home/mester/.config/docker/daemon.json || true
-cat /home/mester/.config/systemd/user/docker.service.d/proxy.conf || true
-echo '=== Rootless Docker service and RootlessKit arguments ==='
-sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" \
-  "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" systemctl --user cat docker
-ps -ww -u mester -o args= | grep '[r]ootlesskit' || echo 'RootlessKit process not found'
-echo '=== BuildKit RUN network probe (same network path as Dockerfile apt-get) ==='
-sudo -iu mester env \
-  "DOCKER_HOST=unix:///run/user/${uid}/docker.sock" \
-  HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 \
-  http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128 \
-  NO_PROXY=localhost,127.0.0.1,10.0.2.100 \
-  no_proxy=localhost,127.0.0.1,10.0.2.100 \
-  docker build --pull=false --no-cache --progress=plain \
-    --build-arg HTTP_PROXY --build-arg HTTPS_PROXY \
-    --build-arg http_proxy --build-arg https_proxy \
-    --build-arg NO_PROXY --build-arg no_proxy \
-    -t mester-network-diagnostic - <<'NETWORK_PROBE_DOCKERFILE'
-FROM python:3.12-slim
-RUN python -c "import socket,urllib.request; print(open('/proc/net/route').read()); s=socket.socket(); print('proxy_tcp_errno=',s.connect_ex(('10.0.2.100',3128))); print('proxy_http_status=',urllib.request.build_opener(urllib.request.ProxyHandler({'http':'http://10.0.2.100:3128'})).open('http://deb.debian.org/',timeout=4).status)"
-NETWORK_PROBE_DOCKERFILE
-probe_status=$?
-echo "buildkit_network_probe_status=$probe_status"
-if [ "$probe_status" -eq 0 ]; then
-  sudo -iu mester env "DOCKER_HOST=unix:///run/user/${uid}/docker.sock" \
-    docker image rm mester-network-diagnostic
+  local version="${VM_OPENCODE_VERSION:-2.2.0}"
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    log "ERROR: VM_OPENCODE_VERSION must be a pinned semantic version (for example 2.2.0)"
+    return 2
+  }
+
+  log "Installing direct guest OpenCode harness (version $version)..."
+  vm_ssh "$vm_dir" "sudo bash -s -- '$version'" <<'GUEST_OPENCODE_INSTALL'
+set -euo pipefail
+version="$1"
+. /etc/profile.d/mester.sh
+export DEBIAN_FRONTEND=noninteractive
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo apt-get install -y nodejs npm
 fi
-GUEST_NETWORK_DIAGNOSTICS
-  log "Network diagnostics saved to $vm_dir/network-diagnostics.log"
+current="$(opencode --version 2>/dev/null | awk '{print $2}' || true)"
+if [[ "$current" != "v$version" ]]; then
+  sudo env HTTP_PROXY="$HTTP_PROXY" HTTPS_PROXY="$HTTPS_PROXY" \
+    http_proxy="$http_proxy" https_proxy="$https_proxy" \
+    npm install --global "@opencode/cli@$version"
+fi
+test "$(opencode --version | awk '{print $2}')" = "v$version"
+install -d -o root -g root -m 0755 /etc/opencode/opencode /etc/opencode/plugins
+GUEST_OPENCODE_INSTALL
+
+  if ! tar -C "$LAB_DIR/agent/opencode" -cf - opencode.json plugins | \
+    vm_ssh "$vm_dir" "sudo tar -xf - -C /etc/opencode"; then
+    log "ERROR: failed to transfer guest OpenCode config/plugins"
+    return 1
+  fi
+
+  vm_ssh "$vm_dir" "sudo sed -i \
+    -e 's#http://ollama:11434#http://10.0.2.100:11434#g' \
+    -e 's#http://llamacpp:11434#http://10.0.2.100:8080#g' \
+    /etc/opencode/opencode/opencode.json && \
+    sudo chown -R root:root /etc/opencode && \
+    sudo chmod -R a+rX /etc/opencode && \
+    sudo -iu mester opencode --version"
 }
 
 _vm_rootless_diagnostics() {
@@ -278,6 +257,7 @@ vm_cmd_up() {
   if echo "$status" | grep -q "running"; then
     echo "VM '$vm_name' is already running."
     echo "$status"
+    _vm_install_guest_harness "$vm_dir"
     return 0
   fi
 
@@ -306,15 +286,16 @@ vm_cmd_up() {
     return 1
   fi
 
-  # Build the harness image from the harness, not an arbitrary workspace Dockerfile.
-  # Transfer only its build context; the host checkout is not another guest mount.
-  _vm_build_agent_image "$vm_dir" || return $?
+  # Install the harness in the guest OS. Docker remains available for project
+  # workloads; it is not the wrapper or security boundary around the agent.
+  _vm_install_guest_harness "$vm_dir" || return $?
 
   VM_STARTING=0
 
   echo ""
   echo "VM '$vm_name' is up and running."
   echo "  SSH:  ./lab-vm ssh $vm_name"
+  echo "  Agent: ./lab-vm agent $vm_name"
   echo "  Stop: ./lab-vm down $vm_name"
   echo ""
 
@@ -395,6 +376,26 @@ vm_cmd_ssh() {
     -i "$vm_dir/id_vm_control" \
     -p "$ssh_port" \
     mester@127.0.0.1 "$@"
+}
+
+vm_cmd_agent() {
+  local vm_name="${1:-default}"
+  local vm_dir
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
+  if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
+  fi
+
+  _vm_install_guest_harness "$vm_dir"
+  local version="${VM_OPENCODE_VERSION:-2.2.0}"
+  echo "Launching OpenCode $version directly in VM '$vm_name' at /workspace."
+  exec ssh -t \
+    -o BatchMode=yes -o ConnectTimeout=10 \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$vm_dir/known_hosts" \
+    -i "$vm_dir/id_vm_control" -p "$(cat "$vm_dir/ssh_port")" \
+    mester@127.0.0.1 \
+    "cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode/opencode.json && export OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-logo","/etc/opencode/plugins/host-metrics-tui","/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}' && exec opencode"
 }
 
 # ─── vm down: stop and remove VM ────────────────────────────────────

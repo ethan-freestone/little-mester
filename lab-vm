@@ -143,6 +143,9 @@ VM lifecycle commands (epic #35, ticket #41):
   ./lab-vm ssh [name]
       SSH into the running VM.
 
+  ./lab-vm agent [name]
+      Launch OpenCode directly in the guest, attached to this terminal.
+
   ./lab-vm down [name]
       Stop the VM and remove per-VM artifacts (overlay disk, seed ISO, keys).
       Base disk is preserved.
@@ -174,6 +177,7 @@ Environment:
   VM_YES=1 / LAB_YES=1 Auto-accept all prompts (same as --yes)
   VM_VERBOSE=1         Equivalent to --verbose
   VM_DEBUG=1           Equivalent to --debug (implies --verbose)
+  VM_OPENCODE_VERSION  Pinned guest OpenCode version (default: 2.2.0)
 
 Per-VM state is stored at: ./.mester/vm/<name>/
 
@@ -354,6 +358,11 @@ case "$cmd" in
     # Restore real TTY for interactive SSH session
     exec 1>&3 2>&4
     vm_cmd_ssh "$vm_name"
+    ;;
+  agent)
+    # Restore real TTY for the interactive guest OpenCode session.
+    exec 1>&3 2>&4
+    vm_cmd_agent "$vm_name"
     ;;
   down)
     vm_cmd_down "$vm_name"

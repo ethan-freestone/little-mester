@@ -77,7 +77,8 @@ The egress target is a loopback-only launcher proxy that rejects private/reserve
 and applies `.mester-egress`; it is not a general route to host loopback.
 3. cloud-init provisions the guest user, direct harness runtime, Docker/Compose, native
    auth prerequisites, proxy settings and the workspace mount.
-4. The host launches the selected harness directly in the guest (not in a container).
+4. `./lab-vm agent [name]` attaches the selected harness directly in the guest (not in a
+   container) to the invoking terminal.
    Guest-native provider login and browser callback forwarding are tracked in #45.
 5. The agent controls guest Docker/Compose for project services and tests. It may launch
    nested Little Mester VMs when nested virtualization is available and verified.

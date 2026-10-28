@@ -47,8 +47,28 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
-@test "guest agent image build preserves host workspace ownership" {
-  run grep -F -- '--build-arg LAB_UID=$(id -u) --build-arg LAB_GID=$(id -g)' "$REPO_ROOT/lib/vm/lifecycle.sh"
+@test "VM runtime installs OpenCode in the guest rather than building an agent container" {
+  run grep -F '_vm_install_guest_harness "$vm_dir"' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  [ "$status" -eq 0 ]
+  run grep -F 'npm install --global "@opencode/cli@$version"' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  [ "$status" -eq 0 ]
+  run grep -F 'exec opencode' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "guest OpenCode version must be pinned to semantic version" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  log() { echo "$*"; }
+  VM_OPENCODE_VERSION=latest
+  run _vm_install_guest_harness /nonexistent
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"must be a pinned semantic version"* ]]
+}
+
+@test "lab-vm exposes an interactive direct guest agent command" {
+  run grep -F 'vm_cmd_agent "$vm_name"' "$REPO_ROOT/lab-vm"
+  [ "$status" -eq 0 ]
+  run grep -F 'ssh -t' "$REPO_ROOT/lib/vm/lifecycle.sh"
   [ "$status" -eq 0 ]
 }
 
@@ -162,91 +182,6 @@ MOCK
   rm -rf "$vm_dir"
 }
 
-mock_guest_build() {
-  vm_dir="$(mktemp -d)"
-  LAB_DIR="$vm_dir/harness"
-  mkdir -p "$LAB_DIR/agent/node_modules" "$LAB_DIR/agent/.git" "$vm_dir/bin"
-  echo 'FROM python:3.12-slim' > "$LAB_DIR/agent/Dockerfile"
-  touch "$LAB_DIR/agent/node_modules/ignored" "$LAB_DIR/agent/.git/ignored"
-  TEST_PROFILE="$vm_dir/guest-profile"
-  cat > "$TEST_PROFILE" <<'PROFILE'
-export HTTP_PROXY=http://10.0.2.100:3128
-export HTTPS_PROXY=http://10.0.2.100:3128
-export http_proxy=http://10.0.2.100:3128
-export https_proxy=http://10.0.2.100:3128
-export NO_PROXY=localhost,127.0.0.1,10.0.2.100
-export no_proxy=localhost,127.0.0.1,10.0.2.100
-PROFILE
-  cat > "$vm_dir/bin/docker" <<'DOCKER'
-#!/bin/bash
-set -eu
-printf '%s\n' "$HTTP_PROXY" "$HTTPS_PROXY" "$http_proxy" "$https_proxy" "$NO_PROXY" "$no_proxy" > "$CAPTURE_ENV"
-printf '%s\n' "$@" > "$CAPTURE_ARGS"
-cat > "$CAPTURE_CONTEXT"
-echo 'mock Docker build output'
-exit "${MOCK_DOCKER_EXIT:-0}"
-DOCKER
-  chmod +x "$vm_dir/bin/docker"
-  log() { echo "$*"; }
-  vm_ssh() {
-    local command="${2/\/etc\/profile.d\/mester.sh/$TEST_PROFILE}"
-    # Deliberately no inherited host proxy variables or login-shell startup.
-    env -i PATH="$vm_dir/bin:/usr/bin:/bin" \
-      CAPTURE_ENV="$vm_dir/client-env" CAPTURE_ARGS="$vm_dir/build-args" \
-      CAPTURE_CONTEXT="$vm_dir/context.tar" MOCK_DOCKER_EXIT="${MOCK_DOCKER_EXIT:-0}" \
-      bash -c "$command"
-  }
-}
-
-@test "non-login image build loads client proxy env and forwards both build-arg cases" {
-  source "$REPO_ROOT/lib/vm/lifecycle.sh"
-  mock_guest_build
-  run _vm_build_agent_image "$vm_dir"
-  [ "$status" -eq 0 ]
-  [ "$(head -4 "$vm_dir/client-env" | sort -u)" = 'http://10.0.2.100:3128' ]
-  [ "$(tail -2 "$vm_dir/client-env" | sort -u)" = 'localhost,127.0.0.1,10.0.2.100' ]
-  for name in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy; do
-    grep -qx "$name" "$vm_dir/build-args"
-  done
-  tar -tf "$vm_dir/context.tar" > "$vm_dir/context-files"
-  grep -q 'Dockerfile' "$vm_dir/context-files"
-  ! grep -q 'ignored' "$vm_dir/context-files"
-  grep -q 'mock Docker build output' "$vm_dir/build.log"
-  rm -rf "$vm_dir"
-}
-
-@test "image build failure is logged and its original status survives tee" {
-  source "$REPO_ROOT/lib/vm/lifecycle.sh"
-  mock_guest_build
-  _vm_build_network_diagnostics() {
-    touch "$1/diagnostic-called"
-    echo 'network diagnostics captured'
-  }
-  MOCK_DOCKER_EXIT=37
-  run _vm_build_agent_image "$vm_dir"
-  [ "$status" -eq 37 ]
-  [[ "$output" == *"retry without --clean"* ]]
-  [[ "$output" == *"network diagnostics captured"* ]]
-  [ -f "$vm_dir/diagnostic-called" ]
-  grep -q 'mock Docker build output' "$vm_dir/build.log"
-  rm -rf "$vm_dir"
-}
-
-@test "build network diagnostics include guest and BuildKit RUN proxy probes" {
-  source "$REPO_ROOT/lib/vm/lifecycle.sh"
-  diagnostics="$(declare -f _vm_build_network_diagnostics)"
-  [[ "$diagnostics" == *'ip route'* ]]
-  [[ "$diagnostics" == *'ss -ltnp'* ]]
-  [[ "$diagnostics" == *'curl -sv --connect-timeout'* ]]
-  [[ "$diagnostics" == *'--pull=false --no-cache'* ]]
-  [[ "$diagnostics" == *'FROM python:3.12-slim'* ]]
-  [[ "$diagnostics" == *"open('/proc/net/route')"* ]]
-  [[ "$diagnostics" == *'proxy_tcp_errno='* ]]
-  [[ "$diagnostics" == *'proxy_http_status='* ]]
-  [[ "$diagnostics" == *'10.0.2.100:3128'* ]]
-  [[ "$diagnostics" == *'network-diagnostics.log'* ]]
-}
-
 @test "agent Dockerfile prints sanitized npm diagnostics when OpenCode install fails" {
   dockerfile="$REPO_ROOT/agent/Dockerfile"
   grep -Fq 'npm install -g --ignore-scripts @opencode/cli || {' "$dockerfile"
@@ -260,17 +195,6 @@ DOCKER
   [[ -f "$REPO_ROOT/agent/diagnose-opencode-install.cjs" ]]
   grep -Fq 'postinstall_source_begin' "$REPO_ROOT/agent/diagnose-opencode-install.cjs"
   grep -Fq 'exports: pkg.exports' "$REPO_ROOT/agent/diagnose-opencode-install.cjs"
-}
-
-@test "missing guest proxy profile blocks build instead of falling back to direct egress" {
-  source "$REPO_ROOT/lib/vm/lifecycle.sh"
-  mock_guest_build
-  rm "$TEST_PROFILE"
-  run _vm_build_agent_image "$vm_dir"
-  [ "$status" -ne 0 ]
-  [ ! -f "$vm_dir/build-args" ]
-  [ -s "$vm_dir/build.log" ]
-  rm -rf "$vm_dir"
 }
 
 @test "rootless Docker startup diagnostics are run before startup failure cleanup" {

@@ -436,8 +436,9 @@ is for decisions that outlive any single ticket.
 | Session-specific notes and outcomes | Conventions and non-goals |
 | | Distro-specific implementation caveats (as reference) |
 
-The `docs/VM-TESTING-PLAN.md` created during this session was moved into ticket-041 as
-AC; the file was deleted.
+Ticket-specific test setup and procedures live on the relevant ticket; do not duplicate
+them in separate test-plan documents. The ticket engine's current `tests` ledger records
+needed/created/cases, while a first-class planned test-plan field is tracked by #51.
 
 #### C.9.10 Log rotation — last 5 runs in `.mester/logs/` (2026-10-27)
 

@@ -115,7 +115,7 @@ The `vm up` command:
 5. Starts the loopback egress proxy, virtiofsd, and QEMU with KVM (or TCG fallback)
 6. Waits for SSH to become available
 7. Confirms the guest Docker daemon is running rootless
-8. Streams the repository's `agent/` build context into the guest and builds `little-mester-agent`
+8. Installs the pinned OpenCode CLI and syncs its config/plugins into the guest OS (no agent container)
 
 **CPU-only hosts:** The same command works. You'll see:
 
@@ -134,6 +134,7 @@ This is expected. The VM will be slower but fully functional.
 ```bash
 ./lab-vm up                  # Start the VM (idempotent)
 ./lab-vm status              # Check if running, show containers
+./lab-vm agent               # Run OpenCode directly in the guest TUI
 ./lab-vm ssh                 # SSH into the VM
 ./lab-vm down                # Stop and remove the VM
 ./lab-vm stop                # Teardown containers + stop VM
@@ -170,7 +171,7 @@ The `check_workspace()` guard runs on the host **before** the workspace is expor
 | **No host filesystem access** | The guest has an isolated writable qcow2 overlay; the selected workspace is its only host filesystem export |
 | **Model API via guestfwd** | Ollama (`:11434`) and llama.cpp (`:8080`) are reachable at `10.0.2.100` from inside the VM |
 | **Egress proxy** | HTTP(S) outbound goes through `10.0.2.100:3128` (allowlist enforcement — #43) |
-| **Rootless Docker** | Docker daemon runs as user `mester` inside the VM; containers cannot escape to VM root |
+| **Guest authority** | OpenCode runs directly as `mester`; it can use guest Docker/Compose and administer the guest. The outer VM is the host boundary. |
 | **Per-VM SSH keys** | Each VM has its own key pair under `.mester/vm/<name>/` |
 
 ---
@@ -178,7 +179,7 @@ The `check_workspace()` guard runs on the host **before** the workspace is expor
 ## 5. Teardown and cleanup
 
 ```bash
-# Full teardown: containers + VM
+# Destructive: stop guest workloads and remove the VM overlay/state
 ./lab-vm stop
 
 # Remove VM artifacts (overlay disk, seed ISO, keys)
@@ -237,6 +238,9 @@ docker info
 journalctl -u cloud-init --no-pager -n 50
 ```
 
+To start the direct guest agent rather than a shell, use `./lab-vm agent`. This requires
+the VM to be running and attaches the OpenCode TUI to the current terminal.
+
 ### `Could not open guest forwarding device`
 
 This was caused by the old invalid destination `guestfwd=...-10.0.2.2:PORT`. The runner now uses QEMU's `cmd:` character-device form with `socat`, so optional host model services need not be listening when QEMU starts. Confirm the current command includes `guestfwd=...-cmd:socat` with `--debug`.
@@ -252,16 +256,15 @@ ss -tlnp | grep "$(cat .mester/vm/<name>/ssh_port)"
 
 ---
 
-## 7. Migration from host-Docker mode
+## 7. Migration status
 
-If you've been using the current host-Docker mode:
-
-1. **Stop the old setup:** `./lab stop`
-2. **Install VM prerequisites** (Section 1)
-3. **Create base disk:** `./lab-vm base`
-4. **Start VM:** `./lab-vm up --workspace /path/to/project`
-5. The host no longer runs the agent container (A8). All execution is inside the VM.
-6. Existing `compose.yaml` and workspace files work unchanged — they're now managed by the in-VM rootless Docker daemon.
+VM mode is still under acceptance testing. **Do not stop or replace the working
+host-Docker session yet.** The VM currently provisions guest Docker and the launcher now
+installs and offers to launch OpenCode directly in the guest, but direct TUI, provider
+auth, Compose feedback, permissions, nested virtualization and full lifecycle gates still
+need live verification.
+The current sequence and stop conditions are tracked on tickets #41–#45. Integration into
+`./lab` and retiring host-Docker mode happen only after those gates pass.
 
 ---
 
@@ -269,7 +272,7 @@ If you've been using the current host-Docker mode:
 
 - **Architecture:** [`vm-architecture.md`](vm-architecture.md)
 - **ChatGPT authentication:** [`docs/chatgpt-auth.md`](chatgpt-auth.md)
-- **Decisions:** [`DECISIONS.md` §C.8](DECISIONS.md#c8-vm-harness-topology-transport-and-isolation-2026-10-26)
+- **Decisions:** [`DECISIONS.md` §C.8](DECISIONS.md#c8-vm-harness-topology-transport-and-isolation-current)
 - **Security:** [`../SECURITY.md`](../SECURITY.md)
 - **Epic:** [#35](tickets/ticket-035.json)
 - **Provisioning:** [#41](tickets/ticket-041.json) (this document satisfies A1 and A8)
