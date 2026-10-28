@@ -241,11 +241,14 @@ DOCKER
 
 @test "agent Dockerfile prints sanitized npm diagnostics when OpenCode install fails" {
   dockerfile="$REPO_ROOT/agent/Dockerfile"
-  grep -Fq 'npm install -g @opencode/cli || {' "$dockerfile"
+  grep -Fq 'npm install -g --ignore-scripts @opencode/cli || {' "$dockerfile"
   grep -Fq '/root/.npm/_logs/*-debug-0.log' "$dockerfile"
   grep -Fq 'grep -viE '\''authorization|_auth|token|password'\''' "$dockerfile"
   grep -Fq 'tail -n 160' "$dockerfile"
   grep -Fq 'exit "$status"' "$dockerfile"
+  grep -Fq 'node /tmp/diagnose-opencode-install.cjs "$npm_root"' "$dockerfile"
+  grep -Fq 'node ./postinstall.mjs' "$dockerfile"
+  [[ -f "$REPO_ROOT/agent/diagnose-opencode-install.cjs" ]]
 }
 
 @test "missing guest proxy profile blocks build instead of falling back to direct egress" {
