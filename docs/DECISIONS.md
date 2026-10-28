@@ -335,6 +335,27 @@ engineering invariants are in `docs/tickets/architecture/DECISIONS.md` §K.
 
 ---
 
+## Licensing — standard AGPL (2026-10-28)
+
+**Decision:** Replace the root MIT licence and the MCP package's ISC declaration
+with standard **GNU Affero General Public License version 3 only**
+(`AGPL-3.0-only`). There are no additional restrictions, mandatory
+payments, or separate commercial-licensing terms in this change.
+
+- Preserve Ethan Freestone's 2026 copyright notice in the project and module docs.
+- Use the complete, unmodified AGPL text in root `LICENSE`. Keep an identical copy
+  in `little-mester-mcp/LICENSE` because npm packages must carry their own licence
+  document when distributed independently of this repository.
+- Align `package.json` and the root package entry in `package-lock.json` with the
+  SPDX identifier. Leave third-party dependency licences unchanged.
+- Explain commercial use/resale, distribution and modified-network-version source
+  obligations, private local modifications, and independent project output in the
+  README. Existing MIT/ISC grants for previously published versions remain valid.
+- Extend `npm run check:package` to check metadata, identical licence copies, and
+  inclusion of `LICENSE` in the npm tarball before considering the change verified.
+
+---
+
 ## D. Fields & categories — what each means and when to use it
 
 > This section resolves the "project manager's question": **what does each category field actually mean, what are they FOR, and when should you use which?**
@@ -1083,4 +1104,3 @@ standalone TUI through a pty and asserts Ctrl+D is inert, `yq` types with the di
 opens the dialog, Esc/N/Ctrl+C cancel without exiting, and q exits. It passed on OpenCode 2.1.4 in
 the agent container; the run is recorded on ticket #37. The image must be rebuilt/restarted for the
 baked `/etc/opencode` copy to replace any stale running copy.
-
