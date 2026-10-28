@@ -744,6 +744,40 @@ verify `systemctl --user is-enabled docker`, active user service, rootless
 `docker info`, and only then expect the image build (which remains a separate
 pending gate).
 
+#### C.9.19 RootlessKit needs verified subordinate ID mappings (2026-10-28)
+
+**Sixth owner retry:** On the existing overlay, SSH and cloud-init were clean;
+the new enable/start call ran. Captured diagnostics prove this is not a service
+enablement or linger failure: `Linger=yes`, `user@1000.service` is active and
+Ready, `/run/user/1000` and its bus exist, Docker is enabled with the expected
+`default.target.wants/docker.service` symlink. Docker repeatedly exits in
+RootlessKit with `failed to compute uid/gid map: no subuid ranges found for user
+1000 ("mester")`; the socket is absent and the image build was not reached.
+The previous boot-enable hypothesis is disproved.
+
+The original provisioner did write `mester:100000:65536` into `/etc/subuid` and
+`/etc/subgid`, but those current files were not printed in this attempt's
+diagnostic output. Therefore the precise reason RootlessKit cannot see the
+entries remains unknown. QEMU, rootless diagnostics, SSH scan and launcher logs
+are preserved under `.mester/logs/vm-host-rootless-subuid-20261028_133440/`.
+
+**Correction:** Factor subordinate range setup into a generated helper that
+checks the exact user/range in both files, adds missing values with `usermod`
+only when no other account overlaps the reserved range, and validates the
+result before Docker setup. The host runs that same helper over the existing
+guest before enabling Docker, allowing a non-clean retry. Failure diagnostics
+now include account resolution, file modes/owners, full subuid/subgid contents
+and `getsubids` output when available. This is fail-closed: do not replace a
+conflicting range, fall back to rootful Docker or broaden network access.
+
+**Next gate:** Commit the change, then retry without `--clean`:
+`./lab-vm up --debug --unsafe-recurse --auto-accept`. This should ensure the
+reserved subordinate mappings before starting the enabled user service. If it
+fails, preserve/return `rootless-diagnostics.log`, especially the exact
+`/etc/subuid` and `/etc/subgid` lines, plus the service journal; do not clean or
+repeat until those values and any overlap are reviewed. Success still requires
+rootless `docker info` and the agent image build.
+
 ---
 
 ### C.8 VM harness topology, transport and isolation (2026-10-26)

@@ -3,8 +3,50 @@
 # this ISO. All outbound downloads use the host's explicit egress proxy.
 set -euo pipefail
 
+vm_cloud_init_subid_script() {
+  cat <<'SUBIDS'
+#!/usr/bin/env bash
+set -euo pipefail
+user="${1:-mester}"
+start=100000
+count=65536
+end=$((start + count - 1))
+subuid_file="${MESTER_SUBUID_FILE:-/etc/subuid}"
+subgid_file="${MESTER_SUBGID_FILE:-/etc/subgid}"
+
+ensure_range() {
+  local file="$1" option="$2" label="$3"
+  if [[ ! -e "$file" ]]; then
+    install -m 0644 /dev/null "$file"
+  fi
+  if awk -F: -v user="$user" -v start="$start" -v count="$count" \
+      '$1 == user && $2 == start && $3 == count { found=1 } END { exit !found }' "$file"; then
+    return 0
+  fi
+  if awk -F: -v user="$user" -v start="$start" -v end="$end" \
+      '$1 != user && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { last=$2+$3-1; if ($2 <= end && last >= start) { print; conflict=1 } } END { exit !conflict }' "$file"; then
+    echo "ERROR: cannot allocate ${label} range ${start}-${end} to ${user}; it overlaps another account:" >&2
+    awk -F: -v user="$user" -v start="$start" -v end="$end" \
+      '$1 != user && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { last=$2+$3-1; if ($2 <= end && last >= start) print }' "$file" >&2
+    return 1
+  fi
+  usermod "$option" "${start}-${end}" "$user"
+  if ! awk -F: -v user="$user" -v start="$start" -v count="$count" \
+      '$1 == user && $2 == start && $3 == count { found=1 } END { exit !found }' "$file"; then
+    echo "ERROR: ${label} range ${start}-${end} for ${user} was not recorded in ${file}" >&2
+    return 1
+  fi
+}
+
+ensure_range "$subuid_file" --add-subuids UID
+ensure_range "$subgid_file" --add-subgids GID
+SUBIDS
+}
+
 vm_cloud_init_user_data() {
   local vm_name="$1" uid="$2" gid="$3" ssh_pubkey="$4"
+  local subid_script
+  subid_script="$(vm_cloud_init_subid_script)"
   cat <<USERDATA
 #cloud-config
 hostname: ${vm_name}
@@ -52,6 +94,10 @@ write_files:
         echo "ERROR: guest kernel \$(uname -r) cannot load nf_tables; rootless Docker requires it. Check matching guest kernel modules before retrying." >&2
         exit 1
       fi
+  - path: /usr/local/sbin/mester-configure-subids
+    permissions: '0755'
+    content: |
+$(printf '%s\n' "$subid_script" | sed 's/^/      /')
   - path: /usr/local/sbin/mester-provision
     permissions: '0755'
     content: |
@@ -77,10 +123,8 @@ write_files:
       apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin docker-ce-rootless-extras
       systemctl disable --now docker.service docker.socket containerd.service
       rm /usr/sbin/policy-rc.d
-      # Subordinate IDs must not overlap the real user's UID/GID.
-      sed -i '/^mester:/d' /etc/subuid /etc/subgid
-      echo 'mester:100000:65536' >> /etc/subuid
-      echo 'mester:100000:65536' >> /etc/subgid
+      # Configure and validate subordinate mappings before rootless Docker setup.
+      /usr/local/sbin/mester-configure-subids mester
       /usr/local/sbin/mester-load-netfilter
       loginctl enable-linger mester
       systemctl start user@${uid}.service

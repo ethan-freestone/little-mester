@@ -89,6 +89,12 @@ loginctl show-user mester -p Linger -p State -p RuntimePath
 systemctl status "user@${uid}.service" --no-pager
 ls -ld "/run/user/${uid}" "/run/user/${uid}/bus" "/run/user/${uid}/docker.sock"
 test -S "/run/user/${uid}/docker.sock"; echo "docker_socket_status=$?"
+echo '=== subordinate ID configuration ==='
+getent passwd mester
+getent group mester
+stat -c '%a %U:%G %n' /etc/subuid /etc/subgid
+cat -n /etc/subuid /etc/subgid
+if command -v getsubids >/dev/null 2>&1; then getsubids mester; else echo 'getsubids command unavailable'; fi
 echo '=== rootless Docker user service ==='
 sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" systemctl --user is-enabled docker; echo "docker_enabled_status=$?"
 sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" systemctl --user status docker --no-pager
@@ -105,6 +111,7 @@ GUEST_DIAGNOSTICS
 _vm_ensure_rootless_docker() {
   local vm_dir="$1" uid
   uid="$(id -u)"
+  vm_cloud_init_subid_script | vm_ssh "$vm_dir" "sudo bash -s -- mester" || return $?
   vm_ssh "$vm_dir" "sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user enable --now docker"
 }
 

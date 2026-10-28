@@ -234,9 +234,13 @@ DOCKER
   diagnostics="$(declare -f _vm_rootless_diagnostics)"
   [[ "$diagnostics" == *"loginctl show-user mester -p Linger -p State -p RuntimePath"* ]]
   [[ "$diagnostics" == *"systemctl --user is-enabled docker"* ]]
+  [[ "$diagnostics" == *"cat -n /etc/subuid /etc/subgid"* ]]
+  [[ "$diagnostics" == *"getsubids mester"* ]]
   [[ "$diagnostics" == *"journalctl --user -u docker -b"* ]]
   [[ "$diagnostics" == *'rootless-diagnostics.log'* ]]
   body="$(declare -f vm_cmd_up)"
   [[ "$body" == *'_vm_rootless_diagnostics "$vm_dir"'* ]]
   [[ "$body" == *'ERROR: guest Docker is not running rootless'* ]]
+  ensure="$(declare -f _vm_ensure_rootless_docker)"
+  [[ "$ensure" == *'vm_cloud_init_subid_script | vm_ssh'* ]]
 }
