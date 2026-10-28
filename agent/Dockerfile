@@ -33,13 +33,7 @@ RUN npm install -g --ignore-scripts @opencode/cli || { \
  && node /tmp/diagnose-opencode-install.cjs "$npm_root" \
  && (cd "$npm_root/@opencode/cli" && node ./postinstall.mjs) || { \
       status=$?; \
-      echo "OpenCode postinstall failed (status ${status}); sanitized npm diagnostic tail follows:"; \
-      log="$(ls -t /root/.npm/_logs/*-debug-0.log 2>/dev/null | head -n 1)"; \
-      if [ -n "$log" ]; then \
-        grep -viE 'authorization|_auth|token|password' "$log" | tail -n 160; \
-      else \
-        echo "No npm debug log found under /root/.npm/_logs"; \
-      fi; \
+      echo "OpenCode postinstall failed (status ${status}); platform package files and postinstall source are printed above."; \
       exit "$status"; \
     } \
  && rm /tmp/diagnose-opencode-install.cjs \

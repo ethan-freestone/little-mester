@@ -248,7 +248,10 @@ DOCKER
   grep -Fq 'exit "$status"' "$dockerfile"
   grep -Fq 'node /tmp/diagnose-opencode-install.cjs "$npm_root"' "$dockerfile"
   grep -Fq 'node ./postinstall.mjs' "$dockerfile"
+  grep -Fq 'platform package files and postinstall source are printed above' "$dockerfile"
   [[ -f "$REPO_ROOT/agent/diagnose-opencode-install.cjs" ]]
+  grep -Fq 'postinstall_source_begin' "$REPO_ROOT/agent/diagnose-opencode-install.cjs"
+  grep -Fq 'exports: pkg.exports' "$REPO_ROOT/agent/diagnose-opencode-install.cjs"
 }
 
 @test "missing guest proxy profile blocks build instead of falling back to direct egress" {
