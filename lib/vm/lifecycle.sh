@@ -76,6 +76,38 @@ _vm_build_agent_image() {
   fi
 }
 
+_vm_rootless_diagnostics() {
+  local vm_dir="$1" uid
+  uid="$(id -u)"
+  log "Capturing rootless Docker startup diagnostics before VM cleanup..."
+  vm_ssh "$vm_dir" "sudo bash -s -- '$uid'" <<'GUEST_DIAGNOSTICS' 2>&1 | tee "$vm_dir/rootless-diagnostics.log" || true
+set +e
+uid="$1"
+echo '=== identity and runtime ==='
+id; id mester
+loginctl show-user mester -p Linger -p State -p RuntimePath
+systemctl status "user@${uid}.service" --no-pager
+ls -ld "/run/user/${uid}" "/run/user/${uid}/bus" "/run/user/${uid}/docker.sock"
+test -S "/run/user/${uid}/docker.sock"; echo "docker_socket_status=$?"
+echo '=== rootless Docker user service ==='
+sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" systemctl --user is-enabled docker; echo "docker_enabled_status=$?"
+sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" systemctl --user status docker --no-pager
+sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" systemctl --user cat docker
+echo '=== recent Docker user-service journal ==='
+sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" journalctl --user -u docker -b --no-pager -n 100
+echo '=== linger and enablement files ==='
+loginctl show-user mester -p Linger -p RuntimePath
+ls -la /home/mester/.config/systemd/user/default.target.wants/
+GUEST_DIAGNOSTICS
+  log "Rootless Docker diagnostics saved to $vm_dir/rootless-diagnostics.log"
+}
+
+_vm_ensure_rootless_docker() {
+  local vm_dir="$1" uid
+  uid="$(id -u)"
+  vm_ssh "$vm_dir" "sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user enable --now docker"
+}
+
 # ─── vm up: provision and start VM ──────────────────────────────────
 vm_cmd_up() {
   local vm_name="${1:-default}"
@@ -180,10 +212,16 @@ vm_cmd_up() {
   # SSH may become ready long before first-boot package installation finishes.
   _vm_wait_for_cloud_init "$vm_dir" || return $?
   vm_ssh "$vm_dir" 'test -f /var/lib/mester-provisioned && mountpoint -q /workspace' || return 1
-  vm_ssh "$vm_dir" "docker -H unix:///run/user/$(id -u)/docker.sock info --format '{{json .SecurityOptions}}'" | grep -q rootless || {
-    log "ERROR: guest Docker is not running rootless"
+  if ! _vm_ensure_rootless_docker "$vm_dir"; then
+    log "ERROR: could not enable/start the guest rootless Docker user service"
+    _vm_rootless_diagnostics "$vm_dir"
     return 1
-  }
+  fi
+  if ! vm_ssh "$vm_dir" "docker -H unix:///run/user/$(id -u)/docker.sock info --format '{{json .SecurityOptions}}'" | grep -q rootless; then
+    log "ERROR: guest Docker is not running rootless"
+    _vm_rootless_diagnostics "$vm_dir"
+    return 1
+  fi
 
   # Build the harness image from the harness, not an arbitrary workspace Dockerfile.
   # Transfer only its build context; the host checkout is not another guest mount.

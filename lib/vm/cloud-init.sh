@@ -90,7 +90,9 @@ write_files:
       chown -R mester:mester /home/mester/.config
       sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user daemon-reload
       sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus dockerd-rootless-setuptool.sh install
-      sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user restart docker
+      # Restart only starts the daemon in this boot. Ensure the lingered user
+      # manager starts it on every subsequent VM boot too.
+      sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user enable --now docker
       touch /var/lib/mester-provisioned
 runcmd:
   - [bash, /usr/local/sbin/mester-provision]

@@ -48,6 +48,8 @@ class CloudInitTests(unittest.TestCase):
         self.assertIn("kmod iptables", provision)
         self.assertNotIn("--skip-iptables", provision)
         self.assertNotIn("--iptables=false", provision)
+        self.assertIn("systemctl --user enable --now docker", provision)
+        self.assertNotIn("systemctl --user restart docker", provision)
 
     def test_generated_helper_loads_nf_tables_and_propagates_failure(self):
         helper = self.content("/usr/local/sbin/mester-load-netfilter")

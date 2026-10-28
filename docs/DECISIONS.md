@@ -702,6 +702,48 @@ Commit the reviewed implementation/docs/tests and engine-produced ticket/audit
 changes, then record the implementation commit through MCP. No push, host
 container recreation or VM start is implied by this authorization.
 
+#### C.9.18 Rootless Docker must be enabled across VM boots (2026-10-28)
+
+**Fifth owner retry:** The non-clean `./lab-vm up --debug --unsafe-recurse
+--auto-accept` reused the provisioned overlay, SSH became ready after five
+probes, and cloud-init reported `done` with empty errors. The rootless Docker
+socket `/run/user/1000/docker.sock` was absent; the launcher stopped before the
+agent image build, so `build.log` is correctly absent. QEMU's current log ends
+with termination by the launcher's EXIT cleanup. The host's `provision.log` and
+cloud-init JSON timestamps were 12:58 and belong to the previous run; do not
+use them as this attempt's diagnostics. Current QEMU/keyscan evidence is
+preserved under `.mester/logs/vm-host-rootless-attempt5-20261028_132400/`.
+
+**Diagnosis status:** This was a reboot of a previously provisioned overlay,
+not a new cloud-init installation. Existing provisioning ran
+`systemctl --user restart docker`, which proves only that it was started in the
+provisioning boot; the script did not explicitly enable the user service for
+later boots. That is a plausible explanation, not a confirmed root cause:
+there is no live `systemctl --user is-enabled`, user journal, linger/runtime or
+socket diagnostic from this attempt, and the guest was stopped during failure
+cleanup. Do not claim the failure is resolved until a retry verifies service
+enablement and rootless `docker info`.
+
+**Correction and evidence collection:** Provisioning now uses
+`systemctl --user enable --now docker`. On every VM start the host also issues
+that idempotent command after cloud-init/workspace checks, so an already
+provisioned overlay can be repaired without a clean reprovision. If enabling
+or the rootless API check fails, collect `loginctl` linger/runtime state,
+`user@UID.service`, `/run/user/UID` and socket state, Docker user-service
+enabled/status/unit data, and the current-boot user journal to
+`rootless-diagnostics.log` before the startup EXIT trap stops QEMU. Do not
+silently fall back to rootful Docker or loosen guest networking.
+
+**Next gate:** After committing this targeted change, retry on CachyOS with
+`./lab-vm up --debug --unsafe-recurse --auto-accept` and **without `--clean`**.
+The existing overlay contains the Docker user unit; the new host-side
+`enable --now` repairs its boot enablement if that was the issue. If it fails,
+stop and return the first error plus `rootless-diagnostics.log` and the latest
+QEMU log. Do not clean/stop/down before preserving diagnostics. If it succeeds,
+verify `systemctl --user is-enabled docker`, active user service, rootless
+`docker info`, and only then expect the image build (which remains a separate
+pending gate).
+
 ---
 
 ### C.8 VM harness topology, transport and isolation (2026-10-26)

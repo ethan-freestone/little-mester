@@ -43,7 +43,8 @@ If a tool fails or is unavailable, report the error — do not fall back to dire
 - **2026-10-28 host proof (partial)**: KVM boot, SSH, and proxied package downloads succeeded at `7b54d26`; cloud-init then failed because rootless Docker required `nf_tables`. The fix explicitly installs kmod/iptables, loads/persists guest nf_tables, and installs Docker proxy/CIDR settings before first service start. Clean host retest remains required.
 - **Second host attempt (12:05–12:06 UTC)**: The patched script successfully installed/started rootless Docker 29.9.2 and touched the completion marker. Launcher still rejected cloud-init's nonzero result despite `status: done`; QEMU log shows an early schema-validation warning. Exact failing field/exit code remain unknown. Updated diagnostics capture numeric status, long/JSON status and `cloud-init schema --system`; next retry must preserve/reuse overlay, **without --clean**, to obtain those details. See #41 and docs/DECISIONS.md §C.9.14–15.
 - **Third host attempt (12:55 UTC; supersedes diagnostic-only handoff above)**: Confirmed exit 2 and schema error `groups.0.mester: [] is too short`. Generator now uses string group `mester`; regression coverage added and CI validates production-rendered YAML using cloud-init CLI. Old overlay caches invalid first-boot data, so next acceptance run requires **--clean**, after evidence archival. Warm guest cloud-init finished at 7.62s but SSH discovery took ~2m40s; single-type bounded keyscan replaces multi-key/pipeline probe and retains diagnostics, with actual speed improvement still pending host proof.
-- **Fourth host attempt (13:08 UTC; current gate)**: SSH ready in ~10s, cloud-init clean with no recoverable errors, rootless/workspace checks passed. Agent image build failed resolving auth.docker.io during anonymous token retrieval. Build now explicitly sources guest proxy profile for the non-login Docker CLI/auth helper and forwards all six upper/lower-case build proxy args; build output/status retained in build.log. Owner approved adding npmjs.org to the project allowlist. Next retry is **without --clean** because installed guest state is good. See #41 and docs/DECISIONS.md §C.9.17; full image/lifecycle/auth/permissions remain pending.
+- **Fourth host attempt (13:08 UTC; superseded)**: SSH ready in ~10s, cloud-init clean with no recoverable errors, rootless/workspace checks passed. Agent image build failed resolving auth.docker.io during anonymous token retrieval. Build now explicitly sources guest proxy profile for the non-login Docker CLI/auth helper and forwards all six upper/lower-case build proxy args; build output/status retained in build.log. Owner approved adding npmjs.org to the project allowlist. See #41 and docs/DECISIONS.md §C.9.17; full image/lifecycle/auth/permissions remain pending.
+- **Fifth host attempt (13:24 UTC)**: Non-clean retry reused the overlay; SSH ready after five probes and cloud-init reported done/errors empty. Rootless Docker socket `/run/user/1000/docker.sock` was absent, so launcher failed before image build (`build.log` absent as expected). Launcher cleanup stopped QEMU. Current QEMU/keyscan logs archived under `.mester/logs/vm-host-rootless-attempt5-20261028_132400/`; old provision/status files are historical and must not be treated as attempt-5 diagnostics. Likely boot enablement gap is not yet confirmed. Provisioning now explicitly enables Docker, and every boot attempts idempotent `enable --now`; failures collect user-manager/linger/runtime/socket/service/journal evidence before cleanup. Next attempt is **without --clean**; see #41 and DECISIONS C.9.18.
 - **Ticket #48**: AC updated to include `-y`/`--yes` (A7-A8)
 - **Ticket #41**: Active VM provisioning/lifecycle; partial host evidence is not a full pass. Exact retry and handoff steps live in its test ledger. Decisions/backtracks: docs/DECISIONS.md §C.9.11–13.
 
@@ -55,7 +56,7 @@ If a tool fails or is unavailable, report the error — do not fall back to dire
 - #50: launcher argument/mode fixes have mock regression coverage, but this running v2.2.0 container already has `opencode --auto` and the reported “prompt” UI is unresolved. Do not claim the UI bug fixed from argv tests.
 - This container has no /dev/kvm or Docker daemon. Host testing must be coordinated, never simulated as a passing lifecycle result.
 
-### Immediate next step: Retry the proxied build without --clean
+### Immediate next step: Verify rootless Docker boot enablement without --clean
 
 Read #41/#45/#50 through MCP before asking the owner to exit/rebuild/retry.
 Export the current container login privately using docs/chatgpt-auth.md **before
@@ -74,9 +75,9 @@ files may be historical and must not be mistaken for this run's build result.
 git status --short
 git log -1 --oneline
 
-# 2. Reuse installed overlay and retry image build with explicit CLI proxy env
+# 2. Reuse installed overlay; startup now enables/starts rootless Docker
 ./lab-vm up --debug --unsafe-recurse --auto-accept
-# Stop on any new failure; return the error and saved diagnostics before retry.
+# Stop on any failure; return the error and rootless-diagnostics.log before retry.
 
 # 4. Verify
 ./lab-vm status

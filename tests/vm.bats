@@ -228,3 +228,15 @@ DOCKER
   [ -s "$vm_dir/build.log" ]
   rm -rf "$vm_dir"
 }
+
+@test "rootless Docker startup diagnostics are run before startup failure cleanup" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  diagnostics="$(declare -f _vm_rootless_diagnostics)"
+  [[ "$diagnostics" == *"loginctl show-user mester -p Linger -p State -p RuntimePath"* ]]
+  [[ "$diagnostics" == *"systemctl --user is-enabled docker"* ]]
+  [[ "$diagnostics" == *"journalctl --user -u docker -b"* ]]
+  [[ "$diagnostics" == *'rootless-diagnostics.log'* ]]
+  body="$(declare -f vm_cmd_up)"
+  [[ "$body" == *'_vm_rootless_diagnostics "$vm_dir"'* ]]
+  [[ "$body" == *'ERROR: guest Docker is not running rootless'* ]]
+}

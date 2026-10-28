@@ -101,6 +101,11 @@ The next #41 retry uses **no `--clean`**: installed guest state is valid. Do not
 repeat provisioning just for a host-side build-command fix. The owner also approved
 `npmjs.org` in the manifest for OpenCode's npm installation. Single-type SSH probing
 retains `ssh-keyscan.log`; warm-restart performance still needs measurement.
+The fifth non-clean restart reached SSH and clean cloud-init, but the rootless
+Docker socket was absent after reboot. Boot-time service enablement is a likely
+cause, not yet confirmed; the next retry explicitly enables/starts the user
+service and captures user-manager/service/journal diagnostics before cleanup.
+Retry without `--clean`; follow #41 and DECISIONS C.9.18.
 Follow ticket #41's current test ledger before `--clean`,
 `stop`, or `down` (all can delete guest state). Failure diagnostics are saved to
 `.mester/vm/<name>/provision.log`, `cloud-init-status.json` and
