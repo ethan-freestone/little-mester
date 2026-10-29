@@ -48,14 +48,15 @@ capabilities, not proof against a QEMU/KVM or host-kernel vulnerability.
   container's network; treat it as documentation, not a control. `--isolated` disables
   container egress.
 - **VM mode:** QEMU uses `restrict=on`. Direct guest Internet and general host-gateway
-  access are blocked; approved HTTP(S) egress goes through the host loopback proxy, which
-  enforces the selected workspace's `.mester-egress` domain list and rejects private,
-  reserved, link-local, multicast, and mixed public/non-public DNS results. This control is
-  separate from host-Docker egress and remains subject to the pending live acceptance gates
-  in #41/#43.
-  The manifest permits the exact `api.openai.com` hostname for ChatGPT model requests; it
-  does not permit `openai.com` broadly. A running VM proxy must reload the manifest before
-  the new rule takes effect.
+  access are blocked; public HTTP(S) egress goes through the host loopback proxy. The proxy
+  rejects private, reserved, link-local, multicast, mixed public/non-public DNS results, and
+  host-local/directly connected networks even when a hostname resolves to a public address;
+  IPv4-embedded IPv6 destinations are normalized before checks. On Linux, route tables are
+  inspected for each proxy connection and unreadable or malformed route data fails closed.
+  `.mester-egress` can disable VM proxy egress with `permission=false`; a blank
+  `allowed_domains` allows public HTTP(S) hostnames, not private IPs or arbitrary protocols.
+  This control is separate from host-Docker egress and remains subject to live acceptance
+  gates in #41/#43. A running VM proxy must reload the manifest after changes.
 - **Host-Docker setup pulls use egress too.** `ollama-pull` and `llamacpp-pull` run only
   during `./lab setup` and use the `egress` network; they are removed afterwards.
 - **Host-Docker mode:** services do not publish ports to the host; agent/workspace

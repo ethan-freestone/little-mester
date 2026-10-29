@@ -577,10 +577,11 @@ workspace is shared with virtiofs; model servers stay on the host behind explici
 5. **Credentials stay out.** Host keys, cloud keys, git credentials and the owner's
    `~/.ssh` are never copied into the VM, the image, or a ticket. Runtime secrets come from
    a gitignored source.
-6. **Egress is mediated.** The VM has no general host route. Internet access goes through
-   the allowlisting proxy, and `.mester-egress` `allowed_domains` is enforced there rather
-   than parsed and ignored. A blank list keeps the documented allow-all behaviour at the
-   domain level; protocol coverage is a separate, explicit decision.
+6. **Egress is mediated.** The VM has no general host route. Public HTTP(S) access goes
+   through the proxy; a blank `.mester-egress` `allowed_domains` permits public hostnames,
+   while private/reserved addresses, mixed DNS, and the host's local/directly connected
+   networks are denied before connect. A populated list narrows the public destinations.
+   Non-HTTP protocols and DNS outside the proxy remain denied.
 7. **Lifecycle is explicit and recursion-safe.** Cleanup must not silently destroy a live
    agent/test loop, nested VM state or evidence. Persistence/reset semantics require
    explicit lifecycle behavior and acceptance tests.

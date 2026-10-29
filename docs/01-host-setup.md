@@ -171,7 +171,7 @@ The `check_workspace()` guard runs on the host **before** the workspace is expor
 | **Workspace isolation** | Only the single directory passed to `./lab-vm` is exported via `virtiofsd` |
 | **No host filesystem access** | The guest has an isolated writable qcow2 overlay; the selected workspace is its only host filesystem export |
 | **Optional model API via guestfwd** | A configured local API endpoint is intended to be reachable at one explicit `10.0.2.100:<port>` guest address; current fixed-port prototype is still under test |
-| **Egress proxy** | HTTP(S) outbound goes through `10.0.2.100:3128` (allowlist enforcement — #43) |
+| **Egress proxy** | Public HTTP(S) goes through `10.0.2.100:3128`; QEMU direct networking remains disabled and host/private networks are denied (#43) |
 | **Guest authority** | OpenCode runs directly as `mester`; it can use guest Docker/Compose and administer the guest. The outer VM is the host boundary. |
 | **Per-VM SSH keys** | Each VM has its own key pair under `.mester/vm/<name>/` |
 

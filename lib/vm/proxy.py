@@ -4,7 +4,8 @@
 The selected workspace manifest is loaded at startup and can be safely reloaded
 with SIGHUP without rebinding the listener. No shell evaluation. CONNECT is
 restricted to 443; plain HTTP to 80. Local model APIs use separate QEMU
-guestfwd channels; approved public provider APIs may use this proxy.
+guestfwd channels; public HTTP(S) uses this proxy, which denies non-public and
+host-local/directly connected destinations.
 """
 import argparse
 import ipaddress
@@ -17,6 +18,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
+
+_NAT64_WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
 
 
 def policy(path):
@@ -69,19 +72,145 @@ class PolicyStore:
             self._policy = current
 
 
+def _policy_address(address):
+    """Normalize IPv4-embedding IPv6 forms before applying destination policy."""
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            return address.ipv4_mapped
+        elif address.sixtofour is not None or address.teredo is not None:
+            return None
+        elif address in _NAT64_WELL_KNOWN_PREFIX:
+            return ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+    return address
+
+
 def _is_public_unicast(address):
     # Some Python versions do not consistently inherit IPv4 classification
-    # for IPv4-mapped IPv6 addresses. Apply the IPv4 policy to the mapped value.
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-        address = address.ipv4_mapped
-    return address.is_global and not address.is_multicast
+    # for IPv4-mapped IPv6 addresses, so classify their embedded IPv4 value.
+    address = _policy_address(address)
+    return address is not None and address.is_global and not address.is_multicast
 
 
-def connect_public(host, port):
+def _host_networks_from_proc(route_text, ipv6_route_text, ipv6_addresses_text, fib_trie_text):
+    """Return host-local and directly connected networks from Linux proc tables."""
+    networks = set()
+
+    route_lines = route_text.splitlines()
+    if not route_lines or not {"Iface", "Destination", "Gateway", "Flags", "Mask"}.issubset(
+        set(route_lines[0].split())
+    ):
+        raise PermissionError("could not parse host IPv4 route header")
+    for line in route_lines[1:]:
+        fields = line.split()
+        if not fields:
+            continue
+        if len(fields) < 8:
+            raise PermissionError("could not parse host IPv4 route row")
+        try:
+            destination = ipaddress.IPv4Address(bytes.fromhex(fields[1])[::-1])
+            gateway = ipaddress.IPv4Address(bytes.fromhex(fields[2])[::-1])
+            flags = int(fields[3], 16)
+            netmask = ipaddress.IPv4Address(bytes.fromhex(fields[7])[::-1])
+            network = ipaddress.IPv4Network((destination, str(netmask)), strict=False)
+        except ValueError as error:
+            raise PermissionError("could not parse host IPv4 routes") from error
+        # Do not block the default route. Directly connected routes have no
+        # gateway; private ranges are independently rejected by is_global.
+        if network.prefixlen and gateway.is_unspecified and not flags & 0x2:
+            networks.add(network)
+
+    for line in ipv6_route_text.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        if len(fields) < 10:
+            raise PermissionError("could not parse host IPv6 route row")
+        try:
+            destination = ipaddress.IPv6Address(bytes.fromhex(fields[0]))
+            prefix = int(fields[1], 16)
+            gateway = ipaddress.IPv6Address(bytes.fromhex(fields[4]))
+            network = ipaddress.IPv6Network((destination, prefix), strict=False)
+        except ValueError as error:
+            raise PermissionError("could not parse host IPv6 routes") from error
+        if prefix and gateway.is_unspecified:
+            networks.add(network)
+
+    for line in ipv6_addresses_text.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        if len(fields) < 6:
+            raise PermissionError("could not parse host IPv6 address row")
+        try:
+            address = ipaddress.IPv6Address(bytes.fromhex(fields[0]))
+            prefix = int(fields[2], 16)
+            network = ipaddress.IPv6Network((address, prefix), strict=False)
+        except ValueError as error:
+            raise PermissionError("could not parse host IPv6 addresses") from error
+        if prefix:
+            networks.add(network)
+
+    trie_lines = fib_trie_text.splitlines()
+    found_local_ipv4 = False
+    for index, line in enumerate(trie_lines):
+        if "host LOCAL" not in line:
+            continue
+        found_local_ipv4 = True
+        candidates = [line]
+        if index:
+            candidates.append(trie_lines[index - 1])
+        found_address = False
+        for candidate in candidates:
+            for token in candidate.split():
+                try:
+                    address = ipaddress.IPv4Address(token)
+                except ValueError:
+                    continue
+                networks.add(ipaddress.IPv4Network((address, 32)))
+                found_address = True
+        if not found_address:
+            raise PermissionError("could not parse host-local IPv4 address")
+
+    if not found_local_ipv4:
+        raise PermissionError("could not determine host-local IPv4 addresses")
+    if not networks:
+        raise PermissionError("could not determine host-local networks")
+    return frozenset(networks)
+
+
+def host_networks():
+    """Read local/directly connected host routes; fail closed if unavailable."""
+    proc_net = Path("/proc/net")
+    try:
+        return _host_networks_from_proc(
+            (proc_net / "route").read_text(encoding="ascii"),
+            (proc_net / "ipv6_route").read_text(encoding="ascii"),
+            (proc_net / "if_inet6").read_text(encoding="ascii"),
+            (proc_net / "fib_trie").read_text(encoding="ascii"),
+        )
+    except (OSError, ValueError) as error:
+        raise PermissionError("could not safely inspect host-local networks") from error
+
+
+def _is_allowed_public_destination(address, blocked_networks):
+    address = _policy_address(address)
+    if address is None or not _is_public_unicast(address):
+        return False
+    return not any(
+        network.version == address.version and address in network
+        for network in blocked_networks
+    )
+
+
+def connect_public(host, port, blocked_networks=None):
     addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    if blocked_networks is None:
+        blocked_networks = host_networks()
     resolved = [ipaddress.ip_address(address[4][0]) for address in addresses]
-    if not resolved or any(not _is_public_unicast(address) for address in resolved):
-        raise PermissionError("non-public or non-unicast destination")
+    if not resolved or any(
+        not _is_allowed_public_destination(address, blocked_networks) for address in resolved
+    ):
+        raise PermissionError("non-public, host-local, or non-unicast destination")
     # Connect to the IP we validated, avoiding a second DNS resolution.
     last_error = None
     for family, kind, proto, _, address in addresses:

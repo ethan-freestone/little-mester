@@ -14,7 +14,7 @@ Host (your machine) — ./lab runs here as you, not as a service
 │   ├─ check_workspace()            path guards run BEFORE anything is shared   │
 │   ├─ VM host adapter              QEMU + supported host acceleration          │
 │   ├─ virtiofsd                   exports ONLY the selected workspace          │
-│   ├─ egress proxy (allowlist)    exposed at 10.0.2.100:3128 via guestfwd      │
+│   ├─ public HTTP(S) egress proxy exposed at 10.0.2.100:3128 via guestfwd      │
 │   └─ optional model API          user-configured loopback endpoint via guestfwd│
 │                                                                              │
 │   ┌────────────────────────── disposable VM ───────────────────────────────┐ │
@@ -44,7 +44,7 @@ host-Docker metrics path; the latter remains in place during migration.
 | SSH control | host → VM | `127.0.0.1:<ephemeral>` → guest `:22`, per-VM key, per-VM `known_hosts` | Host keys/credentials inside the VM; VM listening on the host LAN |
 | Optional model API `guestfwd` | VM → one configured host endpoint | One explicitly selected local API port | General host loopback, host filesystem, host Docker |
 | Optional metrics endpoint/stream | VM → one configured host metrics endpoint | Read-only metrics API/data needed by the guest plugin | Compose DNS assumptions, host `/proc` mounts, host filesystem, host Docker, general host loopback |
-| Egress proxy `guestfwd` | VM → internet | HTTP(S) destinations allowed by `.mester-egress` | Unlisted domains, non-HTTP protocols (until added deliberately), raw host routing |
+| Egress proxy `guestfwd` | VM → public Internet | Any public HTTP(S) destination when `allowed_domains` is blank | Host-local/directly connected networks, private/reserved/multicast IPs, mixed DNS, non-HTTP protocols, raw host routing |
 | Temporary browser OAuth callback | host browser → VM guest | One exact runtime-selected callback port, bound to host `127.0.0.1` and forwarded to guest `127.0.0.1` over the temporary SSH control master | Port ranges, LAN listeners, callback URL rewriting, general host route, callback/token capture |
 | Guest runtime | agent in guest → VM | Guest Docker/Compose, guest processes, optional nested VMs | Host Docker daemon, host filesystem outside the selected workspace |
 
@@ -77,9 +77,11 @@ a general network route. The existing public-destination proxy checks apply to
 login traffic as well: loopback, private, link-local, multicast and mixed
 public/non-public DNS answers are rejected before connection, and connections
 use the validated IP rather than resolving the hostname again.
-ChatGPT model requests may use only the owner-approved `api.openai.com` domain
-through this same proxy; `.mester-egress` does not authorize broad `openai.com`
-access or change the VM's host/LAN boundary.
+ChatGPT model requests and ordinary agent work use the same public-only HTTP(S)
+proxy. A blank `.mester-egress` domain list permits public hostnames, while address
+validation still rejects the parent host's local/directly connected networks and
+private, reserved, multicast, IPv4-embedded IPv6, or mixed-DNS destinations. The Linux
+route guard fails closed if local/direct network data cannot be inspected.
 
 This is intentionally runtime-derived to avoid a hardcoded ephemeral port, but
 it still depends on an internal OpenCode URL shape. Unexpected/missing redirect
@@ -93,7 +95,7 @@ and test evidence.
 
 | Compromised component | Can reach | Cannot reach (by design) |
 |---|---|---|
-| **Agent process in guest** | Guest OS with admin-equivalent control, guest Docker/Compose, nested VMs where supported, `/workspace`, allowlisted egress, and only configured guestfwd endpoints | Host filesystem outside the workspace, general host loopback/network routes, host Docker, host LAN |
+| **Agent process in guest** | Guest OS with admin-equivalent control, guest Docker/Compose, nested VMs where supported, `/workspace`, public HTTP(S) through the proxy, and only configured guestfwd endpoints | Host filesystem outside the workspace, general host loopback/network routes, host-local/directly connected networks, host Docker, host LAN |
 | **A guest workload container** | Guest Docker networks/volumes and explicitly mounted guest paths | Host filesystem outside the selected workspace, host Docker, host LAN |
 | **A nested VM** | Its explicitly shared guest paths and its own virtual devices | Host filesystem outside the outer workspace export, host Docker, host LAN |
 | **The outer VM kernel** | Guest processes and the exported workspace | Host kernel, host files outside the export, host Docker, host credentials |
@@ -106,6 +108,20 @@ compromised agent can corrupt the workspace it was pointed at; that is the autho
 by choosing it. The design blocks ordinary guest routes to the host/LAN, but it is not a
 mathematical guarantee against vulnerabilities in QEMU/KVM, virtiofs, the host kernel, or
 other host components. Live checks are bounded evidence, not a proof against every breakout.
+
+Each recursively launched VM must repeat this boundary at its own level: `restrict=on`, a
+child-specific public HTTP(S) proxy, and denial of the parent VM's local/directly connected
+networks. The child must not inherit the parent's SSH/control endpoint, Docker socket, model
+service, browser bridge, or workspace by default. Recursive networking remains unimplemented
+and must fail closed until tested on a supported nested-KVM host.
+
+If parent-selected information needs to flow into a child, the proposed interface is a
+read-only, schema-limited MCP resource surface: the parent chooses and validates the exported
+records; the child can request only those records and cannot mutate parent state or enumerate
+parent files/services. A resource read does send a request identifier upward; if strict
+one-way wire flow is required, use a push-only signed snapshot instead. MCP is an
+application-level data contract, not a network security boundary, and must itself be reachable
+only over a per-child explicit channel. Design and threat-model work is tracked in #55.
 
 ## 4. Target lifecycle
 
@@ -202,7 +218,7 @@ The intended setup flow is host-adapter based:
 3. Create a local config for the selected workspace, VM profile, optional guest workload
    runtime, and optional model endpoint. Defaults should work without a model endpoint.
 4. Validate every host crossing before boot: exactly one selected workspace, loopback-only
-   SSH, `restrict=on`, allowlisted egress, and—only when configured—one loopback model API
+   SSH, `restrict=on`, public-only proxy egress, and—only when configured—one loopback model API
    port. Refuse startup if the host platform cannot enforce these invariants.
 
 The configuration contract should separate independent choices rather than derive host
@@ -220,10 +236,9 @@ metrics: off                       # optional; must not be required to launch th
 This is a design shape, not a committed config schema. The VM's guest address/port is a
 stable logical endpoint; the host adapter maps it to the configured `127.0.0.1` service
 using QEMU's supported `guestfwd` command target. It does not create a host listener,
-publish a Docker port, or expose a host network. Remote providers are a separate explicit
-egress mode: their domain must be approved by the egress policy and credentials remain in
-the guest auth store. Metrics are optional and need a separately specified data source; the
-agent must still start if metrics are disabled/unavailable.
+publish a Docker port, or expose a host network. Remote providers use the public-only proxy
+and credentials remain in the guest auth store. Metrics are optional and need a separately
+specified data source; the agent must still start if metrics are disabled/unavailable.
 
 Initial portability work should preserve the Linux profile while extracting interfaces for
 VM lifecycle, workspace sharing, network forwarding, and model-provider configuration.

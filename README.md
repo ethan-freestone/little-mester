@@ -234,11 +234,13 @@ and live-acceptance ledger is ticket #45. The owner reports browser auth works; 
 persistence and remaining host-isolation acceptance are still open. Do not expect guest
 credentials to survive destructive VM deletion.
 
-The owner approved only `api.openai.com` for ChatGPT model requests. VM traffic reaches it
-through the existing policy-controlled HTTP(S) proxy; the rule does not add a host/LAN route,
-allow private destinations, or wildcard `openai.com`. Reload an already-running VM proxy with
-`./lab-vm egress-reload` after this manifest change; a real model completion remains a separate
-host acceptance check.
+VM agent work may use any public HTTP(S) destination through the existing host proxy. QEMU
+still runs with `restrict=on`, so guests have no direct Internet or host route. The proxy
+rejects private/reserved/multicast addresses, mixed public/private DNS answers, and the host's
+local or directly connected networks, including IPv4-embedded IPv6 destinations. This broad
+public-web policy does not expose host services or permit non-HTTP protocols. A running VM
+proxy must be refreshed with `./lab-vm egress-reload` after the manifest change; live host
+isolation and public-workflow acceptance remain separate gates.
 
 `models up` selects the provider in `agent/opencode/opencode.json` by default; choose
 `ollama`, `llamacpp`, or `all` explicitly when needed. It starts only the selected Compose

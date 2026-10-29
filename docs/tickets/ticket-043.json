@@ -8,7 +8,7 @@
   "title": "Guest Docker workloads, recursive VMs and host isolation",
   "objective": "Give a directly running guest agent ordinary Docker/Compose control for arbitrary project test services and recursive Little Mester VMs where nested virtualization is supported, while the outer VM continues to isolate the host and the existing egress allowlist/no-host-route policy remains enforced.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-10-29T15:29:49.576Z",
+  "updated_at": "2026-10-29T16:23:39.911Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -27,7 +27,7 @@
     },
     {
       "id": "A4",
-      "text": "The existing QEMU restrict=on and approved HTTP(S) egress allowlist remain enforced for guest and workload traffic; do not widen policy or add a relay without evidence and owner approval.",
+      "text": "QEMU restrict=on remains enforced for outer and nested VMs. Guest/workload public HTTP(S) uses only the proxy; blank allowed_domains permits public hosts, while the proxy rejects non-public/mixed DNS and parent-local/directly connected networks. Direct guest Internet/DNS, non-HTTP, host/LAN, and ancestor routes remain blocked; the Linux route guard fails closed if host routes cannot be inspected. Broader public egress is owner-approved.",
       "status": "pending"
     },
     {
@@ -70,16 +70,21 @@
       "Outer VM teardown confirmation and nested-state/evidence handling",
       "VM model API forwarder boundary check coordinated with #42: host Docker version >=28, host publishes only 127.0.0.1:8080/11434, separate LAN host cannot connect, guest can reach only configured forwarded model APIs, and QEMU restrict=on remains set. Do not broaden networking or expose ports on 0.0.0.0.",
       "Test nested agent/VM recursion with default depth 0, explicit depth boundary, attempted child depth reset, workspace isolation, and no host Docker/credential/LAN access; unsupported nesting fails closed (#52).",
-      "Repeat the non-public destination and allowlist matrix inside the live guest and rootless workload network on the owner KVM host; verify QEMU restrict=on, host gateway/LAN/direct Internet negative paths, selected model/proxy guestfwd positive paths, and host workspace/credential boundary. This environment lacks /dev/kvm and cannot substitute local unit tests for host acceptance."
+      "Repeat the non-public destination and allowlist matrix inside the live guest and rootless workload network on the owner KVM host; verify QEMU restrict=on, host gateway/LAN/direct Internet negative paths, selected model/proxy guestfwd positive paths, and host workspace/credential boundary. This environment lacks /dev/kvm and cannot substitute local unit tests for host acceptance.",
+      "On a supported host, prove public HTTPS works only through the VM proxy while direct Internet, QEMU host gateway, private/LAN, and the host's local/directly connected addresses fail; verify restrict=on. Repeat the same positive/negative matrix from a nested VM before claiming recursion. Preserve the existing overlay; no firewall/route changes."
     ],
     "created": [
       "tests/test_vm_proxy.py: current project build-registry allowlist and npm lookalike-domain refusal",
-      "tests/test_vm_proxy.py: end-to-end proxy-handler HTTP and CONNECT denial for loopback/private/reserved/link-local/multicast targets, mixed DNS rejection before connect, public DNS pinning, and explicit api.openai.com egress denial before resolution."
+      "tests/test_vm_proxy.py: end-to-end proxy-handler HTTP and CONNECT denial for loopback/private/reserved/link-local/multicast targets, mixed DNS rejection before connect, public DNS pinning, and explicit api.openai.com egress denial before resolution.",
+      "tests/test_vm_proxy.py: parent-local/directly connected IPv4/IPv6 network denial, mapped-IPv4 denial, and Linux host-route discovery",
+      "tests/test_vm_proxy.py: public host-network denial, Linux route-table discovery/fail-closed, IPv4-mapped/NAT64 handling, and 6to4/Teredo rejection"
     ],
     "cases": [
       "2026-10-28 owner explicitly approved adding npmjs.org to .mester-egress for registry.npmjs.org required by agent/OpenCode npm install. Existing entries preserved; public-only proxy enforcement unchanged; no allow-all or provider domains granted. #41 build fix loads CLI/auth-helper proxy env separately from daemon/RUN arguments; live registry build retry still pending.",
       "2026-10-29 security regression found Python 3.12 considers IPv4 multicast 224.0.0.1 `is_global=True`. VM proxy now rejects multicast in addition to non-global addresses and checks all DNS answers before connecting. HTTP/CONNECT regression tests cover IPv4/IPv6 multicast and private/reserved/link-local targets; mixed public/private or multicast DNS results cannot reach connect(). VM Python suite 33/33 passes locally. No KVM host egress acceptance is claimed.",
-      "2026-10-29: reviewed patch committed locally as 32bb8ea6b6a2959839216653797e4a49fd5a814d (`fix(vm): derive ChatGPT callback forwarding at runtime`) on feat/vm-approach. Local validation: VM Python tests 33/33, Bats 104/104, docs checks 115/115, ShellCheck, Bash/Python compile, diff check, and ticket validation pass. No live VM/browser acceptance. `git push origin feat/vm-approach` was attempted but this environment has no `ssh` executable; revision is still local and must be transferred to the owner checkout before the handoff can run."
+      "2026-10-29: reviewed patch committed locally as 32bb8ea6b6a2959839216653797e4a49fd5a814d (`fix(vm): derive ChatGPT callback forwarding at runtime`) on feat/vm-approach. Local validation: VM Python tests 33/33, Bats 104/104, docs checks 115/115, ShellCheck, Bash/Python compile, diff check, and ticket validation pass. No live VM/browser acceptance. `git push origin feat/vm-approach` was attempted but this environment has no `ssh` executable; revision is still local and must be transferred to the owner checkout before the handoff can run.",
+      "2026-10-29 owner-approved public-only egress: `.mester-egress` now leaves `allowed_domains` blank for broad public HTTP(S) work; `permission=false` still disables egress. QEMU restrict=on remains; proxy now denies local/directly connected parent networks plus non-public/mixed DNS destinations. Regression tests cover Linux route-table parsing, public IPv4/IPv6-mapped targets inside blocked parent networks, and ordinary public domains. Local tests pass; no owner KVM or nested-VM acceptance is claimed.",
+      "2026-10-29 final regression verification: proxy 20/20, full VM Python 40/40, Bats 106/106, Ruff/Python compile and docs 115/115 passed locally. Tests exercise public-only proxy policy and deny parent-local/directly connected destinations, including IPv4-embedded IPv6. Live host and nested-VM acceptance remain pending."
     ]
   },
   "priority": "critical",

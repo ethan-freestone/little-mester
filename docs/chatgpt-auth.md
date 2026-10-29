@@ -1,6 +1,6 @@
 # ChatGPT authentication runbook (container and VM)
 
-> **Status (2026-10-29):** The owner reports that VM browser authentication works. `./lab-vm agent` now enables its temporary host-browser handoff by default; use `--no-browser-auth` to skip it. The bridge derives the callback port from OpenCode's runtime `redirect_uri` and adds one loopback-only SSH forward. This behavior is source-verified for pinned OpenCode 2.2.0; broader auth cleanup/persistence acceptance remains open (#45). The owner also reports model requests fail; the exact `api.openai.com` domain is now allowlisted through the existing VM proxy, but a successful completion is not yet verified. VM/host credential escrow and export-before-delete are **not implemented**; the VM overlay remains the only persistence for guest-created auth. Preserve the current host-Docker session and VM state during testing.
+> **Status (2026-10-29):** The owner reports that VM browser authentication works. `./lab-vm agent` now enables its temporary host-browser handoff by default; use `--no-browser-auth` to skip it. The bridge derives the callback port from OpenCode's runtime `redirect_uri` and adds one loopback-only SSH forward. This behavior is source-verified for pinned OpenCode 2.2.0; broader auth cleanup/persistence acceptance remains open (#45). Public HTTP(S) agent work is now approved through the VM proxy; a successful real model completion and live host-isolation checks are not yet verified. VM/host credential escrow and export-before-delete are **not implemented**; the VM overlay remains the only persistence for guest-created auth. Preserve the current host-Docker session and VM state during testing.
 
 Use this for operational ChatGPT login and credential-preservation steps when OpenCode runs without a browser. The general auth boundary is [decision C.9.13](DECISIONS.md); acceptance criteria, implementation chronology, and test results belong to [ticket #45](tickets/ticket-045.json). This uses a ChatGPT Plus or Pro subscription; it does not require an OpenAI API key or separate API billing.
 
@@ -98,11 +98,12 @@ numeric callback port may appear in opt-in SSH transport diagnostics; OAuth
 URL/state/code/tokens are not logged. If the host port is already occupied, the
 forward fails closed; stop the conflicting local listener before retrying. No
 LAN listener, QEMU host-forward, general host route, or credential copy is
-created. The guest sends OAuth token exchange/refresh through the restricted egress
-proxy. The workspace allowlist includes `auth.openai.com`, `chatgpt.com`, and the
-exact model API host `api.openai.com`,
-alongside its existing package domains. Because this is a workspace-level policy,
-the same destinations are also allowed to host-Docker sessions using this workspace. A
+created. The guest sends OAuth token exchange/refresh through the public-only egress
+proxy. A blank VM `allowed_domains` setting permits public HTTP(S) hostnames; the proxy
+still rejects private/reserved/multicast IPs, mixed DNS, and parent-host local or directly
+connected networks. This does not change QEMU `restrict=on` or expose host/LAN services.
+The same `.mester-egress` file's `permission` switch also affects host-Docker setup, but its
+domain list is not a host-Docker network control. A
 running VM proxy keeps its startup policy snapshot; after changing the manifest,
 run `./lab-vm egress-reload` to refresh the proxy on its existing loopback port
 without restarting QEMU or changing the overlay. A proxy started by older code
@@ -111,18 +112,17 @@ drop during that one-time upgrade.
 
 **Login versus model egress:** the pinned **Sign in with ChatGPT** method uses
 `auth.openai.com` for token exchange and signing-key verification, and
-`https://api.openai.com/v1` for model requests. The owner approved the exact
-`api.openai.com` domain, now listed in `.mester-egress`; there is no broad
-`openai.com` rule. The VM must use its existing policy-controlled proxy, which
-allows only public destinations on supported HTTP(S) ports and rejects private
-or reserved IPs. No host/LAN route or firewall change is part of this allowlist.
+`https://api.openai.com/v1` for model requests. Any public HTTP(S) hostname is
+available through the VM proxy when the manifest's domain list is blank. The proxy
+allows only HTTP 80 and HTTPS CONNECT 443, rejects non-public and parent-connected
+destinations, and does not add a direct route or modify host firewall/network policy.
 After the manifest is present on the host, reload the running proxy with
 `./lab-vm egress-reload`; a successful real completion is still unverified.
 
 The owner reports that browser sign-in works. Remaining ticket #45 acceptance still
 requires owner-controlled checks of success/cancellation cleanup, occupied-port
-and egress-denied cases, and `auth list`. A real provider request is separately
-approved for the exact `api.openai.com` host and remains to be verified. Never
+and egress-denied cases, and `auth list`. A real provider request through the public-only
+proxy remains to be verified. Never
 record the authorization URL, OAuth state, code, or token in logs, tickets, or chat.
 
 `chatgpt-headless` is a distinct device-code method. It does not exercise this

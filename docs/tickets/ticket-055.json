@@ -1,0 +1,49 @@
+{
+  "id": 55,
+  "file_path": "/workspace/docs/tickets/ticket-055.json",
+  "number": 55,
+  "area": "infra",
+  "type": "spike",
+  "status": "draft",
+  "title": "Design one-way parent-to-child VM information sharing",
+  "objective": "Define a common, least-authority contract for information a parent VM intentionally shares with nested child VMs. Compare read-only MCP resources with push-only snapshots, ensure child access cannot become parent control, and keep network isolation as the primary boundary.",
+  "created_at": "2026-10-29T16:19:49.564Z",
+  "updated_at": "2026-10-29T16:19:49.564Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Document the parent/child data-flow threat model and distinguish parent-selected information flowing down from child requests/control flowing up; explicitly decide whether request/response MCP satisfies the required one-way semantics or a push-only artifact is required.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Define a versioned, size-bounded schema for parent-selected records with provenance and sensitivity metadata; children cannot enumerate or access unshared records.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Specify a per-child transport and authorization path bound to loopback and an explicit guestfwd/SSH channel; it exposes no arbitrary parent filesystem, command, Docker, network, credential, or write capability.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Specify recursive behavior: each descendant receives only data explicitly selected by its immediate parent, with scoped credentials, revocation, and no inherited parent/ancestor channel.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Record the decision and security limits in VM architecture docs and define adversarial tests for read scope, write attempts, path/URI abuse, child depth/reset, and transport isolation before implementation is accepted.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Inventory current host/guest crossings and browser-auth MCP capability; identify whether any existing channel can expose parent state beyond its intended purpose.",
+      "Compare read-only MCP resources with a push-only schema-validated snapshot for strict one-way data flow; document the request-metadata direction tradeoff.",
+      "Define adversarial integration tests proving a child cannot read unshared parent data, mutate parent state, invoke arbitrary host actions, or access ancestor channels."
+    ],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}

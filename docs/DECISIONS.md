@@ -483,19 +483,21 @@ cancellation. Discover and pin the server namespace, auth method, and listener
 for the installed OpenCode version; port numbers are not a cross-version
 contract. Never publish a LAN callback, add a general host route, bypass the
 egress proxy's private-address denial, or substitute an API key/device-only
-flow for a required subscription browser flow. Permit only provider-specific
-outbound domains, and require owner-controlled success, cancellation,
+flow for a required subscription browser flow. Route browser/model traffic only
+through the public-only VM proxy, and require owner-controlled success, cancellation,
 port-conflict, egress-denial, request, and persistence evidence before claiming
 auth accepted. Ticket #45 owns the implementation chronology and test ledger;
 the [auth runbook](chatgpt-auth.md) contains operator steps and secret handling.
 
-**Narrow ChatGPT model egress approval (2026-10-29):** The owner approved
-`api.openai.com` for ChatGPT model requests. Add only that exact hostname to the
-workspace egress manifest and use the existing VM HTTP(S) proxy; do not add a
-wildcard `openai.com` rule, direct guest route, host/LAN exposure, or firewall
-change. The proxy's public-IP validation/private-address denial remains in force.
-The active VM proxy must reload the updated manifest, and a real completion
-still needs owner-host verification.
+**Public VM HTTP(S) egress approval (2026-10-29):** The owner approved broad
+public-web access so the guest agent can do ordinary project work. Any public
+HTTP(S) hostname may use the existing host proxy when `.mester-egress`
+`allowed_domains` is blank. This does not create a direct guest route: QEMU stays
+`restrict=on`, and the proxy rejects private/reserved/multicast addresses, mixed
+public/non-public DNS answers, and the host's local/directly connected networks
+(including IPv4-embedded IPv6 destinations). Non-HTTP protocols remain denied. No host
+firewall, route, NAT, or LAN listener is added. Reload the running VM proxy after
+the manifest change; live positive/negative and nested-VM checks remain required.
 
 If the guest cannot launch the host browser, a host-resident MCP or equivalent
 may open an ephemeral authorization URL only for approved provider origins.
@@ -504,6 +506,15 @@ loopback; its host listener remains bound to host loopback. Expose only the
 provider-specific open-URL capability, with no general host access. Never log
 or retain the URL/state, and never capture the callback/code; the callback
 continues directly to the guest through the temporary loopback SSH forward.
+
+**Recursive information sharing (design pending, #55):** A parent may expose only
+records it explicitly selects for a child. The proposed MCP surface is read-only,
+schema-limited, size-bounded, and scoped to one child over an explicit loopback
+channel; it is not a substitute for `restrict=on` or proxy destination checks.
+MCP resource reads still send a request identifier from child to parent, so #55
+must decide whether that control metadata is acceptable or strict one-way wire
+flow requires a push-only signed snapshot. No generic parent/host tools or paths
+are to be exposed to descendants.
 
 **OpenAI ChatGPT implementation for the pinned guest version:** OpenCode 2.2.0
 source commit `1097e2668b1e08ad63bdf0b1c4860b9bc01e420c`,
@@ -593,12 +604,12 @@ browser callback endpoint (#45).
   service or user-managed container may provide it; host Docker is not a prerequisite and
   `lab-vm` does not implicitly install/manage a host model server. No model weights or GPUs
   enter the VM; a VM without a model endpoint remains usable for shell/workload tasks.
-- **Egress:** QEMU user networking runs with `restrict=on`; the only way out is a host-side
-  allowlisting HTTP(S) proxy exposed through `guestfwd` (`10.0.2.100:3128`). Docker, apt,
-  npm and pip are configured to use it. This is where `.mester-egress` `allowed_domains`
-  is enforced (#43), instead of the current advisory parsing. A blank list keeps allow-all
-  at the *domain* level; non-HTTP protocols and DNS outside the proxy are follow-ups, not
-  silently allowed.
+- **Egress:** QEMU user networking runs with `restrict=on`; the only Internet path is a
+  host-side HTTP(S) proxy exposed through `guestfwd` (`10.0.2.100:3128`). Docker, apt, npm,
+  and pip use it. A blank `.mester-egress` `allowed_domains` permits any public HTTP(S)
+  hostname; a populated list narrows destinations. The proxy rejects non-public addresses,
+  mixed DNS, and the host's local/directly connected networks before connecting. Non-HTTP
+  protocols and DNS outside the proxy remain denied.
 - **No host LAN ports:** the harness adds only loopback SSH control and any explicitly
   configured loopback model endpoint. That endpoint crosses to the guest only through its
   matching `guestfwd` entry. Guest services remain guest-local unless separately reviewed;
