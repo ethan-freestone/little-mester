@@ -94,12 +94,12 @@ host_diagnostics() {
     docker info --format 'security={{json .SecurityOptions}} firewall={{.FirewallBackend}} root={{.DockerRootDir}}' 2>&1 || docker info --format 'security={{json .SecurityOptions}} root={{.DockerRootDir}}' 2>&1 || true
     command -v ss >/dev/null 2>&1 && { echo '=== host TCP listeners (diagnostic only) ==='; ss -ltnp | awk 'NR == 1 || /:8080|:19532/'; } || true
     echo '=== resolved Compose port configuration ==='
-    vm_model_compose config --format json | python3 -c 'import json,sys; d=json.load(sys.stdin); [print("{}: {}".format(n,d["services"].get(n,{}).get("ports"))) for n in ("llamacpp-vm-api","metrics-vm-api")]' || true
+    vm_model_compose config --format json | python3 -c 'import json,sys; d=json.load(sys.stdin); [print("{}: {}".format(n,d["services"].get(n,{}).get("ports"))) for n in ("llamacpp-vm-api",)]' || true
   fi
   echo "=== forwarder containers ==="
   "$LAB_DIR/lab-vm" models status
   diagnose_backend llamacpp 11434 /health
-  diagnose_backend metrics 19532 /summary
+  "$LAB_DIR/lab-vm" metrics status || true
   echo "=== host loopback probes (proxy bypassed) ==="
   for endpoint in http://127.0.0.1:8080/health http://127.0.0.1:8080/v1/models http://127.0.0.1:19532/summary; do
     echo "--- $endpoint"

@@ -86,6 +86,107 @@ _vm_probe_published_api() {
   return 1
 }
 
+_vm_metrics_state_dir() {
+  printf '%s\n' "$LAB_DIR/.mester/vm-services/metrics"
+}
+
+_vm_metrics_pid_matches() {
+  local pid="$1" command_line
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
+  command_line="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  [[ "$command_line" == *"$LAB_DIR/agent/metrics/gather.py"* ]]
+}
+
+vm_cmd_metrics() {
+  local action="${1:-status}"
+  local state_dir pid_file log_file pid attempt
+  state_dir="$(_vm_metrics_state_dir)"
+  pid_file="$state_dir/service.pid"
+  log_file="$state_dir/service.log"
+
+  case "$action" in
+    up|start)
+      mkdir -p "$state_dir"
+      if [[ -f "$pid_file" ]]; then
+        pid="$(cat "$pid_file" 2>/dev/null || true)"
+        if _vm_metrics_pid_matches "$pid" && kill -0 "$pid" 2>/dev/null; then
+          if curl --noproxy '*' --fail --silent --max-time 2 http://127.0.0.1:19532/summary >/dev/null; then
+            log "VM host metrics service already running at 127.0.0.1:19532"
+            return 0
+          fi
+          die "Metrics PID $pid exists but its endpoint is unhealthy; preserve $log_file and investigate before restarting it."
+        fi
+        rm -f "$pid_file"
+      fi
+
+      if curl --noproxy '*' --fail --silent --max-time 1 http://127.0.0.1:19532/summary >/dev/null 2>&1; then
+        die "127.0.0.1:19532 is already serving another metrics endpoint; refusing to adopt or replace it."
+      fi
+
+      log "Starting curated VM host metrics endpoint on 127.0.0.1:19532"
+      env METRICS_HOST_PROC=/proc \
+          METRICS_HOST_HWMON=/sys/class/hwmon \
+          METRICS_HOST_THERMAL=/sys/class/thermal \
+          METRICS_BIND_HOST=127.0.0.1 \
+          METRICS_BIND_PORT=19532 \
+          python3 "$LAB_DIR/agent/metrics/gather.py" \
+            </dev/null >>"$log_file" 2>&1 &
+      pid=$!
+      printf '%s\n' "$pid" > "$pid_file"
+      for attempt in {1..30}; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+          rm -f "$pid_file"
+          tail -n 60 "$log_file" >&2 || true
+          die "VM host metrics service exited during startup (status unavailable); see $log_file."
+        fi
+        if curl --noproxy '*' --fail --silent --max-time 1 http://127.0.0.1:19532/summary >/dev/null 2>&1; then
+          log "VM host metrics service is healthy at 127.0.0.1:19532"
+          return 0
+        fi
+        sleep 0.1
+      done
+      kill "$pid" 2>/dev/null || true
+      rm -f "$pid_file"
+      tail -n 60 "$log_file" >&2 || true
+      die "VM host metrics endpoint did not become healthy; see $log_file."
+      ;;
+    status)
+      if [[ -f "$pid_file" ]]; then
+        pid="$(cat "$pid_file" 2>/dev/null || true)"
+        if _vm_metrics_pid_matches "$pid" && kill -0 "$pid" 2>/dev/null; then
+          printf 'VM host metrics service is healthy: '
+          if curl --noproxy '*' --fail --silent --show-error --max-time 2 http://127.0.0.1:19532/summary; then
+            printf '\n'
+            return 0
+          fi
+        fi
+      fi
+      echo "VM host metrics service is stopped or unhealthy."
+      return 1
+      ;;
+    down|stop)
+      if [[ -f "$pid_file" ]]; then
+        pid="$(cat "$pid_file" 2>/dev/null || true)"
+        if _vm_metrics_pid_matches "$pid" && kill -0 "$pid" 2>/dev/null; then
+          kill "$pid" 2>/dev/null || true
+          for attempt in {1..30}; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+          done
+          if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+          fi
+        fi
+        rm -f "$pid_file"
+      fi
+      log "Stopped only the VM host metrics process; the host-Docker metrics service is untouched."
+      ;;
+    *)
+      die "Usage: ./lab-vm metrics {up|status|down}"
+      ;;
+  esac
+}
+
 vm_cmd_models() {
   local action="${1:-status}"
   shift || true
@@ -103,17 +204,14 @@ vm_cmd_models() {
         llama|llamacpp) services+=(llamacpp-vm-api) ;;
         ollama) services+=(ollama-vm-api) ;;
         all) services+=(ollama-vm-api llamacpp-vm-api) ;;
-        metrics) ;;
-        *) die "Usage: ./lab-vm models up [default|ollama|llamacpp|all|metrics]" ;;
+          *) die "Usage: ./lab-vm models up [default|ollama|llamacpp|all]" ;;
       esac
       _vm_check_docker
       vm_model_compose config -q
-      services+=(metrics-vm-api)
       for service in "${services[@]}"; do
         case "$service" in
           ollama-vm-api) _vm_validate_api_publish_config "$service" 127.0.0.1 11434 || die "Unsafe or missing port mapping for $service." ;;
           llamacpp-vm-api) _vm_validate_api_publish_config "$service" 127.0.0.1 8080 || die "Unsafe or missing port mapping for $service." ;;
-          metrics-vm-api) _vm_validate_api_publish_config "$service" 127.0.0.1 19532 || die "Unsafe or missing port mapping for $service." ;;
         esac
       done
       if [[ $VM_VERBOSE -ge 1 ]]; then
@@ -132,24 +230,41 @@ vm_cmd_models() {
       log "VM API services are reachable through Docker loopback-only published ports."
       ;;
     status)
+      local status=0 actual state
       command -v docker >/dev/null 2>&1 || die "Docker CLI not found."
-      vm_model_compose ps ollama-vm-api llamacpp-vm-api metrics-vm-api
-      for item in "ollama-vm-api|11434|/api/tags" "llamacpp-vm-api|8080|/health" "metrics-vm-api|19532|/summary"; do
+      vm_model_compose ps ollama-vm-api llamacpp-vm-api
+      for item in "ollama-vm-api|11434|/api/tags" "llamacpp-vm-api|8080|/health"; do
         IFS='|' read -r service port path <<<"$item"
         local container
         container="$(vm_model_compose ps -q "$service" 2>/dev/null || true)"
-        [[ -n "$container" ]] || continue
-        docker inspect --format "$service state={{.State.Status}} configured={{json .HostConfig.PortBindings}} actual={{json .NetworkSettings.Ports}}" "$container" || true
-        docker port "$container" || true
-        _vm_probe_published_api "$service" "$port" "$path" || log "$service health probe failed; diagnostics are shown above."
+        if [[ -z "$container" ]]; then
+          log "$service: not started"
+          continue
+        fi
+        state="$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || echo unknown)"
+        actual="$(docker inspect --format '{{json .NetworkSettings.Ports}}' "$container" 2>/dev/null || echo unavailable)"
+        log "$service: state=$state; expected=127.0.0.1:$port; runtime_ports=$actual"
+        case "$actual" in
+          null|*'null'*)
+            log "$service: Docker reports no active runtime host-port mapping."
+            status=1
+            ;;
+        esac
+        if curl --noproxy '*' --fail --silent --show-error --connect-timeout 2 --max-time 5 "http://127.0.0.1:$port$path" >/dev/null 2>&1; then
+          log "$service: loopback HTTP probe passed."
+        else
+          log "$service: loopback HTTP probe failed. Run './lab-vm models diagnose' for read-only diagnostics."
+          status=1
+        fi
       done
+      return "$status"
       ;;
     down|stop)
-      command -v docker >/dev/null 2>&1 && vm_model_compose stop ollama-vm-api llamacpp-vm-api metrics-vm-api || true
-      log "Stopped only VM API Compose services; model/metrics containers and VM were left running."
+      command -v docker >/dev/null 2>&1 && vm_model_compose stop ollama-vm-api llamacpp-vm-api || true
+      log "Stopped only VM model API Compose services; model containers and VM were left running."
       ;;
     *)
-      die "Usage: ./lab-vm models {up [default|ollama|llamacpp|all|metrics]|status|down}"
+      die "Usage: ./lab-vm models {up [default|ollama|llamacpp|all]|status|down}"
       ;;
   esac
 }

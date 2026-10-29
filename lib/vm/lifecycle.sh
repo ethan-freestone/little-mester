@@ -382,7 +382,10 @@ vm_cmd_ssh() {
 vm_cmd_agent() {
   local vm_name="${1:-default}"
   local vm_dir
+  local started_at elapsed probe_options probe_command probe_status
   vm_dir="$(_vm_resolve "$vm_name")"
+  log_verbose "Launching guest agent for VM '$vm_name'."
+  log_debug "VM directory: $vm_dir"
   [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
   if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
     die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
@@ -391,7 +394,10 @@ vm_cmd_agent() {
   local version="${VM_OPENCODE_VERSION:-2.2.0}"
   local installed_version
   local model_provider model_url
+  log_verbose "Checking guest OpenCode version and configuration."
+  log_debug "Expected OpenCode version: $version"
   installed_version="$(vm_ssh "$vm_dir" "opencode --version" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
+  log_debug "Guest OpenCode version: ${installed_version:-unavailable}"
   if [[ "$installed_version" != "$version" ]]; then
     die "OpenCode $version is not installed in VM '$vm_name' (found ${installed_version:-none}). Run ./lab-vm up $vm_name to install/update it."
   fi
@@ -404,8 +410,22 @@ vm_cmd_agent() {
     ollama) model_url="http://10.0.2.100:11434/api/tags" ;;
     *) die "OpenCode model provider '$model_provider' has no configured VM host forwarder." ;;
   esac
-  if ! vm_ssh "$vm_dir" "curl --noproxy 10.0.2.100 --fail --silent --show-error --max-time 5 '$model_url' >/dev/null"; then
-    die "$model_provider is not reachable from VM '$vm_name'. Start its host API forwarder and metrics with: ./lab-vm models up ${model_provider}"
+  log_verbose "Checking $model_provider API reachability from the guest at $model_url."
+  probe_options="--fail --silent --show-error"
+  if [[ "$VM_DEBUG" -ge 1 ]]; then
+    probe_options="--fail --show-error --verbose --http1.1"
+  fi
+  probe_command="curl --noproxy 10.0.2.100 $probe_options --max-time 5 '$model_url' >/dev/null"
+  log_debug "Guest model probe: $probe_command"
+  started_at=$SECONDS
+  if vm_ssh "$vm_dir" "$probe_command"; then
+    elapsed=$((SECONDS - started_at))
+    log_debug "Guest model probe succeeded in ${elapsed}s."
+  else
+    probe_status=$?
+    elapsed=$((SECONDS - started_at))
+    log_debug "Guest model probe failed after ${elapsed}s (ssh/curl status=$probe_status)."
+    die "$model_provider API is not reachable from VM '$vm_name' at $model_url. Check the host forwarder with './lab-vm models status'; start it with './lab-vm models up $model_provider'. Metrics are managed separately with './lab-vm metrics status'."
   fi
   echo "Launching OpenCode $version directly in VM '$vm_name' at /workspace."
   local cli_config cli_config_quoted

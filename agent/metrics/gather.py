@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Hardware metrics sidecar - collects GPU, CPU, RAM, and temperature data from the host
-and exposes them over HTTP for the agent container to query.
+"""Host metrics endpoint for the agent's deliberately narrow metrics view.
 
-Listens on 0.0.0.0:19532 *inside this container's network namespace* so sibling
-containers on the compose `internal` network can reach it via Docker DNS
-(http://metrics:19532). No host port is published, so it is not reachable from
-outside the Docker network -- see compose.yaml (no `ports:` entry) and
-scripts/verify-metrics.sh acceptance criterion A7.
+The host-Docker deployment listens on 0.0.0.0:19532 inside its private container
+namespace so sibling containers can use Docker DNS (http://metrics:19532); compose.yaml
+publishes no host port. The separate VM deployment explicitly sets METRICS_BIND_HOST to
+127.0.0.1 and forwards only this API endpoint through QEMU guestfwd. Neither deployment
+exposes host files or a general host route to the agent.
 
 Exposes three endpoints:
     GET /metrics  -- JSON blob with all four metric categories
@@ -36,9 +35,8 @@ HOST_PROC = os.environ.get("METRICS_HOST_PROC", "/host/proc")
 HOST_HWMON = os.environ.get("METRICS_HOST_HWMON", "/host/hwmon")
 HOST_THERMAL = os.environ.get("METRICS_HOST_THERMAL", "/host/thermal")
 
-# Bind address. 0.0.0.0 = all interfaces in this container's netns (required for
-# cross-container reachability). The container publishes no host ports, so the
-# service stays invisible to the host and to anything outside the compose network.
+# The Docker deployment uses all interfaces in its private container namespace;
+# the VM host process overrides this to 127.0.0.1 before launch.
 BIND_HOST = os.environ.get("METRICS_BIND_HOST", "0.0.0.0")
 BIND_PORT = int(os.environ.get("METRICS_BIND_PORT", "19532"))
 

@@ -599,6 +599,53 @@ support-profile failure, not worked around with host-specific relays or firewall
 Keeping the host model provider and guest workload runtime behind optional interfaces allows
 the same VM flow to work with native host services and across tested Unix profiles.
 
+#### C.9.17 VM-first launcher, retained Docker mode, and bounded recursion (2026-10-29)
+
+**Decision:** Once the VM acceptance gates pass, `./lab` is the VM-backed, directly-in-guest
+Little Mester entry point and launches the interactive agent by default. Preserve the current
+containerized single-agent workflow as an explicit `./lab-docker` option; it is not
+Docker-in-Docker and must not acquire a host Docker socket or recursive agent capability.
+During migration, `./lab-vm` remains the experimental VM implementation and `./lab` remains
+the established Docker workflow. Do not switch the default or remove the Docker launcher
+until the VM model/TUI/metrics/exit, auth, permission, workload, isolation, and lifecycle
+gates pass. Any launcher rename/migration must preserve a tested rollback path.
+
+**Setup versus daily use:** Host prerequisites, base-image download, and first guest
+provisioning are setup-time operations. Daily startup should reuse the provisioned VM, perform
+only bounded readiness/config checks, and land the user directly in the guest agent; `ssh`,
+`status`, `base`, and other component commands remain available for diagnostics. The normal
+daily path must not require a separate `up`, `ssh`, then `agent` sequence. VM commands must
+document whether they preserve or delete the writable overlay, guest Docker volumes, auth
+state, and logs. A non-destructive stop/suspend/restart policy must be implemented and
+verified before documenting an end-of-day shutdown recommendation. In the current
+experimental implementation, `up` provisions/starts but does not launch the TUI; `stop`
+tears down guest Compose volumes and then calls `down`; `down` deletes the VM overlay and
+control keys. These commands are destructive to guest state and are not a routine end-of-day
+stop.
+
+**Metrics compatibility:** Keep the existing host-Docker metrics integration working while
+developing and validating a separate VM metrics transport. VM metrics must use an explicitly
+configured, narrow endpoint/stream and preserve the host boundary; the guest must not depend
+on Compose DNS names such as `metrics`, host Docker access, or a general host route. Only
+retire or replace the Docker metrics path after both modes have their own verified acceptance
+coverage and the owner approves the transition.
+
+**Self-hosting and recursion:** Mount only the selected workspace by default; do not include
+the Little Mester checkout in a VM workspace unless recursion is explicitly requested.
+`--recurse` enables the bounded nested Little Mester test capability, while
+`--unsafe-recurse` explicitly permits self-modification and implies the required repository
+workspace. Both are governed by a maximum nesting depth, default `0`, configurable only via
+an explicit maximum-depth option. Depth is propagated and enforced at every launcher boundary;
+no child can reset/increase it implicitly, and exceeding the limit fails closed before VM or
+agent startup. Recursive tests use a distinct disposable workspace/checkout so the active
+outer implementation session remains intact. The outer VM remains the host boundary; nested
+VMs do not gain additional host paths, host Docker, credentials, LAN access, or egress rights.
+
+**Reason:** Make the safer VM the eventual ordinary route without losing the useful,
+non-recursive Docker sandbox; maintain metrics parity during migration; and support deliberate
+self-improvement without accidental or infinite agent/VM recursion. Implementation and
+acceptance evidence are tracked on #35, #41–#43, and the new linked launcher/recursion ticket.
+
 The trust-boundary diagram and crossing table live in `docs/vm-architecture.md`; the
 engineering invariants are in `docs/tickets/architecture/DECISIONS.md` §K.
 
@@ -620,6 +667,14 @@ security boundaries, or run unrelated/destructive commands. Bound noisy command 
 appropriate, identify unavailable probes rather than silently omitting them, and keep raw
 artifacts in gitignored state/log locations. Implementations and evidence belong on their
 ticket; this is the cross-project product/workflow rule. See #41 for VM failure diagnostics.
+
+When an investigation requires the same multi-step host checks more than once, add a reusable
+diagnostic command to the relevant tool rather than asking the owner to compose bespoke shell
+commands. Keep ordinary `status` output concise and actionable; put detailed, read-only evidence
+behind an explicit `diagnose`/`doctor` command (or a documented verbosity flag). Agents should
+run the existing diagnostic entry point first and request extra manual commands only when it
+does not cover a specific evidence gap. Diagnostic helpers must not repair or restart services
+unless the user explicitly invokes a separate repair action.
 
 ## Licensing — standard AGPL (2026-10-28)
 

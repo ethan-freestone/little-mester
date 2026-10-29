@@ -1,0 +1,65 @@
+{
+  "id": 52,
+  "file_path": "/workspace/docs/tickets/ticket-052.json",
+  "number": 52,
+  "area": "infra",
+  "type": "feature",
+  "status": "draft",
+  "title": "VM-first launcher, retained Docker mode, and bounded recursion",
+  "objective": "Make the provisioned VM the eventual default one-command Little Mester workflow while preserving host-Docker as ./lab-docker, keeping setup separate from fast daily launch, and enabling explicitly opted-in, depth-bounded recursive self-testing. Follow-on child work for parent epic #35; do not switch the ./lab default until #35's VM adoption gates pass.",
+  "created_at": "2026-10-29T10:27:45.504Z",
+  "updated_at": "2026-10-29T10:28:53.015Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "After all parent #35 VM adoption gates pass, ./lab <workspace> launches or reuses the outer VM and enters the direct guest OpenCode TUI by default; setup/provisioning is not repeated on normal starts, and explicit diagnostics/satellite commands remain available.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "The existing host-Docker single-agent workflow remains usable as ./lab-docker, without Docker-in-Docker, host Docker socket exposure, or implicit recursive-agent capability; ./lab is not switched before VM release gates pass.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "README documents fresh setup, normal startup, end-of-day behavior, and exact effects of up/status/ssh/agent/stop/down/base/rebuild, including which commands preserve or delete VM overlay, guest workloads/volumes, auth data, and control keys. A safe non-destructive stop/resume lifecycle is available before recommending daily VM use.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Default VM workspace sharing excludes the Little Mester repository unless an explicit recursion option requests it; host path validation and sensitive-path refusals remain enforced.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "--recurse and --unsafe-recurse are explicit, distinct modes; unsafe-recurse enables self-modification and implies the required repository view, while recurse alone does not silently authorize self-writes.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "A maximum nesting depth is configurable by an explicit flag, defaults to 0, is propagated/enforced across every child launcher, cannot be reset or increased implicitly, and refuses over-depth launches before starting a VM/agent.",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "A disposable outer-agent self-development loop can modify a selected checkout, start a separate nested Little Mester instance to test those changes, retain/clean nested state explicitly, and continue the outer session; nested execution does not expose additional host paths, host Docker, credentials, LAN, or broader egress.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Measure clean setup/provisioning separately from warm daily startup; verify warm startup avoids package/image rebuild and enters the TUI with one command.",
+      "Exercise fresh install, up/reuse, interactive launch, normal shutdown/resume, and destructive down/rebuild on disposable VMs; assert retained/deleted overlay, guest volumes, auth, logs, and keys match docs.",
+      "Run host-Docker workflow as ./lab-docker and verify it remains a single agent with no host Docker socket and no nested agent/VM capability.",
+      "Test default workspace does not include repo; test --recurse inclusion and --unsafe-recurse write authority with all path guards.",
+      "Test max-depth defaults to zero; test boundary depths, propagation, attempts to reset/increase depth, and fail-closed behavior before child startup.",
+      "On a supported KVM host, run the full self-development loop using a disposable workspace/nested VM and verify outer session remains usable and host isolation/egress invariants hold.",
+      "Test on unsupported nested-virtualization host and verify clear refusal without weakening outer boundary."
+    ],
+    "created": [],
+    "cases": [
+      "2026-10-29: accepted product direction and documented in docs/DECISIONS.md §C.9.17, README.md and docs/vm-architecture.md. Local validation: Bats 84/84, VM Python tests 12/12, ticket-engine Jest 143/143, documentation checks 112/112, bash -n and git diff --check pass. These are repository regressions/docs checks only; this environment has no /dev/kvm or Docker executable, so no VM startup, host metrics endpoint, TUI interaction, warm-start timing, or nested VM behavior is claimed."
+    ]
+  },
+  "models_used": []
+}

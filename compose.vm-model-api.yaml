@@ -28,16 +28,3 @@ services:
       - "127.0.0.1:8080:8080"
     networks: [internal]
     restart: unless-stopped
-
-  metrics-vm-api:
-    image: alpine/socat:latest
-    entrypoint: ["socat"]
-    command: ["TCP-LISTEN:19532,fork,reuseaddr", "TCP:metrics:19532"]
-    profiles: [vm-model-api]
-    depends_on:
-      metrics:
-        condition: service_healthy
-    ports:
-      - "127.0.0.1:19532:19532"
-    networks: [internal]
-    restart: unless-stopped

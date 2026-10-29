@@ -18,15 +18,25 @@ setup() {
 
 @test "VM-only local model forwarders bind host ports to loopback" {
   local compose="$REPO_ROOT/compose.vm-model-api.yaml"
-  [ "$(grep -c '127.0.0.1:' "$compose")" -eq 3 ]
+  [ "$(grep -c '127.0.0.1:' "$compose")" -eq 2 ]
   grep -Fq '127.0.0.1:11434:11434' "$compose"
   grep -Fq '127.0.0.1:8080:8080' "$compose"
   grep -Fq 'TCP:ollama:11434' "$compose"
   grep -Fq 'TCP:llamacpp:11434' "$compose"
-  grep -Fq '127.0.0.1:19532:19532' "$compose"
-  grep -Fq 'TCP:metrics:19532' "$compose"
   grep -Fq 'profiles: [vm-model-api]' "$compose"
-  ! grep -Eq '0\.0\.0\.0:(8080|11434|19532)' "$compose"
+  ! grep -Eq '0\.0\.0\.0:(8080|11434)' "$compose"
+  ! grep -Fq 'metrics-vm-api' "$compose"
+}
+
+@test "VM metrics service is native, loopback-only, and independent of Docker Compose" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  body="$(declare -f vm_cmd_metrics)"
+  [[ "$body" == *'METRICS_BIND_HOST=127.0.0.1'* ]]
+  [[ "$body" == *'METRICS_BIND_PORT=19532'* ]]
+  [[ "$body" == *'python3 "$LAB_DIR/agent/metrics/gather.py"'* ]]
+  [[ "$body" != *'docker compose'* ]]
+  grep -Fq 'guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532' "$REPO_ROOT/lib/vm/runner.sh"
+  grep -Fq 'metrics)' "$REPO_ROOT/lab-vm"
 }
 
 @test "llama.cpp public model alias matches the direct guest model configuration" {
@@ -42,8 +52,12 @@ setup() {
   [[ "$body" == *'http://10.0.2.100:11434/api/tags'* ]]
   [[ "$body" == *'curl --noproxy 10.0.2.100'* ]]
   [[ "$body" == *'python3 -c'* ]]
-  [[ "$body" == *'./lab-vm models up ${model_provider}'* ]]
+  [[ "$body" == *'./lab-vm models up $model_provider'* ]]
   [[ "$body" == *'METRICS_URL=http://10.0.2.100:19532'* ]]
+  [[ "$body" == *'log_verbose "Checking $model_provider API reachability'* ]]
+  [[ "$body" == *'Guest model probe: $probe_command'* ]]
+  [[ "$body" == *'--verbose --http1.1'* ]]
+  [[ "$body" == *'Guest model probe failed after ${elapsed}s'* ]]
 }
 
 @test "guest agent remote command preserves CLI JSON quotes and TUI plugin wiring" {
@@ -85,7 +99,7 @@ setup() {
   vm_model_compose() {
     if [[ "$*" == 'config --format json' ]]; then
       cat <<'JSON'
-{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"127.0.0.1"}]},"metrics-vm-api":{"ports":[{"target":19532,"published":"19532","host_ip":"127.0.0.1"}]}}}
+{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"127.0.0.1"}]}}}
 JSON
     else printf 'compose:%s\n' "$*"; fi
   }
@@ -93,9 +107,8 @@ JSON
   run vm_cmd_models up
   [ "$status" -eq 0 ]
   [[ "$output" == *'compose:config -q'* ]]
-  [[ "$output" == *'compose:up -d llamacpp-vm-api metrics-vm-api'* ]]
+  [[ "$output" == *'compose:up -d llamacpp-vm-api'* ]]
   [[ "$output" == *'127.0.0.1:8080'* ]]
-  [[ "$output" == *'127.0.0.1:19532'* ]]
   [[ "$output" == *'reachable through Docker loopback-only published ports'* ]]
 }
 
@@ -141,6 +154,88 @@ JSON
   run _vm_probe_published_api llamacpp-vm-api 8080 /health
   [ "$status" -ne 0 ]
   [[ "$output" == *'diagnostic:llamacpp-vm-api 8080 /health'* ]]
+}
+
+@test "models status summarizes absent Docker runtime publication and fails unhealthy" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  vm_model_compose() {
+    case "$*" in
+      'ps ollama-vm-api llamacpp-vm-api') echo 'SERVICE STATUS' ;;
+      'ps -q ollama-vm-api') echo '' ;;
+      'ps -q llamacpp-vm-api') echo 'llama-container-id' ;;
+    esac
+  }
+  docker() {
+    case "$*" in
+      inspect*State.Status*) echo running ;;
+      inspect*NetworkSettings.Ports*) echo '{"8080/tcp":null}' ;;
+      *) return 0 ;;
+    esac
+  }
+  curl() { return 7; }
+  run vm_cmd_models status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'llamacpp-vm-api: state=running; expected=127.0.0.1:8080; runtime_ports={"8080/tcp":null}'* ]]
+  [[ "$output" == *'Docker reports no active runtime host-port mapping.'* ]]
+  [[ "$output" == *"Run './lab-vm models diagnose'"* ]]
+}
+
+@test "models diagnose helper is a separate read-only tool command" {
+  grep -Fq 'scripts/vm-models-diagnose.sh' "$REPO_ROOT/lab-vm"
+  grep -Fq 'docker port "$container"' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq "journalctl -u docker --since '1 hour ago'" "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  ! grep -Eq 'docker compose (up|down|stop|restart)|docker (start|stop|restart|rm|system prune)' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+}
+
+@test "models diagnose captures publication failure without mutating Docker state" {
+  local fakebin="$BATS_TEST_TMPDIR/diagnose-bin"
+  mkdir -p "$fakebin"
+  cat >"$fakebin/docker" <<'MOCK_DOCKER'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$MOCK_DOCKER_CALLS"
+case "$*" in
+  'info') exit 0 ;;
+  'context show') echo default ;;
+  'version --format '* ) echo 'client=29.9.2 server=29.9.2' ;;
+  'info --format '* ) echo 'root=/var/lib/docker security=["name=seccomp"] firewall=iptables' ;;
+  *'config --format json') echo '{"services":{"llamacpp-vm-api":{"ports":[{"host_ip":"127.0.0.1","published":"8080","target":8080}]}}}' ;;
+  *' ps -a') echo 'SERVICE STATUS' ;;
+  *'ps -a -q llamacpp-vm-api') echo sidecar-id ;;
+  *'ps -q llamacpp') echo backend-id ;;
+  'port sidecar-id') exit 0 ;;
+  *'sidecar-id') echo 'name=/api state=running health=none network_mode=internal configured_bindings={"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]} runtime_ports={"8080/tcp":null} networks={}' ;;
+  *'backend-id') echo 'backend=/llamacpp state=running health=healthy networks={}' ;;
+  *) echo "unexpected docker invocation: $*" >&2; exit 1 ;;
+esac
+MOCK_DOCKER
+  cat >"$fakebin/curl" <<'MOCK_CURL'
+#!/usr/bin/env bash
+echo 'curl: (7) Connection refused' >&2
+exit 7
+MOCK_CURL
+  cat >"$fakebin/ss" <<'MOCK_SS'
+#!/usr/bin/env bash
+echo 'State Recv-Q Send-Q Local Address:Port Peer Address:Port'
+MOCK_SS
+  cat >"$fakebin/journalctl" <<'MOCK_JOURNAL'
+#!/usr/bin/env bash
+echo '-- No entries --'
+MOCK_JOURNAL
+  chmod +x "$fakebin"/*
+  export MOCK_DOCKER_CALLS="$BATS_TEST_TMPDIR/docker-calls"
+
+  run env PATH="$fakebin:$PATH" bash -c 'docker info; printf "fake_status=%s\\n" "$?"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'fake_status=0'* ]]
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" llamacpp
+  if [ "$status" -ne 1 ]; then cat "$MOCK_DOCKER_CALLS" >&2; fi
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'runtime_ports={"8080/tcp":null}'* ]]
+  [[ "$output" == *'docker port: no active published-port mapping reported.'* ]]
+  [[ "$output" == *'Host loopback probe failed.'* ]]
+  ! grep -Eq 'compose .* (up|down|stop|restart)| (start|stop|restart|rm) ' "$MOCK_DOCKER_CALLS"
 }
 
 @test "lab-vm extra delegates to the temporary script with a removal marker" {

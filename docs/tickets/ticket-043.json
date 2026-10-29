@@ -8,7 +8,7 @@
   "title": "Guest Docker workloads, recursive VMs and host isolation",
   "objective": "Give a directly running guest agent ordinary Docker/Compose control for arbitrary project test services and recursive Little Mester VMs where nested virtualization is supported, while the outer VM continues to isolate the host and the existing egress allowlist/no-host-route policy remains enforced.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-10-28T16:55:57.215Z",
+  "updated_at": "2026-10-29T10:27:55.388Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -44,6 +44,11 @@
       "id": "A7",
       "text": "Tests cover Compose feedback loops, host-boundary negative cases, current egress allow/deny policy and nested-VM capability/boot behavior; evidence is recorded before claiming support.",
       "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "Recursive Little Mester execution is opt-in, uses a separate disposable workspace/state, and enforces the propagated maximum nesting depth (default 0) before starting child agents/VMs. Neither recurse nor unsafe-recurse grants additional host paths, host Docker, credentials, LAN, or broader egress; self-write authority requires explicit unsafe-recurse. See #52.",
+      "status": "pending"
     }
   ],
   "tests": {
@@ -63,7 +68,8 @@
       "Current egress allow/deny matrix without policy widening",
       "Nested VM boot/test/stop and unsupported-host behavior",
       "Outer VM teardown confirmation and nested-state/evidence handling",
-      "VM model API forwarder boundary check coordinated with #42: host Docker version >=28, host publishes only 127.0.0.1:8080/11434, separate LAN host cannot connect, guest can reach only configured forwarded model APIs, and QEMU restrict=on remains set. Do not broaden networking or expose ports on 0.0.0.0."
+      "VM model API forwarder boundary check coordinated with #42: host Docker version >=28, host publishes only 127.0.0.1:8080/11434, separate LAN host cannot connect, guest can reach only configured forwarded model APIs, and QEMU restrict=on remains set. Do not broaden networking or expose ports on 0.0.0.0.",
+      "Test nested agent/VM recursion with default depth 0, explicit depth boundary, attempted child depth reset, workspace isolation, and no host Docker/credential/LAN access; unsupported nesting fails closed (#52)."
     ],
     "created": [
       "tests/test_vm_proxy.py: current project build-registry allowlist and npm lookalike-domain refusal"

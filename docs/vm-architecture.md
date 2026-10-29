@@ -31,9 +31,10 @@ Host (your machine) — ./lab runs here as you, not as a service
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Only three kinds of traffic cross the VM boundary: the workspace (virtiofs), SSH control
-(loopback-only host forward), and explicitly forwarded model/egress endpoints. There is
-no general host route.
+Only explicitly selected crossings traverse the VM boundary: the workspace (virtiofs), SSH
+control (loopback-only host forward), and named model, metrics, or egress endpoints. There is
+no general host route. VM metrics transport is a separate integration from the existing
+host-Docker metrics path; the latter remains in place during migration.
 
 ## 2. Crossings
 
@@ -42,6 +43,7 @@ no general host route.
 | `virtiofsd` → guest `/workspace` | host → VM | Exactly the directory passed to `./lab`, read/write | `$HOME`, `~/.ssh`, `~/.config`, the lab repo without `--unsafe-recurse`, Docker sockets, other checkouts |
 | SSH control | host → VM | `127.0.0.1:<ephemeral>` → guest `:22`, per-VM key, per-VM `known_hosts` | Host keys/credentials inside the VM; VM listening on the host LAN |
 | Optional model API `guestfwd` | VM → one configured host endpoint | One explicitly selected local API port | General host loopback, host filesystem, host Docker |
+| Optional metrics endpoint/stream | VM → one configured host metrics endpoint | Read-only metrics API/data needed by the guest plugin | Compose DNS assumptions, host `/proc` mounts, host filesystem, host Docker, general host loopback |
 | Egress proxy `guestfwd` | VM → internet | HTTP(S) destinations allowed by `.mester-egress` | Unlisted domains, non-HTTP protocols (until added deliberately), raw host routing |
 | Guest runtime | agent in guest → VM | Guest Docker/Compose, guest processes, optional nested VMs | Host Docker daemon, host filesystem outside the selected workspace |
 
@@ -78,13 +80,28 @@ and applies `.mester-egress`; it is not a general route to host loopback.
 3. cloud-init provisions the guest user, direct harness runtime, optional guest workload
    runtime (Docker/Compose), native
    auth prerequisites, proxy settings and the workspace mount.
-4. `./lab-vm agent [name]` attaches the selected harness directly in the guest (not in a
-   container) to the invoking terminal.
+4. `./lab-vm agent [name]` currently attaches the selected harness directly in the guest
+   (not in a container) to the invoking terminal. The target everyday entry point is a
+   single `./lab <workspace>` command that reuses/starts the prepared VM and enters the
+   guest TUI directly; provisioning and diagnostic commands remain explicit satellites.
+   The host-Docker workflow remains available as `./lab-docker`. This transition is gated by
+   #35/#52 and has not happened yet.
    Guest-native provider login and browser callback forwarding are tracked in #45.
 5. The agent controls guest Docker/Compose for project services and tests. It may launch
    nested Little Mester VMs when nested virtualization is available and verified.
 6. The lifecycle can stop guest workloads and the outer VM. VM-state retention/deletion is
    an explicit lifecycle choice; recursive test sessions must not be silently destroyed.
+
+The current `lab-vm stop` and `lab-vm down` are destructive to guest state; they are not the
+target end-of-day operation. A resumable, non-destructive stop/restart path and command-by-
+command retention guarantees are required before the VM workflow is recommended for daily
+use (#41/#52).
+
+The Little Mester checkout is not part of the default workspace export. Explicit recursion
+may expose it; self-modification additionally requires `--unsafe-recurse`. Both recursive
+modes must enforce a propagated maximum depth, defaulting to zero, and use a separate
+disposable child workspace/state. These are target requirements tracked by #52, not claims
+that recursive VM execution already works.
 
 ## 5. Deliberate non-goals
 

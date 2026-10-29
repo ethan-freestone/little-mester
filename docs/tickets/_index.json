@@ -300,7 +300,13 @@
       "file_path": "ticket-051.json",
       "status": "draft",
       "area": "engine"
+    },
+    {
+      "number": 52,
+      "file_path": "ticket-052.json",
+      "status": "draft",
+      "area": "infra"
     }
   ],
-  "updated_at": "2026-10-28T17:49:07.592Z"
+  "updated_at": "2026-10-29T11:49:37.817Z"
 }

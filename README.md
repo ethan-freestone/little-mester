@@ -27,7 +27,7 @@ A local LLM (Ollama or llama.cpp) drives a coding agent (**opencode** by default
 
 ### Architecture
 
-**Migration status (2026-10-28):** Use `./lab` (host Docker) for actual work; the VM is **not usable as a replacement yet**. `./lab-vm` installs OpenCode 2.2.0 and opens its TUI, but the owner reports `Malformed_HTTP_Response` from the forwarded llama.cpp endpoint, missing metrics, and a missing Ctrl-C catch. The VM remains an acceptance-test path, not the daily workflow. Keep the working Docker session/container intact; do not run both agents against the same checkout concurrently. #42 tracks fixing and verifying the guest experience; PostgreSQL Compose is a later test after basic model/TUI behavior works. Browser auth (#45), permission behavior (#50), nested virtualization/isolation (#43), and full lifecycle gates (#41) also remain open. See [VM architecture](docs/vm-architecture.md).
+**Migration status (2026-10-29):** `./lab` is currently the established host-Docker workflow; `./lab-vm` is the experimental direct-guest VM workflow and is **not ready to replace it**. The VM TUI has unresolved model connectivity, metrics, and Ctrl-C behavior. Keep the working Docker session/container intact and do not run two agents against the same checkout concurrently. The VM will become the default `./lab` route only after the model/TUI/metrics/exit, browser auth, permission, guest workload, isolation, and lifecycle gates pass. The existing Docker workflow will be retained as an explicit `./lab-docker` option; it is not Docker-in-Docker and does not expose the host Docker socket. During migration, use `./lab` for established Docker work and `./lab-vm` only for acceptance testing. See [VM architecture](docs/vm-architecture.md) and decision §C.9.17.
 
 ```
  HOST (any Linux / macOS with Docker)
@@ -125,10 +125,11 @@ git init
 
 **Requirements:** Docker with GPU support (`nvidia-smi` works on host), `sudo`, and a working GPU driver. Other distros and GPU vendors may need adjustments to `./lab setup` — see [`docs/`](docs/).
 
-### Current operating steps after a full shutdown
+### Current host-Docker workflow
 
-Use the established host-Docker agent for work, and start the VM separately when you need
-to inspect/debug it. The VM is **not** ready to replace the working agent yet.
+Use this established workflow for actual work until the VM acceptance gates pass. The future
+VM-first launcher will make `./lab <workspace>` enter the VM agent directly; that cutover is
+not implemented yet.
 
 1. **Start the computer and Docker Engine.** Open a terminal in this repository and check:
 
@@ -189,31 +190,49 @@ This is for acceptance testing only—not normal work—while guest model connec
 and TUI key handling are unresolved. It runs OpenCode as a native guest process (not in an
 agent container). **Current support is an experimental Linux x86_64/QEMU profile**, not a
 claim of support for every Unix. Guest Docker/Compose is for project workloads; the VM does
-not expose or share the host Docker socket. The optional model path is not yet portable:
+not expose or share the host Docker socket. VM metrics are being developed separately from
+the existing host-Docker metrics path; neither path should be removed until both modes have
+verified coverage. The optional model path is not yet portable:
 `models up` currently uses the host Compose installation, which is explicitly not the target
 architecture. No firewall or host-network changes are permitted to make it work. Manage the
 current experimental host-to-guest path through `lab-vm`:
 
 ```bash
-./lab-vm models up          # configured local model + metrics
-./lab-vm -d models status        # bindings and live loopback probes
-./lab-vm -d extra repair-model-api  # temporary diagnostics for ticket #42
+    ./lab-vm models up          # configured local model API forwarder
+    ./lab-vm metrics up         # separate host-native VM metrics endpoint
+    ./lab-vm models status      # concise state and host reachability summary
+    ./lab-vm -d models diagnose # detailed, read-only host/model-path evidence
 ```
 
 `models up` selects the provider in `agent/opencode/opencode.json` by default; choose
-`ollama`, `llamacpp`, or `all` explicitly when needed. It starts the selected Compose API
-forwarders, whose ports are published by Docker on `127.0.0.1` only. It verifies actual host
-HTTP reachability instead of trusting Compose/inspect port metadata. On failure, `-d`
-reports Docker context/daemon/network and port-publication evidence without changing host
-firewall or networking. The default `./lab` workflow does not start these services. Stop
-only the API forwarders when finished with VM testing:
+`ollama`, `llamacpp`, or `all` explicitly when needed. It starts only the selected Compose
+model API forwarders, whose ports are published by Docker on `127.0.0.1` only. It verifies
+actual host HTTP reachability instead of trusting Compose/inspect port metadata. `models status`
+summarizes whether each running forwarder has an active host port mapping and responds on
+loopback. If it does not, run `./lab-vm -d models diagnose` before collecting ad-hoc evidence.
+That command records resolved Compose ports, Docker context/daemon mode, container bindings and
+network attachments, `docker port`, relevant host listeners, loopback HTTP probes, backend health,
+and available Docker journal diagnostics in the normal `.mester/logs/` run log. It is read-only: it
+does not start/recreate containers, alter daemon/firewall/network settings, or remove orphans.
+The output identifies unavailable checks and exits nonzero if a running forwarder is unhealthy.
+VM metrics
+use a separate native host process at `127.0.0.1:19532`, independent of Docker; it returns
+only curated metrics API data and is reachable from the guest through the existing QEMU
+guestfwd. The host-Docker `metrics` Compose service is unchanged. `models diagnose` is the
+standard first step when API status is unhealthy; `models up -d` also prints publication
+diagnostics if startup fails. Neither changes host firewall or networking. The default `./lab`
+workflow does not start these VM services. Stop the API forwarders and metrics process
+separately when finished with VM testing:
 
 ```bash
 ./lab-vm models down
+./lab-vm metrics down
 ```
 
-`./lab-vm extra` delegates to `scripts/vm-extra.sh`, a **temporary** repair/diagnostic
-script that must be removed after ticket #42's model, metrics and TUI acceptance gates pass.
+`./lab-vm extra` delegates to `scripts/vm-extra.sh`, a **temporary** end-to-end guest
+acceptance helper that must be removed after ticket #42's model, metrics and TUI gates pass.
+Use the built-in `models diagnose` command for host Docker/model-forwarder troubleshooting;
+it is read-only and does not attempt repairs.
 
 On a fresh host, install the QEMU/KVM and `virtiofsd` prerequisites in
 [`docs/01-host-setup.md`](docs/01-host-setup.md), then from the little-mester checkout:
@@ -224,7 +243,7 @@ On a fresh host, install the QEMU/KVM and `virtiofsd` prerequisites in
 ./lab-vm agent                                     # attach to the guest OpenCode TUI
 ```
 
-For an already-provisioned default VM, the normal start is simply:
+For an already-provisioned default VM, acceptance testing currently requires two commands:
 
 ```bash
 ./lab-vm up
@@ -239,11 +258,28 @@ repo workspace:
 ./lab-vm agent
 ```
 
-`up` installs/repairs the pinned default OpenCode version; `agent` only checks readiness
-and launches it. The agent has broad authority inside the guest, including guest Docker;
-the outer VM is the host-isolation boundary. VM mode is not yet a replacement for `./lab`:
-keep the existing Docker workflow available and follow the current gates on tickets #41–#45
-and #50. Do not concurrently edit the same workspace from both agents.
+`base` downloads/prepares the reusable base image once. `up` starts/provisions the VM and
+installs or repairs the pinned OpenCode version; it currently returns to the host rather
+than launching the TUI. `agent` checks readiness and attaches the interactive TUI. `ssh` is
+for guest diagnostics, not a required daily step. The target daily path is one command that
+starts/reuses the VM and launches OpenCode; that behavior is tracked for future implementation
+and is not yet available.
+
+**Shutdown and data retention:** Current `./lab-vm stop` is not a gentle pause: it runs
+`docker compose down -v --remove-orphans` in the guest, then calls `down`. `./lab-vm down`
+stops QEMU and deletes the writable VM overlay, seed ISO, and VM control keys (the cached base
+image remains). Either command can discard guest state; `stop` also removes guest Compose
+volumes. There is not yet a supported non-destructive end-of-day suspend/stop command. Do not
+use `stop`, `down`, `--clean`, or `rebuild` on a VM whose state you need to preserve. This
+behavior must be improved and documented before VM mode is recommended for daily use.
+
+The agent has broad authority inside the guest, including guest Docker; the outer VM is the
+host-isolation boundary. VM mode is not yet a replacement for `./lab`: keep the existing
+Docker workflow available and follow the current gates on tickets #41–#45 and #50. Do not
+concurrently edit the same workspace from both agents. Do not mount the Little Mester
+repository unless recursion is explicitly enabled. Bounded `--recurse` and `--unsafe-recurse`
+(self-modification) with a maximum nesting depth defaulting to zero are approved design
+requirements, but are not implemented yet; see the linked recursion ticket.
 
 Hardware configuration lives in [`machine.conf.example`](machine.conf.example). Copy it to `machine.conf` (gitignored) and fill in your specs. The benchmark tools use it to suggest optimal starting points.
 
@@ -252,7 +288,9 @@ Hardware configuration lives in [`machine.conf.example`](machine.conf.example). 
 ## Everyday use
 
 The commands below are for the established host-Docker workflow. For the VM acceptance
-workflow, use `./lab-vm up` followed by `./lab-vm agent` as described above.
+workflow, use `./lab-vm up` followed by `./lab-vm agent` as described above. After the
+acceptance gates pass, `./lab` is intended to use the VM by default and the current Docker
+workflow will remain available as `./lab-docker`.
 
 ```bash
 ./lab <workspace>                   # start opencode (default agent)

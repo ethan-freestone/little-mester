@@ -8,7 +8,7 @@
   "title": "Direct guest harness runtime and guest workload control",
   "objective": "Install and run the model-agnostic Little Mester harness directly inside the outer VM guest, with native guest auth and broad guest-level control. Docker/Compose are available to the agent for arbitrary project workloads; no Docker container wraps the agent. Preserve the outer VM host-isolation boundary and existing restricted egress/secret rules.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-10-28T17:49:07.592Z",
+  "updated_at": "2026-10-29T11:31:59.146Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -59,6 +59,12 @@
       "id": "A10",
       "text": "The direct guest OpenCode TUI loads the Little Mester exit-confirm plugin: Ctrl-C opens the confirmation flow, cancel remains in the TUI, and confirm exits; record OpenCode version and actual observed behavior.",
       "status": "pending"
+    },
+    {
+      "id": "A11",
+      "text": "VM metrics are implemented and acceptance-tested as a VM-specific path without removing or regressing the existing host-Docker metrics path; the guest does not depend on Compose DNS or general host access, and transition/removal requires owner approval after both paths pass.",
+      "status": "in-progress",
+      "evidence": "2026-10-29 implementation adds a host-native curated metrics endpoint bound to 127.0.0.1:19532, independent of the existing Docker metrics service, and guestfwd remains limited to that endpoint. Local endpoint, host-service lifecycle, guest URL configuration, Bats and Python tests pass. Direct guest/TUI metrics acceptance remains unverified because this environment has no /dev/kvm or Docker. Owner CachyOS host check 2026-10-29: `./lab-vm metrics up` started endpoint on 127.0.0.1:19532; `metrics status` returned live CPU/RAM/NVIDIA GPU/temperature data. Subsequent `./lab-vm status` showed outer VM stopped, so guestfwd/TUI are not yet tested. Owner CachyOS live guest check 2026-10-29: after non-clean `./lab-vm up --debug --unsafe-recurse --auto-accept`, guest `curl -fsS` requests to `http://10.0.2.100:19532/summary`, `/metrics`, and `/history?n=5` all succeeded. Returned host CPU/RAM, NVIDIA GPU, temperatures, and rolling history via QEMU guestfwd. OpenCode TUI/tool rendering and LAN-negative check remain pending."
     }
   ],
   "tests": {
@@ -98,13 +104,19 @@
       "Long-term model/metrics transport plan (owner explicitly rejected host-owned socat relays and other workarounds): retain Docker's standard Compose port publishing bound to 127.0.0.1 only, with QEMU guestfwd unchanged. Make `./lab-vm models up/status/down` own the Compose forwarder lifecycle; validate real host HTTP reachability, not only Docker port-binding metadata. On failure, report and preserve read-only evidence (Docker context/daemon mode, resolved Compose ports, container state and HostConfig bindings, `docker port`, host socket/listener and direct loopback probes, backend health) without changing firewall, daemon settings, or network topology. Use that evidence to identify and correct a reproducible Docker/host configuration defect; keep the VM blocked until host and guest API/completion/metrics checks pass. Do not retain host socat, dynamic container-IP targeting, host-network mode, or similar alternate forwarding as a fallback. Host-specific root cause remains unknown; local code cannot prove it without owner-host results.",
       "Do not start TUI model/metrics acceptance until the standard Docker loopback-published endpoint is verified on host and reachable through the existing QEMU guestfwd path. Owner must run host verification once instrumentation is shared; no workaround fallback.",
       "Document primary use cases, privilege/trust boundaries, optional model provider contract, guest workload-runtime role, and explicit supported-host matrix; classify current QEMU/KVM+virtiofs Linux implementation as experimental until portability profiles pass.",
-      "Define and test native/user-managed OpenAI-compatible model endpoint access without requiring host Docker; host model service should bind to loopback and cross only the explicitly configured QEMU forwarding port. No firewall changes, host route, LAN listener, or Docker socket sharing."
+      "Define and test native/user-managed OpenAI-compatible model endpoint access without requiring host Docker; host model service should bind to loopback and cross only the explicitly configured QEMU forwarding port. No firewall changes, host route, LAN listener, or Docker socket sharing.",
+      "Keep existing host-Docker metrics integration intact while developing a separate VM metrics endpoint/stream; test both independently and document an owner-approved switchover only after both pass.",
+      "On KVM host, start ./lab-vm metrics up; verify 127.0.0.1:19532/summary and /metrics, then verify guest 10.0.2.100:19532/summary, /metrics and /history through QEMU guestfwd; confirm endpoint only exposes curated fields and no LAN listener.",
+      "In direct guest OpenCode TUI, verify host-metrics tool and TUI receive live data; stop the host-native endpoint and verify clear transport-unavailable behavior; restart it and verify recovery.",
+      "Run host-Docker metrics acceptance unchanged and confirm the Docker metrics service is not started/stopped by ./lab-vm metrics commands."
     ],
     "created": [
       "tests/vm.bats: pinned semantic-version validation, direct guest CLI installation path and interactive `lab-vm agent` command wiring.",
       "tests/vm.bats: confirms `lab-vm agent` checks installed OpenCode version/config and does not invoke installer or config sync.",
       "tests/vm.bats covers the guest config install/launch path agreement, flat /etc/opencode/opencode.json location, and version output parsing without escaped-quote awk failure.",
-      "tests/vm.bats: validates optional VM-only model forwarder profile, loopback-only host binds for 11434/8080, expected internal Ollama/llama.cpp destinations, and that base compose.yaml still has no published ports."
+      "tests/vm.bats: validates optional VM-only model forwarder profile, loopback-only host binds for 11434/8080, expected internal Ollama/llama.cpp destinations, and that base compose.yaml still has no published ports.",
+      "tests/test_vm_metrics_service.py: starts the metrics collector on an isolated loopback test port with fixture proc/sys sources; verifies curated JSON, summary/history, and 404 for unlisted paths.",
+      "tests/vm.bats: verifies native VM metrics command binds 127.0.0.1:19532, uses the existing guestfwd, and remains independent of Docker Compose."
     ],
     "cases": [
       "2026-10-28 prerequisite feedback: real CachyOS guest boots and installs Docker packages but rootless installer fails on unloaded nf_tables. #41 now loads/persists the guest module and sets service drop-in before installer starts Docker; no rootful or --skip-iptables fallback. Agent CLI/daemon capability AC remain pending until live guest verification. Existing ./lab compose has GPU-local model dependencies, so running it unmodified inside CPU-only VM is not evidence of #42 completion.",
@@ -128,7 +140,11 @@
       "Owner debug run 2026-10-28: `./lab-vm -d extra repair-model-api` failed at Compose JSON parsing. Root cause identified locally: vm_model_compose emitted log_debug to stdout, contaminating JSON captured by _vm_validate_model_api_config; debug mode itself caused validator failure. Redirected Compose command trace to stderr and added regression asserting captured JSON remains clean while debug output is emitted. Host diagnostics after this correction remain pending.",
       "Owner debug transcript 2026-10-28 established: Compose-side socat forwarder containers can reach llama.cpp (`HTTP/1.1 200`) and metrics (`HTTP/1.0 200`) on the internal network; Docker HostConfig records 127.0.0.1 binds, but host `ss` has no listeners and host loopback curls are refused. Guestfwd model request reaches QEMU but gets raw HTTP/0.9 because its host-loopback target is unavailable; guest metrics port is refused. Root cause localized to Docker-published-port host delivery, not the model HTTP API. Replaced Compose-published API ports with host-managed socat relay design: host connects to exact backend container IP/port, relay binds only 127.0.0.1, and lab-vm models owns relays. `models up` first verifies host-to-container bridge access; only then stops legacy API sidecars and creates relays. No firewall/network policy changes. Local validation: 82 Bats, 111 docs, bash syntax and diff checks pass. Host confirmation pending.",
       "Owner decision 2026-10-28: no host socat relays, dynamic bridge-IP targeting, or other workaround. Preserve standard Compose port publication bound only to 127.0.0.1 and fix the underlying host/Docker delivery issue based on diagnostics. This host-specific root cause is not yet known.",
-      "Owner clarified target portability: setup should be drop-in across declared Unix support profiles and must not depend on the owner's host Docker/firewall configuration. Guest Docker may be used for workload management but must not wrap the agent or be the only way to provide host-side model inference. Current CachyOS Docker publication failure is environment evidence, not a reason to add host-specific workarounds."
+      "Owner clarified target portability: setup should be drop-in across declared Unix support profiles and must not depend on the owner's host Docker/firewall configuration. Guest Docker may be used for workload management but must not wrap the agent or be the only way to provide host-side model inference. Current CachyOS Docker publication failure is environment evidence, not a reason to add host-specific workarounds.",
+      "2026-10-29: local host service lifecycle smoke passed: ./lab-vm metrics up/status/down; live /summary returned CPU, RAM and temperature data; process/PID file removed and listener stopped. This does not verify guestfwd or live TUI.",
+      "2026-10-29: Bats 85/85, VM Python tests 15/15, docs checks 112/112, shell syntax and diff checks pass. No KVM/Docker is available in this environment; guest endpoint/TUI remains pending.",
+      "2026-10-29 owner CachyOS host: `./lab-vm metrics up` succeeded and bound the host-native endpoint to 127.0.0.1:19532; `metrics status` returned CPU, RAM, NVIDIA GPU utilization/VRAM/temperature and sensor data. `./lab-vm status` immediately reported VM default stopped. This verifies the host service only; guestfwd and TUI remain pending.",
+      "2026-10-29 owner CachyOS live guest: after non-clean `./lab-vm up --debug --unsafe-recurse --auto-accept`, `./lab-vm ssh` then guest `curl -fsS` to 10.0.2.100:19532/summary, /metrics, and /history?n=5 all succeeded through QEMU guestfwd. Metrics payload contained host CPU/RAM, NVIDIA GPU (RTX 5070 Laptop GPU), sensor temperatures, and five recent samples. This proves host endpoint→QEMU guestfwd→guest HTTP API only; actual OpenCode TUI/tool behavior and LAN-negative test remain pending."
     ]
   },
   "priority": "major",

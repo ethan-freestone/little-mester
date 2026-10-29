@@ -149,6 +149,7 @@ VM lifecycle commands (epic #35, ticket #41):
 
   ./lab-vm agent [name]
       Launch OpenCode directly in the guest, attached to this terminal.
+      Use -v/--verbose or -d/--debug for preflight diagnostics.
 
   ./lab-vm down [name]
       Stop the VM and remove per-VM artifacts (overlay disk, seed ISO, keys).
@@ -164,15 +165,23 @@ VM lifecycle commands (epic #35, ticket #41):
       Delete and recreate the base disk (destructive, requires confirmation).
       Removes overlay disk as well. A new base is created in its place.
 
-  ./lab-vm models up [default|ollama|llamacpp|all|metrics]
-      Start selected Compose API forwarders published on loopback; verify host HTTP.
-      Default selects the provider configured in agent/opencode/opencode.json.
+   ./lab-vm models up [default|ollama|llamacpp|all]
+       Start selected Compose model API forwarders published on loopback; verify host HTTP.
+       Default selects the provider configured in agent/opencode/opencode.json.
 
   ./lab-vm models status
-      Show VM API container bindings and probe host loopback endpoints.
+      Concise forwarder state and host loopback reachability summary.
 
-  ./lab-vm models down
-      Stop only the Compose VM API forwarders; model servers and VM are untouched.
+  ./lab-vm [-v|-d] models diagnose [ollama|llamacpp|all]
+      Collect detailed, read-only Docker/model forwarding diagnostics.
+      Does not start/recreate containers or change host networking.
+
+   ./lab-vm models down
+       Stop only the Compose VM model API forwarders; model servers and VM are untouched.
+
+   ./lab-vm metrics up|status|down
+       Manage a separate host-native metrics endpoint on 127.0.0.1:19532 for VM guestfwd.
+       This does not use host Docker and does not change the host-Docker metrics service.
 
   ./lab-vm extra <command> [args...]
       Run temporary repair/diagnostic helpers from scripts/vm-extra.sh.
@@ -395,7 +404,13 @@ case "$cmd" in
     vm_cmd_rebuild "$vm_name"
     ;;
   models)
+    if [[ "${remaining[1]:-}" == diagnose ]]; then
+      exec bash "$LAB_DIR/scripts/vm-models-diagnose.sh" "${remaining[@]:2}"
+    fi
     vm_cmd_models "${remaining[@]:1}"
+    ;;
+  metrics)
+    vm_cmd_metrics "${remaining[@]:1}"
     ;;
   extra)
     exec bash "$LAB_DIR/scripts/vm-extra.sh" "${remaining[@]:1}"
