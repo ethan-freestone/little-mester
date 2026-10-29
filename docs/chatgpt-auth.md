@@ -1,6 +1,6 @@
 # ChatGPT authentication runbook (container and VM)
 
-> **Status (2026-10-29):** Manual legacy device-code login is verified in the current agent container. `./lab-vm agent --browser-auth` starts the guest TUI with a temporary host-browser handoff, deriving the callback port from OpenCode's runtime `redirect_uri` and adding one loopback-only SSH forward. This behavior is source-verified for pinned OpenCode 2.2.0; native browser acceptance remains open (#45). The owner confirmed same-port proxy reload (#41). VM/host credential escrow and export-before-delete are **not implemented**; the VM overlay remains the only persistence for guest-created auth. Preserve the current host-Docker session and VM state during authentication testing.
+> **Status (2026-10-29):** The owner reports that VM browser authentication works. `./lab-vm agent` now enables its temporary host-browser handoff by default; use `--no-browser-auth` to skip it. The bridge derives the callback port from OpenCode's runtime `redirect_uri` and adds one loopback-only SSH forward. This behavior is source-verified for pinned OpenCode 2.2.0; broader auth cleanup/persistence acceptance remains open (#45). The owner also reports model requests fail; the exact `api.openai.com` domain is now allowlisted through the existing VM proxy, but a successful completion is not yet verified. VM/host credential escrow and export-before-delete are **not implemented**; the VM overlay remains the only persistence for guest-created auth. Preserve the current host-Docker session and VM state during testing.
 
 Use this for operational ChatGPT login and credential-preservation steps when OpenCode runs without a browser. The general auth boundary is [decision C.9.13](DECISIONS.md); acceptance criteria, implementation chronology, and test results belong to [ticket #45](tickets/ticket-045.json). This uses a ChatGPT Plus or Pro subscription; it does not require an OpenAI API key or separate API billing.
 
@@ -41,8 +41,8 @@ Specifically, source commit `1097e2668b1e08ad63bdf0b1c4860b9bc01e420c`,
 `http://127.0.0.1:${port}/auth/callback`. This is **source-level confirmation,
 not a documented OpenCode CLI/API guarantee**. The port is deliberately not fixed.
 
-1. Run `./lab-vm agent --browser-auth` on the host. This is the standard agent
-   entry point with browser handoff enabled. It starts the guest TUI, temporary
+1. Run `./lab-vm agent` on the host. Browser handoff is enabled by default; use
+   `--no-browser-auth` only to skip it. This starts the guest TUI, temporary
    host MCP browser bridge, and an OpenSSH control master with a reverse forward
    to the bridge. No callback port is guessed or opened yet. No second terminal or
    manual URL copy is required.
@@ -85,7 +85,7 @@ record that behavior; do not paste or log the URL as a workaround.
 diagnostic fallback. Start the guest TUI separately, read the numeric port from
 its `redirect_uri` locally, and run the helper with that port in a second
 terminal. It does not take or log the URL. This fallback is not needed for the
-normal `./lab-vm agent --browser-auth` flow.
+normal `./lab-vm agent` flow.
 
 **Fragility and version maintenance:** callback discovery depends on the
 internal v2.2.0 implementation exposing `redirect_uri` in the authorize URL
@@ -98,8 +98,9 @@ numeric callback port may appear in opt-in SSH transport diagnostics; OAuth
 URL/state/code/tokens are not logged. If the host port is already occupied, the
 forward fails closed; stop the conflicting local listener before retrying. No
 LAN listener, QEMU host-forward, general host route, or credential copy is
-created. The guest still sends OAuth token exchange/refresh through the restricted
-egress proxy. The workspace allowlist includes `auth.openai.com` and `chatgpt.com`,
+created. The guest sends OAuth token exchange/refresh through the restricted egress
+proxy. The workspace allowlist includes `auth.openai.com`, `chatgpt.com`, and the
+exact model API host `api.openai.com`,
 alongside its existing package domains. Because this is a workspace-level policy,
 the same destinations are also allowed to host-Docker sessions using this workspace. A
 running VM proxy keeps its startup policy snapshot; after changing the manifest,
@@ -110,17 +111,18 @@ drop during that one-time upgrade.
 
 **Login versus model egress:** the pinned **Sign in with ChatGPT** method uses
 `auth.openai.com` for token exchange and signing-key verification, and
-`https://api.openai.com/v1` for model requests. The current manifest does **not**
-allow `api.openai.com`; login can be tested independently, but a completion with
-this method requires explicit owner approval for that domain. Do not add a broad
-`openai.com` rule or bypass the proxy to make a completion work. Public provider
-egress and the temporary browser callback do not grant host/LAN or host-file access.
+`https://api.openai.com/v1` for model requests. The owner approved the exact
+`api.openai.com` domain, now listed in `.mester-egress`; there is no broad
+`openai.com` rule. The VM must use its existing policy-controlled proxy, which
+allows only public destinations on supported HTTP(S) ports and rejects private
+or reserved IPs. No host/LAN route or firewall change is part of this allowlist.
+After the manifest is present on the host, reload the running proxy with
+`./lab-vm egress-reload`; a successful real completion is still unverified.
 
-This wiring has **not yet passed live browser acceptance**. Ticket #45 still
-requires an owner-controlled test of automatic host browser launch, success and
-cancellation cleanup, occupied-port and egress-denied checks, and `auth list`.
-An actual provider request is a separate gate that requires explicit approval
-for `api.openai.com` egress; it is not part of login-only acceptance. Never
+The owner reports that browser sign-in works. Remaining ticket #45 acceptance still
+requires owner-controlled checks of success/cancellation cleanup, occupied-port
+and egress-denied cases, and `auth list`. A real provider request is separately
+approved for the exact `api.openai.com` host and remains to be verified. Never
 record the authorization URL, OAuth state, code, or token in logs, tickets, or chat.
 
 `chatgpt-headless` is a distinct device-code method. It does not exercise this
@@ -302,15 +304,15 @@ If the database is under `/home/agent`, the tmpfs was probably recreated. Import
 
 ### Browser waits on a localhost callback
 
-Use `./lab-vm agent --browser-auth` for the normal single-command flow; it owns
-the temporary host-browser handoff and derives one loopback callback forward from the runtime
+Use `./lab-vm agent` for the normal single-command flow; browser handoff is enabled
+by default. The command owns the temporary host-browser handoff and derives one loopback callback forward from the runtime
 `redirect_uri`. If it fails, record the OpenCode version and a redacted error,
 then stop rather than copying the authorization URL or opening a LAN listener.
 `./lab-vm auth-forward [name] <callback-port>` is a callback-only diagnostic
 fallback; it does not open the browser or satisfy the single-command browser
 acceptance gate.
 
-For one callback-routing diagnostic run, use `./lab-vm -d agent --browser-auth`. The temporary
+For one callback-routing diagnostic run, use `./lab-vm -d agent`. The temporary
 SSH control master and on-demand forwarding command write verbose transport
 diagnostics to `.mester/vm/default/browser-bridge-ssh.log`; these report whether
 the exact loopback listener was installed and whether SSH could open the guest

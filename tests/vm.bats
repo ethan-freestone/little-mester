@@ -123,21 +123,37 @@ setup() {
   [ ! -e "$VM_AUTH_CAPTURE" ]
 }
 
-@test "agent browser-auth mode keeps MCP bridge forward on SSH loopback" {
+@test "agent enables browser auth by default and keeps MCP bridge on SSH loopback" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  unset LAB_VM_RECURSION_DEPTH
+  _vm_browser_auth_enabled auto
+  LAB_VM_RECURSION_DEPTH=1
+  ! _vm_browser_auth_enabled auto
+  _vm_browser_auth_enabled on
+  ! _vm_browser_auth_enabled off
+
   mapfile -d '' -t args < <(_vm_openai_browser_bridge_ssh_args)
   [ "${#args[@]}" -eq 4 ]
   [[ "${args[*]}" == *'-R 127.0.0.1:19533:127.0.0.1:19533'* ]]
   [[ "${args[*]}" == *'-o ExitOnForwardFailure=yes'* ]]
   ! [[ "${args[*]}" == *'0.0.0.0'* ]]
-  grep -Fq -- '--browser-auth)' "$REPO_ROOT/lab-vm"
   grep -Fq 'vm_cmd_agent_with_browser_auth "$vm_name"' "$REPO_ROOT/lab-vm"
+  grep -Fq -- '--browser-auth)' "$REPO_ROOT/lab-vm"
+  grep -Fq -- '--no-browser-auth)' "$REPO_ROOT/lab-vm"
+  grep -Fq 'if _vm_browser_auth_enabled "$VM_BROWSER_AUTH_MODE"; then' "$REPO_ROOT/lab-vm"
+  grep -Fq 'LAB_VM_RECURSION_DEPTH=1' "$REPO_ROOT/lib/vm/lifecycle.sh"
   ! grep -Eq '^  auth\)' "$REPO_ROOT/lab-vm"
   grep -Fq 'vm_cmd_agent_with_browser_auth()' "$REPO_ROOT/lib/vm/lifecycle.sh"
   grep -Fq 'ssh "${ssh_debug_args[@]}" -F /dev/null -M -S "$control_path" -N' "$REPO_ROOT/lib/vm/lifecycle.sh"
   grep -Fq 'VM_BROWSER_BRIDGE_SSH_CONTROL_PATH="$control_path"' "$REPO_ROOT/lib/vm/lifecycle.sh"
   grep -Fq -- '-o IdentitiesOnly=yes -o IdentityAgent=none' "$REPO_ROOT/lib/vm/lifecycle.sh"
   grep -Fq -- '-o ForwardAgent=no -o ForwardX11=no' "$REPO_ROOT/lib/vm/lifecycle.sh"
+}
+
+@test "direct guest agent exports recursion marker for nested lab-vm launches" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  body="$(declare -f vm_cmd_agent)"
+  [[ "$body" == *'export LAB_VM_RECURSION_DEPTH=1'* ]]
 }
 
 @test "browser auth debug enables SSH transport tracing only on request" {

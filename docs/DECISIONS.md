@@ -489,6 +489,14 @@ port-conflict, egress-denial, request, and persistence evidence before claiming
 auth accepted. Ticket #45 owns the implementation chronology and test ledger;
 the [auth runbook](chatgpt-auth.md) contains operator steps and secret handling.
 
+**Narrow ChatGPT model egress approval (2026-10-29):** The owner approved
+`api.openai.com` for ChatGPT model requests. Add only that exact hostname to the
+workspace egress manifest and use the existing VM HTTP(S) proxy; do not add a
+wildcard `openai.com` rule, direct guest route, host/LAN exposure, or firewall
+change. The proxy's public-IP validation/private-address denial remains in force.
+The active VM proxy must reload the updated manifest, and a real completion
+still needs owner-host verification.
+
 If the guest cannot launch the host browser, a host-resident MCP or equivalent
 may open an ephemeral authorization URL only for approved provider origins.
 Reach it only through a temporary per-VM SSH reverse forward bound to guest
@@ -503,7 +511,8 @@ source commit `1097e2668b1e08ad63bdf0b1c4860b9bc01e420c`,
 listener with `server.listen(0, "127.0.0.1", ...)`, then uses the selected port
 in the OAuth `redirect_uri` (`/auth/callback`). This is confirmed by source
 inspection, **not a stable/documented OpenCode CLI or API contract**. The
-temporary `./lab-vm agent --browser-auth` host bridge extracts the port from the actual
+temporary `./lab-vm agent` host bridge (enabled by default; `--no-browser-auth`
+opts out) extracts the port from the actual
 validated authorize URL and asks its private OpenSSH control master to forward
 only `127.0.0.1:<port>` on the host to `127.0.0.1:<port>` in the guest before
 opening the unchanged URL. At most one callback forward is active; a new port

@@ -126,13 +126,16 @@ class ProxyTests(unittest.TestCase):
             self.assertTrue(proxy.allowed(host, enabled, domains), host)
         self.assertFalse(proxy.allowed("registry.npmjs.org.attacker.invalid", enabled, domains))
 
-    def test_project_policy_permits_only_the_openai_hosts_used_by_chatgpt_oauth(self):
+    def test_project_policy_permits_only_the_openai_hosts_used_by_chatgpt(self):
         enabled, domains = proxy.policy(Path(__file__).parents[1] / ".mester-egress")
         self.assertTrue(proxy.allowed("auth.openai.com", enabled, domains))
         self.assertTrue(proxy.allowed("chatgpt.com", enabled, domains))
         self.assertTrue(proxy.allowed("backend.chatgpt.com", enabled, domains))
+        self.assertTrue(proxy.allowed("api.openai.com", enabled, domains))
+        self.assertFalse(proxy.allowed("v1.api.openai.com", enabled, domains))
         self.assertFalse(proxy.allowed("auth.openai.com.attacker.invalid", enabled, domains))
-        self.assertFalse(proxy.allowed("api.openai.com", enabled, domains))
+        self.assertFalse(proxy.allowed("api.openai.com.attacker.invalid", enabled, domains))
+        self.assertFalse(proxy.allowed("openai.com", enabled, domains))
 
     def test_policy_store_reloads_changed_manifest_without_restarting_listener(self):
         with tempfile.TemporaryDirectory() as directory:

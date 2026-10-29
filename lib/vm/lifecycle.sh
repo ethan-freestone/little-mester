@@ -404,6 +404,19 @@ _vm_openai_browser_bridge_ssh_args() {
     -R 127.0.0.1:19533:127.0.0.1:19533
 }
 
+_vm_browser_auth_enabled() {
+  case "${1:-auto}" in
+    on) return 0 ;;
+    off) return 1 ;;
+    auto)
+      # The guest agent marks its environment so nested lab-vm launches
+      # default to no host-browser bridge. --browser-auth explicitly overrides.
+      [[ "${LAB_VM_RECURSION_DEPTH:-0}" =~ ^0+$ ]]
+      ;;
+    *) return 2 ;;
+  esac
+}
+
 vm_cmd_auth_forward() {
   local vm_name=default callback_port="" vm_dir
   local -a forward_args=()
@@ -885,9 +898,9 @@ vm_cmd_agent() {
   local remote_command browser_dir_quoted
   if [[ -n "${VM_BROWSER_BRIDGE_DIR:-}" ]]; then
     printf -v browser_dir_quoted '%q' "$VM_BROWSER_BRIDGE_DIR"
-    remote_command="set -eu; browser_dir=$browser_dir_quoted; cleanup(){ rm -rf -- \"\$browser_dir\"; }; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' HUP TERM; export PATH=\"\$browser_dir:\$PATH\" VM_BROWSER_BRIDGE_TOKEN_FILE=\"\$browser_dir/token\"; cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=http://10.0.2.100:19532 && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && opencode"
+      remote_command="set -eu; browser_dir=$browser_dir_quoted; cleanup(){ rm -rf -- \"\$browser_dir\"; }; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' HUP TERM; export PATH=\"\$browser_dir:\$PATH\" VM_BROWSER_BRIDGE_TOKEN_FILE=\"\$browser_dir/token\" LAB_VM_RECURSION_DEPTH=1; cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=http://10.0.2.100:19532 && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && opencode"
   else
-    remote_command="cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=http://10.0.2.100:19532 && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && exec opencode"
+    remote_command="cd /workspace && . /etc/profile.d/mester.sh && export LAB_VM_RECURSION_DEPTH=1 OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=http://10.0.2.100:19532 && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && exec opencode"
   fi
   ssh -t \
     -o BatchMode=yes -o ConnectTimeout=10 \

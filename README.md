@@ -205,7 +205,8 @@ current experimental host-to-guest path through `lab-vm`:
     ./lab-vm -d models diagnose # detailed, read-only host/model-path evidence
     ./lab-vm -d models diagnose --probe-egress llamacpp # explicit TCP egress probe
     ./lab-vm verify-isolation   # inspect live QEMU config and probe from inside the guest
-    ./lab-vm agent --browser-auth # guest TUI with temporary host-browser OAuth handoff
+    ./lab-vm agent               # guest TUI; browser OAuth handoff is enabled by default
+    ./lab-vm agent --no-browser-auth # skip the temporary host-browser bridge
     ./lab-vm auth-forward default <port> # exact-port manual diagnostic fallback
 ```
 
@@ -220,17 +221,24 @@ workspace, model/metrics forwarders and policy-controlled proxy are intentional 
 check exits nonzero with the individual results; it never repairs settings or changes firewall,
 network, VM or container state.
 
-Native provider sign-in happens in the guest TUI through `/connect`; use
-`./lab-vm agent --browser-auth` for the one-command OpenAI browser flow. This is the same
-`agent` entry point with temporary browser support enabled. The MCP bridge opens only
+Native provider sign-in happens in the guest TUI through `/connect`; `./lab-vm agent` uses
+the one-command OpenAI browser flow by default. Add `--no-browser-auth` to skip the
+temporary bridge. Nested launches inherit a recursion marker and default to no browser
+bridge; `--browser-auth` explicitly opts a nested launch in. The MCP bridge opens only
 approved provider authorization URLs in the host browser and derives one loopback SSH callback
 forward from the runtime OAuth `redirect_uri`; the URL is not rewritten or logged. This relies on
 the pinned OpenCode 2.2.0 implementation, not a stable CLI/API contract; see [decision C.9.13](docs/DECISIONS.md)
 and [the auth runbook](docs/chatgpt-auth.md) for the source reference and version-update procedure.
 `auth-forward` takes one exact callback port as a manual diagnostic fallback. The implementation
-and live-acceptance ledger is ticket #45.
-Browser auth and credential persistence still require owner-controlled acceptance; do not
-expect guest credentials to survive destructive VM deletion.
+and live-acceptance ledger is ticket #45. The owner reports browser auth works; credential
+persistence and remaining host-isolation acceptance are still open. Do not expect guest
+credentials to survive destructive VM deletion.
+
+The owner approved only `api.openai.com` for ChatGPT model requests. VM traffic reaches it
+through the existing policy-controlled HTTP(S) proxy; the rule does not add a host/LAN route,
+allow private destinations, or wildcard `openai.com`. Reload an already-running VM proxy with
+`./lab-vm egress-reload` after this manifest change; a real model completion remains a separate
+host acceptance check.
 
 `models up` selects the provider in `agent/opencode/opencode.json` by default; choose
 `ollama`, `llamacpp`, or `all` explicitly when needed. It starts only the selected Compose
@@ -304,8 +312,8 @@ repo workspace:
 
 `base` downloads/prepares the reusable base image once. `up` starts/provisions the VM and
 installs or repairs the pinned OpenCode version; it currently returns to the host rather
-than launching the TUI. `agent` checks readiness and attaches the interactive TUI; add
-`--browser-auth` when native browser OAuth is needed. `ssh` is
+than launching the TUI. `agent` checks readiness and attaches the interactive TUI; use
+`--no-browser-auth` when the temporary browser bridge is not wanted. `ssh` is
 for guest diagnostics, not a required daily step. The target daily path is one command that
 starts/reuses the VM and launches OpenCode; that behavior is tracked for future implementation
 and is not yet available.
@@ -324,7 +332,9 @@ Docker workflow available and follow the current gates on tickets #41–#45 and 
 concurrently edit the same workspace from both agents. Do not mount the Little Mester
 repository unless recursion is explicitly enabled. Bounded `--recurse` and `--unsafe-recurse`
 (self-modification) with a maximum nesting depth defaulting to zero are approved design
-requirements, but are not implemented yet; see the linked recursion ticket.
+requirements, but are not implemented yet; see the linked recursion ticket. When a guest
+agent launches another `lab-vm`, an inherited recursion marker disables browser auth by
+default; pass `--browser-auth` to explicitly enable the temporary bridge for that nested run.
 
 Hardware configuration lives in [`machine.conf.example`](machine.conf.example). Copy it to `machine.conf` (gitignored) and fill in your specs. The benchmark tools use it to suggest optimal starting points.
 

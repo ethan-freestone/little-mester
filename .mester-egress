@@ -1,7 +1,8 @@
 # Workspace egress control manifest (controlled by /lab via `check_egress_permission`)
 # Format: key=value  Lines without '=' are ignored; comments start with #
+# In the VM proxy allowlist, plain domains include subdomains; =host is exact-match only.
 
 permission=true     # Set to "false" to deny all internet access for the agent
-allowed_domains=pypi.org,pythonhosted.org,github.com,npmjs.com,npmjs.org,ubuntu.com,deb.debian.org,docker.com,docker.io,cloudflarestorage.com,auth.openai.com,chatgpt.com  # comma-separated; blank = allow all domains
+allowed_domains=pypi.org,pythonhosted.org,github.com,npmjs.com,npmjs.org,ubuntu.com,deb.debian.org,docker.com,docker.io,cloudflarestorage.com,auth.openai.com,chatgpt.com,=api.openai.com  # comma-separated; blank = allow all domains
 intent=install dependencies and optionally use OpenAI ChatGPT browser sign-in/model access from the VM
 # Note: permission=false overrides all other settings. Use with caution.

@@ -57,7 +57,7 @@ For pinned OpenCode 2.2.0, source commit
 `redirect_uri` as `http://127.0.0.1:<port>/auth/callback`. This is confirmed by
 source inspection, **not a documented/stable OpenCode CLI or API contract**.
 
-`./lab-vm agent --browser-auth` starts the guest agent with an SSH control
+`./lab-vm agent` starts the guest agent with an SSH control
 master and host MCP browser bridge. When the guest opener requests the approved
 authorization URL, the bridge extracts only that `redirect_uri` port, validates
 the exact loopback host and callback
@@ -77,6 +77,9 @@ a general network route. The existing public-destination proxy checks apply to
 login traffic as well: loopback, private, link-local, multicast and mixed
 public/non-public DNS answers are rejected before connection, and connections
 use the validated IP rather than resolving the hostname again.
+ChatGPT model requests may use only the owner-approved `api.openai.com` domain
+through this same proxy; `.mester-egress` does not authorize broad `openai.com`
+access or change the VM's host/LAN boundary.
 
 This is intentionally runtime-derived to avoid a hardcoded ephemeral port, but
 it still depends on an internal OpenCode URL shape. Unexpected/missing redirect

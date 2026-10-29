@@ -53,6 +53,9 @@ capabilities, not proof against a QEMU/KVM or host-kernel vulnerability.
   reserved, link-local, multicast, and mixed public/non-public DNS results. This control is
   separate from host-Docker egress and remains subject to the pending live acceptance gates
   in #41/#43.
+  The manifest permits the exact `api.openai.com` hostname for ChatGPT model requests; it
+  does not permit `openai.com` broadly. A running VM proxy must reload the manifest before
+  the new rule takes effect.
 - **Host-Docker setup pulls use egress too.** `ollama-pull` and `llamacpp-pull` run only
   during `./lab setup` and use the `egress` network; they are removed afterwards.
 - **Host-Docker mode:** services do not publish ports to the host; agent/workspace
@@ -60,8 +63,10 @@ capabilities, not proof against a QEMU/KVM or host-kernel vulnerability.
 - **VM mode:** QEMU's SSH control port is bound to host loopback. Narrow QEMU `guestfwd`
   channels target only the explicitly configured egress proxy, local-model API and metrics
   API. Optional model API publishing must bind to `127.0.0.1`, never the host LAN. Native
-  browser auth temporarily adds one host-loopback callback port forwarded to guest
-  loopback; it is removed when the auth SSH control master exits. The full lifecycle and
+  browser auth is on by default (use `--no-browser-auth` to opt out) and temporarily adds
+  one host-loopback callback port forwarded to guest loopback; it is removed when the auth
+  SSH control master exits. Nested guest-agent launches default to no browser bridge unless
+  explicitly started with `--browser-auth`. The full lifecycle and
   live boundary gates remain incomplete.
 
 ## 3. Filesystem restrictions

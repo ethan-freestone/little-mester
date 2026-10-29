@@ -349,18 +349,23 @@ teardown() {
   [[ "$output" != *"Unknown flag"* ]]
 }
 
-@test "lab-vm browser-auth option is accepted only with agent" {
-  local -a args=(status --browser-auth)
+@test "lab-vm browser-auth options are agent-only and conflicting flags are refused" {
+  local -a args=(status --no-browser-auth)
   run ./lab-vm "${args[@]}"
   [ "$status" -ne 0 ]
-  [[ "$output" == *'--browser-auth is only valid with the agent command.'* ]]
+  [[ "$output" == *'Browser-auth options are only valid with the agent command.'* ]]
   [[ "$output" != *'Unknown command'* ]]
 
   args=(--browser-auth status)
   run ./lab-vm "${args[@]}"
   [ "$status" -ne 0 ]
-  [[ "$output" == *'--browser-auth is only valid with the agent command.'* ]]
+  [[ "$output" == *'Browser-auth options are only valid with the agent command.'* ]]
   [[ "$output" != *'Unknown command'* ]]
+
+  args=(agent --browser-auth --no-browser-auth)
+  run ./lab-vm "${args[@]}"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Choose only one of --browser-auth or --no-browser-auth.'* ]]
 
   run ./lab-vm auth
   [ "$status" -ne 0 ]

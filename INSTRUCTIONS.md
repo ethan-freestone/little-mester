@@ -48,8 +48,8 @@ If a tool fails or is unavailable, report the error — do not fall back to dire
 - `./lab vm up` doesn't exist — VM commands only live in `./lab-vm`
 - Logging coverage is incremental; #48 already marks A1–A8 passing. Runtime permission behavior is a separate open bug, #50.
 - ChatGPT credentials are still container-local under `/home/agent/.local/share/opencode/opencode.db`; automatic host escrow, VM import, guest data persistence, and export-before-VM-deletion are documented but not implemented
-- Browser/non-device-code OpenCode ChatGPT login is required by #45. Runtime-derived callback forwarding for pinned OpenCode 2.2.0 is implemented locally; the real browser callback and persistence still need acceptance. Do not depend on legacy Codex device code remaining available.
-- The current egress manifest allows login through auth.openai.com but not model requests through api.openai.com. The latter requires separate explicit owner approval. Authentication must preserve the VM boundary: no host/LAN route, host Docker socket, broad credential mount or arbitrary host command capability.
+- Owner reports native browser ChatGPT auth works; #45 still tracks cleanup, failure and persistence acceptance. `./lab-vm agent` now enables the browser bridge by default; `--no-browser-auth` opts out. Nested launches inherit a recursion marker and default to no bridge unless `--browser-auth` is explicit.
+- Owner approved only `api.openai.com` for model requests; `.mester-egress` now lists this exact hostname. The running VM proxy must reload the manifest, then a real model request still needs verification. Preserve the VM boundary: no host/LAN route, host Docker socket, broad credential mount, arbitrary host command capability, or broad `openai.com` rule.
 - Global VM TUI dialog rendering and repeated socket-disconnect reports remain open on #41. Do not infer either is fixed by the earlier smoke result or exit-confirm styling.
 - Current stop/down delete guest state. Non-destructive daily shutdown/resume and launcher integration are #52; preserve the valuable existing overlay.
 - #50: launcher argument/mode fixes have mock regression coverage, but this running v2.2.0 container already has `opencode --auto` and the reported “prompt” UI is unresolved. Do not claim the UI bug fixed from argv tests.
@@ -63,8 +63,8 @@ recreation. Exact commands, expected results, diagnostics to preserve and stop
 conditions belong to ticket #41 `tests.needed`; do not duplicate or follow a
 superseded procedure from this file.
 
-The active gate is native guest browser authentication with the current running
-VM, followed by the remaining ordered gates on parent #35. Follow the latest
+The active gate is the current #41/#45 host handoff, followed by the remaining
+ordered gates on parent #35. Follow the latest
 superseding handoff on #41/#45; do not restart provisioning to test a host-side
 auth patch. Keep host-Docker mode until lifecycle, auth, permissions, workload
 and host-isolation acceptance pass. Record implementation, local tests and owner

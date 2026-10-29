@@ -3,8 +3,8 @@
 
 The selected workspace manifest is loaded at startup and can be safely reloaded
 with SIGHUP without rebinding the listener. No shell evaluation. CONNECT is
-restricted to 443; plain HTTP to 80. Model API access uses separate QEMU
-forwards and cannot be reached through this proxy.
+restricted to 443; plain HTTP to 80. Local model APIs use separate QEMU
+guestfwd channels; approved public provider APIs may use this proxy.
 """
 import argparse
 import ipaddress
@@ -34,10 +34,17 @@ def policy(path):
 
 def allowed(host, enabled, domains):
     host = host.lower().rstrip(".")
-    return enabled and (
-        not domains
-        or any(host == domain or host.endswith("." + domain) for domain in domains)
-    )
+    if not enabled:
+        return False
+    if not domains:
+        return True
+    for domain in domains:
+        if domain.startswith("="):
+            if host == domain[1:]:
+                return True
+        elif host == domain or host.endswith("." + domain):
+            return True
+    return False
 
 
 class PolicyStore:
