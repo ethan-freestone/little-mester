@@ -507,14 +507,15 @@ provider-specific open-URL capability, with no general host access. Never log
 or retain the URL/state, and never capture the callback/code; the callback
 continues directly to the guest through the temporary loopback SSH forward.
 
-**Recursive information sharing (design pending, #55):** A parent may expose only
-records it explicitly selects for a child. The proposed MCP surface is read-only,
-schema-limited, size-bounded, and scoped to one child over an explicit loopback
-channel; it is not a substitute for `restrict=on` or proxy destination checks.
-MCP resource reads still send a request identifier from child to parent, so #55
-must decide whether that control metadata is acceptable or strict one-way wire
-flow requires a push-only signed snapshot. No generic parent/host tools or paths
-are to be exposed to descendants.
+**Recursive information sharing (strict push-only direction, 2026-10-29; design in #55):**
+The initial sharing path must be parent-to-child only: the parent selects and validates a
+schema-limited snapshot, and the child cannot request data or send control metadata through
+that channel. Snapshot format, integrity, delivery, size limits, expiry, and revocation remain
+design work. Read-only MCP resources are a future alternative to investigate for their common
+resource shape, discovery/interoperability, and tooling; resource reads carry child request
+metadata upward and are not the current path. Any reconsideration requires an explicit owner
+decision. Neither design substitutes for `restrict=on` or proxy destination checks, and no
+generic parent/host tools or paths may be exposed to descendants.
 
 **OpenAI ChatGPT implementation for the pinned guest version:** OpenCode 2.2.0
 source commit `1097e2668b1e08ad63bdf0b1c4860b9bc01e420c`,

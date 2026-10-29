@@ -115,13 +115,13 @@ networks. The child must not inherit the parent's SSH/control endpoint, Docker s
 service, browser bridge, or workspace by default. Recursive networking remains unimplemented
 and must fail closed until tested on a supported nested-KVM host.
 
-If parent-selected information needs to flow into a child, the proposed interface is a
-read-only, schema-limited MCP resource surface: the parent chooses and validates the exported
-records; the child can request only those records and cannot mutate parent state or enumerate
-parent files/services. A resource read does send a request identifier upward; if strict
-one-way wire flow is required, use a push-only signed snapshot instead. MCP is an
-application-level data contract, not a network security boundary, and must itself be reachable
-only over a per-child explicit channel. Design and threat-model work is tracked in #55.
+The initial parent-to-child sharing direction is strict push-only: the parent selects and
+validates a scoped snapshot, then delivers it to the child without a child request/response
+channel or upward control metadata. Snapshot schema, integrity, delivery, expiry, and revocation
+are design work in #55. Read-only MCP resources are a possible future option to investigate
+for their common resource shape, discovery/interoperability, and tooling; reads carry request
+metadata upward, so MCP is not the current sharing path. Reconsideration requires an explicit
+owner decision. Neither snapshots nor MCP replace `restrict=on` or proxy destination checks.
 
 ## 4. Target lifecycle
 

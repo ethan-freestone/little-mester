@@ -322,9 +322,9 @@
     {
       "number": 55,
       "file_path": "ticket-055.json",
-      "status": "draft",
+      "status": "active",
       "area": "infra"
     }
   ],
-  "updated_at": "2026-10-29T16:23:39.914Z"
+  "updated_at": "2026-10-29T16:31:10.350Z"
 }
