@@ -58,7 +58,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
       - name: ShellCheck (lab + shell scripts)
-        run: shellcheck lab scripts/*.sh lib/vm/cloud-init.sh
+        run: shellcheck lab scripts/*.sh lib/vm/cloud-init.sh lib/vm/host-services.sh
 
       - name: Python compile check (scripts/*.py)
         run: python3 -m py_compile scripts/*.py

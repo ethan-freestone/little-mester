@@ -189,6 +189,10 @@ JSON
   ! grep -Eq 'docker compose (up|down|stop|restart)|docker (start|stop|restart|rm|system prune)' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
 }
 
+@test "hygiene ShellCheck invocation includes the VM host-services source dependency" {
+  grep -Fq 'shellcheck lab scripts/*.sh lib/vm/cloud-init.sh lib/vm/host-services.sh' "$REPO_ROOT/.github/workflows/ci.yml"
+}
+
 @test "models diagnose captures publication failure without mutating Docker state" {
   local fakebin="$BATS_TEST_TMPDIR/diagnose-bin"
   mkdir -p "$fakebin"

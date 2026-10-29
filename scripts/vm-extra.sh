@@ -12,8 +12,17 @@ VM_DIR="$LAB_DIR/.mester/vm/$VM_NAME"
 : "${VM_VERBOSE:=0}"
 : "${VM_DEBUG:=0}"
 
-log_verbose() { [[ "$VM_VERBOSE" -ge 1 ]] && echo "[verbose] $*" || true; }
-log_debug() { [[ "$VM_DEBUG" -ge 1 ]] && echo "[debug] $*" || true; }
+log_verbose() {
+  if [[ "$VM_VERBOSE" -ge 1 ]]; then
+    echo "[verbose] $*"
+  fi
+}
+
+log_debug() {
+  if [[ "$VM_DEBUG" -ge 1 ]]; then
+    echo "[debug] $*"
+  fi
+}
 
 # Keep a redacted-by-design diagnostic transcript; probes never print proxy
 # credentials or environment values.
@@ -92,7 +101,10 @@ host_diagnostics() {
   docker version --format 'server={{.Server.Version}}'
   if [[ "$VM_DEBUG" -ge 1 ]]; then
     docker info --format 'security={{json .SecurityOptions}} firewall={{.FirewallBackend}} root={{.DockerRootDir}}' 2>&1 || docker info --format 'security={{json .SecurityOptions}} root={{.DockerRootDir}}' 2>&1 || true
-    command -v ss >/dev/null 2>&1 && { echo '=== host TCP listeners (diagnostic only) ==='; ss -ltnp | awk 'NR == 1 || /:8080|:19532/'; } || true
+    if command -v ss >/dev/null 2>&1; then
+      echo '=== host TCP listeners (diagnostic only) ==='
+      ss -ltnp | awk 'NR == 1 || /:8080|:19532/' || true
+    fi
     echo '=== resolved Compose port configuration ==='
     vm_model_compose config --format json | python3 -c 'import json,sys; d=json.load(sys.stdin); [print("{}: {}".format(n,d["services"].get(n,{}).get("ports"))) for n in ("llamacpp-vm-api",)]' || true
   fi
