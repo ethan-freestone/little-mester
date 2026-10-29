@@ -8,7 +8,7 @@
   "title": "Model-agnostic harness: local models and cloud providers",
   "objective": "Keep the harness model-agnostic while supporting native provider authentication from the guest where the harness actually runs. OpenCode ChatGPT login must use a currently supported browser-based flow with its callback reaching the real guest OpenCode server; optional secure host escrow/import/export must not replace or block native login. Keep secrets out of the image, workspace, seed and Git.",
   "created_at": "2026-10-26T20:39:18.839Z",
-  "updated_at": "2026-10-29T15:37:34.882Z",
+  "updated_at": "2026-10-29T15:39:43.564Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -176,7 +176,8 @@
       "2026-10-29 resumed work: owner reiterated that authentication must not allow escape from the VM; VM host isolation is mandatory. Treat auth as a narrow temporary loopback capability and retain restrict=on, current proxy policy, workspace guard, and no host Docker/credential mounts. Owner did not explicitly approve api.openai.com model egress, so the manifest is unchanged. Exact pinned chatgpt.ts source uses method chatgpt-token-sharing (Sign in with ChatGPT), ephemeral 127.0.0.1 callback, auth.openai.com token exchange/JWKS, and api.openai.com/v1 model requests. Login-only next gate; provider completion remains blocked pending separate domain approval.",
       "2026-10-29 source review: pinned OpenCode v2.2.0 Sign in with ChatGPT (`chatgpt-token-sharing`) uses auth.openai.com for token exchange/JWKS and api.openai.com/v1 for model requests. Current manifest allows the login host but explicitly denies api.openai.com. No model egress was added; provider-completion acceptance requires separate owner approval. Local regression suite and full test results are recorded on #41; live browser callback/auth persistence remain unverified.",
       "2026-10-29: reviewed patch committed locally as 32bb8ea6b6a2959839216653797e4a49fd5a814d (`fix(vm): derive ChatGPT callback forwarding at runtime`) on feat/vm-approach. Local validation: VM Python tests 33/33, Bats 104/104, docs checks 115/115, ShellCheck, Bash/Python compile, diff check, and ticket validation pass. No live VM/browser acceptance. `git push origin feat/vm-approach` was attempted but this environment has no `ssh` executable; revision is still local and must be transferred to the owner checkout before the handoff can run.",
-      "2026-10-29: unified the public guest-TUI entry point. `./lab-vm agent [name]` is the direct launch; add `--browser-auth` to enable the temporary host browser bridge and runtime callback forwarding. The standalone `auth` command is removed; `auth-forward` remains a low-level callback diagnostic only. Local tests: Bats 105/105, VM Python 33/33, docs consistency 115/115, ShellCheck/syntax/compile/diff checks pass. No live VM/browser acceptance."
+      "2026-10-29: unified the public guest-TUI entry point. `./lab-vm agent [name]` is the direct launch; add `--browser-auth` to enable the temporary host browser bridge and runtime callback forwarding. The standalone `auth` command is removed; `auth-forward` remains a low-level callback diagnostic only. Local tests: Bats 105/105, VM Python 33/33, docs consistency 115/115, ShellCheck/syntax/compile/diff checks pass. No live VM/browser acceptance.",
+      "2026-10-29: unified agent/auth entry committed locally as 1117b743 (refactor(vm): unify agent and browser auth entry). `./lab-vm agent [name]` is the sole TUI command; `--browser-auth` enables temporary OAuth handoff, and standalone `auth` is removed. Bats 105/105, VM Python 33/33, docs checks 115/115, ShellCheck/syntax/compile/diff checks pass. No live KVM/browser acceptance."
     ]
   },
   "priority": "major",
