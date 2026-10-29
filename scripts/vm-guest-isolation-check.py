@@ -5,8 +5,8 @@ import json
 import socket
 import sys
 from pathlib import Path
+from urllib.error import URLError
 from urllib.request import ProxyHandler, Request, build_opener
-
 
 passed = 0
 failed = 0
@@ -94,7 +94,7 @@ if provider in model_urls:
     try:
         code = fetch_direct(model_urls[provider])
         report(f"approved {provider} model guestfwd", 200 <= code < 300, f"HTTP {code}")
-    except Exception as exc:  # report transport/TLS errors without dumping request data
+    except (OSError, http.client.HTTPException, URLError) as exc:
         report(f"approved {provider} model guestfwd", False, f"unreachable ({type(exc).__name__})")
 elif provider:
     report("selected model configuration", False, f"unsupported VM model provider {provider!r}")

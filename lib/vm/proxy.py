@@ -62,10 +62,18 @@ class PolicyStore:
             self._policy = current
 
 
+def _is_public_unicast(address):
+    # Some Python versions do not consistently inherit IPv4 classification
+    # for IPv4-mapped IPv6 addresses. Apply the IPv4 policy to the mapped value.
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_global and not address.is_multicast
+
+
 def connect_public(host, port):
     addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     resolved = [ipaddress.ip_address(address[4][0]) for address in addresses]
-    if not resolved or any(not address.is_global or address.is_multicast for address in resolved):
+    if not resolved or any(not _is_public_unicast(address) for address in resolved):
         raise PermissionError("non-public or non-unicast destination")
     # Connect to the IP we validated, avoiding a second DNS resolution.
     last_error = None

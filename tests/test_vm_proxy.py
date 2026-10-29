@@ -37,6 +37,11 @@ class ProxyTests(unittest.TestCase):
         self.assertFalse(proxy.allowed("evil-example.com", True, {"example.com"}))
         self.assertFalse(proxy.allowed("example.com", False, set()))
 
+    def test_ipv4_mapped_ipv6_uses_ipv4_public_unicast_classification(self):
+        self.assertFalse(proxy._is_public_unicast(proxy.ipaddress.ip_address("::ffff:127.0.0.1")))
+        self.assertFalse(proxy._is_public_unicast(proxy.ipaddress.ip_address("::ffff:224.0.0.1")))
+        self.assertTrue(proxy._is_public_unicast(proxy.ipaddress.ip_address("::ffff:93.184.216.34")))
+
     def test_http_and_connect_reject_nonpublic_and_multicast_targets(self):
         # Empty domain policy deliberately isolates the IP boundary from the
         # allowlist. Exercise real proxy request handling without external I/O.
