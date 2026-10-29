@@ -271,6 +271,13 @@ MOCK_SUDO
   [[ "$output" == *'tcp dport 8080 dnat'* ]]
   grep -Fxq -- '-n iptables-save -t nat' "$MOCK_SUDO_CALLS"
   grep -Fxq -- '-n nft list ruleset' "$MOCK_SUDO_CALLS"
+
+  : >"$MOCK_SUDO_CALLS"
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 bash "$REPO_ROOT/lab-vm" models diagnose --sudo llamacpp
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Non-interactive sudo context:'* ]]
+  grep -Fxq -- '-n iptables-save -t nat' "$MOCK_SUDO_CALLS"
+  grep -Fxq -- '-n nft list ruleset' "$MOCK_SUDO_CALLS"
 }
 
 @test "lab-vm extra delegates to the temporary script with a removal marker" {
