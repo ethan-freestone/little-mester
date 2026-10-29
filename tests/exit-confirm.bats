@@ -23,6 +23,29 @@ setup() {
   [ "$status" -eq 1 ]
 }
 
+@test "exit-confirm applies centered sizing after show and keeps its panel subtly translucent" {
+  run python3 - "$PLUGIN" <<'PY'
+import re
+import sys
+
+src = open(sys.argv[1], encoding="utf-8").read()
+show = src.index("context.ui.dialog.show(")
+layout = src.index('context.ui.dialog.set({ centered: true, size: "medium" })', show)
+if layout < show:
+    raise SystemExit("dialog layout must be applied after show() resets its state")
+
+match = re.search(r'backgroundColor="(#(?:[0-9a-fA-F]{8}))"', src)
+if not match:
+    raise SystemExit("dialog panel needs an explicit RGBA background")
+alpha = int(match.group(1)[-2:], 16)
+if not 0 < alpha < 0xFF:
+    raise SystemExit(f"dialog panel alpha must stay translucent, got {alpha:#x}")
+if match.group(1).lower() != "#00000030":
+    raise SystemExit(f"unexpected dialog dimming color {match.group(1)}")
+PY
+  [ "$status" -eq 0 ]
+}
+
 @test "exit-confirm keeps letter keys inside a dialog-gated modal layer" {
   run python3 - "$PLUGIN" <<'PY'
 import re
