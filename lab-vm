@@ -172,8 +172,9 @@ VM lifecycle commands (epic #35, ticket #41):
   ./lab-vm models status
       Concise forwarder state and host loopback reachability summary.
 
-  ./lab-vm [-v|-d] models diagnose [ollama|llamacpp|all]
+  ./lab-vm [-v|-d] models diagnose [--sudo] [ollama|llamacpp|all]
       Collect detailed, read-only Docker/model forwarding diagnostics.
+      --sudo uses non-interactive sudo only for read-only firewall-rule probes.
       Does not start/recreate containers or change host networking.
 
    ./lab-vm models down

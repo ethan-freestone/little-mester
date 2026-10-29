@@ -9,21 +9,37 @@ VM_DEBUG="${VM_DEBUG:-0}"
 usage() {
   cat <<'EOF'
 Usage: ./lab-vm [-v|-d] models diagnose [ollama|llamacpp|all]
+       ./lab-vm [-v|-d] models diagnose [--sudo] [ollama|llamacpp|all]
 
 Collect read-only Docker publication, host-listener, HTTP, backend-health, and
-available Docker journal evidence. Does not start/recreate/stop containers or
-change Docker, firewall, or network settings. Defaults to all model forwarders.
+available Docker journal evidence. --sudo uses non-interactive sudo only for
+read-only iptables/nftables rule inspection. Does not start/recreate/stop
+containers or change Docker, firewall, or network settings. Defaults to all.
 EOF
 }
 
-case "${1:-all}" in
-  -h|--help) usage; exit 0 ;;
+use_sudo=0
+provider=all
+provider_set=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --sudo) use_sudo=1 ;;
+    all|ollama|llama|llamacpp)
+      if [[ "$provider_set" -eq 1 ]]; then usage >&2; exit 2; fi
+      provider="$1"
+      provider_set=1
+      ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+case "$provider" in
   all) services=("ollama-vm-api|11434|/api/tags|ollama|11434" "llamacpp-vm-api|8080|/health|llamacpp|11434") ;;
   ollama) services=("ollama-vm-api|11434|/api/tags|ollama|11434") ;;
   llama|llamacpp) services=("llamacpp-vm-api|8080|/health|llamacpp|11434") ;;
-  *) usage >&2; exit 2 ;;
 esac
-if [[ $# -gt 1 ]]; then usage >&2; exit 2; fi
 
 compose() {
   WORKSPACE="${WORKSPACE:-$LAB_DIR}" docker compose --project-directory "$LAB_DIR" \
@@ -33,6 +49,17 @@ compose() {
 
 section() { printf '\n=== %s ===\n' "$*"; }
 status=0
+run_rule_probe() {
+  if [[ "$use_sudo" -eq 1 ]]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+      echo 'sudo unavailable.'
+      return 127
+    fi
+    sudo -n "$@"
+  else
+    "$@"
+  fi
+}
 
 printf 'Read-only VM model forwarding diagnostics\n'
 printf 'Repository: %s\n' "$LAB_DIR"
@@ -144,9 +171,9 @@ fi
 
 section 'Host Docker port-publication rules (read-only)'
 if command -v iptables-save >/dev/null 2>&1; then
-  nat_rules="$(iptables-save -t nat 2>&1)"
-  if [[ "$nat_rules" == *'Permission denied'* || "$nat_rules" == *'Operation not permitted'* ]]; then
-    echo 'iptables NAT rules unavailable to this user; no elevated command was run.'
+  nat_rules="$(run_rule_probe iptables-save -t nat 2>&1)"
+  if [[ "$nat_rules" == *'Permission denied'* || "$nat_rules" == *'Operation not permitted'* || "$nat_rules" == *'a password is required'* || "$nat_rules" == *'not allowed to execute'* ]]; then
+    echo 'iptables NAT rules unavailable; no additional privilege was requested.'
     [[ "$VM_VERBOSE" -ge 1 ]] && printf '%s\n' "$nat_rules"
   elif [[ -n "$nat_rules" ]]; then
     printf '%s\n' "$nat_rules" | grep -E '^(\*nat|:DOCKER|:DOCKER-USER|:DOCKER-FORWARD|:DOCKER-INGRESS|-A DOCKER|COMMIT)|8080' || echo 'No Docker or port-8080 NAT rules found.'
@@ -158,9 +185,9 @@ else
 fi
 
 if command -v nft >/dev/null 2>&1; then
-  nft_rules="$(nft list ruleset 2>&1)"
-  if [[ "$nft_rules" == *'Permission denied'* || "$nft_rules" == *'Operation not permitted'* ]]; then
-    echo 'nftables rules unavailable to this user; no elevated command was run.'
+  nft_rules="$(run_rule_probe nft list ruleset 2>&1)"
+  if [[ "$nft_rules" == *'Permission denied'* || "$nft_rules" == *'Operation not permitted'* || "$nft_rules" == *'a password is required'* || "$nft_rules" == *'not allowed to execute'* ]]; then
+    echo 'nftables rules unavailable; no additional privilege was requested.'
     [[ "$VM_VERBOSE" -ge 1 ]] && printf '%s\n' "$nft_rules"
   else
     nft_matches="$(printf '%s\n' "$nft_rules" | grep -Ei -C 2 'docker|8080' || true)"

@@ -188,6 +188,7 @@ JSON
   grep -Fq "journalctl -u docker --since '1 hour ago'" "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   grep -Fq 'iptables-save -t nat' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   grep -Fq 'nft list ruleset' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq 'sudo -n "$@"' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   ! grep -Eq 'docker compose (up|down|stop|restart)|docker (start|stop|restart|rm|system prune)' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   ! grep -Eq 'iptables(-save)? .* (-F|-X|--flush|--delete)|nft (flush|delete|add|insert|replace)' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
 }
@@ -230,8 +231,27 @@ MOCK_SS
 #!/usr/bin/env bash
 echo '-- No entries --'
 MOCK_JOURNAL
+  cat >"$fakebin/iptables-save" <<'MOCK_IPTABLES'
+#!/usr/bin/env bash
+echo '*nat'
+echo ':DOCKER - [0:0]'
+echo '-A DOCKER -p tcp --dport 8080 -j DNAT --to-destination 172.18.0.2:8080'
+echo 'COMMIT'
+MOCK_IPTABLES
+  cat >"$fakebin/nft" <<'MOCK_NFT'
+#!/usr/bin/env bash
+echo 'table ip nat { chain DOCKER { tcp dport 8080 dnat to 172.18.0.2:8080 } }'
+MOCK_NFT
+  cat >"$fakebin/sudo" <<'MOCK_SUDO'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$MOCK_SUDO_CALLS"
+[[ "${1:-}" == -n ]] || exit 2
+shift
+exec "$@"
+MOCK_SUDO
   chmod +x "$fakebin"/*
   export MOCK_DOCKER_CALLS="$BATS_TEST_TMPDIR/docker-calls"
+  export MOCK_SUDO_CALLS="$BATS_TEST_TMPDIR/sudo-calls"
 
   run env PATH="$fakebin:$PATH" bash -c 'docker info; printf "fake_status=%s\\n" "$?"'
   [ "$status" -eq 0 ]
@@ -244,6 +264,13 @@ MOCK_JOURNAL
   [[ "$output" == *'Host loopback probe failed.'* ]]
   grep -Fq "WORKSPACE=$REPO_ROOT" "$MOCK_DOCKER_CALLS"
   ! grep -Eq 'compose .* (up|down|stop|restart)| (start|stop|restart|rm) ' "$MOCK_DOCKER_CALLS"
+
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" --sudo llamacpp
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'-A DOCKER -p tcp --dport 8080'* ]]
+  [[ "$output" == *'tcp dport 8080 dnat'* ]]
+  grep -Fxq -- '-n iptables-save -t nat' "$MOCK_SUDO_CALLS"
+  grep -Fxq -- '-n nft list ruleset' "$MOCK_SUDO_CALLS"
 }
 
 @test "lab-vm extra delegates to the temporary script with a removal marker" {

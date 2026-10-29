@@ -215,6 +215,9 @@ network attachments, `docker port`, relevant host listeners and Docker NAT/firew
 rules, loopback HTTP probes, backend health, and available Docker journal diagnostics in the
 normal `.mester/logs/` run log. It is read-only: it
 does not start/recreate containers, alter daemon/firewall/network settings, or remove orphans.
+If firewall-rule inspection is blocked by host permissions, rerun with
+`./lab-vm -d models diagnose --sudo llamacpp`; `--sudo` uses `sudo -n` only for read-only
+iptables/nftables queries and never prompts or escalates the other probes.
 The output identifies unavailable checks and exits nonzero if a running forwarder is unhealthy.
 VM metrics
 use a separate native host process at `127.0.0.1:19532`, independent of Docker; it returns
