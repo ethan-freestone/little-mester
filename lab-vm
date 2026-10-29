@@ -261,7 +261,7 @@ for (( _fi=0; _fi<${#_flags[@]}; _fi++ )); do
     --unsafe-recurse|--clean) ;;
     -v|--verbose|-d|--debug) ;;
     -y|--yes|--auto-accept) ;;
-    --sudo) remaining+=("${_flags[$_fi]}") ;;
+    --sudo|--probe-egress) remaining+=("${_flags[$_fi]}") ;;
     --*) ;; # unknown flag
     *) remaining+=("${_flags[$_fi]}") ;;
   esac

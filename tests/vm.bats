@@ -330,6 +330,11 @@ MOCK_SUDO
   [ "$status" -eq 0 ]
   [[ "$output" == *'Egress probe: TCP connection was not established'* ]]
 
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 MOCK_ACTIVE_MAPPING=1 bash "$REPO_ROOT/lab-vm" models diagnose --probe-egress llamacpp
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'Egress probe: TCP connection was not established'* ]]
+  [[ "$output" != *'Egress probe not run'* ]]
+
   run env PATH="$fakebin:$PATH" VM_DEBUG=0 bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" --sudo llamacpp
   [ "$status" -eq 1 ]
   [[ "$output" == *'-A DOCKER -p tcp --dport 8080'* ]]
