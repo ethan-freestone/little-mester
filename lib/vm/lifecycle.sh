@@ -470,9 +470,17 @@ if "127.0.0.1:19533:127.0.0.1:19533" not in argv:
 PY
 }
 
+_vm_auth_tunnel_debug_args() {
+  # OpenSSH verbose output reports listener/forward connection failures, but
+  # never the forwarded HTTP request payload that carries OAuth material.
+  if [[ "${VM_DEBUG:-0}" -ge 1 ]]; then
+    printf '%s\n' -vv
+  fi
+}
+
 vm_cmd_auth() (
   local vm_name="${1:-default}" vm_dir bridge_script host_bridge_dir="" bridge_pid="" tunnel_pid="" guest_browser_dir="" bridge_token="" tmp_root
-  local -a forward_args=()
+  local -a forward_args=() ssh_debug_args=()
   vm_dir="$(_vm_resolve "$vm_name")"
   [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
   if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
@@ -547,7 +555,11 @@ vm_cmd_auth() (
   unset bridge_token
 
   mapfile -d '' -t forward_args < <(_vm_openai_browser_bridge_ssh_args)
-  ssh -N -o BatchMode=yes -o ConnectTimeout=10 \
+  mapfile -t ssh_debug_args < <(_vm_auth_tunnel_debug_args)
+  if [[ "${VM_DEBUG:-0}" -ge 1 ]]; then
+    log_debug "OpenSSH forward trace is recorded in $vm_dir/browser-bridge-ssh.log; it does not include forwarded request data."
+  fi
+  ssh "${ssh_debug_args[@]}" -N -o BatchMode=yes -o ConnectTimeout=10 \
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$vm_dir/known_hosts" \
     -i "$vm_dir/id_vm_control" -p "$(cat "$vm_dir/ssh_port")" \
     "${forward_args[@]}" mester@127.0.0.1 \

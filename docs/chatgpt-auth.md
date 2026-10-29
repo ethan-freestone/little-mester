@@ -276,6 +276,14 @@ the authorization URL or opening a LAN listener. `./lab-vm auth-forward` is a
 callback-only diagnostic fallback for a separately controlled test; it does not
 open the browser or satisfy the single-command browser acceptance gate.
 
+For one callback-routing diagnostic run, use `./lab-vm -d auth`. The temporary
+SSH tunnel writes verbose transport diagnostics to
+`.mester/vm/default/browser-bridge-ssh.log`; these report whether the host
+callback connected and whether SSH could open the guest listener, without
+logging forwarded HTTP data. If the callback still fails, share only the
+redacted OpenCode error and filtered SSH lines for forwarding/listener failures;
+never share the full auth URL, browser history, OAuth state, code, or token.
+
 ### Verify export/import commands
 
 ```bash

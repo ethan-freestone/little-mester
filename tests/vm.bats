@@ -118,6 +118,24 @@ setup() {
   grep -Fq 'vm_cmd_auth "$vm_name"' "$REPO_ROOT/lab-vm"
 }
 
+@test "browser auth debug enables SSH transport tracing only on request" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_DEBUG=0
+  mapfile -t debug_args < <(_vm_auth_tunnel_debug_args)
+  [ "${#debug_args[@]}" -eq 0 ]
+
+  VM_DEBUG=1
+  mapfile -t debug_args < <(_vm_auth_tunnel_debug_args)
+  [ "${#debug_args[@]}" -eq 1 ]
+  [ "${debug_args[0]}" = '-vv' ]
+
+  mapfile -d '' -t forwards < <(_vm_openai_browser_bridge_ssh_args)
+  [[ "${forwards[*]}" == *'-L 1455:localhost:1455'* ]]
+  [[ "${forwards[*]}" == *'-L 1457:localhost:1457'* ]]
+  [[ "${forwards[*]}" == *'-R 127.0.0.1:19533:127.0.0.1:19533'* ]]
+  ! [[ "${forwards[*]}" == *'0.0.0.0'* ]]
+}
+
 @test "temporary guest browser opener refuses URLs unless MCP handoff is configured" {
   local wrapper="$REPO_ROOT/lib/vm/browser-open.sh" secret_url='https://auth.openai.com/oauth/authorize?state=must-not-echo'
   run env -u VM_BROWSER_BRIDGE_TOKEN_FILE sh "$wrapper" "$secret_url"
