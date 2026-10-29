@@ -198,7 +198,7 @@ JSON
   mkdir -p "$fakebin"
   cat >"$fakebin/docker" <<'MOCK_DOCKER'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >>"$MOCK_DOCKER_CALLS"
+printf 'WORKSPACE=%s %s\n' "${WORKSPACE:-}" "$*" >>"$MOCK_DOCKER_CALLS"
 case "$*" in
   'info') exit 0 ;;
   'context show') echo default ;;
@@ -239,6 +239,7 @@ MOCK_JOURNAL
   [[ "$output" == *'runtime_ports={"8080/tcp":null}'* ]]
   [[ "$output" == *'docker port: no active published-port mapping reported.'* ]]
   [[ "$output" == *'Host loopback probe failed.'* ]]
+  grep -Fq "WORKSPACE=$REPO_ROOT" "$MOCK_DOCKER_CALLS"
   ! grep -Eq 'compose .* (up|down|stop|restart)| (start|stop|restart|rm) ' "$MOCK_DOCKER_CALLS"
 }
 

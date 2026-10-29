@@ -26,7 +26,7 @@ esac
 if [[ $# -gt 1 ]]; then usage >&2; exit 2; fi
 
 compose() {
-  docker compose --project-directory "$LAB_DIR" \
+  WORKSPACE="${WORKSPACE:-$LAB_DIR}" docker compose --project-directory "$LAB_DIR" \
     -f "$LAB_DIR/compose.yaml" -f "$LAB_DIR/compose.vm-model-api.yaml" \
     --profile vm-model-api "$@"
 }
