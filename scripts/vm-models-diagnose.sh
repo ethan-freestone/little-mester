@@ -170,10 +170,23 @@ else
 fi
 
 section 'Host Docker port-publication rules (read-only)'
+if [[ "$use_sudo" -eq 1 ]]; then
+  if sudo_context="$(sudo -n python3 -c 'import os; cap=int(next(line.split()[1] for line in open("/proc/self/status") if line.startswith("CapEff:")), 16); print(f"effective_uid={os.geteuid()} cap_net_admin={bool(cap & (1 << 12))} CapEff={cap:x}")' 2>&1)"; then
+    printf 'Non-interactive sudo context: %s\n' "${sudo_context//$'\n'/; }"
+  else
+    echo 'Non-interactive sudo context unavailable:'
+    printf '%s\n' "$sudo_context"
+  fi
+fi
+
 if command -v iptables-save >/dev/null 2>&1; then
   nat_rules="$(run_rule_probe iptables-save -t nat 2>&1)"
   if [[ "$nat_rules" == *'Permission denied'* || "$nat_rules" == *'Operation not permitted'* || "$nat_rules" == *'a password is required'* || "$nat_rules" == *'not allowed to execute'* ]]; then
-    echo 'iptables NAT rules unavailable; no additional privilege was requested.'
+    if [[ "$use_sudo" -eq 1 ]]; then
+      echo 'iptables NAT rules still unavailable under the requested non-interactive sudo probe.'
+    else
+      echo 'iptables NAT rules unavailable to this user; rerun with --sudo after authorization if appropriate.'
+    fi
     [[ "$VM_VERBOSE" -ge 1 ]] && printf '%s\n' "$nat_rules"
   elif [[ -n "$nat_rules" ]]; then
     printf '%s\n' "$nat_rules" | grep -E '^(\*nat|:DOCKER|:DOCKER-USER|:DOCKER-FORWARD|:DOCKER-INGRESS|-A DOCKER|COMMIT)|8080' || echo 'No Docker or port-8080 NAT rules found.'
@@ -187,7 +200,11 @@ fi
 if command -v nft >/dev/null 2>&1; then
   nft_rules="$(run_rule_probe nft list ruleset 2>&1)"
   if [[ "$nft_rules" == *'Permission denied'* || "$nft_rules" == *'Operation not permitted'* || "$nft_rules" == *'a password is required'* || "$nft_rules" == *'not allowed to execute'* ]]; then
-    echo 'nftables rules unavailable; no additional privilege was requested.'
+    if [[ "$use_sudo" -eq 1 ]]; then
+      echo 'nftables rules still unavailable under the requested non-interactive sudo probe.'
+    else
+      echo 'nftables rules unavailable to this user; rerun with --sudo after authorization if appropriate.'
+    fi
     [[ "$VM_VERBOSE" -ge 1 ]] && printf '%s\n' "$nft_rules"
   else
     nft_matches="$(printf '%s\n' "$nft_rules" | grep -Ei -C 2 'docker|8080' || true)"
