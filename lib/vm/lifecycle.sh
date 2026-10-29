@@ -379,6 +379,97 @@ vm_cmd_ssh() {
     mester@127.0.0.1 "$@"
 }
 
+_vm_validate_qemu_isolation_args() {
+  local process_args="$1" ssh_port="$2" guestfwd_count hostfwd_count netdev_count net_device_count
+  [[ "$process_args" == *'restrict=on'* ]] || {
+    echo 'QEMU network is missing restrict=on.' >&2
+    return 1
+  }
+  guestfwd_count="$(grep -o 'guestfwd=' <<<"$process_args" | wc -l)"
+  [[ "$guestfwd_count" -eq 4 ]] || {
+    echo "Expected exactly four explicit guestfwd channels; found $guestfwd_count." >&2
+    return 1
+  }
+  hostfwd_count="$(grep -o 'hostfwd=' <<<"$process_args" | wc -l)"
+  [[ "$hostfwd_count" -eq 1 && "$process_args" == *"hostfwd=tcp:127.0.0.1:${ssh_port}-:22"* ]] || {
+    echo 'Expected exactly one SSH hostfwd bound to 127.0.0.1.' >&2
+    return 1
+  }
+  netdev_count="$(grep -o -- '-netdev' <<<"$process_args" | wc -l)"
+  net_device_count="$(grep -o -- '-device virtio-net-pci,netdev=net0' <<<"$process_args" | wc -l)"
+  [[ "$netdev_count" -eq 1 && "$net_device_count" -eq 1 && "$process_args" == *'-netdev user,id=net0,'* ]] || {
+    echo 'Expected exactly one QEMU user-mode network device.' >&2
+    return 1
+  }
+  [[ "$process_args" == *'-device vhost-user-fs-pci,'* && "$process_args" == *'tag=workspace'* ]] || {
+    echo 'QEMU workspace share is missing the reviewed virtiofs workspace device.' >&2
+    return 1
+  }
+  [[ "$process_args" == *'guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434'* &&
+     "$process_args" == *'guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080'* &&
+     "$process_args" == *'guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532'* &&
+     "$process_args" == *'guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:'* ]] || {
+    echo 'QEMU guestfwd channels do not match the reviewed loopback-only allowlist.' >&2
+    return 1
+  }
+}
+
+_vm_read_qemu_process_args() {
+  local qemu_pid="$1"
+  [[ "$qemu_pid" =~ ^[0-9]+$ && -r "/proc/$qemu_pid/cmdline" ]] || return 1
+  tr '\0' ' ' <"/proc/$qemu_pid/cmdline"
+}
+
+_vm_read_virtiofsd_shared_dir() {
+  local virtiofsd_pid="$1"
+  python3 - "$virtiofsd_pid" <<'PY'
+import os
+import sys
+
+pid = sys.argv[1]
+try:
+    argv = open(f"/proc/{pid}/cmdline", "rb").read().decode().rstrip("\0").split("\0")
+except OSError:
+    raise SystemExit(1)
+if not argv or os.path.basename(argv[0]) != "virtiofsd":
+    raise SystemExit(1)
+try:
+    index = argv.index("--shared-dir")
+    shared_dir = argv[index + 1]
+except (ValueError, IndexError):
+    raise SystemExit(1)
+print(shared_dir)
+PY
+}
+
+vm_cmd_verify_isolation() {
+  local vm_name="${1:-default}" vm_dir ssh_port qemu_pid process_args virtiofsd_pid shared_dir sensitive_path
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
+  if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
+  fi
+  ssh_port="$(cat "$vm_dir/ssh_port" 2>/dev/null)"
+  qemu_pid="$(cat "$vm_dir/qemu.pid" 2>/dev/null)"
+  process_args="$(_vm_read_qemu_process_args "$qemu_pid")" || die 'Cannot inspect the running QEMU process command line.'
+  [[ "$process_args" == *qemu-system-x86_64* ]] || die 'The recorded PID is not a QEMU x86_64 process.'
+  _vm_validate_qemu_isolation_args "$process_args" "$ssh_port" || die 'QEMU network configuration failed the isolation check.'
+  virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null)"
+  shared_dir="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid")" || die 'Cannot inspect the running virtiofsd workspace export.'
+  shared_dir="$(realpath "$shared_dir")" || die 'Cannot resolve the virtiofsd shared directory.'
+  [[ -d "$shared_dir" && "$shared_dir" != '/' && "$shared_dir" != "$HOME" ]] || die "Unsafe or missing virtiofsd shared directory: $shared_dir"
+  for sensitive_path in "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.config" "$HOME/.aws" "$HOME/.kube" "$HOME/.local" "$HOME/.bashrc" "$HOME/.zshrc"; do
+    if [[ "$shared_dir" == "$sensitive_path" || "$shared_dir" == "$sensitive_path"/* || "$sensitive_path" == "$shared_dir"/* ]]; then
+      die "virtiofsd export overlaps a sensitive host path: $sensitive_path"
+    fi
+  done
+
+  echo "QEMU configuration: restrict=on; SSH bound to 127.0.0.1:$ssh_port; only the four reviewed guestfwd channels are configured."
+  echo "Host workspace export: $shared_dir (the guest can read/write this selected directory)."
+  echo 'Running network and approved-channel probes inside the guest (no VM or host settings will be changed).'
+  vm_ssh "$vm_dir" 'python3 -' <"$LAB_DIR/scripts/vm-guest-isolation-check.py"
+}
+
 vm_cmd_agent() {
   local vm_name="${1:-default}"
   local vm_dir

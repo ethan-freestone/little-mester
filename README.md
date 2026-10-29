@@ -203,7 +203,19 @@ current experimental host-to-guest path through `lab-vm`:
     ./lab-vm models status      # concise state and host reachability summary
     ./lab-vm -d models diagnose # detailed, read-only host/model-path evidence
     ./lab-vm -d models diagnose --probe-egress llamacpp # explicit TCP egress probe
+    ./lab-vm verify-isolation   # inspect live QEMU config and probe from inside the guest
 ```
+
+`verify-isolation` requires an already-running VM; it does not start or modify it. It verifies
+the live QEMU process uses `restrict=on`, the SSH host forward is loopback-only, and the four
+reviewed guest forwards target host loopback. It then runs bounded probes over SSH from inside
+the guest: representative connections to the QEMU host gateway and direct Internet are expected
+to fail; the egress proxy must refuse a private destination; the configured model API guestfwd
+and the selected virtiofs workspace mount must work. This tests representative paths, not every
+possible host service or exploit, and does not claim the guest has no host access: the selected
+workspace, model/metrics forwarders and policy-controlled proxy are intentional channels. A failed
+check exits nonzero with the individual results; it never repairs settings or changes firewall,
+network, VM or container state.
 
 `models up` selects the provider in `agent/opencode/opencode.json` by default; choose
 `ollama`, `llamacpp`, or `all` explicitly when needed. It starts only the selected Compose
@@ -226,12 +238,12 @@ The forwarders remain attached to the internal model network and join a dedicate
 bridge because Docker Engine can silently omit published-port mappings when a service is attached
 only to an `internal: true` bridge. Masquerading is disabled on the publication bridge, but this
 alone is not an egress firewall. The output identifies unavailable checks and exits nonzero if a
-running forwarder is unhealthy or a non-loopback-address probe succeeds. That local probe is not
-a remote LAN test; verify from a separate LAN device that `http://<host-LAN-IP>:8080/health` and,
-when enabled, `http://<host-LAN-IP>:11434/api/tags` do not connect. `--probe-egress` explicitly
-attempts one TCP connection from each selected forwarder to `1.1.1.1:443`; a successful
+running forwarder is unhealthy or a non-loopback-address probe succeeds. These are host-side
+Docker-forwarder checks, not tests of what the VM agent can access. The optional `--probe-egress`
+attempts one TCP connection from each selected host forwarder to `1.1.1.1:443`; a successful
 connection proves some egress exists, while a failed connection does not prove all destinations
-or protocols are blocked. Neither probe changes host or container configuration.
+or protocols are blocked. Neither probe changes host or container configuration. No separate
+LAN device is needed for the guest isolation check; use `./lab-vm verify-isolation` for that.
 VM metrics
 use a separate native host process at `127.0.0.1:19532`, independent of Docker; it returns
 only curated metrics API data and is reachable from the guest through the existing QEMU

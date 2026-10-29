@@ -16,6 +16,53 @@ setup() {
   [[ "$output" != *"-10.0.2.2:"* ]]
 }
 
+@test "QEMU isolation validator requires restrict=on and the reviewed loopback-only forwarding set" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  local args='qemu-system-x86_64 -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434,guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080,guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:45678,restrict=on -device virtio-net-pci,netdev=net0 -device vhost-user-fs-pci,chardev=charfs,tag=workspace'
+  run _vm_validate_qemu_isolation_args "$args" 22222
+  [ "$status" -eq 0 ]
+  run _vm_validate_qemu_isolation_args "${args/,restrict=on/}" 22222
+  [ "$status" -ne 0 ]
+  run _vm_validate_qemu_isolation_args "${args/127.0.0.1:22222/0.0.0.0:22222}" 22222
+  [ "$status" -ne 0 ]
+  run _vm_validate_qemu_isolation_args "${args},guestfwd=tcp:10.0.2.100:9999-cmd:socat - TCP:127.0.0.1:9999" 22222
+  [ "$status" -ne 0 ]
+}
+
+@test "verify-isolation checks the running QEMU argv and streams guest probes over SSH" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  local vm_dir="$BATS_TEST_TMPDIR/vm-isolation" args capture="$BATS_TEST_TMPDIR/guest-probe.py" workspace="$BATS_TEST_TMPDIR/workspace"
+  mkdir -p "$vm_dir"
+  mkdir -p "$workspace"
+  printf '22222\n' >"$vm_dir/ssh_port"
+  printf '12345\n' >"$vm_dir/qemu.pid"
+  args='qemu-system-x86_64 -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434,guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080,guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:45678,restrict=on -device virtio-net-pci,netdev=net0 -device vhost-user-fs-pci,chardev=charfs,tag=workspace'
+  _vm_resolve() { echo "$vm_dir"; }
+  vm_run_status() { echo running; }
+  _vm_read_qemu_process_args() { echo "$args"; }
+  _vm_read_virtiofsd_shared_dir() { echo "$workspace"; }
+  vm_ssh() { cat >"$capture"; echo 'guest probes completed'; }
+  run vm_cmd_verify_isolation default
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'QEMU configuration: restrict=on'* ]]
+  [[ "$output" == *"Host workspace export: $workspace"* ]]
+  [[ "$output" == *'guest probes completed'* ]]
+  cmp -s "$capture" "$REPO_ROOT/scripts/vm-guest-isolation-check.py"
+}
+
+@test "guest isolation probe covers blocked direct routes, constrained proxy and selected workspace/model exceptions" {
+  local probe="$REPO_ROOT/scripts/vm-guest-isolation-check.py"
+  grep -Fq '10.0.2.2' "$probe"
+  grep -Fq '1.1.1.1' "$probe"
+  grep -Fq 'HTTP 403' "$probe"
+  grep -Fq '10.0.2.100", 3128' "$probe"
+  grep -Fq '10.0.2.100:8080/health' "$probe"
+  grep -Fq '10.0.2.100:11434/api/tags' "$probe"
+  grep -Fq 'workspace access is intentional' "$probe"
+  grep -Fq 'not a proof against every possible host service' "$probe"
+  grep -Fq 'verify-isolation)' "$REPO_ROOT/lab-vm"
+}
+
 @test "VM-only local model forwarders bind host ports to loopback" {
   local compose="$REPO_ROOT/compose.vm-model-api.yaml"
   [ "$(grep -c '127.0.0.1:' "$compose")" -eq 2 ]

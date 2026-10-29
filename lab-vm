@@ -151,6 +151,9 @@ VM lifecycle commands (epic #35, ticket #41):
       Launch OpenCode directly in the guest, attached to this terminal.
       Use -v/--verbose or -d/--debug for preflight diagnostics.
 
+  ./lab-vm verify-isolation [name]
+      Verify the running QEMU network allowlist and run bounded probes inside the guest.
+
   ./lab-vm down [name]
       Stop the VM and remove per-VM artifacts (overlay disk, seed ISO, keys).
       Base disk is preserved.
@@ -393,6 +396,9 @@ case "$cmd" in
     # Restore real TTY for the interactive guest OpenCode session.
     exec 1>&3 2>&4
     vm_cmd_agent "$vm_name"
+    ;;
+  verify-isolation)
+    vm_cmd_verify_isolation "$vm_name"
     ;;
   down)
     vm_cmd_down "$vm_name"
