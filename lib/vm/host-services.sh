@@ -13,7 +13,7 @@ vm_model_compose() {
 
 _vm_check_docker() {
   command -v docker >/dev/null 2>&1 || die "Docker CLI not found; install Docker Engine to manage host model APIs."
-  docker info >/dev/null 2>&1 || die "Docker Engine is not reachable; start it before `./lab-vm models up`."
+  docker info >/dev/null 2>&1 || die "Docker Engine is not reachable; start it before ./lab-vm models up."
 }
 
 _vm_default_model_provider() {
@@ -169,7 +169,7 @@ vm_cmd_metrics() {
         pid="$(cat "$pid_file" 2>/dev/null || true)"
         if _vm_metrics_pid_matches "$pid" && kill -0 "$pid" 2>/dev/null; then
           kill "$pid" 2>/dev/null || true
-          for attempt in {1..30}; do
+          for _attempt in {1..30}; do
             kill -0 "$pid" 2>/dev/null || break
             sleep 0.1
           done
@@ -260,7 +260,9 @@ vm_cmd_models() {
       return "$status"
       ;;
     down|stop)
-      command -v docker >/dev/null 2>&1 && vm_model_compose stop ollama-vm-api llamacpp-vm-api || true
+      if command -v docker >/dev/null 2>&1; then
+        vm_model_compose stop ollama-vm-api llamacpp-vm-api || true
+      fi
       log "Stopped only VM model API Compose services; model containers and VM were left running."
       ;;
     *)
