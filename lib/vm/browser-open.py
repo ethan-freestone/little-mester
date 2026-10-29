@@ -130,7 +130,9 @@ def call_host_bridge(
     if not is_authorization_url(raw_url):
         raise ValueError("authorization URL rejected")
 
-    connection = http.client.HTTPConnection(host, port, timeout=8)
+    # A replacement can cancel an old forward (10s), create the new one (10s)
+    # and launch the host browser (15s). Let the server report its bounded error.
+    connection = http.client.HTTPConnection(host, port, timeout=40)
     session_id = None
     protocol_version = "2025-03-26"
     try:

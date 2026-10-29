@@ -1,14 +1,16 @@
 import importlib.util
-import ipaddress
+import http.client
 import os
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -35,9 +37,83 @@ class ProxyTests(unittest.TestCase):
         self.assertFalse(proxy.allowed("evil-example.com", True, {"example.com"}))
         self.assertFalse(proxy.allowed("example.com", False, set()))
 
-    def test_private_and_loopback_addresses_are_not_global(self):
-        for value in ("127.0.0.1", "10.0.2.2", "169.254.1.1", "::1"):
-            self.assertFalse(ipaddress.ip_address(value).is_global)
+    def test_http_and_connect_reject_nonpublic_and_multicast_targets(self):
+        # Empty domain policy deliberately isolates the IP boundary from the
+        # allowlist. Exercise real proxy request handling without external I/O.
+        server = proxy.ThreadingHTTPServer(("127.0.0.1", 0), proxy.Proxy)
+        server.policy = Mock(allows=lambda _host: True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for host in (
+                "0.0.0.0", "127.0.0.1", "10.0.2.2", "172.16.0.1", "192.168.1.1",
+                "169.254.169.254", "100.64.0.1", "192.0.2.1", "224.0.0.1", "255.255.255.255",
+                "[::1]", "[fc00::1]", "[fe80::1]", "[ff02::1]",
+                "[::ffff:127.0.0.1]", "[::ffff:224.0.0.1]",
+            ):
+                for method, target in (("GET", f"http://{host}/"), ("CONNECT", f"{host}:443")):
+                    with self.subTest(host=host, method=method):
+                        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                        try:
+                            connection.request(method, target)
+                            response = connection.getresponse()
+                            response.read()
+                            self.assertEqual(response.status, 403)
+                        finally:
+                            connection.close()
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
+
+    def test_unapproved_chatgpt_model_endpoint_is_denied_before_dns_or_connect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / ".mester-egress"
+            manifest.write_text("permission=true\nallowed_domains=auth.openai.com,chatgpt.com\n")
+            server = proxy.ThreadingHTTPServer(("127.0.0.1", 0), proxy.Proxy)
+            server.policy = proxy.PolicyStore(manifest)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with patch.object(proxy, "connect_public") as connect:
+                    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                    try:
+                        connection.request("CONNECT", "api.openai.com:443")
+                        response = connection.getresponse()
+                        response.read()
+                        self.assertEqual(response.status, 403)
+                    finally:
+                        connection.close()
+                    connect.assert_not_called()
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+                server.server_close()
+
+    def test_allowlisted_hostname_with_mixed_dns_answers_cannot_reach_host(self):
+        unsafe_addresses = (
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::ffff:127.0.0.1", 443, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("224.0.0.1", 443)),
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("ff02::1", 443, 0, 0)),
+        )
+        for unsafe in unsafe_addresses:
+            with self.subTest(unsafe=unsafe[4][0]):
+                answers = [
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+                    unsafe,
+                ]
+                with patch.object(proxy.socket, "getaddrinfo", return_value=answers), patch.object(proxy.socket, "socket") as sock:
+                    with self.assertRaises(PermissionError):
+                        proxy.connect_public("auth.openai.com", 443)
+                    sock.assert_not_called()
+
+    def test_public_connection_uses_validated_ip_without_second_dns_lookup(self):
+        address = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        with patch.object(proxy.socket, "getaddrinfo", return_value=[address]) as resolve, patch.object(proxy.socket, "socket") as sock:
+            connection = proxy.connect_public("auth.openai.com", 443)
+            resolve.assert_called_once_with("auth.openai.com", 443, type=socket.SOCK_STREAM)
+            self.assertIs(connection, sock.return_value)
+            connection.connect.assert_called_once_with(("93.184.216.34", 443))
 
     def test_project_policy_permits_build_registries_without_lookalike_domains(self):
         enabled, domains = proxy.policy(Path(__file__).parents[1] / ".mester-egress")

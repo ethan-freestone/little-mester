@@ -64,8 +64,9 @@ class PolicyStore:
 
 def connect_public(host, port):
     addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
-        raise PermissionError("private/reserved destination")
+    resolved = [ipaddress.ip_address(address[4][0]) for address in addresses]
+    if not resolved or any(not address.is_global or address.is_multicast for address in resolved):
+        raise PermissionError("non-public or non-unicast destination")
     # Connect to the IP we validated, avoiding a second DNS resolution.
     last_error = None
     for family, kind, proto, _, address in addresses:

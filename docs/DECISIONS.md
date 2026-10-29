@@ -498,14 +498,27 @@ or retain the URL/state, and never capture the callback/code; the callback
 continues directly to the guest through the temporary loopback SSH forward.
 
 **OpenAI ChatGPT implementation for the pinned guest version:** OpenCode 2.2.0
-registers `chatgpt-browser` (displayed as **Codex browser (legacy)**) with a
-guest-local callback on port 1455 and fallback 1457. `./lab-vm auth-forward`
-provides only those host-loopback SSH forwards to guest `localhost`; the owner
-stops the helper after success or cancellation. The workspace egress manifest
-allows `auth.openai.com` for token exchange and `chatgpt.com` for ChatGPT model
-requests. These version-specific details must be revalidated when the pinned
-OpenCode version changes. The tunnel and allowlist are implemented; live browser
-login and persistence remain unverified under #45.
+source commit `1097e2668b1e08ad63bdf0b1c4860b9bc01e420c`,
+`packages/core/src/plugin/provider/chatgpt.ts`, creates its OAuth callback
+listener with `server.listen(0, "127.0.0.1", ...)`, then uses the selected port
+in the OAuth `redirect_uri` (`/auth/callback`). This is confirmed by source
+inspection, **not a stable/documented OpenCode CLI or API contract**. The
+temporary `./lab-vm auth` host bridge extracts the port from the actual
+validated authorize URL and asks its private OpenSSH control master to forward
+only `127.0.0.1:<port>` on the host to `127.0.0.1:<port>` in the guest before
+opening the unchanged URL. At most one callback forward is active; a new port
+replaces the previous one. Auth forwarding commands ignore host SSH configuration
+and explicitly disable SSH agent/X11 forwarding so inherited forwards, proxy
+commands or agent sockets cannot expand this capability.
+It fails closed if the authorization endpoint, callback URI, port,
+or control forward is unexpected; it does not guess a fixed port, rewrite the
+URL, open a range, or bind to a LAN interface. The independent diagnostic
+`./lab-vm auth-forward [name] <callback-port>` also takes exactly one locally
+observed port. This runtime URL parsing is a version-specific integration
+assumption, not an OpenCode API; on every pinned-version change inspect the
+provider source, update regression tests and this decision, and repeat the
+owner-controlled browser acceptance. The tunnel and allowlist are implemented;
+live browser login and persistence remain unverified under #45.
 
 **Permission decision:** `--unsafe-recurse` authorizes exporting the repo; it
 does not select an OpenCode permission mode. `--auto-accept` / `--permissions auto`

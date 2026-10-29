@@ -59,6 +59,97 @@ def is_authorization_url(raw_url: str) -> bool:
         return False
 
 
+def openai_callback_port(raw_url: str) -> int:
+    """Return only the validated loopback callback port for OpenAI OAuth."""
+    if not is_authorization_url(raw_url):
+        raise ValueError("invalid OpenAI authorization URL")
+    parsed = urlsplit(raw_url)
+    if parsed.hostname != "auth.openai.com" or parsed.path != "/api/accounts/authorize":
+        raise ValueError("unsupported OpenAI authorization endpoint")
+
+    redirects = [value for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key == "redirect_uri"]
+    if len(redirects) != 1:
+        raise ValueError("invalid OpenAI callback URI")
+    redirect = urlsplit(redirects[0])
+    try:
+        port = redirect.port
+    except ValueError as exc:
+        raise ValueError("invalid OpenAI callback URI") from exc
+    if (
+        redirect.scheme != "http"
+        or redirect.hostname != "127.0.0.1"
+        or redirect.username is not None
+        or redirect.password is not None
+        or redirect.path != "/auth/callback"
+        or redirect.query
+        or redirect.fragment
+        or port is None
+        or not 1024 <= port <= 65535
+        or redirects[0] != f"http://127.0.0.1:{port}/auth/callback"
+    ):
+        raise ValueError("invalid OpenAI callback URI")
+    return port
+
+
+def callback_forward_command(port: int, operation: str = "forward") -> list[str]:
+    control_path = os.environ.get("VM_BROWSER_BRIDGE_SSH_CONTROL_PATH", "")
+    ssh_port = os.environ.get("VM_BROWSER_BRIDGE_SSH_PORT", "")
+    if not os.path.isabs(control_path) or len(control_path) >= 100:
+        raise RuntimeError("temporary SSH control socket is unavailable")
+    if not ssh_port.isdigit() or not 1 <= int(ssh_port) <= 65535:
+        raise RuntimeError("temporary SSH connection is unavailable")
+    if not isinstance(port, int) or not 1024 <= port <= 65535:
+        raise RuntimeError("invalid callback port")
+    if operation not in {"forward", "cancel"}:
+        raise RuntimeError("invalid callback operation")
+
+    command = ["ssh", "-F", "/dev/null"]
+    debug = os.environ.get("VM_BROWSER_BRIDGE_SSH_DEBUG", "0")
+    if debug.isdigit() and int(debug) >= 1:
+        command.append("-vv")
+    command.extend([
+        "-S", control_path,
+        "-O", operation,
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "ForwardAgent=no",
+        "-o", "ForwardX11=no",
+        "-L", f"127.0.0.1:{port}:127.0.0.1:{port}",
+        "-p", ssh_port,
+        "mester@127.0.0.1",
+    ])
+    return command
+
+
+def forward_openai_callback(port: int) -> None:
+    """Add one host-loopback -> guest-loopback forward to the active master."""
+    _update_openai_callback(port, "forward")
+
+
+def cancel_openai_callback(port: int) -> None:
+    _update_openai_callback(port, "cancel")
+
+
+def _update_openai_callback(port: int, operation: str) -> None:
+    command = callback_forward_command(port, operation)
+    log_path = os.environ.get("VM_BROWSER_BRIDGE_SSH_LOG", "")
+    if not log_path:
+        raise RuntimeError("temporary SSH diagnostics are unavailable")
+    try:
+        with open(log_path, "ab") as log:
+            result = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=log,
+                timeout=10,
+                check=False,
+            )
+    except Exception as exc:
+        raise RuntimeError("callback forwarding failed") from exc
+    if result.returncode != 0:
+        raise RuntimeError("callback forwarding failed")
+
+
 def open_with_host_browser(url: str) -> None:
     try:
         result = subprocess.run(
@@ -79,12 +170,31 @@ class BrowserBridgeHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = False
 
-    def __init__(self, address, token: str, opener=open_with_host_browser):
+    def __init__(
+        self, address, token: str, opener=open_with_host_browser,
+        callback_forwarder=forward_openai_callback, callback_canceller=cancel_openai_callback,
+    ):
         super().__init__(address, BrowserBridgeRequestHandler)
         self.bridge_token = token.encode("ascii")
         self.open_url = opener
+        self.forward_callback = callback_forwarder
+        self.cancel_callback = callback_canceller
+        self.callback_port: int | None = None
+        self.callback_lock = threading.Lock()
         self.sessions: dict[str, Session] = {}
         self.sessions_lock = threading.Lock()
+
+    def open_authorization_url(self, url: str) -> None:
+        """Serialize callback replacement with browser opening as one operation."""
+        port = openai_callback_port(url)
+        with self.callback_lock:
+            if port != self.callback_port:
+                if self.callback_port is not None:
+                    self.cancel_callback(self.callback_port)
+                    self.callback_port = None
+                self.forward_callback(port)
+                self.callback_port = port
+            self.open_url(url)
 
 
 class BrowserBridgeRequestHandler(BaseHTTPRequestHandler):
@@ -237,7 +347,7 @@ class BrowserBridgeRequestHandler(BaseHTTPRequestHandler):
                         "tools": [{
                             "name": "open_auth_url",
                             "title": "Open approved authorization URL in host browser",
-                            "description": "Open an HTTPS authorization URL on auth.openai.com or chatgpt.com in the host default browser. Does not handle callbacks or provide other host access.",
+                            "description": "Open the supported OpenAI authorization URL after forwarding its exact guest-loopback callback port. Does not receive callbacks or provide other host access.",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {"url": {"type": "string", "minLength": 1, "maxLength": MAX_URL_LENGTH}},
@@ -253,10 +363,17 @@ class BrowserBridgeRequestHandler(BaseHTTPRequestHandler):
             params = message.get("params")
             arguments = params.get("arguments") if isinstance(params, dict) else None
             raw_url = arguments.get("url") if isinstance(arguments, dict) else None
-            error = not isinstance(raw_url, str) or not is_authorization_url(raw_url)
+            error = (
+                not isinstance(params, dict)
+                or params.get("name") != "open_auth_url"
+                or not isinstance(arguments, dict)
+                or set(arguments) != {"url"}
+                or not isinstance(raw_url, str)
+                or not is_authorization_url(raw_url)
+            )
             if not error:
                 try:
-                    self.server.open_url(raw_url)
+                    self.server.open_authorization_url(raw_url)
                 except Exception:
                     error = True
             result = {

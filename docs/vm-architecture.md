@@ -21,7 +21,7 @@ Host (your machine) — ./lab runs here as you, not as a service
 │   │  systemd                                                                │ │
 │   │  Little Mester harness runs directly in the guest (no agent container)  │ │
 │   │    OpenCode / Aider / Claude Code / Codex adapter                       │ │
-│   │    native guest auth + browser callback to the guest agent              │ │
+│   │    native guest auth + temporary loopback browser callback via SSH      │ │
 │   │    /workspace (virtiofs, rw)                                            │ │
 │   │                                                                         │ │
 │   │  optional guest Docker + Compose (project workload capability)          │ │
@@ -45,22 +45,63 @@ host-Docker metrics path; the latter remains in place during migration.
 | Optional model API `guestfwd` | VM → one configured host endpoint | One explicitly selected local API port | General host loopback, host filesystem, host Docker |
 | Optional metrics endpoint/stream | VM → one configured host metrics endpoint | Read-only metrics API/data needed by the guest plugin | Compose DNS assumptions, host `/proc` mounts, host filesystem, host Docker, general host loopback |
 | Egress proxy `guestfwd` | VM → internet | HTTP(S) destinations allowed by `.mester-egress` | Unlisted domains, non-HTTP protocols (until added deliberately), raw host routing |
+| Temporary browser OAuth callback | host browser → VM guest | One exact runtime-selected callback port, bound to host `127.0.0.1` and forwarded to guest `127.0.0.1` over the temporary SSH control master | Port ranges, LAN listeners, callback URL rewriting, general host route, callback/token capture |
 | Guest runtime | agent in guest → VM | Guest Docker/Compose, guest processes, optional nested VMs | Host Docker daemon, host filesystem outside the selected workspace |
+
+### Temporary browser OAuth callback: version-specific integration
+
+For pinned OpenCode 2.2.0, source commit
+`1097e2668b1e08ad63bdf0b1c4860b9bc01e420c` at
+`packages/core/src/plugin/provider/chatgpt.ts` calls
+`server.listen(0, "127.0.0.1", ...)` and places the chosen port in the OAuth
+`redirect_uri` as `http://127.0.0.1:<port>/auth/callback`. This is confirmed by
+source inspection, **not a documented/stable OpenCode CLI or API contract**.
+
+`./lab-vm auth` starts an SSH control master and host MCP browser bridge. When
+the guest opener requests the approved authorization URL, the bridge extracts
+only that `redirect_uri` port, validates the exact loopback host and callback
+path, then requests one SSH `-O forward` from host `127.0.0.1:<port>` to guest
+`127.0.0.1:<port>`. Only after the forward succeeds does it open the original
+URL unchanged. The forward exists only while the auth command's SSH master is
+alive. A new callback port replaces the previous forward before browser launch;
+there is at most one callback listener. Auth forwarding commands ignore user SSH
+config and disable SSH agent/X11 forwarding to prevent inherited forwards,
+proxy commands, or agent sockets from expanding this capability. The bridge
+accepts only the pinned authorization endpoint and callback shape. No port range
+is opened, and
+the browser URL, OAuth state, code and tokens are not logged or captured.
+
+Authentication does not grant host execution, host filesystem/Docker access, or
+a general network route. The existing public-destination proxy checks apply to
+login traffic as well: loopback, private, link-local, multicast and mixed
+public/non-public DNS answers are rejected before connection, and connections
+use the validated IP rather than resolving the hostname again.
+
+This is intentionally runtime-derived to avoid a hardcoded ephemeral port, but
+it still depends on an internal OpenCode URL shape. Unexpected/missing redirect
+URIs fail closed before browser launch. On every OpenCode version bump, inspect
+the provider source and callback URL construction, update parser tests and this
+document, and require owner-controlled live acceptance before claiming auth
+works. See [the auth runbook](chatgpt-auth.md) and ticket #45 for operator steps
+and test evidence.
 
 ## 3. Boundaries and what a compromise buys
 
 | Compromised component | Can reach | Cannot reach (by design) |
 |---|---|---|
-| **Agent process in guest** | Guest OS with admin-equivalent control, guest Docker/Compose, nested VMs where supported, `/workspace`, allowlisted egress | Host filesystem outside the workspace, host loopback, host Docker, host LAN |
+| **Agent process in guest** | Guest OS with admin-equivalent control, guest Docker/Compose, nested VMs where supported, `/workspace`, allowlisted egress, and only configured guestfwd endpoints | Host filesystem outside the workspace, general host loopback/network routes, host Docker, host LAN |
 | **A guest workload container** | Guest Docker networks/volumes and explicitly mounted guest paths | Host filesystem outside the selected workspace, host Docker, host LAN |
 | **A nested VM** | Its explicitly shared guest paths and its own virtual devices | Host filesystem outside the outer workspace export, host Docker, host LAN |
 | **The outer VM kernel** | Guest processes and the exported workspace | Host kernel, host files outside the export, host Docker, host credentials |
 | **The host user** | Everything (they own the machine) | — the harness does not pretend to protect the host from its owner |
 
-The selected workspace is the data boundary and the outer VM is the execution boundary.
-The agent is intentionally trusted with broad control inside that guest; guest root or a
-Docker daemon is not treated as an additional security boundary. A compromised agent can
-corrupt the workspace it was pointed at; that is the authority granted by choosing it.
+The selected workspace is the intentional host-data boundary and the outer VM is the
+execution boundary. The agent is intentionally trusted with broad control inside that guest;
+guest root or a Docker daemon is not treated as an additional host security boundary. A
+compromised agent can corrupt the workspace it was pointed at; that is the authority granted
+by choosing it. The design blocks ordinary guest routes to the host/LAN, but it is not a
+mathematical guarantee against vulnerabilities in QEMU/KVM, virtiofs, the host kernel, or
+other host components. Live checks are bounded evidence, not a proof against every breakout.
 
 ## 4. Target lifecycle
 

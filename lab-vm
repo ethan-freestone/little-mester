@@ -64,11 +64,11 @@ if [[ "$VM_DEBUG" -ge 1 ]]; then VM_VERBOSE=1; fi
 log() { echo "$@"; }
 
 log_verbose() {
-  if [[ $VM_VERBOSE -ge 1 ]]; then echo "[verbose] $@"; fi
+  if [[ $VM_VERBOSE -ge 1 ]]; then echo "[verbose] $*"; fi
 }
 
 log_debug() {
-  if [[ $VM_DEBUG -ge 1 ]]; then echo "[debug] $(date '+%H:%M:%S') $@"; fi
+  if [[ $VM_DEBUG -ge 1 ]]; then echo "[debug] $(date '+%H:%M:%S') $*"; fi
 }
 
 # Export for sourced library files
@@ -151,13 +151,13 @@ VM lifecycle commands (epic #35, ticket #41):
       Launch OpenCode directly in the guest, attached to this terminal.
       Use -v/--verbose or -d/--debug for preflight diagnostics.
 
-  ./lab-vm auth-forward [name]
-      Temporarily forward OpenAI browser callback ports over loopback-only SSH.
-      Run in a second terminal during /connect; press Ctrl-C after login/cancel.
+  ./lab-vm auth-forward [name] <callback-port>
+      Temporarily forward the exact loopback callback port over SSH.
+      Read the numeric port from redirect_uri locally; never share the URL.
 
   ./lab-vm auth [name]
       Launch guest OpenCode with a temporary host-browser MCP handoff and
-      callback forwards; exit the TUI after success/cancellation to clean up.
+      on-demand callback forwarding; exit the TUI after success/cancellation.
 
   ./lab-vm egress-reload [name]
       Refresh the workspace egress manifest on the recorded loopback port
@@ -423,7 +423,7 @@ case "$cmd" in
     # Keep the temporary callback tunnel attached to this terminal so Ctrl-C
     # closes it immediately after the browser flow completes or is cancelled.
     exec 1>&3 2>&4
-    vm_cmd_auth_forward "$vm_name"
+    vm_cmd_auth_forward "${remaining[@]:1}"
     ;;
   auth)
     # Restore the terminal for OpenCode. The auth wrapper owns temporary host

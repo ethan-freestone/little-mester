@@ -379,35 +379,52 @@ vm_cmd_ssh() {
     mester@127.0.0.1 "$@"
 }
 
-# OpenCode 2.2.0's OpenAI browser OAuth listener uses localhost:1455 and falls
-# back to 1457. Omitting the local bind address keeps these SSH forwards on
-# host loopback only; the destination is resolved inside the guest.
+# OpenCode 2.2.0 chooses an ephemeral guest-loopback callback port at runtime.
+# The authenticated host browser bridge reads only that port from the approved
+# authorize URL and asks this SSH control master to forward that exact port.
+_vm_validate_auth_callback_port() {
+  local port="${1:-}" port_num
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] || return 1
+  port_num=$((10#$port))
+  (( port_num >= 1024 && port_num <= 65535 ))
+}
+
 _vm_openai_callback_ssh_args() {
+  local port="${1:-}" port_num
+  _vm_validate_auth_callback_port "$port" || return 2
+  port_num=$((10#$port))
   printf '%s\0' \
     -o ExitOnForwardFailure=yes \
-    -L 1455:localhost:1455 \
-    -L 1457:localhost:1457
+    -L "127.0.0.1:${port_num}:127.0.0.1:${port_num}"
 }
 
 _vm_openai_browser_bridge_ssh_args() {
-  _vm_openai_callback_ssh_args
   printf '%s\0' \
+    -o ExitOnForwardFailure=yes \
     -R 127.0.0.1:19533:127.0.0.1:19533
 }
 
 vm_cmd_auth_forward() {
-  local vm_name="${1:-default}" vm_dir
+  local vm_name=default callback_port="" vm_dir
   local -a forward_args=()
+  case "$#" in
+    1) callback_port="$1" ;;
+    2) vm_name="$1"; callback_port="$2" ;;
+    *) die 'Usage: ./lab-vm auth-forward [name] <callback-port>' ;;
+  esac
+  _vm_validate_auth_callback_port "$callback_port" || die 'Usage: ./lab-vm auth-forward [name] <callback-port> (read the port from the redirect_uri locally; do not share the URL).'
   vm_dir="$(_vm_resolve "$vm_name")"
   [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
   if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
     die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
   fi
 
-  mapfile -d '' -t forward_args < <(_vm_openai_callback_ssh_args)
-  echo 'Forwarding OpenAI browser callback ports 1455 and 1457 on host loopback to guest localhost.'
+  mapfile -d '' -t forward_args < <(_vm_openai_callback_ssh_args "$callback_port")
+  echo "Forwarding OpenAI browser callback port $callback_port on host loopback to guest loopback."
   echo 'Keep this command running during /connect; press Ctrl-C after success or cancellation to close the tunnel.'
-  ssh -N -o BatchMode=yes -o ConnectTimeout=10 \
+  ssh -F /dev/null -N -o BatchMode=yes -o ConnectTimeout=10 \
+    -o IdentitiesOnly=yes -o IdentityAgent=none \
+    -o ForwardAgent=no -o ForwardX11=no \
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$vm_dir/known_hosts" \
     -i "$vm_dir/id_vm_control" -p "$(cat "$vm_dir/ssh_port")" \
     "${forward_args[@]}" mester@127.0.0.1
@@ -479,7 +496,7 @@ _vm_auth_tunnel_debug_args() {
 }
 
 vm_cmd_auth() (
-  local vm_name="${1:-default}" vm_dir bridge_script host_bridge_dir="" bridge_pid="" tunnel_pid="" guest_browser_dir="" bridge_token="" tmp_root
+  local vm_name="${1:-default}" vm_dir bridge_script host_bridge_dir="" bridge_pid="" tunnel_pid="" guest_browser_dir="" bridge_token="" tmp_root control_path ssh_port
   local -a forward_args=() ssh_debug_args=()
   vm_dir="$(_vm_resolve "$vm_name")"
   [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
@@ -530,9 +547,15 @@ vm_cmd_auth() (
   [[ -d "$tmp_root" && -O "$tmp_root" ]] || tmp_root=/tmp
   host_bridge_dir="$(mktemp -d "$tmp_root/lab-vm-browser-host.XXXXXX")" || die 'Could not create a private host runtime directory for the browser bridge.'
   chmod 700 "$host_bridge_dir"
+  control_path="$host_bridge_dir/ssh-control"
+  (( ${#control_path} < 100 )) || die 'Private SSH control socket path is too long; set a shorter XDG_RUNTIME_DIR and retry.'
   bridge_script="$host_bridge_dir/browser-bridge-server.py"
   install -m 700 "$LAB_DIR/lib/vm/browser-bridge-server.py" "$bridge_script" || die 'Could not stage the host browser bridge into private runtime storage.'
   VM_BROWSER_BRIDGE_TOKEN="$bridge_token" VM_BROWSER_BRIDGE_PORT=19533 \
+    VM_BROWSER_BRIDGE_SSH_CONTROL_PATH="$control_path" \
+    VM_BROWSER_BRIDGE_SSH_PORT="$(cat "$vm_dir/ssh_port")" \
+    VM_BROWSER_BRIDGE_SSH_LOG="$vm_dir/browser-bridge-ssh.log" \
+    VM_BROWSER_BRIDGE_SSH_DEBUG="${VM_DEBUG:-0}" \
     python3 "$bridge_script" </dev/null >>"$vm_dir/browser-bridge.log" 2>&1 &
   bridge_pid=$!
   printf '%s\n' "$bridge_pid" >"$vm_dir/browser-bridge.pid"
@@ -556,22 +579,29 @@ vm_cmd_auth() (
 
   mapfile -d '' -t forward_args < <(_vm_openai_browser_bridge_ssh_args)
   mapfile -t ssh_debug_args < <(_vm_auth_tunnel_debug_args)
+  ssh_port="$(cat "$vm_dir/ssh_port")"
   if [[ "${VM_DEBUG:-0}" -ge 1 ]]; then
-    log_debug "OpenSSH forward trace is recorded in $vm_dir/browser-bridge-ssh.log; it does not include forwarded request data."
+    log_debug "OpenSSH control-master and callback-forward traces are recorded in $vm_dir/browser-bridge-ssh.log; forwarded request data is not logged."
   fi
-  ssh "${ssh_debug_args[@]}" -N -o BatchMode=yes -o ConnectTimeout=10 \
+  ssh "${ssh_debug_args[@]}" -F /dev/null -M -S "$control_path" -N \
+    -o ControlPersist=no -o BatchMode=yes -o ConnectTimeout=10 \
+    -o IdentitiesOnly=yes -o IdentityAgent=none \
+    -o ForwardAgent=no -o ForwardX11=no \
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$vm_dir/known_hosts" \
-    -i "$vm_dir/id_vm_control" -p "$(cat "$vm_dir/ssh_port")" \
+    -i "$vm_dir/id_vm_control" -p "$ssh_port" \
     "${forward_args[@]}" mester@127.0.0.1 \
     </dev/null >>"$vm_dir/browser-bridge-ssh.log" 2>&1 &
   tunnel_pid=$!
-  for _ in $(seq 1 30); do
-    _vm_auth_tunnel_pid_matches "$tunnel_pid" || die 'The temporary callback/browser SSH forwards failed to start; see browser-bridge-ssh.log.'
+  for _ in $(seq 1 100); do
+    kill -0 "$tunnel_pid" 2>/dev/null || die 'The temporary callback/browser SSH forwards failed to start; see browser-bridge-ssh.log.'
+    if ssh -F /dev/null -S "$control_path" -O check -p "$ssh_port" mester@127.0.0.1 >/dev/null 2>&1; then break; fi
     sleep 0.1
   done
+  ssh -F /dev/null -S "$control_path" -O check -p "$ssh_port" mester@127.0.0.1 >/dev/null 2>&1 || die 'The temporary SSH control master did not become ready; see browser-bridge-ssh.log.'
+  _vm_auth_tunnel_pid_matches "$tunnel_pid" || die 'The temporary SSH control master process could not be verified.'
 
-  echo 'Starting guest OpenCode with temporary host-browser handoff and callback forwards.'
-  echo 'In the TUI, use /connect → OpenAI → browser OAuth. The host browser opens automatically when OpenCode requests it.'
+  echo 'Starting guest OpenCode with a temporary host-browser handoff and on-demand callback forwarding.'
+  echo 'In the TUI, use /connect → OpenAI → Sign in with ChatGPT. The host browser opens automatically when OpenCode requests it.'
   echo 'The callback still returns through loopback SSH to the guest; exit OpenCode after success or cancellation to close all temporary access.'
   VM_BROWSER_BRIDGE_DIR="$guest_browser_dir" VM_AGENT_SKIP_MODEL_PROBE=1 vm_cmd_agent "$vm_name"
 )

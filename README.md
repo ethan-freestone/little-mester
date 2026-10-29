@@ -205,8 +205,8 @@ current experimental host-to-guest path through `lab-vm`:
     ./lab-vm -d models diagnose # detailed, read-only host/model-path evidence
     ./lab-vm -d models diagnose --probe-egress llamacpp # explicit TCP egress probe
     ./lab-vm verify-isolation   # inspect live QEMU config and probe from inside the guest
-    ./lab-vm auth               # temporary host-browser MCP handoff + guest callback tunnel
-    ./lab-vm auth-forward       # callback-only manual diagnostic fallback
+    ./lab-vm auth               # temporary host-browser handoff + runtime-derived callback tunnel
+    ./lab-vm auth-forward default <port> # exact-port manual diagnostic fallback
 ```
 
 `verify-isolation` requires an already-running VM; it does not start or modify it. It verifies
@@ -222,10 +222,12 @@ network, VM or container state.
 
 Native provider sign-in happens in the guest TUI through `/connect`; use
 `./lab-vm auth` for the one-command OpenAI browser flow. The temporary MCP bridge opens only
-approved provider authorization URLs in the host browser; the callback still reaches the guest
-through loopback SSH. `auth-forward` is a callback-only manual diagnostic fallback. The operator
-procedure and credential safeguards are in [the auth runbook](docs/chatgpt-auth.md), the cross-provider policy is in
-[decision C.9.13](docs/DECISIONS.md), and the implementation/test ledger is ticket #45.
+approved provider authorization URLs in the host browser and derives one loopback SSH callback
+forward from the runtime OAuth `redirect_uri`; the URL is not rewritten or logged. This relies on
+the pinned OpenCode 2.2.0 implementation, not a stable CLI/API contract; see [decision C.9.13](docs/DECISIONS.md)
+and [the auth runbook](docs/chatgpt-auth.md) for the source reference and version-update procedure.
+`auth-forward` takes one exact callback port as a manual diagnostic fallback. The implementation
+and live-acceptance ledger is ticket #45.
 Browser auth and credential persistence still require owner-controlled acceptance; do not
 expect guest credentials to survive destructive VM deletion.
 

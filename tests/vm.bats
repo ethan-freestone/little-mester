@@ -63,7 +63,7 @@ setup() {
   grep -Fq 'verify-isolation)' "$REPO_ROOT/lab-vm"
 }
 
-@test "OpenAI auth-forward exposes only the pinned localhost callback ports over SSH" {
+@test "OpenAI auth-forward exposes only the requested callback port on loopback" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   VM_AUTH_TEST_DIR="$BATS_TEST_TMPDIR/vm-auth-forward"
   VM_AUTH_CAPTURE="$BATS_TEST_TMPDIR/auth-forward-ssh-args"
@@ -75,17 +75,34 @@ setup() {
   die() { echo "REFUSED: $*" >&2; exit 1; }
   ssh() { printf '%s\n' "$@" >"$VM_AUTH_CAPTURE"; }
 
-  run vm_cmd_auth_forward default
+  run vm_cmd_auth_forward default 40391
   [ "$status" -eq 0 ]
   [[ "$output" == *'host loopback'* ]]
   [[ "$output" == *'press Ctrl-C'* ]]
   grep -Fxq -- '-N' "$VM_AUTH_CAPTURE"
-  [ "$(grep -Fxc -- '-L' "$VM_AUTH_CAPTURE")" -eq 2 ]
-  grep -Fxq '1455:localhost:1455' "$VM_AUTH_CAPTURE"
-  grep -Fxq '1457:localhost:1457' "$VM_AUTH_CAPTURE"
+  [ "$(grep -Fxc -- '-L' "$VM_AUTH_CAPTURE")" -eq 1 ]
+  grep -Fxq '127.0.0.1:40391:127.0.0.1:40391' "$VM_AUTH_CAPTURE"
   grep -Fxq 'ExitOnForwardFailure=yes' "$VM_AUTH_CAPTURE"
+  grep -Fxq -- '-F' "$VM_AUTH_CAPTURE"
+  grep -Fxq '/dev/null' "$VM_AUTH_CAPTURE"
+  grep -Fxq 'IdentitiesOnly=yes' "$VM_AUTH_CAPTURE"
+  grep -Fxq 'IdentityAgent=none' "$VM_AUTH_CAPTURE"
+  grep -Fxq 'ForwardAgent=no' "$VM_AUTH_CAPTURE"
+  grep -Fxq 'ForwardX11=no' "$VM_AUTH_CAPTURE"
   ! grep -Eq -- '(^-g$|0\.0\.0\.0|\*:[0-9])' "$VM_AUTH_CAPTURE"
   grep -Fq 'auth-forward)' "$REPO_ROOT/lab-vm"
+
+  run vm_cmd_auth_forward 40391
+  [ "$status" -eq 0 ]
+  grep -Fxq '127.0.0.1:40391:127.0.0.1:40391' "$VM_AUTH_CAPTURE"
+
+  for bad_port in '' 80 65536 '-L' '40391:127.0.0.1:22'; do
+    run vm_cmd_auth_forward default "$bad_port"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'Usage:'* ]]
+  done
+  run vm_cmd_auth_forward default 40391 extra
+  [ "$status" -ne 0 ]
 }
 
 @test "OpenAI auth-forward refuses to start unless the VM is already running" {
@@ -100,22 +117,24 @@ setup() {
   die() { echo "REFUSED: $*" >&2; exit 1; }
   ssh() { touch "$VM_AUTH_CAPTURE"; }
 
-  run vm_cmd_auth_forward test-vm
+  run vm_cmd_auth_forward test-vm 40391
   [ "$status" -ne 0 ]
   [[ "$output" == *"VM 'test-vm' is not running"* ]]
   [ ! -e "$VM_AUTH_CAPTURE" ]
 }
 
-@test "single-command browser auth keeps callback and MCP bridge forwards on SSH loopback" {
+@test "single-command browser auth keeps MCP bridge forward on SSH loopback" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   mapfile -d '' -t args < <(_vm_openai_browser_bridge_ssh_args)
-  [ "${#args[@]}" -eq 8 ]
-  [[ "${args[*]}" == *'-L 1455:localhost:1455'* ]]
-  [[ "${args[*]}" == *'-L 1457:localhost:1457'* ]]
+  [ "${#args[@]}" -eq 4 ]
   [[ "${args[*]}" == *'-R 127.0.0.1:19533:127.0.0.1:19533'* ]]
   [[ "${args[*]}" == *'-o ExitOnForwardFailure=yes'* ]]
   ! [[ "${args[*]}" == *'0.0.0.0'* ]]
   grep -Fq 'vm_cmd_auth "$vm_name"' "$REPO_ROOT/lab-vm"
+  grep -Fq 'ssh "${ssh_debug_args[@]}" -F /dev/null -M -S "$control_path" -N' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  grep -Fq 'VM_BROWSER_BRIDGE_SSH_CONTROL_PATH="$control_path"' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  grep -Fq -- '-o IdentitiesOnly=yes -o IdentityAgent=none' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  grep -Fq -- '-o ForwardAgent=no -o ForwardX11=no' "$REPO_ROOT/lib/vm/lifecycle.sh"
 }
 
 @test "browser auth debug enables SSH transport tracing only on request" {
@@ -130,10 +149,13 @@ setup() {
   [ "${debug_args[0]}" = '-vv' ]
 
   mapfile -d '' -t forwards < <(_vm_openai_browser_bridge_ssh_args)
-  [[ "${forwards[*]}" == *'-L 1455:localhost:1455'* ]]
-  [[ "${forwards[*]}" == *'-L 1457:localhost:1457'* ]]
   [[ "${forwards[*]}" == *'-R 127.0.0.1:19533:127.0.0.1:19533'* ]]
   ! [[ "${forwards[*]}" == *'0.0.0.0'* ]]
+
+  mapfile -d '' -t callback < <(_vm_openai_callback_ssh_args 40391)
+  [[ "${callback[*]}" == *'-L 127.0.0.1:40391:127.0.0.1:40391'* ]]
+  ! _vm_openai_callback_ssh_args 0
+  ! _vm_openai_callback_ssh_args 65536
 }
 
 @test "temporary guest browser opener refuses URLs unless MCP handoff is configured" {
@@ -502,8 +524,9 @@ JSON
   ! grep -Eq 'iptables(-save)? .* (-F|-X|--flush|--delete)|nft (flush|delete|add|insert|replace)' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
 }
 
-@test "hygiene ShellCheck invocation includes the VM host-services source dependency" {
-  grep -Fq 'shellcheck lab scripts/*.sh lib/vm/cloud-init.sh lib/vm/host-services.sh' "$REPO_ROOT/.github/workflows/ci.yml"
+@test "hygiene ShellCheck covers VM entry points, browser opener, and lifecycle errors" {
+  grep -Fq 'shellcheck lab scripts/*.sh lib/vm/cloud-init.sh lib/vm/host-services.sh lib/vm/browser-open.sh' "$REPO_ROOT/.github/workflows/ci.yml"
+  grep -Fq 'shellcheck --severity=error lab-vm lib/vm/lifecycle.sh' "$REPO_ROOT/.github/workflows/ci.yml"
 }
 
 @test "models diagnose captures publication failure without mutating Docker state" {
