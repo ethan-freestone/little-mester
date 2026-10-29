@@ -8,7 +8,7 @@
   "title": "Model-agnostic harness: local models and cloud providers",
   "objective": "Keep the harness model-agnostic while supporting native provider authentication from the guest where the harness actually runs. OpenCode ChatGPT login must use a currently supported browser-based flow with its callback reaching the real guest OpenCode server; optional secure host escrow/import/export must not replace or block native login. Keep secrets out of the image, workspace, seed and Git.",
   "created_at": "2026-10-26T20:39:18.839Z",
-  "updated_at": "2026-10-29T14:23:01.734Z",
+  "updated_at": "2026-10-29T14:32:51.788Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -68,7 +68,8 @@
     {
       "id": "A12",
       "text": "Fresh VM supports a currently supported non-device-code OpenCode ChatGPT browser OAuth login (including Sign in with ChatGPT/token-sharing if offered), not only legacy Codex device code: discover actual methods/version and callback location, open URL in host browser, route required callback across host→VM→agent/server using explicit loopback-only SSH/relay forwarding, verify auth list and one provider request. Repeat with device code unavailable; no API-key substitution or broad/LAN port exposure.",
-      "status": "pending"
+      "status": "in-progress",
+      "evidence": "Owner CachyOS trial: `./lab-vm auth` launched guest OpenCode and `/connect` opened the host browser, but the OAuth callback did not return to the VM. Authentication, `auth list`, and a provider request are not verified."
     },
     {
       "id": "A13",
@@ -78,11 +79,28 @@
     {
       "id": "A14",
       "text": "OpenAI browser sign-in is a smooth single-command host workflow: one explicit command starts the native guest OpenCode browser OAuth flow, establishes only the required temporary loopback callback path, and opens or securely hands off the authorization URL to the host browser without requiring a second manually coordinated terminal or copy/pasting the URL. It closes temporary forwarding on success, cancellation, interruption, timeout, and failure; remains the browser method (not device code); and never logs/stores the authorization URL, state, code, or tokens.",
-      "status": "pending"
+      "status": "in-progress",
+      "evidence": "Owner CachyOS trial: `./lab-vm auth` launched guest OpenCode and `/connect` opened the host browser, but the OAuth callback did not return to the VM. Authentication, `auth list`, and a provider request are not verified."
     },
     {
       "id": "A15",
       "text": "A host-resident browser-bridge MCP integration lets the guest-started native OAuth flow open its authorization URL in the host's default browser without manual URL copy/paste. The bridge is a narrowly scoped open-auth-URL capability, bound to host loopback and reachable only through the per-VM control SSH channel; it accepts only approved provider authorization origins, provides no arbitrary host command/file/network access, does not receive or relay the OAuth callback/code, and never logs or persists authorization URLs, state, codes, or tokens. The callback still reaches the actual guest OpenCode listener through the temporary loopback SSH forward; cancellation and helper shutdown remove temporary access.",
+      "status": "in-progress",
+      "evidence": "Owner CachyOS trial: `./lab-vm auth` launched guest OpenCode and `/connect` opened the host browser, but the OAuth callback did not return to the VM. Authentication, `auth list`, and a provider request are not verified."
+    },
+    {
+      "id": "A16",
+      "text": "First-login milestone: from the normal guest OpenCode TUI, native non-device-code ChatGPT browser OAuth completes its callback to the actual guest server, saves the account in the intended private credential store, and supports `opencode auth list` plus a real provider completion. One explicit owner approval is the only interactive step; no second terminal or manual URL transfer is required.",
+      "status": "pending"
+    },
+    {
+      "id": "A17",
+      "text": "Workspace-start milestone: after selecting/connecting Little Mester to workspace X, the standard documented start workflow has all required auth configuration present. If no credential exists, it guides or launches the one-time native TUI login; after that, ordinary workspace starts reuse the saved auth without extra setup or repeated login.",
+      "status": "pending"
+    },
+    {
+      "id": "A18",
+      "text": "Credential handling supports explicitly enabled recursive Little Mester use: prefer private app/OS credential storage outside the worktree; any workspace-local fallback is Git-ignored, mode-restricted, and excluded from commits, images, build contexts, and logs. Auth is forwarded only at runtime through a narrow secret channel to nested Little Mester containers, without copying a broad credential directory or requiring reauthentication; a nested end-to-end test proves this while preserving existing recursion bounds.",
       "status": "pending"
     }
   ],
@@ -111,7 +129,10 @@
       "Prototype and threat-model a host-side browser-bridge MCP tool callable by the guest only over the existing per-VM SSH control channel. Demonstrate it opens only allowlisted provider authorization origins in the host default browser, has no generic host tool capability, keeps URL/state in memory only, and does not intercept callback codes/tokens.",
       "Integrate browser-bridge invocation into the single-command native auth flow; test unreachable host bridge, unsupported provider origin, browser-launch failure, cancellation, timeout, and cleanup without exposing a LAN service or requiring a second manually coordinated terminal.",
       "CURRENT OWNER GATE (supersedes prior separate `agent` + `auth-forward` + manual URL handoff): first complete #41's proxy-recovery gate without restarting QEMU or changing host network/firewall state. Preserve the current VM/overlay and host-Docker session. Run `./lab-vm auth`; in guest `/connect` → OpenAI → its browser OAuth method (not device code). Verify automatic host-browser opening and guest callback success; if the pinned build does not call the shim or the browser does not open, stop—never copy/paste the URL as workaround. On success, verify guest `opencode auth list` and one harmless OpenAI completion. Also cancel a separate attempt, exit OpenCode, and verify cleanup of bridge, token/helper, and SSH forwards. Report only version/method, success/cancel/error, auth-list/completion outcomes, and cleanup; never record URL/state/code/token. Keep the existing VM/overlay and host-Docker session; do not run `--clean`, stop/down, or recreate containers.",
-      "After the basic owner flow, separately test occupied callback port(s) fail closed, denied OpenAI egress, interruption/startup-failure cleanup, and timeout behavior. The current command waits for the interactive TUI and relies on exit/signal cleanup; no independent OAuth-cancellation detector or timeout acceptance is claimed. Persistence/export/import, container recreation, and VM deletion remain separate pending gates."
+      "After the basic owner flow, separately test occupied callback port(s) fail closed, denied OpenAI egress, interruption/startup-failure cleanup, and timeout behavior. The current command waits for the interactive TUI and relies on exit/signal cleanup; no independent OAuth-cancellation detector or timeout acceptance is claimed. Persistence/export/import, container recreation, and VM deletion remain separate pending gates.",
+      "CALLBACK FAILURE follow-up (supersedes the expected-success portion of the prior owner handoff): owner confirmed `./lab-vm auth` starts guest OpenCode and `/connect` opens the host browser, but the callback does not return to the VM. Diagnose the host-loopback → SSH `-L` → guest-listener route and the guest's actual callback listener for the pinned OpenCode method/version; add redacted, URL/code-free diagnostics and a regression before requesting another browser attempt. On the next controlled run verify callback completion, guest `opencode auth list`, and one harmless provider completion. Do not copy/paste or record the authorization URL, state, code, or token; preserve VM/overlay/host-Docker session and do not change firewall/network settings.",
+      "Implement workspace-selected auth bootstrap after the TUI first-login milestone: verify the standard `./lab <workspace>`/configured VM start path finds the intended credential without separate manual setup, and document first-run login versus subsequent reuse.",
+      "Implement and test recursive credential availability only when recursion is explicitly enabled: one nested Little Mester agent can use the same provider auth via a narrow runtime channel, with no secret in Git, build context, image, seed, logs, or unrestricted parent/child workspace exposure. Verify the minimum one-level nested case and existing recursion depth bounds."
     ],
     "created": [
       "2026-10-29: `lab-vm auth-forward` uses the existing per-VM SSH control key and `ssh -N` with `ExitOnForwardFailure=yes`; it forwards only host-loopback ports 1455 and 1457 to guest localhost for the pinned OpenCode 2.2.0 browser OAuth listener/fallback. It is a separate, user-controlled helper, not an always-on QEMU forward.",
@@ -138,7 +159,9 @@
       "2026-10-29 follow-up: #45 A14/A15 now require a single-command browser flow and a narrowly scoped host-browser MCP integration to avoid manual multi-terminal/URL-copy handoff. The bridge is not implemented yet; native guest OpenCode remains required and callback must still route directly to guest over temporary loopback SSH.",
       "2026-10-29 local validation after safe proxy recovery implementation: Bats 100/100, VM Python suite 20/20, docs 114/114, syntax/compile/diff checks pass; live CachyOS browser/model acceptance remains pending.",
       "2026-10-29 local bridge tests verify the host exposes only authenticated `open_auth_url`, binds through the loopback server, rejects unapproved origins even if guest validation is bypassed, supports repeated handoffs, and does not echo authorization state. These tests do not prove that pinned OpenCode invokes the `xdg-open` shim or that a real host browser/callback succeeds.",
-      "2026-10-29: temporary lifecycle cleanup now registers before bridge startup; local process startup/health/shutdown passes. The runbook requires exiting guest OpenCode after success or cancellation to trigger cleanup; live cancellation detection/cleanup and owner-host behavior remain unverified. No OAuth URL, state, code, or token was captured."
+      "2026-10-29: temporary lifecycle cleanup now registers before bridge startup; local process startup/health/shutdown passes. The runbook requires exiting guest OpenCode after success or cancellation to trigger cleanup; live cancellation detection/cleanup and owner-host behavior remain unverified. No OAuth URL, state, code, or token was captured.",
+      "2026-10-29 owner CachyOS trial: `./lab-vm auth` launched OpenCode and the OpenAI `/connect` browser action opened the host browser, but authentication did not return to the VM. No successful callback, stored auth, `auth list`, or provider completion was reported; no OAuth URL/state/code/token was shared. A12/A14/A15 remain in progress, not passing.",
+      "Owner clarified the intended product workflow: first make native OpenCode TUI browser auth complete; then selecting a workspace and starting Little Mester should reuse/configure auth without a pile of manual steps. Auth must remain private and support explicitly enabled recursion into nested Little Mester containers; at minimum any workspace-local secret must be Git-ignored. Captured as new A16–A18; implementation remains pending."
     ]
   },
   "priority": "major",
