@@ -74,8 +74,7 @@ _vm_api_diagnostics() {
 
 _vm_probe_published_api() {
   local service="$1" port="$2" path="$3" url="http://127.0.0.1:$2$3"
-  local attempt
-  for attempt in {1..20}; do
+  for _attempt in {1..20}; do
     if curl --noproxy '*' --fail --silent --show-error --connect-timeout 2 --max-time 5 "$url" >/dev/null 2>&1; then
       log "$service is reachable at $url"
       return 0
@@ -133,7 +132,7 @@ vm_cmd_metrics() {
             </dev/null >>"$log_file" 2>&1 &
       pid=$!
       printf '%s\n' "$pid" > "$pid_file"
-      for attempt in {1..30}; do
+      for _attempt in {1..30}; do
         if ! kill -0 "$pid" 2>/dev/null; then
           rm -f "$pid_file"
           tail -n 60 "$log_file" >&2 || true
