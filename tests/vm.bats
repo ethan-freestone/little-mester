@@ -186,7 +186,10 @@ JSON
   grep -Fq 'scripts/vm-models-diagnose.sh' "$REPO_ROOT/lab-vm"
   grep -Fq 'docker port "$container"' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   grep -Fq "journalctl -u docker --since '1 hour ago'" "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq 'iptables-save -t nat' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq 'nft list ruleset' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   ! grep -Eq 'docker compose (up|down|stop|restart)|docker (start|stop|restart|rm|system prune)' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  ! grep -Eq 'iptables(-save)? .* (-F|-X|--flush|--delete)|nft (flush|delete|add|insert|replace)' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
 }
 
 @test "hygiene ShellCheck invocation includes the VM host-services source dependency" {

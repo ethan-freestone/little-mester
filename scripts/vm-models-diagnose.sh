@@ -142,6 +142,34 @@ else
   echo 'Unavailable (ss not installed).'
 fi
 
+section 'Host Docker port-publication rules (read-only)'
+if command -v iptables-save >/dev/null 2>&1; then
+  nat_rules="$(iptables-save -t nat 2>&1)"
+  if [[ "$nat_rules" == *'Permission denied'* || "$nat_rules" == *'Operation not permitted'* ]]; then
+    echo 'iptables NAT rules unavailable to this user; no elevated command was run.'
+    [[ "$VM_VERBOSE" -ge 1 ]] && printf '%s\n' "$nat_rules"
+  elif [[ -n "$nat_rules" ]]; then
+    printf '%s\n' "$nat_rules" | grep -E '^(\*nat|:DOCKER|:DOCKER-USER|:DOCKER-FORWARD|:DOCKER-INGRESS|-A DOCKER|COMMIT)|8080' || echo 'No Docker or port-8080 NAT rules found.'
+  else
+    echo 'iptables-save returned no NAT rules.'
+  fi
+else
+  echo 'iptables-save unavailable.'
+fi
+
+if command -v nft >/dev/null 2>&1; then
+  nft_rules="$(nft list ruleset 2>&1)"
+  if [[ "$nft_rules" == *'Permission denied'* || "$nft_rules" == *'Operation not permitted'* ]]; then
+    echo 'nftables rules unavailable to this user; no elevated command was run.'
+    [[ "$VM_VERBOSE" -ge 1 ]] && printf '%s\n' "$nft_rules"
+  else
+    nft_matches="$(printf '%s\n' "$nft_rules" | grep -Ei -C 2 'docker|8080' || true)"
+    if [[ -n "$nft_matches" ]]; then printf '%s\n' "$nft_matches"; else echo 'No Docker or port-8080 nftables rules found.'; fi
+  fi
+else
+  echo 'nft unavailable.'
+fi
+
 section 'Recent Docker daemon publication/network errors (best effort, last hour)'
 if command -v journalctl >/dev/null 2>&1; then
   journal="$(journalctl -u docker --since '1 hour ago' --no-pager -n 200 2>&1)"

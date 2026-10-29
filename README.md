@@ -211,8 +211,9 @@ actual host HTTP reachability instead of trusting Compose/inspect port metadata.
 summarizes whether each running forwarder has an active host port mapping and responds on
 loopback. If it does not, run `./lab-vm -d models diagnose` before collecting ad-hoc evidence.
 That command records resolved Compose ports, Docker context/daemon mode, container bindings and
-network attachments, `docker port`, relevant host listeners, loopback HTTP probes, backend health,
-and available Docker journal diagnostics in the normal `.mester/logs/` run log. It is read-only: it
+network attachments, `docker port`, relevant host listeners and Docker NAT/firewall publication
+rules, loopback HTTP probes, backend health, and available Docker journal diagnostics in the
+normal `.mester/logs/` run log. It is read-only: it
 does not start/recreate containers, alter daemon/firewall/network settings, or remove orphans.
 The output identifies unavailable checks and exits nonzero if a running forwarder is unhealthy.
 VM metrics
