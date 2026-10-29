@@ -8,7 +8,7 @@
   "title": "Epic: VM-native Little Mester agent and isolated workload environment",
   "objective": "Deliver Little Mester as a native harness process inside an outer QEMU/KVM VM, with guest Docker/Compose for project workloads and narrow local/cloud model access. Do not wrap the agent in Docker. Preserve the host-Docker workflow as the working fallback until direct-guest usability, auth, permissions, workload, host-isolation and lifecycle acceptance gates pass; integrate the VM into ./lab only after those gates.",
   "created_at": "2026-10-26T17:39:37.714Z",
-  "updated_at": "2026-10-29T15:26:18.284Z",
+  "updated_at": "2026-10-29T15:29:49.549Z",
   "priority": "critical",
   "comments": [
     {
@@ -210,7 +210,8 @@
       "2026-10-28 implementation checkpoint committed as a31e9af on feat/vm-approach; local regression/documentation/store checks pass. Host image-build retry is still required (#41); browser/non-device-code auth/persistence (#45), actual permission UI (#50), controlled workspace Docker and integrated ./lab lifecycle remain open. Commit is not a release/lifecycle pass and was not pushed.",
       "2026-10-28 documentation cleanup: detailed VM host attempts, fixes, test records and retry handoffs are tracked on implementing ticket #41; current status and procedure refer there. Historical C.9.14–15 references in earlier append-only case are superseded; OpenCode image-update detail remains under #42 A8/tests, permission UI observation under #50, auth requirements under #45. No ticket schema additions required; existing tests/evidence fields fit.",
       "2026-10-28 owner-directed documentation-boundary cleanup committed as 4578581 (`docs: keep VM execution history on tickets`). Top of docs/DECISIONS.md now defines durable project decisions vs subsystem architecture vs per-ticket implementation/host evidence and schema-change process. Moved/removes per-attempt histories, diagnostics, fixes, test outcomes and retry handoffs from DECISIONS; concise host state points to #41; kept only durable project-wide human-gate/auth/permission rules. Existing tests.cases/needed/created and AC evidence cover required details, so no ticket schema change planned. 109 doc checks and ticket validation pass.",
-      "Owner-directed release strategy 2026-10-28: no cutover while guest model requests fail or core metrics/exit UX/auth/permission/workload/security/lifecycle gates are pending. Keep host-Docker session as active working path; no simultaneous editing agents on the same checkout. Ordered human sequence is recorded in this ticket's tests.needed and child implementation gates; #51's dedicated test_plan field is not yet implemented."
+      "Owner-directed release strategy 2026-10-28: no cutover while guest model requests fail or core metrics/exit UX/auth/permission/workload/security/lifecycle gates are pending. Keep host-Docker session as active working path; no simultaneous editing agents on the same checkout. Ordered human sequence is recorded in this ticket's tests.needed and child implementation gates; #51's dedicated test_plan field is not yet implemented.",
+      "2026-10-29: reviewed patch committed locally as 32bb8ea6b6a2959839216653797e4a49fd5a814d (`fix(vm): derive ChatGPT callback forwarding at runtime`) on feat/vm-approach. Local validation: VM Python tests 33/33, Bats 104/104, docs checks 115/115, ShellCheck, Bash/Python compile, diff check, and ticket validation pass. No live VM/browser acceptance. `git push origin feat/vm-approach` was attempted but this environment has no `ssh` executable; revision is still local and must be transferred to the owner checkout before the handoff can run."
     ]
   },
   "is_epic": true

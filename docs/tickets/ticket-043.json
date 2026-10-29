@@ -8,7 +8,7 @@
   "title": "Guest Docker workloads, recursive VMs and host isolation",
   "objective": "Give a directly running guest agent ordinary Docker/Compose control for arbitrary project test services and recursive Little Mester VMs where nested virtualization is supported, while the outer VM continues to isolate the host and the existing egress allowlist/no-host-route policy remains enforced.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-10-29T15:26:11.980Z",
+  "updated_at": "2026-10-29T15:29:49.576Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -78,7 +78,8 @@
     ],
     "cases": [
       "2026-10-28 owner explicitly approved adding npmjs.org to .mester-egress for registry.npmjs.org required by agent/OpenCode npm install. Existing entries preserved; public-only proxy enforcement unchanged; no allow-all or provider domains granted. #41 build fix loads CLI/auth-helper proxy env separately from daemon/RUN arguments; live registry build retry still pending.",
-      "2026-10-29 security regression found Python 3.12 considers IPv4 multicast 224.0.0.1 `is_global=True`. VM proxy now rejects multicast in addition to non-global addresses and checks all DNS answers before connecting. HTTP/CONNECT regression tests cover IPv4/IPv6 multicast and private/reserved/link-local targets; mixed public/private or multicast DNS results cannot reach connect(). VM Python suite 33/33 passes locally. No KVM host egress acceptance is claimed."
+      "2026-10-29 security regression found Python 3.12 considers IPv4 multicast 224.0.0.1 `is_global=True`. VM proxy now rejects multicast in addition to non-global addresses and checks all DNS answers before connecting. HTTP/CONNECT regression tests cover IPv4/IPv6 multicast and private/reserved/link-local targets; mixed public/private or multicast DNS results cannot reach connect(). VM Python suite 33/33 passes locally. No KVM host egress acceptance is claimed.",
+      "2026-10-29: reviewed patch committed locally as 32bb8ea6b6a2959839216653797e4a49fd5a814d (`fix(vm): derive ChatGPT callback forwarding at runtime`) on feat/vm-approach. Local validation: VM Python tests 33/33, Bats 104/104, docs checks 115/115, ShellCheck, Bash/Python compile, diff check, and ticket validation pass. No live VM/browser acceptance. `git push origin feat/vm-approach` was attempted but this environment has no `ssh` executable; revision is still local and must be transferred to the owner checkout before the handoff can run."
     ]
   },
   "priority": "critical",
