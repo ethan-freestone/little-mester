@@ -9,23 +9,27 @@ VM_DEBUG="${VM_DEBUG:-0}"
 usage() {
   cat <<'EOF'
 Usage: ./lab-vm [-v|-d] models diagnose [ollama|llamacpp|all]
-       ./lab-vm [-v|-d] models diagnose [--sudo] [ollama|llamacpp|all]
+       ./lab-vm [-v|-d] models diagnose [--sudo] [--probe-egress] [ollama|llamacpp|all]
 
 Collect read-only Docker daemon/network publication, host-listener, HTTP,
 backend-health, and available Docker journal evidence. --sudo uses
 non-interactive sudo only for read-only firewall and daemon-config inspection.
-Does not start/recreate/stop
-containers or change Docker, firewall, or network settings. Defaults to all.
+--probe-egress explicitly attempts a TCP connection from each running forwarder
+to 1.1.1.1:443; a successful connection shows that this bridge has some egress,
+not that all egress is available. Does not start/recreate/stop containers or
+change Docker, firewall, or network settings. Defaults to all.
 EOF
 }
 
 use_sudo=0
+probe_egress=0
 provider=all
 provider_set=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --sudo) use_sudo=1 ;;
+    --probe-egress) probe_egress=1 ;;
     all|ollama|llama|llamacpp)
       if [[ "$provider_set" -eq 1 ]]; then usage >&2; exit 2; fi
       provider="$1"
@@ -227,6 +231,44 @@ for spec in "${services[@]}"; do
     status=1
   fi
 
+  if command -v ip >/dev/null 2>&1; then
+    route_source="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+  else
+    route_source=''
+  fi
+  if [[ -n "$route_source" && "$route_source" != '127.'* ]]; then
+    echo "Host non-loopback-address HTTP probe (local-only; not a remote LAN test): http://$route_source:$host_port$path"
+    if curl --noproxy '*' --http1.1 --fail --connect-timeout 2 --max-time 5 \
+        --silent --show-error --output /dev/null \
+        --write-out 'http_status=%{http_code} remote_ip=%{remote_ip}\n' \
+        "http://$route_source:$host_port$path"; then
+      echo 'Non-loopback host-address probe succeeded; the published API may be reachable beyond loopback.'
+      status=1
+    else
+      echo 'Non-loopback host-address probe did not connect from this host; verify from a separate LAN device before claiming LAN isolation.'
+    fi
+  else
+    echo 'Non-loopback host-address probe unavailable (no source address from the default IPv4 route). Verify from a separate LAN device.'
+  fi
+
+  if [[ "$probe_egress" -eq 1 ]]; then
+    section "$service publication-bridge egress probe (TCP 1.1.1.1:443)"
+    egress_probe_output="$(docker exec "$container" sh -c 'socat -T3 -u /dev/null TCP:1.1.1.1:443,connect-timeout=3' 2>&1)"
+    egress_probe_status=$?
+    if [[ "$egress_probe_status" -eq 0 ]]; then
+      echo 'Egress probe: TCP connection succeeded; publication-bridge egress is present.'
+      status=1
+    elif [[ "$egress_probe_output" == *'executable file not found'* || "$egress_probe_output" == *'not found'* ]]; then
+      echo 'Egress probe unavailable: socat could not be executed in the forwarder.'
+      [[ -n "$egress_probe_output" ]] && printf '%s\n' "$egress_probe_output"
+      status=1
+    else
+      printf 'Egress probe: TCP connection was not established (exit=%s); this single destination/protocol check does not prove all egress is blocked.\n' "$egress_probe_status"
+    fi
+  else
+    echo 'Egress probe not run; pass --probe-egress to attempt the fixed TCP connectivity check.'
+  fi
+
   if [[ "$direct_container_ok" -eq 1 && "$loopback_ok" -eq 0 ]]; then
     echo 'Finding: the forwarder responds on its container IP, but the host-published loopback port is unavailable; investigate Docker port publication, not the model backend.'
   fi
@@ -312,8 +354,8 @@ fi
 
 section 'Result'
 if [[ "$status" -eq 0 ]]; then
-  echo 'No failed probes were observed for the selected running forwarders.'
+  echo 'No failed required probes were observed for the selected running forwarders.'
 else
-  echo 'One or more Docker, listener, or HTTP checks failed; no repairs were attempted.'
+  echo 'One or more Docker, listener, HTTP, or requested isolation checks failed; no repairs were attempted.'
 fi
 exit "$status"

@@ -236,6 +236,11 @@ case "$*" in
   *'network inspect --format'*'{{.Internal}}'*'little-mester_vm-api-publish') echo false ;;
   *'network inspect --format'*'little-mester_internal') echo 'network=little-mester_internal driver=bridge internal=true options={} ipam=[]' ;;
   *'network inspect --format'*'little-mester_vm-api-publish') echo 'network=little-mester_vm-api-publish driver=bridge internal=false options={"com.docker.network.bridge.enable_ip_masquerade":"false"} ipam=[]' ;;
+  exec\ sidecar-id\ sh\ -c\ *)
+    if [[ "${MOCK_EGRESS_REACHABLE:-0}" == 1 ]]; then exit 0; fi
+    echo 'socat: Connection timed out' >&2
+    exit 1
+    ;;
   *) echo "unexpected docker invocation: $*" >&2; exit 1 ;;
 esac
 MOCK_DOCKER
@@ -250,9 +255,17 @@ if [[ "${MOCK_ACTIVE_MAPPING:-0}" == 1 && "$*" == *'http://127.0.0.1:8080/health
   echo 'http_status=200 remote_ip=127.0.0.1'
   exit 0
 fi
+if [[ "$*" == *'http://192.0.2.10:8080/health' && "${MOCK_LAN_EXPOSED:-0}" == 1 ]]; then
+  echo 'http_status=200 remote_ip=192.0.2.10'
+  exit 0
+fi
 echo 'curl: (7) Connection refused' >&2
 exit 7
 MOCK_CURL
+  cat >"$fakebin/ip" <<'MOCK_IP'
+#!/usr/bin/env bash
+echo '1.1.1.1 via 192.0.2.1 dev eth0 src 192.0.2.10'
+MOCK_IP
   cat >"$fakebin/ss" <<'MOCK_SS'
 #!/usr/bin/env bash
 echo 'State Recv-Q Send-Q Local Address:Port Peer Address:Port'
@@ -306,6 +319,16 @@ MOCK_SUDO
   [[ "$output" != *'Docker has no active runtime host-port mapping'* ]]
   [[ "$output" == *'Host direct-container HTTP probe: http://172.20.0.2:8080/health'* ]]
   [[ "$output" == *'Host loopback HTTP probe: http://127.0.0.1:8080/health'* ]]
+  [[ "$output" == *'Host non-loopback-address HTTP probe (local-only; not a remote LAN test): http://192.0.2.10:8080/health'* ]]
+
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 MOCK_ACTIVE_MAPPING=1 MOCK_LAN_EXPOSED=1 MOCK_EGRESS_REACHABLE=1 bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" --probe-egress llamacpp
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Non-loopback host-address probe succeeded; the published API may be reachable beyond loopback.'* ]]
+  [[ "$output" == *'Egress probe: TCP connection succeeded; publication-bridge egress is present.'* ]]
+
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 MOCK_ACTIVE_MAPPING=1 bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" --probe-egress llamacpp
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'Egress probe: TCP connection was not established'* ]]
 
   run env PATH="$fakebin:$PATH" VM_DEBUG=0 bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" --sudo llamacpp
   [ "$status" -eq 1 ]

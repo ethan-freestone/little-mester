@@ -202,6 +202,7 @@ current experimental host-to-guest path through `lab-vm`:
     ./lab-vm metrics up         # separate host-native VM metrics endpoint
     ./lab-vm models status      # concise state and host reachability summary
     ./lab-vm -d models diagnose # detailed, read-only host/model-path evidence
+    ./lab-vm -d models diagnose --probe-egress llamacpp # explicit TCP egress probe
 ```
 
 `models up` selects the provider in `agent/opencode/opencode.json` by default; choose
@@ -214,7 +215,8 @@ That command records resolved Compose ports, Docker context/daemon mode, contain
 network attachments and internal-network settings, `docker port`, allowlisted Docker daemon
 publication settings, relevant host listeners and NAT/firewall publication rules, loopback HTTP
 probes, direct host-to-forwarder-container HTTP probes (to distinguish container reachability
-from port publication), backend health, and available Docker journal diagnostics in the
+from port publication), a host-originated probe to the non-loopback address selected by the
+default IPv4 route, backend health, and available Docker journal diagnostics in the
 normal `.mester/logs/` run log. It is read-only: it
 does not start/recreate containers, alter daemon/firewall/network settings, or remove orphans.
 If firewall-rule inspection is blocked by host permissions, rerun with
@@ -224,7 +226,12 @@ The forwarders remain attached to the internal model network and join a dedicate
 bridge because Docker Engine can silently omit published-port mappings when a service is attached
 only to an `internal: true` bridge. Masquerading is disabled on the publication bridge, but this
 alone is not an egress firewall. The output identifies unavailable checks and exits nonzero if a
-running forwarder is unhealthy.
+running forwarder is unhealthy or a non-loopback-address probe succeeds. That local probe is not
+a remote LAN test; verify from a separate LAN device that `http://<host-LAN-IP>:8080/health` and,
+when enabled, `http://<host-LAN-IP>:11434/api/tags` do not connect. `--probe-egress` explicitly
+attempts one TCP connection from each selected forwarder to `1.1.1.1:443`; a successful
+connection proves some egress exists, while a failed connection does not prove all destinations
+or protocols are blocked. Neither probe changes host or container configuration.
 VM metrics
 use a separate native host process at `127.0.0.1:19532`, independent of Docker; it returns
 only curated metrics API data and is reachable from the guest through the existing QEMU
