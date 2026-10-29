@@ -11,9 +11,10 @@ usage() {
 Usage: ./lab-vm [-v|-d] models diagnose [ollama|llamacpp|all]
        ./lab-vm [-v|-d] models diagnose [--sudo] [ollama|llamacpp|all]
 
-Collect read-only Docker publication, host-listener, HTTP, backend-health, and
-available Docker journal evidence. --sudo uses non-interactive sudo only for
-read-only iptables/nftables rule inspection. Does not start/recreate/stop
+Collect read-only Docker daemon/network publication, host-listener, HTTP,
+backend-health, and available Docker journal evidence. --sudo uses
+non-interactive sudo only for read-only firewall and daemon-config inspection.
+Does not start/recreate/stop
 containers or change Docker, firewall, or network settings. Defaults to all.
 EOF
 }
@@ -36,9 +37,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$provider" in
-  all) services=("ollama-vm-api|11434|/api/tags|ollama|11434" "llamacpp-vm-api|8080|/health|llamacpp|11434") ;;
-  ollama) services=("ollama-vm-api|11434|/api/tags|ollama|11434") ;;
-  llama|llamacpp) services=("llamacpp-vm-api|8080|/health|llamacpp|11434") ;;
+  all) services=("ollama-vm-api|11434|/api/tags|ollama|11434|11434" "llamacpp-vm-api|8080|/health|llamacpp|11434|8080") ;;
+  ollama) services=("ollama-vm-api|11434|/api/tags|ollama|11434|11434") ;;
+  llama|llamacpp) services=("llamacpp-vm-api|8080|/health|llamacpp|11434|8080") ;;
 esac
 
 compose() {
@@ -80,6 +81,46 @@ if [[ "$VM_DEBUG" -ge 1 ]]; then
   docker info 2>&1 | grep -E '^( Operating System| Firewall Backend| EnableUserlandProxy| UserlandProxyPath):' || true
 fi
 
+section 'Docker daemon port-publication settings (allowlisted)'
+if command -v cat >/dev/null 2>&1; then
+  daemon_config="$(run_rule_probe cat /etc/docker/daemon.json 2>&1)"
+  if [[ "$daemon_config" == *'No such file or directory'* ]]; then
+    echo '/etc/docker/daemon.json not present.'
+  elif [[ "$daemon_config" == *'Permission denied'* || "$daemon_config" == *'a password is required'* || "$daemon_config" == *'not allowed to execute'* ]]; then
+    echo 'daemon.json unavailable; rerun with --sudo if authorized.'
+    [[ "$VM_VERBOSE" -ge 1 ]] && printf '%s\n' "$daemon_config"
+  elif ! printf '%s' "$daemon_config" | python3 -c '
+import json, sys
+try:
+    settings = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    raise SystemExit(f"daemon.json could not be parsed: {exc}")
+allowed = ("iptables", "ip6tables", "userland-proxy", "userland-proxy-path", "firewall-backend", "bridge", "bip", "ip-forward", "ip-masq")
+print(json.dumps({key: settings[key] for key in allowed if key in settings}, sort_keys=True))
+'; then
+    echo 'daemon.json settings unavailable or invalid; raw configuration was not printed.'
+  fi
+else
+  echo 'cat unavailable; daemon.json not inspected.'
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  docker_execstart="$(systemctl show docker.service --property=ExecStart --value 2>&1)"
+  if [[ "$docker_execstart" == *'not found'* || "$docker_execstart" == *'not loaded'* ]]; then
+    echo 'Docker systemd ExecStart unavailable.'
+  else
+    printf '%s\n' "$docker_execstart" | python3 -c '
+import re, sys
+text = sys.stdin.read()
+pattern = r"--(?:iptables|ip6tables|userland-proxy|userland-proxy-path|firewall-backend|bridge|bip|ip-forward|ip-masq)(?:=|\s+)[^ ;}\]]+"
+matches = re.findall(pattern, text)
+print("ExecStart publication flags: " + (" ".join(matches) if matches else "none explicitly set"))
+'
+  fi
+else
+  echo 'systemctl unavailable; Docker service flags not inspected.'
+fi
+
 section 'Resolved Compose publication configuration'
 resolved="$(compose config --format json 2>&1)" || {
   printf '%s\n' "$resolved"
@@ -104,7 +145,7 @@ section 'Compose containers'
 compose ps -a 2>&1 || status=1
 
 for spec in "${services[@]}"; do
-  IFS='|' read -r service host_port path backend backend_port <<<"$spec"
+  IFS='|' read -r service host_port path backend backend_port container_port <<<"$spec"
   section "$service (host 127.0.0.1:$host_port$path → $backend:$backend_port)"
 
   container="$(compose ps -a -q "$service" 2>/dev/null | head -n 1)"
@@ -116,10 +157,21 @@ for spec in "${services[@]}"; do
   forwarder_info="$(docker inspect --format 'name={{.Name}} created={{.Created}} state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} network_mode={{.HostConfig.NetworkMode}} configured_bindings={{json .HostConfig.PortBindings}} runtime_ports={{json .NetworkSettings.Ports}} networks={{json .NetworkSettings.Networks}}' "$container" 2>&1)" || status=1
   printf '%s\n' "$forwarder_info"
   if [[ "$forwarder_info" != *'state=running'* ]]; then status=1; fi
-  if [[ "$forwarder_info" == *'runtime_ports='*null* ]]; then
+  if [[ "$forwarder_info" == *"runtime_ports={\"${container_port}/tcp\":null}"* || "$forwarder_info" == *'runtime_ports=null'* ]]; then
     echo 'Docker has no active runtime host-port mapping for this forwarder.'
     status=1
   fi
+  network_names="$(docker inspect --format '{{range $name, $config := .NetworkSettings.Networks}}{{$name}} {{end}}' "$container" 2>/dev/null)"
+  container_ip=''
+  read -r -a network_names_array <<<"$network_names"
+  for network_name in "${network_names_array[@]}"; do
+    docker network inspect --format 'network={{.Name}} driver={{.Driver}} internal={{.Internal}} options={{json .Options}} ipam={{json .IPAM.Config}}' "$network_name" 2>&1 || status=1
+    network_internal="$(docker network inspect --format '{{.Internal}}' "$network_name" 2>/dev/null)"
+    if [[ "$network_internal" == 'false' ]]; then
+      network_ip="$(docker inspect --format "{{(index .NetworkSettings.Networks \"$network_name\").IPAddress}}" "$container" 2>/dev/null)"
+      if [[ -n "$network_ip" ]]; then container_ip="$network_ip"; fi
+    fi
+  done
   ports="$(docker port "$container" 2>&1)"
   if [[ -n "$ports" ]]; then
     printf 'docker port:\n%s\n' "$ports"
@@ -145,15 +197,38 @@ for spec in "${services[@]}"; do
     echo 'Host listener probe unavailable (ss not installed).'
   fi
 
+  if [[ -n "$container_ip" ]]; then
+    echo "Host direct-container HTTP probe: http://$container_ip:$container_port$path"
+    if curl --noproxy '*' --http1.1 --fail --connect-timeout 2 --max-time 5 \
+        --silent --show-error --output /dev/null \
+        --write-out 'http_status=%{http_code} remote_ip=%{remote_ip}\n' \
+        "http://$container_ip:$container_port$path"; then
+      direct_container_ok=1
+    else
+      direct_container_ok=0
+      echo 'Host direct-container probe failed.'
+      status=1
+    fi
+  else
+    direct_container_ok=0
+    echo 'Host direct-container HTTP probe unavailable (no container IPv4 address).'
+    status=1
+  fi
+
   echo "Host loopback HTTP probe: http://127.0.0.1:$host_port$path"
   if curl --noproxy '*' --http1.1 --fail --connect-timeout 2 --max-time 5 \
       --silent --show-error --output /dev/null \
       --write-out 'http_status=%{http_code} remote_ip=%{remote_ip}\n' \
       "http://127.0.0.1:$host_port$path"; then
-    :
+    loopback_ok=1
   else
+    loopback_ok=0
     echo 'Host loopback probe failed.'
     status=1
+  fi
+
+  if [[ "$direct_container_ok" -eq 1 && "$loopback_ok" -eq 0 ]]; then
+    echo 'Finding: the forwarder responds on its container IP, but the host-published loopback port is unavailable; investigate Docker port publication, not the model backend.'
   fi
 
   if [[ "$VM_DEBUG" -ge 1 ]]; then

@@ -23,6 +23,9 @@ setup() {
   grep -Fq '127.0.0.1:8080:8080' "$compose"
   grep -Fq 'TCP:ollama:11434' "$compose"
   grep -Fq 'TCP:llamacpp:11434' "$compose"
+  [ "$(grep -c 'networks: \[internal, vm-api-publish\]' "$compose")" -eq 2 ]
+  grep -Fq 'vm-api-publish:' "$compose"
+  grep -Fq 'com.docker.network.bridge.enable_ip_masquerade: "false"' "$compose"
   grep -Fq 'profiles: [vm-model-api]' "$compose"
   ! grep -Eq '0\.0\.0\.0:(8080|11434)' "$compose"
   ! grep -Fq 'metrics-vm-api' "$compose"
@@ -188,6 +191,9 @@ JSON
   grep -Fq "journalctl -u docker --since '1 hour ago'" "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   grep -Fq 'iptables-save -t nat' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   grep -Fq 'nft list ruleset' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq 'userland-proxy-path' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq 'internal={{.Internal}}' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq 'Host direct-container HTTP probe:' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   grep -Fq 'sudo -n "$@"' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   ! grep -Eq 'docker compose (up|down|stop|restart)|docker (start|stop|restart|rm|system prune)' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   ! grep -Eq 'iptables(-save)? .* (-F|-X|--flush|--delete)|nft (flush|delete|add|insert|replace)' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
@@ -212,14 +218,38 @@ case "$*" in
   *' ps -a') echo 'SERVICE STATUS' ;;
   *'ps -a -q llamacpp-vm-api') echo sidecar-id ;;
   *'ps -q llamacpp') echo backend-id ;;
-  'port sidecar-id') exit 0 ;;
-  *'sidecar-id') echo 'name=/api state=running health=none network_mode=internal configured_bindings={"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]} runtime_ports={"8080/tcp":null} networks={}' ;;
+  'port sidecar-id')
+    if [[ "${MOCK_ACTIVE_MAPPING:-0}" == 1 ]]; then echo '8080/tcp -> 127.0.0.1:8080'; else exit 0; fi
+    ;;
+  *'index .NetworkSettings.Networks "little-mester_internal"'*) echo '172.18.0.2' ;;
+  *'index .NetworkSettings.Networks "little-mester_vm-api-publish"'*) echo '172.20.0.2' ;;
+  *'{{range $name, $config := .NetworkSettings.Networks}}'*) echo 'little-mester_internal little-mester_vm-api-publish' ;;
+  *'sidecar-id')
+    if [[ "${MOCK_ACTIVE_MAPPING:-0}" == 1 ]]; then
+      echo 'name=/api state=running health=none network_mode=internal configured_bindings={"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]} runtime_ports={"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]} networks={"internal":{"IPAMConfig":null,"Links":null}}'
+    else
+      echo 'name=/api state=running health=none network_mode=internal configured_bindings={"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]} runtime_ports={"8080/tcp":null} networks={}'
+    fi
+    ;;
   *'backend-id') echo 'backend=/llamacpp state=running health=healthy networks={}' ;;
+  *'network inspect --format'*'{{.Internal}}'*'little-mester_internal') echo true ;;
+  *'network inspect --format'*'{{.Internal}}'*'little-mester_vm-api-publish') echo false ;;
+  *'network inspect --format'*'little-mester_internal') echo 'network=little-mester_internal driver=bridge internal=true options={} ipam=[]' ;;
+  *'network inspect --format'*'little-mester_vm-api-publish') echo 'network=little-mester_vm-api-publish driver=bridge internal=false options={"com.docker.network.bridge.enable_ip_masquerade":"false"} ipam=[]' ;;
   *) echo "unexpected docker invocation: $*" >&2; exit 1 ;;
 esac
 MOCK_DOCKER
-  cat >"$fakebin/curl" <<'MOCK_CURL'
+cat >"$fakebin/curl" <<'MOCK_CURL'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >>"$MOCK_CURL_CALLS"
+if [[ "$*" == *'http://172.20.0.2:8080/health' ]]; then
+  echo 'http_status=200 remote_ip=172.20.0.2'
+  exit 0
+fi
+if [[ "${MOCK_ACTIVE_MAPPING:-0}" == 1 && "$*" == *'http://127.0.0.1:8080/health' ]]; then
+  echo 'http_status=200 remote_ip=127.0.0.1'
+  exit 0
+fi
 echo 'curl: (7) Connection refused' >&2
 exit 7
 MOCK_CURL
@@ -252,6 +282,7 @@ MOCK_SUDO
   chmod +x "$fakebin"/*
   export MOCK_DOCKER_CALLS="$BATS_TEST_TMPDIR/docker-calls"
   export MOCK_SUDO_CALLS="$BATS_TEST_TMPDIR/sudo-calls"
+  export MOCK_CURL_CALLS="$BATS_TEST_TMPDIR/curl-calls"
 
   run env PATH="$fakebin:$PATH" bash -c 'docker info; printf "fake_status=%s\\n" "$?"'
   [ "$status" -eq 0 ]
@@ -261,9 +292,20 @@ MOCK_SUDO
   [ "$status" -eq 1 ]
   [[ "$output" == *'runtime_ports={"8080/tcp":null}'* ]]
   [[ "$output" == *'docker port: no active published-port mapping reported.'* ]]
+  [[ "$output" == *'Host direct-container HTTP probe: http://172.20.0.2:8080/health'* ]]
+  [[ "$output" == *'http_status=200 remote_ip=172.20.0.2'* ]]
   [[ "$output" == *'Host loopback probe failed.'* ]]
+  [[ "$output" == *'Finding: the forwarder responds on its container IP, but the host-published loopback port is unavailable; investigate Docker port publication, not the model backend.'* ]]
+  grep -Fq 'http://172.20.0.2:8080/health' "$MOCK_CURL_CALLS"
   grep -Fq "WORKSPACE=$REPO_ROOT" "$MOCK_DOCKER_CALLS"
   ! grep -Eq 'compose .* (up|down|stop|restart)| (start|stop|restart|rm) ' "$MOCK_DOCKER_CALLS"
+
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 MOCK_ACTIVE_MAPPING=1 bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" llamacpp
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'runtime_ports={"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}'* ]]
+  [[ "$output" != *'Docker has no active runtime host-port mapping'* ]]
+  [[ "$output" == *'Host direct-container HTTP probe: http://172.20.0.2:8080/health'* ]]
+  [[ "$output" == *'Host loopback HTTP probe: http://127.0.0.1:8080/health'* ]]
 
   run env PATH="$fakebin:$PATH" VM_DEBUG=0 bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" --sudo llamacpp
   [ "$status" -eq 1 ]

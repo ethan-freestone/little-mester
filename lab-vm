@@ -174,7 +174,7 @@ VM lifecycle commands (epic #35, ticket #41):
 
   ./lab-vm [-v|-d] models diagnose [--sudo] [ollama|llamacpp|all]
       Collect detailed, read-only Docker/model forwarding diagnostics.
-      --sudo uses non-interactive sudo only for read-only firewall-rule probes.
+      --sudo uses non-interactive sudo only for read-only firewall/config probes.
       Does not start/recreate containers or change host networking.
 
    ./lab-vm models down

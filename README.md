@@ -211,14 +211,20 @@ actual host HTTP reachability instead of trusting Compose/inspect port metadata.
 summarizes whether each running forwarder has an active host port mapping and responds on
 loopback. If it does not, run `./lab-vm -d models diagnose` before collecting ad-hoc evidence.
 That command records resolved Compose ports, Docker context/daemon mode, container bindings and
-network attachments, `docker port`, relevant host listeners and Docker NAT/firewall publication
-rules, loopback HTTP probes, backend health, and available Docker journal diagnostics in the
+network attachments and internal-network settings, `docker port`, allowlisted Docker daemon
+publication settings, relevant host listeners and NAT/firewall publication rules, loopback HTTP
+probes, direct host-to-forwarder-container HTTP probes (to distinguish container reachability
+from port publication), backend health, and available Docker journal diagnostics in the
 normal `.mester/logs/` run log. It is read-only: it
 does not start/recreate containers, alter daemon/firewall/network settings, or remove orphans.
 If firewall-rule inspection is blocked by host permissions, rerun with
 `./lab-vm -d models diagnose --sudo llamacpp`; `--sudo` uses `sudo -n` only for read-only
-iptables/nftables queries and never prompts or escalates the other probes.
-The output identifies unavailable checks and exits nonzero if a running forwarder is unhealthy.
+iptables/nftables and daemon-config reads and never prompts or escalates the other probes.
+The forwarders remain attached to the internal model network and join a dedicated publication
+bridge because Docker Engine can silently omit published-port mappings when a service is attached
+only to an `internal: true` bridge. Masquerading is disabled on the publication bridge, but this
+alone is not an egress firewall. The output identifies unavailable checks and exits nonzero if a
+running forwarder is unhealthy.
 VM metrics
 use a separate native host process at `127.0.0.1:19532`, independent of Docker; it returns
 only curated metrics API data and is reachable from the guest through the existing QEMU
