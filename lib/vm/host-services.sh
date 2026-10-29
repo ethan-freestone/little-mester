@@ -98,7 +98,7 @@ _vm_metrics_pid_matches() {
 
 vm_cmd_metrics() {
   local action="${1:-status}"
-  local state_dir pid_file log_file pid attempt
+  local state_dir pid_file log_file pid
   state_dir="$(_vm_metrics_state_dir)"
   pid_file="$state_dir/service.pid"
   log_file="$state_dir/service.log"
