@@ -1,8 +1,8 @@
-# ChatGPT Plus authentication in containers and disposable VMs
+# ChatGPT authentication runbook (container and VM)
 
-> **Status (2026-10-28):** Manual legacy device-code login is verified in the current agent container. Non-device-code browser sign-in is a **required acceptance gate** (#45 A12/A13), not yet verified across the VM/agent boundary. Automatic credential transfer/persistence is also **not implemented yet**. Export existing auth privately before recreating its container or deleting its VM.
+> **Status (2026-10-29):** Manual legacy device-code login is verified in the current agent container. A temporary host-browser MCP bridge and one-command `./lab-vm auth` flow are implemented with local tests, but have not been live-verified on CachyOS; native browser acceptance remains open (#45). Safe same-port proxy recovery is locally tested but still needs the owner's VM host run (#41). VM/host credential escrow and export-before-delete are **not implemented**; the VM overlay remains the only persistence for guest-created auth. Do not destroy the current host-Docker session or VM state as part of this test.
 
-Use this runbook when OpenCode runs without a browser, especially inside the agent container or the planned disposable VM. It uses a ChatGPT Plus or Pro subscription; it does not require an OpenAI API key or separate API billing.
+Use this for operational ChatGPT login and credential-preservation steps when OpenCode runs without a browser. The general auth boundary is [decision C.9.13](DECISIONS.md); acceptance criteria, implementation chronology, and test results belong to [ticket #45](tickets/ticket-045.json). This uses a ChatGPT Plus or Pro subscription; it does not require an OpenAI API key or separate API billing.
 
 ## Currently verified login (legacy device code)
 
@@ -28,39 +28,73 @@ opencode auth list
 
 The OpenAI entry should report `stored`.
 
-## Browser sign-in must also work (required, not yet implemented)
+## Native browser sign-in from the VM
 
-Do not make the VM depend on Codex device code remaining available. OpenCode V2
-documents **Sign in with ChatGPT** and legacy Codex methods. Inspect the methods
-offered by the installed version with an interactive `opencode auth login openai`
-or `/connect`; use the supported non-device-code method when testing #45. Method
-IDs and callback ports are not a stable harness contract.
+The VM runs OpenCode directly as guest user `mester`, so its native `/connect`
+dialog and callback listener are in the same guest/server namespace. For the
+pinned OpenCode **2.2.0**, source inspection confirms OpenAI registers method ID
+`chatgpt-browser` (shown as **Codex browser (legacy)**), listens on guest
+`localhost:1455`, and falls back to `localhost:1457`. This is a browser OAuth
+flow, not the separate legacy device-code flow. These are version-specific
+details; re-check them when changing the pinned OpenCode version.
 
-The existing device-code proof below does **not** satisfy the browser gate.
+1. Run `./lab-vm auth` on the host. It starts the guest TUI, temporary host MCP
+   browser bridge, callback forwards for ports 1455/1457, and a reverse SSH
+   forward to the bridge. No second terminal or manual URL copy is required.
+2. In the guest TUI, run `/connect`, choose **OpenAI**, then choose its browser
+   OAuth method (not **Codex device code (legacy)**). When OpenCode requests a
+   browser open, a temporary guest `xdg-open` shim calls the host MCP server's
+   sole `open_auth_url` tool. The host server accepts only HTTPS URLs on the
+   exact `auth.openai.com` or `chatgpt.com` origins and opens them with the host
+   default browser. It has no arbitrary command/file/network tool and does not
+   handle the OAuth callback.
+3. Keep the TUI running through success or cancellation, then exit OpenCode.
+   The command removes the guest token/helper and closes the SSH forwards and
+   host MCP process. The host callback ports are loopback-only; callback traffic
+   still goes directly to guest `localhost` over the `-L` SSH forwards.
+4. Check the saved account in the guest with `opencode auth list`, then select
+   an OpenAI model and make one ordinary completion request.
 
-The normal browser method starts a callback listener and supplies a redirect such as:
+The host MCP listener binds only to `127.0.0.1:19533`; the guest reaches it only
+through a reverse forward on guest loopback. A random, per-run bearer token is
+sent to the guest over SSH stdin and held in a mode-`0600` temporary file. The
+bridge and opener never log or retain authorization URLs, OAuth state, codes,
+or tokens. The guest shim refuses all non-allowlisted URLs instead of falling
+back to a general host browser launcher. If this OpenCode build does not use
+`xdg-open` for the native auth action, the live acceptance run must stop and
+record that behavior; do not paste or log the URL as a workaround.
 
-```text
-http://127.0.0.1:<random-port>/auth/callback
-```
+`./lab-vm auth-forward` remains a manual callback-only fallback for diagnosing
+the guest listener, but requires a separate terminal and manual URL handoff.
 
-When the browser is on the host but OpenCode is in a container, the browser's `127.0.0.1` is the host, not the container. If the selected method uses a callback, it cannot reach OpenCode unless that port is forwarded correctly. The listener belongs to the **server doing auth**, which may be a shared service, not the CLI process.
+The callback URI uses `http://localhost:1455/auth/callback` (or port 1457 if
+the guest's primary port is occupied). The host browser's localhost callback
+reaches only the guest OpenCode callback listener through SSH; no LAN listener,
+new QEMU host-forward, general host route, or credential copy is created. If a
+host callback port is occupied, SSH fails closed with `ExitOnForwardFailure`;
+stop the conflicting local listener before retrying. The guest still sends
+OAuth token exchange/refresh and model traffic through the restricted egress
+proxy. The workspace allowlist includes only the two OpenAI-specific hostnames
+needed for those requests, `auth.openai.com` and `chatgpt.com`, alongside its
+existing package domains. Because this is a workspace-level policy, the same
+destinations are also allowed to host-Docker sessions using this workspace. A
+running VM proxy keeps its startup policy snapshot; after changing the manifest,
+run `./lab-vm egress-reload` to refresh the proxy on its existing loopback port
+without restarting QEMU or changing the overlay. A proxy started by older code
+may be replaced briefly to add safe reload support; active proxy connections can
+drop during that one-time upgrade.
 
-Required implementation: use supported token-sharing when offered, or create a
-temporary loopback-only path **host browser → control SSH → VM → agent/server
-listener**. SSH forwarding to guest localhost alone does not reach container
-localhost. No general host networking, LAN port publishing, or relaxation of
-the egress proxy's private-address rejection is acceptable. Cancel/finish must
-remove temporary forwarding. Outbound provider traffic still obeys egress policy.
+This wiring has **not yet passed live browser acceptance**. Ticket #45 still
+requires an owner-controlled test of automatic host browser launch, success and
+cancellation cleanup, occupied-port and egress-denied checks, `auth list`, and
+an actual provider request. Never record the authorization URL, OAuth state,
+code, or token in logs, tickets, or chat.
 
-Ticket #45 owns the exact human procedure and results: browser success with
-device-code unavailable, cancellation, occupied callback port, denied egress,
-`auth list`, one provider request, container recreation and VM export/re-import.
-Do not start an unattended OAuth flow or put auth URLs/state/codes in tickets.
+`chatgpt-headless` is a distinct device-code method. It does not exercise this
+callback route and does not satisfy the browser-flow acceptance gate.
 
-`chatgpt-headless` uses a device-code flow instead. Both sides communicate with OpenAI, so it works across the container or VM boundary without a forwarded callback port.
-
-The available methods observed in this environment were:
+The methods previously observed in the current agent container (not a guarantee
+for the pinned guest version) were:
 
 ```text
 chatgpt-token-sharing
@@ -235,11 +269,12 @@ If the database is under `/home/agent`, the tmpfs was probably recreated. Import
 
 ### Browser waits on a localhost callback
 
-The browser-based method may be correct. Identify the callback port and the
-server namespace; both VM and agent-container hops must be reachable from host
-loopback. Do not open a LAN listener or substitute device code and call the
-browser test passing. If forwarding is not implemented, record #45 as blocked;
-the legacy device flow can be a temporary workaround only while available.
+Use `./lab-vm auth` for the normal single-command flow; it owns both the
+temporary host-browser handoff and loopback callback forwards. If it fails,
+record the OpenCode version and a redacted error, then stop rather than copying
+the authorization URL or opening a LAN listener. `./lab-vm auth-forward` is a
+callback-only diagnostic fallback for a separately controlled test; it does not
+open the browser or satisfy the single-command browser acceptance gate.
 
 ### Verify export/import commands
 

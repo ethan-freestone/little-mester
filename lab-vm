@@ -151,6 +151,19 @@ VM lifecycle commands (epic #35, ticket #41):
       Launch OpenCode directly in the guest, attached to this terminal.
       Use -v/--verbose or -d/--debug for preflight diagnostics.
 
+  ./lab-vm auth-forward [name]
+      Temporarily forward OpenAI browser callback ports over loopback-only SSH.
+      Run in a second terminal during /connect; press Ctrl-C after login/cancel.
+
+  ./lab-vm auth [name]
+      Launch guest OpenCode with a temporary host-browser MCP handoff and
+      callback forwards; exit the TUI after success/cancellation to clean up.
+
+  ./lab-vm egress-reload [name]
+      Refresh the workspace egress manifest on the recorded loopback port
+      without restarting QEMU or changing the VM overlay. An older proxy may
+      be replaced briefly to add safe in-place reload support.
+
   ./lab-vm verify-isolation [name]
       Verify the running QEMU network allowlist and run bounded probes inside the guest.
 
@@ -343,8 +356,17 @@ _vm_cleanup() {
       rm -f "$vm_dir/virtiofsd.pid"
     fi
     if [[ -f "$vm_dir/proxy.pid" ]]; then
-      kill "$(cat "$vm_dir/proxy.pid")" 2>/dev/null || true
-      rm -f "$vm_dir/proxy.pid" "$vm_dir/proxy_port"
+      local proxy_pid
+      proxy_pid=$(cat "$vm_dir/proxy.pid" 2>/dev/null || true)
+      if [[ -n "$proxy_pid" ]]; then
+        kill -TERM "$proxy_pid" 2>/dev/null || true
+        for _ in $(seq 1 10); do
+          kill -0 "$proxy_pid" 2>/dev/null || break
+          sleep 0.1
+        done
+        kill -9 "$proxy_pid" 2>/dev/null || true
+      fi
+      rm -f "$vm_dir/proxy.pid" "$vm_dir/proxy_port" "$vm_dir/proxy.reload-ready"
     fi
   fi
 }
@@ -396,6 +418,21 @@ case "$cmd" in
     # Restore real TTY for the interactive guest OpenCode session.
     exec 1>&3 2>&4
     vm_cmd_agent "$vm_name"
+    ;;
+  auth-forward)
+    # Keep the temporary callback tunnel attached to this terminal so Ctrl-C
+    # closes it immediately after the browser flow completes or is cancelled.
+    exec 1>&3 2>&4
+    vm_cmd_auth_forward "$vm_name"
+    ;;
+  auth)
+    # Restore the terminal for OpenCode. The auth wrapper owns temporary host
+    # browser service, SSH forwards, guest token, and cleanup for this session.
+    exec 1>&3 2>&4
+    vm_cmd_auth "$vm_name"
+    ;;
+  egress-reload)
+    vm_cmd_egress_reload "$vm_name"
     ;;
   verify-isolation)
     vm_cmd_verify_isolation "$vm_name"

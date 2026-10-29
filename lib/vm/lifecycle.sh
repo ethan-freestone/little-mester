@@ -379,6 +379,320 @@ vm_cmd_ssh() {
     mester@127.0.0.1 "$@"
 }
 
+# OpenCode 2.2.0's OpenAI browser OAuth listener uses localhost:1455 and falls
+# back to 1457. Omitting the local bind address keeps these SSH forwards on
+# host loopback only; the destination is resolved inside the guest.
+_vm_openai_callback_ssh_args() {
+  printf '%s\0' \
+    -o ExitOnForwardFailure=yes \
+    -L 1455:localhost:1455 \
+    -L 1457:localhost:1457
+}
+
+_vm_openai_browser_bridge_ssh_args() {
+  _vm_openai_callback_ssh_args
+  printf '%s\0' \
+    -R 127.0.0.1:19533:127.0.0.1:19533
+}
+
+vm_cmd_auth_forward() {
+  local vm_name="${1:-default}" vm_dir
+  local -a forward_args=()
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
+  if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
+  fi
+
+  mapfile -d '' -t forward_args < <(_vm_openai_callback_ssh_args)
+  echo 'Forwarding OpenAI browser callback ports 1455 and 1457 on host loopback to guest localhost.'
+  echo 'Keep this command running during /connect; press Ctrl-C after success or cancellation to close the tunnel.'
+  ssh -N -o BatchMode=yes -o ConnectTimeout=10 \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$vm_dir/known_hosts" \
+    -i "$vm_dir/id_vm_control" -p "$(cat "$vm_dir/ssh_port")" \
+    "${forward_args[@]}" mester@127.0.0.1
+}
+
+_vm_browser_bridge_pid_matches() {
+  local pid="$1" expected_script="$2"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/cmdline" ]] || return 1
+  python3 - "$pid" "$expected_script" <<'PY'
+import os
+import sys
+
+pid, expected_script = sys.argv[1:]
+try:
+    argv = open(f"/proc/{pid}/cmdline", "rb").read().decode().rstrip("\0").split("\0")
+except OSError:
+    raise SystemExit(1)
+if not any(os.path.realpath(arg) == os.path.realpath(expected_script) for arg in argv):
+    raise SystemExit(1)
+PY
+}
+
+_vm_browser_bridge_health() {
+  python3 - <<'PY'
+import urllib.request
+try:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open("http://127.0.0.1:19533/health", timeout=0.5) as response:
+        raise SystemExit(0 if response.status == 200 else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
+_vm_browser_bridge_port_free() {
+  python3 - <<'PY'
+import socket
+try:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 19533))
+except OSError:
+    raise SystemExit(1)
+PY
+}
+
+_vm_auth_tunnel_pid_matches() {
+  local pid="$1"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/cmdline" ]] || return 1
+  python3 - "$pid" <<'PY'
+import os
+import sys
+try:
+    argv = open(f"/proc/{sys.argv[1]}/cmdline", "rb").read().decode().rstrip("\0").split("\0")
+except OSError:
+    raise SystemExit(1)
+if not argv or os.path.basename(argv[0]) != "ssh":
+    raise SystemExit(1)
+if "127.0.0.1:19533:127.0.0.1:19533" not in argv:
+    raise SystemExit(1)
+PY
+}
+
+vm_cmd_auth() (
+  local vm_name="${1:-default}" vm_dir bridge_script host_bridge_dir="" bridge_pid="" tunnel_pid="" guest_browser_dir="" bridge_token="" tmp_root
+  local -a forward_args=()
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
+  if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
+  fi
+  bridge_script="$LAB_DIR/lib/vm/browser-bridge-server.py"
+  command -v python3 >/dev/null 2>&1 || die 'The host browser MCP bridge requires Python 3.'
+  [[ -f "$bridge_script" ]] || die 'The host browser MCP bridge source is missing.'
+  [[ ! -e "$vm_dir/browser-bridge.pid" ]] || die "A browser bridge PID record already exists at $vm_dir/browser-bridge.pid; inspect it before retrying."
+  _vm_browser_bridge_port_free || die 'Host loopback port 19533 is occupied; refusing to adopt or replace the existing listener.'
+
+  _vm_auth_cleanup() {
+    local cleanup_dir="${guest_browser_dir:-}"
+    if [[ "$cleanup_dir" =~ ^/tmp/lab-vm-browser\.[A-Za-z0-9]+$ ]]; then
+      vm_ssh "$vm_dir" "rm -rf -- '$cleanup_dir'" </dev/null >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${tunnel_pid:-}" ]] && _vm_auth_tunnel_pid_matches "$tunnel_pid"; then
+      kill -TERM "$tunnel_pid" 2>/dev/null || true
+      for _ in $(seq 1 20); do
+        _vm_auth_tunnel_pid_matches "$tunnel_pid" || break
+        sleep 0.1
+      done
+      _vm_auth_tunnel_pid_matches "$tunnel_pid" && kill -KILL "$tunnel_pid" 2>/dev/null || true
+      wait "$tunnel_pid" 2>/dev/null || true
+    fi
+    if [[ -n "${bridge_pid:-}" ]] && _vm_browser_bridge_pid_matches "$bridge_pid" "$bridge_script"; then
+      kill -TERM "$bridge_pid" 2>/dev/null || true
+      for _ in $(seq 1 30); do
+        _vm_browser_bridge_pid_matches "$bridge_pid" "$bridge_script" || break
+        sleep 0.1
+      done
+      _vm_browser_bridge_pid_matches "$bridge_pid" "$bridge_script" && kill -KILL "$bridge_pid" 2>/dev/null || true
+      wait "$bridge_pid" 2>/dev/null || true
+    fi
+    if [[ -n "${host_bridge_dir:-}" && -d "$host_bridge_dir" && -O "$host_bridge_dir" ]]; then
+      rm -rf -- "$host_bridge_dir"
+    fi
+    rm -f "$vm_dir/browser-bridge.pid"
+  }
+  trap _vm_auth_cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+
+  bridge_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')" || die 'Could not create the temporary browser bridge credential.'
+  mkdir -p "$vm_dir"
+  tmp_root="${XDG_RUNTIME_DIR:-/tmp}"
+  [[ -d "$tmp_root" && -O "$tmp_root" ]] || tmp_root=/tmp
+  host_bridge_dir="$(mktemp -d "$tmp_root/lab-vm-browser-host.XXXXXX")" || die 'Could not create a private host runtime directory for the browser bridge.'
+  chmod 700 "$host_bridge_dir"
+  bridge_script="$host_bridge_dir/browser-bridge-server.py"
+  install -m 700 "$LAB_DIR/lib/vm/browser-bridge-server.py" "$bridge_script" || die 'Could not stage the host browser bridge into private runtime storage.'
+  VM_BROWSER_BRIDGE_TOKEN="$bridge_token" VM_BROWSER_BRIDGE_PORT=19533 \
+    python3 "$bridge_script" </dev/null >>"$vm_dir/browser-bridge.log" 2>&1 &
+  bridge_pid=$!
+  printf '%s\n' "$bridge_pid" >"$vm_dir/browser-bridge.pid"
+
+  for _ in $(seq 1 50); do
+    if _vm_browser_bridge_health; then break; fi
+    kill -0 "$bridge_pid" 2>/dev/null || {
+      die "Host browser MCP bridge failed to start; inspect $vm_dir/browser-bridge.log (OAuth URLs and tokens are not logged)."
+    }
+    sleep 0.1
+  done
+  _vm_browser_bridge_health || die "Host browser MCP bridge did not become ready; inspect $vm_dir/browser-bridge.log."
+
+  guest_browser_dir="$(vm_ssh "$vm_dir" 'umask 077 && mktemp -d /tmp/lab-vm-browser.XXXXXX')" || die 'Could not create temporary guest browser bridge files.'
+  [[ "$guest_browser_dir" =~ ^/tmp/lab-vm-browser\.[A-Za-z0-9]+$ ]] || die 'Guest returned an unexpected temporary directory; refusing to write bridge files.'
+  vm_ssh "$vm_dir" "install -m 700 /dev/stdin '$guest_browser_dir/xdg-open'" <"$LAB_DIR/lib/vm/browser-open.sh" || die 'Could not install the temporary guest browser opener.'
+  vm_ssh "$vm_dir" "install -m 700 /dev/stdin '$guest_browser_dir/browser-open.py'" <"$LAB_DIR/lib/vm/browser-open.py" || die 'Could not install the temporary guest MCP client.'
+  vm_ssh "$vm_dir" "ln -s xdg-open '$guest_browser_dir/open' && ln -s xdg-open '$guest_browser_dir/gio'" || die 'Could not prepare supported guest browser opener names.'
+  printf '%s' "$bridge_token" | vm_ssh "$vm_dir" "install -m 600 /dev/stdin '$guest_browser_dir/token'" || die 'Could not transfer the temporary bridge credential over SSH stdin.'
+  unset bridge_token
+
+  mapfile -d '' -t forward_args < <(_vm_openai_browser_bridge_ssh_args)
+  ssh -N -o BatchMode=yes -o ConnectTimeout=10 \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$vm_dir/known_hosts" \
+    -i "$vm_dir/id_vm_control" -p "$(cat "$vm_dir/ssh_port")" \
+    "${forward_args[@]}" mester@127.0.0.1 \
+    </dev/null >>"$vm_dir/browser-bridge-ssh.log" 2>&1 &
+  tunnel_pid=$!
+  for _ in $(seq 1 30); do
+    _vm_auth_tunnel_pid_matches "$tunnel_pid" || die 'The temporary callback/browser SSH forwards failed to start; see browser-bridge-ssh.log.'
+    sleep 0.1
+  done
+
+  echo 'Starting guest OpenCode with temporary host-browser handoff and callback forwards.'
+  echo 'In the TUI, use /connect → OpenAI → browser OAuth. The host browser opens automatically when OpenCode requests it.'
+  echo 'The callback still returns through loopback SSH to the guest; exit OpenCode after success or cancellation to close all temporary access.'
+  VM_BROWSER_BRIDGE_DIR="$guest_browser_dir" VM_AGENT_SKIP_MODEL_PROBE=1 vm_cmd_agent "$vm_name"
+)
+
+_vm_proxy_pid_matches() {
+  local proxy_pid="$1" vm_dir="$2" workspace="$3"
+  python3 - "$proxy_pid" "$LAB_DIR/lib/vm/proxy.py" "$vm_dir/proxy_port" "$workspace" <<'PY'
+import os
+import sys
+
+pid, expected_script, expected_port_file, expected_workspace = sys.argv[1:]
+try:
+    argv = open(f"/proc/{pid}/cmdline", "rb").read().decode().rstrip("\0").split("\0")
+except OSError:
+    raise SystemExit(1)
+if len(argv) < 2 or os.path.realpath(argv[1]) != os.path.realpath(expected_script):
+    raise SystemExit(1)
+try:
+    index = argv.index("--port-file")
+    actual_port_file = argv[index + 1]
+except (ValueError, IndexError):
+    raise SystemExit(1)
+if os.path.realpath(actual_port_file) != os.path.realpath(expected_port_file):
+    raise SystemExit(1)
+try:
+    index = argv.index("--workspace")
+    actual_workspace = argv[index + 1]
+except (ValueError, IndexError):
+    raise SystemExit(1)
+if os.path.realpath(actual_workspace) != os.path.realpath(expected_workspace):
+    raise SystemExit(1)
+PY
+}
+
+_vm_proxy_supports_reload() {
+  local proxy_pid="$1" vm_dir="$2" port="$3" marker_pid marker_port
+  [[ -s "$vm_dir/proxy.reload-ready" ]] || return 1
+  read -r marker_pid marker_port <"$vm_dir/proxy.reload-ready" || return 1
+  [[ "$marker_pid" == "$proxy_pid" && "$marker_port" == "$port" ]] || return 1
+  python3 - "$proxy_pid" "$vm_dir/proxy.reload-ready" <<'PY'
+import os
+import sys
+
+pid, marker = sys.argv[1:]
+try:
+    argv = open(f"/proc/{pid}/cmdline", "rb").read().decode().rstrip("\0").split("\0")
+    index = argv.index("--reload-marker")
+    actual = argv[index + 1]
+except (OSError, ValueError, IndexError):
+    raise SystemExit(1)
+if os.path.realpath(actual) != os.path.realpath(marker):
+    raise SystemExit(1)
+PY
+}
+
+_vm_start_proxy_at() {
+  local vm_dir="$1" workspace="$2" port="$3" proxy_pid marker_pid marker_port
+  rm -f "$vm_dir/proxy.reload-ready"
+  python3 "$LAB_DIR/lib/vm/proxy.py" \
+    --workspace "$workspace" \
+    --port-file "$vm_dir/proxy_port" \
+    --port "$port" \
+    --reload-marker "$vm_dir/proxy.reload-ready" \
+    </dev/null >>"$vm_dir/proxy.log" 2>&1 &
+  proxy_pid=$!
+  echo "$proxy_pid" >"$vm_dir/proxy.pid"
+  for _ in $(seq 1 50); do
+    if [[ -s "$vm_dir/proxy.reload-ready" && -s "$vm_dir/proxy_port" ]]; then
+      read -r marker_pid marker_port <"$vm_dir/proxy.reload-ready" || true
+      if [[ "$marker_pid" == "$proxy_pid" && "$marker_port" == "$port" && "$(cat "$vm_dir/proxy_port")" == "$port" ]]; then
+        return 0
+      fi
+    fi
+    kill -0 "$proxy_pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  log "ERROR: egress proxy did not recover on 127.0.0.1:$port; inspect $vm_dir/proxy.log"
+  return 1
+}
+
+vm_cmd_egress_reload() {
+  local vm_name="${1:-default}" vm_dir proxy_pid proxy_port virtiofsd_pid workspace log_file log_offset reload_result
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
+  if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
+  fi
+  [[ -s "$vm_dir/proxy_port" ]] || die "VM '$vm_name' has no recorded egress proxy port; refusing to guess a QEMU guestfwd destination."
+  proxy_port="$(cat "$vm_dir/proxy_port")"
+  [[ "$proxy_port" =~ ^[1-9][0-9]*$ ]] && (( proxy_port <= 65535 )) || die "Invalid egress proxy port recorded for VM '$vm_name'."
+  virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null)"
+  workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid")" || die 'Cannot verify the running VM workspace export; refusing to reload proxy policy.'
+  workspace="$(realpath "$workspace")" || die 'Cannot resolve the VM workspace path.'
+  [[ -d "$workspace" ]] || die 'The VM workspace export is no longer available.'
+
+  proxy_pid="$(cat "$vm_dir/proxy.pid" 2>/dev/null || true)"
+  if [[ -n "$proxy_pid" && ! "$proxy_pid" =~ ^[1-9][0-9]*$ ]]; then
+    die "Invalid egress proxy PID recorded for VM '$vm_name'."
+  fi
+
+  if [[ -n "$proxy_pid" ]] && kill -0 "$proxy_pid" 2>/dev/null; then
+    _vm_proxy_pid_matches "$proxy_pid" "$vm_dir" "$workspace" || die "The recorded PID is not this VM's egress proxy; refusing to signal it."
+    if _vm_proxy_supports_reload "$proxy_pid" "$vm_dir" "$proxy_port"; then
+      log_file="$vm_dir/proxy.log"
+      [[ -f "$log_file" ]] || die "Egress proxy log is missing; cannot confirm policy reload."
+      log_offset="$(wc -c <"$log_file")"
+      kill -HUP "$proxy_pid" || die "Could not signal the reload-capable egress proxy."
+      reload_result=""
+      for _ in $(seq 1 20); do
+        reload_result="$(tail -c +$((log_offset + 1)) "$log_file" 2>/dev/null | grep -E 'egress policy reload failed|egress policy reloaded' | tail -n 1 || true)"
+        [[ -n "$reload_result" ]] && break
+        sleep 0.05
+      done
+      [[ "$reload_result" == *'egress policy reloaded'* ]] || die "Egress policy reload was not confirmed; inspect $log_file. The proxy was not restarted."
+      echo "Egress policy reloaded for VM '$vm_name' on its existing loopback listener; QEMU and the overlay were not restarted."
+      return 0
+    fi
+
+    echo "The recorded proxy predates safe in-place reload; replacing only that host proxy on 127.0.0.1:$proxy_port. Existing proxy connections may briefly drop."
+    kill -TERM "$proxy_pid" 2>/dev/null || die 'Could not stop the verified older egress proxy safely.'
+    for _ in $(seq 1 20); do
+      kill -0 "$proxy_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -0 "$proxy_pid" 2>/dev/null && die 'Older egress proxy did not exit; leaving QEMU and the overlay untouched.'
+  else
+    echo "Recorded egress proxy is not running; restoring it on QEMU's existing loopback port 127.0.0.1:$proxy_port."
+  fi
+
+  _vm_start_proxy_at "$vm_dir" "$workspace" "$proxy_port" || die "Could not restore the host egress proxy; QEMU and the overlay remain running. Inspect $vm_dir/proxy.log."
+  echo "Egress proxy is ready on the existing loopback port 127.0.0.1:$proxy_port with the current workspace policy; QEMU and the overlay were not restarted."
+}
+
 _vm_validate_qemu_isolation_args() {
   local process_args="$1" ssh_port="$2" guestfwd_count hostfwd_count netdev_count net_device_count
   [[ "$process_args" == *'restrict=on'* ]] || {
@@ -501,33 +815,44 @@ vm_cmd_agent() {
     ollama) model_url="http://10.0.2.100:11434/api/tags" ;;
     *) die "OpenCode model provider '$model_provider' has no configured VM host forwarder." ;;
   esac
-  log_verbose "Checking $model_provider API reachability from the guest at $model_url."
-  probe_options="--fail --silent --show-error"
-  if [[ "$VM_DEBUG" -ge 1 ]]; then
-    probe_options="--fail --show-error --verbose --http1.1"
-  fi
-  probe_command="curl --noproxy 10.0.2.100 $probe_options --max-time 5 '$model_url' >/dev/null"
-  log_debug "Guest model probe: $probe_command"
-  started_at=$SECONDS
-  if vm_ssh "$vm_dir" "$probe_command"; then
-    elapsed=$((SECONDS - started_at))
-    log_debug "Guest model probe succeeded in ${elapsed}s."
+  if [[ "${VM_AGENT_SKIP_MODEL_PROBE:-0}" != 1 ]]; then
+    log_verbose "Checking $model_provider API reachability from the guest at $model_url."
+    probe_options="--fail --silent --show-error"
+    if [[ "$VM_DEBUG" -ge 1 ]]; then
+      probe_options="--fail --show-error --verbose --http1.1"
+    fi
+    probe_command="curl --noproxy 10.0.2.100 $probe_options --max-time 5 '$model_url' >/dev/null"
+    log_debug "Guest model probe: $probe_command"
+    started_at=$SECONDS
+    if vm_ssh "$vm_dir" "$probe_command"; then
+      elapsed=$((SECONDS - started_at))
+      log_debug "Guest model probe succeeded in ${elapsed}s."
+    else
+      probe_status=$?
+      elapsed=$((SECONDS - started_at))
+      log_debug "Guest model probe failed after ${elapsed}s (ssh/curl status=$probe_status)."
+      die "$model_provider API is not reachable from VM '$vm_name' at $model_url. Check the host forwarder with './lab-vm models status'; start it with './lab-vm models up $model_provider'. Metrics are managed separately with './lab-vm metrics status'."
+    fi
   else
-    probe_status=$?
-    elapsed=$((SECONDS - started_at))
-    log_debug "Guest model probe failed after ${elapsed}s (ssh/curl status=$probe_status)."
-    die "$model_provider API is not reachable from VM '$vm_name' at $model_url. Check the host forwarder with './lab-vm models status'; start it with './lab-vm models up $model_provider'. Metrics are managed separately with './lab-vm metrics status'."
+    log_verbose 'Skipping model API health probe for the browser-only authentication flow.'
   fi
   echo "Launching OpenCode $version directly in VM '$vm_name' at /workspace."
   local cli_config cli_config_quoted
   cli_config='{"plugins":["/etc/opencode/plugins/little-mester-logo","/etc/opencode/plugins/host-metrics-tui","/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}'
   printf -v cli_config_quoted '%q' "$cli_config"
-  exec ssh -t \
+  local remote_command browser_dir_quoted
+  if [[ -n "${VM_BROWSER_BRIDGE_DIR:-}" ]]; then
+    printf -v browser_dir_quoted '%q' "$VM_BROWSER_BRIDGE_DIR"
+    remote_command="set -eu; browser_dir=$browser_dir_quoted; cleanup(){ rm -rf -- \"\$browser_dir\"; }; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' HUP TERM; export PATH=\"\$browser_dir:\$PATH\" VM_BROWSER_BRIDGE_TOKEN_FILE=\"\$browser_dir/token\"; cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=http://10.0.2.100:19532 && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && opencode"
+  else
+    remote_command="cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=http://10.0.2.100:19532 && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && exec opencode"
+  fi
+  ssh -t \
     -o BatchMode=yes -o ConnectTimeout=10 \
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$vm_dir/known_hosts" \
     -i "$vm_dir/id_vm_control" -p "$(cat "$vm_dir/ssh_port")" \
     mester@127.0.0.1 \
-    "cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=http://10.0.2.100:19532 && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && exec opencode"
+    "$remote_command"
 }
 
 # ─── vm down: stop and remove VM ────────────────────────────────────

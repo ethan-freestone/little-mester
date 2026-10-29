@@ -186,8 +186,9 @@ not implemented yet.
 
 ### VM acceptance-test workflow (direct guest agent)
 
-This is for acceptance testing only—not normal work—while guest model connectivity, metrics,
-and TUI key handling are unresolved. It runs OpenCode as a native guest process (not in an
+This is for acceptance testing only—not normal work—while browser auth, permission, workload,
+and safe-lifecycle gates remain open. The owner has verified guest model completion, metrics,
+and exit confirmation on CachyOS. It runs OpenCode as a native guest process (not in an
 agent container). **Current support is an experimental Linux x86_64/QEMU profile**, not a
 claim of support for every Unix. Guest Docker/Compose is for project workloads; the VM does
 not expose or share the host Docker socket. VM metrics are being developed separately from
@@ -204,6 +205,8 @@ current experimental host-to-guest path through `lab-vm`:
     ./lab-vm -d models diagnose # detailed, read-only host/model-path evidence
     ./lab-vm -d models diagnose --probe-egress llamacpp # explicit TCP egress probe
     ./lab-vm verify-isolation   # inspect live QEMU config and probe from inside the guest
+    ./lab-vm auth               # temporary host-browser MCP handoff + guest callback tunnel
+    ./lab-vm auth-forward       # callback-only manual diagnostic fallback
 ```
 
 `verify-isolation` requires an already-running VM; it does not start or modify it. It verifies
@@ -216,6 +219,15 @@ possible host service or exploit, and does not claim the guest has no host acces
 workspace, model/metrics forwarders and policy-controlled proxy are intentional channels. A failed
 check exits nonzero with the individual results; it never repairs settings or changes firewall,
 network, VM or container state.
+
+Native provider sign-in happens in the guest TUI through `/connect`; use
+`./lab-vm auth` for the one-command OpenAI browser flow. The temporary MCP bridge opens only
+approved provider authorization URLs in the host browser; the callback still reaches the guest
+through loopback SSH. `auth-forward` is a callback-only manual diagnostic fallback. The operator
+procedure and credential safeguards are in [the auth runbook](docs/chatgpt-auth.md), the cross-provider policy is in
+[decision C.9.13](docs/DECISIONS.md), and the implementation/test ledger is ticket #45.
+Browser auth and credential persistence still require owner-controlled acceptance; do not
+expect guest credentials to survive destructive VM deletion.
 
 `models up` selects the provider in `agent/opencode/opencode.json` by default; choose
 `ollama`, `llamacpp`, or `all` explicitly when needed. It starts only the selected Compose

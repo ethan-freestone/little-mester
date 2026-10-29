@@ -466,19 +466,46 @@ planning a follow-up. Ticket fields, not this log, hold execution history and
 handoffs. Keep an existing working session available until its replacement path
 is verified; do not expose credentials in tickets or logs.
 
-#### C.9.13 Browser OAuth is required; auto approval is not a policy bypass (2026-10-28)
+#### C.9.13 Native provider auth and credential boundaries (2026-10-29)
 
-**Auth decision:** Legacy Codex device code is a currently verified method, not
-an architectural dependency. #45 A12/A13 and epic #35 require a current,
-non-device-code OpenCode ChatGPT sign-in with host-browser interaction and any
-callback reaching the actual OpenCode server inside VM/agent. Discover the
-installed version/method/listener; do not hard-code a port or assume the TUI owns
-the listener. Prefer existing supported token-sharing behavior when available;
-otherwise use a temporary, explicit loopback-only SSH/relay path across both
-namespaces. No permanent/LAN callback port, general host route, proxy exception
-to private-address denial, or API-key replacement for subscription auth. Success,
-cancellation, port collision, denied egress and credential persistence require
-human evidence before this gate can pass. See [auth runbook](chatgpt-auth.md).
+**General auth decision:** Authenticate in the OpenCode server/process that will
+use the account, using its native provider dialog where available. A host
+credential database or broad host credential directory must not be copied or
+mounted into the VM. Any optional escrow/import/export is runtime-only, private,
+auditable without secret output, provider-agnostic where supported, and must not
+put credentials in the workspace, Git, image, base disk, or seed. Persistence
+and safe export-before-delete are acceptance gates, not assumed behavior.
+
+If a provider uses a host-browser OAuth callback, route only the callback to the
+actual server namespace using a temporary, explicit host-loopback-to-control-SSH
+forward. Keep it alive only during the login attempt and close it on success or
+cancellation. Discover and pin the server namespace, auth method, and listener
+for the installed OpenCode version; port numbers are not a cross-version
+contract. Never publish a LAN callback, add a general host route, bypass the
+egress proxy's private-address denial, or substitute an API key/device-only
+flow for a required subscription browser flow. Permit only provider-specific
+outbound domains, and require owner-controlled success, cancellation,
+port-conflict, egress-denial, request, and persistence evidence before claiming
+auth accepted. Ticket #45 owns the implementation chronology and test ledger;
+the [auth runbook](chatgpt-auth.md) contains operator steps and secret handling.
+
+If the guest cannot launch the host browser, a host-resident MCP or equivalent
+may open an ephemeral authorization URL only for approved provider origins.
+Reach it only through a temporary per-VM SSH reverse forward bound to guest
+loopback; its host listener remains bound to host loopback. Expose only the
+provider-specific open-URL capability, with no general host access. Never log
+or retain the URL/state, and never capture the callback/code; the callback
+continues directly to the guest through the temporary loopback SSH forward.
+
+**OpenAI ChatGPT implementation for the pinned guest version:** OpenCode 2.2.0
+registers `chatgpt-browser` (displayed as **Codex browser (legacy)**) with a
+guest-local callback on port 1455 and fallback 1457. `./lab-vm auth-forward`
+provides only those host-loopback SSH forwards to guest `localhost`; the owner
+stops the helper after success or cancellation. The workspace egress manifest
+allows `auth.openai.com` for token exchange and `chatgpt.com` for ChatGPT model
+requests. These version-specific details must be revalidated when the pinned
+OpenCode version changes. The tunnel and allowlist are implemented; live browser
+login and persistence remain unverified under #45.
 
 **Permission decision:** `--unsafe-recurse` authorizes exporting the repo; it
 does not select an OpenCode permission mode. `--auto-accept` / `--permissions auto`

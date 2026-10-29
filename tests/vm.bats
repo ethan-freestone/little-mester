@@ -63,6 +63,244 @@ setup() {
   grep -Fq 'verify-isolation)' "$REPO_ROOT/lab-vm"
 }
 
+@test "OpenAI auth-forward exposes only the pinned localhost callback ports over SSH" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_AUTH_TEST_DIR="$BATS_TEST_TMPDIR/vm-auth-forward"
+  VM_AUTH_CAPTURE="$BATS_TEST_TMPDIR/auth-forward-ssh-args"
+  export VM_AUTH_TEST_DIR VM_AUTH_CAPTURE
+  mkdir -p "$VM_AUTH_TEST_DIR"
+  printf '22222\n' >"$VM_AUTH_TEST_DIR/ssh_port"
+  _vm_resolve() { echo "$VM_AUTH_TEST_DIR"; }
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ssh() { printf '%s\n' "$@" >"$VM_AUTH_CAPTURE"; }
+
+  run vm_cmd_auth_forward default
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'host loopback'* ]]
+  [[ "$output" == *'press Ctrl-C'* ]]
+  grep -Fxq -- '-N' "$VM_AUTH_CAPTURE"
+  [ "$(grep -Fxc -- '-L' "$VM_AUTH_CAPTURE")" -eq 2 ]
+  grep -Fxq '1455:localhost:1455' "$VM_AUTH_CAPTURE"
+  grep -Fxq '1457:localhost:1457' "$VM_AUTH_CAPTURE"
+  grep -Fxq 'ExitOnForwardFailure=yes' "$VM_AUTH_CAPTURE"
+  ! grep -Eq -- '(^-g$|0\.0\.0\.0|\*:[0-9])' "$VM_AUTH_CAPTURE"
+  grep -Fq 'auth-forward)' "$REPO_ROOT/lab-vm"
+}
+
+@test "OpenAI auth-forward refuses to start unless the VM is already running" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_AUTH_TEST_DIR="$BATS_TEST_TMPDIR/vm-auth-forward-stopped"
+  VM_AUTH_CAPTURE="$BATS_TEST_TMPDIR/auth-forward-should-not-run"
+  export VM_AUTH_TEST_DIR VM_AUTH_CAPTURE
+  mkdir -p "$VM_AUTH_TEST_DIR"
+  printf '22222\n' >"$VM_AUTH_TEST_DIR/ssh_port"
+  _vm_resolve() { echo "$VM_AUTH_TEST_DIR"; }
+  vm_run_status() { echo stopped; return 1; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ssh() { touch "$VM_AUTH_CAPTURE"; }
+
+  run vm_cmd_auth_forward test-vm
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"VM 'test-vm' is not running"* ]]
+  [ ! -e "$VM_AUTH_CAPTURE" ]
+}
+
+@test "single-command browser auth keeps callback and MCP bridge forwards on SSH loopback" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  mapfile -d '' -t args < <(_vm_openai_browser_bridge_ssh_args)
+  [ "${#args[@]}" -eq 8 ]
+  [[ "${args[*]}" == *'-L 1455:localhost:1455'* ]]
+  [[ "${args[*]}" == *'-L 1457:localhost:1457'* ]]
+  [[ "${args[*]}" == *'-R 127.0.0.1:19533:127.0.0.1:19533'* ]]
+  [[ "${args[*]}" == *'-o ExitOnForwardFailure=yes'* ]]
+  ! [[ "${args[*]}" == *'0.0.0.0'* ]]
+  grep -Fq 'vm_cmd_auth "$vm_name"' "$REPO_ROOT/lab-vm"
+}
+
+@test "temporary guest browser opener refuses URLs unless MCP handoff is configured" {
+  local wrapper="$REPO_ROOT/lib/vm/browser-open.sh" secret_url='https://auth.openai.com/oauth/authorize?state=must-not-echo'
+  run env -u VM_BROWSER_BRIDGE_TOKEN_FILE sh "$wrapper" "$secret_url"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *'must-not-echo'* ]]
+  [[ "$output" == *'Host browser bridge unavailable or authorization URL rejected.'* ]]
+}
+
+@test "browser-auth agent launch injects only the temporary opener and skips model probe" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_AGENT_TEST_DIR="$BATS_TEST_TMPDIR/vm-agent-browser"
+  VM_AGENT_CAPTURE="$BATS_TEST_TMPDIR/vm-agent-browser-ssh-args"
+  VM_BROWSER_TEST_DIR="/tmp/lab-vm-browser.Abc123"
+  export VM_AGENT_TEST_DIR VM_AGENT_CAPTURE VM_BROWSER_TEST_DIR
+  mkdir -p "$VM_AGENT_TEST_DIR"
+  printf '22222\n' >"$VM_AGENT_TEST_DIR/ssh_port"
+  _vm_resolve() { echo "$VM_AGENT_TEST_DIR"; }
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  vm_ssh() {
+    case "$*" in
+      *'opencode --version'*) echo '2.2.0' ;;
+      *'test -r /etc/opencode/opencode.json'*) return 0 ;;
+      *'python3 -c'*) echo 'llamacpp' ;;
+      *) echo "unexpected guest probe: $*" >&2; return 99 ;;
+    esac
+  }
+  ssh() { printf '%s\0' "$@" >"$VM_AGENT_CAPTURE"; }
+  VM_BROWSER_BRIDGE_DIR="$VM_BROWSER_TEST_DIR"
+  VM_AGENT_SKIP_MODEL_PROBE=1
+  VM_BROWSER_BRIDGE_TOKEN=must-not-be-forwarded
+  run vm_cmd_agent default
+  [ "$status" -eq 0 ]
+  local remote_command
+  remote_command="$(python3 - "$VM_AGENT_CAPTURE" <<'PY'
+import sys
+args = open(sys.argv[1], "rb").read().decode().rstrip("\0").split("\0")
+print(args[-1])
+PY
+)"
+  [[ "$remote_command" == *'trap cleanup EXIT'* ]]
+  [[ "$remote_command" == *'PATH="$browser_dir:$PATH"'* ]]
+  [[ "$remote_command" == *'VM_BROWSER_BRIDGE_TOKEN_FILE="$browser_dir/token"'* ]]
+  [[ "$remote_command" != *'must-not-be-forwarded'* ]]
+}
+
+@test "egress-reload signals only the matching running VM proxy and confirms policy reload" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_RELOAD_TEST_DIR="$BATS_TEST_TMPDIR/vm-egress-reload"
+  VM_RELOAD_CAPTURE="$BATS_TEST_TMPDIR/vm-egress-reload-signals"
+  VM_RELOAD_WORKSPACE="$BATS_TEST_TMPDIR/vm-egress-workspace"
+  export VM_RELOAD_TEST_DIR VM_RELOAD_CAPTURE VM_RELOAD_WORKSPACE
+  mkdir -p "$VM_RELOAD_TEST_DIR"
+  mkdir -p "$VM_RELOAD_WORKSPACE"
+  printf '12345\n' >"$VM_RELOAD_TEST_DIR/proxy.pid"
+  printf '31234\n' >"$VM_RELOAD_TEST_DIR/proxy_port"
+  printf '98766\n' >"$VM_RELOAD_TEST_DIR/virtiofsd.pid"
+  printf '12345 31234\n' >"$VM_RELOAD_TEST_DIR/proxy.reload-ready"
+  : >"$VM_RELOAD_TEST_DIR/proxy.log"
+  _vm_resolve() { echo "$VM_RELOAD_TEST_DIR"; }
+  vm_run_status() { echo 'running (PID: 98765)'; }
+  _vm_read_virtiofsd_shared_dir() { echo "$VM_RELOAD_WORKSPACE"; }
+  _vm_proxy_pid_matches() { [[ "$1" == 12345 && "$2" == "$VM_RELOAD_TEST_DIR" && "$3" == "$VM_RELOAD_WORKSPACE" ]]; }
+  _vm_proxy_supports_reload() { [[ "$1" == 12345 && "$2" == "$VM_RELOAD_TEST_DIR" && "$3" == 31234 ]]; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  kill() {
+    printf '%s\n' "$*" >>"$VM_RELOAD_CAPTURE"
+    case "$1" in
+      -0) return 0 ;;
+      -HUP) echo 'egress policy reloaded' >>"$VM_RELOAD_TEST_DIR/proxy.log" ;;
+      *) return 1 ;;
+    esac
+  }
+
+  run vm_cmd_egress_reload default
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'existing loopback listener'* ]]
+  [[ "$output" == *'QEMU and the overlay were not restarted'* ]]
+  grep -Fxq -- '-HUP 12345' "$VM_RELOAD_CAPTURE"
+}
+
+@test "egress-reload safely replaces a pre-reload proxy on the identical port" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_RELOAD_TEST_DIR="$BATS_TEST_TMPDIR/vm-egress-reload-old"
+  VM_RELOAD_CAPTURE="$BATS_TEST_TMPDIR/vm-egress-reload-old-signals"
+  VM_RELOAD_WORKSPACE="$BATS_TEST_TMPDIR/vm-egress-old-workspace"
+  VM_RELOAD_STOPPED="$BATS_TEST_TMPDIR/vm-egress-old-stopped"
+  export VM_RELOAD_TEST_DIR VM_RELOAD_CAPTURE VM_RELOAD_WORKSPACE VM_RELOAD_STOPPED
+  mkdir -p "$VM_RELOAD_TEST_DIR" "$VM_RELOAD_WORKSPACE"
+  printf '12345\n' >"$VM_RELOAD_TEST_DIR/proxy.pid"
+  printf '31234\n' >"$VM_RELOAD_TEST_DIR/proxy_port"
+  printf '98766\n' >"$VM_RELOAD_TEST_DIR/virtiofsd.pid"
+  : >"$VM_RELOAD_TEST_DIR/proxy.log"
+  _vm_resolve() { echo "$VM_RELOAD_TEST_DIR"; }
+  vm_run_status() { echo 'running (PID: 98765)'; }
+  _vm_read_virtiofsd_shared_dir() { echo "$VM_RELOAD_WORKSPACE"; }
+  _vm_proxy_pid_matches() { [[ "$1" == 12345 && "$2" == "$VM_RELOAD_TEST_DIR" && "$3" == "$VM_RELOAD_WORKSPACE" ]]; }
+  _vm_proxy_supports_reload() { return 1; }
+  _vm_start_proxy_at() { printf '%s\n%s\n%s\n' "$1" "$2" "$3" >"$VM_RELOAD_CAPTURE.start"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  kill() {
+    printf '%s\n' "$*" >>"$VM_RELOAD_CAPTURE"
+    case "$1" in
+      -0) [[ ! -e "$VM_RELOAD_STOPPED" ]] ;;
+      -TERM) touch "$VM_RELOAD_STOPPED" ;;
+      *) return 1 ;;
+    esac
+  }
+
+  run vm_cmd_egress_reload default
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'predates safe in-place reload'* ]]
+  grep -Fxq -- '-TERM 12345' "$VM_RELOAD_CAPTURE"
+  ! grep -Fxq -- '-HUP 12345' "$VM_RELOAD_CAPTURE"
+  [ "$(sed -n '3p' "$VM_RELOAD_CAPTURE.start")" = 31234 ]
+}
+
+@test "egress-reload restores a dead proxy on the port retained by running QEMU" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_RELOAD_TEST_DIR="$BATS_TEST_TMPDIR/vm-egress-reload-dead"
+  VM_RELOAD_CAPTURE="$BATS_TEST_TMPDIR/vm-egress-reload-dead-start"
+  VM_RELOAD_WORKSPACE="$BATS_TEST_TMPDIR/vm-egress-dead-workspace"
+  export VM_RELOAD_TEST_DIR VM_RELOAD_CAPTURE VM_RELOAD_WORKSPACE
+  mkdir -p "$VM_RELOAD_TEST_DIR" "$VM_RELOAD_WORKSPACE"
+  printf '12345\n' >"$VM_RELOAD_TEST_DIR/proxy.pid"
+  printf '31234\n' >"$VM_RELOAD_TEST_DIR/proxy_port"
+  printf '98766\n' >"$VM_RELOAD_TEST_DIR/virtiofsd.pid"
+  _vm_resolve() { echo "$VM_RELOAD_TEST_DIR"; }
+  vm_run_status() { echo 'running (PID: 98765)'; }
+  _vm_read_virtiofsd_shared_dir() { echo "$VM_RELOAD_WORKSPACE"; }
+  _vm_start_proxy_at() { printf '%s\n%s\n%s\n' "$1" "$2" "$3" >"$VM_RELOAD_CAPTURE"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  kill() { return 1; }
+
+  run vm_cmd_egress_reload default
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'existing loopback port'* ]]
+  [ "$(sed -n '3p' "$VM_RELOAD_CAPTURE")" = 31234 ]
+}
+
+@test "egress-reload refuses a stale or unrelated proxy PID" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_RELOAD_TEST_DIR="$BATS_TEST_TMPDIR/vm-egress-reload-mismatch"
+  VM_RELOAD_CAPTURE="$BATS_TEST_TMPDIR/vm-egress-reload-mismatch-signals"
+  VM_RELOAD_WORKSPACE="$BATS_TEST_TMPDIR/vm-egress-mismatch-workspace"
+  export VM_RELOAD_TEST_DIR VM_RELOAD_CAPTURE VM_RELOAD_WORKSPACE
+  mkdir -p "$VM_RELOAD_TEST_DIR" "$VM_RELOAD_WORKSPACE"
+  printf '12345\n' >"$VM_RELOAD_TEST_DIR/proxy.pid"
+  printf '31234\n' >"$VM_RELOAD_TEST_DIR/proxy_port"
+  printf '98766\n' >"$VM_RELOAD_TEST_DIR/virtiofsd.pid"
+  : >"$VM_RELOAD_TEST_DIR/proxy.log"
+  _vm_resolve() { echo "$VM_RELOAD_TEST_DIR"; }
+  vm_run_status() { echo 'running (PID: 98765)'; }
+  _vm_read_virtiofsd_shared_dir() { echo "$VM_RELOAD_WORKSPACE"; }
+  _vm_proxy_pid_matches() { return 1; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  kill() {
+    [[ "$1" == -0 ]] && return 0
+    printf '%s\n' "$*" >>"$VM_RELOAD_CAPTURE"
+  }
+
+  run vm_cmd_egress_reload default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'refusing to signal it'* ]]
+  [ ! -e "$VM_RELOAD_CAPTURE" ]
+}
+
+@test "egress-reload refuses to touch a stopped VM" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_RELOAD_TEST_DIR="$BATS_TEST_TMPDIR/vm-egress-reload-stopped"
+  VM_RELOAD_CAPTURE="$BATS_TEST_TMPDIR/vm-egress-reload-stopped-signal"
+  export VM_RELOAD_TEST_DIR VM_RELOAD_CAPTURE
+  mkdir -p "$VM_RELOAD_TEST_DIR"
+  _vm_resolve() { echo "$VM_RELOAD_TEST_DIR"; }
+  vm_run_status() { echo stopped; return 1; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  kill() { touch "$VM_RELOAD_CAPTURE"; }
+
+  run vm_cmd_egress_reload default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"VM 'default' is not running"* ]]
+  [ ! -e "$VM_RELOAD_CAPTURE" ]
+}
+
 @test "VM-only local model forwarders bind host ports to loopback" {
   local compose="$REPO_ROOT/compose.vm-model-api.yaml"
   [ "$(grep -c '127.0.0.1:' "$compose")" -eq 2 ]

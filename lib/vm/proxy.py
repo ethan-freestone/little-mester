@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """VM HTTP(S) egress proxy. Loopback listener; public destinations only.
 
-The selected workspace manifest is read once at startup. No shell evaluation.
-CONNECT is restricted to 443; plain HTTP to 80. Model API access uses separate
-QEMU forwards and cannot be reached through this proxy.
+The selected workspace manifest is loaded at startup and can be safely reloaded
+with SIGHUP without rebinding the listener. No shell evaluation. CONNECT is
+restricted to 443; plain HTTP to 80. Model API access uses separate QEMU
+forwards and cannot be reached through this proxy.
 """
 import argparse
 import ipaddress
+import os
 import select
+import signal
 import socket
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -34,6 +38,28 @@ def allowed(host, enabled, domains):
         not domains
         or any(host == domain or host.endswith("." + domain) for domain in domains)
     )
+
+
+class PolicyStore:
+    """Thread-safe snapshot of the current workspace egress policy."""
+
+    def __init__(self, path):
+        self.path = path
+        self._lock = threading.Lock()
+        self._policy = policy(path)
+
+    def allows(self, host):
+        with self._lock:
+            current = self._policy
+        return allowed(host, *current)
+
+    def reload(self):
+        # Parse first; a failed read must leave the current policy in place.
+        if not self.path.is_file():
+            raise FileNotFoundError(self.path)
+        current = policy(self.path)
+        with self._lock:
+            self._policy = current
 
 
 def connect_public(host, port):
@@ -82,7 +108,7 @@ class Proxy(BaseHTTPRequestHandler):
             if (not host or target.username or target.password or
                     (not tunnel and target.scheme != "http") or
                     port != (443 if tunnel else 80) or
-                    not allowed(host, *self.server.policy)):
+                    not self.server.policy.allows(host)):
                 self.send_error(403)
                 return
             upstream = connect_public(host, port)
@@ -124,8 +150,45 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--port-file", type=Path, required=True)
+    parser.add_argument("--port", type=int, default=0, help="Bind a fixed loopback port instead of choosing one")
+    parser.add_argument("--reload-marker", type=Path, required=True)
     args = parser.parse_args()
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
-    server.policy = policy(args.workspace / ".mester-egress")
+    if not 0 <= args.port <= 65535:
+        parser.error("--port must be between 0 and 65535")
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), Proxy)
+    server.policy = PolicyStore(args.workspace / ".mester-egress")
+
+    def reload_policy(_signum, _frame):
+        try:
+            server.policy.reload()
+        except (OSError, UnicodeError):
+            print("egress policy reload failed; previous policy retained", file=sys.stderr, flush=True)
+            return
+        print("egress policy reloaded", file=sys.stderr, flush=True)
+
+    signal.signal(signal.SIGHUP, reload_policy)
+
+    # A marker lets the lifecycle command distinguish this reload-capable
+    # process from an older proxy before sending SIGHUP (whose default action
+    # would terminate that older process).
+    marker_value = f"{os.getpid()} {server.server_port}\n"
+    marker_tmp = args.reload_marker.with_name(f"{args.reload_marker.name}.{os.getpid()}.tmp")
+    marker_tmp.write_text(marker_value, encoding="ascii")
+    os.replace(marker_tmp, args.reload_marker)
     args.port_file.write_text(str(server.server_port))
-    server.serve_forever()
+
+    def stop_proxy(_signum, _frame):
+        # shutdown() must run from a thread other than serve_forever's thread.
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, stop_proxy)
+    print(f"egress proxy listening on 127.0.0.1:{server.server_port}", file=sys.stderr, flush=True)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        try:
+            if args.reload_marker.read_text(encoding="ascii") == marker_value:
+                args.reload_marker.unlink()
+        except OSError:
+            pass

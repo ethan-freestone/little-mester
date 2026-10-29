@@ -159,8 +159,9 @@ _vm_start() {
 
   # ── Start virtiofsd (workspace export) ───────────────────────────
   VM_STARTING=1
-  rm -f "$vm_dir/proxy_port"
+  rm -f "$vm_dir/proxy_port" "$vm_dir/proxy.reload-ready"
   python3 "$LAB_DIR/lib/vm/proxy.py" --workspace "$workspace" --port-file "$vm_dir/proxy_port" \
+    --reload-marker "$vm_dir/proxy.reload-ready" \
     </dev/null > "$vm_dir/proxy.log" 2>&1 &
   echo "$!" > "$vm_dir/proxy.pid"
   for i in $(seq 1 30); do
@@ -320,8 +321,15 @@ _vm_stop() {
 
   # Clean up stale socket
   if [[ -f "$vm_dir/proxy.pid" ]]; then
-    kill "$(cat "$vm_dir/proxy.pid")" 2>/dev/null || true
-    rm -f "$vm_dir/proxy.pid" "$vm_dir/proxy_port"
+    local pid
+    pid=$(cat "$vm_dir/proxy.pid")
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 10); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -9 "$pid" 2>/dev/null || true
+    rm -f "$vm_dir/proxy.pid" "$vm_dir/proxy_port" "$vm_dir/proxy.reload-ready"
   fi
   rm -f "$vm_dir/virtiofs.sock" "$vm_dir/mgmt.sock"
 
