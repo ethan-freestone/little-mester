@@ -135,6 +135,7 @@ This is expected. The VM will be slower but fully functional.
 ./lab-vm up                  # Start the VM (idempotent)
 ./lab-vm status              # Check if running, show containers
 ./lab-vm agent               # Run OpenCode directly in the guest TUI
+./lab-vm agent --browser-auth # Same entry, with temporary browser OAuth bridge
 ./lab-vm ssh                 # SSH into the VM
 ./lab-vm down                # Stop and remove the VM
 ./lab-vm stop                # Teardown containers + stop VM

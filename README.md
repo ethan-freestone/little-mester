@@ -205,7 +205,7 @@ current experimental host-to-guest path through `lab-vm`:
     ./lab-vm -d models diagnose # detailed, read-only host/model-path evidence
     ./lab-vm -d models diagnose --probe-egress llamacpp # explicit TCP egress probe
     ./lab-vm verify-isolation   # inspect live QEMU config and probe from inside the guest
-    ./lab-vm auth               # temporary host-browser handoff + runtime-derived callback tunnel
+    ./lab-vm agent --browser-auth # guest TUI with temporary host-browser OAuth handoff
     ./lab-vm auth-forward default <port> # exact-port manual diagnostic fallback
 ```
 
@@ -221,7 +221,8 @@ check exits nonzero with the individual results; it never repairs settings or ch
 network, VM or container state.
 
 Native provider sign-in happens in the guest TUI through `/connect`; use
-`./lab-vm auth` for the one-command OpenAI browser flow. The temporary MCP bridge opens only
+`./lab-vm agent --browser-auth` for the one-command OpenAI browser flow. This is the same
+`agent` entry point with temporary browser support enabled. The MCP bridge opens only
 approved provider authorization URLs in the host browser and derives one loopback SSH callback
 forward from the runtime OAuth `redirect_uri`; the URL is not rewritten or logged. This relies on
 the pinned OpenCode 2.2.0 implementation, not a stable CLI/API contract; see [decision C.9.13](docs/DECISIONS.md)
@@ -286,7 +287,7 @@ On a fresh host, install the QEMU/KVM and `virtiofsd` prerequisites in
 ./lab-vm agent                                     # attach to the guest OpenCode TUI
 ```
 
-For an already-provisioned default VM, acceptance testing currently requires two commands:
+For an already-provisioned default VM, launching the TUI currently requires two commands:
 
 ```bash
 ./lab-vm up
@@ -303,7 +304,8 @@ repo workspace:
 
 `base` downloads/prepares the reusable base image once. `up` starts/provisions the VM and
 installs or repairs the pinned OpenCode version; it currently returns to the host rather
-than launching the TUI. `agent` checks readiness and attaches the interactive TUI. `ssh` is
+than launching the TUI. `agent` checks readiness and attaches the interactive TUI; add
+`--browser-auth` when native browser OAuth is needed. `ssh` is
 for guest diagnostics, not a required daily step. The target daily path is one command that
 starts/reuses the VM and launches OpenCode; that behavior is tracked for future implementation
 and is not yet available.

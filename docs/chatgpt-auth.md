@@ -1,6 +1,6 @@
 # ChatGPT authentication runbook (container and VM)
 
-> **Status (2026-10-29):** Manual legacy device-code login is verified in the current agent container. The one-command `./lab-vm auth` host-browser handoff derives the callback port from OpenCode's runtime `redirect_uri` and adds one temporary loopback-only SSH forward. This behavior is source-verified for pinned OpenCode 2.2.0; native browser acceptance remains open (#45). The owner confirmed same-port proxy reload (#41). VM/host credential escrow and export-before-delete are **not implemented**; the VM overlay remains the only persistence for guest-created auth. Preserve the current host-Docker session and VM state during authentication testing.
+> **Status (2026-10-29):** Manual legacy device-code login is verified in the current agent container. `./lab-vm agent --browser-auth` starts the guest TUI with a temporary host-browser handoff, deriving the callback port from OpenCode's runtime `redirect_uri` and adding one loopback-only SSH forward. This behavior is source-verified for pinned OpenCode 2.2.0; native browser acceptance remains open (#45). The owner confirmed same-port proxy reload (#41). VM/host credential escrow and export-before-delete are **not implemented**; the VM overlay remains the only persistence for guest-created auth. Preserve the current host-Docker session and VM state during authentication testing.
 
 Use this for operational ChatGPT login and credential-preservation steps when OpenCode runs without a browser. The general auth boundary is [decision C.9.13](DECISIONS.md); acceptance criteria, implementation chronology, and test results belong to [ticket #45](tickets/ticket-045.json). This uses a ChatGPT Plus or Pro subscription; it does not require an OpenAI API key or separate API billing.
 
@@ -41,9 +41,10 @@ Specifically, source commit `1097e2668b1e08ad63bdf0b1c4860b9bc01e420c`,
 `http://127.0.0.1:${port}/auth/callback`. This is **source-level confirmation,
 not a documented OpenCode CLI/API guarantee**. The port is deliberately not fixed.
 
-1. Run `./lab-vm auth` on the host. It starts the guest TUI, temporary host MCP
-   browser bridge, and an OpenSSH control master with a reverse forward to the
-   bridge. No callback port is guessed or opened yet. No second terminal or
+1. Run `./lab-vm agent --browser-auth` on the host. This is the standard agent
+   entry point with browser handoff enabled. It starts the guest TUI, temporary
+   host MCP browser bridge, and an OpenSSH control master with a reverse forward
+   to the bridge. No callback port is guessed or opened yet. No second terminal or
    manual URL copy is required.
 2. In the guest TUI, run `/connect`, choose **OpenAI**, then **Sign in with ChatGPT**.
    When OpenCode requests a
@@ -84,7 +85,7 @@ record that behavior; do not paste or log the URL as a workaround.
 diagnostic fallback. Start the guest TUI separately, read the numeric port from
 its `redirect_uri` locally, and run the helper with that port in a second
 terminal. It does not take or log the URL. This fallback is not needed for the
-normal `./lab-vm auth` flow.
+normal `./lab-vm agent --browser-auth` flow.
 
 **Fragility and version maintenance:** callback discovery depends on the
 internal v2.2.0 implementation exposing `redirect_uri` in the authorize URL
@@ -301,15 +302,15 @@ If the database is under `/home/agent`, the tmpfs was probably recreated. Import
 
 ### Browser waits on a localhost callback
 
-Use `./lab-vm auth` for the normal single-command flow; it owns the temporary
-host-browser handoff and derives one loopback callback forward from the runtime
+Use `./lab-vm agent --browser-auth` for the normal single-command flow; it owns
+the temporary host-browser handoff and derives one loopback callback forward from the runtime
 `redirect_uri`. If it fails, record the OpenCode version and a redacted error,
 then stop rather than copying the authorization URL or opening a LAN listener.
 `./lab-vm auth-forward [name] <callback-port>` is a callback-only diagnostic
 fallback; it does not open the browser or satisfy the single-command browser
 acceptance gate.
 
-For one callback-routing diagnostic run, use `./lab-vm -d auth`. The temporary
+For one callback-routing diagnostic run, use `./lab-vm -d agent --browser-auth`. The temporary
 SSH control master and on-demand forwarding command write verbose transport
 diagnostics to `.mester/vm/default/browser-bridge-ssh.log`; these report whether
 the exact loopback listener was installed and whether SSH could open the guest

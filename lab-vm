@@ -52,6 +52,7 @@ LAB_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 # --clean        : before up, run stop + down to fully teardown first
 VM_YES="${VM_YES:-${LAB_YES:-0}}"
 VM_CLEAN=0
+VM_BROWSER_AUTH=0
 VM_VERBOSE="${VM_VERBOSE:-0}"
 VM_DEBUG="${VM_DEBUG:-0}"
 if [[ "$VM_DEBUG" -ge 1 ]]; then VM_VERBOSE=1; fi
@@ -147,17 +148,14 @@ VM lifecycle commands (epic #35, ticket #41):
   ./lab-vm ssh [name]
       SSH into the running VM.
 
-  ./lab-vm agent [name]
+  ./lab-vm agent [name] [--browser-auth]
       Launch OpenCode directly in the guest, attached to this terminal.
+      Add --browser-auth to enable temporary host-browser handoff for OAuth.
       Use -v/--verbose or -d/--debug for preflight diagnostics.
 
   ./lab-vm auth-forward [name] <callback-port>
       Temporarily forward the exact loopback callback port over SSH.
       Read the numeric port from redirect_uri locally; never share the URL.
-
-  ./lab-vm auth [name]
-      Launch guest OpenCode with a temporary host-browser MCP handoff and
-      on-demand callback forwarding; exit the TUI after success/cancellation.
 
   ./lab-vm egress-reload [name]
       Refresh the workspace egress manifest on the recorded loopback port
@@ -248,6 +246,7 @@ for _i in "${_flags[@]}"; do
     --base-size|--workspace)  ;; # value consumed next iteration
     -y|--yes|--auto-accept)   VM_YES=1; LAB_YES=1 ;;
     --clean)                  VM_CLEAN=1 ;;
+    --browser-auth)           VM_BROWSER_AUTH=1 ;;
     -v|--verbose)             VM_VERBOSE=1 ;;
     -d|--debug)               VM_VERBOSE=1; VM_DEBUG=1 ;;
     --help|-h)                ;;
@@ -275,6 +274,7 @@ for (( _fi=0; _fi<${#_flags[@]}; _fi++ )); do
     -h|--help) ;;
     --base-size|--workspace) _fi=$(( _fi + 1 )) ;; # skip flag-pair
     --unsafe-recurse|--clean) ;;
+    --browser-auth) ;;
     -v|--verbose|-d|--debug) ;;
     -y|--yes|--auto-accept) ;;
     --sudo|--probe-egress) remaining+=("${_flags[$_fi]}") ;;
@@ -303,6 +303,10 @@ for _hf in "${_flags[@]}"; do
     break
   fi
 done
+
+if [[ "$VM_BROWSER_AUTH" -eq 1 && "$cmd" != "agent" && "$cmd" != "--help" ]]; then
+  die '--browser-auth is only valid with the agent command.'
+fi
 
 # ─── Prerequisite check (auto-install on demand) ────────────────────
 # Only runs for commands that actually need the tools.
@@ -417,19 +421,17 @@ case "$cmd" in
   agent)
     # Restore real TTY for the interactive guest OpenCode session.
     exec 1>&3 2>&4
-    vm_cmd_agent "$vm_name"
+    if [[ "$VM_BROWSER_AUTH" -eq 1 ]]; then
+      vm_cmd_agent_with_browser_auth "$vm_name"
+    else
+      vm_cmd_agent "$vm_name"
+    fi
     ;;
   auth-forward)
     # Keep the temporary callback tunnel attached to this terminal so Ctrl-C
     # closes it immediately after the browser flow completes or is cancelled.
     exec 1>&3 2>&4
     vm_cmd_auth_forward "${remaining[@]:1}"
-    ;;
-  auth)
-    # Restore the terminal for OpenCode. The auth wrapper owns temporary host
-    # browser service, SSH forwards, guest token, and cleanup for this session.
-    exec 1>&3 2>&4
-    vm_cmd_auth "$vm_name"
     ;;
   egress-reload)
     vm_cmd_egress_reload "$vm_name"

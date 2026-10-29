@@ -349,6 +349,24 @@ teardown() {
   [[ "$output" != *"Unknown flag"* ]]
 }
 
+@test "lab-vm browser-auth option is accepted only with agent" {
+  local -a args=(status --browser-auth)
+  run ./lab-vm "${args[@]}"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--browser-auth is only valid with the agent command.'* ]]
+  [[ "$output" != *'Unknown command'* ]]
+
+  args=(--browser-auth status)
+  run ./lab-vm "${args[@]}"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--browser-auth is only valid with the agent command.'* ]]
+  [[ "$output" != *'Unknown command'* ]]
+
+  run ./lab-vm auth
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Unknown command: auth'* ]]
+}
+
 @test "lab-vm flags can be interleaved with subcommand" {
   run bash -c './lab-vm --unsafe-recurse --verbose -y test --debug 2>&1 | head -1'
   [ $status -eq 0 ]

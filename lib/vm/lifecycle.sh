@@ -495,7 +495,7 @@ _vm_auth_tunnel_debug_args() {
   fi
 }
 
-vm_cmd_auth() (
+vm_cmd_agent_with_browser_auth() (
   local vm_name="${1:-default}" vm_dir bridge_script host_bridge_dir="" bridge_pid="" tunnel_pid="" guest_browser_dir="" bridge_token="" tmp_root control_path ssh_port
   local -a forward_args=() ssh_debug_args=()
   vm_dir="$(_vm_resolve "$vm_name")"

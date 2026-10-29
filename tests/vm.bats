@@ -123,14 +123,17 @@ setup() {
   [ ! -e "$VM_AUTH_CAPTURE" ]
 }
 
-@test "single-command browser auth keeps MCP bridge forward on SSH loopback" {
+@test "agent browser-auth mode keeps MCP bridge forward on SSH loopback" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   mapfile -d '' -t args < <(_vm_openai_browser_bridge_ssh_args)
   [ "${#args[@]}" -eq 4 ]
   [[ "${args[*]}" == *'-R 127.0.0.1:19533:127.0.0.1:19533'* ]]
   [[ "${args[*]}" == *'-o ExitOnForwardFailure=yes'* ]]
   ! [[ "${args[*]}" == *'0.0.0.0'* ]]
-  grep -Fq 'vm_cmd_auth "$vm_name"' "$REPO_ROOT/lab-vm"
+  grep -Fq -- '--browser-auth)' "$REPO_ROOT/lab-vm"
+  grep -Fq 'vm_cmd_agent_with_browser_auth "$vm_name"' "$REPO_ROOT/lab-vm"
+  ! grep -Eq '^  auth\)' "$REPO_ROOT/lab-vm"
+  grep -Fq 'vm_cmd_agent_with_browser_auth()' "$REPO_ROOT/lib/vm/lifecycle.sh"
   grep -Fq 'ssh "${ssh_debug_args[@]}" -F /dev/null -M -S "$control_path" -N' "$REPO_ROOT/lib/vm/lifecycle.sh"
   grep -Fq 'VM_BROWSER_BRIDGE_SSH_CONTROL_PATH="$control_path"' "$REPO_ROOT/lib/vm/lifecycle.sh"
   grep -Fq -- '-o IdentitiesOnly=yes -o IdentityAgent=none' "$REPO_ROOT/lib/vm/lifecycle.sh"

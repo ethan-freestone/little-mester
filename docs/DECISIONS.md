@@ -503,7 +503,7 @@ source commit `1097e2668b1e08ad63bdf0b1c4860b9bc01e420c`,
 listener with `server.listen(0, "127.0.0.1", ...)`, then uses the selected port
 in the OAuth `redirect_uri` (`/auth/callback`). This is confirmed by source
 inspection, **not a stable/documented OpenCode CLI or API contract**. The
-temporary `./lab-vm auth` host bridge extracts the port from the actual
+temporary `./lab-vm agent --browser-auth` host bridge extracts the port from the actual
 validated authorize URL and asks its private OpenSSH control master to forward
 only `127.0.0.1:<port>` on the host to `127.0.0.1:<port>` in the guest before
 opening the unchanged URL. At most one callback forward is active; a new port

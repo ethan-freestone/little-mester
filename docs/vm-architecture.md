@@ -57,9 +57,10 @@ For pinned OpenCode 2.2.0, source commit
 `redirect_uri` as `http://127.0.0.1:<port>/auth/callback`. This is confirmed by
 source inspection, **not a documented/stable OpenCode CLI or API contract**.
 
-`./lab-vm auth` starts an SSH control master and host MCP browser bridge. When
-the guest opener requests the approved authorization URL, the bridge extracts
-only that `redirect_uri` port, validates the exact loopback host and callback
+`./lab-vm agent --browser-auth` starts the guest agent with an SSH control
+master and host MCP browser bridge. When the guest opener requests the approved
+authorization URL, the bridge extracts only that `redirect_uri` port, validates
+the exact loopback host and callback
 path, then requests one SSH `-O forward` from host `127.0.0.1:<port>` to guest
 `127.0.0.1:<port>`. Only after the forward succeeds does it open the original
 URL unchanged. The forward exists only while the auth command's SSH master is
