@@ -98,10 +98,19 @@ _vm_metrics_pid_matches() {
 
 vm_cmd_metrics() {
   local action="${1:-status}"
-  local state_dir pid_file log_file pid
+  local state_dir pid_file log_file lock_fd pid
   state_dir="$(_vm_metrics_state_dir)"
   pid_file="$state_dir/service.pid"
   log_file="$state_dir/service.log"
+
+  case "$action" in
+    up|start|down|stop)
+      mkdir -p "$state_dir"
+      command -v flock >/dev/null 2>&1 || die 'VM metrics lifecycle requires flock (util-linux).'
+      exec {lock_fd}>"$state_dir/service.lock"
+      flock -x "$lock_fd" || die 'Could not lock the VM metrics service state.'
+      ;;
+  esac
 
   case "$action" in
     up|start)
@@ -109,8 +118,10 @@ vm_cmd_metrics() {
       if [[ -f "$pid_file" ]]; then
         pid="$(cat "$pid_file" 2>/dev/null || true)"
         if _vm_metrics_pid_matches "$pid" && kill -0 "$pid" 2>/dev/null; then
-          if curl --noproxy '*' --fail --silent --max-time 2 http://127.0.0.1:19532/summary >/dev/null; then
+          if curl --noproxy '*' --fail --silent --max-time 2 http://127.0.0.1:19532/health >/dev/null; then
             log "VM host metrics service already running at 127.0.0.1:19532"
+            flock -u "$lock_fd" || true
+            exec {lock_fd}>&-
             return 0
           fi
           die "Metrics PID $pid exists but its endpoint is unhealthy; preserve $log_file and investigate before restarting it."
@@ -118,7 +129,7 @@ vm_cmd_metrics() {
         rm -f "$pid_file"
       fi
 
-      if curl --noproxy '*' --fail --silent --max-time 1 http://127.0.0.1:19532/summary >/dev/null 2>&1; then
+      if curl --noproxy '*' --fail --silent --max-time 1 http://127.0.0.1:19532/health >/dev/null 2>&1; then
         die "127.0.0.1:19532 is already serving another metrics endpoint; refusing to adopt or replace it."
       fi
 
@@ -138,8 +149,10 @@ vm_cmd_metrics() {
           tail -n 60 "$log_file" >&2 || true
           die "VM host metrics service exited during startup (status unavailable); see $log_file."
         fi
-        if curl --noproxy '*' --fail --silent --max-time 1 http://127.0.0.1:19532/summary >/dev/null 2>&1; then
+        if curl --noproxy '*' --fail --silent --max-time 1 http://127.0.0.1:19532/health >/dev/null 2>&1; then
           log "VM host metrics service is healthy at 127.0.0.1:19532"
+          flock -u "$lock_fd" || true
+          exec {lock_fd}>&-
           return 0
         fi
         sleep 0.1
@@ -153,9 +166,13 @@ vm_cmd_metrics() {
       if [[ -f "$pid_file" ]]; then
         pid="$(cat "$pid_file" 2>/dev/null || true)"
         if _vm_metrics_pid_matches "$pid" && kill -0 "$pid" 2>/dev/null; then
-          printf 'VM host metrics service is healthy: '
-          if curl --noproxy '*' --fail --silent --show-error --max-time 2 http://127.0.0.1:19532/summary; then
-            printf '\n'
+          if curl --noproxy '*' --fail --silent --max-time 2 http://127.0.0.1:19532/health >/dev/null; then
+            printf 'VM host metrics service is running at 127.0.0.1:19532; '
+            if curl --noproxy '*' --fail --silent --show-error --max-time 2 http://127.0.0.1:19532/summary; then
+              printf '\n'
+            else
+              printf 'first hardware sample is warming up.\n'
+            fi
             return 0
           fi
         fi
@@ -179,6 +196,8 @@ vm_cmd_metrics() {
         rm -f "$pid_file"
       fi
       log "Stopped only the VM host metrics process; the host-Docker metrics service is untouched."
+      flock -u "$lock_fd" || true
+      exec {lock_fd}>&-
       ;;
     *)
       die "Usage: ./lab-vm metrics {up|status|down}"

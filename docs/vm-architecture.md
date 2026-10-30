@@ -48,6 +48,16 @@ host-Docker metrics path; the latter remains in place during migration.
 | Temporary browser OAuth callback | host browser → VM guest | One exact runtime-selected callback port, bound to host `127.0.0.1` and forwarded to guest `127.0.0.1` over the temporary SSH control master | Port ranges, LAN listeners, callback URL rewriting, general host route, callback/token capture |
 | Guest runtime | agent in guest → VM | Guest Docker/Compose, guest processes, optional nested VMs | Host Docker daemon, host filesystem outside the selected workspace |
 
+The current Linux VM implementation uses one native, curated host metrics service on
+`127.0.0.1:19532` per immediate VM host. Each QEMU profile has an independent guestfwd to
+that service, so multiple outer profiles do not need separate metrics listeners. Agent launch
+starts the service idempotently and verifies `/summary`, `/metrics`, and `/history` from inside
+the guest. Metrics are optional to the agent: if startup or the guestfwd preflight fails, the
+launcher warns and still opens OpenCode, whose TUI surfaces and retries the failure. Nested
+guests must not be pointed at an ancestor host's service by default; their
+parent must provide only an explicitly reviewed child-local endpoint. That nested path is not
+implemented or accepted yet.
+
 ### Temporary browser OAuth callback: version-specific integration
 
 For pinned OpenCode 2.2.0, source commit
@@ -164,6 +174,28 @@ modes must enforce a propagated maximum depth, defaulting to zero, and use a sep
 disposable child workspace/state. These are target requirements tracked by #52, not claims
 that recursive VM execution already works.
 
+### Sessions, worktrees, and parallel agents
+
+A profile is one VM overlay plus **one** host workspace mount at `/workspace`. Use the
+following choices deliberately:
+
+| Goal | Current approach | Support boundary |
+|---|---|---|
+| Work on one project | Reuse one named profile and workspace | Implemented locally; warm same-workspace and workspace-switch behavior still needs the owner KVM acceptance recorded in #41/#52. |
+| Open multiple TUIs in one guest | Start separate `./lab-vm agent <profile>` sessions | Multiple SSH/TUI processes can share one guest; they see the same workspace and guest services. Avoid concurrent writes to one checkout. |
+| Work on parallel branches | Create distinct Git worktrees; mount each worktree in its own named profile for clear isolation | One profile still means one mount. A new named profile requires a fresh guest bootstrap the first time and consumes extra VM resources. |
+| Make several worktrees visible to one VM | Mount a common parent directory containing them | This exposes that entire parent. Per-session cwd/worktree selection is not yet a polished launcher feature; use manual guest navigation only if you understand the shared boundary. |
+| Spawn/coordinate agent loops | Future supervisor + worktree/session lifecycle | Not implemented: no ownership protocol, conflict resolution, resource budget, cancellation, or cleanup contract. See #56. |
+| Self-test Little Mester recursively | Explicit child VM, after bounded-recursion and nested-KVM gates | Not currently supported: depth is not enforced, nested KVM is unverified, and child sharing must remain push-only and scoped. |
+
+For sequential workspace changes, reusing the same profile restarts the guest against the new
+single mount while retaining its overlay; it does not mount both directories at once. `--name`
+chooses another VM profile, not a warm switch. Separate auth sessions use independent
+host/guest loopback ports; metrics are shared per immediate host. These port choices remove
+the known fixed `19533` auth-listener collision locally, but live concurrent-session acceptance
+still requires a supported KVM host. A recursion marker that disables browser auth is not a
+maximum-depth mechanism.
+
 ## 5. Deliberate non-goals
 
 - Protecting the host from its owner, or from a malicious host kernel/driver.
@@ -230,7 +262,7 @@ workload_runtime: docker-compose   # guest-only; also supports none for shell-on
 model:
   provider: none                   # none | local-openai-compatible | configured-remote
   local_port: 8080                 # optional host-loopback port, forwarded by QEMU
-metrics: off                       # optional; must not be required to launch the agent
+metrics: optional                  # current VM launcher auto-starts the host endpoint for agent runs
 ```
 
 This is a design shape, not a committed config schema. The VM's guest address/port is a

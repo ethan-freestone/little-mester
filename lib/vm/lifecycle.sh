@@ -86,7 +86,7 @@ if [[ "$current" != "$version" ]]; then
 fi
 installed="$(opencode --version | awk '{for (i=1; i<=NF; i++) if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/) {sub(/^v/, "", $i); print $i; exit}}')"
 test "$installed" = "$version"
-  install -d -o root -g root -m 0755 /etc/opencode /etc/opencode/plugins
+install -d -o root -g root -m 0755 /etc/opencode /etc/opencode/plugins
 GUEST_OPENCODE_INSTALL
 
   if ! tar -C "$LAB_DIR/agent/opencode" -cf - opencode.json plugins | \
@@ -175,7 +175,7 @@ GUEST_DOCKER_PROXY
 vm_cmd_up() {
   local vm_name="${1:-default}"
   local workspace="${2:-}"
-  local vm_dir
+  local vm_dir running_workspace virtiofsd_pid qemu_pid qemu_args
   vm_dir="$(_vm_resolve "$vm_name")"
 
   # Check prerequisites
@@ -256,10 +256,24 @@ vm_cmd_up() {
   local status
   status="$(_vm_status "$vm_dir" 2>/dev/null)" || true
   if echo "$status" | grep -q "running"; then
-    echo "VM '$vm_name' is already running."
-    echo "$status"
-    _vm_install_guest_harness "$vm_dir"
-    return 0
+    qemu_pid="$(cat "$vm_dir/qemu.pid" 2>/dev/null || true)"
+    qemu_args="$(_vm_read_qemu_process_args "$qemu_pid")" || die "Cannot verify the QEMU process for VM '$vm_name'; refusing to reuse or switch it."
+    [[ "$qemu_args" == *qemu-system-x86_64* ]] || die "The recorded VM '$vm_name' PID is not QEMU; refusing to signal it."
+    virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null || true)"
+    running_workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid")" || die "Cannot verify the workspace mounted by VM '$vm_name'; refusing to reuse or switch it."
+    running_workspace="$(realpath "$running_workspace")" || die "Cannot resolve the workspace mounted by VM '$vm_name'."
+    if [[ "$running_workspace" == "$workspace" ]]; then
+      echo "VM '$vm_name' is already running with workspace: $workspace"
+      echo "$status"
+      _vm_install_guest_harness "$vm_dir"
+      return 0
+    fi
+
+    echo "VM '$vm_name' is currently mounted on: $running_workspace"
+    echo "Requested workspace: $workspace"
+    _vm_confirm_workspace_switch "$running_workspace" "$workspace" || die 'Workspace switch cancelled; the running VM was not changed.'
+    _vm_shutdown_for_workspace_switch "$vm_dir" || die 'Guest shutdown did not complete; the VM and current workspace were left in place.'
+    echo "Guest stopped cleanly. Reusing the existing VM overlay for the new workspace."
   fi
 
   # ── 6. Create overlay disk ──────────────────────────────────────
@@ -295,14 +309,60 @@ vm_cmd_up() {
 
   echo ""
   echo "VM '$vm_name' is up and running."
+  echo "  Workspace: $workspace"
   echo "  SSH:  ./lab-vm ssh $vm_name"
-  echo "  Agent: ./lab-vm agent $vm_name"
+  if [[ "${VM_LAUNCH_AFTER_UP:-0}" == 1 ]]; then
+    echo "  Starting OpenCode in the guest now."
+  else
+    echo "  Agent: ./lab-vm agent $vm_name"
+  fi
   echo "  Stop: ./lab-vm down $vm_name"
   echo ""
 
   # A8: Confirm host no longer runs the agent container
   echo "Host Docker is not running the agent container in VM mode."
   echo "All agent execution is inside the VM."
+}
+
+_vm_confirm_workspace_switch() {
+  local old_workspace="$1" new_workspace="$2" answer
+  if [[ "${VM_YES:-0}" == 1 ]]; then
+    echo "Auto-accept enabled: stopping the guest to switch its single workspace mount."
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    echo "REFUSED: switching a running VM to another workspace requires an interactive confirmation (or --yes)." >&2
+    return 1
+  fi
+  echo "Switching workspaces will shut down the guest and stop its running processes/workloads."
+  echo "The VM overlay, installed tools, and control keys are preserved; neither host workspace is deleted."
+  read -r -p "Switch from '$old_workspace' to '$new_workspace'? [y/N] " answer
+  [[ "$answer" == [yY] || "$answer" == [yY][eE][sS] ]]
+}
+
+_vm_shutdown_for_workspace_switch() {
+  local vm_dir="$1" timeout="${VM_WORKSPACE_SWITCH_TIMEOUT:-60}" deadline status
+  [[ "$timeout" =~ ^[1-9][0-9]{0,2}$ ]] || {
+    echo 'REFUSED: VM_WORKSPACE_SWITCH_TIMEOUT must be an integer from 1 to 999 seconds.' >&2
+    return 2
+  }
+  echo "Requesting a clean guest shutdown before changing the virtiofs workspace."
+  # Graceful guest poweroff first. An SSH disconnect during shutdown is normal;
+  # the VM process status below decides whether it completed.
+  vm_ssh "$vm_dir" 'sudo systemctl poweroff' >/dev/null 2>&1 || true
+  deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status="stopped"
+    if ! grep -q 'running' <<<"$status"; then
+      # Remove only stale host-side processes/sockets. This does not delete the
+      # overlay, seed, SSH keys, or either host workspace.
+      vm_run_stop "$vm_dir"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for the guest to power off; leaving the running VM and its current workspace untouched." >&2
+  return 1
 }
 
 # ─── vm status: check VM state ──────────────────────────────────────
@@ -399,9 +459,12 @@ _vm_openai_callback_ssh_args() {
 }
 
 _vm_openai_browser_bridge_ssh_args() {
+  local guest_port="${1:-}" host_port="${2:-}"
+  [[ "$guest_port" =~ ^[0-9]+$ && "$host_port" =~ ^[0-9]+$ ]] || return 2
+  (( guest_port >= 1024 && guest_port <= 65535 && host_port >= 1024 && host_port <= 65535 )) || return 2
   printf '%s\0' \
     -o ExitOnForwardFailure=yes \
-    -R 127.0.0.1:19533:127.0.0.1:19533
+    -R "127.0.0.1:${guest_port}:127.0.0.1:${host_port}"
 }
 
 _vm_browser_auth_enabled() {
@@ -461,32 +524,25 @@ PY
 }
 
 _vm_browser_bridge_health() {
-  python3 - <<'PY'
+  local port="${1:-}"
+  [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) || return 1
+  python3 - "$port" <<'PY'
 import urllib.request
+import sys
 try:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open("http://127.0.0.1:19533/health", timeout=0.5) as response:
+    with opener.open(f"http://127.0.0.1:{sys.argv[1]}/health", timeout=0.5) as response:
         raise SystemExit(0 if response.status == 200 else 1)
 except Exception:
     raise SystemExit(1)
 PY
 }
 
-_vm_browser_bridge_port_free() {
-  python3 - <<'PY'
-import socket
-try:
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 19533))
-except OSError:
-    raise SystemExit(1)
-PY
-}
-
 _vm_auth_tunnel_pid_matches() {
-  local pid="$1"
+  local pid="${1:-}" guest_port="${2:-}" host_port="${3:-}"
+  [[ "$guest_port" =~ ^[0-9]+$ && "$host_port" =~ ^[0-9]+$ ]] || return 1
   [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/cmdline" ]] || return 1
-  python3 - "$pid" <<'PY'
+  python3 - "$pid" "$guest_port" "$host_port" <<'PY'
 import os
 import sys
 try:
@@ -495,7 +551,8 @@ except OSError:
     raise SystemExit(1)
 if not argv or os.path.basename(argv[0]) != "ssh":
     raise SystemExit(1)
-if "127.0.0.1:19533:127.0.0.1:19533" not in argv:
+expected = f"127.0.0.1:{sys.argv[2]}:127.0.0.1:{sys.argv[3]}"
+if expected not in argv:
     raise SystemExit(1)
 PY
 }
@@ -509,7 +566,7 @@ _vm_auth_tunnel_debug_args() {
 }
 
 vm_cmd_agent_with_browser_auth() (
-  local vm_name="${1:-default}" vm_dir bridge_script host_bridge_dir="" bridge_pid="" tunnel_pid="" guest_browser_dir="" bridge_token="" tmp_root control_path ssh_port
+  local vm_name="${1:-default}" vm_dir bridge_script host_bridge_dir="" bridge_pid="" tunnel_pid="" guest_browser_dir="" bridge_token="" tmp_root control_path ssh_port bridge_log ssh_log bridge_port guest_bridge_port session_id
   local -a forward_args=() ssh_debug_args=()
   vm_dir="$(_vm_resolve "$vm_name")"
   [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
@@ -519,21 +576,19 @@ vm_cmd_agent_with_browser_auth() (
   bridge_script="$LAB_DIR/lib/vm/browser-bridge-server.py"
   command -v python3 >/dev/null 2>&1 || die 'The host browser MCP bridge requires Python 3.'
   [[ -f "$bridge_script" ]] || die 'The host browser MCP bridge source is missing.'
-  [[ ! -e "$vm_dir/browser-bridge.pid" ]] || die "A browser bridge PID record already exists at $vm_dir/browser-bridge.pid; inspect it before retrying."
-  _vm_browser_bridge_port_free || die 'Host loopback port 19533 is occupied; refusing to adopt or replace the existing listener.'
 
   _vm_auth_cleanup() {
     local cleanup_dir="${guest_browser_dir:-}"
     if [[ "$cleanup_dir" =~ ^/tmp/lab-vm-browser\.[A-Za-z0-9]+$ ]]; then
       vm_ssh "$vm_dir" "rm -rf -- '$cleanup_dir'" </dev/null >/dev/null 2>&1 || true
     fi
-    if [[ -n "${tunnel_pid:-}" ]] && _vm_auth_tunnel_pid_matches "$tunnel_pid"; then
+    if [[ -n "${tunnel_pid:-}" ]] && _vm_auth_tunnel_pid_matches "$tunnel_pid" "${guest_bridge_port:-}" "${bridge_port:-}"; then
       kill -TERM "$tunnel_pid" 2>/dev/null || true
       for _ in $(seq 1 20); do
-        _vm_auth_tunnel_pid_matches "$tunnel_pid" || break
+        _vm_auth_tunnel_pid_matches "$tunnel_pid" "${guest_bridge_port:-}" "${bridge_port:-}" || break
         sleep 0.1
       done
-      _vm_auth_tunnel_pid_matches "$tunnel_pid" && kill -KILL "$tunnel_pid" 2>/dev/null || true
+      _vm_auth_tunnel_pid_matches "$tunnel_pid" "${guest_bridge_port:-}" "${bridge_port:-}" && kill -KILL "$tunnel_pid" 2>/dev/null || true
       wait "$tunnel_pid" 2>/dev/null || true
     fi
     if [[ -n "${bridge_pid:-}" ]] && _vm_browser_bridge_pid_matches "$bridge_pid" "$bridge_script"; then
@@ -548,7 +603,6 @@ vm_cmd_agent_with_browser_auth() (
     if [[ -n "${host_bridge_dir:-}" && -d "$host_bridge_dir" && -O "$host_bridge_dir" ]]; then
       rm -rf -- "$host_bridge_dir"
     fi
-    rm -f "$vm_dir/browser-bridge.pid"
   }
   trap _vm_auth_cleanup EXIT
   trap 'exit 130' INT
@@ -559,29 +613,38 @@ vm_cmd_agent_with_browser_auth() (
   tmp_root="${XDG_RUNTIME_DIR:-/tmp}"
   [[ -d "$tmp_root" && -O "$tmp_root" ]] || tmp_root=/tmp
   host_bridge_dir="$(mktemp -d "$tmp_root/lab-vm-browser-host.XXXXXX")" || die 'Could not create a private host runtime directory for the browser bridge.'
+  session_id="${host_bridge_dir##*/}"
   chmod 700 "$host_bridge_dir"
   control_path="$host_bridge_dir/ssh-control"
   (( ${#control_path} < 100 )) || die 'Private SSH control socket path is too long; set a shorter XDG_RUNTIME_DIR and retry.'
   bridge_script="$host_bridge_dir/browser-bridge-server.py"
+  bridge_log="$vm_dir/browser-bridge-${session_id}.log"
+  ssh_log="$vm_dir/browser-bridge-ssh-${session_id}.log"
   install -m 700 "$LAB_DIR/lib/vm/browser-bridge-server.py" "$bridge_script" || die 'Could not stage the host browser bridge into private runtime storage.'
-  VM_BROWSER_BRIDGE_TOKEN="$bridge_token" VM_BROWSER_BRIDGE_PORT=19533 \
+  VM_BROWSER_BRIDGE_TOKEN="$bridge_token" VM_BROWSER_BRIDGE_PORT=0 \
     VM_BROWSER_BRIDGE_SSH_CONTROL_PATH="$control_path" \
     VM_BROWSER_BRIDGE_SSH_PORT="$(cat "$vm_dir/ssh_port")" \
-    VM_BROWSER_BRIDGE_SSH_LOG="$vm_dir/browser-bridge-ssh.log" \
+    VM_BROWSER_BRIDGE_SSH_LOG="$ssh_log" \
     VM_BROWSER_BRIDGE_SSH_DEBUG="${VM_DEBUG:-0}" \
-    python3 "$bridge_script" </dev/null >>"$vm_dir/browser-bridge.log" 2>&1 &
+    python3 "$bridge_script" </dev/null >>"$bridge_log" 2>&1 &
   bridge_pid=$!
-  printf '%s\n' "$bridge_pid" >"$vm_dir/browser-bridge.pid"
 
+  bridge_port=""
   for _ in $(seq 1 50); do
-    if _vm_browser_bridge_health; then break; fi
     kill -0 "$bridge_pid" 2>/dev/null || {
-      die "Host browser MCP bridge failed to start; inspect $vm_dir/browser-bridge.log (OAuth URLs and tokens are not logged)."
+      die "Host browser MCP bridge failed to start; inspect $bridge_log (OAuth URLs and tokens are not logged)."
     }
+    bridge_port="$(sed -nE 's/^Host browser MCP bridge listening on 127\.0\.0\.1:([0-9]+)$/\1/p' "$bridge_log" | tail -n 1)"
+    if [[ "$bridge_port" =~ ^[0-9]+$ ]] && (( bridge_port >= 1024 && bridge_port <= 65535 )); then
+      _vm_browser_bridge_health "$bridge_port" && break
+    fi
     sleep 0.1
   done
-  _vm_browser_bridge_health || die "Host browser MCP bridge did not become ready; inspect $vm_dir/browser-bridge.log."
+  [[ "$bridge_port" =~ ^[0-9]+$ ]] && (( bridge_port >= 1024 && bridge_port <= 65535 )) || die "Host browser MCP bridge did not report a valid dynamic loopback port; inspect $bridge_log."
+  _vm_browser_bridge_health "$bridge_port" || die "Host browser MCP bridge did not become ready on its dynamic port; inspect $bridge_log."
 
+  guest_bridge_port="$(vm_ssh "$vm_dir" "python3 -c 'import socket; s=socket.socket(); s.bind((\"127.0.0.1\", 0)); print(s.getsockname()[1]); s.close()'")" || die 'Could not allocate a guest-loopback port for this browser session.'
+  [[ "$guest_bridge_port" =~ ^[0-9]+$ ]] && (( guest_bridge_port >= 1024 && guest_bridge_port <= 65535 )) || die 'Guest returned an invalid browser bridge port.'
   guest_browser_dir="$(vm_ssh "$vm_dir" 'umask 077 && mktemp -d /tmp/lab-vm-browser.XXXXXX')" || die 'Could not create temporary guest browser bridge files.'
   [[ "$guest_browser_dir" =~ ^/tmp/lab-vm-browser\.[A-Za-z0-9]+$ ]] || die 'Guest returned an unexpected temporary directory; refusing to write bridge files.'
   vm_ssh "$vm_dir" "install -m 700 /dev/stdin '$guest_browser_dir/xdg-open'" <"$LAB_DIR/lib/vm/browser-open.sh" || die 'Could not install the temporary guest browser opener.'
@@ -590,11 +653,11 @@ vm_cmd_agent_with_browser_auth() (
   printf '%s' "$bridge_token" | vm_ssh "$vm_dir" "install -m 600 /dev/stdin '$guest_browser_dir/token'" || die 'Could not transfer the temporary bridge credential over SSH stdin.'
   unset bridge_token
 
-  mapfile -d '' -t forward_args < <(_vm_openai_browser_bridge_ssh_args)
+  mapfile -d '' -t forward_args < <(_vm_openai_browser_bridge_ssh_args "$guest_bridge_port" "$bridge_port")
   mapfile -t ssh_debug_args < <(_vm_auth_tunnel_debug_args)
   ssh_port="$(cat "$vm_dir/ssh_port")"
   if [[ "${VM_DEBUG:-0}" -ge 1 ]]; then
-    log_debug "OpenSSH control-master and callback-forward traces are recorded in $vm_dir/browser-bridge-ssh.log; forwarded request data is not logged."
+    log_debug "OpenSSH control-master and callback-forward traces are recorded in $ssh_log; forwarded request data is not logged."
   fi
   ssh "${ssh_debug_args[@]}" -F /dev/null -M -S "$control_path" -N \
     -o ControlPersist=no -o BatchMode=yes -o ConnectTimeout=10 \
@@ -603,20 +666,21 @@ vm_cmd_agent_with_browser_auth() (
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$vm_dir/known_hosts" \
     -i "$vm_dir/id_vm_control" -p "$ssh_port" \
     "${forward_args[@]}" mester@127.0.0.1 \
-    </dev/null >>"$vm_dir/browser-bridge-ssh.log" 2>&1 &
+    </dev/null >>"$ssh_log" 2>&1 &
   tunnel_pid=$!
   for _ in $(seq 1 100); do
-    kill -0 "$tunnel_pid" 2>/dev/null || die 'The temporary callback/browser SSH forwards failed to start; see browser-bridge-ssh.log.'
+    kill -0 "$tunnel_pid" 2>/dev/null || die "The temporary callback/browser SSH forwards failed to start; see $ssh_log."
     if ssh -F /dev/null -S "$control_path" -O check -p "$ssh_port" mester@127.0.0.1 >/dev/null 2>&1; then break; fi
     sleep 0.1
   done
-  ssh -F /dev/null -S "$control_path" -O check -p "$ssh_port" mester@127.0.0.1 >/dev/null 2>&1 || die 'The temporary SSH control master did not become ready; see browser-bridge-ssh.log.'
-  _vm_auth_tunnel_pid_matches "$tunnel_pid" || die 'The temporary SSH control master process could not be verified.'
+  ssh -F /dev/null -S "$control_path" -O check -p "$ssh_port" mester@127.0.0.1 >/dev/null 2>&1 || die "The temporary SSH control master did not become ready; see $ssh_log."
+  _vm_auth_tunnel_pid_matches "$tunnel_pid" "$guest_bridge_port" "$bridge_port" || die 'The temporary SSH control master process could not be verified.'
 
-  echo 'Starting guest OpenCode with a temporary host-browser handoff and on-demand callback forwarding.'
+  echo "Starting guest OpenCode with per-session loopback ports (host $bridge_port, guest $guest_bridge_port) and temporary callback forwarding."
   echo 'In the TUI, use /connect → OpenAI → Sign in with ChatGPT. The host browser opens automatically when OpenCode requests it.'
-  echo 'The callback still returns through loopback SSH to the guest; exit OpenCode after success or cancellation to close all temporary access.'
-  VM_BROWSER_BRIDGE_DIR="$guest_browser_dir" VM_AGENT_SKIP_MODEL_PROBE=1 vm_cmd_agent "$vm_name"
+  echo "The callback still returns through loopback SSH to the guest; exit OpenCode after success or cancellation to close all temporary access. Diagnostics: $ssh_log"
+  VM_BROWSER_BRIDGE_DIR="$guest_browser_dir" VM_BROWSER_BRIDGE_PORT="$guest_bridge_port" \
+    VM_AGENT_SKIP_MODEL_PROBE=1 vm_cmd_agent "$vm_name"
 )
 
 _vm_proxy_pid_matches() {
@@ -842,13 +906,26 @@ vm_cmd_verify_isolation() {
 vm_cmd_agent() {
   local vm_name="${1:-default}"
   local vm_dir
-  local started_at elapsed probe_options probe_command probe_status
+  local started_at elapsed probe_options probe_command probe_status metrics_url
   vm_dir="$(_vm_resolve "$vm_name")"
   log_verbose "Launching guest agent for VM '$vm_name'."
   log_debug "VM directory: $vm_dir"
   [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
   if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
     die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
+  fi
+
+  # Metrics are optional to the agent runtime. Start the shared curated host
+  # service and check this guest's forward, but never block OpenCode on metrics;
+  # the TUI reports transport failure and continues polling if this path is down.
+  metrics_url="http://127.0.0.1:1"
+  if (vm_cmd_metrics up); then
+    metrics_url="http://10.0.2.100:19532"
+    if ! _vm_guest_metrics_preflight "$vm_dir"; then
+      echo "WARNING: VM host metrics are not ready through this guest's 10.0.2.100:19532 forward; OpenCode will start and the TUI will report/retry that guestfwd. See './lab-vm metrics status'." >&2
+    fi
+  else
+    echo "WARNING: VM host metrics service could not be started; OpenCode will start with metrics disabled for this session. See './lab-vm metrics status'." >&2
   fi
 
   local version="${VM_OPENCODE_VERSION:-2.2.0}"
@@ -897,10 +974,15 @@ vm_cmd_agent() {
   printf -v cli_config_quoted '%q' "$cli_config"
   local remote_command browser_dir_quoted
   if [[ -n "${VM_BROWSER_BRIDGE_DIR:-}" ]]; then
+    local browser_bridge_port_quoted browser_bridge_port_num
+    [[ "${VM_BROWSER_BRIDGE_PORT:-}" =~ ^[0-9]+$ ]] || die 'Browser-auth session has no valid guest bridge port.'
+    browser_bridge_port_num=$((10#$VM_BROWSER_BRIDGE_PORT))
+    (( browser_bridge_port_num >= 1024 && browser_bridge_port_num <= 65535 )) || die 'Browser-auth session has no valid guest bridge port.'
     printf -v browser_dir_quoted '%q' "$VM_BROWSER_BRIDGE_DIR"
-      remote_command="set -eu; browser_dir=$browser_dir_quoted; cleanup(){ rm -rf -- \"\$browser_dir\"; }; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' HUP TERM; export PATH=\"\$browser_dir:\$PATH\" VM_BROWSER_BRIDGE_TOKEN_FILE=\"\$browser_dir/token\" LAB_VM_RECURSION_DEPTH=1; cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=http://10.0.2.100:19532 && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && opencode"
+    printf -v browser_bridge_port_quoted '%q' "$browser_bridge_port_num"
+    remote_command="set -eu; browser_dir=$browser_dir_quoted; cleanup(){ rm -rf -- \"\$browser_dir\"; }; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' HUP TERM; export PATH=\"\$browser_dir:\$PATH\" VM_BROWSER_BRIDGE_TOKEN_FILE=\"\$browser_dir/token\" VM_BROWSER_BRIDGE_PORT=$browser_bridge_port_quoted LAB_VM_RECURSION_DEPTH=1; cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=$metrics_url && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && opencode"
   else
-    remote_command="cd /workspace && . /etc/profile.d/mester.sh && export LAB_VM_RECURSION_DEPTH=1 OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=http://10.0.2.100:19532 && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && exec opencode"
+    remote_command="cd /workspace && . /etc/profile.d/mester.sh && export LAB_VM_RECURSION_DEPTH=1 OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=$metrics_url && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && exec opencode"
   fi
   ssh -t \
     -o BatchMode=yes -o ConnectTimeout=10 \
@@ -908,6 +990,39 @@ vm_cmd_agent() {
     -i "$vm_dir/id_vm_control" -p "$(cat "$vm_dir/ssh_port")" \
     mester@127.0.0.1 \
     "$remote_command"
+}
+
+_vm_guest_metrics_preflight() {
+  local vm_dir="$1"
+  vm_ssh "$vm_dir" 'python3 -' <<'PY'
+import json
+import sys
+import time
+import urllib.request
+
+base = "http://10.0.2.100:19532"
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+deadline = time.monotonic() + 10
+last_error = "no response"
+while time.monotonic() < deadline:
+    try:
+        bodies = []
+        for path in ("/summary", "/metrics", "/history?n=2"):
+            with opener.open(base + path, timeout=4) as response:
+                bodies.append(response.read())
+        metrics = json.loads(bodies[1])
+        history = json.loads(bodies[2])
+        if not isinstance(metrics, dict) or not isinstance(history, list):
+            raise ValueError("unexpected metrics response shape")
+        print("guest metrics forward healthy: summary, metrics, history")
+        raise SystemExit(0)
+    except Exception as exc:
+        last_error = f"{type(exc).__name__}: {exc}"
+        time.sleep(0.5)
+
+print(f"guest metrics forward did not become ready: {last_error}", file=sys.stderr)
+raise SystemExit(1)
+PY
 }
 
 # ─── vm down: stop and remove VM ────────────────────────────────────

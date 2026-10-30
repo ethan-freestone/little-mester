@@ -4,11 +4,11 @@
   "number": 52,
   "area": "infra",
   "type": "feature",
-  "status": "draft",
+  "status": "active",
   "title": "VM-first launcher, retained Docker mode, and bounded recursion",
   "objective": "Make the provisioned VM the eventual default one-command Little Mester workflow while preserving host-Docker as ./lab-docker, keeping setup separate from fast daily launch, and enabling explicitly opted-in, depth-bounded recursive self-testing. Follow-on child work for parent epic #35; do not switch the ./lab default until #35's VM adoption gates pass.",
   "created_at": "2026-10-29T10:27:45.504Z",
-  "updated_at": "2026-10-29T10:28:53.015Z",
+  "updated_at": "2026-10-30T16:45:10.051Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -54,11 +54,24 @@
       "Test default workspace does not include repo; test --recurse inclusion and --unsafe-recurse write authority with all path guards.",
       "Test max-depth defaults to zero; test boundary depths, propagation, attempts to reset/increase depth, and fail-closed behavior before child startup.",
       "On a supported KVM host, run the full self-development loop using a disposable workspace/nested VM and verify outer session remains usable and host isolation/egress invariants hold.",
-      "Test on unsupported nested-virtualization host and verify clear refusal without weakening outer boundary."
+      "Test on unsupported nested-virtualization host and verify clear refusal without weakening outer boundary.",
+      "On an owner KVM host, launch with workspace A, exit the TUI, then run the one-command launcher with workspace B. Confirm the prompt and verify /workspace maps only B, QEMU/virtiofsd reuse the existing profile and qcow2 overlay, installed OpenCode is not reinstalled, and workspace A/B host data is unchanged except for deliberate test markers. Also rerun with B to verify same-workspace warm launch does not reboot. Stop if guest shutdown fails or current workspace cannot be verified; do not use --clean, stop, or down.",
+      "Before committing launcher changes, run the CI Bats suite (`bats tests/vm.bats`) and ShellCheck gate (`shellcheck --severity=error lab-vm lib/vm/lifecycle.sh`) in an environment where installed; current guest lacks both. These do not replace live VM acceptance.",
+      "After the code is committed/shared and when the current #41/#45 host handoff permits another action, test workspace A/B/same-workspace warm reuse on a disposable named profile (`./lab-vm run <A> --name launcher-smoke`, then B, then B again). Preserve the existing default profile and host-Docker session; do not use --clean, stop, or down. Verify /workspace mapping, retained overlay, no guest harness reinstall, and unchanged host workspaces. Follow #41's current handoff and stop conditions first.",
+      "ORDERED FOLLOW-UP: first complete #41's current egress-reload/models-status gate, then owner-verify same-profile warm switching (workspace A → B → B, retaining the overlay and avoiding reprovisioning). Only after that passes, implement bounded recursive/nested self-testing under #43/#52 before default migration: max depth defaults to 0, is propagated and cannot be reset, refusal occurs before child startup, child workspace/state and network boundary are independently enforced, and unsupported nested KVM fails clearly. Keep host-Docker mode and do not merge/default-switch based on local mocks alone."
     ],
-    "created": [],
+    "created": [
+      "tests/vm.bats: one-command direct workspace launch, workspace-switch confirmation, guest graceful shutdown, and overlay-preservation checks.",
+      "tests/vm.bats: named-profile CLI regression cases reject traversal and duplicate --name values, and confirm accepted named-profile syntax for run with --workspace and positional workspace shorthand.",
+      "tests/vm.bats: per-session browser bridge port forwarding and guest-env propagation; README.md/docs/vm-architecture.md session/worktree/nesting decision matrix."
+    ],
     "cases": [
-      "2026-10-29: accepted product direction and documented in docs/DECISIONS.md §C.9.17, README.md and docs/vm-architecture.md. Local validation: Bats 84/84, VM Python tests 12/12, ticket-engine Jest 143/143, documentation checks 112/112, bash -n and git diff --check pass. These are repository regressions/docs checks only; this environment has no /dev/kvm or Docker executable, so no VM startup, host metrics endpoint, TUI interaction, warm-start timing, or nested VM behavior is claimed."
+      "2026-10-29: accepted product direction and documented in docs/DECISIONS.md §C.9.17, README.md and docs/vm-architecture.md. Local validation: Bats 84/84, VM Python tests 12/12, ticket-engine Jest 143/143, documentation checks 112/112, bash -n and git diff --check pass. These are repository regressions/docs checks only; this environment has no /dev/kvm or Docker executable, so no VM startup, host metrics endpoint, TUI interaction, warm-start timing, or nested VM behavior is claimed.",
+      "2026-10-30 local implementation adds `./lab-vm <workspace>` and `./lab-vm run [workspace]`; different-workspace selection requests a clean guest poweroff and restarts QEMU/virtiofsd against the new single virtiofs share while preserving overlay, guest tools and keys. Local `bash -n`, `./lab-vm test` (6 passed; qemu-img/ISO checks skipped), docs checks (115/115), and `git diff --check` pass. Bats and ShellCheck are unavailable in this guest; /dev/kvm is unavailable, so no live VM/workspace-switch acceptance is claimed.",
+      "2026-10-30 named-profile argument probes: traversal profile `../escape` is refused before workspace/prerequisite work; valid `launcher-smoke` is accepted through both `run --workspace /` and positional workspace syntax before the expected root-workspace refusal; duplicate --name is refused. `./lab-vm test` 6 passed (qemu-img/ISO checks skipped), VM Python suite 40/40, docs consistency 115/115, bash syntax and git diff --check pass. Bats/ShellCheck and live KVM are unavailable here; no VM/profile launch acceptance claimed.",
+      "2026-10-30 continuation: same-profile warm workspace switching is implemented locally but still requires the existing owner-host A→B→B test. Browser bridge host/guest ports are now per auth session; metrics are shared per immediate host and agent launch starts/preflights them. Docs distinguish one profile, concurrent TUIs, separate worktree profiles, common-parent manual access, future agent-loop orchestration, and nested self-testing. Local VM Python tests 47/47, lab-vm self-tests 6 passed (QEMU/ISO skipped), docs 115/115, TUI JSX, Bash/Python syntax, and diff checks pass. Bats/ShellCheck/KVM are unavailable; no warm-switch or recursion acceptance claimed.",
+      "CORRECTION to the prior note that Bats/ShellCheck are unavailable in the guest: that was based only on `command -v` in the OpenCode execution runner, not an inspection of the VM. Investigation found guest cloud-init omitted both packages although CI installs them separately. Fresh VM provisioning now adds Bats and ShellCheck; generated cloud-init and local regression/schema checks pass. The existing owner VM has not been modified or queried, so availability there remains unverified until the #41 handoff permits a guest check.",
+      "CORRECTION to the immediately preceding cloud-init note: Bats/ShellCheck are not part of base guest provisioning. They are optional on-demand packages installed into an already-running selected profile by `./lab-vm install-tools [--name <profile>]`; `--restart-opencode` relaunches the direct-guest TUI after installation, and `-v`/`-d` propagate diagnostics. User must exit the current TUI first. The script does not boot/reprovision/restart the VM, and the current owner guest was not modified. Mocked SSH/profile tests and the complete 50-test VM Python suite pass; live use awaits the #41 gate."
     ]
   },
   "models_used": []

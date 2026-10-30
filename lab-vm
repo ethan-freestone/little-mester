@@ -23,6 +23,8 @@
 # is read-only from lab-vm's perspective during normal operation.
 #
 # Usage:
+#   ./lab-vm <workspace>                 # start/reuse VM and open guest TUI
+#   ./lab-vm run [workspace] [--name <profile>] # same, explicit spelling/profile
 #   ./lab-vm up [name] [--workspace <path>]
 #   ./lab-vm status [name]
 #   ./lab-vm ssh [name]
@@ -30,6 +32,7 @@
 #   ./lab-vm stop [name]
 #   ./lab-vm base [name]
 #   ./lab-vm rebuild [name]
+#   ./lab-vm install-tools [name] [--restart-opencode]
 #   ./lab-vm models {up|status|down} [provider]
 #   ./lab-vm extra <temporary-command> [args...]
 #
@@ -55,6 +58,7 @@ VM_CLEAN=0
 VM_BROWSER_AUTH_MODE=auto
 VM_BROWSER_AUTH_ENABLE_FLAG=0
 VM_BROWSER_AUTH_DISABLE_FLAG=0
+VM_RESTART_OPENCODE=0
 VM_VERBOSE="${VM_VERBOSE:-0}"
 VM_DEBUG="${VM_DEBUG:-0}"
 if [[ "$VM_DEBUG" -ge 1 ]]; then VM_VERBOSE=1; fi
@@ -81,6 +85,7 @@ export VM_VERBOSE VM_DEBUG
 # sensitive credential directories ($HOME/.ssh, $HOME/.config, etc.)
 
 VM_WORKSPACE=""
+VM_NAME_ARG=""
 
 die() { echo "REFUSED: $*" >&2; exit 1; }
 
@@ -136,12 +141,24 @@ source "$LAB_DIR/lib/vm/host-services.sh"
 # ─── CLI parsing ────────────────────────────────────────────────────
 usage() {
   cat <<'EOF'
-Usage: ./lab-vm <command> [options]
+Usage: ./lab-vm <command|workspace> [options]
+
+Daily workspace launch (keeps one VM and mounts one workspace at a time):
+
+  ./lab-vm <workspace>
+  ./lab-vm run [workspace] [--name <profile>] [--browser-auth|--no-browser-auth]
+      Start/reuse the selected VM profile (default: default) and enter the
+      direct guest OpenCode TUI.
+      Omit workspace to use the current directory. Reusing the same workspace
+      does not reboot. Selecting a different workspace asks before a clean
+      guest shutdown/restart; the VM overlay, installed tools, and control keys
+      are preserved. The old workspace is unmounted before the new one is used.
+      --name selects an isolated VM profile (useful for disposable tests).
 
 VM lifecycle commands (epic #35, ticket #41):
 
   ./lab-vm up [name] [--workspace <path>]
-      Provision and start the VM. Creates base disk if needed.
+      Provision/start the VM for diagnostics; does not launch OpenCode.
       Idempotent: re-running does not duplicate VMs.
 
   ./lab-vm status [name]
@@ -151,7 +168,7 @@ VM lifecycle commands (epic #35, ticket #41):
       SSH into the running VM.
 
   ./lab-vm agent [name] [--browser-auth|--no-browser-auth]
-      Launch OpenCode directly in the guest, attached to this terminal.
+      Attach OpenCode to the already-running VM and currently mounted workspace.
       Browser OAuth handoff is enabled by default; use --no-browser-auth to skip it.
       Nested agent launches disable the bridge by default; --browser-auth overrides.
       Use -v/--verbose or -d/--debug for preflight diagnostics.
@@ -181,6 +198,12 @@ VM lifecycle commands (epic #35, ticket #41):
   ./lab-vm rebuild [name]
       Delete and recreate the base disk (destructive, requires confirmation).
       Removes overlay disk as well. A new base is created in its place.
+
+  ./lab-vm install-tools [name] [--name <profile>] [--restart-opencode]
+      Install optional Bats and ShellCheck packages into an already-running guest.
+      Does not provision/restart the VM. Exit the current TUI first; the optional
+      --restart-opencode launches a fresh direct-guest OpenCode session afterward.
+      Use -v/--verbose or -d/--debug for install/SSH diagnostics.
 
    ./lab-vm models up [default|ollama|llamacpp|all]
        Start selected Compose model API forwarders published on loopback; verify host HTTP.
@@ -212,6 +235,7 @@ VM lifecycle commands (epic #35, ticket #41):
 Flags (any order):
   --unsafe-recurse     Allow workspace to be inside the little-mester repo
   --base-size <GiB>    Base disk size in GiB (default: 20)
+  --name <profile>     Select a VM profile with 'run' or 'install-tools'
   -y, --yes            Auto-accept all prompts (same as VM_YES=1)
   --auto-accept        Alias for --yes
   --clean              Before 'up': run 'stop' then 'down' to fully teardown first
@@ -246,11 +270,12 @@ _flags=("$cmd" "$@")
 for _i in "${_flags[@]}"; do
   case "$_i" in
     --unsafe-recurse)         VM_UNSAFE_RECURSE=1 ;;
-    --base-size|--workspace)  ;; # value consumed next iteration
+    --base-size|--workspace|--name) ;; # value consumed next iteration
     -y|--yes|--auto-accept)   VM_YES=1; LAB_YES=1 ;;
     --clean)                  VM_CLEAN=1 ;;
     --browser-auth)           VM_BROWSER_AUTH_MODE=on; VM_BROWSER_AUTH_ENABLE_FLAG=1 ;;
     --no-browser-auth)        VM_BROWSER_AUTH_MODE=off; VM_BROWSER_AUTH_DISABLE_FLAG=1 ;;
+    --restart-opencode)       VM_RESTART_OPENCODE=1 ;;
     -v|--verbose)             VM_VERBOSE=1 ;;
     -d|--debug)               VM_VERBOSE=1; VM_DEBUG=1 ;;
     --help|-h)                ;;
@@ -263,6 +288,12 @@ for ((_fi=0; _fi<${#_flags[@]}; _fi++ )); do
   case "${_flags[$_fi]}" in
     --base-size)    VM_BASE_SIZE="${_flags[$((_fi+1))]:-${VM_BASE_SIZE:-20}}"; _fi=$(( _fi+1 )) ;;
     --workspace)    VM_WS_ARG="${_flags[$((_fi+1))]}"; _fi=$(( _fi+1 )) ;;
+    --name)
+      [[ -n "${_flags[$((_fi+1))]:-}" && "${_flags[$((_fi+1))]}" != --* ]] || die '--name requires a profile name.'
+      [[ -z "$VM_NAME_ARG" ]] || die 'Pass --name only once.'
+      VM_NAME_ARG="${_flags[$((_fi+1))]}"
+      _fi=$((_fi+1))
+      ;;
   esac
 done
 
@@ -276,9 +307,10 @@ remaining=()
 for (( _fi=0; _fi<${#_flags[@]}; _fi++ )); do
   case "${_flags[$_fi]}" in
     -h|--help) ;;
-    --base-size|--workspace) _fi=$(( _fi + 1 )) ;; # skip flag-pair
+    --base-size|--workspace|--name) _fi=$(( _fi + 1 )) ;; # skip flag-pair
     --unsafe-recurse|--clean) ;;
     --browser-auth|--no-browser-auth) ;;
+    --restart-opencode) ;;
     -v|--verbose|-d|--debug) ;;
     -y|--yes|--auto-accept) ;;
     --sudo|--probe-egress) remaining+=("${_flags[$_fi]}") ;;
@@ -308,11 +340,67 @@ for _hf in "${_flags[@]}"; do
   fi
 done
 
+# A workspace path is the ergonomic one-command form, matching `./lab <dir>`.
+# Keep the explicit subcommands below for lifecycle diagnostics and testing.
+case "$cmd" in
+  run)
+    if [[ -n "${VM_WS_ARG:-}" && -n "${remaining[1]:-}" ]]; then
+      die 'Pass the workspace either positionally or with --workspace, not both.'
+    fi
+    if [[ ${#remaining[@]} -gt 2 ]]; then
+      die 'Usage: ./lab-vm run [workspace] [--workspace <path>]'
+    fi
+    VM_WS_ARG="${VM_WS_ARG:-${remaining[1]:-$(pwd)}}"
+    vm_name="${VM_NAME_ARG:-default}"
+    ;;
+  --workspace)
+    [[ -n "${VM_WS_ARG:-}" ]] || die 'Usage: ./lab-vm run --workspace <path>'
+    cmd=run
+    vm_name="${VM_NAME_ARG:-default}"
+    ;;
+  *)
+    if [[ -d "$cmd" || "$cmd" == */* ]]; then
+      if [[ ${#remaining[@]} -gt 1 ]]; then
+        die 'A workspace shorthand accepts one path only; use ./lab-vm run --workspace <path> for explicit options.'
+      fi
+      if [[ -n "${VM_WS_ARG:-}" ]]; then
+        die 'Pass the workspace either positionally or with --workspace, not both.'
+      fi
+      VM_WS_ARG="$cmd"
+      cmd=run
+      vm_name="${VM_NAME_ARG:-default}"
+    fi
+    ;;
+esac
+
+if [[ "$cmd" == run ]]; then
+  [[ -n "${VM_WS_ARG:-}" ]] || die 'A workspace path is required.'
+  [[ "$vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
+  check_workspace "$VM_WS_ARG"
+  VM_WS_ARG="$VM_WORKSPACE"
+elif [[ -n "${VM_WS_ARG:-}" && "$cmd" != up ]]; then
+  die '--workspace is only valid with the run or up command.'
+elif [[ -n "$VM_NAME_ARG" && "$cmd" != install-tools ]]; then
+  die '--name is only valid with the run or install-tools command.'
+fi
+if [[ "$cmd" == install-tools ]]; then
+  [[ ${#remaining[@]} -le 2 ]] || die 'Usage: ./lab-vm install-tools [name] [--name <profile>] [--restart-opencode]'
+  [[ -z "$VM_NAME_ARG" || -z "${remaining[1]:-}" ]] || die 'Select the install-tools profile either positionally or with --name, not both.'
+  vm_name="${VM_NAME_ARG:-${remaining[1]:-default}}"
+  [[ "$vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
+fi
+if [[ "$VM_RESTART_OPENCODE" == 1 && "$cmd" != install-tools ]]; then
+  die '--restart-opencode is only valid with install-tools.'
+fi
+if [[ "$cmd" == run && "$VM_CLEAN" == 1 ]]; then
+  die 'The combined run command never deletes VM state; use the explicit up --clean command only when you intend a destructive reset.'
+fi
+
 if [[ "$VM_BROWSER_AUTH_ENABLE_FLAG" -eq 1 && "$VM_BROWSER_AUTH_DISABLE_FLAG" -eq 1 ]]; then
   die 'Choose only one of --browser-auth or --no-browser-auth.'
 fi
-if [[ "$VM_BROWSER_AUTH_MODE" != auto && "$cmd" != "agent" && "$cmd" != "--help" ]]; then
-  die 'Browser-auth options are only valid with the agent command.'
+if [[ "$VM_BROWSER_AUTH_MODE" != auto && "$cmd" != "agent" && "$cmd" != "run" && ! ( "$cmd" == install-tools && "$VM_RESTART_OPENCODE" == 1 ) && "$cmd" != "--help" ]]; then
+  die 'Browser-auth options are only valid with the agent or run command.'
 fi
 
 # ─── Prerequisite check (auto-install on demand) ────────────────────
@@ -320,7 +408,7 @@ fi
 # status, ssh, and test don't need anything.
 _prereqs_needed=0
 case "$cmd" in
-  base|up|rebuild) _prereqs_needed=1 ;;
+  base|up|rebuild|run) _prereqs_needed=1 ;;
 esac
 
 if [[ $_prereqs_needed -eq 1 ]]; then
@@ -417,6 +505,17 @@ case "$cmd" in
       vm_cmd_up "$vm_name" ""
     fi
     ;;
+  run)
+    # Set up/reuse the guest while logs are captured, then restore the real TTY
+    # for the foreground OpenCode session.
+    VM_LAUNCH_AFTER_UP=1 vm_cmd_up "$vm_name" "$VM_WS_ARG"
+    exec 1>&3 2>&4
+    if _vm_browser_auth_enabled "$VM_BROWSER_AUTH_MODE"; then
+      vm_cmd_agent_with_browser_auth "$vm_name"
+    else
+      vm_cmd_agent "$vm_name"
+    fi
+    ;;
   status)
     vm_cmd_status "$vm_name"
     ;;
@@ -457,6 +556,18 @@ case "$cmd" in
     ;;
   rebuild)
     vm_cmd_rebuild "$vm_name"
+    ;;
+  install-tools)
+    bash "$LAB_DIR/scripts/vm-install-tools.sh" "$vm_name"
+    if [[ "$VM_RESTART_OPENCODE" == 1 ]]; then
+      echo "Starting a new OpenCode session in VM '$vm_name'."
+      exec 1>&3 2>&4
+      if _vm_browser_auth_enabled "$VM_BROWSER_AUTH_MODE"; then
+        vm_cmd_agent_with_browser_auth "$vm_name"
+      else
+        vm_cmd_agent "$vm_name"
+      fi
+    fi
     ;;
   models)
     if [[ "${remaining[1]:-}" == diagnose ]]; then

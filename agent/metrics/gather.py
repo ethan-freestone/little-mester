@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -134,31 +134,39 @@ def _format_summary(data: dict):
     )
 
 
-def _sampler():
-    """Background thread that polls _aggregate() every 500 ms and maintains
-    the `_latest` snapshot plus a rolling-ring of recent samples."""
+def _sample_once():
+    """Collect and publish one snapshot without holding the request lock."""
     global _latest
+    # Hardware sampling can block (nvidia-smi has a bounded 10s timeout).
+    # Never hold the request/history lock while collecting: an HTTP caller
+    # should keep getting the previous snapshot during a slow sample.
+    snap = _aggregate()
+    g = (snap["gpu"] or [{}])[0]   # first GPU, empty dict if no data
+    vram_pct = round(
+        100 * g.get("memory_used_mb", 0)
+        / max(g.get("memory_total_mb", 1), 1), 4
+    )
+
+    history_entry = collections.OrderedDict([
+        ("t", snap["timestamp"]),
+        ("ts", time.monotonic()),       # monotonic for interval logic
+        ("gpu_util", g.get("utilization_percent", 0)),
+        ("vram_pct", vram_pct),
+        ("gpu_temp", int(g.get("temperature_c", 0))),
+        ("cpu_load", snap["cpu"]["load_avg_1m"]),
+    ])
+    with _lock:
+        _latest = snap
+        _history.append(history_entry)
+
+
+def _sampler():
+    """Background thread that polls _aggregate() every 500 ms."""
     while True:
-        with _lock:
-            snap = _aggregate()
-            g = (snap["gpu"] or [{}])[0]   # first GPU, empty dict if no data
-            vram_pct = round(
-                100 * g.get("memory_used_mb", 0)
-                / max(g.get("memory_total_mb", 1), 1), 4
-            )
-
-        history_entry = collections.OrderedDict([
-            ("t", snap["timestamp"]),
-            ("ts", time.monotonic()),       # monotonic for interval logic
-            ("gpu_util", g.get("utilization_percent", 0)),
-            ("vram_pct", vram_pct),
-            ("gpu_temp", int(g.get("temperature_c", 0))),
-            ("cpu_load", snap["cpu"]["load_avg_1m"]),
-        ])
-        with _lock:
-            _latest = snap
-            _history.append(history_entry)
-
+        try:
+            _sample_once()
+        except Exception as exc:  # keep serving the last good snapshot
+            print(f"[metrics-sidecar] sample failed ({type(exc).__name__})", file=sys.stderr)
         time.sleep(0.5)
 
 
@@ -199,10 +207,6 @@ try:
     _HAS_SMI = bool(result.stdout.strip())
 except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
     pass
-
-# ── Start sampler thread ─────────────────────────────────────
-threading.Thread(target=_sampler, daemon=True).start()
-
 
 def _collect_gpu_nvml():
     gpus = []
@@ -372,22 +376,38 @@ class _MetricsHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/metrics":
             with _lock:
-                data = dict(_latest) if _latest else _aggregate()
+                data = dict(_latest) if _latest else None
+            if data is None:
+                self.send_error(503, "metrics sample is warming up")
+                return
             payload = json.dumps(data, indent=2)
             content_type = "application/json"
 
         elif parsed.path == "/summary":
             with _lock:
-                data = dict(_latest) if _latest else _aggregate()
+                data = dict(_latest) if _latest else None
+            if data is None:
+                self.send_error(503, "metrics sample is warming up")
+                return
             payload = _format_summary(data)
             content_type = "text/plain"
 
         elif parsed.path == "/history":
-            n = int(query.get("n", ["120"])[0])
+            try:
+                n = int(query.get("n", ["120"])[0])
+            except ValueError:
+                self.send_error(400, "n must be an integer")
+                return
+            n = max(0, min(n, _history.maxlen or 240))
             with _lock:
-                recent = list(_history)[-n:]
+                samples = list(_history)
+                recent = samples[-n:] if n else []
             payload = json.dumps(recent, indent=2)
             content_type = "application/json"
+
+        elif parsed.path == "/health":
+            payload = "ok\n"
+            content_type = "text/plain"
 
         else:
             self.send_response(404)
@@ -414,8 +434,12 @@ class _MetricsHandler(BaseHTTPRequestHandler):
 def main():
     host = BIND_HOST
     port = BIND_PORT
-    server = HTTPServer((host, port), _MetricsHandler)
+    server = ThreadingHTTPServer((host, port), _MetricsHandler)
     print(f"[metrics-sidecar] listening on {host}:{port}", file=sys.stderr)
+    # Start only after module initialization and socket bind so the sampler
+    # cannot race function definitions and the health endpoint is immediately
+    # available while the first hardware sample is still warming up.
+    threading.Thread(target=_sampler, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

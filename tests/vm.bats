@@ -16,6 +16,29 @@ setup() {
   [[ "$output" != *"-10.0.2.2:"* ]]
 }
 
+@test "optional guest test tools use a separate installer and install into apt guest" {
+  local cloud_init="$REPO_ROOT/lib/vm/cloud-init.sh"
+  local installer="$REPO_ROOT/scripts/vm-install-tools.sh"
+  ! grep -Fq 'iptables bats shellcheck' "$cloud_init"
+  grep -Fq 'apt-get install -y bats shellcheck' "$installer"
+  grep -Fq 'vm_ssh "$vm_dir"' "$installer"
+  grep -Fq 'install-tools)' "$REPO_ROOT/lab-vm"
+  grep -Fq 'VM_NAME_ARG:-${remaining[1]:-default}' "$REPO_ROOT/lab-vm"
+  grep -Fq 'VM_RESTART_OPENCODE' "$REPO_ROOT/lab-vm"
+  grep -Fq 'vm_cmd_agent_with_browser_auth "$vm_name"' "$REPO_ROOT/lab-vm"
+  grep -Fq 'vm_cmd_agent "$vm_name"' "$REPO_ROOT/lab-vm"
+}
+
+@test "install-tools refuses unsafe profiles and restart flag on unrelated commands" {
+  run "$REPO_ROOT/lab-vm" -d install-tools --name ../escape
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM profile names must start with a letter or digit'* ]]
+
+  run "$REPO_ROOT/lab-vm" status --restart-opencode
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--restart-opencode is only valid with install-tools'* ]]
+}
+
 @test "QEMU isolation validator requires restrict=on and the reviewed loopback-only forwarding set" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   local args='qemu-system-x86_64 -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434,guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080,guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:45678,restrict=on -device virtio-net-pci,netdev=net0 -device vhost-user-fs-pci,chardev=charfs,tag=workspace'
@@ -132,11 +155,13 @@ setup() {
   _vm_browser_auth_enabled on
   ! _vm_browser_auth_enabled off
 
-  mapfile -d '' -t args < <(_vm_openai_browser_bridge_ssh_args)
+  mapfile -d '' -t args < <(_vm_openai_browser_bridge_ssh_args 41701 42193)
   [ "${#args[@]}" -eq 4 ]
-  [[ "${args[*]}" == *'-R 127.0.0.1:19533:127.0.0.1:19533'* ]]
+  [[ "${args[*]}" == *'-R 127.0.0.1:41701:127.0.0.1:42193'* ]]
   [[ "${args[*]}" == *'-o ExitOnForwardFailure=yes'* ]]
   ! [[ "${args[*]}" == *'0.0.0.0'* ]]
+  ! _vm_openai_browser_bridge_ssh_args 80 42193
+  ! _vm_openai_browser_bridge_ssh_args 41701 invalid
   grep -Fq 'vm_cmd_agent_with_browser_auth "$vm_name"' "$REPO_ROOT/lab-vm"
   grep -Fq -- '--browser-auth)' "$REPO_ROOT/lab-vm"
   grep -Fq -- '--no-browser-auth)' "$REPO_ROOT/lab-vm"
@@ -146,6 +171,8 @@ setup() {
   grep -Fq 'vm_cmd_agent_with_browser_auth()' "$REPO_ROOT/lib/vm/lifecycle.sh"
   grep -Fq 'ssh "${ssh_debug_args[@]}" -F /dev/null -M -S "$control_path" -N' "$REPO_ROOT/lib/vm/lifecycle.sh"
   grep -Fq 'VM_BROWSER_BRIDGE_SSH_CONTROL_PATH="$control_path"' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  grep -Fq 'VM_BROWSER_BRIDGE_PORT="$guest_bridge_port"' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  grep -Fq 'VM_BROWSER_BRIDGE_PORT=$browser_bridge_port_quoted' "$REPO_ROOT/lib/vm/lifecycle.sh"
   grep -Fq -- '-o IdentitiesOnly=yes -o IdentityAgent=none' "$REPO_ROOT/lib/vm/lifecycle.sh"
   grep -Fq -- '-o ForwardAgent=no -o ForwardX11=no' "$REPO_ROOT/lib/vm/lifecycle.sh"
 }
@@ -167,8 +194,8 @@ setup() {
   [ "${#debug_args[@]}" -eq 1 ]
   [ "${debug_args[0]}" = '-vv' ]
 
-  mapfile -d '' -t forwards < <(_vm_openai_browser_bridge_ssh_args)
-  [[ "${forwards[*]}" == *'-R 127.0.0.1:19533:127.0.0.1:19533'* ]]
+  mapfile -d '' -t forwards < <(_vm_openai_browser_bridge_ssh_args 41701 42193)
+  [[ "${forwards[*]}" == *'-R 127.0.0.1:41701:127.0.0.1:42193'* ]]
   ! [[ "${forwards[*]}" == *'0.0.0.0'* ]]
 
   mapfile -d '' -t callback < <(_vm_openai_callback_ssh_args 40391)
@@ -195,16 +222,19 @@ setup() {
   printf '22222\n' >"$VM_AGENT_TEST_DIR/ssh_port"
   _vm_resolve() { echo "$VM_AGENT_TEST_DIR"; }
   vm_run_status() { echo 'running (PID: 12345)'; }
+  vm_cmd_metrics() { [[ "${1:-}" == up ]]; }
   vm_ssh() {
     case "$*" in
       *'opencode --version'*) echo '2.2.0' ;;
       *'test -r /etc/opencode/opencode.json'*) return 0 ;;
       *'python3 -c'*) echo 'llamacpp' ;;
+      *'python3 -'*) echo 'guest metrics forward healthy: summary, metrics, history' ;;
       *) echo "unexpected guest probe: $*" >&2; return 99 ;;
     esac
   }
   ssh() { printf '%s\0' "$@" >"$VM_AGENT_CAPTURE"; }
   VM_BROWSER_BRIDGE_DIR="$VM_BROWSER_TEST_DIR"
+  VM_BROWSER_BRIDGE_PORT=41701
   VM_AGENT_SKIP_MODEL_PROBE=1
   VM_BROWSER_BRIDGE_TOKEN=must-not-be-forwarded
   run vm_cmd_agent default
@@ -219,6 +249,8 @@ PY
   [[ "$remote_command" == *'trap cleanup EXIT'* ]]
   [[ "$remote_command" == *'PATH="$browser_dir:$PATH"'* ]]
   [[ "$remote_command" == *'VM_BROWSER_BRIDGE_TOKEN_FILE="$browser_dir/token"'* ]]
+  [[ "$remote_command" == *'VM_BROWSER_BRIDGE_PORT=41701'* ]]
+  [[ "$remote_command" == *'METRICS_URL=http://10.0.2.100:19532'* ]]
   [[ "$remote_command" != *'must-not-be-forwarded'* ]]
 }
 
@@ -381,9 +413,21 @@ PY
   [[ "$body" == *'METRICS_BIND_HOST=127.0.0.1'* ]]
   [[ "$body" == *'METRICS_BIND_PORT=19532'* ]]
   [[ "$body" == *'python3 "$LAB_DIR/agent/metrics/gather.py"'* ]]
+  [[ "$body" == *'flock -x "$lock_fd"'* ]]
+  [[ "$body" == *'http://127.0.0.1:19532/health'* ]]
   [[ "$body" != *'docker compose'* ]]
   grep -Fq 'guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532' "$REPO_ROOT/lib/vm/runner.sh"
   grep -Fq 'metrics)' "$REPO_ROOT/lab-vm"
+}
+
+@test "VM guest metrics preflight bypasses egress proxy and verifies every TUI endpoint" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  body="$(declare -f _vm_guest_metrics_preflight)"
+  [[ "$body" == *'http://10.0.2.100:19532'* ]]
+  [[ "$body" == *'urllib.request.ProxyHandler({})'* ]]
+  [[ "$body" == *'("/summary", "/metrics", "/history?n=2")'* ]]
+  [[ "$body" == *'deadline = time.monotonic() + 10'* ]]
+  [[ "$body" == *'guest metrics forward healthy: summary, metrics, history'* ]]
 }
 
 @test "llama.cpp public model alias matches the direct guest model configuration" {
@@ -398,9 +442,14 @@ PY
   [[ "$body" == *'http://10.0.2.100:8080/health'* ]]
   [[ "$body" == *'http://10.0.2.100:11434/api/tags'* ]]
   [[ "$body" == *'curl --noproxy 10.0.2.100'* ]]
+  [[ "$body" == *'vm_cmd_metrics up'* ]]
+  [[ "$body" == *'_vm_guest_metrics_preflight "$vm_dir"'* ]]
+  [[ "$body" == *'OpenCode will start and the TUI will report/retry'* ]]
   [[ "$body" == *'python3 -c'* ]]
   [[ "$body" == *'./lab-vm models up $model_provider'* ]]
-  [[ "$body" == *'METRICS_URL=http://10.0.2.100:19532'* ]]
+  [[ "$body" == *'metrics_url="http://127.0.0.1:1"'* ]]
+  [[ "$body" == *'metrics_url="http://10.0.2.100:19532"'* ]]
+  [[ "$body" == *'METRICS_URL=$metrics_url'* ]]
   [[ "$body" == *'log_verbose "Checking $model_provider API reachability'* ]]
   [[ "$body" == *'Guest model probe: $probe_command'* ]]
   [[ "$body" == *'--verbose --http1.1'* ]]
@@ -425,9 +474,12 @@ PY
 @test "metrics TUI uses configurable VM endpoint and surfaces transport failure" {
   local plugin="$REPO_ROOT/agent/opencode/plugins/host-metrics-tui/tui.tsx"
   grep -Fq 'process.env.METRICS_URL || "http://metrics:19532"' "$plugin"
+  grep -Fq 'METRICS_REQUEST_TIMEOUT_MS = 3000' "$plugin"
+  grep -Fq 'fetchMetricsJson<MetricsPayload>("/metrics")' "$plugin"
+  grep -Fq 'fetchMetricsJson<Array<' "$plugin"
   grep -Fq 'host metrics unavailable' "$plugin"
-  grep -Fq '`${metricsBase()}/history?n=60`' "$plugin"
-  grep -Fq '`${metricsBase()}/metrics`' "$plugin"
+  grep -Fq '"/history?n=60"' "$plugin"
+  grep -Fq 'metricsRequestInFlight' "$plugin"
 }
 
 @test "lab-vm models up uses standard loopback-only Compose API publication" {
@@ -937,4 +989,95 @@ MOCK
   [[ "$ensure" == *'DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS=--cidr=10.0.3.0/24'* ]]
   [[ "$ensure" == *'Environment=HTTP_PROXY=http://10.0.2.100:3128'* ]]
   [[ "$ensure" == *'systemctl --user restart docker'* ]]
+}
+
+@test "workspace-driven CLI offers a one-command VM and agent launch" {
+  run "$REPO_ROOT/lab-vm" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'./lab-vm <workspace>'* ]]
+  [[ "$output" == *'./lab-vm run [workspace] [--name <profile>]'* ]]
+  grep -Fq 'VM_LAUNCH_AFTER_UP=1 vm_cmd_up "$vm_name" "$VM_WS_ARG"' "$REPO_ROOT/lab-vm"
+  grep -Fq 'vm_cmd_agent "$vm_name"' "$REPO_ROOT/lab-vm"
+  grep -Fq 'vm_cmd_agent_with_browser_auth "$vm_name"' "$REPO_ROOT/lab-vm"
+  grep -Fq 'if [[ -d "$cmd" || "$cmd" == */* ]]' "$REPO_ROOT/lab-vm"
+}
+
+@test "workspace shorthand and run validate dangerous paths before host prerequisites" {
+  run "$REPO_ROOT/lab-vm" /
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Cannot mount filesystem root (/)'* ]]
+
+  run "$REPO_ROOT/lab-vm" run --workspace /
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Cannot mount filesystem root (/)'* ]]
+}
+
+@test "named run profile is validated and selected for both workspace forms" {
+  run "$REPO_ROOT/lab-vm" run / --name ../escape
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM profile names must start with a letter or digit'* ]]
+
+  run "$REPO_ROOT/lab-vm" run --workspace / --name launcher-smoke
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Cannot mount filesystem root (/)'* ]]
+
+  run "$REPO_ROOT/lab-vm" / --name launcher-smoke
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Cannot mount filesystem root (/)'* ]]
+
+  run "$REPO_ROOT/lab-vm" run / --name launcher-smoke --name duplicate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Pass --name only once'* ]]
+}
+
+@test "switching a running VM workspace requires explicit confirmation unless yes is set" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_YES=0
+  run _vm_confirm_workspace_switch /work/first /work/second
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'requires an interactive confirmation'* ]]
+
+  VM_YES=1
+  run _vm_confirm_workspace_switch /work/first /work/second
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'Auto-accept enabled'* ]]
+}
+
+@test "workspace switch cleanly powers off the guest and preserves the VM overlay" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_SWITCH_STATUS=running
+  VM_SWITCH_STOP_MARKER="$BATS_TEST_TMPDIR/vm-switch-stop-called"
+  VM_SWITCH_OVERLAY="$BATS_TEST_TMPDIR/disk.qcow2"
+  export VM_SWITCH_STATUS VM_SWITCH_STOP_MARKER VM_SWITCH_OVERLAY
+  printf 'valuable overlay state\n' >"$VM_SWITCH_OVERLAY"
+
+  vm_ssh() {
+    [[ "$*" == *'sudo systemctl poweroff'* ]]
+    VM_SWITCH_STATUS=stopped
+  }
+  vm_run_status() {
+    echo "$VM_SWITCH_STATUS"
+    [[ "$VM_SWITCH_STATUS" == running ]]
+  }
+  vm_run_stop() { touch "$VM_SWITCH_STOP_MARKER"; }
+
+  run _vm_shutdown_for_workspace_switch "$BATS_TEST_TMPDIR/vm-switch"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'Requesting a clean guest shutdown'* ]]
+  [ -e "$VM_SWITCH_STOP_MARKER" ]
+  [ "$(cat "$VM_SWITCH_OVERLAY")" = 'valuable overlay state' ]
+}
+
+@test "workspace switch path preserves the overlay and refuses an unverified active mount" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  body="$(declare -f vm_cmd_up)"
+  [[ "$body" == *'_vm_read_virtiofsd_shared_dir'* ]]
+  [[ "$body" == *'_vm_confirm_workspace_switch'* ]]
+  [[ "$body" == *'_vm_shutdown_for_workspace_switch'* ]]
+  [[ "$body" == *'running_workspace" == "$workspace"'* ]]
+
+  switch_body="$(declare -f _vm_shutdown_for_workspace_switch)"
+  [[ "$switch_body" == *'vm_run_stop "$vm_dir"'* ]]
+  [[ "$switch_body" != *'vm_disk_delete'* ]]
+  [[ "$switch_body" != *'vm_ssh_clean'* ]]
 }

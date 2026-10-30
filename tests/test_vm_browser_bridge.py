@@ -145,6 +145,47 @@ class BrowserBridgeClientTests(unittest.TestCase):
         self.assertNotIn("state=first", captured.getvalue())
         self.assertNotIn("state=second", captured.getvalue())
 
+    def test_client_uses_per_session_port_from_environment(self):
+        token = "p" * 48
+        opened = []
+        server = bridge_server.BrowserBridgeHTTPServer(
+            ("127.0.0.1", 0), token, opener=opened.append,
+            callback_forwarder=lambda _port: None,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = (
+            "https://auth.openai.com/api/accounts/authorize?state=per-session&redirect_uri="
+            + quote("http://127.0.0.1:40391/auth/callback", safe="")
+        )
+        try:
+            with patch.dict(os.environ, {"VM_BROWSER_BRIDGE_PORT": str(server.server_port)}):
+                browser_open.call_host_bridge(url, token)
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
+        self.assertEqual(opened, [url])
+
+    def test_client_refuses_to_guess_a_shared_bridge_port(self):
+        url = "https://auth.openai.com/oauth/authorize?state=missing-port"
+        with patch.dict(os.environ, {}, clear=True), self.assertRaisesRegex(
+            ValueError, "port is not configured"
+        ):
+            browser_open.call_host_bridge(url, "r" * 48)
+
+    def test_two_sessions_can_bind_independent_dynamic_host_ports(self):
+        token = "q" * 48
+        first = bridge_server.BrowserBridgeHTTPServer(("127.0.0.1", 0), token)
+        second = bridge_server.BrowserBridgeHTTPServer(("127.0.0.1", 0), token)
+        try:
+            self.assertNotEqual(first.server_port, second.server_port)
+            self.assertEqual(first.server_address[0], "127.0.0.1")
+            self.assertEqual(second.server_address[0], "127.0.0.1")
+        finally:
+            first.server_close()
+            second.server_close()
+
     def test_callback_forward_uses_runtime_redirect_uri_and_only_loopback(self):
         auth_url = (
             "https://auth.openai.com/api/accounts/authorize?state=not-logged&redirect_uri="

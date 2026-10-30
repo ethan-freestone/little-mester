@@ -36,6 +36,13 @@ def fetch_direct(url, timeout=5):
         return response.status
 
 
+def fetch_via_proxy(url, timeout=10):
+    proxy_url = "http://10.0.2.100:3128"
+    opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+    with opener.open(Request(url, headers={"Connection": "close"}), timeout=timeout) as response:
+        return response.status
+
+
 print("Guest-originated QEMU isolation checks")
 print("These bounded probes check representative paths; they are not a proof against every possible host service.")
 
@@ -58,6 +65,14 @@ for port in (80, 443):
         not reachable,
         "connection blocked" if not reachable else "TCP connection succeeded unexpectedly",
     )
+
+# Public HTTPS must work through the explicit proxy even though direct egress
+# is blocked. Keep the URL fixed and report only the status, never response data.
+try:
+    status = fetch_via_proxy("https://example.com/")
+    report("public HTTPS through approved egress proxy", 200 <= status < 400, f"HTTP {status}")
+except (OSError, http.client.HTTPException, URLError) as exc:
+    report("public HTTPS through approved egress proxy", False, f"unreachable ({type(exc).__name__})")
 
 # The approved proxy endpoint should be reachable, but must refuse a private
 # destination even if the workspace's domain allowlist is empty.

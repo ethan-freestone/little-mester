@@ -13,7 +13,6 @@ from urllib.parse import urlsplit, parse_qsl
 
 
 BRIDGE_HOST = "127.0.0.1"
-BRIDGE_PORT = 19533
 BRIDGE_PATH = "/mcp"
 MAX_URL_LENGTH = 8192
 APPROVED_HOSTS = {"auth.openai.com", "chatgpt.com"}
@@ -125,10 +124,20 @@ def call_host_bridge(
     token: str,
     *,
     host: str = BRIDGE_HOST,
-    port: int = BRIDGE_PORT,
+    port: int | None = None,
 ) -> None:
     if not is_authorization_url(raw_url):
         raise ValueError("authorization URL rejected")
+    if port is None:
+        raw_port = os.environ.get("VM_BROWSER_BRIDGE_PORT", "")
+        if not raw_port:
+            raise ValueError("browser bridge port is not configured for this session")
+        try:
+            port = int(raw_port)
+        except ValueError as exc:
+            raise ValueError("browser bridge port is invalid") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("browser bridge port is invalid")
 
     # A replacement can cancel an old forward (10s), create the new one (10s)
     # and launch the host browser (15s). Let the server report its bounded error.

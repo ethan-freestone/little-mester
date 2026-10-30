@@ -213,6 +213,19 @@ function metricsBase(): string {
   return (process.env.METRICS_URL || "http://metrics:19532").replace(/\/+$/, "")
 }
 
+const METRICS_REQUEST_TIMEOUT_MS = 3000
+
+function fetchMetricsJson<T>(path: string): Promise<T> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), METRICS_REQUEST_TIMEOUT_MS)
+  return fetch(`${metricsBase()}${path}`, { signal: controller.signal })
+    .then(response => {
+      if (!response.ok) throw new Error(`metrics endpoint returned HTTP ${response.status}`)
+      return response.json() as Promise<T>
+    })
+    .finally(() => clearTimeout(timeout))
+}
+
 function MetricsView(props: { state: () => State; theme: Theme; onToggle: () => void }) {
   return (
     <box flexDirection="column" gap={0} onMouseUp={props.onToggle}>
@@ -305,6 +318,7 @@ export default Plugin.define({
     const theme = resolveTheme(context.theme)
     let pollingId: ReturnType<typeof setInterval> | null = null
     let isDisposed = false
+    let metricsRequestInFlight = false
 
     function toggle() {
       setState(prev => ({ ...prev, mode: prev.mode === "compact" ? "expanded" : "compact" }))
@@ -312,8 +326,7 @@ export default Plugin.define({
 
     /* Poll /history (first time) → seeds the data arrays. */
     function seedHistory() {
-      return fetch(`${metricsBase()}/history?n=60`)
-        .then(r => r.json())
+      return fetchMetricsJson<Array<{ gpu_util?: number; vram_pct?: number; gpu_temp?: number }>>("/history?n=60")
         .then((data: Array<{ gpu_util?: number; vram_pct?: number; gpu_temp?: number }>) => {
           if (isDisposed || !Array.isArray(data) || !data.length) return
           setState(prev => ({
@@ -333,8 +346,9 @@ export default Plugin.define({
 
     /* Poll /metrics → push latest data point. */
     function pollMetrics() {
-      fetch(`${metricsBase()}/metrics`)
-        .then(r => r.json())
+      if (metricsRequestInFlight) return
+      metricsRequestInFlight = true
+      fetchMetricsJson<MetricsPayload>("/metrics")
         .then((d: MetricsPayload) => {
           if (isDisposed) return
           setState(prev => ({ ...prev, metricsError: "" }))
@@ -379,6 +393,9 @@ export default Plugin.define({
         })
         .catch(() => {
           if (!isDisposed) setState(prev => ({ ...prev, metricsError: "host metrics unavailable" }))
+        })
+        .finally(() => {
+          metricsRequestInFlight = false
         })
     }
 

@@ -147,6 +147,11 @@ isolation because its containers, networks, and volumes are shared with other wo
 - The **repo checkout is never the test target**. Tests run in a disposable workspace
   (`workspaces/test-<id>` or a fresh clone) so `--unsafe-recurse`, compose, and
   destructive lab cases cannot touch the developer's working tree.
+- Optional `bats` and `shellcheck` packages are installed into a running guest on demand with
+  `./lab-vm install-tools [--name <profile>]`; this is separate from base provisioning.
+  Exit the current TUI first, then add `--restart-opencode` to launch a fresh guest TUI after
+  installation. Checking those commands in the separate OpenCode execution runner does not
+  establish whether they exist in the guest.
 - Fresh provisioning is one documented runbook: install Docker (and the NVIDIA toolkit
   when GPU-enabled), clone the repo, build the agent image, then run `./verify-lab.sh`.
   A CPU-only host is supported; GPU tooling is optional.

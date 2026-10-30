@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlsplit
 
 
-DEFAULT_PORT = 19533
+DEFAULT_PORT = 0
 MAX_BODY_BYTES = 16 * 1024
 MAX_URL_LENGTH = 8192
 OPEN_TIMEOUT_SECONDS = 15
@@ -410,8 +410,12 @@ def main() -> int:
     try:
         port = int(raw_port)
     except ValueError:
-        port = 0
-    if len(token) < 32 or not 1 <= port <= 65535:
+        print("Host browser MCP bridge configuration is invalid.", file=sys.stderr)
+        return 2
+    # Port 0 asks the OS for a free loopback port. The launcher reads the
+    # selected port from this process's private per-session log, then creates
+    # one matching SSH reverse forward in that guest.
+    if len(token) < 32 or not 0 <= port <= 65535:
         print("Host browser MCP bridge configuration is invalid.", file=sys.stderr)
         return 2
     try:

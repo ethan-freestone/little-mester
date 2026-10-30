@@ -207,8 +207,14 @@ current experimental host-to-guest path through `lab-vm`:
     ./lab-vm verify-isolation   # inspect live QEMU config and probe from inside the guest
     ./lab-vm agent               # guest TUI; browser OAuth handoff is enabled by default
     ./lab-vm agent --no-browser-auth # skip the temporary host-browser bridge
+    ./lab-vm -d install-tools --name default --restart-opencode # install guest Bats/ShellCheck, then relaunch TUI
     ./lab-vm auth-forward default <port> # exact-port manual diagnostic fallback
 ```
+
+Exit the current TUI before `install-tools`. It updates packages in the selected running
+guest without reprovisioning or rebooting the VM; `--restart-opencode` starts a new TUI
+afterward. Use `--name <profile>` for a non-default guest, and `-v`/`-d` for verbose/debug
+diagnostics.
 
 `verify-isolation` requires an already-running VM; it does not start or modify it. It verifies
 the live QEMU process uses `restrict=on`, the SSH host forward is loopback-only, and the four
@@ -269,14 +275,18 @@ attempts one TCP connection from each selected host forwarder to `1.1.1.1:443`; 
 connection proves some egress exists, while a failed connection does not prove all destinations
 or protocols are blocked. Neither probe changes host or container configuration. No separate
 LAN device is needed for the guest isolation check; use `./lab-vm verify-isolation` for that.
-VM metrics
-use a separate native host process at `127.0.0.1:19532`, independent of Docker; it returns
-only curated metrics API data and is reachable from the guest through the existing QEMU
-guestfwd. The host-Docker `metrics` Compose service is unchanged. `models diagnose` is the
-standard first step when API status is unhealthy; `models up -d` also prints publication
-diagnostics if startup fails. Neither changes host firewall or networking. The default `./lab`
-workflow does not start these VM services. Stop the API forwarders and metrics process
-separately when finished with VM testing:
+VM metrics use one shared native host process at `127.0.0.1:19532`, independent of Docker;
+it returns only curated metrics API data. Every outer VM profile has its own QEMU guestfwd
+to that same host endpoint. `./lab-vm agent` starts the metrics service idempotently and checks
+`/summary`, `/metrics`, and `/history` from inside the guest before opening OpenCode. If the
+optional metrics process or forward is unavailable, the launcher warns but still starts
+OpenCode; the TUI reports the failure and retries. Slow hardware sampling leaves the last
+snapshot available instead of blocking concurrent session requests.
+`./lab-vm metrics up/status/down` remain available for manual diagnostics. The host-Docker
+`metrics` Compose service is unchanged. `models diagnose` is the standard first
+step when a model API is unhealthy; `models up -d` also prints publication diagnostics if
+startup fails. Neither path changes host firewall or networking. Stop the model forwarders
+and metrics process separately when finished with VM testing:
 
 ```bash
 ./lab-vm models down
@@ -289,36 +299,74 @@ Use the built-in `models diagnose` command for host Docker/model-forwarder troub
 it is read-only and does not attempt repairs.
 
 On a fresh host, install the QEMU/KVM and `virtiofsd` prerequisites in
-[`docs/01-host-setup.md`](docs/01-host-setup.md), then from the little-mester checkout:
+[`docs/01-host-setup.md`](docs/01-host-setup.md). The normal VM workflow is one
+workspace-oriented command, matching the Docker interface:
 
 ```bash
-./lab-vm base                                      # one-time base image
-./lab-vm up --workspace /path/to/project           # provision VM and install OpenCode
-./lab-vm agent                                     # attach to the guest OpenCode TUI
+./lab-vm /path/to/project
+# or, explicitly:
+./lab-vm run /path/to/project
+# for an isolated acceptance run:
+./lab-vm run /path/to/project --name launcher-smoke
 ```
 
-For an already-provisioned default VM, launching the TUI currently requires two commands:
+The command starts the VM if needed, provisions the guest only on first use, then
+attaches OpenCode directly to the selected workspace. `./lab-vm base` remains an
+optional one-time prefetch; `./lab-vm up --workspace <path>` remains available for
+setup and diagnostics without launching the TUI. `./lab-vm agent` attaches to the
+already-running VM and its current workspace.
+
+Each VM profile mounts exactly one host workspace at `/workspace`. Re-running with
+that same path reuses the warm VM and enters the TUI without a reboot. `--name`
+selects a separate profile and overlay, so host acceptance testing can avoid the
+existing `default` profile. To switch to
+another workspace, exit the current TUI and run the same command with the new path.
+If the VM is still running on a different workspace, the CLI asks before requesting
+a clean guest shutdown and restarting QEMU/virtiofsd with the new single-workspace
+mount. The qcow2 overlay, installed guest tools, and control keys are preserved;
+no base image or guest package provisioning is repeated, and neither host workspace
+is deleted. Guest processes and active workload containers stop during the switch.
+`--yes` skips the confirmation and therefore should only be used when that
+interruption is intended. `stop`, `down`, `--clean`, and `rebuild` have separate,
+more destructive effects described below.
+
+### Choosing sessions, workspaces, and branches
+
+| Goal | Use this | What to expect |
+|---|---|---|
+| One agent on one project | One VM profile and one workspace (`./lab-vm run /path/to/project`) | The guest and overlay are reused on later launches. |
+| Several OpenCode sessions on the same checkout | Start `./lab-vm agent` in separate terminals against the same running profile | Each is a separate TUI process, but they edit the same files and share the guest. Coordinate edits; this is not an agent orchestrator. |
+| Parallel branches with strong workspace separation | Create one Git worktree per branch and give each a separate named VM profile | Each profile mounts one worktree and has its own overlay. First use of a new profile provisions a guest; it is not a warm workspace switch. Concurrent VMs consume additional host resources. |
+| One guest that can see several worktrees | Mount a common parent containing the worktrees | All descendants of that selected parent are intentionally exposed. The launcher currently starts sessions at `/workspace`; a polished per-session worktree/cwd selector is not implemented. |
+| Have agents spawn/coordinate more agents | Not implemented | There is no supported agent-loop supervisor, work ownership protocol, or automatic worktree lifecycle yet; tracked in #56. |
+| Test Little Mester inside Little Mester | Explicit nested VM design, after recursion gates pass | Nested KVM availability, depth enforcement, and child-state handling are not yet accepted. Do not treat the current recursion marker as a depth limit. |
+
+Use a **same-profile workspace switch** only for sequential work: exit OpenCode, select the
+new workspace, and let the guest shut down and restart while retaining that profile's overlay.
+It does not keep two workspaces mounted concurrently. Use separate profiles for concurrent
+VMs; `--name` is profile selection, not a switch shortcut. The temporary browser bridge uses
+independent loopback ports per authorization session, while metrics intentionally use one
+host-wide service per immediate VM host. A nested VM must enforce its own boundary and must
+not inherit an ancestor's services or control channels by default.
+
+For parallel work, separate Git worktrees avoid agents overwriting the same branch, but they do
+not isolate uncommitted work if multiple sessions point at one worktree. In the interim, create
+worktrees explicitly and either mount the intended worktree in its own profile or mount a
+carefully chosen parent and manually select the correct project directory. Automated agent
+spawning, session-to-worktree assignment, resource limits, cancellation, and safe cleanup are
+future work—not implied by having multiple OpenCode processes.
+
+For self-development, explicitly allow the repo workspace:
 
 ```bash
-./lab-vm up
-./lab-vm agent
+./lab-vm --unsafe-recurse "$PWD"
 ```
 
-For self-development, run these from the little-mester repo root and explicitly allow the
-repo workspace:
-
-```bash
-./lab-vm up --unsafe-recurse --workspace "$PWD"
-./lab-vm agent
-```
-
-`base` downloads/prepares the reusable base image once. `up` starts/provisions the VM and
-installs or repairs the pinned OpenCode version; it currently returns to the host rather
-than launching the TUI. `agent` checks readiness and attaches the interactive TUI; use
-`--no-browser-auth` when the temporary browser bridge is not wanted. `ssh` is
-for guest diagnostics, not a required daily step. The target daily path is one command that
-starts/reuses the VM and launches OpenCode; that behavior is tracked for future implementation
-and is not yet available.
+Use `--no-browser-auth` when the temporary browser bridge is not wanted. `ssh` is
+for guest diagnostics, not a required daily step. The one-command launcher does not
+change `./lab`'s default host-Docker behavior; VM-first routing remains gated on the
+parent ticket's live usability, auth, permission, workload, isolation, and lifecycle
+acceptance.
 
 **Shutdown and data retention:** Current `./lab-vm stop` is not a gentle pause: it runs
 `docker compose down -v --remove-orphans` in the guest, then calls `down`. `./lab-vm down`
@@ -334,7 +382,8 @@ Docker workflow available and follow the current gates on tickets #41–#45 and 
 concurrently edit the same workspace from both agents. Do not mount the Little Mester
 repository unless recursion is explicitly enabled. Bounded `--recurse` and `--unsafe-recurse`
 (self-modification) with a maximum nesting depth defaulting to zero are approved design
-requirements, but are not implemented yet; see the linked recursion ticket. When a guest
+requirements, but are not implemented yet; the present recursion environment marker only
+controls default browser-auth behavior and does **not** enforce depth. See #43/#52. When a guest
 agent launches another `lab-vm`, an inherited recursion marker disables browser auth by
 default; pass `--browser-auth` to explicitly enable the temporary bridge for that nested run.
 
@@ -345,7 +394,7 @@ Hardware configuration lives in [`machine.conf.example`](machine.conf.example). 
 ## Everyday use
 
 The commands below are for the established host-Docker workflow. For the VM acceptance
-workflow, use `./lab-vm up` followed by `./lab-vm agent` as described above. After the
+workflow, use the one-command `./lab-vm <workspace>` launcher as described above. After the
 acceptance gates pass, `./lab` is intended to use the VM by default and the current Docker
 workflow will remain available as `./lab-docker`.
 

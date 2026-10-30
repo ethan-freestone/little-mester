@@ -135,6 +135,21 @@ def _host_networks_from_proc(route_text, ipv6_route_text, ipv6_addresses_text, f
         if prefix and gateway.is_unspecified:
             networks.add(network)
 
+    for address, prefix in _ipv6_interface_records(ipv6_addresses_text):
+        network = ipaddress.IPv6Network((address, prefix), strict=False)
+        if prefix:
+            networks.add(network)
+
+    for address in _ipv4_host_addresses_from_fib_trie(fib_trie_text):
+        networks.add(ipaddress.IPv4Network((address, 32)))
+
+    if not networks:
+        raise PermissionError("could not determine host-local networks")
+    return frozenset(networks)
+
+
+def _ipv6_interface_records(ipv6_addresses_text):
+    records = set()
     for line in ipv6_addresses_text.splitlines():
         fields = line.split()
         if not fields:
@@ -144,12 +159,15 @@ def _host_networks_from_proc(route_text, ipv6_route_text, ipv6_addresses_text, f
         try:
             address = ipaddress.IPv6Address(bytes.fromhex(fields[0]))
             prefix = int(fields[2], 16)
-            network = ipaddress.IPv6Network((address, prefix), strict=False)
+            ipaddress.IPv6Network((address, prefix), strict=False)
         except ValueError as error:
             raise PermissionError("could not parse host IPv6 addresses") from error
-        if prefix:
-            networks.add(network)
+        records.add((address, prefix))
+    return frozenset(records)
 
+
+def _ipv4_host_addresses_from_fib_trie(fib_trie_text):
+    addresses = set()
     trie_lines = fib_trie_text.splitlines()
     found_local_ipv4 = False
     for index, line in enumerate(trie_lines):
@@ -166,16 +184,32 @@ def _host_networks_from_proc(route_text, ipv6_route_text, ipv6_addresses_text, f
                     address = ipaddress.IPv4Address(token)
                 except ValueError:
                     continue
-                networks.add(ipaddress.IPv4Network((address, 32)))
+                addresses.add(address)
                 found_address = True
         if not found_address:
             raise PermissionError("could not parse host-local IPv4 address")
 
     if not found_local_ipv4:
         raise PermissionError("could not determine host-local IPv4 addresses")
-    if not networks:
-        raise PermissionError("could not determine host-local networks")
-    return frozenset(networks)
+    return frozenset(addresses)
+
+
+def host_local_addresses():
+    """Return local IPv4/IPv6 interface addresses for bounded isolation probes."""
+    proc_net = Path("/proc/net")
+    try:
+        ipv4 = _ipv4_host_addresses_from_fib_trie(
+            (proc_net / "fib_trie").read_text(encoding="ascii")
+        )
+        ipv6 = {address for address, _ in _ipv6_interface_records(
+            (proc_net / "if_inet6").read_text(encoding="ascii")
+        )}
+    except (OSError, ValueError) as error:
+        raise PermissionError("could not safely inspect host-local addresses") from error
+    addresses = frozenset(ipv4 | ipv6)
+    if not addresses:
+        raise PermissionError("could not determine host-local interface addresses")
+    return addresses
 
 
 def host_networks():

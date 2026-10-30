@@ -117,6 +117,11 @@ The `vm up` command:
 7. Confirms the guest Docker daemon is running rootless
 8. Installs the pinned OpenCode CLI and syncs its config/plugins into the guest OS (no agent container)
 
+Optional Bats and ShellCheck packages are kept out of base provisioning. Install them into
+an already-running guest without reprovisioning by exiting the current TUI and running
+`./lab-vm install-tools --name <profile>`. Add `--restart-opencode` to start a fresh TUI
+after installation; `-v`/`-d` enable verbose/debug output. See [Testing](testing.md).
+
 **CPU-only hosts:** The same command works. You'll see:
 
 ```

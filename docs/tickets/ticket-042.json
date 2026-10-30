@@ -8,7 +8,7 @@
   "title": "Direct guest harness runtime and guest workload control",
   "objective": "Install and run the model-agnostic Little Mester harness directly inside the outer VM guest, with native guest auth and broad guest-level control. Docker/Compose are available to the agent for arbitrary project workloads; no Docker container wraps the agent. Preserve the outer VM host-isolation boundary and existing restricted egress/secret rules.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-10-29T11:31:59.146Z",
+  "updated_at": "2026-10-30T16:54:44.010Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -65,6 +65,21 @@
       "text": "VM metrics are implemented and acceptance-tested as a VM-specific path without removing or regressing the existing host-Docker metrics path; the guest does not depend on Compose DNS or general host access, and transition/removal requires owner approval after both paths pass.",
       "status": "in-progress",
       "evidence": "2026-10-29 implementation adds a host-native curated metrics endpoint bound to 127.0.0.1:19532, independent of the existing Docker metrics service, and guestfwd remains limited to that endpoint. Local endpoint, host-service lifecycle, guest URL configuration, Bats and Python tests pass. Direct guest/TUI metrics acceptance remains unverified because this environment has no /dev/kvm or Docker. Owner CachyOS host check 2026-10-29: `./lab-vm metrics up` started endpoint on 127.0.0.1:19532; `metrics status` returned live CPU/RAM/NVIDIA GPU/temperature data. Subsequent `./lab-vm status` showed outer VM stopped, so guestfwd/TUI are not yet tested. Owner CachyOS live guest check 2026-10-29: after non-clean `./lab-vm up --debug --unsafe-recurse --auto-accept`, guest `curl -fsS` requests to `http://10.0.2.100:19532/summary`, `/metrics`, and `/history?n=5` all succeeded. Returned host CPU/RAM, NVIDIA GPU, temperatures, and rolling history via QEMU guestfwd. OpenCode TUI/tool rendering and LAN-negative check remain pending."
+    },
+    {
+      "id": "A12",
+      "text": "Fresh VM guests install the latest OpenCode CLI by default; an explicit VM_OPENCODE_VERSION semantic-version pin remains supported. Ordinary `up` preserves an already installed version unless an explicit pin is selected; latest upgrades are deliberate via the update command.",
+      "status": "pending"
+    },
+    {
+      "id": "A13",
+      "text": "`./lab-vm update` checks available updates and asks for confirmation before applying changes. With no target it checks/updates OpenCode, installed managed test tools, and the Little Mester guest config/plugins; individual targets can be selected, while `--all` additionally upgrades managed guest OS packages and the guest Docker Engine. `--yes` is the explicit non-interactive confirmation override.",
+      "status": "pending"
+    },
+    {
+      "id": "A14",
+      "text": "Guest updates happen in place without deleting/recreating the VM overlay, base image, selected workspace, or credential state; normal agent launches do not download or install updates.",
+      "status": "pending"
     }
   ],
   "tests": {
@@ -108,7 +123,12 @@
       "Keep existing host-Docker metrics integration intact while developing a separate VM metrics endpoint/stream; test both independently and document an owner-approved switchover only after both pass.",
       "On KVM host, start ./lab-vm metrics up; verify 127.0.0.1:19532/summary and /metrics, then verify guest 10.0.2.100:19532/summary, /metrics and /history through QEMU guestfwd; confirm endpoint only exposes curated fields and no LAN listener.",
       "In direct guest OpenCode TUI, verify host-metrics tool and TUI receive live data; stop the host-native endpoint and verify clear transport-unavailable behavior; restart it and verify recovery.",
-      "Run host-Docker metrics acceptance unchanged and confirm the Docker metrics service is not started/stopped by ./lab-vm metrics commands."
+      "Run host-Docker metrics acceptance unchanged and confirm the Docker metrics service is not started/stopped by ./lab-vm metrics commands.",
+      "METRICS RETEST after the current #41 egress-reload/models-status handoff passes and this patch is present on the owner checkout: preserve the current VM/overlay and host-Docker session; do not up/clean/stop/down or change network policy. Run `./lab-vm agent` once. Expected: native host metrics starts idempotently, the guest preflight confirms `/summary`, `/metrics`, and `/history` through 10.0.2.100:19532 before OpenCode starts, and the TUI displays live data. On any failure, stop and report command status plus redacted `./lab-vm metrics status`, host service log tail, and the guest preflight error; do not restart QEMU or widen networking. This is separate from TUI/tool acceptance and does not substitute for host-Docker metrics regression testing.",
+      "SUPERSEDES the earlier Docker-image rebuild/pull update procedure: test native guest OpenCode latest default, exact-version override, and idempotent ordinary up without upgrading an existing install.",
+      "Test ./lab-vm update with no targets and individual opencode/tools/config targets: detect available updates, show them, require confirmation, respect cancellation and --yes, and perform no mutation when nothing is newer.",
+      "Test ./lab-vm update --all includes guest OS and Docker package updates only after confirmation; validate target/profile parsing and stopped-VM refusal.",
+      "Verify in-place updates preserve VM overlay/base/workspace/auth data and agent launch performs no package/network update."
     ],
     "created": [
       "tests/vm.bats: pinned semantic-version validation, direct guest CLI installation path and interactive `lab-vm agent` command wiring.",
@@ -116,7 +136,9 @@
       "tests/vm.bats covers the guest config install/launch path agreement, flat /etc/opencode/opencode.json location, and version output parsing without escaped-quote awk failure.",
       "tests/vm.bats: validates optional VM-only model forwarder profile, loopback-only host binds for 11434/8080, expected internal Ollama/llama.cpp destinations, and that base compose.yaml still has no published ports.",
       "tests/test_vm_metrics_service.py: starts the metrics collector on an isolated loopback test port with fixture proc/sys sources; verifies curated JSON, summary/history, and 404 for unlisted paths.",
-      "tests/vm.bats: verifies native VM metrics command binds 127.0.0.1:19532, uses the existing guestfwd, and remains independent of Docker Compose."
+      "tests/vm.bats: verifies native VM metrics command binds 127.0.0.1:19532, uses the existing guestfwd, and remains independent of Docker Compose.",
+      "tests/test_vm_metrics_service.py: curated endpoint schema, health/readiness, malformed history handling, concurrent guest polling, and delayed fake nvidia-smi sampling without HTTP stalls/resets.",
+      "tests/vm.bats: automatic host metrics startup and guest-side all-endpoint preflight wiring; TUI request timeouts and single-flight polling assertions."
     ],
     "cases": [
       "2026-10-28 prerequisite feedback: real CachyOS guest boots and installs Docker packages but rootless installer fails on unloaded nf_tables. #41 now loads/persists the guest module and sets service drop-in before installer starts Docker; no rootful or --skip-iptables fallback. Agent CLI/daemon capability AC remain pending until live guest verification. Existing ./lab compose has GPU-local model dependencies, so running it unmodified inside CPU-only VM is not evidence of #42 completion.",
@@ -144,7 +166,12 @@
       "2026-10-29: local host service lifecycle smoke passed: ./lab-vm metrics up/status/down; live /summary returned CPU, RAM and temperature data; process/PID file removed and listener stopped. This does not verify guestfwd or live TUI.",
       "2026-10-29: Bats 85/85, VM Python tests 15/15, docs checks 112/112, shell syntax and diff checks pass. No KVM/Docker is available in this environment; guest endpoint/TUI remains pending.",
       "2026-10-29 owner CachyOS host: `./lab-vm metrics up` succeeded and bound the host-native endpoint to 127.0.0.1:19532; `metrics status` returned CPU, RAM, NVIDIA GPU utilization/VRAM/temperature and sensor data. `./lab-vm status` immediately reported VM default stopped. This verifies the host service only; guestfwd and TUI remain pending.",
-      "2026-10-29 owner CachyOS live guest: after non-clean `./lab-vm up --debug --unsafe-recurse --auto-accept`, `./lab-vm ssh` then guest `curl -fsS` to 10.0.2.100:19532/summary, /metrics, and /history?n=5 all succeeded through QEMU guestfwd. Metrics payload contained host CPU/RAM, NVIDIA GPU (RTX 5070 Laptop GPU), sensor temperatures, and five recent samples. This proves host endpoint→QEMU guestfwd→guest HTTP API only; actual OpenCode TUI/tool behavior and LAN-negative test remain pending."
+      "2026-10-29 owner CachyOS live guest: after non-clean `./lab-vm up --debug --unsafe-recurse --auto-accept`, `./lab-vm ssh` then guest `curl -fsS` to 10.0.2.100:19532/summary, /metrics, and /history?n=5 all succeeded through QEMU guestfwd. Metrics payload contained host CPU/RAM, NVIDIA GPU (RTX 5070 Laptop GPU), sensor temperatures, and five recent samples. This proves host endpoint→QEMU guestfwd→guest HTTP API only; actual OpenCode TUI/tool behavior and LAN-negative test remain pending.",
+      "2026-10-30 live guest metrics probe: OpenCode 2.2.0 config and host-metrics/host-metrics-tui plugin package paths are present. Guest requests to 10.0.2.100:19532 /summary, /metrics, and /history did not return valid HTTP; the follow-up curl observed connection reset (status 56). The host-native service, QEMU guestfwd, and plugin/TUI must be checked separately; no cause or fix is claimed.",
+      "2026-10-30 local metrics fix: sampler now gathers hardware outside the shared HTTP/history lock, starts only after module initialization and socket bind, serves concurrent requests, returns fast health/readiness responses, and leaves `/metrics`/`/summary` warming up with 503 until a first sample is ready. Agent launch starts the shared host-native service and retries all three guestfwd endpoints for up to 30s before launching OpenCode. TUI polls have 3s timeouts and do not overlap. The focused metrics suite passes 7/7 and the complete VM Python suite passes 47/47. The owner-reported live guest reset is not yet retested; no live metrics/TUI acceptance is claimed.",
+      "2026-10-30 clarification: metrics are optional to OpenCode launch. `vm_cmd_agent` starts the host service and attempts a bounded guestfwd preflight; if startup or forwarding fails, it warns but continues, while the TUI shows transport failure and retries with bounded, non-overlapping requests. This preserves the documented core-agent behavior while making metrics failures explicit. Live CachyOS metrics reset still needs owner-host retest.",
+      "2026-10-30 local follow-up: fixed and independently syntax-checked the embedded preflight Python. Agent launch retains optional-metrics behavior: start the shared service and make a bounded 10s guestfwd readiness attempt; on failure, warn, disable this session's metrics URL, and still launch OpenCode. Local checks: complete VM Python suite 47/47, docs consistency 115/115, TUI JSX, Bash/Python syntax, and diff check pass; lab-vm self-tests 6 passed (QEMU/ISO unavailable in the self-test). No live guest/API/TUI retest or owner VM action was performed.",
+      "CORRECTION to the immediately preceding 2026-10-30 local follow-up: if host metrics service startup fails, the session gets a loopback-unavailable placeholder URL; if startup succeeds but the 10s guestfwd preflight fails, the session retains METRICS_URL=http://10.0.2.100:19532 so the TUI can report/retry that path. In both cases OpenCode launches. The embedded preflight Python syntax check and local suite results remain as recorded; no live guest retest was performed."
     ]
   },
   "priority": "major",

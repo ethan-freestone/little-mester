@@ -72,12 +72,15 @@ not a documented OpenCode CLI/API guarantee**. The port is deliberately not fixe
 5. Check the saved account in the guest with `opencode auth list`. Model-request
    acceptance requires separately approved provider egress as described below.
 
-The host MCP listener binds only to `127.0.0.1:19533`; the guest reaches it only
-through a reverse forward on guest loopback. A random, per-run bearer token is
-sent to the guest over SSH stdin and held in a mode-`0600` temporary file. The
-bridge and opener never log or retain authorization URLs, OAuth state, codes,
-or tokens. The guest shim refuses all non-allowlisted URLs instead of falling
-back to a general host browser launcher. If this OpenCode build does not use
+Each authorization session binds the host MCP listener to a dynamically chosen
+`127.0.0.1` port and requests a separate dynamically chosen guest-loopback port
+for its SSH reverse forward. The guest opener receives that session's port via
+its temporary environment; parallel sessions do not contend for a global
+`19533` listener. A random, per-run bearer token is sent to the guest over SSH
+stdin and held in a mode-`0600` temporary file. The bridge and opener never log
+or retain authorization URLs, OAuth state, codes, or tokens. The guest shim
+refuses all non-allowlisted URLs instead of falling back to a general host
+browser launcher. If this OpenCode build does not use
 `xdg-open` for the native auth action, the live acceptance run must stop and
 record that behavior; do not paste or log the URL as a workaround.
 
@@ -95,10 +98,10 @@ while strict validation and regression tests make a changed URL shape fail
 closed. When changing the pinned OpenCode version, inspect its ChatGPT provider
 source and update the callback tests/docs before relying on this path. The
 numeric callback port may appear in opt-in SSH transport diagnostics; OAuth
-URL/state/code/tokens are not logged. If the host port is already occupied, the
-forward fails closed; stop the conflicting local listener before retrying. No
-LAN listener, QEMU host-forward, general host route, or credential copy is
-created. The guest sends OAuth token exchange/refresh through the public-only egress
+URL/state/code/tokens are not logged. If either allocated port cannot be bound,
+the forward fails closed; no existing listener is adopted or replaced. No LAN
+listener, QEMU host-forward, general host route, or credential copy is created.
+The guest sends OAuth token exchange/refresh through the public-only egress
 proxy. A blank VM `allowed_domains` setting permits public HTTP(S) hostnames; the proxy
 still rejects private/reserved/multicast IPs, mixed DNS, and parent-host local or directly
 connected networks. This does not change QEMU `restrict=on` or expose host/LAN services.

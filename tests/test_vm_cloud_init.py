@@ -89,6 +89,16 @@ class CloudInitTests(unittest.TestCase):
                      "/usr/local/sbin/mester-provision"]:
             subprocess.run(["bash", "-n"], input=self.content(name), text=True, check=True)
 
+    def test_base_guest_provisioning_keeps_optional_validation_tools_out(self):
+        provision = self.content("/usr/local/sbin/mester-provision")
+        package_installs = [
+            line.lstrip().split() for line in provision.splitlines()
+            if line.lstrip().startswith("apt-get install -y ")
+        ]
+        self.assertTrue(package_installs)
+        self.assertFalse(any("bats" in packages for packages in package_installs))
+        self.assertFalse(any("shellcheck" in packages for packages in package_installs))
+
     def test_empty_group_uses_string_not_invalid_empty_membership_mapping(self):
         # Actual Ubuntu guest error: groups.0.mester: [] is too short.
         # A string creates the empty group; a mapping's member list cannot be [].
