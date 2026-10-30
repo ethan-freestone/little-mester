@@ -33,6 +33,8 @@
 #   ./lab-vm base [name]
 #   ./lab-vm rebuild [name]
 #   ./lab-vm install-tools [name] [--restart-opencode]
+#   ./lab-vm update [opencode|config|tools|docker|system ...] [--name <profile>]
+#   ./lab-vm update --all [--name <profile>]
 #   ./lab-vm models {up|status|down} [provider]
 #   ./lab-vm extra <temporary-command> [args...]
 #
@@ -59,6 +61,7 @@ VM_BROWSER_AUTH_MODE=auto
 VM_BROWSER_AUTH_ENABLE_FLAG=0
 VM_BROWSER_AUTH_DISABLE_FLAG=0
 VM_RESTART_OPENCODE=0
+VM_UPDATE_ALL=0
 VM_VERBOSE="${VM_VERBOSE:-0}"
 VM_DEBUG="${VM_DEBUG:-0}"
 if [[ "$VM_DEBUG" -ge 1 ]]; then VM_VERBOSE=1; fi
@@ -205,6 +208,14 @@ VM lifecycle commands (epic #35, ticket #41):
       --restart-opencode launches a fresh direct-guest OpenCode session afterward.
       Use -v/--verbose or -d/--debug for install/SSH diagnostics.
 
+  ./lab-vm update [opencode|config|tools|docker|system ...] [--name <profile>]
+  ./lab-vm update --all [--name <profile>]
+      Check for updates, then ask before changing the running guest.
+      The default checks OpenCode, installed Bats/ShellCheck, and guest config/plugins.
+      Select one or more targets to narrow the check. `--all` additionally upgrades
+      guest OS packages (including the managed Docker Engine). Use --yes to confirm
+      non-interactively. Exit the OpenCode TUI and guest workloads first.
+
    ./lab-vm models up [default|ollama|llamacpp|all]
        Start selected Compose model API forwarders published on loopback; verify host HTTP.
        Default selects the provider configured in agent/opencode/opencode.json.
@@ -235,7 +246,8 @@ VM lifecycle commands (epic #35, ticket #41):
 Flags (any order):
   --unsafe-recurse     Allow workspace to be inside the little-mester repo
   --base-size <GiB>    Base disk size in GiB (default: 20)
-  --name <profile>     Select a VM profile with 'run' or 'install-tools'
+  --name <profile>     Select a VM profile with 'run', 'install-tools', or 'update'
+  --all                Select all managed guest software with 'update'
   -y, --yes            Auto-accept all prompts (same as VM_YES=1)
   --auto-accept        Alias for --yes
   --clean              Before 'up': run 'stop' then 'down' to fully teardown first
@@ -247,7 +259,7 @@ Environment:
   VM_YES=1 / LAB_YES=1 Auto-accept all prompts (same as --yes)
   VM_VERBOSE=1         Equivalent to --verbose
   VM_DEBUG=1           Equivalent to --debug (implies --verbose)
-  VM_OPENCODE_VERSION  Pinned guest OpenCode version (default: 2.2.0)
+  VM_OPENCODE_VERSION  Guest OpenCode target (default: latest; may be pinned)
 
 Per-VM state is stored at: ./.mester/vm/<name>/
 
@@ -272,6 +284,7 @@ for _i in "${_flags[@]}"; do
     --unsafe-recurse)         VM_UNSAFE_RECURSE=1 ;;
     --base-size|--workspace|--name) ;; # value consumed next iteration
     -y|--yes|--auto-accept)   VM_YES=1; LAB_YES=1 ;;
+    --all)                    VM_UPDATE_ALL=1 ;;
     --clean)                  VM_CLEAN=1 ;;
     --browser-auth)           VM_BROWSER_AUTH_MODE=on; VM_BROWSER_AUTH_ENABLE_FLAG=1 ;;
     --no-browser-auth)        VM_BROWSER_AUTH_MODE=off; VM_BROWSER_AUTH_DISABLE_FLAG=1 ;;
@@ -308,7 +321,7 @@ for (( _fi=0; _fi<${#_flags[@]}; _fi++ )); do
   case "${_flags[$_fi]}" in
     -h|--help) ;;
     --base-size|--workspace|--name) _fi=$(( _fi + 1 )) ;; # skip flag-pair
-    --unsafe-recurse|--clean) ;;
+    --unsafe-recurse|--clean|--all) ;;
     --browser-auth|--no-browser-auth) ;;
     --restart-opencode) ;;
     -v|--verbose|-d|--debug) ;;
@@ -380,14 +393,25 @@ if [[ "$cmd" == run ]]; then
   VM_WS_ARG="$VM_WORKSPACE"
 elif [[ -n "${VM_WS_ARG:-}" && "$cmd" != up ]]; then
   die '--workspace is only valid with the run or up command.'
-elif [[ -n "$VM_NAME_ARG" && "$cmd" != install-tools ]]; then
-  die '--name is only valid with the run or install-tools command.'
+elif [[ -n "$VM_NAME_ARG" && "$cmd" != install-tools && "$cmd" != update ]]; then
+  die '--name is only valid with the run, install-tools, or update command.'
 fi
 if [[ "$cmd" == install-tools ]]; then
   [[ ${#remaining[@]} -le 2 ]] || die 'Usage: ./lab-vm install-tools [name] [--name <profile>] [--restart-opencode]'
   [[ -z "$VM_NAME_ARG" || -z "${remaining[1]:-}" ]] || die 'Select the install-tools profile either positionally or with --name, not both.'
   vm_name="${VM_NAME_ARG:-${remaining[1]:-default}}"
   [[ "$vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
+fi
+update_targets=()
+if [[ "$cmd" == update ]]; then
+  vm_name="${VM_NAME_ARG:-default}"
+  [[ "$vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
+  update_targets=("${remaining[@]:1}")
+  if [[ "$VM_UPDATE_ALL" == 1 && ${#update_targets[@]} -gt 0 ]]; then
+    die 'Do not combine --all with individual update targets.'
+  fi
+elif [[ "$VM_UPDATE_ALL" == 1 ]]; then
+  die '--all is only valid with the update command.'
 fi
 if [[ "$VM_RESTART_OPENCODE" == 1 && "$cmd" != install-tools ]]; then
   die '--restart-opencode is only valid with install-tools.'
@@ -568,6 +592,17 @@ case "$cmd" in
         vm_cmd_agent "$vm_name"
       fi
     fi
+    ;;
+  update)
+    update_args=("$vm_name")
+    if [[ "$VM_UPDATE_ALL" == 1 ]]; then
+      update_args+=(--all)
+    else
+      update_args+=("${update_targets[@]}")
+    fi
+    VM_YES="$VM_YES" VM_VERBOSE="$VM_VERBOSE" VM_DEBUG="$VM_DEBUG" \
+      VM_OPENCODE_VERSION="${VM_OPENCODE_VERSION:-latest}" \
+      bash "$LAB_DIR/scripts/vm-update.sh" "${update_args[@]}"
     ;;
   models)
     if [[ "${remaining[1]:-}" == diagnose ]]; then

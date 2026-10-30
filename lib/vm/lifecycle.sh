@@ -62,16 +62,21 @@ _vm_wait_for_cloud_init() {
 
 _vm_install_guest_harness() {
   local vm_dir="$1"
-  local version="${VM_OPENCODE_VERSION:-2.2.0}"
-  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-    log "ERROR: VM_OPENCODE_VERSION must be a pinned semantic version (for example 2.2.0)"
+  local version="${VM_OPENCODE_VERSION:-latest}"
+  local config_hash
+  [[ "$version" == latest || "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    log "ERROR: VM_OPENCODE_VERSION must be 'latest' or a pinned semantic version (for example 2.2.0)"
     return 2
   }
+  config_hash="$(
+    cd "$LAB_DIR/agent/opencode"
+    find opencode.json plugins -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+  )" || return $?
 
-  log "Installing direct guest OpenCode harness (version $version)..."
+  log "Ensuring direct guest OpenCode harness (requested version: $version)..."
   vm_ssh "$vm_dir" "sudo bash -s -- '$version'" <<'GUEST_OPENCODE_INSTALL'
 set -euo pipefail
-version="$1"
+requested_version="$1"
 . /etc/profile.d/mester.sh
 export DEBIAN_FRONTEND=noninteractive
 if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
@@ -79,6 +84,16 @@ if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
   sudo apt-get install -y -qq nodejs npm
 fi
 current="$(opencode --version 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/) {sub(/^v/, "", $i); print $i; exit}}' || true)"
+if [[ "$requested_version" == latest && -n "$current" ]]; then
+  # `latest` is the fresh-install default, not an implicit upgrade channel.
+  # Existing guests are upgraded only by the explicit `lab-vm update` command.
+  version="$current"
+elif [[ "$requested_version" == latest ]]; then
+  version="$(npm view @opencode/cli@latest version --json | tr -d '"[:space:]')"
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Unexpected OpenCode package version: $version" >&2; exit 1; }
+else
+  version="$requested_version"
+fi
 if [[ "$current" != "$version" ]]; then
   sudo env HTTP_PROXY="$HTTP_PROXY" HTTPS_PROXY="$HTTPS_PROXY" \
     http_proxy="$http_proxy" https_proxy="$https_proxy" \
@@ -101,6 +116,7 @@ GUEST_OPENCODE_INSTALL
     /etc/opencode/opencode.json && \
     sudo chown -R root:root /etc/opencode && \
     sudo chmod -R a+rX /etc/opencode && \
+    printf '%s\\n' '$config_hash' | sudo tee /etc/opencode/.little-mester-config-hash >/dev/null && \
     sudo -iu mester opencode --version"
 }
 
@@ -928,14 +944,17 @@ vm_cmd_agent() {
     echo "WARNING: VM host metrics service could not be started; OpenCode will start with metrics disabled for this session. See './lab-vm metrics status'." >&2
   fi
 
-  local version="${VM_OPENCODE_VERSION:-2.2.0}"
+  local version="${VM_OPENCODE_VERSION:-latest}"
   local installed_version
   local model_provider model_url
   log_verbose "Checking guest OpenCode version and configuration."
   log_debug "Expected OpenCode version: $version"
   installed_version="$(vm_ssh "$vm_dir" "opencode --version" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
   log_debug "Guest OpenCode version: ${installed_version:-unavailable}"
-  if [[ "$installed_version" != "$version" ]]; then
+  if [[ ! "$installed_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    die "OpenCode is not installed in VM '$vm_name' (found ${installed_version:-none}). Run ./lab-vm up $vm_name to install it."
+  fi
+  if [[ "$version" != latest && "$installed_version" != "$version" ]]; then
     die "OpenCode $version is not installed in VM '$vm_name' (found ${installed_version:-none}). Run ./lab-vm up $vm_name to install/update it."
   fi
   if ! vm_ssh "$vm_dir" "test -r /etc/opencode/opencode.json && test -r /etc/opencode/plugins/host-metrics-tui/package.json && test -r /etc/opencode/plugins/little-mester-exit-confirm/package.json && test -r /etc/opencode/plugins/little-mester-logo/package.json"; then

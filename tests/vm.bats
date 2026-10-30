@@ -805,13 +805,22 @@ MOCK_SUDO
   [ "$status" -eq 0 ]
 }
 
-@test "guest OpenCode version must be pinned to semantic version" {
+@test "fresh guest defaults to latest OpenCode while existing installs stay put until update" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   log() { echo "$*"; }
-  VM_OPENCODE_VERSION=latest
+  VM_OPENCODE_VERSION=not-a-version
   run _vm_install_guest_harness /nonexistent
   [ "$status" -eq 2 ]
-  [[ "$output" == *"must be a pinned semantic version"* ]]
+  [[ "$output" == *"must be 'latest' or a pinned semantic version"* ]]
+
+  unset VM_OPENCODE_VERSION
+  installer="$(declare -f _vm_install_guest_harness)"
+  [[ "$installer" == *'${VM_OPENCODE_VERSION:-latest}'* ]]
+  [[ "$installer" == *'requested_version" == latest && -n "$current"'* ]]
+  [[ "$installer" == *'version="$current"'* ]]
+  [[ "$installer" == *'npm view @opencode/cli@latest version --json'* ]]
+  [[ "$installer" == *'npm install --global "@opencode/cli@$version"'* ]]
+  [[ "$installer" == *'.little-mester-config-hash'* ]]
 }
 
 @test "lab-vm exposes an interactive direct guest agent command" {
@@ -841,6 +850,40 @@ MOCK_SUDO
   [[ "$installer" == *'tar -C "$LAB_DIR/agent/opencode" -cf - opencode.json plugins'* ]]
   [[ "$installer" == *'/etc/opencode/opencode.json'* ]]
   [[ "$installer" != *'/etc/opencode/opencode/opencode.json'* ]]
+}
+
+@test "lab-vm update supports default managed targets, one target, and explicit all" {
+  run "$REPO_ROOT/lab-vm" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'./lab-vm update [opencode|config|tools|docker|system ...]'* ]]
+  [[ "$output" == *'./lab-vm update --all'* ]]
+  [[ "$output" == *'default checks OpenCode, installed Bats/ShellCheck, and guest config/plugins'* ]]
+
+  run "$REPO_ROOT/lab-vm" update banana
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Unknown update target 'banana'"* ]]
+
+  run "$REPO_ROOT/lab-vm" update --all opencode
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Do not combine --all with individual update targets'* ]]
+
+  run "$REPO_ROOT/lab-vm" update --name ../escape
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM profile names must start with a letter or digit'* ]]
+}
+
+@test "guest update script checks before confirmation and scopes OS updates to explicit all" {
+  local updater="$REPO_ROOT/scripts/vm-update.sh"
+  grep -Fq 'apt-get -s upgrade' "$updater"
+  grep -Fq 'apt-get upgrade -y' "$updater"
+  grep -Fq 'Updates are available, but confirmation requires a terminal' "$updater"
+  grep -Fq 'No updates available for VM' "$updater"
+  grep -Fq 'VM overlay, base image, workspace and credential database were not replaced' "$updater"
+  grep -Fq 'REFUSED: OpenCode is running in the guest' "$updater"
+  grep -Fq 'REFUSED: guest Docker workloads are running' "$updater"
+  grep -Fq 'REFUSED: could not verify guest Docker workloads' "$updater"
+  grep -Fq 'npm view @opencode/cli@latest version' "$updater"
+  grep -Fq 'npm install --global "@opencode/cli@$requested_opencode_version"' "$updater"
 }
 
 @test "guest compose teardown runs from the mounted workspace" {

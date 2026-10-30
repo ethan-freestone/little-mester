@@ -24,8 +24,10 @@ log_debug() {
 [[ "$vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'Invalid VM profile name.'
 
 # shellcheck source=../lib/vm/runner.sh
+# shellcheck disable=SC1091
 source "$LAB_DIR/lib/vm/runner.sh"
 # shellcheck source=../lib/vm/ssh.sh
+# shellcheck disable=SC1091
 source "$LAB_DIR/lib/vm/ssh.sh"
 
 vm_dir="$VM_DIR_BASE/$vm_name"

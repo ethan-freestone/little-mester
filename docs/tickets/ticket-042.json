@@ -8,7 +8,7 @@
   "title": "Direct guest harness runtime and guest workload control",
   "objective": "Install and run the model-agnostic Little Mester harness directly inside the outer VM guest, with native guest auth and broad guest-level control. Docker/Compose are available to the agent for arbitrary project workloads; no Docker container wraps the agent. Preserve the outer VM host-isolation boundary and existing restricted egress/secret rules.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-10-30T16:54:44.010Z",
+  "updated_at": "2026-10-30T17:19:29.122Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -69,17 +69,17 @@
     {
       "id": "A12",
       "text": "Fresh VM guests install the latest OpenCode CLI by default; an explicit VM_OPENCODE_VERSION semantic-version pin remains supported. Ordinary `up` preserves an already installed version unless an explicit pin is selected; latest upgrades are deliberate via the update command.",
-      "status": "pending"
+      "status": "test-created"
     },
     {
       "id": "A13",
       "text": "`./lab-vm update` checks available updates and asks for confirmation before applying changes. With no target it checks/updates OpenCode, installed managed test tools, and the Little Mester guest config/plugins; individual targets can be selected, while `--all` additionally upgrades managed guest OS packages and the guest Docker Engine. `--yes` is the explicit non-interactive confirmation override.",
-      "status": "pending"
+      "status": "test-created"
     },
     {
       "id": "A14",
       "text": "Guest updates happen in place without deleting/recreating the VM overlay, base image, selected workspace, or credential state; normal agent launches do not download or install updates.",
-      "status": "pending"
+      "status": "test-created"
     }
   ],
   "tests": {
@@ -138,7 +138,10 @@
       "tests/test_vm_metrics_service.py: starts the metrics collector on an isolated loopback test port with fixture proc/sys sources; verifies curated JSON, summary/history, and 404 for unlisted paths.",
       "tests/vm.bats: verifies native VM metrics command binds 127.0.0.1:19532, uses the existing guestfwd, and remains independent of Docker Compose.",
       "tests/test_vm_metrics_service.py: curated endpoint schema, health/readiness, malformed history handling, concurrent guest polling, and delayed fake nvidia-smi sampling without HTTP stalls/resets.",
-      "tests/vm.bats: automatic host metrics startup and guest-side all-endpoint preflight wiring; TUI request timeouts and single-flight polling assertions."
+      "tests/vm.bats: automatic host metrics startup and guest-side all-endpoint preflight wiring; TUI request timeouts and single-flight polling assertions.",
+      "tests/vm.bats: latest-by-default, explicit pin validation, update CLI targets, and no-op/confirmation safety wiring.",
+      "tests/test_vm_update.py: mocked SSH regressions for no-op checks, non-interactive confirmation refusal, exact OpenCode version apply, --all guest OS/Docker path, invalid targets, and stopped-VM refusal.",
+      "tests/test_vm_update.py: interactive PTY cancellation confirms no package/config apply is sent after declining the prompt."
     ],
     "cases": [
       "2026-10-28 prerequisite feedback: real CachyOS guest boots and installs Docker packages but rootless installer fails on unloaded nf_tables. #41 now loads/persists the guest module and sets service drop-in before installer starts Docker; no rootful or --skip-iptables fallback. Agent CLI/daemon capability AC remain pending until live guest verification. Existing ./lab compose has GPU-local model dependencies, so running it unmodified inside CPU-only VM is not evidence of #42 completion.",
@@ -171,7 +174,9 @@
       "2026-10-30 local metrics fix: sampler now gathers hardware outside the shared HTTP/history lock, starts only after module initialization and socket bind, serves concurrent requests, returns fast health/readiness responses, and leaves `/metrics`/`/summary` warming up with 503 until a first sample is ready. Agent launch starts the shared host-native service and retries all three guestfwd endpoints for up to 30s before launching OpenCode. TUI polls have 3s timeouts and do not overlap. The focused metrics suite passes 7/7 and the complete VM Python suite passes 47/47. The owner-reported live guest reset is not yet retested; no live metrics/TUI acceptance is claimed.",
       "2026-10-30 clarification: metrics are optional to OpenCode launch. `vm_cmd_agent` starts the host service and attempts a bounded guestfwd preflight; if startup or forwarding fails, it warns but continues, while the TUI shows transport failure and retries with bounded, non-overlapping requests. This preserves the documented core-agent behavior while making metrics failures explicit. Live CachyOS metrics reset still needs owner-host retest.",
       "2026-10-30 local follow-up: fixed and independently syntax-checked the embedded preflight Python. Agent launch retains optional-metrics behavior: start the shared service and make a bounded 10s guestfwd readiness attempt; on failure, warn, disable this session's metrics URL, and still launch OpenCode. Local checks: complete VM Python suite 47/47, docs consistency 115/115, TUI JSX, Bash/Python syntax, and diff check pass; lab-vm self-tests 6 passed (QEMU/ISO unavailable in the self-test). No live guest/API/TUI retest or owner VM action was performed.",
-      "CORRECTION to the immediately preceding 2026-10-30 local follow-up: if host metrics service startup fails, the session gets a loopback-unavailable placeholder URL; if startup succeeds but the 10s guestfwd preflight fails, the session retains METRICS_URL=http://10.0.2.100:19532 so the TUI can report/retry that path. In both cases OpenCode launches. The embedded preflight Python syntax check and local suite results remain as recorded; no live guest retest was performed."
+      "CORRECTION to the immediately preceding 2026-10-30 local follow-up: if host metrics service startup fails, the session gets a loopback-unavailable placeholder URL; if startup succeeds but the 10s guestfwd preflight fails, the session retains METRICS_URL=http://10.0.2.100:19532 so the TUI can report/retry that path. In both cases OpenCode launches. The embedded preflight Python syntax check and local suite results remain as recorded; no live guest retest was performed.",
+      "Local 2026-10-30: Bats 117/117, Python unittest 56/56, docs checks 115/115, CI ShellCheck commands, Bash syntax, diff check, and ticket validation pass. Update behavior is mock-tested only; no KVM/guest package update or host acceptance was performed.",
+      "Final local verification 2026-10-30 after latest-by-default and resolved-version install changes: Bats 117/117, Python unittest 57/57, docs 115/115, CI ShellCheck commands, Bash syntax, diff check, ticket validation all pass. No live VM/KVM package update was run."
     ]
   },
   "priority": "major",

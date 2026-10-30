@@ -115,12 +115,21 @@ The `vm up` command:
 5. Starts the loopback egress proxy, virtiofsd, and QEMU with KVM (or TCG fallback)
 6. Waits for SSH to become available
 7. Confirms the guest Docker daemon is running rootless
-8. Installs the pinned OpenCode CLI and syncs its config/plugins into the guest OS (no agent container)
+8. Installs the latest OpenCode CLI on a fresh guest and syncs its config/plugins into the guest OS (no agent container). Existing guests keep their installed version on ordinary `up`.
 
 Optional Bats and ShellCheck packages are kept out of base provisioning. Install them into
 an already-running guest without reprovisioning by exiting the current TUI and running
 `./lab-vm install-tools --name <profile>`. Add `--restart-opencode` to start a fresh TUI
 after installation; `-v`/`-d` enable verbose/debug output. See [Testing](testing.md).
+
+To check for software changes in place, exit the OpenCode TUI and run `./lab-vm update`.
+It checks the OpenCode CLI, already-installed Bats/ShellCheck, and the guest's managed
+OpenCode config/plugins, then asks before applying anything. Choose one target such as
+`./lab-vm update opencode` or `./lab-vm update tools`; `./lab-vm update --all` also checks
+and upgrades guest OS packages (including the managed Docker Engine). Docker/OS upgrades
+are refused while guest containers are running. `--yes` explicitly skips confirmation.
+Updates preserve the VM overlay, base image, workspace, and guest auth database. To pin a
+version for a fresh install or a later `up`, set `VM_OPENCODE_VERSION` to a semantic version.
 
 **CPU-only hosts:** The same command works. You'll see:
 

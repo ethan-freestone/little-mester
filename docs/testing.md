@@ -152,6 +152,10 @@ isolation because its containers, networks, and volumes are shared with other wo
   Exit the current TUI first, then add `--restart-opencode` to launch a fresh guest TUI after
   installation. Checking those commands in the separate OpenCode execution runner does not
   establish whether they exist in the guest.
+- `./lab-vm update` checks OpenCode, installed validation tools, and the guest config/plugins,
+  then requests confirmation before applying changes. Use a target (for example `opencode`)
+  to narrow the update; `--all` additionally upgrades guest OS packages and the managed Docker
+  Engine. Updates happen in place and do not recreate the VM/base disk or replace guest auth.
 - Fresh provisioning is one documented runbook: install Docker (and the NVIDIA toolkit
   when GPU-enabled), clone the repo, build the agent image, then run `./verify-lab.sh`.
   A CPU-only host is supported; GPU tooling is optional.
