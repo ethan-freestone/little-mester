@@ -139,6 +139,120 @@ PY
   return 0
 }
 
+# Automatic recovery is deliberately limited to the Compose forwarder created
+# by this repository and a stopped/missing backend from the same Compose
+# project. Never replace an arbitrary listener or restart a backend that is
+# already running but unhealthy.
+_vm_model_compose_container_id() {
+  local service="$1" container_id
+  container_id="$(vm_model_compose ps -a -q "$service" 2>/dev/null)" || return 1
+  [[ "$container_id" != *$'\n'* && "$container_id" != *' '* ]] || return 1
+  printf '%s' "$container_id"
+}
+
+_vm_managed_model_container_project() {
+  local inspect_json="$1" expected_service="$2" expected_state="$3" expected_port="${4:-}"
+  python3 - "$inspect_json" "$expected_service" "$expected_state" "$expected_port" <<'PY'
+import json
+import sys
+
+try:
+    obj = json.loads(sys.argv[1])
+    expected_service, expected_state, expected_port = sys.argv[2:]
+    labels = obj["Config"]["Labels"]
+    state = obj["State"]["Status"]
+    project = labels["com.docker.compose.project"]
+    service = labels["com.docker.compose.service"]
+except (KeyError, TypeError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+if not project or service != expected_service or state != expected_state:
+    raise SystemExit(1)
+
+if expected_port:
+    try:
+        bindings = obj["NetworkSettings"]["Ports"][f"{expected_port}/tcp"]
+    except (KeyError, TypeError):
+        raise SystemExit(1)
+    if bindings != [{"HostIp": "127.0.0.1", "HostPort": expected_port}]:
+        raise SystemExit(1)
+
+print(project)
+PY
+}
+
+_vm_model_forwarder_recovery_allowed() {
+  local provider="$1" service="$2" port backend api_id backend_id api_json backend_json
+  case "$provider" in
+    ollama) port=11434; backend=ollama ;;
+    llamacpp|llama) port=8080; backend=llamacpp ;;
+    *) return 1 ;;
+  esac
+
+  _vm_check_docker
+  vm_model_compose config -q || {
+    log "Cannot automatically recover $provider: the model Compose configuration did not validate."
+    return 1
+  }
+  _vm_validate_api_publish_config "$service" 127.0.0.1 "$port" || return 1
+
+  api_id="$(_vm_model_compose_container_id "$service")" || {
+    log "Cannot automatically recover $provider: could not identify one Compose forwarder container."
+    return 1
+  }
+  if [[ -z "$api_id" ]]; then
+    log "Cannot automatically recover $provider: the unhealthy listener is not backed by a known Compose forwarder."
+    return 1
+  fi
+  api_json="$(docker inspect --format '{{json .}}' "$api_id" 2>/dev/null)" || {
+    log "Cannot automatically recover $provider: Docker could not inspect the Compose forwarder."
+    return 1
+  }
+  local api_project
+  api_project="$(_vm_managed_model_container_project "$api_json" "$service" running "$port")" || {
+    log "Cannot automatically recover $provider: the forwarder is not a running, correctly published container for service $service."
+    return 1
+  }
+
+  backend_id="$(_vm_model_compose_container_id "$backend")" || {
+    log "Cannot automatically recover $provider: could not inspect the Compose backend service."
+    return 1
+  }
+  if [[ -z "$backend_id" ]]; then
+    log "$provider backend container is absent; Compose may create the configured dependency."
+    return 0
+  fi
+  backend_json="$(docker inspect --format '{{json .}}' "$backend_id" 2>/dev/null)" || {
+    log "Cannot automatically recover $provider: Docker could not inspect its backend container."
+    return 1
+  }
+
+  local backend_project backend_state
+  backend_state="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("State", {}).get("Status", "unknown"))' "$backend_json")" || backend_state=unknown
+  backend_project="$(_vm_managed_model_container_project "$backend_json" "$backend" "$backend_state")" || {
+    log "Cannot automatically recover $provider: backend container ownership could not be verified."
+    return 1
+  }
+  [[ "$backend_project" == "$api_project" ]] || {
+    log "Cannot automatically recover $provider: forwarder and backend belong to different Compose projects."
+    return 1
+  }
+  case "$backend_state" in
+    exited|dead|created)
+      log "$provider backend is $backend_state; attempting its Compose health-gated recovery."
+      return 0
+      ;;
+    running)
+      log "Cannot automatically recover $provider: backend is running but the API health check failed."
+      return 1
+      ;;
+    *)
+      log "Cannot automatically recover $provider: backend state '$backend_state' is not a verified stopped state."
+      return 1
+      ;;
+  esac
+}
+
 _vm_metrics_state_dir() {
   printf '%s\n' "$LAB_DIR/.mester/vm-services/metrics"
 }
@@ -267,6 +381,18 @@ vm_cmd_models() {
   local -a services_to_start=()
 
   case "$action" in
+    ensure)
+      (($# <= 1)) || die "Usage: ./lab-vm models ensure [default|ollama|llamacpp]"
+      if [[ $# -eq 0 || "$1" == default ]]; then
+        provider="$(_vm_default_model_provider)" || die 'Could not determine the configured local model provider.'
+      else
+        provider="$1"
+      fi
+      case "$provider" in
+        llama|llamacpp|ollama) vm_cmd_models up "$provider" ;;
+        *) die "Usage: ./lab-vm models ensure [default|ollama|llamacpp]" ;;
+      esac
+      ;;
     up)
       if [[ $# -eq 0 || "$1" == default ]]; then
         provider="$(_vm_default_model_provider)"
@@ -291,6 +417,10 @@ vm_cmd_models() {
           probe_status=$?
           case "$probe_status" in
             1) services_to_start+=("$service") ;;
+            3)
+              _vm_model_forwarder_recovery_allowed "$provider" "$service" || die "Refusing automatic recovery of $provider: the unhealthy loopback listener is not a verified managed forwarder with a stopped backend."
+              services_to_start+=("$service")
+              ;;
             *) die "Refusing to start a model forwarder while the existing $provider endpoint cannot be verified safely." ;;
           esac
         fi
@@ -408,7 +538,7 @@ PY
       log "Stopped only VM model API Compose services; model containers and VM were left running."
       ;;
     *)
-      die "Usage: ./lab-vm models {up [default|ollama|llamacpp|all]|status [default|ollama|llamacpp|all]|down}"
+      die "Usage: ./lab-vm models {ensure [default|ollama|llamacpp]|up [default|ollama|llamacpp|all]|status [default|ollama|llamacpp|all]|down}"
       ;;
   esac
 }

@@ -35,7 +35,7 @@
 #   ./lab-vm install-tools [name] [--restart-opencode]
 #   ./lab-vm update [opencode|config|tools|docker|system ...] [--name <profile>]
 #   ./lab-vm update --all [--name <profile>]
-#   ./lab-vm models {up|status|down} [provider]
+#   ./lab-vm models {ensure|up|status|down} [provider]
 #   ./lab-vm extra <temporary-command> [args...]
 #
 # Epic #35 | Sub-ticket #41
@@ -159,6 +159,10 @@ Daily workspace launch (keeps one VM and mounts one workspace at a time):
       --name selects an isolated VM profile (useful for disposable tests).
 
 VM lifecycle commands (epic #35, ticket #41):
+
+  ./lab-vm models ensure [default|ollama|llamacpp]
+      Ensure the configured host model API is healthy. The run/agent launch
+      does this automatically before opening OpenCode (except browser-auth-only).
 
   ./lab-vm up [name] [--workspace <path>]
       Provision/start the VM for diagnostics; does not launch OpenCode.

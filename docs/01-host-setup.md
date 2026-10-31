@@ -59,7 +59,7 @@ sudo usermod -aG kvm $(whoami)
 
 ### 1.4 Optional model service (host-side)
 
-An OpenAI-compatible Ollama or llama.cpp service may run natively on the host and listen on `127.0.0.1`. The target design treats it as an optional, user-configured endpoint, reached through one narrow QEMU `guestfwd` mapping—not a required host Docker service or a LAN-published port. `./lab-vm models up/status` uses a healthy loopback endpoint directly; if none is running, `models up` can fall back to the experimental Compose forwarder. No firewall, route, NAT, or host daemon changes are an acceptable prerequisite.
+An OpenAI-compatible Ollama or llama.cpp service may run natively on the host and listen on `127.0.0.1`. The target design treats it as an optional, user-configured endpoint, reached through one narrow QEMU `guestfwd` mapping—not a required host Docker service or a LAN-published port. `./lab-vm models up/status/ensure` uses a healthy loopback endpoint directly; if none is running, `models up` can fall back to the experimental Compose forwarder. Normal `run`/`agent` launches automatically ensure the selected model API before OpenCode starts; recovery only starts a verified Compose backend when stopped, and fails closed for unknown or unhealthy-running services. No firewall, route, NAT, or host daemon changes are an acceptable prerequisite.
 
 ```bash
 # Example: run ollama on host

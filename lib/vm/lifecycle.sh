@@ -967,6 +967,8 @@ vm_cmd_agent() {
     *) die "OpenCode model provider '$model_provider' has no configured VM host forwarder." ;;
   esac
   if [[ "${VM_AGENT_SKIP_MODEL_PROBE:-0}" != 1 ]]; then
+    log_verbose "Ensuring the host model service for provider $model_provider."
+    vm_cmd_models ensure "$model_provider" || die "Could not ensure the host model API for $model_provider; OpenCode was not launched."
     log_verbose "Checking $model_provider API reachability from the guest at $model_url."
     probe_options="--fail --silent --show-error"
     if [[ "$VM_DEBUG" -ge 1 ]]; then

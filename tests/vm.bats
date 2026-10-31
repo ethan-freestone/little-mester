@@ -439,10 +439,12 @@ PY
 @test "guest agent preflights the selected local model forwarder before OpenCode" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   body="$(declare -f vm_cmd_agent)"
+  local ensure_line probe_line
   [[ "$body" == *'http://10.0.2.100:8080/health'* ]]
   [[ "$body" == *'http://10.0.2.100:11434/api/tags'* ]]
   [[ "$body" == *'curl --noproxy 10.0.2.100'* ]]
   [[ "$body" == *'vm_cmd_metrics up'* ]]
+  [[ "$body" == *'vm_cmd_models ensure "$model_provider"'* ]]
   [[ "$body" == *'_vm_guest_metrics_preflight "$vm_dir"'* ]]
   [[ "$body" == *'OpenCode will start and the TUI will report/retry'* ]]
   [[ "$body" == *'python3 -c'* ]]
@@ -454,6 +456,10 @@ PY
   [[ "$body" == *'Guest model probe: $probe_command'* ]]
   [[ "$body" == *'--verbose --http1.1'* ]]
   [[ "$body" == *'Guest model probe failed after ${elapsed}s'* ]]
+  ensure_line="$(grep -nF 'vm_cmd_models ensure "$model_provider"' <<<"$body" | cut -d: -f1)"
+  probe_line="$(grep -nF 'curl --noproxy 10.0.2.100' <<<"$body" | cut -d: -f1)"
+  [ "$ensure_line" -lt "$probe_line" ]
+  [[ "$body" == *'if [[ "${VM_AGENT_SKIP_MODEL_PROBE:-0}" != 1 ]]; then'*'vm_cmd_models ensure "$model_provider"'*'else'*'Skipping model API health probe for the browser-only authentication flow.'* ]]
 }
 
 @test "guest agent remote command preserves CLI JSON quotes and TUI plugin wiring" {
@@ -528,6 +534,22 @@ JSON
   [[ "$output" == *'no model forwarder was started'* ]]
 }
 
+@test "models ensure is idempotent for a healthy native endpoint" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
+  curl() { return 0; }
+  docker() { echo 'Docker must not be queried for a healthy host API' >&2; return 1; }
+  vm_model_compose() { echo 'Compose must not be called for a healthy host API' >&2; return 1; }
+
+  run vm_cmd_models ensure
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'llama.cpp API is healthy on host loopback 127.0.0.1:8080.'* ]]
+  [[ "$output" == *'no model forwarder was started'* ]]
+}
+
 @test "lab-vm models up accepts a loopback Ollama API without Docker" {
   source "$REPO_ROOT/lib/vm/host-services.sh"
   LAB_DIR="$REPO_ROOT"
@@ -559,20 +581,131 @@ JSON
   [[ "$output" == *'cannot be verified safely'* ]]
 }
 
-@test "lab-vm models up refuses an unhealthy loopback listener without replacing it" {
+@test "lab-vm models up refuses an unhealthy loopback listener not owned by the model Compose service" {
   source "$REPO_ROOT/lib/vm/host-services.sh"
   LAB_DIR="$REPO_ROOT"
   log() { echo "$*"; }
   die() { echo "REFUSED: $*" >&2; exit 1; }
   ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
   curl() { return 7; }
-  docker() { echo 'Docker must not be queried for an unhealthy occupied API' >&2; return 1; }
-  vm_model_compose() { echo 'Compose must not replace the existing listener' >&2; return 1; }
+  docker() { [[ "$*" == info* ]]; }
+  vm_model_compose() {
+    case "$*" in
+      'config --format json')
+        echo '{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"127.0.0.1"}]}}}'
+        ;;
+      'config -q') return 0 ;;
+      'ps -a -q llamacpp-vm-api') echo '' ;;
+      *) echo "unexpected Compose mutation: $*" >&2; return 1 ;;
+    esac
+  }
 
   run vm_cmd_models up
   [ "$status" -ne 0 ]
   [[ "$output" == *'listening on 127.0.0.1:8080 but its /health health check failed'* ]]
-  [[ "$output" == *'cannot be verified safely'* ]]
+  [[ "$output" == *'Refusing automatic recovery'* ]]
+}
+
+@test "lab-vm models up recovers only a verified managed forwarder with a stopped backend" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
+  curl() { [[ "${MODEL_COMPOSE_STARTED:-0}" == 1 ]]; }
+  docker() {
+    case "$*" in
+      info*) return 0 ;;
+      'inspect --format {{json .}} api-container')
+        echo '{"Config":{"Labels":{"com.docker.compose.service":"llamacpp-vm-api","com.docker.compose.project":"little-mester"}},"State":{"Status":"running"},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}}}'
+        ;;
+      'inspect --format {{json .}} backend-container')
+        echo '{"Config":{"Labels":{"com.docker.compose.service":"llamacpp","com.docker.compose.project":"little-mester"}},"State":{"Status":"exited"},"NetworkSettings":{"Ports":{}}}'
+        ;;
+      *) echo "unexpected docker call: $*" >&2; return 1 ;;
+    esac
+  }
+  vm_model_compose() {
+    case "$*" in
+      'config --format json')
+        echo '{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"127.0.0.1"}]}}}'
+        ;;
+      'config -q') return 0 ;;
+      'ps -a -q llamacpp-vm-api') echo api-container ;;
+      'ps -a -q llamacpp') echo backend-container ;;
+      'up -d llamacpp-vm-api') MODEL_COMPOSE_STARTED=1; echo 'compose started selected model stack' ;;
+      *) echo "unexpected compose call: $*" >&2; return 1 ;;
+    esac
+  }
+
+  run vm_cmd_models up llamacpp
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'compose started selected model stack'* ]]
+  [[ "$output" == *'reachable through Docker loopback-only published ports'* ]]
+}
+
+@test "model recovery refuses an unowned or unverifiable unhealthy listener" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
+  curl() { return 7; }
+  docker() { return 0; }
+  local calls="$BATS_TEST_TMPDIR/model-recovery-calls"
+  vm_model_compose() {
+    printf '%s\n' "$*" >>"$calls"
+    case "$*" in
+      'config --format json')
+        echo '{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"127.0.0.1"}]}}}'
+        ;;
+      'ps -a -q llamacpp-vm-api') echo '' ;;
+      *) return 0 ;;
+    esac
+  }
+
+  run vm_cmd_models up llamacpp
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Refusing automatic recovery'* ]]
+  ! grep -Fq 'up -d' "$calls"
+}
+
+@test "model recovery refuses a running but unhealthy backend" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
+  curl() { [[ "${MODEL_COMPOSE_STARTED:-0}" == 1 ]]; }
+  docker() {
+    case "$*" in
+      info*) return 0 ;;
+      'inspect --format {{json .}} api-container')
+        echo '{"Config":{"Labels":{"com.docker.compose.service":"llamacpp-vm-api","com.docker.compose.project":"little-mester"}},"State":{"Status":"running"},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}}}'
+        ;;
+      'inspect --format {{json .}} backend-container')
+        echo '{"Config":{"Labels":{"com.docker.compose.service":"llamacpp","com.docker.compose.project":"little-mester"}},"State":{"Status":"running"},"NetworkSettings":{"Ports":{}}}'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  vm_model_compose() {
+    case "$*" in
+      'config --format json')
+        echo '{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"127.0.0.1"}]}}}'
+        ;;
+      'config -q') return 0 ;;
+      'ps -a -q llamacpp-vm-api') echo api-container ;;
+      'ps -a -q llamacpp') echo backend-container ;;
+      'up -d llamacpp-vm-api') MODEL_COMPOSE_STARTED=1; echo unexpected-start ;;
+      *) return 1 ;;
+    esac
+  }
+
+  run vm_cmd_models up llamacpp
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'backend is running'* ]]
+  [[ "$output" != *'unexpected-start'* ]]
 }
 
 @test "lab-vm models up refuses Compose fallback when host listener inspection fails" {

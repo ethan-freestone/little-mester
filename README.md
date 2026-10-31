@@ -201,6 +201,7 @@ host-network changes are permitted to make it work. Manage the current host-to-g
 
 ```bash
     ./lab-vm models up          # configured local model API forwarder
+    ./lab-vm models ensure      # idempotent health/recovery check used by run/agent
     ./lab-vm metrics up         # separate host-native VM metrics endpoint
     ./lab-vm models status      # checks the configured provider; exits nonzero if unavailable
     ./lab-vm -d models diagnose # detailed, read-only host/model-path evidence
@@ -258,7 +259,7 @@ public-web policy does not expose host services or permit non-HTTP protocols. A 
 proxy must be refreshed with `./lab-vm egress-reload` after the manifest change; live host
 isolation and public-workflow acceptance remain separate gates.
 
-`models up` selects the provider in `agent/opencode/opencode.json` by default; choose
+`models up` and `models ensure` select the provider in `agent/opencode/opencode.json` by default; choose
 `ollama`, `llamacpp`, or `all` explicitly when needed. It first uses an already-running,
 healthy API bound only to host `127.0.0.1`; this path does not require Docker. Ollama uses
 `127.0.0.1:11434`; a native llama.cpp server must use `--host 127.0.0.1 --port 8080` so it
@@ -268,6 +269,13 @@ checks only the configured provider by default, or a selected provider with
 `models status ollama|llamacpp|all`; it verifies the host listener is loopback-only and its
 health endpoint responds. If no native endpoint is available, it also checks the Compose
 forwarder and exits nonzero if it is missing, unhealthy, incorrectly bound, or unreachable.
+`./lab-vm run` and `./lab-vm agent` run `models ensure` before launching OpenCode: if the
+configured API is already healthy they leave it alone; if its loopback listener is the verified
+Compose forwarder and its backend is stopped, they start that selected Compose dependency and
+wait for the health-gated API. Unknown listeners and running-but-unhealthy backends fail closed.
+This is on-demand, not a boot-time GPU service; the first normal `run`/`agent` after host startup
+performs recovery automatically. The browser-auth-only launch skips model startup so auth can be
+completed without loading a model.
 Use `./lab-vm -d models diagnose` for read-only, Docker-specific layer-by-layer evidence.
 That command records resolved Compose ports, Docker context/daemon mode, container bindings and
 network attachments and internal-network settings, `docker port`, allowlisted Docker daemon
