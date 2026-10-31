@@ -69,16 +69,21 @@ log_debug "Requested OpenCode version: $version"
 # pgrep -f matches background OpenCode servers and other commands containing
 # the CLI name. Inspect the guest's process table instead and block only an
 # OpenCode CLI attached to a terminal (the interactive TUI).
-if vm_ssh "$vm_dir" "sudo python3 -" <"$LAB_DIR/scripts/vm-opencode-tui-check.py"; then
-  :
+if tui_check_output="$(vm_ssh "$vm_dir" "sudo python3 -" <"$LAB_DIR/scripts/vm-opencode-tui-check.py")"; then
+  printf '%s\n' "$tui_check_output"
 else
   check_status=$?
+  printf '%s\n' "$tui_check_output"
+  if [[ "$tui_check_output" != *'OpenCode TUI is running in guest process'* ]]; then
+    echo "ERROR: Could not verify guest OpenCode TUI state (SSH/guest status $check_status); no updates were checked or applied." >&2
+  fi
   exit "$check_status"
 fi
 
+echo "Checking guest update availability for targets: ${targets[*]}"
 remote_args=("$config_hash" "$version" "${targets[@]}")
 printf -v remote_args_quoted '%q ' "${remote_args[@]}"
-check_output="$(vm_ssh "$vm_dir" "sudo bash -s -- ${remote_args_quoted% }" <<'GUEST_UPDATE_CHECK'
+if check_output="$(vm_ssh "$vm_dir" "sudo bash -s -- ${remote_args_quoted% }" <<'GUEST_UPDATE_CHECK'
 set -euo pipefail
 desired_config_hash="$1"
 requested_opencode_version="$2"
@@ -180,7 +185,13 @@ if has_target docker || has_target system; then
   fi
 fi
 GUEST_UPDATE_CHECK
-)" || exit $?
+)"; then
+  :
+else
+  check_status=$?
+  echo "ERROR: Guest update availability check failed (SSH/guest status $check_status); no updates were applied." >&2
+  exit "$check_status"
+fi
 
 if [[ -z "$check_output" ]]; then
   echo 'No update information was returned by the guest.' >&2

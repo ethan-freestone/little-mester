@@ -43,6 +43,9 @@ class VmUpdateTests(unittest.TestCase):
             "        raise SystemExit(int(os.environ.get('SSH_TUI_STATUS', '3')))\n"
             "elif 'requested_opencode_version' in latest['stdin']:\n"
             "    print(os.environ.get('SSH_CHECK_OUTPUT', 'CURRENT OpenCode CLI 2.2.0'))\n"
+            "    status = int(os.environ.get('SSH_CHECK_STATUS', '0'))\n"
+            "    if status:\n"
+            "        raise SystemExit(status)\n"
             "else:\n"
             "    print('mock guest update applied')\n"
         )
@@ -78,6 +81,7 @@ class VmUpdateTests(unittest.TestCase):
         result = self.run_updater(check_output="CURRENT OpenCode CLI 2.2.0")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("No updates available", result.stdout)
+        self.assertIn("Checking guest update availability", result.stdout)
         calls = self.ssh_calls()
         self.assertEqual(len(calls), 2)
         self.assertIn("find_interactive_tui", calls[0]["stdin"])
@@ -174,6 +178,40 @@ class VmUpdateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertEqual(len(self.ssh_calls()), 1)
         self.assertIn("find_interactive_tui", self.ssh_calls()[0]["stdin"])
+
+    def test_failed_tui_preflight_reports_ssh_failure_and_skips_update_check(self):
+        env = self.env.copy()
+        env["SSH_TUI_FAIL_ON_CALL"] = "1"
+        env["SSH_TUI_STATUS"] = "255"
+        result = subprocess.run(
+            ["bash", str(UPDATER), "test-profile", "config"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 255)
+        self.assertIn("No interactive OpenCode TUI is attached", result.stdout)
+        self.assertIn("Could not verify guest OpenCode TUI state", result.stderr)
+        self.assertIn("status 255", result.stderr)
+        self.assertEqual(len(self.ssh_calls()), 1)
+
+    def test_failed_guest_update_check_reports_ssh_status_and_applies_nothing(self):
+        env = self.env.copy()
+        env["SSH_CHECK_STATUS"] = "255"
+        result = subprocess.run(
+            ["bash", str(UPDATER), "test-profile", "config"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 255)
+        self.assertIn("Checking guest update availability", result.stdout)
+        self.assertIn("Guest update availability check failed", result.stderr)
+        self.assertIn("status 255", result.stderr)
+        self.assertNotIn("mock guest update applied", result.stdout)
+        self.assertEqual(len(self.ssh_calls()), 2)
 
     def test_update_rechecks_for_a_tui_immediately_before_applying(self):
         env = self.env.copy()
