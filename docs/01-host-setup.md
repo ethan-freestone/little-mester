@@ -59,15 +59,21 @@ sudo usermod -aG kvm $(whoami)
 
 ### 1.4 Optional model service (host-side)
 
-An OpenAI-compatible Ollama or llama.cpp service may run natively on the host and listen on loopback. The target design treats it as an optional, user-configured endpoint, reached through one narrow QEMU `guestfwd` mapping—not a required host Docker service or a LAN-published port. The current experimental management command still starts Compose forwarders and is not yet the portable setup path. No firewall, route, NAT, or host daemon changes are an acceptable prerequisite.
+An OpenAI-compatible Ollama or llama.cpp service may run natively on the host and listen on `127.0.0.1`. The target design treats it as an optional, user-configured endpoint, reached through one narrow QEMU `guestfwd` mapping—not a required host Docker service or a LAN-published port. `./lab-vm models up/status` uses a healthy loopback endpoint directly; if none is running, `models up` can fall back to the experimental Compose forwarder. No firewall, route, NAT, or host daemon changes are an acceptable prerequisite.
 
 ```bash
 # Example: run ollama on host
-ollama serve &
+OLLAMA_HOST=127.0.0.1:11434 ollama serve &
 
 # Example: run llama.cpp on host
-./llama-server -m models/your-model.gguf -p 8080
+./llama-server -m models/your-model.gguf --host 127.0.0.1 --port 8080 \
+  --alias qwen3.6-35b-a3b-q4_k_m
 ```
+
+The selected provider/model must match `agent/opencode/opencode.json`. The VM agent reaches
+these endpoints only through the existing QEMU loopback guest forwards; it does not gain a
+general host route. `models status` checks the host listener and its health endpoint, not an
+actual model completion, which remains a separate acceptance test.
 
 ### 1.5 Verify QEMU works
 

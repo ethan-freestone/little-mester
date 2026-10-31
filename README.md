@@ -174,7 +174,7 @@ not implemented yet.
    shell to return to the host without stopping the VM. Do **not** run `./lab-vm agent` on a
    workspace the host-Docker agent is actively editing: both would write the same files.
    Also avoid `--clean`, `./lab-vm stop`, `down`, or `rebuild`; those can destroy the VM's
-   overlay/state. The VM's model forwarding is currently failing on the tested host, so
+   overlay/state. Local-model forwarding is currently failing on the tested host, so
    starting the VM is useful for debugging but does not make its agent ready for normal work.
 
    To inspect that known model-path failure without changing host networking, use a separate
@@ -187,21 +187,22 @@ not implemented yet.
 ### VM acceptance-test workflow (direct guest agent)
 
 This is for acceptance testing only—not normal work—while browser auth, permission, workload,
-and safe-lifecycle gates remain open. The owner has verified guest model completion, metrics,
-and exit confirmation on CachyOS. It runs OpenCode as a native guest process (not in an
+and safe-lifecycle gates remain open. A one-off guest completion does not meet the still-open
+repeated-stream acceptance; local-model failures have also been reported. Metrics TUI and dialog
+rendering remain open. It runs OpenCode as a native guest process (not in an
 agent container). **Current support is an experimental Linux x86_64/QEMU profile**, not a
 claim of support for every Unix. Guest Docker/Compose is for project workloads; the VM does
 not expose or share the host Docker socket. VM metrics are being developed separately from
 the existing host-Docker metrics path; neither path should be removed until both modes have
-verified coverage. The optional model path is not yet portable:
-`models up` currently uses the host Compose installation, which is explicitly not the target
-architecture. No firewall or host-network changes are permitted to make it work. Manage the
-current experimental host-to-guest path through `lab-vm`:
+verified coverage. Local models can use a user-managed API bound to host loopback; the optional
+Compose forwarder remains an experimental, host-Docker-dependent convenience. No firewall or
+host-network changes are permitted to make it work. Manage the current host-to-guest path through
+`lab-vm`:
 
 ```bash
     ./lab-vm models up          # configured local model API forwarder
     ./lab-vm metrics up         # separate host-native VM metrics endpoint
-    ./lab-vm models status      # concise state and host reachability summary
+    ./lab-vm models status      # checks the configured provider; exits nonzero if unavailable
     ./lab-vm -d models diagnose # detailed, read-only host/model-path evidence
     ./lab-vm -d models diagnose --probe-egress llamacpp # explicit TCP egress probe
     ./lab-vm verify-isolation   # inspect live QEMU config and probe from inside the guest
@@ -258,11 +259,16 @@ proxy must be refreshed with `./lab-vm egress-reload` after the manifest change;
 isolation and public-workflow acceptance remain separate gates.
 
 `models up` selects the provider in `agent/opencode/opencode.json` by default; choose
-`ollama`, `llamacpp`, or `all` explicitly when needed. It starts only the selected Compose
-model API forwarders, whose ports are published by Docker on `127.0.0.1` only. It verifies
-actual host HTTP reachability instead of trusting Compose/inspect port metadata. `models status`
-summarizes whether each running forwarder has an active host port mapping and responds on
-loopback. If it does not, run `./lab-vm -d models diagnose` before collecting ad-hoc evidence.
+`ollama`, `llamacpp`, or `all` explicitly when needed. It first uses an already-running,
+healthy API bound only to host `127.0.0.1`; this path does not require Docker. Ollama uses
+`127.0.0.1:11434`; a native llama.cpp server must use `--host 127.0.0.1 --port 8080` so it
+matches the reviewed QEMU forward. If no host API is listening, `models up` can start the
+optional Compose API forwarder, whose publication must remain loopback-only. `models status`
+checks only the configured provider by default, or a selected provider with
+`models status ollama|llamacpp|all`; it verifies the host listener is loopback-only and its
+health endpoint responds. If no native endpoint is available, it also checks the Compose
+forwarder and exits nonzero if it is missing, unhealthy, incorrectly bound, or unreachable.
+Use `./lab-vm -d models diagnose` for read-only, Docker-specific layer-by-layer evidence.
 That command records resolved Compose ports, Docker context/daemon mode, container bindings and
 network attachments and internal-network settings, `docker port`, allowlisted Docker daemon
 publication settings, relevant host listeners and NAT/firewall publication rules, loopback HTTP

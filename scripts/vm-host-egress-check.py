@@ -8,7 +8,6 @@ import socket
 import sys
 from pathlib import Path
 
-
 PROXY_PATH = Path(__file__).parents[1] / "lib" / "vm" / "proxy.py"
 SPEC = importlib.util.spec_from_file_location("vm_proxy", PROXY_PATH)
 proxy = importlib.util.module_from_spec(SPEC)

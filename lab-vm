@@ -220,8 +220,9 @@ VM lifecycle commands (epic #35, ticket #41):
        Start selected Compose model API forwarders published on loopback; verify host HTTP.
        Default selects the provider configured in agent/opencode/opencode.json.
 
-  ./lab-vm models status
-      Concise forwarder state and host loopback reachability summary.
+  ./lab-vm models status [default|ollama|llamacpp|all]
+      Check the configured provider (or selected providers) and fail if its
+      forwarder is absent, not loopback-published, or unreachable.
 
   ./lab-vm [-v|-d] models diagnose [--sudo] [--probe-egress] [ollama|llamacpp|all]
       Collect detailed, read-only Docker/model forwarding diagnostics.

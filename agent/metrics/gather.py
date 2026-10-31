@@ -165,7 +165,7 @@ def _sampler():
     while True:
         try:
             _sample_once()
-        except Exception as exc:  # keep serving the last good snapshot
+        except Exception as exc:  # noqa: BLE001 - keep serving the last good snapshot
             print(f"[metrics-sidecar] sample failed ({type(exc).__name__})", file=sys.stderr)
         time.sleep(0.5)
 

@@ -60,10 +60,21 @@ config_hash="$(
   find opencode.json plugins -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
 )" || die 'Could not hash the local OpenCode configuration/plugins.'
 [[ "$config_hash" =~ ^[a-f0-9]{64}$ ]] || die 'Generated an invalid OpenCode config hash.'
+[[ -f "$LAB_DIR/scripts/vm-opencode-tui-check.py" ]] || die 'Guest OpenCode process-check helper is missing.'
 
 log_verbose "VM profile directory: $vm_dir"
 log_verbose "Checking targets: ${targets[*]}"
 log_debug "Requested OpenCode version: $version"
+
+# pgrep -f matches background OpenCode servers and other commands containing
+# the CLI name. Inspect the guest's process table instead and block only an
+# OpenCode CLI attached to a terminal (the interactive TUI).
+if vm_ssh "$vm_dir" "sudo python3 -" <"$LAB_DIR/scripts/vm-opencode-tui-check.py"; then
+  :
+else
+  check_status=$?
+  exit "$check_status"
+fi
 
 remote_args=("$config_hash" "$version" "${targets[@]}")
 printf -v remote_args_quoted '%q ' "${remote_args[@]}"
@@ -81,18 +92,6 @@ has_target() {
 }
 
 . /etc/profile.d/mester.sh
-
-command -v pgrep >/dev/null 2>&1 || { echo 'REFUSED: pgrep is unavailable; cannot verify whether OpenCode is active.' >&2; exit 3; }
-if pgrep -u mester -f '[o]pencode' >/dev/null 2>&1; then
-  echo 'REFUSED: OpenCode is running in the guest. Exit the TUI before updating.' >&2
-  exit 3
-else
-  pgrep_status=$?
-  if (( pgrep_status != 1 )); then
-    echo 'REFUSED: could not verify whether OpenCode is active.' >&2
-    exit 3
-  fi
-fi
 
 needs_apt=0
 for target in "${targets[@]}"; do
@@ -239,6 +238,12 @@ fi
 apply_args=("$apply_version" "${apply_targets[@]}")
 printf -v apply_args_quoted '%q ' "${apply_args[@]}"
 if ((${#apply_targets[@]})); then
+  if vm_ssh "$vm_dir" "sudo python3 -" <"$LAB_DIR/scripts/vm-opencode-tui-check.py"; then
+    :
+  else
+    check_status=$?
+    exit "$check_status"
+  fi
   vm_ssh "$vm_dir" "sudo bash -s -- ${apply_args_quoted% }" <<'GUEST_UPDATE_APPLY'
 set -euo pipefail
 requested_opencode_version="$1"

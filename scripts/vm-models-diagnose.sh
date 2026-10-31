@@ -155,6 +155,15 @@ for spec in "${services[@]}"; do
   container="$(compose ps -a -q "$service" 2>/dev/null | head -n 1)"
   if [[ -z "$container" ]]; then
     echo 'Forwarder container: not present (diagnostic did not start it).'
+    backend_id="$(compose ps -a -q "$backend" 2>/dev/null | head -n 1)"
+    if [[ -z "$backend_id" ]]; then
+      echo "Backend $backend: container not present (not started)."
+    else
+      backend_info="$(docker inspect --format 'backend={{.Name}} state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$backend_id" 2>&1)" || status=1
+      printf '%s\n' "$backend_info"
+      if [[ "$backend_info" != *'state=running'* || "$backend_info" == *'health=unhealthy'* ]]; then status=1; fi
+    fi
+    status=1
     continue
   fi
 

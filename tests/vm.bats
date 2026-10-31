@@ -502,6 +502,7 @@ PY
 JSON
     else printf 'compose:%s\n' "$*"; fi
   }
+  ss() { :; }
   curl() { return 0; }
   run vm_cmd_models up
   [ "$status" -eq 0 ]
@@ -509,6 +510,85 @@ JSON
   [[ "$output" == *'compose:up -d llamacpp-vm-api'* ]]
   [[ "$output" == *'127.0.0.1:8080'* ]]
   [[ "$output" == *'reachable through Docker loopback-only published ports'* ]]
+}
+
+@test "lab-vm models up accepts a healthy user-managed loopback API without Docker" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
+  curl() { return 0; }
+  docker() { echo 'Docker must not be queried for a healthy host API' >&2; return 1; }
+  vm_model_compose() { echo 'Compose must not be called for a healthy host API' >&2; return 1; }
+
+  run vm_cmd_models up
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'llama.cpp API is healthy on host loopback 127.0.0.1:8080.'* ]]
+  [[ "$output" == *'no model forwarder was started'* ]]
+}
+
+@test "lab-vm models up accepts a loopback Ollama API without Docker" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:11434 0.0.0.0:*'; }
+  curl() { [[ "$*" == *'/api/tags' ]] ; }
+  docker() { echo 'Docker must not be queried for a healthy host API' >&2; return 1; }
+  vm_model_compose() { echo 'Compose must not be called for a healthy host API' >&2; return 1; }
+
+  run vm_cmd_models up ollama
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'Ollama API is healthy on host loopback 127.0.0.1:11434.'* ]]
+}
+
+@test "lab-vm models up refuses a non-loopback native model listener" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:*'; }
+  curl() { return 0; }
+  docker() { return 1; }
+  vm_model_compose() { echo 'Compose must not be called for an unsafe listener' >&2; return 1; }
+
+  run vm_cmd_models up
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'not loopback-only'* ]]
+  [[ "$output" == *'cannot be verified safely'* ]]
+}
+
+@test "lab-vm models up refuses an unhealthy loopback listener without replacing it" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
+  curl() { return 7; }
+  docker() { echo 'Docker must not be queried for an unhealthy occupied API' >&2; return 1; }
+  vm_model_compose() { echo 'Compose must not replace the existing listener' >&2; return 1; }
+
+  run vm_cmd_models up
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'listening on 127.0.0.1:8080 but its /health health check failed'* ]]
+  [[ "$output" == *'cannot be verified safely'* ]]
+}
+
+@test "lab-vm models up refuses Compose fallback when host listener inspection fails" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { return 127; }
+  docker() { return 0; }
+  local calls="$BATS_TEST_TMPDIR/model-compose-calls"
+  vm_model_compose() { printf '%s\n' "$*" >>"$calls"; return 0; }
+
+  run vm_cmd_models up
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Cannot verify host listeners'* ]]
+  [ ! -s "$calls" ]
 }
 
 @test "VM host-service debug traces do not corrupt captured Compose JSON" {
@@ -542,6 +622,14 @@ JSON
   }
   run _vm_validate_api_publish_config llamacpp-vm-api 127.0.0.1 8080
   [ "$status" -ne 0 ]
+
+  vm_model_compose() {
+    cat <<'JSON'
+{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"127.0.0.1"},{"target":8080,"published":"8080","host_ip":"0.0.0.0"}]}}}
+JSON
+  }
+  run _vm_validate_api_publish_config llamacpp-vm-api 127.0.0.1 8080
+  [ "$status" -ne 0 ]
 }
 
 @test "failed published API probe is reported as failure, not success" {
@@ -555,13 +643,12 @@ JSON
   [[ "$output" == *'diagnostic:llamacpp-vm-api 8080 /health'* ]]
 }
 
-@test "models status summarizes absent Docker runtime publication and fails unhealthy" {
+@test "models status checks the configured provider and rejects absent runtime publication" {
   source "$REPO_ROOT/lib/vm/host-services.sh"
   log() { echo "$*"; }
   die() { echo "REFUSED: $*" >&2; exit 1; }
   vm_model_compose() {
     case "$*" in
-      'ps ollama-vm-api llamacpp-vm-api') echo 'SERVICE STATUS' ;;
       'ps -q ollama-vm-api') echo '' ;;
       'ps -q llamacpp-vm-api') echo 'llama-container-id' ;;
     esac
@@ -569,16 +656,93 @@ JSON
   docker() {
     case "$*" in
       inspect*State.Status*) echo running ;;
-      inspect*NetworkSettings.Ports*) echo '{"8080/tcp":null}' ;;
+      inspect*NetworkSettings.Ports*)
+        if [[ -n "${MOCK_PORTS_JSON:-}" ]]; then echo "$MOCK_PORTS_JSON"; else echo '{"8080/tcp":null}'; fi
+        ;;
       *) return 0 ;;
     esac
   }
-  curl() { return 7; }
+  ss() { :; }
+  curl() { [[ "${MOCK_LOOPBACK_OK:-0}" == 1 ]]; }
   run vm_cmd_models status
   [ "$status" -eq 1 ]
   [[ "$output" == *'llamacpp-vm-api: state=running; expected=127.0.0.1:8080; runtime_ports={"8080/tcp":null}'* ]]
-  [[ "$output" == *'Docker reports no active runtime host-port mapping.'* ]]
-  [[ "$output" == *"Run './lab-vm models diagnose'"* ]]
+  [[ "$output" == *'Docker has no active 127.0.0.1:8080 runtime mapping'* ]]
+  [[ "$output" == *"run './lab-vm models diagnose'"* ]]
+  MOCK_PORTS_JSON='{"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"8080"}]}'
+  export MOCK_PORTS_JSON
+  run vm_cmd_models status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Docker has no active 127.0.0.1:8080 runtime mapping'* ]]
+
+  MOCK_PORTS_JSON='{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"},{"HostIp":"0.0.0.0","HostPort":"8080"}]}'
+  export MOCK_PORTS_JSON
+  run vm_cmd_models status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Docker has no active 127.0.0.1:8080 runtime mapping'* ]]
+
+  MOCK_PORTS_JSON='{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}'
+  MOCK_LOOPBACK_OK=1
+  export MOCK_PORTS_JSON MOCK_LOOPBACK_OK
+  run vm_cmd_models status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'llamacpp-vm-api: loopback HTTP probe passed.'* ]]
+}
+
+@test "models status fails clearly when the selected provider forwarder is absent" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  local calls="$BATS_TEST_TMPDIR/model-status-calls"
+  vm_model_compose() {
+    printf '%s\n' "$*" >>"$calls"
+    case "$*" in 'ps -q llamacpp-vm-api'|'ps -q ollama-vm-api') echo '' ;; esac
+  }
+  docker() { return 0; }
+  ss() { :; }
+
+  run vm_cmd_models status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"llamacpp-vm-api: not started. Start it with './lab-vm models up llamacpp'."* ]]
+  [ "$(cat "$calls")" = 'ps -q llamacpp-vm-api' ]
+
+  : >"$calls"
+  run vm_cmd_models status all
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'ollama-vm-api: not started'* ]]
+  [[ "$output" == *'llamacpp-vm-api: not started'* ]]
+  [ "$(cat "$calls")" = $'ps -q ollama-vm-api\nps -q llamacpp-vm-api' ]
+}
+
+@test "models status succeeds for a healthy native endpoint without Docker" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
+  curl() { return 0; }
+  docker() { echo 'Docker must not be queried for a healthy host API' >&2; return 1; }
+  vm_model_compose() { echo 'Compose must not be called for a healthy host API' >&2; return 1; }
+
+  run vm_cmd_models status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'llama.cpp API is healthy on host loopback 127.0.0.1:8080.'* ]]
+}
+
+@test "models status fails closed when host listener inspection fails" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { return 127; }
+  docker() { echo 'Docker must not be queried when host listener inspection fails' >&2; return 1; }
+  local calls="$BATS_TEST_TMPDIR/model-status-calls"
+  vm_model_compose() { printf '%s\n' "$*" >>"$calls"; return 1; }
+
+  run vm_cmd_models status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Cannot verify host listeners for llama.cpp: ss failed'* ]]
+  [ ! -s "$calls" ]
 }
 
 @test "models diagnose helper is a separate read-only tool command" {
@@ -590,6 +754,7 @@ JSON
   grep -Fq 'userland-proxy-path' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   grep -Fq 'internal={{.Internal}}' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   grep -Fq 'Host direct-container HTTP probe:' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq 'Forwarder container: not present (diagnostic did not start it).' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   grep -Fq 'sudo -n "$@"' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   ! grep -Eq 'docker compose (up|down|stop|restart)|docker (start|stop|restart|rm|system prune)' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
   ! grep -Eq 'iptables(-save)? .* (-F|-X|--flush|--delete)|nft (flush|delete|add|insert|replace)' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
@@ -613,8 +778,13 @@ case "$*" in
   'info --format '* ) echo 'root=/var/lib/docker security=["name=seccomp"] firewall=iptables' ;;
   *'config --format json') echo '{"services":{"llamacpp-vm-api":{"ports":[{"host_ip":"127.0.0.1","published":"8080","target":8080}]}}}' ;;
   *' ps -a') echo 'SERVICE STATUS' ;;
-  *'ps -a -q llamacpp-vm-api') echo sidecar-id ;;
+  *'ps -a -q llamacpp-vm-api')
+    if [[ "${MOCK_SIDECAR_PRESENT:-1}" == 1 ]]; then echo sidecar-id; fi
+    ;;
   *'ps -q llamacpp') echo backend-id ;;
+  *'ps -a -q llamacpp')
+    if [[ "${MOCK_BACKEND_PRESENT:-1}" == 1 ]]; then echo backend-id; fi
+    ;;
   'port sidecar-id')
     if [[ "${MOCK_ACTIVE_MAPPING:-0}" == 1 ]]; then echo '8080/tcp -> 127.0.0.1:8080'; else exit 0; fi
     ;;
@@ -745,6 +915,13 @@ MOCK_SUDO
   [[ "$output" == *'Non-interactive sudo context:'* ]]
   grep -Fxq -- '-n iptables-save -t nat' "$MOCK_SUDO_CALLS"
   grep -Fxq -- '-n nft list ruleset' "$MOCK_SUDO_CALLS"
+
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 MOCK_SIDECAR_PRESENT=0 \
+    bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" llamacpp
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Forwarder container: not present (diagnostic did not start it).'* ]]
+  [[ "$output" == *'backend=/llamacpp state=running health=healthy'* ]]
+  [[ "$output" == *'One or more Docker, listener, HTTP, or requested isolation checks failed'* ]]
 }
 
 @test "lab-vm extra delegates to the temporary script with a removal marker" {
@@ -879,7 +1056,8 @@ MOCK_SUDO
   grep -Fq 'Updates are available, but confirmation requires a terminal' "$updater"
   grep -Fq 'No updates available for VM' "$updater"
   grep -Fq 'VM overlay, base image, workspace and credential database were not replaced' "$updater"
-  grep -Fq 'REFUSED: OpenCode is running in the guest' "$updater"
+  grep -Fq 'OpenCode TUI is running in guest process' "$REPO_ROOT/scripts/vm-opencode-tui-check.py"
+  grep -Fq 'vm-opencode-tui-check.py' "$updater"
   grep -Fq 'REFUSED: guest Docker workloads are running' "$updater"
   grep -Fq 'REFUSED: could not verify guest Docker workloads' "$updater"
   grep -Fq 'npm view @opencode/cli@latest version' "$updater"
