@@ -259,8 +259,8 @@ public-web policy does not expose host services or permit non-HTTP protocols. A 
 proxy must be refreshed with `./lab-vm egress-reload` after the manifest change; live host
 isolation and public-workflow acceptance remain separate gates.
 
-`models up` and `models ensure` select the provider in `agent/opencode/opencode.json` by default; choose
-`ollama`, `llamacpp`, or `all` explicitly when needed. It first uses an already-running,
+`models up` and `models ensure` select the provider in `agent/opencode/opencode.json` by default;
+choose `ollama` or `llamacpp` explicitly when needed. `models up` also accepts `all`. Both first use an already-running,
 healthy API bound only to host `127.0.0.1`; this path does not require Docker. Ollama uses
 `127.0.0.1:11434`; a native llama.cpp server must use `--host 127.0.0.1 --port 8080` so it
 matches the reviewed QEMU forward. If no host API is listening, `models up` can start the
