@@ -8,7 +8,7 @@ WORKSPACE=""
 MOUNT_MODE="rw"  # Default mount mode
 WORKFLOW=""      # Default workflow (default, tdd, regression)
 VERBOSE=0        # Enable verbose logging
-PERMISSIONS=""    # Optional: per-run permission override (deny|ask|auto)
+PERMISSIONS=""    # Optional: per-run permission mode (ask|auto)
 AGENT="opencode"    # Which agent to launch: opencode | aider (fallback)
 
 # Network mode: egress=true by default; --isolated flips to false
@@ -19,6 +19,9 @@ UNSAFE_RECURSE=0
 
 # Docker build cache (default: use cache)
 NO_CACHE=0
+
+# ─── Auto-accept (alias for --auto on opencode CLI) ─────────────────
+AUTO_ACCEPT=0
 
 # Load user config if present (gitignored; put your real identity here)
 if [[ -f "$LAB_DIR/.little-mester.conf" ]]; then
@@ -55,6 +58,26 @@ dc() {
         "GIT_COMMITTER_NAME=$GIT_COMMITTER_NAME" \
         "GIT_COMMITTER_EMAIL=$GIT_COMMITTER_EMAIL" \
       docker compose -f "$LAB_DIR/compose.yaml" --project-directory "$LAB_DIR" "$@"
+}
+
+agent_run() {
+  case "$PERMISSIONS" in
+    ""|ask|auto) ;;
+    *) die "Unsupported --permissions '$PERMISSIONS'; use ask or auto. Configure explicit deny rules in OpenCode, not a silent lab override." ;;
+  esac
+  if [[ "$AUTO_ACCEPT" -eq 1 && "$PERMISSIONS" == "ask" ]]; then
+    die "--auto-accept conflicts with --permissions ask"
+  fi
+  if [[ -n "$PERMISSIONS" && "$AGENT" != "opencode" ]]; then
+    die "--permissions is supported only for OpenCode"
+  fi
+  # --auto is a client approval mode, NOT a blanket allow configuration.
+  # Explicit denies remain enforced. Aider never receives this OpenCode flag.
+  if [[ "$AGENT" == "opencode" && ( "$AUTO_ACCEPT" -eq 1 || "$PERMISSIONS" == "auto" ) ]]; then
+    dc run --rm agent opencode --auto "$@"
+  else
+    dc run --rm agent "$AGENT" "$@"
+  fi
 }
 
 check_workspace() {
@@ -152,6 +175,10 @@ check_egress_permission() {
 
 confirm() {
   [[ "${LAB_YES:-}" == "1" ]] && return 0
+  [[ "${AUTO_ACCEPT:-0}" == "1" ]] && return 0
+  [[ "${VM_YES:-0}" == "1" ]] && return 0
+  [[ "${PERMISSIONS:-}" == "auto" ]] && return 0
+  local perm="${PERMISSIONS:-default}"
   echo "--------------------------------------------------------"
   echo " Mounting path : $WORKSPACE"
   echo " Mount mode    : READ-${MOUNT_MODE^^}"
@@ -159,6 +186,7 @@ confirm() {
   echo " Agent         : $AGENT"
   echo " Workflow      : ${WORKFLOW:-default}"
   echo " Verbose       : $VERBOSE"
+  echo " Permissions   : $perm"
   echo " Unsaferecurse : ${UNSAFE_RECURSE:-0}"
   echo "--------------------------------------------------------"
   read -r -p "Continue? [y/N] " a
@@ -181,29 +209,61 @@ warn_hooks() {
   fi
 }
 
-# Parse flags (they must come BEFORE the subcommand or workspace path)
-# shellcheck disable=SC2034
+# Consume lab flags in any position; preserve only agent/subcommand arguments.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  SUBCMD=""
+  _args=()
+  _help=0
   while [[ $# -gt 0 ]]; do
-    case "${1:-}" in
-      --ro) MOUNT_MODE="ro"; shift ;;
-      --rw) MOUNT_MODE="rw"; shift ;;
-      --workflow) WORKFLOW="${2:-default}"; shift 2 ;;
-      --verbose) VERBOSE=1; shift ;;
-      --agent) AGENT="${2:?--agent needs a name (aider|opencode)}"; shift 2 ;;
-      --egress) EGRESS="${2:?--egress needs true/false}"; shift 2 ;;
-      --egress-false|--isolated) EGRESS="false"; shift ;;
-      --egress-true) EGRESS="true"; shift ;;
-      --permissions) PERMISSIONS="${2:?--permissions needs deny/ask/auto}"; shift 2 ;;
-      --unsafe-recurse) UNSAFE_RECURSE=1; shift ;;
-      --no-cache) NO_CACHE=1; shift ;;
-      --opencode) AGENT="opencode"; shift ;;
-      --aider) AGENT="aider"; shift ;;
-      *) break ;;
+    case "$1" in
+      --ro)                 MOUNT_MODE="ro" ;;
+      --rw)                 MOUNT_MODE="rw" ;;
+      --verbose)            VERBOSE=1 ;;
+      --egress-false|--isolated) EGRESS="false" ;;
+      --egress-true)        EGRESS="true" ;;
+      -y|--yes|--auto-accept) AUTO_ACCEPT=1; LAB_YES=1 ;;
+      --unsafe-recurse)     UNSAFE_RECURSE=1 ;;
+      --no-cache)           NO_CACHE=1 ;;
+      --opencode)           AGENT="opencode" ;;
+      --aider)              AGENT="aider" ;;
+      --help|-h)
+        if [[ -z "$SUBCMD" ]]; then _help=1; else _args+=("$1"); fi
+        ;;
+      --workflow|--agent|--egress|--permissions)
+        [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die "$1 requires a value"
+        case "$1" in
+          --workflow) WORKFLOW="$2" ;;
+          --agent) AGENT="$2" ;;
+          --egress) EGRESS="$2" ;;
+          --permissions) PERMISSIONS="$2" ;;
+        esac
+        shift
+        ;;
+      --) shift; _args+=("$@"); break ;;
+      -*) _args+=("$1") ;;
+      *)
+        if [[ -z "$SUBCMD" ]]; then SUBCMD="$1"; else _args+=("$1"); fi
+        ;;
     esac
+    shift
   done
+  if [[ "$_help" == 1 ]]; then SUBCMD="--help"; fi
+  set -- "${_args[@]}"
 
-  case "${1:-}" in
+  # Save real TTY before tee redirect (restored before interactive agent)
+  exec 3>&1 4>&2
+
+  # ─── Log rotation + tee (last 5 runs) ──────────────────────────────
+  LOG_FILE="$LAB_DIR/.mester/logs/lab_$(date '+%Y%m%d_%H%M%S').log"
+  mkdir -p "$LAB_DIR/.mester/logs"
+
+  mapfile -t old < <(ls -1t "$LAB_DIR/.mester/logs"/lab_*.log 2>/dev/null || true)
+  if (( ${#old[@]} > 4 )); then
+    rm -f "${old[@]:4}"
+  fi
+  exec 1> >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2)
+
+  case "$SUBCMD" in
     setup)
       command -v pacman >/dev/null || die "automated setup is Arch/CachyOS only; see docs/01-host-setup.md"
       nvidia-smi -L || die "NVIDIA driver not working on host (fix this first)"
@@ -226,7 +286,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       echo "Setup complete. Next: ./verify-lab.sh, then ./lab <workspace>"
       ;;
     build)
-      shift
       # Regenerate opencode.json from models.txt before building the image
       ( cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/scripts" && ./regen-configs ) 2>&1
       if [[ "$NO_CACHE" -eq 1 ]]; then
@@ -249,7 +308,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       # Benchmark runner — two modes:
       #   HTTP mode (default): connects to running llamacpp, measures real throughput/latency
       #   Native mode (--native): runs llama.cpp --test inside container, instant between-test switches
-      shift
       MODE="http"
       BENCH_JSON=0 BENCH_N=5
       # Native-mode params (passed via env to bench service)
@@ -360,7 +418,6 @@ HELPTEXT
       #
       # KV cache persistence: --cache flag keeps model in VRAM between
       # restarts, reducing reload to ~2-3s.
-      shift
       CACHE_FLAG=""
       while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -411,21 +468,19 @@ HELPTEXT
       dc restart llamacpp || dc up -d llamacpp
       ;;
     tune)
-      shift
       exec env VERBOSE="$VERBOSE" "$LAB_DIR/bench/tune.sh" "$@"
       ;;
     ai-analyze)
-      shift
       exec env VERBOSE="$VERBOSE" "$LAB_DIR/bench/ai-analyze.sh" "$@"
       ;;
     exec)
-      check_workspace "${2:?Usage: ./lab exec <path> '<command>'}"
+      check_workspace "${1:?Usage: ./lab exec <path> '<command>'}"
       confirm
       # On exec, pass egress status via env so compose knows how to route
-      LITTLE_MESTER_EGRESS="$EGRESS" dc run --rm -T agent sh -c "${3:?Missing command}"
+      LITTLE_MESTER_EGRESS="$EGRESS" dc run --rm -T agent sh -c "${2:?Missing command}"
       ;;
     shell)
-      check_workspace "${2:?Usage: ./lab shell [--ro|--rw] <path>}"
+      check_workspace "${1:?Usage: ./lab shell <path>}"
       confirm
       dc run --rm agent bash
       warn_hooks
@@ -439,7 +494,7 @@ HELPTEXT
       echo "  ./lab setup | build | pull | stop | bench [--json] [-n N]"
       echo "  ./lab restart-llama [--cache] | tune [--analyse] | ai-analyze [OPTIONS]"
       echo
-      echo "Flags (before path):"
+      echo "Flags:"
       echo "  --ro / --rw        Mount mode (default: rw)"
       echo "  --agent name       Agent to launch (opencode|aider, default: opencode)"
       echo "  --workflow name    Workflow profile (default: default)"
@@ -448,7 +503,8 @@ HELPTEXT
       echo "  --egress-false     Short alias for --egress false / --isolated"
       echo "  --egress-true      Short alias for --egress true"
       echo "  --isolated         Same as --egress-false"
-      echo "  --permissions P    Per-run permission mode (deny/ask/auto, default: from config)"
+      echo "  --auto-accept      Enable --auto on opencode CLI (all tools auto-approved)"
+      echo "  --permissions P    OpenCode permission mode (ask/auto; explicit denies preserved)"
       echo "  --no-cache         Disable Docker build cache (for setup/build)"
       ;;
 
@@ -463,7 +519,9 @@ HELPTEXT
           fi
         fi
         confirm
-        dc run --rm agent "$AGENT"
+        # Restore real TTY for interactive agent — tee pipe breaks container TTY
+        exec 1>&3 2>&4
+        agent_run "$@"
         warn_hooks
       else
         # No subcommand, no path → show help.
@@ -473,7 +531,7 @@ HELPTEXT
         echo "  ./lab exec <path-to-workspace> '<command>'"
         echo "  ./lab setup | build | pull | stop | bench | restart-llama | tune | ai-analyze"
         echo
-        echo "Flags (before path):"
+        echo "Flags (any order):"
         echo "  --ro / --rw        Mount mode (default: rw)"
         echo "  --agent name       Agent to launch (opencode|aider, default: opencode)"
         echo "  --workflow name    Workflow profile (default: default)"
@@ -482,7 +540,8 @@ HELPTEXT
         echo "  --egress-false     Short alias for --egress false / --isolated"
         echo "  --egress-true      Short alias for --egress true"
         echo "  --isolated         Same as --egress-false"
-        echo "  --permissions P    Per-run permission mode (deny/ask/auto, default: from config)"
+        echo "  --auto-accept      Enable --auto on opencode CLI (all tools auto-approved)"
+        echo "  --permissions P    OpenCode permission mode (ask/auto; explicit denies preserved)"
         echo
         echo "Any remaining arguments after the path are passed to the agent."
       fi
@@ -492,7 +551,7 @@ HELPTEXT
         aider|opencode) ;;
         *) die "unknown agent: $AGENT (expected aider or opencode)" ;;
       esac
-      check_workspace "$1"
+      check_workspace "$SUBCMD"
 
       # Per-call egress authorization gate before confirming
       if [[ "$EGRESS" == "true" ]]; then
@@ -502,8 +561,9 @@ HELPTEXT
       fi
 
       confirm
-      shift
-      dc run --rm agent "$AGENT" "$@"
+      # Restore real TTY for interactive agent — tee pipe breaks container TTY
+      exec 1>&3 2>&4
+      agent_run "$@"
       warn_hooks
       ;;
   esac

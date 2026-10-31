@@ -760,5 +760,1499 @@
     "operation": "update",
     "ticket_number": 45,
     "hash": "99ebfe740535b047cba6c20cfc86b6cf9330516f225426769ee30a5cab59d930"
+  },
+  {
+    "timestamp": "2026-10-27T11:12:33.210Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "8c5ac3b3bf6f0bbfca398c6c00f06a2bfd3dbcf7de91fbf2aa718df7b7c5bd34"
+  },
+  {
+    "timestamp": "2026-10-27T11:53:03.580Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "5514d1652c56aad9914b8e3ffa8a1392da6802c0ff8025021ebba35c6b58685a"
+  },
+  {
+    "timestamp": "2026-10-27T11:53:12.058Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "aeaf776ea51b198a6c2ef2604a0eb9492c533c17e5d783b4d5408ade354cceaa"
+  },
+  {
+    "timestamp": "2026-10-27T12:13:43.751Z",
+    "operation": "create",
+    "ticket_number": 48,
+    "hash": "4e1523f116f49bf926766fb1972f1c139c708de1bec04eee357ee724d69c7fc1"
+  },
+  {
+    "timestamp": "2026-10-27T12:17:50.217Z",
+    "operation": "update",
+    "ticket_number": 48,
+    "hash": "982fc6b5542035acc8c1209e861511f63ee9f82cd2c67f72c7a3dad7e234de77"
+  },
+  {
+    "timestamp": "2026-10-27T12:18:00.715Z",
+    "operation": "update",
+    "ticket_number": 48,
+    "hash": "9940f04060a72ebee3fe16aab423f01c3aa4af5d6f2e256488cde8ab2fb3085a"
+  },
+  {
+    "timestamp": "2026-10-27T12:18:10.946Z",
+    "operation": "update",
+    "ticket_number": 48,
+    "hash": "c8c19c4db3426474cfa327b9bed4ba9e469afde4aecbba0edc9a9a3097e5eca0"
+  },
+  {
+    "timestamp": "2026-10-27T12:46:20.866Z",
+    "operation": "update",
+    "ticket_number": 48,
+    "hash": "b17f2066a63bc111edf5e0fb23700a26496422c166914a04f7e9297419e2f53d"
+  },
+  {
+    "timestamp": "2026-10-27T12:46:35.425Z",
+    "operation": "update",
+    "ticket_number": 48,
+    "hash": "d3eb963a85f8d3846f94b1416095c08e810c72dfbb2d1076fe74c7f81caeb6d0"
+  },
+  {
+    "timestamp": "2026-10-27T12:46:45.416Z",
+    "operation": "update",
+    "ticket_number": 48,
+    "hash": "3b2e65b3e29fc91308460cd82c96c84ae08b84e7051e3d14981e9f70c7c67b39"
+  },
+  {
+    "timestamp": "2026-10-27T12:47:22.688Z",
+    "operation": "create",
+    "ticket_number": 49,
+    "hash": "c6eee9909ee52a38587d7a98ebbbf6b8932abd9117c9a30b2321db8d47904f87"
+  },
+  {
+    "timestamp": "2026-10-27T12:49:19.446Z",
+    "operation": "update",
+    "ticket_number": 49,
+    "hash": "09d403a4905f69c16e4644922085ee7cd5d76bfa907c678d1bbb68caafb48bf1"
+  },
+  {
+    "timestamp": "2026-10-27T15:48:58.441Z",
+    "operation": "update",
+    "ticket_number": 48,
+    "hash": "eaced490f966a08fb8bfab43e705d35bb990388a57de4840d18d4f3a980f2ecb"
+  },
+  {
+    "timestamp": "2026-10-27T15:49:52.934Z",
+    "operation": "update",
+    "ticket_number": 48,
+    "hash": "0bb9c53b0d225506d383461b1a1cfb7f58248a52a274d3de2fbc04d4d95daafd"
+  },
+  {
+    "timestamp": "2026-10-27T15:50:09.649Z",
+    "operation": "update",
+    "ticket_number": 48,
+    "hash": "c610e42847becadd99b9dffb90177bf7fea4bc4872ffabcb8e2d7f8d5c6f2169"
+  },
+  {
+    "timestamp": "2026-10-27T16:49:20.933Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "f4dfe0d37dfefdde56147e37215ef123299059b8d9491628c9d3bc2c649ecd1b"
+  },
+  {
+    "timestamp": "2026-10-27T16:49:31.672Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "e5a8a3936966cc76d07f528f2afc954517050000a54b9668d1bfeeea633b6a91"
+  },
+  {
+    "timestamp": "2026-10-27T16:49:35.799Z",
+    "operation": "update",
+    "ticket_number": 43,
+    "hash": "a7151b08bfff6489ee2f7d6b6a89dfeabbe72ef0dd3c93ab5453d48d58056ae0"
+  },
+  {
+    "timestamp": "2026-10-27T16:49:39.838Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "7e46fef8353af87fae1a5140710b8bdce2d8e40202fc6035dccf5203cf3326bc"
+  },
+  {
+    "timestamp": "2026-10-27T17:15:26.272Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "fc364047e372bcda34441997916e45630eef52a25c428e39e258784e70c483e4"
+  },
+  {
+    "timestamp": "2026-10-28T11:41:58.128Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "f7a83b5c4626bd0b34ddf6c4acc39a23e323484f6ac1e7caaf1db3709db307bb"
+  },
+  {
+    "timestamp": "2026-10-28T11:43:02.111Z",
+    "operation": "create",
+    "ticket_number": 50,
+    "hash": "e9ace58372984c06d2dde80c9e735cdc9021259da98f60d43c5ddd915e4e5733"
+  },
+  {
+    "timestamp": "2026-10-28T11:43:02.136Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "6618fab3e39776f23fcf21be294448ec8494eecb96858faf6f8895913f68b702"
+  },
+  {
+    "timestamp": "2026-10-28T11:44:55.962Z",
+    "operation": "update",
+    "ticket_number": 44,
+    "hash": "9aa3d53363d14f1a86ad9dcc48309792fbb7424f8b94a82aa857553fa67e994d"
+  },
+  {
+    "timestamp": "2026-10-28T11:47:58.200Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "e499455bebed03098eb0820153a90e6a2779cc926061218ab4f0804c2d3f2037"
+  },
+  {
+    "timestamp": "2026-10-28T11:48:34.115Z",
+    "operation": "update",
+    "ticket_number": 50,
+    "hash": "df2d0e8acbda2151653fad13132d2fd7db3c60b15e44434298e572bd86d26663"
+  },
+  {
+    "timestamp": "2026-10-28T11:48:55.119Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "339e39179c4b83ff20cc26d1a61ccefac10dd0fec80e259dcbaf3dafb08172a1"
+  },
+  {
+    "timestamp": "2026-10-28T11:48:55.124Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "b41ee1468f02956d5a21e242c52d8098fd610ff000a957c82153fb10a378e2ac"
+  },
+  {
+    "timestamp": "2026-10-28T11:48:55.129Z",
+    "operation": "update",
+    "ticket_number": 48,
+    "hash": "9217a14d1041b27d539c40fdae1def3862492c0086843c37cf183b601cffd6ff"
+  },
+  {
+    "timestamp": "2026-10-28T11:49:05.338Z",
+    "operation": "update",
+    "ticket_number": 44,
+    "hash": "23ac4dafc335a87fa5824aee634fb7672854e89e7e6a138eb3b154a1ca9c4090"
+  },
+  {
+    "timestamp": "2026-10-28T11:49:05.363Z",
+    "operation": "update",
+    "ticket_number": 44,
+    "hash": "23052f6d106c2389937a089464245c05210923457451ae096a9adf1d2b7ead7b"
+  },
+  {
+    "timestamp": "2026-10-28T11:49:05.367Z",
+    "operation": "update",
+    "ticket_number": 44,
+    "hash": "8667f042b76b23b6e272e7c7d2a2a08bfe855d12c20468c104179b361a71c6ed"
+  },
+  {
+    "timestamp": "2026-10-28T11:49:31.233Z",
+    "operation": "update",
+    "ticket_number": 48,
+    "hash": "7c3203a1984155d75388dae84453d73692ac49e9ae529d042aca318b0b953648"
+  },
+  {
+    "timestamp": "2026-10-28T11:49:57.644Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "18aa08463c6e33a8cc0c9d8a10fe7cb54fb49beadd414220c0a6840693cd609b"
+  },
+  {
+    "timestamp": "2026-10-28T12:48:57.056Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "a74cc7a105dd7030aa95ea46d2ffd41b2d6575c93593fadd32dd2e442bf4e25a"
+  },
+  {
+    "timestamp": "2026-10-28T12:50:22.551Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "a17bfc224db86810a54e70ff71c4d4b7e488e6f9827c95d9d2e34b63e2763e20"
+  },
+  {
+    "timestamp": "2026-10-28T12:51:12.838Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "cae37ed5494b13e4770d34e4425071e5fb4994efd7a67c9d04a4012321d013db"
+  },
+  {
+    "timestamp": "2026-10-28T12:52:47.773Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "a0dc7ae5cb97ff49367ebec1b61b5709dc6dfdf3c1f04aef235c26929a527a43"
+  },
+  {
+    "timestamp": "2026-10-28T12:53:19.958Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "077481261045a2b6a7653ce6fb8a891a08f82dc099b10b7f3f5a3eaad82a2175"
+  },
+  {
+    "timestamp": "2026-10-28T12:53:19.963Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "5e17f64aa1a936c28f35ce2f54288c310f3273d5f92f78df9e0d7ec470d3614d"
+  },
+  {
+    "timestamp": "2026-10-28T13:03:11.291Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "24727a79767a54f97c29ca8155d5a6551f673318511ac29d55a098669abf7985"
+  },
+  {
+    "timestamp": "2026-10-28T13:06:00.598Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "56f87f542316111bfeb0fc2a078adff21d93c36205ac3cd6730e86db20941b4b"
+  },
+  {
+    "timestamp": "2026-10-28T13:06:12.225Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "6e7bb74a1f8258898ca74ee8f1545efdff8831f1b17f43e9300c90b7ba644cff"
+  },
+  {
+    "timestamp": "2026-10-28T13:06:28.809Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "f1f96b1e8f5cf3565b2a93ef7ac70f4aff0409d33a684700843c00c17d73d4c2"
+  },
+  {
+    "timestamp": "2026-10-28T13:12:37.180Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "8c05ea557f807a8cd9807a8744274bc421ab58d454cf00a7506967e4de589333"
+  },
+  {
+    "timestamp": "2026-10-28T13:22:36.757Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "7960b22f5c5f6350fcbaf5fe8d27e60e0cd1cfdb63b7cd6da425e405b2722ac0"
+  },
+  {
+    "timestamp": "2026-10-28T13:22:50.026Z",
+    "operation": "update",
+    "ticket_number": 43,
+    "hash": "118aab499f480313e7e1a8517f438e12507800a97894719554464f56b4f2f33b"
+  },
+  {
+    "timestamp": "2026-10-28T13:22:50.050Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "0042120d9654406f8665d791496d2f18a0d02a061b172eb4558e22a30ee43724"
+  },
+  {
+    "timestamp": "2026-10-28T13:23:19.294Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "8eec8022c4109bae7f3d94198ba9d9ff8872b7fee6f28c402e10e7bb88e90bf6"
+  },
+  {
+    "timestamp": "2026-10-28T13:23:38.018Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "7f2aed2777df2dc1c98533c3419d639e4366ad9892386cb3e8c3050a9306bf1c"
+  },
+  {
+    "timestamp": "2026-10-28T13:23:38.023Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "6c7abd4c01eb9117277309d7671ef4c142d8bc40a74cdc7950ffa28cf7a5b933"
+  },
+  {
+    "timestamp": "2026-10-28T13:28:38.517Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "468965119b994ac22ca487db05e17c34bff49e73a679fb5f29ec3cdd8a504e6a"
+  },
+  {
+    "timestamp": "2026-10-28T13:29:12.066Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "10deef8a1a8c448f2138931a2965569902c4cebc097e93079a3b69e355e6bca3"
+  },
+  {
+    "timestamp": "2026-10-28T13:36:48.302Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "c903df34b12e325960f4f48beb5db322ab8cb2270c0bacfea47d8751a7844409"
+  },
+  {
+    "timestamp": "2026-10-28T13:39:56.656Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "f20b70c81f931fd64b2cc2adccc4c537da7c2f19c91246b52100f04bfa046269"
+  },
+  {
+    "timestamp": "2026-10-28T13:40:22.146Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "bf89022c891b13f4cfed1e7a0fcebf021d061eed24e8fd1565d3893fc21c67af"
+  },
+  {
+    "timestamp": "2026-10-28T13:45:12.594Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "5a8b6fcb37f3d8494cd9031aeca35496c2e5fb3d59951792cb2e76ebf4311b0d"
+  },
+  {
+    "timestamp": "2026-10-28T13:45:12.596Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "1a194e26327470376d43a1f9fcdf98249c0dd532f9f843f1f0b2b763eb3c3c44"
+  },
+  {
+    "timestamp": "2026-10-28T13:45:34.982Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "58ae5abb377f6a13eec335c7761769c453fd58660ff72664ed4a8e615a2b04d1"
+  },
+  {
+    "timestamp": "2026-10-28T13:45:34.989Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "3dcd85b543cfe4bc9e238317905d0c081eacff1f58f1c6d489dd97946911ddde"
+  },
+  {
+    "timestamp": "2026-10-28T13:52:59.909Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "7d70d09a49585ae078e42ee3bf9e7b8706faaafbd3cb26c12774e618bd647ff4"
+  },
+  {
+    "timestamp": "2026-10-28T13:52:59.934Z",
+    "operation": "update",
+    "ticket_number": 50,
+    "hash": "0abe57a0b78acaa6d58bc03f723f7369eb7ff67b86844aaf7a7bc40466131eee"
+  },
+  {
+    "timestamp": "2026-10-28T13:53:41.127Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "47f93fdcbf754a4dfe27ba53eb9f4982a84c2e0ab0cfbc2472178762486f1bb9"
+  },
+  {
+    "timestamp": "2026-10-28T13:53:41.134Z",
+    "operation": "update",
+    "ticket_number": 50,
+    "hash": "3932482661b209b6b3619004f40f2a76b75c9cd8c9a670c38d8f154386bdafde"
+  },
+  {
+    "timestamp": "2026-10-28T14:29:07.231Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "ed180929855cf63d16311cf739056b278eda2b38304602ee8cee6c15f3be3cec"
+  },
+  {
+    "timestamp": "2026-10-28T15:00:52.546Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "9cff4cb4c8356e8211253ae8f586800cfac3d0d2c5e5d18477e16b73e76b9d11"
+  },
+  {
+    "timestamp": "2026-10-28T15:03:13.929Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "32509084ddd48d33927e451b93306893e4683434b94e4b3f15bf4d832ac7dfa3"
+  },
+  {
+    "timestamp": "2026-10-28T15:18:43.938Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "735ebd8f993606f58493f79969338da248291ec23a1fec7ec332d7244712f061"
+  },
+  {
+    "timestamp": "2026-10-28T15:37:23.361Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "6916ef0b8200a4c634d32749a11c70cf8e041a06ecb7a4b442e12d44fe47fcf8"
+  },
+  {
+    "timestamp": "2026-10-28T15:38:23.757Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "1381b796a471749b468e97780ce3e40de6a4824500e6ea9d0ca3e53132c55661"
+  },
+  {
+    "timestamp": "2026-10-28T15:38:34.039Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "2a9b8a1a67b7e814ac19572eb5ccf57d2fa2a992370350aecb60a488635af3f8"
+  },
+  {
+    "timestamp": "2026-10-28T15:43:03.964Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "b3f03a3af6086b8e80cfe492c7ce52aca706357bdf7807d92be19266dda1d7ea"
+  },
+  {
+    "timestamp": "2026-10-28T15:47:10.666Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "260e62d2e9d236c3f0ab798c277fecf5ecffad9f0020a4a8c53cab3677357c6a"
+  },
+  {
+    "timestamp": "2026-10-28T15:47:21.386Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "e0b795d9ed22ffa558efd6c3975ece370bf14587c2ad1ebf69c95e286fea646a"
+  },
+  {
+    "timestamp": "2026-10-28T15:48:09.253Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "2e45a084693b74fb16c3c159fd2174211afca6206f20712fae627c838df498d2"
+  },
+  {
+    "timestamp": "2026-10-28T15:48:27.557Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "be5e0129d7823b79529eb9ed0f59e0f157cfdf5022bcf0ba240d770cd8d36407"
+  },
+  {
+    "timestamp": "2026-10-28T16:01:10.378Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "b317b9feae5f240a45b6fa90449985c33e3dc8e00347c86e42fa834cb6a18566"
+  },
+  {
+    "timestamp": "2026-10-28T16:03:59.986Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "c929e1b192a3c212bd341e32bd39c5bec1c20125d021ee25c9b68e4fec0e28d0"
+  },
+  {
+    "timestamp": "2026-10-28T16:07:47.515Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "8407f52f7dcfd8e2956f49848151970311f3285547583b464b67446d1a256ea9"
+  },
+  {
+    "timestamp": "2026-10-28T16:09:48.548Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "8012cb18c0f66b98911095b35ab869f84f3070a9d3bf17819426c0260f3b7cf5"
+  },
+  {
+    "timestamp": "2026-10-28T16:11:47.321Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "5e338d70ba2ef2742cbb3501a31cdf45c5585b9b72c00f7f65513b4b3fba8e5e"
+  },
+  {
+    "timestamp": "2026-10-28T16:14:28.687Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "b51eb794c1c35b421af721eab04d722b31f07a7542beb4f451c9bef704215c6a"
+  },
+  {
+    "timestamp": "2026-10-28T16:15:57.003Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "9e32b85ca3454029349f1ad608f91750eea13792691855b398d3334a0e2dfcf2"
+  },
+  {
+    "timestamp": "2026-10-28T16:22:13.581Z",
+    "operation": "update",
+    "ticket_number": 40,
+    "hash": "36e5ff9370f359b6a3a4e20a0bc18ccacf4a6324d66a6fb35527b445888d8627"
+  },
+  {
+    "timestamp": "2026-10-28T16:22:13.583Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "0e89a4f34214296a486fb2507ab616581a61055dd289b9dc0f530089349d6da9"
+  },
+  {
+    "timestamp": "2026-10-28T16:22:13.585Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "0885bc69442cc091789e4b135957de2745ed5b244be4bd254cc76ca776f37583"
+  },
+  {
+    "timestamp": "2026-10-28T16:22:13.586Z",
+    "operation": "update",
+    "ticket_number": 43,
+    "hash": "2b6fd00572a236021c9b3e0aa44310586616ab57306bfbef69f4f900e82192c2"
+  },
+  {
+    "timestamp": "2026-10-28T16:22:13.587Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "9d801e9781e987f8d1b5f6016e4dfe14594c2ebae6f1dd16cdcf1216c8d6b72d"
+  },
+  {
+    "timestamp": "2026-10-28T16:24:42.446Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "9f3719e5df7a1c5a914cab48f58c29fa05c65dedc19a96591948c0278732e753"
+  },
+  {
+    "timestamp": "2026-10-28T16:24:56.445Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "a86b683cb00bb511238521ff6315b7cc1af8efa8cd35d14c9dbbc25693501a67"
+  },
+  {
+    "timestamp": "2026-10-28T16:25:03.452Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "e6bb99a9ea29b852bd35c40cd5fdc56bc7c4888318a5c5bd083c5d2c45f325a7"
+  },
+  {
+    "timestamp": "2026-10-28T16:28:15.652Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "edcfb934a84b15b57f9d733a7627207fd8777625d22b3e098cb341598e67a428"
+  },
+  {
+    "timestamp": "2026-10-28T16:30:53.865Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "a2a7d41b393dd9e97f459fe1f578856322b17003b5520770aa9f52cba2308139"
+  },
+  {
+    "timestamp": "2026-10-28T16:33:46.307Z",
+    "operation": "create",
+    "ticket_number": 51,
+    "hash": "666a38771b9ad9f9a25b84e251bff1af443b8c7951270e99d09d3c2847b83b13"
+  },
+  {
+    "timestamp": "2026-10-28T16:34:05.794Z",
+    "operation": "update",
+    "ticket_number": 51,
+    "hash": "efbe02bbc8689d77cd30e61d6ba4a5809ece0f8c1899754be28d79af4275c0c3"
+  },
+  {
+    "timestamp": "2026-10-28T16:36:44.297Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "1568465b77f250f40401c25135d0b58f8405fb84f7f9cefb9a11caa45ae59f9c"
+  },
+  {
+    "timestamp": "2026-10-28T16:39:19.729Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "f85b5f009d057ae6a6db816eb4e66f81ddd81b9191b84e749f79675c2af6448c"
+  },
+  {
+    "timestamp": "2026-10-28T16:43:11.026Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "8d8b79ad3d97622c8018864145e28978901adb81899ee008320e123d95318812"
+  },
+  {
+    "timestamp": "2026-10-28T16:44:59.792Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "5e28a10fe090bf8cfcb50c1c4c0d40f8511183f33e1e285b8467f99013b8db38"
+  },
+  {
+    "timestamp": "2026-10-28T16:48:06.778Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "018ddd5fa29587d6cf223a39cd6d088f5ce44e71276adaba6c46df4a52afee16"
+  },
+  {
+    "timestamp": "2026-10-28T16:50:27.779Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "5b9e8a1caa4e3a67b09db1db0f016f129cf2e6d64fd9d2da3c4e476ffbeacabc"
+  },
+  {
+    "timestamp": "2026-10-28T16:51:29.211Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "a5309b4344589bc35eab592e4985beee29d0ec94491d9add090070258a8d9ac1"
+  },
+  {
+    "timestamp": "2026-10-28T16:51:45.584Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "b60158a1398ab3a58d715f631941fbff9afc1591b2d8a7b385a7b14e214f1496"
+  },
+  {
+    "timestamp": "2026-10-28T16:55:19.635Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "1084bb544cb8bfd6a04239a2359b210d91fc186460206d23788bbe3fe5abd357"
+  },
+  {
+    "timestamp": "2026-10-28T16:55:42.238Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "b40555eac1783099fcb1a293287d60783dc14047e3ef65b492de2be4e29fb643"
+  },
+  {
+    "timestamp": "2026-10-28T16:55:49.336Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "c5e3400938ddfbf77db79c7fcc202f764671a3726bf06e404aee0101d3a86969"
+  },
+  {
+    "timestamp": "2026-10-28T16:55:51.863Z",
+    "operation": "update",
+    "ticket_number": 50,
+    "hash": "abd546ff0061debd6be327720bdfea8e38825999d4014539935434355040d065"
+  },
+  {
+    "timestamp": "2026-10-28T16:55:57.215Z",
+    "operation": "update",
+    "ticket_number": 43,
+    "hash": "a5d70ed03757de4725e5564d7c7d297303fa8c5a62e01c01daf04d25a738b077"
+  },
+  {
+    "timestamp": "2026-10-28T17:08:41.289Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "793bcf18e79a00c8fccc0785d00029dd0841aa945b663f19b7e0e40b0d5ccb0c"
+  },
+  {
+    "timestamp": "2026-10-28T17:17:16.459Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "29c15df27bea3de9939d03038c37b81f5821f0dca977ee1d06167d5b95a2d733"
+  },
+  {
+    "timestamp": "2026-10-28T17:19:14.702Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "ed20ae55f060aecd7fd2a6c4feba5f94b00b1dcfa2758c8cf9260db09c9f82ba"
+  },
+  {
+    "timestamp": "2026-10-28T17:22:11.183Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "78b78cab21bb13e15bc0fab3f4599a070f013bb0b0881e70a7d0af9872c1db2b"
+  },
+  {
+    "timestamp": "2026-10-28T17:25:38.259Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "0dc43989cad877845d6867e9bc1917113de45f4ffefaab3c82fd22593cd79e66"
+  },
+  {
+    "timestamp": "2026-10-28T17:29:36.527Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "e89482b9ff0c192f701a6eb3ecdd1a51c36e28c3c4f8bf0bc812371c11614dc7"
+  },
+  {
+    "timestamp": "2026-10-28T17:39:57.583Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "8f218d1b8de6e677e1aea570e91bd1578d618f73b31242998568564d18a38dd1"
+  },
+  {
+    "timestamp": "2026-10-28T17:43:40.812Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "8f857c622d17975d9371a9ab825b100d541d7a692e2d7bd49536f6e2cdd393e4"
+  },
+  {
+    "timestamp": "2026-10-28T17:43:40.819Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "a0a58f8adbe541873b39f938ecf60e480efa6d5ee626e9adca615080568ad4a5"
+  },
+  {
+    "timestamp": "2026-10-28T17:49:07.584Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "39f80333912ffd5c90babdc9afc9b5461456c5c3e85434c89f96eca77bba4fa4"
+  },
+  {
+    "timestamp": "2026-10-28T17:49:07.592Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "b3fd50a76dac5694c38d3760e2e173e9043b03043740ae0a95b8a381190f5ce4"
+  },
+  {
+    "timestamp": "2026-10-29T10:27:45.505Z",
+    "operation": "create",
+    "ticket_number": 52,
+    "hash": "9173e82ba860eeb53a3ee13a093c19089ef66c86d47a38d2807f03b4b7a9458c"
+  },
+  {
+    "timestamp": "2026-10-29T10:27:55.341Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "f7482ffb28faf158205ab556aa29d11dbe61ef97e82e15f13d252ee18d783262"
+  },
+  {
+    "timestamp": "2026-10-29T10:27:55.357Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "beb0260b9c37410541f323ced2dcd4fdb22497100f8e6a72b58e06383bd87b75"
+  },
+  {
+    "timestamp": "2026-10-29T10:27:55.374Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "49d7750aa9bfee4fd42c719095bcaa5592a68c5e24a8314680090cf67a325053"
+  },
+  {
+    "timestamp": "2026-10-29T10:27:55.388Z",
+    "operation": "update",
+    "ticket_number": 43,
+    "hash": "d08b59fb77522d54016bccb6fac4f644eae3c61778ce784856d468119ea43fa3"
+  },
+  {
+    "timestamp": "2026-10-29T10:28:41.657Z",
+    "operation": "update",
+    "ticket_number": 52,
+    "hash": "f4a56f80e687e2c8b5c87e1b2e636c8e597800dba32843037af1719c361416fa"
+  },
+  {
+    "timestamp": "2026-10-29T10:28:53.015Z",
+    "operation": "update",
+    "ticket_number": 52,
+    "hash": "234ef02c58ab9a6880de9f603eaf81ab2976981b12a7e530889952a610ea4b95"
+  },
+  {
+    "timestamp": "2026-10-29T10:51:02.591Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "8174498f8fd41a4ab56388d26c92a229d4cb762f806c6f4896b02ffda0d30407"
+  },
+  {
+    "timestamp": "2026-10-29T10:57:18.013Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "e22c27cca027b8a8478fca053b08d9d024049863a581ed0bcccd00dd9e66a2a9"
+  },
+  {
+    "timestamp": "2026-10-29T11:31:59.147Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "cb749a86f740974deb29b68bf396284ef2991a9ec727c28f070fcae4dd811bde"
+  },
+  {
+    "timestamp": "2026-10-29T11:35:43.142Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "9ae89edbd59007a5876a0de4d4131fa3329febd2b40620b6a9a6d30651df6e71"
+  },
+  {
+    "timestamp": "2026-10-29T11:39:56.483Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "8904f5b355dd5f931be414a3d55f6c72b5d0d8dafc75d781c33bd8c9a75d40f3"
+  },
+  {
+    "timestamp": "2026-10-29T11:41:04.428Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "e45d4e78284c26f218c660f239422c749ac8a076ab5d8c1b6c153fd05ddb5c60"
+  },
+  {
+    "timestamp": "2026-10-29T11:41:48.635Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "60ce51a01037856374e9cdb219ded9cac9b32578d36a8af43be43cd2c31bca9f"
+  },
+  {
+    "timestamp": "2026-10-29T11:49:37.817Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "2ae7e7d5f65dd07dfd9f07406ffe48bf532d7d16e4a602bfe022a2887a7a2251"
+  },
+  {
+    "timestamp": "2026-10-29T12:00:19.836Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "d1bf0fe598628462dc1ef6db48ea8878274284e72819dd8d05c4325829c4d25f"
+  },
+  {
+    "timestamp": "2026-10-29T12:02:17.214Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "a73256929d5ebea76b5ce6661e13552790d4f4d1b61c6a4cf4d5063c3ccd303d"
+  },
+  {
+    "timestamp": "2026-10-29T12:02:34.462Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "026615f0f4988aa96490d089fd7a741b3eb9a8e944ebe45c632bda11aa39b6d2"
+  },
+  {
+    "timestamp": "2026-10-29T12:10:04.028Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "4cb1851d0c590bde774abd6324e43d8f759042478739cf2b2c079403ae658bf6"
+  },
+  {
+    "timestamp": "2026-10-29T12:10:35.110Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "b9e7fdabeeec865e4be86cd4479157f702a32dc661ce1c54093d9f232933dc52"
+  },
+  {
+    "timestamp": "2026-10-29T12:12:55.244Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "ec6a4cca831daf00a67da7fd047992ada797c1929aaff572c931fffca3dc26ae"
+  },
+  {
+    "timestamp": "2026-10-29T12:14:46.338Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "d5b8e332e3d21159f492fb878b8a6f2db253ba28d1db04f4866000af4a8b0973"
+  },
+  {
+    "timestamp": "2026-10-29T12:15:53.195Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "c7a7a82f81f5d220355509220c5f77ed16f037ebeca238b4aba8109754a8cb2d"
+  },
+  {
+    "timestamp": "2026-10-29T12:17:41.689Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "b07f3592fc57a6285ee051155bc4cf230efa1b0570851e01b4450985c8e2b4c8"
+  },
+  {
+    "timestamp": "2026-10-29T12:19:01.963Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "5de64ab0460e3a4d1eb9e480a7e7a87898e6010b0a8b7d7778d646a19561680e"
+  },
+  {
+    "timestamp": "2026-10-29T12:22:43.507Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "b6a51e878170e90d4a9d94164001b48092569a03b34dba248ed4be409c5cb097"
+  },
+  {
+    "timestamp": "2026-10-29T12:26:49.419Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "a1c5e543eb18f730bf7011ae36d7b37e2007695759eef41c72680ff8d2beaa12"
+  },
+  {
+    "timestamp": "2026-10-29T12:28:17.145Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "e517a4d9904d894a44641f267ab1b5d5f5bf7c33360d902e09cae0a05b347dc0"
+  },
+  {
+    "timestamp": "2026-10-29T12:31:49.044Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "f3d0dc11fe79e245a63fdbf4dc7ffd6552f8be8ad02238893b7b5132cda77fa8"
+  },
+  {
+    "timestamp": "2026-10-29T12:36:44.511Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "d62b0d0125fcc4f59ee317bb04217e9a824a273ad41dbb0d42f07ed00038979d"
+  },
+  {
+    "timestamp": "2026-10-29T12:38:34.070Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "b3779413f93a1d8399491b4fce61bdea686fc93e71c441b54cbe748a664d8526"
+  },
+  {
+    "timestamp": "2026-10-29T12:39:24.260Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "c761fd64e84078515d187b62c1ad67e19eda68d22a91266094f51710ef9be8a8"
+  },
+  {
+    "timestamp": "2026-10-29T12:44:55.639Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "effb3474e30135c61176ab817f06bbe04d7be8a9fdceea3a504370c872d19889"
+  },
+  {
+    "timestamp": "2026-10-29T12:46:39.890Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "2cea9d2bc95a98ddf4bb7b4be764dffb709e22f2b05abe2f76af042773223384"
+  },
+  {
+    "timestamp": "2026-10-29T12:47:24.943Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "f36dbfa308d7e8690116605e3a1dd5807db5ccd97dc418d95f20409daf9957f4"
+  },
+  {
+    "timestamp": "2026-10-29T12:57:19.163Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "43cde62dbb80e483370e157c8450a5dc4cfe78ea92a136b62989fc8425b0e29c"
+  },
+  {
+    "timestamp": "2026-10-29T12:58:39.893Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "271f24848c43814768bb9787261d1d7c91829df0fb8ef1658382a6f3bfd261b0"
+  },
+  {
+    "timestamp": "2026-10-29T13:14:49.345Z",
+    "operation": "create",
+    "ticket_number": 53,
+    "hash": "7d2ea28306791e4a0c3f10c826046791d34e5117092d170f3d4367c3936bf243"
+  },
+  {
+    "timestamp": "2026-10-29T13:16:00.174Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "5101c870f05c1c61929ea2c333a247880647d6e4dd57a174a1438295ab92e9a5"
+  },
+  {
+    "timestamp": "2026-10-29T13:16:00.183Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "1ea9b0f3037c01aca8e2c3556ebabbe42b6a60ba045fb0cf7ee8e8aabcf48995"
+  },
+  {
+    "timestamp": "2026-10-29T13:26:10.024Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "a391c7a95f68d75cdb622dd6055cea00cab1ae4e186a99b50043c79183975c21"
+  },
+  {
+    "timestamp": "2026-10-29T13:27:10.521Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "56825170486adb4ffe0d1ca49c76897c6e0569eb669d99f26a188daa6d82b8a6"
+  },
+  {
+    "timestamp": "2026-10-29T13:44:50.608Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "e8153456cc0a531517f8c8c79afa8117375da0f3236dda81ee5fc6675bcb7bf2"
+  },
+  {
+    "timestamp": "2026-10-29T13:44:50.620Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "8aaa78feee291a66a7fb7057c9b7e69054251a5f89a621ceaa69fb00a372d112"
+  },
+  {
+    "timestamp": "2026-10-29T13:46:13.712Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "03aa1d49f700a9d39d6484d0864ed3521744e5d33e8d8b75f15aeea01db7a4e9"
+  },
+  {
+    "timestamp": "2026-10-29T13:46:13.737Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "bdbf4fddb138dba68cfae86a561f76d9890b3cd995bd82d5948fb12e8d051325"
+  },
+  {
+    "timestamp": "2026-10-29T13:51:38.188Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "86483ebfd5ad49ce6332f9b05da58bd511b64ef9e9930451ee40a15cb48c024b"
+  },
+  {
+    "timestamp": "2026-10-29T13:51:38.197Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "e98125597bd294823cdc483e0cfb8c86c41c29a1f51ebdcc39a3841ddbddf417"
+  },
+  {
+    "timestamp": "2026-10-29T14:23:01.734Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "5699521c9cf08cc20fe22f5673d0e886c1f2a20de6b847a5bc5686e708679789"
+  },
+  {
+    "timestamp": "2026-10-29T14:23:01.734Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "9e6732f18f5cd56485a0eb19bd0a4d83cdef439012c4fb0b8bec9bbe338e03ec"
+  },
+  {
+    "timestamp": "2026-10-29T14:24:09.078Z",
+    "operation": "create",
+    "ticket_number": 54,
+    "hash": "fc5491187ea0d968a92de3616572a2e3ede78a2abaac49eebe486b88b578d2cb"
+  },
+  {
+    "timestamp": "2026-10-29T14:24:09.082Z",
+    "operation": "update",
+    "ticket_number": 54,
+    "hash": "3b94101433a79813e41fbb6dc4a5f061f21823a26ab5d657abf297cf3ef911f9"
+  },
+  {
+    "timestamp": "2026-10-29T14:32:51.787Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "1114f9438903942d2c124e2185abde4ffb7fc2737cf3682df0aef2896a0d27ce"
+  },
+  {
+    "timestamp": "2026-10-29T14:32:51.812Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "1f51f21fa5fb1933543975afa88662b96d8cbfc6e7eb46111ae81e5f6d05a5ae"
+  },
+  {
+    "timestamp": "2026-10-29T14:40:57.169Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "6aac47a5b42e169a50cf08f21872893c50a48b69c0a21aeddacc193885765aa1"
+  },
+  {
+    "timestamp": "2026-10-29T14:40:57.171Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "4bcdc0a21d04f782eb17244e8366fa03d5810228f640f1504710bd8176c22d4c"
+  },
+  {
+    "timestamp": "2026-10-29T14:56:18.102Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "b395c7685d600c5b881ed6d3ecc0058750b35e9f052d91fe2d40c06790401b35"
+  },
+  {
+    "timestamp": "2026-10-29T14:56:18.104Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "8b4cc74ddcb9466ada84ec50966029dfa003de5e2180f0ef16aeefb9a87de2f8"
+  },
+  {
+    "timestamp": "2026-10-29T15:06:32.638Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "c86c6b10e5603fb325333a03ab5b44cc4fed07ea37e4e9a3acdc865ea5a95b96"
+  },
+  {
+    "timestamp": "2026-10-29T15:06:32.640Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "9521e31f12d1984597cbd380a1f9d5f5de1b1888ff3d6c2cf4396ca6cf2a7e8a"
+  },
+  {
+    "timestamp": "2026-10-29T15:26:11.978Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "832616f3455777c5f777c6b797fd4e0336e9b0db7906ae76ae27d697b6e6f2ea"
+  },
+  {
+    "timestamp": "2026-10-29T15:26:12.003Z",
+    "operation": "update",
+    "ticket_number": 43,
+    "hash": "617aec91b71fd3742c832f67559d87ab4613d63a1c071bea90442045c77ee94d"
+  },
+  {
+    "timestamp": "2026-10-29T15:26:12.005Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "5a8924cf9314a89c8c6c7bebd4c951ff2b80c27d445b57810d2f6769fa629019"
+  },
+  {
+    "timestamp": "2026-10-29T15:26:18.285Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "d0b33b261012b8cd74206b1884debd87bbd2fa8982748ba7709b1200f1c5af59"
+  },
+  {
+    "timestamp": "2026-10-29T15:29:49.550Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "ba4dd2cad3836654609d0e1c118eebd0c119a94658242e1fa7a18b06a6d3f133"
+  },
+  {
+    "timestamp": "2026-10-29T15:29:49.575Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "d344109f5d636c30dee2d570eed36b31db32a1abfe05528beaa25227b82e8e4d"
+  },
+  {
+    "timestamp": "2026-10-29T15:29:49.577Z",
+    "operation": "update",
+    "ticket_number": 43,
+    "hash": "141e777f3898053442b8967902d1d1fe4a3f17198a43a2850962d55b963556ca"
+  },
+  {
+    "timestamp": "2026-10-29T15:29:49.590Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "a677b5bda14e401de0ce8b215e71c04722edf448a31945bbed9b782124d279d2"
+  },
+  {
+    "timestamp": "2026-10-29T15:37:34.879Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "266a43c3f262cf0d809f42c9c99c149909746556a94846f0db04caaf6a05162d"
+  },
+  {
+    "timestamp": "2026-10-29T15:37:34.881Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "240b75d6be1442771566e4c218ff10554f63ab0147cd18c12fe189f9ff2d1399"
+  },
+  {
+    "timestamp": "2026-10-29T15:37:34.882Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "0e1a3449cb0266dc1671903f354f7d8cbaedc7b94fa21f273f398131d5700433"
+  },
+  {
+    "timestamp": "2026-10-29T15:39:43.561Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "8a8d18d229e9bb200724356c9ee98c6c57cd067eff9fc6895dec956574ced5eb"
+  },
+  {
+    "timestamp": "2026-10-29T15:39:43.564Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "91fb3c354ddb908b541f834f7c1922c5a1a69db82292f9d5bddd798e7797c654"
+  },
+  {
+    "timestamp": "2026-10-29T15:39:43.576Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "03d6ee6f9950eef8f1d5559e87f16b1fbfb38a340f019805e287792fbf5d364b"
+  },
+  {
+    "timestamp": "2026-10-29T16:01:39.826Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "f17a2539fb018db0d7a540a1d950ce8b925e28c8731e2e40220e3edc62641078"
+  },
+  {
+    "timestamp": "2026-10-29T16:01:39.829Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "d0713180c81ec34ca1b1b12243a846a296cf3da1813bdffc73f8a3eafcac11e3"
+  },
+  {
+    "timestamp": "2026-10-29T16:01:39.830Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "f27ace4cdced8d27e9ed0ddaf7a4a23f7933ca694fd090abfb41c05d60ae29ea"
+  },
+  {
+    "timestamp": "2026-10-29T16:07:54.531Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "d8e16e25a533bc247ff7166c7e470dcf02359318872aed30a15709114d3a448e"
+  },
+  {
+    "timestamp": "2026-10-29T16:07:54.533Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "d2165dfa42de58c2afb28fd4688de903bc8448b6d2eae64118c1a70280c4ece3"
+  },
+  {
+    "timestamp": "2026-10-29T16:19:49.564Z",
+    "operation": "create",
+    "ticket_number": 55,
+    "hash": "f2a836e2ad1cf8b720707dfca729b28c3fd1223c12a20e442f060911a8394801"
+  },
+  {
+    "timestamp": "2026-10-29T16:20:50.557Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "e652a5e8135666bafc3ca994806217d269a79e20d4d07863e8c2ddc24d7a721f"
+  },
+  {
+    "timestamp": "2026-10-29T16:20:50.581Z",
+    "operation": "update",
+    "ticket_number": 43,
+    "hash": "dee3ce444a432e09124e9919062d3452788acb0989e19c8814109043b96b0a17"
+  },
+  {
+    "timestamp": "2026-10-29T16:20:50.587Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "cd4fdf00e6f9672ecb66637d8885063c6d1813d096d10b7ff129cfae2e1a5ec7"
+  },
+  {
+    "timestamp": "2026-10-29T16:23:39.910Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "394bc85987771e015d865939ffb3cb24f74299e48fdaeee2ba8b2c480d060f4e"
+  },
+  {
+    "timestamp": "2026-10-29T16:23:39.912Z",
+    "operation": "update",
+    "ticket_number": 43,
+    "hash": "125e9c98179954724e57082bc10b538709595d3a9852c5e62979739f30e24b3f"
+  },
+  {
+    "timestamp": "2026-10-29T16:23:39.914Z",
+    "operation": "update",
+    "ticket_number": 45,
+    "hash": "6e95853c8fd7fa0a669417bad1d9c16813a5e466309c22e2445ba3a3dc1cb0eb"
+  },
+  {
+    "timestamp": "2026-10-29T16:31:10.350Z",
+    "operation": "update",
+    "ticket_number": 55,
+    "hash": "0f759350ccd1df662b484ca705b54e8a6b648fb5e1f1f3b32b424498afca48c7"
+  },
+  {
+    "timestamp": "2026-10-29T16:46:21.220Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "d2e8447de6f6aa93e17275c81d53179334f712da5c9c5bbcdc5a1de9794b4956"
+  },
+  {
+    "timestamp": "2026-10-29T16:46:21.222Z",
+    "operation": "update",
+    "ticket_number": 43,
+    "hash": "780c9b60448f4fc933dff09d8f86cb1b281c88d6c9caf6f43363a6cc0ed97a17"
+  },
+  {
+    "timestamp": "2026-10-29T16:47:27.427Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "13e4182b7c5c70dc494b0c40909eeb95040857f9bc4fa00dbe2b838867d10973"
+  },
+  {
+    "timestamp": "2026-10-30T06:04:07.236Z",
+    "operation": "update",
+    "ticket_number": 52,
+    "hash": "1b08d1c8cd85f2c346c8d8b8974420858682e90d738a25da695add58eb8e0fac"
+  },
+  {
+    "timestamp": "2026-10-30T06:15:50.808Z",
+    "operation": "update",
+    "ticket_number": 52,
+    "hash": "1d1c9e2ea2647b13c0fefcc5f09bd49f650404ed46bb1d57823afee33434b4f2"
+  },
+  {
+    "timestamp": "2026-10-30T06:17:26.486Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "a9b326617f95900c3247a9446078b7837040cb4790300fc53828f1c9d60cc586"
+  },
+  {
+    "timestamp": "2026-10-30T06:17:26.512Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "623f3555c4b1932702f2c568a327bea18f022536bee3a1bc65dd65438d7a97f6"
+  },
+  {
+    "timestamp": "2026-10-30T06:34:41.352Z",
+    "operation": "update",
+    "ticket_number": 52,
+    "hash": "b8c62f5efab4f71ff67809b93883781d07e50def49d6bbf26727a97da388515d"
+  },
+  {
+    "timestamp": "2026-10-30T16:14:51.055Z",
+    "operation": "create",
+    "ticket_number": 56,
+    "hash": "5792a5a2af72731da52f6894514e1822993baa35ca104bd09b7b68bf1b27a7da"
+  },
+  {
+    "timestamp": "2026-10-30T16:16:01.731Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "e1ec5b18383442ed1c6c79f2a4eecaa6a5a7be8b6be44ebdef460b49ad1638f0"
+  },
+  {
+    "timestamp": "2026-10-30T16:16:01.743Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "72744fd04f6b33b9d89466bcede66728123346997f272d4d129f1e3abe82a2c3"
+  },
+  {
+    "timestamp": "2026-10-30T16:16:01.752Z",
+    "operation": "update",
+    "ticket_number": 43,
+    "hash": "66f550d1c5405ebb90f571d752e8ad58d0f472f24ddfed05680acabbf3022b19"
+  },
+  {
+    "timestamp": "2026-10-30T16:16:01.761Z",
+    "operation": "update",
+    "ticket_number": 52,
+    "hash": "1a61b2241f8284f85de08764fa6c3bf462bceca4fe07057cea8134d1d469aac8"
+  },
+  {
+    "timestamp": "2026-10-30T16:16:01.774Z",
+    "operation": "update",
+    "ticket_number": 35,
+    "hash": "ed791ce7dad92332f4c3982b384876fb95eeaf0b3a087dffa2d126d9dc6f4fee"
+  },
+  {
+    "timestamp": "2026-10-30T16:19:17.610Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "bba1cd31caeb8ccc0ec89ce47c941870aa34a37f7c8f25b6110905130cd71bf4"
+  },
+  {
+    "timestamp": "2026-10-30T16:19:17.623Z",
+    "operation": "update",
+    "ticket_number": 56,
+    "hash": "b112e19099e3963c0585e38188407e309d79dc18878cff32bf9db446ccd35302"
+  },
+  {
+    "timestamp": "2026-10-30T16:25:23.232Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "30eeef69f6c9e6097b684efcc03c30d02219f562fad784977e0c63f271ad4276"
+  },
+  {
+    "timestamp": "2026-10-30T16:25:23.239Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "eaeca0ccb354a99a27eceaed1405c0734ca452bdd15446309faf7476e66472a6"
+  },
+  {
+    "timestamp": "2026-10-30T16:25:36.028Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "ad611b0d3412020b351cca58b89f27f065e4e1d749b6f27e0b40f6ff8bcc47b1"
+  },
+  {
+    "timestamp": "2026-10-30T16:31:36.480Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "3602cdf23b578b971cdeea9b0d11ff6dd79f659447ac4e5410e818f3f94e2cbd"
+  },
+  {
+    "timestamp": "2026-10-30T16:31:36.495Z",
+    "operation": "update",
+    "ticket_number": 52,
+    "hash": "d66deab29169a210625068296fe2ccf98421a4ba2092efa486cf833c3023fb9b"
+  },
+  {
+    "timestamp": "2026-10-30T16:32:56.317Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "dd9eefdd6d3ec82e80b53f319af3905a734d5854845478d8ccabde5b26b41f3c"
+  },
+  {
+    "timestamp": "2026-10-30T16:45:10.038Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "69e45407788a901904226ed9053f4f0b2a0d0e90b20e1aeabd7590abe1fe5ad9"
+  },
+  {
+    "timestamp": "2026-10-30T16:45:10.052Z",
+    "operation": "update",
+    "ticket_number": 52,
+    "hash": "82ad04692578ac3a673d4a20cdd2a2eaee29f658618ee8f832b86faad0febdba"
+  },
+  {
+    "timestamp": "2026-10-30T16:54:44.012Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "a8f9aa0456ea38f38dbdfa69978fd35ae788aa7e1e6f4751f77ff7965910e00d"
+  },
+  {
+    "timestamp": "2026-10-30T17:16:38.955Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "2c5bf46068fd045bd4e16d490e7752c0076899e07e8ceda0e4d1a8d078277899"
+  },
+  {
+    "timestamp": "2026-10-30T17:19:29.124Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "03209bf011f9d81a8cec1f93f968b6fe466e6a1463075a7cfe23235695b01e9d"
+  },
+  {
+    "timestamp": "2026-10-30T17:39:12.085Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "fc55d383ae1231eb6aa7f0217593dfbfdfb248ccd9e3fe46a28822aa11b47580"
+  },
+  {
+    "timestamp": "2026-10-30T17:39:12.109Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "6d5d83bded00915231af433b2c340e32c3499aadba6e95697f65e91f032d7828"
+  },
+  {
+    "timestamp": "2026-10-31T09:43:03.918Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "57552613d39cbafc753e6d6e46bec92c749e0a2488499ca272eaf878cc325efd"
+  },
+  {
+    "timestamp": "2026-10-31T09:48:21.970Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "7cc1268d59d28635dddf46420853bfc4c31f0fdbb931b0542ad95854e7af18c6"
+  },
+  {
+    "timestamp": "2026-10-31T09:50:35.034Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "48fa5b3d13435eb73d13227f420decf0c468cc714115fd52079f6f5a1caa4883"
+  },
+  {
+    "timestamp": "2026-10-31T09:52:46.900Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "cdbf4ee62f003e2786a2e29d23c1f295ac231ba33da57251a52c58b8640012ef"
+  },
+  {
+    "timestamp": "2026-10-31T09:54:00.808Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "59a8a3c6c84540191df8f1cb9222f7e3599c1765839be650bfa5fc66d99f8667"
+  },
+  {
+    "timestamp": "2026-10-31T09:54:36.281Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "e8326bb044717e8dacc21190cfd2aa538fc9b8dc87a4ed533bfab232b931955e"
+  },
+  {
+    "timestamp": "2026-10-31T10:01:34.353Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "f6b2f980202eefca2575c432e4116eed93f5cf9e338e932b6226fe9bcb4b9721"
+  },
+  {
+    "timestamp": "2026-10-31T10:01:34.375Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "5433b7b831c05ace5a825f7432cecbc4968cd3f251e943ce33f2c3e3e06f23de"
+  },
+  {
+    "timestamp": "2026-10-31T10:07:53.370Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "fc18912979c411fe7782f4d52a50de1761d9994366577160a265dfec7da423a9"
+  },
+  {
+    "timestamp": "2026-10-31T10:07:53.394Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "0382d3d56b7e16c14ec13dd8f7dd21a1f0ceceee6eeb7d560c97a63481fec538"
+  },
+  {
+    "timestamp": "2026-10-31T10:14:22.579Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "6e4f305bfc5e2b03e5ff2904a51a007d24d6b5e199c24a81f2cc98696f85e032"
+  },
+  {
+    "timestamp": "2026-10-31T10:14:22.596Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "be655ac7242b757f888fe7d1603387f531b38f9ee19973223bee6eb9d25e152c"
+  },
+  {
+    "timestamp": "2026-10-31T10:40:56.585Z",
+    "operation": "update",
+    "ticket_number": 41,
+    "hash": "fae161febd7649ffad2c2a04e3d1c0ffd4dfdb82b91f2897c0b8834439279f0d"
+  },
+  {
+    "timestamp": "2026-10-31T10:40:56.597Z",
+    "operation": "update",
+    "ticket_number": 42,
+    "hash": "8ec8fdcd06d66c937be24327b6c10ff0c3059efc35122d8d69bd38e6fdef02ff"
   }
 ]

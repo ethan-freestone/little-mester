@@ -1,0 +1,56 @@
+{
+  "id": 54,
+  "file_path": "/workspace/docs/tickets/ticket-054.json",
+  "number": 54,
+  "area": "improvements",
+  "type": "improvement",
+  "status": "draft",
+  "title": "On-screen ChatGPT usage windows via Little Mester MCP",
+  "objective": "Add a low-priority, read-only Little Mester MCP module and on-screen counter for authenticated ChatGPT usage in the five-hour and weekly windows, after confirming a supported and safe source for the data.",
+  "created_at": "2026-10-29T14:24:09.078Z",
+  "updated_at": "2026-10-29T14:24:09.082Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "The implementation uses a supported, documented source for the authenticated account's five-hour and weekly usage windows; discovery records whether the source provides token counts, quota percentages, reset times, and plan-specific limits. It never labels another metric as tokens or fabricates unavailable values.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "A read-only Little Mester MCP tool reports the available five-hour and weekly usage, remaining quota or percentage, and reset information with explicit units and collection time; it handles unsupported plans, missing data, and source outages clearly.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "A compact on-screen counter presents both windows and their reset state, refreshes at a bounded rate, and remains legible without disrupting existing TUI/sidebar content.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Authentication uses the existing supported OpenCode credential boundary; credentials, authorization headers, and raw usage responses containing sensitive account data are not logged, persisted in the workspace, or exposed through unrelated MCP tools.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "The module is opt-in or safely unavailable when the required provider/auth is absent, performs no quota-changing actions, and does not broaden host/network exposure or egress policy.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "Automated tests cover parsing and units, five-hour/weekly windows and reset boundaries, missing/unsupported responses, authentication failures, refresh behavior, and secret/log redaction; owner verification confirms the displayed values against the supported account UI/source.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Research and document the supported ChatGPT/OpenAI usage endpoint or API available to the authenticated OpenCode account; confirm allowed use, response semantics, and whether the source exposes tokens versus quota percentage/request limits before implementation.",
+      "Define the MCP tool response schema and the on-screen TUI placement/refresh policy; coordinate with existing token metrics ticket #24 so session token totals are not confused with provider quota windows.",
+      "Add unit and integration tests for five-hour and weekly usage/reset parsing, units, boundaries, unsupported plans, missing fields, provider errors, and redaction.",
+      "Owner acceptance: compare both displayed windows and reset times with the provider's supported account usage view; confirm no credentials or sensitive response data are logged or persisted."
+    ],
+    "created": [],
+    "cases": []
+  },
+  "models_used": [],
+  "priority": "trivial"
+}

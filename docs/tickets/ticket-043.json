@@ -5,49 +5,49 @@
   "area": "security",
   "type": "feature",
   "status": "draft",
-  "title": "Workspace Docker capability, isolation and egress enforcement",
-  "objective": "When the target directory declares Docker dependencies, ./lab and the agent run them predictably and safely: detection and approval at launch, a generated safe compose overlay, workspace labels for teardown, explicit approval for extra context mounts, and enforced egress rules.",
+  "title": "Guest Docker workloads, recursive VMs and host isolation",
+  "objective": "Give a directly running guest agent ordinary Docker/Compose control for arbitrary project test services and recursive Little Mester VMs where nested virtualization is supported, while the outer VM continues to isolate the host and the existing egress allowlist/no-host-route policy remains enforced.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-10-26T20:50:56.507Z",
+  "updated_at": "2026-10-30T16:16:01.751Z",
   "acceptance_criteria": [
     {
       "id": "A1",
-      "text": "At launch ./lab detects compose files in the workspace (docker-compose.yml/.yaml, compose.yaml/.yml and override files) and shows them in the existing confirmation summary before anything runs.",
+      "text": "From the guest agent, bring up a representative project Compose stack (including PostgreSQL), run its tests, stop/restart services, and tear down the stack without requiring host Docker or host-side compose orchestration.",
       "status": "pending"
     },
     {
       "id": "A2",
-      "text": "A generated override enforces: no published host ports, a workspace-scoped compose project name, com.little-mester.workspace=<path> labels, no privileged mode, no host network/PID/IPC, and no bind mounts outside the workspace.",
+      "text": "Guest-local ports, bind mounts within the selected guest workspace, volumes and ordinary Compose features work for guest workloads; no generated restrictive compose overlay silently blocks normal project behavior.",
       "status": "pending"
     },
     {
       "id": "A3",
-      "text": "The agent can run compose commands for the workspace in-session; containers it starts are labelled and removed by ./lab stop, with no orphan containers, volumes or networks left behind.",
+      "text": "Host isolation remains intact: no host Docker socket, no host route/LAN exposure, no access to host files outside the selected workspace, and no host credential directory mount. Services do not publish onto the host LAN.",
       "status": "pending"
     },
     {
       "id": "A4",
-      "text": ".mester-egress allowed_domains is enforced by the host-side allowlisting proxy described in §C.8, not advisory: a non-empty list restricts agent egress and image pulls to those domains, and permission=false denies all egress. A blank list keeps the documented allow-all behaviour.",
+      "text": "QEMU restrict=on remains enforced for outer and nested VMs. Guest/workload public HTTP(S) uses only the proxy; blank allowed_domains permits public hosts, while the proxy rejects non-public/mixed DNS and parent-local/directly connected networks. Direct guest Internet/DNS, non-HTTP, host/LAN, and ancestor routes remain blocked; the Linux route guard fails closed if host routes cannot be inspected. Broader public egress is owner-approved.",
       "status": "pending"
     },
     {
       "id": "A5",
-      "text": "Negative cases are refused with a clear message: published ports, privileged mode, host networking, bind mounts outside the workspace, and pulls from an unapproved registry where policy disallows them.",
+      "text": "When nested virtualization is available, the guest can launch and control a nested Little Mester VM with an explicitly selected guest-side workspace, run a test there, and stop it. Capability absence is detected and reported without weakening the outer boundary.",
       "status": "pending"
     },
     {
       "id": "A6",
-      "text": "When the agent needs a host path outside the workspace (for example fixtures or a second checkout), it can request it; ./lab shows the exact path and requires explicit owner approval before mounting it read-only. Nothing outside the workspace is mounted silently.",
+      "text": "Lifecycle distinguishes ordinary guest workload cleanup from outer-VM deletion; it does not silently delete active recursive test state or evidence, and any destructive teardown is explicit.",
       "status": "pending"
     },
     {
       "id": "A7",
-      "text": "Mid-session Docker needs (a new image or service) follow an explicit approval step; the agent can write a request but cannot grant it. The flow is documented.",
+      "text": "Tests cover Compose feedback loops, host-boundary negative cases, current egress allow/deny policy and nested-VM capability/boot behavior; evidence is recorded before claiming support.",
       "status": "pending"
     },
     {
       "id": "A8",
-      "text": "Tests cover the allow/deny matrix, override generation, extra-mount approval and teardown; results are recorded on the ticket.",
+      "text": "Recursive Little Mester execution is opt-in, uses a separate disposable workspace/state, and enforces the propagated maximum nesting depth (default 0) before starting child agents/VMs. Neither recurse nor unsafe-recurse grants additional host paths, host Docker, credentials, LAN, or broader egress; self-write authority requires explicit unsafe-recurse. See #52.",
       "status": "pending"
     }
   ],
@@ -59,10 +59,35 @@
       "each negative case is refused",
       "extra context mount approval",
       "mid-session Docker request approval",
-      "teardown residue check"
+      "teardown residue check",
+      "credential-forwarding boundary test: no host secret directory mount and no credential when disabled",
+      "selected cloud provider auth works only when its required egress is allowed",
+      "Guest compose PostgreSQL feedback loop",
+      "Guest loopback service reachability and no host-LAN publication",
+      "Host Docker/filesystem/socket isolation negative tests",
+      "Current egress allow/deny matrix without policy widening",
+      "Nested VM boot/test/stop and unsupported-host behavior",
+      "Outer VM teardown confirmation and nested-state/evidence handling",
+      "VM model API forwarder boundary check coordinated with #42: host Docker version >=28, host publishes only 127.0.0.1:8080/11434, separate LAN host cannot connect, guest can reach only configured forwarded model APIs, and QEMU restrict=on remains set. Do not broaden networking or expose ports on 0.0.0.0.",
+      "Test nested agent/VM recursion with default depth 0, explicit depth boundary, attempted child depth reset, workspace isolation, and no host Docker/credential/LAN access; unsupported nesting fails closed (#52).",
+      "Repeat the non-public destination and allowlist matrix inside the live guest and rootless workload network on the owner KVM host; verify QEMU restrict=on, host gateway/LAN/direct Internet negative paths, selected model/proxy guestfwd positive paths, and host workspace/credential boundary. This environment lacks /dev/kvm and cannot substitute local unit tests for host acceptance.",
+      "On a supported host, prove public HTTPS works only through the VM proxy while direct Internet, QEMU host gateway, private/LAN, and the host's local/directly connected addresses fail; verify restrict=on. Repeat the same positive/negative matrix from a nested VM before claiming recursion. Preserve the existing overlay; no firewall/route changes."
     ],
-    "created": [],
-    "cases": []
+    "created": [
+      "tests/test_vm_proxy.py: current project build-registry allowlist and npm lookalike-domain refusal",
+      "tests/test_vm_proxy.py: end-to-end proxy-handler HTTP and CONNECT denial for loopback/private/reserved/link-local/multicast targets, mixed DNS rejection before connect, public DNS pinning, and explicit api.openai.com egress denial before resolution.",
+      "tests/test_vm_proxy.py: parent-local/directly connected IPv4/IPv6 network denial, mapped-IPv4 denial, and Linux host-route discovery",
+      "tests/test_vm_proxy.py: public host-network denial, Linux route-table discovery/fail-closed, IPv4-mapped/NAT64 handling, and 6to4/Teredo rejection"
+    ],
+    "cases": [
+      "2026-10-28 owner explicitly approved adding npmjs.org to .mester-egress for registry.npmjs.org required by agent/OpenCode npm install. Existing entries preserved; public-only proxy enforcement unchanged; no allow-all or provider domains granted. #41 build fix loads CLI/auth-helper proxy env separately from daemon/RUN arguments; live registry build retry still pending.",
+      "2026-10-29 security regression found Python 3.12 considers IPv4 multicast 224.0.0.1 `is_global=True`. VM proxy now rejects multicast in addition to non-global addresses and checks all DNS answers before connecting. HTTP/CONNECT regression tests cover IPv4/IPv6 multicast and private/reserved/link-local targets; mixed public/private or multicast DNS results cannot reach connect(). VM Python suite 33/33 passes locally. No KVM host egress acceptance is claimed.",
+      "2026-10-29: reviewed patch committed locally as 32bb8ea6b6a2959839216653797e4a49fd5a814d (`fix(vm): derive ChatGPT callback forwarding at runtime`) on feat/vm-approach. Local validation: VM Python tests 33/33, Bats 104/104, docs checks 115/115, ShellCheck, Bash/Python compile, diff check, and ticket validation pass. No live VM/browser acceptance. `git push origin feat/vm-approach` was attempted but this environment has no `ssh` executable; revision is still local and must be transferred to the owner checkout before the handoff can run.",
+      "2026-10-29 owner-approved public-only egress: `.mester-egress` now leaves `allowed_domains` blank for broad public HTTP(S) work; `permission=false` still disables egress. QEMU restrict=on remains; proxy now denies local/directly connected parent networks plus non-public/mixed DNS destinations. Regression tests cover Linux route-table parsing, public IPv4/IPv6-mapped targets inside blocked parent networks, and ordinary public domains. Local tests pass; no owner KVM or nested-VM acceptance is claimed.",
+      "2026-10-29 final regression verification: proxy 20/20, full VM Python 40/40, Bats 106/106, Ruff/Python compile and docs 115/115 passed locally. Tests exercise public-only proxy policy and deny parent-local/directly connected destinations, including IPv4-embedded IPv6. Live host and nested-VM acceptance remain pending.",
+      "2026-10-29 owner CachyOS observation after public-egress patch: `./lab-vm egress-reload` succeeded on the existing loopback listener without restarting QEMU/overlay. `./lab-vm verify-isolation` reported restrict=on, loopback SSH and only four reviewed guestfwd channels; 14/14 probes passed: QEMU gateway ports 22/80/443/2375/2376/3128/8080/11434/19532 blocked, direct 1.1.1.1:80 and :443 blocked, proxy private-target response 403, selected llama.cpp guestfwd HTTP 200, workspace virtiofs. Bounded partial evidence only: positive public HTTPS through the proxy and explicit proxy 403 checks for host-local/directly-connected targets were not shown; nested-VM acceptance remains separate. No host settings or VM state were changed.",
+      "2026-10-30 ordering note: after #41's current host gate and same-profile warm-switch acceptance, bounded recursion/nested self-testing is the next implementation gate before any default migration or PR merge. #52 A6/A7 and this ticket A5/A8 already require propagated max depth default 0, fail-closed unsupported-host handling, a separate child workspace/state, and nested isolation. The current recursion marker only affects browser-auth defaults; it is not enforcement. This environment has no /dev/kvm, so no nested boot result is claimed."
+    ]
   },
   "priority": "critical",
   "parent": 35,

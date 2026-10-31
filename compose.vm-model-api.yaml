@@ -1,0 +1,39 @@
+# Optional, loopback-only host endpoints for the direct guest VM.
+# The default host-Docker workflow does not start these forwarders or publish
+# either model service. QEMU's existing guestfwd entries reach these ports with
+# restrict=on; the forwarders then connect to the model containers on `internal`.
+# Docker silently omits published-port mappings for containers attached only to
+# an internal bridge, so forwarders also join vm-api-publish. Masquerading is
+# disabled on that bridge; this is not a substitute for host egress policy.
+services:
+  ollama-vm-api:
+    image: alpine/socat:latest
+    entrypoint: ["socat"]
+    command: ["TCP-LISTEN:11434,fork,reuseaddr", "TCP:ollama:11434"]
+    profiles: [vm-model-api]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:11434:11434"
+    networks: [internal, vm-api-publish]
+    restart: unless-stopped
+
+  llamacpp-vm-api:
+    image: alpine/socat:latest
+    entrypoint: ["socat"]
+    command: ["TCP-LISTEN:8080,fork,reuseaddr", "TCP:llamacpp:11434"]
+    profiles: [vm-model-api]
+    depends_on:
+      llamacpp:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks: [internal, vm-api-publish]
+    restart: unless-stopped
+
+networks:
+  vm-api-publish:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"

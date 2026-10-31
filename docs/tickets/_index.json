@@ -238,13 +238,13 @@
     {
       "number": 41,
       "file_path": "ticket-041.json",
-      "status": "draft",
+      "status": "active",
       "area": "infra"
     },
     {
       "number": 42,
       "file_path": "ticket-042.json",
-      "status": "draft",
+      "status": "active",
       "area": "infra"
     },
     {
@@ -262,7 +262,7 @@
     {
       "number": 45,
       "file_path": "ticket-045.json",
-      "status": "draft",
+      "status": "active",
       "area": "infra"
     },
     {
@@ -276,7 +276,61 @@
       "file_path": "ticket-047.json",
       "status": "draft",
       "area": "infra"
+    },
+    {
+      "number": 48,
+      "file_path": "ticket-048.json",
+      "status": "draft",
+      "area": "infra"
+    },
+    {
+      "number": 49,
+      "file_path": "ticket-049.json",
+      "status": "draft",
+      "area": "infra"
+    },
+    {
+      "number": 50,
+      "file_path": "ticket-050.json",
+      "status": "active",
+      "area": "infra"
+    },
+    {
+      "number": 51,
+      "file_path": "ticket-051.json",
+      "status": "draft",
+      "area": "engine"
+    },
+    {
+      "number": 52,
+      "file_path": "ticket-052.json",
+      "status": "active",
+      "area": "infra"
+    },
+    {
+      "number": 53,
+      "file_path": "ticket-053.json",
+      "status": "draft",
+      "area": "docs"
+    },
+    {
+      "number": 54,
+      "file_path": "ticket-054.json",
+      "status": "draft",
+      "area": "improvements"
+    },
+    {
+      "number": 55,
+      "file_path": "ticket-055.json",
+      "status": "active",
+      "area": "infra"
+    },
+    {
+      "number": 56,
+      "file_path": "ticket-056.json",
+      "status": "draft",
+      "area": "infra"
     }
   ],
-  "updated_at": "2026-10-26T20:50:56.509Z"
+  "updated_at": "2026-10-31T10:40:56.596Z"
 }

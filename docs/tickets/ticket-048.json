@@ -1,0 +1,95 @@
+{
+  "id": 48,
+  "file_path": "/workspace/docs/tickets/ticket-048.json",
+  "number": 48,
+  "area": "infra",
+  "type": "improvement",
+  "status": "draft",
+  "title": "Add --verbose and --debug flags to lab-vm",
+  "objective": "Add --verbose (-v) and --debug (-d) flags to lab-vm for progressive verbosity. --verbose prints extra progress information (SSH commands, qemu args, genisoimage output). --debug prints everything including raw command output, timing, and internal state.",
+  "created_at": "2026-10-27T12:13:43.750Z",
+  "updated_at": "2026-10-28T11:49:31.233Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "lab-vm accepts --verbose (-v) and --debug (-d) flags at any position after the command",
+      "status": "passing",
+      "evidence": "Flag parsing in lab-vm (lines 194-235) iterates all args in any order; -v/--verbose sets VM_VERBOSE=1, -d/--debug sets VM_VERBOSE=1+VM_DEBUG=1. Same pattern in lab (lines 210-228, 232-267). Verified via --help text showing flags in usage section."
+    },
+    {
+      "id": "A2",
+      "text": "Default (no flag): same output as today — status lines for each phase",
+      "status": "passing",
+      "evidence": "Default VM_VERBOSE=0, VM_DEBUG=0 (lines 53-54); log() prints unconditionally while log_verbose()/log_debug() gated. No behavioral change from prior version."
+    },
+    {
+      "id": "A3",
+      "text": "--verbose: prints extra progress info (SSH commands, qemu virtiofsd output, genisoimage stdout/stderr, port discovery details)",
+      "status": "passing",
+      "evidence": "log_verbose() at line 63-65 prints [verbose] prefix when VM_VERBOSE>=1. Called throughout lifecycle.sh (SSH commands, port discovery) and prereqs.sh (distro/package info). Usage text at line 169 documents the flag."
+    },
+    {
+      "id": "A4",
+      "text": "--debug: prints everything from --verbose plus raw command output, timing, and internal variable values",
+      "status": "passing",
+      "evidence": "log_debug() at line 67-69 prints [debug] timestamp prefix when VM_DEBUG>=1. -d/--debug sets both VM_VERBOSE=1 and VM_DEBUG=1 (line 203), so debug includes verbose. Usage text at line 170 documents the flag."
+    },
+    {
+      "id": "A5",
+      "text": "Usage text documents -v/--verbose, -d/--debug, and -y/--yes flags",
+      "status": "passing",
+      "evidence": "Usage text in lab-vm (lines 163-170) lists: -y/--yes, --auto-accept, --clean, -v/--verbose, -d/--debug, --unsafe-recurse, --base-size. lab (lines 525-536) lists: --verbose, --auto-accept."
+    },
+    {
+      "id": "A6",
+      "text": "Verbose/debug flags are passed through to sourced library files via VM_VERBOSE/VM_DEBUG env vars",
+      "status": "passing",
+      "evidence": "export VM_VERBOSE VM_DEBUG at line 72. Library files (lifecycle.sh, prereqs.sh) check VM_VERBOSE/VM_DEBUG via log_verbose()/log_debug() helpers."
+    },
+    {
+      "id": "A7",
+      "text": "lab-vm accepts -y/--yes flag that auto-accepts all interactive prompts (package install, confirmation summary), matching the LAB_YES=1 env var pattern",
+      "status": "passing",
+      "evidence": "lab-vm: -y/--yes/--auto-accept at line 200 sets VM_YES=1; prereqs.sh line 211 checks VM_YES before prompting; lifecycle.sh line 370 checks VM_YES for rebuild confirmation. lab: -y/--yes/--auto-accept at line 219 sets AUTO_ACCEPT=1+LAB_YES=1; confirm() at lines 169-172 checks LAB_YES, AUTO_ACCEPT, VM_YES."
+    },
+    {
+      "id": "A8",
+      "text": "-y/--yes sets both VM_YES and LAB_YES env vars for cross-script compatibility",
+      "status": "passing",
+      "evidence": "lab-vm line 200: VM_YES=1; LAB_YES=1. lab line 219: AUTO_ACCEPT=1; LAB_YES=1. Both scripts init VM_YES from env at top (lab-vm line 51: VM_YES=${VM_YES:-${LAB_YES:-0}}, lab line 169 in confirm(): [[ \"${VM_YES:-0}\" == \"1\" ]])."
+    }
+  ],
+  "tests": {
+    "needed": [
+      "flag ordering: -y before and after command in lab",
+      "flag ordering: -y before and after command in lab-vm",
+      "flag ordering: -v/--verbose before and after command",
+      "flag ordering: -d/--debug before and after command",
+      "auto-accept: --yes skips confirm() prompt in lab",
+      "auto-accept: --auto-accept sets AUTO_ACCEPT in lab",
+      "auto-accept: VM_YES=1 env var skips prereqs prompt in lab-vm",
+      "auto-accept: --clean flag with -y combined",
+      "help flag mixed with other flags in lab",
+      "help flag mixed with other flags in lab-vm"
+    ],
+    "created": [
+      "tests/lab.bats: help/flag ordering and LAB_YES/AUTO_ACCEPT/VM_YES confirmation regressions (existing suite)",
+      "tests/lab-permissions.bats: mocked final OpenCode argv for auto-accept before/after workspace; permission UI evidence remains #50"
+    ],
+    "cases": [
+      "flag_ordering: -y before command",
+      "flag_ordering: -y after command",
+      "flag_ordering: --auto-accept before command",
+      "flag_ordering: --verbose before command",
+      "flag_ordering: --debug before command",
+      "auto_accept: confirm() with LAB_YES=1 skips prompt",
+      "auto_accept: confirm() with AUTO_ACCEPT=1 skips prompt",
+      "auto_accept: confirm() with VM_YES=1 skips prompt",
+      "help_flag: --help mixed with --verbose in lab",
+      "help_flag: --help mixed with --yes in lab-vm",
+      "2026-10-28 clarification: -y/--yes/--auto-accept wrapper confirmation and flag parsing are separate from actual OpenCode permission mode. Owner reports prompt UI even with PID 1 argv opencode --auto (v2.2.0). Keep A1–A8 existing wrapper evidence; live permission regression is #50 and epic #35 A20. Do not treat wrapper tests as permission UI proof.",
+      "2026-10-28 validator backtrack: store validation passed audit/index/orphans but warned that #48 passing criteria had an empty tests.created ledger. Registered the existing Bats coverage through MCP instead of suppressing validator warnings or editing JSON."
+    ]
+  },
+  "models_used": []
+}

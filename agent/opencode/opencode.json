@@ -61,10 +61,6 @@
     "/etc/opencode/plugins/host-metrics-tui",
     "/etc/opencode/plugins/little-mester-exit-confirm"
   ],
-  "permission": {
-    "edit": "ask",
-    "bash": "ask"
-  },
   "otel": {},
   "model": "llamacpp/qwen3.6-35b-a3b-q4_k_m",
   "small_model": "llamacpp/qwen3.6-35b-a3b-q4_k_m",

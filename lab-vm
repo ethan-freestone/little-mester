@@ -1,0 +1,748 @@
+#!/usr/bin/env bash
+# lab-vm — Standalone VM mode entry point for little-mester.
+#
+# This script is fully independent of ./lab (the host-Docker mode).
+# It provides VM lifecycle commands without touching the existing
+# Docker compose workflow.
+#
+# Once VM mode is proven working, these commands will be merged
+# into ./lab (ticket #41).
+#
+# ── Isolation guarantee ──────────────────────────────────────────────
+# lab-vm and ./lab share ZERO resources:
+#   - ./lab  → Docker Compose (host-Docker)
+#   - lab-vm → QEMU/KVM + virtiofsd (host process, guest VM)
+#
+# A crash, core dump, or signal in lab-vm CANNOT affect ./lab:
+#   - Different hypervisor, different process tree, different ports
+#   - lab-vm uses $LAB_DIR/.mester/vm/<name>/ for state; lab uses ./ for compose
+#   - failed startup cleanup kills only the QEMU/virtiofsd/proxy it started
+#   - lab-vm failures are completely silent to ./lab
+#
+# The only shared path is $LAB_DIR (the repo root), and even that
+# is read-only from lab-vm's perspective during normal operation.
+#
+# Usage:
+#   ./lab-vm <workspace>                 # start/reuse VM and open guest TUI
+#   ./lab-vm run [workspace] [--name <profile>] # same, explicit spelling/profile
+#   ./lab-vm up [name] [--workspace <path>]
+#   ./lab-vm status [name]
+#   ./lab-vm ssh [name]
+#   ./lab-vm down [name]
+#   ./lab-vm stop [name]
+#   ./lab-vm base [name]
+#   ./lab-vm rebuild [name]
+#   ./lab-vm install-tools [name] [--restart-opencode]
+#   ./lab-vm update [opencode|config|tools|docker|system ...] [--name <profile>]
+#   ./lab-vm update --all [--name <profile>]
+#   ./lab-vm models {ensure|up|status|down} [provider]
+#   ./lab-vm extra <temporary-command> [args...]
+#
+# Epic #35 | Sub-ticket #41
+
+set -euo pipefail
+
+LAB_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
+
+# ─── Verbosity levels ───────────────────────────────────────────────
+# VM_DEBUG=2 > VM_VERBOSE=1 > VM_VERBOSE=0 (default)
+#
+# --verbose / -v : extra progress info (SSH commands, qemu/virtiofsd
+#                  output, genisoimage stdout, port discovery)
+# --debug / -d   : everything from --verbose plus raw command output,
+#                  timing, and internal variable values
+#
+# ─── Auto-accept ────────────────────────────────────────────────────
+# -y / --yes     : auto-accept all prompts (same as LAB_YES=1 / VM_YES=1)
+# --clean        : before up, run stop + down to fully teardown first
+VM_YES="${VM_YES:-${LAB_YES:-0}}"
+VM_CLEAN=0
+VM_BROWSER_AUTH_MODE=auto
+VM_BROWSER_AUTH_ENABLE_FLAG=0
+VM_BROWSER_AUTH_DISABLE_FLAG=0
+VM_RESTART_OPENCODE=0
+VM_UPDATE_ALL=0
+VM_VERBOSE="${VM_VERBOSE:-0}"
+VM_DEBUG="${VM_DEBUG:-0}"
+if [[ "$VM_DEBUG" -ge 1 ]]; then VM_VERBOSE=1; fi
+
+# ─── Logging helpers ────────────────────────────────────────────────
+# log      — always printed (normal status lines)
+# log_verbose — printed with -v or -d
+# log_debug  — printed with -d only
+
+log() { echo "$@"; }
+
+log_verbose() {
+  if [[ $VM_VERBOSE -ge 1 ]]; then echo "[verbose] $*"; fi
+}
+
+log_debug() {
+  if [[ $VM_DEBUG -ge 1 ]]; then echo "[debug] $(date '+%H:%M:%S') $*"; fi
+}
+
+# Export for sourced library files
+export VM_VERBOSE VM_DEBUG
+# check_workspace: guards path selection before it's exported to the VM.
+# Refuses: /, $HOME, the lab repo (without --unsafe-recurse),
+# sensitive credential directories ($HOME/.ssh, $HOME/.config, etc.)
+
+VM_WORKSPACE=""
+VM_NAME_ARG=""
+
+die() { echo "REFUSED: $*" >&2; exit 1; }
+
+check_workspace() {
+  local ws="$1"
+  [[ -d "$ws" ]] || die "Not a directory: $ws"
+  ws="$(realpath "$ws")"
+
+  # System & Root folder protections
+  [[ "$ws" != "/" ]] || die "Cannot mount filesystem root (/)"
+  [[ "$ws" != "$HOME" ]] || die "Cannot mount entire home directory ($HOME)"
+
+  # Ensure target is owned by current user
+  [[ -O "$ws" ]] || die "Workspace directory must be owned by you (UID $(id -u))"
+
+  # Prevent exposing the lab repo itself
+  if [[ "$ws" == "$LAB_DIR" || "$LAB_DIR" == "$ws"/* ]]; then
+    if [[ "${VM_UNSAFE_RECURSE:-0}" != "1" ]]; then
+      die "Workspace path would expose the little-mester repo itself. Use --unsafe-recurse to override (requires awareness of the risks)."
+    fi
+  fi
+
+  # Blacklist sensitive credential/config paths
+  local sensitive_paths=(
+    "$HOME/.ssh"
+    "$HOME/.gnupg"
+    "$HOME/.config"
+    "$HOME/.aws"
+    "$HOME/.kube"
+    "$HOME/.local"
+    "$HOME/.bashrc"
+    "$HOME/.zshrc"
+  )
+
+  for s in "${sensitive_paths[@]}"; do
+    if [[ "$ws" == "$s" || "$ws" == "$s"/* || "$s" == "$ws"/* ]]; then
+      die "Path overlaps with sensitive system/credential directory: $s"
+    fi
+  done
+
+  VM_WORKSPACE="$ws"
+}
+
+# ─── Source VM libraries ────────────────────────────────────────────
+source "$LAB_DIR/lib/vm/cloud-init.sh"
+source "$LAB_DIR/lib/vm/disk.sh"
+source "$LAB_DIR/lib/vm/ssh.sh"
+source "$LAB_DIR/lib/vm/runner.sh"
+source "$LAB_DIR/lib/vm/prereqs.sh"
+source "$LAB_DIR/lib/vm/lifecycle.sh"
+source "$LAB_DIR/lib/vm/host-services.sh"
+
+# ─── CLI parsing ────────────────────────────────────────────────────
+usage() {
+  cat <<'EOF'
+Usage: ./lab-vm <command|workspace> [options]
+
+Daily workspace launch (keeps one VM and mounts one workspace at a time):
+
+  ./lab-vm <workspace>
+  ./lab-vm run [workspace] [--name <profile>] [--browser-auth|--no-browser-auth]
+      Start/reuse the selected VM profile (default: default) and enter the
+      direct guest OpenCode TUI.
+      Omit workspace to use the current directory. Reusing the same workspace
+      does not reboot. Selecting a different workspace asks before a clean
+      guest shutdown/restart; the VM overlay, installed tools, and control keys
+      are preserved. The old workspace is unmounted before the new one is used.
+      --name selects an isolated VM profile (useful for disposable tests).
+
+VM lifecycle commands (epic #35, ticket #41):
+
+  ./lab-vm models ensure [default|ollama|llamacpp]
+      Ensure the configured host model API is healthy. The run/agent launch
+      does this automatically before opening OpenCode (except browser-auth-only).
+
+  ./lab-vm up [name] [--workspace <path>]
+      Provision/start the VM for diagnostics; does not launch OpenCode.
+      Idempotent: re-running does not duplicate VMs.
+
+  ./lab-vm status [name]
+      Show VM state, SSH port, and running containers.
+
+  ./lab-vm ssh [name]
+      SSH into the running VM.
+
+  ./lab-vm agent [name] [--browser-auth|--no-browser-auth]
+      Attach OpenCode to the already-running VM and currently mounted workspace.
+      Browser OAuth handoff is enabled by default; use --no-browser-auth to skip it.
+      Nested agent launches disable the bridge by default; --browser-auth overrides.
+      Use -v/--verbose or -d/--debug for preflight diagnostics.
+
+  ./lab-vm auth-forward [name] <callback-port>
+      Temporarily forward the exact loopback callback port over SSH.
+      Read the numeric port from redirect_uri locally; never share the URL.
+
+  ./lab-vm egress-reload [name]
+      Refresh the workspace egress manifest on the recorded loopback port
+      without restarting QEMU or changing the VM overlay. An older proxy may
+      be replaced briefly to add safe in-place reload support.
+
+  ./lab-vm verify-isolation [name]
+      Verify the running QEMU network allowlist and run bounded probes inside the guest.
+
+  ./lab-vm down [name]
+      Stop the VM and remove per-VM artifacts (overlay disk, seed ISO, keys).
+      Base disk is preserved.
+
+  ./lab-vm stop [name]
+      Teardown Docker containers in VM, verify git is clean, then down.
+
+  ./lab-vm base [name]
+      Download and verify the base image (about 600 MiB; 20 GiB virtual size).
+
+  ./lab-vm rebuild [name]
+      Delete and recreate the base disk (destructive, requires confirmation).
+      Removes overlay disk as well. A new base is created in its place.
+
+  ./lab-vm install-tools [name] [--name <profile>] [--restart-opencode]
+      Install optional Bats and ShellCheck packages into an already-running guest.
+      Does not provision/restart the VM. Exit the current TUI first; the optional
+      --restart-opencode launches a fresh direct-guest OpenCode session afterward.
+      Use -v/--verbose or -d/--debug for install/SSH diagnostics.
+
+  ./lab-vm update [opencode|config|tools|docker|system ...] [--name <profile>]
+  ./lab-vm update --all [--name <profile>]
+      Check for updates, then ask before changing the running guest.
+      The default checks OpenCode, installed Bats/ShellCheck, and guest config/plugins.
+      Select one or more targets to narrow the check. `--all` additionally upgrades
+      guest OS packages (including the managed Docker Engine). Use --yes to confirm
+      non-interactively. Exit the OpenCode TUI and guest workloads first.
+
+   ./lab-vm models up [default|ollama|llamacpp|all]
+       Start selected Compose model API forwarders published on loopback; verify host HTTP.
+       Default selects the provider configured in agent/opencode/opencode.json.
+
+  ./lab-vm models status [default|ollama|llamacpp|all]
+      Check the configured provider (or selected providers) and fail if its
+      forwarder is absent, not loopback-published, or unreachable.
+
+  ./lab-vm [-v|-d] models diagnose [--sudo] [--probe-egress] [ollama|llamacpp|all]
+      Collect detailed, read-only Docker/model forwarding diagnostics.
+      --sudo uses non-interactive sudo only for read-only firewall/config probes.
+      --probe-egress attempts a TCP connection from each forwarder to 1.1.1.1:443.
+      Does not start/recreate containers or change host networking.
+
+   ./lab-vm models down
+       Stop only the Compose VM model API forwarders; model servers and VM are untouched.
+
+   ./lab-vm metrics up|status|down
+       Manage a separate host-native metrics endpoint on 127.0.0.1:19532 for VM guestfwd.
+       This does not use host Docker and does not change the host-Docker metrics service.
+
+  ./lab-vm extra <command> [args...]
+      Run temporary repair/diagnostic helpers from scripts/vm-extra.sh.
+      These commands MUST be removed after ticket #42's VM acceptance gates.
+
+  ./lab-vm test
+      Run self-tests: validate prerequisites, workspace guard, disk/ISO creation.
+
+Flags (any order):
+  --unsafe-recurse     Allow workspace to be inside the little-mester repo
+  --base-size <GiB>    Base disk size in GiB (default: 20)
+  --name <profile>     Select a VM profile with 'run', 'install-tools', or 'update'
+  --all                Select all managed guest software with 'update'
+  -y, --yes            Auto-accept all prompts (same as VM_YES=1)
+  --auto-accept        Alias for --yes
+  --clean              Before 'up': run 'stop' then 'down' to fully teardown first
+  -v, --verbose        Extra progress info (SSH commands, qemu/virtiofsd output)
+  -d, --debug          Everything from --verbose plus raw output and timing
+
+Environment:
+  VM_BASE_SIZE         Override default base disk size (default: 20)
+  VM_YES=1 / LAB_YES=1 Auto-accept all prompts (same as --yes)
+  VM_VERBOSE=1         Equivalent to --verbose
+  VM_DEBUG=1           Equivalent to --debug (implies --verbose)
+  VM_OPENCODE_VERSION  Guest OpenCode target (default: latest; may be pinned)
+
+Per-VM state is stored at: ./.mester/vm/<name>/
+
+References:
+  docs/01-host-setup.md     — Host setup runbook (A1, A8)
+  docs/vm-architecture.md   — Trust boundary & crossings
+  docs/DECISIONS.md §C.8    — VM topology decisions
+EOF
+}
+
+# ─── Parse arguments in any order ───────────────────────────────────
+# Extract known global flags from any position, identify cmd + vm_name
+# as the first two non-flag arguments (skipping flag-pair values).
+# shellcheck disable=SC2034
+cmd="${1:-help}"
+shift 2>/dev/null || true
+
+# ── 1. Extract known global flags from $@ ──────────────────────────
+_flags=("$cmd" "$@")
+for _i in "${_flags[@]}"; do
+  case "$_i" in
+    --unsafe-recurse)         VM_UNSAFE_RECURSE=1 ;;
+    --base-size|--workspace|--name) ;; # value consumed next iteration
+    -y|--yes|--auto-accept)   VM_YES=1; LAB_YES=1 ;;
+    --all)                    VM_UPDATE_ALL=1 ;;
+    --clean)                  VM_CLEAN=1 ;;
+    --browser-auth)           VM_BROWSER_AUTH_MODE=on; VM_BROWSER_AUTH_ENABLE_FLAG=1 ;;
+    --no-browser-auth)        VM_BROWSER_AUTH_MODE=off; VM_BROWSER_AUTH_DISABLE_FLAG=1 ;;
+    --restart-opencode)       VM_RESTART_OPENCODE=1 ;;
+    -v|--verbose)             VM_VERBOSE=1 ;;
+    -d|--debug)               VM_VERBOSE=1; VM_DEBUG=1 ;;
+    --help|-h)                ;;
+    *) ;; # not a global flag
+  esac
+done
+
+# ── 2. Resolve value-attached flags (--base-size, --workspace) ─────
+for ((_fi=0; _fi<${#_flags[@]}; _fi++ )); do
+  case "${_flags[$_fi]}" in
+    --base-size)    VM_BASE_SIZE="${_flags[$((_fi+1))]:-${VM_BASE_SIZE:-20}}"; _fi=$(( _fi+1 )) ;;
+    --workspace)    VM_WS_ARG="${_flags[$((_fi+1))]}"; _fi=$(( _fi+1 )) ;;
+    --name)
+      [[ -n "${_flags[$((_fi+1))]:-}" && "${_flags[$((_fi+1))]}" != --* ]] || die '--name requires a profile name.'
+      [[ -z "$VM_NAME_ARG" ]] || die 'Pass --name only once.'
+      VM_NAME_ARG="${_flags[$((_fi+1))]}"
+      _fi=$((_fi+1))
+      ;;
+  esac
+done
+
+# ── 3. Ensure defaults if env vars not set ─────────────────────────
+: "${VM_BASE_SIZE:=${VM_BASE_SIZE:-20}}"
+: "${VM_YES:=${VM_YES:-0}}"
+: "${LAB_YES:=${LAB_YES:-0}}"
+
+# ── 4. Find cmd (first non-flag) and vm_name (second non-flag) ─────
+remaining=()
+for (( _fi=0; _fi<${#_flags[@]}; _fi++ )); do
+  case "${_flags[$_fi]}" in
+    -h|--help) ;;
+    --base-size|--workspace|--name) _fi=$(( _fi + 1 )) ;; # skip flag-pair
+    --unsafe-recurse|--clean|--all) ;;
+    --browser-auth|--no-browser-auth) ;;
+    --restart-opencode) ;;
+    -v|--verbose|-d|--debug) ;;
+    -y|--yes|--auto-accept) ;;
+    --sudo|--probe-egress) remaining+=("${_flags[$_fi]}") ;;
+    --*) ;; # unknown flag
+    *) remaining+=("${_flags[$_fi]}") ;;
+  esac
+done
+
+_cmd_found=0
+vm_name="default"
+
+for (( _fi=0; _fi<${#remaining[@]}; _fi++ )); do
+  if [[ $_cmd_found -eq 0 ]]; then
+    cmd="${remaining[$_fi]}"
+    _cmd_found=1
+  elif [[ $_cmd_found -eq 1 ]]; then
+    vm_name="${remaining[$_fi]}"
+    break
+  fi
+done
+
+# Check for --help/-h among flags
+for _hf in "${_flags[@]}"; do
+  if [[ "$_hf" == "--help" || "$_hf" == "-h" ]]; then
+    cmd="--help"
+    break
+  fi
+done
+
+# A workspace path is the ergonomic one-command form, matching `./lab <dir>`.
+# Keep the explicit subcommands below for lifecycle diagnostics and testing.
+case "$cmd" in
+  run)
+    if [[ -n "${VM_WS_ARG:-}" && -n "${remaining[1]:-}" ]]; then
+      die 'Pass the workspace either positionally or with --workspace, not both.'
+    fi
+    if [[ ${#remaining[@]} -gt 2 ]]; then
+      die 'Usage: ./lab-vm run [workspace] [--workspace <path>]'
+    fi
+    VM_WS_ARG="${VM_WS_ARG:-${remaining[1]:-$(pwd)}}"
+    vm_name="${VM_NAME_ARG:-default}"
+    ;;
+  --workspace)
+    [[ -n "${VM_WS_ARG:-}" ]] || die 'Usage: ./lab-vm run --workspace <path>'
+    cmd=run
+    vm_name="${VM_NAME_ARG:-default}"
+    ;;
+  *)
+    if [[ -d "$cmd" || "$cmd" == */* ]]; then
+      if [[ ${#remaining[@]} -gt 1 ]]; then
+        die 'A workspace shorthand accepts one path only; use ./lab-vm run --workspace <path> for explicit options.'
+      fi
+      if [[ -n "${VM_WS_ARG:-}" ]]; then
+        die 'Pass the workspace either positionally or with --workspace, not both.'
+      fi
+      VM_WS_ARG="$cmd"
+      cmd=run
+      vm_name="${VM_NAME_ARG:-default}"
+    fi
+    ;;
+esac
+
+if [[ "$cmd" == run ]]; then
+  [[ -n "${VM_WS_ARG:-}" ]] || die 'A workspace path is required.'
+  [[ "$vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
+  check_workspace "$VM_WS_ARG"
+  VM_WS_ARG="$VM_WORKSPACE"
+elif [[ -n "${VM_WS_ARG:-}" && "$cmd" != up ]]; then
+  die '--workspace is only valid with the run or up command.'
+elif [[ -n "$VM_NAME_ARG" && "$cmd" != install-tools && "$cmd" != update ]]; then
+  die '--name is only valid with the run, install-tools, or update command.'
+fi
+if [[ "$cmd" == install-tools ]]; then
+  [[ ${#remaining[@]} -le 2 ]] || die 'Usage: ./lab-vm install-tools [name] [--name <profile>] [--restart-opencode]'
+  [[ -z "$VM_NAME_ARG" || -z "${remaining[1]:-}" ]] || die 'Select the install-tools profile either positionally or with --name, not both.'
+  vm_name="${VM_NAME_ARG:-${remaining[1]:-default}}"
+  [[ "$vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
+fi
+update_targets=()
+if [[ "$cmd" == update ]]; then
+  vm_name="${VM_NAME_ARG:-default}"
+  [[ "$vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
+  update_targets=("${remaining[@]:1}")
+  if [[ "$VM_UPDATE_ALL" == 1 && ${#update_targets[@]} -gt 0 ]]; then
+    die 'Do not combine --all with individual update targets.'
+  fi
+elif [[ "$VM_UPDATE_ALL" == 1 ]]; then
+  die '--all is only valid with the update command.'
+fi
+if [[ "$VM_RESTART_OPENCODE" == 1 && "$cmd" != install-tools ]]; then
+  die '--restart-opencode is only valid with install-tools.'
+fi
+if [[ "$cmd" == run && "$VM_CLEAN" == 1 ]]; then
+  die 'The combined run command never deletes VM state; use the explicit up --clean command only when you intend a destructive reset.'
+fi
+
+if [[ "$VM_BROWSER_AUTH_ENABLE_FLAG" -eq 1 && "$VM_BROWSER_AUTH_DISABLE_FLAG" -eq 1 ]]; then
+  die 'Choose only one of --browser-auth or --no-browser-auth.'
+fi
+if [[ "$VM_BROWSER_AUTH_MODE" != auto && "$cmd" != "agent" && "$cmd" != "run" && ! ( "$cmd" == install-tools && "$VM_RESTART_OPENCODE" == 1 ) && "$cmd" != "--help" ]]; then
+  die 'Browser-auth options are only valid with the agent or run command.'
+fi
+
+# ─── Prerequisite check (auto-install on demand) ────────────────────
+# Only runs for commands that actually need the tools.
+# status, ssh, and test don't need anything.
+_prereqs_needed=0
+case "$cmd" in
+  base|up|rebuild|run) _prereqs_needed=1 ;;
+esac
+
+if [[ $_prereqs_needed -eq 1 ]]; then
+  _saved_cmd="$cmd"
+  if ! _vm_prereqs_check "$cmd"; then
+    _vm_prereqs_install || exit 1
+    # After install, re-check. If still missing, the user needs to
+    # re-run (install was cancelled or failed).
+    if ! _vm_prereqs_check "$cmd"; then
+      exit 1
+    fi
+  fi
+fi
+
+# ─── Isolation safeguard: cleanup trap ──────────────────────────────
+# If lab-vm crashes or is killed after the VM has started, kill any
+# child QEMU/virtiofsd processes so they don't become zombies. This is
+# a safety net — it does NOT affect ./lab (which uses Docker, not QEMU).
+# The trap is registered AFTER vm_name is set so it has the correct path.
+_vm_cleanup() {
+  # Only a failed startup owns cleanup. status/help/normal up completion must
+  # never kill a running VM. The runner sets this when it starts children.
+  [[ "${VM_STARTING:-0}" == 1 ]] || return 0
+  local vm_dir="$VM_DIR_BASE/$vm_name"
+  if [[ -d "$vm_dir" ]]; then
+    if [[ -f "$vm_dir/qemu.pid" ]]; then
+      local qpid
+      qpid=$(cat "$vm_dir/qemu.pid" 2>/dev/null || true)
+      if [[ -n "$qpid" ]] && kill -0 "$qpid" 2>/dev/null; then
+        kill "$qpid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$qpid" 2>/dev/null || true
+      fi
+      rm -f "$vm_dir/qemu.pid"
+    fi
+    if [[ -f "$vm_dir/virtiofsd.pid" ]]; then
+      local vpid
+      vpid=$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null || true)
+      if [[ -n "$vpid" ]] && kill -0 "$vpid" 2>/dev/null; then
+        kill "$vpid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$vpid" 2>/dev/null || true
+      fi
+      rm -f "$vm_dir/virtiofsd.pid"
+    fi
+    if [[ -f "$vm_dir/proxy.pid" ]]; then
+      local proxy_pid
+      proxy_pid=$(cat "$vm_dir/proxy.pid" 2>/dev/null || true)
+      if [[ -n "$proxy_pid" ]]; then
+        kill -TERM "$proxy_pid" 2>/dev/null || true
+        for _ in $(seq 1 10); do
+          kill -0 "$proxy_pid" 2>/dev/null || break
+          sleep 0.1
+        done
+        kill -9 "$proxy_pid" 2>/dev/null || true
+      fi
+      rm -f "$vm_dir/proxy.pid" "$vm_dir/proxy_port" "$vm_dir/proxy.reload-ready"
+    fi
+  fi
+}
+trap _vm_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# ─── Command dispatch ───────────────────────────────────────────────
+
+# ─── Log rotation + tee (last 5 runs) ──────────────────────────────
+# Save real TTY before tee redirect (restored before interactive commands)
+exec 3>&1 4>&2
+
+VM_LOG_FILE="$LAB_DIR/.mester/logs/lab-vm_$(date '+%Y%m%d_%H%M%S').log"
+mkdir -p "$LAB_DIR/.mester/logs"
+
+mapfile -t vm_old < <(ls -1t "$LAB_DIR/.mester/logs"/lab-vm_*.log 2>/dev/null || true)
+if (( ${#vm_old[@]} > 4 )); then
+  rm -f "${vm_old[@]:4}"
+fi
+exec 1> >(tee -a "$VM_LOG_FILE") 2> >(tee -a "$VM_LOG_FILE" >&2)
+
+case "$cmd" in
+  up)
+    # --clean: run 'stop' then 'down' before 'up'
+    if [[ $VM_CLEAN -eq 1 ]]; then
+      echo "=== VM Clean: running stop (includes down) before up ==="
+      vm_cmd_stop "$vm_name"
+      echo "Clean teardown complete. Starting fresh VM..."
+      echo ""
+    fi
+    # Validate workspace before doing anything
+    if [[ -n "${VM_WS_ARG:-}" ]]; then
+      check_workspace "$VM_WS_ARG"
+      vm_cmd_up "$vm_name" "$VM_WORKSPACE"
+    else
+      vm_cmd_up "$vm_name" ""
+    fi
+    ;;
+  run)
+    # Set up/reuse the guest while logs are captured, then restore the real TTY
+    # for the foreground OpenCode session.
+    VM_LAUNCH_AFTER_UP=1 vm_cmd_up "$vm_name" "$VM_WS_ARG"
+    exec 1>&3 2>&4
+    if _vm_browser_auth_enabled "$VM_BROWSER_AUTH_MODE"; then
+      vm_cmd_agent_with_browser_auth "$vm_name"
+    else
+      vm_cmd_agent "$vm_name"
+    fi
+    ;;
+  status)
+    vm_cmd_status "$vm_name"
+    ;;
+  ssh)
+    # Restore real TTY for interactive SSH session
+    exec 1>&3 2>&4
+    vm_cmd_ssh "$vm_name"
+    ;;
+  agent)
+    # Restore real TTY for the interactive guest OpenCode session.
+    exec 1>&3 2>&4
+    if _vm_browser_auth_enabled "$VM_BROWSER_AUTH_MODE"; then
+      vm_cmd_agent_with_browser_auth "$vm_name"
+    else
+      vm_cmd_agent "$vm_name"
+    fi
+    ;;
+  auth-forward)
+    # Keep the temporary callback tunnel attached to this terminal so Ctrl-C
+    # closes it immediately after the browser flow completes or is cancelled.
+    exec 1>&3 2>&4
+    vm_cmd_auth_forward "${remaining[@]:1}"
+    ;;
+  egress-reload)
+    vm_cmd_egress_reload "$vm_name"
+    ;;
+  verify-isolation)
+    vm_cmd_verify_isolation "$vm_name"
+    ;;
+  down)
+    vm_cmd_down "$vm_name"
+    ;;
+  stop)
+    vm_cmd_stop "$vm_name"
+    ;;
+  base)
+    vm_cmd_base "$vm_name"
+    ;;
+  rebuild)
+    vm_cmd_rebuild "$vm_name"
+    ;;
+  install-tools)
+    bash "$LAB_DIR/scripts/vm-install-tools.sh" "$vm_name"
+    if [[ "$VM_RESTART_OPENCODE" == 1 ]]; then
+      echo "Starting a new OpenCode session in VM '$vm_name'."
+      exec 1>&3 2>&4
+      if _vm_browser_auth_enabled "$VM_BROWSER_AUTH_MODE"; then
+        vm_cmd_agent_with_browser_auth "$vm_name"
+      else
+        vm_cmd_agent "$vm_name"
+      fi
+    fi
+    ;;
+  update)
+    update_args=("$vm_name")
+    if [[ "$VM_UPDATE_ALL" == 1 ]]; then
+      update_args+=(--all)
+    else
+      update_args+=("${update_targets[@]}")
+    fi
+    VM_YES="$VM_YES" VM_VERBOSE="$VM_VERBOSE" VM_DEBUG="$VM_DEBUG" \
+      VM_OPENCODE_VERSION="${VM_OPENCODE_VERSION:-latest}" \
+      bash "$LAB_DIR/scripts/vm-update.sh" "${update_args[@]}"
+    ;;
+  models)
+    if [[ "${remaining[1]:-}" == diagnose ]]; then
+      exec bash "$LAB_DIR/scripts/vm-models-diagnose.sh" "${remaining[@]:2}"
+    fi
+    vm_cmd_models "${remaining[@]:1}"
+    ;;
+  metrics)
+    vm_cmd_metrics "${remaining[@]:1}"
+    ;;
+  extra)
+    exec bash "$LAB_DIR/scripts/vm-extra.sh" "${remaining[@]:1}"
+    ;;
+  test)
+    # ── Self-tests (runnable on any host, including non-KVM) ──────
+    echo "=== lab-vm self-tests ==="
+    pass=0; fail=0
+    _pass() { pass=$((pass + 1)); }
+    _fail() { fail=$((fail + 1)); }
+
+    # Test 1: check_workspace rejects root
+    echo -n "Test 1: check_workspace rejects / ... "
+    if (check_workspace "/" 2>/dev/null) 2>/dev/null; then
+      echo "FAIL (should have refused /)"
+      _fail
+    else
+      echo "PASS"
+      _pass
+    fi
+
+    # Test 2: check_workspace rejects $HOME
+    echo -n "Test 2: check_workspace rejects \$HOME ... "
+    if (check_workspace "$HOME" 2>/dev/null) 2>/dev/null; then
+      echo "FAIL (should have refused \$HOME)"
+      _fail
+    else
+      echo "PASS"
+      _pass
+    fi
+
+    # Test 3: check_workspace rejects $HOME/.ssh
+    echo -n "Test 3: check_workspace rejects \$HOME/.ssh ... "
+    if (check_workspace "$HOME/.ssh" 2>/dev/null) 2>/dev/null; then
+      echo "FAIL (should have refused ~/.ssh)"
+      _fail
+    else
+      echo "PASS"
+      _pass
+    fi
+
+    # Test 4: check_workspace accepts a safe directory
+    echo -n "Test 4: check_workspace accepts a safe directory ... "
+    local_tmp=$(mktemp -d)
+    if check_workspace "$local_tmp"; then
+      echo "PASS"
+      rm -rf "$local_tmp"
+      _pass
+    else
+      echo "FAIL (should have accepted safe directory)"
+      rm -rf "$local_tmp"
+      _fail
+    fi
+
+    # Test 5: check_workspace accepts a sibling directory (not the repo itself)
+    echo -n "Test 5: check_workspace accepts a sibling directory ... "
+    local_sibling=$(mktemp -d)
+    if check_workspace "$local_sibling" 2>/dev/null; then
+      echo "PASS"
+      rm -rf "$local_sibling"
+      _pass
+    else
+      echo "FAIL (should have accepted sibling directory)"
+      rm -rf "$local_sibling"
+      _fail
+    fi
+
+    # Test 6: check_workspace with --unsafe-recurse accepts repo itself
+    echo -n "Test 6: check_workspace with --unsafe-recurse accepts repo ... "
+    if (VM_UNSAFE_RECURSE=1 check_workspace "$LAB_DIR" 2>/dev/null) 2>/dev/null; then
+      echo "PASS"
+      _pass
+    else
+      echo "FAIL (should have accepted with --unsafe-recurse)"
+      _fail
+    fi
+
+    # Test 7: disk functions work (qemu-img)
+    echo -n "Test 7: qemu-img create/delete works ... "
+    if command -v qemu-img >/dev/null 2>&1; then
+      local_test_disk=$(mktemp -d)/test.qcow2
+      if qemu-img create -f qcow2 "$local_test_disk" 1G >/dev/null 2>&1 && \
+         rm -f "$local_test_disk"; then
+        echo "PASS"
+        _pass
+      else
+        echo "FAIL"
+        rm -f "$local_test_disk" 2>/dev/null
+        _fail
+      fi
+    else
+      echo "SKIP (qemu-img not installed)"
+    fi
+
+    # Test 8: generate the real cloud-init seed ISO
+    echo -n "Test 8: cloud-init ISO generation ... "
+    if command -v genisoimage >/dev/null 2>&1 || command -v mkisofs >/dev/null 2>&1; then
+      local_test_dir=$(mktemp -d)
+      if vm_cloud_init_generate "$local_test_dir/vm" test-vm 12345 12345 \
+           "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC5nKZi71f3wIkZ7O/H1QVYW2ZBL6szPqts1yWc6fD8j test" \
+           >/dev/null 2>&1 && [[ -s "$local_test_dir/vm/seed.iso" ]]; then
+        echo "PASS"
+        rm -rf "$local_test_dir"
+        _pass
+      else
+        echo "FAIL"
+        rm -rf "$local_test_dir"
+        _fail
+      fi
+    else
+      echo "SKIP (no ISO generator installed)"
+    fi
+
+    echo ""
+    echo "---- $pass passed, $fail failed ----"
+    [[ $fail -eq 0 ]]
+    ;;
+  --help|-h)
+    echo ""
+    usage
+    exit 0
+    ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    echo ""
+    usage
+    exit 1
+    ;;
+esac
