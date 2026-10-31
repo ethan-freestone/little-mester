@@ -131,7 +131,7 @@ check_package_updates() {
   local package="$1" current candidate
   current="$(installed_version "$package" || true)"
   [[ -n "$current" ]] || return 0
-  candidate="$(apt-cache policy "$package" | awk '/^[[:space:]]*Candidate:/ {print $2; exit}')"
+  candidate="$(apt-cache policy "$package" | awk '/^[[:space:]]*Candidate:/ { candidate=$2 } END { if (candidate) print candidate }')"
   [[ -n "$candidate" && "$candidate" != '(none)' ]] || return 0
   if dpkg --compare-versions "$candidate" gt "$current"; then
     printf 'UPDATE  %s  %s -> %s\n' "$package" "$current" "$candidate"

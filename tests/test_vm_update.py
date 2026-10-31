@@ -91,6 +91,21 @@ class VmUpdateTests(unittest.TestCase):
         self.assertNotIn("pgrep", check_script)
         self.assertIn("apt-get update -qq", check_script)
 
+    def test_apt_candidate_parser_consumes_full_policy_output_under_pipefail(self):
+        source = UPDATER.read_text()
+        parser = "awk '/^[[:space:]]*Candidate:/ { candidate=$2 } END { if (candidate) print candidate }'"
+        self.assertIn(parser, source)
+
+        script = r'''set -o pipefail
+candidate="$(python3 -c 'import sys; sys.stdout.write("Candidate: 1.2\n" + "x" * 1048576)' | awk '/^[[:space:]]*Candidate:/ { candidate=$2 } END { if (candidate) print candidate }')"
+printf '%s\n' "$candidate"
+'''
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "1.2")
+
     def test_detected_update_requires_confirmation_before_apply(self):
         result = self.run_updater("opencode", check_output="UPDATE  OpenCode CLI  2.2.0 -> 2.3.0")
         self.assertNotEqual(result.returncode, 0)
