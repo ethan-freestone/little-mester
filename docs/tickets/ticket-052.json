@@ -8,7 +8,7 @@
   "title": "VM-first launcher, retained Docker mode, and bounded recursion",
   "objective": "Make the provisioned VM the eventual default one-command Little Mester workflow while preserving host-Docker as ./lab-docker, keeping setup separate from fast daily launch, and enabling explicitly opted-in, depth-bounded recursive self-testing. Follow-on child work for parent epic #35; do not switch the ./lab default until #35's VM adoption gates pass.",
   "created_at": "2026-10-29T10:27:45.504Z",
-  "updated_at": "2026-11-01T12:01:07.896Z",
+  "updated_at": "2026-11-01T12:08:00.603Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -90,7 +90,8 @@
       "2026-11-01 workspace isolation: safe repo-related outer workspace uses a private persistent snapshot; nested profiles copy the selected workspace into ~/.cache/lab-vm-recursion/<profile>/workspace and use a separate VM state root. The snapshot helper creates independent Git metadata, preserves dirty/untracked files, excludes .mester/.little-mester.conf, refuses escaping symlinks/special files, and reuses without overwriting. recursion-clean requires explicit confirmation/--yes and refuses a live profile. Local tests are in progress; no live child lifecycle acceptance claimed.",
       "2026-11-01 parser discovery: the existing path-shorthand check treated the repository agent/ directory as a workspace when invoked as lab-vm agent; command recognition now takes precedence over path shorthand. The execution environment carries LAB_VM_RECURSION_DEPTH=1 without a maximum (legacy marker), which correctly fails closed for nested startup until launched by the new profile metadata path.",
       "2026-11-01 local validation after teardown guard: Bats 142/142, Python 66/66, documentation consistency 115/115, ShellCheck, Bash/Python syntax/compile, and git diff --check passed. No nested-KVM/host acceptance claimed.",
-      "2026-11-01 teardown hardening: down, stop, rebuild, and up --clean refuse recursive-state loss before side effects; explicit --discard-recursive warns and permits teardown. Possible descendant state remains recorded after a lowered maximum and is cleared when the associated overlay is deleted."
+      "2026-11-01 teardown hardening: down, stop, rebuild, and up --clean refuse recursive-state loss before side effects; explicit --discard-recursive warns and permits teardown. Possible descendant state remains recorded after a lowered maximum and is cleared when the associated overlay is deleted.",
+      "2026-11-01 commit 35ee0f6 (`feat(vm): add bounded recursive self-testing`) fast-forwarded feat/bounded-vm-recursion into local feat/vm-approach. Local integration only; no push/main merge or live KVM acceptance is claimed."
     ]
   },
   "models_used": []
