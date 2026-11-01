@@ -184,8 +184,15 @@ more memory by its parent hypervisor/launcher and restarted there.
 
 Fresh profiles now default to 8 GiB at depth 0 and 4/2/1 GiB at nested depths 1/2/3+
 (1-GiB floor). Existing profiles without `memory_gib` metadata retain the legacy 4-GiB
-allocation. The setup-only `--memory <GiB>` override for new profiles is a follow-on and
-is not implemented yet.
+allocation. Set a different allocation only while creating a profile:
+
+```bash
+./lab-vm up project-x --workspace /path/to/project --memory 16
+```
+
+`--memory` also works with `run` for a new profile. It is refused for an existing
+profile; use `resize` to change that profile, or explicitly use `up --clean --memory N`
+when you intend to delete and recreate it. The resource preflight still applies.
 
 ### Multi-VM support
 

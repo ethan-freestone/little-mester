@@ -362,8 +362,9 @@ guest state; it does not hot-add RAM or tear down workload volumes. The command 
 available and cgroup-limited memory with 512 MiB reserved. It can resize only profiles managed
 from the current host namespace, not the ancestor VM containing the current shell.
 New profiles default to 8 GiB at depth 0 and 4/2/1 GiB for nested depths (1-GiB floor);
-existing profiles without memory metadata retain 4 GiB. The setup-only `--memory <GiB>`
-override is not implemented yet.
+existing profiles without memory metadata retain 4 GiB. Set RAM during new-profile setup
+with `./lab-vm up --memory <GiB>`; `run` accepts it too. Existing profiles refuse this
+setup flag and must use `resize` (or explicit destructive `up --clean --memory <GiB>`).
 
 ### Choosing sessions, workspaces, and branches
 

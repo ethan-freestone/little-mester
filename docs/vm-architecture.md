@@ -207,7 +207,9 @@ discarded.
 ### VM memory budget and resize
 
 New depth-0 profiles request 8 GiB; nested profiles scale down by level (4/2/1 GiB,
-with a 1-GiB floor). A new-profile `--memory <GiB>` override is planned; each profile's
+with a 1-GiB floor). `--memory <GiB>` overrides this only during setup of a new profile;
+`run` supports the same setup flag. Existing profiles reject the setup override and must
+use `resize`, or be explicitly replaced with `up --clean --memory <GiB>`. Each profile's
 allocation is persisted and warm starts reuse it. Existing profiles without memory
 metadata retain the legacy 4-GiB allocation until explicitly resized. `./lab-vm
 resize <profile> <GiB>` changes a managed VM's allocation by a clean guest shutdown and

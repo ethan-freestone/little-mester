@@ -1489,6 +1489,30 @@ MOCK_SUDO
   [ "$status" -ne 0 ]
 }
 
+@test "setup memory override is restricted to a new profile or explicit clean replacement" {
+  source "$REPO_ROOT/lib/vm/runner.sh"
+  local new_profile="$BATS_TEST_TMPDIR/memory-override/new"
+  local existing_profile="$BATS_TEST_TMPDIR/memory-override/existing"
+
+  vm_memory_profile_apply_setup_override "$new_profile" 12
+  [ "$VM_MEMORY_GIB" -eq 12 ]
+  [ ! -e "$new_profile" ]
+
+  mkdir -p "$existing_profile"
+  : >"$existing_profile/disk.qcow2"
+  VM_MEMORY_GIB=8
+  run vm_memory_profile_apply_setup_override "$existing_profile" 16
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'only configures a new profile'* ]]
+  [ "$VM_MEMORY_GIB" -eq 8 ]
+
+  vm_memory_profile_apply_setup_override "$existing_profile" 16 1
+  [ "$VM_MEMORY_GIB" -eq 16 ]
+
+  run vm_memory_profile_apply_setup_override "$new_profile" 0
+  [ "$status" -ne 0 ]
+}
+
 @test "managed resize preflights before clean restart and preserves VM storage" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   VM_DIR_BASE="$BATS_TEST_TMPDIR/resize-state"
@@ -1618,6 +1642,29 @@ MOCK_SUDO
   [ "$status" -ne 0 ]
   [[ "$output" == *'whole number of GiB from 1 to 128'* ]]
   [[ "$output" != *'Checking VM prerequisites'* ]]
+}
+
+@test "memory setup flag validates its value, cardinality, and command scope" {
+  run "$REPO_ROOT/lab-vm" up --memory 0
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--memory must be a whole number of GiB from 1 to 128'* ]]
+  [[ "$output" != *'Checking VM prerequisites'* ]]
+
+  run "$REPO_ROOT/lab-vm" up --memory
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--memory requires a whole-number GiB value'* ]]
+
+  run "$REPO_ROOT/lab-vm" up --memory 8 --memory 16
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Pass --memory only once'* ]]
+
+  run "$REPO_ROOT/lab-vm" status --memory 8
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'only valid with up or run'* ]]
+
+  run "$REPO_ROOT/lab-vm" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'--memory <GiB>'* ]]
 }
 
 @test "KVM QEMU command passes host CPU features through to the guest" {

@@ -84,6 +84,23 @@ vm_memory_profile_select_for_up() {
   VM_MEMORY_GIB="$default_gib"
 }
 
+vm_memory_profile_apply_setup_override() {
+  local vm_dir="${1:?VM profile directory required}" value="${2:-}" force_fresh="${3:-0}"
+  vm_memory_validate_gib "$value" || {
+    echo 'REFUSED: --memory must be a whole number of GiB from 1 to 128.' >&2
+    return 1
+  }
+  [[ "$force_fresh" == 0 || "$force_fresh" == 1 ]] || return 2
+  if [[ "$force_fresh" != 1 &&
+        ( -e "$vm_dir/memory_gib" || -L "$vm_dir/memory_gib" ||
+          -e "$vm_dir/disk.qcow2" || -e "$vm_dir/seed.iso" ||
+          -e "$vm_dir/id_vm_control" || -e "$vm_dir/qemu.pid" ) ]]; then
+    echo 'REFUSED: --memory only configures a new profile. Use ./lab-vm resize for an existing VM, or explicitly use up --clean to replace it.' >&2
+    return 1
+  fi
+  VM_MEMORY_GIB="$value"
+}
+
 vm_memory_profile_store() {
   local vm_dir="${1:?VM profile directory required}" value="${2:-}" tmp
   vm_memory_validate_gib "$value" || {

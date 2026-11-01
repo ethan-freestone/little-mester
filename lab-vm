@@ -24,8 +24,8 @@
 #
 # Usage:
 #   ./lab-vm <workspace>                 # start/reuse VM and open guest TUI
-#   ./lab-vm run [workspace] [--name <profile>] # same, explicit spelling/profile
-#   ./lab-vm up [name] [--workspace <path>]
+#   ./lab-vm run [workspace] [--name <profile>] [--memory <GiB>]
+#   ./lab-vm up [name] [--workspace <path>] [--memory <GiB>]
 #   ./lab-vm status [name]
 #   ./lab-vm ssh [name]
 #   ./lab-vm down [name]
@@ -59,6 +59,7 @@ LAB_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 # --clean        : before up, run stop + down to fully teardown first
 VM_YES="${VM_YES:-${LAB_YES:-0}}"
 VM_CLEAN=0
+VM_MEMORY_ARG=""
 # This destructive acknowledgement must come from an explicit CLI flag.
 VM_DISCARD_RECURSIVE=0
 VM_BROWSER_AUTH_MODE=auto
@@ -280,6 +281,7 @@ Flags (any order):
   --unsafe-recurse     Explicit self-modification mode; implies --recurse
   --max-depth <N>      Set recursion maximum (0-32; propagated to guests)
   --base-size <GiB>    Base disk size in GiB (default: 20)
+  --memory <GiB>      New-profile RAM (default: 8 GiB; nested defaults scale down)
   --name <profile>     Select a VM profile with 'run', 'install-tools', or 'update'
   --all                Select all managed guest software with 'update'
   -y, --yes            Auto-accept all prompts (same as VM_YES=1)
@@ -318,7 +320,7 @@ for _i in "${_flags[@]}"; do
   case "$_i" in
     --recurse)                VM_RECURSE=1 ;;
     --unsafe-recurse)         VM_RECURSE=1; VM_UNSAFE_RECURSE=1 ;;
-    --base-size|--workspace|--name|--max-depth) ;; # value consumed next iteration
+    --base-size|--workspace|--name|--max-depth|--memory) ;; # value consumed next iteration
     -y|--yes|--auto-accept)   VM_YES=1; LAB_YES=1 ;;
     --all)                    VM_UPDATE_ALL=1 ;;
     --clean)                  VM_CLEAN=1 ;;
@@ -351,6 +353,13 @@ for ((_fi=0; _fi<${#_flags[@]}; _fi++ )); do
       VM_NAME_ARG="${_flags[$((_fi+1))]}"
       _fi=$((_fi+1))
       ;;
+    --memory)
+      [[ -n "${_flags[$((_fi+1))]:-}" && "${_flags[$((_fi+1))]}" != --* ]] || die '--memory requires a whole-number GiB value.'
+      [[ -z "$VM_MEMORY_ARG" ]] || die 'Pass --memory only once.'
+      VM_MEMORY_ARG="${_flags[$((_fi+1))]}"
+      vm_memory_validate_gib "$VM_MEMORY_ARG" || die '--memory must be a whole number of GiB from 1 to 128.'
+      _fi=$((_fi+1))
+      ;;
   esac
 done
 
@@ -364,7 +373,7 @@ remaining=()
 for (( _fi=0; _fi<${#_flags[@]}; _fi++ )); do
   case "${_flags[$_fi]}" in
     -h|--help) ;;
-    --base-size|--workspace|--name|--max-depth) _fi=$(( _fi + 1 )) ;; # skip flag-pair
+    --base-size|--workspace|--name|--max-depth|--memory) _fi=$(( _fi + 1 )) ;; # skip flag-pair
     --recurse|--unsafe-recurse|--clean|--discard-recursive|--all) ;;
     --browser-auth|--no-browser-auth) ;;
     --restart-opencode) ;;
@@ -448,6 +457,9 @@ fi
 if [[ "$VM_CLEAN" == 1 && "$cmd" != up ]]; then
   die '--clean is only valid with up.'
 fi
+if [[ -n "$VM_MEMORY_ARG" && "$cmd" != up && "$cmd" != run ]]; then
+  die '--memory is only valid with up or run when creating a VM profile.'
+fi
 
 if [[ "$cmd" == run ]]; then
   [[ -n "${VM_WS_ARG:-}" ]] || die 'A workspace path is required.'
@@ -481,6 +493,9 @@ if [[ "$cmd" == run || "$cmd" == up ]]; then
   _memory_vm_dir="$VM_DIR_BASE/$vm_name"
   [[ ! -L "$_memory_vm_dir" ]] || die "VM profile directory must not be a symlink: $_memory_vm_dir"
   vm_memory_profile_select_for_up "$_memory_vm_dir" "${VM_GUEST_RECURSION_DEPTH:-0}" "$VM_CLEAN" || exit 1
+  if [[ -n "$VM_MEMORY_ARG" ]]; then
+    vm_memory_profile_apply_setup_override "$_memory_vm_dir" "$VM_MEMORY_ARG" "$VM_CLEAN" || exit 1
+  fi
   _memory_release_pid=""
   if [[ -d "$_memory_vm_dir" ]] && grep -q running <<<"$(vm_run_status "$_memory_vm_dir" 2>/dev/null || true)"; then
     _memory_release_pid="$(cat "$_memory_vm_dir/qemu.pid" 2>/dev/null || true)"
