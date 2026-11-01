@@ -8,7 +8,7 @@
   "title": "Epic: VM-native Little Mester agent and isolated workload environment",
   "objective": "CURRENT RELEASE COORDINATOR (2026-11-01): deliver the VM-first Little Mester release, preserve the Docker fallback as ./lab-docker, simplify and correct maintained docs, and do not claim merge-ready until code, host acceptance, docs, CI and PR evidence are complete. Follow the phased CURRENT RELEASE PLAN appended to tests.needed; newest phase pointer supersedes stale handoffs. Current owner-configured default guest recursion policy is depth 0 / max 2; host/KVM and release evidence remain separately scoped.",
   "created_at": "2026-10-26T17:39:37.714Z",
-  "updated_at": "2026-11-01T19:14:03.829Z",
+  "updated_at": "2026-11-01T19:14:52.962Z",
   "priority": "critical",
   "comments": [
     {
@@ -249,7 +249,8 @@
       "2026-11-01 resize slice final validation: Final resize-slice regression after preserving nested recursion state: Bats 151/151; VM Python 81/81; ./lab-vm test 8/8; docs consistency 115/115; ShellCheck, Bash syntax, Python compilation, and git diff --check pass. A read-only 32-GiB memory preflight in this shell refused as expected (MemAvailable=2822 MiB, requested=32768 MiB + 512 MiB); no QEMU or host resize was attempted. MCP Jest not run: Node v18.19.1 is below package requirement >=20.",
       "2026-11-01 local default-memory phase: new profiles select 8 GiB at depth 0 and 4/2/1 GiB at depths 1/2/3+; metadata-less existing profiles remain 4 GiB; persisted profile allocations win on warm starts. Explicit `up --clean` chooses the fresh depth-based default while verifying any running old QEMU against its old metadata before removal. Validation: Bats 152/152, VM Python 81/81, ./lab-vm test 8/8, docs consistency 115/115, ShellCheck/syntax/compile/diff pass. No live QEMU boot or owner-host resize was performed. Setup-only `--memory <GiB>` override remains the next phase.",
       "2026-11-01 setup-override phase: `--memory <GiB>` applies during new-profile `up`/`run`, must be 1–128, persists as the selected profile allocation, and refuses an existing profile unless explicit destructive `up --clean` is used. Existing profile RAM changes remain `resize`. Validation: Bats 154/154; all VM Python tests 81/81; `./lab-vm test` 8/8; docs consistency 115/115; ShellCheck, Bash syntax, Python compile, and `git diff --check` pass. No QEMU boot or owner-host acceptance was performed.",
-      "The memory plan is implemented in three separate local commits: 4925e55 managed resize, dc1fb7a depth-scaled defaults, and the current setup override slice (pending commit). All remain unpushed; host acceptance and broader VM-first release gates stay open."
+      "The memory plan is implemented in three separate local commits: 4925e55 managed resize, dc1fb7a depth-scaled defaults, and the current setup override slice (pending commit). All remain unpushed; host acceptance and broader VM-first release gates stay open.",
+      "SUPERSEDES earlier ledger entries saying the setup override is the next implementation phase: all three memory slices are now committed locally as 4925e55, dc1fb7a, and 9e4a16b. Implementation and local verification are complete; only owner-host KVM acceptance and the broader VM-first release gates remain. No commits have been pushed and no live resize/boot is claimed."
     ]
   },
   "is_epic": true

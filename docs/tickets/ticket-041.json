@@ -8,7 +8,7 @@
   "title": "VM provisioning and ./lab VM lifecycle",
   "objective": "CURRENT IMPLEMENTATION TRACK (2026-11-01): finish VM provisioning/lifecycle prerequisites for the VM-first release. The active guest reports persistent recursion policy depth 0/max 2 and usable KVM; detailed phase pointer is #35 tests.needed. Preserve the existing modified source and the owner's current VM; do not infer real child/lifecycle acceptance from local mocks.",
   "created_at": "2026-10-26T20:39:18.836Z",
-  "updated_at": "2026-11-01T19:14:03.835Z",
+  "updated_at": "2026-11-01T19:14:52.967Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -462,7 +462,8 @@
       "2026-11-01 resize slice final validation: Final resize-slice regression after preserving nested recursion state: Bats 151/151; VM Python 81/81; ./lab-vm test 8/8; docs consistency 115/115; ShellCheck, Bash syntax, Python compilation, and git diff --check pass. A read-only 32-GiB memory preflight in this shell refused as expected (MemAvailable=2822 MiB, requested=32768 MiB + 512 MiB); no QEMU or host resize was attempted. MCP Jest not run: Node v18.19.1 is below package requirement >=20.",
       "2026-11-01 local default-memory phase: new profiles select 8 GiB at depth 0 and 4/2/1 GiB at depths 1/2/3+; metadata-less existing profiles remain 4 GiB; persisted profile allocations win on warm starts. Explicit `up --clean` chooses the fresh depth-based default while verifying any running old QEMU against its old metadata before removal. Validation: Bats 152/152, VM Python 81/81, ./lab-vm test 8/8, docs consistency 115/115, ShellCheck/syntax/compile/diff pass. No live QEMU boot or owner-host resize was performed. Setup-only `--memory <GiB>` override remains the next phase.",
       "2026-11-01 setup-override phase: `--memory <GiB>` applies during new-profile `up`/`run`, must be 1–128, persists as the selected profile allocation, and refuses an existing profile unless explicit destructive `up --clean` is used. Existing profile RAM changes remain `resize`. Validation: Bats 154/154; all VM Python tests 81/81; `./lab-vm test` 8/8; docs consistency 115/115; ShellCheck, Bash syntax, Python compile, and `git diff --check` pass. No QEMU boot or owner-host acceptance was performed.",
-      "Setup override preserves fail-closed memory preflight before profile metadata, recursive snapshot, disk, or QEMU side effects; existing profile metadata remains authoritative unless explicitly clean-replaced."
+      "Setup override preserves fail-closed memory preflight before profile metadata, recursive snapshot, disk, or QEMU side effects; existing profile metadata remains authoritative unless explicitly clean-replaced.",
+      "SUPERSEDES earlier ledger entries saying the setup override is the next implementation phase: all three memory slices are now committed locally as 4925e55, dc1fb7a, and 9e4a16b. Implementation and local verification are complete; only owner-host KVM acceptance and the broader VM-first release gates remain. No commits have been pushed and no live resize/boot is claimed."
     ]
   },
   "priority": "major",
