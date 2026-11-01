@@ -748,6 +748,15 @@ field or treat prose as authoritative. Ticket #57 tracks that schema/engine/CLI/
 reconstructed from conversation. A canonical programmatic workflow makes work portable between
 humans, agents, and harnesses and makes status auditable/queryable.
 
+#### C.9.19 Shell portability in user instructions (2026-11-01)
+
+**Decision:** User-facing command instructions must include both Bash and Fish forms. When a
+sequence is identical in both shells, explicitly label it as shared; when syntax differs (for
+example assignments, command substitution, loops, or environment-variable prefixes), show
+separate complete blocks. Do not assume the user's interactive shell is Bash.
+
+**Reason:** Bash-only snippets fail when copied into Fish, interrupting otherwise safe workflows.
+
 ---
 
 ### C.9.14 Diagnostics are part of the workflow (2026-10-28)
