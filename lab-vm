@@ -57,6 +57,8 @@ LAB_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 # --clean        : before up, run stop + down to fully teardown first
 VM_YES="${VM_YES:-${LAB_YES:-0}}"
 VM_CLEAN=0
+# This destructive acknowledgement must come from an explicit CLI flag.
+VM_DISCARD_RECURSIVE=0
 VM_BROWSER_AUTH_MODE=auto
 VM_BROWSER_AUTH_ENABLE_FLAG=0
 VM_BROWSER_AUTH_DISABLE_FLAG=0
@@ -84,11 +86,15 @@ log_debug() {
 # Export for sourced library files
 export VM_VERBOSE VM_DEBUG
 # check_workspace: guards path selection before it's exported to the VM.
-# Refuses: /, $HOME, the lab repo (without --unsafe-recurse),
+# Refuses: /, $HOME, the lab repo (without explicit recurse mode),
 # sensitive credential directories ($HOME/.ssh, $HOME/.config, etc.)
 
 VM_WORKSPACE=""
 VM_NAME_ARG=""
+VM_RECURSE=0
+VM_UNSAFE_RECURSE=0
+VM_MAX_DEPTH=0
+VM_MAX_DEPTH_EXPLICIT=0
 
 die() { echo "REFUSED: $*" >&2; exit 1; }
 
@@ -104,10 +110,12 @@ check_workspace() {
   # Ensure target is owned by current user
   [[ -O "$ws" ]] || die "Workspace directory must be owned by you (UID $(id -u))"
 
-  # Prevent exposing the lab repo itself
-  if [[ "$ws" == "$LAB_DIR" || "$LAB_DIR" == "$ws"/* ]]; then
-    if [[ "${VM_UNSAFE_RECURSE:-0}" != "1" ]]; then
-      die "Workspace path would expose the little-mester repo itself. Use --unsafe-recurse to override (requires awareness of the risks)."
+  # Repo workspaces require explicit recursion. Safe recursion snapshots the
+  # selected files before sharing; only --unsafe-recurse exposes the checkout
+  # itself for deliberate self-modification.
+  if vm_recursion_workspace_is_repo_related "$ws" "$LAB_DIR"; then
+    if [[ "${VM_RECURSE:-0}" != 1 ]]; then
+      die "Workspace path overlaps the little-mester repo. Use --recurse for an isolated snapshot or --unsafe-recurse to explicitly permit self-modification."
     fi
   fi
 
@@ -193,10 +201,16 @@ VM lifecycle commands (epic #35, ticket #41):
       Verify the running QEMU network allowlist and run bounded probes inside the guest.
 
   ./lab-vm down [name]
+      Add --discard-recursive to acknowledge deletion of nested child state.
       Stop the VM and remove per-VM artifacts (overlay disk, seed ISO, keys).
       Base disk is preserved.
 
+  ./lab-vm recursion-clean <profile>
+      Explicitly delete a stopped nested VM profile and its disposable workspace/state.
+      Requires confirmation (or --yes); active recursive VMs are never removed.
+
   ./lab-vm stop [name]
+      Add --discard-recursive to acknowledge deletion of nested child state.
       Teardown Docker containers in VM, verify git is clean, then down.
 
   ./lab-vm base [name]
@@ -205,6 +219,7 @@ VM lifecycle commands (epic #35, ticket #41):
   ./lab-vm rebuild [name]
       Delete and recreate the base disk (destructive, requires confirmation).
       Removes overlay disk as well. A new base is created in its place.
+      Add --discard-recursive if the profile may contain nested VM state.
 
   ./lab-vm install-tools [name] [--name <profile>] [--restart-opencode]
       Install optional Bats and ShellCheck packages into an already-running guest.
@@ -249,13 +264,16 @@ VM lifecycle commands (epic #35, ticket #41):
       Run self-tests: validate prerequisites, workspace guard, disk/ISO creation.
 
 Flags (any order):
-  --unsafe-recurse     Allow workspace to be inside the little-mester repo
+  --recurse            Opt into bounded recursive VM testing (default max depth: 0)
+  --unsafe-recurse     Explicit self-modification mode; implies --recurse
+  --max-depth <N>      Set recursion maximum (0-32; propagated to guests)
   --base-size <GiB>    Base disk size in GiB (default: 20)
   --name <profile>     Select a VM profile with 'run', 'install-tools', or 'update'
   --all                Select all managed guest software with 'update'
   -y, --yes            Auto-accept all prompts (same as VM_YES=1)
   --auto-accept        Alias for --yes
   --clean              Before 'up': run 'stop' then 'down' to fully teardown first
+  --discard-recursive  Acknowledge that down/stop/rebuild (or up --clean) may delete child VM state
   -v, --verbose        Extra progress info (SSH commands, qemu/virtiofsd output)
   -d, --debug          Everything from --verbose plus raw output and timing
 
@@ -286,11 +304,13 @@ shift 2>/dev/null || true
 _flags=("$cmd" "$@")
 for _i in "${_flags[@]}"; do
   case "$_i" in
-    --unsafe-recurse)         VM_UNSAFE_RECURSE=1 ;;
-    --base-size|--workspace|--name) ;; # value consumed next iteration
+    --recurse)                VM_RECURSE=1 ;;
+    --unsafe-recurse)         VM_RECURSE=1; VM_UNSAFE_RECURSE=1 ;;
+    --base-size|--workspace|--name|--max-depth) ;; # value consumed next iteration
     -y|--yes|--auto-accept)   VM_YES=1; LAB_YES=1 ;;
     --all)                    VM_UPDATE_ALL=1 ;;
     --clean)                  VM_CLEAN=1 ;;
+    --discard-recursive)      VM_DISCARD_RECURSIVE=1 ;;
     --browser-auth)           VM_BROWSER_AUTH_MODE=on; VM_BROWSER_AUTH_ENABLE_FLAG=1 ;;
     --no-browser-auth)        VM_BROWSER_AUTH_MODE=off; VM_BROWSER_AUTH_DISABLE_FLAG=1 ;;
     --restart-opencode)       VM_RESTART_OPENCODE=1 ;;
@@ -306,6 +326,12 @@ for ((_fi=0; _fi<${#_flags[@]}; _fi++ )); do
   case "${_flags[$_fi]}" in
     --base-size)    VM_BASE_SIZE="${_flags[$((_fi+1))]:-${VM_BASE_SIZE:-20}}"; _fi=$(( _fi+1 )) ;;
     --workspace)    VM_WS_ARG="${_flags[$((_fi+1))]}"; _fi=$(( _fi+1 )) ;;
+    --max-depth)
+      [[ -n "${_flags[$((_fi+1))]:-}" && "${_flags[$((_fi+1))]}" != --* ]] || die '--max-depth requires an integer value.'
+      VM_MAX_DEPTH="${_flags[$((_fi+1))]}"
+      VM_MAX_DEPTH_EXPLICIT=1
+      _fi=$((_fi+1))
+      ;;
     --name)
       [[ -n "${_flags[$((_fi+1))]:-}" && "${_flags[$((_fi+1))]}" != --* ]] || die '--name requires a profile name.'
       [[ -z "$VM_NAME_ARG" ]] || die 'Pass --name only once.'
@@ -325,8 +351,8 @@ remaining=()
 for (( _fi=0; _fi<${#_flags[@]}; _fi++ )); do
   case "${_flags[$_fi]}" in
     -h|--help) ;;
-    --base-size|--workspace|--name) _fi=$(( _fi + 1 )) ;; # skip flag-pair
-    --unsafe-recurse|--clean|--all) ;;
+    --base-size|--workspace|--name|--max-depth) _fi=$(( _fi + 1 )) ;; # skip flag-pair
+    --recurse|--unsafe-recurse|--clean|--discard-recursive|--all) ;;
     --browser-auth|--no-browser-auth) ;;
     --restart-opencode) ;;
     -v|--verbose|-d|--debug) ;;
@@ -377,29 +403,86 @@ case "$cmd" in
     vm_name="${VM_NAME_ARG:-default}"
     ;;
   *)
-    if [[ -d "$cmd" || "$cmd" == */* ]]; then
-      if [[ ${#remaining[@]} -gt 1 ]]; then
-        die 'A workspace shorthand accepts one path only; use ./lab-vm run --workspace <path> for explicit options.'
-      fi
-      if [[ -n "${VM_WS_ARG:-}" ]]; then
-        die 'Pass the workspace either positionally or with --workspace, not both.'
-      fi
-      VM_WS_ARG="$cmd"
-      cmd=run
-      vm_name="${VM_NAME_ARG:-default}"
-    fi
+    case "$cmd" in
+      run|up|status|ssh|down|stop|agent|auth-forward|egress-reload|verify-isolation|recursion-clean|base|rebuild|install-tools|update|models|metrics|extra|test|help|--help) ;;
+      *)
+        if [[ -d "$cmd" || "$cmd" == */* ]]; then
+          if [[ ${#remaining[@]} -gt 1 ]]; then
+            die 'A workspace shorthand accepts one path only; use ./lab-vm run --workspace <path> for explicit options.'
+          fi
+          if [[ -n "${VM_WS_ARG:-}" ]]; then
+            die 'Pass the workspace either positionally or with --workspace, not both.'
+          fi
+          VM_WS_ARG="$cmd"
+          cmd=run
+          vm_name="${VM_NAME_ARG:-default}"
+        fi
+        ;;
+    esac
     ;;
 esac
+
+if [[ "$VM_DISCARD_RECURSIVE" == 1 ]]; then
+  case "$cmd" in
+    down|stop|rebuild) ;;
+    up)
+      [[ "$VM_CLEAN" == 1 ]] || die '--discard-recursive is only valid with down, stop, rebuild, or up --clean.'
+      ;;
+    *) die '--discard-recursive is only valid with down, stop, rebuild, or up --clean.' ;;
+  esac
+fi
 
 if [[ "$cmd" == run ]]; then
   [[ -n "${VM_WS_ARG:-}" ]] || die 'A workspace path is required.'
   [[ "$vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
-  check_workspace "$VM_WS_ARG"
-  VM_WS_ARG="$VM_WORKSPACE"
 elif [[ -n "${VM_WS_ARG:-}" && "$cmd" != up ]]; then
   die '--workspace is only valid with the run or up command.'
 elif [[ -n "$VM_NAME_ARG" && "$cmd" != install-tools && "$cmd" != update ]]; then
   die '--name is only valid with the run, install-tools, or update command.'
+fi
+if [[ "$cmd" == up ]]; then
+  [[ "$vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
+fi
+if [[ "$cmd" == run || "$cmd" == up ]]; then
+  vm_recursion_configure "$cmd" || exit 1
+  if (( VM_NESTED_LAUNCH == 1 )); then
+    vm_recursion_require_nested_kvm || exit 1
+  fi
+  VM_WS_ARG="${VM_WS_ARG:-$(pwd)}"
+  check_workspace "$VM_WS_ARG"
+  VM_WS_ARG="$VM_WORKSPACE"
+  vm_recursion_validate_workspace "$VM_WS_ARG" "$LAB_DIR" || exit 1
+
+  VM_RECURSION_SESSION_DIR=""
+  if (( VM_NESTED_LAUNCH == 1 )); then
+    VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$vm_name")" || die 'Invalid recursive profile name.'
+    VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
+    VM_WS_ARG="$(python3 "$LAB_DIR/scripts/vm-recursion-workspace.py" prepare --source "$VM_WS_ARG" --session "$VM_RECURSION_SESSION_DIR")" || exit 1
+    check_workspace "$VM_WS_ARG"
+    VM_WS_ARG="$VM_WORKSPACE"
+  elif [[ "$VM_RECURSE" == 1 && "$VM_UNSAFE_RECURSE" != 1 ]] && vm_recursion_workspace_is_repo_related "$VM_WS_ARG" "$LAB_DIR"; then
+    # Safe top-level recursion must not give the direct guest agent write access
+    # to the host checkout. The private snapshot is stable across warm starts.
+    VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "initial-$vm_name")" || die 'Invalid recursive profile name.'
+    VM_WS_ARG="$(python3 "$LAB_DIR/scripts/vm-recursion-workspace.py" prepare --source "$VM_WS_ARG" --session "$VM_RECURSION_SESSION_DIR")" || exit 1
+    printf '%s\n' "$VM_DIR_BASE/$vm_name" >"$VM_RECURSION_SESSION_DIR/.outer-vm-dir.tmp"
+    chmod 600 "$VM_RECURSION_SESSION_DIR/.outer-vm-dir.tmp"
+    mv -f -- "$VM_RECURSION_SESSION_DIR/.outer-vm-dir.tmp" "$VM_RECURSION_SESSION_DIR/outer-vm-dir"
+    check_workspace "$VM_WS_ARG"
+    VM_WS_ARG="$VM_WORKSPACE"
+  fi
+
+  VM_GUEST_RECURSION_DEPTH="${VM_GUEST_RECURSION_DEPTH:-0}"
+  VM_GUEST_MAX_DEPTH="$VM_EFFECTIVE_MAX_DEPTH"
+elif [[ "$VM_RECURSE" == 1 || "$VM_MAX_DEPTH_EXPLICIT" == 1 ]]; then
+  vm_recursion_configure "$cmd" || exit 1
+fi
+if [[ "$cmd" == recursion-clean ]]; then
+  [[ -z "$VM_NAME_ARG" ]] || die '--name is not valid with recursion-clean; pass the profile positionally.'
+  [[ -n "${remaining[1]:-}" ]] || die 'Usage: ./lab-vm recursion-clean <profile>'
+  [[ "${remaining[1]}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
+  VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "${remaining[1]}")" || die 'Invalid recursive profile name.'
+  VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
 fi
 if [[ "$cmd" == install-tools ]]; then
   [[ ${#remaining[@]} -le 2 ]] || die 'Usage: ./lab-vm install-tools [name] [--name <profile>] [--restart-opencode]'
@@ -424,6 +507,28 @@ fi
 if [[ "$cmd" == run && "$VM_CLEAN" == 1 ]]; then
   die 'The combined run command never deletes VM state; use the explicit up --clean command only when you intend a destructive reset.'
 fi
+
+# Nested profiles live outside the selected workspace so the child state is
+# independent of the parent's checkout. Resolve that same profile root for all
+# later lifecycle commands, not only the command that originally created it.
+if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" ]]; then
+  case "$cmd" in
+    run|up|status|ssh|down|stop|agent|egress-reload|verify-isolation|base|rebuild|install-tools|update)
+      VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$vm_name")" || die 'Invalid recursive profile name.'
+      VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
+      ;;
+    auth-forward)
+      _auth_profile=default
+      if (( ${#remaining[@]} == 3 )); then _auth_profile="${remaining[1]}"; fi
+      VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$_auth_profile")" || die 'Invalid recursive profile name.'
+      VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
+      ;;
+    recursion-clean)
+      VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
+      ;;
+  esac
+fi
+export VM_DIR_BASE
 
 if [[ "$VM_BROWSER_AUTH_ENABLE_FLAG" -eq 1 && "$VM_BROWSER_AUTH_DISABLE_FLAG" -eq 1 ]]; then
   die 'Choose only one of --browser-auth or --no-browser-auth.'
@@ -508,10 +613,18 @@ trap 'exit 143' TERM
 # Save real TTY before tee redirect (restored before interactive commands)
 exec 3>&1 4>&2
 
-VM_LOG_FILE="$LAB_DIR/.mester/logs/lab-vm_$(date '+%Y%m%d_%H%M%S').log"
-mkdir -p "$LAB_DIR/.mester/logs"
+VM_LOG_DIR="$LAB_DIR/.mester/logs"
+if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" && -n "${VM_RECURSION_SESSION_DIR:-}" ]]; then
+  if [[ "$cmd" == recursion-clean ]]; then
+    VM_LOG_DIR="$HOME/.cache/lab-vm-recursion/logs"
+  else
+    VM_LOG_DIR="$VM_RECURSION_SESSION_DIR/logs"
+  fi
+fi
+VM_LOG_FILE="$VM_LOG_DIR/lab-vm_$(date '+%Y%m%d_%H%M%S').log"
+mkdir -p "$VM_LOG_DIR"
 
-mapfile -t vm_old < <(ls -1t "$LAB_DIR/.mester/logs"/lab-vm_*.log 2>/dev/null || true)
+mapfile -t vm_old < <(ls -1t "$VM_LOG_DIR"/lab-vm_*.log 2>/dev/null || true)
 if (( ${#vm_old[@]} > 4 )); then
   rm -f "${vm_old[@]:4}"
 fi
@@ -577,6 +690,9 @@ case "$cmd" in
   down)
     vm_cmd_down "$vm_name"
     ;;
+  recursion-clean)
+    vm_cmd_recursion_clean "${remaining[1]:-}"
+    ;;
   stop)
     vm_cmd_stop "$vm_name"
     ;;
@@ -587,7 +703,7 @@ case "$cmd" in
     vm_cmd_rebuild "$vm_name"
     ;;
   install-tools)
-    bash "$LAB_DIR/scripts/vm-install-tools.sh" "$vm_name"
+    VM_DIR_BASE="$VM_DIR_BASE" bash "$LAB_DIR/scripts/vm-install-tools.sh" "$vm_name"
     if [[ "$VM_RESTART_OPENCODE" == 1 ]]; then
       echo "Starting a new OpenCode session in VM '$vm_name'."
       exec 1>&3 2>&4
@@ -606,6 +722,7 @@ case "$cmd" in
       update_args+=("${update_targets[@]}")
     fi
     VM_YES="$VM_YES" VM_VERBOSE="$VM_VERBOSE" VM_DEBUG="$VM_DEBUG" \
+      VM_DIR_BASE="$VM_DIR_BASE" \
       VM_OPENCODE_VERSION="${VM_OPENCODE_VERSION:-latest}" \
       bash "$LAB_DIR/scripts/vm-update.sh" "${update_args[@]}"
     ;;
@@ -686,7 +803,7 @@ case "$cmd" in
 
     # Test 6: check_workspace with --unsafe-recurse accepts repo itself
     echo -n "Test 6: check_workspace with --unsafe-recurse accepts repo ... "
-    if (VM_UNSAFE_RECURSE=1 check_workspace "$LAB_DIR" 2>/dev/null) 2>/dev/null; then
+    if (VM_RECURSE=1 VM_UNSAFE_RECURSE=1 check_workspace "$LAB_DIR" 2>/dev/null) 2>/dev/null; then
       echo "PASS"
       _pass
     else

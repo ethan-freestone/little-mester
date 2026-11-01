@@ -8,7 +8,7 @@
   "title": "VM-first launcher, retained Docker mode, and bounded recursion",
   "objective": "Make the provisioned VM the eventual default one-command Little Mester workflow while preserving host-Docker as ./lab-docker, keeping setup separate from fast daily launch, and enabling explicitly opted-in, depth-bounded recursive self-testing. Follow-on child work for parent epic #35; do not switch the ./lab default until #35's VM adoption gates pass.",
   "created_at": "2026-10-29T10:27:45.504Z",
-  "updated_at": "2026-10-30T16:45:10.051Z",
+  "updated_at": "2026-11-01T12:01:07.896Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -33,17 +33,20 @@
     {
       "id": "A5",
       "text": "--recurse and --unsafe-recurse are explicit, distinct modes; unsafe-recurse enables self-modification and implies the required repository view, while recurse alone does not silently authorize self-writes.",
-      "status": "pending"
+      "status": "test-created",
+      "evidence": "Local Bats cases cover unsafe-recurse implying recurse and requiring a workspace containing the checkout, plus safe workspace snapshots are copied into a separate checkout. Full VM/host behavior remains unverified."
     },
     {
       "id": "A6",
       "text": "A maximum nesting depth is configurable by an explicit flag, defaults to 0, is propagated/enforced across every child launcher, cannot be reset or increased implicitly, and refuses over-depth launches before starting a VM/agent.",
-      "status": "pending"
+      "status": "test-created",
+      "evidence": "Local Bats cases cover default depth 0, explicit max propagation, nested increment, missing opt-in, reset/increase rejection, CLI max parsing, profile metadata, and refusal before prerequisite checks. No live nested VM acceptance claimed."
     },
     {
       "id": "A7",
       "text": "A disposable outer-agent self-development loop can modify a selected checkout, start a separate nested Little Mester instance to test those changes, retain/clean nested state explicitly, and continue the outer session; nested execution does not expose additional host paths, host Docker, credentials, LAN, or broader egress.",
-      "status": "pending"
+      "status": "test-created",
+      "evidence": "Local tests cover persistent isolated snapshots, dirty/untracked content, excluded .mester/.little-mester.conf, escaping-symlink refusal, separate profile roots, and explicit cleanup protections. Nested KVM/session/isolation acceptance remains pending."
     }
   ],
   "tests": {
@@ -58,12 +61,23 @@
       "On an owner KVM host, launch with workspace A, exit the TUI, then run the one-command launcher with workspace B. Confirm the prompt and verify /workspace maps only B, QEMU/virtiofsd reuse the existing profile and qcow2 overlay, installed OpenCode is not reinstalled, and workspace A/B host data is unchanged except for deliberate test markers. Also rerun with B to verify same-workspace warm launch does not reboot. Stop if guest shutdown fails or current workspace cannot be verified; do not use --clean, stop, or down.",
       "Before committing launcher changes, run the CI Bats suite (`bats tests/vm.bats`) and ShellCheck gate (`shellcheck --severity=error lab-vm lib/vm/lifecycle.sh`) in an environment where installed; current guest lacks both. These do not replace live VM acceptance.",
       "After the code is committed/shared and when the current #41/#45 host handoff permits another action, test workspace A/B/same-workspace warm reuse on a disposable named profile (`./lab-vm run <A> --name launcher-smoke`, then B, then B again). Preserve the existing default profile and host-Docker session; do not use --clean, stop, or down. Verify /workspace mapping, retained overlay, no guest harness reinstall, and unchanged host workspaces. Follow #41's current handoff and stop conditions first.",
-      "ORDERED FOLLOW-UP: first complete #41's current egress-reload/models-status gate, then owner-verify same-profile warm switching (workspace A → B → B, retaining the overlay and avoiding reprovisioning). Only after that passes, implement bounded recursive/nested self-testing under #43/#52 before default migration: max depth defaults to 0, is propagated and cannot be reset, refusal occurs before child startup, child workspace/state and network boundary are independently enforced, and unsupported nested KVM fails clearly. Keep host-Docker mode and do not merge/default-switch based on local mocks alone."
+      "ORDERED FOLLOW-UP: first complete #41's current egress-reload/models-status gate, then owner-verify same-profile warm switching (workspace A → B → B, retaining the overlay and avoiding reprovisioning). Only after that passes, implement bounded recursive/nested self-testing under #43/#52 before default migration: max depth defaults to 0, is propagated and cannot be reset, refusal occurs before child startup, child workspace/state and network boundary are independently enforced, and unsupported nested KVM fails clearly. Keep host-Docker mode and do not merge/default-switch based on local mocks alone.",
+      "On owner KVM host, test the outer workspace A/B/B warm-switch gate first per current #41 handoff; then test a supported nested KVM profile and verify depth propagation, max-boundary refusal before child startup, separate guest workspace/state, independent restrict=on/proxy/host-LAN boundary, parent-session continuity, and recursion-clean behavior.",
+      "On an unsupported nested-virtualization guest, verify the /dev/kvm preflight refuses before workspace copy, VM provision, or agent startup; preserve the outer VM and existing host-Docker session.",
+      "Exercise --recurse with the Little Mester checkout and verify host checkout remains unchanged while the snapshot is writable; separately verify --unsafe-recurse requires a workspace containing the checkout and grants only the explicitly selected workspace.",
+      "SUPERSEDES the earlier ORDERED FOLLOW-UP wording that placed implementation after the live A/B/B host check: bounded-recursion implementation is being developed on feat/bounded-vm-recursion as explicitly requested; live nested KVM/isolation validation remains blocked until the current #41 host handoff permits it, and default migration remains gated.",
+      "For safe top-level repository snapshots, verify recursion-clean initial-<profile> refuses while the associated outer VM profile is running, then removes the snapshot only after the outer VM is stopped; verify normal nested-profile cleanup also refuses live QEMU/virtiofsd/proxy processes."
     ],
     "created": [
       "tests/vm.bats: one-command direct workspace launch, workspace-switch confirmation, guest graceful shutdown, and overlay-preservation checks.",
       "tests/vm.bats: named-profile CLI regression cases reject traversal and duplicate --name values, and confirm accepted named-profile syntax for run with --workspace and positional workspace shorthand.",
-      "tests/vm.bats: per-session browser bridge port forwarding and guest-env propagation; README.md/docs/vm-architecture.md session/worktree/nesting decision matrix."
+      "tests/vm.bats: per-session browser bridge port forwarding and guest-env propagation; README.md/docs/vm-architecture.md session/worktree/nesting decision matrix.",
+      "tests/vm.bats: bounded recursion default/explicit depth, opt-in, increment, reset/increase refusal, pre-prerequisite refusal, isolated persistent workspace snapshots, Git metadata/content copy, local state exclusion, symlink rejection, profile policy persistence, and explicit cleanup.",
+      "lib/vm/recursion.sh and scripts/vm-recursion-workspace.py implement max-depth policy, persisted guest depth/max, nested KVM preflight, per-profile disposable workspace and VM-state roots, and recursion-clean.",
+      "tests/vm.bats: actual mocked direct-agent SSH command verifies persisted current/max depth are exported; CLI probes verify parsed --recurse/--max-depth, child limit reduction/increase rejection, missing opt-in refusal, and unsafe workspace requirement.",
+      "tests/vm.bats: recursive cleanup refuses both live nested profiles and a live outer profile using the top-level snapshot; stopped profile cleanup removes only its disposable session.",
+      "tests/vm.bats: outer down/stop/rebuild refuse before workload or VM side effects when descendants may exist; --discard-recursive is accepted only for destructive commands, and --yes alone is not sufficient.",
+      "lib/vm/recursion.sh: persisted descendant-possible bit remains sticky when a reused profile lowers its max-depth; vm down/rebuild clear the policy only after removing the associated overlay."
     ],
     "cases": [
       "2026-10-29: accepted product direction and documented in docs/DECISIONS.md §C.9.17, README.md and docs/vm-architecture.md. Local validation: Bats 84/84, VM Python tests 12/12, ticket-engine Jest 143/143, documentation checks 112/112, bash -n and git diff --check pass. These are repository regressions/docs checks only; this environment has no /dev/kvm or Docker executable, so no VM startup, host metrics endpoint, TUI interaction, warm-start timing, or nested VM behavior is claimed.",
@@ -71,7 +85,12 @@
       "2026-10-30 named-profile argument probes: traversal profile `../escape` is refused before workspace/prerequisite work; valid `launcher-smoke` is accepted through both `run --workspace /` and positional workspace syntax before the expected root-workspace refusal; duplicate --name is refused. `./lab-vm test` 6 passed (qemu-img/ISO checks skipped), VM Python suite 40/40, docs consistency 115/115, bash syntax and git diff --check pass. Bats/ShellCheck and live KVM are unavailable here; no VM/profile launch acceptance claimed.",
       "2026-10-30 continuation: same-profile warm workspace switching is implemented locally but still requires the existing owner-host A→B→B test. Browser bridge host/guest ports are now per auth session; metrics are shared per immediate host and agent launch starts/preflights them. Docs distinguish one profile, concurrent TUIs, separate worktree profiles, common-parent manual access, future agent-loop orchestration, and nested self-testing. Local VM Python tests 47/47, lab-vm self-tests 6 passed (QEMU/ISO skipped), docs 115/115, TUI JSX, Bash/Python syntax, and diff checks pass. Bats/ShellCheck/KVM are unavailable; no warm-switch or recursion acceptance claimed.",
       "CORRECTION to the prior note that Bats/ShellCheck are unavailable in the guest: that was based only on `command -v` in the OpenCode execution runner, not an inspection of the VM. Investigation found guest cloud-init omitted both packages although CI installs them separately. Fresh VM provisioning now adds Bats and ShellCheck; generated cloud-init and local regression/schema checks pass. The existing owner VM has not been modified or queried, so availability there remains unverified until the #41 handoff permits a guest check.",
-      "CORRECTION to the immediately preceding cloud-init note: Bats/ShellCheck are not part of base guest provisioning. They are optional on-demand packages installed into an already-running selected profile by `./lab-vm install-tools [--name <profile>]`; `--restart-opencode` relaunches the direct-guest TUI after installation, and `-v`/`-d` propagate diagnostics. User must exit the current TUI first. The script does not boot/reprovision/restart the VM, and the current owner guest was not modified. Mocked SSH/profile tests and the complete 50-test VM Python suite pass; live use awaits the #41 gate."
+      "CORRECTION to the immediately preceding cloud-init note: Bats/ShellCheck are not part of base guest provisioning. They are optional on-demand packages installed into an already-running selected profile by `./lab-vm install-tools [--name <profile>]`; `--restart-opencode` relaunches the direct-guest TUI after installation, and `-v`/`-d` propagate diagnostics. User must exit the current TUI first. The script does not boot/reprovision/restart the VM, and the current owner guest was not modified. Mocked SSH/profile tests and the complete 50-test VM Python suite pass; live use awaits the #41 gate.",
+      "2026-11-01 implementation in feat/bounded-vm-recursion: added explicit --recurse, --unsafe-recurse, and --max-depth (0-32; default 0); nested VM launches require opt-in, increment inherited depth, reject max-depth increases/resets and refuse over-depth before prerequisites/startup. Direct guest agent launch persists and exports current/max depth. Local tests are in progress; no nested KVM, VM boot, TUI, or host-isolation acceptance claimed.",
+      "2026-11-01 workspace isolation: safe repo-related outer workspace uses a private persistent snapshot; nested profiles copy the selected workspace into ~/.cache/lab-vm-recursion/<profile>/workspace and use a separate VM state root. The snapshot helper creates independent Git metadata, preserves dirty/untracked files, excludes .mester/.little-mester.conf, refuses escaping symlinks/special files, and reuses without overwriting. recursion-clean requires explicit confirmation/--yes and refuses a live profile. Local tests are in progress; no live child lifecycle acceptance claimed.",
+      "2026-11-01 parser discovery: the existing path-shorthand check treated the repository agent/ directory as a workspace when invoked as lab-vm agent; command recognition now takes precedence over path shorthand. The execution environment carries LAB_VM_RECURSION_DEPTH=1 without a maximum (legacy marker), which correctly fails closed for nested startup until launched by the new profile metadata path.",
+      "2026-11-01 local validation after teardown guard: Bats 142/142, Python 66/66, documentation consistency 115/115, ShellCheck, Bash/Python syntax/compile, and git diff --check passed. No nested-KVM/host acceptance claimed.",
+      "2026-11-01 teardown hardening: down, stop, rebuild, and up --clean refuse recursive-state loss before side effects; explicit --discard-recursive warns and permits teardown. Possible descendant state remains recorded after a lowered maximum and is cleared when the associated overlay is deleted."
     ]
   },
   "models_used": []

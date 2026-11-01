@@ -17,13 +17,14 @@ set -euo pipefail
 
 : "${LAB_DIR:=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")/..")" && pwd)}"
 MESTER_DIR="$LAB_DIR/.mester"
-VM_DIR_BASE="$MESTER_DIR/vm"
+VM_DIR_BASE="${VM_DIR_BASE:-$MESTER_DIR/vm}"
 
 # Source library functions
 source "$LAB_DIR/lib/vm/cloud-init.sh"
 source "$LAB_DIR/lib/vm/disk.sh"
 source "$LAB_DIR/lib/vm/ssh.sh"
 source "$LAB_DIR/lib/vm/runner.sh"
+source "$LAB_DIR/lib/vm/recursion.sh"
 
 # ─── Logging helpers (sourced from lab-vm's main script) ────────────
 # If log() is not defined by the caller, provide no-op stubs so
@@ -281,6 +282,7 @@ vm_cmd_up() {
     if [[ "$running_workspace" == "$workspace" ]]; then
       echo "VM '$vm_name' is already running with workspace: $workspace"
       echo "$status"
+      vm_recursion_store_profile "$vm_dir"
       _vm_install_guest_harness "$vm_dir"
       return 0
     fi
@@ -291,6 +293,8 @@ vm_cmd_up() {
     _vm_shutdown_for_workspace_switch "$vm_dir" || die 'Guest shutdown did not complete; the VM and current workspace were left in place.'
     echo "Guest stopped cleanly. Reusing the existing VM overlay for the new workspace."
   fi
+
+  vm_recursion_store_profile "$vm_dir"
 
   # ── 6. Create overlay disk ──────────────────────────────────────
   vm_disk_create_overlay "$base_disk" "$overlay_disk" "${VM_BASE_SIZE:-20}"
@@ -923,6 +927,7 @@ vm_cmd_agent() {
   local vm_name="${1:-default}"
   local vm_dir
   local started_at elapsed probe_options probe_command probe_status metrics_url
+  local guest_recursion_env
   vm_dir="$(_vm_resolve "$vm_name")"
   log_verbose "Launching guest agent for VM '$vm_name'."
   log_debug "VM directory: $vm_dir"
@@ -930,6 +935,8 @@ vm_cmd_agent() {
   if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
     die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
   fi
+  vm_recursion_load_profile "$vm_dir" || die 'Could not load the VM recursion policy; refusing to start the agent.'
+  guest_recursion_env="LAB_VM_RECURSION_DEPTH=$VM_AGENT_RECURSION_DEPTH LAB_VM_MAX_DEPTH=$VM_AGENT_MAX_DEPTH"
 
   # Metrics are optional to the agent runtime. Start the shared curated host
   # service and check this guest's forward, but never block OpenCode on metrics;
@@ -1001,9 +1008,9 @@ vm_cmd_agent() {
     (( browser_bridge_port_num >= 1024 && browser_bridge_port_num <= 65535 )) || die 'Browser-auth session has no valid guest bridge port.'
     printf -v browser_dir_quoted '%q' "$VM_BROWSER_BRIDGE_DIR"
     printf -v browser_bridge_port_quoted '%q' "$browser_bridge_port_num"
-    remote_command="set -eu; browser_dir=$browser_dir_quoted; cleanup(){ rm -rf -- \"\$browser_dir\"; }; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' HUP TERM; export PATH=\"\$browser_dir:\$PATH\" VM_BROWSER_BRIDGE_TOKEN_FILE=\"\$browser_dir/token\" VM_BROWSER_BRIDGE_PORT=$browser_bridge_port_quoted LAB_VM_RECURSION_DEPTH=1; cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=$metrics_url && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && opencode"
+    remote_command="set -eu; browser_dir=$browser_dir_quoted; cleanup(){ rm -rf -- \"\$browser_dir\"; }; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' HUP TERM; export PATH=\"\$browser_dir:\$PATH\" VM_BROWSER_BRIDGE_TOKEN_FILE=\"\$browser_dir/token\" VM_BROWSER_BRIDGE_PORT=$browser_bridge_port_quoted $guest_recursion_env; cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=$metrics_url && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && opencode"
   else
-    remote_command="cd /workspace && . /etc/profile.d/mester.sh && export LAB_VM_RECURSION_DEPTH=1 OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=$metrics_url && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && exec opencode"
+    remote_command="cd /workspace && . /etc/profile.d/mester.sh && export $guest_recursion_env OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=$metrics_url && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && exec opencode"
   fi
   ssh -t \
     -o BatchMode=yes -o ConnectTimeout=10 \
@@ -1047,6 +1054,42 @@ PY
 }
 
 # ─── vm down: stop and remove VM ────────────────────────────────────
+vm_cmd_recursion_clean() {
+  local vm_name="${1:-}" session_dir vm_dir answer pid pid_file
+  [[ -n "$vm_name" ]] || die 'Usage: ./lab-vm recursion-clean <profile>'
+  [[ "$vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
+  session_dir="$(vm_recursion_session_dir "$vm_name")" || die 'Invalid recursive VM profile name.'
+  [[ -d "$session_dir" && ! -L "$session_dir" ]] || {
+    echo "No recursive session found for profile '$vm_name' (skipping)."
+    return 0
+  }
+  [[ "$(stat -c '%u' "$session_dir")" == "$(id -u)" ]] || die 'Recursive session is not owned by the current user.'
+  if [[ -e "$session_dir/outer-vm-dir" || -L "$session_dir/outer-vm-dir" ]]; then
+    [[ -f "$session_dir/outer-vm-dir" && ! -L "$session_dir/outer-vm-dir" ]] || die 'Recursive snapshot has invalid outer VM ownership metadata; refusing cleanup.'
+    vm_dir="$(cat "$session_dir/outer-vm-dir")"
+    [[ "$vm_dir" == /* && -d "$vm_dir" && ! -L "$vm_dir" ]] || die 'Cannot verify the outer VM profile associated with this snapshot; refusing cleanup.'
+  else
+    vm_dir="$session_dir/vm/$vm_name"
+  fi
+  if [[ -d "$vm_dir" ]] && echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    die "Recursive VM '$vm_name' is still running; stop it before cleanup."
+  fi
+  for pid_file in "$vm_dir/qemu.pid" "$vm_dir/virtiofsd.pid" "$vm_dir/proxy.pid"; do
+    [[ -f "$pid_file" ]] || continue
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      die "A process recorded for recursive VM '$vm_name' is still alive; refusing to remove its state."
+    fi
+  done
+  if [[ "${VM_YES:-0}" != 1 ]]; then
+    [[ -t 0 ]] || die 'Recursive cleanup is destructive and requires an interactive confirmation or --yes.'
+    read -r -p "Delete recursive VM '$vm_name', its overlay/base disk, and disposable workspace at '$session_dir'? [y/N] " answer
+    [[ "$answer" == [yY] || "$answer" == [yY][eE][sS] ]] || die 'Recursive cleanup cancelled; state was preserved.'
+  fi
+  rm -rf -- "$session_dir"
+  echo "Recursive profile '$vm_name' and its disposable workspace/state were removed."
+}
+
 vm_cmd_down() {
   local vm_name="${1:-default}"
   local vm_dir
@@ -1056,6 +1099,8 @@ vm_cmd_down() {
     echo "No VM profile found at: $vm_dir (skipping)"
     return 0
   fi
+
+  vm_recursion_require_discard_ack "$vm_dir" || return 1
 
   echo "=== VM Down: $vm_name ==="
 
@@ -1074,6 +1119,10 @@ vm_cmd_down() {
   # 5. Clean mgmt socket
   rm -f "$vm_dir/mgmt.sock"
 
+  # The persisted policy belongs to this discarded overlay; a later up will
+  # write a fresh policy before starting the VM.
+  vm_recursion_clear_profile "$vm_dir" || return 1
+
   echo "VM '$vm_name' removed. Base disk preserved for next VM."
 }
 
@@ -1082,6 +1131,10 @@ vm_cmd_stop() {
   local vm_name="${1:-default}"
   local vm_dir
   vm_dir="$(_vm_resolve "$vm_name")"
+
+  # Refuse before tearing down guest workloads; down repeats the guard before
+  # deleting the overlay in case it is called independently.
+  vm_recursion_require_discard_ack "$vm_dir" || return 1
 
   echo "=== VM Stop: $vm_name ==="
 
@@ -1126,6 +1179,12 @@ vm_cmd_stop() {
 vm_cmd_rebuild() {
   local vm_name="${1:-default}"
   local base_disk="$VM_DIR_BASE/base.qcow2"
+  local vm_dir
+  vm_dir="$(_vm_resolve "$vm_name")"
+
+  # Rebuild removes the target overlay along with its base disk. Check before
+  # prompting or stopping anything so a refusal has no partial side effects.
+  vm_recursion_require_discard_ack "$vm_dir" || return 1
 
   # Safety: never proceed without explicit confirmation
   if [[ -f "$base_disk" ]]; then
@@ -1153,8 +1212,6 @@ vm_cmd_rebuild() {
   fi
 
   # Stop any running VMs that use this base disk
-  local vm_dir
-  vm_dir="$(_vm_resolve "$vm_name")"
   if echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
     log "VM '$vm_name' is running. Stopping it first..."
     vm_run_stop "$vm_dir"
@@ -1171,6 +1228,7 @@ vm_cmd_rebuild() {
     log "Removing overlay disk: $overlay_disk"
     vm_disk_delete "$overlay_disk"
   fi
+  vm_recursion_clear_profile "$vm_dir" || return 1
 
   # Recreate base disk
   echo "Creating new base disk image ($VM_BASE_SIZE GiB)..."

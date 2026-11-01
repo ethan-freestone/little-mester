@@ -10,6 +10,7 @@ source "$(dirname "$BATS_TEST_FILENAME")/../lab"
 setup() {
   # Ensure LAB_DIR is set correctly for sourcing context
   LAB_DIR="$(cd "$(dirname "${BATS_TEST_FILENAME}")/.." && pwd)"
+  unset LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH
   
   # Create a temporary directory owned by current user for workspace tests
   WORKSPACE_TMPDIR=$(mktemp -d)

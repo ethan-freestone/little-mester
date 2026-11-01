@@ -8,7 +8,7 @@
   "title": "Guest Docker workloads, recursive VMs and host isolation",
   "objective": "Give a directly running guest agent ordinary Docker/Compose control for arbitrary project test services and recursive Little Mester VMs where nested virtualization is supported, while the outer VM continues to isolate the host and the existing egress allowlist/no-host-route policy remains enforced.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-10-30T16:16:01.751Z",
+  "updated_at": "2026-11-01T12:01:07.898Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -48,7 +48,8 @@
     {
       "id": "A8",
       "text": "Recursive Little Mester execution is opt-in, uses a separate disposable workspace/state, and enforces the propagated maximum nesting depth (default 0) before starting child agents/VMs. Neither recurse nor unsafe-recurse grants additional host paths, host Docker, credentials, LAN, or broader egress; self-write authority requires explicit unsafe-recurse. See #52.",
-      "status": "pending"
+      "status": "test-created",
+      "evidence": "Local Bats tests cover explicit opt-in, depth/default/boundaries, pre-prerequisite over-depth refusal, snapshot isolation, host-state exclusions, symlink refusal, and explicit live-profile cleanup refusal. Local mocks do not establish nested KVM, virtiofs, or host-isolation acceptance."
     }
   ],
   "tests": {
@@ -71,13 +72,22 @@
       "VM model API forwarder boundary check coordinated with #42: host Docker version >=28, host publishes only 127.0.0.1:8080/11434, separate LAN host cannot connect, guest can reach only configured forwarded model APIs, and QEMU restrict=on remains set. Do not broaden networking or expose ports on 0.0.0.0.",
       "Test nested agent/VM recursion with default depth 0, explicit depth boundary, attempted child depth reset, workspace isolation, and no host Docker/credential/LAN access; unsupported nesting fails closed (#52).",
       "Repeat the non-public destination and allowlist matrix inside the live guest and rootless workload network on the owner KVM host; verify QEMU restrict=on, host gateway/LAN/direct Internet negative paths, selected model/proxy guestfwd positive paths, and host workspace/credential boundary. This environment lacks /dev/kvm and cannot substitute local unit tests for host acceptance.",
-      "On a supported host, prove public HTTPS works only through the VM proxy while direct Internet, QEMU host gateway, private/LAN, and the host's local/directly connected addresses fail; verify restrict=on. Repeat the same positive/negative matrix from a nested VM before claiming recursion. Preserve the existing overlay; no firewall/route changes."
+      "On a supported host, prove public HTTPS works only through the VM proxy while direct Internet, QEMU host gateway, private/LAN, and the host's local/directly connected addresses fail; verify restrict=on. Repeat the same positive/negative matrix from a nested VM before claiming recursion. Preserve the existing overlay; no firewall/route changes.",
+      "On an unsupported nested-virtualization guest, verify usable /dev/kvm preflight refuses before workspace copy, VM provision, or agent startup.",
+      "On a supported owner KVM host, launch nested profile at depth 1, verify child receives the incremented depth and inherited maximum, then verify another child refuses before startup; verify nested VM uses its own QEMU restrict=on/proxy allowlist and host/private/LAN negative checks.",
+      "Live-test nested child workspace and VM-state separation, preservation of the parent workspace/session, stop/reuse semantics, and confirmed recursion-clean teardown; local copy tests do not establish virtiofs/KVM isolation.",
+      "For safe top-level repository snapshots, verify recursion-clean initial-<profile> refuses while the associated outer VM profile is running, then removes the snapshot only after the outer VM is stopped; verify normal nested-profile cleanup also refuses live QEMU/virtiofsd/proxy processes.",
+      "Owner-host acceptance must verify --discard-recursive behavior on a disposable recursive profile, including preserving/inspecting child evidence before explicit discard; do not use the working host-Docker session or a valuable overlay."
     ],
     "created": [
       "tests/test_vm_proxy.py: current project build-registry allowlist and npm lookalike-domain refusal",
       "tests/test_vm_proxy.py: end-to-end proxy-handler HTTP and CONNECT denial for loopback/private/reserved/link-local/multicast targets, mixed DNS rejection before connect, public DNS pinning, and explicit api.openai.com egress denial before resolution.",
       "tests/test_vm_proxy.py: parent-local/directly connected IPv4/IPv6 network denial, mapped-IPv4 denial, and Linux host-route discovery",
-      "tests/test_vm_proxy.py: public host-network denial, Linux route-table discovery/fail-closed, IPv4-mapped/NAT64 handling, and 6to4/Teredo rejection"
+      "tests/test_vm_proxy.py: public host-network denial, Linux route-table discovery/fail-closed, IPv4-mapped/NAT64 handling, and 6to4/Teredo rejection",
+      "tests/vm.bats: recursion mode/depth policy, nested opt-in and boundary, inherited max reset/increase rejection, pre-prerequisite over-depth refusal, independent workspace snapshot, escaping-symlink refusal, policy persistence, and recursive cleanup cases.",
+      "lib/vm/recursion.sh and scripts/vm-recursion-workspace.py: policy/metadata helpers and a persistent, isolated, symlink-checked disposable workspace snapshot helper.",
+      "tests/vm.bats: mocked direct-agent SSH command verifies profile depth/max propagation; tests cover usable /dev/kvm and vmx/svm preflight failures, nested CLI state-root resolution, and cleanup refusal for a live child or active outer snapshot.",
+      "tests/vm.bats: outer down/stop/rebuild teardown guard, explicit --discard-recursive acknowledgement, flag scope, and refusal before side effects; descendant-possible metadata survives lowering the current maximum."
     ],
     "cases": [
       "2026-10-28 owner explicitly approved adding npmjs.org to .mester-egress for registry.npmjs.org required by agent/OpenCode npm install. Existing entries preserved; public-only proxy enforcement unchanged; no allow-all or provider domains granted. #41 build fix loads CLI/auth-helper proxy env separately from daemon/RUN arguments; live registry build retry still pending.",
@@ -86,7 +96,9 @@
       "2026-10-29 owner-approved public-only egress: `.mester-egress` now leaves `allowed_domains` blank for broad public HTTP(S) work; `permission=false` still disables egress. QEMU restrict=on remains; proxy now denies local/directly connected parent networks plus non-public/mixed DNS destinations. Regression tests cover Linux route-table parsing, public IPv4/IPv6-mapped targets inside blocked parent networks, and ordinary public domains. Local tests pass; no owner KVM or nested-VM acceptance is claimed.",
       "2026-10-29 final regression verification: proxy 20/20, full VM Python 40/40, Bats 106/106, Ruff/Python compile and docs 115/115 passed locally. Tests exercise public-only proxy policy and deny parent-local/directly connected destinations, including IPv4-embedded IPv6. Live host and nested-VM acceptance remain pending.",
       "2026-10-29 owner CachyOS observation after public-egress patch: `./lab-vm egress-reload` succeeded on the existing loopback listener without restarting QEMU/overlay. `./lab-vm verify-isolation` reported restrict=on, loopback SSH and only four reviewed guestfwd channels; 14/14 probes passed: QEMU gateway ports 22/80/443/2375/2376/3128/8080/11434/19532 blocked, direct 1.1.1.1:80 and :443 blocked, proxy private-target response 403, selected llama.cpp guestfwd HTTP 200, workspace virtiofs. Bounded partial evidence only: positive public HTTPS through the proxy and explicit proxy 403 checks for host-local/directly-connected targets were not shown; nested-VM acceptance remains separate. No host settings or VM state were changed.",
-      "2026-10-30 ordering note: after #41's current host gate and same-profile warm-switch acceptance, bounded recursion/nested self-testing is the next implementation gate before any default migration or PR merge. #52 A6/A7 and this ticket A5/A8 already require propagated max depth default 0, fail-closed unsupported-host handling, a separate child workspace/state, and nested isolation. The current recursion marker only affects browser-auth defaults; it is not enforcement. This environment has no /dev/kvm, so no nested boot result is claimed."
+      "2026-10-30 ordering note: after #41's current host gate and same-profile warm-switch acceptance, bounded recursion/nested self-testing is the next implementation gate before any default migration or PR merge. #52 A6/A7 and this ticket A5/A8 already require propagated max depth default 0, fail-closed unsupported-host handling, a separate child workspace/state, and nested isolation. The current recursion marker only affects browser-auth defaults; it is not enforcement. This environment has no /dev/kvm, so no nested boot result is claimed.",
+      "2026-11-01 implementation in feat/bounded-vm-recursion: local recursion guards and snapshot tests added for depth-zero default, explicit cap, nested increment, missing opt-in, over-depth refusal before prerequisite checks, child max reset/increase refusal, independent workspace/Git metadata, dirty/untracked snapshot content, host-state exclusion, escaping symlink refusal, and stopped-state cleanup. These are local tests only; nested QEMU/KVM, nested network boundary, live workloads and host isolation remain unverified.",
+      "2026-11-01 unsupported nested virtualization now has a fail-closed preflight requiring usable /dev/kvm before workspace snapshot/provisioning; this is code-level only and has not been exercised on a live unsupported guest."
     ]
   },
   "priority": "critical",

@@ -362,7 +362,7 @@ more destructive effects described below.
 | Parallel branches with strong workspace separation | Create one Git worktree per branch and give each a separate named VM profile | Each profile mounts one worktree and has its own overlay. First use of a new profile provisions a guest; it is not a warm workspace switch. Concurrent VMs consume additional host resources. |
 | One guest that can see several worktrees | Mount a common parent containing the worktrees | All descendants of that selected parent are intentionally exposed. The launcher currently starts sessions at `/workspace`; a polished per-session worktree/cwd selector is not implemented. |
 | Have agents spawn/coordinate more agents | Not implemented | There is no supported agent-loop supervisor, work ownership protocol, or automatic worktree lifecycle yet; tracked in #56. |
-| Test Little Mester inside Little Mester | Explicit nested VM design, after recursion gates pass | Nested KVM availability, depth enforcement, and child-state handling are not yet accepted. Do not treat the current recursion marker as a depth limit. |
+| Test Little Mester inside Little Mester | `--recurse --max-depth 1` (implementation is local-test covered) | Nested KVM availability, lifecycle, and host-isolation acceptance still require a supported owner host. |
 
 Use a **same-profile workspace switch** only for sequential work: exit OpenCode, select the
 new workspace, and let the guest shut down and restart while retaining that profile's overlay.
@@ -379,11 +379,39 @@ carefully chosen parent and manually select the correct project directory. Autom
 spawning, session-to-worktree assignment, resource limits, cancellation, and safe cleanup are
 future work—not implied by having multiple OpenCode processes.
 
-For self-development, explicitly allow the repo workspace:
+For a bounded self-test loop, opt in and set a positive depth explicitly:
 
 ```bash
-./lab-vm --unsafe-recurse "$PWD"
+./lab-vm run "$PWD" --recurse --max-depth 1
+# From the outer guest, a child launch must opt in again:
+./lab-vm run /workspace --recurse
 ```
+
+`--recurse` snapshots a repository-related workspace into a private disposable checkout so
+the guest cannot write back to the host checkout. Nested launches always get a separate
+snapshot and VM-state directory under `~/.cache/lab-vm-recursion/<profile>`. The inherited
+depth is incremented for each nested guest; children may lower, but never raise, the inherited
+maximum. The supported maximum is 0–32 and defaults to 0, so recursion is refused unless a
+positive `--max-depth` was explicitly set at the outer launch. Use
+`./lab-vm recursion-clean <profile>` to remove a stopped nested VM and its disposable
+workspace; nested `down` alone removes that child's overlay but retains its workspace for
+inspection or reuse. The nested cache is inside the outer guest overlay, so destructive outer
+`down`/`rebuild` can still remove all nested state. For a safe top-level repository snapshot,
+clean the corresponding `initial-<profile>`
+entry (for example `recursion-clean initial-default`) before creating a fresh snapshot; cleanup
+refuses while the associated outer VM profile is still running.
+If an outer `down`, `stop`, `rebuild`, or `up --clean` would discard possible nested state,
+it refuses before changing workloads or VM state. After cleaning child profiles or deciding to
+discard them, pass `--discard-recursive` explicitly to acknowledge that loss; `--yes` alone is
+not sufficient.
+
+`--unsafe-recurse` implies `--recurse` and explicitly permits the selected Little Mester
+checkout as a read/write workspace; it requires a workspace containing that checkout. Use it
+only when self-modification of the selected checkout is intended. It does not increase the
+depth limit or broaden host/network access. Every child still receives a separate workspace
+snapshot and state directory.
+Nested starts require usable `/dev/kvm` and guest CPU `vmx`/`svm` flags; if either is missing,
+the launcher refuses before snapshot/provisioning rather than falling back to TCG emulation.
 
 Use `--no-browser-auth` when the temporary browser bridge is not wanted. `ssh` is
 for guest diagnostics, not a required daily step. The one-command launcher does not
@@ -402,12 +430,11 @@ behavior must be improved and documented before VM mode is recommended for daily
 The agent has broad authority inside the guest, including guest Docker; the outer VM is the
 host-isolation boundary. VM mode is not yet a replacement for `./lab`: keep the existing
 Docker workflow available and follow the current gates on tickets #41–#45 and #50. Do not
-concurrently edit the same workspace from both agents. Do not mount the Little Mester
-repository unless recursion is explicitly enabled. Bounded `--recurse` and `--unsafe-recurse`
-(self-modification) with a maximum nesting depth defaulting to zero are approved design
-requirements, but are not implemented yet; the present recursion environment marker only
-controls default browser-auth behavior and does **not** enforce depth. See #43/#52. When a guest
-agent launches another `lab-vm`, an inherited recursion marker disables browser auth by
+concurrently edit the same workspace from both agents. This bounded recursion implementation
+is local code/test coverage only; nested KVM, recursive workload behavior, and the complete
+host-isolation boundary still require the owner-host acceptance on #43/#52 before support is
+claimed. A child launch must use `--recurse` or `--unsafe-recurse`; a depth marker alone never
+authorizes a child. When a guest agent launches another `lab-vm`, browser auth is disabled by
 default; pass `--browser-auth` to explicitly enable the temporary bridge for that nested run.
 
 Hardware configuration lives in [`machine.conf.example`](machine.conf.example). Copy it to `machine.conf` (gitignored) and fill in your specs. The benchmark tools use it to suggest optimal starting points.

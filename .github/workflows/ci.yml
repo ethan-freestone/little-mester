@@ -60,7 +60,7 @@ jobs:
       - name: ShellCheck (lab + shell scripts)
         run: shellcheck lab scripts/*.sh lib/vm/cloud-init.sh lib/vm/host-services.sh lib/vm/browser-open.sh
       - name: ShellCheck (VM entry points and lifecycle errors)
-        run: shellcheck --severity=error lab-vm lib/vm/lifecycle.sh
+        run: shellcheck --severity=error lab-vm lib/vm/lifecycle.sh lib/vm/recursion.sh
 
       - name: Python compile check (scripts/*.py)
         run: python3 -m py_compile scripts/*.py

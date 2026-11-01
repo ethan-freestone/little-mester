@@ -1,0 +1,58 @@
+{
+  "id": 57,
+  "file_path": "/home/mester/.local/share/opencode/worktree/9cac63/bounded-recursion/docs/tickets/ticket-057.json",
+  "number": 57,
+  "area": "engine",
+  "type": "improvement",
+  "status": "draft",
+  "title": "Machine-readable merge readiness and delivery-slice relationships",
+  "objective": "Extend the ticket engine so independently integrable work slices can carry an auditable, harness-neutral merge-readiness state while larger objectives remain open and are split into linked follow-on tickets. Keep ticket lifecycle status separate, and expose identical semantics through the canonical schema, engine, CLI, MCP, validation, and query views.",
+  "created_at": "2026-11-01T11:57:57.922Z",
+  "updated_at": "2026-11-01T12:01:07.899Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Ticket lifecycle status remains draft/active/resolved/archived; merge or integration readiness is represented as an independent machine-readable dimension, not by overloading status or ad-hoc labels.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "A broad objective can be split into independently deliverable tickets while preserving explicit parent/child or split/follow-on relationships, the remaining scope, and audit history.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "A readiness claim is explicit and auditable with the relevant commit/ref and verification evidence; the engine does not infer readiness from prose, branch names, or harness identity.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Canonical JSON schema, engine validation/persistence, and backward-compatible migration/default behavior agree on the new representation.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "CLI and MCP expose equivalent create/read/update/query behavior and reject the same invalid readiness and relationship transitions.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "Tests cover lifecycle/readiness independence, split relationships, evidence requirements, old-ticket compatibility, and CLI/MCP parity; documentation gives a harness-neutral workflow.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Schema and migration tests for old tickets with no readiness metadata",
+      "Engine tests for readiness state transitions/evidence and split/follow-on relationships",
+      "CLI and MCP parity tests for create/get/update/search/validation",
+      "Board/list/search tests for presenting readiness without conflating it with lifecycle status",
+      "Cross-harness documentation and clean-store validation",
+      "Confirm the canonical representation can express an independently merge-ready child while its parent/follow-on scope remains active, using the same operations through CLI and MCP.",
+      "Review all ticket relationship operations in the current CLI/MCP schemas; close parity gaps rather than adding a second workflow model."
+    ],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}

@@ -3,6 +3,7 @@
 setup() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   LAB_DIR="$REPO_ROOT"
+  unset LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH
   source "$REPO_ROOT/lib/vm/runner.sh"
 }
 
@@ -166,7 +167,8 @@ setup() {
   grep -Fq -- '--browser-auth)' "$REPO_ROOT/lab-vm"
   grep -Fq -- '--no-browser-auth)' "$REPO_ROOT/lab-vm"
   grep -Fq 'if _vm_browser_auth_enabled "$VM_BROWSER_AUTH_MODE"; then' "$REPO_ROOT/lab-vm"
-  grep -Fq 'LAB_VM_RECURSION_DEPTH=1' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  grep -Fq 'VM_AGENT_RECURSION_DEPTH' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  grep -Fq 'VM_AGENT_MAX_DEPTH' "$REPO_ROOT/lib/vm/lifecycle.sh"
   ! grep -Eq '^  auth\)' "$REPO_ROOT/lab-vm"
   grep -Fq 'vm_cmd_agent_with_browser_auth()' "$REPO_ROOT/lib/vm/lifecycle.sh"
   grep -Fq 'ssh "${ssh_debug_args[@]}" -F /dev/null -M -S "$control_path" -N' "$REPO_ROOT/lib/vm/lifecycle.sh"
@@ -180,7 +182,279 @@ setup() {
 @test "direct guest agent exports recursion marker for nested lab-vm launches" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   body="$(declare -f vm_cmd_agent)"
-  [[ "$body" == *'export LAB_VM_RECURSION_DEPTH=1'* ]]
+  [[ "$body" == *'LAB_VM_RECURSION_DEPTH='* ]]
+  [[ "$body" == *'LAB_VM_MAX_DEPTH='* ]]
+}
+
+@test "recursion configuration defaults to depth zero and propagates an explicit limit" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  unset LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH
+  VM_RECURSE=0 VM_UNSAFE_RECURSE=0 VM_MAX_DEPTH=0 VM_MAX_DEPTH_EXPLICIT=0
+  vm_recursion_configure run
+  [ "$VM_GUEST_RECURSION_DEPTH" -eq 0 ]
+  [ "$VM_EFFECTIVE_MAX_DEPTH" -eq 0 ]
+
+  VM_RECURSE=1 VM_UNSAFE_RECURSE=0 VM_MAX_DEPTH=2 VM_MAX_DEPTH_EXPLICIT=1
+  vm_recursion_configure run
+  [ "$VM_GUEST_RECURSION_DEPTH" -eq 0 ]
+  [ "$VM_EFFECTIVE_MAX_DEPTH" -eq 2 ]
+}
+
+@test "nested recursion increments depth and refuses missing opt-in or over-depth launch" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=1
+  VM_RECURSE=1 VM_UNSAFE_RECURSE=0 VM_MAX_DEPTH=0 VM_MAX_DEPTH_EXPLICIT=0
+  vm_recursion_configure run
+  [ "$VM_GUEST_RECURSION_DEPTH" -eq 1 ]
+  [ "$VM_EFFECTIVE_MAX_DEPTH" -eq 1 ]
+
+  VM_RECURSE=0
+  if output="$(vm_recursion_configure run 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Nested VM launch requires --recurse'* ]]
+
+  LAB_VM_RECURSION_DEPTH=1
+  VM_RECURSE=1
+  if output="$(vm_recursion_configure run 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'maximum nesting depth'* ]]
+}
+
+@test "nested KVM absence fails closed and an available device passes preflight" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  _vm_kvm_available() { return 1; }
+  if output="$(vm_recursion_require_nested_kvm 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'requires usable /dev/kvm'* ]]
+
+  _vm_kvm_available() { return 0; }
+  _vm_nested_cpu_virtualization_available() { return 1; }
+  if output="$(vm_recursion_require_nested_kvm 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'requires a guest CPU with vmx or svm'* ]]
+
+  _vm_nested_cpu_virtualization_available() { return 0; }
+  vm_recursion_require_nested_kvm
+}
+
+@test "a child cannot reset or increase its inherited recursion maximum" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  LAB_VM_RECURSION_DEPTH=1 LAB_VM_MAX_DEPTH=2
+  VM_RECURSE=1 VM_UNSAFE_RECURSE=0 VM_MAX_DEPTH=3 VM_MAX_DEPTH_EXPLICIT=1
+  if output="$(vm_recursion_configure run 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'cannot exceed inherited maximum depth 2'* ]]
+
+  VM_MAX_DEPTH=0
+  if output="$(vm_recursion_configure run 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'below the current recursion depth 1'* ]]
+}
+
+@test "unsafe recursion implies recurse mode and requires repository workspace" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  unset LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH
+  VM_RECURSE=0 VM_UNSAFE_RECURSE=1 VM_MAX_DEPTH=1 VM_MAX_DEPTH_EXPLICIT=1
+  vm_recursion_configure run
+  [ "$VM_RECURSE" -eq 1 ]
+  run vm_recursion_validate_workspace "$REPO_ROOT" "$REPO_ROOT"
+  [ "$status" -eq 0 ]
+  run vm_recursion_validate_workspace "$BATS_TEST_TMPDIR" "$REPO_ROOT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--unsafe-recurse requires a workspace containing the Little Mester checkout'* ]]
+}
+
+@test "recursion policy is persisted with a VM profile and malformed metadata fails closed" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  local vm_dir="$BATS_TEST_TMPDIR/recursion-profile"
+  VM_GUEST_RECURSION_DEPTH=1 VM_EFFECTIVE_MAX_DEPTH=2
+  vm_recursion_store_profile "$vm_dir"
+  vm_recursion_load_profile "$vm_dir"
+  [ "$VM_AGENT_RECURSION_DEPTH" -eq 1 ]
+  [ "$VM_AGENT_MAX_DEPTH" -eq 2 ]
+  [ "$VM_AGENT_RECURSION_STATE_POSSIBLE" -eq 1 ]
+
+  # Lowering a reused profile's current limit must not erase the fact that an
+  # earlier launch could have left descendants in its overlay.
+  VM_GUEST_RECURSION_DEPTH=1 VM_EFFECTIVE_MAX_DEPTH=1
+  vm_recursion_store_profile "$vm_dir"
+  vm_recursion_load_profile "$vm_dir"
+  [ "$VM_AGENT_MAX_DEPTH" -eq 1 ]
+  [ "$VM_AGENT_RECURSION_STATE_POSSIBLE" -eq 1 ]
+  if output="$(vm_recursion_require_discard_ack "$vm_dir" 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'may contain nested VM state'* ]]
+
+  printf '1 33\n' >"$vm_dir/recursion_policy"
+  if output="$(vm_recursion_load_profile "$vm_dir" 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'invalid recursion metadata'* ]]
+}
+
+@test "recursion cleanup refuses live child VMs and explicitly removes stopped disposable state" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  export HOME="$BATS_TEST_TMPDIR/recursion-home"
+  local session="$HOME/.cache/lab-vm-recursion/child" vm_dir="$HOME/.cache/lab-vm-recursion/child/vm/child"
+  mkdir -p "$vm_dir" "$session/workspace"
+  printf '%s\n' "$REPO_ROOT" >"$session/source-path"
+  VM_YES=1
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  vm_run_status() { echo running; return 0; }
+  run vm_cmd_recursion_clean child
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'is still running'* ]]
+  [ -d "$session/workspace" ]
+
+  vm_run_status() { echo stopped; return 1; }
+  run vm_cmd_recursion_clean child
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'disposable workspace/state were removed'* ]]
+  [ ! -e "$session" ]
+
+  local initial_session="$HOME/.cache/lab-vm-recursion/initial-default" outer_vm="$BATS_TEST_TMPDIR/outer-vm-profile"
+  mkdir -p "$initial_session/workspace" "$outer_vm"
+  printf '%s\n' "$REPO_ROOT" >"$initial_session/source-path"
+  printf '%s\n' "$outer_vm" >"$initial_session/outer-vm-dir"
+  vm_run_status() { echo running; return 0; }
+  run vm_cmd_recursion_clean initial-default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'is still running'* ]]
+  [ -d "$initial_session/workspace" ]
+
+  vm_run_status() { echo stopped; return 1; }
+  run vm_cmd_recursion_clean initial-default
+  [ "$status" -eq 0 ]
+  [ ! -e "$initial_session" ]
+}
+
+@test "outer down stop and rebuild refuse possible recursive-state deletion before side effects" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/outer-vm-state"
+  local vm_dir="$VM_DIR_BASE/default" side_effects="$BATS_TEST_TMPDIR/teardown-side-effects"
+  mkdir -p "$vm_dir" "$VM_DIR_BASE"
+  printf '0 1\n' >"$vm_dir/recursion_policy"
+  : >"$VM_DIR_BASE/base.qcow2"
+  VM_DISCARD_RECURSIVE=0
+
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  vm_run_stop() { echo run-stop >>"$side_effects"; }
+  vm_disk_delete() { echo disk-delete >>"$side_effects"; }
+  vm_ssh_clean() { echo ssh-clean >>"$side_effects"; }
+  vm_disk_exists() { return 1; }
+  vm_disk_create_base() { echo base-create >>"$side_effects"; }
+  ssh() { echo ssh-command >>"$side_effects"; return 0; }
+
+  run vm_cmd_down default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'pass --discard-recursive'* ]]
+  [ ! -s "$side_effects" ]
+
+  run vm_cmd_stop default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'pass --discard-recursive'* ]]
+  [ ! -s "$side_effects" ]
+
+  run vm_cmd_rebuild default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'pass --discard-recursive'* ]]
+  [ ! -s "$side_effects" ]
+
+  VM_DISCARD_RECURSIVE=1
+  run vm_cmd_down default
+  [ "$status" -eq 0 ]
+  grep -q '^run-stop$' "$side_effects"
+  grep -q '^disk-delete$' "$side_effects"
+  [ ! -e "$vm_dir/recursion_policy" ]
+}
+
+@test "lab-vm refuses an over-depth launch before prerequisite checks" {
+  local workspace="$BATS_TEST_TMPDIR/recursion-preflight"
+  mkdir -p "$workspace"
+  run env LAB_VM_RECURSION_DEPTH=1 LAB_VM_MAX_DEPTH=1 VM_SKIP_PREREQS_TEST=1 \
+    "$REPO_ROOT/lab-vm" run "$workspace" --recurse
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'maximum nesting depth'* ]]
+  [[ "$output" != *'Checking VM prerequisites'* ]]
+  [[ "$output" != *'qemu-system-x86_64 not found'* ]]
+}
+
+@test "lab-vm CLI parses recursion modes and refuses child limit reset or increase" {
+  local workspace="$BATS_TEST_TMPDIR/recursion-cli"
+  mkdir -p "$workspace"
+
+  run env LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=1 "$REPO_ROOT/lab-vm" run "$workspace" --recurse --max-depth 0
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'maximum nesting depth 0 reached'* ]]
+
+  run env LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=1 "$REPO_ROOT/lab-vm" run "$workspace" --recurse --max-depth 2
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'cannot exceed inherited maximum depth 1'* ]]
+
+  run env LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=1 "$REPO_ROOT/lab-vm" run "$workspace"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Nested VM launch requires --recurse'* ]]
+
+  run env -u LAB_VM_RECURSION_DEPTH -u LAB_VM_MAX_DEPTH "$REPO_ROOT/lab-vm" run "$BATS_TEST_TMPDIR" --unsafe-recurse
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--unsafe-recurse requires a workspace containing the Little Mester checkout'* ]]
+
+  run "$REPO_ROOT/lab-vm" status --discard-recursive
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'only valid with down, stop, rebuild, or up --clean'* ]]
+
+  run env -u LAB_VM_RECURSION_DEPTH -u LAB_VM_MAX_DEPTH "$REPO_ROOT/lab-vm" up --discard-recursive
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'only valid with down, stop, rebuild, or up --clean'* ]]
+}
+
+@test "nested lifecycle commands resolve the isolated per-profile VM state root" {
+  local recursion_root="$HOME/.cache/lab-vm-recursion"
+  run env LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=1 \
+    "$REPO_ROOT/lab-vm" status child
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$recursion_root/child/vm/child"* ]]
+}
+
+@test "recursive workspace preparation snapshots changes into a separate disposable checkout" {
+  local source="$BATS_TEST_TMPDIR/source-repo" session="$BATS_TEST_TMPDIR/child-session" target
+  mkdir -p "$source/.mester"
+  git -C "$source" init -q
+  git -C "$source" config user.email test@example.invalid
+  git -C "$source" config user.name test
+  printf 'committed\n' >"$source/tracked.txt"
+  git -C "$source" add tracked.txt
+  git -C "$source" commit -qm initial
+  printf 'dirty snapshot\n' >"$source/tracked.txt"
+  printf 'untracked snapshot\n' >"$source/untracked.txt"
+  printf 'host state\n' >"$source/.mester/private"
+  printf 'host config\n' >"$source/.little-mester.conf"
+
+  run python3 "$REPO_ROOT/scripts/vm-recursion-workspace.py" prepare --source "$source" --session "$session"
+  [ "$status" -eq 0 ]
+  target="$output"
+  [ -f "$target/.git/config" ]
+  [ "$target" != "$source" ]
+  [ "$(cat "$target/tracked.txt")" = 'dirty snapshot' ]
+  [ "$(cat "$target/untracked.txt")" = 'untracked snapshot' ]
+  [ ! -e "$target/.mester/private" ]
+  [ ! -e "$target/.little-mester.conf" ]
+
+  printf 'child-only\n' >>"$target/tracked.txt"
+  run python3 "$REPO_ROOT/scripts/vm-recursion-workspace.py" prepare --source "$source" --session "$session"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$target" ]
+  [[ "$(cat "$target/tracked.txt")" == *child-only* ]]
+  [ "$(cat "$source/tracked.txt")" = 'dirty snapshot' ]
+}
+
+@test "recursive workspace snapshot refuses symlinks that escape the selected workspace" {
+  local source="$BATS_TEST_TMPDIR/source-with-link" outside="$BATS_TEST_TMPDIR/outside" session="$BATS_TEST_TMPDIR/unsafe-child"
+  mkdir -p "$source" "$outside"
+  printf 'secret\n' >"$outside/secret"
+  ln -s "$outside/secret" "$source/escape"
+  run python3 "$REPO_ROOT/scripts/vm-recursion-workspace.py" prepare --source "$source" --session "$session"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'symlink escapes selected workspace'* ]]
 }
 
 @test "browser auth debug enables SSH transport tracing only on request" {
@@ -220,6 +494,7 @@ setup() {
   export VM_AGENT_TEST_DIR VM_AGENT_CAPTURE VM_BROWSER_TEST_DIR
   mkdir -p "$VM_AGENT_TEST_DIR"
   printf '22222\n' >"$VM_AGENT_TEST_DIR/ssh_port"
+  printf '1 2\n' >"$VM_AGENT_TEST_DIR/recursion_policy"
   _vm_resolve() { echo "$VM_AGENT_TEST_DIR"; }
   vm_run_status() { echo 'running (PID: 12345)'; }
   vm_cmd_metrics() { [[ "${1:-}" == up ]]; }
@@ -250,6 +525,7 @@ PY
   [[ "$remote_command" == *'PATH="$browser_dir:$PATH"'* ]]
   [[ "$remote_command" == *'VM_BROWSER_BRIDGE_TOKEN_FILE="$browser_dir/token"'* ]]
   [[ "$remote_command" == *'VM_BROWSER_BRIDGE_PORT=41701'* ]]
+  [[ "$remote_command" == *'LAB_VM_RECURSION_DEPTH=1 LAB_VM_MAX_DEPTH=2'* ]]
   [[ "$remote_command" == *'METRICS_URL=http://10.0.2.100:19532'* ]]
   [[ "$remote_command" != *'must-not-be-forwarded'* ]]
 }
@@ -895,7 +1171,7 @@ JSON
 
 @test "hygiene ShellCheck covers VM entry points, browser opener, and lifecycle errors" {
   grep -Fq 'shellcheck lab scripts/*.sh lib/vm/cloud-init.sh lib/vm/host-services.sh lib/vm/browser-open.sh' "$REPO_ROOT/.github/workflows/ci.yml"
-  grep -Fq 'shellcheck --severity=error lab-vm lib/vm/lifecycle.sh' "$REPO_ROOT/.github/workflows/ci.yml"
+  grep -Fq 'shellcheck --severity=error lab-vm lib/vm/lifecycle.sh lib/vm/recursion.sh' "$REPO_ROOT/.github/workflows/ci.yml"
 }
 
 @test "models diagnose captures publication failure without mutating Docker state" {

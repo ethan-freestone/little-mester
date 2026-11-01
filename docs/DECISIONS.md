@@ -702,6 +702,24 @@ agent startup. Recursive tests use a distinct disposable workspace/checkout so t
 outer implementation session remains intact. The outer VM remains the host boundary; nested
 VMs do not gain additional host paths, host Docker, credentials, LAN access, or egress rights.
 
+**Implementation contract:** `lab-vm` accepts `--max-depth` from 0 through 32; the default is
+0, and a nested invocation inherits the parent maximum unless explicitly lowered. A safe
+repo-related workspace is copied to a stable private snapshot before it is shared; snapshots
+exclude `.mester` and `.little-mester.conf`, use independent Git metadata, and reject escaping
+symlinks and special files. Nested VM overlays/state are stored separately under the guest
+user's `~/.cache/lab-vm-recursion/<profile>` and persist until the explicit
+`recursion-clean <profile>` command is confirmed. Nested startup requires usable `/dev/kvm` and
+guest CPU `vmx`/`svm` flags, and fails before snapshot/provisioning when either is unavailable;
+it must not fall back to TCG for a recursive child. This implementation detail does not claim
+live nested-KVM or isolation acceptance; see #43/#52. The cache is inside the containing guest
+overlay: destructive outer `down`/`rebuild` can still remove it and must be treated as an
+independent destructive action until #43 A6/#52 lifecycle acceptance closes.
+When profile recursion metadata shows that descendants may exist, `down`, `stop`, `rebuild`,
+and `up --clean` refuse before destructive side effects unless the caller supplies
+`--discard-recursive`; `--yes` is not a substitute for this acknowledgement. The persisted
+“descendants may exist” bit is sticky if a profile's configured maximum is later lowered, and
+is cleared only when that profile's writable overlay is discarded.
+
 **Reason:** Make the safer VM the eventual ordinary route without losing the useful,
 non-recursive Docker sandbox; maintain metrics parity during migration; and support deliberate
 self-improvement without accidental or infinite agent/VM recursion. Implementation and
@@ -709,6 +727,26 @@ acceptance evidence are tracked on #35, #41–#43, and the new linked launcher/r
 
 The trust-boundary diagram and crossing table live in `docs/vm-architecture.md`; the
 engineering invariants are in `docs/tickets/architecture/DECISIONS.md` §K.
+
+#### C.9.18 Harness-neutral, data-first tooling (2026-11-01)
+
+**Decision:** Little Mester's operational workflows and project state should be available
+through stable, machine-oriented interfaces—CLI and/or MCP—with one canonical data model.
+Harness-specific integrations (OpenCode, Claude Code, Codex, or others) are adapters, not the
+source of truth; they should invoke the same operations and expose the same validation/results.
+Keep semantic decisions in versioned schemas, engine rules, and explicit data rather than
+prompts, agent-specific memory, or undocumented conventions. Natural-language interaction may
+help a user choose an operation, but must not be required to interpret or mutate canonical state.
+
+For ticket work, lifecycle status remains distinct from delivery/merge readiness. When a broad
+objective contains a separately integrable slice, split the remaining scope into separate tickets
+rather than marking unfinished work resolved. The current ticket schema/CLI/MCP do not yet offer
+a complete, equivalent machine-readable readiness-and-split workflow; do not invent an ad-hoc
+field or treat prose as authoritative. Ticket #57 tracks that schema/engine/CLI/MCP improvement.
+
+**Reason:** Reduce coupling to any one coding harness and minimize semantic state that must be
+reconstructed from conversation. A canonical programmatic workflow makes work portable between
+humans, agents, and harnesses and makes status auditable/queryable.
 
 ---
 

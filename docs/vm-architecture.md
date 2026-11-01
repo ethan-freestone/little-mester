@@ -168,11 +168,26 @@ target end-of-day operation. A resumable, non-destructive stop/restart path and 
 command retention guarantees are required before the VM workflow is recommended for daily
 use (#41/#52).
 
-The Little Mester checkout is not part of the default workspace export. Explicit recursion
-may expose it; self-modification additionally requires `--unsafe-recurse`. Both recursive
-modes must enforce a propagated maximum depth, defaulting to zero, and use a separate
-disposable child workspace/state. These are target requirements tracked by #52, not claims
-that recursive VM execution already works.
+The Little Mester checkout is not part of the default workspace export. `--recurse` opts into
+bounded child-VM testing; repository-related workspaces are snapshotted so the direct guest
+cannot write back to the host checkout. `--unsafe-recurse` additionally requires and permits a
+read/write workspace containing the checkout. Each nested launch gets a separate disposable
+workspace and VM-state directory, increments the inherited depth, and refuses to exceed the
+outer `--max-depth` (0 by default; supported range 0–32). A child may lower but cannot raise
+the inherited maximum. `recursion-clean` explicitly removes a stopped child session and its
+snapshot. These are local implementation/test results tracked by #52; nested KVM boot,
+workload, and isolation acceptance are still pending and must not be inferred from mocks.
+Nested starts require usable `/dev/kvm` and guest CPU `vmx`/`svm` flags, and refuse before
+copying or provisioning if either is absent; recursive launches do not fall back to TCG.
+Snapshot copies exclude `.mester` and
+`.little-mester.conf`, preserve independent Git metadata for repository roots, and reject
+escaping symlinks and special files. Recursive cache/state lives inside the containing guest
+overlay, so a destructive outer `down`/`rebuild` can still remove it; this remains an open
+lifecycle acceptance gate under #43 A6/#52. If persisted policy permits descendants, outer
+`down`, `stop`, `rebuild`, and `up --clean` require explicit `--discard-recursive` before any
+destructive side effects; `--yes` alone does not bypass this guard. The descendant-possible
+marker remains set if the configured maximum is lowered, until the associated overlay is
+discarded.
 
 ### Sessions, worktrees, and parallel agents
 
@@ -186,15 +201,15 @@ following choices deliberately:
 | Work on parallel branches | Create distinct Git worktrees; mount each worktree in its own named profile for clear isolation | One profile still means one mount. A new named profile requires a fresh guest bootstrap the first time and consumes extra VM resources. |
 | Make several worktrees visible to one VM | Mount a common parent directory containing them | This exposes that entire parent. Per-session cwd/worktree selection is not yet a polished launcher feature; use manual guest navigation only if you understand the shared boundary. |
 | Spawn/coordinate agent loops | Future supervisor + worktree/session lifecycle | Not implemented: no ownership protocol, conflict resolution, resource budget, cancellation, or cleanup contract. See #56. |
-| Self-test Little Mester recursively | Explicit child VM, after bounded-recursion and nested-KVM gates | Not currently supported: depth is not enforced, nested KVM is unverified, and child sharing must remain push-only and scoped. |
+| Self-test Little Mester recursively | Explicit child VM with `--recurse`/`--unsafe-recurse` and a configured depth | Launcher depth/workspace/state guards are implemented locally; nested KVM and live isolation/workload gates remain unverified. |
 
 For sequential workspace changes, reusing the same profile restarts the guest against the new
 single mount while retaining its overlay; it does not mount both directories at once. `--name`
 chooses another VM profile, not a warm switch. Separate auth sessions use independent
 host/guest loopback ports; metrics are shared per immediate host. These port choices remove
 the known fixed `19533` auth-listener collision locally, but live concurrent-session acceptance
-still requires a supported KVM host. A recursion marker that disables browser auth is not a
-maximum-depth mechanism.
+still requires a supported KVM host. The inherited recursion marker now carries both current
+depth and maximum; browser-auth defaults remain a separate policy.
 
 ## 5. Deliberate non-goals
 
