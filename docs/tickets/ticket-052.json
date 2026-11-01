@@ -8,7 +8,7 @@
   "title": "VM-first launcher, retained Docker mode, and bounded recursion",
   "objective": "Make the provisioned VM the eventual default one-command Little Mester workflow while preserving host-Docker as ./lab-docker, keeping setup separate from fast daily launch, and enabling explicitly opted-in, depth-bounded recursive self-testing. Follow-on child work for parent epic #35; do not switch the ./lab default until #35's VM adoption gates pass.",
   "created_at": "2026-10-29T10:27:45.504Z",
-  "updated_at": "2026-11-01T12:33:31.673Z",
+  "updated_at": "2026-11-01T12:41:51.823Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -68,7 +68,9 @@
       "SUPERSEDES the earlier ORDERED FOLLOW-UP wording that placed implementation after the live A/B/B host check: bounded-recursion implementation is being developed on feat/bounded-vm-recursion as explicitly requested; live nested KVM/isolation validation remains blocked until the current #41 host handoff permits it, and default migration remains gated.",
       "For safe top-level repository snapshots, verify recursion-clean initial-<profile> refuses while the associated outer VM profile is running, then removes the snapshot only after the outer VM is stopped; verify normal nested-profile cleanup also refuses live QEMU/virtiofsd/proxy processes.",
       "After the current #41 handoff permits guest action, safely refresh kvm membership for the existing mester guest and start a fresh agent process with valid persisted depth/max metadata; preserve the overlay and do not recreate the VM.",
-      "Resolve the observed `.mester/vm/default/id_vm_control` exposure from the shared unsafe-recurse checkout before any write-enabled `--unsafe-recurse` test. Demonstrate host VM control keys/state are unavailable to the child while the selected Git checkout remains writable; until then use only the safe snapshot mode and do not claim A7 host-boundary acceptance."
+      "Resolve the observed `.mester/vm/default/id_vm_control` exposure from the shared unsafe-recurse checkout before any write-enabled `--unsafe-recurse` test. Demonstrate host VM control keys/state are unavailable to the child while the selected Git checkout remains writable; until then use only the safe snapshot mode and do not claim A7 host-boundary acceptance.",
+      "After the current #41 handoff and same-profile A→B→B gate, use only a disposable .mester-free snapshot for recursion: from the host run `./lab-vm run \"$PWD\" --recurse --max-depth 1`; in the outer guest verify context depth=0/max=1, nested KVM preflight is ready, and `/workspace/.mester` is absent; then run `./lab-vm run /workspace --recurse --name recursion-smoke`. Verify child depth=1/max=1, another child refuses before side effects, and parent snapshot/session remain usable. Preserve evidence before any child down/recursion-clean; do not use --unsafe-recurse on the original checkout.",
+      "After the current #41 handoff permits guest action, if `id -nG mester` lacks `kvm`, run `sudo usermod -aG kvm mester`; start a fresh SSH/agent login and verify `id -nG` includes `kvm` plus `test -r /dev/kvm && test -w /dev/kvm`. Preserve the overlay; no VM recreation is needed."
     ],
     "created": [
       "tests/vm.bats: one-command direct workspace launch, workspace-switch confirmation, guest graceful shutdown, and overlay-preservation checks.",
