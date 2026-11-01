@@ -45,7 +45,16 @@ SUBIDS
 
 vm_cloud_init_user_data() {
   local vm_name="$1" uid="$2" gid="$3" ssh_pubkey="$4"
+  local recursion_depth="${5:-0}" max_depth="${6:-0}"
   local subid_script
+  [[ "$recursion_depth" =~ ^(0|[1-9][0-9]*)$ && "$max_depth" =~ ^(0|[1-9][0-9]*)$ ]] || {
+    echo 'REFUSED: cloud-init recursion identity must use non-negative decimal values.' >&2
+    return 1
+  }
+  (( recursion_depth <= 32 && max_depth <= 32 && recursion_depth <= max_depth )) || {
+    echo 'REFUSED: cloud-init recursion identity is outside the supported range.' >&2
+    return 1
+  }
   subid_script="$(vm_cloud_init_subid_script)"
   cat <<USERDATA
 #cloud-config
@@ -81,6 +90,19 @@ write_files:
       export LLAMACPP_HOST=http://10.0.2.100:8080
       export DOCKER_HOST=unix:///run/user/${uid}/docker.sock
       export XDG_RUNTIME_DIR=/run/user/${uid}
+  - path: /etc/lab-vm-recursion
+    owner: root:root
+    permissions: '0644'
+    content: |
+      ${recursion_depth} ${max_depth}
+  - path: /etc/profile.d/lab-vm-recursion.sh
+    owner: root:root
+    permissions: '0644'
+    content: |
+      if [ -r /etc/lab-vm-recursion ]; then
+        IFS=' ' read -r LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH < /etc/lab-vm-recursion
+        export LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH
+      fi
   - path: /etc/modules-load.d/mester-rootless.conf
     content: |
       nf_tables
@@ -158,12 +180,14 @@ USERDATA
 vm_cloud_init_generate() (
   set -e
   local vm_dir="$1" vm_name="$2" uid="$3" gid="$4" ssh_pubkey="$5"
+  local recursion_depth="${6:-0}" max_depth="${7:-0}"
   local seed_dir
   seed_dir=$(mktemp -d)
   trap 'rm -rf "$seed_dir"' EXIT
   mkdir -p "$vm_dir"
 
-  vm_cloud_init_user_data "$vm_name" "$uid" "$gid" "$ssh_pubkey" > "$seed_dir/user-data"
+  vm_cloud_init_user_data "$vm_name" "$uid" "$gid" "$ssh_pubkey" \
+    "$recursion_depth" "$max_depth" > "$seed_dir/user-data"
 
   printf 'instance-id: %s\nlocal-hostname: %s\n' "$vm_name" "$vm_name" > "$seed_dir/meta-data"
   local iso_tool

@@ -15,7 +15,7 @@
 #
 # A crash, core dump, or signal in lab-vm CANNOT affect ./lab:
 #   - Different hypervisor, different process tree, different ports
-#   - lab-vm uses $LAB_DIR/.mester/vm/<name>/ for state; lab uses ./ for compose
+#   - lab-vm keeps VM state under the user's private data directory; lab uses ./ for compose
 #   - failed startup cleanup kills only the QEMU/virtiofsd/proxy it started
 #   - lab-vm failures are completely silent to ./lab
 #
@@ -152,6 +152,7 @@ source "$LAB_DIR/lib/vm/runner.sh"
 source "$LAB_DIR/lib/vm/prereqs.sh"
 source "$LAB_DIR/lib/vm/lifecycle.sh"
 source "$LAB_DIR/lib/vm/host-services.sh"
+vm_recursion_apply_guest_identity || exit 1
 
 # ─── CLI parsing ────────────────────────────────────────────────────
 usage() {
@@ -298,7 +299,9 @@ Environment:
   VM_DEBUG=1           Equivalent to --debug (implies --verbose)
   VM_OPENCODE_VERSION  Guest OpenCode target (default: latest; may be pinned)
 
-Per-VM state is stored at: ./.mester/vm/<name>/
+New VM state is stored outside the checkout at:
+  ${XDG_DATA_HOME:-~/.local/share}/little-mester/vm/<name>/
+Existing ./.mester/vm state remains in place for compatibility until explicitly migrated.
 
 References:
   docs/01-host-setup.md     — Host setup runbook (A1, A8)
@@ -482,6 +485,7 @@ if [[ "$cmd" == run || "$cmd" == up ]]; then
     vm_recursion_require_nested_kvm || exit 1
     VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$vm_name")" || die 'Invalid recursive profile name.'
     VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
+    VM_LEGACY_STATE=0
   fi
   VM_WS_ARG="${VM_WS_ARG:-$(pwd)}"
   check_workspace "$VM_WS_ARG"
@@ -539,6 +543,7 @@ if [[ "$cmd" == run || "$cmd" == up ]]; then
 
   VM_GUEST_RECURSION_DEPTH="${VM_GUEST_RECURSION_DEPTH:-0}"
   VM_GUEST_MAX_DEPTH="$VM_EFFECTIVE_MAX_DEPTH"
+  vm_recursion_validate_state_boundary "$VM_WS_ARG" "$VM_DIR_BASE" || exit 1
 elif [[ "$VM_RECURSE" == 1 || "$VM_MAX_DEPTH_EXPLICIT" == 1 ]]; then
   vm_recursion_configure "$cmd" || exit 1
 fi
@@ -546,8 +551,9 @@ if [[ "$cmd" == recursion-clean ]]; then
   [[ -z "$VM_NAME_ARG" ]] || die '--name is not valid with recursion-clean; pass the profile positionally.'
   [[ -n "${remaining[1]:-}" ]] || die 'Usage: ./lab-vm recursion-clean <profile>'
   [[ "${remaining[1]}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
-  VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "${remaining[1]}")" || die 'Invalid recursive profile name.'
-  VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
+    VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "${remaining[1]}")" || die 'Invalid recursive profile name.'
+    VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
+    VM_LEGACY_STATE=0
 fi
 if [[ "$cmd" == install-tools ]]; then
   [[ ${#remaining[@]} -le 2 ]] || die 'Usage: ./lab-vm install-tools [name] [--name <profile>] [--restart-opencode]'
@@ -584,15 +590,18 @@ if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" ]]; then
     run|up|status|ssh|down|stop|resize|agent|egress-reload|verify-isolation|base|rebuild|install-tools|update)
       VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$vm_name")" || die 'Invalid recursive profile name.'
       VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
+      VM_LEGACY_STATE=0
       ;;
     auth-forward)
       _auth_profile=default
       if (( ${#remaining[@]} == 3 )); then _auth_profile="${remaining[1]}"; fi
       VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$_auth_profile")" || die 'Invalid recursive profile name.'
       VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
+      VM_LEGACY_STATE=0
       ;;
     recursion-clean)
       VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
+      VM_LEGACY_STATE=0
       ;;
   esac
 fi
@@ -689,7 +698,7 @@ trap 'exit 143' TERM
 # Save real TTY before tee redirect (restored before interactive commands)
 exec 3>&1 4>&2
 
-VM_LOG_DIR="$LAB_DIR/.mester/logs"
+VM_LOG_DIR="$VM_STATE_DIR/logs"
 if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" && -n "${VM_RECURSION_SESSION_DIR:-}" ]]; then
   if [[ "$cmd" == recursion-clean ]]; then
     VM_LOG_DIR="$HOME/.cache/lab-vm-recursion/logs"
@@ -698,7 +707,11 @@ if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" && -n "${VM_RECURSION_SESSION_DIR:-}" ]];
   fi
 fi
 VM_LOG_FILE="$VM_LOG_DIR/lab-vm_$(date '+%Y%m%d_%H%M%S').log"
-mkdir -p "$VM_LOG_DIR"
+mkdir -p -m 0700 "$VM_STATE_DIR" "$VM_LOG_DIR"
+chmod 0700 "$VM_STATE_DIR" "$VM_LOG_DIR"
+if [[ "${VM_LEGACY_STATE:-0}" == 1 ]]; then
+  echo "Using existing legacy VM state under the checkout for compatibility. It will not be exported to a guest; migrate it to $VM_STATE_DIR before using --unsafe-recurse on the checkout."
+fi
 
 mapfile -t vm_old < <(ls -1t "$VM_LOG_DIR"/lab-vm_*.log 2>/dev/null || true)
 if (( ${#vm_old[@]} > 4 )); then

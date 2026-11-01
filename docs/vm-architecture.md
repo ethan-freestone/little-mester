@@ -8,9 +8,10 @@
 ## 1. Shape
 
 ```
-Host (your machine) — ./lab is the intended default and runs here as you, not as a service
+Host (your machine) — intended VM-default launcher runs here as you, not as a service
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  ./lab (VM-first target; current implementation is ./lab-vm)                  │
+│  Target: ./lab <workspace> → VM host adapter                                 │
+│  Current: ./lab vm <args> → ./lab-vm; ./lab → ./lab-docker until cutover    │
 │   ├─ check_workspace()            path guards run BEFORE anything is shared   │
 │   ├─ VM host adapter              QEMU + supported host acceleration          │
 │   ├─ virtiofsd                   exports ONLY the selected workspace          │
@@ -31,9 +32,10 @@ Host (your machine) — ./lab is the intended default and runs here as you, not 
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Until the launcher migration lands, invoke VM primitives through `./lab-vm`; the current
-`./lab` implementation is still the Docker launcher. The selected future entry is
-`./lab <workspace>`, while the old workflow is to remain available as `./lab-docker`.
+The compatibility dispatcher routes `./lab vm <args>` to `./lab-vm`; `./lab-docker` is the
+explicit host-Docker entry. While the adoption gates remain open, ordinary `./lab <workspace>`
+still delegates to the old Docker workflow. The intended final default is `./lab <workspace>`
+starting/reusing the VM directly, but this worktree is not cut over or accepted yet.
 Only explicitly selected crossings traverse the VM boundary: the workspace (virtiofs), SSH
 control (loopback-only host forward), and named model, metrics, or egress endpoints. There is
 no general host route. VM metrics transport is a separate integration from the existing
@@ -43,13 +45,21 @@ host-Docker metrics path; the latter remains in place during migration.
 
 | Crossing | Direction | What is exposed | What is *not* exposed |
 |---|---|---|---|
-| `virtiofsd` → guest `/workspace` | host → VM | Exactly the directory passed to `./lab`, read/write | `$HOME`, `~/.ssh`, `~/.config`, the lab repo without `--unsafe-recurse`, Docker sockets, other checkouts |
+| `virtiofsd` → guest `/workspace` | host → VM | Exactly the directory passed to `./lab vm` (target default: `./lab`), read/write | `$HOME`, `~/.ssh`, `~/.config`, the lab repo without `--unsafe-recurse`, Docker sockets, other checkouts |
 | SSH control | host → VM | `127.0.0.1:<ephemeral>` → guest `:22`, per-VM key, per-VM `known_hosts` | Host keys/credentials inside the VM; VM listening on the host LAN |
+| VM state | host-local | Per-user data directory outside the selected workspace; nested state stays in a private guest session | VM disks, control keys, logs, or process state through virtiofs |
 | Optional model API `guestfwd` | VM → one configured host endpoint | One explicitly selected local API port | General host loopback, host filesystem, host Docker |
 | Optional metrics endpoint/stream | VM → one configured host metrics endpoint | Read-only metrics API/data needed by the guest plugin | Compose DNS assumptions, host `/proc` mounts, host filesystem, host Docker, general host loopback |
 | Egress proxy `guestfwd` | VM → public Internet; nested VMs chain through the immediate parent's proxy | Any public HTTP(S) destination when `allowed_domains` is blank, subject to each VM's policy | Host-local/directly connected networks, private/reserved/multicast IPs, mixed DNS, non-HTTP protocols, raw host routing |
 | Temporary browser OAuth callback | host browser → VM guest | One exact runtime-selected callback port, bound to host `127.0.0.1` and forwarded to guest `127.0.0.1` over the temporary SSH control master | Port ranges, LAN listeners, callback URL rewriting, general host route, callback/token capture |
 | Guest runtime | agent in guest → VM | Guest Docker/Compose, guest processes, optional nested VMs | Host Docker daemon, host filesystem outside the selected workspace |
+
+New VM profiles/logs use `${XDG_DATA_HOME:-~/.local/share}/little-mester` outside the selected
+workspace. Existing `.mester` state is preserved for compatibility, but overlapping legacy
+runtime paths are refused as guest workspaces until the owner explicitly migrates them. Guest
+recursion identity is stored in root-owned guest OS state and is not dependent on the agent SSH
+environment. The little-mester MCP server runs from a guest-private copy with Node.js 20+ and
+lockfile-installed dependencies; it does not create `node_modules` in the shared workspace.
 
 The current Linux VM implementation uses one native, curated host metrics service on
 `127.0.0.1:19532` per immediate VM host. Each QEMU profile has an independent guestfwd to
@@ -140,8 +150,9 @@ owner decision. Neither snapshots nor MCP replace `restrict=on` or proxy destina
 
 ## 4. Target lifecycle
 
-The VM primitives currently live in standalone `./lab-vm`; merging them into `./lab` and
-launching the agent there remain ticket #41 A2. The intended integrated lifecycle is:
+The VM primitives live in standalone `./lab-vm` and are available through explicit
+`./lab vm <args>` dispatch. The default-workspace cutover and its acceptance remain tracked on
+#35/#52. The intended integrated lifecycle is:
 
 1. `./lab-vm up --workspace <dir>` validates the path on the host, resolves the pinned base image, and
    creates the profile's overlay, seed, keys, and sockets. The intended state root is private and
@@ -164,11 +175,12 @@ path; local regressions do not replace the pending live nested-KVM acceptance ga
    runtime (Docker/Compose), native
    auth prerequisites, proxy settings and the workspace mount.
 4. `./lab-vm agent [name]` attaches the selected harness directly in the guest (not in a
-   container) to the invoking terminal. The owner-directed everyday entry is a single
-   `./lab <workspace>` command that reuses/starts the prepared VM and enters the guest TUI;
-   provisioning and diagnostic commands remain explicit satellites. The launcher cutover
-   is still unimplemented: `./lab` remains Docker today, and `./lab-docker` has not yet been
-   split out. Track implementation on #35/#52; acceptance gates remain independent.
+   container) to the invoking terminal. The explicit one-command VM route is
+   `./lab vm <workspace>`, which delegates to `lab-vm` and reuses/starts the selected profile;
+   provisioning and diagnostic commands remain available. Ordinary `./lab <workspace>` still
+   uses host Docker until the required release gates pass; that workflow is now available
+   explicitly as `./lab-docker`. Track the eventual default cutover on #35/#52; acceptance gates
+   remain independent.
    Guest-native provider login and browser callback forwarding are tracked in #45.
 5. The agent controls guest Docker/Compose for project services and tests. It may launch
    nested Little Mester VMs when nested virtualization is available and verified.
@@ -194,9 +206,16 @@ copying or provisioning if either is absent; recursive launches do not fall back
 Fresh guest provisioning places `mester` in the `kvm` group so the nested-QEMU preflight can
 use the device when the outer hypervisor exposes it. Existing guests need an explicit, safe
 membership refresh; changing cloud-init source does not update an already-running guest.
-Snapshot copies exclude `.mester`, `.little-mester.conf`, and the ignored host-side
-`.bench-models` model cache, preserve independent Git metadata for repository roots, and reject
-escaping symlinks and special files. Recursive cache/state lives inside the containing guest
+Snapshot copies exclude `.mester`, `.little-mester.conf`, `secrets.env`, local `.env` files,
+auth/database files, private keys, `.bench-models`, and regenerated dependency/runtime caches.
+In-workspace symlinks are rewritten as relative links inside the child copy; escaping links
+are refused. They preserve intended current work in a synthetic one-commit Git repository, not the source
+repository's full history; a private manifest records source HEAD and included content hashes.
+The default snapshot cap is 2 GiB, with a 128-MiB staging reserve and a checked free-space
+preflight; `LAB_VM_MAX_SNAPSHOT_BYTES` can explicitly raise the cap up to 16 GiB but cannot
+bypass available-space checks. Reusing a session refuses a changed source revision/tree, so a
+new test attempt needs a fresh profile. Escaping symlinks and special files are refused.
+Recursive cache/state lives inside the containing guest
 overlay, so a destructive outer `down`/`rebuild` can still remove it; this remains an open
 lifecycle acceptance gate under #43 A6/#52. If persisted policy permits descendants, outer
 `down`, `stop`, `rebuild`, and `up --clean` require explicit `--discard-recursive` before any
@@ -233,11 +252,12 @@ separate harness-specific MCP service. A depth marker without a maximum is repor
 or incomplete and is not treated as authorization to launch a child.
 
 **Current self-development blocker:** the repository checkout itself is mounted via virtiofs,
-and `.mester/vm/default/id_vm_control` is present in that shared tree. Therefore
-`--unsafe-recurse` on this checkout would give the guest the host-side VM control key/state.
-Do not use write-enabled unsafe recursion until VM control state is moved outside the shared
-workspace or equivalently excluded. This observed gap means the intended "workspace only" boundary
-is not yet satisfied; track remediation and live evidence under #43/#52.
+and `.mester/vm/default/id_vm_control` is visible in that shared tree in the current guest.
+Filtered `--recurse` snapshots exclude it, but that does not repair the parent guest's direct
+workspace exposure. Do not use `--unsafe-recurse` on this checkout until VM control state is
+moved outside the shared workspace and the source boundary is verified. This means the intended
+"workspace only" boundary is not yet satisfied; track remediation and live evidence under
+#41/#43/#52.
 
 ### Sessions, worktrees, and parallel agents
 

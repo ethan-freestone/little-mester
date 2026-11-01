@@ -5,7 +5,7 @@
 die() { echo "REFUSED: $*" >&2; return 1; }
 
 # Source the lab script
-source "$(dirname "$BATS_TEST_FILENAME")/../lab"
+source "$(dirname "$BATS_TEST_FILENAME")/../lab-docker"
 
 setup() {
   # Ensure LAB_DIR is set correctly for sourcing context
@@ -275,6 +275,30 @@ teardown() {
   run bash -c './lab --verbose --help 2>&1 | head -1'
   [ $status -eq 0 ]
   [[ "$output" == "Usage:"* ]]
+}
+
+@test "lab vm dispatches directly to the VM CLI and preserves the path guard" {
+  run "$LAB_DIR/lab" vm --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'Usage: ./lab-vm'* ]]
+  [[ "$output" != *'./lab-docker setup'* ]]
+
+  run "$LAB_DIR/lab" vm run / --recurse
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Cannot mount filesystem root (/)'* ]]
+  [[ "$output" != *'Checking VM prerequisites'* ]]
+}
+
+@test "lab-docker is the explicit host workflow and lab keeps the compatibility route" {
+  [ -x "$LAB_DIR/lab-docker" ]
+  run "$LAB_DIR/lab-docker" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'./lab-docker [flags] <path-to-workspace>'* ]]
+  [[ "$output" == *'./lab vm <lab-vm command|workspace>'* ]]
+
+  run "$LAB_DIR/lab" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'./lab-docker [flags] <path-to-workspace>'* ]]
 }
 
 @test "lab -y before and after workspace path" {

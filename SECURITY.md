@@ -1,11 +1,13 @@
 # Security Model & Architecture
 
-> **Core principle:** The agent never gets a host shell or host Docker socket. Current
-> `./lab` host-Docker mode runs in a hardened container; experimental `./lab-vm` runs
-> OpenCode directly inside a local QEMU/KVM guest. The model's output is not trusted.
+> **Core principle:** The agent never gets a host shell or host Docker socket. `./lab-docker`
+> runs the established host-Docker mode in a hardened container; `./lab vm` routes explicitly
+> to the experimental direct-guest `./lab-vm` workflow. Until VM release gates pass, ordinary
+> `./lab` remains a compatibility route to `./lab-docker`. The model's output is not trusted.
 >
-> **Two modes:** the current `./lab` runs an agent container on the host Docker daemon.
-> The experimental `./lab-vm` runs the agent directly in a local QEMU/KVM guest; guest
+> **Two modes:** `./lab-docker` runs an agent container on the host Docker daemon (and is the
+> current default behind `./lab`). The experimental `./lab vm` / `./lab-vm` runs the agent
+> directly in a local QEMU/KVM guest; guest
 > rootless Docker is for project workloads, not the agent wrapper or VM security boundary.
 > Both are intended to expose only an explicitly selected workspace to host data. The
 > full target design is in [`docs/vm-architecture.md`](docs/vm-architecture.md) and
@@ -16,14 +18,14 @@
 ```
 Current (host-Docker mode)
 ┌───────────────────────────── HOST ─────────────────────────────┐
-│  ./lab ──► Docker daemon (root-owned)                          │
+│  ./lab / ./lab-docker ──► Docker daemon (root-owned)           │
 │              └─ agent container (non-root, read-only, no caps) │
 │                   └─ /workspace (one bind mount)                │
 └────────────────────────────────────────────────────────────────┘
 
 Experimental VM mode (epic #35, in progress)
 ┌───────────────────────────── HOST ─────────────────────────────┐
-│  ./lab-vm ──► QEMU/KVM + virtiofsd + model API + egress proxy  │
+│  ./lab vm ──► ./lab-vm ──► QEMU/KVM + virtiofsd + proxy       │
 │              └─ disposable VM                                   │
 │                   ├─ OpenCode runs directly as guest user mester│
 │                   ├─ rootless Docker/Compose (project workloads) │
@@ -42,7 +44,7 @@ capabilities, not proof against a QEMU/KVM or host-kernel vulnerability.
 - **Agent egress is enabled by default.** `compose.yaml` puts the agent on
   `[egress, internal]`; the `egress` network is not `internal`. This is the current
   behaviour, not an opt-in.
-- **Disable it explicitly:** `./lab --isolated` (or `--egress false`) sets the agent to
+- **Disable it explicitly:** `./lab-docker --isolated` (or `--egress false`) sets the agent to
   `[internal]` only. `.mester-egress` with `permission=false` is the file-based equivalent.
 - **Host-Docker mode:** `.mester-egress` `allowed_domains` is not enforced for the
   container's network; treat it as documentation, not a control. `--isolated` disables
@@ -58,7 +60,7 @@ capabilities, not proof against a QEMU/KVM or host-kernel vulnerability.
   This control is separate from host-Docker egress and remains subject to live acceptance
   gates in #41/#43. A running VM proxy must reload the manifest after changes.
 - **Host-Docker setup pulls use egress too.** `ollama-pull` and `llamacpp-pull` run only
-  during `./lab setup` and use the `egress` network; they are removed afterwards.
+  during `./lab-docker setup` and use the `egress` network; they are removed afterwards.
 - **Host-Docker mode:** services do not publish ports to the host; agent/workspace
   services use Docker networks.
 - **VM mode:** QEMU's SSH control port is bound to host loopback. Narrow QEMU `guestfwd`
@@ -73,7 +75,7 @@ capabilities, not proof against a QEMU/KVM or host-kernel vulnerability.
 ## 3. Filesystem restrictions
 
 - **One workspace mount.** Host-Docker mounts only the directory chosen with
-  `./lab <path>` at `/workspace`. VM mode exports only that selected directory with virtiofs;
+  `./lab-docker <path>` at `/workspace`. VM mode exports only that selected directory with virtiofs;
   `virtiofsd` is started with that single shared directory. The agent can read/write this
   selected workspace, so use backups and do not select sensitive directories.
 - **Path guards run on the host first.** `check_workspace()` refuses `/`, `$HOME`,
@@ -108,11 +110,11 @@ capabilities, not proof against a QEMU/KVM or host-kernel vulnerability.
 ## 6. Security policy and immutability
 
 - **The agent never gets host shell access.** Host-Docker interaction uses the mounted
-  workspace and container shell (`./lab shell`). VM-mode OpenCode runs directly in the
+  workspace and container shell (`./lab-docker shell`). VM-mode OpenCode runs directly in the
   guest and can control its in-VM rootless Docker/Compose workload runtime; it does not
   receive the host Docker socket or a host command capability.
 - **Security configuration is immutable without review.** Changes to `compose.yaml`,
-  `agent/Dockerfile`, `lab`, the VM boundary, or the egress model require explicit human
+  `agent/Dockerfile`, `lab`, `lab-docker`, the VM boundary, or the egress model require explicit human
   review and a ticket with evidence. The agent must not silently widen a boundary.
 - **The host-Docker boundary is tested.** `./verify-lab.sh` covers container assertions, and
   `scripts/check-docs-consistency.py` fails when this document or `README.md` drifts from the

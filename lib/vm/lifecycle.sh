@@ -17,7 +17,20 @@ set -euo pipefail
 
 : "${LAB_DIR:=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")/..")" && pwd)}"
 MESTER_DIR="$LAB_DIR/.mester"
-VM_DIR_BASE="${VM_DIR_BASE:-$MESTER_DIR/vm}"
+VM_STATE_DIR="${VM_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/little-mester}"
+VM_LEGACY_DIR_BASE="$MESTER_DIR/vm"
+VM_LEGACY_STATE=0
+if [[ -n "${VM_DIR_BASE+x}" ]]; then
+  : # Explicit overrides are used by recursion and isolated tests.
+elif [[ -d "$VM_LEGACY_DIR_BASE" && ! -e "$VM_STATE_DIR/vm" ]]; then
+  # Preserve existing overlays/keys until the operator explicitly migrates
+  # them. The workspace boundary check below prevents exporting this legacy
+  # in-checkout state to a guest.
+  VM_DIR_BASE="$VM_LEGACY_DIR_BASE"
+  VM_LEGACY_STATE=1
+else
+  VM_DIR_BASE="$VM_STATE_DIR/vm"
+fi
 
 # Source library functions
 source "$LAB_DIR/lib/vm/cloud-init.sh"
@@ -61,18 +74,29 @@ _vm_wait_for_cloud_init() {
   fi
 }
 
-_vm_install_guest_harness() {
+_vm_install_guest_harness() (
   local vm_dir="$1"
   local version="${VM_OPENCODE_VERSION:-latest}"
-  local config_hash
+  local config_hash config_dir
   [[ "$version" == latest || "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
     log "ERROR: VM_OPENCODE_VERSION must be 'latest' or a pinned semantic version (for example 2.2.0)"
     return 2
   }
   config_hash="$(
-    cd "$LAB_DIR/agent/opencode"
-    find opencode.json plugins -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+    {
+      find "$LAB_DIR/agent/opencode" -type f \( -name opencode.json -o -path '*/plugins/*' \) -print0
+      printf '%s\0' "$LAB_DIR/little-mester-mcp/package.json" \
+        "$LAB_DIR/little-mester-mcp/package-lock.json" "$LAB_DIR/little-mester-mcp/tsconfig.json" \
+        "$LAB_DIR/scripts/vm-opencode-config.py"
+      find "$LAB_DIR/little-mester-mcp/src" -type f -print0
+    } | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
   )" || return $?
+  config_dir="$(mktemp -d "${TMPDIR:-/tmp}/lab-vm-opencode-config.XXXXXX")" || return 1
+  trap 'rm -rf -- "$config_dir"' EXIT
+  python3 "$LAB_DIR/scripts/vm-opencode-config.py" \
+    --input "$LAB_DIR/agent/opencode/opencode.json" \
+    --output "$config_dir/opencode.json" \
+    --mcp-cwd /home/mester/.local/share/little-mester/mcp || return $?
 
   log "Ensuring direct guest OpenCode harness (requested version: $version)..."
   vm_ssh "$vm_dir" "sudo bash -s -- '$version'" <<'GUEST_OPENCODE_INSTALL'
@@ -84,6 +108,19 @@ if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
   sudo apt-get update
   sudo apt-get install -y -qq nodejs npm
 fi
+node_major="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
+if [[ ! "$node_major" =~ ^[0-9]+$ ]] || (( node_major < 20 )); then
+  echo "Installing supported Node.js 22 runtime (current major: ${node_major:-unknown})."
+  npm install --global n
+  n 22
+  export PATH="/usr/local/bin:$PATH"
+  hash -r
+fi
+node_major="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
+[[ "$node_major" =~ ^[0-9]+$ ]] && (( node_major >= 20 )) || {
+  echo "Node.js 20 or newer is required by the Little Mester MCP server (found $(node --version 2>&1))." >&2
+  exit 1
+}
 current="$(opencode --version 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/) {sub(/^v/, "", $i); print $i; exit}}' || true)"
 if [[ "$requested_version" == latest && -n "$current" ]]; then
   # `latest` is the fresh-install default, not an implicit upgrade channel.
@@ -105,20 +142,69 @@ test "$installed" = "$version"
 install -d -o root -g root -m 0755 /etc/opencode /etc/opencode/plugins
 GUEST_OPENCODE_INSTALL
 
-  if ! tar -C "$LAB_DIR/agent/opencode" -cf - opencode.json plugins | \
+  if ! tar -C "$LAB_DIR/agent/opencode" -cf - plugins | \
     vm_ssh "$vm_dir" "sudo tar -xf - -C /etc/opencode"; then
     log "ERROR: failed to transfer guest OpenCode config/plugins"
     return 1
   fi
+  if ! tar -C "$config_dir" -cf - opencode.json | \
+    vm_ssh "$vm_dir" 'sudo tar -xf - -C /etc/opencode'; then
+    log 'ERROR: failed to transfer the rendered V2 guest OpenCode configuration.'
+    return 1
+  fi
 
-  vm_ssh "$vm_dir" "sudo sed -i \
-    -e 's#http://ollama:11434#http://10.0.2.100:11434#g' \
-    -e 's#http://llamacpp:11434#http://10.0.2.100:8080#g' \
-    /etc/opencode/opencode.json && \
-    sudo chown -R root:root /etc/opencode && \
-    sudo chmod -R a+rX /etc/opencode && \
-    printf '%s\\n' '$config_hash' | sudo tee /etc/opencode/.little-mester-config-hash >/dev/null && \
-    sudo -iu mester opencode --version"
+  vm_ssh "$vm_dir" 'sudo install -d -o mester -g mester -m 0700 /home/mester/.local/share/little-mester/mcp' || {
+    log 'ERROR: could not prepare the guest-private MCP runtime directory.'
+    return 1
+  }
+  if ! tar -C "$LAB_DIR/little-mester-mcp" -cf - package.json package-lock.json tsconfig.json src | \
+    vm_ssh "$vm_dir" 'sudo tar -xf - -C /home/mester/.local/share/little-mester/mcp && sudo chown -R mester:mester /home/mester/.local/share/little-mester/mcp'; then
+    log 'ERROR: failed to transfer the Little Mester MCP source into the guest-private runtime.'
+    return 1
+  fi
+  if vm_ssh "$vm_dir" "sudo test -r /etc/opencode/.little-mester-config-hash && test \"\$(sudo cat /etc/opencode/.little-mester-config-hash)\" = '$config_hash' && sudo -u mester test -r /home/mester/.local/share/little-mester/mcp/dist/mcp-server.js"; then
+    log 'Guest Node/MCP dependency image is current; skipping npm install/build.'
+  else
+    vm_ssh "$vm_dir" "sudo -u mester env HOME=/home/mester HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128 bash -c 'cd /home/mester/.local/share/little-mester/mcp && npm ci && npm run build'" || {
+      log 'ERROR: guest Node.js dependency install or Little Mester MCP build failed.'
+      return 1
+    }
+  fi
+
+  vm_ssh "$vm_dir" "sudo chown -R root:root /etc/opencode && sudo chmod -R a+rX /etc/opencode && printf '%s\\n' '$config_hash' | sudo tee /etc/opencode/.little-mester-config-hash >/dev/null && sudo -iu mester opencode --version && sudo -iu mester node --version && sudo -iu mester test -r /home/mester/.local/share/little-mester/mcp/dist/mcp-server.js"
+)
+
+_vm_install_guest_recursion_identity() {
+  local vm_dir="$1" depth="${VM_GUEST_RECURSION_DEPTH:-0}" maximum="${VM_EFFECTIVE_MAX_DEPTH:-0}"
+  [[ "$depth" =~ ^(0|[1-9][0-9]*)$ && "$maximum" =~ ^(0|[1-9][0-9]*)$ ]] || {
+    log 'ERROR: refusing to install an invalid guest recursion identity.'
+    return 1
+  }
+  (( depth <= VM_RECURSION_MAX_SUPPORTED && maximum <= VM_RECURSION_MAX_SUPPORTED && depth <= maximum )) || {
+    log 'ERROR: refusing to install a guest recursion identity outside the supported policy.'
+    return 1
+  }
+  vm_ssh "$vm_dir" "sudo bash -s -- '$depth' '$maximum'" <<'GUEST_RECURSION_IDENTITY'
+set -euo pipefail
+depth="$1"
+maximum="$2"
+[[ "$depth" =~ ^(0|[1-9][0-9]*)$ && "$maximum" =~ ^(0|[1-9][0-9]*)$ ]] || exit 2
+(( depth <= 32 && maximum <= 32 && depth <= maximum )) || exit 2
+policy_tmp="/etc/.lab-vm-recursion.$$"
+profile_tmp="/etc/profile.d/.lab-vm-recursion.sh.$$"
+trap 'rm -f -- "$policy_tmp" "$profile_tmp"' EXIT
+printf '%s %s\n' "$depth" "$maximum" >"$policy_tmp"
+cat >"$profile_tmp" <<'PROFILE_IDENTITY'
+if [ -r /etc/lab-vm-recursion ]; then
+  IFS=' ' read -r LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH < /etc/lab-vm-recursion
+  export LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH
+fi
+PROFILE_IDENTITY
+chown root:root "$policy_tmp" "$profile_tmp"
+chmod 0644 "$policy_tmp" "$profile_tmp"
+mv -f -- "$policy_tmp" /etc/lab-vm-recursion
+mv -f -- "$profile_tmp" /etc/profile.d/lab-vm-recursion.sh
+GUEST_RECURSION_IDENTITY
 }
 
 _vm_rootless_diagnostics() {
@@ -272,7 +358,8 @@ vm_cmd_up() {
   fi
 
   # ── 2. Create VM directory ──────────────────────────────────────
-  mkdir -p "$vm_dir"
+  mkdir -p -m 0700 "$VM_DIR_BASE" "$vm_dir"
+  chmod 0700 "$VM_DIR_BASE" "$vm_dir"
 
   # ── 3. SSH key initialization ───────────────────────────────────
   vm_ssh_init_keys "$vm_dir"
@@ -294,7 +381,7 @@ vm_cmd_up() {
     vm_memory_qemu_matches "$qemu_args" "$VM_MEMORY_GIB" || die "VM '$vm_name' QEMU RAM does not match its profile metadata; use ./lab-vm resize after reviewing the profile."
     vm_memory_preflight "$VM_MEMORY_GIB" "$qemu_pid" || die 'Insufficient memory budget to safely reuse or restart this VM profile.'
     virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null || true)"
-    running_workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid")" || die "Cannot verify the workspace mounted by VM '$vm_name'; refusing to reuse or switch it."
+    running_workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$(cat "$vm_dir/workspace")" "$vm_dir/virtiofs.sock")" || die "Cannot verify the workspace mounted by VM '$vm_name'; refusing to reuse or switch it."
     running_workspace="$(realpath "$running_workspace")" || die "Cannot resolve the workspace mounted by VM '$vm_name'."
     if [[ "$running_workspace" == "$workspace" ]]; then
       echo "VM '$vm_name' is already running with workspace: $workspace"
@@ -302,6 +389,7 @@ vm_cmd_up() {
       vm_memory_profile_store "$vm_dir" "$VM_MEMORY_GIB" || die 'Could not persist VM memory configuration.'
       _vm_profile_workspace_store "$vm_dir" "$workspace" || die 'Could not persist the active VM workspace.'
       vm_recursion_store_profile "$vm_dir"
+      _vm_install_guest_recursion_identity "$vm_dir" || die 'Could not persist recursion identity inside the running guest.'
       _vm_install_guest_harness "$vm_dir"
       return 0
     fi
@@ -325,7 +413,8 @@ vm_cmd_up() {
 
   # ── 7. Generate cloud-init seed ISO ─────────────────────────────
   echo "Generating cloud-init seed ISO..."
-  vm_cloud_init_generate "$vm_dir" "$vm_name" "$(id -u)" "$(id -g)" "$ssh_pubkey"
+  vm_cloud_init_generate "$vm_dir" "$vm_name" "$(id -u)" "$(id -g)" "$ssh_pubkey" \
+    "${VM_GUEST_RECURSION_DEPTH:-0}" "${VM_EFFECTIVE_MAX_DEPTH:-0}"
 
   # ── 8. Start QEMU + virtiofsd ──────────────────────────────────
   echo "Starting VM..."
@@ -334,6 +423,7 @@ vm_cmd_up() {
   # SSH may become ready long before first-boot package installation finishes.
   _vm_wait_for_cloud_init "$vm_dir" || return $?
   vm_ssh "$vm_dir" 'test -f /var/lib/mester-provisioned && mountpoint -q /workspace' || return 1
+  _vm_install_guest_recursion_identity "$vm_dir" || return $?
   if ! _vm_ensure_rootless_docker "$vm_dir"; then
     log "ERROR: could not enable/start the guest rootless Docker user service"
     _vm_rootless_diagnostics "$vm_dir"
@@ -557,7 +647,7 @@ vm_cmd_resize() {
   }
 
   virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null || true)"
-  workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid")" || {
+  workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$(cat "$vm_dir/workspace")" "$vm_dir/virtiofs.sock")" || {
     echo 'REFUSED: cannot verify the active workspace export; VM was not changed.' >&2
     return 1
   }
@@ -622,6 +712,7 @@ vm_cmd_ssh() {
   if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
     die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
   fi
+  _vm_validate_profile_workspace_boundary "$vm_dir" || die 'Refusing SSH because the active guest workspace overlaps VM control state.'
 
   local ssh_port
   ssh_port=$(cat "$vm_dir/ssh_port")
@@ -633,6 +724,20 @@ vm_cmd_ssh() {
     -i "$vm_dir/id_vm_control" \
     -p "$ssh_port" \
     mester@127.0.0.1 "$@"
+}
+
+_vm_validate_profile_workspace_boundary() {
+  local vm_dir="${1:?VM profile directory required}" workspace
+  [[ -f "$vm_dir/workspace" && ! -L "$vm_dir/workspace" ]] || {
+    echo "REFUSED: active VM workspace identity is missing or unsafe: $vm_dir" >&2
+    return 1
+  }
+  workspace="$(cat "$vm_dir/workspace")"
+  [[ -d "$workspace" ]] || {
+    echo "REFUSED: active VM workspace is not available: $workspace" >&2
+    return 1
+  }
+  vm_recursion_validate_state_boundary "$workspace" "$VM_DIR_BASE"
 }
 
 # OpenCode 2.2.0 chooses an ephemeral guest-loopback callback port at runtime.
@@ -970,7 +1075,8 @@ vm_cmd_egress_reload() {
   proxy_port="$(cat "$vm_dir/proxy_port")"
   [[ "$proxy_port" =~ ^[1-9][0-9]*$ ]] && (( proxy_port <= 65535 )) || die "Invalid egress proxy port recorded for VM '$vm_name'."
   virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null)"
-  workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid")" || die 'Cannot verify the running VM workspace export; refusing to reload proxy policy.'
+  expected_workspace="$(cat "$vm_dir/workspace" 2>/dev/null)"
+  workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$expected_workspace" "$vm_dir/virtiofs.sock")" || die 'Cannot verify the running VM workspace export; refusing to reload proxy policy.'
   workspace="$(realpath "$workspace")" || die 'Cannot resolve the VM workspace path.'
   [[ -d "$workspace" ]] || die 'The VM workspace export is no longer available.'
 
@@ -1054,41 +1160,74 @@ _vm_read_qemu_process_args() {
 }
 
 _vm_read_virtiofsd_shared_dir() {
-  local virtiofsd_pid="$1"
-  python3 - "$virtiofsd_pid" <<'PY'
+  local virtiofsd_pid="$1" expected_workspace="$2" expected_socket="$3"
+  python3 - "$virtiofsd_pid" "$expected_workspace" "$expected_socket" <<'PY'
 import os
 import sys
 
-pid = sys.argv[1]
-try:
-    argv = open(f"/proc/{pid}/cmdline", "rb").read().decode().rstrip("\0").split("\0")
-except OSError:
-    raise SystemExit(1)
-if not argv or os.path.basename(argv[0]) != "virtiofsd":
-    raise SystemExit(1)
-try:
-    index = argv.index("--shared-dir")
-    shared_dir = argv[index + 1]
-except (ValueError, IndexError):
-    raise SystemExit(1)
-print(shared_dir)
+root_pid, expected_workspace, expected_socket = sys.argv[1:]
+expected_workspace = os.path.realpath(expected_workspace)
+expected_socket = os.path.realpath(expected_socket)
+pending = [root_pid]
+seen = set()
+
+while pending:
+    pid = pending.pop()
+    if pid in seen or not pid.isdecimal():
+        continue
+    seen.add(pid)
+    process_root = f"/proc/{pid}"
+    try:
+        if os.stat(process_root).st_uid != os.getuid():
+            continue
+        argv = open(f"{process_root}/cmdline", "rb").read().decode().rstrip("\0").split("\0")
+    except OSError:
+        continue
+
+    try:
+        executable = os.path.basename(os.readlink(f"{process_root}/exe"))
+    except OSError:
+        executable = ""
+
+    if executable == "virtiofsd":
+        try:
+            shared_index = argv.index("--shared-dir")
+            socket_index = argv.index("--socket-path")
+            shared_dir = os.path.realpath(argv[shared_index + 1])
+            socket_path = os.path.realpath(argv[socket_index + 1])
+        except (ValueError, IndexError):
+            shared_dir = socket_path = ""
+        if shared_dir == expected_workspace and socket_path == expected_socket:
+            print(shared_dir)
+            raise SystemExit(0)
+
+    try:
+        children = open(f"{process_root}/task/{pid}/children", encoding="ascii").read().split()
+    except OSError:
+        continue
+    pending.extend(children)
+
+raise SystemExit(1)
 PY
 }
 
 vm_cmd_verify_isolation() {
-  local vm_name="${1:-default}" vm_dir ssh_port qemu_pid process_args virtiofsd_pid shared_dir sensitive_path
+  local vm_name="${1:-default}" vm_dir ssh_port qemu_pid process_args virtiofsd_pid shared_dir sensitive_path expected_workspace
   vm_dir="$(_vm_resolve "$vm_name")"
   [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
   if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
     die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
   fi
+  _vm_validate_profile_workspace_boundary "$vm_dir" || die 'Refusing verification because the active guest workspace overlaps VM control state.'
   ssh_port="$(cat "$vm_dir/ssh_port" 2>/dev/null)"
   qemu_pid="$(cat "$vm_dir/qemu.pid" 2>/dev/null)"
   process_args="$(_vm_read_qemu_process_args "$qemu_pid")" || die 'Cannot inspect the running QEMU process command line.'
   [[ "$process_args" == *qemu-system-x86_64* ]] || die 'The recorded PID is not a QEMU x86_64 process.'
   _vm_validate_qemu_isolation_args "$process_args" "$ssh_port" || die 'QEMU network configuration failed the isolation check.'
   virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null)"
-  shared_dir="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid")" || die 'Cannot inspect the running virtiofsd workspace export.'
+  [[ -f "$vm_dir/workspace" && ! -L "$vm_dir/workspace" ]] || die 'VM workspace identity is missing or unsafe.'
+  expected_workspace="$(cat "$vm_dir/workspace")"
+  shared_dir="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$expected_workspace" "$vm_dir/virtiofs.sock")" || die 'Cannot inspect the running virtiofsd workspace export.'
   shared_dir="$(realpath "$shared_dir")" || die 'Cannot resolve the virtiofsd shared directory.'
   [[ -d "$shared_dir" && "$shared_dir" != '/' && "$shared_dir" != "$HOME" ]] || die "Unsafe or missing virtiofsd shared directory: $shared_dir"
   for sensitive_path in "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.config" "$HOME/.aws" "$HOME/.kube" "$HOME/.local" "$HOME/.bashrc" "$HOME/.zshrc"; do
@@ -1115,6 +1254,7 @@ vm_cmd_agent() {
   if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
     die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
   fi
+  _vm_validate_profile_workspace_boundary "$vm_dir" || die 'Refusing agent launch because the active guest workspace overlaps VM control state.'
   vm_recursion_load_profile "$vm_dir" || die 'Could not load the VM recursion policy; refusing to start the agent.'
   guest_recursion_env="LAB_VM_RECURSION_DEPTH=$VM_AGENT_RECURSION_DEPTH LAB_VM_MAX_DEPTH=$VM_AGENT_MAX_DEPTH"
 
@@ -1144,8 +1284,8 @@ vm_cmd_agent() {
   if [[ "$version" != latest && "$installed_version" != "$version" ]]; then
     die "OpenCode $version is not installed in VM '$vm_name' (found ${installed_version:-none}). Run ./lab-vm up $vm_name to install/update it."
   fi
-  if ! vm_ssh "$vm_dir" "test -r /etc/opencode/opencode.json && test -r /etc/opencode/plugins/host-metrics-tui/package.json && test -r /etc/opencode/plugins/little-mester-exit-confirm/package.json && test -r /etc/opencode/plugins/little-mester-logo/package.json"; then
-    die "OpenCode guest configuration is missing in VM '$vm_name'. Run ./lab-vm up $vm_name to provision it."
+  if ! vm_ssh "$vm_dir" "test -r /etc/opencode/opencode.json && test -r /etc/opencode/plugins/host-metrics-tui/package.json && test -r /etc/opencode/plugins/little-mester-exit-confirm/package.json && test -r /etc/opencode/plugins/little-mester-logo/package.json && node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 20 ? 0 : 1)' && test -r /home/mester/.local/share/little-mester/mcp/dist/mcp-server.js"; then
+    die "OpenCode/Node/MCP guest configuration is missing or unsupported in VM '$vm_name'. Run ./lab-vm up $vm_name to provision it."
   fi
   model_provider="$(vm_ssh "$vm_dir" "python3 -c 'import json; print(json.load(open(\"/etc/opencode/opencode.json\"))[\"model\"].split(\"/\", 1)[0])'")"
   case "$model_provider" in

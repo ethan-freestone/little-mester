@@ -666,10 +666,12 @@ point and should start/reuse the guest and launch the interactive agent. Preserv
 existing containerized single-agent workflow separately as `./lab-docker`; it is not
 Docker-in-Docker and must not acquire a host Docker socket or recursive agent capability.
 This decision supersedes the earlier decision to postpone switching the default until all
-acceptance gates passed. The implementation cutover is not complete yet: `./lab` is still
-the Docker launcher and `./lab-vm` is the VM implementation. Do not describe the branch as
-accepted or merge-ready until the independent VM, auth, permission, workload, isolation,
-lifecycle, CI, and owner-review gates pass. Preserve a tested rollback path.
+acceptance gates passed. The staged dispatcher is implemented: `./lab vm <args>` reaches
+`./lab-vm`, and the former host-Docker launcher is `./lab-docker`. Ordinary `./lab` still
+delegates to Docker in this worktree, so the VM-default cutover is not complete. Do not
+describe the branch as accepted or merge-ready until the independent VM, auth, permission,
+workload, isolation, lifecycle, CI, and owner-review gates pass. Preserve a tested rollback
+path.
 
 **Setup versus daily use:** Host prerequisites, base-image download, and first guest
 provisioning are setup-time operations. Daily startup should reuse the provisioned VM, perform
@@ -701,6 +703,11 @@ no child can reset/increase it implicitly, and exceeding the limit fails closed 
 agent startup. Recursive tests use a distinct disposable workspace/checkout so the active
 outer implementation session remains intact. The outer VM remains the host boundary; nested
 VMs do not gain additional host paths, host Docker, credentials, LAN access, or egress rights.
+
+**Implementation note (2026-11-01):** the explicit `./lab vm <args>` dispatcher now reaches the
+standalone VM CLI, and the former host-Docker implementation is split out as `./lab-docker`.
+Ordinary `./lab` remains on the host-Docker compatibility path while the project release gates
+are open; this is not the final VM-first default cutover or an acceptance claim.
 
 **Implementation contract:** `lab-vm` accepts `--max-depth` from 0 through 32; the default is
 0, and a nested invocation inherits the parent maximum unless explicitly lowered. A safe
@@ -793,6 +800,57 @@ checks are safety gates, not proof that the guest workload fits its configured R
 **Reason:** Keep the ordinary new guest useful while scaling deliberate recursion to fit
 inside its parent, preserve a per-profile operator override, and fail before disturbing
 valuable VM/workspace state when the enclosing machine cannot satisfy the request.
+
+#### C.9.22 Recursive source snapshots are filtered, bounded, and revision-bound (2026-11-01)
+
+An explicitly requested recursive child receives a private copy of the selected source, not
+the parent's state directory or a live shared checkout. Exclude `.mester`, `secrets.env`,
+`.env` files (except checked-in examples), auth/database files, private-key files, model
+weights, SQLite/database files, and regenerated dependency/runtime caches. Reject escaping
+symlinks and special files. Rewrite in-workspace symlinks to relative links within the child
+snapshot so they cannot point back to the parent checkout. Do not clone the source repository's
+history into the child: historical committed
+credentials must not be reachable through its Git object database. Preserve only a synthetic
+Git commit of the filtered current tree, including intended tracked, dirty, and untracked
+source files.
+
+Record the source HEAD plus a content manifest/hash outside the child's workspace. Before
+reusing a session, compare the current selected tree and refuse if its source revision changed;
+use a fresh profile for a new test attempt. Preflight the included file bytes against a 2-GiB
+default maximum and filesystem free space for the snapshot plus staging reserve before copying.
+An explicit `LAB_VM_MAX_SNAPSHOT_BYTES` may raise the cap up to 16 GiB; it never bypasses the
+free-space check. Snapshot preparation must fail closed without replacing an existing session.
+
+**Reason:** The child should test the parent's selected revision and intended work without
+inheriting host credentials, stale source, model caches, or unbounded disk consumption. This
+filtered child copy does not make a parent workspace safe if the parent itself shares host VM
+control state; that is separately blocked by C.9.23 until private-state migration is complete.
+
+#### C.9.23 VM control state is private to the host user (2026-11-01)
+
+New VM profiles, base disks, SSH control keys, and VM logs live under
+`${XDG_DATA_HOME:-~/.local/share}/little-mester`, outside the selected workspace. Restrict the
+state root and profile directories to mode 0700; individual control keys remain mode 0600.
+Nested profiles remain under the containing guest's private recursion session. Before sharing
+a workspace, reject any overlap with the selected VM state or legacy `.mester` runtime state.
+
+Do not silently move existing overlays or keys. If only the legacy checkout-local
+`.mester/vm` tree exists, keep using it for compatibility and warn; refuse to export any
+overlapping checkout/runtime path to a guest. Migration must be explicit and preserve profile
+data. This compatibility fallback does not satisfy the new private-state layout until migrated.
+
+#### C.9.24 Guest recursion identity and MCP runtime persist independently of the workspace (2026-11-01)
+
+Provision a root-owned recursion identity in guest OS state and load it into ordinary login
+shells and launcher processes. A caller-supplied recursion environment that disagrees with
+the persisted depth/maximum is refused. `lab-vm context` reports the persisted identity even
+when invoked outside the agent's original SSH command. The maximum remains bounded at 32 and a
+child cannot raise its inherited maximum.
+
+The direct guest MCP server uses a guest-private runtime copy, not workspace `node_modules`.
+Provision Node.js 20 or newer, install dependencies from the checked-in lockfile, and build the
+MCP server before launch. Do not copy guest dependencies/caches into recursive source
+snapshots or mutate the selected workspace as a side effect of setup.
 
 ---
 

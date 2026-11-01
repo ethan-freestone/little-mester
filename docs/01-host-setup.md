@@ -43,7 +43,7 @@ Host Docker, libvirt, and OVMF are not required to boot the VM. `lab-vm` launche
 
 - `kvm-intel` or `kvm-amd` module loaded (check with `lsmod | grep kvm`)
 - `/dev/kvm` exists and is readable by the current user
-- If KVM is not available (CPU-only host), QEMU falls back to TCG emulation — slower but functional
+- Usable KVM is required even on CPU-only hosts; the VM launcher fails closed when `/dev/kvm` is unavailable
 
 ```bash
 ls -la /dev/kvm
@@ -96,8 +96,10 @@ If the agent will use a ChatGPT Plus or Pro subscription, preserve existing auth
 **VM acceptance status:** The host lifecycle is still under test; the latest
 failure and current retry procedure are tracked on ticket #41. Follow that
 ticket's current handoff before using `--clean`, `stop`, or `down` (these can
-delete guest state). The VM is not integrated into `./lab`, and a successful
-`lab-vm up` alone is not an integrated-agent acceptance pass.
+delete guest state). `./lab vm <args>` is an explicit dispatcher to `./lab-vm`;
+ordinary `./lab` still keeps the host-Docker compatibility route, also available
+as `./lab-docker`. A successful `lab-vm up` alone is not an integrated-agent
+acceptance pass.
 
 After installing prerequisites, run:
 
@@ -118,7 +120,7 @@ The `vm up` command:
 2. Creates per-VM SSH keys under this checkout's `.mester/vm/<name>/`
 3. Downloads the pinned Ubuntu 24.04 cloud image, verifies its SHA-256, and creates a qcow2 overlay
 4. Generates a secret-free cloud-init seed ISO with rootless Docker provisioning
-5. Starts the loopback egress proxy, virtiofsd, and QEMU with KVM (or TCG fallback)
+5. Starts the loopback egress proxy, virtiofsd, and QEMU with KVM
 6. Waits for SSH to become available
 7. Confirms the guest Docker daemon is running rootless
 8. Installs the latest OpenCode CLI on a fresh guest and syncs its config/plugins into the guest OS (no agent container). Existing guests keep their installed version on ordinary `up`.
@@ -137,13 +139,10 @@ are refused while guest containers are running. `--yes` explicitly skips confirm
 Updates preserve the VM overlay, base image, workspace, and guest auth database. To pin a
 version for a fresh install or a later `up`, set `VM_OPENCODE_VERSION` to a semantic version.
 
-**CPU-only hosts:** The same command works. You'll see:
-
-```
-WARNING: /dev/kvm not available — running in TCG (CPU emulation) mode
-```
-
-This is expected. The VM will be slower but fully functional.
+**CPU-only hosts:** VM mode does not require a GPU, but it does require usable KVM; it does not
+fall back to TCG emulation. If `/dev/kvm` is unavailable or unusable, the launcher refuses with
+an actionable prerequisite error. Host-Docker mode remains separate for machines that cannot
+meet the KVM requirements.
 
 ---
 

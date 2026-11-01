@@ -58,9 +58,26 @@ def detect_virtualization(mode: str) -> str | None:
     return hypervisor or None
 
 
-def recursion_context() -> dict[str, object]:
+def recursion_context(identity_file: Path = Path("/etc/lab-vm-recursion")) -> dict[str, object]:
     depth_raw = os.environ.get("LAB_VM_RECURSION_DEPTH")
     maximum_raw = os.environ.get("LAB_VM_MAX_DEPTH")
+    identity_invalid = False
+    if identity_file.exists() or identity_file.is_symlink():
+        try:
+            if identity_file.is_symlink() or not identity_file.is_file():
+                raise ValueError("identity is not a regular file")
+            values = identity_file.read_text().split()
+            if len(values) != 2:
+                raise ValueError("identity must contain exactly two fields")
+            persisted_depth, persisted_maximum = values
+            if depth_raw is not None and depth_raw != persisted_depth:
+                identity_invalid = True
+            if maximum_raw is not None and maximum_raw != persisted_maximum:
+                identity_invalid = True
+            depth_raw = depth_raw if depth_raw is not None else persisted_depth
+            maximum_raw = maximum_raw if maximum_raw is not None else persisted_maximum
+        except (OSError, ValueError):
+            identity_invalid = True
 
     def parse_limit(raw: str | None) -> tuple[int | None, bool]:
         if raw is None:
@@ -73,7 +90,9 @@ def recursion_context() -> dict[str, object]:
     depth, depth_valid = parse_limit(depth_raw)
     maximum, maximum_valid = parse_limit(maximum_raw)
 
-    if depth_raw is None and maximum_raw is None:
+    if identity_invalid:
+        state = "invalid-or-incomplete"
+    elif depth_raw is None and maximum_raw is None:
         state = "unmarked"
     elif depth is not None and depth_valid and maximum_raw is None:
         state = "legacy-depth-only"

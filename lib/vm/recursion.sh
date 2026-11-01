@@ -3,6 +3,57 @@
 
 VM_RECURSION_MAX_SUPPORTED=32
 
+vm_recursion_apply_guest_identity() {
+  local identity_file="${1:-/etc/lab-vm-recursion}"
+  local depth maximum extra
+  [[ -e "$identity_file" || -L "$identity_file" ]] || return 0
+  [[ -f "$identity_file" && ! -L "$identity_file" ]] || {
+    echo "REFUSED: persisted recursion identity is not a regular file: $identity_file" >&2
+    return 1
+  }
+  read -r depth maximum extra <"$identity_file" || {
+    echo "REFUSED: cannot read persisted recursion identity: $identity_file" >&2
+    return 1
+  }
+  [[ -z "$extra" && "$depth" =~ ^(0|[1-9][0-9]*)$ && "$maximum" =~ ^(0|[1-9][0-9]*)$ ]] || {
+    echo "REFUSED: invalid persisted recursion identity: $identity_file" >&2
+    return 1
+  }
+  (( depth <= VM_RECURSION_MAX_SUPPORTED && maximum <= VM_RECURSION_MAX_SUPPORTED && depth <= maximum )) || {
+    echo "REFUSED: persisted recursion identity exceeds the supported policy: $identity_file" >&2
+    return 1
+  }
+  if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" && "$LAB_VM_RECURSION_DEPTH" != "$depth" ]] || \
+     [[ -n "${LAB_VM_MAX_DEPTH+x}" && "$LAB_VM_MAX_DEPTH" != "$maximum" ]]; then
+    echo "REFUSED: environment recursion settings do not match the guest's persisted identity." >&2
+    return 1
+  fi
+  export LAB_VM_RECURSION_DEPTH="$depth" LAB_VM_MAX_DEPTH="$maximum"
+}
+
+vm_recursion_paths_overlap() {
+  local workspace state
+  workspace="$(realpath "${1:?workspace required}")" || return 2
+  state="$(realpath -m "${2:?VM state path required}")" || return 2
+  [[ "$workspace" == "$state" || "$workspace" == "$state"/* || "$state" == "$workspace"/* ]]
+}
+
+vm_recursion_validate_state_boundary() {
+  local workspace="${1:?workspace required}" state="${2:?VM state path required}" legacy
+  if vm_recursion_paths_overlap "$workspace" "$state"; then
+    echo "REFUSED: selected workspace overlaps private VM state ($state); move VM state outside the workspace before sharing it with a guest." >&2
+    return 1
+  fi
+  [[ -n "${LAB_DIR:-}" ]] || return 0
+  for legacy in "$LAB_DIR/.mester/vm" "$LAB_DIR/.mester/vm-services" "$LAB_DIR/.mester/logs"; do
+    [[ -e "$legacy" || -L "$legacy" ]] || continue
+    if vm_recursion_paths_overlap "$workspace" "$legacy"; then
+      echo "REFUSED: selected workspace overlaps legacy host runtime state ($legacy); move that state outside the workspace before sharing it with a guest." >&2
+      return 1
+    fi
+  done
+}
+
 vm_recursion_configure() {
   local command="${1:-}" parent_depth=0 inherited_max=0
   local has_parent_depth=0

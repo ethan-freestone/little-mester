@@ -109,6 +109,21 @@ class CloudInitTests(unittest.TestCase):
         self.assertNotIn("  - kvm\n", groups[1])
         self.assertNotIn("mester: []", self.data)
 
+    def test_generated_guest_persists_recursion_identity_for_login_shells(self):
+        self.assertEqual(self.content("/etc/lab-vm-recursion"), "0 0\n")
+        profile = self.content("/etc/profile.d/lab-vm-recursion.sh")
+        self.assertIn("read -r LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH", profile)
+        self.assertIn("export LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH", profile)
+        self.assertIn("owner: root:root", self.data)
+
+    def test_cloud_init_rejects_invalid_recursion_identity(self):
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1/lib/vm/cloud-init.sh"; vm_cloud_init_user_data demo 1234 2345 "ssh-ed25519 test" 1 0', "_", str(ROOT)],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("recursion identity", result.stderr)
+
     def test_schema_check_script_validates_rendered_config_and_propagates_failure(self):
         # The real CLI schema check runs separately in CI; here test its wiring.
         self.command("ssh-keygen", 'printf "ssh-ed25519 test-validation-key\\n" > "${@: -1}.pub"\n')

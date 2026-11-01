@@ -17,6 +17,38 @@ setup() {
   [[ "$output" != *"-10.0.2.2:"* ]]
 }
 
+@test "persisted guest recursion identity is inherited and cannot be overridden" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  local identity="$BATS_TEST_TMPDIR/recursion-identity"
+  printf '1 2\n' >"$identity"
+
+  unset LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH
+  vm_recursion_apply_guest_identity "$identity"
+  [ "$LAB_VM_RECURSION_DEPTH" = 1 ]
+  [ "$LAB_VM_MAX_DEPTH" = 2 ]
+
+  run env LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=2 bash -c \
+    'source "$1"; vm_recursion_apply_guest_identity "$2"' _ \
+    "$REPO_ROOT/lib/vm/recursion.sh" "$identity"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'do not match the guest'* ]]
+}
+
+@test "workspace boundary refuses legacy VM state but allows private VM state" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  local workspace="$BATS_TEST_TMPDIR/workspace" private="$BATS_TEST_TMPDIR/home/.local/share/little-mester/vm"
+  mkdir -p "$workspace/.mester/vm" "$(dirname "$private")"
+  LAB_DIR="$workspace"
+  run vm_recursion_validate_state_boundary "$workspace" "$private"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'legacy host runtime state'* ]]
+
+  LAB_DIR="$BATS_TEST_TMPDIR/source-repo"
+  mkdir -p "$LAB_DIR"
+  run vm_recursion_validate_state_boundary "$workspace" "$private"
+  [ "$status" -eq 0 ]
+}
+
 @test "only nested VM egress proxies use the parent proxy as an upstream" {
   VM_DIR_BASE="$REPO_ROOT/.mester/vm"
   VM_NESTED_LAUNCH=0
@@ -79,23 +111,28 @@ setup() {
 
 @test "verify-isolation checks the running QEMU argv and streams guest probes over SSH" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
-  local vm_dir="$BATS_TEST_TMPDIR/vm-isolation" args capture="$BATS_TEST_TMPDIR/guest-probe.py" workspace="$BATS_TEST_TMPDIR/workspace"
-  mkdir -p "$vm_dir"
-  mkdir -p "$workspace"
-  printf '22222\n' >"$vm_dir/ssh_port"
-  printf '12345\n' >"$vm_dir/qemu.pid"
-  args='qemu-system-x86_64 -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434,guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080,guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:45678,restrict=on -device virtio-net-pci,netdev=net0 -device vhost-user-fs-pci,chardev=charfs,tag=workspace'
-  _vm_resolve() { echo "$vm_dir"; }
+  VM_ISOLATION_TEST_DIR="$BATS_TEST_TMPDIR/vm-isolation"
+  VM_ISOLATION_CAPTURE="$BATS_TEST_TMPDIR/guest-probe.py"
+  VM_ISOLATION_WORKSPACE="$BATS_TEST_TMPDIR/workspace"
+  VM_ISOLATION_ARGS='qemu-system-x86_64 -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434,guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080,guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:45678,restrict=on -device virtio-net-pci,netdev=net0 -device vhost-user-fs-pci,chardev=charfs,tag=workspace'
+  export VM_ISOLATION_TEST_DIR VM_ISOLATION_CAPTURE VM_ISOLATION_WORKSPACE VM_ISOLATION_ARGS
+  mkdir -p "$VM_ISOLATION_TEST_DIR" "$VM_ISOLATION_WORKSPACE"
+  printf '22222\n' >"$VM_ISOLATION_TEST_DIR/ssh_port"
+  printf '12345\n' >"$VM_ISOLATION_TEST_DIR/qemu.pid"
+  printf '%s\n' "$VM_ISOLATION_WORKSPACE" >"$VM_ISOLATION_TEST_DIR/workspace"
+  _vm_resolve() { echo "$VM_ISOLATION_TEST_DIR"; }
   vm_run_status() { echo running; }
-  _vm_read_qemu_process_args() { echo "$args"; }
-  _vm_read_virtiofsd_shared_dir() { echo "$workspace"; }
-  vm_ssh() { cat >"$capture"; echo 'guest probes completed'; }
+  _vm_read_qemu_process_args() { echo "$VM_ISOLATION_ARGS"; }
+  _vm_validate_profile_workspace_boundary() { return 0; }
+  _vm_read_virtiofsd_shared_dir() { echo "$VM_ISOLATION_WORKSPACE"; }
+  vm_ssh() { cat >"$VM_ISOLATION_CAPTURE"; echo 'guest probes completed'; }
+  die() { echo "REFUSED: $*" >&2; return 1; }
   run vm_cmd_verify_isolation default
   [ "$status" -eq 0 ]
   [[ "$output" == *'QEMU configuration: restrict=on'* ]]
-  [[ "$output" == *"Host workspace export: $workspace"* ]]
+  [[ "$output" == *"Host workspace export: $VM_ISOLATION_WORKSPACE"* ]]
   [[ "$output" == *'guest probes completed'* ]]
-  cmp -s "$capture" "$REPO_ROOT/scripts/vm-guest-isolation-check.py"
+  cmp -s "$VM_ISOLATION_CAPTURE" "$REPO_ROOT/scripts/vm-guest-isolation-check.py"
 }
 
 @test "guest isolation probe covers blocked direct routes, constrained proxy and selected workspace/model exceptions" {
@@ -471,18 +508,32 @@ setup() {
 
 @test "recursive workspace preparation snapshots changes into a separate disposable checkout" {
   local source="$BATS_TEST_TMPDIR/source-repo" session="$BATS_TEST_TMPDIR/child-session" target
-  mkdir -p "$source/.mester" "$source/.bench-models"
+  mkdir -p "$source/.mester" "$source/.bench-models" "$source/node_modules/pkg" \
+    "$source/.ssh" "$source/.aider.tags.cache.v4"
   git -C "$source" init -q
   git -C "$source" config user.email test@example.invalid
   git -C "$source" config user.name test
   printf 'committed\n' >"$source/tracked.txt"
   git -C "$source" add tracked.txt
   git -C "$source" commit -qm initial
+  printf 'credential in old history\n' >"$source/historical-credential.env"
+  git -C "$source" add historical-credential.env
+  git -C "$source" commit -qm 'temporary historical credential'
+  git -C "$source" rm -q historical-credential.env
+  git -C "$source" commit -qm 'remove temporary historical credential'
   printf 'dirty snapshot\n' >"$source/tracked.txt"
   printf 'untracked snapshot\n' >"$source/untracked.txt"
   printf 'host state\n' >"$source/.mester/private"
   printf 'host config\n' >"$source/.little-mester.conf"
   printf 'host model cache\n' >"$source/.bench-models/model.gguf"
+  printf 'do not copy\n' >"$source/secrets.env"
+  printf 'do not copy\n' >"$source/.env.local"
+  printf 'safe example\n' >"$source/.env.example"
+  printf 'auth db\n' >"$source/opencode.db"
+  printf 'dependency\n' >"$source/node_modules/pkg/index.js"
+  printf 'private key\n' >"$source/.ssh/id_ed25519"
+  printf 'cache\n' >"$source/.aider.tags.cache.v4/cache.db"
+  ln -s "$source/tracked.txt" "$source/absolute-internal-link"
 
   run python3 "$REPO_ROOT/scripts/vm-recursion-workspace.py" prepare --source "$source" --session "$session"
   [ "$status" -eq 0 ]
@@ -494,6 +545,20 @@ setup() {
   [ ! -e "$target/.mester/private" ]
   [ ! -e "$target/.little-mester.conf" ]
   [ ! -e "$target/.bench-models/model.gguf" ]
+  [ ! -e "$target/secrets.env" ]
+  [ ! -e "$target/.env.local" ]
+  [ -f "$target/.env.example" ]
+  [ ! -e "$target/opencode.db" ]
+  [ ! -e "$target/node_modules/pkg/index.js" ]
+  [ ! -e "$target/.ssh/id_ed25519" ]
+  [ ! -e "$target/.aider.tags.cache.v4/cache.db" ]
+  [ "$(cat "$target/absolute-internal-link")" = 'dirty snapshot' ]
+  [[ "$(readlink "$target/absolute-internal-link")" != "$source/tracked.txt" ]]
+  [ "$(git -C "$target" rev-list --count HEAD)" -eq 1 ]
+  ! git -C "$target" show HEAD:historical-credential.env >/dev/null 2>&1
+  [ -f "$session/source-manifest.json" ]
+  [ "$(stat -c '%a' "$session/source-manifest.json")" = 600 ]
+  ! grep -q 'do not copy\|private key\|credential in old history' "$session/source-manifest.json"
 
   printf 'child-only\n' >>"$target/tracked.txt"
   run python3 "$REPO_ROOT/scripts/vm-recursion-workspace.py" prepare --source "$source" --session "$session"
@@ -501,6 +566,23 @@ setup() {
   [ "$output" = "$target" ]
   [[ "$(cat "$target/tracked.txt")" == *child-only* ]]
   [ "$(cat "$source/tracked.txt")" = 'dirty snapshot' ]
+
+  printf 'new parent source revision\n' >>"$source/tracked.txt"
+  run python3 "$REPO_ROOT/scripts/vm-recursion-workspace.py" prepare --source "$source" --session "$session"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'source changed since this profile was created'* ]]
+  [[ "$(cat "$target/tracked.txt")" == *child-only* ]]
+}
+
+@test "recursive workspace snapshot enforces size limits before creating session state" {
+  local source="$BATS_TEST_TMPDIR/oversized-source" session="$BATS_TEST_TMPDIR/oversized-session"
+  mkdir -p "$source"
+  printf 'larger than the configured byte cap\n' >"$source/source.txt"
+  run env LAB_VM_MAX_SNAPSHOT_BYTES=1 python3 "$REPO_ROOT/scripts/vm-recursion-workspace.py" \
+    prepare --source "$source" --session "$session"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'snapshot limit'* ]]
+  [ ! -e "$session" ]
 }
 
 @test "recursive workspace snapshot refuses symlinks that escape the selected workspace" {
@@ -549,8 +631,10 @@ setup() {
   VM_BROWSER_TEST_DIR="/tmp/lab-vm-browser.Abc123"
   export VM_AGENT_TEST_DIR VM_AGENT_CAPTURE VM_BROWSER_TEST_DIR
   mkdir -p "$VM_AGENT_TEST_DIR"
+  mkdir -p "$BATS_TEST_TMPDIR/vm-agent-workspace"
   printf '22222\n' >"$VM_AGENT_TEST_DIR/ssh_port"
   printf '1 2\n' >"$VM_AGENT_TEST_DIR/recursion_policy"
+  printf '%s\n' "$BATS_TEST_TMPDIR/vm-agent-workspace" >"$VM_AGENT_TEST_DIR/workspace"
   _vm_resolve() { echo "$VM_AGENT_TEST_DIR"; }
   vm_run_status() { echo 'running (PID: 12345)'; }
   vm_cmd_metrics() { [[ "${1:-}" == up ]]; }
@@ -1739,9 +1823,11 @@ MOCK_SUDO
 @test "guest install copies config to the same path used by the launcher" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   installer="$(declare -f _vm_install_guest_harness)"
-  [[ "$installer" == *'tar -C "$LAB_DIR/agent/opencode" -cf - opencode.json plugins'* ]]
-  [[ "$installer" == *'/etc/opencode/opencode.json'* ]]
-  [[ "$installer" != *'/etc/opencode/opencode/opencode.json'* ]]
+  [[ "$installer" == *'tar -C "$LAB_DIR/agent/opencode" -cf - plugins'* ]]
+  [[ "$installer" == *'vm-opencode-config.py'* ]]
+  [[ "$installer" == *'--mcp-cwd /home/mester/.local/share/little-mester/mcp'* ]]
+  [[ "$installer" == *'tar -C "$config_dir" -cf - opencode.json'* ]]
+  [[ "$installer" == *'sudo tar -xf - -C /etc/opencode'* ]]
 }
 
 @test "lab-vm update supports default managed targets, one target, and explicit all" {

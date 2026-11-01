@@ -27,13 +27,14 @@ A local LLM (Ollama or llama.cpp) drives a coding agent (**opencode** by default
 
 ### Architecture
 
-**Migration status (2026-10-29):** `./lab` is currently the established host-Docker workflow; `./lab-vm` is the experimental direct-guest VM workflow and is **not ready to replace it**. The VM TUI has unresolved model connectivity, metrics, and Ctrl-C behavior. Keep the working Docker session/container intact and do not run two agents against the same checkout concurrently. The VM will become the default `./lab` route only after the model/TUI/metrics/exit, browser auth, permission, guest workload, isolation, and lifecycle gates pass. The existing Docker workflow will be retained as an explicit `./lab-docker` option; it is not Docker-in-Docker and does not expose the host Docker socket. During migration, use `./lab` for established Docker work and `./lab-vm` only for acceptance testing. See [VM architecture](docs/vm-architecture.md) and decision §C.9.17.
+**Migration status (2026-11-01):** `./lab vm <args>` explicitly routes to the direct-guest VM CLI, while `./lab-docker` invokes the preserved host-Docker workflow. To protect the active workflow while lifecycle, auth, permission, workload, isolation, and release gates remain open, ordinary `./lab <workspace>` still delegates to host Docker; the VM-first default cutover is not accepted yet. The owner has reported a local-model completion, metrics, and exit smoke, but global guest-TUI dialog rendering, repeated socket disconnects, and the wider acceptance matrix remain open. Keep the working Docker session/container intact and do not run two agents against the same checkout concurrently. Host-Docker mode is not Docker-in-Docker and does not expose the host Docker socket. See [VM architecture](docs/vm-architecture.md) and decision §C.9.17.
 
 ```
- HOST (any Linux / macOS with Docker)
+ HOST (host-Docker compatibility where Docker is supported; VM on tested QEMU/KVM hosts)
  ┌──────────────────────────────────────────────────────────────────────────────┐
  │                                                                              │
- │  ./lab ──► docker compose                                                    │
+ │  ./lab vm ──► ./lab-vm (explicit VM route)                                  │
+ │  ./lab / ./lab-docker ──► host Docker Compose (legacy default until gates)   │
  │                                                                              │
  │   ┌──────────── network: internal [+ optional egress] ───────────────────┐  │
  │   │                                                                       │  │
@@ -97,10 +98,11 @@ The default development cycle is **doc → test → code → commit**. See [`doc
 
 ## Setup
 
-### Established host-Docker workflow (fallback)
+### Established host-Docker workflow (explicit compatibility route)
 
-**Use this workflow for development now.** VM mode has unresolved model connectivity and
-TUI integration problems; do not switch your active work to it yet.
+**Use `./lab-docker` for the established host-Docker workflow.** `./lab` still preserves this
+legacy behavior by default until the VM adoption gates are closed. The VM has passed some
+owner-reported smoke checks, but is not accepted for normal work yet.
 
 > **ChatGPT authentication:** VM browser login and credential persistence are still being tested; see [ChatGPT authentication](docs/chatgpt-auth.md) and ticket #45 before replacing a working authenticated session.
 
@@ -109,7 +111,7 @@ git clone <this-repo> little-mester
 cd little-mester
 
 # One-time host-Docker setup: install Docker + GPU toolkit, build images, pull models
-./lab setup
+./lab-docker setup
 
 # Verify sandbox properties (network isolation, capabilities, etc.)
 ./verify-lab.sh
@@ -120,16 +122,17 @@ cd workspaces/my-project
 git init
 
 # Start the agent
-./lab .
+./lab-docker .
 ```
 
-**Requirements:** Docker with GPU support (`nvidia-smi` works on host), `sudo`, and a working GPU driver. Other distros and GPU vendors may need adjustments to `./lab setup` — see [`docs/`](docs/).
+**Requirements:** Docker with GPU support (`nvidia-smi` works on host), `sudo`, and a working GPU driver. Other distros and GPU vendors may need adjustments to `./lab-docker setup` — see [`docs/`](docs/).
 
 ### Current host-Docker workflow
 
-Use this established workflow for actual work until the VM acceptance gates pass. The future
-VM-first launcher will make `./lab <workspace>` enter the VM agent directly; that cutover is
-not implemented yet.
+Use this established workflow for actual work until the VM acceptance gates pass. The explicit
+`./lab vm <workspace>` route is available for VM acceptance runs; ordinary `./lab <workspace>` remains
+the compatibility host-Docker route for now. Do not use both modes concurrently against one
+checkout.
 
 1. **Start the computer and Docker Engine.** Open a terminal in this repository and check:
 
@@ -138,19 +141,19 @@ not implemented yet.
    docker compose version
    ```
 
-   Run `./lab setup` only if this machine has not been set up yet or the images/models need
+   Run `./lab-docker setup` only if this machine has not been set up yet or the images/models need
    installation; it is not a per-boot command. Do not run `docker compose down`, `docker
-   system prune`, `./lab stop`, or VM teardown as part of a normal restart.
+   system prune`, `./lab-docker stop`, or VM teardown as part of a normal restart.
 
 2. **Resume work in the host-Docker workflow** in terminal A. From the project you want to
-   edit, launch the repository's `lab` script (adjust the path if the checkout is elsewhere):
+   edit, launch the repository's `lab-docker` script (adjust the path if the checkout is elsewhere):
 
    ```bash
    cd /path/to/little-mester
-   ./lab /path/to/project
+   ./lab-docker /path/to/project
    ```
 
-   When working on little-mester itself, from the checkout root use `./lab --unsafe-recurse .`.
+   When working on little-mester itself, from the checkout root use `./lab-docker --unsafe-recurse .`.
    This is a new agent invocation after a full shutdown. OpenCode's `/home/agent` is currently tmpfs, so
    do not assume its login survived container removal/power-off. If it asks you to sign in,
    follow [`docs/chatgpt-auth.md`](docs/chatgpt-auth.md). Credential export/import across
@@ -431,10 +434,9 @@ Nested starts require usable `/dev/kvm` and guest CPU `vmx`/`svm` flags; if eith
 the launcher refuses before snapshot/provisioning rather than falling back to TCG emulation.
 
 Use `--no-browser-auth` when the temporary browser bridge is not wanted. `ssh` is
-for guest diagnostics, not a required daily step. The one-command launcher does not
-change `./lab`'s default host-Docker behavior; VM-first routing remains gated on the
-parent ticket's live usability, auth, permission, workload, isolation, and lifecycle
-acceptance.
+for guest diagnostics, not a required daily step. `./lab vm` is an explicit route to the
+standalone VM CLI; the default `./lab` route remains host Docker until the parent ticket's
+live usability, auth, permission, workload, isolation, and lifecycle acceptance is complete.
 
 **Shutdown and data retention:** Current `./lab-vm stop` is not a gentle pause: it runs
 `docker compose down -v --remove-orphans` in the guest, then calls `down`. `./lab-vm down`
@@ -460,18 +462,17 @@ Hardware configuration lives in [`machine.conf.example`](machine.conf.example). 
 
 ## Everyday use
 
-The commands below are for the established host-Docker workflow. For the VM acceptance
-workflow, use the one-command `./lab-vm <workspace>` launcher as described above. After the
-acceptance gates pass, `./lab` is intended to use the VM by default and the current Docker
-workflow will remain available as `./lab-docker`.
+The commands below are for the established host-Docker workflow. Use `./lab-docker` explicitly;
+`./lab` currently delegates to it for compatibility. For VM acceptance, use `./lab vm <workspace>`
+or the standalone `./lab-vm <workspace>` launcher. The final default cutover remains gated.
 
 ```bash
-./lab <workspace>                   # start opencode (default agent)
-./lab --aider    <workspace>        # use Aider for this session
-./lab shell <workspace>             # plain bash inside the sandbox
-./lab stop                          # stop all containers
-./lab pull                          # re-pull models after editing models.txt
-./lab build                         # rebuild agent image
+./lab-docker <workspace>            # start OpenCode (default agent)
+./lab-docker --aider <workspace>    # use Aider for this session
+./lab-docker shell <workspace>      # plain bash inside the container sandbox
+./lab-docker stop                   # stop host-Docker containers
+./lab-docker pull                   # re-pull models after editing models.txt
+./lab-docker build                  # rebuild agent image
 ./verify-lab.sh                     # re-verify sandbox guarantees
 ```
 
@@ -494,7 +495,7 @@ To let the agent modify the little-mester repo:
 
 ```bash
 cd /path/to/little-mester
-./lab --unsafe-recurse    # allows opencode to read/write this directory
+./lab-docker --unsafe-recurse    # allows OpenCode to read/write this directory
 ```
 
 This is off by design — it signals "I know what I'm doing." Without `--unsafe-recurse`, the guard always blocks self-mapping.
@@ -572,4 +573,4 @@ withdraw permissions already granted for versions published under MIT or ISC.
 
 ---
 
-*In the established `./lab` workflow, the agent runs inside a Docker container and the workspace is bind-mounted at `/workspace`. VM mode instead runs OpenCode directly in the guest OS; it remains under acceptance testing and is not yet a replacement for host-Docker mode.*
+*In the established `./lab-docker` workflow (also the temporary default behind `./lab`), the agent runs inside a Docker container and the workspace is bind-mounted at `/workspace`. VM mode instead runs OpenCode directly in the guest OS; it remains under acceptance testing and is not yet a replacement for host-Docker mode.*

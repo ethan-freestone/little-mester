@@ -132,7 +132,9 @@ _vm_prereqs_fix_virtiofsd_path() {
 
   # Use the installed binary without requiring a privileged host mutation.
   if [[ -n "$_found" && -x "$_found" ]]; then
-    virtiofsd() { "$_VM_VIRTIOFSD" "$@"; }
+    # Keep the PID returned by a backgrounded function equal to the actual
+    # daemon PID. A wrapper Bash process here is not a safe lifecycle identity.
+    virtiofsd() { exec "$_VM_VIRTIOFSD" "$@"; }
     _VM_VIRTIOFSD="$_found"
     log_verbose "Using virtiofsd at $_found"
     return 0

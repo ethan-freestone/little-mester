@@ -8,7 +8,7 @@
   "title": "VM-first launcher, retained Docker mode, and bounded recursion",
   "objective": "CURRENT RELEASE TRACK (2026-11-01): implement and verify the eventual VM-first ./lab entry point while retaining the existing Docker launcher as ./lab-docker; document actual setup, daily lifecycle and rollback. Owner set this default guest's recursion cap to 2 (policy 0 2 1); recurse remains explicit and child depth may never exceed the inherited cap. Follow the phased coordinator #35; do not claim cutover/acceptance until the applicable gates pass.",
   "created_at": "2026-10-29T10:27:45.504Z",
-  "updated_at": "2026-11-01T19:14:52.973Z",
+  "updated_at": "2026-11-01T21:24:23.193Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -88,7 +88,8 @@
       "2026-11-01 owner-approved VM memory work: first managed-profile `lab-vm resize <profile> <GiB>` via graceful poweroff/restart preserving all guest state; next new-profile default8GiB and nested defaults4/2/1GiB; finally setup-only `--memory <GiB>` override. Existing profiles without memory metadata remain legacy4GiB. Resource preflight must include MemAvailable/cgroup cap plus512MiB reserve before snapshots/state/QEMU and calculate post-shutdown capacity before stopping for resize. `lab-vm` cannot resize its ancestor shell VM; current guest exposes only3.8GiB, and owner's requested32GiB requires the parent hypervisor/launcher and a restart. No host resize/child boot is claimed.",
       "Owner-host acceptance remains open: resize a disposable running managed profile on a suitable KVM host, verify graceful shutdown/restart and guest MemTotal, and confirm overlay/base/seed/SSH identity/workspace/installed state remain. This shell cannot resize its ancestor; current MemAvailable is about 2.8 GiB, so do not start a 32-GiB child here.",
       "Next memory phase: implement setup-only `--memory <GiB>` for new profiles, refuse it for existing profiles unless `--clean` explicitly creates a fresh profile, validate and persist the chosen value, and cover parser/preflight/side-effect ordering. Keep host/KVM resize and nested-depth boot acceptance open.",
-      "Owner-host acceptance remains open for the three memory phases: on a suitable KVM host, verify fresh depth defaults and an explicit new-profile RAM override in guest MemTotal, warm-start persistence, and managed resize state preservation. The 32-GiB target for the ancestor shell VM requires parent hypervisor/launcher action; do not attempt it as a child VM."
+      "Owner-host acceptance remains open for the three memory phases: on a suitable KVM host, verify fresh depth defaults and an explicit new-profile RAM override in guest MemTotal, warm-start persistence, and managed resize state preservation. The 32-GiB target for the ancestor shell VM requires parent hypervisor/launcher action; do not attempt it as a child VM.",
+      "After parent #35 release gates and the approved host handoff, verify the staged explicit ./lab vm route on the owner KVM host and only then perform the separately approved VM-default cutover; keep ./lab-docker usable and verify rollback. Local routing tests do not pass A1/A2 or host acceptance."
     ],
     "created": [
       "tests/vm.bats: one-command direct workspace launch, workspace-switch confirmation, guest graceful shutdown, and overlay-preservation checks.",
@@ -104,7 +105,8 @@
       "tests/vm.bats: QEMU RAM configuration, private profile metadata, resize validation, preservation, and fail-before-side-effect refusal cases.",
       "tests/vm.bats: new profile RAM defaults at recursion depths 0/1/2/3+, legacy 4-GiB fallback, explicit persisted profile memory, and clean-reset fresh default.",
       "tests/vm.bats: setup-memory helper permits validated RAM only for an empty/new profile, rejects existing profile state without changing selection, and permits explicit clean replacement.",
-      "tests/vm.bats: CLI rejects missing/invalid/duplicate --memory values and commands outside up/run; help documents the option."
+      "tests/vm.bats: CLI rejects missing/invalid/duplicate --memory values and commands outside up/run; help documents the option.",
+      "tests/lab.bats: explicit ./lab vm dispatch reaches lab-vm help and preserves early workspace-path refusal; ./lab-docker remains executable and advertises the VM route; ordinary ./lab still reports the compatibility Docker workflow. tests/lab-permissions.bats now exercises the preserved Docker entry directly."
     ],
     "cases": [
       "2026-10-29: accepted product direction and documented in docs/DECISIONS.md §C.9.17, README.md and docs/vm-architecture.md. Local validation: Bats 84/84, VM Python tests 12/12, ticket-engine Jest 143/143, documentation checks 112/112, bash -n and git diff --check pass. These are repository regressions/docs checks only; this environment has no /dev/kvm or Docker executable, so no VM startup, host metrics endpoint, TUI interaction, warm-start timing, or nested VM behavior is claimed.",
@@ -133,7 +135,8 @@
       "2026-11-01 local default-memory phase: new profiles select 8 GiB at depth 0 and 4/2/1 GiB at depths 1/2/3+; metadata-less existing profiles remain 4 GiB; persisted profile allocations win on warm starts. Explicit `up --clean` chooses the fresh depth-based default while verifying any running old QEMU against its old metadata before removal. Validation: Bats 152/152, VM Python 81/81, ./lab-vm test 8/8, docs consistency 115/115, ShellCheck/syntax/compile/diff pass. No live QEMU boot or owner-host resize was performed. Setup-only `--memory <GiB>` override remains the next phase.",
       "2026-11-01 setup-override phase: `--memory <GiB>` applies during new-profile `up`/`run`, must be 1–128, persists as the selected profile allocation, and refuses an existing profile unless explicit destructive `up --clean` is used. Existing profile RAM changes remain `resize`. Validation: Bats 154/154; all VM Python tests 81/81; `./lab-vm test` 8/8; docs consistency 115/115; ShellCheck, Bash syntax, Python compile, and `git diff --check` pass. No QEMU boot or owner-host acceptance was performed.",
       "Memory resize/default/override implementation is split into separate commits; local tests are mocks/unit coverage only. No live lifecycle evidence is claimed.",
-      "SUPERSEDES earlier ledger entries saying the setup override is the next implementation phase: all three memory slices are now committed locally as 4925e55, dc1fb7a, and 9e4a16b. Implementation and local verification are complete; only owner-host KVM acceptance and the broader VM-first release gates remain. No commits have been pushed and no live resize/boot is claimed."
+      "SUPERSEDES earlier ledger entries saying the setup override is the next implementation phase: all three memory slices are now committed locally as 4925e55, dc1fb7a, and 9e4a16b. Implementation and local verification are complete; only owner-host KVM acceptance and the broader VM-first release gates remain. No commits have been pushed and no live resize/boot is claimed.",
+      "2026-11-01 staged launcher/docs slice on feat/vm-approach working tree: complete Bats suite 159/159; VM Python suite 89/89; cloud-init schema valid; docs consistency 115/115; Bash syntax, ShellCheck --severity=error, Python compileall, and git diff --check pass. No AC status changed. This verifies local dispatch and compatibility regressions only: no owner-host VM/TUI/lifecycle or default-cutover acceptance is claimed; ordinary ./lab remains routed to ./lab-docker. Preserved unrelated .idea/vcs.xml workspace-bootstrap mapping."
     ]
   },
   "models_used": []
