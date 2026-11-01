@@ -17,6 +17,30 @@ setup() {
   [[ "$output" != *"-10.0.2.2:"* ]]
 }
 
+@test "only nested VM egress proxies use the parent proxy as an upstream" {
+  VM_DIR_BASE="$REPO_ROOT/.mester/vm"
+  VM_NESTED_LAUNCH=0
+  unset LAB_VM_RECURSION_DEPTH
+  _vm_proxy_upstream_args
+  [ "${#VM_PROXY_UPSTREAM_ARGS[@]}" -eq 0 ]
+
+  VM_NESTED_LAUNCH=1
+  _vm_proxy_upstream_args
+  [ "${VM_PROXY_UPSTREAM_ARGS[*]}" = "--upstream-proxy=http://10.0.2.100:3128" ]
+
+  VM_NESTED_LAUNCH=0
+  LAB_VM_RECURSION_DEPTH=0
+  VM_DIR_BASE="$HOME/.cache/lab-vm-recursion/recursion-smoke/vm"
+  _vm_proxy_upstream_args
+  [ "${VM_PROXY_UPSTREAM_ARGS[*]}" = "--upstream-proxy=http://10.0.2.100:3128" ]
+
+  VM_DIR_BASE="$REPO_ROOT/.mester/vm"
+  _vm_proxy_upstream_args
+  [ "${#VM_PROXY_UPSTREAM_ARGS[@]}" -eq 0 ]
+  grep -Fq '"${VM_PROXY_UPSTREAM_ARGS[@]}"' "$REPO_ROOT/lib/vm/runner.sh"
+  grep -Fq '"${upstream_args[@]}"' "$REPO_ROOT/lib/vm/lifecycle.sh"
+}
+
 @test "optional guest test tools use a separate installer and install into apt guest" {
   local cloud_init="$REPO_ROOT/lib/vm/cloud-init.sh"
   local installer="$REPO_ROOT/scripts/vm-install-tools.sh"
@@ -435,7 +459,7 @@ setup() {
 
 @test "recursive workspace preparation snapshots changes into a separate disposable checkout" {
   local source="$BATS_TEST_TMPDIR/source-repo" session="$BATS_TEST_TMPDIR/child-session" target
-  mkdir -p "$source/.mester"
+  mkdir -p "$source/.mester" "$source/.bench-models"
   git -C "$source" init -q
   git -C "$source" config user.email test@example.invalid
   git -C "$source" config user.name test
@@ -446,6 +470,7 @@ setup() {
   printf 'untracked snapshot\n' >"$source/untracked.txt"
   printf 'host state\n' >"$source/.mester/private"
   printf 'host config\n' >"$source/.little-mester.conf"
+  printf 'host model cache\n' >"$source/.bench-models/model.gguf"
 
   run python3 "$REPO_ROOT/scripts/vm-recursion-workspace.py" prepare --source "$source" --session "$session"
   [ "$status" -eq 0 ]
@@ -456,6 +481,7 @@ setup() {
   [ "$(cat "$target/untracked.txt")" = 'untracked snapshot' ]
   [ ! -e "$target/.mester/private" ]
   [ ! -e "$target/.little-mester.conf" ]
+  [ ! -e "$target/.bench-models/model.gguf" ]
 
   printf 'child-only\n' >>"$target/tracked.txt"
   run python3 "$REPO_ROOT/scripts/vm-recursion-workspace.py" prepare --source "$source" --session "$session"

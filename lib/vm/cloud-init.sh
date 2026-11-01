@@ -54,7 +54,6 @@ ssh_pwauth: false
 disable_root: true
 groups:
   - mester
-  - kvm
 users:
   - name: mester
     uid: ${uid}

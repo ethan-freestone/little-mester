@@ -28,7 +28,7 @@
     {
       "number": 6,
       "file_path": "ticket-006.json",
-      "status": "draft",
+      "status": "active",
       "area": "general"
     },
     {
@@ -250,7 +250,7 @@
     {
       "number": 43,
       "file_path": "ticket-043.json",
-      "status": "draft",
+      "status": "active",
       "area": "security"
     },
     {
@@ -338,5 +338,5 @@
       "area": "engine"
     }
   ],
-  "updated_at": "2026-11-01T14:15:17.004Z"
+  "updated_at": "2026-11-01T18:08:41.276Z"
 }

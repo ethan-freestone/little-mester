@@ -44,7 +44,7 @@ host-Docker metrics path; the latter remains in place during migration.
 | SSH control | host → VM | `127.0.0.1:<ephemeral>` → guest `:22`, per-VM key, per-VM `known_hosts` | Host keys/credentials inside the VM; VM listening on the host LAN |
 | Optional model API `guestfwd` | VM → one configured host endpoint | One explicitly selected local API port | General host loopback, host filesystem, host Docker |
 | Optional metrics endpoint/stream | VM → one configured host metrics endpoint | Read-only metrics API/data needed by the guest plugin | Compose DNS assumptions, host `/proc` mounts, host filesystem, host Docker, general host loopback |
-| Egress proxy `guestfwd` | VM → public Internet | Any public HTTP(S) destination when `allowed_domains` is blank | Host-local/directly connected networks, private/reserved/multicast IPs, mixed DNS, non-HTTP protocols, raw host routing |
+| Egress proxy `guestfwd` | VM → public Internet; nested VMs chain through the immediate parent's proxy | Any public HTTP(S) destination when `allowed_domains` is blank, subject to each VM's policy | Host-local/directly connected networks, private/reserved/multicast IPs, mixed DNS, non-HTTP protocols, raw host routing |
 | Temporary browser OAuth callback | host browser → VM guest | One exact runtime-selected callback port, bound to host `127.0.0.1` and forwarded to guest `127.0.0.1` over the temporary SSH control master | Port ranges, LAN listeners, callback URL rewriting, general host route, callback/token capture |
 | Guest runtime | agent in guest → VM | Guest Docker/Compose, guest processes, optional nested VMs | Host Docker daemon, host filesystem outside the selected workspace |
 
@@ -122,8 +122,10 @@ other host components. Live checks are bounded evidence, not a proof against eve
 Each recursively launched VM must repeat this boundary at its own level: `restrict=on`, a
 child-specific public HTTP(S) proxy, and denial of the parent VM's local/directly connected
 networks. The child must not inherit the parent's SSH/control endpoint, Docker socket, model
-service, browser bridge, or workspace by default. Recursive networking remains unimplemented
-and must fail closed until tested on a supported nested-KVM host.
+service, browser bridge, or workspace by default. Nested HTTP/CONNECT proxy chaining is now
+implemented and locally regression-tested, but remains pending live nested-KVM acceptance.
+Other recursive crossings remain unimplemented and must not be inherited implicitly; if parent
+proxy chaining is unavailable, nested proxy requests must fail rather than bypass to direct egress.
 
 The initial parent-to-child sharing direction is strict push-only: the parent selects and
 validates a scoped snapshot, then delivers it to the child without a child request/response
@@ -147,7 +149,12 @@ The concrete QEMU wiring is `vhost-user-fs-pci` with shareable memfd-backed gues
 the mount tag `workspace`. `guestfwd` targets use QEMU's per-connection `cmd:` character
 device form (`socat` to host loopback); a bare `-10.0.2.2:PORT` target is invalid QEMU syntax.
 The egress target is a loopback-only launcher proxy that rejects private/reserved addresses
-and applies `.mester-egress`; it is not a general route to host loopback.
+and applies `.mester-egress`; it is not a general route to host loopback. For a nested VM, its
+proxy applies the child's policy, then forwards HTTP and CONNECT through the immediate parent's
+existing `10.0.2.100:3128` proxy. The parent remains the final destination validator for DNS
+answers and local/directly connected networks. There is no direct-origin fallback when the
+configured parent proxy is unreachable. Top-level VM proxies retain the direct-to-public-origin
+path; local regressions do not replace the pending live nested-KVM acceptance gate (#41/#43).
 3. cloud-init provisions the guest user, direct harness runtime, optional guest workload
    runtime (Docker/Compose), native
    auth prerequisites, proxy settings and the workspace mount.
@@ -182,8 +189,8 @@ copying or provisioning if either is absent; recursive launches do not fall back
 Fresh guest provisioning places `mester` in the `kvm` group so the nested-QEMU preflight can
 use the device when the outer hypervisor exposes it. Existing guests need an explicit, safe
 membership refresh; changing cloud-init source does not update an already-running guest.
-Snapshot copies exclude `.mester` and
-`.little-mester.conf`, preserve independent Git metadata for repository roots, and reject
+Snapshot copies exclude `.mester`, `.little-mester.conf`, and the ignored host-side
+`.bench-models` model cache, preserve independent Git metadata for repository roots, and reject
 escaping symlinks and special files. Recursive cache/state lives inside the containing guest
 overlay, so a destructive outer `down`/`rebuild` can still remove it; this remains an open
 lifecycle acceptance gate under #43 A6/#52. If persisted policy permits descendants, outer

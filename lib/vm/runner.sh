@@ -25,6 +25,18 @@ _vm_netdev_arg() {
   printf '%s' "user,id=net0,hostfwd=tcp:127.0.0.1:${ssh_port}-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434,guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080,guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:${VM_PROXY_PORT:-3128},restrict=on"
 }
 
+# Nested VM proxies use the outer guest's existing host-proxy guestfwd as an
+# upstream. Top-level proxies connect directly, preserving their current path.
+_vm_proxy_upstream_args() {
+  local recursion_root="${HOME%/}/.cache/lab-vm-recursion/"
+  VM_PROXY_UPSTREAM_ARGS=()
+  if [[ "${VM_NESTED_LAUNCH:-0}" == 1 ]] || \
+    [[ -n "${LAB_VM_RECURSION_DEPTH+x}" && "${VM_DIR_BASE:-}" == "$recursion_root"*/vm ]]; then
+    VM_PROXY_UPSTREAM_ARGS=(--upstream-proxy=http://10.0.2.100:3128)
+  fi
+  return 0
+}
+
 # Populate VM_QEMU_CMD. Keeping this separate from process launch lets tests
 # inspect every argv entry and catches invalid device combinations early.
 _vm_build_qemu_command() {
@@ -160,7 +172,9 @@ _vm_start() {
   # ── Start virtiofsd (workspace export) ───────────────────────────
   VM_STARTING=1
   rm -f "$vm_dir/proxy_port" "$vm_dir/proxy.reload-ready"
-  python3 "$LAB_DIR/lib/vm/proxy.py" --workspace "$workspace" --port-file "$vm_dir/proxy_port" \
+  _vm_proxy_upstream_args
+  python3 "$LAB_DIR/lib/vm/proxy.py" "${VM_PROXY_UPSTREAM_ARGS[@]}" \
+    --workspace "$workspace" --port-file "$vm_dir/proxy_port" \
     --reload-marker "$vm_dir/proxy.reload-ready" \
     </dev/null > "$vm_dir/proxy.log" 2>&1 &
   echo "$!" > "$vm_dir/proxy.pid"

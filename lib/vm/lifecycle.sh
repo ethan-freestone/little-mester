@@ -756,8 +756,12 @@ PY
 
 _vm_start_proxy_at() {
   local vm_dir="$1" workspace="$2" port="$3" proxy_pid marker_pid marker_port
+  local -a upstream_args=()
+  _vm_proxy_upstream_args
+  upstream_args=("${VM_PROXY_UPSTREAM_ARGS[@]}")
   rm -f "$vm_dir/proxy.reload-ready"
   python3 "$LAB_DIR/lib/vm/proxy.py" \
+    "${upstream_args[@]}" \
     --workspace "$workspace" \
     --port-file "$vm_dir/proxy_port" \
     --port "$port" \

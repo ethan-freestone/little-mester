@@ -259,6 +259,51 @@ def connect_public(host, port, blocked_networks=None):
     raise last_error
 
 
+def parse_upstream_proxy(value):
+    """Parse an unauthenticated HTTP parent-proxy endpoint."""
+    if value is None:
+        return None
+    target = urlsplit(value)
+    try:
+        host = target.hostname
+        port = target.port or 80
+    except ValueError as error:
+        raise ValueError("invalid upstream proxy endpoint") from error
+    if (
+        target.scheme.lower() != "http"
+        or not host
+        or target.username
+        or target.password
+        or target.path not in ("", "/")
+        or target.query
+        or target.fragment
+        or not 1 <= port <= 65535
+    ):
+        raise ValueError("upstream proxy must be a plain HTTP proxy endpoint without credentials or a path")
+    return host, port
+
+
+def _receive_http_headers(sock):
+    """Read one bounded HTTP response header block without buffering tunnel data."""
+    headers = bytearray()
+    while not headers.endswith(b"\r\n\r\n"):
+        byte = sock.recv(1)
+        if not byte:
+            raise OSError("upstream proxy closed before completing its response headers")
+        headers.extend(byte)
+        if len(headers) > 65536:
+            raise OSError("upstream proxy response headers are too large")
+    return bytes(headers)
+
+
+def _http_status_code(headers):
+    try:
+        fields = headers.split(b"\r\n", 1)[0].split()
+        return int(fields[1])
+    except (IndexError, ValueError) as error:
+        raise ValueError("upstream proxy returned an invalid HTTP status line") from error
+
+
 class Proxy(BaseHTTPRequestHandler):
     rbufsize = 0
     timeout = 30
@@ -280,6 +325,8 @@ class Proxy(BaseHTTPRequestHandler):
             self.send_error(503)
             return
         upstream = None
+        response_started = False
+        parent_proxy = getattr(self.server, "upstream_proxy", None)
         try:
             target = urlsplit("//" + self.path if tunnel else self.path)
             host = target.hostname
@@ -290,34 +337,96 @@ class Proxy(BaseHTTPRequestHandler):
                     not self.server.policy.allows(host)):
                 self.send_error(403)
                 return
-            upstream = connect_public(host, port)
-            if tunnel:
-                self.send_response(200, "Connection established")
-                self.end_headers()
+
+            if parent_proxy:
+                # Nested guests can reach public HTTP(S) only by chaining through
+                # the parent VM's already-restricted egress proxy. The parent
+                # remains responsible for DNS/IP and host-route validation.
+                upstream = socket.create_connection(parent_proxy, timeout=20)
+                if tunnel:
+                    authority_host = f"[{host}]" if ":" in host else host
+                    authority = f"{authority_host}:{port}"
+                    request = (
+                        f"CONNECT {authority} HTTP/1.1\r\n"
+                        f"Host: {authority}\r\n"
+                        "Proxy-Connection: keep-alive\r\n\r\n"
+                    )
+                    upstream.sendall(request.encode("ascii"))
+                    response_headers = _receive_http_headers(upstream)
+                    status_code = _http_status_code(response_headers)
+                    self.connection.sendall(response_headers)
+                    response_started = True
+                    if not 200 <= status_code < 300:
+                        # Preserve the parent's denial/error response body.
+                        self.close_connection = True
+                        while True:
+                            data = upstream.recv(65536)
+                            if not data:
+                                return
+                            self.connection.sendall(data)
+                else:
+                    path = target.path or "/"
+                    if target.query:
+                        path += "?" + target.query
+                    request_target = f"http://{target.netloc}{path}"
+                    headers = [
+                        f"{self.command} {request_target} HTTP/1.1",
+                        f"Host: {target.netloc}",
+                        "Connection: close",
+                    ]
+                    for key, value in self.headers.items():
+                        if key.lower() not in {
+                            "host", "connection", "proxy-connection", "proxy-authorization"
+                        }:
+                            headers.append(f"{key}: {value}")
+                    upstream.sendall(("\r\n".join(headers) + "\r\n\r\n").encode("iso-8859-1"))
             else:
-                path = target.path or "/"
-                if target.query:
-                    path += "?" + target.query
-                headers = [f"{self.command} {path} HTTP/1.1", f"Host: {host}", "Connection: close"]
-                for key, value in self.headers.items():
-                    if key.lower() not in {"host", "connection", "proxy-connection", "proxy-authorization"}:
-                        headers.append(f"{key}: {value}")
-                upstream.sendall(("\r\n".join(headers) + "\r\n\r\n").encode("iso-8859-1"))
+                upstream = connect_public(host, port)
+                if tunnel:
+                    self.send_response(200, "Connection established")
+                    self.end_headers()
+                    response_started = True
+                else:
+                    path = target.path or "/"
+                    if target.query:
+                        path += "?" + target.query
+                    headers = [
+                        f"{self.command} {path} HTTP/1.1",
+                        f"Host: {target.netloc}",
+                        "Connection: close",
+                    ]
+                    for key, value in self.headers.items():
+                        if key.lower() not in {
+                            "host", "connection", "proxy-connection", "proxy-authorization"
+                        }:
+                            headers.append(f"{key}: {value}")
+                    upstream.sendall(("\r\n".join(headers) + "\r\n\r\n").encode("iso-8859-1"))
+
             self.close_connection = True
             self.connection.settimeout(60)
+            upstream.settimeout(60)
             while True:
                 ready, _, _ = select.select([self.connection, upstream], [], [], 60)
                 if not ready:
+                    if not response_started:
+                        self.send_error(502)
                     break
                 for source in ready:
                     data = source.recv(65536)
                     if not data:
+                        if source is upstream and not response_started:
+                            self.send_error(502)
                         return
                     (upstream if source is self.connection else self.connection).sendall(data)
+                    if source is upstream:
+                        response_started = True
         except PermissionError:
-            self.send_error(403)
+            if parent_proxy and not response_started:
+                self.send_error(502)
+            elif not response_started:
+                self.send_error(403)
         except (OSError, ValueError):
-            if upstream is None:
+            if not response_started:
                 self.send_error(502)
         finally:
             if upstream:
@@ -330,12 +439,18 @@ if __name__ == "__main__":
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--port-file", type=Path, required=True)
     parser.add_argument("--port", type=int, default=0, help="Bind a fixed loopback port instead of choosing one")
+    parser.add_argument("--upstream-proxy", help="Optional parent HTTP proxy for nested VM egress")
     parser.add_argument("--reload-marker", type=Path, required=True)
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error("--port must be between 0 and 65535")
+    try:
+        upstream_proxy = parse_upstream_proxy(args.upstream_proxy)
+    except ValueError as error:
+        parser.error(str(error))
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Proxy)
     server.policy = PolicyStore(args.workspace / ".mester-egress")
+    server.upstream_proxy = upstream_proxy
 
     def reload_policy(_signum, _frame):
         try:

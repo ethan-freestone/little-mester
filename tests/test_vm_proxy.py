@@ -4,6 +4,7 @@ import ipaddress
 import os
 import signal
 import socket
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,82 @@ SPEC = importlib.util.spec_from_file_location(
 )
 proxy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(proxy)
+
+
+class _RecordingUpstreamHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        request = bytearray()
+        while not request.endswith(b"\r\n\r\n"):
+            chunk = self.request.recv(4096)
+            if not chunk:
+                return
+            request.extend(chunk)
+            if len(request) > 65536:
+                return
+        self.server.requests.append(bytes(request))
+
+        status = self.server.response_status
+        if request.startswith(b"CONNECT "):
+            reason = b"Connection established" if status == 200 else b"Forbidden"
+            self.request.sendall(f"HTTP/1.1 {status} ".encode() + reason + b"\r\n\r\n")
+            if status == 200:
+                while True:
+                    try:
+                        payload = self.request.recv(4096)
+                    except OSError:
+                        return
+                    if not payload:
+                        return
+                    self.request.sendall(payload)
+        else:
+            body = b"parent-response"
+            reason = b"OK" if status == 200 else b"Forbidden"
+            response = (
+                f"HTTP/1.1 {status} ".encode()
+                + reason
+                + b"\r\nContent-Length: "
+                + str(len(body)).encode()
+                + b"\r\nConnection: close\r\n\r\n"
+                + body
+            )
+            self.request.sendall(response)
+
+
+class _RecordingUpstreamServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, response_status=200):
+        self.requests = []
+        self.response_status = response_status
+        super().__init__(("127.0.0.1", 0), _RecordingUpstreamHandler)
+
+
+class _RecordingOriginHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        request = bytearray()
+        while not request.endswith(b"\r\n\r\n"):
+            chunk = self.request.recv(4096)
+            if not chunk:
+                return
+            request.extend(chunk)
+        self.server.requests.append(bytes(request))
+        body = b"direct-origin"
+        self.request.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Length: "
+            + str(len(body)).encode()
+            + b"\r\nConnection: close\r\n\r\n"
+            + body
+        )
+
+
+class _RecordingOriginServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self):
+        self.requests = []
+        super().__init__(("127.0.0.1", 0), _RecordingOriginHandler)
 
 
 class ProxyTests(unittest.TestCase):
@@ -38,6 +115,270 @@ class ProxyTests(unittest.TestCase):
         self.assertTrue(proxy.allowed("api.openai.com", True, {"=api.openai.com"}))
         self.assertFalse(proxy.allowed("v1.api.openai.com", True, {"=api.openai.com"}))
         self.assertFalse(proxy.allowed("example.com", False, set()))
+
+    def test_upstream_proxy_parser_accepts_only_plain_proxy_endpoints(self):
+        self.assertEqual(
+            proxy.parse_upstream_proxy("http://10.0.2.100:3128"), ("10.0.2.100", 3128)
+        )
+        for endpoint in (
+            "https://10.0.2.100:3128",
+            "http://user:secret@10.0.2.100:3128",
+            "http://10.0.2.100:3128/path",
+            "http://10.0.2.100:3128/?target=example.com",
+        ):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                proxy.parse_upstream_proxy(endpoint)
+
+    def _start_chained_proxy(self, manifest, upstream):
+        server = proxy.ThreadingHTTPServer(("127.0.0.1", 0), proxy.Proxy)
+        server.policy = proxy.PolicyStore(manifest)
+        server.upstream_proxy = upstream
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, thread
+
+    def test_nested_http_request_chains_without_direct_origin_connection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / ".mester-egress"
+            manifest.write_text("permission=true\n")
+            parent = _RecordingUpstreamServer()
+            parent_thread = threading.Thread(target=parent.serve_forever, daemon=True)
+            parent_thread.start()
+            child, child_thread = self._start_chained_proxy(
+                manifest, ("127.0.0.1", parent.server_address[1])
+            )
+            try:
+                with patch.object(proxy, "connect_public") as direct_connect:
+                    connection = http.client.HTTPConnection(
+                        "127.0.0.1", child.server_port, timeout=3
+                    )
+                    try:
+                        connection.request(
+                            "GET",
+                            "http://public.example/packages?channel=stable",
+                            headers={
+                                "Host": "public.example",
+                                "Proxy-Authorization": "must-not-forward",
+                            },
+                        )
+                        response = connection.getresponse()
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(response.read(), b"parent-response")
+                    finally:
+                        connection.close()
+                    direct_connect.assert_not_called()
+
+                self.assertEqual(len(parent.requests), 1)
+                self.assertTrue(
+                    parent.requests[0].startswith(
+                        b"GET http://public.example/packages?channel=stable HTTP/1.1\r\n"
+                    )
+                )
+                self.assertNotIn(b"must-not-forward", parent.requests[0])
+            finally:
+                child.shutdown()
+                child_thread.join(timeout=2)
+                child.server_close()
+                parent.shutdown()
+                parent_thread.join(timeout=2)
+                parent.server_close()
+
+    def test_nested_child_policy_denial_does_not_reach_parent_proxy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / ".mester-egress"
+            manifest.write_text("permission=false\n")
+            parent = _RecordingUpstreamServer()
+            parent_thread = threading.Thread(target=parent.serve_forever, daemon=True)
+            parent_thread.start()
+            child, child_thread = self._start_chained_proxy(
+                manifest, ("127.0.0.1", parent.server_address[1])
+            )
+            try:
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", child.server_port, timeout=3
+                )
+                try:
+                    connection.request("GET", "http://public.example/")
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 403)
+                    response.read()
+                finally:
+                    connection.close()
+                self.assertEqual(parent.requests, [])
+            finally:
+                child.shutdown()
+                child_thread.join(timeout=2)
+                child.server_close()
+                parent.shutdown()
+                parent_thread.join(timeout=2)
+                parent.server_close()
+
+    def test_nested_proxy_preserves_parent_denial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / ".mester-egress"
+            manifest.write_text("permission=true\n")
+            parent = _RecordingUpstreamServer(response_status=403)
+            parent_thread = threading.Thread(target=parent.serve_forever, daemon=True)
+            parent_thread.start()
+            child, child_thread = self._start_chained_proxy(
+                manifest, ("127.0.0.1", parent.server_address[1])
+            )
+            try:
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", child.server_port, timeout=3
+                )
+                try:
+                    connection.request("GET", "http://public.example/")
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 403)
+                    self.assertEqual(response.read(), b"parent-response")
+                finally:
+                    connection.close()
+                self.assertEqual(len(parent.requests), 1)
+            finally:
+                child.shutdown()
+                child_thread.join(timeout=2)
+                child.server_close()
+                parent.shutdown()
+                parent_thread.join(timeout=2)
+                parent.server_close()
+
+    def test_nested_connect_is_tunneled_through_parent_proxy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / ".mester-egress"
+            manifest.write_text("permission=true\n")
+            parent = _RecordingUpstreamServer()
+            parent_thread = threading.Thread(target=parent.serve_forever, daemon=True)
+            parent_thread.start()
+            child, child_thread = self._start_chained_proxy(
+                manifest, ("127.0.0.1", parent.server_address[1])
+            )
+            connection = None
+            try:
+                connection = socket.create_connection(
+                    ("127.0.0.1", child.server_port), timeout=3
+                )
+                connection.sendall(
+                    b"CONNECT public.example:443 HTTP/1.1\r\n"
+                    b"Host: public.example:443\r\n\r\n"
+                )
+                response_headers = bytearray()
+                while not response_headers.endswith(b"\r\n\r\n"):
+                    response_headers.extend(connection.recv(1))
+                self.assertTrue(response_headers.startswith(b"HTTP/1.1 200 "))
+                self.assertIn(b"CONNECT public.example:443 HTTP/1.1\r\n", parent.requests[0])
+
+                connection.sendall(b"nested-tunnel-probe")
+                self.assertEqual(connection.recv(len(b"nested-tunnel-probe")), b"nested-tunnel-probe")
+            finally:
+                if connection is not None:
+                    connection.close()
+                child.shutdown()
+                child_thread.join(timeout=2)
+                child.server_close()
+                parent.shutdown()
+                parent_thread.join(timeout=2)
+                parent.server_close()
+
+    def test_nested_connect_preserves_parent_denial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / ".mester-egress"
+            manifest.write_text("permission=true\n")
+            parent = _RecordingUpstreamServer(response_status=403)
+            parent_thread = threading.Thread(target=parent.serve_forever, daemon=True)
+            parent_thread.start()
+            child, child_thread = self._start_chained_proxy(
+                manifest, ("127.0.0.1", parent.server_address[1])
+            )
+            connection = None
+            try:
+                connection = socket.create_connection(
+                    ("127.0.0.1", child.server_port), timeout=3
+                )
+                connection.sendall(
+                    b"CONNECT public.example:443 HTTP/1.1\r\n"
+                    b"Host: public.example:443\r\n\r\n"
+                )
+                response_headers = bytearray()
+                while not response_headers.endswith(b"\r\n\r\n"):
+                    response_headers.extend(connection.recv(1))
+                self.assertTrue(response_headers.startswith(b"HTTP/1.1 403 "))
+                self.assertIn(b"CONNECT public.example:443 HTTP/1.1\r\n", parent.requests[0])
+            finally:
+                if connection is not None:
+                    connection.close()
+                child.shutdown()
+                child_thread.join(timeout=2)
+                child.server_close()
+                parent.shutdown()
+                parent_thread.join(timeout=2)
+                parent.server_close()
+
+    def test_nested_upstream_connection_failure_returns_502(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / ".mester-egress"
+            manifest.write_text("permission=true\n")
+            unavailable = socket.socket()
+            unavailable.bind(("127.0.0.1", 0))
+            upstream_port = unavailable.getsockname()[1]
+            unavailable.close()
+            child, child_thread = self._start_chained_proxy(
+                manifest, ("127.0.0.1", upstream_port)
+            )
+            try:
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", child.server_port, timeout=3
+                )
+                try:
+                    connection.request("GET", "http://public.example/")
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 502)
+                    response.read()
+                finally:
+                    connection.close()
+            finally:
+                child.shutdown()
+                child_thread.join(timeout=2)
+                child.server_close()
+
+    def test_top_level_proxy_uses_direct_path_without_parent_chaining(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / ".mester-egress"
+            manifest.write_text("permission=true\n")
+            origin = _RecordingOriginServer()
+            origin_thread = threading.Thread(target=origin.serve_forever, daemon=True)
+            origin_thread.start()
+            server = proxy.ThreadingHTTPServer(("127.0.0.1", 0), proxy.Proxy)
+            server.policy = proxy.PolicyStore(manifest)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with patch.object(
+                    proxy,
+                    "connect_public",
+                    side_effect=lambda _host, _port: socket.create_connection(
+                        origin.server_address, timeout=3
+                    ),
+                ) as direct_connect:
+                    connection = http.client.HTTPConnection(
+                        "127.0.0.1", server.server_port, timeout=3
+                    )
+                    try:
+                        connection.request("GET", "http://public.example/path")
+                        response = connection.getresponse()
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(response.read(), b"direct-origin")
+                    finally:
+                        connection.close()
+                    direct_connect.assert_called_once_with("public.example", 80)
+                self.assertTrue(origin.requests[0].startswith(b"GET /path HTTP/1.1\r\n"))
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
+                server.server_close()
+                origin.shutdown()
+                origin_thread.join(timeout=2)
+                origin.server_close()
 
     def test_ipv4_mapped_ipv6_uses_ipv4_public_unicast_classification(self):
         self.assertFalse(proxy._is_public_unicast(proxy.ipaddress.ip_address("::ffff:127.0.0.1")))

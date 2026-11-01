@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import NoReturn
 
 
-EXCLUDED_NAMES = {".git", ".mester", ".little-mester.conf"}
+# Keep host-only state and large ignored model weights out of disposable child
+# snapshots. The selected source tree remains read/write within its own copy.
+EXCLUDED_NAMES = {".bench-models", ".git", ".little-mester.conf", ".mester"}
 
 
 def fail(message: str) -> NoReturn:
