@@ -206,10 +206,10 @@ discarded.
 
 ### VM memory budget and resize
 
-New depth-0 profiles are intended to request 8 GiB; nested profiles scale down by level
-(4/2/1 GiB, with a 1-GiB floor). A new-profile `--memory <GiB>` override is planned;
-each profile's allocation is persisted and warm starts reuse it. Profiles created before
-the setting exists retain the legacy 4-GiB allocation until explicitly resized. `./lab-vm
+New depth-0 profiles request 8 GiB; nested profiles scale down by level (4/2/1 GiB,
+with a 1-GiB floor). A new-profile `--memory <GiB>` override is planned; each profile's
+allocation is persisted and warm starts reuse it. Existing profiles without memory
+metadata retain the legacy 4-GiB allocation until explicitly resized. `./lab-vm
 resize <profile> <GiB>` changes a managed VM's allocation by a clean guest shutdown and
 restart, preserving the writable overlay, base image, seed, keys, and installed guest
 state. QEMU live memory hotplug is not configured. This command cannot change the memory

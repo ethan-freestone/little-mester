@@ -480,15 +480,25 @@ if [[ "$cmd" == run || "$cmd" == up ]]; then
   # snapshots, profile metadata, disks, or QEMU processes.
   _memory_vm_dir="$VM_DIR_BASE/$vm_name"
   [[ ! -L "$_memory_vm_dir" ]] || die "VM profile directory must not be a symlink: $_memory_vm_dir"
-  vm_memory_profile_load "$_memory_vm_dir" || exit 1
+  vm_memory_profile_select_for_up "$_memory_vm_dir" "${VM_GUEST_RECURSION_DEPTH:-0}" "$VM_CLEAN" || exit 1
   _memory_release_pid=""
   if [[ -d "$_memory_vm_dir" ]] && grep -q running <<<"$(vm_run_status "$_memory_vm_dir" 2>/dev/null || true)"; then
     _memory_release_pid="$(cat "$_memory_vm_dir/qemu.pid" 2>/dev/null || true)"
     _memory_qemu_args="$(_vm_read_qemu_process_args "$_memory_release_pid")" || die 'Cannot inspect the existing QEMU process before memory preflight.'
     [[ "$_memory_qemu_args" == *qemu-system-x86_64* ]] || die 'Recorded running PID is not QEMU; refusing resource preflight.'
-    vm_memory_qemu_matches "$_memory_qemu_args" "$VM_MEMORY_GIB" || die 'Running QEMU RAM does not match profile metadata; refusing startup.'
+    if [[ "$VM_CLEAN" == 1 ]]; then
+      _memory_requested_gib="$VM_MEMORY_GIB"
+      vm_memory_profile_load "$_memory_vm_dir" || exit 1
+      vm_memory_qemu_matches "$_memory_qemu_args" "$VM_MEMORY_GIB" || die 'Running QEMU RAM does not match profile metadata; refusing clean replacement.'
+      VM_MEMORY_GIB="$_memory_requested_gib"
+    else
+      vm_memory_qemu_matches "$_memory_qemu_args" "$VM_MEMORY_GIB" || die 'Running QEMU RAM does not match profile metadata; refusing startup.'
+    fi
   fi
   vm_memory_preflight "$VM_MEMORY_GIB" "$_memory_release_pid" || exit 1
+  if [[ "$VM_CLEAN" != 1 ]]; then
+    vm_memory_profile_store "$_memory_vm_dir" "$VM_MEMORY_GIB" || exit 1
+  fi
 
   # The nested path was resolved above so preflight targets the same isolated
   # profile/state root. Clear it only for an outer launch (which may choose a

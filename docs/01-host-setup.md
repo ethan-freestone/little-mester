@@ -182,10 +182,10 @@ confirmation only; it does not bypass the memory preflight.
 It cannot resize the ancestor VM that contains the current shell; that must be assigned
 more memory by its parent hypervisor/launcher and restarted there.
 
-In this implementation slice, fresh profiles still default to 4 GiB, and profiles without
-`memory_gib` metadata are treated as legacy 4-GiB profiles. The planned depth-scaled
-8/4/2/1-GiB defaults and new-profile `--memory <GiB>` setup override follow this resize
-slice; they are not implemented yet.
+Fresh profiles now default to 8 GiB at depth 0 and 4/2/1 GiB at nested depths 1/2/3+
+(1-GiB floor). Existing profiles without `memory_gib` metadata retain the legacy 4-GiB
+allocation. The setup-only `--memory <GiB>` override for new profiles is a follow-on and
+is not implemented yet.
 
 ### Multi-VM support
 

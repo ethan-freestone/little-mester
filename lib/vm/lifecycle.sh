@@ -196,7 +196,7 @@ vm_cmd_up() {
   vm_dir="$(_vm_resolve "$vm_name")"
   [[ ! -L "$vm_dir" ]] || die "VM profile directory must not be a symlink: $vm_dir"
 
-  vm_memory_profile_load "$vm_dir" || die 'Could not load VM memory configuration; refusing to start.'
+  vm_memory_profile_load "$vm_dir" "${VM_MEMORY_GIB:-4}" || die 'Could not load VM memory configuration; refusing to start.'
 
   # Check prerequisites
   if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then

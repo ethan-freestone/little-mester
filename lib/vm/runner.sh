@@ -22,10 +22,25 @@ vm_memory_validate_gib() {
   [[ "$value" =~ ^[1-9][0-9]{0,2}$ ]] && (( value <= 128 ))
 }
 
+vm_memory_default_for_depth() {
+  local depth="${1:-0}" value
+  [[ "$depth" =~ ^(0|[1-9][0-9]*)$ ]] && (( depth <= 32 )) || {
+    echo 'REFUSED: recursion depth must be an integer from 0 to 32.' >&2
+    return 1
+  }
+  value=$((8 >> depth))
+  (( value >= 1 )) || value=1
+  printf '%s\n' "$value"
+}
+
 vm_memory_profile_load() {
-  local vm_dir="${1:?VM profile directory required}" value
+  local vm_dir="${1:?VM profile directory required}" value default_gib="${2:-4}"
   local -a lines=()
-  VM_MEMORY_GIB=4
+  vm_memory_validate_gib "$default_gib" || {
+    echo 'REFUSED: invalid fallback VM memory allocation.' >&2
+    return 1
+  }
+  VM_MEMORY_GIB="$default_gib"
   if [[ ! -e "$vm_dir/memory_gib" && ! -L "$vm_dir/memory_gib" ]]; then
     return 0
   fi
@@ -44,6 +59,29 @@ vm_memory_profile_load() {
     return 1
   }
   VM_MEMORY_GIB="$value"
+}
+
+vm_memory_profile_select_for_up() {
+  local vm_dir="${1:?VM profile directory required}" depth="${2:-0}" force_fresh="${3:-0}" default_gib
+  [[ "$force_fresh" == 0 || "$force_fresh" == 1 ]] || return 2
+  if [[ "$force_fresh" == 1 ]]; then
+    default_gib="$(vm_memory_default_for_depth "$depth")" || return 1
+    VM_MEMORY_GIB="$default_gib"
+    return 0
+  fi
+  if [[ -e "$vm_dir/memory_gib" || -L "$vm_dir/memory_gib" ]]; then
+    vm_memory_profile_load "$vm_dir"
+    return $?
+  fi
+  # Pre-metadata profiles keep the old 4-GiB allocation. A disk, seed, key or
+  # QEMU PID means setup has begun; do not silently reinterpret it as fresh.
+  if [[ -e "$vm_dir/disk.qcow2" || -e "$vm_dir/seed.iso" ||
+        -e "$vm_dir/id_vm_control" || -e "$vm_dir/qemu.pid" ]]; then
+    VM_MEMORY_GIB=4
+    return 0
+  fi
+  default_gib="$(vm_memory_default_for_depth "$depth")" || return 1
+  VM_MEMORY_GIB="$default_gib"
 }
 
 vm_memory_profile_store() {

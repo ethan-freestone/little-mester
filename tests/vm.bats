@@ -1453,6 +1453,42 @@ MOCK_SUDO
   [ "$status" -ne 0 ]
 }
 
+@test "new VM profiles default to depth-scaled RAM while metadata-less existing profiles stay 4 GiB" {
+  source "$REPO_ROOT/lib/vm/runner.sh"
+  local vm_dir="$BATS_TEST_TMPDIR/memory-defaults"
+
+  [ "$(vm_memory_default_for_depth 0)" = 8 ]
+  [ "$(vm_memory_default_for_depth 1)" = 4 ]
+  [ "$(vm_memory_default_for_depth 2)" = 2 ]
+  [ "$(vm_memory_default_for_depth 3)" = 1 ]
+  [ "$(vm_memory_default_for_depth 32)" = 1 ]
+
+  vm_memory_profile_select_for_up "$vm_dir/depth0" 0
+  [ "$VM_MEMORY_GIB" -eq 8 ]
+  vm_memory_profile_select_for_up "$vm_dir/depth1" 1
+  [ "$VM_MEMORY_GIB" -eq 4 ]
+  vm_memory_profile_select_for_up "$vm_dir/depth2" 2
+  [ "$VM_MEMORY_GIB" -eq 2 ]
+  vm_memory_profile_select_for_up "$vm_dir/depth3" 3
+  [ "$VM_MEMORY_GIB" -eq 1 ]
+
+  mkdir -p "$vm_dir/legacy"
+  : >"$vm_dir/legacy/disk.qcow2"
+  vm_memory_profile_select_for_up "$vm_dir/legacy" 0
+  [ "$VM_MEMORY_GIB" -eq 4 ]
+
+  vm_memory_profile_select_for_up "$vm_dir/legacy" 0 1
+  [ "$VM_MEMORY_GIB" -eq 8 ]
+  [ ! -e "$vm_dir/legacy/memory_gib" ]
+
+  vm_memory_profile_store "$vm_dir/legacy" 16
+  vm_memory_profile_select_for_up "$vm_dir/legacy" 3
+  [ "$VM_MEMORY_GIB" -eq 16 ]
+
+  run vm_memory_default_for_depth invalid
+  [ "$status" -ne 0 ]
+}
+
 @test "managed resize preflights before clean restart and preserves VM storage" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   VM_DIR_BASE="$BATS_TEST_TMPDIR/resize-state"
