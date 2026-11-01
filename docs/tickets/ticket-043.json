@@ -8,7 +8,7 @@
   "title": "Guest Docker workloads, recursive VMs and host isolation",
   "objective": "Give a directly running guest agent ordinary Docker/Compose control for arbitrary project test services and recursive Little Mester VMs where nested virtualization is supported, while the outer VM continues to isolate the host and the existing egress allowlist/no-host-route policy remains enforced.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-11-01T12:08:00.620Z",
+  "updated_at": "2026-11-01T12:33:31.676Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -77,7 +77,8 @@
       "On a supported owner KVM host, launch nested profile at depth 1, verify child receives the incremented depth and inherited maximum, then verify another child refuses before startup; verify nested VM uses its own QEMU restrict=on/proxy allowlist and host/private/LAN negative checks.",
       "Live-test nested child workspace and VM-state separation, preservation of the parent workspace/session, stop/reuse semantics, and confirmed recursion-clean teardown; local copy tests do not establish virtiofs/KVM isolation.",
       "For safe top-level repository snapshots, verify recursion-clean initial-<profile> refuses while the associated outer VM profile is running, then removes the snapshot only after the outer VM is stopped; verify normal nested-profile cleanup also refuses live QEMU/virtiofsd/proxy processes.",
-      "Owner-host acceptance must verify --discard-recursive behavior on a disposable recursive profile, including preserving/inspecting child evidence before explicit discard; do not use the working host-Docker session or a valuable overlay."
+      "Owner-host acceptance must verify --discard-recursive behavior on a disposable recursive profile, including preserving/inspecting child evidence before explicit discard; do not use the working host-Docker session or a valuable overlay.",
+      "Before write-enabled `--unsafe-recurse`, prove the shared Little Mester checkout cannot expose `.mester/vm/<profile>` host VM state/control keys to the guest. Current virtiofs workspace contains `.mester/vm/default/id_vm_control` (mode 0600, owned by the same mester UID); move VM state outside the share or enforce an equivalent exclusion, then test the child boundary. Do not use the live checkout for unsafe recursion until resolved."
     ],
     "created": [
       "tests/test_vm_proxy.py: current project build-registry allowlist and npm lookalike-domain refusal",

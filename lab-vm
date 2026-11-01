@@ -36,6 +36,7 @@
 #   ./lab-vm update [opencode|config|tools|docker|system ...] [--name <profile>]
 #   ./lab-vm update --all [--name <profile>]
 #   ./lab-vm models {ensure|up|status|down} [provider]
+#   ./lab-vm context [--json]
 #   ./lab-vm extra <temporary-command> [args...]
 #
 # Epic #35 | Sub-ticket #41
@@ -64,6 +65,7 @@ VM_BROWSER_AUTH_ENABLE_FLAG=0
 VM_BROWSER_AUTH_DISABLE_FLAG=0
 VM_RESTART_OPENCODE=0
 VM_UPDATE_ALL=0
+VM_CONTEXT_JSON=0
 VM_VERBOSE="${VM_VERBOSE:-0}"
 VM_DEBUG="${VM_DEBUG:-0}"
 if [[ "$VM_DEBUG" -ge 1 ]]; then VM_VERBOSE=1; fi
@@ -200,6 +202,10 @@ VM lifecycle commands (epic #35, ticket #41):
   ./lab-vm verify-isolation [name]
       Verify the running QEMU network allowlist and run bounded probes inside the guest.
 
+  ./lab-vm context [--json]
+      Show the current runtime layer, recursion metadata, nested-KVM readiness,
+      and Little Mester checkout revision. --json emits machine-readable data.
+
   ./lab-vm down [name]
       Add --discard-recursive to acknowledge deletion of nested child state.
       Stop the VM and remove per-VM artifacts (overlay disk, seed ISO, keys).
@@ -314,6 +320,7 @@ for _i in "${_flags[@]}"; do
     --browser-auth)           VM_BROWSER_AUTH_MODE=on; VM_BROWSER_AUTH_ENABLE_FLAG=1 ;;
     --no-browser-auth)        VM_BROWSER_AUTH_MODE=off; VM_BROWSER_AUTH_DISABLE_FLAG=1 ;;
     --restart-opencode)       VM_RESTART_OPENCODE=1 ;;
+    --json)                   VM_CONTEXT_JSON=1 ;;
     -v|--verbose)             VM_VERBOSE=1 ;;
     -d|--debug)               VM_VERBOSE=1; VM_DEBUG=1 ;;
     --help|-h)                ;;
@@ -355,6 +362,7 @@ for (( _fi=0; _fi<${#_flags[@]}; _fi++ )); do
     --recurse|--unsafe-recurse|--clean|--discard-recursive|--all) ;;
     --browser-auth|--no-browser-auth) ;;
     --restart-opencode) ;;
+    --json) ;;
     -v|--verbose|-d|--debug) ;;
     -y|--yes|--auto-accept) ;;
     --sudo|--probe-egress) remaining+=("${_flags[$_fi]}") ;;
@@ -404,7 +412,7 @@ case "$cmd" in
     ;;
   *)
     case "$cmd" in
-      run|up|status|ssh|down|stop|agent|auth-forward|egress-reload|verify-isolation|recursion-clean|base|rebuild|install-tools|update|models|metrics|extra|test|help|--help) ;;
+      run|up|status|ssh|down|stop|agent|auth-forward|egress-reload|verify-isolation|recursion-clean|base|rebuild|install-tools|update|models|metrics|context|extra|test|help|--help) ;;
       *)
         if [[ -d "$cmd" || "$cmd" == */* ]]; then
           if [[ ${#remaining[@]} -gt 1 ]]; then
@@ -504,6 +512,9 @@ fi
 if [[ "$VM_RESTART_OPENCODE" == 1 && "$cmd" != install-tools ]]; then
   die '--restart-opencode is only valid with install-tools.'
 fi
+if [[ "$VM_CONTEXT_JSON" == 1 && "$cmd" != context ]]; then
+  die '--json is only valid with context.'
+fi
 if [[ "$cmd" == run && "$VM_CLEAN" == 1 ]]; then
   die 'The combined run command never deletes VM state; use the explicit up --clean command only when you intend a destructive reset.'
 fi
@@ -535,6 +546,14 @@ if [[ "$VM_BROWSER_AUTH_ENABLE_FLAG" -eq 1 && "$VM_BROWSER_AUTH_DISABLE_FLAG" -e
 fi
 if [[ "$VM_BROWSER_AUTH_MODE" != auto && "$cmd" != "agent" && "$cmd" != "run" && ! ( "$cmd" == install-tools && "$VM_RESTART_OPENCODE" == 1 ) && "$cmd" != "--help" ]]; then
   die 'Browser-auth options are only valid with the agent or run command.'
+fi
+
+# Context is intentionally read-only and bypasses the normal log rotation,
+# which writes under .mester and may be a shared host-state directory.
+if [[ "$cmd" == context ]]; then
+  context_format=text
+  [[ "$VM_CONTEXT_JSON" == 1 ]] && context_format=json
+  exec python3 "$LAB_DIR/scripts/vm-context.py" --repo "$LAB_DIR" --format "$context_format"
 fi
 
 # ─── Prerequisite check (auto-install on demand) ────────────────────

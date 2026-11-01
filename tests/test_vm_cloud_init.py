@@ -99,13 +99,13 @@ class CloudInitTests(unittest.TestCase):
         self.assertFalse(any("bats" in packages for packages in package_installs))
         self.assertFalse(any("shellcheck" in packages for packages in package_installs))
 
-    def test_empty_group_uses_string_not_invalid_empty_membership_mapping(self):
-        # Actual Ubuntu guest error: groups.0.mester: [] is too short.
-        # A string creates the empty group; a mapping's member list cannot be [].
+    def test_guest_user_gets_kvm_membership_and_string_groups_are_valid(self):
+        # A string creates a group; a mapping with an empty members list is invalid.
         groups = re.search(r"^groups:\n((?:  .+\n)+)", self.data, re.MULTILINE)
         self.assertIsNotNone(groups)
-        self.assertEqual(groups[1], "  - mester\n")
+        self.assertEqual(groups[1], "  - mester\n  - kvm\n")
         self.assertIn("    primary_group: mester\n", self.data)
+        self.assertIn("    groups: [sudo, kvm]\n", self.data)
         self.assertNotIn("mester: []", self.data)
 
     def test_schema_check_script_validates_rendered_config_and_propagates_failure(self):
@@ -117,7 +117,7 @@ class CloudInitTests(unittest.TestCase):
         subprocess.run(command, env=self.env, check=True)
         rendered = (self.path / "user-data.validated").read_text()
         self.assertIn("hostname: schema-test\n", rendered)
-        self.assertIn("groups:\n  - mester\n", rendered)
+        self.assertIn("groups:\n  - mester\n  - kvm\n", rendered)
         result = subprocess.run(command, env=dict(self.env, SCHEMA_EXIT="7"))
         self.assertEqual(result.returncode, 7)
 

@@ -407,6 +407,24 @@ setup() {
   [[ "$output" == *'only valid with down, stop, rebuild, or up --clean'* ]]
 }
 
+@test "context reports runtime, recursion, and Little Mester checkout as JSON without a VM action" {
+  local commit
+  commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+
+  run env -u LAB_VM_MAX_DEPTH LAB_VM_RECURSION_DEPTH=1 "$REPO_ROOT/lab-vm" context --json
+  [ "$status" -eq 0 ]
+  python3 -c 'import json,sys; c=json.loads(sys.argv[1]); assert c["schema_version"] == 1; assert c["recursion"]["depth"] == 1; assert c["recursion"]["max_depth"] is None; assert c["recursion"]["metadata"] == "legacy-depth-only"; assert c["little_mester"]["commit"] == sys.argv[2]; assert "runtime" in c and "kvm" in c' "$output" "$commit"
+
+  run "$REPO_ROOT/lab-vm" context
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Little Mester:"* ]]
+  [[ "$output" == *"Recursion:"* ]]
+
+  run "$REPO_ROOT/lab-vm" status --json
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--json is only valid with context'* ]]
+}
+
 @test "nested lifecycle commands resolve the isolated per-profile VM state root" {
   local recursion_root="$HOME/.cache/lab-vm-recursion"
   run env LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=1 \

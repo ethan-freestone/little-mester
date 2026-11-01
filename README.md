@@ -207,6 +207,8 @@ host-network changes are permitted to make it work. Manage the current host-to-g
     ./lab-vm -d models diagnose # detailed, read-only host/model-path evidence
     ./lab-vm -d models diagnose --probe-egress llamacpp # explicit TCP egress probe
     ./lab-vm verify-isolation   # inspect live QEMU config and probe from inside the guest
+    ./lab-vm context            # current runtime, recursion, KVM, and checkout summary
+    ./lab-vm context --json     # same information as machine-readable JSON
     ./lab-vm agent               # guest TUI; browser OAuth handoff is enabled by default
     ./lab-vm agent --no-browser-auth # skip the temporary host-browser bridge
     ./lab-vm -d install-tools --name default --restart-opencode # install guest Bats/ShellCheck, then relaunch TUI
@@ -408,8 +410,12 @@ not sufficient.
 `--unsafe-recurse` implies `--recurse` and explicitly permits the selected Little Mester
 checkout as a read/write workspace; it requires a workspace containing that checkout. Use it
 only when self-modification of the selected checkout is intended. It does not increase the
-depth limit or broaden host/network access. Every child still receives a separate workspace
-snapshot and state directory.
+depth limit or network access. **Do not use it with a live checkout that contains `.mester`
+state:** the current virtiofs workspace can expose `.mester/vm/<profile>` control files (including
+the SSH control key) to the guest. This is a known isolation gap tracked under #43; use the
+safe `--recurse` snapshot mode until it is resolved. Every child still receives a separate
+workspace snapshot and state directory. Fresh guests add `mester` to the `kvm` group so nested
+QEMU can access `/dev/kvm`; existing guests do not gain that membership from a source edit alone.
 Nested starts require usable `/dev/kvm` and guest CPU `vmx`/`svm` flags; if either is missing,
 the launcher refuses before snapshot/provisioning rather than falling back to TCG emulation.
 

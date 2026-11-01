@@ -54,11 +54,12 @@ ssh_pwauth: false
 disable_root: true
 groups:
   - mester
+  - kvm
 users:
   - name: mester
     uid: ${uid}
     primary_group: mester
-    groups: [sudo]
+    groups: [sudo, kvm]
     shell: /bin/bash
     sudo: ['ALL=(ALL) NOPASSWD:ALL']
     lock_passwd: true

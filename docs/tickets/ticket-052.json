@@ -8,7 +8,7 @@
   "title": "VM-first launcher, retained Docker mode, and bounded recursion",
   "objective": "Make the provisioned VM the eventual default one-command Little Mester workflow while preserving host-Docker as ./lab-docker, keeping setup separate from fast daily launch, and enabling explicitly opted-in, depth-bounded recursive self-testing. Follow-on child work for parent epic #35; do not switch the ./lab default until #35's VM adoption gates pass.",
   "created_at": "2026-10-29T10:27:45.504Z",
-  "updated_at": "2026-11-01T12:08:00.603Z",
+  "updated_at": "2026-11-01T12:33:31.673Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -66,7 +66,9 @@
       "On an unsupported nested-virtualization guest, verify the /dev/kvm preflight refuses before workspace copy, VM provision, or agent startup; preserve the outer VM and existing host-Docker session.",
       "Exercise --recurse with the Little Mester checkout and verify host checkout remains unchanged while the snapshot is writable; separately verify --unsafe-recurse requires a workspace containing the checkout and grants only the explicitly selected workspace.",
       "SUPERSEDES the earlier ORDERED FOLLOW-UP wording that placed implementation after the live A/B/B host check: bounded-recursion implementation is being developed on feat/bounded-vm-recursion as explicitly requested; live nested KVM/isolation validation remains blocked until the current #41 host handoff permits it, and default migration remains gated.",
-      "For safe top-level repository snapshots, verify recursion-clean initial-<profile> refuses while the associated outer VM profile is running, then removes the snapshot only after the outer VM is stopped; verify normal nested-profile cleanup also refuses live QEMU/virtiofsd/proxy processes."
+      "For safe top-level repository snapshots, verify recursion-clean initial-<profile> refuses while the associated outer VM profile is running, then removes the snapshot only after the outer VM is stopped; verify normal nested-profile cleanup also refuses live QEMU/virtiofsd/proxy processes.",
+      "After the current #41 handoff permits guest action, safely refresh kvm membership for the existing mester guest and start a fresh agent process with valid persisted depth/max metadata; preserve the overlay and do not recreate the VM.",
+      "Resolve the observed `.mester/vm/default/id_vm_control` exposure from the shared unsafe-recurse checkout before any write-enabled `--unsafe-recurse` test. Demonstrate host VM control keys/state are unavailable to the child while the selected Git checkout remains writable; until then use only the safe snapshot mode and do not claim A7 host-boundary acceptance."
     ],
     "created": [
       "tests/vm.bats: one-command direct workspace launch, workspace-switch confirmation, guest graceful shutdown, and overlay-preservation checks.",

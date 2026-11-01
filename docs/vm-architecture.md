@@ -179,6 +179,9 @@ snapshot. These are local implementation/test results tracked by #52; nested KVM
 workload, and isolation acceptance are still pending and must not be inferred from mocks.
 Nested starts require usable `/dev/kvm` and guest CPU `vmx`/`svm` flags, and refuse before
 copying or provisioning if either is absent; recursive launches do not fall back to TCG.
+Fresh guest provisioning places `mester` in the `kvm` group so the nested-QEMU preflight can
+use the device when the outer hypervisor exposes it. Existing guests need an explicit, safe
+membership refresh; changing cloud-init source does not update an already-running guest.
 Snapshot copies exclude `.mester` and
 `.little-mester.conf`, preserve independent Git metadata for repository roots, and reject
 escaping symlinks and special files. Recursive cache/state lives inside the containing guest
@@ -188,6 +191,19 @@ lifecycle acceptance gate under #43 A6/#52. If persisted policy permits descenda
 destructive side effects; `--yes` alone does not bypass this guard. The descendant-possible
 marker remains set if the configured maximum is lowered, until the associated overlay is
 discarded.
+
+`./lab-vm context` reports the current process's container/VM layer, recursion metadata,
+nested-KVM device/CPU readiness, workspace filesystem, and Little Mester commit. Use
+`./lab-vm context --json` for stable machine-readable output; this is a local CLI query, not a
+separate harness-specific MCP service. A depth marker without a maximum is reported as legacy
+or incomplete and is not treated as authorization to launch a child.
+
+**Current self-development blocker:** the repository checkout itself is mounted via virtiofs,
+and `.mester/vm/default/id_vm_control` is present in that shared tree. Therefore
+`--unsafe-recurse` on this checkout would give the guest the host-side VM control key/state.
+Do not use write-enabled unsafe recursion until VM control state is moved outside the shared
+workspace or equivalently excluded. This observed gap means the intended "workspace only" boundary
+is not yet satisfied; track remediation and live evidence under #43/#52.
 
 ### Sessions, worktrees, and parallel agents
 
