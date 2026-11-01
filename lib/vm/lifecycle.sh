@@ -192,8 +192,11 @@ GUEST_DOCKER_PROXY
 vm_cmd_up() {
   local vm_name="${1:-default}"
   local workspace="${2:-}"
-  local vm_dir running_workspace virtiofsd_pid qemu_pid qemu_args
+  local vm_dir running_workspace virtiofsd_pid qemu_pid qemu_args status
   vm_dir="$(_vm_resolve "$vm_name")"
+  [[ ! -L "$vm_dir" ]] || die "VM profile directory must not be a symlink: $vm_dir"
+
+  vm_memory_profile_load "$vm_dir" || die 'Could not load VM memory configuration; refusing to start.'
 
   # Check prerequisites
   if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
@@ -255,6 +258,19 @@ vm_cmd_up() {
   workspace="$VM_WORKSPACE"
   echo "Workspace: $workspace"
 
+  # Enforce the RAM budget before creating profile state, credentials, or a
+  # base disk. lab-vm also runs this before preparing recursive snapshots.
+  status="$(_vm_status "$vm_dir" 2>/dev/null)" || status="stopped"
+  if grep -q running <<<"$status"; then
+    qemu_pid="$(cat "$vm_dir/qemu.pid" 2>/dev/null || true)"
+    qemu_args="$(_vm_read_qemu_process_args "$qemu_pid")" || die "Cannot inspect the running QEMU process for VM '$vm_name'; refusing to proceed."
+    [[ "$qemu_args" == *qemu-system-x86_64* ]] || die "The recorded VM '$vm_name' PID is not QEMU; refusing to proceed."
+    vm_memory_qemu_matches "$qemu_args" "$VM_MEMORY_GIB" || die "VM '$vm_name' QEMU RAM does not match its profile metadata; use ./lab-vm resize after reviewing the profile."
+    vm_memory_preflight "$VM_MEMORY_GIB" "$qemu_pid" || die 'Insufficient memory budget to safely reuse or restart this VM profile.'
+  else
+    vm_memory_preflight "$VM_MEMORY_GIB" || die 'Insufficient memory budget to safely start this VM profile.'
+  fi
+
   # ── 2. Create VM directory ──────────────────────────────────────
   mkdir -p "$vm_dir"
 
@@ -270,18 +286,21 @@ vm_cmd_up() {
   vm_disk_create_base "$base_disk" "${VM_BASE_SIZE:-20}"
 
   # ── 5. Check if VM already running (idempotency, A2) ───────────
-  local status
   status="$(_vm_status "$vm_dir" 2>/dev/null)" || true
   if echo "$status" | grep -q "running"; then
     qemu_pid="$(cat "$vm_dir/qemu.pid" 2>/dev/null || true)"
     qemu_args="$(_vm_read_qemu_process_args "$qemu_pid")" || die "Cannot verify the QEMU process for VM '$vm_name'; refusing to reuse or switch it."
     [[ "$qemu_args" == *qemu-system-x86_64* ]] || die "The recorded VM '$vm_name' PID is not QEMU; refusing to signal it."
+    vm_memory_qemu_matches "$qemu_args" "$VM_MEMORY_GIB" || die "VM '$vm_name' QEMU RAM does not match its profile metadata; use ./lab-vm resize after reviewing the profile."
+    vm_memory_preflight "$VM_MEMORY_GIB" "$qemu_pid" || die 'Insufficient memory budget to safely reuse or restart this VM profile.'
     virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null || true)"
     running_workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid")" || die "Cannot verify the workspace mounted by VM '$vm_name'; refusing to reuse or switch it."
     running_workspace="$(realpath "$running_workspace")" || die "Cannot resolve the workspace mounted by VM '$vm_name'."
     if [[ "$running_workspace" == "$workspace" ]]; then
       echo "VM '$vm_name' is already running with workspace: $workspace"
       echo "$status"
+      vm_memory_profile_store "$vm_dir" "$VM_MEMORY_GIB" || die 'Could not persist VM memory configuration.'
+      _vm_profile_workspace_store "$vm_dir" "$workspace" || die 'Could not persist the active VM workspace.'
       vm_recursion_store_profile "$vm_dir"
       _vm_install_guest_harness "$vm_dir"
       return 0
@@ -292,7 +311,12 @@ vm_cmd_up() {
     _vm_confirm_workspace_switch "$running_workspace" "$workspace" || die 'Workspace switch cancelled; the running VM was not changed.'
     _vm_shutdown_for_workspace_switch "$vm_dir" || die 'Guest shutdown did not complete; the VM and current workspace were left in place.'
     echo "Guest stopped cleanly. Reusing the existing VM overlay for the new workspace."
+  else
+    vm_memory_preflight "$VM_MEMORY_GIB" || die 'Insufficient memory budget to safely start this VM profile.'
   fi
+
+  vm_memory_profile_store "$vm_dir" "$VM_MEMORY_GIB" || die 'Could not persist VM memory configuration.'
+  _vm_profile_workspace_store "$vm_dir" "$workspace" || die 'Could not persist the selected VM workspace.'
 
   vm_recursion_store_profile "$vm_dir"
 
@@ -329,6 +353,7 @@ vm_cmd_up() {
 
   echo ""
   echo "VM '$vm_name' is up and running."
+  echo "  Memory: ${VM_MEMORY_GIB} GiB"
   echo "  Workspace: $workspace"
   echo "  SSH:  ./lab-vm ssh $vm_name"
   if [[ "${VM_LAUNCH_AFTER_UP:-0}" == 1 ]]; then
@@ -342,6 +367,28 @@ vm_cmd_up() {
   # A8: Confirm host no longer runs the agent container
   echo "Host Docker is not running the agent container in VM mode."
   echo "All agent execution is inside the VM."
+}
+
+_vm_profile_workspace_store() {
+  local vm_dir="${1:?VM profile directory required}" workspace="${2:?workspace required}" tmp
+  [[ -d "$workspace" && ! -L "$workspace" ]] || {
+    echo "REFUSED: VM workspace must be a real directory: $workspace" >&2
+    return 1
+  }
+  workspace="$(realpath "$workspace")" || return 1
+  [[ ! -L "$vm_dir" ]] || {
+    echo "REFUSED: VM profile directory must not be a symlink: $vm_dir" >&2
+    return 1
+  }
+  mkdir -p "$vm_dir"
+  [[ ! -L "$vm_dir/workspace" ]] || {
+    echo "REFUSED: VM workspace metadata must not be a symlink: $vm_dir/workspace" >&2
+    return 1
+  }
+  tmp="$(mktemp "$vm_dir/.workspace.tmp.XXXXXX")" || return 1
+  (umask 077; printf '%s\n' "$workspace" >"$tmp") || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp"
+  mv -f -- "$tmp" "$vm_dir/workspace"
 }
 
 _vm_confirm_workspace_switch() {
@@ -361,12 +408,13 @@ _vm_confirm_workspace_switch() {
 }
 
 _vm_shutdown_for_workspace_switch() {
-  local vm_dir="$1" timeout="${VM_WORKSPACE_SWITCH_TIMEOUT:-60}" deadline status
+  local vm_dir="$1" reason="${2:-changing the virtiofs workspace}"
+  local timeout="${VM_WORKSPACE_SWITCH_TIMEOUT:-60}" deadline status
   [[ "$timeout" =~ ^[1-9][0-9]{0,2}$ ]] || {
     echo 'REFUSED: VM_WORKSPACE_SWITCH_TIMEOUT must be an integer from 1 to 999 seconds.' >&2
     return 2
   }
-  echo "Requesting a clean guest shutdown before changing the virtiofs workspace."
+  echo "Requesting a clean guest shutdown before $reason."
   # Graceful guest poweroff first. An SSH disconnect during shutdown is normal;
   # the VM process status below decides whether it completed.
   vm_ssh "$vm_dir" 'sudo systemctl poweroff' >/dev/null 2>&1 || true
@@ -402,6 +450,9 @@ vm_cmd_status() {
   echo "VM: $vm_name"
   echo "  State: $status"
   echo "  Dir:   $vm_dir"
+  if vm_memory_profile_load "$vm_dir" 2>/dev/null; then
+    echo "  Memory: ${VM_MEMORY_GIB} GiB"
+  fi
 
   if echo "$status" | grep -q running; then
     local ssh_port
@@ -430,6 +481,131 @@ vm_cmd_status() {
   fi
 
   return 0
+}
+
+_vm_confirm_resize() {
+  local vm_name="$1" old_gib="$2" new_gib="$3" answer
+  if [[ "${VM_YES:-0}" == 1 ]]; then
+    echo 'Auto-accept enabled (VM_YES=1); continuing with a clean VM restart.'
+    return 0
+  fi
+  [[ -t 0 ]] || {
+    echo 'REFUSED: resizing a running VM requires an interactive confirmation or --yes.' >&2
+    return 1
+  }
+  echo "Resizing VM '$vm_name' from ${old_gib} GiB to ${new_gib} GiB requires a clean guest shutdown and restart."
+  echo 'The overlay, base image, seed, SSH identity, installed software, and guest data will be preserved; running guest processes will stop.'
+  read -r -p 'Proceed with resize? [y/N] ' answer
+  [[ "$answer" == [yY] || "$answer" == [yY][eE][sS] ]]
+}
+
+vm_cmd_resize() {
+  local vm_name="${1:-}" new_gib="${2:-}" vm_dir status qemu_pid qemu_args
+  local virtiofsd_pid workspace base_disk overlay_disk ssh_pubkey old_gib guest_mem_kib
+  [[ -n "$vm_name" && -n "$new_gib" ]] || {
+    echo 'Usage: ./lab-vm resize <profile> <GiB>' >&2
+    return 2
+  }
+  vm_memory_validate_gib "$new_gib" || {
+    echo 'REFUSED: requested memory must be a whole number of GiB from 1 to 128.' >&2
+    return 2
+  }
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" && ! -L "$vm_dir" ]] || {
+    echo "REFUSED: no safe VM profile found at $vm_dir" >&2
+    return 1
+  }
+  [[ -f "$vm_dir/disk.qcow2" && -f "$VM_DIR_BASE/base.qcow2" && -f "$vm_dir/seed.iso" ]] || {
+    echo "REFUSED: VM profile '$vm_name' is missing its overlay, base image, or seed; resize does not provision or rebuild profiles." >&2
+    return 1
+  }
+  [[ -f "$vm_dir/id_vm_control" && -f "$vm_dir/id_vm_control.pub" && -f "$vm_dir/known_hosts" ]] || {
+    echo "REFUSED: VM profile '$vm_name' is missing its SSH identity; resize will not recreate credentials." >&2
+    return 1
+  }
+  status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status='stopped'
+  [[ "$status" == *running* ]] || {
+    echo "REFUSED: VM '$vm_name' must be running so resize can verify and preserve its active workspace. Start it with ./lab-vm up $vm_name, then retry." >&2
+    return 1
+  }
+  qemu_pid="$(cat "$vm_dir/qemu.pid" 2>/dev/null || true)"
+  qemu_args="$(_vm_read_qemu_process_args "$qemu_pid")" || {
+    echo 'REFUSED: cannot inspect the running QEMU process; VM was not changed.' >&2
+    return 1
+  }
+  [[ "$qemu_args" == *qemu-system-x86_64* ]] || {
+    echo 'REFUSED: recorded PID is not a QEMU process; VM was not changed.' >&2
+    return 1
+  }
+  vm_memory_profile_load "$vm_dir" || return 1
+  old_gib="$VM_MEMORY_GIB"
+  vm_memory_qemu_matches "$qemu_args" "$old_gib" || {
+    echo 'REFUSED: running QEMU memory does not match profile metadata; VM was not changed.' >&2
+    return 1
+  }
+  if [[ "$new_gib" == "$old_gib" ]]; then
+    echo "VM '$vm_name' already uses ${old_gib} GiB; no restart needed."
+    return 0
+  fi
+  vm_memory_preflight "$new_gib" "$qemu_pid" || {
+    echo 'REFUSED: memory budget is insufficient; VM remains running and unchanged.' >&2
+    return 1
+  }
+  _vm_confirm_resize "$vm_name" "$old_gib" "$new_gib" || {
+    echo 'Resize cancelled; VM remains running and unchanged.' >&2
+    return 1
+  }
+
+  virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null || true)"
+  workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid")" || {
+    echo 'REFUSED: cannot verify the active workspace export; VM was not changed.' >&2
+    return 1
+  }
+  [[ -d "$workspace" ]] || {
+    echo "REFUSED: active workspace is no longer a directory: $workspace" >&2
+    return 1
+  }
+  workspace="$(realpath "$workspace")" || return 1
+  _vm_profile_workspace_store "$vm_dir" "$workspace" || return 1
+  vm_recursion_load_profile "$vm_dir" || return 1
+  VM_GUEST_RECURSION_DEPTH="$VM_AGENT_RECURSION_DEPTH"
+  VM_EFFECTIVE_MAX_DEPTH="$VM_AGENT_MAX_DEPTH"
+
+  _vm_shutdown_for_workspace_switch "$vm_dir" 'resizing VM RAM' || {
+    echo 'Resize stopped before changing profile settings; the running VM and its overlay remain intact.' >&2
+    return 1
+  }
+
+  vm_memory_profile_store "$vm_dir" "$new_gib" || return 1
+  VM_MEMORY_GIB="$new_gib"
+  base_disk="$VM_DIR_BASE/base.qcow2"
+  overlay_disk="$vm_dir/disk.qcow2"
+  ssh_pubkey="$(vm_ssh_get_host_key "$vm_dir")" || return 1
+  echo "Restarting VM '$vm_name' with ${new_gib} GiB; preserving workspace '$workspace' and the existing overlay."
+  vm_run_start "$vm_dir" "$vm_name" "$workspace" "$base_disk" "$overlay_disk" "$ssh_pubkey" || {
+    echo "ERROR: resized VM did not start. The profile and overlay are preserved at $vm_dir; requested memory remains ${new_gib} GiB." >&2
+    return 1
+  }
+  VM_STARTING=0
+  _vm_wait_for_cloud_init "$vm_dir" || return 1
+  vm_ssh "$vm_dir" 'test -f /var/lib/mester-provisioned && mountpoint -q /workspace' || {
+    echo "ERROR: VM restarted but guest/workspace readiness failed; profile remains at $vm_dir." >&2
+    return 1
+  }
+  _vm_ensure_rootless_docker "$vm_dir" || {
+    echo "ERROR: VM restarted but rootless guest Docker did not become ready; profile remains at $vm_dir." >&2
+    return 1
+  }
+  guest_mem_kib="$(vm_ssh "$vm_dir" "awk '/^MemTotal:/ {print \$2}' /proc/meminfo")" || return 1
+  [[ "$guest_mem_kib" =~ ^[0-9]+$ ]] || {
+    echo 'ERROR: could not verify guest MemTotal after resize.' >&2
+    return 1
+  }
+  (( guest_mem_kib >= new_gib * 1024 * 900 )) || {
+    echo "ERROR: guest reports only $((guest_mem_kib / 1024)) MiB after requesting ${new_gib} GiB; profile remains running for inspection." >&2
+    return 1
+  }
+  echo "VM '$vm_name' resized to ${new_gib} GiB and restarted successfully."
 }
 
 # ─── vm ssh: SSH into the VM ────────────────────────────────────────

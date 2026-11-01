@@ -215,6 +215,7 @@ host-network changes are permitted to make it work. Manage the current host-to-g
     ./lab-vm update               # check managed tools/config, then confirm updates
     ./lab-vm update opencode      # check/update only OpenCode
     ./lab-vm update --all         # include guest OS packages and Docker Engine
+    ./lab-vm resize default 8     # cleanly restart a managed profile with 8 GiB RAM
     ./lab-vm auth-forward default <port> # exact-port manual diagnostic fallback
 ```
 
@@ -354,6 +355,12 @@ is deleted. Guest processes and active workload containers stop during the switc
 `--yes` skips the confirmation and therefore should only be used when that
 interruption is intended. `stop`, `down`, `--clean`, and `rebuild` have separate,
 more destructive effects described below.
+
+To change a running profile's QEMU RAM allocation, use `./lab-vm resize <profile> <GiB>`.
+This performs a clean guest shutdown/restart while preserving the overlay, keys, and installed
+guest state; it does not hot-add RAM or tear down workload volumes. The command preflights
+available and cgroup-limited memory with 512 MiB reserved. It can resize only profiles managed
+from the current host namespace, not the ancestor VM containing the current shell.
 
 ### Choosing sessions, workspaces, and branches
 

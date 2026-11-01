@@ -457,6 +457,18 @@ setup() {
   [[ "$output" == *"$recursion_root/child/vm/child"* ]]
 }
 
+@test "nested startup keeps its preflighted recursion session for snapshot preparation" {
+  local session_line reset_line prepare_line reset_context
+  session_line="$(grep -nF 'VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$vm_name")"' "$REPO_ROOT/lab-vm" | head -1 | cut -d: -f1)"
+  reset_line="$(grep -nF 'VM_RECURSION_SESSION_DIR=""' "$REPO_ROOT/lab-vm" | head -1 | cut -d: -f1)"
+  prepare_line="$(grep -nF 'vm-recursion-workspace.py" prepare --source' "$REPO_ROOT/lab-vm" | head -1 | cut -d: -f1)"
+  [ -n "$session_line" ] && [ -n "$reset_line" ] && [ -n "$prepare_line" ]
+  [ "$session_line" -lt "$reset_line" ]
+  [ "$reset_line" -lt "$prepare_line" ]
+  reset_context="$(sed -n "$((reset_line - 1)),$((reset_line + 2))p" "$REPO_ROOT/lab-vm")"
+  [[ "$reset_context" == *'if (( VM_NESTED_LAUNCH != 1 )); then'* ]]
+}
+
 @test "recursive workspace preparation snapshots changes into a separate disposable checkout" {
   local source="$BATS_TEST_TMPDIR/source-repo" session="$BATS_TEST_TMPDIR/child-session" target
   mkdir -p "$source/.mester" "$source/.bench-models"
@@ -1403,6 +1415,173 @@ MOCK_SUDO
   [[ "$joined" == *"vhost-user-fs-pci,chardev=charfs,tag=workspace"* ]]
   [[ "$joined" != *"virtio-9p"* ]]
   [[ "$joined" != *"host-workspace"* ]]
+}
+
+@test "QEMU memory override keeps the memfd backend and guest RAM size in sync" {
+  VM_PROXY_PORT=45678
+  _vm_build_qemu_command /state demo /state/disk.qcow2 /state/virtiofs.sock 22222 tcg 0 "" 8
+  joined="$(printf '%s\n' "${VM_QEMU_CMD[@]}")"
+  [[ "$joined" == *$'-m\n8192'* ]]
+  [[ "$joined" == *"memory-backend-memfd,id=mem,size=8G,share=on"* ]]
+  [[ "$joined" != *"size=4G,share=on"* ]]
+}
+
+@test "VM profile memory metadata is private, validated, and legacy profiles remain 4 GiB" {
+  source "$REPO_ROOT/lib/vm/runner.sh"
+  local vm_dir="$BATS_TEST_TMPDIR/memory-profile"
+  mkdir -p "$vm_dir"
+
+  vm_memory_profile_load "$vm_dir"
+  [ "$VM_MEMORY_GIB" -eq 4 ]
+
+  vm_memory_profile_store "$vm_dir" 32
+  vm_memory_profile_load "$vm_dir"
+  [ "$VM_MEMORY_GIB" -eq 32 ]
+  [ "$(stat -c '%a' "$vm_dir/memory_gib")" = 600 ]
+
+  printf '0\n' >"$vm_dir/memory_gib"
+  run vm_memory_profile_load "$vm_dir"
+  [ "$status" -ne 0 ]
+
+  printf '8\n32\n' >"$vm_dir/memory_gib"
+  run vm_memory_profile_load "$vm_dir"
+  [ "$status" -ne 0 ]
+
+  rm -f "$vm_dir/memory_gib"
+  ln -s /etc/passwd "$vm_dir/memory_gib"
+  run vm_memory_profile_load "$vm_dir"
+  [ "$status" -ne 0 ]
+}
+
+@test "managed resize preflights before clean restart and preserves VM storage" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/resize-state"
+  VM_YES=1
+  local vm_dir="$VM_DIR_BASE/default" workspace="$BATS_TEST_TMPDIR/resize-workspace"
+  local calls="$BATS_TEST_TMPDIR/resize-calls"
+  export RESIZE_TEST_WORKSPACE="$workspace"
+  mkdir -p "$vm_dir" "$workspace"
+  printf 'base-data\n' >"$VM_DIR_BASE/base.qcow2"
+  printf 'overlay-data\n' >"$vm_dir/disk.qcow2"
+  printf 'seed-data\n' >"$vm_dir/seed.iso"
+  printf 'ssh-key-data\n' >"$vm_dir/id_vm_control"
+  printf 'ssh-pubkey-data\n' >"$vm_dir/id_vm_control.pub"
+  : >"$vm_dir/known_hosts"
+  printf '0 2 1\n' >"$vm_dir/recursion_policy"
+  printf '12345\n' >"$vm_dir/qemu.pid"
+
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  _vm_read_qemu_process_args() { echo 'qemu-system-x86_64 -m 4096 -object memory-backend-memfd,id=mem,size=4G,share=on'; }
+  _vm_read_virtiofsd_shared_dir() { echo "$RESIZE_TEST_WORKSPACE"; }
+  vm_memory_preflight() { echo "preflight:$1:${2:-}" >>"$calls"; }
+  _vm_shutdown_for_workspace_switch() { echo "shutdown:$1" >>"$calls"; }
+  vm_run_start() { echo "start:$3:$VM_MEMORY_GIB" >>"$calls"; }
+  _vm_wait_for_cloud_init() { echo cloud-init >>"$calls"; }
+  vm_ssh() {
+    echo guest-ready >>"$calls"
+    if [[ "${2:-}" == *awk* ]]; then echo 33554432; fi
+    return 0
+  }
+  _vm_ensure_rootless_docker() { return 0; }
+  _vm_install_guest_harness() { return 0; }
+
+  run vm_cmd_resize default 32
+  [ "$status" -eq 0 ]
+  grep -Fxq "preflight:32:12345" "$calls"
+  grep -Fxq "shutdown:$vm_dir" "$calls"
+  grep -Fxq "start:$workspace:32" "$calls"
+  grep -Fxq cloud-init "$calls"
+  [ "$(cat "$vm_dir/memory_gib")" = 32 ]
+  [ "$(cat "$vm_dir/disk.qcow2")" = overlay-data ]
+  [ "$(cat "$VM_DIR_BASE/base.qcow2")" = base-data ]
+  [ "$(cat "$vm_dir/seed.iso")" = seed-data ]
+  [ "$(cat "$vm_dir/id_vm_control")" = ssh-key-data ]
+  [ "$(cat "$vm_dir/recursion_policy")" = '0 2 1' ]
+}
+
+@test "managed resize resource refusal leaves the running profile untouched" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/resize-refusal"
+  local vm_dir="$VM_DIR_BASE/default" workspace="$BATS_TEST_TMPDIR/resize-workspace"
+  local calls="$BATS_TEST_TMPDIR/resize-refusal-calls"
+  export RESIZE_TEST_WORKSPACE="$workspace"
+  mkdir -p "$vm_dir" "$workspace"
+  : >"$VM_DIR_BASE/base.qcow2"
+  : >"$vm_dir/seed.iso"
+  printf 'overlay-data\n' >"$vm_dir/disk.qcow2"
+  printf '4\n' >"$vm_dir/memory_gib"
+  printf '0 0 0\n' >"$vm_dir/recursion_policy"
+  : >"$vm_dir/id_vm_control"
+  : >"$vm_dir/id_vm_control.pub"
+  : >"$vm_dir/known_hosts"
+  printf '12345\n' >"$vm_dir/qemu.pid"
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  _vm_read_qemu_process_args() { echo 'qemu-system-x86_64 -m 4096 -object memory-backend-memfd,id=mem,size=4G,share=on'; }
+  _vm_read_virtiofsd_shared_dir() { echo "$RESIZE_TEST_WORKSPACE"; }
+  vm_memory_preflight() { echo preflight >>"$calls"; return 1; }
+  _vm_shutdown_for_workspace_switch() { echo shutdown >>"$calls"; }
+  vm_run_start() { echo start >>"$calls"; }
+
+  run vm_cmd_resize default 32
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'memory budget'* ]]
+  [ "$(cat "$vm_dir/memory_gib")" = 4 ]
+  [ "$(cat "$vm_dir/disk.qcow2")" = overlay-data ]
+  [ "$(cat "$calls")" = preflight ]
+}
+
+@test "managed resize refuses an unclean shutdown before changing the requested RAM" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/resize-shutdown-refusal"
+  VM_YES=1
+  local vm_dir="$VM_DIR_BASE/default" workspace="$BATS_TEST_TMPDIR/resize-workspace"
+  local calls="$BATS_TEST_TMPDIR/resize-shutdown-calls"
+  export RESIZE_TEST_WORKSPACE="$workspace"
+  mkdir -p "$vm_dir" "$workspace"
+  : >"$VM_DIR_BASE/base.qcow2"
+  : >"$vm_dir/seed.iso"
+  printf 'overlay-data\n' >"$vm_dir/disk.qcow2"
+  printf '4\n' >"$vm_dir/memory_gib"
+  printf '0 0 0\n' >"$vm_dir/recursion_policy"
+  : >"$vm_dir/id_vm_control"
+  : >"$vm_dir/id_vm_control.pub"
+  : >"$vm_dir/known_hosts"
+  printf '12345\n' >"$vm_dir/qemu.pid"
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  _vm_read_qemu_process_args() { echo 'qemu-system-x86_64 -m 4096 -object memory-backend-memfd,id=mem,size=4G,share=on'; }
+  _vm_read_virtiofsd_shared_dir() { echo "$RESIZE_TEST_WORKSPACE"; }
+  vm_memory_preflight() { echo preflight >>"$calls"; }
+  _vm_shutdown_for_workspace_switch() { echo shutdown >>"$calls"; return 1; }
+  vm_run_start() { echo start >>"$calls"; }
+
+  run vm_cmd_resize default 32
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'running VM and its overlay remain intact'* ]]
+  [ "$(cat "$vm_dir/memory_gib")" = 4 ]
+  [ "$(cat "$vm_dir/disk.qcow2")" = overlay-data ]
+  [ "$(cat "$calls")" = $'preflight\nshutdown' ]
+}
+
+@test "resize CLI rejects invalid profile, RAM, and arity before prerequisite checks" {
+  run "$REPO_ROOT/lab-vm" resize
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Usage: ./lab-vm resize <profile> <GiB>'* ]]
+  [[ "$output" != *'Checking VM prerequisites'* ]]
+
+  run "$REPO_ROOT/lab-vm" resize ../escape 8
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM profile names must start with a letter or digit'* ]]
+  [[ "$output" != *'Checking VM prerequisites'* ]]
+
+  run "$REPO_ROOT/lab-vm" resize default 0
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'whole number of GiB from 1 to 128'* ]]
+  [[ "$output" != *'Checking VM prerequisites'* ]]
+
+  run "$REPO_ROOT/lab-vm" resize default 129
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'whole number of GiB from 1 to 128'* ]]
+  [[ "$output" != *'Checking VM prerequisites'* ]]
 }
 
 @test "KVM QEMU command passes host CPU features through to the guest" {

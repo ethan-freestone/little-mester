@@ -30,6 +30,7 @@
 #   ./lab-vm ssh [name]
 #   ./lab-vm down [name]
 #   ./lab-vm stop [name]
+#   ./lab-vm resize <name> <GiB>
 #   ./lab-vm base [name]
 #   ./lab-vm rebuild [name]
 #   ./lab-vm install-tools [name] [--restart-opencode]
@@ -218,6 +219,11 @@ VM lifecycle commands (epic #35, ticket #41):
   ./lab-vm stop [name]
       Add --discard-recursive to acknowledge deletion of nested child state.
       Teardown Docker containers in VM, verify git is clean, then down.
+
+  ./lab-vm resize <name> <GiB>
+      Cleanly shut down and restart a running managed VM with different RAM.
+      Preserves the active workspace, overlay, base image, seed, SSH identity,
+      installed software, and guest data. This cannot resize an ancestor VM.
 
   ./lab-vm base [name]
       Download and verify the base image (about 600 MiB; 20 GiB virtual size).
@@ -412,7 +418,7 @@ case "$cmd" in
     ;;
   *)
     case "$cmd" in
-      run|up|status|ssh|down|stop|agent|auth-forward|egress-reload|verify-isolation|recursion-clean|base|rebuild|install-tools|update|models|metrics|context|extra|test|help|--help) ;;
+      run|up|status|ssh|down|stop|resize|agent|auth-forward|egress-reload|verify-isolation|recursion-clean|base|rebuild|install-tools|update|models|metrics|context|extra|test|help|--help) ;;
       *)
         if [[ -d "$cmd" || "$cmd" == */* ]]; then
           if [[ ${#remaining[@]} -gt 1 ]]; then
@@ -439,6 +445,9 @@ if [[ "$VM_DISCARD_RECURSIVE" == 1 ]]; then
     *) die '--discard-recursive is only valid with down, stop, rebuild, or up --clean.' ;;
   esac
 fi
+if [[ "$VM_CLEAN" == 1 && "$cmd" != up ]]; then
+  die '--clean is only valid with up.'
+fi
 
 if [[ "$cmd" == run ]]; then
   [[ -n "${VM_WS_ARG:-}" ]] || die 'A workspace path is required.'
@@ -448,23 +457,46 @@ elif [[ -n "${VM_WS_ARG:-}" && "$cmd" != up ]]; then
 elif [[ -n "$VM_NAME_ARG" && "$cmd" != install-tools && "$cmd" != update ]]; then
   die '--name is only valid with the run, install-tools, or update command.'
 fi
-if [[ "$cmd" == up ]]; then
+if [[ "$cmd" == up || "$cmd" == resize ]]; then
   [[ "$vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
+fi
+if [[ "$cmd" == resize ]]; then
+  [[ ${#remaining[@]} -eq 3 ]] || die 'Usage: ./lab-vm resize <profile> <GiB>'
+  vm_memory_validate_gib "${remaining[2]}" || die 'Requested memory must be a whole number of GiB from 1 to 128.'
 fi
 if [[ "$cmd" == run || "$cmd" == up ]]; then
   vm_recursion_configure "$cmd" || exit 1
   if (( VM_NESTED_LAUNCH == 1 )); then
     vm_recursion_require_nested_kvm || exit 1
+    VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$vm_name")" || die 'Invalid recursive profile name.'
+    VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
   fi
   VM_WS_ARG="${VM_WS_ARG:-$(pwd)}"
   check_workspace "$VM_WS_ARG"
   VM_WS_ARG="$VM_WORKSPACE"
   vm_recursion_validate_workspace "$VM_WS_ARG" "$LAB_DIR" || exit 1
 
-  VM_RECURSION_SESSION_DIR=""
+  # Check the selected profile's RAM budget before creating recursive
+  # snapshots, profile metadata, disks, or QEMU processes.
+  _memory_vm_dir="$VM_DIR_BASE/$vm_name"
+  [[ ! -L "$_memory_vm_dir" ]] || die "VM profile directory must not be a symlink: $_memory_vm_dir"
+  vm_memory_profile_load "$_memory_vm_dir" || exit 1
+  _memory_release_pid=""
+  if [[ -d "$_memory_vm_dir" ]] && grep -q running <<<"$(vm_run_status "$_memory_vm_dir" 2>/dev/null || true)"; then
+    _memory_release_pid="$(cat "$_memory_vm_dir/qemu.pid" 2>/dev/null || true)"
+    _memory_qemu_args="$(_vm_read_qemu_process_args "$_memory_release_pid")" || die 'Cannot inspect the existing QEMU process before memory preflight.'
+    [[ "$_memory_qemu_args" == *qemu-system-x86_64* ]] || die 'Recorded running PID is not QEMU; refusing resource preflight.'
+    vm_memory_qemu_matches "$_memory_qemu_args" "$VM_MEMORY_GIB" || die 'Running QEMU RAM does not match profile metadata; refusing startup.'
+  fi
+  vm_memory_preflight "$VM_MEMORY_GIB" "$_memory_release_pid" || exit 1
+
+  # The nested path was resolved above so preflight targets the same isolated
+  # profile/state root. Clear it only for an outer launch (which may choose a
+  # safe snapshot of the source workspace below).
+  if (( VM_NESTED_LAUNCH != 1 )); then
+    VM_RECURSION_SESSION_DIR=""
+  fi
   if (( VM_NESTED_LAUNCH == 1 )); then
-    VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$vm_name")" || die 'Invalid recursive profile name.'
-    VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
     VM_WS_ARG="$(python3 "$LAB_DIR/scripts/vm-recursion-workspace.py" prepare --source "$VM_WS_ARG" --session "$VM_RECURSION_SESSION_DIR")" || exit 1
     check_workspace "$VM_WS_ARG"
     VM_WS_ARG="$VM_WORKSPACE"
@@ -524,7 +556,7 @@ fi
 # later lifecycle commands, not only the command that originally created it.
 if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" ]]; then
   case "$cmd" in
-    run|up|status|ssh|down|stop|agent|egress-reload|verify-isolation|base|rebuild|install-tools|update)
+    run|up|status|ssh|down|stop|resize|agent|egress-reload|verify-isolation|base|rebuild|install-tools|update)
       VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$vm_name")" || die 'Invalid recursive profile name.'
       VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
       ;;
@@ -561,7 +593,7 @@ fi
 # status, ssh, and test don't need anything.
 _prereqs_needed=0
 case "$cmd" in
-  base|up|rebuild|run) _prereqs_needed=1 ;;
+  base|up|rebuild|run|resize) _prereqs_needed=1 ;;
 esac
 
 if [[ $_prereqs_needed -eq 1 ]]; then
@@ -714,6 +746,10 @@ case "$cmd" in
     ;;
   stop)
     vm_cmd_stop "$vm_name"
+    ;;
+  resize)
+    [[ ${#remaining[@]} -eq 3 ]] || die 'Usage: ./lab-vm resize <profile> <GiB>'
+    vm_cmd_resize "$vm_name" "${remaining[2]}"
     ;;
   base)
     vm_cmd_base "$vm_name"

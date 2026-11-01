@@ -1,6 +1,6 @@
 # Host Setup — VM Mode (Epic #35)
 
-> **Last updated:** 2026-10-28
+> **Last updated:** 2026-11-01
 > **Target:** Experimental Linux x86_64 host profile for the disposable QEMU VM that hosts the agent sandbox. This is not yet a claim of support for every Unix system.
 > **Epic:** [#35](tickets/ticket-035.json) — VM-based Docker agent environment.
 > **Architectural reference:** [`vm-architecture.md`](vm-architecture.md), [`DECISIONS.md` §C.8](DECISIONS.md#c8-vm-harness-topology-transport-and-isolation-2026-10-26).
@@ -160,6 +160,32 @@ This is expected. The VM will be slower but fully functional.
 ./lab-vm down                # Stop and remove the VM
 ./lab-vm stop                # Teardown containers + stop VM
 ```
+
+### Resize a running VM
+
+QEMU RAM is not changed live. Resize a running managed profile with a clean guest
+shutdown and restart:
+
+```bash
+./lab-vm resize default 32
+```
+
+Replace `default` with the profile name and `32` with the requested whole number of
+GiB (1–128). The command checks available/cgroup memory with 512 MiB headroom before
+stopping the guest, prompts before interrupting guest processes, and preserves the
+overlay, base image, seed, SSH identity, installed software, and guest data. It does not
+run `stop`, `down`, `rebuild`, or `docker compose down -v`. The profile must be running
+so the command can verify and remount its active workspace. `--yes` skips the restart
+confirmation only; it does not bypass the memory preflight.
+
+`lab-vm` can resize only a QEMU profile managed in the current host/process namespace.
+It cannot resize the ancestor VM that contains the current shell; that must be assigned
+more memory by its parent hypervisor/launcher and restarted there.
+
+In this implementation slice, fresh profiles still default to 4 GiB, and profiles without
+`memory_gib` metadata are treated as legacy 4-GiB profiles. The planned depth-scaled
+8/4/2/1-GiB defaults and new-profile `--memory <GiB>` setup override follow this resize
+slice; they are not implemented yet.
 
 ### Multi-VM support
 

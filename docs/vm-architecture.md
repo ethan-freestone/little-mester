@@ -8,9 +8,9 @@
 ## 1. Shape
 
 ```
-Host (your machine) — ./lab runs here as you, not as a service
+Host (your machine) — ./lab is the intended default and runs here as you, not as a service
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  ./lab                                                                       │
+│  ./lab (VM-first target; current implementation is ./lab-vm)                  │
 │   ├─ check_workspace()            path guards run BEFORE anything is shared   │
 │   ├─ VM host adapter              QEMU + supported host acceleration          │
 │   ├─ virtiofsd                   exports ONLY the selected workspace          │
@@ -31,6 +31,9 @@ Host (your machine) — ./lab runs here as you, not as a service
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
+Until the launcher migration lands, invoke VM primitives through `./lab-vm`; the current
+`./lab` implementation is still the Docker launcher. The selected future entry is
+`./lab <workspace>`, while the old workflow is to remain available as `./lab-docker`.
 Only explicitly selected crossings traverse the VM boundary: the workspace (virtiofs), SSH
 control (loopback-only host forward), and named model, metrics, or egress endpoints. There is
 no general host route. VM metrics transport is a separate integration from the existing
@@ -141,7 +144,9 @@ The VM primitives currently live in standalone `./lab-vm`; merging them into `./
 launching the agent there remain ticket #41 A2. The intended integrated lifecycle is:
 
 1. `./lab-vm up --workspace <dir>` validates the path on the host, resolves the pinned base image, and
-   creates `.mester/vm/<name>/` (overlay, seed, keys, sockets; gitignored).
+   creates the profile's overlay, seed, keys, and sockets. The intended state root is private and
+   outside all selected workspaces; the current implementation still has legacy
+   `.mester/vm/<name>/` consumers, which is a known self-development boundary gap tracked on #41/#52.
 2. `qemu-system-x86_64` starts with KVM, the virtiofs device, SSH on a loopback ephemeral
    port, model/egress `guestfwd` entries, and `restrict=on`.
 
@@ -158,12 +163,12 @@ path; local regressions do not replace the pending live nested-KVM acceptance ga
 3. cloud-init provisions the guest user, direct harness runtime, optional guest workload
    runtime (Docker/Compose), native
    auth prerequisites, proxy settings and the workspace mount.
-4. `./lab-vm agent [name]` currently attaches the selected harness directly in the guest
-   (not in a container) to the invoking terminal. The target everyday entry point is a
-   single `./lab <workspace>` command that reuses/starts the prepared VM and enters the
-   guest TUI directly; provisioning and diagnostic commands remain explicit satellites.
-   The host-Docker workflow remains available as `./lab-docker`. This transition is gated by
-   #35/#52 and has not happened yet.
+4. `./lab-vm agent [name]` attaches the selected harness directly in the guest (not in a
+   container) to the invoking terminal. The owner-directed everyday entry is a single
+   `./lab <workspace>` command that reuses/starts the prepared VM and enters the guest TUI;
+   provisioning and diagnostic commands remain explicit satellites. The launcher cutover
+   is still unimplemented: `./lab` remains Docker today, and `./lab-docker` has not yet been
+   split out. Track implementation on #35/#52; acceptance gates remain independent.
    Guest-native provider login and browser callback forwarding are tracked in #45.
 5. The agent controls guest Docker/Compose for project services and tests. It may launch
    nested Little Mester VMs when nested virtualization is available and verified.
@@ -198,6 +203,26 @@ lifecycle acceptance gate under #43 A6/#52. If persisted policy permits descenda
 destructive side effects; `--yes` alone does not bypass this guard. The descendant-possible
 marker remains set if the configured maximum is lowered, until the associated overlay is
 discarded.
+
+### VM memory budget and resize
+
+New depth-0 profiles are intended to request 8 GiB; nested profiles scale down by level
+(4/2/1 GiB, with a 1-GiB floor). A new-profile `--memory <GiB>` override is planned;
+each profile's allocation is persisted and warm starts reuse it. Profiles created before
+the setting exists retain the legacy 4-GiB allocation until explicitly resized. `./lab-vm
+resize <profile> <GiB>` changes a managed VM's allocation by a clean guest shutdown and
+restart, preserving the writable overlay, base image, seed, keys, and installed guest
+state. QEMU live memory hotplug is not configured. This command cannot change the memory
+of the ancestor VM that contains the current `lab-vm` process; that requires its parent
+hypervisor/launcher and a restart at that layer.
+
+Before snapshot, profile creation, or QEMU startup—and before stopping a running VM to
+resize—preflight the requested RAM against current `MemAvailable` and any cgroup limit,
+retaining at least 512 MiB of headroom. For a running profile, account for its memory that
+will be released by a clean shutdown. Refuse without side effects when the projected budget
+is insufficient; do not silently rely on swap or overcommit. These rules are the design
+contract; implementation and local regression results are tracked by #41/#52, and live
+boot/resize acceptance still requires an appropriate host.
 
 `./lab-vm context` reports the current process's container/VM layer, recursion metadata,
 nested-KVM device/CPU readiness, workspace filesystem, and Little Mester commit. Use

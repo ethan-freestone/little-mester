@@ -30,41 +30,47 @@ This rule applies to all future sessions. No implementation without prior writte
 
 ## A. How to use little-mester
 
-### A.1 Default workflow: --unsafe-recurse direct editing
-**You run:** `./lab <workspace> --unsafe-recurse` to launch an agent that directly edits files in the workspace. This includes editing little-mester itself when the workspace IS little-mester.
+### A.1 Default workflow — VM-native agent
+
+The owner-directed release target is a native OpenCode process inside a local
+QEMU/KVM guest. `./lab <workspace>` is the intended VM-first entry point; the former
+container launcher is retained separately as `./lab-docker`. The launcher cutover and
+VM acceptance are still in progress, so use the command behavior documented by the
+current README and ticket #35 until that cutover is implemented. `./lab-vm` remains the
+explicit lifecycle and diagnostic interface during this transition.
+
+The guest receives one selected workspace. It has broad authority inside the guest,
+but must not receive host credentials, host Docker, or files outside that workspace.
+Use `--recurse --max-depth N` only for bounded nested testing. `--unsafe-recurse`
+permits write access to a selected Little Mester checkout; it does not grant extra
+network or host access. Do not use write-enabled recursion while VM control keys/state
+are visible through the workspace share.
+
+### A.2 Configuration defaults
+
+| Setting | Default | Notes |
+|---|---|---|
+| Agent | OpenCode in the guest | Docker compatibility mode is explicit: `./lab-docker` |
+| Workspace | One selected directory at `/workspace` | Guarded before the host shares it |
+| Recursion | Disabled (`max-depth=0`) | Opt in explicitly; a child cannot raise the inherited maximum |
+| Public HTTP(S) | Through the policy-checked VM proxy | Direct guest egress and non-HTTP protocols are blocked |
+| Guest Docker | For project workloads | Not an agent wrapper or a host security boundary |
+| Permission mode | OpenCode default/ask | `--auto-accept` requests OpenCode `--auto`; explicit denies remain configured |
+
+Product direction does not imply acceptance. Check #35 and its linked ticket ledgers
+before describing host lifecycle, auth, permission UI, workload, or isolation behavior
+as accepted.
+
+### A.3 Verify the active runtime
 
 ```bash
-cd /path/to/little-mester
-./lab --unsafe-recurse    # agent can read/write the current directory
+./lab-vm context --json
+./lab-vm status default
+./lab-vm verify-isolation default
 ```
 
-- `--unsafe-recurse` lifts the guard that blocks self-mounting (`check_workspace`)
-- Agent edits, runs tests (`bats tests/`, `npm test`), and commits — all within its session
-- No temp clone bridge needed
-
-### A.4 Container environment — everything must live in the repo
-**Critical constraint:** The sandbox container is ephemeral and gets recreated from the built image. Any changes made inside the running container that aren't persisted will be lost on the next run.
-
-- **`/home/agent` is a tmpfs mount** — writable at runtime but completely wiped when the container is recreated. Do NOT put persistent configs, plugins, or customizations there. They will not survive.
-- **All persistent configuration must live in the little-mester repo** (or be baked into the agent Docker image). Files in the repo can be copied during image build or mounted in via compose.
-- **The workspace mount** (`/workspace`) persists as long as it's the host directory you choose — that's the only host filesystem the agent sees by design. But configs for the agent/tui/opencode itself need to go in the repo, not in `/home/agent`.
-- **When customizing the agent (logos, themes, plugins, TUI config),** put them in the repo (e.g., under `agent/` or a tracked location) and wire them up in `agent/Dockerfile` or compose so they persist across container rebuilds.
-- **Avoid duplication** — when adding assets like logos, keep the canonical copy in a single tracked location (ideally under `agent/`) and symlink or copy from there as needed. Do not create multiple scattered copies without documenting why.
-
-### A.2 Default configuration values
-| Setting | Value | How to change |
-|---------|-------|---------------|
-| Default agent | `opencode` | `./lab --aider <workspace>` for aider |
-| Default egress | `true` (internet on) | `--isolated` or `--egress-false` |
-| Self-edit guard | denies by default | `--unsafe-recurse` sets `UNSAFE_RECURSE=1` |
-| Network when egress=true | `[egress, internal]` | — |
-| Network when egress=false | `[internal]` only | — |
-
-### A.3 How to verify the sandbox
-```bash
-./verify-lab.sh    # proves security guarantees hold
-./lab shell <workspace>  # plain bash inside the sandbox for debugging
-```
+These report runtime/context and representative boundary checks; they are not a
+substitute for the full acceptance matrix or a proof against hypervisor vulnerabilities.
 
 ---
 
@@ -316,19 +322,20 @@ These decisions cover the `./lab-vm` scripts, `lib/vm/` modules, and the CachyOS
 work. They are tactical choices that don't change the topology in §C.8 but affect how the
 code is structured and what to watch for on other distros.
 
-#### C.9.1 VM state stored in-repo, not in `$HOME`
+#### C.9.1 VM control state is private and outside workspaces
 
-**Decision:** All VM artifacts (overlay disk, seed ISO, SSH keys, virtiofs sockets, PID
-files) live under `$LAB_DIR/.mester/vm/<name>/` — inside the workspace repository, not
-`~/.mester/vm/`.
+**Current decision (supersedes the original 2026-10-26 in-repository-state rationale):**
+VM keys, disks, seeds, sockets, PIDs, logs, and profile control metadata must live under
+a private per-user state root outside every selected workspace. A suitable default is
+`${XDG_STATE_HOME:-$HOME/.local/state}/little-mester/vm/`; immutable/downloaded base
+images belong in a separate cache root. Git-ignored state is not private if the agent
+can read it through the workspace share.
 
-**Why:** The `--unsafe-recurse` flag needs to target the repo itself. If VM state lived
-under `~/.mester/`, `--unsafe-recurse` wouldn't reach it and the agent couldn't inspect
-its own VM state. Storing in-repo keeps everything scoped to the workspace.
-
-**Consequence:** `.mester/` must be gitignored. The directory is gitignored globally
-(see `.gitignore`) so no VM state accidentally leaks to the remote. The agent can use
-`git status --short` to verify no uncommitted files remain after `down`.
+The current implementation still has legacy `.mester/vm` consumers and requires a
+careful migration/compatibility path. Until that work is complete and checked, do not
+use `--unsafe-recurse` on a live checkout that contains VM state or control keys. Do
+not move a live QEMU profile or backing-image chain in place. Track implementation and
+acceptance on #41/#43/#52.
 
 #### C.9.2 Prereq check runs only for state-changing commands
 
@@ -385,25 +392,15 @@ missing is the pair reported. If either exists, neither is flagged.
 **Why:** These two packages are interchangeable; the script tries `genisoimage` first and
 falls back to `mkisofs`. Reporting both when only one is missing would be redundant.
 
-#### C.9.7 Full lifecycle test sequence
+#### C.9.7 Lifecycle acceptance is a set of independent gates
 
-**Decision:** The canonical test sequence for verifying a working VM is:
-
-```
-base → up → status → ssh → [lab --unsafe-recurse] → git status --short → stop → down
-```
-
-- `base`: download/verify base image
-- `up`: start the VM
-- `status`: verify running
-- `ssh`: open interactive shell (verify cloud-init completed, Docker running)
-- `lab --unsafe-recurse`: run the agent with full workspace access
-- `git status --short`: confirm no uncommitted files (agent didn't leave artifacts)
-- `stop`: graceful shutdown
-- `down`: teardown
-
-This sequence exercises the full flow: image management, VM startup, cloud-init, SSH,
-agent execution, and clean teardown.
+There is no single canonical command sequence that establishes VM acceptance. Record
+base-image integrity, first provisioning, warm startup, guest readiness, agent attach,
+workspace switch, safe shutdown/resume, destructive teardown, auth/permission behavior,
+workload operation, and isolation as separate results on the relevant ticket. Preserve
+the VM and its evidence until the owner approves destructive cleanup. In particular,
+the current `stop`/`down` behavior deletes guest state and is not a routine daily stop;
+see #41/#52 for the current lifecycle contract and evidence.
 
 #### C.9.8 User permission prompt before package installation
 
@@ -552,15 +549,16 @@ nothing. Do not patch generated permissions into blanket allow rules.
 ---
 
 ### C.8 VM harness topology, transport and isolation (current)
-**Decision:** Little Mester is the
-harness and runs **directly in a local, `./lab`-managed QEMU/KVM VM guest**. The guest VM,
-not a Docker container, is the host-isolation boundary. The agent is intentionally given
-guest-level control: it can use Docker/Compose for arbitrary project services, install and
-configure guest software, and launch nested Little Mester QEMU/KVM VMs when supported.
-Docker is a workload tool inside the guest, never the outer agent sandbox. The selected
-workspace enters through virtiofs; model APIs and egress remain on narrowly forwarded,
-policy-controlled channels. Native provider auth belongs to the guest agent and its actual
-browser callback endpoint (#45).
+**Product architecture decision:** Little Mester runs the harness directly in a local,
+QEMU/KVM VM guest. The owner-directed default entry point is `./lab`; until that launcher
+cutover lands, the implementation remains split between the Docker launcher and
+`./lab-vm`. The guest VM, not a Docker container, is the intended host-isolation boundary.
+The agent is intentionally given guest-level control: it can use Docker/Compose for
+project services, install and configure guest software, and launch nested Little Mester
+QEMU/KVM VMs when supported. Docker is a workload tool inside the guest, never the outer
+agent sandbox. The selected workspace enters through virtiofs; model APIs and egress
+remain on narrowly forwarded, policy-controlled channels. Native provider auth belongs
+to the guest agent and its actual browser callback endpoint (#45).
 
 **Why this shape:**
 
@@ -595,10 +593,11 @@ browser callback endpoint (#45).
   root is not claimed as a security boundary from the agent. Host Docker and host privilege
   are never exposed.
 - **Control channel:** SSH over a QEMU user-network forward bound to `127.0.0.1` on an
-  ephemeral host port. `./lab vm` generates a per-VM ed25519 key under the gitignored
-  `.mester/vm/<name>/` state directory, uses a per-VM `known_hosts`, and never copies host
-  keys, cloud credentials, or `~/.ssh` into the VM. `qemu-guest-agent` handles lifecycle;
-  SSH handles commands and `./lab shell`.
+  ephemeral host port. The intended private per-user state directory holds per-VM keys
+  and `known_hosts`; the implementation still uses legacy `.mester/vm/<name>/` paths and
+  must migrate them before sharing the checkout with write-enabled recursion. Host keys,
+  cloud credentials, and `~/.ssh` are never copied into the VM. `qemu-guest-agent` handles
+  lifecycle; SSH handles commands and shell access.
 - **Model APIs:** Model service is optional and configured independently of the VM runtime.
   When selected, the VM may reach exactly one configured host-loopback API endpoint through
   an explicit QEMU `guestfwd` mapping, not through a general host route. A native host
@@ -660,16 +659,17 @@ support-profile failure, not worked around with host-specific relays or firewall
 Keeping the host model provider and guest workload runtime behind optional interfaces allows
 the same VM flow to work with native host services and across tested Unix profiles.
 
-#### C.9.17 VM-first launcher, retained Docker mode, and bounded recursion (2026-10-29)
+#### C.9.17 VM-first launcher, retained Docker mode, and bounded recursion (2026-11-01)
 
-**Decision:** Once the VM acceptance gates pass, `./lab` is the VM-backed, directly-in-guest
-Little Mester entry point and launches the interactive agent by default. Preserve the current
-containerized single-agent workflow as an explicit `./lab-docker` option; it is not
+**Owner-directed product decision:** `./lab <workspace>` is the VM-first default entry
+point and should start/reuse the guest and launch the interactive agent. Preserve the
+existing containerized single-agent workflow separately as `./lab-docker`; it is not
 Docker-in-Docker and must not acquire a host Docker socket or recursive agent capability.
-During migration, `./lab-vm` remains the experimental VM implementation and `./lab` remains
-the established Docker workflow. Do not switch the default or remove the Docker launcher
-until the VM model/TUI/metrics/exit, auth, permission, workload, isolation, and lifecycle
-gates pass. Any launcher rename/migration must preserve a tested rollback path.
+This decision supersedes the earlier decision to postpone switching the default until all
+acceptance gates passed. The implementation cutover is not complete yet: `./lab` is still
+the Docker launcher and `./lab-vm` is the VM implementation. Do not describe the branch as
+accepted or merge-ready until the independent VM, auth, permission, workload, isolation,
+lifecycle, CI, and owner-review gates pass. Preserve a tested rollback path.
 
 **Setup versus daily use:** Host prerequisites, base-image download, and first guest
 provisioning are setup-time operations. Daily startup should reuse the provisioned VM, perform
@@ -720,10 +720,10 @@ and `up --clean` refuse before destructive side effects unless the caller suppli
 “descendants may exist” bit is sticky if a profile's configured maximum is later lowered, and
 is cleared only when that profile's writable overlay is discarded.
 
-**Reason:** Make the safer VM the eventual ordinary route without losing the useful,
-non-recursive Docker sandbox; maintain metrics parity during migration; and support deliberate
+**Reason:** Make the intended VM the ordinary route without losing the useful, non-recursive
+Docker fallback; maintain metrics parity during migration; and support deliberate
 self-improvement without accidental or infinite agent/VM recursion. Implementation and
-acceptance evidence are tracked on #35, #41–#43, and the new linked launcher/recursion ticket.
+acceptance evidence are tracked on #35, #41–#43, #50, and #52.
 
 The trust-boundary diagram and crossing table live in `docs/vm-architecture.md`; the
 engineering invariants are in `docs/tickets/architecture/DECISIONS.md` §K.
@@ -756,6 +756,43 @@ example assignments, command substitution, loops, or environment-variable prefix
 separate complete blocks. Do not assume the user's interactive shell is Bash.
 
 **Reason:** Bash-only snippets fail when copied into Fish, interrupting otherwise safe workflows.
+
+#### C.9.20 Managed VM memory resize (2026-11-01)
+
+`./lab-vm resize <profile> <GiB>` changes RAM for a VM profile controlled by that
+invocation of `lab-vm`. QEMU RAM is not hot-resized: for a running profile, the command
+must verify the requested budget first, request a clean guest shutdown, stop host-side
+VM helpers, preserve the overlay/base image/seed/SSH identity/installed guest state, and
+restart the same profile with the new RAM. If guest shutdown or resource preflight fails,
+leave the current VM running and unchanged. Never implement resize by `down`, `rebuild`,
+container-volume teardown, or overlay replacement.
+
+This command cannot resize an ancestor VM that contains the current shell: `lab-vm`
+controls only QEMU profiles it launches in the current host namespace. Assigning more RAM
+to the coding shell itself requires its parent hypervisor/launch configuration and a
+shutdown/restart there.
+
+**Reason:** Permit deliberate RAM changes without losing useful guest state or confusing
+a nested guest with the hypervisor that owns its parent.
+
+#### C.9.21 VM memory defaults, per-profile persistence, and setup override (2026-11-01)
+
+New depth-0 VM profiles default to **8 GiB**. New nested profiles default to half the
+parent-level allocation (8/4/2/1 GiB by depth, with 1 GiB as the floor); `--memory <GiB>`
+is an explicit setup-time override for a new profile. The selected allocation is persisted
+with that VM profile and reused on warm starts. Existing profiles without metadata retain
+the legacy 4-GiB allocation until explicitly resized. Changing a running VM's RAM requires
+`resize`; an override must not silently affect a running or existing profile.
+
+Before creating recursive snapshots, profile state, or QEMU processes—and before stopping
+a running profile to resize—check the available parent memory, any enforced cgroup memory
+limit, the requested guest RAM, and 512 MiB of safety headroom. Refuse before side effects
+when the budget is insufficient; do not rely on host swap or QEMU overcommit. Resource
+checks are safety gates, not proof that the guest workload fits its configured RAM.
+
+**Reason:** Keep the ordinary new guest useful while scaling deliberate recursion to fit
+inside its parent, preserve a per-profile operator override, and fail before disturbing
+valuable VM/workspace state when the enclosing machine cannot satisfy the request.
 
 ---
 

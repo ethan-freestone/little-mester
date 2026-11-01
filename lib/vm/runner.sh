@@ -15,6 +15,76 @@
 
 : "${VM_VERBOSE:=0}"
 : "${VM_DEBUG:=0}"
+: "${VM_MEMORY_GIB:=4}"
+
+vm_memory_validate_gib() {
+  local value="${1:-}"
+  [[ "$value" =~ ^[1-9][0-9]{0,2}$ ]] && (( value <= 128 ))
+}
+
+vm_memory_profile_load() {
+  local vm_dir="${1:?VM profile directory required}" value
+  local -a lines=()
+  VM_MEMORY_GIB=4
+  if [[ ! -e "$vm_dir/memory_gib" && ! -L "$vm_dir/memory_gib" ]]; then
+    return 0
+  fi
+  [[ -f "$vm_dir/memory_gib" && ! -L "$vm_dir/memory_gib" ]] || {
+    echo "REFUSED: VM memory metadata must be a regular file: $vm_dir/memory_gib" >&2
+    return 1
+  }
+  mapfile -t lines <"$vm_dir/memory_gib" || return 1
+  (( ${#lines[@]} == 1 )) || {
+    echo "REFUSED: invalid VM memory metadata in $vm_dir/memory_gib" >&2
+    return 1
+  }
+  value="${lines[0]}"
+  vm_memory_validate_gib "$value" || {
+    echo "REFUSED: invalid VM memory metadata in $vm_dir/memory_gib" >&2
+    return 1
+  }
+  VM_MEMORY_GIB="$value"
+}
+
+vm_memory_profile_store() {
+  local vm_dir="${1:?VM profile directory required}" value="${2:-}" tmp
+  vm_memory_validate_gib "$value" || {
+    echo 'REFUSED: VM memory must be a whole number of GiB from 1 to 128.' >&2
+    return 1
+  }
+  [[ ! -L "$vm_dir" ]] || {
+    echo "REFUSED: VM profile directory must not be a symlink: $vm_dir" >&2
+    return 1
+  }
+  mkdir -p "$vm_dir"
+  [[ ! -L "$vm_dir/memory_gib" ]] || {
+    echo "REFUSED: VM memory metadata must not be a symlink: $vm_dir/memory_gib" >&2
+    return 1
+  }
+  tmp="$(mktemp "$vm_dir/.memory_gib.tmp.XXXXXX")" || return 1
+  (umask 077; printf '%s\n' "$value" >"$tmp") || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp"
+  mv -f -- "$tmp" "$vm_dir/memory_gib"
+}
+
+vm_memory_preflight() {
+  local memory_gib="${1:-${VM_MEMORY_GIB:-4}}" release_pid="${2:-}"
+  vm_memory_validate_gib "$memory_gib" || {
+    echo 'REFUSED: VM memory must be a whole number of GiB from 1 to 128.' >&2
+    return 1
+  }
+  local -a args=(--requested-mib "$((memory_gib * 1024))" --reserve-mib 512)
+  [[ -z "$release_pid" ]] || args+=(--release-pid "$release_pid")
+  python3 "$LAB_DIR/scripts/vm_memory_budget.py" "${args[@]}"
+}
+
+vm_memory_qemu_matches() {
+  local process_args="${1:-}" memory_gib="${2:-4}" expected_mib
+  vm_memory_validate_gib "$memory_gib" || return 1
+  expected_mib=$((memory_gib * 1024))
+  [[ " $process_args " == *" -m $expected_mib "* &&
+     "$process_args" == *"memory-backend-memfd,id=mem,size=${memory_gib}G,share=on"* ]]
+}
 
 # Build the user-mode network argument in one place so its syntax can be
 # regression-tested without starting QEMU. guestfwd's right-hand side is a
@@ -48,7 +118,11 @@ _vm_build_qemu_command() {
   local machine_accel="$6"
   local kvm_enabled="$7"
   local bios_path="${8:-}"
+  local memory_gib="${9:-${VM_MEMORY_GIB:-4}}"
+  local memory_mib
   local cpu_model="Westmere"
+  vm_memory_validate_gib "$memory_gib" || return 2
+  memory_mib=$((memory_gib * 1024))
   local netdev_arg
   netdev_arg="$(_vm_netdev_arg "$ssh_port")"
   # OpenCode's Bun executable requires SSE4.2 even for its baseline build.
@@ -61,10 +135,10 @@ _vm_build_qemu_command() {
   VM_QEMU_CMD+=(
     # Identity and shareable RAM required by vhost-user/virtiofs.
     -name "$vm_name"
-    -m 4096
+    -m "$memory_mib"
     -smp 2
     -cpu "$cpu_model"
-    -object memory-backend-memfd,id=mem,size=4G,share=on
+    -object "memory-backend-memfd,id=mem,size=${memory_gib}G,share=on"
     -numa node,memdev=mem
 
     # Disks: cloud-init seed + writable overlay.
@@ -227,7 +301,7 @@ _vm_start() {
 
   _vm_build_qemu_command \
     "$vm_dir" "$vm_name" "$overlay_disk" "$virtiofs_sock" \
-    "$ssh_port" "$machine_accel" "$kvm_enabled" ""
+    "$ssh_port" "$machine_accel" "$kvm_enabled" "" "${VM_MEMORY_GIB:-4}"
 
   log_debug "QEMU command: ${VM_QEMU_CMD[*]}"
 
