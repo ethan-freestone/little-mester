@@ -37,8 +37,12 @@ from threading import Thread
 ROOT = Path(__file__).resolve().parents[1]
 LAB_VM = ROOT / "lab-vm"
 SNAPSHOT_FILES = (
-    "lib/vm/proxy.py", "lib/vm/runner.sh", "lib/vm/lifecycle.sh",
-    "scripts/vm-guest-isolation-check.py",
+    "lab-vm", "lib/state.sh", "lib/vm/proxy.py", "lib/vm/runner.sh",
+    "lib/vm/host-services.sh", "lib/vm/lifecycle.sh", "lib/vm/recursion.sh",
+    "scripts/vm-context.py", "scripts/vm-extra.sh", "scripts/vm-guest-isolation-check.py",
+    "scripts/vm-install-tools.sh", "scripts/vm-recursion-live-children.py",
+    "scripts/vm-recursion-workspace.py", "scripts/vm-update.sh",
+    "tests/test_vm_context.py", "tests/test_vm_recursion_live_children.py",
 )
 DEFAULT_OUTER_PROFILE = "launcher-smoke"
 DEFAULT_SNAPSHOT = Path.home() / ".cache/lab-vm-recursion/initial-launcher-smoke/workspace"
@@ -48,9 +52,10 @@ REMOTE_PROGRESS_MARKER = "__LM_VM_ACCEPTANCE_PROGRESS__"
 REMOTE_SUMMARY_MARKER = "__LM_VM_ACCEPTANCE__"
 REMOTE_NESTED_TIMEOUT_SECONDS = 1800
 REMOTE_PROGRESS_STAGES = {
-    "remote_script", "runtime_overlay", "child_vm_up", "child_control_state",
+    "remote_script", "runtime_overlay", "child_workspace_source", "child_vm_up", "child_control_state",
     "child_cloud_init_status", "child_context", "child_findmnt",
-    "child_workspace_boundary", "child_readiness", "depth_cap_refusal",
+    "child_workspace_boundary", "child_source_parity", "child_recursive_self_tests",
+    "child_readiness", "depth_cap_refusal",
     "outer_continuity", "outer_ssh_startup", "cloud-init status",
     "lab-vm context --json", "findmnt /workspace",
     "child SSH or remote readiness probe",
@@ -743,10 +748,27 @@ def snapshot_checks(
 
     _, parity = snapshot_status(snapshot, repo)
     state_visible = snapshot_state_visible(snapshot) if snapshot.is_dir() else False
-    needs_rebuild = not snapshot.is_dir() or state_visible or any(
-        not (repo / relative).is_file() or (repo / relative).is_symlink()
-        or not safe_snapshot_target(snapshot, snapshot / relative)
+    active_users = active_snapshot_users(snapshot) if allow_active_source_overlay and snapshot.is_dir() else []
+    source_targets_safe = all(
+        (repo / relative).is_file()
+        and not path_has_symlink(repo / relative)
+        and (repo / relative).resolve().is_relative_to(repo.resolve())
+        and safe_snapshot_target(snapshot, snapshot / relative)
+        and (
+            not lexists(snapshot / relative)
+            or ((snapshot / relative).is_file() and not (snapshot / relative).is_symlink())
+        )
         for relative in SNAPSHOT_FILES
+    )
+    missing_sources = any(not lexists(snapshot / relative) for relative in SNAPSHOT_FILES)
+    active_overlay_can_supply_missing = bool(
+        active_users and not state_visible and source_targets_safe
+    )
+    needs_rebuild = (
+        not snapshot.is_dir()
+        or state_visible
+        or not source_targets_safe
+        or (missing_sources and not active_overlay_can_supply_missing)
     )
     if needs_rebuild and not allow_repair:
         evidence.check(
@@ -765,7 +787,6 @@ def snapshot_checks(
                 evidence.check(f"snapshot source {relative}", same, "matches checkout" if same else "mismatch remains")
             return False
     elif not all(parity.values()):
-        active_users = active_snapshot_users(snapshot)
         if active_users and allow_active_source_overlay:
             # Never replace files beneath a live virtiofs export. The nested
             # command can use a private /tmp source overlay inside the outer
@@ -1009,22 +1030,79 @@ def ssh_command(vm_dir: Path, remote: str) -> list[str]:
     ]
 
 
-REMOTE_PREFLIGHT = r'''import json, os, re, shutil, subprocess, sys
+REMOTE_PREFLIGHT = r'''import base64, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tempfile
 def command(args):
     return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
 result = {"checks": {}, "context": None, "tools": {}}
-ctx_run = command(["./lab-vm", "context", "--json"])
+context_payload = json.loads(CONTEXT_SOURCE_PAYLOAD_JSON)
+ctx_run = None
+raw = None
+context_source_category = "ok"
 try:
-    raw = json.loads(ctx_run.stdout) if ctx_run.returncode == 0 else None
-except json.JSONDecodeError:
-    raw = None
-if isinstance(raw, dict):
+    encoded = context_payload.get("content")
+    expected_hash = context_payload.get("sha256")
+    if not isinstance(encoded, str) or not isinstance(expected_hash, str):
+        raise ValueError("invalid source metadata")
+    context_source = base64.b64decode(encoded, validate=True)
+    if hashlib.sha256(context_source).hexdigest() != expected_hash:
+        raise ValueError("source hash mismatch")
+    with tempfile.TemporaryDirectory(prefix="little-mester-context-") as directory:
+        script = pathlib.Path(directory) / "vm-context.py"
+        script.write_bytes(context_source)
+        ctx_run = command([sys.executable, str(script), "--repo", "/workspace", "--format", "json"])
+        try:
+            raw = json.loads(ctx_run.stdout) if ctx_run.returncode == 0 else None
+        except json.JSONDecodeError:
+            raw = None
+except (ValueError, OSError, TypeError):
+    context_source_category = "source_payload_invalid"
+if ctx_run is not None:
+    if ctx_run.returncode != 0:
+        context_category = "command_failed"
+    elif not ctx_run.stdout.strip():
+        context_category = "empty_stdout"
+    elif not isinstance(raw, dict):
+        context_category = "invalid_json"
+    elif not all(isinstance(raw.get(key), dict) for key in ("runtime", "recursion", "kvm")):
+        context_category = "invalid_context_shape"
+    else:
+        context_category = "ok"
+else:
+    context_category = context_source_category
+result["context_probe"] = {
+    "returncode": ctx_run.returncode if ctx_run is not None else None,
+    "stdout_present": bool(ctx_run and ctx_run.stdout),
+    "stderr_present": bool(ctx_run and ctx_run.stderr),
+    "failure_category": context_category,
+}
+if isinstance(raw, dict) and context_category == "ok":
     runtime, recursion, kvm = raw.get("runtime", {}), raw.get("recursion", {}), raw.get("kvm", {})
     result["context"] = {"runtime_kind": runtime.get("kind"), "depth": recursion.get("depth"), "max_depth": recursion.get("max_depth"),
       "child_depth_available": recursion.get("child_depth_available"),
       "device_present": kvm.get("device_present"), "device_read_write": kvm.get("device_read_write"),
       "nested_kvm_preflight_ready": kvm.get("nested_kvm_preflight_ready"),
       "cpu_virtualization": sorted(x for x in kvm.get("cpu_virtualization", []) if x in ("vmx", "svm"))}
+launcher_context = command(["./lab-vm", "context", "--json"])
+try:
+    launcher_context_json = json.loads(launcher_context.stdout) if launcher_context.returncode == 0 else None
+except json.JSONDecodeError:
+    launcher_context_json = None
+if launcher_context.returncode != 0:
+    launcher_category = "command_failed"
+elif not launcher_context.stdout.strip():
+    launcher_category = "empty_stdout"
+elif not isinstance(launcher_context_json, dict):
+    launcher_category = "invalid_json"
+elif not all(isinstance(launcher_context_json.get(key), dict) for key in ("runtime", "recursion", "kvm")):
+    launcher_category = "invalid_context_shape"
+else:
+    launcher_category = "ok"
+result["launcher_context_probe"] = {
+    "returncode": launcher_context.returncode,
+    "stdout_present": bool(launcher_context.stdout),
+    "stderr_present": bool(launcher_context.stderr),
+    "failure_category": launcher_category,
+}
 result["checks"]["context_valid"] = result["context"] is not None
 ctx = result["context"] or {}
 result["checks"]["outer_guest"] = ctx.get("runtime_kind") == "vm" and ctx.get("depth") == 0 and ctx.get("max_depth") == 1 and ctx.get("child_depth_available") is True
@@ -1090,6 +1168,13 @@ result["checks"]["memory_budget"] = budget.returncode == 0 and memory_budget["me
 print(json.dumps(result, sort_keys=True))
 sys.exit(0 if all(result["checks"].values()) else 2)
 '''
+
+
+def build_remote_preflight_script(repo: Path = ROOT) -> str:
+    """Use the checked-out context reporter, not a possibly stale active snapshot copy."""
+    payload = active_source_overlay_payload(repo)["scripts/vm-context.py"]
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return f"CONTEXT_SOURCE_PAYLOAD_JSON = {encoded!r}\n" + REMOTE_PREFLIGHT
 
 
 REMOTE_ENSURE_NESTED_TOOLS = r'''import json, os, pathlib, shutil, subprocess, sys
@@ -1206,8 +1291,12 @@ progress("runtime_overlay", "started")
 def stage_runtime_overlay():
     if not source_overlay_payload:
         return root
-    expected = {"lib/vm/proxy.py", "lib/vm/runner.sh", "lib/vm/lifecycle.sh",
-        "scripts/vm-guest-isolation-check.py"}
+    expected = {"lab-vm", "lib/state.sh", "lib/vm/proxy.py", "lib/vm/runner.sh",
+        "lib/vm/host-services.sh", "lib/vm/lifecycle.sh", "lib/vm/recursion.sh",
+        "scripts/vm-context.py", "scripts/vm-extra.sh", "scripts/vm-guest-isolation-check.py",
+        "scripts/vm-install-tools.sh", "scripts/vm-recursion-live-children.py",
+        "scripts/vm-recursion-workspace.py", "scripts/vm-update.sh",
+        "tests/test_vm_context.py", "tests/test_vm_recursion_live_children.py"}
     if set(source_overlay_payload) != expected:
         raise ValueError("runtime source overlay has an unexpected file set")
     stage = pathlib.Path(tempfile.mkdtemp(prefix="little-mester-acceptance-", dir="/tmp"))
@@ -1230,10 +1319,12 @@ def populate_runtime_overlay(stage):
             raise ValueError("runtime overlay link escapes the safe workspace")
         destination.symlink_to(target, target_is_directory=target.is_dir())
     overlay_scripts = any(relative.startswith("scripts/") for relative in source_overlay_payload)
+    overlay_tests = any(relative.startswith("tests/") for relative in source_overlay_payload)
     for item in root.iterdir():
         if (item.name in excluded or item.name.startswith(".")
                 or item.name in ("lab-vm", "lib")
-                or (overlay_scripts and item.name == "scripts")):
+                or (overlay_scripts and item.name == "scripts")
+                or (overlay_tests and item.name == "tests")):
             continue
         if item.name.endswith((".db", ".key", ".pem", ".secret", ".sqlite", ".sqlite3", ".token")):
             continue
@@ -1252,9 +1343,9 @@ def populate_runtime_overlay(stage):
             output.write(content)
         os.chmod(destination, mode)
     launcher = root / "lab-vm"
-    if launcher.is_symlink() or not launcher.is_file():
+    if launcher.is_symlink() or (launcher.exists() and not launcher.is_file()):
         raise ValueError("active workspace lab-vm entry point is unsafe")
-    shutil.copy2(launcher, stage / "lab-vm")
+    write_source("lab-vm")
     lib_source, lib_stage = root / "lib", stage / "lib"
     vm_source = lib_source / "vm"
     if (lib_source.is_symlink() or not lib_source.is_dir()
@@ -1263,7 +1354,16 @@ def populate_runtime_overlay(stage):
     lib_stage.mkdir(mode=0o700)
     for item in lib_source.iterdir():
         if item.name != "vm":
-            safe_link(item, lib_stage / item.name)
+            relative = "lib/" + item.name
+            if relative in source_overlay_payload:
+                write_source(relative)
+            else:
+                safe_link(item, lib_stage / item.name)
+    for relative in source_overlay_payload:
+        if relative.startswith("lib/") and relative.count("/") == 1:
+            destination = stage / relative
+            if not destination.exists() and not destination.is_symlink():
+                write_source(relative)
     vm_stage = lib_stage / "vm"
     vm_stage.mkdir(mode=0o700)
     for item in vm_source.iterdir():
@@ -1274,18 +1374,108 @@ def populate_runtime_overlay(stage):
             safe_link(item, vm_stage / item.name)
     if overlay_scripts:
         scripts_source, scripts_stage = root / "scripts", stage / "scripts"
-        if scripts_source.is_symlink() or not scripts_source.is_dir():
+        if scripts_source.is_symlink() or (scripts_source.exists() and not scripts_source.is_dir()):
             raise ValueError("active workspace scripts directory is unsafe")
         scripts_stage.mkdir(mode=0o700)
-        for item in scripts_source.iterdir():
-            relative = "scripts/" + item.name
-            if relative in source_overlay_payload:
-                write_source(relative)
-            elif (item.name.startswith(".") or item.name == "__pycache__"
-                    or item.name.endswith((".db", ".key", ".pem", ".secret", ".sqlite", ".sqlite3", ".token"))):
-                continue
-            else:
-                safe_link(item, scripts_stage / item.name)
+        if scripts_source.is_dir():
+            for item in scripts_source.iterdir():
+                relative = "scripts/" + item.name
+                if relative in source_overlay_payload:
+                    write_source(relative)
+                elif (item.name.startswith(".") or item.name == "__pycache__"
+                        or item.name.endswith((".db", ".key", ".pem", ".secret", ".sqlite", ".sqlite3", ".token"))):
+                    continue
+                else:
+                    safe_link(item, scripts_stage / item.name)
+        for relative in source_overlay_payload:
+            if relative.startswith("scripts/"):
+                destination = stage / relative
+                if not destination.exists() and not destination.is_symlink():
+                    write_source(relative)
+    if overlay_tests:
+        tests_source, tests_stage = root / "tests", stage / "tests"
+        if tests_source.is_symlink() or (tests_source.exists() and not tests_source.is_dir()):
+            raise ValueError("active workspace tests directory is unsafe")
+        tests_stage.mkdir(mode=0o700)
+        if tests_source.is_dir():
+            for item in tests_source.iterdir():
+                relative = "tests/" + item.name
+                if relative in source_overlay_payload:
+                    write_source(relative)
+                elif (item.name.startswith(".") or item.name == "__pycache__"
+                        or item.name.endswith((".db", ".key", ".pem", ".secret", ".sqlite", ".sqlite3", ".token"))):
+                    continue
+                else:
+                    safe_link(item, tests_stage / item.name)
+        for relative in source_overlay_payload:
+            if relative.startswith("tests/"):
+                destination = stage / relative
+                if not destination.exists() and not destination.is_symlink():
+                    write_source(relative)
+
+class SourceWorkspaceFailure(Exception):
+    def __init__(self, category, returncode=None, stderr_present=False):
+        super().__init__(category)
+        self.category = category
+        self.returncode = returncode
+        self.stderr_present = stderr_present
+
+def prepare_current_source_workspace(launcher_root, root, source_payload):
+    try:
+        session_root = pathlib.Path(tempfile.mkdtemp(
+            prefix="little-mester-child-source-", dir="/tmp"))
+        os.chmod(session_root, 0o700)
+    except OSError:
+        raise SourceWorkspaceFailure("workspace_session_unavailable") from None
+    builder = launcher_root / "scripts/vm-recursion-workspace.py"
+    try:
+        prepared = subprocess.run(
+            [sys.executable, str(builder), "prepare", "--source", str(root),
+             "--session", str(session_root / "snapshot")],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+    except OSError:
+        raise SourceWorkspaceFailure("workspace_builder_unavailable") from None
+    if prepared.returncode != 0:
+        raise SourceWorkspaceFailure("workspace_builder_failed", prepared.returncode, bool(prepared.stderr))
+    try:
+        child_workspace = pathlib.Path(prepared.stdout.strip()).resolve(strict=True)
+        if (not child_workspace.is_dir()
+                or not child_workspace.is_relative_to(session_root.resolve(strict=True))):
+            raise ValueError("unsafe builder path")
+        for relative, item in source_payload.items():
+            encoded, expected_hash, mode = item.get("content"), item.get("sha256"), item.get("mode")
+            if not isinstance(encoded, str) or not isinstance(expected_hash, str) or not isinstance(mode, int) or not 0 <= mode <= 0o777:
+                raise ValueError("invalid source metadata")
+            content = base64.b64decode(encoded, validate=True)
+            if hashlib.sha256(content).hexdigest() != expected_hash:
+                raise ValueError("source hash mismatch")
+            destination = child_workspace / relative
+            parent = destination.parent
+            while parent != child_workspace.parent:
+                if parent.is_symlink() or not parent.is_dir():
+                    raise ValueError("unsafe source parent")
+                if parent == child_workspace:
+                    break
+                parent = parent.parent
+            if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+                raise ValueError("unsafe source target")
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix="." + destination.name + ".acceptance-", dir=destination.parent)
+            try:
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(content)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.chmod(temporary_name, mode)
+                os.replace(temporary_name, destination)
+            finally:
+                pathlib.Path(temporary_name).unlink(missing_ok=True)
+    except (OSError, ValueError, TypeError):
+        raise SourceWorkspaceFailure("source_materialization_failed", prepared.returncode,
+            bool(prepared.stderr)) from None
+    return session_root, child_workspace
+
 try:
     launcher_root = stage_runtime_overlay()
 except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -1297,8 +1487,28 @@ except (OSError, ValueError, KeyError, TypeError) as exc:
 summary["checks"]["runtime_source_overlay"] = True
 progress("runtime_overlay", "completed", private_overlay=launcher_root != root)
 if launcher_root != root:
-    print("Using a private /tmp runtime source overlay; the active /workspace snapshot is unchanged.", flush=True)
+    print("Using a private verified runtime overlay; the active /workspace snapshot is unchanged.", flush=True)
     summary["runtime_source_overlay_path"] = str(launcher_root)
+child_workspace = root
+source_workspace_session = None
+if not resume_existing:
+    progress("child_workspace_source", "started")
+    try:
+        source_workspace_session, child_workspace = prepare_current_source_workspace(
+            launcher_root, root, source_overlay_payload)
+    except SourceWorkspaceFailure as exc:
+        progress("child_workspace_source", "failed", reason=exc.category)
+        summary["checks"]["child_workspace_source"] = False
+        summary["child_workspace_source"] = {
+            "failure_category": exc.category,
+            "builder_returncode": exc.returncode,
+            "stderr_present": exc.stderr_present,
+        }
+        summary["failure"] = "current-source child workspace could not be prepared safely; no child VM was started"
+        emit(2)
+    summary["checks"]["child_workspace_source"] = True
+    summary["child_workspace_source"] = {"source_files_verified": len(source_overlay_payload)}
+    progress("child_workspace_source", "completed", passed=True)
 env = os.environ.copy()
 env["LAB_VM_RECURSION_DEPTH"], env["LAB_VM_MAX_DEPTH"] = "0", "1"
 # The active stable snapshot may still contain older CLI/helper sources. Route
@@ -1316,12 +1526,17 @@ if resume_existing:
 else:
     print("Starting one new nested child; no model/TUI or teardown will run.", flush=True)
     progress("child_vm_up", "started")
-    up = subprocess.run([str(launcher_root / "lab-vm"), "-d", "up", profile, "--workspace", "/workspace", "--recurse"], cwd=launcher_root, env=env, check=False)
+    up = subprocess.run([str(launcher_root / "lab-vm"), "-d", "up", profile, "--workspace", str(child_workspace), "--recurse"], cwd=launcher_root, env=env, check=False)
     progress("child_vm_up", "completed", returncode=up.returncode)
     summary["checks"]["child_up"] = up.returncode == 0
     if up.returncode != 0:
         summary["failure"] = "child up failed; preserve the profile and its logs"
         emit(3)
+    # Nested `lab-vm up --recurse` has copied this verified source into the
+    # child profile's own recursion session before returning. The live VM mounts
+    # that profile-owned copy, so the one-shot staging tree is now disposable.
+    if source_workspace_session is not None:
+        shutil.rmtree(source_workspace_session, ignore_errors=True)
 progress("child_control_state", "started")
 if not vm_dir.is_dir() or vm_dir.is_symlink():
     progress("child_control_state", "failed", reason="profile_state_missing_or_unsafe")
@@ -1400,6 +1615,32 @@ print(json.dumps({"host_state_excluded": not any(p.exists() or p.is_symlink() fo
 '''
 boundary = run_child_stage("child_workspace_boundary", "cd /workspace && python3 -", 10, workspace_probe)
 boundary_data = obj(boundary.stdout)
+source_hashes = {relative: item.get("sha256") for relative, item in source_overlay_payload.items()}
+source_probe = r'''import hashlib, json, pathlib, sys
+expected = json.loads(sys.stdin.read())
+checks = {}
+for relative, digest in expected.items():
+    path = pathlib.Path("/workspace") / relative
+    checks[relative] = (isinstance(digest, str) and path.is_file() and not path.is_symlink()
+        and hashlib.sha256(path.read_bytes()).hexdigest() == digest)
+print(json.dumps({"checks": checks}, sort_keys=True))
+sys.exit(0 if checks and all(checks.values()) else 2)
+'''
+source_run = run_child_stage("child_source_parity", "cd /workspace && python3 -", 30,
+    json.dumps(source_hashes, sort_keys=True))
+source_result = obj(source_run.stdout)
+source_checks = source_result.get("checks", {}) if isinstance(source_result, dict) else {}
+source_parity_ok = (source_run.returncode == 0 and isinstance(source_checks, dict)
+    and set(source_checks) == set(source_hashes) and all(value is True for value in source_checks.values()))
+self_tests = run_child_stage(
+    "child_recursive_self_tests",
+    "cd /workspace && python3 tests/test_vm_context.py && python3 tests/test_vm_recursion_live_children.py",
+    180,
+)
+self_test_output = self_tests.stdout + "\n" + self_tests.stderr
+test_run_counts = [int(value) for value in re.findall(r"^Ran (\d+) tests?$", self_test_output, re.MULTILINE)]
+failed_test_names = re.findall(r"^(?:FAIL|ERROR): (test_[A-Za-z0-9_]+)", self_test_output, re.MULTILINE)
+self_tests_ok = self_tests.returncode == 0 and len(test_run_counts) == 2 and sum(test_run_counts) > 0
 child_summary = {"cloud_status": cloud.get("status") if cloud else None,
   "reused_existing_profile": resume_existing,
   "cloud_extended_status": cloud.get("extended_status") if cloud else None,
@@ -1412,13 +1653,20 @@ child_summary = {"cloud_status": cloud.get("status") if cloud else None,
  "max_depth": (context or {}).get("recursion", {}).get("max_depth"),
  "child_depth_available": (context or {}).get("recursion", {}).get("child_depth_available"),
  "nested_kvm_ready": (context or {}).get("kvm", {}).get("nested_kvm_preflight_ready"),
- "workspace_fstype": fstype,
- "host_state_excluded": (boundary_data or {}).get("host_state_excluded") is True,
- "probe_stages": {
+  "workspace_fstype": fstype,
+  "host_state_excluded": (boundary_data or {}).get("host_state_excluded") is True,
+  "current_source_files_match": source_parity_ok,
+   "recursive_self_tests_passed": self_tests_ok,
+  "probe_stages": {
   "child_cloud_init_status": {"returncode": cloud_run.returncode, "stderr_present": bool(cloud_run.stderr)},
   "child_context": {"returncode": context_run.returncode, "stderr_present": bool(context_run.stderr)},
   "child_findmnt": {"returncode": mount.returncode, "stderr_present": bool(mount.stderr)},
-  "child_workspace_boundary": {"returncode": boundary.returncode, "stderr_present": bool(boundary.stderr)}}}
+   "child_workspace_boundary": {"returncode": boundary.returncode, "stderr_present": bool(boundary.stderr)},
+   "child_source_parity": {"returncode": source_run.returncode, "stderr_present": bool(source_run.stderr),
+       "files_checked": len(source_hashes), "files_matching": sum(value is True for value in source_checks.values()) if isinstance(source_checks, dict) else 0},
+    "child_recursive_self_tests": {"returncode": self_tests.returncode,
+        "tests_run": sum(test_run_counts), "test_programs_run": len(test_run_counts),
+        "failed_test_names": failed_test_names, "stderr_present": bool(self_tests.stderr)}}}
 checks = {
  "cloud_command_ok": child_summary["cloud_command_ok"],
  "cloud_status_done": child_summary["cloud_status"] == "done",
@@ -1430,9 +1678,11 @@ checks = {
  "depth_is_1": child_summary["depth"] == 1,
  "max_depth_is_1": child_summary["max_depth"] == 1,
  "child_depth_unavailable": child_summary["child_depth_available"] is False,
- "nested_kvm_ready": child_summary["nested_kvm_ready"] is True,
- "workspace_is_virtiofs": "virtiofs" in fstype.lower(),
- "host_state_excluded": child_summary["host_state_excluded"]}
+  "nested_kvm_ready": child_summary["nested_kvm_ready"] is True,
+  "workspace_is_virtiofs": "virtiofs" in fstype.lower(),
+  "host_state_excluded": child_summary["host_state_excluded"],
+  "current_source_files_match": child_summary["current_source_files_match"],
+  "recursive_self_tests_passed": child_summary["recursive_self_tests_passed"]}
 child_summary["checks"] = checks
 summary["child"] = child_summary
 summary["checks"]["child_acceptance"] = all(checks.values())
@@ -1590,6 +1840,7 @@ def outer_guest_preflight(
     vm_dir: Path,
     evidence: Evidence,
     *,
+    repo: Path = ROOT,
     require_child_memory_budget: bool = True,
     allow_tool_bootstrap: bool = True,
 ) -> bool:
@@ -1600,18 +1851,61 @@ def outer_guest_preflight(
     if require_child_memory_budget:
         non_tool_checks.append("memory_budget")
 
+    try:
+        preflight_script = build_remote_preflight_script(repo)
+    except (AcceptanceError, OSError) as exc:
+        evidence.check(
+            "outer guest context source", False,
+            f"current context source is unavailable ({type(exc).__name__}); no child was started",
+        )
+        return False
+
     def query(script: str):
         result = run(ssh_command(vm_dir, "cd /workspace && python3 -"), input_text=script)
         return result, parse_json_object(result.stdout)
 
     try:
-        _result, parsed = query(REMOTE_PREFLIGHT)
+        _result, parsed = query(preflight_script)
     except (AcceptanceError, OSError) as exc:
-        evidence.check("outer guest SSH", False, str(exc))
+        evidence.check("outer guest SSH", False, f"connection failed ({type(exc).__name__}); no child was started")
         return False
     if parsed is None:
-        evidence.check("outer guest preflight", False, "SSH check failed or returned invalid data; no child was started")
+        evidence.check(
+            "outer guest preflight", False,
+            f"SSH returned no valid JSON; command rc={_result.returncode}; "
+            f"stdout-present={bool(_result.stdout)}; stderr-present={bool(_result.stderr)}; no child was started",
+        )
         return False
+
+    probe_categories = {
+        "ok", "command_failed", "empty_stdout", "invalid_json",
+        "invalid_context_shape", "source_payload_invalid",
+    }
+
+    def sanitize_probe(value: object) -> dict[str, object] | None:
+        if not isinstance(value, dict):
+            return None
+        category = value.get("failure_category")
+        returncode = value.get("returncode")
+        return {
+            "failure_category": (
+                category if isinstance(category, str) and category in probe_categories
+                else "invalid_probe"
+            ),
+            "returncode": returncode if type(returncode) is int else None,
+            "stdout_present": value.get("stdout_present") is True,
+            "stderr_present": value.get("stderr_present") is True,
+        }
+
+    context_probes = {}
+    for name in ("context_probe", "launcher_context_probe"):
+        sanitized = sanitize_probe(parsed.get(name))
+        if sanitized is not None:
+            context_probes[name] = sanitized
+    if context_probes:
+        evidence.data["outer_guest_context_probes"] = context_probes
+        evidence.save()
+    context_probe = context_probes.get("context_probe", {})
 
     initial_checks = parsed.get("checks", {})
     initial_tools = parsed.get("tools", {})
@@ -1648,12 +1942,19 @@ def outer_guest_preflight(
             evidence.save()
             evidence.check("outer guest nested-tool bootstrap", True, detail)
             try:
-                _result, parsed = query(REMOTE_PREFLIGHT)
+                _result, parsed = query(preflight_script)
             except (AcceptanceError, OSError) as exc:
-                evidence.check("outer guest preflight retry", False, f"SSH check failed after guest bootstrap: {exc}")
+                evidence.check(
+                    "outer guest preflight retry", False,
+                    f"SSH check failed after guest bootstrap ({type(exc).__name__})",
+                )
                 return False
             if parsed is None:
-                evidence.check("outer guest preflight retry", False, "SSH check returned invalid data after guest bootstrap")
+                evidence.check(
+                    "outer guest preflight retry", False,
+                    f"SSH returned no valid JSON after guest bootstrap; command rc={_result.returncode}; "
+                    f"stdout-present={bool(_result.stdout)}; stderr-present={bool(_result.stderr)}",
+                )
                 return False
         else:
             failure = install.get("failure")
@@ -1713,6 +2014,13 @@ def outer_guest_preflight(
                 f"reserve={budget.get('reserve_mib', 'unknown')} MiB, "
                 f"budget command rc={budget.get('command_returncode', 'unknown')}; "
                 "no child was started"
+            )
+        elif name == "context_valid" and isinstance(context_probe, dict):
+            detail = (
+                f"current-source context {context_probe.get('failure_category', 'unavailable')}; "
+                f"command rc={context_probe.get('returncode', 'unknown')}; "
+                f"stdout-present={context_probe.get('stdout_present') is True}; "
+                f"stderr-present={context_probe.get('stderr_present') is True}; no child was started"
             )
         else:
             detail = "failed; no child was started"
@@ -1774,6 +2082,7 @@ def run_preflight(
             outer = outer_profile_checks(selected_profile, snapshot, repo, evidence)
     guest_ok = outer_guest_preflight(
         outer, evidence,
+        repo=repo,
         require_child_memory_budget=require_child_memory_budget,
         allow_tool_bootstrap=not read_only,
     ) if outer is not None else False
@@ -1861,18 +2170,22 @@ def run_nested_remote(
     *,
     resume_existing: bool = False,
 ) -> tuple[int, dict[str, object] | None]:
-    use_source_overlay = evidence.data.get("snapshot_source_overlay_required") is True
+    # Always create a current-source child workspace. The snapshot may be an
+    # active virtiofs export, so neither the outer workspace nor an existing
+    # child's source tree is repaired in place.
     try:
-        source_payload = active_source_overlay_payload(repo) if use_source_overlay else {}
-        remote_script = build_remote_nested_script(repo, use_source_overlay, source_payload)
+        source_payload = active_source_overlay_payload(repo)
+        remote_script = build_remote_nested_script(repo, True, source_payload)
     except (AcceptanceError, OSError) as exc:
-        evidence.check("active snapshot runtime overlay", False, f"could not prepare verified host sources: {exc}")
+        evidence.check(
+            "current-source nested workspace", False,
+            f"could not prepare verified host sources ({type(exc).__name__}); no child was started",
+        )
         return 2, {"checks": {}, "failure": "runtime source overlay could not be prepared; no child was started"}
-    if use_source_overlay:
-        evidence.data["runtime_source_overlay_files"] = {
-            relative: item["sha256"] for relative, item in source_payload.items()
-        }
-        evidence.save()
+    evidence.data["runtime_source_overlay_files"] = {
+        relative: item["sha256"] for relative, item in source_payload.items()
+    }
+    evidence.save()
     resume_arg = " --resume-existing" if resume_existing else ""
     command = ssh_command(vm_dir, f"cd /workspace && python3 - {profile} {probe}{resume_arg}")
     process = subprocess.Popen(command, cwd=repo, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)

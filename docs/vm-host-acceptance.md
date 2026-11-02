@@ -37,11 +37,11 @@ manual review/confirmation step:
 - Stale allowlisted runtime files are replaced atomically; previous bytes are
   retained under the private acceptance evidence directory. Both source repair
   and full rebuild refuse to mutate a snapshot while an active export is
-  detected. For the nested gate only, if the existing export is otherwise safe
-  and only those allowlisted runtime files differ, the runner leaves the active
-  snapshot untouched and stages the verified current files in a private `/tmp`
-  source overlay inside the outer guest. Other stale/unsafe snapshot conditions
-  still block; `preflight` does not use this fallback.
+  detected. For the nested gate, current sources are staged privately in the
+  outer guest. If an allowlisted source is stale or missing in the active export,
+  that private overlay supplies it without changing the export. Other
+  stale/unsafe snapshot conditions still block; `preflight` does not use this
+  fallback.
 - If `.mester` control state is visible, the snapshot is rebuilt using
   `scripts/vm-recursion-workspace.py` exclusions. The old tree is retained as a
   private sibling backup. Rebuild is refused while a QEMU/virtiofsd process is
@@ -78,7 +78,10 @@ usable KVM/tools it makes no snapshot or VM changes.
 Checks host KVM/tools, reconciles the stable snapshot and outer profile as
 described above, then verifies the outer guest's context, nested KVM, virtiofs,
 4-GiB child RAM budget plus reserve, tools, and host-state exclusion. It does
-not query model services or launch an agent/TUI. If only nested-VM tools are
+not query model services or launch an agent/TUI. Context is collected with the
+current checkout's context reporter; the potentially stale `lab-vm context`
+probe is recorded separately using only return status, output-presence flags,
+and a bounded failure category (never raw stderr or paths). If only nested-VM tools are
 missing and all other guest checks pass, it performs the bounded guest-only
 bootstrap above and repeats preflight before proceeding. It writes a private
 summary report and may start a missing outer profile.
@@ -107,14 +110,19 @@ name is needed for a controlled retry.
 ./scripts/vm-host-acceptance.py nested
 ```
 
-The runner starts one child from `/workspace` using `--recurse` (never
-`--unsafe-recurse`), verifies cloud-init completion, child depth 1/max 1,
-virtiofs and excluded host state, tries one depth-2 launch and confirms it is
-refused before profile state is created, then checks the outer session remains
-usable. Before changing or probing the child, it also runs the same read-only
-QEMU/listener and guest-network checks against the outer profile; a failure
-stops before the child phase. It additionally validates the running child's
-QEMU `restrict=on`, the
+The runner creates a private recursive copy of `/workspace`, applies the
+hash-verified current-source allowlist to that copy, then starts one child from
+it using `--recurse` (never `--unsafe-recurse`). It does not modify `/workspace`
+or any snapshot currently exported by a running outer guest. The child verifies
+the allowlisted file hashes, runs
+`tests/test_vm_context.py` and `tests/test_vm_recursion_live_children.py` from
+that copy, and then checks cloud-init,
+depth 1/max 1, virtiofs, and excluded host state. It tries one depth-2 launch
+and confirms it is refused before profile state is created, then checks the
+outer session remains usable. Before changing or probing the child, it also runs
+the same read-only QEMU/listener and guest-network checks against the outer
+profile; a failure stops before the child phase. It additionally validates the
+running child's QEMU `restrict=on`, the
 loopback-only SSH and reviewed guestfwd set, and bounded guest probes for blocked
 host-gateway/direct TCP and raw DNS, successful public HTTPS through the nested
 proxy, private-destination denial, and the virtiofs workspace. The isolation
@@ -131,20 +139,19 @@ diagnostics. It never retries a failed child under the same name or cleans it
 up. The child uses its private recursion-session directory as `VM_STATE_DIR`
 and explicitly inherits the existing parent egress proxy for provisioning, so
 startup does not chmod the outer guest's unrelated default XDG state directory
-or try direct DNS/network access. This keeps the gate compatible with an
-already-active snapshot whose `lab-vm` or disk helper source has not yet been
-refreshed. The runner starts the child with `lab-vm -d up`, so virtiofsd debug
+or try direct DNS/network access. The runner starts the child with `lab-vm -d up`, so virtiofsd debug
 output is captured in the private child profile's `virtiofsd.log`; startup
 failure details are also retained in `virtiofsd-startup.log`. Virtiofs sockets
 use a private per-user short path under `/tmp/little-mester-vfs-<uid>/` rather
 than the deeply nested profile path, which can exceed Linux's AF_UNIX pathname
 limit. Existing live VMs using the legacy per-profile socket remain recognized.
-If the stable snapshot is still actively exported and the only mismatch is an
-allowlisted runtime source, the nested runner uses current host source files in
-a private `/tmp` overlay in the outer guest; it does not replace files under
-the mounted `/workspace` or restart the outer VM. This path transfers only the
-hash-verified allowlisted runtime files, and leaves the child workspace as the
-existing `/workspace` snapshot.
+When the stable snapshot is actively exported, the nested runner uses a private
+`/tmp` launcher overlay and a separate builder-created child workspace. The
+overlay includes top-level dependencies such as `lib/state.sh`; the child copy
+receives the same verified current-source files before launch. This avoids
+running a current CLI against a stale `/workspace`, while leaving the active
+mount and outer VM unchanged. The report records file-hash parity and focused
+test counts/failures, not test logs.
 
 If child boot and readiness have already passed but a later probe failed or was
 blocked by the child RAM budget, continue against that exact still-running child
