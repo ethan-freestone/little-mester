@@ -156,6 +156,44 @@ setup() {
   [ "$status" -ne 0 ]
 }
 
+@test "QEMU SSH and egress proxy listeners must bind exclusively to loopback" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  ss() { printf '%s\n' "$VM_TEST_SS_OUTPUT"; }
+
+  export VM_TEST_SS_OUTPUT='LISTEN 0 128 127.0.0.1:22222 0.0.0.0:*
+LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
+  run _vm_validate_loopback_tcp_listeners 22222 45678
+  [ "$status" -eq 0 ]
+
+  export VM_TEST_SS_OUTPUT='LISTEN 0 128 0.0.0.0:22222 0.0.0.0:*
+LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
+  run _vm_validate_loopback_tcp_listeners 22222 45678
+  [ "$status" -ne 0 ]
+
+  export VM_TEST_SS_OUTPUT='LISTEN 0 128 [::]:22222 [::]:*
+LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
+  run _vm_validate_loopback_tcp_listeners 22222 45678
+  [ "$status" -ne 0 ]
+
+  export VM_TEST_SS_OUTPUT='LISTEN 0 128 127.0.0.1:22222 0.0.0.0:*
+LISTEN 0 128 [::1]:45678 [::]:*'
+  run _vm_validate_loopback_tcp_listeners 22222 45678
+  [ "$status" -ne 0 ]
+
+  export VM_TEST_SS_OUTPUT='LISTEN 0 128 127.0.0.1:22222 0.0.0.0:*
+LISTEN 0 128 0.0.0.0:22222 0.0.0.0:*
+LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
+  run _vm_validate_loopback_tcp_listeners 22222 45678
+  [ "$status" -ne 0 ]
+
+  export VM_TEST_SS_OUTPUT='LISTEN 0 128 127.0.0.1:22222 0.0.0.0:*'
+  run _vm_validate_loopback_tcp_listeners 22222 45678
+  [ "$status" -ne 0 ]
+
+  run _vm_validate_loopback_tcp_listeners 22222 99999
+  [ "$status" -ne 0 ]
+}
+
 @test "verify-isolation checks the running QEMU argv and streams guest probes over SSH" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   VM_ISOLATION_TEST_DIR="$BATS_TEST_TMPDIR/vm-isolation"
@@ -163,7 +201,10 @@ setup() {
   VM_ISOLATION_COMMAND="$BATS_TEST_TMPDIR/guest-probe-command"
   VM_ISOLATION_WORKSPACE="$BATS_TEST_TMPDIR/workspace"
   VM_ISOLATION_ARGS='qemu-system-x86_64 -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434,guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080,guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:45678,restrict=on -device virtio-net-pci,netdev=net0 -device vhost-user-fs-pci,chardev=charfs,tag=workspace'
+  VM_TEST_SS_OUTPUT='LISTEN 0 128 127.0.0.1:22222 0.0.0.0:*
+LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
   export VM_ISOLATION_TEST_DIR VM_ISOLATION_CAPTURE VM_ISOLATION_COMMAND VM_ISOLATION_WORKSPACE VM_ISOLATION_ARGS
+  export VM_TEST_SS_OUTPUT
   mkdir -p "$VM_ISOLATION_TEST_DIR" "$VM_ISOLATION_WORKSPACE"
   printf '22222\n' >"$VM_ISOLATION_TEST_DIR/ssh_port"
   printf '45678\n' >"$VM_ISOLATION_TEST_DIR/proxy_port"
@@ -179,6 +220,7 @@ setup() {
   run vm_cmd_verify_isolation default
   [ "$status" -eq 0 ]
   [[ "$output" == *'QEMU configuration: restrict=on'* ]]
+  [[ "$output" == *'QEMU TCP listeners: SSH and egress proxy are loopback-only.'* ]]
   [[ "$output" == *"Host workspace export: $VM_ISOLATION_WORKSPACE"* ]]
   [[ "$output" == *'guest probes completed'* ]]
   cmp -s "$VM_ISOLATION_CAPTURE" "$REPO_ROOT/scripts/vm-guest-isolation-check.py"

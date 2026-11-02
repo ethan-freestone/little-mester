@@ -1298,6 +1298,55 @@ _vm_read_qemu_process_args() {
   tr '\0' ' ' <"/proc/$qemu_pid/cmdline"
 }
 
+_vm_validate_loopback_tcp_listeners() {
+  local port expected_ports
+  (($# >= 1)) || return 1
+  for port in "$@"; do
+    [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && (( port <= 65535 )) || {
+      echo 'Invalid port supplied to the loopback-listener check.' >&2
+      return 1
+    }
+  done
+  command -v ss >/dev/null 2>&1 || {
+    echo 'Cannot verify QEMU listener bindings because ss is unavailable.' >&2
+    return 1
+  }
+  expected_ports="$*"
+  ss -H -ltn 2>/dev/null | awk -v expected_ports="$expected_ports" '
+    BEGIN {
+      count = split(expected_ports, values, /[[:space:]]+/)
+      for (i = 1; i <= count; i++) expected[values[i]] = 1
+    }
+    NF >= 4 {
+      endpoint = $4
+      port = endpoint
+      sub(/^.*:/, "", port)
+      if (!(port in expected)) next
+      address = endpoint
+      sub(/:[^:]*$/, "", address)
+      if (substr(address, 1, 1) == "[" && substr(address, length(address), 1) == "]") {
+        address = substr(address, 2, length(address) - 2)
+      }
+      seen[port] = 1
+      if (address != "127.0.0.1") unsafe[port] = 1
+    }
+    END {
+      failed = 0
+      for (port in expected) {
+        if (!seen[port]) {
+          print "A required SSH/proxy listener is missing."
+          failed = 1
+        }
+        if (unsafe[port]) {
+          print "An SSH/proxy listener is bound outside loopback."
+          failed = 1
+        }
+      }
+      exit failed
+    }
+  ' || return 1
+}
+
 _vm_read_virtiofsd_shared_dir() {
   local virtiofsd_pid="$1" expected_workspace="$2" expected_socket="$3"
   python3 - "$virtiofsd_pid" "$expected_workspace" "$expected_socket" <<'PY'
@@ -1365,6 +1414,7 @@ vm_cmd_verify_isolation() {
   process_args="$(_vm_read_qemu_process_args "$qemu_pid")" || die 'Cannot inspect the running QEMU process command line.'
   [[ "$process_args" == *qemu-system-x86_64* ]] || die 'The recorded PID is not a QEMU x86_64 process.'
   _vm_validate_qemu_isolation_args "$process_args" "$ssh_port" "$proxy_port" || die 'QEMU network configuration failed the isolation check.'
+  _vm_validate_loopback_tcp_listeners "$ssh_port" "$proxy_port" || die 'QEMU SSH or egress proxy listener is missing or bound outside loopback.'
   virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null)"
   [[ -f "$vm_dir/workspace" && ! -L "$vm_dir/workspace" ]] || die 'VM workspace identity is missing or unsafe.'
   expected_workspace="$(cat "$vm_dir/workspace")"
@@ -1379,6 +1429,7 @@ vm_cmd_verify_isolation() {
   done
 
   echo "QEMU configuration: restrict=on; SSH bound to 127.0.0.1:$ssh_port; only the four reviewed guestfwd channels are configured."
+  echo 'QEMU TCP listeners: SSH and egress proxy are loopback-only.'
   echo "Host workspace export: $shared_dir (the guest can read/write this selected directory)."
   echo 'Running network and approved-channel probes inside the guest (no VM or host settings will be changed).'
   if [[ "${VM_ISOLATION_SKIP_MODEL:-0}" == 1 ]]; then

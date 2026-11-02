@@ -222,6 +222,97 @@ def parse_json_object(raw: str) -> dict[str, object] | None:
     return None
 
 
+def parse_isolation_result(output: str, returncode: int) -> dict[str, object]:
+    """Parse only named counts and required boundary markers; never retain raw output."""
+    passed_lines = len(re.findall(r"^PASS:", output, re.MULTILINE))
+    failed_lines = len(re.findall(r"^FAIL:", output, re.MULTILINE))
+    skipped_lines = len(re.findall(r"^SKIP:", output, re.MULTILINE))
+    result = re.search(r"^Result: (\d+) passed, (\d+) failed$", output, re.MULTILINE)
+    summary_matches = bool(
+        result and int(result.group(1)) == passed_lines
+        and int(result.group(2)) == failed_lines
+    )
+    qemu_validated = (
+        "QEMU configuration: restrict=on; SSH bound to 127.0.0.1:" in output
+        and "; only the four reviewed guestfwd channels are configured." in output
+    )
+    listeners_validated = "QEMU TCP listeners: SSH and egress proxy are loopback-only." in output
+    model_skipped = output.count(
+        "SKIP: selected model availability (not part of isolation-only acceptance)"
+    ) == 1
+    passed = (
+        returncode == 0 and qemu_validated and listeners_validated
+        and summary_matches and passed_lines > 0 and failed_lines == 0
+        and skipped_lines == 1 and model_skipped
+    )
+    return {
+        "returncode": returncode,
+        "qemu_argv_validated": qemu_validated,
+        "loopback_listeners_validated": listeners_validated,
+        "result_summary_parsed": summary_matches,
+        "model_check_skipped": model_skipped,
+        "passed_checks": passed_lines,
+        "failed_checks": failed_lines,
+        "skipped_checks": skipped_lines,
+        "passed": passed,
+    }
+
+
+def run_isolation_check(
+    profile: str,
+    evidence: Evidence,
+    label: str,
+    repo: Path = ROOT,
+) -> bool:
+    """Run read-only QEMU/listener and guest network checks for one live profile."""
+    if not PROFILE_RE.fullmatch(profile):
+        evidence.check(f"{label} QEMU and guest network boundary", False, "invalid VM profile name")
+        return False
+    env = os.environ.copy()
+    env["VM_ISOLATION_SKIP_MODEL"] = "1"
+    timed_out = False
+    try:
+        completed = subprocess.run(
+            [str(repo / "lab-vm"), "verify-isolation", profile],
+            cwd=repo,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=120,
+        )
+        parsed = parse_isolation_result(completed.stdout, completed.returncode)
+    except subprocess.TimeoutExpired as error:
+        raw_output = error.stdout or ""
+        if isinstance(raw_output, bytes):
+            raw_output = raw_output.decode("utf-8", "replace")
+        parsed = parse_isolation_result(raw_output, 124)
+        timed_out = True
+        parsed["passed"] = False
+    except OSError as error:
+        parsed = parse_isolation_result("", 127)
+        parsed["error_category"] = type(error).__name__
+    parsed["timed_out"] = timed_out
+    evidence.data[f"{label}_isolation"] = parsed
+    evidence.save()
+    passed = parsed["passed"] is True
+    if passed:
+        detail = (
+            f"QEMU arguments and loopback listeners passed; "
+            f"{parsed['passed_checks']} guest probes passed; model check explicitly skipped"
+        )
+    elif timed_out:
+        detail = "isolation command timed out; preserve VM state and inspect its private diagnostics"
+    else:
+        detail = (
+            f"boundary failed or output was incomplete; {parsed['failed_checks']} guest probes failed; "
+            "preserve VM state and inspect diagnostics"
+        )
+    evidence.check(f"{label} QEMU and guest network boundary", passed, detail)
+    return passed
+
+
 def profile_base(repo: Path = ROOT) -> Path:
     # Mirror lifecycle.sh exactly: VM_DIR_BASE is selected by variable
     # presence (even an empty value), while VM_STATE_DIR/XDG_DATA_HOME use
@@ -1223,14 +1314,19 @@ qemu_argv_validated = (
     "QEMU configuration: restrict=on; SSH bound to 127.0.0.1:" in isolation_run.stdout
     and "; only the four reviewed guestfwd channels are configured." in isolation_run.stdout
 )
+loopback_listeners_validated = (
+    "QEMU TCP listeners: SSH and egress proxy are loopback-only." in isolation_run.stdout
+)
 result_match = re.search(r"^Result: (\d+) passed, (\d+) failed$", isolation_run.stdout, re.MULTILINE)
 result_matches_output = bool(result_match and int(result_match.group(1)) == isolation_passes
     and int(result_match.group(2)) == isolation_failures)
-isolation_ok = (isolation_run.returncode == 0 and qemu_argv_validated and result_matches_output
+isolation_ok = (isolation_run.returncode == 0 and qemu_argv_validated
+    and loopback_listeners_validated and result_matches_output
     and isolation_passes > 0 and isolation_failures == 0)
 summary["nested_isolation"] = {
     "returncode": isolation_run.returncode,
     "qemu_argv_validated": qemu_argv_validated,
+    "loopback_listeners_validated": loopback_listeners_validated,
     "passed_checks": isolation_passes,
     "failed_checks": isolation_failures,
     "skipped_checks": isolation_skips,
@@ -1747,6 +1843,10 @@ def nested_gate(
         evidence.check(command, False, "preflight blocked; existing child was not changed")
         evidence.finish("BLOCKED")
         return 2
+    if not run_isolation_check(outer.name, evidence, "outer", repo):
+        evidence.check(command, False, "outer QEMU/listener or guest network boundary failed; child was not changed")
+        evidence.finish("FAIL")
+        return 1
     if profile is None:
         profile = f"nested-accept-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
     evidence.data["child_profile"] = profile

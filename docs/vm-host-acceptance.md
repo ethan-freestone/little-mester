@@ -9,9 +9,9 @@ VM release is accepted.
 ## Before using it
 
 The latest #35/#41/#45/#50 tickets remain the source of truth for gate order.
-This runner automates only safe-snapshot preparation, outer-guest readiness,
-and one bounded nested-VM gate. It does not perform model, TUI, browser-auth,
-permission, workload, full-isolation, or teardown acceptance.
+This runner automates safe-snapshot preparation, outer-guest readiness, and a
+bounded nested-VM gate. It does not perform model, TUI, browser-auth,
+permission, workload, or teardown acceptance.
 
 Run commands from the CachyOS checkout root. The stable snapshot path is
 `$HOME/.cache/lab-vm-recursion/initial-launcher-smoke/workspace`; the default
@@ -97,12 +97,20 @@ The runner starts one child from `/workspace` using `--recurse` (never
 `--unsafe-recurse`), verifies cloud-init completion, child depth 1/max 1,
 virtiofs and excluded host state, tries one depth-2 launch and confirms it is
 refused before profile state is created, then checks the outer session remains
-usable. It additionally validates the running child's QEMU `restrict=on`, the
+usable. Before changing or probing the child, it also runs the same read-only
+QEMU/listener and guest-network checks against the outer profile; a failure
+stops before the child phase. It additionally validates the running child's
+QEMU `restrict=on`, the
 loopback-only SSH and reviewed guestfwd set, and bounded guest probes for blocked
 host-gateway/direct TCP and raw DNS, successful public HTTPS through the nested
 proxy, private-destination denial, and the virtiofs workspace. The isolation
 probe explicitly skips model availability, so this is not model acceptance or
-a complete host/LAN isolation proof. It does not run an agent, auth flow,
+a complete host-isolation proof. On the physical host it also checks the outer
+VM's live QEMU arguments and confirms its SSH and egress-proxy listening sockets
+are loopback-only. The child performs the same socket check in the outer guest.
+This replaces a separate LAN-client probe for inbound QEMU forwarding: no
+wildcard or LAN-bound hostfwd/listener is accepted. Guest-originated private/LAN
+egress denial remains a separate check. It does not run an agent, auth flow,
 workload, or teardown. **The child profile is retained on both success and
 failure.** On failure, the runner stops and preserves the profile and
 diagnostics. It never retries a failed child under the same name or cleans it

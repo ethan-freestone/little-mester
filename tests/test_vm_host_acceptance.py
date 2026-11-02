@@ -56,6 +56,75 @@ def create_snapshot_source_parents(*roots):
 
 
 class HostAcceptanceTests(unittest.TestCase):
+    def test_isolation_result_requires_qemu_listener_and_guest_probe_passes(self):
+        output = (
+            "QEMU configuration: restrict=on; SSH bound to 127.0.0.1:23456; only the four reviewed guestfwd channels are configured.\n"
+            "QEMU TCP listeners: SSH and egress proxy are loopback-only.\n"
+            "PASS: direct route: blocked\n"
+            "SKIP: selected model availability (not part of isolation-only acceptance)\n"
+            "Result: 1 passed, 0 failed\n"
+        )
+        result = acceptance.parse_isolation_result(output, 0)
+        self.assertTrue(result["qemu_argv_validated"])
+        self.assertTrue(result["loopback_listeners_validated"])
+        self.assertTrue(result["result_summary_parsed"])
+        self.assertTrue(result["model_check_skipped"])
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["passed_checks"], 1)
+        self.assertEqual(result["skipped_checks"], 1)
+
+        self.assertFalse(acceptance.parse_isolation_result(
+            output.replace("QEMU TCP listeners: SSH and egress proxy are loopback-only.\n", ""), 0
+        )["passed"])
+        self.assertFalse(acceptance.parse_isolation_result(
+            output.replace("Result: 1 passed, 0 failed", "Result: 2 passed, 0 failed"), 0
+        )["passed"])
+        self.assertFalse(acceptance.parse_isolation_result(
+            output.replace("PASS: direct route: blocked", "FAIL: direct route: reachable")
+                .replace("Result: 1 passed, 0 failed", "Result: 0 passed, 1 failed"), 0
+        )["passed"])
+        self.assertFalse(acceptance.parse_isolation_result(output, 1)["passed"])
+
+    def test_live_isolation_check_is_read_only_skips_model_and_records_sanitized_counts(self):
+        output = (
+            "QEMU configuration: restrict=on; SSH bound to 127.0.0.1:23456; only the four reviewed guestfwd channels are configured.\n"
+            "QEMU TCP listeners: SSH and egress proxy are loopback-only.\n"
+            "PASS: private destination denied\n"
+            "SKIP: selected model availability (not part of isolation-only acceptance)\n"
+            "Result: 1 passed, 0 failed\n"
+        )
+        evidence = DummyEvidence()
+        with patch.dict(os.environ, {"VM_ISOLATION_SKIP_MODEL": "0"}), \
+             patch.object(acceptance.subprocess, "run", return_value=subprocess.CompletedProcess(
+                 ["lab-vm"], 0, output, "sensitive stderr must not be recorded"
+             )) as mocked_run:
+            passed = acceptance.run_isolation_check("profile-safe", evidence, "outer", ROOT)
+
+        self.assertTrue(passed)
+        command = mocked_run.call_args.args[0]
+        self.assertEqual(command, [str(ROOT / "lab-vm"), "verify-isolation", "profile-safe"])
+        self.assertEqual(mocked_run.call_args.kwargs["env"]["VM_ISOLATION_SKIP_MODEL"], "1")
+        self.assertEqual(mocked_run.call_args.kwargs["timeout"], 120)
+        serialized = json.dumps(evidence.data, sort_keys=True)
+        self.assertNotIn("23456", serialized)
+        self.assertNotIn("sensitive stderr", serialized)
+        self.assertEqual(evidence.data["outer_isolation"]["passed_checks"], 1)
+
+    def test_live_isolation_timeout_is_a_sanitized_failure(self):
+        evidence = DummyEvidence()
+        timeout = subprocess.TimeoutExpired(["lab-vm"], 120, output="private-port 23456")
+        with patch.object(acceptance.subprocess, "run", side_effect=timeout):
+            self.assertFalse(acceptance.run_isolation_check("profile-safe", evidence, "outer", ROOT))
+        self.assertTrue(evidence.data["outer_isolation"]["timed_out"])
+        self.assertFalse(evidence.data["outer_isolation"]["passed"])
+        self.assertNotIn("23456", json.dumps(evidence.data))
+
+    def test_live_isolation_refuses_invalid_profile_before_subprocess(self):
+        evidence = DummyEvidence()
+        with patch.object(acceptance.subprocess, "run") as mocked_run:
+            self.assertFalse(acceptance.run_isolation_check("../default", evidence, "outer", ROOT))
+        mocked_run.assert_not_called()
+
     def test_context_summary_drops_paths_and_unrelated_cpu_flags(self):
         raw = '{"runtime":{"kind":"vm","root":"/private/path"},"recursion":{"depth":0,"max_depth":1},"kvm":{"device_present":true,"device_read_write":true,"nested_kvm_preflight_ready":true,"cpu_virtualization":["svm","aes"]},"workspace_filesystem":"virtiofs"}'
         result = acceptance.safe_context(raw)
@@ -486,7 +555,8 @@ class HostAcceptanceTests(unittest.TestCase):
         evidence = DummyEvidence()
         summary = {"checks": {"child_up": False}}
         with patch.object(acceptance, "Evidence", return_value=evidence), \
-             patch.object(acceptance, "run_preflight", return_value=(True, Path("/outer"))) as mock_preflight, \
+             patch.object(acceptance, "run_preflight", return_value=(True, Path("/vm/launcher-smoke"))) as mock_preflight, \
+             patch.object(acceptance, "run_isolation_check", return_value=True), \
              patch.object(acceptance, "run_nested_remote", return_value=(3, summary)), \
              redirect_stdout(io.StringIO()):
             result = acceptance.nested_gate(None, "launcher-smoke", Path("/snapshot"), ROOT)
@@ -506,7 +576,8 @@ class HostAcceptanceTests(unittest.TestCase):
             "depth_limit_refused_before_state": True, "outer_session_usable": True,
         }}
         with patch.object(acceptance, "Evidence", return_value=evidence), \
-             patch.object(acceptance, "run_preflight", return_value=(True, Path("/outer"))) as mock_preflight, \
+             patch.object(acceptance, "run_preflight", return_value=(True, Path("/vm/outer-8g"))) as mock_preflight, \
+             patch.object(acceptance, "run_isolation_check", return_value=True) as mock_outer_isolation, \
              patch.object(acceptance, "run_nested_remote", return_value=(0, summary)) as mock_remote, \
              redirect_stdout(io.StringIO()):
             result = acceptance.nested_gate(
@@ -517,6 +588,7 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertFalse(mock_preflight.call_args.kwargs["require_child_memory_budget"])
         self.assertTrue(mock_remote.call_args.kwargs["resume_existing"])
+        mock_outer_isolation.assert_called_once_with("outer-8g", evidence, "outer", ROOT)
         outcomes = {check["name"]: check["result"] for check in evidence.data["checks"]}
         self.assertEqual(outcomes["existing child profile"], "PASS")
         self.assertEqual(outcomes["child up"], "PASS")
@@ -531,7 +603,8 @@ class HostAcceptanceTests(unittest.TestCase):
             "depth_limit_refused_before_state": True, "outer_session_usable": True,
         }}
         with patch.object(acceptance, "Evidence", return_value=evidence), \
-             patch.object(acceptance, "run_preflight", return_value=(True, Path("/outer"))), \
+             patch.object(acceptance, "run_preflight", return_value=(True, Path("/vm/outer-8g"))), \
+             patch.object(acceptance, "run_isolation_check", return_value=True), \
              patch.object(acceptance, "run_nested_remote", return_value=(7, summary)), \
              redirect_stdout(io.StringIO()):
             result = acceptance.nested_gate(
@@ -543,6 +616,29 @@ class HostAcceptanceTests(unittest.TestCase):
         outcomes = {check["name"]: check["result"] for check in evidence.data["checks"]}
         self.assertEqual(outcomes["nested isolation"], "FAIL")
         self.assertEqual(evidence.data["outcome"], "FAIL")
+
+    def test_nested_gate_stops_before_child_when_outer_boundary_fails(self):
+        evidence = DummyEvidence()
+
+        def fail_outer(_profile, target, _label, _repo):
+            target.check("outer QEMU and guest network boundary", False, "listener was not loopback-only")
+            return False
+
+        with patch.object(acceptance, "Evidence", return_value=evidence), \
+             patch.object(acceptance, "run_preflight", return_value=(True, Path("/vm/outer-8g"))), \
+             patch.object(acceptance, "run_isolation_check", side_effect=fail_outer), \
+             patch.object(acceptance, "run_nested_remote") as mock_remote, \
+             redirect_stdout(io.StringIO()):
+            result = acceptance.nested_gate(
+                "nested-accept-existing", "outer-8g", Path("/snapshot"), ROOT,
+                reuse_existing=True,
+            )
+
+        self.assertNotEqual(result, 0)
+        mock_remote.assert_not_called()
+        self.assertEqual(evidence.data["outcome"], "FAIL")
+        self.assertEqual(evidence.data["checks"][-1]["name"], "nested-resume")
+        self.assertEqual(evidence.data["checks"][-2]["result"], "FAIL")
 
     def test_nested_command_is_explicit_and_contains_no_teardown_or_tui(self):
         compile(acceptance.REMOTE_PREFLIGHT, "remote-preflight", "exec")
@@ -572,6 +668,7 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertIn('isolation_env["VM_ISOLATION_SKIP_MODEL"] = "1"', acceptance.REMOTE_NESTED)
         self.assertIn('"verify-isolation", profile', acceptance.REMOTE_NESTED)
         self.assertIn('"nested_isolation"] = isolation_ok', acceptance.REMOTE_NESTED)
+        self.assertIn('"QEMU TCP listeners: SSH and egress proxy are loopback-only."', acceptance.REMOTE_NESTED)
         self.assertIn('Reusing the existing nested child; no VM will be started or stopped.', acceptance.REMOTE_NESTED)
         self.assertIn(
             'session, vm_dir = sessions / profile, sessions / profile / "vm" / profile',
@@ -647,6 +744,7 @@ class HostAcceptanceTests(unittest.TestCase):
         cap_result = {"returncode": 1, "expected_refusal": True, "state_created": False}
         isolation_output = (
             "QEMU configuration: restrict=on; SSH bound to 127.0.0.1:23456; only the four reviewed guestfwd channels are configured.\n"
+            "QEMU TCP listeners: SSH and egress proxy are loopback-only.\n"
             "PASS: direct route: blocked\n"
             "SKIP: selected model availability (not part of isolation-only acceptance)\n"
             "Result: 1 passed, 0 failed\n"
@@ -690,6 +788,7 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertTrue(summary["checks"]["child_acceptance"])
         self.assertTrue(summary["checks"]["nested_isolation"])
         self.assertTrue(summary["nested_isolation"]["qemu_argv_validated"])
+        self.assertTrue(summary["nested_isolation"]["loopback_listeners_validated"])
         self.assertEqual(summary["nested_isolation"]["passed_checks"], 1)
         self.assertEqual(summary["nested_isolation"]["skipped_checks"], 1)
         self.assertTrue(summary["checks"]["depth_limit_refused_before_state"])
