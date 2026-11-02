@@ -278,7 +278,7 @@ vm_cmd_metrics() {
 
   case "$action" in
     up|start|down|stop)
-      mkdir -p -m 0700 "$state_dir"
+      mkdir -p "$state_dir"
       chmod 0700 "$state_dir"
       command -v flock >/dev/null 2>&1 || die 'VM metrics lifecycle requires flock (util-linux).'
       exec {lock_fd}>"$state_dir/service.lock"
@@ -288,8 +288,6 @@ vm_cmd_metrics() {
 
   case "$action" in
     up|start)
-      mkdir -p -m 0700 "$state_dir"
-      chmod 0700 "$state_dir"
       if [[ -f "$pid_file" ]]; then
         pid="$(cat "$pid_file" 2>/dev/null || true)"
         if _vm_metrics_pid_matches "$pid" && kill -0 "$pid" 2>/dev/null; then

@@ -16,4 +16,5 @@ fi
 
 # Keep the Docker helper functions available to existing scripts/tests that
 # source ./lab. New code should source lab-docker when it needs these helpers.
+# shellcheck source=lab-docker
 source "$LAB_DIR/lab-docker"

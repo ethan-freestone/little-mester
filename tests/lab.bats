@@ -419,9 +419,11 @@ teardown() {
 }
 
 @test "lab-vm preserves a named VM argument after the command" {
-  run ./lab-vm status named-parser-test
+  local vm_root="$WORKSPACE_TMPDIR/vm" state_root="$WORKSPACE_TMPDIR/state"
+  run env VM_DIR_BASE="$vm_root" VM_STATE_DIR="$state_root" \
+    "$LAB_DIR/lab-vm" status named-parser-test
   [ "$status" -eq 1 ]
-  [[ "$output" == *".mester/vm/named-parser-test"* ]]
+  [[ "$output" == *"$vm_root/named-parser-test"* ]]
   [[ "$output" != *"Unknown command: named-parser-test"* ]]
 }
 

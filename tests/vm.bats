@@ -1684,7 +1684,7 @@ JSON
 }
 
 @test "hygiene ShellCheck covers VM entry points, browser opener, and lifecycle errors" {
-  grep -Fq 'shellcheck lab scripts/*.sh lib/vm/cloud-init.sh lib/vm/host-services.sh lib/vm/browser-open.sh' "$REPO_ROOT/.github/workflows/ci.yml"
+  grep -Fq 'shellcheck lab lab-docker scripts/*.sh lib/vm/cloud-init.sh lib/vm/host-services.sh lib/vm/browser-open.sh' "$REPO_ROOT/.github/workflows/ci.yml"
   grep -Fq 'shellcheck --severity=error lab-vm lib/vm/lifecycle.sh lib/vm/recursion.sh' "$REPO_ROOT/.github/workflows/ci.yml"
 }
 
