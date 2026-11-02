@@ -8,7 +8,7 @@
   "title": "Epic: VM-native Little Mester agent and isolated workload environment",
   "objective": "CURRENT RELEASE COORDINATOR (2026-11-01): deliver the VM-first Little Mester release, preserve the Docker fallback as ./lab-docker, simplify and correct maintained docs, and do not claim merge-ready until code, host acceptance, docs, CI and PR evidence are complete. Follow the phased CURRENT RELEASE PLAN appended to tests.needed; newest phase pointer supersedes stale handoffs. Current owner-configured default guest recursion policy is depth 0 / max 2; host/KVM and release evidence remain separately scoped.",
   "created_at": "2026-10-26T17:39:37.714Z",
-  "updated_at": "2026-11-02T23:40:08.686Z",
+  "updated_at": "2026-11-02T23:42:43.860Z",
   "priority": "critical",
   "comments": [
     {
@@ -306,7 +306,8 @@
       "2026-11-02 local CI follow-up (local only, before commit): `bats tests/` passed 179/179; `python3 -m unittest discover -s tests -p 'test_vm_*.py'` passed 145/145; `./lab-vm test` passed 8/8; exact CI ShellCheck commands passed; Ruff `check scripts/*.py agent/metrics/gather.py bench/bench.py` passed; `python3 -m py_compile scripts/*.py`, cloud-init schema validation, docs consistency (115 checks), and `git diff --check` passed. Fixes isolate test 51's VM profile state and address Ruff findings while retaining Python 3.10 compatibility. GitHub Actions still needs to run on the committed/pushed revision; local tests are not owner-host acceptance.",
       "2026-11-02 owner campaign: existing-child nested continuation passed; approved egress policy reload passed; read-only `lab-vm models status all` exited 1 without changing services. Campaign stopped before direct guest TUI/model and later gates; those are blocked, not passed. Private report: vm-acceptance-20261102T184924Z-1556996-3bf3ce11.json. #41 owns follow-up diagnostics and preservation constraints.",
       "41d69ab4: focused nested-gate source hardening and local regression evidence recorded; physical host acceptance remains pending.",
-      "Physical-host attempt 2026-11-02: RAM=28406 MiB projected; host/KVM checks passed; runner selected launcher-smoke despite requested fresh outer; outer guest nested tools missing; guest bootstrap interrupted by Ctrl-C (exit 130), completion unknown; child not started. This is BLOCKED/INTERRUPTED, not a pass."
+      "Physical-host attempt 2026-11-02: RAM=28406 MiB projected; host/KVM checks passed; runner selected launcher-smoke despite requested fresh outer; outer guest nested tools missing; guest bootstrap interrupted by Ctrl-C (exit 130), completion unknown; child not started. This is BLOCKED/INTERRUPTED, not a pass.",
+      "2026-11-02 focused nested host run blocked before SSH/child startup on stable-snapshot exporter conflict; full owner-supplied observation and unresolved report/bootstrap review are recorded on #41. No profile/snapshot mutation or retry. Physical-host acceptance remains pending."
     ]
   },
   "is_epic": true
