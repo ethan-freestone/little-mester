@@ -61,7 +61,14 @@ vm_disk_create_base() (
   staging=$(mktemp -d "$(dirname "$base_disk")/.image.XXXXXX")
   trap 'rm -rf "$staging"' EXIT
   log "Downloading pinned Ubuntu 24.04 cloud image (20 GiB is virtual disk size, not download size)..."
-  curl --fail --location --retry 3 --output "$staging/image" "$VM_IMAGE_URL"
+  local -a curl_args=(--fail --location --retry 3 --output "$staging/image")
+  if [[ "${VM_NESTED_LAUNCH:-0}" == 1 ]]; then
+    # Non-interactive SSH commands need not source /etc/profile.d/mester.sh.
+    # Force nested provisioning through the outer guest's public-only proxy;
+    # do not fall back to direct DNS/network access or a caller's NO_PROXY.
+    curl_args+=(--proxy http://10.0.2.100:3128 --noproxy "")
+  fi
+  curl "${curl_args[@]}" "$VM_IMAGE_URL"
   printf '%s  %s\n' "$VM_IMAGE_SHA256" "$staging/image" | sha256sum --check --status
   qemu-img convert -f qcow2 -O qcow2 "$staging/image" "$staging/base.qcow2"
   qemu-img resize "$staging/base.qcow2" "${size}G"

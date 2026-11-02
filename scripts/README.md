@@ -1,6 +1,6 @@
 # scripts — little-mester automation tools
 
-All scripts use `#!/usr/bin/env sh` (POSIX sh). Sourced files in `lib/` are never executed directly.
+Shell scripts use POSIX `sh` or Bash as required; Python tools use `python3`. Sourced files in `lib/` are never executed directly.
 
 ## Core scripts
 
@@ -11,6 +11,7 @@ All scripts use `#!/usr/bin/env sh` (POSIX sh). Sourced files in `lib/` are neve
 | `ticket-new` | Scaffold a new ticket file formatted to pass validation | `./scripts/ticket-new [--number NNN] <description>` |
 | `sync-helper` | Wrap PR open + validate-tickets pre-merge guard | `./scripts/sync-helper [--target main] [--dry-run] [-h|--help]` |
 | `commit-helper` | Git commit with validation gate + ticket update | `./scripts/commit-helper <message> [--add-ticket-ref]` |
+| `vm-host-acceptance.py` | Automated owner-host snapshot/profile preflight, bounded nested-VM gate, and optional human-observation reports | `./scripts/vm-host-acceptance.py <command>` |
 
 ## Helper scripts
 
@@ -35,3 +36,5 @@ NOTE: ticket-discarded-scripts-analysis.md does not exist -- should it be create
 3. **Before syncing to target branch**: run `sync-helper` — blocks if any ticket fails strict validation.
 4. **Before committing code**: run `commit-helper` with a message; it validates tickets and optionally references the ticket number.
 5. **After any script change**: run `./scripts/lib/check-syntax.sh --all`.
+
+See [VM host acceptance](../docs/vm-host-acceptance.md) for the host-only test order and safety boundaries.

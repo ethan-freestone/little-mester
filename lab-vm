@@ -484,6 +484,10 @@ if [[ "$cmd" == run || "$cmd" == up ]]; then
   if (( VM_NESTED_LAUNCH == 1 )); then
     vm_recursion_require_nested_kvm || exit 1
     VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$vm_name")" || die 'Invalid recursive profile name.'
+    # A recursive profile owns its entire private state namespace. Do not
+    # chmod the guest's unrelated default XDG state root while starting a
+    # child; it may be root-owned or otherwise not mutable by this user.
+    VM_STATE_DIR="$VM_RECURSION_SESSION_DIR"
     VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
     VM_LEGACY_STATE=0
   fi
@@ -551,9 +555,10 @@ if [[ "$cmd" == recursion-clean ]]; then
   [[ -z "$VM_NAME_ARG" ]] || die '--name is not valid with recursion-clean; pass the profile positionally.'
   [[ -n "${remaining[1]:-}" ]] || die 'Usage: ./lab-vm recursion-clean <profile>'
   [[ "${remaining[1]}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
-    VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "${remaining[1]}")" || die 'Invalid recursive profile name.'
-    VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
-    VM_LEGACY_STATE=0
+  VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "${remaining[1]}")" || die 'Invalid recursive profile name.'
+  VM_STATE_DIR="$VM_RECURSION_SESSION_DIR"
+  VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
+  VM_LEGACY_STATE=0
 fi
 if [[ "$cmd" == install-tools ]]; then
   [[ ${#remaining[@]} -le 2 ]] || die 'Usage: ./lab-vm install-tools [name] [--name <profile>] [--restart-opencode]'
@@ -589,6 +594,7 @@ if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" ]]; then
   case "$cmd" in
     run|up|status|ssh|down|stop|resize|agent|egress-reload|verify-isolation|base|rebuild|install-tools|update)
       VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$vm_name")" || die 'Invalid recursive profile name.'
+      VM_STATE_DIR="$VM_RECURSION_SESSION_DIR"
       VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
       VM_LEGACY_STATE=0
       ;;
@@ -596,6 +602,7 @@ if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" ]]; then
       _auth_profile=default
       if (( ${#remaining[@]} == 3 )); then _auth_profile="${remaining[1]}"; fi
       VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$_auth_profile")" || die 'Invalid recursive profile name.'
+      VM_STATE_DIR="$VM_RECURSION_SESSION_DIR"
       VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
       VM_LEGACY_STATE=0
       ;;
@@ -605,7 +612,7 @@ if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" ]]; then
       ;;
   esac
 fi
-export VM_DIR_BASE
+export VM_DIR_BASE VM_STATE_DIR
 
 if [[ "$VM_BROWSER_AUTH_ENABLE_FLAG" -eq 1 && "$VM_BROWSER_AUTH_DISABLE_FLAG" -eq 1 ]]; then
   die 'Choose only one of --browser-auth or --no-browser-auth.'

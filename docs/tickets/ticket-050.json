@@ -8,7 +8,7 @@
   "title": "Honor lab permission controls and verify OpenCode auto mode",
   "objective": "Fix host and VM launcher argument/mode propagation, including actual guest OpenCode permission argv. `--auto-accept` must request the supported `opencode --auto` mode once; `ask` must not, invalid modes/conflicts must refuse, explicit configured denies stay intact. Mock argv coverage is necessary but real UI/action acceptance remains a separate human gate.",
   "created_at": "2026-10-28T11:43:02.111Z",
-  "updated_at": "2026-11-01T18:07:36.410Z",
+  "updated_at": "2026-11-01T22:43:15.902Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -43,7 +43,8 @@
       "After implementation, verify actual harmless allow plus explicit deny behavior in the running VM at the reported OpenCode version; do not mark UI acceptance passing from mocked SSH argv alone or add blanket allow rules."
     ],
     "created": [
-      "tests/lab-permissions.bats: final Docker argv, permission mapping, conflict/invalid value, aider, no-path and nonzero exit propagation"
+      "tests/lab-permissions.bats: final Docker argv, permission mapping, conflict/invalid value, aider, no-path and nonzero exit propagation",
+      "scripts/vm-host-acceptance.py observe --gate permissions: guided human permission observations; tests/test_vm_host_acceptance.py covers safe report recording. This does not execute permission UI checks or mark acceptance."
     ],
     "cases": [
       "2026-10-28 owner reports prompt mode under ./lab --unsafe-recurse --auto-accept. /proc inspection in this container confirms PID 1 argv is opencode --auto; version v2.2.0; shared server PID 16. Therefore missing --auto is NOT established as cause of the current UI symptom.",

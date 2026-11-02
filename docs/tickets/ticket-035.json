@@ -8,7 +8,7 @@
   "title": "Epic: VM-native Little Mester agent and isolated workload environment",
   "objective": "CURRENT RELEASE COORDINATOR (2026-11-01): deliver the VM-first Little Mester release, preserve the Docker fallback as ./lab-docker, simplify and correct maintained docs, and do not claim merge-ready until code, host acceptance, docs, CI and PR evidence are complete. Follow the phased CURRENT RELEASE PLAN appended to tests.needed; newest phase pointer supersedes stale handoffs. Current owner-configured default guest recursion policy is depth 0 / max 2; host/KVM and release evidence remain separately scoped.",
   "created_at": "2026-10-26T17:39:37.714Z",
-  "updated_at": "2026-11-01T19:14:52.962Z",
+  "updated_at": "2026-11-02T00:22:07.210Z",
   "priority": "critical",
   "comments": [
     {
@@ -214,7 +214,8 @@
       "The current coding shell itself reports MemTotal 3.8 GiB / MemAvailable about 2.8 GiB and is an ancestor KVM guest, not a profile managed by the `lab-vm` invocation in this shell. User authorizes 32 GiB for this shell VM but `lab-vm` cannot resize its ancestor; this requires parent hypervisor/launcher configuration and restart. Do not claim the shell has been resized or try a 32-GiB QEMU launch here. Keep general VM acceptance open until the owner has done the external resize and evidence is observed.",
       "Owner-host acceptance remains open: resize a disposable running managed profile on a suitable KVM host, verify graceful shutdown/restart and guest MemTotal, and confirm overlay/base/seed/SSH identity/workspace/installed state remain. This shell cannot resize its ancestor; current MemAvailable is about 2.8 GiB, so do not start a 32-GiB child here.",
       "Next memory phase: implement setup-only `--memory <GiB>` for new profiles, refuse it for existing profiles unless `--clean` explicitly creates a fresh profile, validate and persist the chosen value, and cover parser/preflight/side-effect ordering. Keep host/KVM resize and nested-depth boot acceptance open.",
-      "Owner-host acceptance remains open for the three memory phases: on a suitable KVM host, verify fresh depth defaults and an explicit new-profile RAM override in guest MemTotal, warm-start persistence, and managed resize state preservation. The 32-GiB target for the ancestor shell VM requires parent hypervisor/launcher action; do not attempt it as a child VM."
+      "Owner-host acceptance remains open for the three memory phases: on a suitable KVM host, verify fresh depth defaults and an explicit new-profile RAM override in guest MemTotal, warm-start persistence, and managed resize state preservation. The 32-GiB target for the ancestor shell VM requires parent hypervisor/launcher action; do not attempt it as a child VM.",
+      "SUPERSEDES the prior #41 nested retry handoff after the 2026-11-02 child image download DNS failure: follow the newest #41 tests.needed entry. Keep the launcher-smoke VM/overlay/workspace, host-Docker session/credentials, default/base profile, both failed child sessions and reports; no teardown, container recreation, active snapshot mutation, proxy bypass, or egress widening. After the nested proxy fix is present in the CachyOS checkout, run the #41 bounded nested runner exactly once with a fresh generated child. Local checks do not pass this owner-host gate; stop and preserve evidence on any failure."
     ],
     "created": [
       "docs/DECISIONS.md §C.6 topology decision",
@@ -223,7 +224,8 @@
       "tests/vm.bats: QEMU RAM configuration, private profile metadata, resize validation, preservation, and fail-before-side-effect refusal cases.",
       "tests/vm.bats: new profile RAM defaults at recursion depths 0/1/2/3+, legacy 4-GiB fallback, explicit persisted profile memory, and clean-reset fresh default.",
       "tests/vm.bats: setup-memory helper permits validated RAM only for an empty/new profile, rejects existing profile state without changing selection, and permits explicit clean replacement.",
-      "tests/vm.bats: CLI rejects missing/invalid/duplicate --memory values and commands outside up/run; help documents the option."
+      "tests/vm.bats: CLI rejects missing/invalid/duplicate --memory values and commands outside up/run; help documents the option.",
+      "2026-11-02 targeted nested image-download fix: nested curl explicitly uses the existing parent public-only proxy with no-proxy bypass disabled; the owner-host runner also sets the existing proxy environment for older guest helper sources. Top-level behavior and egress policy are unchanged. See #41 for exact implementation and retry handoff."
     ],
     "cases": [
       "topology decision review (full Linux VM + Docker)",
@@ -250,7 +252,9 @@
       "2026-11-01 local default-memory phase: new profiles select 8 GiB at depth 0 and 4/2/1 GiB at depths 1/2/3+; metadata-less existing profiles remain 4 GiB; persisted profile allocations win on warm starts. Explicit `up --clean` chooses the fresh depth-based default while verifying any running old QEMU against its old metadata before removal. Validation: Bats 152/152, VM Python 81/81, ./lab-vm test 8/8, docs consistency 115/115, ShellCheck/syntax/compile/diff pass. No live QEMU boot or owner-host resize was performed. Setup-only `--memory <GiB>` override remains the next phase.",
       "2026-11-01 setup-override phase: `--memory <GiB>` applies during new-profile `up`/`run`, must be 1–128, persists as the selected profile allocation, and refuses an existing profile unless explicit destructive `up --clean` is used. Existing profile RAM changes remain `resize`. Validation: Bats 154/154; all VM Python tests 81/81; `./lab-vm test` 8/8; docs consistency 115/115; ShellCheck, Bash syntax, Python compile, and `git diff --check` pass. No QEMU boot or owner-host acceptance was performed.",
       "The memory plan is implemented in three separate local commits: 4925e55 managed resize, dc1fb7a depth-scaled defaults, and the current setup override slice (pending commit). All remain unpushed; host acceptance and broader VM-first release gates stay open.",
-      "SUPERSEDES earlier ledger entries saying the setup override is the next implementation phase: all three memory slices are now committed locally as 4925e55, dc1fb7a, and 9e4a16b. Implementation and local verification are complete; only owner-host KVM acceptance and the broader VM-first release gates remain. No commits have been pushed and no live resize/boot is claimed."
+      "SUPERSEDES earlier ledger entries saying the setup override is the next implementation phase: all three memory slices are now committed locally as 4925e55, dc1fb7a, and 9e4a16b. Implementation and local verification are complete; only owner-host KVM acceptance and the broader VM-first release gates remain. No commits have been pushed and no live resize/boot is claimed.",
+      "2026-11-01 local implementation only: added reusable owner-host acceptance runner, private summary output, bounded nested gate and guided observation capture, documented in docs/vm-host-acceptance.md. Acceptance unit tests 9/9, full VM Python 98/98, Bats 159/159, docs 115/115, compile/help/diff checks pass. No CachyOS host action or nested KVM boot performed; all physical-host gates remain open.",
+      "2026-11-02 latest owner nested attempt passed host, KVM, snapshot, outer guest preflight and RAM checks, then failed during pinned Ubuntu cloud-image download with curl DNS resolution failure; downstream readiness/depth/continuity checks were BLOCKED. Failed child and private evidence are retained per #41. Targeted local fix is implemented and locally tested, but has not yet been transferred/retried on CachyOS; nested recursion and all subsequent release gates remain open."
     ]
   },
   "is_epic": true

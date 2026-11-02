@@ -494,6 +494,22 @@ setup() {
   [[ "$output" == *"$recursion_root/child/vm/child"* ]]
 }
 
+@test "nested commands do not chmod the unrelated default VM state root" {
+  local home="$BATS_TEST_TMPDIR/nested-home"
+  local state_dir="$BATS_TEST_TMPDIR/default-vm-state"
+  local nested_session="$home/.cache/lab-vm-recursion/child"
+  mkdir -p "$home" "$state_dir/vm"
+  chmod 0755 "$state_dir"
+
+  run env HOME="$home" VM_STATE_DIR="$state_dir" \
+    LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=1 \
+    "$REPO_ROOT/lab-vm" status child
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$nested_session/vm/child"* ]]
+  [ "$(stat -c %a "$state_dir")" = 755 ]
+  [ "$(stat -c %a "$nested_session")" = 700 ]
+}
+
 @test "nested startup keeps its preflighted recursion session for snapshot preparation" {
   local session_line reset_line prepare_line reset_context
   session_line="$(grep -nF 'VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$vm_name")"' "$REPO_ROOT/lab-vm" | head -1 | cut -d: -f1)"
@@ -1770,6 +1786,38 @@ MOCK_SUDO
   [ "$status" -eq 0 ]
   run grep -F "sha256sum --check --status" "$REPO_ROOT/lib/vm/disk.sh"
   [ "$status" -eq 0 ]
+}
+
+@test "nested base image download uses the parent proxy while top-level download remains unchanged" {
+  local fakebin="$BATS_TEST_TMPDIR/curl-bin" args_file="$BATS_TEST_TMPDIR/curl-args" source_file="$BATS_TEST_TMPDIR/download.sh"
+  mkdir -p "$fakebin"
+  cat >"$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '<%s>\n' "$@" >"$CURL_ARGS_FILE"
+exit 23
+SH
+  chmod +x "$fakebin/curl"
+  cat >"$source_file" <<'SH'
+source "$LAB_DIR/lib/vm/disk.sh"
+log() { :; }
+vm_disk_create_base "$BASE_DIR/base.qcow2" 4
+SH
+
+  run env PATH="$fakebin:$PATH" LAB_DIR="$REPO_ROOT" BASE_DIR="$BATS_TEST_TMPDIR" \
+    CURL_ARGS_FILE="$args_file" VM_NESTED_LAUNCH=1 \
+    VM_IMAGE_URL=https://cloud-images.ubuntu.com/image.img bash "$source_file"
+  [ "$status" -ne 0 ]
+  grep -Fxq '<--proxy>' "$args_file"
+  grep -Fxq '<http://10.0.2.100:3128>' "$args_file"
+  grep -Fxq '<--noproxy>' "$args_file"
+  grep -Fxq '<>' "$args_file"
+
+  run env -u VM_NESTED_LAUNCH PATH="$fakebin:$PATH" LAB_DIR="$REPO_ROOT" \
+    BASE_DIR="$BATS_TEST_TMPDIR" CURL_ARGS_FILE="$args_file" \
+    VM_IMAGE_URL=https://cloud-images.ubuntu.com/image.img bash "$source_file"
+  [ "$status" -ne 0 ]
+  ! grep -Fxq '<--proxy>' "$args_file"
+  ! grep -Fxq '<--noproxy>' "$args_file"
 }
 
 @test "VM runtime installs OpenCode in the guest rather than building an agent container" {
