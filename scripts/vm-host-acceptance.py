@@ -1391,6 +1391,25 @@ def nested_gate(profile: str | None, outer_profile: str, snapshot: Path, repo: P
     return 0 if passed else (rc or 1)
 
 
+def classify_interrupted_process(args: list[str]) -> str | None:
+    """Match only the acceptance runner and its exact nested-probe SSH command."""
+    if not args:
+        return None
+    executable = Path(args[0]).name
+    if (executable.startswith("python")
+            and any("vm-host-acceptance.py" in arg for arg in args)
+            and "nested" in args):
+        return "nested-acceptance-runner"
+    if executable != "ssh" or "mester@127.0.0.1" not in args:
+        return None
+    remote = args[-1].split()
+    if (len(remote) == 7 and remote[:5] == ["cd", "/workspace", "&&", "python3", "-"]
+            and PROFILE_RE.fullmatch(remote[5])
+            and re.fullmatch(r"depth-cap-[0-9a-f]{10}", remote[6])):
+        return "nested-acceptance-ssh-to-outer"
+    return None
+
+
 def interrupted_processes() -> list[dict[str, str]]:
     """Describe matching local runner/SSH processes without exposing argv or signaling them."""
     found: list[dict[str, str]] = []
@@ -1410,12 +1429,7 @@ def interrupted_processes() -> list[dict[str, str]]:
             continue
         if not args:
             continue
-        executable = Path(args[0]).name
-        kind = None
-        if executable.startswith("python") and any("vm-host-acceptance.py" in arg for arg in args) and "nested" in args:
-            kind = "nested-acceptance-runner"
-        elif executable == "ssh" and "mester@127.0.0.1" in args:
-            kind = "ssh-to-outer-guest"
+        kind = classify_interrupted_process(args)
         if kind is None:
             continue
         try:
@@ -1480,8 +1494,9 @@ def inspect_interrupted(profile: str, state_dir: Path | None = None) -> int:
         print("No matching partial/final report found for this child profile.")
 
     processes = interrupted_processes()
-    relevant = [item for item in processes if item["kind"] == "nested-acceptance-runner"]
-    relevant.extend(item for item in processes if item["kind"] == "ssh-to-outer-guest")
+    relevant = [item for item in processes if item["kind"] in (
+        "nested-acceptance-runner", "nested-acceptance-ssh-to-outer",
+    )]
     if relevant:
         print("Matching local processes (inspection only; none were signaled):")
         for item in relevant:

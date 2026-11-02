@@ -559,6 +559,26 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertEqual(parsed.command, "inspect-interrupted")
         self.assertEqual(parsed.profile, profile)
 
+    def test_interrupted_process_classifier_excludes_live_browser_and_tui_ssh(self):
+        browser_bridge = [
+            "ssh", "-F", "/dev/null", "-M", "-S", "/run/user/1000/ssh-control",
+            "-N", "-R", "127.0.0.1:53719:127.0.0.1:52367", "mester@127.0.0.1",
+        ]
+        tui = [
+            "ssh", "-t", "-o", "BatchMode=yes", "mester@127.0.0.1",
+            "set -eu; cd /workspace && opencode",
+        ]
+        nested_probe = [
+            "ssh", "-o", "BatchMode=yes", "mester@127.0.0.1",
+            "cd /workspace && python3 - nested-accept-20261102005812-6494102d depth-cap-0123456789",
+        ]
+        self.assertIsNone(acceptance.classify_interrupted_process(browser_bridge))
+        self.assertIsNone(acceptance.classify_interrupted_process(tui))
+        self.assertEqual(
+            acceptance.classify_interrupted_process(nested_probe),
+            "nested-acceptance-ssh-to-outer",
+        )
+
     def test_nested_profile_is_automatically_generated_by_default(self):
         args = acceptance.parser().parse_args(["nested"])
         self.assertIsNone(args.profile)

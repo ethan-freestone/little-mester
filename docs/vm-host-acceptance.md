@@ -170,8 +170,10 @@ matching local runner/SSH processes without changing state:
 
 Replace the profile with the exact child name printed by `lab-vm up`. This
 command prints check names/results only (not raw report details or command
-arguments); it does not signal processes, connect to a VM, or delete evidence.
-Keep the child profile and report. Do not treat an unfinished report as a pass.
+arguments); it recognizes only this runner and its generated depth-probe SSH
+command, not browser-auth tunnels or ordinary `lab-vm run`/TUI SSH sessions. It
+does not signal processes, connect to a VM, or delete evidence. Keep the child
+profile and report. Do not treat an unfinished report as a pass.
 
 Exit status is zero only for a passed preflight/nested gate or a fully
 positive human observation; blocked or failed gates return nonzero. A runner
