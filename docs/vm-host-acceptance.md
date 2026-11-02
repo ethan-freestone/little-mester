@@ -23,7 +23,11 @@ manual review/confirmation step:
 - Stale allowlisted runtime files are replaced atomically; previous bytes are
   retained under the private acceptance evidence directory. Both source repair
   and full rebuild refuse to mutate a snapshot while an active export is
-  detected.
+  detected. For the nested gate only, if the existing export is otherwise safe
+  and only those allowlisted runtime files differ, the runner leaves the active
+  snapshot untouched and stages the verified current files in a private `/tmp`
+  source overlay inside the outer guest. Other stale/unsafe snapshot conditions
+  still block; `preflight` does not use this fallback.
 - If `.mester` control state is visible, the snapshot is rebuilt using
   `scripts/vm-recursion-workspace.py` exclusions. The old tree is retained as a
   private sibling backup. Rebuild is refused while a QEMU/virtiofsd process is
@@ -94,6 +98,12 @@ failure details are also retained in `virtiofsd-startup.log`. Virtiofs sockets
 use a private per-user short path under `/tmp/little-mester-vfs-<uid>/` rather
 than the deeply nested profile path, which can exceed Linux's AF_UNIX pathname
 limit. Existing live VMs using the legacy per-profile socket remain recognized.
+If the stable snapshot is still actively exported and the only mismatch is an
+allowlisted runtime source, the nested runner uses current host source files in
+a private `/tmp` overlay in the outer guest; it does not replace files under
+the mounted `/workspace` or restart the outer VM. This path transfers only the
+hash-verified allowlisted runtime files, and leaves the child workspace as the
+existing `/workspace` snapshot.
 For a retry, wait until the targeted revision is present in the CachyOS checkout
 and the current #35/#41 handoff permits it, then run this once; it generates a
 fresh child profile:

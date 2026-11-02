@@ -12,6 +12,7 @@ and are never inferred from the automated nested gate.
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import hashlib
 import json
@@ -128,6 +129,24 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def active_source_overlay_payload(repo: Path = ROOT) -> dict[str, dict[str, object]]:
+    """Return the narrow, integrity-checked runtime files needed for an active snapshot overlay."""
+    payload: dict[str, dict[str, object]] = {}
+    root = repo.resolve(strict=True)
+    for relative in SNAPSHOT_FILES:
+        source = repo / relative
+        if (path_has_symlink(source) or not source.is_file()
+                or not source.resolve(strict=True).is_relative_to(root)):
+            raise AcceptanceError(f"Unsafe or missing active-snapshot runtime source: {relative}")
+        data = source.read_bytes()
+        payload[relative] = {
+            "content": base64.b64encode(data).decode("ascii"),
+            "mode": stat.S_IMODE(source.stat().st_mode),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    return payload
 
 
 def safe_snapshot_target(snapshot: Path, target: Path) -> bool:
@@ -466,7 +485,14 @@ def rebuild_safe_snapshot(snapshot: Path, evidence: Evidence, repo: Path = ROOT)
     return True
 
 
-def snapshot_checks(snapshot: Path, evidence: Evidence, repo: Path = ROOT) -> bool:
+def snapshot_checks(
+    snapshot: Path,
+    evidence: Evidence,
+    repo: Path = ROOT,
+    *,
+    allow_active_source_overlay: bool = False,
+) -> bool:
+    active_source_overlay = False
     expected = snapshot.resolve() == DEFAULT_SNAPSHOT.resolve()
     evidence.check("known snapshot path", expected, "using the stable snapshot named in the current handoff" if expected else "only the stable snapshot named in the current handoff may be repaired")
     if not expected or snapshot.is_symlink() or path_has_symlink(snapshot.parent):
@@ -476,7 +502,8 @@ def snapshot_checks(snapshot: Path, evidence: Evidence, repo: Path = ROOT) -> bo
     _, parity = snapshot_status(snapshot, repo)
     state_visible = snapshot_state_visible(snapshot) if snapshot.is_dir() else False
     needs_rebuild = not snapshot.is_dir() or state_visible or any(
-        not (repo / relative).is_file() or not safe_snapshot_target(snapshot, snapshot / relative)
+        not (repo / relative).is_file() or (repo / relative).is_symlink()
+        or not safe_snapshot_target(snapshot, snapshot / relative)
         for relative in SNAPSHOT_FILES
     )
     if needs_rebuild:
@@ -489,21 +516,41 @@ def snapshot_checks(snapshot: Path, evidence: Evidence, repo: Path = ROOT) -> bo
                 evidence.check(f"snapshot source {relative}", same, "matches checkout" if same else "mismatch remains")
             return False
     elif not all(parity.values()):
-        repaired = sync_snapshot_sources(snapshot, evidence, repo)
-        status_ok, parity = snapshot_status(snapshot, repo)
-        if not repaired and not status_ok:
-            evidence.check("existing safe snapshot", False, "allowlisted source repair failed")
-            return False
+        active_users = active_snapshot_users(snapshot)
+        if active_users and allow_active_source_overlay:
+            # Never replace files beneath a live virtiofs export. The nested
+            # command can use a private /tmp source overlay inside the outer
+            # guest while leaving its active /workspace mount untouched.
+            active_source_overlay = True
+            evidence.data["snapshot_source_overlay_required"] = True
+            evidence.data["snapshot_export_processes"] = active_users
+            evidence.check(
+                "active snapshot source overlay", True,
+                "active snapshot left unchanged; nested launcher will use a private guest runtime overlay",
+            )
+            evidence.save()
+        else:
+            repaired = sync_snapshot_sources(snapshot, evidence, repo)
+            status_ok, parity = snapshot_status(snapshot, repo)
+            if not repaired and not status_ok:
+                evidence.check("existing safe snapshot", False, "allowlisted source repair failed")
+                return False
 
     path_ok = snapshot.is_dir() and not snapshot.is_symlink()
     evidence.check("existing safe snapshot", path_ok, "stable snapshot exists as a real directory" if path_ok else "stable snapshot is absent or unsafe")
     state_excluded = not snapshot_state_visible(snapshot)
     evidence.check("host control state excluded", state_excluded, "no .mester control state is visible in the snapshot" if state_excluded else "host control state remains visible")
     for relative, same in parity.items():
-        evidence.check(f"snapshot source {relative}", same, "matches checkout" if same else "mismatch remains")
+        if same:
+            detail = "matches checkout"
+        elif active_source_overlay:
+            detail = "differs from checkout; private runtime overlay will supply current source without changing the active snapshot"
+        else:
+            detail = "mismatch remains"
+        evidence.check(f"snapshot source {relative}", same or active_source_overlay, detail)
     evidence.data["snapshot_file_parity"] = parity
     evidence.save()
-    return expected and path_ok and state_excluded and all(parity.values())
+    return expected and path_ok and state_excluded and (all(parity.values()) or active_source_overlay)
 
 
 def outer_profile_checks(name: str, snapshot: Path, repo: Path, evidence: Evidence) -> Path | None:
@@ -809,11 +856,12 @@ sys.exit(0 if installed.returncode == 0 and not result["missing_tools"] else 2)
 '''
 
 
-REMOTE_NESTED = r"""import json, os, pathlib, re, subprocess, sys
+REMOTE_NESTED = r"""import base64, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tempfile
 profile, probe = sys.argv[1:3]
 root = pathlib.Path("/workspace")
 sessions = pathlib.Path.home() / ".cache/lab-vm-recursion"
 session, vm_dir = sessions / profile, sessions / profile / "vm"
+source_overlay_payload = json.loads(SOURCE_OVERLAY_PAYLOAD_JSON)
 summary = {"profile": profile, "probe": probe, "checks": {}, "child": {}, "depth_limit": {}}
 def emit(code):
     print("__LM_VM_ACCEPTANCE__" + json.dumps(summary, sort_keys=True), flush=True)
@@ -829,6 +877,82 @@ if workspace_path == state_path or workspace_path in state_path.parents or state
     emit(2)
 summary["checks"]["state_boundary"] = True
 summary["checks"]["fresh_profile"] = True
+def stage_runtime_overlay():
+    if not source_overlay_payload:
+        return root
+    expected = {"lib/vm/proxy.py", "lib/vm/runner.sh", "lib/vm/lifecycle.sh"}
+    if set(source_overlay_payload) != expected:
+        raise ValueError("runtime source overlay has an unexpected file set")
+    stage = pathlib.Path(tempfile.mkdtemp(prefix="little-mester-acceptance-", dir="/tmp"))
+    try:
+        os.chmod(stage, 0o700)
+        populate_runtime_overlay(stage)
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    return stage
+def populate_runtime_overlay(stage):
+    workspace = root.resolve(strict=True)
+    excluded = {".aws", ".bench-models", ".cache", ".config", ".git", ".gnupg", ".kube",
+        ".local", ".mester", ".pytest_cache", ".ruff_cache", ".secrets", ".ssh", ".tox",
+        ".venv", "__pycache__", "auth.json", "credentials", "credentials.json", "node_modules",
+        "opencode.db", "secrets", "secrets.env"}
+    def safe_link(source, destination):
+        target = source.resolve(strict=True)
+        if not target.is_relative_to(workspace):
+            raise ValueError("runtime overlay link escapes the safe workspace")
+        destination.symlink_to(target, target_is_directory=target.is_dir())
+    for item in root.iterdir():
+        if item.name in excluded or item.name.startswith(".") or item.name in ("lab-vm", "lib"):
+            continue
+        if item.name.endswith((".db", ".key", ".pem", ".secret", ".sqlite", ".sqlite3", ".token")):
+            continue
+        safe_link(item, stage / item.name)
+    def write_source(relative):
+        item = source_overlay_payload[relative]
+        encoded, expected_hash, mode = item.get("content"), item.get("sha256"), item.get("mode")
+        if not isinstance(encoded, str) or not isinstance(expected_hash, str) or not isinstance(mode, int) or not 0 <= mode <= 0o777:
+            raise ValueError("runtime source metadata is invalid")
+        content = base64.b64decode(encoded, validate=True)
+        if hashlib.sha256(content).hexdigest() != expected_hash:
+            raise ValueError("runtime source hash does not match")
+        destination = stage / relative
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with destination.open("xb") as output:
+            output.write(content)
+        os.chmod(destination, mode)
+    launcher = root / "lab-vm"
+    if launcher.is_symlink() or not launcher.is_file():
+        raise ValueError("active workspace lab-vm entry point is unsafe")
+    shutil.copy2(launcher, stage / "lab-vm")
+    lib_source, lib_stage = root / "lib", stage / "lib"
+    vm_source = lib_source / "vm"
+    if (lib_source.is_symlink() or not lib_source.is_dir()
+            or vm_source.is_symlink() or not vm_source.is_dir()):
+        raise ValueError("active workspace VM source directories are unsafe")
+    lib_stage.mkdir(mode=0o700)
+    for item in lib_source.iterdir():
+        if item.name != "vm":
+            safe_link(item, lib_stage / item.name)
+    vm_stage = lib_stage / "vm"
+    vm_stage.mkdir(mode=0o700)
+    for item in vm_source.iterdir():
+        relative = "lib/vm/" + item.name
+        if relative in source_overlay_payload:
+            write_source(relative)
+        elif item.name != "__pycache__":
+            safe_link(item, vm_stage / item.name)
+try:
+    launcher_root = stage_runtime_overlay()
+except (OSError, ValueError, KeyError, TypeError) as exc:
+    summary["checks"]["runtime_source_overlay"] = False
+    summary["failure"] = "verified runtime sources could not be staged safely; no child VM was started"
+    summary["source_overlay_error"] = type(exc).__name__
+    emit(2)
+summary["checks"]["runtime_source_overlay"] = True
+if launcher_root != root:
+    print("Using a private /tmp runtime source overlay; the active /workspace snapshot is unchanged.", flush=True)
+    summary["runtime_source_overlay_path"] = str(launcher_root)
 env = os.environ.copy()
 env["LAB_VM_RECURSION_DEPTH"], env["LAB_VM_MAX_DEPTH"] = "0", "1"
 # The active stable snapshot may still contain older CLI/helper sources. Route
@@ -836,11 +960,13 @@ env["LAB_VM_RECURSION_DEPTH"], env["LAB_VM_MAX_DEPTH"] = "0", "1"
 # the existing parent egress proxy, even if a non-login SSH shell omitted the
 # guest profile or inherited a broader NO_PROXY value.
 env["VM_STATE_DIR"] = str(session)
+env["LM_ACCEPTANCE_LAUNCHER"] = str(launcher_root / "lab-vm")
+os.environ["LM_ACCEPTANCE_LAUNCHER"] = env["LM_ACCEPTANCE_LAUNCHER"]
 parent_proxy = "http://10.0.2.100:3128"
 env.update({key: parent_proxy for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")})
 env.update({key: "localhost,127.0.0.1,10.0.2.100" for key in ("NO_PROXY", "no_proxy")})
 print("Starting one new nested child; no model/TUI or teardown will run.", flush=True)
-up = subprocess.run(["./lab-vm", "-d", "up", profile, "--workspace", "/workspace", "--recurse"], cwd=root, env=env, check=False)
+up = subprocess.run([str(launcher_root / "lab-vm"), "-d", "up", profile, "--workspace", "/workspace", "--recurse"], cwd=launcher_root, env=env, check=False)
 summary["checks"]["child_up"] = up.returncode == 0
 if up.returncode != 0:
     summary["failure"] = "child up failed; preserve the profile and its logs"
@@ -918,7 +1044,8 @@ if session.exists() or session.is_symlink():
     sys.exit(11)
 env = os.environ.copy()
 env["LAB_VM_RECURSION_DEPTH"], env["LAB_VM_MAX_DEPTH"] = "1", "1"
-attempt = subprocess.run(["./lab-vm", "up", probe, "--workspace", "/workspace", "--recurse"], cwd="/workspace", env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+launcher = pathlib.Path(env["LM_ACCEPTANCE_LAUNCHER"])
+attempt = subprocess.run([str(launcher), "up", probe, "--workspace", "/workspace", "--recurse"], cwd=launcher.parent, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
 summary = {"returncode": attempt.returncode,
  "expected_refusal": attempt.returncode == 1 and "maximum nesting depth 1 reached; no child VM or agent was started." in attempt.stdout,
  "state_created": session.exists() or session.is_symlink()}
@@ -935,7 +1062,7 @@ summary["checks"]["depth_limit_refused_before_state"] = overflow.returncode == 0
 if not summary["checks"]["depth_limit_refused_before_state"]:
     summary["failure"] = "over-depth launch did not refuse before state; stop and preserve evidence"
     emit(8)
-parent_run = subprocess.run(["./lab-vm", "context", "--json"], cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+parent_run = subprocess.run([str(launcher_root / "lab-vm"), "context", "--json"], cwd=launcher_root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
 try:
     parent = json.loads(parent_run.stdout)
 except json.JSONDecodeError:
@@ -1065,7 +1192,14 @@ def outer_guest_preflight(vm_dir: Path, evidence: Evidence) -> bool:
     return context_ok and all(checks.get(name) is True for name in names)
 
 
-def run_preflight(evidence: Evidence, outer_profile: str, snapshot: Path, repo: Path = ROOT) -> tuple[bool, Path | None]:
+def run_preflight(
+    evidence: Evidence,
+    outer_profile: str,
+    snapshot: Path,
+    repo: Path = ROOT,
+    *,
+    allow_active_source_overlay: bool = False,
+) -> tuple[bool, Path | None]:
     checkout_ok = repo.is_dir() and (repo / ".git").exists() and (repo / "lab-vm").is_file()
     evidence.check("checkout", checkout_ok, "repository and lab-vm found" if checkout_ok else "run from the owner checkout")
     cwd_ok = Path.cwd().resolve() == repo.resolve()
@@ -1083,7 +1217,10 @@ def run_preflight(evidence: Evidence, outer_profile: str, snapshot: Path, repo: 
     checkout_ready = checkout_ok and cwd_ok and revision.returncode == 0
     prerequisites_ready = host_ok and tools_ok and checkout_ready
     if prerequisites_ready:
-        snapshot_ok = snapshot_checks(snapshot, evidence, repo)
+        snapshot_ok = snapshot_checks(
+            snapshot, evidence, repo,
+            allow_active_source_overlay=allow_active_source_overlay,
+        )
     else:
         evidence.check("snapshot preparation", False, "owner-host, checkout, and VM-tool prerequisites are required; no snapshot/profile changes attempted")
         snapshot_ok = False
@@ -1107,12 +1244,30 @@ def run_preflight(evidence: Evidence, outer_profile: str, snapshot: Path, repo: 
     return ok, outer
 
 
-def run_nested_remote(vm_dir: Path, profile: str, probe: str, evidence: Evidence) -> tuple[int, dict[str, object] | None]:
+def run_nested_remote(
+    vm_dir: Path,
+    profile: str,
+    probe: str,
+    evidence: Evidence,
+    repo: Path = ROOT,
+) -> tuple[int, dict[str, object] | None]:
+    use_source_overlay = evidence.data.get("snapshot_source_overlay_required") is True
+    try:
+        source_payload = active_source_overlay_payload(repo) if use_source_overlay else {}
+        remote_script = build_remote_nested_script(repo, use_source_overlay, source_payload)
+    except (AcceptanceError, OSError) as exc:
+        evidence.check("active snapshot runtime overlay", False, f"could not prepare verified host sources: {exc}")
+        return 2, {"checks": {}, "failure": "runtime source overlay could not be prepared; no child was started"}
+    if use_source_overlay:
+        evidence.data["runtime_source_overlay_files"] = {
+            relative: item["sha256"] for relative, item in source_payload.items()
+        }
+        evidence.save()
     command = ssh_command(vm_dir, f"cd /workspace && python3 - {profile} {probe}")
-    process = subprocess.Popen(command, cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    process = subprocess.Popen(command, cwd=repo, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     assert process.stdin is not None and process.stdout is not None
     try:
-        process.stdin.write(REMOTE_NESTED)
+        process.stdin.write(remote_script)
         process.stdin.close()
     except BrokenPipeError:
         try:
@@ -1134,13 +1289,28 @@ def run_nested_remote(vm_dir: Path, profile: str, probe: str, evidence: Evidence
     return process.wait(), summary
 
 
+def build_remote_nested_script(
+    repo: Path = ROOT,
+    use_source_overlay: bool = False,
+    source_payload: dict[str, dict[str, object]] | None = None,
+) -> str:
+    payload = source_payload
+    if payload is None:
+        payload = active_source_overlay_payload(repo) if use_source_overlay else {}
+    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return f"SOURCE_OVERLAY_PAYLOAD_JSON = {payload_json!r}\n" + REMOTE_NESTED
+
+
 def nested_gate(profile: str | None, outer_profile: str, snapshot: Path, repo: Path) -> int:
     evidence = Evidence("nested", "one named disposable nested VM boot, depth-1 context, depth-2 refusal before state, and parent continuity; no model/TUI/auth/workload/isolation matrix/teardown")
     if profile is not None and not PROFILE_RE.fullmatch(profile):
         evidence.check("child profile name", False, "invalid profile name")
         evidence.finish("FAIL")
         return 2
-    ready, outer = run_preflight(evidence, outer_profile, snapshot, repo)
+    ready, outer = run_preflight(
+        evidence, outer_profile, snapshot, repo,
+        allow_active_source_overlay=True,
+    )
     if not ready or outer is None:
         evidence.check("nested launch", False, "preflight blocked; no child VM was started")
         evidence.finish("BLOCKED")
@@ -1152,7 +1322,7 @@ def nested_gate(profile: str | None, outer_profile: str, snapshot: Path, repo: P
     probe = f"depth-cap-{uuid.uuid4().hex[:10]}"
     evidence.data["depth_limit_probe"] = probe
     evidence.save()
-    rc, summary = run_nested_remote(outer, profile, probe, evidence)
+    rc, summary = run_nested_remote(outer, profile, probe, evidence, repo)
     checks = summary.get("checks", {}) if isinstance(summary, dict) else {}
     evidence.data["nested_summary"] = summary or {"result": "missing remote summary"}
     if isinstance(checks, dict):

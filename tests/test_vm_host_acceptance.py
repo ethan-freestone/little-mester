@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import ast
+import base64
+import hashlib
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -39,6 +43,10 @@ class DummyEvidence:
 
     def finish(self, outcome):
         self.data["outcome"] = outcome
+
+
+def payload_bytes(item):
+    return base64.b64decode(item["content"], validate=True)
 
 
 class HostAcceptanceTests(unittest.TestCase):
@@ -111,6 +119,122 @@ class HostAcceptanceTests(unittest.TestCase):
                 self.assertFalse(acceptance.sync_snapshot_sources(snapshot, evidence, checkout))
             for relative in acceptance.SNAPSHOT_FILES:
                 self.assertEqual((snapshot / relative).read_text(), f"old:{relative}")
+
+    def test_nested_snapshot_check_uses_private_overlay_instead_of_mutating_active_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            checkout, snapshot = base / "checkout", base / ".cache/lab-vm-recursion/initial-launcher-smoke/workspace"
+            for root in (checkout, snapshot):
+                (root / "lib/vm").mkdir(parents=True)
+            for relative in acceptance.SNAPSHOT_FILES:
+                (checkout / relative).write_text(f"current:{relative}")
+                (snapshot / relative).write_text(f"old:{relative}")
+            before = {relative: (snapshot / relative).read_bytes() for relative in acceptance.SNAPSHOT_FILES}
+            evidence = DummyEvidence(base / "evidence")
+            with patch.object(acceptance, "DEFAULT_SNAPSHOT", snapshot), \
+                 patch.object(acceptance, "active_snapshot_users", return_value=["123"]):
+                self.assertTrue(acceptance.snapshot_checks(
+                    snapshot, evidence, checkout, allow_active_source_overlay=True,
+                ))
+            self.assertTrue(evidence.data["snapshot_source_overlay_required"])
+            self.assertEqual(evidence.data["snapshot_file_parity"], {relative: False for relative in acceptance.SNAPSHOT_FILES})
+            for relative in acceptance.SNAPSHOT_FILES:
+                self.assertEqual((snapshot / relative).read_bytes(), before[relative])
+            preflight_evidence = DummyEvidence(base / "preflight-evidence")
+            with patch.object(acceptance, "DEFAULT_SNAPSHOT", snapshot), \
+                 patch.object(acceptance, "active_snapshot_users", return_value=["123"]):
+                self.assertFalse(acceptance.snapshot_checks(snapshot, preflight_evidence, checkout))
+            for relative in acceptance.SNAPSHOT_FILES:
+                self.assertEqual((snapshot / relative).read_bytes(), before[relative])
+
+    def test_active_source_overlay_payload_is_allowlisted_and_hash_verified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "lib/vm").mkdir(parents=True)
+            contents = {}
+            for relative in acceptance.SNAPSHOT_FILES:
+                contents[relative] = f"patched:{relative}".encode()
+                (repo / relative).write_bytes(contents[relative])
+            payload = acceptance.active_source_overlay_payload(repo)
+        self.assertEqual(set(payload), set(acceptance.SNAPSHOT_FILES))
+        for relative, item in payload.items():
+            data = base64.b64decode(item["content"], validate=True)
+            self.assertEqual(data, contents[relative])
+            self.assertEqual(item["sha256"], hashlib.sha256(data).hexdigest())
+
+    def test_remote_active_source_overlay_stages_verified_files_privately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            (workspace / "lib/vm").mkdir(parents=True)
+            (workspace / "scripts").mkdir()
+            (workspace / ".secrets").mkdir()
+            launcher = workspace / "lab-vm"
+            launcher.write_text("#!/bin/sh\nexit 0\n")
+            launcher.chmod(0o755)
+            (workspace / "scripts/helper.py").write_text("helper")
+            (workspace / ".secrets/token").write_text("private")
+            (workspace / "lib/vm/support.sh").write_text("support")
+            original = {}
+            for relative in acceptance.SNAPSHOT_FILES:
+                original[relative] = f"snapshot:{relative}".encode()
+                (workspace / relative).write_bytes(original[relative])
+            payload = acceptance.active_source_overlay_payload(workspace)
+            tree = ast.parse(acceptance.REMOTE_NESTED)
+            definitions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                           and node.name in {"stage_runtime_overlay", "populate_runtime_overlay"}]
+            namespace = {
+                "base64": base64,
+                "hashlib": hashlib,
+                "os": os,
+                "pathlib": __import__("pathlib"),
+                "shutil": shutil,
+                "tempfile": tempfile,
+                "root": workspace,
+                "source_overlay_payload": payload,
+            }
+            exec(compile(ast.Module(body=definitions, type_ignores=[]), "remote-overlay", "exec"), namespace)
+            stage = namespace["stage_runtime_overlay"]()
+            try:
+                self.assertEqual(stage.stat().st_mode & 0o777, 0o700)
+                self.assertEqual((stage / "lab-vm").read_bytes(), launcher.read_bytes())
+                self.assertFalse((stage / "lab-vm").is_symlink())
+                self.assertFalse((stage / ".secrets").exists())
+                self.assertTrue((stage / "scripts").is_symlink())
+                self.assertTrue((stage / "lib/vm/support.sh").is_symlink())
+                for relative in acceptance.SNAPSHOT_FILES:
+                    self.assertEqual((stage / relative).read_bytes(), payload_bytes(payload[relative]))
+                    self.assertEqual((workspace / relative).read_bytes(), original[relative])
+            finally:
+                shutil.rmtree(stage)
+
+    def test_remote_active_source_overlay_rejects_tampering_and_cleans_partial_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            (workspace / "lib/vm").mkdir(parents=True)
+            launcher = workspace / "lab-vm"
+            launcher.write_text("#!/bin/sh\nexit 0\n")
+            for relative in acceptance.SNAPSHOT_FILES:
+                (workspace / relative).write_text(relative)
+            payload = acceptance.active_source_overlay_payload(workspace)
+            payload[acceptance.SNAPSHOT_FILES[0]]["sha256"] = "0" * 64
+            stage = Path(directory) / "overlay"
+            tree = ast.parse(acceptance.REMOTE_NESTED)
+            definitions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                           and node.name in {"stage_runtime_overlay", "populate_runtime_overlay"}]
+            namespace = {
+                "base64": base64,
+                "hashlib": hashlib,
+                "os": os,
+                "pathlib": __import__("pathlib"),
+                "shutil": shutil,
+                "tempfile": type("Temp", (), {"mkdtemp": staticmethod(lambda **_: (stage.mkdir() or str(stage)))}),
+                "root": workspace,
+                "source_overlay_payload": payload,
+            }
+            exec(compile(ast.Module(body=definitions, type_ignores=[]), "remote-overlay", "exec"), namespace)
+            with self.assertRaisesRegex(ValueError, "hash does not match"):
+                namespace["stage_runtime_overlay"]()
+            self.assertFalse(stage.exists())
 
     def test_snapshot_rebuild_excludes_host_state_and_preserves_old_tree(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -311,10 +435,11 @@ class HostAcceptanceTests(unittest.TestCase):
         evidence = DummyEvidence()
         summary = {"checks": {"child_up": False}}
         with patch.object(acceptance, "Evidence", return_value=evidence), \
-             patch.object(acceptance, "run_preflight", return_value=(True, Path("/outer"))), \
+             patch.object(acceptance, "run_preflight", return_value=(True, Path("/outer"))) as mock_preflight, \
              patch.object(acceptance, "run_nested_remote", return_value=(3, summary)), \
              redirect_stdout(io.StringIO()):
             result = acceptance.nested_gate(None, "launcher-smoke", Path("/snapshot"), ROOT)
+        self.assertTrue(mock_preflight.call_args.kwargs["allow_active_source_overlay"])
         self.assertEqual(result, 3)
         outcomes = {check["name"]: check["result"] for check in evidence.data["checks"]}
         self.assertEqual(outcomes["child up"], "FAIL")
@@ -325,7 +450,10 @@ class HostAcceptanceTests(unittest.TestCase):
     def test_nested_command_is_explicit_and_contains_no_teardown_or_tui(self):
         compile(acceptance.REMOTE_PREFLIGHT, "remote-preflight", "exec")
         compile(acceptance.REMOTE_ENSURE_NESTED_TOOLS, "remote-ensure-nested-tools", "exec")
-        compile(acceptance.REMOTE_NESTED, "remote-nested", "exec")
+        remote_script = acceptance.build_remote_nested_script(ROOT)
+        compile(remote_script, "remote-nested", "exec")
+        overlay_script = acceptance.build_remote_nested_script(ROOT, use_source_overlay=True)
+        compile(overlay_script, "remote-nested-overlay", "exec")
         child = re.search(r"child_probe = r'''(.*?)'''", acceptance.REMOTE_NESTED, re.DOTALL)
         overflow = re.search(r"overflow_probe = r'''(.*?)'''", acceptance.REMOTE_NESTED, re.DOTALL)
         self.assertIsNotNone(child)
@@ -351,7 +479,10 @@ class HostAcceptanceTests(unittest.TestCase):
             'env.update({key: "localhost,127.0.0.1,10.0.2.100" for key in ("NO_PROXY", "no_proxy")})',
             acceptance.REMOTE_NESTED,
         )
-        self.assertIn('["./lab-vm", "-d", "up", profile, "--workspace", "/workspace", "--recurse"]', acceptance.REMOTE_NESTED)
+        self.assertIn('tempfile.mkdtemp(prefix="little-mester-acceptance-", dir="/tmp")', acceptance.REMOTE_NESTED)
+        self.assertIn('subprocess.run([str(launcher_root / "lab-vm"), "-d", "up", profile, "--workspace", "/workspace", "--recurse"]', acceptance.REMOTE_NESTED)
+        self.assertIn('str(launcher), "up", probe', acceptance.REMOTE_NESTED)
+        self.assertIn('the active /workspace snapshot is unchanged', acceptance.REMOTE_NESTED)
         self.assertNotIn('"down"', acceptance.REMOTE_NESTED)
         self.assertNotIn('"stop"', acceptance.REMOTE_NESTED)
         self.assertNotIn('"--clean"', acceptance.REMOTE_NESTED)
