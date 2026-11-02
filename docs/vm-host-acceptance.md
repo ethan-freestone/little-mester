@@ -152,13 +152,18 @@ into the report. The nested command streams provisioning diagnostics to the
 terminal and leaves native VM failure logs in the child profile; preserve and
 redact those separately before sharing.
 
-After child startup, the readiness SSH probe has a 180-second deadline, the
-depth-cap probe has a 120-second deadline, and the outer continuity probe has a
-30-second deadline; the runner prints a marker before each. A timeout is a
-failed/blocked gate and preserves the child profile for diagnosis. Ctrl-C exits
-the acceptance runner (typically status 130) and closes its local SSH client;
-it does not stop or clean the nested VM. An interrupted run is not a pass, and
-must not be retried with the same child profile.
+After child startup, readiness has an overall 180-second SSH deadline plus
+per-command deadlines: 30 seconds for `cloud-init status`, 30 seconds for
+`lab-vm context --json`, and 10 seconds for `findmnt /workspace`. Each
+sub-command timeout is returned as a structured failed stage; completed probes
+also include named check results. If SSH or remote script startup fails before
+a structured response, the report records its return code and that stderr was
+present without copying raw stderr. The depth-cap probe has a 120-second
+deadline, and outer continuity has a 30-second deadline; the runner prints a
+marker before each. Timeouts fail the gate and preserve the child profile.
+Ctrl-C exits the acceptance runner (typically status 130) and closes its local
+SSH client; it does not stop or clean the nested VM. An interrupted run is not
+a pass and must not be retried with the same child profile.
 
 For a run interrupted after child startup, inspect its private summary and
 matching local runner/SSH processes without changing state:
@@ -172,8 +177,10 @@ Replace the profile with the exact child name printed by `lab-vm up`. This
 command prints check names/results only (not raw report details or command
 arguments); it recognizes only this runner and its generated depth-probe SSH
 command, not browser-auth tunnels or ordinary `lab-vm run`/TUI SSH sessions. It
-does not signal processes, connect to a VM, or delete evidence. Keep the child
-profile and report. Do not treat an unfinished report as a pass.
+also prints allowlisted child readiness failure stages, SSH return status, and
+boolean subcheck results when present. It does not print raw stderr, signal
+processes, connect to a VM, or delete evidence. Keep the child profile and
+report. Do not treat an unfinished report as a pass.
 
 Exit status is zero only for a passed preflight/nested gate or a fully
 positive human observation; blocked or failed gates return nonzero. A runner

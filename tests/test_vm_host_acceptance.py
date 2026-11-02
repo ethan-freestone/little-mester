@@ -500,6 +500,22 @@ class HostAcceptanceTests(unittest.TestCase):
             self.assertIn(f"timeout={timeout}", acceptance.REMOTE_NESTED)
         self.assertIn('"-o", "ServerAliveInterval=15"', acceptance.REMOTE_NESTED)
 
+    def test_child_readiness_reports_bounded_subprobe_stage(self):
+        child = re.search(r"child_probe = r'''(.*?)'''", acceptance.REMOTE_NESTED, re.DOTALL)
+        self.assertIsNotNone(child)
+        probe = child.group(1)
+        for source in (
+            'run("cloud-init status", ["sudo", "-n", "cloud-init", "status", "--format", "json"], 30)',
+            'run("lab-vm context --json", ["./lab-vm", "context", "--json"], 30)',
+            'run("findmnt /workspace", ["findmnt", "-n", "-o", "FSTYPE", "--target", "/workspace"], 10)',
+        ):
+            self.assertIn(source, probe)
+        self.assertIn('"failed_stage": stage', probe)
+        self.assertIn('"timeout_seconds": timeout', probe)
+        self.assertIn('summary["checks"] = checks', probe)
+        self.assertIn('"failed_stage": "child SSH transport or remote script startup"', acceptance.REMOTE_NESTED)
+        self.assertIn('"failed_stage": "child SSH or remote readiness probe"', acceptance.REMOTE_NESTED)
+
     def test_interrupt_terminates_only_local_ssh_client(self):
         class FakeProcess:
             def __init__(self, timeout_first_wait=False):
@@ -541,6 +557,16 @@ class HostAcceptanceTests(unittest.TestCase):
                 "started_at": "2026-11-02T01:00:00+00:00",
                 "child_profile": profile,
                 "checks": [{"name": "child up", "result": "PASS", "detail": "private-detail-marker"}],
+                "nested_summary": {
+                    "checks": {"child_up": True, "child_acceptance": False},
+                    "child": {
+                        "result": "timed out",
+                        "failed_stage": "lab-vm context --json",
+                        "timeout_seconds": 30,
+                        "ssh_returncode": 20,
+                        "checks": {"cloud_command_ok": True, "context_command_ok": False},
+                    },
+                },
             }))
             report_path.chmod(0o600)
             before = report_path.read_bytes()
@@ -551,6 +577,8 @@ class HostAcceptanceTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertIn("Outcome: interrupted or unfinished", output.getvalue())
             self.assertIn("PASS: child up", output.getvalue())
+            self.assertIn("Child readiness failed stage: lab-vm context --json", output.getvalue())
+            self.assertIn("FAIL: context_command_ok", output.getvalue())
             self.assertNotIn("private-detail-marker", output.getvalue())
             self.assertIn("No matching local acceptance runner", output.getvalue())
             self.assertEqual(report_path.read_bytes(), before)

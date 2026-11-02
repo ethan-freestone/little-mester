@@ -994,19 +994,25 @@ ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "StrictHostKeyChecking=yes",
        "-o", "UserKnownHostsFile=" + str(known_file), "-i", str(key_file), "-p", str(port), "mester@127.0.0.1"]
 child_probe = r'''import json, pathlib, subprocess, sys
-def run(args):
-    return subprocess.run(args, cwd="/workspace", text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+def run(stage, args, timeout):
+    try:
+        return subprocess.run(args, cwd="/workspace", text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(json.dumps({"result": "timed out", "failed_stage": stage,
+            "timeout_seconds": timeout}, sort_keys=True), flush=True)
+        raise SystemExit(20)
 def obj(text):
     try:
         value = json.loads(text)
     except json.JSONDecodeError:
         return None
     return value if isinstance(value, dict) else None
-cloud_run = run(["sudo", "-n", "cloud-init", "status", "--format", "json"])
+cloud_run = run("cloud-init status", ["sudo", "-n", "cloud-init", "status", "--format", "json"], 30)
 cloud = obj(cloud_run.stdout)
-context_run = run(["./lab-vm", "context", "--json"])
+context_run = run("lab-vm context --json", ["./lab-vm", "context", "--json"], 30)
 context = obj(context_run.stdout)
-mount = run(["findmnt", "-n", "-o", "FSTYPE", "--target", "/workspace"])
+mount = run("findmnt /workspace", ["findmnt", "-n", "-o", "FSTYPE", "--target", "/workspace"], 10)
 fstype = mount.stdout.strip() if mount.returncode == 0 else ""
 summary = {"cloud_status": cloud.get("status") if cloud else None,
  "cloud_extended_status": cloud.get("extended_status") if cloud else None,
@@ -1019,15 +1025,25 @@ summary = {"cloud_status": cloud.get("status") if cloud else None,
  "max_depth": (context or {}).get("recursion", {}).get("max_depth"),
  "child_depth_available": (context or {}).get("recursion", {}).get("child_depth_available"),
  "nested_kvm_ready": (context or {}).get("kvm", {}).get("nested_kvm_preflight_ready"),
- "workspace_fstype": fstype,
- "host_state_excluded": not pathlib.Path("/workspace/.mester").exists() and not pathlib.Path("/workspace/.mester").is_symlink() and not pathlib.Path("/workspace/.workspace/.mester").exists() and not pathlib.Path("/workspace/.workspace/.mester").is_symlink()}
-checks = [summary["cloud_command_ok"], summary["cloud_status"] == "done", summary["cloud_extended_status"] == "done",
- summary["cloud_errors_empty"], summary["cloud_recoverable_errors_empty"], summary["context_command_ok"],
- summary["runtime_kind"] == "vm",
- summary["depth"] == 1, summary["max_depth"] == 1, summary["child_depth_available"] is False, summary["nested_kvm_ready"] is True,
- "virtiofs" in fstype.lower(), summary["host_state_excluded"]]
+  "workspace_fstype": fstype,
+  "host_state_excluded": not pathlib.Path("/workspace/.mester").exists() and not pathlib.Path("/workspace/.mester").is_symlink() and not pathlib.Path("/workspace/.workspace/.mester").exists() and not pathlib.Path("/workspace/.workspace/.mester").is_symlink()}
+checks = {
+ "cloud_command_ok": summary["cloud_command_ok"],
+ "cloud_status_done": summary["cloud_status"] == "done",
+ "cloud_extended_status_done": summary["cloud_extended_status"] == "done",
+ "cloud_errors_empty": summary["cloud_errors_empty"],
+ "cloud_recoverable_errors_empty": summary["cloud_recoverable_errors_empty"],
+ "context_command_ok": summary["context_command_ok"],
+ "runtime_is_vm": summary["runtime_kind"] == "vm",
+ "depth_is_1": summary["depth"] == 1,
+ "max_depth_is_1": summary["max_depth"] == 1,
+ "child_depth_unavailable": summary["child_depth_available"] is False,
+ "nested_kvm_ready": summary["nested_kvm_ready"] is True,
+ "workspace_is_virtiofs": "virtiofs" in fstype.lower(),
+ "host_state_excluded": summary["host_state_excluded"]}
+summary["checks"] = checks
 print(json.dumps(summary, sort_keys=True))
-sys.exit(0 if all(checks) else 10)
+sys.exit(0 if all(checks.values()) else 10)
 '''
 print("Checking child SSH/cloud-init/context readiness (timeout: 180s).", flush=True)
 try:
@@ -1035,17 +1051,30 @@ try:
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=180)
 except subprocess.TimeoutExpired:
     summary["checks"]["child_acceptance"] = False
-    summary["child"] = {"result": "timed out"}
-    summary["failure"] = "child readiness probe timed out; preserve the child VM and diagnostics"
+    summary["child"] = {
+        "result": "timed out",
+        "failed_stage": "child SSH or remote readiness probe",
+        "timeout_seconds": 180,
+    }
+    summary["failure"] = "child SSH/remote readiness deadline expired; preserve the child VM and diagnostics"
     emit(6)
 try:
     child_summary = json.loads(child.stdout)
 except json.JSONDecodeError:
     child_summary = None
-summary["child"] = child_summary if isinstance(child_summary, dict) else {"result": "unparseable"}
+if isinstance(child_summary, dict):
+    child_summary["ssh_returncode"] = child.returncode
+    summary["child"] = child_summary
+else:
+    summary["child"] = {
+        "result": "no structured readiness response",
+        "failed_stage": "child SSH transport or remote script startup",
+        "ssh_returncode": child.returncode,
+        "ssh_stderr_present": bool(child.stderr),
+    }
 summary["checks"]["child_acceptance"] = child.returncode == 0 and isinstance(child_summary, dict)
 if not summary["checks"]["child_acceptance"]:
-    summary["failure"] = "child readiness/context/workspace check failed; preserve state and diagnostics"
+    summary["failure"] = "child readiness check failed; inspect the structured stage/check result and preserve state"
     emit(6)
 overflow_probe = r'''import json, os, pathlib, subprocess, sys
 probe = sys.argv[1]
@@ -1490,6 +1519,31 @@ def inspect_interrupted(profile: str, state_dir: Path | None = None) -> int:
             print("Remote nested checks:")
             for name, result in nested_checks.items():
                 print(f"  {'PASS' if result is True else 'FAIL' if result is False else 'UNKNOWN'}: {name}")
+        child = nested.get("child") if isinstance(nested, dict) else None
+        if isinstance(child, dict):
+            stages = {
+                "cloud-init status", "lab-vm context --json", "findmnt /workspace",
+                "child SSH or remote readiness probe",
+                "child SSH transport or remote script startup",
+            }
+            stage = child.get("failed_stage")
+            if isinstance(stage, str) and stage in stages:
+                print(f"Child readiness failed stage: {stage}")
+            result = child.get("result")
+            if result in ("timed out", "no structured readiness response"):
+                print(f"Child readiness result: {result}")
+            returncode = child.get("ssh_returncode")
+            if type(returncode) is int:
+                print(f"Child readiness SSH return code: {returncode}")
+            stderr_present = child.get("ssh_stderr_present")
+            if isinstance(stderr_present, bool):
+                print(f"Child readiness SSH stderr present: {'yes' if stderr_present else 'no'}")
+            child_checks = child.get("checks")
+            if isinstance(child_checks, dict):
+                print("Child readiness checks:")
+                for name, result in child_checks.items():
+                    if isinstance(result, bool):
+                        print(f"  {'PASS' if result else 'FAIL'}: {name}")
     else:
         print("No matching partial/final report found for this child profile.")
 
