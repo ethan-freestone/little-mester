@@ -426,7 +426,7 @@ class HostAcceptanceTests(unittest.TestCase):
             self.assertEqual(evidence.directory.stat().st_mode & 0o777, 0o700)
 
     def test_auth_observation_records_only_fixed_answers_and_version(self):
-        answers = ["y", "v2.2.5", "y", "y", "y", "y", "y", "y"]
+        answers = ["y", "v2.2.5", "host-browser-bridge", "y", "y", "y", "y", "y", "y"]
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"XDG_STATE_HOME": directory}), \
              patch("builtins.input", side_effect=answers), redirect_stdout(io.StringIO()):
             result = acceptance.observe_gate("auth")
@@ -435,8 +435,20 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertEqual(result, 0)
         observation = data["observations"][0]
         self.assertEqual(observation["opencode_version"], "v2.2.5")
+        self.assertEqual(observation["auth_method"], "host-browser-bridge")
         self.assertEqual(observation["sensitive_material_recorded"], "no")
         self.assertFalse(any(key in observation for key in ("url", "token", "prompt", "raw_log")))
+
+    def test_unknown_human_observation_is_blocked_not_recorded_as_failure(self):
+        answers = ["y", "v2.2.5", "host-browser-bridge", "u", "y", "y", "y", "y", "y"]
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"XDG_STATE_HOME": directory}), \
+             patch("builtins.input", side_effect=answers), redirect_stdout(io.StringIO()):
+            result = acceptance.observe_gate("auth")
+            report = next((Path(directory) / "little-mester/host-acceptance").glob("*.json"))
+            data = json.loads(report.read_text())
+        self.assertEqual(result, 1)
+        self.assertEqual(data["checks"][-1]["result"], "BLOCKED")
+        self.assertEqual(data["outcome"], "REPORTED_INCOMPLETE")
 
     def test_preflight_never_ssh_connects_from_non_host_context(self):
         calls = []
@@ -1164,6 +1176,164 @@ class HostAcceptanceTests(unittest.TestCase):
             self.assertEqual(evidence.directory, Path(directory) / ".local/state/little-mester/host-acceptance")
             self.assertEqual(evidence.path.stat().st_mode & 0o777, 0o600)
 
+    def test_campaign_contract_classifies_each_ticket_ac_without_unclaimed_overlap(self):
+        ac_counts = {"#35": 22, "#41": 26, "#42": 14, "#43": 8, "#45": 18, "#50": 4, "#52": 8}
+        covered = {ticket: set() for ticket in ac_counts}
+        for gate in acceptance.CAMPAIGN_GATE_COVERAGE.values():
+            self.assertIn("scope", gate)
+            for ticket, ids in gate["tickets"].items():
+                self.assertIn(ticket, ac_counts)
+                covered[ticket].update(ids)
+        self.assertEqual(set(acceptance.CAMPAIGN_NOT_CLAIMED), set(ac_counts))
+        for ticket, count in ac_counts.items():
+            existing = {f"A{number}" for number in range(1, count + 1)}
+            not_claimed = set(acceptance.CAMPAIGN_NOT_CLAIMED[ticket])
+            self.assertTrue(covered[ticket] <= existing, f"nonexistent AC mapped for {ticket}")
+            self.assertTrue(not_claimed <= existing, f"nonexistent AC listed as unclaimed for {ticket}")
+            self.assertFalse(covered[ticket] & not_claimed, f"AC both covered and unclaimed for {ticket}")
+            self.assertEqual(covered[ticket] | not_claimed, existing, f"AC classification incomplete for {ticket}")
+
+    def test_campaign_outcome_fails_closed_for_missing_failed_and_blocked_gates(self):
+        def evidence():
+            item = DummyEvidence()
+            item.data["command"] = "campaign"
+            item.data["campaign_gate_coverage"] = {
+                gate: {**details, "result": "NOT_RUN"}
+                for gate, details in acceptance.CAMPAIGN_GATE_COVERAGE.items()
+            }
+            return item
+
+        skipped = evidence()
+        self.assertEqual(acceptance.finish_campaign(skipped, "PASS"), "BLOCKED")
+        self.assertEqual(skipped.data["outcome"], "BLOCKED")
+        self.assertTrue(all(entry["result"] == "BLOCKED" for entry in skipped.data["campaign_gate_coverage"].values()))
+
+        failed = evidence()
+        acceptance.record_campaign_gate(failed, "host_prerequisites", "FAIL", "probe failed")
+        self.assertEqual(acceptance.finish_campaign(failed, "PASS"), "FAIL")
+        self.assertEqual(failed.data["campaign_gate_coverage"]["host_prerequisites"]["result"], "FAIL")
+
+        blocked = evidence()
+        acceptance.record_campaign_gate(blocked, "native_auth", "BLOCKED", "OAuth approval declined")
+        self.assertEqual(acceptance.finish_campaign(blocked, "PASS"), "BLOCKED")
+        self.assertEqual(blocked.data["campaign_gate_coverage"]["native_auth"]["result"], "BLOCKED")
+
+    def test_campaign_record_rejects_duplicate_gate_results(self):
+        evidence = DummyEvidence()
+        evidence.data["campaign_gate_coverage"] = {
+            gate: {**details, "result": "NOT_RUN"}
+            for gate, details in acceptance.CAMPAIGN_GATE_COVERAGE.items()
+        }
+        acceptance.record_campaign_gate(evidence, "host_prerequisites", "PASS", "first result")
+        with self.assertRaisesRegex(acceptance.AcceptanceError, "recorded more than once"):
+            acceptance.record_campaign_gate(evidence, "host_prerequisites", "PASS", "duplicate")
+
+    def test_recursive_source_requires_clean_committed_checkout(self):
+        clean = subprocess.CompletedProcess(["git"], 0, "", "")
+        dirty = subprocess.CompletedProcess(["git"], 0, " M scripts/changed.py\n", "")
+        unavailable = subprocess.CompletedProcess(["git"], 128, "", "fatal: not a git repository")
+        with patch.object(acceptance, "run", side_effect=[clean, dirty, unavailable]):
+            self.assertTrue(acceptance.recursive_source_checkout_clean(ROOT))
+            self.assertFalse(acceptance.recursive_source_checkout_clean(ROOT))
+            self.assertFalse(acceptance.recursive_source_checkout_clean(ROOT))
+
+    def test_prerequisite_probe_clears_inherited_auto_accept(self):
+        output = (
+            "DISTRO=ubuntu\nMANAGER=apt\nMAPPING=REQUIRED: qemu-utils\n"
+            "INSTALL_RC=1\nInstall these packages? [y/N] Aborted. Install manually and re-run.\n"
+        )
+        with patch.dict(os.environ, {"VM_YES": "1", "LAB_YES": "1"}), \
+             patch.object(
+                 acceptance, "run",
+                 return_value=subprocess.CompletedProcess([], 0, output, ""),
+             ) as run:
+            ok, _ = acceptance.prerequisite_prompt_probe(ROOT)
+        self.assertTrue(ok)
+        self.assertEqual(run.call_args.kwargs["env"]["VM_YES"], "0")
+        self.assertEqual(run.call_args.kwargs["env"]["LAB_YES"], "0")
+
+    def test_generated_campaign_guest_scripts_have_valid_shell_syntax(self):
+        scripts = {
+            "root readiness": acceptance.disposable_guest_readiness_script(0, 2),
+            "recursive chain": acceptance.recursion_chain_script("depth-one", "depth-two", "depth-three"),
+            "nested readiness": acceptance.nested_guest_script_command(
+                "depth-one", acceptance.disposable_guest_readiness_script(1, 2),
+                env_prefix=acceptance.recursive_profile_state_env("depth-one"),
+            ),
+            "Compose workload": acceptance.compose_feedback_script("campaign-profile"),
+            "Compose teardown": acceptance.compose_feedback_teardown_script("campaign-profile"),
+        }
+        for name, script in scripts.items():
+            with self.subTest(script=name):
+                result = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        chain = scripts["recursive chain"]
+        self.assertIn("= '1 2'", scripts["nested readiness"])
+        self.assertIn("DEPTH3_REFUSED_BEFORE_STATE", chain)
+        self.assertIn("CHAIN_PARENT_CONTINUITY_PASS", chain)
+        self.assertIn("VM_DIR_BASE=\"$HOME/.cache/lab-vm-recursion/depth-one/vm\"", chain)
+        self.assertIn(
+            'child2_ready="$(VM_STATE_DIR="$HOME/.cache/lab-vm-recursion/depth-one" '
+            'VM_DIR_BASE="$HOME/.cache/lab-vm-recursion/depth-one/vm" ./lab-vm ssh depth-one ',
+            chain,
+        )
+        self.assertIn("VM_ISOLATION_SKIP_MODEL=1", chain)
+
+    def test_human_permission_observations_validate_mode_argv_and_same_version(self):
+        evidence = DummyEvidence()
+        evidence.data["observations"] = [
+            {
+                "gate": "permissions", "opencode_version": "2.2.5", "permission_mode": "auto",
+                "opencode_argv": ["opencode", "--auto"],
+                **{question: "pass" for question in acceptance.OBSERVATIONS["permissions"][1]},
+            },
+            {
+                "gate": "permissions_standalone", "opencode_version": "2.2.5", "permission_mode": "auto",
+                "opencode_argv": ["opencode", "--standalone", "--auto"],
+                **{question: "pass" for question in acceptance.OBSERVATIONS["permissions_standalone"][1]},
+            },
+        ]
+        self.assertEqual(acceptance.human_observation_result(evidence, "permissions"), "PASS")
+        self.assertEqual(acceptance.human_observation_result(evidence, "permissions_standalone"), "PASS")
+        self.assertTrue(acceptance.permission_versions_match(evidence))
+        evidence.data["observations"][1]["opencode_version"] = "2.2.6"
+        self.assertFalse(acceptance.permission_versions_match(evidence))
+        evidence.data["observations"][1]["permission_mode"] = "ask"
+        self.assertEqual(acceptance.human_observation_result(evidence, "permissions_standalone"), "FAIL")
+
+    def test_auth_gate_requires_the_host_browser_bridge_method(self):
+        evidence = DummyEvidence()
+        evidence.data["observations"] = [{
+            "gate": "auth", "auth_method": "other", "opencode_version": "v2.2.5",
+            **{question: "pass" for question in acceptance.OBSERVATIONS["auth"][1]},
+        }]
+        self.assertEqual(acceptance.human_observation_result(evidence, "auth"), "FAIL")
+        evidence.data["observations"][0]["auth_method"] = "host-browser-bridge"
+        self.assertEqual(acceptance.human_observation_result(evidence, "auth"), "PASS")
+
+    def test_standalone_campaign_launch_is_direct_and_uses_exact_opencode_args(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_root = Path(directory)
+            profile_dir = state_root / "vm" / "disposable-profile"
+            profile_dir.mkdir(parents=True)
+            (profile_dir / "recursion_policy").write_text("0 0 0\n")
+            evidence = DummyEvidence()
+            with patch.object(acceptance, "ssh_command", side_effect=lambda _vm_dir, remote: ["ssh", "profile", remote]), \
+                 patch.object(acceptance, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run, \
+                 redirect_stdout(io.StringIO()):
+                passed = acceptance.launch_campaign_agent(
+                    "disposable-profile", evidence, browser_auth=False, auto=True,
+                    state_root=state_root, standalone=True,
+                )
+        self.assertTrue(passed)
+        self.assertEqual(run.call_args.args[0][:2], ["ssh", "-tt"])
+        remote = run.call_args.args[0][-1]
+        self.assertIn("exec opencode --standalone --auto", remote)
+        self.assertIn("OPENCODE_CONFIG=/etc/opencode/opencode.json", remote)
+        self.assertIn("VM_STATE_DIR", run.call_args.kwargs["env"])
+        self.assertFalse(run.call_args.kwargs["capture"])
+        self.assertFalse(run.call_args.kwargs["no_input"])
+
     def test_campaign_cli_requires_exact_preserved_outer_and_child_names(self):
         args = acceptance.parser().parse_args([
             "campaign", "--outer-profile", "nested-8g-20261102094820",
@@ -1196,6 +1366,12 @@ class HostAcceptanceTests(unittest.TestCase):
         def make_evidence(command, scope):
             evidence = DummyEvidence()
             evidence.data["command"] = command
+            if command == "campaign":
+                evidence.data["campaign_gate_coverage"] = {
+                    gate: {**details, "result": "NOT_RUN"}
+                    for gate, details in acceptance.CAMPAIGN_GATE_COVERAGE.items()
+                }
+                evidence.data["ticket_ac_not_claimed"] = acceptance.CAMPAIGN_NOT_CLAIMED
             created.append(evidence)
             return evidence
 
@@ -1251,6 +1427,12 @@ class HostAcceptanceTests(unittest.TestCase):
         def make_evidence(command, scope):
             evidence = DummyEvidence()
             evidence.data["command"] = command
+            if command == "campaign":
+                evidence.data["campaign_gate_coverage"] = {
+                    gate: {**details, "result": "NOT_RUN"}
+                    for gate, details in acceptance.CAMPAIGN_GATE_COVERAGE.items()
+                }
+                evidence.data["ticket_ac_not_claimed"] = acceptance.CAMPAIGN_NOT_CLAIMED
             created.append(evidence)
             return evidence
 
@@ -1275,12 +1457,63 @@ class HostAcceptanceTests(unittest.TestCase):
         nested.assert_called_once()
         self.assertEqual(vm.call_args_list, [
             call(["egress-reload", "nested-8g-20261102094820"]),
-            call(["models", "status"]),
+            call(["models", "status", "all"]),
         ])
         self.assertEqual(created[0].data["outcome"], "FAIL")
-        self.assertEqual(created[0].data["checks"][-1]["name"], "selected host-side model endpoint status")
+        model_gate = next(
+            item for item in created[0].data["checks"]
+            if item["name"] == "campaign gate: direct_guest_model_tui"
+        )
+        self.assertEqual(model_gate["result"], "FAIL")
 
-    def test_campaign_order_and_destructive_actions_are_limited_to_generated_profile(self):
+    def test_campaign_blocks_dirty_recursive_source_before_creating_state_or_base(self):
+        class Terminal:
+            @staticmethod
+            def isatty():
+                return True
+
+        evidence_items = []
+
+        def make_evidence(command, scope):
+            evidence = DummyEvidence()
+            evidence.data["command"] = command
+            evidence.data["campaign_gate_coverage"] = {
+                gate: {**details, "result": "NOT_RUN"}
+                for gate, details in acceptance.CAMPAIGN_GATE_COVERAGE.items()
+            }
+            evidence.data["ticket_ac_not_claimed"] = acceptance.CAMPAIGN_NOT_CLAIMED
+            evidence_items.append(evidence)
+            return evidence
+
+        vm_calls = []
+
+        def run_vm(args):
+            vm_calls.append(list(args))
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with patch.object(acceptance.sys, "stdin", Terminal()), \
+             patch.object(acceptance, "Evidence", side_effect=make_evidence), \
+             patch.object(acceptance, "nested_gate", return_value=0), \
+             patch.object(acceptance, "run_campaign_vm", side_effect=run_vm), \
+             patch.object(acceptance, "launch_campaign_agent", return_value=True), \
+             patch.object(acceptance, "observe_gate", return_value=0), \
+             patch.object(acceptance, "human_observation_result", return_value="PASS"), \
+             patch.object(acceptance, "prerequisite_prompt_probe", return_value=(True, "default-N passed")), \
+             patch.object(acceptance, "recursive_source_checkout_clean", return_value=False), \
+             patch.object(acceptance, "memory_budget_ok", side_effect=AssertionError("no VM budget/start after dirty checkout")), \
+             patch.object(acceptance, "create_campaign_state_root", side_effect=AssertionError("no campaign state after dirty checkout")), \
+             redirect_stdout(io.StringIO()):
+            result = acceptance.vm_campaign("preserved-outer", "preserved-child", Path("/snapshot"))
+
+        self.assertEqual(result, 2)
+        self.assertEqual(vm_calls, [["egress-reload", "preserved-outer"], ["models", "status", "all"]])
+        self.assertEqual(evidence_items[0].data["outcome"], "BLOCKED")
+        self.assertEqual(
+            evidence_items[0].data["campaign_gate_coverage"]["clean_provisioning"]["result"],
+            "BLOCKED",
+        )
+
+    def test_campaign_order_coverage_approvals_and_generated_profile_scope(self):
         class Terminal:
             @staticmethod
             def isatty():
@@ -1289,21 +1522,40 @@ class HostAcceptanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             workspace_root = home / ".cache/little-mester/host-acceptance"
-            workspace = workspace_root / "vm-acceptance-disposable-test-workspace"
             workspace_root.mkdir(mode=0o700, parents=True)
+            workspace = workspace_root / "vm-acceptance-main-workspace"
             workspace.mkdir(mode=0o700)
-            profile = "vm-acceptance-disposable-test"
-            vm_base = home / "vm-state"
-            vm_base.mkdir(mode=0o700)
-            vm_dir = vm_base / profile
-            escrow = home / "secrets" / f"{profile}-auth.json"
+            recursion_session = workspace_root / "vm-acceptance-recursion-recursive-source"
+            recursion_session.mkdir(mode=0o700)
+            recursion_workspace = recursion_session / "workspace"
+            recursion_workspace.mkdir(mode=0o700)
+            shared_state = home / "shared-state"
+            state_parent = shared_state / "host-acceptance"
+            state_parent.mkdir(mode=0o700, parents=True)
+            state_root = state_parent / "campaign-20261102000000-0123456789"
+            (state_root / "vm").mkdir(mode=0o700, parents=True)
+            profile_names = iter((
+                "vm-acceptance-recursion", "vm-acceptance-depth1",
+                "vm-acceptance-depth2", "vm-acceptance-main",
+            ))
+            recursion_profile = "vm-acceptance-recursion"
+            profile = "vm-acceptance-main"
+            escrow = shared_state / "secrets" / f"{profile}-auth.json"
             evidence_items = []
             events = []
             vm_calls = []
+            running = {}
+            chain_scripts = []
 
             def make_evidence(command, scope):
                 evidence = DummyEvidence()
                 evidence.data["command"] = command
+                if command == "campaign":
+                    evidence.data["campaign_gate_coverage"] = {
+                        gate: {**details, "result": "NOT_RUN"}
+                        for gate, details in acceptance.CAMPAIGN_GATE_COVERAGE.items()
+                    }
+                    evidence.data["ticket_ac_not_claimed"] = acceptance.CAMPAIGN_NOT_CLAIMED
                 evidence_items.append(evidence)
                 return evidence
 
@@ -1311,42 +1563,80 @@ class HostAcceptanceTests(unittest.TestCase):
                 args = list(args)
                 vm_calls.append(args)
                 events.append("vm:" + " ".join(args))
+                if args[0] == "base":
+                    (state_root / "vm" / "base.qcow2").write_text("base")
+                    return subprocess.CompletedProcess(args, 0, "All VM dependencies found. OK\n", "")
                 if args[0] == "up":
-                    vm_dir.mkdir(mode=0o700, exist_ok=True)
-                    (vm_dir / "disk.qcow2").write_text("disposable-overlay")
-                    (vm_dir / "id_vm_control").write_text("disposable-key")
-                    (vm_dir / "workspace").write_text(str(workspace.resolve()))
+                    name = args[1]
+                    vm_dir = state_root / "vm" / name
+                    vm_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    (vm_dir / "disk.qcow2").write_text("overlay")
+                    (vm_dir / "id_vm_control").write_text("key")
+                    ws_arg = args[args.index("--workspace") + 1]
+                    (vm_dir / "workspace").write_text(ws_arg)
+                    running[name] = True
                 elif args[0] in ("stop", "down"):
-                    for name in ("disk.qcow2", "id_vm_control"):
+                    name = args[1]
+                    running[name] = False
+                    vm_dir = state_root / "vm" / name
+                    for asset in ("disk.qcow2", "id_vm_control", "seed.iso", "qemu.pid", "virtiofsd.pid", "proxy.pid"):
                         try:
-                            (vm_dir / name).unlink()
+                            (vm_dir / asset).unlink()
                         except FileNotFoundError:
                             pass
+                elif args[0] == "suspend":
+                    running[args[1]] = False
+                elif args[0] == "resume":
+                    running[args[1]] = True
                 return subprocess.CompletedProcess(args, 0, "", "")
 
-            def launch(profile_name, evidence, *, browser_auth, auto=False):
-                events.append(f"agent:{profile_name}:browser={browser_auth}:auto={auto}")
+            def launch(profile_name, evidence, *, browser_auth, auto=False, state_root=None, standalone=False):
+                events.append(f"agent:{profile_name}:browser={browser_auth}:auto={auto}:standalone={standalone}")
                 return True
 
-            def observe(gate, evidence):
+            def observe(gate, evidence, **kwargs):
                 events.append("observe:" + gate)
+                observation = {"gate": gate, "sensitive_material_recorded": "no"}
+                for question in acceptance.OBSERVATIONS[gate][1]:
+                    observation[question] = "pass"
+                if gate.startswith("permissions"):
+                    observation["permission_mode"] = "auto"
+                    observation["opencode_version"] = "2.2.5"
+                    observation["opencode_argv"] = kwargs["opencode_argv"]
+                if gate == "auth":
+                    observation["opencode_version"] = "v2.2.5"
+                    observation["auth_method"] = "host-browser-bridge"
+                evidence.data["observations"].append(observation)
                 return 0
 
-            def guest_script(profile_name, script, *, timeout):
+            def guest_script(vm_dir, script, *, timeout, stream=False):
                 events.append("guest-script")
+                if "CHAIN_STAGE depth1-up" in script:
+                    chain_scripts.append(script)
+                    return True, "", "exit_0"
+                if "test \"$(cat /etc/lab-vm-recursion)\" = '0 2'" in script:
+                    return True, "DISPOSABLE_GUEST_READY depth=0 max=2\n", "exit_0"
+                if "test \"$(cat /etc/lab-vm-recursion)\" = '0 0'" in script:
+                    return True, "DISPOSABLE_GUEST_READY depth=0 max=0\n", "exit_0"
+                if "WORKLOAD_READY_FOR_HOST_BOUNDARY" in script:
+                    return True, "WORKLOAD_QUERY_FIRST\nWORKLOAD_RESTART_QUERY\nGUEST_LOOPBACK_PORT_ONLY\nBIND_MOUNT_AND_VOLUME_OK\nWORKLOAD_READY_FOR_HOST_BOUNDARY\n", "exit_0"
+                if "WORKLOAD_DOWN" in script:
+                    return True, "WORKLOAD_DOWN\n", "exit_0"
                 if "LIFECYCLE_DATA_WRITTEN" in script:
                     return True, "LIFECYCLE_DATA_WRITTEN\n", "exit_0"
                 if "LIFECYCLE_DATA_PERSISTED" in script:
                     return True, "LIFECYCLE_DATA_PERSISTED\n", "exit_0"
-                return True, "NO_HOST_PORTS\nWORKLOAD_QUERY_FIRST\nWORKLOAD_RESTART_QUERY\nWORKLOAD_DOWN\n", "exit_0"
+                self.fail("unexpected guest script")
 
             def approval(label):
-                if "prerequisites" in label:
+                if "depth-2 probes" in label:
+                    event = "approval:recursive-teardown"
+                elif "prerequisites" in label:
                     event = "approval:oauth-prerequisites"
                 elif "OAuth" in label:
                     event = "approval:oauth-start"
                 else:
-                    event = "approval:teardown"
+                    event = "approval:final-teardown"
                 events.append(event)
                 return "pass"
 
@@ -1359,38 +1649,53 @@ class HostAcceptanceTests(unittest.TestCase):
                 stack.enter_context(patch.object(acceptance, "launch_campaign_agent", side_effect=launch))
                 stack.enter_context(patch.object(acceptance, "observe_gate", side_effect=observe))
                 stack.enter_context(patch.object(acceptance, "memory_budget_ok", return_value=True))
-                stack.enter_context(patch.object(acceptance, "unique_profile_name", return_value=profile))
-                stack.enter_context(patch.object(acceptance, "profile_base", return_value=vm_base))
-                stack.enter_context(patch.object(acceptance, "profile_dir", return_value=vm_dir))
-                stack.enter_context(patch.object(acceptance, "campaign_profile_storage_safe", return_value=True))
+                stack.enter_context(patch.object(acceptance, "create_campaign_state_root", return_value=(state_root, shared_state)))
+                stack.enter_context(patch.object(acceptance, "unique_campaign_profile", side_effect=lambda *a, **k: next(profile_names)))
+                stack.enter_context(patch.object(acceptance, "private_recursive_source_workspace", return_value=(recursion_workspace, recursion_session)))
                 stack.enter_context(patch.object(acceptance, "private_acceptance_workspace", return_value=workspace))
                 stack.enter_context(patch.object(acceptance, "private_campaign_escrow", return_value=escrow))
-                stack.enter_context(patch.object(acceptance, "guest_openai_auth_stored", side_effect=[(True, "stored"), (True, "stored")]))
+                stack.enter_context(patch.object(acceptance, "prerequisite_prompt_probe", return_value=(True, "safe default-N prompt passed")))
+                stack.enter_context(patch.object(acceptance, "host_port_available", return_value=True))
+                stack.enter_context(patch.object(acceptance, "host_port_unreachable", return_value=True))
+                stack.enter_context(patch.object(acceptance, "guest_openai_auth_stored", return_value=(True, "stored")))
                 stack.enter_context(patch.object(acceptance, "run_guest_script", side_effect=guest_script))
-                stack.enter_context(patch.object(acceptance, "process_matches_profile", side_effect=[False, True, False]))
+                stack.enter_context(patch.object(acceptance, "process_matches_profile", side_effect=lambda path: running.get(path.name, False)))
+                stack.enter_context(patch.object(acceptance, "campaign_state_residue_free", return_value=True))
+                stack.enter_context(patch.object(acceptance, "campaign_state_root_safe", return_value=True))
+                stack.enter_context(patch.object(acceptance, "private_tree_is_owned_non_symlink", return_value=True))
+                stack.enter_context(patch.object(acceptance, "campaign_project_dir_safe", return_value=True))
+                stack.enter_context(patch.object(acceptance, "campaign_profile_dir", side_effect=lambda root, name: root / "vm" / name))
                 stack.enter_context(patch.object(acceptance, "escrow_file_is_private", return_value=True))
+                def fake_run(args, **kwargs):
+                    if args and args[0] == "git":
+                        return subprocess.CompletedProcess(args, 0, "", "")
+                    return subprocess.CompletedProcess(args, 0, '{"format":"qcow2","virtual-size":21474836480}', "")
+                stack.enter_context(patch.object(acceptance, "run", side_effect=fake_run))
                 stack.enter_context(patch.object(acceptance, "prompt_result", side_effect=approval))
                 stack.enter_context(redirect_stdout(io.StringIO()))
-                result = acceptance.vm_campaign(
-                    "nested-8g-20261102094820",
-                    "nested-accept-20261102124501-ee957d5c",
-                    Path("/safe-snapshot"),
-                )
+                result = acceptance.vm_campaign("preserved-outer", "preserved-child", Path("/safe-snapshot"))
 
-            self.assertEqual(result, 0)
-            self.assertEqual(evidence_items[0].data["outcome"], "PASS")
-            self.assertLess(events.index("nested"), events.index("vm:egress-reload nested-8g-20261102094820"))
-            self.assertLess(events.index("vm:egress-reload nested-8g-20261102094820"), events.index("vm:models status"))
-            self.assertLess(events.index("vm:models status"), events.index("agent:nested-8g-20261102094820:browser=False:auto=False"))
-            self.assertLess(events.index("observe:tui"), events.index(f"agent:{profile}:browser=True:auto=False"))
+            self.assertEqual(result, 0, repr(evidence_items[0].data.get("checks", [])))
+            evidence = evidence_items[0]
+            self.assertEqual(evidence.data["outcome"], "PASS")
+            self.assertTrue(evidence.data["campaign_gate_coverage_complete"])
+            self.assertTrue(all(item["result"] == "PASS" for item in evidence.data["campaign_gate_coverage"].values()))
+            self.assertEqual(events[0], "nested")
+            self.assertLess(events.index("vm:models status all"), events.index("observe:tui"))
+            self.assertLess(events.index("observe:tui"), events.index("approval:recursive-teardown"))
+            self.assertLess(events.index("approval:recursive-teardown"), events.index("approval:oauth-prerequisites"))
             self.assertLess(events.index("approval:oauth-prerequisites"), events.index("approval:oauth-start"))
-            self.assertLess(events.index("approval:oauth-start"), events.index(f"agent:{profile}:browser=True:auto=False"))
-            self.assertLess(events.index("observe:workload"), events.index("guest-script"))
-            self.assertLess(events.index("approval:teardown"), next(i for i, item in enumerate(events) if item.startswith("vm:stop ")))
+            self.assertLess(events.index("approval:oauth-start"), next(i for i, event in enumerate(events) if event.startswith("agent:vm-acceptance-main:browser=True")))
+            self.assertLess(events.index("approval:final-teardown"), events.index(f"vm:stop {profile}"))
             destructive = [args for args in vm_calls if args[0] in ("stop", "down")]
             self.assertTrue(destructive)
-            self.assertTrue(all(args[1] == profile for args in destructive))
+            self.assertEqual({args[1] for args in destructive}, {recursion_profile, profile})
+            self.assertIn("DEPTH3_REFUSED_BEFORE_STATE", chain_scripts[0])
+            self.assertIn("vm-acceptance-depth1", chain_scripts[0])
+            self.assertIn("vm-acceptance-depth2", chain_scripts[0])
             self.assertFalse(workspace.exists())
+            self.assertFalse(state_root.exists())
+            self.assertFalse(recursion_session.exists())
 
     def test_campaign_vm_environment_does_not_inherit_yes_or_unrelated_escrow(self):
         escrow = Path("/private/campaign-auth.json")
@@ -1444,16 +1749,15 @@ class HostAcceptanceTests(unittest.TestCase):
                     acceptance.refuse_campaign_teardown_after_incomplete_gates(evidence),
                     expected,
                 )
-                self.assertEqual(evidence.data["outcome"], result)
                 teardown = next(item for item in evidence.data["checks"] if item["name"] == "disposable teardown")
                 self.assertEqual(teardown["result"], "BLOCKED")
-                self.assertIn("workspace were preserved", teardown["detail"])
+                self.assertIn("disposable state was preserved", teardown["detail"])
 
         passing = DummyEvidence()
         passing.check("earlier gate", True, "simulated result")
         self.assertIsNone(acceptance.refuse_campaign_teardown_after_incomplete_gates(passing))
 
-    def test_disposable_workspace_is_private_and_has_no_published_compose_ports(self):
+    def test_disposable_workspace_is_private_and_publishes_only_guest_loopback_port(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             state = home / "state"
@@ -1465,7 +1769,10 @@ class HostAcceptanceTests(unittest.TestCase):
             self.assertEqual(workspace.stat().st_mode & 0o777, 0o700)
             self.assertEqual((workspace / "compose.yaml").stat().st_mode & 0o777, 0o600)
             compose = (workspace / "compose.yaml").read_text()
-            self.assertNotIn("ports:", compose)
+            self.assertIn('"127.0.0.1:', compose)
+            self.assertNotIn('"0.0.0.0:', compose)
+            self.assertIn("./acceptance-bind:/acceptance-bind:ro", compose)
+            self.assertIn("pg-data:/var/lib/postgresql/data", compose)
             config = json.loads((workspace / "opencode.json").read_text())
             self.assertEqual(config["permissions"], [
                 {"action": "shell", "resource": "pwd", "effect": "ask"},
@@ -1473,7 +1780,10 @@ class HostAcceptanceTests(unittest.TestCase):
             ])
             self.assertEqual(escrow.parent.stat().st_mode & 0o777, 0o700)
             self.assertFalse(escrow.exists())
-            self.assertIn("compose down -v", acceptance.compose_feedback_script("vm-acceptance-test"))
+            feedback = acceptance.compose_feedback_script("vm-acceptance-test")
+            self.assertIn("compose down -v", acceptance.compose_feedback_teardown_script("vm-acceptance-test"))
+            self.assertIn("PortBindings", feedback)
+            self.assertIn("BIND_MOUNT_AND_VOLUME_OK", feedback)
             self.assertIn("LIFECYCLE_DATA_PERSISTED", acceptance.lifecycle_workload_check_script("vm-acceptance-test"))
             with self.assertRaises(acceptance.AcceptanceError):
                 acceptance.private_acceptance_workspace("../../unsafe")

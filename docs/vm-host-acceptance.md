@@ -189,8 +189,9 @@ gate, and they do not update tickets.
 
 ### Ordered owner-host campaign
 
-After the current #35/#41/#45/#50 handoff explicitly permits the remaining
-gates, run this once from the physical CachyOS checkout root:
+This is a finite, interactive, physical-owner-host campaign—not a CI test. Run
+it only after the current #35/#41/#45/#50 handoff explicitly permits every
+remaining gate, from the physical CachyOS checkout root:
 
 ```bash
 ./scripts/vm-host-acceptance.py campaign \
@@ -198,52 +199,84 @@ gates, run this once from the physical CachyOS checkout root:
   --reuse-child nested-accept-20261102124501-ee957d5c
 ```
 
-The first gate is the existing-child continuation from `nested --reuse-child`.
-The campaign requires that the exact named outer already be live on the safe
-snapshot; it will not provision a substitute profile. This gate is strictly
-read-only: it refuses a missing/stale snapshot rather than repairing it, refuses
-missing outer-guest QEMU tools rather than installing them, and refuses to
-create/restart an outer profile. It starts, stops, and cleans no VM. If it fails
-or blocks, the campaign stops before any agent or disposable-profile work. A
-pass there is only nested readiness,
-QEMU/listener/network-boundary, depth-refusal, and parent-continuity evidence.
+The campaign requires the exact named outer and child to be live on the safe
+snapshot; it will not provision replacements, repair the snapshot, install
+outer-guest tools, or change either preserved profile. The existing-child
+continuation is read-only. If it fails or blocks, the campaign stops before
+agent or disposable-profile work.
 
-Next, it reloads the current approved outer guest egress policy, performs
-read-only `lab-vm models status`, opens the direct guest TUI for the
-model-stream/metrics/dialog/exit observations, then provisions
-one uniquely named 2-GiB disposable profile and a private scratch workspace
-outside the checkout. OAuth is not started until a separate interactive
-confirmation that the current #45 prerequisites authorize the test, followed
-by a second independent approval to start the real browser OAuth flow. Never
-copy or record OAuth URLs, state, codes, or tokens. The agent
-permission/workload gate uses only that scratch project's `opencode.json` and
-`compose.yaml`: an `ask` rule, one exact harmless `deny`, and a PostgreSQL
-Compose project with no host-published ports. Fixed human answers and sanitized
-gate results are saved; raw TUI, auth-list, Docker, and OAuth output is not put
-in the report.
+After that continuation, it reloads the approved egress policy, checks both
+host-side model endpoints without starting or changing either service, and
+opens the preserved outer guest for direct-TUI observations. It then probes the
+real prerequisite script in a private copy: the missing-package path must show
+the safe default-N prompt without invoking a package manager. This does not
+install host packages.
 
-The final stages verify guest Compose health/query/restart/down, then put a
-known row in the guest workload, exercise non-destructive `suspend`/`resume`,
-and verify the same overlay/workspace and row survive. Before destructive
-`stop`/`down`, the runner asks for explicit confirmation naming only its
-generated disposable profile/workspace. If OpenAI credentials are stored, the
-campaign opts that profile into private host escrow, checks a fresh-overlay
-import, and leaves the mode-0600 escrow in the mode-0700 state directory; it
-does not touch host-Docker credentials or recreate its container. It removes
-only the generated scratch workspace after the disposable VM residue check.
-Declined approval, failed export/import, uncertain state, or failed gates leave
-VM/workspace state in place for review; never clean it manually as part of a
-retry. The campaign resets inherited `VM_YES`/`LAB_YES` so its explicit
-confirmation is not bypassed. Guest agent launches explicitly disable any
-ambient credential-forwarding environment; escrow is enabled only for the
-campaign's own generated profile during the authorized teardown/import gate.
-Any earlier failed or blocked gate prevents destructive cleanup and leaves the
-disposable guest and workspace available for review.
+Before provisioning, the runner requires a measured aggregate budget for the
+depth-0/1/2 chain (8+4+2 GiB requested, plus a 512-MiB reserve). It creates a
+fresh, unique VM state root below the normal VM state directory's private
+`host-acceptance` subdirectory; the campaign base image and top-level disposable
+profiles live only there. The recursive proof also requires a clean committed
+checkout; uncommitted or untracked files block before the source snapshot or
+VM is created. A separate revision-bound recursive source/workspace is used for
+the nested chain. The chain verifies persisted depth/max policy,
+guest readiness and isolation at each level, guest memory ranges, a depth-3
+refusal before child state is created, and parent continuity. The runner asks
+separately before stopping/cleaning only these generated recursive profiles and
+scratch state. It does not use the earlier depth-1 continuation as proof of
+depth 2.
+
+Only after that chain is clean does it create a separate 2-GiB auth/workload
+profile with max recursion depth 0 and a private project workspace outside the
+checkout. The real browser OAuth flow requires two distinct approvals: confirm
+the latest #45 prerequisites, then separately authorize starting OAuth. Never
+copy or record OAuth URLs, state, codes, or tokens. Human auth observations and
+a sanitized guest auth-list/provider check are required; the report records the
+observed host-browser-bridge method and OpenCode version. Agent launches do not
+inherit ambient credential forwarding.
+
+Permission acceptance uses the same disposable project/config and OpenCode
+version for a shared-service `opencode --auto` session and a separate direct
+`opencode --standalone --auto` session. Both must demonstrate the harmless
+configured ask behavior and exact deny; blanket allows are not added. The
+report records fixed observations, version, selected permission mode, and the
+expected command argv—not terminal output. This is a same-version comparison
+only; it does not validate the separate `./lab --unsafe-recurse --auto-accept`
+invocation or diagnose/work around the known OpenCode 2.2.0 UI behavior.
+
+The project Compose file binds its PostgreSQL port to guest loopback only and
+contains a selected-workspace bind mount plus a named volume. The campaign
+combines agent-reported startup/query/restart/teardown with guest-side health,
+query, mount/volume, and port-binding checks. The physical host must be able to
+bind the same loopback port and receive connection refusal while the guest
+service is running. It then writes a persistent row/marker, uses
+non-destructive `suspend`/`resume`, and verifies the same overlay inode,
+workspace, and data survived.
+
+Final `stop`/`down` requires its own explicit approval naming only the generated
+disposable resources. If the guest reports OpenAI auth stored, the authorized
+teardown tests export-before-deletion and fresh-overlay import, then verifies
+the auth state again. The mode-0600 escrow remains in a mode-0700 host secrets
+directory outside the disposable state root. This does not test host-Docker
+credential migration, recursive credential forwarding, or container
+recreation. Cleanup removes only generated profiles, the two private
+workspaces, and the isolated campaign base/state after residue checks. It never
+removes the escrow or the preserved outer/child profiles.
+
+`PASS` requires every named campaign gate and final cleanup checks to pass.
+The private evidence file contains the gate-to-AC scope map and explicit AC
+non-claims; a gate maps only to its stated evidence slice, not blanket ticket
+closure or release acceptance. Any failed/blocked gate, declined approval,
+uncertain identity, or interrupted run prevents final teardown and preserves
+remaining generated state for review. The campaign clears inherited
+`VM_YES`/`LAB_YES` so they cannot bypass its approvals. Do not manually clean
+preserved state as part of a retry; inspect the report and coordinate the next
+action under the current ticket handoff.
 
 Use `observe --gate workload` only when doing that human slice separately. The
-campaign's report records the unique disposable profile and fixed observations,
-not secret material or raw command output. A campaign result covers only these
-gates and does not imply overall VM/release acceptance.
+campaign report records generated disposable profiles, gate outcomes, and fixed
+observations—not secret material or raw TUI/auth/Docker output. It covers only
+these scoped host-only gates and does not imply overall VM/release acceptance.
 
 ## Post-merge disposition
 
