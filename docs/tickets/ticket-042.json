@@ -8,7 +8,7 @@
   "title": "Direct guest harness runtime and guest workload control",
   "objective": "Install and run the model-agnostic Little Mester harness directly inside the outer VM guest, with native guest auth and broad guest-level control. Docker/Compose are available to the agent for arbitrary project workloads; no Docker container wraps the agent. Preserve the outer VM host-isolation boundary and existing restricted egress/secret rules.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-11-02T15:02:00.247Z",
+  "updated_at": "2026-11-02T17:13:04.410Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -218,7 +218,8 @@
       "Owner host acceptance (2026-10-31): ran Fish-compatible `./lab-vm -v update config`, captured `$status`, and got exit 0. Output: TUI preflight passed (`No interactive OpenCode TUI is attached`), update scan started for target `config`, guest reported `CURRENT Little Mester config/plugins`, then `No updates available for VM 'default'.` No update prompt or mutation occurred. This confirms the narrow config-check path after d2b9005.",
       "2026-10-31 local updater fix: default `./lab-vm update` reached the guest scan but exited 141 because `set -o pipefail` propagated SIGPIPE from `apt-cache policy ... | awk ... {exit}`. Changed the parser to save Candidate and print it in END, consuming all input. Added `test_apt_candidate_parser_consumes_full_policy_output_under_pipefail` with 1 MiB trailing output. Local checks: updater Python tests 12/12; complete Python suite 66/66; Bats `tests/vm.bats` 74/74; updater ShellCheck, Bash syntax and diff checks pass. A broad exploratory ShellCheck over all scripts/lib files reported pre-existing findings in unrelated files; no unrelated source edits were made. Local/mock evidence only; no host updater run was performed.",
       "Updater SIGPIPE fix committed locally as 6f9b76c (`fix(vm): avoid apt candidate parser SIGPIPE`). The `apt-cache policy` awk parser now reads through EOF before printing Candidate, eliminating SIGPIPE under pipefail. Regression uses 1 MiB trailing output. Validation: updater unittest 12/12, complete Python unittest 66/66, full Bats `tests/` 129/129, CI ShellCheck commands pass, `./lab-vm test` 8/8, generated cloud-init schema valid, docs consistency 115/115, Python compile passes, ticket validation passes. Ruff could not run because the executable is absent. No host default-update run or model-service action was performed; owner host verification remains required after sharing the commit.",
-      "Owner confirms the default `./lab-vm -v update` scan after commit 6f9b76c completed successfully with exit 0 and no SIGPIPE/status 141. Full terminal output was not supplied; no update installation is claimed. This closes the host default-scan verification for the parser fix, not the separate update-state-preservation acceptance in A14."
+      "Owner confirms the default `./lab-vm -v update` scan after commit 6f9b76c completed successfully with exit 0 and no SIGPIPE/status 141. Full terminal output was not supplied; no update installation is claimed. This closes the host default-scan verification for the parser fix, not the separate update-state-preservation acceptance in A14.",
+      "2026-11-02 owner-host existing-child continuation passed child readiness/context/workspace and live nested-KVM/depth-boundary checks; it did not launch a direct guest agent, run guest Compose workloads, or test a nested stop. Report on #41: vm-acceptance-20261102T170658Z-1433884-be822256.json."
     ]
   },
   "priority": "major",

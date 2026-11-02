@@ -19,7 +19,6 @@ import datetime as dt
 import hashlib
 import json
 import os
-from pathlib import Path
 import platform
 import re
 import shutil
@@ -28,6 +27,7 @@ import subprocess
 import sys
 import time
 import uuid
+from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 
@@ -280,8 +280,7 @@ def run_isolation_check(
             cwd=repo,
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
             timeout=120,
         )
@@ -1477,7 +1476,7 @@ def outer_guest_preflight(
         return result, parse_json_object(result.stdout)
 
     try:
-        result, parsed = query(REMOTE_PREFLIGHT)
+        _result, parsed = query(REMOTE_PREFLIGHT)
     except (AcceptanceError, OSError) as exc:
         evidence.check("outer guest SSH", False, str(exc))
         return False
@@ -1520,7 +1519,7 @@ def outer_guest_preflight(
             evidence.save()
             evidence.check("outer guest nested-tool bootstrap", True, detail)
             try:
-                result, parsed = query(REMOTE_PREFLIGHT)
+                _result, parsed = query(REMOTE_PREFLIGHT)
             except (AcceptanceError, OSError) as exc:
                 evidence.check("outer guest preflight retry", False, f"SSH check failed after guest bootstrap: {exc}")
                 return False
@@ -1642,7 +1641,7 @@ def run_preflight(
     if prerequisites_ready and snapshot_ok:
         selected = ensure_outer_profile(outer_profile, snapshot, repo, evidence, allow_create=allow_outer_create)
         if selected is not None:
-            selected_profile, directory = selected
+            selected_profile, _directory = selected
             outer = outer_profile_checks(selected_profile, snapshot, repo, evidence)
     guest_ok = outer_guest_preflight(
         outer, evidence,
@@ -2325,7 +2324,7 @@ def run_guest_script(vm_dir: Path, script: str, *, timeout: float = 120) -> tupl
     try:
         result = subprocess.run(
             ssh_command(vm_dir, "bash -s"), input=script, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+            capture_output=True, timeout=timeout,
             check=False,
         )
     except subprocess.TimeoutExpired:
@@ -2339,7 +2338,7 @@ def guest_openai_auth_stored(vm_dir: Path) -> tuple[bool | None, str]:
     try:
         result = subprocess.run(
             ssh_command(vm_dir, "opencode auth list"), text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+            capture_output=True, timeout=30,
             check=False,
         )
     except subprocess.TimeoutExpired:
@@ -2375,9 +2374,9 @@ def escrow_file_is_private(path: Path) -> bool:
 def compose_feedback_script(profile: str) -> str:
     if not PROFILE_RE.fullmatch(profile):
         raise AcceptanceError("Invalid disposable Compose project name.")
-    return r'''set -euo pipefail
+    template = r'''set -euo pipefail
 cd /workspace
-project='%s'
+project='__PROFILE__'
 docker() { command docker -H "unix:///run/user/$(id -u)/docker.sock" "$@"; }
 compose() { docker compose --project-name "$project" -f /workspace/compose.yaml "$@"; }
 compose config --quiet
@@ -2410,44 +2409,47 @@ test -z "$(compose ps -q)"
 test -z "$(docker network ls -q --filter "label=com.docker.compose.project=$project")"
 test -z "$(docker volume ls -q --filter "label=com.docker.compose.project=$project")"
 printf 'WORKLOAD_DOWN\n'
-''' % profile
+'''
+    return template.replace("__PROFILE__", profile)
 
 
 def lifecycle_workload_start_script(profile: str) -> str:
     if not PROFILE_RE.fullmatch(profile):
         raise AcceptanceError("Invalid disposable lifecycle profile name.")
     marker = f"/var/tmp/little-mester-acceptance-{profile}.state"
-    return r'''set -euo pipefail
+    template = r'''set -euo pipefail
 cd /workspace
-project='%s'
-marker='%s'
+project='__PROFILE__'
+marker='__MARKER__'
 docker() { command docker -H "unix:///run/user/$(id -u)/docker.sock" "$@"; }
 compose() { docker compose --project-name "$project" -f /workspace/compose.yaml "$@"; }
 compose up -d --wait --wait-timeout 120
 compose exec -T db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE TABLE IF NOT EXISTS lifecycle_probe (value integer PRIMARY KEY)'
 compose exec -T db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'INSERT INTO lifecycle_probe(value) VALUES (271828) ON CONFLICT DO NOTHING'
-printf 'overlay-state-%s\n' >"$marker"
+printf 'overlay-state-__PROFILE__\n' >"$marker"
 chmod 600 "$marker"
 printf 'LIFECYCLE_DATA_WRITTEN\n'
-''' % (profile, marker, profile)
+'''
+    return template.replace("__PROFILE__", profile).replace("__MARKER__", marker)
 
 
 def lifecycle_workload_check_script(profile: str) -> str:
     if not PROFILE_RE.fullmatch(profile):
         raise AcceptanceError("Invalid disposable lifecycle profile name.")
     marker = f"/var/tmp/little-mester-acceptance-{profile}.state"
-    return r'''set -euo pipefail
+    template = r'''set -euo pipefail
 cd /workspace
-project='%s'
-marker='%s'
+project='__PROFILE__'
+marker='__MARKER__'
 docker() { command docker -H "unix:///run/user/$(id -u)/docker.sock" "$@"; }
 compose() { docker compose --project-name "$project" -f /workspace/compose.yaml "$@"; }
-test "$(cat "$marker")" = 'overlay-state-%s'
+test "$(cat "$marker")" = 'overlay-state-__PROFILE__'
 compose up -d --wait --wait-timeout 120
 value="$(compose exec -T db psql -U postgres -d postgres -tAc 'SELECT count(*) FROM lifecycle_probe WHERE value=271828' | tr -d '[:space:]')"
 test "$value" = 1
 printf 'LIFECYCLE_DATA_PERSISTED\n'
-''' % (profile, marker, profile)
+'''
+    return template.replace("__PROFILE__", profile).replace("__MARKER__", marker)
 
 
 def campaign_project_dir_safe(path: Path) -> bool:

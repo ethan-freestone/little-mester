@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
 MIB = 1024 * 1024
 

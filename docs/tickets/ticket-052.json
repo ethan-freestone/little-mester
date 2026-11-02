@@ -8,7 +8,7 @@
   "title": "VM-first launcher, retained Docker mode, and bounded recursion",
   "objective": "CURRENT RELEASE TRACK (2026-11-01): implement and verify the eventual VM-first ./lab entry point while retaining the existing Docker launcher as ./lab-docker; document actual setup, daily lifecycle and rollback. Owner set this default guest's recursion cap to 2 (policy 0 2 1); recurse remains explicit and child depth may never exceed the inherited cap. Follow the phased coordinator #35; do not claim cutover/acceptance until the applicable gates pass.",
   "created_at": "2026-10-29T10:27:45.504Z",
-  "updated_at": "2026-11-02T17:04:51.044Z",
+  "updated_at": "2026-11-02T17:13:04.424Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -139,7 +139,8 @@
       "Memory resize/default/override implementation is split into separate commits; local tests are mocks/unit coverage only. No live lifecycle evidence is claimed.",
       "SUPERSEDES earlier ledger entries saying the setup override is the next implementation phase: all three memory slices are now committed locally as 4925e55, dc1fb7a, and 9e4a16b. Implementation and local verification are complete; only owner-host KVM acceptance and the broader VM-first release gates remain. No commits have been pushed and no live resize/boot is claimed.",
       "2026-11-01 staged launcher/docs slice on feat/vm-approach working tree: complete Bats suite 159/159; VM Python suite 89/89; cloud-init schema valid; docs consistency 115/115; Bash syntax, ShellCheck --severity=error, Python compileall, and git diff --check pass. No AC status changed. This verifies local dispatch and compatibility regressions only: no owner-host VM/TUI/lifecycle or default-cutover acceptance is claimed; ordinary ./lab remains routed to ./lab-docker. Preserved unrelated .idea/vcs.xml workspace-bootstrap mapping.",
-      "2026-11-02 local-only commit 454d7ec: Bats 179/179, Python 144/144, docs checks 115/115, ShellCheck/syntax/compile/diff pass. Lifecycle behavior is mocked/unit-tested only; no owner-host KVM suspend/resume or workload persistence test occurred, so host acceptance remains pending."
+      "2026-11-02 local-only commit 454d7ec: Bats 179/179, Python 144/144, docs checks 115/115, ShellCheck/syntax/compile/diff pass. Lifecycle behavior is mocked/unit-tested only; no owner-host KVM suspend/resume or workload persistence test occurred, so host acceptance remains pending.",
+      "2026-11-02 owner-host existing-child continuation observed outer recursion depth 0/max 1, child readiness, depth-2 refusal before state, and outer continuity. This does not verify the current max-2 depth-1/depth-2/depth-3 release matrix or agent self-development loop. Report on #41: vm-acceptance-20261102T170658Z-1433884-be822256.json."
     ]
   },
   "models_used": []

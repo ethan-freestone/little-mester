@@ -398,11 +398,16 @@ teardown() {
 }
 
 @test "lab-vm --auto is agent/run-only and reaches OpenCode rather than auto-accepting host prompts" {
-  run ./lab-vm status --auto
+  local vm_root="$WORKSPACE_TMPDIR/vm" state_root="$WORKSPACE_TMPDIR/state"
+  mkdir -p "$vm_root/default"
+
+  run env VM_DIR_BASE="$vm_root" VM_STATE_DIR="$state_root" \
+    "$LAB_DIR/lab-vm" status --auto
   [ "$status" -ne 0 ]
   [[ "$output" == *'The --auto permission option is only valid with the agent or run command.'* ]]
 
-  run ./lab-vm agent --auto --no-browser-auth
+  run env VM_DIR_BASE="$vm_root" VM_STATE_DIR="$state_root" \
+    "$LAB_DIR/lab-vm" agent --auto --no-browser-auth
   [ "$status" -ne 0 ]
   [[ "$output" == *'is not running'* ]]
   [[ "$output" != *'Unknown command'* ]]

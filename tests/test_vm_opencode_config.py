@@ -17,6 +17,18 @@ SPEC.loader.exec_module(vm_opencode_config)
 
 
 class GuestConfigTests(unittest.TestCase):
+    def test_non_object_mcp_sections_raise_type_error(self):
+        malformed = (
+            {"mcp": []},
+            {"mcp": {"servers": []}},
+            {"mcpServers": []},
+            {"mcpServers": {"legacy": []}},
+            {"mcp": {"servers": {"little-mester": {"environment": []}}}},
+        )
+        for source in malformed:
+            with self.subTest(source=source), self.assertRaises(TypeError):
+                vm_opencode_config.guest_config(source, "/private/mcp")
+
     def test_legacy_mcp_config_is_converted_to_v2_and_guest_private_runtime(self):
         source = json.loads((ROOT / "agent/opencode/opencode.json").read_text())
         result = vm_opencode_config.guest_config(

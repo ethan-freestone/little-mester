@@ -17,7 +17,6 @@ import tempfile
 from pathlib import Path
 from typing import NoReturn
 
-
 # Child snapshots contain selected source, not parent control state, credentials,
 # model weights, or regenerated dependency/cache directories.
 EXCLUDED_NAMES = {

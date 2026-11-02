@@ -23,19 +23,19 @@ def guest_config(source: dict, mcp_cwd: str) -> dict:
 
     mcp = config.setdefault("mcp", {})
     if not isinstance(mcp, dict):
-        raise ValueError("OpenCode config field 'mcp' must be an object")
+        raise TypeError("OpenCode config field 'mcp' must be an object")
     servers = mcp.setdefault("servers", {})
     if not isinstance(servers, dict):
-        raise ValueError("OpenCode config field 'mcp.servers' must be an object")
+        raise TypeError("OpenCode config field 'mcp.servers' must be an object")
 
     legacy_servers = config.pop("mcpServers", {})
     if not isinstance(legacy_servers, dict):
-        raise ValueError("Legacy OpenCode config field 'mcpServers' must be an object")
+        raise TypeError("Legacy OpenCode config field 'mcpServers' must be an object")
     for name, legacy in legacy_servers.items():
         if name in servers:
             continue
         if not isinstance(legacy, dict):
-            raise ValueError(f"Legacy MCP server '{name}' must be an object")
+            raise TypeError(f"Legacy MCP server '{name}' must be an object")
         command = legacy.get("command")
         args = legacy.get("args", [])
         if isinstance(command, str):
@@ -67,7 +67,7 @@ def guest_config(source: dict, mcp_cwd: str) -> dict:
     server["cwd"] = mcp_cwd
     server.setdefault("environment", {})
     if not isinstance(server["environment"], dict):
-        raise ValueError("OpenCode MCP server environment must be an object")
+        raise TypeError("OpenCode MCP server environment must be an object")
 
     return config
 

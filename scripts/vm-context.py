@@ -6,10 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 
 def command_output(command: list[str]) -> str | None:
@@ -150,7 +150,7 @@ def collect(repo: Path) -> dict[str, object]:
     cpu_flags: set[str] = set()
     try:
         for line in Path("/proc/cpuinfo").read_text(errors="replace").splitlines():
-            if line.startswith("flags") or line.startswith("Features"):
+            if line.startswith(("flags", "Features")):
                 cpu_flags.update(re.findall(r"(?<!\S)(?:vmx|svm)(?!\S)", line))
     except OSError:
         pass
