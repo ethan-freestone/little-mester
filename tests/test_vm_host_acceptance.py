@@ -489,6 +489,48 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertNotIn('"agent"', acceptance.REMOTE_NESTED)
         self.assertNotIn('"run"', acceptance.REMOTE_NESTED)
 
+    def test_nested_probes_are_visible_and_bounded(self):
+        for marker in (
+            "Checking child SSH/cloud-init/context readiness (timeout: 180s).",
+            "Checking depth-cap refusal before state creation (timeout: 120s).",
+            "Checking outer-session continuity (timeout: 30s).",
+        ):
+            self.assertIn(marker, acceptance.REMOTE_NESTED)
+        for timeout in (180, 120, 90, 30):
+            self.assertIn(f"timeout={timeout}", acceptance.REMOTE_NESTED)
+        self.assertIn('"-o", "ServerAliveInterval=15"', acceptance.REMOTE_NESTED)
+
+    def test_interrupt_terminates_only_local_ssh_client(self):
+        class FakeProcess:
+            def __init__(self, timeout_first_wait=False):
+                self.timeout_first_wait = timeout_first_wait
+                self.wait_calls = 0
+                self.terminated = False
+                self.killed = False
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                self.wait_calls += 1
+                if self.timeout_first_wait and self.wait_calls == 1:
+                    raise subprocess.TimeoutExpired("ssh", timeout)
+                return 0
+
+            def kill(self):
+                self.killed = True
+
+        normal = FakeProcess()
+        acceptance.terminate_local_ssh(normal)
+        self.assertTrue(normal.terminated)
+        self.assertFalse(normal.killed)
+
+        delayed = FakeProcess(timeout_first_wait=True)
+        acceptance.terminate_local_ssh(delayed)
+        self.assertTrue(delayed.terminated)
+        self.assertTrue(delayed.killed)
+        self.assertEqual(delayed.wait_calls, 2)
+
     def test_nested_profile_is_automatically_generated_by_default(self):
         args = acceptance.parser().parse_args(["nested"])
         self.assertIsNone(args.profile)

@@ -736,7 +736,9 @@ def ssh_command(vm_dir: Path, remote: str) -> list[str]:
     if stat.S_IMODE((vm_dir / "id_vm_control").stat().st_mode) & 0o077:
         raise AcceptanceError("Outer VM control key permissions are broader than 0600")
     return [
-        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes",
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+        "-o", "StrictHostKeyChecking=yes",
         "-o", f"UserKnownHostsFile={vm_dir / 'known_hosts'}", "-i", str(vm_dir / "id_vm_control"),
         "-p", port, "mester@127.0.0.1", remote,
     ]
@@ -988,7 +990,8 @@ except (OSError, ValueError):
 if not 1 <= port <= 65535:
     summary["failure"] = "child SSH port metadata is out of range"
     emit(5)
-ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes",
+ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+       "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "StrictHostKeyChecking=yes",
        "-o", "UserKnownHostsFile=" + str(known_file), "-i", str(key_file), "-p", str(port), "mester@127.0.0.1"]
 child_probe = r'''import json, pathlib, subprocess, sys
 def run(args):
@@ -1026,7 +1029,15 @@ checks = [summary["cloud_command_ok"], summary["cloud_status"] == "done", summar
 print(json.dumps(summary, sort_keys=True))
 sys.exit(0 if all(checks) else 10)
 '''
-child = subprocess.run(ssh + ["python3 -"], input=child_probe, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+print("Checking child SSH/cloud-init/context readiness (timeout: 180s).", flush=True)
+try:
+    child = subprocess.run(ssh + ["python3 -"], input=child_probe, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=180)
+except subprocess.TimeoutExpired:
+    summary["checks"]["child_acceptance"] = False
+    summary["child"] = {"result": "timed out"}
+    summary["failure"] = "child readiness probe timed out; preserve the child VM and diagnostics"
+    emit(6)
 try:
     child_summary = json.loads(child.stdout)
 except json.JSONDecodeError:
@@ -1045,14 +1056,26 @@ if session.exists() or session.is_symlink():
 env = os.environ.copy()
 env["LAB_VM_RECURSION_DEPTH"], env["LAB_VM_MAX_DEPTH"] = "1", "1"
 launcher = pathlib.Path(env["LM_ACCEPTANCE_LAUNCHER"])
-attempt = subprocess.run([str(launcher), "up", probe, "--workspace", "/workspace", "--recurse"], cwd=launcher.parent, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
-summary = {"returncode": attempt.returncode,
- "expected_refusal": attempt.returncode == 1 and "maximum nesting depth 1 reached; no child VM or agent was started." in attempt.stdout,
- "state_created": session.exists() or session.is_symlink()}
+try:
+ attempt = subprocess.run([str(launcher), "up", probe, "--workspace", "/workspace", "--recurse"], cwd=launcher.parent, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=90)
+ summary = {"returncode": attempt.returncode,
+  "expected_refusal": attempt.returncode == 1 and "maximum nesting depth 1 reached; no child VM or agent was started." in attempt.stdout,
+  "state_created": session.exists() or session.is_symlink()}
+except subprocess.TimeoutExpired:
+ summary = {"timed_out": True, "expected_refusal": False,
+  "state_created": session.exists() or session.is_symlink()}
 print(json.dumps(summary, sort_keys=True))
 sys.exit(0 if summary["expected_refusal"] and not summary["state_created"] else 12)
 '''
-overflow = subprocess.run(ssh + ["python3 -", probe], input=overflow_probe, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+print("Checking depth-cap refusal before state creation (timeout: 120s).", flush=True)
+try:
+    overflow = subprocess.run(ssh + ["python3 -", probe], input=overflow_probe, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=120)
+except subprocess.TimeoutExpired:
+    summary["depth_limit"] = {"result": "timed out; preserve state and stop"}
+    summary["checks"]["depth_limit_refused_before_state"] = False
+    summary["failure"] = "depth-cap probe timed out; preserve any generated state and stop"
+    emit(8)
 try:
     overflow_summary = json.loads(overflow.stdout)
 except json.JSONDecodeError:
@@ -1062,7 +1085,14 @@ summary["checks"]["depth_limit_refused_before_state"] = overflow.returncode == 0
 if not summary["checks"]["depth_limit_refused_before_state"]:
     summary["failure"] = "over-depth launch did not refuse before state; stop and preserve evidence"
     emit(8)
-parent_run = subprocess.run([str(launcher_root / "lab-vm"), "context", "--json"], cwd=launcher_root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+print("Checking outer-session continuity (timeout: 30s).", flush=True)
+try:
+    parent_run = subprocess.run([str(launcher_root / "lab-vm"), "context", "--json"], cwd=launcher_root,
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=30)
+except subprocess.TimeoutExpired:
+    summary["checks"]["outer_session_usable"] = False
+    summary["failure"] = "outer-session continuity probe timed out"
+    emit(9)
 try:
     parent = json.loads(parent_run.stdout)
 except json.JSONDecodeError:
@@ -1244,6 +1274,16 @@ def run_preflight(
     return ok, outer
 
 
+def terminate_local_ssh(process: subprocess.Popen[str]) -> None:
+    """Close the runner's SSH client without sending a VM teardown command."""
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def run_nested_remote(
     vm_dir: Path,
     profile: str,
@@ -1276,16 +1316,22 @@ def run_nested_remote(
             pass
     marker = "__LM_VM_ACCEPTANCE__"
     summary: dict[str, object] | None = None
-    for line in process.stdout:
-        if line.startswith(marker):
-            try:
-                value = json.loads(line[len(marker):])
-                summary = value if isinstance(value, dict) else None
-            except json.JSONDecodeError:
-                summary = None
-        else:
-            sys.stdout.write(line)
-            sys.stdout.flush()
+    try:
+        for line in process.stdout:
+            if line.startswith(marker):
+                try:
+                    value = json.loads(line[len(marker):])
+                    summary = value if isinstance(value, dict) else None
+                except json.JSONDecodeError:
+                    summary = None
+            else:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+    except KeyboardInterrupt:
+        # Interrupt only the local SSH client. The nested VM is intentionally
+        # left running so its profile and diagnostics remain available.
+        terminate_local_ssh(process)
+        raise
     return process.wait(), summary
 
 

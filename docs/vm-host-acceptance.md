@@ -152,6 +152,14 @@ into the report. The nested command streams provisioning diagnostics to the
 terminal and leaves native VM failure logs in the child profile; preserve and
 redact those separately before sharing.
 
+After child startup, the readiness SSH probe has a 180-second deadline, the
+depth-cap probe has a 120-second deadline, and the outer continuity probe has a
+30-second deadline; the runner prints a marker before each. A timeout is a
+failed/blocked gate and preserves the child profile for diagnosis. Ctrl-C exits
+the acceptance runner (typically status 130) and closes its local SSH client;
+it does not stop or clean the nested VM. An interrupted run is not a pass, and
+must not be retried with the same child profile.
+
 Exit status is zero only for a passed preflight/nested gate or a fully
 positive human observation; blocked or failed gates return nonzero. A runner
 PASS covers only the stated gate and must not be generalized to full VM,
