@@ -524,12 +524,45 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertIn('tempfile.mkdtemp(prefix="little-mester-acceptance-", dir="/tmp")', acceptance.REMOTE_NESTED)
         self.assertIn('subprocess.run([str(launcher_root / "lab-vm"), "-d", "up", profile, "--workspace", "/workspace", "--recurse"]', acceptance.REMOTE_NESTED)
         self.assertIn('str(launcher), "up", probe', acceptance.REMOTE_NESTED)
+        self.assertIn('launcher = pathlib.Path("/workspace/lab-vm")', overflow.group(1))
+        self.assertNotIn('env["LM_ACCEPTANCE_LAUNCHER"]', overflow.group(1))
+        self.assertIn('"stdout_bytes": len(overflow.stdout)', acceptance.REMOTE_NESTED)
+        self.assertIn('"stderr_present": bool(overflow.stderr)', acceptance.REMOTE_NESTED)
         self.assertIn('the active /workspace snapshot is unchanged', acceptance.REMOTE_NESTED)
         self.assertNotIn('"down"', acceptance.REMOTE_NESTED)
         self.assertNotIn('"stop"', acceptance.REMOTE_NESTED)
         self.assertNotIn('"--clean"', acceptance.REMOTE_NESTED)
         self.assertNotIn('"agent"', acceptance.REMOTE_NESTED)
         self.assertNotIn('"run"', acceptance.REMOTE_NESTED)
+
+    def test_depth_cap_probe_uses_child_workspace_launcher_without_outer_only_env(self):
+        overflow = re.search(r"overflow_probe = r'''(.*?)'''", acceptance.REMOTE_NESTED, re.DOTALL)
+        self.assertIsNotNone(overflow)
+        expected_refusal = "REFUSED: maximum nesting depth 1 reached; no child VM or agent was started."
+        attempt = subprocess.CompletedProcess(
+            args=["/workspace/lab-vm", "up"], returncode=1,
+            stdout=expected_refusal, stderr="",
+        )
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory(prefix="depth-cap-probe-test-") as home:
+            with patch.dict(os.environ):
+                os.environ["HOME"] = home
+                os.environ["LAB_VM_RECURSION_DEPTH"] = "0"
+                os.environ["LAB_VM_MAX_DEPTH"] = "1"
+                os.environ.pop("LM_ACCEPTANCE_LAUNCHER", None)
+                with patch.object(acceptance.subprocess, "run", return_value=attempt) as mocked_run, \
+                     patch.object(acceptance.sys, "argv", ["probe", "depth-cap-test"]), \
+                     redirect_stdout(output):
+                    with self.assertRaises(SystemExit) as exited:
+                        exec(overflow.group(1), {})
+
+        self.assertEqual(exited.exception.code, 0)
+        self.assertIn('"expected_refusal": true', output.getvalue())
+        self.assertIn('"state_created": false', output.getvalue())
+        call = mocked_run.call_args
+        self.assertEqual(call.args[0][:3], ["/workspace/lab-vm", "up", "depth-cap-test"])
+        self.assertEqual(call.kwargs["cwd"], Path("/workspace"))
 
     def test_nested_probes_are_visible_and_bounded(self):
         for marker in (

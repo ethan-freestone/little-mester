@@ -1149,7 +1149,9 @@ if session.exists() or session.is_symlink():
     sys.exit(11)
 env = os.environ.copy()
 env["LAB_VM_RECURSION_DEPTH"], env["LAB_VM_MAX_DEPTH"] = "1", "1"
-launcher = pathlib.Path(env["LM_ACCEPTANCE_LAUNCHER"])
+# This probe runs inside the child guest; the outer guest's private /tmp
+# launcher path and LM_ACCEPTANCE_LAUNCHER environment do not cross the VM.
+launcher = pathlib.Path("/workspace/lab-vm")
 try:
  attempt = subprocess.run([str(launcher), "up", probe, "--workspace", "/workspace", "--recurse"], cwd=launcher.parent, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=90)
  summary = {"returncode": attempt.returncode,
@@ -1176,10 +1178,16 @@ try:
     overflow_summary = json.loads(overflow.stdout)
 except json.JSONDecodeError:
     overflow_summary = None
-summary["depth_limit"] = overflow_summary if isinstance(overflow_summary, dict) else {"result": "unparseable"}
+summary["depth_limit"] = overflow_summary if isinstance(overflow_summary, dict) else {
+    "result": "unparseable",
+    "probe_returncode": overflow.returncode,
+    "stdout_bytes": len(overflow.stdout),
+    "stderr_present": bool(overflow.stderr),
+}
 summary["checks"]["depth_limit_refused_before_state"] = overflow.returncode == 0 and isinstance(overflow_summary, dict)
 progress("depth_cap_refusal", "completed", returncode=overflow.returncode,
-    passed=summary["checks"]["depth_limit_refused_before_state"])
+    passed=summary["checks"]["depth_limit_refused_before_state"],
+    summary_json=isinstance(overflow_summary, dict), stderr_present=bool(overflow.stderr))
 if not summary["checks"]["depth_limit_refused_before_state"]:
     summary["failure"] = "over-depth launch did not refuse before state; stop and preserve evidence"
     emit(8)
