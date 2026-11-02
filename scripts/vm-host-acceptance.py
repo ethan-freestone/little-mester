@@ -2943,9 +2943,11 @@ fi
     fallback = re.search(r"^VIRTIOFSD_FALLBACK=(\S+)$", output, re.MULTILINE)
     distro_match = re.search(r"^DISTRO=(\S+)$", output, re.MULTILINE)
     distro = distro_match.group(1) if distro_match else ""
-    if manager == "pacman" or distro in ("arch", "cachyos", "manjaro"):
-        if not fallback or not Path(fallback.group(1)).is_file():
-            return False, "Arch-derived virtiofsd fallback did not resolve an installed executable"
+    if (
+        (manager == "pacman" or distro in ("arch", "cachyos", "manjaro"))
+        and (not fallback or not Path(fallback.group(1)).is_file())
+    ):
+        return False, "Arch-derived virtiofsd fallback did not resolve an installed executable"
     return True, "real prerequisite script displayed distro/package mapping and defaulted to N; package manager was not invoked"
 
 
