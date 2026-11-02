@@ -8,7 +8,7 @@
   "title": "VM provisioning and ./lab VM lifecycle",
   "objective": "CURRENT IMPLEMENTATION TRACK (2026-11-01): finish VM provisioning/lifecycle prerequisites for the VM-first release. The active guest reports persistent recursion policy depth 0/max 2 and usable KVM; detailed phase pointer is #35 tests.needed. Preserve the existing modified source and the owner's current VM; do not infer real child/lifecycle acceptance from local mocks.",
   "created_at": "2026-10-26T20:39:18.836Z",
-  "updated_at": "2026-11-02T19:03:41.203Z",
+  "updated_at": "2026-11-02T19:53:54.651Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -359,7 +359,9 @@
       "scripts/vm-host-acceptance.py: combined Arch-derived distro/fallback validation condition to address Ruff SIM102 at line 2946.",
       "scripts/vm-python-tools.sh: managed pip/Ruff/uv bootstrap and read-only PyPI update check in a dedicated root-owned venv; refuses to replace unrelated /usr/local/bin tools.",
       "lib/vm/cloud-init.sh: fresh-guest python3-pip/python3-venv dependencies and Python CLI toolchain setup.",
-      "scripts/vm-install-tools.sh and scripts/vm-update.sh: in-place install/refresh for the selected running guest; no VM reprovision or lifecycle operation."
+      "scripts/vm-install-tools.sh and scripts/vm-update.sh: in-place install/refresh for the selected running guest; no VM reprovision or lifecycle operation.",
+      "Local suspend safety regression: `scripts/vm-recursion-live-children.py` inventories guest QEMU processes and child profile disk paths; `tests/test_vm_recursion_live_children.py` covers no child, managed child, untracked QEMU, unreadable metadata, unrelated process, and symlinked disk.",
+      "`tests/vm.bats`: suspend preserves state, permits recursion-capable profile only after empty-child proof, refuses a live child before shutdown, and rejects removed `--poweroff-recursive` flag."
     ],
     "cases": [
       "check_workspace rejects /",
@@ -583,7 +585,10 @@
       "2026-11-02 local commit 8a8e26b; `python3 -m unittest discover -s tests` passed 156/156; Python compilation, generated shell `bash -n`, and `git diff --check` passed. Ticket-store validation passed. No owner-host campaign/action or broader acceptance was run; physical-host gates remain pending current #35/#41/#45/#50 handoff.",
       "2026-11-02 local follow-up: `python3 -m unittest discover -s tests` passed 156/156; `python3 -m py_compile scripts/vm-host-acceptance.py` and `git diff --check` passed. Ruff could not be rerun in the coding workspace because pip/Ruff are not installed; the reported SIM102 condition was simplified.",
       "2026-11-02 local-only Python toolchain update: `python3 -m unittest discover -s tests` passed 157/157; ShellCheck severity=error, Python compilation, cloud-init schema validation, documentation consistency 115/115, and `git diff --check` passed. No owner VM action or guest tool installation was performed.",
-      "2026-11-02 final local run after canonical symlink validation fix: complete Python unittest suite 157/157; ShellCheck severity=error across VM entry points/scripts, Python compilation, cloud-init schema validation and git diff check passed. No live VM action was run."
+      "2026-11-02 final local run after canonical symlink validation fix: complete Python unittest suite 157/157; ShellCheck severity=error across VM entry points/scripts, Python compilation, cloud-init schema validation and git diff check passed. No live VM action was run.",
+      "2026-11-02 owner campaign report vm-acceptance-20261102T184924Z-1556996-3bf3ce11.json (private): existing-child nested continuation passed read-only readiness, depth-2 refusal-before-state, nested/outer network-boundary probes, and outer continuity. Campaign then reloaded the approved egress policy successfully; read-only `./lab-vm models status all` exited 1. No model service was started or changed. Gate `direct_guest_model_tui` failed; all subsequent campaign gates were blocked/not reached. Preserve the default VM, nested outer/child and report; no repair/restart/teardown inferred or authorized.",
+      "2026-11-02 local-only suspend cleanup (no owner VM action): removed the recursive-poweroff bypass; live nested QEMU and untracked/uninspectable QEMU now block suspend before guest shutdown. Recursion allowance alone no longer blocks an empty guest. No lifecycle acceptance inferred.",
+      "2026-11-02 validation: targeted suspend Bats 4/4; Python unittest discovery 163/163; ShellCheck severity=error, Bash syntax, Python compilation, git diff --check, and docs consistency 115/115 passed. Full `bats tests/vm.bats` had 7 environment-sensitive failures from this VM's persisted `/etc/lab-vm-recursion` identity conflicting with tests' recursion settings; do not modify that identity to force a pass."
     ]
   },
   "priority": "major",
