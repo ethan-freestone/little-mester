@@ -278,7 +278,7 @@ GUEST_DOCKER_PROXY
 vm_cmd_up() {
   local vm_name="${1:-default}"
   local workspace="${2:-}"
-  local vm_dir running_workspace virtiofsd_pid qemu_pid qemu_args status
+  local vm_dir running_workspace virtiofsd_pid qemu_pid qemu_args status virtiofs_sock
   vm_dir="$(_vm_resolve "$vm_name")"
   [[ ! -L "$vm_dir" ]] || die "VM profile directory must not be a symlink: $vm_dir"
 
@@ -381,7 +381,8 @@ vm_cmd_up() {
     vm_memory_qemu_matches "$qemu_args" "$VM_MEMORY_GIB" || die "VM '$vm_name' QEMU RAM does not match its profile metadata; use ./lab-vm resize after reviewing the profile."
     vm_memory_preflight "$VM_MEMORY_GIB" "$qemu_pid" || die 'Insufficient memory budget to safely reuse or restart this VM profile.'
     virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null || true)"
-    running_workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$(cat "$vm_dir/workspace")" "$vm_dir/virtiofs.sock")" || die "Cannot verify the workspace mounted by VM '$vm_name'; refusing to reuse or switch it."
+    virtiofs_sock="$(_vm_virtiofs_socket_path "$vm_dir")" || die "Cannot safely resolve the virtiofs socket for VM '$vm_name'."
+    running_workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$(cat "$vm_dir/workspace")" "$virtiofs_sock")" || die "Cannot verify the workspace mounted by VM '$vm_name'; refusing to reuse or switch it."
     running_workspace="$(realpath "$running_workspace")" || die "Cannot resolve the workspace mounted by VM '$vm_name'."
     if [[ "$running_workspace" == "$workspace" ]]; then
       echo "VM '$vm_name' is already running with workspace: $workspace"
@@ -591,7 +592,7 @@ _vm_confirm_resize() {
 
 vm_cmd_resize() {
   local vm_name="${1:-}" new_gib="${2:-}" vm_dir status qemu_pid qemu_args
-  local virtiofsd_pid workspace base_disk overlay_disk ssh_pubkey old_gib guest_mem_kib
+  local virtiofsd_pid workspace virtiofs_sock base_disk overlay_disk ssh_pubkey old_gib guest_mem_kib
   [[ -n "$vm_name" && -n "$new_gib" ]] || {
     echo 'Usage: ./lab-vm resize <profile> <GiB>' >&2
     return 2
@@ -647,7 +648,11 @@ vm_cmd_resize() {
   }
 
   virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null || true)"
-  workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$(cat "$vm_dir/workspace")" "$vm_dir/virtiofs.sock")" || {
+  virtiofs_sock="$(_vm_virtiofs_socket_path "$vm_dir")" || {
+    echo 'REFUSED: cannot safely resolve the active virtiofs socket; VM was not changed.' >&2
+    return 1
+  }
+  workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$(cat "$vm_dir/workspace")" "$virtiofs_sock")" || {
     echo 'REFUSED: cannot verify the active workspace export; VM was not changed.' >&2
     return 1
   }
@@ -1065,7 +1070,7 @@ _vm_start_proxy_at() {
 }
 
 vm_cmd_egress_reload() {
-  local vm_name="${1:-default}" vm_dir proxy_pid proxy_port virtiofsd_pid workspace log_file log_offset reload_result
+  local vm_name="${1:-default}" vm_dir proxy_pid proxy_port virtiofsd_pid virtiofs_sock expected_workspace workspace log_file log_offset reload_result
   vm_dir="$(_vm_resolve "$vm_name")"
   [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
   if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
@@ -1076,7 +1081,8 @@ vm_cmd_egress_reload() {
   [[ "$proxy_port" =~ ^[1-9][0-9]*$ ]] && (( proxy_port <= 65535 )) || die "Invalid egress proxy port recorded for VM '$vm_name'."
   virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null)"
   expected_workspace="$(cat "$vm_dir/workspace" 2>/dev/null)"
-  workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$expected_workspace" "$vm_dir/virtiofs.sock")" || die 'Cannot verify the running VM workspace export; refusing to reload proxy policy.'
+  virtiofs_sock="$(_vm_virtiofs_socket_path "$vm_dir")" || die 'Cannot safely resolve the virtiofs socket; refusing to reload proxy policy.'
+  workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$expected_workspace" "$virtiofs_sock")" || die 'Cannot verify the running VM workspace export; refusing to reload proxy policy.'
   workspace="$(realpath "$workspace")" || die 'Cannot resolve the VM workspace path.'
   [[ -d "$workspace" ]] || die 'The VM workspace export is no longer available.'
 
@@ -1212,7 +1218,7 @@ PY
 }
 
 vm_cmd_verify_isolation() {
-  local vm_name="${1:-default}" vm_dir ssh_port qemu_pid process_args virtiofsd_pid shared_dir sensitive_path expected_workspace
+  local vm_name="${1:-default}" vm_dir ssh_port qemu_pid process_args virtiofsd_pid shared_dir sensitive_path expected_workspace virtiofs_sock
   vm_dir="$(_vm_resolve "$vm_name")"
   [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
   if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
@@ -1227,7 +1233,8 @@ vm_cmd_verify_isolation() {
   virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null)"
   [[ -f "$vm_dir/workspace" && ! -L "$vm_dir/workspace" ]] || die 'VM workspace identity is missing or unsafe.'
   expected_workspace="$(cat "$vm_dir/workspace")"
-  shared_dir="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$expected_workspace" "$vm_dir/virtiofs.sock")" || die 'Cannot inspect the running virtiofsd workspace export.'
+  virtiofs_sock="$(_vm_virtiofs_socket_path "$vm_dir")" || die 'Cannot safely resolve the virtiofs socket.'
+  shared_dir="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$expected_workspace" "$virtiofs_sock")" || die 'Cannot inspect the running virtiofsd workspace export.'
   shared_dir="$(realpath "$shared_dir")" || die 'Cannot resolve the virtiofsd shared directory.'
   [[ -d "$shared_dir" && "$shared_dir" != '/' && "$shared_dir" != "$HOME" ]] || die "Unsafe or missing virtiofsd shared directory: $shared_dir"
   for sensitive_path in "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.config" "$HOME/.aws" "$HOME/.kube" "$HOME/.local" "$HOME/.bashrc" "$HOME/.zshrc"; do

@@ -284,6 +284,172 @@ _vm_scan_ssh_host_key() {
   return 1
 }
 
+_vm_virtiofs_runtime_root() {
+  printf '/tmp/little-mester-vfs-%s\n' "$(id -u)"
+}
+
+_vm_virtiofs_runtime_root_check() {
+  local root="${1:-$(_vm_virtiofs_runtime_root)}" uid owner mode
+  uid="$(id -u)"
+  [[ -d /tmp && ! -L /tmp ]] || {
+    echo 'REFUSED: /tmp is not a real directory; cannot safely host the virtiofs socket.' >&2
+    return 1
+  }
+  [[ ! -L "$root" ]] || {
+    echo "REFUSED: virtiofs runtime directory is a symlink: $root" >&2
+    return 1
+  }
+  [[ -e "$root" ]] || return 0
+  [[ -d "$root" ]] || {
+    echo "REFUSED: virtiofs runtime path is not a directory: $root" >&2
+    return 1
+  }
+  owner="$(stat -c '%u' "$root")" || return 1
+  [[ "$owner" == "$uid" ]] || {
+    echo "REFUSED: virtiofs runtime directory is not owned by UID $uid: $root" >&2
+    return 1
+  }
+  mode="$(stat -c '%a' "$root")" || return 1
+  [[ "$mode" == 700 ]] || {
+    echo "REFUSED: virtiofs runtime directory must have mode 0700: $root (mode $mode)" >&2
+    return 1
+  }
+}
+
+_vm_virtiofs_runtime_root_prepare() {
+  local root uid owner
+  root="$(_vm_virtiofs_runtime_root)"
+  uid="$(id -u)"
+  [[ -d /tmp && ! -L /tmp ]] || {
+    echo 'REFUSED: /tmp is not a real directory; cannot safely host the virtiofs socket.' >&2
+    return 1
+  }
+  [[ ! -L "$root" ]] || {
+    echo "REFUSED: virtiofs runtime directory is a symlink: $root" >&2
+    return 1
+  }
+  if [[ ! -e "$root" && ! -L "$root" ]]; then
+    (umask 077; mkdir -- "$root") || {
+      [[ -d "$root" && ! -L "$root" ]] || {
+        echo "ERROR: could not create private virtiofs runtime directory: $root" >&2
+        return 1
+      }
+    }
+  fi
+  [[ -d "$root" && ! -L "$root" ]] || {
+    echo "REFUSED: virtiofs runtime path is not a real directory: $root" >&2
+    return 1
+  }
+  owner="$(stat -c '%u' "$root")" || return 1
+  [[ "$owner" == "$uid" ]] || {
+    echo "REFUSED: virtiofs runtime directory is not owned by UID $uid: $root" >&2
+    return 1
+  }
+  chmod 0700 "$root" || return 1
+  _vm_virtiofs_runtime_root_check "$root"
+}
+
+_vm_virtiofs_short_socket_path() {
+  local vm_dir="${1:?VM profile directory required}" canonical digest root socket
+  canonical="$(realpath -m -- "$vm_dir")" || return 1
+  digest="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$canonical")" || return 1
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  root="$(_vm_virtiofs_runtime_root)"
+  socket="$root/$digest.sock"
+  (( ${#socket} < 108 )) || {
+    echo "ERROR: calculated virtiofs socket path is too long for AF_UNIX: $socket" >&2
+    return 1
+  }
+  printf '%s\n' "$socket"
+}
+
+_vm_virtiofsd_args() {
+  local workspace="${1:?workspace directory required}" socket="${2:?socket path required}"
+  VM_VIRTIOFSD_ARGS=(
+    --shared-dir "$workspace"
+    --socket-path "$socket"
+    --rlimit-nofile=1048576
+    --announce-submounts
+  )
+  if [[ "${VM_DEBUG:-0}" -ge 1 ]]; then
+    VM_VIRTIOFSD_ARGS+=(-d)
+  fi
+}
+
+_vm_virtiofs_socket_path() {
+  local vm_dir="${1:?VM profile directory required}" legacy="$1/virtiofs.sock" short root
+  if [[ -L "$legacy" ]]; then
+    echo "REFUSED: legacy virtiofs socket path is a symlink: $legacy" >&2
+    return 1
+  fi
+  if [[ -e "$legacy" ]]; then
+    [[ -S "$legacy" ]] || {
+      echo "REFUSED: legacy virtiofs socket path is not a socket: $legacy" >&2
+      return 1
+    }
+    short="$(_vm_virtiofs_short_socket_path "$vm_dir")" || return 1
+    [[ ! -e "$short" && ! -L "$short" ]] || {
+      echo "REFUSED: both legacy and short virtiofs sockets exist for $vm_dir" >&2
+      return 1
+    }
+    printf '%s\n' "$legacy"
+    return 0
+  fi
+  root="$(_vm_virtiofs_runtime_root)"
+  _vm_virtiofs_runtime_root_check "$root" || return 1
+  _vm_virtiofs_short_socket_path "$vm_dir"
+}
+
+_vm_virtiofs_socket_prepare() {
+  local vm_dir="${1:?VM profile directory required}" uid socket old_pid path
+  _vm_virtiofs_runtime_root_prepare || return 1
+  socket="$(_vm_virtiofs_short_socket_path "$vm_dir")" || return 1
+  uid="$(id -u)"
+  for path in "$vm_dir/virtiofs.sock" "$socket"; do
+    [[ -e "$path" || -L "$path" ]] || continue
+    [[ ! -L "$path" && -S "$path" ]] || {
+      echo "REFUSED: existing virtiofs socket path is not a regular socket: $path" >&2
+      return 1
+    }
+    [[ "$(stat -c '%u' "$path")" == "$uid" ]] || {
+      echo "REFUSED: existing virtiofs socket is not owned by UID $uid: $path" >&2
+      return 1
+    }
+    old_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null || true)"
+    if [[ "$old_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$old_pid" 2>/dev/null; then
+      echo "REFUSED: virtiofsd PID $old_pid is still alive with a stale socket; refusing to unlink $path" >&2
+      return 1
+    fi
+    rm -f -- "$path" || return 1
+  done
+  printf '%s\n' "$socket"
+}
+
+_vm_virtiofsd_startup_diagnostics() {
+  local vm_dir="$1" socket="$2" pid="$3" reason="$4" log_offset="$5"
+  local log_file="$vm_dir/virtiofsd.log" diagnostic_file="$vm_dir/virtiofsd-startup.log"
+  {
+    printf '\n=== virtiofsd startup failure: %s ===\n' "$(date --iso-8601=seconds)"
+    printf 'reason: %s\n' "$reason"
+    printf 'pid: %s\n' "$pid"
+    printf 'socket: %s (%s bytes; Linux AF_UNIX limit is 107)\n' "$socket" "${#socket}"
+    if kill -0 "$pid" 2>/dev/null; then
+      printf 'process state:\n'
+      ps -o pid,ppid,stat,etime,args -p "$pid" 2>&1 || true
+    else
+      printf 'process state: not running\n'
+    fi
+    if [[ -s "$log_file" ]] && (( $(wc -c <"$log_file") > log_offset )); then
+      printf 'virtiofsd output from this start attempt:\n'
+      tail -c +$((log_offset + 1)) "$log_file" | tail -n 100
+    else
+      printf 'virtiofsd produced no captured stdout/stderr for this start attempt.\n'
+    fi
+  } >>"$diagnostic_file" 2>&1
+  log "ERROR: virtiofsd startup details saved to $diagnostic_file"
+  tail -n 100 "$diagnostic_file" | while IFS= read -r line; do log "  $line"; done
+}
+
 # ─── Start QEMU VM (background) ─────────────────────────────────────
 _vm_start() {
   local vm_dir="$1"
@@ -292,6 +458,7 @@ _vm_start() {
   local base_disk="$4"
   local overlay_disk="$5"
   local ssh_host_key_pub="$6"
+  local virtiofs_sock virtiofsd_log virtiofsd_log_offset wait_status
 
   # Ask the kernel for an available loopback port.
   local ssh_port
@@ -300,6 +467,7 @@ _vm_start() {
 
   # ── Start virtiofsd (workspace export) ───────────────────────────
   VM_STARTING=1
+  virtiofs_sock="$(_vm_virtiofs_socket_prepare "$vm_dir")" || return 1
   rm -f "$vm_dir/proxy_port" "$vm_dir/proxy.reload-ready"
   _vm_proxy_upstream_args
   python3 "$LAB_DIR/lib/vm/proxy.py" "${VM_PROXY_UPSTREAM_ARGS[@]}" \
@@ -317,16 +485,18 @@ _vm_start() {
     return 1
   fi
   VM_PROXY_PORT=$(cat "$vm_dir/proxy_port")
-  local virtiofs_sock="$vm_dir/virtiofs.sock"
-  rm -f "$virtiofs_sock"
-
-  virtiofsd \
-    --syslog \
-    --shared-dir "$workspace" \
-    --socket-path "$virtiofs_sock" \
-    --rlimit-nofile=1048576 \
-    --announce-submounts \
-    >> "$vm_dir/virtiofsd.log" 2>&1 &
+  virtiofsd_log="$vm_dir/virtiofsd.log"
+  _vm_virtiofsd_args "$workspace" "$virtiofs_sock"
+  if [[ "$VM_DEBUG" -ge 1 ]]; then
+    # QEMU's virtiofsd -d enables daemon debug messages. Do not use --syslog:
+    # startup failures must stay in the private per-profile log for diagnosis.
+    log_debug "virtiofsd command: $(printf '%q ' virtiofsd "${VM_VIRTIOFSD_ARGS[@]}")"
+    log_debug "virtiofsd socket path length: ${#virtiofs_sock} bytes (Linux AF_UNIX limit: 107)"
+  fi
+  printf '\n=== virtiofsd start: %s ===\n' "$(date --iso-8601=seconds)" >>"$virtiofsd_log"
+  virtiofsd_log_offset="$(wc -c <"$virtiofsd_log")"
+  virtiofsd "${VM_VIRTIOFSD_ARGS[@]}" \
+    >>"$virtiofsd_log" 2>&1 &
   local _virtiofsd_pid=$!
   echo "$_virtiofsd_pid" > "$vm_dir/virtiofsd.pid"
   log_verbose "virtiofsd started (PID: $_virtiofsd_pid, socket: $virtiofs_sock)"
@@ -334,11 +504,18 @@ _vm_start() {
   # Wait for virtiofsd socket
   for i in $(seq 1 30); do
     [[ -S "$virtiofs_sock" ]] && break
+    if ! kill -0 "$_virtiofsd_pid" 2>/dev/null; then
+      if wait "$_virtiofsd_pid"; then wait_status=0; else wait_status=$?; fi
+      _vm_virtiofsd_startup_diagnostics "$vm_dir" "$virtiofs_sock" "$_virtiofsd_pid" \
+        "process exited before the socket was created (status $wait_status)" "$virtiofsd_log_offset"
+      _vm_stop "$vm_dir"
+      return 1
+    fi
     sleep 0.5
   done
   if [[ ! -S "$virtiofs_sock" ]]; then
-    log "ERROR: virtiofsd socket not ready after 15s"
-    tail -50 "$vm_dir/virtiofsd.log"
+    _vm_virtiofsd_startup_diagnostics "$vm_dir" "$virtiofs_sock" "$_virtiofsd_pid" \
+      'socket did not become ready after 15 seconds' "$virtiofsd_log_offset"
     _vm_stop "$vm_dir"
     return 1
   fi
@@ -429,6 +606,9 @@ _vm_start() {
 # ─── Stop VM cleanly ────────────────────────────────────────────────
 _vm_stop() {
   local vm_dir="$1"
+  local virtiofs_sock=""
+
+  virtiofs_sock="$(_vm_virtiofs_socket_path "$vm_dir" 2>/dev/null)" || true
 
   # Stop QEMU gracefully
   if [[ -f "$vm_dir/qemu.pid" ]]; then
@@ -462,6 +642,23 @@ _vm_stop() {
     rm -f "$vm_dir/virtiofsd.pid"
   fi
 
+  # Clean up only socket files in the private runtime root or the legacy
+  # per-profile path; never unlink a symlink or unrelated regular file.
+  if [[ -n "$virtiofs_sock" ]]; then
+    if [[ -S "$virtiofs_sock" && ! -L "$virtiofs_sock" ]]; then
+      rm -f -- "$virtiofs_sock"
+    elif [[ -e "$virtiofs_sock" || -L "$virtiofs_sock" ]]; then
+      log "WARNING: preserving unsafe virtiofs socket path: $virtiofs_sock"
+    fi
+  fi
+  if [[ "$virtiofs_sock" != "$vm_dir/virtiofs.sock" ]]; then
+    if [[ -S "$vm_dir/virtiofs.sock" && ! -L "$vm_dir/virtiofs.sock" ]]; then
+      rm -f -- "$vm_dir/virtiofs.sock"
+    elif [[ -e "$vm_dir/virtiofs.sock" || -L "$vm_dir/virtiofs.sock" ]]; then
+      log "WARNING: preserving unsafe legacy virtiofs socket path: $vm_dir/virtiofs.sock"
+    fi
+  fi
+
   # Clean up stale socket
   if [[ -f "$vm_dir/proxy.pid" ]]; then
     local pid
@@ -474,7 +671,7 @@ _vm_stop() {
     kill -9 "$pid" 2>/dev/null || true
     rm -f "$vm_dir/proxy.pid" "$vm_dir/proxy_port" "$vm_dir/proxy.reload-ready"
   fi
-  rm -f "$vm_dir/virtiofs.sock" "$vm_dir/mgmt.sock"
+  rm -f "$vm_dir/mgmt.sock"
 
   log "VM stopped."
 }

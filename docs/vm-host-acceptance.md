@@ -88,7 +88,25 @@ and explicitly inherits the existing parent egress proxy for provisioning, so
 startup does not chmod the outer guest's unrelated default XDG state directory
 or try direct DNS/network access. This keeps the gate compatible with an
 already-active snapshot whose `lab-vm` or disk helper source has not yet been
-refreshed.
+refreshed. The runner starts the child with `lab-vm -d up`, so virtiofsd debug
+output is captured in the private child profile's `virtiofsd.log`; startup
+failure details are also retained in `virtiofsd-startup.log`. Virtiofs sockets
+use a private per-user short path under `/tmp/little-mester-vfs-<uid>/` rather
+than the deeply nested profile path, which can exceed Linux's AF_UNIX pathname
+limit. Existing live VMs using the legacy per-profile socket remain recognized.
+For a retry, wait until the targeted revision is present in the CachyOS checkout
+and the current #35/#41 handoff permits it, then run this once; it generates a
+fresh child profile:
+
+```bash
+./scripts/vm-host-acceptance.py nested
+```
+
+Do not reuse or clean a failed profile, edit the active snapshot manually,
+restart the outer VM, bypass the parent proxy, or widen egress. If startup still
+fails, stop and preserve the child/profile and private report. Use the report to
+locate `virtiofsd.log` and `virtiofsd-startup.log`, then return the first failure
+and a redacted tail of those files; do not retry before the result is reviewed.
 
 ### Guided human observations
 

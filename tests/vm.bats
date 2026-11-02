@@ -17,6 +17,51 @@ setup() {
   [[ "$output" != *"-10.0.2.2:"* ]]
 }
 
+@test "virtiofs socket paths stay within AF_UNIX limits for nested profile names" {
+  local profile="nested-accept-20261102002328-3ccba458"
+  local vm_dir="$BATS_TEST_TMPDIR/home/.cache/lab-vm-recursion/$profile/vm/$profile"
+  local socket_path legacy_dir legacy_socket
+  mkdir -p "$vm_dir"
+
+  socket_path="$(_vm_virtiofs_short_socket_path "$vm_dir")"
+  [ "${#socket_path}" -lt 108 ]
+  [[ "$socket_path" == "/tmp/little-mester-vfs-$(id -u)/"*.sock ]]
+  [[ "$socket_path" != *"$profile"* ]]
+  [ "$(_vm_virtiofs_short_socket_path "$vm_dir")" = "$socket_path" ]
+
+  # Existing live profiles retain support for their legacy per-profile socket.
+  legacy_dir="$BATS_TEST_TMPDIR/legacy-vm"
+  mkdir -p "$legacy_dir"
+  legacy_socket="$legacy_dir/virtiofs.sock"
+  python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()' "$legacy_socket"
+  [ "$(_vm_virtiofs_socket_path "$legacy_dir")" = "$legacy_socket" ]
+}
+
+@test "virtiofsd debug enables daemon logs and startup failures preserve diagnostics" {
+  local vm_dir="$BATS_TEST_TMPDIR/virtiofsd-diagnostics"
+  mkdir -p "$vm_dir"
+  chmod 0700 "$vm_dir"
+  VM_DEBUG=0
+  _vm_virtiofsd_args /workspace /tmp/test.sock
+  [[ " ${VM_VIRTIOFSD_ARGS[*]} " != *" -d "* ]]
+  [[ " ${VM_VIRTIOFSD_ARGS[*]} " != *" --syslog "* ]]
+
+  VM_DEBUG=1
+  _vm_virtiofsd_args /workspace /tmp/test.sock
+  [[ " ${VM_VIRTIOFSD_ARGS[*]} " == *" -d "* ]]
+  [[ " ${VM_VIRTIOFSD_ARGS[*]} " != *" --syslog "* ]]
+
+  log() { echo "$*"; }
+  printf 'virtiofsd: bind failed: File name too long\n' >"$vm_dir/virtiofsd.log"
+  run _vm_virtiofsd_startup_diagnostics "$vm_dir" /tmp/test.sock 99999999 \
+    'process exited before the socket was created (status 1)' 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"virtiofsd-startup.log"* ]]
+  [[ "$output" == *"File name too long"* ]]
+  grep -Fq 'Linux AF_UNIX limit is 107' "$vm_dir/virtiofsd-startup.log"
+  grep -Fq 'process exited before the socket was created (status 1)' "$vm_dir/virtiofsd-startup.log"
+}
+
 @test "persisted guest recursion identity is inherited and cannot be overridden" {
   source "$REPO_ROOT/lib/vm/recursion.sh"
   local identity="$BATS_TEST_TMPDIR/recursion-identity"
