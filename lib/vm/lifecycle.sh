@@ -1793,15 +1793,6 @@ vm_cmd_suspend() {
   vm_dir="$(_vm_resolve "$vm_name")"
   [[ -d "$vm_dir" && ! -L "$vm_dir" ]] || die "No safe VM profile found for '$vm_name'."
 
-  # A profile configured to contain descendants cannot be powered off safely
-  # without first proving the child lifecycle. Refuse rather than orphaning or
-  # abruptly interrupting nested QEMU processes.
-  if [[ -e "$vm_dir/recursion_policy" || -L "$vm_dir/recursion_policy" ]]; then
-    vm_recursion_load_profile "$vm_dir" || die 'Could not verify recursion policy; refusing to suspend.'
-    [[ "${VM_AGENT_RECURSION_STATE_POSSIBLE:-1}" == 0 ]] || die \
-      'This profile may contain nested VM state; stop its child VMs explicitly before suspending the parent.'
-  fi
-
   for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do
     [[ -f "$vm_dir/$asset" && ! -L "$vm_dir/$asset" ]] || die \
       "Cannot safely suspend '$vm_name': required profile state is missing or unsafe ($asset)."
@@ -1814,6 +1805,8 @@ vm_cmd_suspend() {
     return 0
   fi
 
+  _vm_require_no_live_nested_qemu "$vm_dir" || return 1
+
   echo "=== VM Suspend: $vm_name ==="
   _vm_shutdown_for_workspace_switch "$vm_dir" 'suspending the VM' || return 1
   status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status='stopped'
@@ -1825,6 +1818,22 @@ vm_cmd_suspend() {
   done
   echo "VM '$vm_name' suspended. Overlay, guest workloads, workspace selection, seed, and SSH identity were preserved."
   echo "Resume with: ./lab-vm resume $vm_name"
+}
+
+_vm_require_no_live_nested_qemu() {
+  local vm_dir="${1:?VM profile directory required}" probe_output="" probe_status=0
+  local probe_script="$LAB_DIR/scripts/vm-recursion-live-children.py"
+  [[ -r "$probe_script" ]] || {
+    echo 'REFUSED: nested-VM safety probe is missing; refusing to suspend.' >&2
+    return 1
+  }
+  probe_output="$(vm_ssh "$vm_dir" 'python3 -' <"$probe_script")" || probe_status=$?
+  if (( probe_status != 0 )); then
+    [[ -z "$probe_output" ]] || printf '%s\n' "$probe_output" >&2
+    echo 'REFUSED: could not prove the guest has no live nested QEMU; the VM and overlay were left unchanged.' >&2
+    return 1
+  fi
+  printf '%s\n' "$probe_output"
 }
 
 vm_cmd_resume() {

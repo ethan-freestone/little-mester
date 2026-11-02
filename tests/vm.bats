@@ -542,6 +542,7 @@ LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
   printf '0 0 0\n' >"$vm_dir/recursion_policy"
   VM_RUN_STATE=running
   vm_run_status() { echo "$VM_RUN_STATE"; [[ "$VM_RUN_STATE" == running ]]; }
+  _vm_require_no_live_nested_qemu() { echo 'No live nested QEMU processes were found.'; }
   _vm_shutdown_for_workspace_switch() {
     printf '%s\n' "$2" >"$BATS_TEST_TMPDIR/shutdown-reason"
     VM_RUN_STATE=stopped
@@ -560,7 +561,7 @@ LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
   done
 }
 
-@test "suspend refuses descendant-capable profiles before guest or process changes" {
+@test "suspend permits a descendant-capable profile after proving no child QEMU is live" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   source "$REPO_ROOT/lib/vm/recursion.sh"
   die() { echo "ERROR: $*" >&2; exit 1; }
@@ -569,12 +570,42 @@ LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
   mkdir -p "$vm_dir"
   for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do : >"$vm_dir/$asset"; done
   printf '0 2 1\n' >"$vm_dir/recursion_policy"
+  VM_RUN_STATE=running
+  vm_run_status() { echo "$VM_RUN_STATE"; [[ "$VM_RUN_STATE" == running ]]; }
+  _vm_require_no_live_nested_qemu() { echo 'No live nested QEMU processes were found.'; }
+  _vm_shutdown_for_workspace_switch() {
+    echo called >"$BATS_TEST_TMPDIR/shutdown-called"
+    VM_RUN_STATE=stopped
+    return 0
+  }
+
+  run vm_cmd_suspend outer
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'No live nested QEMU processes were found.'* ]]
+  [ -e "$BATS_TEST_TMPDIR/shutdown-called" ]
+  [ -f "$vm_dir/disk.qcow2" ]
+}
+
+@test "suspend refuses when a live child QEMU is found before powering off the parent" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/suspend-live-child-state"
+  local vm_dir="$VM_DIR_BASE/outer"
+  mkdir -p "$vm_dir"
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do : >"$vm_dir/$asset"; done
+  printf '0 2 1\n' >"$vm_dir/recursion_policy"
   vm_run_status() { echo 'running (PID: 12345)'; }
+  _vm_require_no_live_nested_qemu() {
+    echo 'LIVE nested VM profile: child-a' >&2
+    echo 'REFUSED: nested VM is live.' >&2
+    return 1
+  }
   _vm_shutdown_for_workspace_switch() { echo called >"$BATS_TEST_TMPDIR/shutdown-called"; return 0; }
 
   run vm_cmd_suspend outer
   [ "$status" -ne 0 ]
-  [[ "$output" == *'may contain nested VM state'* ]]
+  [[ "$output" == *'LIVE nested VM profile: child-a'* ]]
   [ ! -e "$BATS_TEST_TMPDIR/shutdown-called" ]
   [ -f "$vm_dir/disk.qcow2" ]
 }
@@ -783,6 +814,10 @@ LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
   run "$REPO_ROOT/lab-vm" suspend --workspace /tmp
   [ "$status" -ne 0 ]
   [[ "$output" == *'--workspace is only valid with the run or up command'* ]]
+
+  run "$REPO_ROOT/lab-vm" suspend --poweroff-recursive
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--poweroff-recursive was removed'* ]]
 }
 
 @test "lab-vm CLI parses recursion modes and refuses child limit reset or increase" {
@@ -2241,7 +2276,7 @@ SH
   [ "$status" -eq 0 ]
   [[ "$output" == *'./lab-vm update [opencode|config|tools|docker|system ...]'* ]]
   [[ "$output" == *'./lab-vm update --all'* ]]
-  [[ "$output" == *'default checks OpenCode, installed Bats/ShellCheck, and guest config/plugins'* ]]
+  [[ "$output" == *'default checks OpenCode, installed tools, and guest config/plugins'* ]]
 
   run "$REPO_ROOT/lab-vm" update banana
   [ "$status" -ne 0 ]

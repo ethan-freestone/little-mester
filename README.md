@@ -445,9 +445,10 @@ live usability, auth, permission, workload, isolation, and lifecycle acceptance 
 `docker compose down -v --remove-orphans` in the guest, then calls `down`. `./lab-vm down`
 stops QEMU and deletes the writable VM overlay, seed ISO, and VM control keys (the cached base
 image remains). Either command can discard guest state; `stop` also removes guest Compose
-volumes. There is not yet a supported non-destructive end-of-day suspend/stop command. Do not
-use `stop`, `down`, `--clean`, or `rebuild` on a VM whose state you need to preserve. This
-behavior must be improved and documented before VM mode is recommended for daily use.
+volumes. `./lab-vm suspend`/`resume` preserve the overlay, volumes, workspace, seed, and SSH
+identity. Suspend refuses if a live or untracked nested QEMU is detected; recursion capacity alone
+does not block it. This path is locally tested but still needs owner-host lifecycle acceptance.
+Do not use `stop`, `down`, `--clean`, or `rebuild` on a VM whose state you need to preserve.
 
 The agent has broad authority inside the guest, including guest Docker; the outer VM is the
 host-isolation boundary. VM mode is not yet a replacement for `./lab`: keep the existing

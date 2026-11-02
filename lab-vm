@@ -30,6 +30,8 @@
 #   ./lab-vm ssh [name]
 #   ./lab-vm down [name]
 #   ./lab-vm stop [name]
+#   ./lab-vm suspend [name]
+#   ./lab-vm resume [name]
 #   ./lab-vm resize <name> <GiB>
 #   ./lab-vm base [name]
 #   ./lab-vm rebuild [name]
@@ -240,6 +242,13 @@ VM lifecycle commands (epic #35, ticket #41):
       Preserves the active workspace, overlay, base image, seed, SSH identity,
       installed software, and guest data. This cannot resize an ancestor VM.
 
+  ./lab-vm suspend [name]
+      Gracefully power off while preserving the overlay, workloads, workspace,
+      seed, and SSH identity. Refuses if a live or untracked nested QEMU is found.
+
+  ./lab-vm resume [name]
+      Restart a suspended profile using its recorded workspace and same overlay.
+
   ./lab-vm base [name]
       Download and verify the base image (about 600 MiB; 20 GiB virtual size).
 
@@ -257,7 +266,7 @@ VM lifecycle commands (epic #35, ticket #41):
   ./lab-vm update [opencode|config|tools|docker|system ...] [--name <profile>]
   ./lab-vm update --all [--name <profile>]
       Check for updates, then ask before changing the running guest.
-      The default checks OpenCode, installed Bats/ShellCheck, and guest config/plugins.
+      The default checks OpenCode, installed tools, and guest config/plugins.
       Select one or more targets to narrow the check. `--all` additionally upgrades
       guest OS packages (including the managed Docker Engine). Use --yes to confirm
       non-interactively. Exit the OpenCode TUI and guest workloads first.
@@ -347,6 +356,7 @@ for _i in "${_flags[@]}"; do
     --all)                    VM_UPDATE_ALL=1 ;;
     --clean)                  VM_CLEAN=1 ;;
     --discard-recursive)      VM_DISCARD_RECURSIVE=1 ;;
+    --poweroff-recursive)     die '--poweroff-recursive was removed: suspend now checks for live nested QEMU processes and refuses if any are found.' ;;
     --browser-auth)           VM_BROWSER_AUTH_MODE=on; VM_BROWSER_AUTH_ENABLE_FLAG=1 ;;
     --no-browser-auth)        VM_BROWSER_AUTH_MODE=off; VM_BROWSER_AUTH_DISABLE_FLAG=1 ;;
     --auto)                   VM_AGENT_AUTO=1 ;;

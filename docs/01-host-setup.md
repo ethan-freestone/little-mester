@@ -163,11 +163,13 @@ meet the KVM requirements.
 ./lab-vm down                # Remove VM overlay, seed, and control keys
 ```
 
-`suspend`/`resume` are the intended daily shutdown path. Suspend preserves the guest overlay,
-Docker volumes/workloads, workspace selection, seed, and SSH identity; it refuses a profile
-whose recursion metadata says nested VM state may exist. `stop` and `down` remain destructive.
-The resumable path is implemented locally but has not yet passed owner-host lifecycle acceptance;
-follow #41/#52 before relying on it for valuable guest state.
+`suspend`/`resume` are the non-destructive shutdown path. Suspend preserves the guest overlay,
+Docker volumes/workloads, workspace selection, seed, and SSH identity. Before powering off, it
+checks the guest process table for nested QEMU: live child profiles are listed and block parent
+suspend; an untracked QEMU or failed probe also blocks. A recursion depth allowance by itself
+does not block an empty guest. `stop` and `down` remain destructive. This implementation has not
+yet passed owner-host lifecycle acceptance; follow #41/#52 before relying on it for valuable guest
+state.
 
 ### Resize a running VM
 

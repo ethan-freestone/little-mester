@@ -190,10 +190,12 @@ path; local regressions do not replace the pending live nested-KVM acceptance ga
 `lab-vm suspend` and `lab-vm resume` provide the non-destructive shutdown/restart path: suspend
 requests a clean guest poweroff and preserves the qcow2 overlay, guest Docker workloads/volumes,
 recorded workspace, seed, and SSH identity; resume starts the same profile on that workspace and
-existing overlay. Suspend refuses profiles whose persisted recursion policy says descendants may
-exist, because child QEMU lifecycle must be resolved first. `lab-vm stop` and `lab-vm down` remain
-destructive teardown commands. The new path is locally implemented but still requires owner-host
-KVM acceptance before recommending it for daily use (#41/#52).
+existing overlay. Before shutdown, suspend reads the guest process table and blocks if any nested
+QEMU is live or cannot be matched to a managed child profile. A recursion depth allowance alone
+does not block an empty guest. This replaces the earlier policy-capability heuristic; it does not
+silently power off child VMs. `lab-vm stop` and `lab-vm down` remain destructive teardown
+commands. The new path is locally implemented but still requires owner-host KVM acceptance before
+recommending it for daily use (#41/#52).
 
 The Little Mester checkout is not part of the default workspace export. `--recurse` opts into
 bounded child-VM testing; repository-related workspaces are snapshotted so the direct guest

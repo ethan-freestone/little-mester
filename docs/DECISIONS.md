@@ -403,8 +403,10 @@ the current `stop`/`down` behavior deletes guest state and is not a routine dail
 see #41/#52 for the current lifecycle contract and evidence.
 
 The local implementation now provides explicit `suspend`/`resume` commands that preserve the
-overlay and workspace. They are not recommended for valuable state until the owner-host
-shutdown/resume and workload-persistence checks pass; `stop`/`down` remain destructive.
+overlay and workspace. Suspend checks for live nested QEMU processes in the guest and fails
+closed on an untracked process or an unavailable probe; recursion capacity alone is not treated
+as evidence that a child exists. These commands are not recommended for valuable state until the
+owner-host shutdown/resume and workload-persistence checks pass; `stop`/`down` remain destructive.
 
 #### C.9.8 User permission prompt before package installation
 
