@@ -467,6 +467,16 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertIn("requested=4096 MiB + reserve=512 MiB", memory_check["detail"])
         self.assertEqual(evidence.data["nested_memory_budget"], payload["memory_budget"])
 
+        resumed = DummyEvidence()
+        with patch.object(acceptance, "ssh_command", return_value=["ssh"]), \
+             patch.object(acceptance, "run", return_value=response), \
+             redirect_stdout(io.StringIO()):
+            self.assertTrue(acceptance.outer_guest_preflight(
+                Path("/profile"), resumed, require_child_memory_budget=False,
+            ))
+        self.assertFalse(any(check["name"] == "outer guest memory_budget" for check in resumed.data["checks"]))
+        self.assertIn("already-running child", resumed.data["nested_memory_budget_skipped_reason"])
+
     def test_nested_gate_blocks_checks_not_reached_after_child_up_failure(self):
         evidence = DummyEvidence()
         summary = {"checks": {"child_up": False}}
@@ -482,6 +492,29 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertEqual(outcomes["child acceptance"], "BLOCKED")
         self.assertEqual(outcomes["depth limit refused before state"], "BLOCKED")
         self.assertEqual(outcomes["outer session usable"], "BLOCKED")
+
+    def test_nested_resume_reuses_child_and_skips_new_child_memory_budget(self):
+        evidence = DummyEvidence()
+        summary = {"checks": {
+            "existing_profile": True, "child_up": True, "child_acceptance": True,
+            "depth_limit_refused_before_state": True, "outer_session_usable": True,
+        }}
+        with patch.object(acceptance, "Evidence", return_value=evidence), \
+             patch.object(acceptance, "run_preflight", return_value=(True, Path("/outer"))) as mock_preflight, \
+             patch.object(acceptance, "run_nested_remote", return_value=(0, summary)) as mock_remote, \
+             redirect_stdout(io.StringIO()):
+            result = acceptance.nested_gate(
+                "nested-accept-existing", "outer-8g", Path("/snapshot"), ROOT,
+                reuse_existing=True,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertFalse(mock_preflight.call_args.kwargs["require_child_memory_budget"])
+        self.assertTrue(mock_remote.call_args.kwargs["resume_existing"])
+        outcomes = {check["name"]: check["result"] for check in evidence.data["checks"]}
+        self.assertEqual(outcomes["existing child profile"], "PASS")
+        self.assertEqual(outcomes["child up"], "PASS")
+        self.assertEqual(evidence.data["reused_existing_child"], True)
 
     def test_nested_command_is_explicit_and_contains_no_teardown_or_tui(self):
         compile(acceptance.REMOTE_PREFLIGHT, "remote-preflight", "exec")
@@ -506,6 +539,9 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertIn('"sudo", "-n", "apt-get", "-qq", "update"', acceptance.REMOTE_ENSURE_NESTED_TOOLS)
         self.assertIn("supports only the Ubuntu/Debian guest images", acceptance.REMOTE_ENSURE_NESTED_TOOLS)
         self.assertIn('env["VM_STATE_DIR"] = str(session)', acceptance.REMOTE_NESTED)
+        self.assertIn('resume_existing = len(sys.argv) > 3 and sys.argv[3] == "--resume-existing"', acceptance.REMOTE_NESTED)
+        self.assertIn('"reused_existing_profile": resume_existing', acceptance.REMOTE_NESTED)
+        self.assertIn('Reusing the existing nested child; no VM will be started or stopped.', acceptance.REMOTE_NESTED)
         self.assertIn(
             'session, vm_dir = sessions / profile, sessions / profile / "vm" / profile',
             acceptance.REMOTE_NESTED,
@@ -563,6 +599,61 @@ class HostAcceptanceTests(unittest.TestCase):
         call = mocked_run.call_args
         self.assertEqual(call.args[0][:3], ["/workspace/lab-vm", "up", "depth-cap-test"])
         self.assertEqual(call.kwargs["cwd"], Path("/workspace"))
+
+    def test_remote_resume_rechecks_child_without_starting_a_vm(self):
+        profile = "nested-accept-resume"
+        probe = "depth-cap-0123456789"
+        child_context = {
+            "runtime": {"kind": "vm"},
+            "recursion": {"depth": 1, "max_depth": 1, "child_depth_available": False},
+            "kvm": {"nested_kvm_preflight_ready": True},
+        }
+        parent_context = {
+            "recursion": {"depth": 0, "max_depth": 1, "child_depth_available": True},
+        }
+        cloud_status = {"status": "done", "extended_status": "done", "errors": [], "recoverable_errors": {}}
+        workspace_boundary = {"host_state_excluded": True}
+        cap_result = {"returncode": 1, "expected_refusal": True, "state_created": False}
+        results = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, json.dumps(cloud_status), ""),
+            subprocess.CompletedProcess([], 0, json.dumps(child_context), ""),
+            subprocess.CompletedProcess([], 0, "virtiofs\n", ""),
+            subprocess.CompletedProcess([], 0, json.dumps(workspace_boundary), ""),
+            subprocess.CompletedProcess([], 0, json.dumps(cap_result), ""),
+            subprocess.CompletedProcess([], 0, json.dumps(parent_context), ""),
+        ]
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory(prefix="nested-resume-test-") as home:
+            profile_dir = Path(home) / ".cache/lab-vm-recursion" / profile
+            vm_dir = profile_dir / "vm" / profile
+            vm_dir.mkdir(mode=0o700, parents=True)
+            profile_dir.chmod(0o700)
+            (vm_dir / "ssh_port").write_text("23456\n", encoding="ascii")
+            (vm_dir / "id_vm_control").write_text("key", encoding="ascii")
+            (vm_dir / "known_hosts").write_text("host", encoding="ascii")
+            script = acceptance.build_remote_nested_script(ROOT)
+
+            with patch.dict(os.environ):
+                os.environ["HOME"] = home
+                with patch.object(Path, "home", return_value=Path(home)), \
+                     patch.object(acceptance.subprocess, "run", side_effect=results) as mocked_run, \
+                     patch.object(acceptance.sys, "argv", ["remote", profile, probe, "--resume-existing"]), \
+                     redirect_stdout(output):
+                    with self.assertRaises(SystemExit) as exited:
+                        exec(script, {})
+
+        self.assertEqual(exited.exception.code, 0)
+        summary_line = next(line for line in output.getvalue().splitlines() if line.startswith(acceptance.REMOTE_SUMMARY_MARKER))
+        summary = json.loads(summary_line[len(acceptance.REMOTE_SUMMARY_MARKER):])
+        self.assertTrue(summary["child"]["reused_existing_profile"])
+        self.assertTrue(summary["checks"]["child_up"])
+        self.assertTrue(summary["checks"]["child_acceptance"])
+        self.assertTrue(summary["checks"]["depth_limit_refused_before_state"])
+        self.assertTrue(summary["checks"]["outer_session_usable"])
+        self.assertEqual(mocked_run.call_count, 7)
+        self.assertTrue(all("-d" not in call.args[0] and "up" not in call.args[0] for call in mocked_run.call_args_list))
 
     def test_nested_probes_are_visible_and_bounded(self):
         for marker in (
@@ -817,16 +908,32 @@ class HostAcceptanceTests(unittest.TestCase):
             "ssh", "-o", "BatchMode=yes", "mester@127.0.0.1",
             "cd /workspace && python3 - nested-accept-20261102005812-6494102d depth-cap-0123456789",
         ]
+        resumed_probe = [
+            "ssh", "-o", "BatchMode=yes", "mester@127.0.0.1",
+            "cd /workspace && python3 - nested-accept-20261102005812-6494102d depth-cap-0123456789 --resume-existing",
+        ]
         self.assertIsNone(acceptance.classify_interrupted_process(browser_bridge))
         self.assertIsNone(acceptance.classify_interrupted_process(tui))
         self.assertEqual(
             acceptance.classify_interrupted_process(nested_probe),
             "nested-acceptance-ssh-to-outer",
         )
+        self.assertEqual(
+            acceptance.classify_interrupted_process(resumed_probe),
+            "nested-acceptance-ssh-to-outer",
+        )
 
     def test_nested_profile_is_automatically_generated_by_default(self):
         args = acceptance.parser().parse_args(["nested"])
         self.assertIsNone(args.profile)
+        self.assertIsNone(args.reuse_child)
+        resumed = acceptance.parser().parse_args(["nested", "--reuse-child", "nested-accept-existing"])
+        self.assertEqual(resumed.reuse_child, "nested-accept-existing")
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            acceptance.parser().parse_args([
+                "nested", "--profile", "nested-accept-new",
+                "--reuse-child", "nested-accept-existing",
+            ])
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             acceptance.parser().parse_args(["sync-snapshot", "--confirm-reviewed"])
 

@@ -917,6 +917,7 @@ sys.exit(0 if installed.returncode == 0 and not result["missing_tools"] else 2)
 
 REMOTE_NESTED = r"""import base64, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tempfile
 profile, probe = sys.argv[1:3]
+resume_existing = len(sys.argv) > 3 and sys.argv[3] == "--resume-existing"
 root = pathlib.Path("/workspace")
 sessions = pathlib.Path.home() / ".cache/lab-vm-recursion"
 session, vm_dir = sessions / profile, sessions / profile / "vm" / profile
@@ -930,17 +931,28 @@ def emit(code):
     print("__LM_VM_ACCEPTANCE__" + json.dumps(summary, sort_keys=True), flush=True)
     raise SystemExit(code)
 progress("remote_script", "started")
-if session.exists() or session.is_symlink():
-    summary["checks"]["fresh_profile"] = False
-    summary["failure"] = "child profile already exists"
-    emit(2)
+if resume_existing:
+    if session.is_symlink() or not session.is_dir():
+        summary["checks"]["existing_profile"] = False
+        summary["failure"] = "requested existing child profile is missing or unsafe"
+        emit(2)
+    if session.stat().st_mode & 0o077:
+        summary["checks"]["existing_profile"] = False
+        summary["failure"] = "requested existing child profile is not private"
+        emit(2)
+    summary["checks"]["existing_profile"] = True
+else:
+    if session.exists() or session.is_symlink():
+        summary["checks"]["fresh_profile"] = False
+        summary["failure"] = "child profile already exists"
+        emit(2)
+    summary["checks"]["fresh_profile"] = True
 workspace_path, state_path = root.resolve(), session.resolve()
 if workspace_path == state_path or workspace_path in state_path.parents or state_path in workspace_path.parents:
     summary["checks"]["state_boundary"] = False
     summary["failure"] = "child control state overlaps the shared workspace"
     emit(2)
 summary["checks"]["state_boundary"] = True
-summary["checks"]["fresh_profile"] = True
 progress("runtime_overlay", "started")
 def stage_runtime_overlay():
     if not source_overlay_payload:
@@ -1032,14 +1044,17 @@ os.environ["LM_ACCEPTANCE_LAUNCHER"] = env["LM_ACCEPTANCE_LAUNCHER"]
 parent_proxy = "http://10.0.2.100:3128"
 env.update({key: parent_proxy for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")})
 env.update({key: "localhost,127.0.0.1,10.0.2.100" for key in ("NO_PROXY", "no_proxy")})
-print("Starting one new nested child; no model/TUI or teardown will run.", flush=True)
-progress("child_vm_up", "started")
-up = subprocess.run([str(launcher_root / "lab-vm"), "-d", "up", profile, "--workspace", "/workspace", "--recurse"], cwd=launcher_root, env=env, check=False)
-progress("child_vm_up", "completed", returncode=up.returncode)
-summary["checks"]["child_up"] = up.returncode == 0
-if up.returncode != 0:
-    summary["failure"] = "child up failed; preserve the profile and its logs"
-    emit(3)
+if resume_existing:
+    print("Reusing the existing nested child; no VM will be started or stopped.", flush=True)
+else:
+    print("Starting one new nested child; no model/TUI or teardown will run.", flush=True)
+    progress("child_vm_up", "started")
+    up = subprocess.run([str(launcher_root / "lab-vm"), "-d", "up", profile, "--workspace", "/workspace", "--recurse"], cwd=launcher_root, env=env, check=False)
+    progress("child_vm_up", "completed", returncode=up.returncode)
+    summary["checks"]["child_up"] = up.returncode == 0
+    if up.returncode != 0:
+        summary["failure"] = "child up failed; preserve the profile and its logs"
+        emit(3)
 progress("child_control_state", "started")
 if not vm_dir.is_dir() or vm_dir.is_symlink():
     progress("child_control_state", "failed", reason="profile_state_missing_or_unsafe")
@@ -1066,6 +1081,22 @@ if not 1 <= port <= 65535:
 ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "StrictHostKeyChecking=yes",
        "-o", "UserKnownHostsFile=" + str(known_file), "-i", str(key_file), "-p", str(port), "mester@127.0.0.1"]
+if resume_existing:
+    progress("child_vm_up", "started", timeout_seconds=10, reused=True)
+    try:
+        reachable = subprocess.run(ssh + ["true"], text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=10)
+    except subprocess.TimeoutExpired:
+        progress("child_vm_up", "timed_out", timeout_seconds=10, reused=True)
+        summary["checks"]["child_up"] = False
+        summary["failure"] = "existing child did not answer SSH; it was not restarted"
+        emit(3)
+    summary["checks"]["child_up"] = reachable.returncode == 0
+    progress("child_vm_up", "completed", returncode=reachable.returncode,
+        stderr_present=bool(reachable.stderr), reused=True)
+    if not summary["checks"]["child_up"]:
+        summary["failure"] = "existing child did not answer SSH; it was not restarted"
+        emit(3)
 def run_child_stage(stage, remote, timeout, input_text=None):
     progress(stage, "started", timeout_seconds=timeout)
     try:
@@ -1103,7 +1134,8 @@ print(json.dumps({"host_state_excluded": not any(p.exists() or p.is_symlink() fo
 boundary = run_child_stage("child_workspace_boundary", "cd /workspace && python3 -", 10, workspace_probe)
 boundary_data = obj(boundary.stdout)
 child_summary = {"cloud_status": cloud.get("status") if cloud else None,
- "cloud_extended_status": cloud.get("extended_status") if cloud else None,
+  "reused_existing_profile": resume_existing,
+  "cloud_extended_status": cloud.get("extended_status") if cloud else None,
  "cloud_errors_empty": cloud is not None and isinstance(cloud.get("errors"), list) and not cloud["errors"],
  "cloud_recoverable_errors_empty": cloud is not None and isinstance(cloud.get("recoverable_errors"), dict) and not cloud["recoverable_errors"],
  "cloud_command_ok": cloud_run.returncode == 0,
@@ -1231,11 +1263,18 @@ def add_context_checks(evidence: Evidence, context: dict[str, object], label: st
     return all(passed for passed, _ in checks.values())
 
 
-def outer_guest_preflight(vm_dir: Path, evidence: Evidence) -> bool:
-    non_tool_checks = (
+def outer_guest_preflight(
+    vm_dir: Path,
+    evidence: Evidence,
+    *,
+    require_child_memory_budget: bool = True,
+) -> bool:
+    non_tool_checks = [
         "context_valid", "outer_guest", "nested_kvm", "workspace_root",
-        "workspace_virtiofs", "host_state_excluded", "memory_budget",
-    )
+        "workspace_virtiofs", "host_state_excluded",
+    ]
+    if require_child_memory_budget:
+        non_tool_checks.append("memory_budget")
 
     def query(script: str):
         result = run(ssh_command(vm_dir, "cd /workspace && python3 -"), input_text=script)
@@ -1252,10 +1291,13 @@ def outer_guest_preflight(vm_dir: Path, evidence: Evidence) -> bool:
 
     initial_checks = parsed.get("checks", {})
     initial_tools = parsed.get("tools", {})
+    ignored_initial_checks = {"tools"}
+    if not require_child_memory_budget:
+        ignored_initial_checks.add("memory_budget")
     if (isinstance(initial_checks, dict) and initial_checks.get("tools") is False
             and isinstance(initial_tools, dict)
             and all(name in initial_checks and initial_checks[name] is True for name in non_tool_checks)
-            and all(value is True for name, value in initial_checks.items() if name != "tools")):
+            and all(value is True for name, value in initial_checks.items() if name not in ignored_initial_checks)):
         missing = sorted(key for key, available in initial_tools.items() if available is not True)
         evidence.check(
             "outer guest nested tools",
@@ -1313,7 +1355,9 @@ def outer_guest_preflight(vm_dir: Path, evidence: Evidence) -> bool:
     if not isinstance(checks, dict):
         evidence.check("outer guest response", False, "preflight response has invalid shape")
         return False
-    names = ("context_valid", "outer_guest", "nested_kvm", "workspace_root", "workspace_virtiofs", "host_state_excluded", "tools", "memory_budget")
+    names = ["context_valid", "outer_guest", "nested_kvm", "workspace_root", "workspace_virtiofs", "host_state_excluded", "tools"]
+    if require_child_memory_budget:
+        names.append("memory_budget")
     tools = parsed.get("tools", {})
     for name in names:
         passed = checks.get(name) is True
@@ -1343,6 +1387,11 @@ def outer_guest_preflight(vm_dir: Path, evidence: Evidence) -> bool:
         evidence.check(f"outer guest {name}", passed, detail)
     evidence.data["outer_guest_tools"] = tools
     evidence.data["nested_memory_budget"] = parsed.get("memory_budget", {})
+    if not require_child_memory_budget:
+        evidence.data["nested_memory_budget_skipped_reason"] = (
+            "Reusing an already-running child; this continuation starts no QEMU process."
+        )
+        print("INFO outer guest memory budget: no new VM will be started; existing-child continuation.", flush=True)
     evidence.save()
     return context_ok and all(checks.get(name) is True for name in names)
 
@@ -1354,6 +1403,7 @@ def run_preflight(
     repo: Path = ROOT,
     *,
     allow_active_source_overlay: bool = False,
+    require_child_memory_budget: bool = True,
 ) -> tuple[bool, Path | None]:
     checkout_ok = repo.is_dir() and (repo / ".git").exists() and (repo / "lab-vm").is_file()
     evidence.check("checkout", checkout_ok, "repository and lab-vm found" if checkout_ok else "run from the owner checkout")
@@ -1387,7 +1437,9 @@ def run_preflight(
         if selected is not None:
             selected_profile, directory = selected
             outer = outer_profile_checks(selected_profile, snapshot, repo, evidence)
-    guest_ok = outer_guest_preflight(outer, evidence) if outer is not None else False
+    guest_ok = outer_guest_preflight(
+        outer, evidence, require_child_memory_budget=require_child_memory_budget,
+    ) if outer is not None else False
     if not host_ok:
         evidence.check("outer guest access", False, "host/KVM context is not ready; no SSH or VM action attempted")
     elif outer is None:
@@ -1469,6 +1521,8 @@ def run_nested_remote(
     probe: str,
     evidence: Evidence,
     repo: Path = ROOT,
+    *,
+    resume_existing: bool = False,
 ) -> tuple[int, dict[str, object] | None]:
     use_source_overlay = evidence.data.get("snapshot_source_overlay_required") is True
     try:
@@ -1482,7 +1536,8 @@ def run_nested_remote(
             relative: item["sha256"] for relative, item in source_payload.items()
         }
         evidence.save()
-    command = ssh_command(vm_dir, f"cd /workspace && python3 - {profile} {probe}")
+    resume_arg = " --resume-existing" if resume_existing else ""
+    command = ssh_command(vm_dir, f"cd /workspace && python3 - {profile} {probe}{resume_arg}")
     process = subprocess.Popen(command, cwd=repo, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     assert process.stdin is not None and process.stdout is not None
     try:
@@ -1588,8 +1643,25 @@ def build_remote_nested_script(
     return f"SOURCE_OVERLAY_PAYLOAD_JSON = {payload_json!r}\n" + REMOTE_NESTED
 
 
-def nested_gate(profile: str | None, outer_profile: str, snapshot: Path, repo: Path) -> int:
-    evidence = Evidence("nested", "one named disposable nested VM boot, depth-1 context, depth-2 refusal before state, and parent continuity; no model/TUI/auth/workload/isolation matrix/teardown")
+def nested_gate(
+    profile: str | None,
+    outer_profile: str,
+    snapshot: Path,
+    repo: Path,
+    *,
+    reuse_existing: bool = False,
+) -> int:
+    command = "nested-resume" if reuse_existing else "nested"
+    objective = (
+        "revalidate one existing nested child, depth-1 readiness, depth-2 refusal before state, and parent continuity; no new QEMU, teardown, or workload"
+        if reuse_existing else
+        "one named disposable nested VM boot, depth-1 context, depth-2 refusal before state, and parent continuity; no model/TUI/auth/workload/isolation matrix/teardown"
+    )
+    evidence = Evidence(command, objective)
+    if reuse_existing and profile is None:
+        evidence.check("existing child profile", False, "--reuse-child requires a profile name")
+        evidence.finish("FAIL")
+        return 2
     if profile is not None and not PROFILE_RE.fullmatch(profile):
         evidence.check("child profile name", False, "invalid profile name")
         evidence.finish("FAIL")
@@ -1597,24 +1669,35 @@ def nested_gate(profile: str | None, outer_profile: str, snapshot: Path, repo: P
     ready, outer = run_preflight(
         evidence, outer_profile, snapshot, repo,
         allow_active_source_overlay=True,
+        require_child_memory_budget=not reuse_existing,
     )
     if not ready or outer is None:
-        evidence.check("nested launch", False, "preflight blocked; no child VM was started")
+        evidence.check(command, False, "preflight blocked; existing child was not changed")
         evidence.finish("BLOCKED")
         return 2
     if profile is None:
         profile = f"nested-accept-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
     evidence.data["child_profile"] = profile
+    evidence.data["reused_existing_child"] = reuse_existing
     evidence.save()
     probe = f"depth-cap-{uuid.uuid4().hex[:10]}"
     evidence.data["depth_limit_probe"] = probe
     evidence.save()
-    rc, summary = run_nested_remote(outer, profile, probe, evidence, repo)
+    rc, summary = run_nested_remote(
+        outer, profile, probe, evidence, repo, resume_existing=reuse_existing,
+    )
     checks = summary.get("checks", {}) if isinstance(summary, dict) else {}
     evidence.data["nested_summary"] = summary or {"result": "missing remote summary"}
     if isinstance(checks, dict):
+        if reuse_existing:
+            existing_ok = checks.get("existing_profile") is True
+            evidence.check(
+                "existing child profile",
+                existing_ok,
+                "private existing child profile verified" if existing_ok else "profile missing or unsafe; no VM was started",
+            )
         for name, detail in (
-            ("child_up", "new child profile provisioned"),
+            ("child_up", "existing child answered SSH; no VM was started" if reuse_existing else "new child profile provisioned"),
             ("child_acceptance", "cloud-init, recursion policy, KVM and safe workspace passed"),
             ("depth_limit_refused_before_state", "depth-2 launch refused before profile state"),
             ("outer_session_usable", "outer guest remained usable"),
@@ -1625,7 +1708,10 @@ def nested_gate(profile: str | None, outer_profile: str, snapshot: Path, repo: P
             else:
                 evidence.check(label, checks[name] is True,
                                detail if checks[name] is True else "failed; preserve child state and stop")
-    passed = rc == 0 and isinstance(checks, dict) and all(checks.get(k) is True for k in ("child_up", "child_acceptance", "depth_limit_refused_before_state", "outer_session_usable"))
+    required = ["child_up", "child_acceptance", "depth_limit_refused_before_state", "outer_session_usable"]
+    if reuse_existing:
+        required.append("existing_profile")
+    passed = rc == 0 and isinstance(checks, dict) and all(checks.get(k) is True for k in required)
     if rc != 0 and summary is None:
         evidence.check("nested runner transport", False, "SSH gate stopped before a summary; preserve outer/child diagnostics")
     evidence.finish("PASS" if passed else "FAIL")
@@ -1644,9 +1730,10 @@ def classify_interrupted_process(args: list[str]) -> str | None:
     if executable != "ssh" or "mester@127.0.0.1" not in args:
         return None
     remote = args[-1].split()
-    if (len(remote) == 7 and remote[:5] == ["cd", "/workspace", "&&", "python3", "-"]
+    if (len(remote) in (7, 8) and remote[:5] == ["cd", "/workspace", "&&", "python3", "-"]
             and PROFILE_RE.fullmatch(remote[5])
-            and re.fullmatch(r"depth-cap-[0-9a-f]{10}", remote[6])):
+            and re.fullmatch(r"depth-cap-[0-9a-f]{10}", remote[6])
+            and (len(remote) == 7 or remote[7] == "--resume-existing")):
         return "nested-acceptance-ssh-to-outer"
     return None
 
@@ -1903,7 +1990,12 @@ def parser() -> argparse.ArgumentParser:
         cmd.add_argument("--outer-profile", default=DEFAULT_OUTER_PROFILE)
         cmd.add_argument("--snapshot", type=Path, default=DEFAULT_SNAPSHOT)
         if name == "nested":
-            cmd.add_argument("--profile", help="optional child profile name; otherwise a unique name is generated and retained")
+            profiles = cmd.add_mutually_exclusive_group()
+            profiles.add_argument("--profile", help="optional new child profile name; otherwise a unique name is generated and retained")
+            profiles.add_argument(
+                "--reuse-child", metavar="PROFILE",
+                help="revalidate an existing child without starting another VM (for continuing a partially completed gate)",
+            )
     inspect = subs.add_parser(
         "inspect-interrupted",
         help="read a nested run's private report and matching local processes without changing state",
@@ -1934,7 +2026,12 @@ def main(argv: list[str] | None = None) -> int:
             evidence.finish("PASS" if ready else "BLOCKED")
             return 0 if ready else 2
         if args.command == "nested":
-            return nested_gate(args.profile, args.outer_profile, args.snapshot.expanduser(), ROOT)
+            reuse_existing = args.reuse_child is not None
+            profile = args.reuse_child if reuse_existing else args.profile
+            return nested_gate(
+                profile, args.outer_profile, args.snapshot.expanduser(), ROOT,
+                reuse_existing=reuse_existing,
+            )
     except (AcceptanceError, OSError, subprocess.SubprocessError) as exc:
         print(f"FAIL runner: {exc}", file=sys.stderr)
         return 2

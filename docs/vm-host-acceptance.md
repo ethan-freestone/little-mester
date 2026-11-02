@@ -118,6 +118,25 @@ a private `/tmp` overlay in the outer guest; it does not replace files under
 the mounted `/workspace` or restart the outer VM. This path transfers only the
 hash-verified allowlisted runtime files, and leaves the child workspace as the
 existing `/workspace` snapshot.
+
+If child boot and readiness have already passed but a later probe failed or was
+blocked by the child RAM budget, continue against that exact still-running child
+without allocating another VM:
+
+```bash
+./scripts/vm-host-acceptance.py nested \
+  --outer-profile <running-outer-profile> \
+  --reuse-child <existing-child-profile>
+```
+
+This mode revalidates the existing child's private state, SSH reachability,
+readiness and workspace, then runs the depth-cap and parent-continuity probes.
+It does not start, stop, or clean a VM, and does not require a passing new-child
+memory budget because no child is launched. Use it only when earlier evidence
+already records a successful child boot; the continuation report complements
+rather than replaces that evidence. The depth-cap probe uses a new unique
+profile name.
+
 For a retry, wait until the targeted revision is present in the CachyOS checkout
 and the current #35/#41 handoff permits it, then run this once; it generates a
 fresh child profile:
@@ -126,9 +145,11 @@ fresh child profile:
 ./scripts/vm-host-acceptance.py nested
 ```
 
-Do not reuse or clean a failed profile, edit the active snapshot manually,
-restart the outer VM, bypass the parent proxy, or widen egress. If startup still
-fails, stop and preserve the child/profile and private report. Use the report to
+Do not rerun a failed profile with the fresh-child mode or clean it, edit the
+active snapshot manually, restart the outer VM, bypass the parent proxy, or widen
+egress. Use `--reuse-child` only for the already-running child after its boot and
+readiness passed. If startup still fails, stop and preserve the child/profile
+and private report. Use the report to
 locate `virtiofsd.log` and `virtiofsd-startup.log`, then return the first failure
 and a redacted tail of those files; do not retry before the result is reviewed.
 
