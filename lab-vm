@@ -184,6 +184,10 @@ VM lifecycle commands (epic #35, ticket #41):
   ./lab-vm status [name]
       Show VM state, SSH port, and running containers.
 
+  ./lab-vm list
+      List locally managed VM profiles with state, memory, and workspace.
+      In a recursive guest, list that guest's child VM profiles. Read-only.
+
   ./lab-vm ssh [name]
       SSH into the running VM.
 
@@ -628,10 +632,15 @@ if [[ "$cmd" == context ]]; then
   [[ "$VM_CONTEXT_JSON" == 1 ]] && context_format=json
   exec python3 "$LAB_DIR/scripts/vm-context.py" --repo "$LAB_DIR" --format "$context_format"
 fi
+if [[ "$cmd" == list ]]; then
+  [[ ${#remaining[@]} -eq 1 ]] || die 'Usage: ./lab-vm list'
+  vm_cmd_list
+  exit $?
+fi
 
 # ─── Prerequisite check (auto-install on demand) ────────────────────
 # Only runs for commands that actually need the tools.
-# status, ssh, and test don't need anything.
+# list, status, ssh, and test don't need anything.
 _prereqs_needed=0
 case "$cmd" in
   base|up|rebuild|run|resize) _prereqs_needed=1 ;;

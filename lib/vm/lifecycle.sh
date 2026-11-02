@@ -574,6 +574,132 @@ vm_cmd_status() {
   return 0
 }
 
+_vm_list_profile_row() {
+  local name="${1:?VM profile name required}" vm_dir="${2:?VM profile directory required}"
+  local status state memory workspace
+
+  if [[ -L "$vm_dir" ]]; then
+    printf '%-32s %-10s %-16s %s\n' "$name" 'unsafe' '—' '(symlink; not inspected)'
+    return 0
+  fi
+  [[ -d "$vm_dir" ]] || return 0
+
+  if [[ -L "$vm_dir/qemu.pid" ]]; then
+    state='unsafe'
+  else
+    status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status='stopped'
+    if [[ "$status" == running* ]]; then state='running'; else state='stopped'; fi
+  fi
+
+  if [[ -L "$vm_dir/memory_gib" ]]; then
+    memory='unsafe'
+  elif [[ -e "$vm_dir/memory_gib" ]]; then
+    if vm_memory_profile_load "$vm_dir" >/dev/null 2>&1; then
+      memory="${VM_MEMORY_GIB} GiB"
+    else
+      memory='invalid'
+    fi
+  elif [[ -e "$vm_dir/disk.qcow2" || -e "$vm_dir/seed.iso" || -e "$vm_dir/qemu.pid" ]]; then
+    memory='4 GiB (legacy)'
+  else
+    memory='—'
+  fi
+
+  workspace='—'
+  if [[ -L "$vm_dir/workspace" ]]; then
+    workspace='[symlink]'
+  elif [[ -f "$vm_dir/workspace" ]]; then
+    IFS= read -r workspace <"$vm_dir/workspace" || workspace='[unreadable]'
+    [[ -n "$workspace" ]] || workspace='[empty]'
+  fi
+
+  # %q keeps whitespace and control characters in metadata from corrupting
+  # the table or being interpreted by the terminal.
+  printf '%-32s %-10s %-16s %q\n' "$name" "$state" "$memory" "$workspace"
+}
+
+_vm_list_profile_root() {
+  local root="${1:?VM profile root required}" vm_dir name found=0
+
+  if [[ "$root" == '/' ]]; then
+    echo 'REFUSED: VM profile root is /; check VM_DIR_BASE before listing.' >&2
+    return 1
+  fi
+  if [[ -L "$root" ]]; then
+    echo "REFUSED: VM profile root is a symlink: $root" >&2
+    return 1
+  fi
+  if [[ ! -e "$root" ]]; then
+    echo "No VM profiles found in $root."
+    return 0
+  fi
+  if [[ ! -d "$root" ]]; then
+    echo "REFUSED: VM profile root is not a directory: $root" >&2
+    return 1
+  fi
+
+  printf 'VM profiles in %q:\n' "$root"
+  printf '%-32s %-10s %-16s %s\n' 'PROFILE' 'STATE' 'MEMORY' 'WORKSPACE'
+  for vm_dir in "$root"/*; do
+    [[ -e "$vm_dir" || -L "$vm_dir" ]] || continue
+    name="${vm_dir##*/}"
+    if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+      printf 'Skipping invalid profile entry: %q\n' "$name" >&2
+      continue
+    fi
+    [[ -d "$vm_dir" || -L "$vm_dir" ]] || continue
+    _vm_list_profile_row "$name" "$vm_dir"
+    found=1
+  done
+  (( found == 1 )) || echo '(none)'
+}
+
+_vm_list_recursive_profiles() {
+  local root="${HOME%/}/.cache/lab-vm-recursion" session_dir name vm_dir found=0
+
+  if [[ -L "$root" ]]; then
+    echo "REFUSED: recursive VM profile root is a symlink: $root" >&2
+    return 1
+  fi
+  if [[ ! -e "$root" ]]; then
+    echo "No recursive VM profiles found in $root."
+    return 0
+  fi
+  if [[ ! -d "$root" ]]; then
+    echo "REFUSED: recursive VM profile root is not a directory: $root" >&2
+    return 1
+  fi
+
+  printf 'Recursive VM profiles in %q:\n' "$root"
+  printf '%-32s %-10s %-16s %s\n' 'PROFILE' 'STATE' 'MEMORY' 'WORKSPACE'
+  for session_dir in "$root"/*; do
+    [[ -e "$session_dir" || -L "$session_dir" ]] || continue
+    name="${session_dir##*/}"
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || continue
+    if [[ -L "$session_dir" ]]; then
+      printf '%-32s %-10s %-16s %s\n' "$name" 'unsafe' '—' '(symlink; not inspected)'
+      found=1
+      continue
+    fi
+    [[ -d "$session_dir" ]] || continue
+    vm_dir="$session_dir/vm/$name"
+    [[ -d "$vm_dir" || -L "$vm_dir" ]] || continue
+    _vm_list_profile_row "$name" "$vm_dir"
+    found=1
+  done
+  (( found == 1 )) || echo '(none)'
+}
+
+vm_cmd_list() {
+  # Recursive children use one private session directory per profile instead
+  # of sharing the current VM_DIR_BASE, so enumerate those sessions in guests.
+  if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" ]]; then
+    _vm_list_recursive_profiles
+  else
+    _vm_list_profile_root "$VM_DIR_BASE"
+  fi
+}
+
 _vm_confirm_resize() {
   local vm_name="$1" old_gib="$2" new_gib="$3" answer
   if [[ "${VM_YES:-0}" == 1 ]]; then

@@ -409,3 +409,60 @@ teardown() {
   [[ "$output" == *".mester/vm/named-parser-test"* ]]
   [[ "$output" != *"Unknown command: named-parser-test"* ]]
 }
+
+@test "lab-vm list reports local profiles read-only without SSH or state creation" {
+  local profiles="$WORKSPACE_TMPDIR/profiles" state="$WORKSPACE_TMPDIR/state"
+  mkdir -p "$profiles/default" "$profiles/launcher-smoke" "$profiles/empty"
+  : >"$profiles/default/disk.qcow2"
+  printf '/tmp/default-workspace\n' >"$profiles/default/workspace"
+  printf '8\n' >"$profiles/launcher-smoke/memory_gib"
+  printf '/tmp/workspace with spaces\n' >"$profiles/launcher-smoke/workspace"
+  ln -s "$profiles/default" "$profiles/unsafe-link"
+
+  run env VM_DIR_BASE="$profiles" VM_STATE_DIR="$state" "$LAB_DIR/lab-vm" list
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'PROFILE'*'STATE'*'MEMORY'*'WORKSPACE'* ]]
+  [[ "$output" == *'default'*'stopped'*'4 GiB (legacy)'*'/tmp/default-workspace'* ]]
+  [[ "$output" == *'launcher-smoke'*'8 GiB'*'/tmp/workspace\ with\ spaces'* ]]
+  [[ "$output" == *'unsafe-link'*'unsafe'*'(symlink; not inspected)'* ]]
+  [[ "$output" == *'empty'*'stopped'*'—'* ]]
+  [ ! -e "$profiles/default/qemu.pid" ]
+  [ ! -e "$state/logs" ]
+}
+
+@test "lab-vm list reports recursive child profiles from the guest session root" {
+  local home="$WORKSPACE_TMPDIR/recursive-home"
+  local vm_dir="$home/.cache/lab-vm-recursion/child-a/vm/child-a"
+  mkdir -p "$vm_dir"
+  printf '2\n' >"$vm_dir/memory_gib"
+  printf '/workspace/child-project\n' >"$vm_dir/workspace"
+
+  run env HOME="$home" VM_STATE_DIR="$WORKSPACE_TMPDIR/recursive-state" \
+    LAB_VM_RECURSION_DEPTH=1 LAB_VM_MAX_DEPTH=2 "$LAB_DIR/lab-vm" list
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'Recursive VM profiles'* ]]
+  [[ "$output" == *'child-a'*'stopped'*'2 GiB'*'/workspace/child-project'* ]]
+  [ ! -e "$WORKSPACE_TMPDIR/recursive-state/logs" ]
+}
+
+@test "lab-vm list rejects a positional profile argument" {
+  run env VM_DIR_BASE="$WORKSPACE_TMPDIR/profiles" VM_STATE_DIR="$WORKSPACE_TMPDIR/state" \
+    "$LAB_DIR/lab-vm" list default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Usage: ./lab-vm list'* ]]
+}
+
+@test "lab-vm list refuses a symlinked profile root and filesystem root" {
+  local real_root="$WORKSPACE_TMPDIR/real-profiles"
+  local linked_root="$WORKSPACE_TMPDIR/linked-profiles"
+  mkdir -p "$real_root/profile-a"
+  ln -s "$real_root" "$linked_root"
+
+  run env VM_DIR_BASE="$linked_root" VM_STATE_DIR="$WORKSPACE_TMPDIR/state" "$LAB_DIR/lab-vm" list
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'REFUSED: VM profile root is a symlink'* ]]
+
+  run env VM_DIR_BASE=/ VM_STATE_DIR="$WORKSPACE_TMPDIR/state" "$LAB_DIR/lab-vm" list
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'REFUSED: VM profile root is /'* ]]
+}

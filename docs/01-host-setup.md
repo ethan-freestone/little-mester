@@ -153,6 +153,7 @@ meet the KVM requirements.
 ```bash
 ./lab-vm up                  # Start the VM (idempotent)
 ./lab-vm status              # Check if running, show containers
+./lab-vm list                # List managed profiles (read-only)
 ./lab-vm agent               # Guest TUI; browser OAuth bridge enabled by default
 ./lab-vm agent --no-browser-auth # Skip the temporary browser OAuth bridge
 ./lab-vm ssh                 # SSH into the VM
