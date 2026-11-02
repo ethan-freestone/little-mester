@@ -49,6 +49,12 @@ def payload_bytes(item):
     return base64.b64decode(item["content"], validate=True)
 
 
+def create_snapshot_source_parents(*roots):
+    for root in roots:
+        for relative in acceptance.SNAPSHOT_FILES:
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+
+
 class HostAcceptanceTests(unittest.TestCase):
     def test_context_summary_drops_paths_and_unrelated_cpu_flags(self):
         raw = '{"runtime":{"kind":"vm","root":"/private/path"},"recursion":{"depth":0,"max_depth":1},"kvm":{"device_present":true,"device_read_write":true,"nested_kvm_preflight_ready":true,"cpu_virtualization":["svm","aes"]},"workspace_filesystem":"virtiofs"}'
@@ -91,9 +97,8 @@ class HostAcceptanceTests(unittest.TestCase):
             checkout, snapshot = base / "checkout", base / "snapshot"
             checkout.mkdir()
             snapshot.mkdir()
-            (checkout / "lib/vm").mkdir(parents=True)
-            (snapshot / "lib/vm").mkdir(parents=True)
-            for relative in ("lib/vm/proxy.py", "lib/vm/runner.sh", "lib/vm/lifecycle.sh"):
+            create_snapshot_source_parents(checkout, snapshot)
+            for relative in acceptance.SNAPSHOT_FILES:
                 (checkout / relative).write_text(relative)
                 (snapshot / relative).write_text(relative)
             evidence = DummyEvidence(base / "evidence")
@@ -109,8 +114,7 @@ class HostAcceptanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             checkout, snapshot = base / "checkout", base / "snapshot"
-            for root in (checkout, snapshot):
-                (root / "lib/vm").mkdir(parents=True)
+            create_snapshot_source_parents(checkout, snapshot)
             for relative in acceptance.SNAPSHOT_FILES:
                 (checkout / relative).write_text(f"current:{relative}")
                 (snapshot / relative).write_text(f"old:{relative}")
@@ -124,8 +128,7 @@ class HostAcceptanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             checkout, snapshot = base / "checkout", base / ".cache/lab-vm-recursion/initial-launcher-smoke/workspace"
-            for root in (checkout, snapshot):
-                (root / "lib/vm").mkdir(parents=True)
+            create_snapshot_source_parents(checkout, snapshot)
             for relative in acceptance.SNAPSHOT_FILES:
                 (checkout / relative).write_text(f"current:{relative}")
                 (snapshot / relative).write_text(f"old:{relative}")
@@ -150,7 +153,7 @@ class HostAcceptanceTests(unittest.TestCase):
     def test_active_source_overlay_payload_is_allowlisted_and_hash_verified(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            (repo / "lib/vm").mkdir(parents=True)
+            create_snapshot_source_parents(repo)
             contents = {}
             for relative in acceptance.SNAPSHOT_FILES:
                 contents[relative] = f"patched:{relative}".encode()
@@ -165,8 +168,7 @@ class HostAcceptanceTests(unittest.TestCase):
     def test_remote_active_source_overlay_stages_verified_files_privately(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"
-            (workspace / "lib/vm").mkdir(parents=True)
-            (workspace / "scripts").mkdir()
+            create_snapshot_source_parents(workspace)
             (workspace / ".secrets").mkdir()
             launcher = workspace / "lab-vm"
             launcher.write_text("#!/bin/sh\nexit 0\n")
@@ -199,7 +201,10 @@ class HostAcceptanceTests(unittest.TestCase):
                 self.assertEqual((stage / "lab-vm").read_bytes(), launcher.read_bytes())
                 self.assertFalse((stage / "lab-vm").is_symlink())
                 self.assertFalse((stage / ".secrets").exists())
-                self.assertTrue((stage / "scripts").is_symlink())
+                self.assertFalse((stage / "scripts").is_symlink())
+                self.assertTrue((stage / "scripts").is_dir())
+                self.assertTrue((stage / "scripts/helper.py").is_symlink())
+                self.assertFalse((stage / "scripts/vm-guest-isolation-check.py").is_symlink())
                 self.assertTrue((stage / "lib/vm/support.sh").is_symlink())
                 for relative in acceptance.SNAPSHOT_FILES:
                     self.assertEqual((stage / relative).read_bytes(), payload_bytes(payload[relative]))
@@ -210,7 +215,7 @@ class HostAcceptanceTests(unittest.TestCase):
     def test_remote_active_source_overlay_rejects_tampering_and_cleans_partial_stage(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"
-            (workspace / "lib/vm").mkdir(parents=True)
+            create_snapshot_source_parents(workspace)
             launcher = workspace / "lab-vm"
             launcher.write_text("#!/bin/sh\nexit 0\n")
             for relative in acceptance.SNAPSHOT_FILES:
@@ -242,8 +247,8 @@ class HostAcceptanceTests(unittest.TestCase):
             checkout = base / "checkout"
             snapshot = base / ".cache/lab-vm-recursion/initial-launcher-smoke/workspace"
             checkout.mkdir()
-            (checkout / "lib/vm").mkdir(parents=True)
-            (checkout / "scripts").mkdir()
+            create_snapshot_source_parents(checkout)
+            (checkout / "scripts").mkdir(exist_ok=True)
             (checkout / "scripts/vm-recursion-workspace.py").write_bytes((ROOT / "scripts/vm-recursion-workspace.py").read_bytes())
             for relative in acceptance.SNAPSHOT_FILES:
                 (checkout / relative).write_text(f"source:{relative}")
@@ -497,6 +502,7 @@ class HostAcceptanceTests(unittest.TestCase):
         evidence = DummyEvidence()
         summary = {"checks": {
             "existing_profile": True, "child_up": True, "child_acceptance": True,
+            "nested_isolation": True,
             "depth_limit_refused_before_state": True, "outer_session_usable": True,
         }}
         with patch.object(acceptance, "Evidence", return_value=evidence), \
@@ -514,7 +520,29 @@ class HostAcceptanceTests(unittest.TestCase):
         outcomes = {check["name"]: check["result"] for check in evidence.data["checks"]}
         self.assertEqual(outcomes["existing child profile"], "PASS")
         self.assertEqual(outcomes["child up"], "PASS")
+        self.assertEqual(outcomes["nested isolation"], "PASS")
         self.assertEqual(evidence.data["reused_existing_child"], True)
+
+    def test_nested_gate_does_not_accept_failed_live_isolation_probe(self):
+        evidence = DummyEvidence()
+        summary = {"checks": {
+            "existing_profile": True, "child_up": True, "child_acceptance": True,
+            "nested_isolation": False,
+            "depth_limit_refused_before_state": True, "outer_session_usable": True,
+        }}
+        with patch.object(acceptance, "Evidence", return_value=evidence), \
+             patch.object(acceptance, "run_preflight", return_value=(True, Path("/outer"))), \
+             patch.object(acceptance, "run_nested_remote", return_value=(7, summary)), \
+             redirect_stdout(io.StringIO()):
+            result = acceptance.nested_gate(
+                "nested-accept-existing", "outer-8g", Path("/snapshot"), ROOT,
+                reuse_existing=True,
+            )
+
+        self.assertNotEqual(result, 0)
+        outcomes = {check["name"]: check["result"] for check in evidence.data["checks"]}
+        self.assertEqual(outcomes["nested isolation"], "FAIL")
+        self.assertEqual(evidence.data["outcome"], "FAIL")
 
     def test_nested_command_is_explicit_and_contains_no_teardown_or_tui(self):
         compile(acceptance.REMOTE_PREFLIGHT, "remote-preflight", "exec")
@@ -541,6 +569,9 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertIn('env["VM_STATE_DIR"] = str(session)', acceptance.REMOTE_NESTED)
         self.assertIn('resume_existing = len(sys.argv) > 3 and sys.argv[3] == "--resume-existing"', acceptance.REMOTE_NESTED)
         self.assertIn('"reused_existing_profile": resume_existing', acceptance.REMOTE_NESTED)
+        self.assertIn('isolation_env["VM_ISOLATION_SKIP_MODEL"] = "1"', acceptance.REMOTE_NESTED)
+        self.assertIn('"verify-isolation", profile', acceptance.REMOTE_NESTED)
+        self.assertIn('"nested_isolation"] = isolation_ok', acceptance.REMOTE_NESTED)
         self.assertIn('Reusing the existing nested child; no VM will be started or stopped.', acceptance.REMOTE_NESTED)
         self.assertIn(
             'session, vm_dir = sessions / profile, sessions / profile / "vm" / profile',
@@ -614,12 +645,19 @@ class HostAcceptanceTests(unittest.TestCase):
         cloud_status = {"status": "done", "extended_status": "done", "errors": [], "recoverable_errors": {}}
         workspace_boundary = {"host_state_excluded": True}
         cap_result = {"returncode": 1, "expected_refusal": True, "state_created": False}
+        isolation_output = (
+            "QEMU configuration: restrict=on; SSH bound to 127.0.0.1:23456; only the four reviewed guestfwd channels are configured.\n"
+            "PASS: direct route: blocked\n"
+            "SKIP: selected model availability (not part of isolation-only acceptance)\n"
+            "Result: 1 passed, 0 failed\n"
+        )
         results = [
             subprocess.CompletedProcess([], 0, "", ""),
             subprocess.CompletedProcess([], 0, json.dumps(cloud_status), ""),
             subprocess.CompletedProcess([], 0, json.dumps(child_context), ""),
             subprocess.CompletedProcess([], 0, "virtiofs\n", ""),
             subprocess.CompletedProcess([], 0, json.dumps(workspace_boundary), ""),
+            subprocess.CompletedProcess([], 0, isolation_output, ""),
             subprocess.CompletedProcess([], 0, json.dumps(cap_result), ""),
             subprocess.CompletedProcess([], 0, json.dumps(parent_context), ""),
         ]
@@ -650,10 +688,29 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertTrue(summary["child"]["reused_existing_profile"])
         self.assertTrue(summary["checks"]["child_up"])
         self.assertTrue(summary["checks"]["child_acceptance"])
+        self.assertTrue(summary["checks"]["nested_isolation"])
+        self.assertTrue(summary["nested_isolation"]["qemu_argv_validated"])
+        self.assertEqual(summary["nested_isolation"]["passed_checks"], 1)
+        self.assertEqual(summary["nested_isolation"]["skipped_checks"], 1)
         self.assertTrue(summary["checks"]["depth_limit_refused_before_state"])
         self.assertTrue(summary["checks"]["outer_session_usable"])
-        self.assertEqual(mocked_run.call_count, 7)
+        self.assertEqual(summary["nested_isolation"]["failed_checks"], 0)
+        serialized_summary = json.dumps(summary, sort_keys=True)
+        self.assertNotIn("QEMU configuration:", serialized_summary)
+        self.assertNotIn("127.0.0.1:23456", serialized_summary)
+        self.assertEqual(mocked_run.call_count, 8)
         self.assertTrue(all("-d" not in call.args[0] and "up" not in call.args[0] for call in mocked_run.call_args_list))
+        isolation_call = next(
+            call for call in mocked_run.call_args_list
+            if call.args[0][:2] == ["/workspace/lab-vm", "verify-isolation"]
+        )
+        self.assertEqual(isolation_call.args[0], ["/workspace/lab-vm", "verify-isolation", profile])
+        self.assertEqual(isolation_call.kwargs["env"]["VM_ISOLATION_SKIP_MODEL"], "1")
+        depth_call = next(
+            index for index, call in enumerate(mocked_run.call_args_list)
+            if call.args[0][-1] == probe
+        )
+        self.assertLess(mocked_run.call_args_list.index(isolation_call), depth_call)
 
     def test_nested_probes_are_visible_and_bounded(self):
         for marker in (

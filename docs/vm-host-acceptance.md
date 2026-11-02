@@ -97,8 +97,13 @@ The runner starts one child from `/workspace` using `--recurse` (never
 `--unsafe-recurse`), verifies cloud-init completion, child depth 1/max 1,
 virtiofs and excluded host state, tries one depth-2 launch and confirms it is
 refused before profile state is created, then checks the outer session remains
-usable. It does not run an agent, model request, auth flow, workload, isolation
-matrix, or teardown. **The child profile is retained on both success and
+usable. It additionally validates the running child's QEMU `restrict=on`, the
+loopback-only SSH and reviewed guestfwd set, and bounded guest probes for blocked
+host-gateway/direct TCP and raw DNS, successful public HTTPS through the nested
+proxy, private-destination denial, and the virtiofs workspace. The isolation
+probe explicitly skips model availability, so this is not model acceptance or
+a complete host/LAN isolation proof. It does not run an agent, auth flow,
+workload, or teardown. **The child profile is retained on both success and
 failure.** On failure, the runner stops and preserves the profile and
 diagnostics. It never retries a failed child under the same name or cleans it
 up. The child uses its private recursion-session directory as `VM_STATE_DIR`
@@ -130,12 +135,13 @@ without allocating another VM:
 ```
 
 This mode revalidates the existing child's private state, SSH reachability,
-readiness and workspace, then runs the depth-cap and parent-continuity probes.
-It does not start, stop, or clean a VM, and does not require a passing new-child
-memory budget because no child is launched. Use it only when earlier evidence
-already records a successful child boot; the continuation report complements
-rather than replaces that evidence. The depth-cap probe uses a new unique
-profile name.
+readiness and workspace; runs the live nested QEMU/network-isolation probes
+described above; then checks depth-cap refusal and parent continuity. Model
+availability is explicitly skipped. It does not start, stop, or clean a VM, and
+does not require a passing new-child memory budget because no child is launched.
+Use it only when earlier evidence already records a successful child boot; the
+continuation report complements rather than replaces that evidence. The
+depth-cap probe uses a new unique profile name.
 
 For a retry, wait until the targeted revision is present in the CachyOS checkout
 and the current #35/#41 handoff permits it, then run this once; it generates a

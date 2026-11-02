@@ -1251,7 +1251,7 @@ vm_cmd_egress_reload() {
 }
 
 _vm_validate_qemu_isolation_args() {
-  local process_args="$1" ssh_port="$2" guestfwd_count hostfwd_count netdev_count net_device_count
+  local process_args="$1" ssh_port="$2" proxy_port="${3:-}" guestfwd_count hostfwd_count netdev_count net_device_count
   [[ "$process_args" == *'restrict=on'* ]] || {
     echo 'QEMU network is missing restrict=on.' >&2
     return 1
@@ -1283,6 +1283,13 @@ _vm_validate_qemu_isolation_args() {
     echo 'QEMU guestfwd channels do not match the reviewed loopback-only allowlist.' >&2
     return 1
   }
+  if [[ -n "$proxy_port" ]]; then
+    [[ "$proxy_port" =~ ^[1-9][0-9]{0,4}$ ]] && (( proxy_port <= 65535 )) &&
+      [[ "$process_args" == *"guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:$proxy_port,"* ]] || {
+      echo "QEMU egress guestfwd does not target this profile's recorded loopback proxy port." >&2
+      return 1
+    }
+  fi
 }
 
 _vm_read_qemu_process_args() {
@@ -1344,7 +1351,7 @@ PY
 }
 
 vm_cmd_verify_isolation() {
-  local vm_name="${1:-default}" vm_dir ssh_port qemu_pid process_args virtiofsd_pid shared_dir sensitive_path expected_workspace virtiofs_sock
+  local vm_name="${1:-default}" vm_dir ssh_port proxy_port qemu_pid process_args virtiofsd_pid shared_dir sensitive_path expected_workspace virtiofs_sock guest_probe_command='python3 -'
   vm_dir="$(_vm_resolve "$vm_name")"
   [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
   if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
@@ -1352,10 +1359,12 @@ vm_cmd_verify_isolation() {
   fi
   _vm_validate_profile_workspace_boundary "$vm_dir" || die 'Refusing verification because the active guest workspace overlaps VM control state.'
   ssh_port="$(cat "$vm_dir/ssh_port" 2>/dev/null)"
+  [[ -f "$vm_dir/proxy_port" && ! -L "$vm_dir/proxy_port" ]] || die 'VM egress proxy port metadata is missing or unsafe.'
+  proxy_port="$(cat "$vm_dir/proxy_port" 2>/dev/null)"
   qemu_pid="$(cat "$vm_dir/qemu.pid" 2>/dev/null)"
   process_args="$(_vm_read_qemu_process_args "$qemu_pid")" || die 'Cannot inspect the running QEMU process command line.'
   [[ "$process_args" == *qemu-system-x86_64* ]] || die 'The recorded PID is not a QEMU x86_64 process.'
-  _vm_validate_qemu_isolation_args "$process_args" "$ssh_port" || die 'QEMU network configuration failed the isolation check.'
+  _vm_validate_qemu_isolation_args "$process_args" "$ssh_port" "$proxy_port" || die 'QEMU network configuration failed the isolation check.'
   virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null)"
   [[ -f "$vm_dir/workspace" && ! -L "$vm_dir/workspace" ]] || die 'VM workspace identity is missing or unsafe.'
   expected_workspace="$(cat "$vm_dir/workspace")"
@@ -1372,7 +1381,10 @@ vm_cmd_verify_isolation() {
   echo "QEMU configuration: restrict=on; SSH bound to 127.0.0.1:$ssh_port; only the four reviewed guestfwd channels are configured."
   echo "Host workspace export: $shared_dir (the guest can read/write this selected directory)."
   echo 'Running network and approved-channel probes inside the guest (no VM or host settings will be changed).'
-  vm_ssh "$vm_dir" 'python3 -' <"$LAB_DIR/scripts/vm-guest-isolation-check.py"
+  if [[ "${VM_ISOLATION_SKIP_MODEL:-0}" == 1 ]]; then
+    guest_probe_command='python3 - --skip-model'
+  fi
+  vm_ssh "$vm_dir" "$guest_probe_command" <"$LAB_DIR/scripts/vm-guest-isolation-check.py"
 }
 
 vm_cmd_agent() {

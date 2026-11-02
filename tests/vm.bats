@@ -144,13 +144,15 @@ setup() {
 @test "QEMU isolation validator requires restrict=on and the reviewed loopback-only forwarding set" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   local args='qemu-system-x86_64 -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434,guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080,guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:45678,restrict=on -device virtio-net-pci,netdev=net0 -device vhost-user-fs-pci,chardev=charfs,tag=workspace'
-  run _vm_validate_qemu_isolation_args "$args" 22222
+  run _vm_validate_qemu_isolation_args "$args" 22222 45678
   [ "$status" -eq 0 ]
-  run _vm_validate_qemu_isolation_args "${args/,restrict=on/}" 22222
+  run _vm_validate_qemu_isolation_args "${args/,restrict=on/}" 22222 45678
   [ "$status" -ne 0 ]
-  run _vm_validate_qemu_isolation_args "${args/127.0.0.1:22222/0.0.0.0:22222}" 22222
+  run _vm_validate_qemu_isolation_args "${args/127.0.0.1:22222/0.0.0.0:22222}" 22222 45678
   [ "$status" -ne 0 ]
-  run _vm_validate_qemu_isolation_args "${args},guestfwd=tcp:10.0.2.100:9999-cmd:socat - TCP:127.0.0.1:9999" 22222
+  run _vm_validate_qemu_isolation_args "${args},guestfwd=tcp:10.0.2.100:9999-cmd:socat - TCP:127.0.0.1:9999" 22222 45678
+  [ "$status" -ne 0 ]
+  run _vm_validate_qemu_isolation_args "${args/127.0.0.1:45678/127.0.0.1:45679}" 22222 45678
   [ "$status" -ne 0 ]
 }
 
@@ -158,11 +160,13 @@ setup() {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   VM_ISOLATION_TEST_DIR="$BATS_TEST_TMPDIR/vm-isolation"
   VM_ISOLATION_CAPTURE="$BATS_TEST_TMPDIR/guest-probe.py"
+  VM_ISOLATION_COMMAND="$BATS_TEST_TMPDIR/guest-probe-command"
   VM_ISOLATION_WORKSPACE="$BATS_TEST_TMPDIR/workspace"
   VM_ISOLATION_ARGS='qemu-system-x86_64 -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434,guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080,guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:45678,restrict=on -device virtio-net-pci,netdev=net0 -device vhost-user-fs-pci,chardev=charfs,tag=workspace'
-  export VM_ISOLATION_TEST_DIR VM_ISOLATION_CAPTURE VM_ISOLATION_WORKSPACE VM_ISOLATION_ARGS
+  export VM_ISOLATION_TEST_DIR VM_ISOLATION_CAPTURE VM_ISOLATION_COMMAND VM_ISOLATION_WORKSPACE VM_ISOLATION_ARGS
   mkdir -p "$VM_ISOLATION_TEST_DIR" "$VM_ISOLATION_WORKSPACE"
   printf '22222\n' >"$VM_ISOLATION_TEST_DIR/ssh_port"
+  printf '45678\n' >"$VM_ISOLATION_TEST_DIR/proxy_port"
   printf '12345\n' >"$VM_ISOLATION_TEST_DIR/qemu.pid"
   printf '%s\n' "$VM_ISOLATION_WORKSPACE" >"$VM_ISOLATION_TEST_DIR/workspace"
   _vm_resolve() { echo "$VM_ISOLATION_TEST_DIR"; }
@@ -170,7 +174,7 @@ setup() {
   _vm_read_qemu_process_args() { echo "$VM_ISOLATION_ARGS"; }
   _vm_validate_profile_workspace_boundary() { return 0; }
   _vm_read_virtiofsd_shared_dir() { echo "$VM_ISOLATION_WORKSPACE"; }
-  vm_ssh() { cat >"$VM_ISOLATION_CAPTURE"; echo 'guest probes completed'; }
+  vm_ssh() { printf '%s\n' "$*" >"$VM_ISOLATION_COMMAND"; cat >"$VM_ISOLATION_CAPTURE"; echo 'guest probes completed'; }
   die() { echo "REFUSED: $*" >&2; return 1; }
   run vm_cmd_verify_isolation default
   [ "$status" -eq 0 ]
@@ -178,12 +182,22 @@ setup() {
   [[ "$output" == *"Host workspace export: $VM_ISOLATION_WORKSPACE"* ]]
   [[ "$output" == *'guest probes completed'* ]]
   cmp -s "$VM_ISOLATION_CAPTURE" "$REPO_ROOT/scripts/vm-guest-isolation-check.py"
+
+  export VM_ISOLATION_SKIP_MODEL=1
+  run vm_cmd_verify_isolation default
+  [ "$status" -eq 0 ]
+  grep -Fq 'python3 - --skip-model' "$VM_ISOLATION_COMMAND"
+  unset VM_ISOLATION_SKIP_MODEL
 }
 
 @test "guest isolation probe covers blocked direct routes, constrained proxy and selected workspace/model exceptions" {
   local probe="$REPO_ROOT/scripts/vm-guest-isolation-check.py"
   grep -Fq '10.0.2.2' "$probe"
   grep -Fq '1.1.1.1' "$probe"
+  grep -Fq 'direct_dns_responds' "$probe"
+  grep -Fq '1.1.1.1", 53' "$probe"
+  grep -Fq -- '--skip-model' "$probe"
+  grep -Fq 'SKIP: selected model availability' "$probe"
   grep -Fq 'HTTP 403' "$probe"
   grep -Fq '10.0.2.100", 3128' "$probe"
   grep -Fq '10.0.2.100:8080/health' "$probe"

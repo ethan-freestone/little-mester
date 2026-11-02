@@ -8,7 +8,7 @@
   "title": "Direct guest harness runtime and guest workload control",
   "objective": "Install and run the model-agnostic Little Mester harness directly inside the outer VM guest, with native guest auth and broad guest-level control. Docker/Compose are available to the agent for arbitrary project workloads; no Docker container wraps the agent. Preserve the outer VM host-isolation boundary and existing restricted egress/secret rules.",
   "created_at": "2026-10-26T20:39:18.837Z",
-  "updated_at": "2026-10-31T17:10:02.363Z",
+  "updated_at": "2026-11-02T15:02:00.247Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -33,7 +33,8 @@
     {
       "id": "A5",
       "text": "Nested VM support is explicitly tested: report host KVM nested VMX/SVM capability, guest CPU virtualization flags and /dev/kvm availability, then boot and stop a nested test VM. Unsupported hosts report a clear limitation; no nested support is claimed without a live pass.",
-      "status": "pending"
+      "status": "in-progress",
+      "evidence": "2026-11-02 owner-host report vm-acceptance-20261102T142613Z-1204519-dbe140e7.json: host KVM and outer guest nested-KVM readiness passed; existing depth-1 child SSH/cloud-init/context/virtiofs readiness passed, depth-2 launch refused before state, and outer continuity passed. Child was preserved and not stopped; unsupported-host behavior and the explicit stop portion remain pending."
     },
     {
       "id": "A6",

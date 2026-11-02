@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run bounded guest-originated probes for the QEMU VM boundary."""
+import argparse
 import http.client
 import json
 import socket
@@ -43,6 +44,31 @@ def fetch_via_proxy(url, timeout=10):
         return response.status
 
 
+def direct_dns_responds(timeout=1.5):
+    """Send one fixed DNS query; any reply means raw DNS escaped."""
+    transaction_id = b"LM"
+    question = b"\x07example\x03com\x00\x00\x01\x00\x01"
+    packet = transaction_id + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + question
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.settimeout(timeout)
+        probe.connect(("1.1.1.1", 53))
+        probe.send(packet)
+        return bool(probe.recv(4096))
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--skip-model",
+    action="store_true",
+    help="omit selected-model availability; use for isolation-only acceptance",
+)
+args = parser.parse_args()
+
 print("Guest-originated QEMU isolation checks")
 print("These bounded probes check representative paths; they are not a proof against every possible host service.")
 
@@ -65,6 +91,13 @@ for port in (80, 443):
         not reachable,
         "connection blocked" if not reachable else "TCP connection succeeded unexpectedly",
     )
+
+dns_reachable = direct_dns_responds()
+report(
+    "direct DNS 1.1.1.1:53",
+    not dns_reachable,
+    "no DNS response" if not dns_reachable else "DNS response received unexpectedly",
+)
 
 # Public HTTPS must work through the explicit proxy even though direct egress
 # is blocked. Keep the URL fixed and report only the status, never response data.
@@ -92,27 +125,30 @@ except (OSError, http.client.HTTPException) as exc:
 finally:
     proxy.close()
 
-# Verify the selected model API's narrow guestfwd exception. This is a
-# required dependency for the guest agent, not arbitrary host access.
-try:
-    config = json.loads(Path("/etc/opencode/opencode.json").read_text())
-    provider = config["model"].split("/", 1)[0]
-except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
-    report("selected model configuration", False, f"cannot read provider ({type(exc).__name__})")
-    provider = ""
-
-model_urls = {
-    "llamacpp": "http://10.0.2.100:8080/health",
-    "ollama": "http://10.0.2.100:11434/api/tags",
-}
-if provider in model_urls:
+if args.skip_model:
+    print("SKIP: selected model availability (not part of isolation-only acceptance)")
+else:
+    # Verify the selected model API's narrow guestfwd exception. This is a
+    # required dependency for the guest agent, not arbitrary host access.
     try:
-        code = fetch_direct(model_urls[provider])
-        report(f"approved {provider} model guestfwd", 200 <= code < 300, f"HTTP {code}")
-    except (OSError, http.client.HTTPException, URLError) as exc:
-        report(f"approved {provider} model guestfwd", False, f"unreachable ({type(exc).__name__})")
-elif provider:
-    report("selected model configuration", False, f"unsupported VM model provider {provider!r}")
+        config = json.loads(Path("/etc/opencode/opencode.json").read_text())
+        provider = config["model"].split("/", 1)[0]
+    except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
+        report("selected model configuration", False, f"cannot read provider ({type(exc).__name__})")
+        provider = ""
+
+    model_urls = {
+        "llamacpp": "http://10.0.2.100:8080/health",
+        "ollama": "http://10.0.2.100:11434/api/tags",
+    }
+    if provider in model_urls:
+        try:
+            code = fetch_direct(model_urls[provider])
+            report(f"approved {provider} model guestfwd", 200 <= code < 300, f"HTTP {code}")
+        except (OSError, http.client.HTTPException, URLError) as exc:
+            report(f"approved {provider} model guestfwd", False, f"unreachable ({type(exc).__name__})")
+    elif provider:
+        report("selected model configuration", False, f"unsupported VM model provider {provider!r}")
 
 # The mounted workspace is an intentional, narrow host data channel. Verify
 # the mount type so the report does not imply that the guest has no host data.

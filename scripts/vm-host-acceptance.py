@@ -31,7 +31,10 @@ from threading import Thread
 
 ROOT = Path(__file__).resolve().parents[1]
 LAB_VM = ROOT / "lab-vm"
-SNAPSHOT_FILES = ("lib/vm/proxy.py", "lib/vm/runner.sh", "lib/vm/lifecycle.sh")
+SNAPSHOT_FILES = (
+    "lib/vm/proxy.py", "lib/vm/runner.sh", "lib/vm/lifecycle.sh",
+    "scripts/vm-guest-isolation-check.py",
+)
 DEFAULT_OUTER_PROFILE = "launcher-smoke"
 DEFAULT_SNAPSHOT = Path.home() / ".cache/lab-vm-recursion/initial-launcher-smoke/workspace"
 PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -957,7 +960,8 @@ progress("runtime_overlay", "started")
 def stage_runtime_overlay():
     if not source_overlay_payload:
         return root
-    expected = {"lib/vm/proxy.py", "lib/vm/runner.sh", "lib/vm/lifecycle.sh"}
+    expected = {"lib/vm/proxy.py", "lib/vm/runner.sh", "lib/vm/lifecycle.sh",
+        "scripts/vm-guest-isolation-check.py"}
     if set(source_overlay_payload) != expected:
         raise ValueError("runtime source overlay has an unexpected file set")
     stage = pathlib.Path(tempfile.mkdtemp(prefix="little-mester-acceptance-", dir="/tmp"))
@@ -979,8 +983,11 @@ def populate_runtime_overlay(stage):
         if not target.is_relative_to(workspace):
             raise ValueError("runtime overlay link escapes the safe workspace")
         destination.symlink_to(target, target_is_directory=target.is_dir())
+    overlay_scripts = any(relative.startswith("scripts/") for relative in source_overlay_payload)
     for item in root.iterdir():
-        if item.name in excluded or item.name.startswith(".") or item.name in ("lab-vm", "lib"):
+        if (item.name in excluded or item.name.startswith(".")
+                or item.name in ("lab-vm", "lib")
+                or (overlay_scripts and item.name == "scripts")):
             continue
         if item.name.endswith((".db", ".key", ".pem", ".secret", ".sqlite", ".sqlite3", ".token")):
             continue
@@ -1019,6 +1026,20 @@ def populate_runtime_overlay(stage):
             write_source(relative)
         elif item.name != "__pycache__":
             safe_link(item, vm_stage / item.name)
+    if overlay_scripts:
+        scripts_source, scripts_stage = root / "scripts", stage / "scripts"
+        if scripts_source.is_symlink() or not scripts_source.is_dir():
+            raise ValueError("active workspace scripts directory is unsafe")
+        scripts_stage.mkdir(mode=0o700)
+        for item in scripts_source.iterdir():
+            relative = "scripts/" + item.name
+            if relative in source_overlay_payload:
+                write_source(relative)
+            elif (item.name.startswith(".") or item.name == "__pycache__"
+                    or item.name.endswith((".db", ".key", ".pem", ".secret", ".sqlite", ".sqlite3", ".token"))):
+                continue
+            else:
+                safe_link(item, scripts_stage / item.name)
 try:
     launcher_root = stage_runtime_overlay()
 except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -1173,6 +1194,57 @@ progress("child_readiness", "completed", passed=summary["checks"]["child_accepta
 if not summary["checks"]["child_acceptance"]:
     summary["failure"] = "child readiness checks failed; preserve state and inspect named results"
     emit(6)
+progress("nested_isolation", "started", timeout_seconds=150)
+print("Checking nested QEMU forwarding and guest-originated isolation (model availability excluded; timeout: 150s).", flush=True)
+isolation_env = env.copy()
+isolation_env["VM_ISOLATION_SKIP_MODEL"] = "1"
+try:
+    isolation_run = subprocess.run(
+        [str(launcher_root / "lab-vm"), "verify-isolation", profile],
+        cwd=launcher_root, env=isolation_env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=150,
+    )
+except subprocess.TimeoutExpired as error:
+    stdout = error.stdout.decode("utf-8", "replace") if isinstance(error.stdout, bytes) else (error.stdout or "")
+    summary["nested_isolation"] = {
+        "timed_out": True,
+        "timeout_seconds": 150,
+        "pass_lines": len(re.findall(r"^PASS:", stdout, re.MULTILINE)),
+        "fail_lines": len(re.findall(r"^FAIL:", stdout, re.MULTILINE)),
+    }
+    summary["checks"]["nested_isolation"] = False
+    progress("nested_isolation", "timed_out", timeout_seconds=150)
+    summary["failure"] = "nested isolation probes timed out; preserve state and stop"
+    emit(7)
+isolation_passes = len(re.findall(r"^PASS:", isolation_run.stdout, re.MULTILINE))
+isolation_failures = len(re.findall(r"^FAIL:", isolation_run.stdout, re.MULTILINE))
+isolation_skips = len(re.findall(r"^SKIP:", isolation_run.stdout, re.MULTILINE))
+qemu_argv_validated = (
+    "QEMU configuration: restrict=on; SSH bound to 127.0.0.1:" in isolation_run.stdout
+    and "; only the four reviewed guestfwd channels are configured." in isolation_run.stdout
+)
+result_match = re.search(r"^Result: (\d+) passed, (\d+) failed$", isolation_run.stdout, re.MULTILINE)
+result_matches_output = bool(result_match and int(result_match.group(1)) == isolation_passes
+    and int(result_match.group(2)) == isolation_failures)
+isolation_ok = (isolation_run.returncode == 0 and qemu_argv_validated and result_matches_output
+    and isolation_passes > 0 and isolation_failures == 0)
+summary["nested_isolation"] = {
+    "returncode": isolation_run.returncode,
+    "qemu_argv_validated": qemu_argv_validated,
+    "passed_checks": isolation_passes,
+    "failed_checks": isolation_failures,
+    "skipped_checks": isolation_skips,
+    "result_summary_parsed": result_matches_output,
+    "stderr_present": bool(isolation_run.stderr),
+}
+summary["checks"]["nested_isolation"] = isolation_ok
+progress("nested_isolation", "completed", returncode=isolation_run.returncode,
+    passed=isolation_ok, passed_checks=isolation_passes,
+    failed_checks=isolation_failures, skipped_checks=isolation_skips,
+    stderr_present=bool(isolation_run.stderr))
+if not isolation_ok:
+    summary["failure"] = "nested QEMU or guest isolation checks failed; preserve state and stop"
+    emit(7)
 overflow_probe = r'''import json, os, pathlib, subprocess, sys
 probe = sys.argv[1]
 session = pathlib.Path.home() / ".cache/lab-vm-recursion" / probe
@@ -1653,9 +1725,9 @@ def nested_gate(
 ) -> int:
     command = "nested-resume" if reuse_existing else "nested"
     objective = (
-        "revalidate one existing nested child, depth-1 readiness, depth-2 refusal before state, and parent continuity; no new QEMU, teardown, or workload"
+        "revalidate one existing nested child, depth-1 readiness, nested QEMU/network isolation, depth-2 refusal before state, and parent continuity; no new QEMU, teardown, model, or workload"
         if reuse_existing else
-        "one named disposable nested VM boot, depth-1 context, depth-2 refusal before state, and parent continuity; no model/TUI/auth/workload/isolation matrix/teardown"
+        "one named disposable nested VM boot, depth-1 readiness, nested QEMU/network isolation, depth-2 refusal before state, and parent continuity; no model/TUI/auth/workload/teardown"
     )
     evidence = Evidence(command, objective)
     if reuse_existing and profile is None:
@@ -1699,6 +1771,7 @@ def nested_gate(
         for name, detail in (
             ("child_up", "existing child answered SSH; no VM was started" if reuse_existing else "new child profile provisioned"),
             ("child_acceptance", "cloud-init, recursion policy, KVM and safe workspace passed"),
+            ("nested_isolation", "child QEMU restrict/forwarding and guest network-boundary probes passed; model availability skipped"),
             ("depth_limit_refused_before_state", "depth-2 launch refused before profile state"),
             ("outer_session_usable", "outer guest remained usable"),
         ):
@@ -1708,7 +1781,7 @@ def nested_gate(
             else:
                 evidence.check(label, checks[name] is True,
                                detail if checks[name] is True else "failed; preserve child state and stop")
-    required = ["child_up", "child_acceptance", "depth_limit_refused_before_state", "outer_session_usable"]
+    required = ["child_up", "child_acceptance", "nested_isolation", "depth_limit_refused_before_state", "outer_session_usable"]
     if reuse_existing:
         required.append("existing_profile")
     passed = rc == 0 and isinstance(checks, dict) and all(checks.get(k) is True for k in required)
