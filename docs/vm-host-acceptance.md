@@ -15,6 +15,18 @@ owner-host continuation: it requires the existing named outer/child profiles,
 does not start or clean either one, and uses a newly generated disposable
 profile/workspace for downstream human and destructive tests.
 
+This runbook does not authorize a host action. Before each physical-host command,
+re-read the current #35/#41/#45/#50 `tests.needed` handoff and follow its exact
+stop conditions; a runbook sequence or a scoped runner pass cannot override them.
+
+The VM runtime root defaults to `~/.local/share/little-mester`, with profiles under
+`vm/` and VM launcher logs under `logs/`; `XDG_DATA_HOME` or `MESTER_STATE_DIR`
+may relocate the complete per-user root. The runner follows the same no-fallback
+profile resolution as `lab-vm`. Re-cloning the source on the same host does not
+remove home-directory VM state. Do not move a prior checkout-local overlay until
+its qcow2 backing chain has been inventoried; the runner does not perform that
+migration.
+
 Run commands from the CachyOS checkout root. The stable snapshot path is
 `$HOME/.cache/lab-vm-recursion/initial-launcher-smoke/workspace`; the default
 outer profile is `launcher-smoke`.
@@ -34,8 +46,8 @@ manual review/confirmation step:
   `scripts/vm-recursion-workspace.py` exclusions. The old tree is retained as a
   private sibling backup. Rebuild is refused while a QEMU/virtiofsd process is
   exporting the snapshot; no live mount is changed.
-- The VM-state path is resolved with the same environment-variable semantics as
-  `lib/vm/lifecycle.sh`. A single matching live outer profile is reused. If it
+- The VM profile path is resolved with the same no-fallback environment-variable
+  semantics as `lib/vm/lifecycle.sh`. A single matching live outer profile is reused. If it
   is missing, the runner checks an 8-GiB-plus-512-MiB RAM budget and provisions
   it with recursion depth 0/max 1. Unusable existing profile state is left
   untouched and a fresh unique profile is used instead.
@@ -272,6 +284,13 @@ remaining generated state for review. The campaign clears inherited
 `VM_YES`/`LAB_YES` so they cannot bypass its approvals. Do not manually clean
 preserved state as part of a retry; inspect the report and coordinate the next
 action under the current ticket handoff.
+
+This is the all-in-one **scoped host campaign**, not a command that proves every
+acceptance criterion across #35/#41/#42/#43/#45/#50/#52. Its report's AC map and
+explicit non-claims are authoritative for what it observed. CI/local package tests,
+owner-authored observations, subsystem-specific AC, ticket status/evidence updates,
+and PR checks remain separate merge prerequisites. The runner does not update tickets,
+push branches, or merge.
 
 Use `observe --gate workload` only when doing that human slice separately. The
 campaign report records generated disposable profiles, gate outcomes, and fixed

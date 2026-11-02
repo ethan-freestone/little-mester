@@ -324,18 +324,18 @@ code is structured and what to watch for on other distros.
 
 #### C.9.1 VM control state is private and outside workspaces
 
-**Current decision (supersedes the original 2026-10-26 in-repository-state rationale):**
-VM keys, disks, seeds, sockets, PIDs, logs, and profile control metadata must live under
-a private per-user state root outside every selected workspace. A suitable default is
-`${XDG_STATE_HOME:-$HOME/.local/state}/little-mester/vm/`; immutable/downloaded base
-images belong in a separate cache root. Git-ignored state is not private if the agent
-can read it through the workspace share.
+**Current decision (supersedes the original checkout-local-state rationale):** VM profiles,
+base disks, seeds, keys, sockets, PIDs, and per-profile logs live outside selected workspaces
+under `~/.local/share/little-mester/vm/`. Launcher and host-Docker logs use the same root's
+`logs/` directory. `XDG_DATA_HOME` or `MESTER_STATE_DIR` may relocate the complete per-user
+root. `./lab-vm context` reports the effective profile directory. Git-ignored state is not
+private if the agent can read it through the workspace share.
 
-The current implementation still has legacy `.mester/vm` consumers and requires a
-careful migration/compatibility path. Until that work is complete and checked, do not
-use `--unsafe-recurse` on a live checkout that contains VM state or control keys. Do
-not move a live QEMU profile or backing-image chain in place. Track implementation and
-acceptance on #41/#43/#52.
+The implementation does not fall back to checkout-local runtime state and does not move old
+profiles. A stale checkout-local `.mester` directory is refused as a selected workspace until
+reviewed; it is never used as a profile root. Inventory profiles and qcow2 backing chains before
+any manual move/rebase. Nested profiles remain in a private recursion session inside the
+containing guest.
 
 #### C.9.2 Prereq check runs only for state-changing commands
 
@@ -405,8 +405,11 @@ see #41/#52 for the current lifecycle contract and evidence.
 The local implementation now provides explicit `suspend`/`resume` commands that preserve the
 overlay and workspace. Suspend checks for live nested QEMU processes in the guest and fails
 closed on an untracked process or an unavailable probe; recursion capacity alone is not treated
-as evidence that a child exists. These commands are not recommended for valuable state until the
-owner-host shutdown/resume and workload-persistence checks pass; `stop`/`down` remain destructive.
+as evidence that a child exists. `suspend --poweroff-recursive` explicitly requests graceful,
+deepest-first child suspension before the parent. If any child cannot be stopped and verified,
+the parent remains running; child profile state is preserved. These commands are not recommended
+for valuable state until owner-host shutdown/resume and workload-persistence checks pass;
+`stop`/`down` remain destructive.
 
 #### C.9.8 User permission prompt before package installation
 
@@ -443,11 +446,12 @@ Ticket-specific test setup and procedures live on the relevant ticket; do not du
 them in separate test-plan documents. The ticket engine's current `tests` ledger records
 needed/created/cases, while a first-class planned test-plan field is tracked by #51.
 
-#### C.9.10 Log rotation — last 5 runs in `.mester/logs/` (2026-10-27)
+#### C.9.10 Log rotation — last 5 runs (original checkout-local path, 2026-10-27)
 
 **Decision:** Both `./lab` and `./lab-vm` rotate their stdout/stderr logs, keeping the
-last 5 timestamped runs in `$LAB_DIR/.mester/logs/`. Logs are gitignored by the
-`.mester/` pattern in `.gitignore`.
+last 5 timestamped runs. The original implementation stored logs under the checkout;
+the current location is `$HOME/.local/share/little-mester/logs/` (or the configured
+per-user state root), as recorded in C.9.25.
 
 Implementation: each script defines `rotate_logs()` which creates the log directory,
 generates a timestamped filename, and prunes to 5 files. The script then uses
@@ -456,8 +460,8 @@ output to both stdout and the log file.
 
 **Why:** Without log rotation, repeated runs accumulate indefinitely in the repo or
 get lost when the container is recreated. A 5-run window captures enough history for
-debugging while keeping disk usage bounded. The `.mester/logs/` path ensures logs are
-never committed by accident.
+debugging while keeping disk usage bounded. Runtime logs no longer live in or depend on
+the source checkout.
 
 #### C.9.12 Human gates and session handoff (2026-10-28)
 
@@ -600,8 +604,8 @@ to the guest agent and its actual browser callback endpoint (#45).
   are never exposed.
 - **Control channel:** SSH over a QEMU user-network forward bound to `127.0.0.1` on an
   ephemeral host port. The intended private per-user state directory holds per-VM keys
-  and `known_hosts`; the implementation still uses legacy `.mester/vm/<name>/` paths and
-  must migrate them before sharing the checkout with write-enabled recursion. Host keys,
+  and `known_hosts`; current profile paths are private to the host user's state root and
+  are not exported through the selected workspace. Host keys,
   cloud credentials, and `~/.ssh` are never copied into the VM. `qemu-guest-agent` handles
   lifecycle; SSH handles commands and shell access.
 - **Model APIs:** Model service is optional and configured independently of the VM runtime.
@@ -829,34 +833,59 @@ free-space check. Snapshot preparation must fail closed without replacing an exi
 
 **Reason:** The child should test the parent's selected revision and intended work without
 inheriting host credentials, stale source, model caches, or unbounded disk consumption. This
-filtered child copy does not make a parent workspace safe if the parent itself shares host VM
-control state; that is separately blocked by C.9.23 until private-state migration is complete.
+filtered child copy does not make a parent workspace safe if old checkout-local runtime data is
+still present; the launcher refuses that overlap until it is reviewed.
 
 #### C.9.23 VM control state is private to the host user (2026-11-01)
 
-New VM profiles, base disks, SSH control keys, and VM logs live under
-`${XDG_DATA_HOME:-~/.local/share}/little-mester`, outside the selected workspace. Restrict the
-state root and profile directories to mode 0700; individual control keys remain mode 0600.
-Nested profiles remain under the containing guest's private recursion session. Before sharing
-a workspace, reject any overlap with the selected VM state or legacy `.mester` runtime state.
+VM profiles and base disks live under `~/.local/share/little-mester/vm/` outside every selected
+workspace; launcher logs are under `~/.local/share/little-mester/logs/`. The root may be
+relocated by `XDG_DATA_HOME` or `MESTER_STATE_DIR`. Restrict the state root and profile
+directories to mode 0700; individual control keys remain mode 0600. Nested profiles remain
+under the containing guest's private recursion session. Before sharing a workspace, reject any
+overlap with selected VM state or an unreviewed checkout-local `.mester` directory.
 
-Do not silently move existing overlays or keys. If only the legacy checkout-local
-`.mester/vm` tree exists, keep using it for compatibility and warn; refuse to export any
-overlapping checkout/runtime path to a guest. Migration must be explicit and preserve profile
-data. This compatibility fallback does not satisfy the new private-state layout until migrated.
+There is no checkout-local fallback: old overlays and keys are neither discovered, moved, nor
+deleted automatically. Before a manual migration, inventory all profiles and each qcow2 backing
+chain. If an expected profile does not appear under the effective profile root printed by
+`./lab-vm context`, stop before provisioning another profile.
 
 #### C.9.24 Guest recursion identity and MCP runtime persist independently of the workspace (2026-11-01)
 
 Provision a root-owned recursion identity in guest OS state and load it into ordinary login
 shells and launcher processes. A caller-supplied recursion environment that disagrees with
 the persisted depth/maximum is refused. `lab-vm context` reports the persisted identity even
-when invoked outside the agent's original SSH command. The maximum remains bounded at 32 and a
-child cannot raise its inherited maximum.
+when invoked outside the agent's original SSH command. It also reports the effective VM state
+root and profile directory. The maximum remains bounded at 32 and a child cannot raise its
+inherited maximum.
 
 The direct guest MCP server uses a guest-private runtime copy, not workspace `node_modules`.
 Provision Node.js 20 or newer, install dependencies from the checked-in lockfile, and build the
 MCP server before launch. Do not copy guest dependencies/caches into recursive source
 snapshots or mutate the selected workspace as a side effect of setup.
+
+#### C.9.25 One per-user state root; checkout clones contain source only (2026-11-02)
+
+The canonical host root defaults to `~/.local/share/little-mester`. VM profiles and base disks
+are under `vm/`; VM per-profile logs are stored with those profiles, and both `lab-vm` and
+`lab-docker` launcher logs are under `logs/`. Metrics service files use `vm-services/` under the
+same root. `XDG_DATA_HOME` or `MESTER_STATE_DIR` relocates the whole root. Host acceptance
+reports are private evidence under the XDG state directory and are not VM runtime logs.
+
+`VM_STATE_DIR` and `VM_DIR_BASE` remain explicit internal/test/recursion overrides, not a
+checkout-discovery mechanism. The default is never changed based on whether another directory
+exists. `./lab-vm context` reports the effective state/profile paths, so an operator can verify
+which location a command will use before provisioning or reopening.
+
+Re-cloning the source on the same host preserves home-directory profiles. `resume` uses the
+profile's recorded workspace; if that path moved, the operator selects the new workspace
+explicitly with `up --workspace`. Do not automatically move old profile data: inventory the
+overlay's qcow2 backing chain first. `.mester-egress` remains an independent workspace policy
+file and is not part of this runtime root.
+
+**Reason:** Keep private VM control state out of a writable self-development workspace while
+making the location and re-clone behavior predictable. `--unsafe-recurse` authorizes source
+workspace writes, not access to the parent VM's keys, disks, or control metadata.
 
 ---
 

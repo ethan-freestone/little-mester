@@ -346,14 +346,15 @@ acceptance gate.
 
 For one callback-routing diagnostic run, use `./lab-vm -d agent`. The temporary
 SSH control master and on-demand forwarding command write verbose transport
-diagnostics to `.mester/vm/default/browser-bridge-ssh.log`; these report whether
+diagnostics to `$HOME/.local/share/little-mester/vm/default/browser-bridge-ssh-<session>.log`;
+these report whether
 the exact loopback listener was installed and whether SSH could open the guest
 listener, without logging the authorize URL or forwarded HTTP data. If the
 callback still fails, share only the redacted OpenCode error and filtered SSH
 lines such as:
 
 ```bash
-grep -E 'forward|listener|open failed|connect_to' .mester/vm/default/browser-bridge-ssh.log
+grep -E 'forward|listener|open failed|connect_to' "$HOME/.local/share/little-mester/vm/default"/browser-bridge-ssh-*.log
 ```
 
 Never share the full auth URL, browser history, OAuth state, code, or token.

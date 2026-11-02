@@ -445,18 +445,18 @@ def run_isolation_check(
 
 
 def profile_base(repo: Path = ROOT) -> Path:
-    # Mirror lifecycle.sh exactly: VM_DIR_BASE is selected by variable
-    # presence (even an empty value), while VM_STATE_DIR/XDG_DATA_HOME use
-    # shell ``:-`` semantics (empty means use the fallback).
+    # Match lifecycle.sh: an empty override falls back, and checkout-local
+    # runtime state is never implicitly selected.
     if "VM_DIR_BASE" in os.environ:
-        # lifecycle.sh resolves an explicitly empty VM_DIR_BASE as
-        # "$VM_DIR_BASE/$name", i.e. /<name>.
+        # Match lifecycle.sh's explicit override selection by variable presence.
+        # An explicitly empty profile root consequently resolves as /<profile>.
         return Path(os.environ["VM_DIR_BASE"] or "/")
     xdg_data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
-    state_dir = Path(os.environ.get("VM_STATE_DIR") or str(Path(xdg_data_home) / "little-mester"))
-    legacy = repo / ".mester/vm"
-    if legacy.is_dir() and not (state_dir / "vm").exists():
-        return legacy
+    state_dir = Path(
+        os.environ.get("VM_STATE_DIR")
+        or os.environ.get("MESTER_STATE_DIR")
+        or str(Path(xdg_data_home) / "little-mester")
+    )
     return state_dir / "vm"
 
 

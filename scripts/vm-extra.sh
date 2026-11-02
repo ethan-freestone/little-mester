@@ -8,7 +8,14 @@
 set -euo pipefail
 LAB_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
 VM_NAME="${2:-default}"
-VM_DIR="$LAB_DIR/.mester/vm/$VM_NAME"
+source "$LAB_DIR/lib/state.sh"
+VM_STATE_DIR="${VM_STATE_DIR:-$MESTER_STATE_DIR}"
+if [[ -n "${VM_DIR_BASE+x}" ]]; then
+  :
+else
+  VM_DIR_BASE="$VM_STATE_DIR/vm"
+fi
+VM_DIR="$VM_DIR_BASE/$VM_NAME"
 : "${VM_VERBOSE:=0}"
 : "${VM_DEBUG:=0}"
 
@@ -26,8 +33,9 @@ log_debug() {
 
 # Keep a redacted-by-design diagnostic transcript; probes never print proxy
 # credentials or environment values.
-mkdir -p "$LAB_DIR/.mester/logs"
-EXTRA_LOG="$LAB_DIR/.mester/logs/vm-extra-$(date '+%Y%m%d_%H%M%S').log"
+mkdir -p "$VM_STATE_DIR/logs"
+chmod 0700 "$VM_STATE_DIR" "$VM_STATE_DIR/logs"
+EXTRA_LOG="$VM_STATE_DIR/logs/vm-extra-$(date '+%Y%m%d_%H%M%S').log"
 exec > >(tee -a "$EXTRA_LOG") 2>&1
 echo "Diagnostic log: $EXTRA_LOG"
 source "$LAB_DIR/lib/vm/host-services.sh"

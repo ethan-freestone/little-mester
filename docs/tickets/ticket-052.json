@@ -8,7 +8,7 @@
   "title": "VM-first launcher, retained Docker mode, and bounded recursion",
   "objective": "CURRENT RELEASE TRACK (2026-11-01): implement and verify the eventual VM-first ./lab entry point while retaining the existing Docker launcher as ./lab-docker; document actual setup, daily lifecycle and rollback. Owner set this default guest's recursion cap to 2 (policy 0 2 1); recurse remains explicit and child depth may never exceed the inherited cap. Follow the phased coordinator #35; do not claim cutover/acceptance until the applicable gates pass.",
   "created_at": "2026-10-29T10:27:45.504Z",
-  "updated_at": "2026-11-02T17:13:04.424Z",
+  "updated_at": "2026-11-02T21:19:04.914Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -108,7 +108,9 @@
       "tests/vm.bats: CLI rejects missing/invalid/duplicate --memory values and commands outside up/run; help documents the option.",
       "tests/lab.bats: explicit ./lab vm dispatch reaches lab-vm help and preserves early workspace-path refusal; ./lab-docker remains executable and advertises the VM route; ordinary ./lab still reports the compatibility Docker workflow. tests/lab-permissions.bats now exercises the preserved Docker entry directly.",
       "commit 454d7ec lib/vm/lifecycle.sh + tests/vm.bats: clean suspend preserves VM overlay/workspace/workloads/keys and resume reuses the recorded workspace/overlay; unsafe or descendant-capable profiles fail closed.",
-      "commit 454d7ec campaign regressions cover disposable PostgreSQL/overlay state across suspend/resume and scope destructive stop/down to its unique generated profile."
+      "commit 454d7ec campaign regressions cover disposable PostgreSQL/overlay state across suspend/resume and scope destructive stop/down to its unique generated profile.",
+      "2026-11-02 local-only: Bats covers home-state defaults and refuses checkout-local .mester runtime data, including symlinked stale state beneath a parent workspace; recursive suspend tests child-before-parent order and fail-closed preservation.",
+      "2026-11-02 local-only: Python regressions cover MESTER_STATE_DIR/XDG_DATA_HOME and profile-root resolution without legacy checkout discovery; recursive child helper preserves profile assets and never force-kills a child."
     ],
     "cases": [
       "2026-10-29: accepted product direction and documented in docs/DECISIONS.md §C.9.17, README.md and docs/vm-architecture.md. Local validation: Bats 84/84, VM Python tests 12/12, ticket-engine Jest 143/143, documentation checks 112/112, bash -n and git diff --check pass. These are repository regressions/docs checks only; this environment has no /dev/kvm or Docker executable, so no VM startup, host metrics endpoint, TUI interaction, warm-start timing, or nested VM behavior is claimed.",
@@ -140,7 +142,8 @@
       "SUPERSEDES earlier ledger entries saying the setup override is the next implementation phase: all three memory slices are now committed locally as 4925e55, dc1fb7a, and 9e4a16b. Implementation and local verification are complete; only owner-host KVM acceptance and the broader VM-first release gates remain. No commits have been pushed and no live resize/boot is claimed.",
       "2026-11-01 staged launcher/docs slice on feat/vm-approach working tree: complete Bats suite 159/159; VM Python suite 89/89; cloud-init schema valid; docs consistency 115/115; Bash syntax, ShellCheck --severity=error, Python compileall, and git diff --check pass. No AC status changed. This verifies local dispatch and compatibility regressions only: no owner-host VM/TUI/lifecycle or default-cutover acceptance is claimed; ordinary ./lab remains routed to ./lab-docker. Preserved unrelated .idea/vcs.xml workspace-bootstrap mapping.",
       "2026-11-02 local-only commit 454d7ec: Bats 179/179, Python 144/144, docs checks 115/115, ShellCheck/syntax/compile/diff pass. Lifecycle behavior is mocked/unit-tested only; no owner-host KVM suspend/resume or workload persistence test occurred, so host acceptance remains pending.",
-      "2026-11-02 owner-host existing-child continuation observed outer recursion depth 0/max 1, child readiness, depth-2 refusal before state, and outer continuity. This does not verify the current max-2 depth-1/depth-2/depth-3 release matrix or agent self-development loop. Report on #41: vm-acceptance-20261102T170658Z-1433884-be822256.json."
+      "2026-11-02 owner-host existing-child continuation observed outer recursion depth 0/max 1, child readiness, depth-2 refusal before state, and outer continuity. This does not verify the current max-2 depth-1/depth-2/depth-3 release matrix or agent self-development loop. Report on #41: vm-acceptance-20261102T170658Z-1433884-be822256.json.",
+      "Local-only checks (2026-11-02): VM Python suite 167/167 passed; targeted Bats state/lifecycle cases 8/8 passed; documentation checks 115/115 passed; Ruff, Bash syntax, ShellCheck --severity=error, py_compile, and diff check passed. Full Bats suite: 115/122; seven CLI cases cannot override this guest's root-owned recursion identity 0 0 and were refused as designed. No owner-host VM was inspected/modified; host acceptance remains unverified."
     ]
   },
   "models_used": []

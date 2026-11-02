@@ -30,7 +30,7 @@
 #   ./lab-vm ssh [name]
 #   ./lab-vm down [name]
 #   ./lab-vm stop [name]
-#   ./lab-vm suspend [name]
+#   ./lab-vm suspend [name] [--poweroff-recursive]
 #   ./lab-vm resume [name]
 #   ./lab-vm resize <name> <GiB>
 #   ./lab-vm base [name]
@@ -64,6 +64,7 @@ VM_CLEAN=0
 VM_MEMORY_ARG=""
 # This destructive acknowledgement must come from an explicit CLI flag.
 VM_DISCARD_RECURSIVE=0
+VM_POWEROFF_RECURSIVE=0
 VM_BROWSER_AUTH_MODE=auto
 VM_BROWSER_AUTH_ENABLE_FLAG=0
 VM_BROWSER_AUTH_DISABLE_FLAG=0
@@ -221,10 +222,11 @@ VM lifecycle commands (epic #35, ticket #41):
       Stop the VM and remove per-VM artifacts (overlay disk, seed ISO, keys).
       Base disk is preserved.
 
-  ./lab-vm suspend [name]
+  ./lab-vm suspend [name] [--poweroff-recursive]
       Gracefully power off QEMU while preserving the overlay, guest workloads,
-      workspace selection, seed, and SSH keys. Refuses profiles that may have
-      live nested VM state. Resume with ./lab-vm resume [name].
+      workspace selection, seed, and SSH keys. By default, refuses live or
+      untracked nested QEMU; --poweroff-recursive suspends managed children first.
+      Resume with ./lab-vm resume [name].
 
   ./lab-vm resume [name]
       Restart a suspended profile on its recorded workspace and existing overlay.
@@ -244,7 +246,8 @@ VM lifecycle commands (epic #35, ticket #41):
 
   ./lab-vm suspend [name]
       Gracefully power off while preserving the overlay, workloads, workspace,
-      seed, and SSH identity. Refuses if a live or untracked nested QEMU is found.
+      seed, and SSH identity. Refuses if a child QEMU is live unless
+      --poweroff-recursive is supplied to gracefully suspend children first.
 
   ./lab-vm resume [name]
       Restart a suspended profile using its recorded workspace and same overlay.
@@ -311,12 +314,17 @@ Flags (any order):
   --auto-accept        Alias for --yes
   --clean              Before 'up': run 'stop' then 'down' to fully teardown first
   --discard-recursive  Acknowledge that down/stop/rebuild (or up --clean) may delete child VM state
+  --poweroff-recursive With 'suspend': gracefully suspend managed child VMs first
   -v, --verbose        Extra progress info (SSH commands, qemu/virtiofsd output)
   -d, --debug          Everything from --verbose plus raw output and timing
   --auto               For agent/run only: OpenCode auto-approves permissions
                        except explicit denies; does not bypass configured denies.
 
 Environment:
+  MESTER_STATE_DIR      Override the per-user root (default: ~/.local/share/little-mester)
+  XDG_DATA_HOME         Relocate the default root to $XDG_DATA_HOME/little-mester
+  VM_STATE_DIR          Explicit state-root override (internal/test/recursion use)
+  VM_DIR_BASE           Explicit profile-root override (internal/test/recursion use)
   VM_BASE_SIZE         Override default base disk size (default: 20)
   VM_AUTH_FORWARD=1    Import private host auth escrow on VM startup and atomically
                        export refreshed credentials before stop/down deletion.
@@ -327,9 +335,12 @@ Environment:
   VM_DEBUG=1           Equivalent to --debug (implies --verbose)
   VM_OPENCODE_VERSION  Guest OpenCode target (default: latest; may be pinned)
 
-New VM state is stored outside the checkout at:
+VM profiles, disks, control keys, and per-profile logs are stored outside the
+checkout at:
   ${XDG_DATA_HOME:-~/.local/share}/little-mester/vm/<name>/
-Existing ./.mester/vm state remains in place for compatibility until explicitly migrated.
+Launcher logs are stored at:
+  ${XDG_DATA_HOME:-~/.local/share}/little-mester/logs/
+Use './lab-vm context' to print the effective state and profile paths.
 
 References:
   docs/01-host-setup.md     — Host setup runbook (A1, A8)
@@ -356,7 +367,7 @@ for _i in "${_flags[@]}"; do
     --all)                    VM_UPDATE_ALL=1 ;;
     --clean)                  VM_CLEAN=1 ;;
     --discard-recursive)      VM_DISCARD_RECURSIVE=1 ;;
-    --poweroff-recursive)     die '--poweroff-recursive was removed: suspend now checks for live nested QEMU processes and refuses if any are found.' ;;
+    --poweroff-recursive)     VM_POWEROFF_RECURSIVE=1 ;;
     --browser-auth)           VM_BROWSER_AUTH_MODE=on; VM_BROWSER_AUTH_ENABLE_FLAG=1 ;;
     --no-browser-auth)        VM_BROWSER_AUTH_MODE=off; VM_BROWSER_AUTH_DISABLE_FLAG=1 ;;
     --auto)                   VM_AGENT_AUTO=1 ;;
@@ -407,7 +418,7 @@ for (( _fi=0; _fi<${#_flags[@]}; _fi++ )); do
   case "${_flags[$_fi]}" in
     -h|--help) ;;
     --base-size|--workspace|--name|--max-depth|--memory) _fi=$(( _fi + 1 )) ;; # skip flag-pair
-    --recurse|--unsafe-recurse|--clean|--discard-recursive|--all) ;;
+    --recurse|--unsafe-recurse|--clean|--discard-recursive|--poweroff-recursive|--all) ;;
     --browser-auth|--no-browser-auth|--auto) ;;
     --restart-opencode) ;;
     --json) ;;
@@ -487,6 +498,9 @@ if [[ "$VM_DISCARD_RECURSIVE" == 1 ]]; then
     *) die '--discard-recursive is only valid with down, stop, rebuild, or up --clean.' ;;
   esac
 fi
+if [[ "$VM_POWEROFF_RECURSIVE" == 1 && "$cmd" != suspend ]]; then
+  die '--poweroff-recursive is only valid with suspend.'
+fi
 if [[ "$VM_CLEAN" == 1 && "$cmd" != up ]]; then
   die '--clean is only valid with up.'
 fi
@@ -519,7 +533,6 @@ if [[ "$cmd" == run || "$cmd" == up ]]; then
     # child; it may be root-owned or otherwise not mutable by this user.
     VM_STATE_DIR="$VM_RECURSION_SESSION_DIR"
     VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
-    VM_LEGACY_STATE=0
   fi
   VM_WS_ARG="${VM_WS_ARG:-$(pwd)}"
   check_workspace "$VM_WS_ARG"
@@ -588,7 +601,6 @@ if [[ "$cmd" == recursion-clean ]]; then
   VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "${remaining[1]}")" || die 'Invalid recursive profile name.'
   VM_STATE_DIR="$VM_RECURSION_SESSION_DIR"
   VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
-  VM_LEGACY_STATE=0
 fi
 if [[ "$cmd" == install-tools ]]; then
   [[ ${#remaining[@]} -le 2 ]] || die 'Usage: ./lab-vm install-tools [name] [--name <profile>] [--restart-opencode]'
@@ -626,7 +638,6 @@ if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" ]]; then
       VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$vm_name")" || die 'Invalid recursive profile name.'
       VM_STATE_DIR="$VM_RECURSION_SESSION_DIR"
       VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
-      VM_LEGACY_STATE=0
       ;;
     auth-forward)
       _auth_profile=default
@@ -634,15 +645,13 @@ if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" ]]; then
       VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$_auth_profile")" || die 'Invalid recursive profile name.'
       VM_STATE_DIR="$VM_RECURSION_SESSION_DIR"
       VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
-      VM_LEGACY_STATE=0
       ;;
     recursion-clean)
       VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
-      VM_LEGACY_STATE=0
       ;;
   esac
 fi
-export VM_DIR_BASE VM_STATE_DIR
+export MESTER_STATE_DIR VM_DIR_BASE VM_STATE_DIR
 
 if [[ "$VM_BROWSER_AUTH_ENABLE_FLAG" -eq 1 && "$VM_BROWSER_AUTH_DISABLE_FLAG" -eq 1 ]]; then
   die 'Choose only one of --browser-auth or --no-browser-auth.'
@@ -654,12 +663,12 @@ if [[ "$VM_AGENT_AUTO" == 1 && "$cmd" != agent && "$cmd" != run && "$cmd" != "--
   die 'The --auto permission option is only valid with the agent or run command.'
 fi
 
-# Context is intentionally read-only and bypasses the normal log rotation,
-# which writes under .mester and may be a shared host-state directory.
+# Context is intentionally read-only and bypasses normal log rotation.
 if [[ "$cmd" == context ]]; then
   context_format=text
   [[ "$VM_CONTEXT_JSON" == 1 ]] && context_format=json
-  exec python3 "$LAB_DIR/scripts/vm-context.py" --repo "$LAB_DIR" --format "$context_format"
+  MESTER_STATE_DIR="$MESTER_STATE_DIR" VM_STATE_DIR="$VM_STATE_DIR" VM_DIR_BASE="$VM_DIR_BASE" \
+    exec python3 "$LAB_DIR/scripts/vm-context.py" --repo "$LAB_DIR" --format "$context_format"
 fi
 if [[ "$cmd" == list ]]; then
   [[ ${#remaining[@]} -eq 1 ]] || die 'Usage: ./lab-vm list'
@@ -754,9 +763,6 @@ fi
 VM_LOG_FILE="$VM_LOG_DIR/lab-vm_$(date '+%Y%m%d_%H%M%S').log"
 mkdir -p -m 0700 "$VM_STATE_DIR" "$VM_LOG_DIR"
 chmod 0700 "$VM_STATE_DIR" "$VM_LOG_DIR"
-if [[ "${VM_LEGACY_STATE:-0}" == 1 ]]; then
-  echo "Using existing legacy VM state under the checkout for compatibility. It will not be exported to a guest; migrate it to $VM_STATE_DIR before using --unsafe-recurse on the checkout."
-fi
 
 mapfile -t vm_old < <(ls -1t "$VM_LOG_DIR"/lab-vm_*.log 2>/dev/null || true)
 if (( ${#vm_old[@]} > 4 )); then

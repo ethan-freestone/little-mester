@@ -27,7 +27,7 @@ __pycache__/
 # Tune sweep results
 .tune-results/
 
-# VM artifacts (QEMU disks, cloud-init ISO, SSH keys, PIDs)
-.mester/
-
 secrets.env
+
+# Legacy checkout-local runtime state is no longer used, but keep old data ignored while reviewed.
+.mester/

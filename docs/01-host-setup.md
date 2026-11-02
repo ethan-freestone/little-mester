@@ -101,6 +101,15 @@ ordinary `./lab` still keeps the host-Docker compatibility route, also available
 as `./lab-docker`. A successful `lab-vm up` alone is not an integrated-agent
 acceptance pass.
 
+**State location:** on the normal host configuration, VM profiles and base disks
+are under `~/.local/share/little-mester/vm/`, and both VM and host-Docker launcher
+logs are under `~/.local/share/little-mester/logs/`. Profile-specific QEMU,
+virtiofs, proxy, provisioning, and auth-bridge logs are kept with that profile.
+`XDG_DATA_HOME` or `MESTER_STATE_DIR` can relocate this single per-user root;
+`./lab-vm context` prints the effective profile directory. No VM state or launcher
+log is written into the checkout. Host-acceptance summary reports use a separate
+private XDG state directory.
+
 After installing prerequisites, run:
 
 ```bash
@@ -117,7 +126,7 @@ cd little-mester
 The `vm up` command:
 
 1. Validates the workspace path (refuses `/`, `$HOME`, sensitive dirs, the lab repo without `--unsafe-recurse`)
-2. Creates per-VM SSH keys under this checkout's `.mester/vm/<name>/`
+2. Creates per-VM SSH keys and profile state under `~/.local/share/little-mester/vm/<name>/`
 3. Downloads the pinned Ubuntu 24.04 cloud image, verifies its SHA-256, and creates a qcow2 overlay
 4. Generates a secret-free cloud-init seed ISO with rootless Docker provisioning
 5. Starts the loopback egress proxy, virtiofsd, and QEMU with KVM
@@ -148,6 +157,33 @@ meet the KVM requirements.
 
 ## 3. Everyday use
 
+### Reopen a profile or re-clone the source
+
+The source checkout and VM state are independent. Re-cloning the repository on the
+same host does not remove profiles in the per-user state root. From the new checkout,
+confirm which root and profiles the CLI will use before attempting to start anything:
+
+```bash
+./lab-vm context
+./lab-vm list
+./lab-vm status default
+```
+
+If the stopped profile's recorded workspace still exists, reopen it with
+`./lab-vm resume default`. If the checkout moved, select the new workspace explicitly
+with `./lab-vm up default --workspace /path/to/new/checkout`; review any confirmation
+before a running VM switches workspaces. Both preserve the existing overlay. Do not use
+`--clean`, `stop`, `down`, or `rebuild` to reopen it.
+
+This code never falls back to checkout-local runtime state. If the expected profile is
+missing under the path printed by `context`, stop before running `up`: an older
+checkout-local profile may still exist on the host. Inventory that profile and every
+qcow2 backing chain before any move/rebase decision. Do not copy or move an overlay
+blindly; no automatic migration is performed. A checkout-local `.mester` directory is
+not a valid runtime location and is refused as a shared workspace until its contents
+have been reviewed. The `.mester-egress` policy file in a selected workspace is a
+separate, unchanged setting.
+
 ### Start / stop / inspect
 
 ```bash
@@ -158,6 +194,7 @@ meet the KVM requirements.
 ./lab-vm agent --no-browser-auth # Skip the temporary browser OAuth bridge
 ./lab-vm ssh                 # SSH into the VM
 ./lab-vm suspend             # Cleanly power off; preserve guest state/workloads
+./lab-vm suspend --poweroff-recursive # Gracefully suspend children first, then parent
 ./lab-vm resume              # Restart the same profile, overlay, and workspace
 ./lab-vm stop                # Destructively tear down workloads and VM overlay
 ./lab-vm down                # Remove VM overlay, seed, and control keys
@@ -206,7 +243,7 @@ when you intend to delete and recreate it. The resource preflight still applies.
 
 ### Multi-VM support
 
-Named VMs are isolated under this repository's `.mester/vm/<name>/`:
+Named VM profiles are isolated under `~/.local/share/little-mester/vm/<name>/`:
 
 ```bash
 ./lab-vm up project-x        # Create a named VM
@@ -236,7 +273,7 @@ The `check_workspace()` guard runs on the host **before** the workspace is expor
 | **Optional model API via guestfwd** | A configured local API endpoint is intended to be reachable at one explicit `10.0.2.100:<port>` guest address; current fixed-port prototype is still under test |
 | **Egress proxy** | Public HTTP(S) goes through `10.0.2.100:3128`; QEMU direct networking remains disabled and host/private networks are denied (#43) |
 | **Guest authority** | OpenCode runs directly as `mester`; it can use guest Docker/Compose and administer the guest. The outer VM is the host boundary. |
-| **Per-VM SSH keys** | Each VM has its own key pair under `.mester/vm/<name>/` |
+| **Per-VM SSH keys** | Each VM has its own key pair under `~/.local/share/little-mester/vm/<name>/` |
 
 The current implementation is tested only as an experimental Linux/QEMU profile. macOS,
 BSD, and other Unix systems need explicit hypervisor, architecture, workspace-sharing,
@@ -280,7 +317,7 @@ Early VM code created a blank 20 GiB qcow2 instead of downloading an OS. Replace
 
 ```bash
 # Check QEMU log
-cat .mester/vm/<name>/qemu.log
+cat "$HOME/.local/share/little-mester/vm/<name>/qemu.log"
 
 # Check if KVM is available
 ls -la /dev/kvm
@@ -291,7 +328,7 @@ ls -la /dev/kvm
 
 ```bash
 # Check QEMU log for errors
-tail -50 .mester/vm/<name>/qemu.log
+tail -50 "$HOME/.local/share/little-mester/vm/<name>/qemu.log"
 
 # Wait longer and retry
 ./lab-vm up   # Re-running is safe (idempotent)
@@ -321,8 +358,8 @@ This was caused by the old invalid destination `guestfwd=...-10.0.2.2:PORT`. The
 The kernel assigns an available loopback port for SSH. The selected port is printed during startup and stored in the VM profile:
 
 ```bash
-cat .mester/vm/<name>/ssh_port
-ss -tlnp | grep "$(cat .mester/vm/<name>/ssh_port)"
+cat "$HOME/.local/share/little-mester/vm/<name>/ssh_port"
+ss -tlnp | grep "$(cat "$HOME/.local/share/little-mester/vm/<name>/ssh_port")"
 ```
 
 ---

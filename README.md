@@ -236,6 +236,35 @@ current package-index versions. `--all` also updates managed OS/Docker packages 
 to proceed while guest containers are running. Updates do not recreate the VM or replace guest
 credentials.
 
+### VM state, logs, and reopening a checkout
+
+The host VM state root defaults to `~/.local/share/little-mester`. Profiles and base disks
+are in `~/.local/share/little-mester/vm/`; VM profile logs sit beside each profile, and
+launcher/host-Docker logs are in `~/.local/share/little-mester/logs/`. Metrics service state
+is under the same root. `XDG_DATA_HOME` or `MESTER_STATE_DIR` can relocate the complete
+per-user root. `./lab-vm context` prints the effective root and profile directory; the JSON
+form includes the same paths. The host-acceptance evidence report is separate private data
+under the XDG state directory, not a VM runtime log.
+
+Re-cloning the source checkout on the same host does not move or delete this home-directory
+state. From the new checkout, first inspect the paths and existing profiles:
+
+```bash
+./lab-vm context
+./lab-vm list
+./lab-vm status default
+```
+
+If the profile is stopped and its recorded workspace still exists, use
+`./lab-vm resume default`. If the checkout/workspace moved, run `./lab-vm up default
+--workspace /path/to/new/checkout` and review any workspace-switch confirmation; the overlay
+and guest data are retained. Do not use `--clean`, `stop`, `down`, or `rebuild` to reopen a
+profile. This source no longer discovers or writes checkout-local VM state. If an expected
+profile is absent from the printed home profile directory, stop before provisioning a new
+one: inventory the old profile and its qcow2 backing chain first. No profile is moved
+automatically. The separate `.mester-egress` workspace policy file is unchanged; it is not
+part of VM runtime state.
+
 `verify-isolation` requires an already-running VM; it does not start or modify it. It verifies
 the live QEMU process uses `restrict=on`, the SSH host forward is loopback-only, and the four
 reviewed guest forwards target host loopback. It then runs bounded probes over SSH from inside
@@ -292,7 +321,7 @@ publication settings, relevant host listeners and NAT/firewall publication rules
 probes, direct host-to-forwarder-container HTTP probes (to distinguish container reachability
 from port publication), a host-originated probe to the non-loopback address selected by the
 default IPv4 route, backend health, and available Docker journal diagnostics in the
-normal `.mester/logs/` run log. It is read-only: it
+normal `~/.local/share/little-mester/logs/` run log. It is read-only: it
 does not start/recreate containers, alter daemon/firewall/network settings, or remove orphans.
 If firewall-rule inspection is blocked by host permissions, rerun with
 `./lab-vm -d models diagnose --sudo llamacpp`; `--sudo` uses `sudo -n` only for read-only
@@ -427,14 +456,15 @@ not sufficient.
 `--unsafe-recurse` implies `--recurse` and explicitly permits the selected Little Mester
 checkout as a read/write workspace; it requires a workspace containing that checkout. Use it
 only when self-modification of the selected checkout is intended. It does not increase the
-depth limit or network access. **Do not use it with a live checkout that contains `.mester`
-state:** the current virtiofs workspace can expose `.mester/vm/<profile>` control files (including
-the SSH control key) to the guest. This is a known isolation gap tracked under #43; use the
-safe `--recurse` snapshot mode until it is resolved. Every child still receives a separate
-workspace snapshot and state directory. Fresh guests add `mester` to the `kvm` group so nested
-QEMU can access `/dev/kvm`; existing guests do not gain that membership from a source edit alone.
-Nested starts require usable `/dev/kvm` and guest CPU `vmx`/`svm` flags; if either is missing,
-the launcher refuses before snapshot/provisioning rather than falling back to TCG emulation.
+depth limit or network access. VM control state is outside the workspace under the private
+per-user state root, so it is not exported with the checkout. `./lab-vm context` shows the
+effective profile directory before a self-editing run. A stale checkout-local `.mester`
+directory is not used as state and is refused as a workspace until it has been inventoried;
+do not expose unreviewed leftovers. Every child still receives a separate workspace snapshot
+and state directory. Fresh guests add `mester` to the `kvm` group so nested QEMU can access
+`/dev/kvm`; existing guests do not gain that membership from a source edit alone. Nested starts
+require usable `/dev/kvm` and guest CPU `vmx`/`svm` flags; if either is missing, the launcher
+refuses before snapshot/provisioning rather than falling back to TCG emulation.
 
 Use `--no-browser-auth` when the temporary browser bridge is not wanted. `ssh` is
 for guest diagnostics, not a required daily step. `./lab vm` is an explicit route to the
@@ -446,8 +476,10 @@ live usability, auth, permission, workload, isolation, and lifecycle acceptance 
 stops QEMU and deletes the writable VM overlay, seed ISO, and VM control keys (the cached base
 image remains). Either command can discard guest state; `stop` also removes guest Compose
 volumes. `./lab-vm suspend`/`resume` preserve the overlay, volumes, workspace, seed, and SSH
-identity. Suspend refuses if a live or untracked nested QEMU is detected; recursion capacity alone
-does not block it. This path is locally tested but still needs owner-host lifecycle acceptance.
+identity. Suspend refuses if a live or untracked nested QEMU is detected; add
+`--poweroff-recursive` to gracefully suspend managed children deepest-first before the parent.
+If a child fails, is untracked, or cannot be verified stopped, the parent remains running.
+Both modes preserve all VM profile state and still need owner-host lifecycle acceptance.
 Do not use `stop`, `down`, `--clean`, or `rebuild` on a VM whose state you need to preserve.
 
 The agent has broad authority inside the guest, including guest Docker; the outer VM is the

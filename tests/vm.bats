@@ -7,6 +7,19 @@ setup() {
   source "$REPO_ROOT/lib/vm/runner.sh"
 }
 
+bats_vm_recursion_identity() {
+  local identity_file=/etc/lab-vm-recursion
+  if [[ -e "$identity_file" || -L "$identity_file" ]]; then
+    cat -- "$identity_file"
+  else
+    printf '0 0\n'
+  fi
+}
+
+bats_vm_has_guest_identity() {
+  [[ -e /etc/lab-vm-recursion || -L /etc/lab-vm-recursion ]]
+}
+
 @test "QEMU guestfwd uses lazy command targets, not invalid bare addresses" {
   VM_PROXY_PORT=45678
   run _vm_netdev_arg 22222
@@ -79,14 +92,14 @@ setup() {
   [[ "$output" == *'do not match the guest'* ]]
 }
 
-@test "workspace boundary refuses legacy VM state but allows private VM state" {
+@test "workspace boundary refuses checkout-local runtime data but allows private VM state" {
   source "$REPO_ROOT/lib/vm/recursion.sh"
   local workspace="$BATS_TEST_TMPDIR/workspace" private="$BATS_TEST_TMPDIR/home/.local/share/little-mester/vm"
   mkdir -p "$workspace/.mester/vm" "$(dirname "$private")"
   LAB_DIR="$workspace"
   run vm_recursion_validate_state_boundary "$workspace" "$private"
   [ "$status" -ne 0 ]
-  [[ "$output" == *'legacy host runtime state'* ]]
+  [[ "$output" == *'checkout-local runtime data'* ]]
 
   LAB_DIR="$BATS_TEST_TMPDIR/source-repo"
   mkdir -p "$LAB_DIR"
@@ -94,8 +107,31 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "workspace boundary refuses a parent workspace containing a symlinked stale checkout state" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  local workspace="$BATS_TEST_TMPDIR/worktree-parent" checkout="$BATS_TEST_TMPDIR/worktree-parent/repo" outside="$BATS_TEST_TMPDIR/outside-state"
+  mkdir -p "$checkout" "$outside"
+  ln -s "$outside" "$checkout/.mester"
+  LAB_DIR="$checkout"
+
+  run vm_recursion_validate_state_boundary "$workspace" "$BATS_TEST_TMPDIR/private/vm"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'contains a checkout with stale runtime data'* ]]
+}
+
+@test "VM state defaults to the per-user Little Mester root" {
+  local home="$BATS_TEST_TMPDIR/state-home"
+  mkdir -p "$home"
+  run env -u XDG_DATA_HOME -u MESTER_STATE_DIR -u VM_STATE_DIR -u VM_DIR_BASE \
+    HOME="$home" LAB_DIR="$REPO_ROOT" bash -c \
+    'source "$LAB_DIR/lib/vm/lifecycle.sh"; printf "%s\n%s\n" "$VM_STATE_DIR" "$VM_DIR_BASE"'
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "$home/.local/share/little-mester" ]
+  [ "${lines[1]}" = "$home/.local/share/little-mester/vm" ]
+}
+
 @test "only nested VM egress proxies use the parent proxy as an upstream" {
-  VM_DIR_BASE="$REPO_ROOT/.mester/vm"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/top-level-vm-state/vm"
   VM_NESTED_LAUNCH=0
   unset LAB_VM_RECURSION_DEPTH
   _vm_proxy_upstream_args
@@ -111,7 +147,7 @@ setup() {
   _vm_proxy_upstream_args
   [ "${VM_PROXY_UPSTREAM_ARGS[*]}" = "--upstream-proxy=http://10.0.2.100:3128" ]
 
-  VM_DIR_BASE="$REPO_ROOT/.mester/vm"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/top-level-vm-state/vm"
   _vm_proxy_upstream_args
   [ "${#VM_PROXY_UPSTREAM_ARGS[@]}" -eq 0 ]
   grep -Fq '"${VM_PROXY_UPSTREAM_ARGS[@]}"' "$REPO_ROOT/lib/vm/runner.sh"
@@ -610,6 +646,56 @@ LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
   [ -f "$vm_dir/disk.qcow2" ]
 }
 
+@test "recursive suspend verifies children before shutting down the parent" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/suspend-child-first-state"
+  local vm_dir="$VM_DIR_BASE/outer"
+  mkdir -p "$vm_dir"
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do : >"$vm_dir/$asset"; done
+  VM_RUN_STATE=running
+  vm_run_status() { echo "$VM_RUN_STATE"; [[ "$VM_RUN_STATE" == running ]]; }
+  _vm_poweroff_recursive_children() {
+    echo children-stopped >"$BATS_TEST_TMPDIR/recursive-child-stop"
+  }
+  _vm_shutdown_for_workspace_switch() {
+    [ -f "$BATS_TEST_TMPDIR/recursive-child-stop" ]
+    echo parent-stopped >"$BATS_TEST_TMPDIR/recursive-parent-stop"
+    VM_RUN_STATE=stopped
+  }
+  VM_POWEROFF_RECURSIVE=1
+
+  run vm_cmd_suspend outer
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/recursive-child-stop" ]
+  [ -f "$BATS_TEST_TMPDIR/recursive-parent-stop" ]
+  [ -f "$vm_dir/disk.qcow2" ]
+}
+
+@test "recursive suspend leaves parent running when a child cannot be verified" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/suspend-child-failure-state"
+  local vm_dir="$VM_DIR_BASE/outer"
+  mkdir -p "$vm_dir"
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do : >"$vm_dir/$asset"; done
+  VM_POWEROFF_RECURSIVE=1
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  _vm_poweroff_recursive_children() {
+    echo 'REFUSED: child failed' >&2
+    return 1
+  }
+  _vm_shutdown_for_workspace_switch() { echo called >"$BATS_TEST_TMPDIR/unsafe-parent-shutdown"; }
+
+  run vm_cmd_suspend outer
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'child failed'* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/unsafe-parent-shutdown" ]
+  [ -f "$vm_dir/disk.qcow2" ]
+}
+
 @test "resume reuses only the recorded workspace and preserved overlay" {
   source "$REPO_ROOT/lib/vm/lifecycle.sh"
   source "$REPO_ROOT/lib/vm/recursion.sh"
@@ -793,9 +879,11 @@ LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
 
 @test "lab-vm refuses an over-depth launch before prerequisite checks" {
   local workspace="$BATS_TEST_TMPDIR/recursion-preflight"
+  local identity_depth identity_max
+  read -r identity_depth identity_max < <(bats_vm_recursion_identity)
   mkdir -p "$workspace"
-  run env LAB_VM_RECURSION_DEPTH=1 LAB_VM_MAX_DEPTH=1 VM_SKIP_PREREQS_TEST=1 \
-    "$REPO_ROOT/lab-vm" run "$workspace" --recurse
+  run env LAB_VM_RECURSION_DEPTH="$identity_depth" LAB_VM_MAX_DEPTH="$identity_max" VM_SKIP_PREREQS_TEST=1 \
+    "$REPO_ROOT/lab-vm" run "$workspace" --recurse --max-depth "$identity_depth"
   [ "$status" -ne 0 ]
   [[ "$output" == *'maximum nesting depth'* ]]
   [[ "$output" != *'Checking VM prerequisites'* ]]
@@ -815,28 +903,39 @@ LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
   [ "$status" -ne 0 ]
   [[ "$output" == *'--workspace is only valid with the run or up command'* ]]
 
-  run "$REPO_ROOT/lab-vm" suspend --poweroff-recursive
+  run "$REPO_ROOT/lab-vm" base --poweroff-recursive
   [ "$status" -ne 0 ]
-  [[ "$output" == *'--poweroff-recursive was removed'* ]]
+  [[ "$output" == *'--poweroff-recursive is only valid with suspend'* ]]
+
+  run "$REPO_ROOT/lab-vm" suspend ../default --poweroff-recursive
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM profile names must start with a letter or digit'* ]]
 }
 
 @test "lab-vm CLI parses recursion modes and refuses child limit reset or increase" {
   local workspace="$BATS_TEST_TMPDIR/recursion-cli"
+  local identity_depth identity_max
+  read -r identity_depth identity_max < <(bats_vm_recursion_identity)
   mkdir -p "$workspace"
 
-  run env LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=1 "$REPO_ROOT/lab-vm" run "$workspace" --recurse --max-depth 0
+  run env LAB_VM_RECURSION_DEPTH="$identity_depth" LAB_VM_MAX_DEPTH="$identity_max" \
+    "$REPO_ROOT/lab-vm" run "$workspace" --recurse --max-depth "$identity_depth"
   [ "$status" -ne 0 ]
-  [[ "$output" == *'maximum nesting depth 0 reached'* ]]
+  [[ "$output" == *"maximum nesting depth $identity_max reached"* ]]
 
-  run env LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=1 "$REPO_ROOT/lab-vm" run "$workspace" --recurse --max-depth 2
+  local excessive_max=$((identity_max + 1))
+  run env LAB_VM_RECURSION_DEPTH="$identity_depth" LAB_VM_MAX_DEPTH="$identity_max" \
+    "$REPO_ROOT/lab-vm" run "$workspace" --recurse --max-depth "$excessive_max"
   [ "$status" -ne 0 ]
-  [[ "$output" == *'cannot exceed inherited maximum depth 1'* ]]
+  [[ "$output" == *"cannot exceed inherited maximum depth $identity_max"* ]]
 
-  run env LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=1 "$REPO_ROOT/lab-vm" run "$workspace"
+  run env LAB_VM_RECURSION_DEPTH="$identity_depth" LAB_VM_MAX_DEPTH="$identity_max" \
+    "$REPO_ROOT/lab-vm" run "$workspace"
   [ "$status" -ne 0 ]
   [[ "$output" == *'Nested VM launch requires --recurse'* ]]
 
-  run env -u LAB_VM_RECURSION_DEPTH -u LAB_VM_MAX_DEPTH "$REPO_ROOT/lab-vm" run "$BATS_TEST_TMPDIR" --unsafe-recurse
+  run bash -c 'source "$1/lib/vm/recursion.sh"; LAB_DIR="$1"; VM_UNSAFE_RECURSE=1; vm_recursion_validate_workspace "$2" "$1"' \
+    _ "$REPO_ROOT" "$BATS_TEST_TMPDIR"
   [ "$status" -ne 0 ]
   [[ "$output" == *'--unsafe-recurse requires a workspace containing the Little Mester checkout'* ]]
 
@@ -853,9 +952,9 @@ LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
   local commit
   commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 
-  run env -u LAB_VM_MAX_DEPTH LAB_VM_RECURSION_DEPTH=1 "$REPO_ROOT/lab-vm" context --json
+  run "$REPO_ROOT/lab-vm" context --json
   [ "$status" -eq 0 ]
-  python3 -c 'import json,sys; c=json.loads(sys.argv[1]); assert c["schema_version"] == 1; assert c["recursion"]["depth"] == 1; assert c["recursion"]["max_depth"] is None; assert c["recursion"]["metadata"] == "legacy-depth-only"; assert c["little_mester"]["commit"] == sys.argv[2]; assert "runtime" in c and "kvm" in c' "$output" "$commit"
+  python3 -c 'import json,sys; from pathlib import Path; c=json.loads(sys.argv[1]); p=Path("/etc/lab-vm-recursion"); expected=p.read_text().split() if p.exists() else None; depth,max_depth=(map(int,expected) if expected else (None,None)); metadata="configured" if expected else "unmarked"; assert c["schema_version"] == 1; assert c["recursion"]["depth"] == depth; assert c["recursion"]["max_depth"] == max_depth; assert c["recursion"]["metadata"] == metadata; assert c["little_mester"]["commit"] == sys.argv[2]; assert "runtime" in c and "kvm" in c' "$output" "$commit"
 
   run "$REPO_ROOT/lab-vm" context
   [ "$status" -eq 0 ]
@@ -868,8 +967,10 @@ LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
 }
 
 @test "nested lifecycle commands resolve the isolated per-profile VM state root" {
+  local identity_depth identity_max
   local recursion_root="$HOME/.cache/lab-vm-recursion"
-  run env LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=1 \
+  read -r identity_depth identity_max < <(bats_vm_recursion_identity)
+  run env LAB_VM_RECURSION_DEPTH="$identity_depth" LAB_VM_MAX_DEPTH="$identity_max" \
     "$REPO_ROOT/lab-vm" status child
   [ "$status" -ne 0 ]
   [[ "$output" == *"$recursion_root/child/vm/child"* ]]
@@ -879,11 +980,13 @@ LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
   local home="$BATS_TEST_TMPDIR/nested-home"
   local state_dir="$BATS_TEST_TMPDIR/default-vm-state"
   local nested_session="$home/.cache/lab-vm-recursion/child"
+  local identity_depth identity_max
+  read -r identity_depth identity_max < <(bats_vm_recursion_identity)
   mkdir -p "$home" "$state_dir/vm"
   chmod 0755 "$state_dir"
 
   run env HOME="$home" VM_STATE_DIR="$state_dir" \
-    LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=1 \
+    LAB_VM_RECURSION_DEPTH="$identity_depth" LAB_VM_MAX_DEPTH="$identity_max" \
     "$REPO_ROOT/lab-vm" status child
   [ "$status" -ne 0 ]
   [[ "$output" == *"$nested_session/vm/child"* ]]
@@ -2466,6 +2569,10 @@ MOCK
 }
 
 @test "workspace shorthand and run validate dangerous paths before host prerequisites" {
+  if bats_vm_has_guest_identity; then
+    skip "host-mode workspace validation order cannot be exercised with a persisted guest identity"
+  fi
+
   run "$REPO_ROOT/lab-vm" /
   [ "$status" -ne 0 ]
   [[ "$output" == *'Cannot mount filesystem root (/)'* ]]
@@ -2476,6 +2583,10 @@ MOCK
 }
 
 @test "named run profile is validated and selected for both workspace forms" {
+  if bats_vm_has_guest_identity; then
+    skip "host-mode workspace validation order cannot be exercised with a persisted guest identity"
+  fi
+
   run "$REPO_ROOT/lab-vm" run / --name ../escape
   [ "$status" -ne 0 ]
   [[ "$output" == *'VM profile names must start with a letter or digit'* ]]

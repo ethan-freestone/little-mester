@@ -140,6 +140,20 @@ def git_context(repo: Path) -> dict[str, object]:
     }
 
 
+def vm_state_context() -> dict[str, str]:
+    data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    state_root = Path(
+        os.environ.get("VM_STATE_DIR")
+        or os.environ.get("MESTER_STATE_DIR")
+        or (Path(data_home) / "little-mester")
+    )
+    if "VM_DIR_BASE" in os.environ:
+        profile_root = Path(os.environ["VM_DIR_BASE"] or "/")
+    else:
+        profile_root = state_root / "vm"
+    return {"root": str(state_root), "vm_profiles": str(profile_root)}
+
+
 def mount_type(path: Path) -> str | None:
     return command_output(["findmnt", "--noheadings", "--output", "FSTYPE", "--target", str(path)])
 
@@ -182,6 +196,7 @@ def collect(repo: Path) -> dict[str, object]:
         },
         "little_mester": git_context(repo),
         "workspace_filesystem": mount_type(repo),
+        "vm_state": vm_state_context(),
     }
 
 
@@ -194,6 +209,8 @@ def summary(context: dict[str, object]) -> str:
     assert isinstance(recursion, dict)
     assert isinstance(kvm, dict)
     assert isinstance(checkout, dict)
+    state = context["vm_state"]
+    assert isinstance(state, dict)
 
     if runtime.get("container"):
         layer = f"container ({runtime['container']})"
@@ -221,6 +238,8 @@ def summary(context: dict[str, object]) -> str:
         f"Recursion: depth={depth_text}, max={maximum_text} ({recursion['metadata']})",
         f"Nested KVM: {kvm_access}; device={'present' if kvm['device_present'] else 'absent'}, CPU={cpu}",
         f"Little Mester: {commit_text} ({branch}; {dirty}) at {checkout.get('root')}",
+        f"VM state root: {state['root']}",
+        f"VM profiles: {state['vm_profiles']}",
         f"Workspace filesystem: {mount}",
     ))
 

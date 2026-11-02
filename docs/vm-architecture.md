@@ -54,12 +54,16 @@ host-Docker metrics path; the latter remains in place during migration.
 | Temporary browser OAuth callback | host browser → VM guest | One exact runtime-selected callback port, bound to host `127.0.0.1` and forwarded to guest `127.0.0.1` over the temporary SSH control master | Port ranges, LAN listeners, callback URL rewriting, general host route, callback/token capture |
 | Guest runtime | agent in guest → VM | Guest Docker/Compose, guest processes, optional nested VMs | Host Docker daemon, host filesystem outside the selected workspace |
 
-New VM profiles/logs use `${XDG_DATA_HOME:-~/.local/share}/little-mester` outside the selected
-workspace. Existing `.mester` state is preserved for compatibility, but overlapping legacy
-runtime paths are refused as guest workspaces until the owner explicitly migrates them. Guest
-recursion identity is stored in root-owned guest OS state and is not dependent on the agent SSH
-environment. The little-mester MCP server runs from a guest-private copy with Node.js 20+ and
-lockfile-installed dependencies; it does not create `node_modules` in the shared workspace.
+New VM profiles and base disks use `~/.local/share/little-mester/vm/`; launcher and host-Docker
+logs use `~/.local/share/little-mester/logs/`. `XDG_DATA_HOME` or `MESTER_STATE_DIR` relocates
+that per-user root, and `./lab-vm context` prints the effective profile path. There is no
+checkout-local fallback or automatic migration. A stale checkout-local `.mester` directory is
+not selected as VM state and is refused as a shared workspace until reviewed. Per-profile QEMU,
+proxy, and provisioning logs live in the profile directory. Nested state remains private inside
+the containing guest's recursion session. Guest recursion identity is stored in root-owned guest
+OS state and is not dependent on the agent SSH environment. The little-mester MCP server runs
+from a guest-private copy with Node.js 20+ and lockfile-installed dependencies; it does not
+create `node_modules` in the shared workspace.
 
 The current Linux VM implementation uses one native, curated host metrics service on
 `127.0.0.1:19532` per immediate VM host. Each QEMU profile has an independent guestfwd to
@@ -155,9 +159,10 @@ The VM primitives live in standalone `./lab-vm` and are available through explic
 #35/#52. The intended integrated lifecycle is:
 
 1. `./lab-vm up --workspace <dir>` validates the path on the host, resolves the pinned base image, and
-   creates the profile's overlay, seed, keys, and sockets. The intended state root is private and
-   outside all selected workspaces; the current implementation still has legacy
-   `.mester/vm/<name>/` consumers, which is a known self-development boundary gap tracked on #41/#52.
+   creates the profile's overlay, seed, keys, and sockets under the private per-user state root.
+   The CLI no longer selects or writes checkout-local VM state; `context` exposes the actual
+   resolved profile directory. Existing host profiles still require a read-only inventory before
+   any manual state relocation.
 2. `qemu-system-x86_64` starts with KVM, the virtiofs device, SSH on a loopback ephemeral
    port, model/egress `guestfwd` entries, and `restrict=on`.
 
@@ -190,12 +195,13 @@ path; local regressions do not replace the pending live nested-KVM acceptance ga
 `lab-vm suspend` and `lab-vm resume` provide the non-destructive shutdown/restart path: suspend
 requests a clean guest poweroff and preserves the qcow2 overlay, guest Docker workloads/volumes,
 recorded workspace, seed, and SSH identity; resume starts the same profile on that workspace and
-existing overlay. Before shutdown, suspend reads the guest process table and blocks if any nested
-QEMU is live or cannot be matched to a managed child profile. A recursion depth allowance alone
-does not block an empty guest. This replaces the earlier policy-capability heuristic; it does not
-silently power off child VMs. `lab-vm stop` and `lab-vm down` remain destructive teardown
-commands. The new path is locally implemented but still requires owner-host KVM acceptance before
-recommending it for daily use (#41/#52).
+existing overlay. By default, suspend reads the guest process table and blocks if any nested QEMU
+is live or cannot be matched to a managed child profile. `suspend --poweroff-recursive` explicitly
+requests child-first graceful suspension, deepest-first; the parent is left running if any child
+cannot be stopped and verified. Both modes preserve child overlays and workspace state. A recursion
+depth allowance alone does not block an empty guest. `lab-vm stop` and `lab-vm down` remain
+destructive teardown commands. The implementation is locally tested but still requires
+owner-host KVM acceptance before recommending it for daily use (#41/#52).
 
 The Little Mester checkout is not part of the default workspace export. `--recurse` opts into
 bounded child-VM testing; repository-related workspaces are snapshotted so the direct guest
@@ -256,13 +262,14 @@ nested-KVM device/CPU readiness, workspace filesystem, and Little Mester commit.
 separate harness-specific MCP service. A depth marker without a maximum is reported as legacy
 or incomplete and is not treated as authorization to launch a child.
 
-**Current self-development blocker:** the repository checkout itself is mounted via virtiofs,
-and `.mester/vm/default/id_vm_control` is visible in that shared tree in the current guest.
-Filtered `--recurse` snapshots exclude it, but that does not repair the parent guest's direct
-workspace exposure. Do not use `--unsafe-recurse` on this checkout until VM control state is
-moved outside the shared workspace and the source boundary is verified. This means the intended
-"workspace only" boundary is not yet satisfied; track remediation and live evidence under
-#41/#43/#52.
+**Self-development boundary:** VM state is resolved outside the shared workspace, and the CLI
+prints its effective profile root before use. `--unsafe-recurse` permits write access to the
+selected checkout but does not export the home state root. A leftover checkout-local `.mester`
+directory is refused rather than read as VM state; inventory any such directory and qcow2 backing
+chains before moving or removing it. The source-level path change is not proof that the physical
+host's existing profile was migrated or that its live virtiofs export is clear. Verify the exact
+host profile root and absence of checkout-local control files before write-enabled recursion; the
+owner-host boundary evidence remains tracked under #41/#43/#52.
 
 ### Sessions, worktrees, and parallel agents
 

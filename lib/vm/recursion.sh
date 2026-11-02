@@ -39,19 +39,24 @@ vm_recursion_paths_overlap() {
 }
 
 vm_recursion_validate_state_boundary() {
-  local workspace="${1:?workspace required}" state="${2:?VM state path required}" legacy
+  local workspace="${1:?workspace required}" state="${2:?VM state path required}" checkout_state checkout_root workspace_root
   if vm_recursion_paths_overlap "$workspace" "$state"; then
     echo "REFUSED: selected workspace overlaps private VM state ($state); move VM state outside the workspace before sharing it with a guest." >&2
     return 1
   fi
   [[ -n "${LAB_DIR:-}" ]] || return 0
-  for legacy in "$LAB_DIR/.mester/vm" "$LAB_DIR/.mester/vm-services" "$LAB_DIR/.mester/logs"; do
-    [[ -e "$legacy" || -L "$legacy" ]] || continue
-    if vm_recursion_paths_overlap "$workspace" "$legacy"; then
-      echo "REFUSED: selected workspace overlaps legacy host runtime state ($legacy); move that state outside the workspace before sharing it with a guest." >&2
-      return 1
-    fi
-  done
+  checkout_state="$LAB_DIR/.mester"
+  [[ -e "$checkout_state" || -L "$checkout_state" ]] || return 0
+  if vm_recursion_paths_overlap "$workspace" "$checkout_state"; then
+    echo "REFUSED: selected workspace includes checkout-local runtime data ($checkout_state). This directory is not used for VM state; inventory and move any old data before sharing the checkout." >&2
+    return 1
+  fi
+  checkout_root="$(realpath "$LAB_DIR")" || return 1
+  workspace_root="$(realpath "$workspace")" || return 1
+  if [[ "$workspace_root" == "$checkout_root" || "$checkout_root" == "$workspace_root"/* ]]; then
+    echo "REFUSED: selected workspace contains a checkout with stale runtime data ($checkout_state). Inventory and move any old data before sharing it with a guest." >&2
+    return 1
+  fi
 }
 
 vm_recursion_configure() {

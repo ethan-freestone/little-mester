@@ -139,16 +139,27 @@ class HostAcceptanceTests(unittest.TestCase):
                 acceptance.profile_dir(name)
         self.assertTrue(acceptance.PROFILE_RE.fullmatch("recursion-proxy-20261101"))
 
-    def test_profile_base_matches_shell_empty_variable_semantics(self):
+    def test_profile_base_preserves_explicit_override_and_never_falls_back_to_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory) / "home"
             home.mkdir()
             repo = Path(directory) / "repo"
             repo.mkdir()
-            with patch.dict(os.environ, {"HOME": str(home), "VM_DIR_BASE": "", "VM_STATE_DIR": "", "XDG_DATA_HOME": ""}, clear=True):
+            (repo / ".mester/vm/default").mkdir(parents=True)
+            with patch.dict(os.environ, {"HOME": str(home), "VM_DIR_BASE": "", "VM_STATE_DIR": "", "MESTER_STATE_DIR": "", "XDG_DATA_HOME": ""}, clear=True):
                 self.assertEqual(acceptance.profile_base(repo), Path("/"))
+                os.environ.pop("VM_DIR_BASE")
+                self.assertEqual(acceptance.profile_base(repo), home / ".local/share/little-mester/vm")
             with patch.dict(os.environ, {"HOME": str(home), "VM_STATE_DIR": "", "XDG_DATA_HOME": "/data"}, clear=True):
                 self.assertEqual(acceptance.profile_base(repo), Path("/data/little-mester/vm"))
+            with patch.dict(os.environ, {
+                "HOME": str(home),
+                "MESTER_STATE_DIR": str(home / "custom-state"),
+                "XDG_DATA_HOME": "/data",
+            }, clear=True):
+                self.assertEqual(acceptance.profile_base(repo), home / "custom-state/vm")
+            with patch.dict(os.environ, {"VM_DIR_BASE": "/private/test-vm"}, clear=True):
+                self.assertEqual(acceptance.profile_base(repo), Path("/private/test-vm"))
 
     def test_snapshot_target_rejects_symlinked_parent_escape(self):
         with tempfile.TemporaryDirectory() as directory:

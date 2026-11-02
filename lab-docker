@@ -2,6 +2,7 @@
 set -euo pipefail
 
 LAB_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
+source "$LAB_DIR/lib/state.sh"
 LAB_UID="$(id -u)"
 LAB_GID="$(id -g)"
 WORKSPACE=""
@@ -254,10 +255,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   exec 3>&1 4>&2
 
   # ─── Log rotation + tee (last 5 runs) ──────────────────────────────
-  LOG_FILE="$LAB_DIR/.mester/logs/lab_$(date '+%Y%m%d_%H%M%S').log"
-  mkdir -p "$LAB_DIR/.mester/logs"
+  LOG_DIR="$MESTER_STATE_DIR/logs"
+  LOG_FILE="$LOG_DIR/lab_$(date '+%Y%m%d_%H%M%S').log"
+  mkdir -p "$MESTER_STATE_DIR" "$LOG_DIR"
+  chmod 0700 "$MESTER_STATE_DIR" "$LOG_DIR"
 
-  mapfile -t old < <(ls -1t "$LAB_DIR/.mester/logs"/lab_*.log 2>/dev/null || true)
+  mapfile -t old < <(ls -1t "$LOG_DIR"/lab_*.log 2>/dev/null || true)
   if (( ${#old[@]} > 4 )); then
     rm -f "${old[@]:4}"
   fi

@@ -8,7 +8,7 @@
   "title": "VM provisioning and ./lab VM lifecycle",
   "objective": "CURRENT IMPLEMENTATION TRACK (2026-11-01): finish VM provisioning/lifecycle prerequisites for the VM-first release. The active guest reports persistent recursion policy depth 0/max 2 and usable KVM; detailed phase pointer is #35 tests.needed. Preserve the existing modified source and the owner's current VM; do not infer real child/lifecycle acceptance from local mocks.",
   "created_at": "2026-10-26T20:39:18.836Z",
-  "updated_at": "2026-11-02T19:56:33.572Z",
+  "updated_at": "2026-11-02T21:57:40.857Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -362,7 +362,9 @@
       "lib/vm/cloud-init.sh: fresh-guest python3-pip/python3-venv dependencies and Python CLI toolchain setup.",
       "scripts/vm-install-tools.sh and scripts/vm-update.sh: in-place install/refresh for the selected running guest; no VM reprovision or lifecycle operation.",
       "Local suspend safety regression: `scripts/vm-recursion-live-children.py` inventories guest QEMU processes and child profile disk paths; `tests/test_vm_recursion_live_children.py` covers no child, managed child, untracked QEMU, unreadable metadata, unrelated process, and symlinked disk.",
-      "`tests/vm.bats`: suspend preserves state, permits recursion-capable profile only after empty-child proof, refuses a live child before shutdown, and rejects removed `--poweroff-recursive` flag."
+      "`tests/vm.bats`: suspend preserves state, permits recursion-capable profile only after empty-child proof, refuses a live child before shutdown, and rejects removed `--poweroff-recursive` flag.",
+      "2026-11-02 local-only: Added the shared per-user state-root resolver; removed implicit checkout-local profile/log/metrics fallbacks; context and host-acceptance resolution use effective state paths. Tests cover the default, XDG_DATA_HOME/MESTER_STATE_DIR overrides, and no checkout fallback.",
+      "2026-11-02 local-only: Restored opt-in recursive suspend. Guest helper requests graceful child suspend through each child's lifecycle, recursively handling descendants; verifies QEMU exit and required profile assets; refuses parent shutdown for untracked, failed, or unverifiable children. Coverage in scripts/vm-recursion-live-children.py, tests/test_vm_recursion_live_children.py, tests/vm.bats."
     ],
     "cases": [
       "check_workspace rejects /",
@@ -589,7 +591,9 @@
       "2026-11-02 final local run after canonical symlink validation fix: complete Python unittest suite 157/157; ShellCheck severity=error across VM entry points/scripts, Python compilation, cloud-init schema validation and git diff check passed. No live VM action was run.",
       "2026-11-02 owner campaign report vm-acceptance-20261102T184924Z-1556996-3bf3ce11.json (private): existing-child nested continuation passed read-only readiness, depth-2 refusal-before-state, nested/outer network-boundary probes, and outer continuity. Campaign then reloaded the approved egress policy successfully; read-only `./lab-vm models status all` exited 1. No model service was started or changed. Gate `direct_guest_model_tui` failed; all subsequent campaign gates were blocked/not reached. Preserve the default VM, nested outer/child and report; no repair/restart/teardown inferred or authorized.",
       "2026-11-02 local-only suspend cleanup (no owner VM action): removed the recursive-poweroff bypass; live nested QEMU and untracked/uninspectable QEMU now block suspend before guest shutdown. Recursion allowance alone no longer blocks an empty guest. No lifecycle acceptance inferred.",
-      "2026-11-02 validation: targeted suspend Bats 4/4; Python unittest discovery 163/163; ShellCheck severity=error, Bash syntax, Python compilation, git diff --check, and docs consistency 115/115 passed. Full `bats tests/vm.bats` had 7 environment-sensitive failures from this VM's persisted `/etc/lab-vm-recursion` identity conflicting with tests' recursion settings; do not modify that identity to force a pass."
+      "2026-11-02 validation: targeted suspend Bats 4/4; Python unittest discovery 163/163; ShellCheck severity=error, Bash syntax, Python compilation, git diff --check, and docs consistency 115/115 passed. Full `bats tests/vm.bats` had 7 environment-sensitive failures from this VM's persisted `/etc/lab-vm-recursion` identity conflicting with tests' recursion settings; do not modify that identity to force a pass.",
+      "Local-only checks (2026-11-02): VM Python suite 167/167 passed; targeted Bats state/lifecycle cases 8/8 passed; documentation checks 115/115 passed; Ruff, Bash syntax, ShellCheck --severity=error, py_compile, and diff check passed. Full Bats suite: 115/122; seven CLI cases cannot override this guest's root-owned recursion identity 0 0 and were refused as designed. No owner-host VM was inspected/modified; host acceptance remains unverified.",
+      "2026-11-02 local regression follow-up: Bats recursion CLI cases now use the persisted guest identity instead of trying to override it; full tests/vm.bats completed with 120 passing and 2 host-only workspace-order tests skipped because this guest has /etc/lab-vm-recursion. VM Python unittest suite: 167/167. ShellCheck --severity=error, Bash syntax, and git diff --check passed. No physical-host VM action or acceptance is claimed."
     ]
   },
   "priority": "major",

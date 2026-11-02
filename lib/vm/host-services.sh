@@ -254,12 +254,8 @@ _vm_model_forwarder_recovery_allowed() {
 }
 
 _vm_metrics_state_dir() {
-  local state_root="${VM_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/little-mester}"
-  if [[ ! -e "$state_root/vm-services/metrics" && -d "$LAB_DIR/.mester/vm-services/metrics" ]]; then
-    printf '%s\n' "$LAB_DIR/.mester/vm-services/metrics"
-  else
-    printf '%s\n' "$state_root/vm-services/metrics"
-  fi
+  local state_root="${VM_STATE_DIR:-${MESTER_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/little-mester}}"
+  printf '%s\n' "$state_root/vm-services/metrics"
 }
 
 _vm_metrics_pid_matches() {

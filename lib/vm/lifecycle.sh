@@ -16,18 +16,10 @@
 set -euo pipefail
 
 : "${LAB_DIR:=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")/..")" && pwd)}"
-MESTER_DIR="$LAB_DIR/.mester"
-VM_STATE_DIR="${VM_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/little-mester}"
-VM_LEGACY_DIR_BASE="$MESTER_DIR/vm"
-VM_LEGACY_STATE=0
+source "$LAB_DIR/lib/state.sh"
+VM_STATE_DIR="${VM_STATE_DIR:-$MESTER_STATE_DIR}"
 if [[ -n "${VM_DIR_BASE+x}" ]]; then
-  : # Explicit overrides are used by recursion and isolated tests.
-elif [[ -d "$VM_LEGACY_DIR_BASE" && ! -e "$VM_STATE_DIR/vm" ]]; then
-  # Preserve existing overlays/keys until the operator explicitly migrates
-  # them. The workspace boundary check below prevents exporting this legacy
-  # in-checkout state to a guest.
-  VM_DIR_BASE="$VM_LEGACY_DIR_BASE"
-  VM_LEGACY_STATE=1
+  : # Explicit profile-root overrides are used by recursion and isolated tests.
 else
   VM_DIR_BASE="$VM_STATE_DIR/vm"
 fi
@@ -1805,7 +1797,11 @@ vm_cmd_suspend() {
     return 0
   fi
 
-  _vm_require_no_live_nested_qemu "$vm_dir" || return 1
+  if [[ "${VM_POWEROFF_RECURSIVE:-0}" == 1 ]]; then
+    _vm_poweroff_recursive_children "$vm_dir" || return 1
+  else
+    _vm_require_no_live_nested_qemu "$vm_dir" || return 1
+  fi
 
   echo "=== VM Suspend: $vm_name ==="
   _vm_shutdown_for_workspace_switch "$vm_dir" 'suspending the VM' || return 1
@@ -1831,6 +1827,22 @@ _vm_require_no_live_nested_qemu() {
   if (( probe_status != 0 )); then
     [[ -z "$probe_output" ]] || printf '%s\n' "$probe_output" >&2
     echo 'REFUSED: could not prove the guest has no live nested QEMU; the VM and overlay were left unchanged.' >&2
+    return 1
+  fi
+  printf '%s\n' "$probe_output"
+}
+
+_vm_poweroff_recursive_children() {
+  local vm_dir="${1:?VM profile directory required}" probe_script probe_output="" probe_status=0
+  probe_script="$LAB_DIR/scripts/vm-recursion-live-children.py"
+  [[ -r "$probe_script" ]] || {
+    echo 'REFUSED: nested-VM lifecycle helper is missing; refusing to suspend the parent.' >&2
+    return 1
+  }
+  probe_output="$(vm_ssh "$vm_dir" python3 - --poweroff-recursive <"$probe_script")" || probe_status=$?
+  if (( probe_status != 0 )); then
+    [[ -z "$probe_output" ]] || printf '%s\n' "$probe_output" >&2
+    echo 'REFUSED: a child VM could not be gracefully suspended and verified; the parent and its overlay were left running.' >&2
     return 1
   fi
   printf '%s\n' "$probe_output"

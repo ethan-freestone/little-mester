@@ -4,11 +4,10 @@
 set -euo pipefail
 
 LAB_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
-VM_STATE_DIR="${VM_STATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/little-mester}"
+source "$LAB_DIR/lib/state.sh"
+VM_STATE_DIR="${VM_STATE_DIR:-$MESTER_STATE_DIR}"
 if [[ -n "${VM_DIR_BASE+x}" ]]; then
   :
-elif [[ -d "$LAB_DIR/.mester/vm" && ! -e "$VM_STATE_DIR/vm" ]]; then
-  VM_DIR_BASE="$LAB_DIR/.mester/vm"
 else
   VM_DIR_BASE="$VM_STATE_DIR/vm"
 fi

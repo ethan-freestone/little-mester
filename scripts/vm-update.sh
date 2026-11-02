@@ -3,7 +3,9 @@
 set -euo pipefail
 
 LAB_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
-VM_DIR_BASE="${VM_DIR_BASE:-$LAB_DIR/.mester/vm}"
+source "$LAB_DIR/lib/state.sh"
+VM_STATE_DIR="${VM_STATE_DIR:-$MESTER_STATE_DIR}"
+VM_DIR_BASE="${VM_DIR_BASE:-$VM_STATE_DIR/vm}"
 vm_name="${1:-default}"
 shift || true
 
