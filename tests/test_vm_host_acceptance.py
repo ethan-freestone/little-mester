@@ -431,6 +431,42 @@ class HostAcceptanceTests(unittest.TestCase):
                 mocked_run.assert_called_once()
                 self.assertFalse(any(check["name"] == "outer guest nested-tool bootstrap" for check in evidence.data["checks"]))
 
+    def test_outer_guest_memory_block_records_component_budget_and_reason(self):
+        payload = {
+            "context": {
+                "runtime_kind": "vm", "depth": 0, "max_depth": 1,
+                "child_depth_available": True, "device_present": True,
+                "device_read_write": True, "nested_kvm_preflight_ready": True,
+                "cpu_virtualization": ["svm"],
+            },
+            "workspace_fstype": "virtiofs",
+            "checks": {
+                "context_valid": True, "outer_guest": True, "nested_kvm": True,
+                "workspace_root": True, "workspace_virtiofs": True,
+                "host_state_excluded": True, "tools": True, "memory_budget": False,
+            },
+            "tools": {"qemu-system-x86_64": True},
+            "memory_budget": {
+                "memavailable_mib": 3800, "cgroup_remaining": "4096 MiB",
+                "cgroup_remaining_mib": 4096, "releasable_qemu_rss_mib": 0,
+                "projected_available_mib": 3800, "available_mib": 3800,
+                "requested_mib": 4096, "reserve_mib": 512,
+                "measurement_parsed": True, "command_returncode": 1,
+                "stderr_present": True, "error_category": "insufficient_memory_budget",
+            },
+        }
+        evidence = DummyEvidence()
+        response = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+        with patch.object(acceptance, "ssh_command", return_value=["ssh"]), \
+             patch.object(acceptance, "run", return_value=response), \
+             redirect_stdout(io.StringIO()):
+            self.assertFalse(acceptance.outer_guest_preflight(Path("/profile"), evidence))
+        memory_check = next(check for check in evidence.data["checks"] if check["name"] == "outer guest memory_budget")
+        self.assertIn("MemAvailable=3800 MiB", memory_check["detail"])
+        self.assertIn("cgroup remaining=4096 MiB", memory_check["detail"])
+        self.assertIn("requested=4096 MiB + reserve=512 MiB", memory_check["detail"])
+        self.assertEqual(evidence.data["nested_memory_budget"], payload["memory_budget"])
+
     def test_nested_gate_blocks_checks_not_reached_after_child_up_failure(self):
         evidence = DummyEvidence()
         summary = {"checks": {"child_up": False}}
@@ -454,7 +490,7 @@ class HostAcceptanceTests(unittest.TestCase):
         compile(remote_script, "remote-nested", "exec")
         overlay_script = acceptance.build_remote_nested_script(ROOT, use_source_overlay=True)
         compile(overlay_script, "remote-nested-overlay", "exec")
-        child = re.search(r"child_probe = r'''(.*?)'''", acceptance.REMOTE_NESTED, re.DOTALL)
+        child = re.search(r"workspace_probe = r'''(.*?)'''", acceptance.REMOTE_NESTED, re.DOTALL)
         overflow = re.search(r"overflow_probe = r'''(.*?)'''", acceptance.REMOTE_NESTED, re.DOTALL)
         self.assertIsNotNone(child)
         self.assertIsNotNone(overflow)
@@ -491,30 +527,28 @@ class HostAcceptanceTests(unittest.TestCase):
 
     def test_nested_probes_are_visible_and_bounded(self):
         for marker in (
-            "Checking child SSH/cloud-init/context readiness (timeout: 180s).",
+            "Checking child readiness: cloud-init 30s, context 30s, findmnt 10s, workspace boundary 10s.",
             "Checking depth-cap refusal before state creation (timeout: 120s).",
             "Checking outer-session continuity (timeout: 30s).",
         ):
             self.assertIn(marker, acceptance.REMOTE_NESTED)
-        for timeout in (180, 120, 90, 30):
+        for timeout in (120, 90, 30):
             self.assertIn(f"timeout={timeout}", acceptance.REMOTE_NESTED)
         self.assertIn('"-o", "ServerAliveInterval=15"', acceptance.REMOTE_NESTED)
 
     def test_child_readiness_reports_bounded_subprobe_stage(self):
-        child = re.search(r"child_probe = r'''(.*?)'''", acceptance.REMOTE_NESTED, re.DOTALL)
-        self.assertIsNotNone(child)
-        probe = child.group(1)
         for source in (
-            'run("cloud-init status", ["sudo", "-n", "cloud-init", "status", "--format", "json"], 30)',
-            'run("lab-vm context --json", ["./lab-vm", "context", "--json"], 30)',
-            'run("findmnt /workspace", ["findmnt", "-n", "-o", "FSTYPE", "--target", "/workspace"], 10)',
+            'run_child_stage("child_cloud_init_status", "sudo -n cloud-init status --format json", 30)',
+            'run_child_stage("child_context", "cd /workspace && ./lab-vm context --json", 30)',
+            'run_child_stage("child_findmnt", "findmnt -n -o FSTYPE --target /workspace", 10)',
+            'run_child_stage("child_workspace_boundary", "cd /workspace && python3 -", 10, workspace_probe)',
         ):
-            self.assertIn(source, probe)
-        self.assertIn('"failed_stage": stage', probe)
-        self.assertIn('"timeout_seconds": timeout', probe)
-        self.assertIn('summary["checks"] = checks', probe)
-        self.assertIn('"failed_stage": "child SSH transport or remote script startup"', acceptance.REMOTE_NESTED)
-        self.assertIn('"failed_stage": "child SSH or remote readiness probe"', acceptance.REMOTE_NESTED)
+            self.assertIn(source, acceptance.REMOTE_NESTED)
+        self.assertIn('progress(stage, "started", timeout_seconds=timeout)', acceptance.REMOTE_NESTED)
+        self.assertIn('progress(stage, "timed_out", timeout_seconds=timeout)', acceptance.REMOTE_NESTED)
+        self.assertIn('"probe_stages": {', acceptance.REMOTE_NESTED)
+        self.assertIn('progress("child_vm_up", "started")', acceptance.REMOTE_NESTED)
+        self.assertIn('progress("child_vm_up", "completed", returncode=up.returncode)', acceptance.REMOTE_NESTED)
 
     def test_interrupt_terminates_only_local_ssh_client(self):
         class FakeProcess:
@@ -547,6 +581,30 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertTrue(delayed.killed)
         self.assertEqual(delayed.wait_calls, 2)
 
+    def test_remote_progress_events_are_allowlisted_and_persisted(self):
+        line = acceptance.REMOTE_PROGRESS_MARKER + json.dumps({
+            "stage": "child_vm_up", "status": "waiting", "elapsed_seconds": 60,
+            "silence_seconds": 30, "raw": "must-not-be-recorded",
+        })
+        event = acceptance.parse_remote_progress(line)
+        self.assertEqual(event, {
+            "stage": "child_vm_up", "status": "waiting",
+            "elapsed_seconds": 60, "silence_seconds": 30,
+        })
+        self.assertIsNone(acceptance.parse_remote_progress("ordinary output"))
+        invalid = acceptance.parse_remote_progress(
+            acceptance.REMOTE_PROGRESS_MARKER + '{"stage":"arbitrary","status":"started"}'
+        )
+        self.assertEqual(invalid, {})
+
+        evidence = DummyEvidence()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            acceptance.record_remote_progress(evidence, event)
+        self.assertEqual(evidence.data["nested_progress"][0]["stage"], "child_vm_up")
+        self.assertIn("PROGRESS child_vm_up: waiting", output.getvalue())
+        self.assertNotIn("must-not-be-recorded", output.getvalue())
+
     def test_inspect_interrupted_reads_summary_without_mutating_or_leaking_details(self):
         profile = "nested-accept-20261102005812-6494102d"
         with tempfile.TemporaryDirectory() as directory:
@@ -567,6 +625,20 @@ class HostAcceptanceTests(unittest.TestCase):
                         "checks": {"cloud_command_ok": True, "context_command_ok": False},
                     },
                 },
+                "nested_memory_budget": {
+                    "memavailable_mib": 3800,
+                    "cgroup_remaining": "4096 MiB",
+                    "cgroup_remaining_mib": 4096,
+                    "releasable_qemu_rss_mib": 0,
+                    "projected_available_mib": 3800,
+                    "requested_mib": 4096,
+                    "reserve_mib": 512,
+                    "error_category": "insufficient_memory_budget",
+                },
+                "nested_progress": [{
+                    "observed_at": "2026-11-02T01:01:00+00:00",
+                    "stage": "child_vm_up", "status": "waiting", "silence_seconds": 30,
+                }],
             }))
             report_path.chmod(0o600)
             before = report_path.read_bytes()
@@ -579,13 +651,23 @@ class HostAcceptanceTests(unittest.TestCase):
             self.assertIn("PASS: child up", output.getvalue())
             self.assertIn("Child readiness failed stage: lab-vm context --json", output.getvalue())
             self.assertIn("FAIL: context_command_ok", output.getvalue())
+            self.assertIn("MemAvailable MiB: 3800", output.getvalue())
+            self.assertIn("projected available MiB: 3800", output.getvalue())
+            self.assertIn("child_vm_up: waiting", output.getvalue())
             self.assertNotIn("private-detail-marker", output.getvalue())
             self.assertIn("No matching local acceptance runner", output.getvalue())
             self.assertEqual(report_path.read_bytes(), before)
             self.assertEqual(report_path.stat().st_mode & 0o777, 0o600)
+            report_output = io.StringIO()
+            with redirect_stdout(report_output):
+                self.assertEqual(acceptance.inspect_report(report_path), 0)
+            self.assertIn("Outer guest memory budget:", report_output.getvalue())
+            self.assertNotIn("private-detail-marker", report_output.getvalue())
         parsed = acceptance.parser().parse_args(["inspect-interrupted", profile])
         self.assertEqual(parsed.command, "inspect-interrupted")
         self.assertEqual(parsed.profile, profile)
+        report_args = acceptance.parser().parse_args(["inspect-report", "/tmp/report.json"])
+        self.assertEqual(report_args.command, "inspect-report")
 
     def test_interrupted_process_classifier_excludes_live_browser_and_tui_ssh(self):
         browser_bridge = [

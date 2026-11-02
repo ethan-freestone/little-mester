@@ -69,6 +69,20 @@ missing and all other guest checks pass, it performs the bounded guest-only
 bootstrap above and repeats preflight before proceeding. It writes a private
 summary report and may start a missing outer profile.
 
+If the guest RAM check blocks, the private report records the measured
+`MemAvailable`, remaining cgroup budget, reclaimable QEMU RSS, projected
+available memory, requested RAM/reserve, and a bounded failure category. It
+does not start the child or adjust memory automatically. Use the read-only
+report inspector to display only these diagnostics and named check results:
+
+```bash
+./scripts/vm-host-acceptance.py inspect-report \
+  /path/printed/by/the/acceptance/runner.json
+```
+
+The inspector does not change the report or VM state. Keep the JSON private;
+share only the reported RAM components and check names/results.
+
 ### Bounded nested-VM gate
 
 Run the full automated gate in one command. The child profile name is generated
@@ -152,15 +166,24 @@ into the report. The nested command streams provisioning diagnostics to the
 terminal and leaves native VM failure logs in the child profile; preserve and
 redact those separately before sharing.
 
-After child startup, readiness has an overall 180-second SSH deadline plus
-per-command deadlines: 30 seconds for `cloud-init status`, 30 seconds for
-`lab-vm context --json`, and 10 seconds for `findmnt /workspace`. Each
-sub-command timeout is returned as a structured failed stage; completed probes
-also include named check results. If SSH or remote script startup fails before
-a structured response, the report records its return code and that stderr was
-present without copying raw stderr. The depth-cap probe has a 120-second
-deadline, and outer continuity has a 30-second deadline; the runner prints a
-marker before each. Timeouts fail the gate and preserve the child profile.
+Once the outer guest starts the remote phase, it prints timestamped progress
+markers for runtime overlay setup, child `lab-vm up`, SSH control-state checks,
+each child readiness probe, depth-cap refusal, and outer-session continuity.
+Markers are streamed to the terminal and persisted incrementally in the private
+report. If no remote output arrives for 30 seconds, the host runner records and
+prints a silence heartbeat with the last-known stage and elapsed time. Ordinary
+provisioning output continues to stream and is not copied into the JSON report.
+
+After child startup, readiness uses separate bounded SSH commands: 30 seconds
+for `cloud-init status`, 30 seconds for `lab-vm context --json`, 10 seconds for
+`findmnt /workspace`, and 10 seconds for the workspace-state boundary probe.
+Each stage emits start/completion or timeout progress; the structured summary
+records return codes, stderr-presence booleans, and named readiness checks, not
+raw command output. The depth-cap probe has a 120-second deadline, and outer
+continuity has a 30-second deadline. Timeouts fail the gate and preserve the
+child profile. The child `lab-vm up` stage is visible through streamed output
+and heartbeats; these do not imply that stage passed until its completion event
+and return code are recorded.
 Ctrl-C exits the acceptance runner (typically status 130) and closes its local
 SSH client; it does not stop or clean the nested VM. An interrupted run is not
 a pass and must not be retried with the same child profile.

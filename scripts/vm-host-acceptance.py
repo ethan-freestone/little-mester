@@ -24,7 +24,10 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import uuid
+from queue import Empty, Queue
+from threading import Thread
 
 ROOT = Path(__file__).resolve().parents[1]
 LAB_VM = ROOT / "lab-vm"
@@ -33,6 +36,17 @@ DEFAULT_OUTER_PROFILE = "launcher-smoke"
 DEFAULT_SNAPSHOT = Path.home() / ".cache/lab-vm-recursion/initial-launcher-smoke/workspace"
 PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 VERSION_RE = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
+REMOTE_PROGRESS_MARKER = "__LM_VM_ACCEPTANCE_PROGRESS__"
+REMOTE_PROGRESS_STAGES = {
+    "remote_script", "runtime_overlay", "child_vm_up", "child_control_state",
+    "child_cloud_init_status", "child_context", "child_findmnt",
+    "child_workspace_boundary", "child_readiness", "depth_cap_refusal",
+    "outer_continuity", "outer_ssh_startup", "cloud-init status",
+    "lab-vm context --json", "findmnt /workspace",
+    "child SSH or remote readiness probe",
+    "child SSH transport or remote script startup",
+}
+REMOTE_PROGRESS_STATUSES = {"started", "completed", "failed", "timed_out", "waiting", "interrupted"}
 
 
 class AcceptanceError(RuntimeError):
@@ -778,9 +792,50 @@ result["missing_tools"] = sorted(name for name, available in result["tools"].ite
 result["checks"]["tools"] = all(result["tools"].values())
 budget = command([sys.executable, "scripts/vm_memory_budget.py", "--requested-mib", "4096", "--reserve-mib", "512"])
 budget_text = budget.stdout + " " + budget.stderr
-match = re.search(r"MemAvailable=(\d+) MiB, cgroup remaining=([^,]+), releasable QEMU RSS=(\d+) MiB, projected=(\d+) MiB", budget_text)
-result["memory_budget"] = {"requested_mib": 4096, "reserve_mib": 512, "available_mib": int(match.group(4)) if match else None}
-result["checks"]["memory_budget"] = budget.returncode == 0
+match = re.search(
+    r"MemAvailable=(\d+) MiB, cgroup remaining=(unlimited|\d+ MiB), "
+    r"releasable QEMU RSS=(\d+) MiB, projected=(\d+) MiB, "
+    r"requested=(\d+) MiB \+ reserve=(\d+) MiB",
+    budget_text,
+)
+if match:
+    cgroup_remaining = match.group(2)
+    cgroup_remaining_mib = None if cgroup_remaining == "unlimited" else int(cgroup_remaining.split()[0])
+    projected_mib = int(match.group(4))
+    error_category = None if budget.returncode == 0 else "insufficient_memory_budget"
+    memory_budget = {
+        "memavailable_mib": int(match.group(1)),
+        "cgroup_remaining": cgroup_remaining,
+        "cgroup_remaining_mib": cgroup_remaining_mib,
+        "releasable_qemu_rss_mib": int(match.group(3)),
+        "projected_available_mib": projected_mib,
+        "available_mib": projected_mib,
+        "requested_mib": int(match.group(5)),
+        "reserve_mib": int(match.group(6)),
+        "measurement_parsed": True,
+        "command_returncode": budget.returncode,
+        "stderr_present": bool(budget.stderr),
+        "error_category": error_category,
+    }
+else:
+    error_category = "memory_budget_measurement_unavailable" if budget.returncode == 2 else "memory_budget_output_unparseable"
+    memory_budget = {
+        "memavailable_mib": None,
+        "cgroup_remaining": "unavailable",
+        "cgroup_remaining_mib": None,
+        "releasable_qemu_rss_mib": None,
+        "projected_available_mib": None,
+        "available_mib": None,
+        "requested_mib": 4096,
+        "reserve_mib": 512,
+        "measurement_parsed": False,
+        "command_returncode": budget.returncode,
+        "stdout_present": bool(budget.stdout),
+        "stderr_present": bool(budget.stderr),
+        "error_category": error_category,
+    }
+result["memory_budget"] = memory_budget
+result["checks"]["memory_budget"] = budget.returncode == 0 and memory_budget["measurement_parsed"]
 print(json.dumps(result, sort_keys=True))
 sys.exit(0 if all(result["checks"].values()) else 2)
 '''
@@ -865,9 +920,14 @@ sessions = pathlib.Path.home() / ".cache/lab-vm-recursion"
 session, vm_dir = sessions / profile, sessions / profile / "vm"
 source_overlay_payload = json.loads(SOURCE_OVERLAY_PAYLOAD_JSON)
 summary = {"profile": profile, "probe": probe, "checks": {}, "child": {}, "depth_limit": {}}
+def progress(stage, status="started", **fields):
+    event = {"stage": stage, "status": status}
+    event.update(fields)
+    print("__LM_VM_ACCEPTANCE_PROGRESS__" + json.dumps(event, sort_keys=True), flush=True)
 def emit(code):
     print("__LM_VM_ACCEPTANCE__" + json.dumps(summary, sort_keys=True), flush=True)
     raise SystemExit(code)
+progress("remote_script", "started")
 if session.exists() or session.is_symlink():
     summary["checks"]["fresh_profile"] = False
     summary["failure"] = "child profile already exists"
@@ -879,6 +939,7 @@ if workspace_path == state_path or workspace_path in state_path.parents or state
     emit(2)
 summary["checks"]["state_boundary"] = True
 summary["checks"]["fresh_profile"] = True
+progress("runtime_overlay", "started")
 def stage_runtime_overlay():
     if not source_overlay_payload:
         return root
@@ -947,11 +1008,13 @@ def populate_runtime_overlay(stage):
 try:
     launcher_root = stage_runtime_overlay()
 except (OSError, ValueError, KeyError, TypeError) as exc:
+    progress("runtime_overlay", "failed", error_type=type(exc).__name__)
     summary["checks"]["runtime_source_overlay"] = False
     summary["failure"] = "verified runtime sources could not be staged safely; no child VM was started"
     summary["source_overlay_error"] = type(exc).__name__
     emit(2)
 summary["checks"]["runtime_source_overlay"] = True
+progress("runtime_overlay", "completed", private_overlay=launcher_root != root)
 if launcher_root != root:
     print("Using a private /tmp runtime source overlay; the active /workspace snapshot is unchanged.", flush=True)
     summary["runtime_source_overlay_path"] = str(launcher_root)
@@ -968,53 +1031,76 @@ parent_proxy = "http://10.0.2.100:3128"
 env.update({key: parent_proxy for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")})
 env.update({key: "localhost,127.0.0.1,10.0.2.100" for key in ("NO_PROXY", "no_proxy")})
 print("Starting one new nested child; no model/TUI or teardown will run.", flush=True)
+progress("child_vm_up", "started")
 up = subprocess.run([str(launcher_root / "lab-vm"), "-d", "up", profile, "--workspace", "/workspace", "--recurse"], cwd=launcher_root, env=env, check=False)
+progress("child_vm_up", "completed", returncode=up.returncode)
 summary["checks"]["child_up"] = up.returncode == 0
 if up.returncode != 0:
     summary["failure"] = "child up failed; preserve the profile and its logs"
     emit(3)
+progress("child_control_state", "started")
 if not vm_dir.is_dir() or vm_dir.is_symlink():
+    progress("child_control_state", "failed", reason="profile_state_missing_or_unsafe")
     summary["checks"]["child_state"] = False
     summary["failure"] = "child profile state is absent or unsafe"
     emit(4)
 summary["checks"]["child_state"] = True
+progress("child_control_state", "completed")
 port_file, key_file, known_file = vm_dir / "ssh_port", vm_dir / "id_vm_control", vm_dir / "known_hosts"
 if any(p.is_symlink() or not p.is_file() for p in (port_file, key_file, known_file)):
+    progress("child_control_state", "failed", reason="ssh_controls_missing_or_unsafe")
     summary["failure"] = "child SSH control files are missing or unsafe"
     emit(5)
 try:
     port = int(port_file.read_text(encoding="ascii").strip())
 except (OSError, ValueError):
+    progress("child_control_state", "failed", reason="ssh_port_invalid")
     summary["failure"] = "child SSH port metadata is invalid"
     emit(5)
 if not 1 <= port <= 65535:
+    progress("child_control_state", "failed", reason="ssh_port_out_of_range")
     summary["failure"] = "child SSH port metadata is out of range"
     emit(5)
 ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "StrictHostKeyChecking=yes",
        "-o", "UserKnownHostsFile=" + str(known_file), "-i", str(key_file), "-p", str(port), "mester@127.0.0.1"]
-child_probe = r'''import json, pathlib, subprocess, sys
-def run(stage, args, timeout):
+def run_child_stage(stage, remote, timeout, input_text=None):
+    progress(stage, "started", timeout_seconds=timeout)
     try:
-        return subprocess.run(args, cwd="/workspace", text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=timeout)
+        result = subprocess.run(ssh + [remote], input=input_text, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL if input_text is None else None,
+            check=False, timeout=timeout)
     except subprocess.TimeoutExpired:
-        print(json.dumps({"result": "timed out", "failed_stage": stage,
-            "timeout_seconds": timeout}, sort_keys=True), flush=True)
-        raise SystemExit(20)
+        progress(stage, "timed_out", timeout_seconds=timeout)
+        summary["checks"]["child_acceptance"] = False
+        summary["child"] = {"result": "timed out", "failed_stage": stage,
+            "timeout_seconds": timeout}
+        summary["failure"] = "child readiness subcommand timed out; preserve the child VM and diagnostics"
+        emit(6)
+    progress(stage, "completed", returncode=result.returncode,
+        stderr_present=bool(result.stderr))
+    return result
 def obj(text):
     try:
         value = json.loads(text)
     except json.JSONDecodeError:
         return None
     return value if isinstance(value, dict) else None
-cloud_run = run("cloud-init status", ["sudo", "-n", "cloud-init", "status", "--format", "json"], 30)
+print("Checking child readiness: cloud-init 30s, context 30s, findmnt 10s, workspace boundary 10s.", flush=True)
+cloud_run = run_child_stage("child_cloud_init_status", "sudo -n cloud-init status --format json", 30)
 cloud = obj(cloud_run.stdout)
-context_run = run("lab-vm context --json", ["./lab-vm", "context", "--json"], 30)
+context_run = run_child_stage("child_context", "cd /workspace && ./lab-vm context --json", 30)
 context = obj(context_run.stdout)
-mount = run("findmnt /workspace", ["findmnt", "-n", "-o", "FSTYPE", "--target", "/workspace"], 10)
+mount = run_child_stage("child_findmnt", "findmnt -n -o FSTYPE --target /workspace", 10)
 fstype = mount.stdout.strip() if mount.returncode == 0 else ""
-summary = {"cloud_status": cloud.get("status") if cloud else None,
+workspace_probe = r'''import json, pathlib
+paths = (pathlib.Path("/workspace/.mester"), pathlib.Path("/workspace/.workspace/.mester"))
+print(json.dumps({"host_state_excluded": not any(p.exists() or p.is_symlink() for p in paths)}, sort_keys=True))
+'''
+boundary = run_child_stage("child_workspace_boundary", "cd /workspace && python3 -", 10, workspace_probe)
+boundary_data = obj(boundary.stdout)
+child_summary = {"cloud_status": cloud.get("status") if cloud else None,
  "cloud_extended_status": cloud.get("extended_status") if cloud else None,
  "cloud_errors_empty": cloud is not None and isinstance(cloud.get("errors"), list) and not cloud["errors"],
  "cloud_recoverable_errors_empty": cloud is not None and isinstance(cloud.get("recoverable_errors"), dict) and not cloud["recoverable_errors"],
@@ -1025,56 +1111,33 @@ summary = {"cloud_status": cloud.get("status") if cloud else None,
  "max_depth": (context or {}).get("recursion", {}).get("max_depth"),
  "child_depth_available": (context or {}).get("recursion", {}).get("child_depth_available"),
  "nested_kvm_ready": (context or {}).get("kvm", {}).get("nested_kvm_preflight_ready"),
-  "workspace_fstype": fstype,
-  "host_state_excluded": not pathlib.Path("/workspace/.mester").exists() and not pathlib.Path("/workspace/.mester").is_symlink() and not pathlib.Path("/workspace/.workspace/.mester").exists() and not pathlib.Path("/workspace/.workspace/.mester").is_symlink()}
+ "workspace_fstype": fstype,
+ "host_state_excluded": (boundary_data or {}).get("host_state_excluded") is True,
+ "probe_stages": {
+  "child_cloud_init_status": {"returncode": cloud_run.returncode, "stderr_present": bool(cloud_run.stderr)},
+  "child_context": {"returncode": context_run.returncode, "stderr_present": bool(context_run.stderr)},
+  "child_findmnt": {"returncode": mount.returncode, "stderr_present": bool(mount.stderr)},
+  "child_workspace_boundary": {"returncode": boundary.returncode, "stderr_present": bool(boundary.stderr)}}}
 checks = {
- "cloud_command_ok": summary["cloud_command_ok"],
- "cloud_status_done": summary["cloud_status"] == "done",
- "cloud_extended_status_done": summary["cloud_extended_status"] == "done",
- "cloud_errors_empty": summary["cloud_errors_empty"],
- "cloud_recoverable_errors_empty": summary["cloud_recoverable_errors_empty"],
- "context_command_ok": summary["context_command_ok"],
- "runtime_is_vm": summary["runtime_kind"] == "vm",
- "depth_is_1": summary["depth"] == 1,
- "max_depth_is_1": summary["max_depth"] == 1,
- "child_depth_unavailable": summary["child_depth_available"] is False,
- "nested_kvm_ready": summary["nested_kvm_ready"] is True,
+ "cloud_command_ok": child_summary["cloud_command_ok"],
+ "cloud_status_done": child_summary["cloud_status"] == "done",
+ "cloud_extended_status_done": child_summary["cloud_extended_status"] == "done",
+ "cloud_errors_empty": child_summary["cloud_errors_empty"],
+ "cloud_recoverable_errors_empty": child_summary["cloud_recoverable_errors_empty"],
+ "context_command_ok": child_summary["context_command_ok"],
+ "runtime_is_vm": child_summary["runtime_kind"] == "vm",
+ "depth_is_1": child_summary["depth"] == 1,
+ "max_depth_is_1": child_summary["max_depth"] == 1,
+ "child_depth_unavailable": child_summary["child_depth_available"] is False,
+ "nested_kvm_ready": child_summary["nested_kvm_ready"] is True,
  "workspace_is_virtiofs": "virtiofs" in fstype.lower(),
- "host_state_excluded": summary["host_state_excluded"]}
-summary["checks"] = checks
-print(json.dumps(summary, sort_keys=True))
-sys.exit(0 if all(checks.values()) else 10)
-'''
-print("Checking child SSH/cloud-init/context readiness (timeout: 180s).", flush=True)
-try:
-    child = subprocess.run(ssh + ["python3 -"], input=child_probe, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=180)
-except subprocess.TimeoutExpired:
-    summary["checks"]["child_acceptance"] = False
-    summary["child"] = {
-        "result": "timed out",
-        "failed_stage": "child SSH or remote readiness probe",
-        "timeout_seconds": 180,
-    }
-    summary["failure"] = "child SSH/remote readiness deadline expired; preserve the child VM and diagnostics"
-    emit(6)
-try:
-    child_summary = json.loads(child.stdout)
-except json.JSONDecodeError:
-    child_summary = None
-if isinstance(child_summary, dict):
-    child_summary["ssh_returncode"] = child.returncode
-    summary["child"] = child_summary
-else:
-    summary["child"] = {
-        "result": "no structured readiness response",
-        "failed_stage": "child SSH transport or remote script startup",
-        "ssh_returncode": child.returncode,
-        "ssh_stderr_present": bool(child.stderr),
-    }
-summary["checks"]["child_acceptance"] = child.returncode == 0 and isinstance(child_summary, dict)
+ "host_state_excluded": child_summary["host_state_excluded"]}
+child_summary["checks"] = checks
+summary["child"] = child_summary
+summary["checks"]["child_acceptance"] = all(checks.values())
+progress("child_readiness", "completed", passed=summary["checks"]["child_acceptance"])
 if not summary["checks"]["child_acceptance"]:
-    summary["failure"] = "child readiness check failed; inspect the structured stage/check result and preserve state"
+    summary["failure"] = "child readiness checks failed; preserve state and inspect named results"
     emit(6)
 overflow_probe = r'''import json, os, pathlib, subprocess, sys
 probe = sys.argv[1]
@@ -1096,11 +1159,13 @@ except subprocess.TimeoutExpired:
 print(json.dumps(summary, sort_keys=True))
 sys.exit(0 if summary["expected_refusal"] and not summary["state_created"] else 12)
 '''
+progress("depth_cap_refusal", "started", timeout_seconds=120)
 print("Checking depth-cap refusal before state creation (timeout: 120s).", flush=True)
 try:
     overflow = subprocess.run(ssh + ["python3 -", probe], input=overflow_probe, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=120)
 except subprocess.TimeoutExpired:
+    progress("depth_cap_refusal", "timed_out", timeout_seconds=120)
     summary["depth_limit"] = {"result": "timed out; preserve state and stop"}
     summary["checks"]["depth_limit_refused_before_state"] = False
     summary["failure"] = "depth-cap probe timed out; preserve any generated state and stop"
@@ -1111,14 +1176,18 @@ except json.JSONDecodeError:
     overflow_summary = None
 summary["depth_limit"] = overflow_summary if isinstance(overflow_summary, dict) else {"result": "unparseable"}
 summary["checks"]["depth_limit_refused_before_state"] = overflow.returncode == 0 and isinstance(overflow_summary, dict)
+progress("depth_cap_refusal", "completed", returncode=overflow.returncode,
+    passed=summary["checks"]["depth_limit_refused_before_state"])
 if not summary["checks"]["depth_limit_refused_before_state"]:
     summary["failure"] = "over-depth launch did not refuse before state; stop and preserve evidence"
     emit(8)
+progress("outer_continuity", "started", timeout_seconds=30)
 print("Checking outer-session continuity (timeout: 30s).", flush=True)
 try:
     parent_run = subprocess.run([str(launcher_root / "lab-vm"), "context", "--json"], cwd=launcher_root,
         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=30)
 except subprocess.TimeoutExpired:
+    progress("outer_continuity", "timed_out", timeout_seconds=30)
     summary["checks"]["outer_session_usable"] = False
     summary["failure"] = "outer-session continuity probe timed out"
     emit(9)
@@ -1129,6 +1198,7 @@ except json.JSONDecodeError:
 recursion = parent.get("recursion", {}) if isinstance(parent, dict) else {}
 parent_ok = parent_run.returncode == 0 and recursion.get("depth") == 0 and recursion.get("max_depth") == 1 and recursion.get("child_depth_available") is True
 summary["checks"]["outer_session_usable"] = parent_ok
+progress("outer_continuity", "completed", returncode=parent_run.returncode, passed=parent_ok)
 if not parent_ok:
     summary["failure"] = "outer session context changed or became unavailable"
     emit(9)
@@ -1242,6 +1312,22 @@ def outer_guest_preflight(vm_dir: Path, evidence: Evidence) -> bool:
         elif name == "tools" and isinstance(tools, dict):
             missing = sorted(key for key, available in tools.items() if available is not True)
             detail = f"missing or unavailable: {', '.join(missing) or 'tool inventory incomplete'}; no child was started"
+        elif name == "memory_budget":
+            budget = parsed.get("memory_budget", {})
+            if not isinstance(budget, dict):
+                budget = {}
+            cgroup = budget.get("cgroup_remaining", "unavailable")
+            detail = (
+                f"{budget.get('error_category', 'memory_budget_failed')}; "
+                f"MemAvailable={budget.get('memavailable_mib', 'unknown')} MiB, "
+                f"cgroup remaining={cgroup}, "
+                f"releasable QEMU RSS={budget.get('releasable_qemu_rss_mib', 'unknown')} MiB, "
+                f"projected={budget.get('projected_available_mib', 'unknown')} MiB, "
+                f"requested={budget.get('requested_mib', 'unknown')} MiB + "
+                f"reserve={budget.get('reserve_mib', 'unknown')} MiB, "
+                f"budget command rc={budget.get('command_returncode', 'unknown')}; "
+                "no child was started"
+            )
         else:
             detail = "failed; no child was started"
         evidence.check(f"outer guest {name}", passed, detail)
@@ -1313,6 +1399,60 @@ def terminate_local_ssh(process: subprocess.Popen[str]) -> None:
         process.wait()
 
 
+def parse_remote_progress(line: str) -> dict[str, object] | None:
+    if not line.startswith(REMOTE_PROGRESS_MARKER):
+        return None
+    try:
+        event = json.loads(line[len(REMOTE_PROGRESS_MARKER):])
+    except json.JSONDecodeError:
+        return {}
+    if (not isinstance(event, dict)
+            or event.get("stage") not in REMOTE_PROGRESS_STAGES
+            or event.get("status") not in REMOTE_PROGRESS_STATUSES):
+        return {}
+    safe: dict[str, object] = {"stage": event["stage"], "status": event["status"]}
+    for key in ("timeout_seconds", "returncode", "elapsed_seconds", "silence_seconds"):
+        value = event.get(key)
+        if type(value) is int and value >= 0:
+            safe[key] = value
+    for key in ("passed", "private_overlay", "stderr_present"):
+        value = event.get(key)
+        if isinstance(value, bool):
+            safe[key] = value
+    reason = event.get("reason")
+    if isinstance(reason, str) and reason in {
+        "profile_state_missing_or_unsafe", "ssh_controls_missing_or_unsafe",
+        "ssh_port_invalid", "ssh_port_out_of_range",
+    }:
+        safe["reason"] = reason
+    return safe
+
+
+def record_remote_progress(evidence: Evidence, event: dict[str, object]) -> None:
+    history = evidence.data.setdefault("nested_progress", [])
+    if not isinstance(history, list):
+        history = []
+        evidence.data["nested_progress"] = history
+    history.append({"observed_at": utc_now(), **event})
+    if len(history) > 120:
+        del history[:-120]
+    evidence.save()
+    details = []
+    for key, label in (
+        ("timeout_seconds", "timeout"), ("returncode", "rc"),
+        ("elapsed_seconds", "elapsed"), ("silence_seconds", "quiet"),
+        ("passed", "passed"), ("private_overlay", "private-overlay"),
+        ("stderr_present", "stderr-present"), ("reason", "reason"),
+    ):
+        if key in event:
+            value = event[key]
+            if key in ("timeout_seconds", "elapsed_seconds", "silence_seconds"):
+                value = f"{value}s"
+            details.append(f"{label}={value}")
+    suffix = " " + " ".join(details) if details else ""
+    print(f"PROGRESS {event['stage']}: {event['status']}{suffix}", flush=True)
+
+
 def run_nested_remote(
     vm_dir: Path,
     profile: str,
@@ -1345,8 +1485,44 @@ def run_nested_remote(
             pass
     marker = "__LM_VM_ACCEPTANCE__"
     summary: dict[str, object] | None = None
+    output_lines: Queue[str | None] = Queue()
+
+    def read_output() -> None:
+        assert process.stdout is not None
+        for output_line in process.stdout:
+            output_lines.put(output_line)
+        output_lines.put(None)
+
+    reader = Thread(target=read_output, daemon=True)
+    reader.start()
+    started = time.monotonic()
+    last_output = started
+    last_stage = "outer_ssh_startup"
     try:
-        for line in process.stdout:
+        while True:
+            try:
+                line = output_lines.get(timeout=30)
+            except Empty:
+                now = time.monotonic()
+                silence = int(now - last_output)
+                record_remote_progress(evidence, {
+                    "stage": last_stage,
+                    "status": "waiting",
+                    "elapsed_seconds": int(now - started),
+                    "silence_seconds": silence,
+                })
+                continue
+            if line is None:
+                break
+            last_output = time.monotonic()
+            event = parse_remote_progress(line)
+            if event is not None:
+                if event:
+                    last_stage = str(event["stage"])
+                    record_remote_progress(evidence, event)
+                else:
+                    print("Ignoring malformed remote progress event.", flush=True)
+                continue
             if line.startswith(marker):
                 try:
                     value = json.loads(line[len(marker):])
@@ -1359,6 +1535,11 @@ def run_nested_remote(
     except KeyboardInterrupt:
         # Interrupt only the local SSH client. The nested VM is intentionally
         # left running so its profile and diagnostics remain available.
+        record_remote_progress(evidence, {
+            "stage": last_stage,
+            "status": "interrupted",
+            "elapsed_seconds": int(time.monotonic() - started),
+        })
         terminate_local_ssh(process)
         raise
     return process.wait(), summary
@@ -1473,6 +1654,95 @@ def interrupted_processes() -> list[dict[str, str]]:
     return found
 
 
+def print_report_diagnostics(path: Path, report: dict[str, object]) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
+    print(f"Report: {path} (mode {mode:04o})")
+    if mode & 0o077:
+        print("WARNING: report permissions are broader than 0600; do not share the file.")
+    print(f"Started: {report.get('started_at', 'unknown')}")
+    print(f"Finished: {report.get('finished_at', 'not recorded')}")
+    print(f"Outcome: {report.get('outcome', 'interrupted or unfinished')}")
+    checks = report.get("checks", [])
+    if isinstance(checks, list) and checks:
+        print("Recorded checks:")
+        for item in checks:
+            if isinstance(item, dict):
+                print(f"  {item.get('result', 'UNKNOWN')}: {item.get('name', 'unnamed check')}")
+    else:
+        print("Recorded checks: none")
+
+    budget = report.get("nested_memory_budget")
+    if isinstance(budget, dict) and budget:
+        print("Outer guest memory budget:")
+        numeric_fields = (
+            ("memavailable_mib", "MemAvailable MiB"),
+            ("cgroup_remaining_mib", "cgroup remaining MiB"),
+            ("releasable_qemu_rss_mib", "releasable QEMU RSS MiB"),
+            ("projected_available_mib", "projected available MiB"),
+            ("available_mib", "available MiB"),
+            ("requested_mib", "requested MiB"),
+            ("reserve_mib", "reserve MiB"),
+            ("command_returncode", "command return code"),
+        )
+        for key, label in numeric_fields:
+            value = budget.get(key)
+            if type(value) is int:
+                print(f"  {label}: {value}")
+        cgroup = budget.get("cgroup_remaining")
+        if isinstance(cgroup, str) and re.fullmatch(r"(?:unlimited|unavailable|[0-9]+ MiB)", cgroup):
+            print(f"  cgroup remaining: {cgroup}")
+        category = budget.get("error_category")
+        if category in ("insufficient_memory_budget", "memory_budget_measurement_unavailable", "memory_budget_output_unparseable"):
+            print(f"  result: {category}")
+        if isinstance(budget.get("measurement_parsed"), bool):
+            print(f"  measurement parsed: {'yes' if budget['measurement_parsed'] else 'no'}")
+        if isinstance(budget.get("stderr_present"), bool):
+            print(f"  stderr present: {'yes' if budget['stderr_present'] else 'no'}")
+
+    progress = report.get("nested_progress")
+    if isinstance(progress, list) and progress:
+        print("Recent remote stage events:")
+        for event in progress[-12:]:
+            if not isinstance(event, dict):
+                continue
+            stage, status = event.get("stage"), event.get("status")
+            if not isinstance(stage, str) or stage not in REMOTE_PROGRESS_STAGES:
+                continue
+            if not isinstance(status, str) or status not in REMOTE_PROGRESS_STATUSES:
+                continue
+            fields = []
+            for key in ("returncode", "timeout_seconds", "elapsed_seconds", "silence_seconds"):
+                value = event.get(key)
+                if type(value) is int and value >= 0:
+                    fields.append(f"{key}={value}")
+            at = event.get("observed_at")
+            timestamp = at if isinstance(at, str) and re.fullmatch(r"[0-9T:+.-]+", at) else "time-unknown"
+            suffix = " " + " ".join(fields) if fields else ""
+            print(f"  {timestamp} {stage}: {status}{suffix}")
+
+    nested = report.get("nested_summary")
+    nested_checks = nested.get("checks") if isinstance(nested, dict) else None
+    if isinstance(nested_checks, dict):
+        print("Remote nested checks:")
+        for name, result in nested_checks.items():
+            if isinstance(name, str):
+                print(f"  {'PASS' if result is True else 'FAIL' if result is False else 'UNKNOWN'}: {name}")
+    child = nested.get("child") if isinstance(nested, dict) else None
+    if isinstance(child, dict):
+        stage = child.get("failed_stage")
+        if isinstance(stage, str) and stage in REMOTE_PROGRESS_STAGES:
+            print(f"Child readiness failed stage: {stage}")
+        result = child.get("result")
+        if result in ("timed out", "no structured readiness response"):
+            print(f"Child readiness result: {result}")
+        child_checks = child.get("checks")
+        if isinstance(child_checks, dict):
+            print("Child readiness checks:")
+            for name, result in child_checks.items():
+                if isinstance(name, str) and isinstance(result, bool):
+                    print(f"  {'PASS' if result else 'FAIL'}: {name}")
+
+
 def inspect_interrupted(profile: str, state_dir: Path | None = None) -> int:
     """Read a partial private report and local process state; never changes or kills anything."""
     if not PROFILE_RE.fullmatch(profile):
@@ -1498,52 +1768,7 @@ def inspect_interrupted(profile: str, state_dir: Path | None = None) -> int:
                 report_matches.append((metadata.st_mtime, path, report))
     if report_matches:
         _, path, report = max(report_matches, key=lambda item: item[0])
-        mode = stat.S_IMODE(path.stat().st_mode)
-        print(f"Report: {path} (mode {mode:04o})")
-        if mode & 0o077:
-            print("WARNING: report permissions are broader than 0600; do not share the file.")
-        print(f"Started: {report.get('started_at', 'unknown')}")
-        print(f"Finished: {report.get('finished_at', 'not recorded')}")
-        print(f"Outcome: {report.get('outcome', 'interrupted or unfinished')}")
-        checks = report.get("checks", [])
-        if isinstance(checks, list) and checks:
-            print("Recorded checks:")
-            for item in checks:
-                if isinstance(item, dict):
-                    print(f"  {item.get('result', 'UNKNOWN')}: {item.get('name', 'unnamed check')}")
-        else:
-            print("Recorded checks: none")
-        nested = report.get("nested_summary")
-        nested_checks = nested.get("checks") if isinstance(nested, dict) else None
-        if isinstance(nested_checks, dict):
-            print("Remote nested checks:")
-            for name, result in nested_checks.items():
-                print(f"  {'PASS' if result is True else 'FAIL' if result is False else 'UNKNOWN'}: {name}")
-        child = nested.get("child") if isinstance(nested, dict) else None
-        if isinstance(child, dict):
-            stages = {
-                "cloud-init status", "lab-vm context --json", "findmnt /workspace",
-                "child SSH or remote readiness probe",
-                "child SSH transport or remote script startup",
-            }
-            stage = child.get("failed_stage")
-            if isinstance(stage, str) and stage in stages:
-                print(f"Child readiness failed stage: {stage}")
-            result = child.get("result")
-            if result in ("timed out", "no structured readiness response"):
-                print(f"Child readiness result: {result}")
-            returncode = child.get("ssh_returncode")
-            if type(returncode) is int:
-                print(f"Child readiness SSH return code: {returncode}")
-            stderr_present = child.get("ssh_stderr_present")
-            if isinstance(stderr_present, bool):
-                print(f"Child readiness SSH stderr present: {'yes' if stderr_present else 'no'}")
-            child_checks = child.get("checks")
-            if isinstance(child_checks, dict):
-                print("Child readiness checks:")
-                for name, result in child_checks.items():
-                    if isinstance(result, bool):
-                        print(f"  {'PASS' if result else 'FAIL'}: {name}")
+        print_report_diagnostics(path, report)
     else:
         print("No matching partial/final report found for this child profile.")
 
@@ -1558,6 +1783,25 @@ def inspect_interrupted(profile: str, state_dir: Path | None = None) -> int:
     else:
         print("No matching local acceptance runner or outer-guest SSH process found.")
     print("Read-only inspection complete. No VM, process, report, or workspace state was changed.")
+    return 0
+
+
+def inspect_report(report_path: Path) -> int:
+    """Display allowlisted diagnostics from one private report, including preflight-only reports."""
+    try:
+        metadata = report_path.lstat()
+        if report_path.is_symlink() or not report_path.is_file() or metadata.st_uid != os.getuid():
+            print("Refusing report that is not a regular file owned by this user.", file=sys.stderr)
+            return 2
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        print(f"Could not read report: {type(exc).__name__}", file=sys.stderr)
+        return 2
+    if not isinstance(report, dict) or report.get("command") != "nested":
+        print("Report is not a nested acceptance report.", file=sys.stderr)
+        return 2
+    print_report_diagnostics(report_path, report)
+    print("Read-only report inspection complete; no state was changed.")
     return 0
 
 
@@ -1634,6 +1878,11 @@ def parser() -> argparse.ArgumentParser:
         help="read a nested run's private report and matching local processes without changing state",
     )
     inspect.add_argument("profile", help="child profile name from the interrupted nested run")
+    report = subs.add_parser(
+        "inspect-report",
+        help="read allowlisted diagnostics from one private nested report, including preflight-only runs",
+    )
+    report.add_argument("report", type=Path, help="path printed by the acceptance runner")
     observe = subs.add_parser("observe", help="record guided human TUI/auth/permission observations")
     observe.add_argument("--gate", choices=sorted(OBSERVATIONS), required=True)
     return root
@@ -1646,6 +1895,8 @@ def main(argv: list[str] | None = None) -> int:
             return observe_gate(args.gate)
         if args.command == "inspect-interrupted":
             return inspect_interrupted(args.profile)
+        if args.command == "inspect-report":
+            return inspect_report(args.report.expanduser())
         if args.command == "preflight":
             evidence = Evidence("preflight", "owner-host checks with safe snapshot reconciliation and non-destructive outer-profile bootstrap; no model services, agent, or teardown")
             ready, _ = run_preflight(evidence, args.outer_profile, args.snapshot.expanduser())
