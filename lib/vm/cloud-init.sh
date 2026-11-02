@@ -46,7 +46,7 @@ SUBIDS
 vm_cloud_init_user_data() {
   local vm_name="$1" uid="$2" gid="$3" ssh_pubkey="$4"
   local recursion_depth="${5:-0}" max_depth="${6:-0}"
-  local subid_script
+  local subid_script python_tools_script python_tools_content script_root
   [[ "$recursion_depth" =~ ^(0|[1-9][0-9]*)$ && "$max_depth" =~ ^(0|[1-9][0-9]*)$ ]] || {
     echo 'REFUSED: cloud-init recursion identity must use non-negative decimal values.' >&2
     return 1
@@ -56,6 +56,9 @@ vm_cloud_init_user_data() {
     return 1
   }
   subid_script="$(vm_cloud_init_subid_script)"
+  script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  python_tools_script="$(cat "$script_root/scripts/vm-python-tools.sh")"
+  python_tools_content="$(printf '%s\n' "$python_tools_script" | sed 's/^/      /')"
   cat <<USERDATA
 #cloud-config
 hostname: ${vm_name}
@@ -120,6 +123,11 @@ write_files:
     permissions: '0755'
     content: |
 $(printf '%s\n' "$subid_script" | sed 's/^/      /')
+  - path: /usr/local/sbin/mester-python-tools
+    owner: root:root
+    permissions: '0755'
+    content: |
+${python_tools_content}
   - path: /usr/local/sbin/mester-provision
     permissions: '0755'
     content: |
@@ -133,7 +141,8 @@ $(printf '%s\n' "$subid_script" | sed 's/^/      /')
       mountpoint -q /workspace || mount -t virtiofs workspace /workspace
       export DEBIAN_FRONTEND=noninteractive
       apt-get update
-      apt-get install -y ca-certificates curl uidmap dbus-user-session slirp4netns fuse-overlayfs kmod iptables
+      apt-get install -y ca-certificates curl uidmap dbus-user-session slirp4netns fuse-overlayfs kmod iptables python3-pip python3-venv
+      /usr/local/sbin/mester-python-tools install
       install -m 0755 -d /etc/apt/keyrings
       curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
       chmod a+r /etc/apt/keyrings/docker.asc

@@ -8,7 +8,7 @@
   "title": "VM provisioning and ./lab VM lifecycle",
   "objective": "CURRENT IMPLEMENTATION TRACK (2026-11-01): finish VM provisioning/lifecycle prerequisites for the VM-first release. The active guest reports persistent recursion policy depth 0/max 2 and usable KVM; detailed phase pointer is #35 tests.needed. Preserve the existing modified source and the owner's current VM; do not infer real child/lifecycle acceptance from local mocks.",
   "created_at": "2026-10-26T20:39:18.836Z",
-  "updated_at": "2026-11-02T18:49:56.601Z",
+  "updated_at": "2026-11-02T19:03:41.203Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -356,7 +356,10 @@
       "scripts/vm-host-acceptance.py: finite campaign with fail-closed gate coverage, isolated campaign state, separate recursion/auth-workload workspaces, depth-0→1→2 proof and depth-3 pre-state refusal.",
       "tests/test_vm_host_acceptance.py: campaign ordering/approval/cleanup, AC coverage classification, clean-source gate, permission argv/mode/version, auth method/version and generated shell regressions.",
       "docs/vm-host-acceptance.md: campaign budget, isolation, approvals, cleanup, and scoped non-claims.",
-      "scripts/vm-host-acceptance.py: combined Arch-derived distro/fallback validation condition to address Ruff SIM102 at line 2946."
+      "scripts/vm-host-acceptance.py: combined Arch-derived distro/fallback validation condition to address Ruff SIM102 at line 2946.",
+      "scripts/vm-python-tools.sh: managed pip/Ruff/uv bootstrap and read-only PyPI update check in a dedicated root-owned venv; refuses to replace unrelated /usr/local/bin tools.",
+      "lib/vm/cloud-init.sh: fresh-guest python3-pip/python3-venv dependencies and Python CLI toolchain setup.",
+      "scripts/vm-install-tools.sh and scripts/vm-update.sh: in-place install/refresh for the selected running guest; no VM reprovision or lifecycle operation."
     ],
     "cases": [
       "check_workspace rejects /",
@@ -578,7 +581,9 @@
       "2026-11-02 local-only 454d7ec: Python unittest discovery 144/144, Bats 179/179, docs consistency 115/115, ShellCheck/syntax/compile/diff checks passed. New regressions prove stale/missing snapshots and missing guest tools are refused without mutation. No owner-host command was run; the exact existing-child continuation remains pending after transfer.",
       "2026-11-02 owner-host evidence (report vm-acceptance-20261102T170658Z-1433884-be822256.json, private mode 0600; owner-provided transcript): `./scripts/vm-host-acceptance.py nested --outer-profile nested-8g-20261102094820 --reuse-child nested-accept-20261102124501-ee957d5c` passed. Existing-child readiness and workspace checks, outer/child QEMU and loopback-listener checks, guest network-boundary probes, depth-2 refusal before state, and outer continuity passed. Model availability was explicitly skipped. No VM was started/stopped and no cleanup was performed. This closes only the bounded existing-child continuation; full lifecycle, model/TUI, auth, permissions, workload, and release acceptance remain open. The initial `/scripts/...` typo was corrected by invoking the repo-relative `./scripts/...` path and did not affect the passing run.",
       "2026-11-02 local commit 8a8e26b; `python3 -m unittest discover -s tests` passed 156/156; Python compilation, generated shell `bash -n`, and `git diff --check` passed. Ticket-store validation passed. No owner-host campaign/action or broader acceptance was run; physical-host gates remain pending current #35/#41/#45/#50 handoff.",
-      "2026-11-02 local follow-up: `python3 -m unittest discover -s tests` passed 156/156; `python3 -m py_compile scripts/vm-host-acceptance.py` and `git diff --check` passed. Ruff could not be rerun in the coding workspace because pip/Ruff are not installed; the reported SIM102 condition was simplified."
+      "2026-11-02 local follow-up: `python3 -m unittest discover -s tests` passed 156/156; `python3 -m py_compile scripts/vm-host-acceptance.py` and `git diff --check` passed. Ruff could not be rerun in the coding workspace because pip/Ruff are not installed; the reported SIM102 condition was simplified.",
+      "2026-11-02 local-only Python toolchain update: `python3 -m unittest discover -s tests` passed 157/157; ShellCheck severity=error, Python compilation, cloud-init schema validation, documentation consistency 115/115, and `git diff --check` passed. No owner VM action or guest tool installation was performed.",
+      "2026-11-02 final local run after canonical symlink validation fix: complete Python unittest suite 157/157; ShellCheck severity=error across VM entry points/scripts, Python compilation, cloud-init schema validation and git diff check passed. No live VM action was run."
     ]
   },
   "priority": "major",

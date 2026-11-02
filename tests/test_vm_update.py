@@ -41,6 +41,8 @@ class VmUpdateTests(unittest.TestCase):
             "    helper_calls = sum('No interactive OpenCode TUI is attached' in json.loads(call)['stdin'] for call in calls)\n"
             "    if helper_calls == int(os.environ.get('SSH_TUI_FAIL_ON_CALL', '0')):\n"
             "        raise SystemExit(int(os.environ.get('SSH_TUI_STATUS', '3')))\n"
+            "elif latest['args'][-1].endswith('check'):\n"
+            "    print(os.environ.get('SSH_PYTHON_TOOLS_OUTPUT', 'CURRENT Python tools: pip, ruff, uv'))\n"
             "elif 'requested_opencode_version' in latest['stdin']:\n"
             "    print(os.environ.get('SSH_CHECK_OUTPUT', 'CURRENT OpenCode CLI 2.2.0'))\n"
             "    status = int(os.environ.get('SSH_CHECK_STATUS', '0'))\n"
@@ -58,12 +60,14 @@ class VmUpdateTests(unittest.TestCase):
             VM_YES="0",
         )
 
-    def run_updater(self, *args, yes=None, check_output=None):
+    def run_updater(self, *args, yes=None, check_output=None, python_tools_output=None):
         env = self.env.copy()
         if yes is not None:
             env["VM_YES"] = str(yes)
         if check_output is not None:
             env["SSH_CHECK_OUTPUT"] = check_output
+        if python_tools_output is not None:
+            env["SSH_PYTHON_TOOLS_OUTPUT"] = python_tools_output
         return subprocess.run(
             ["bash", str(UPDATER), "test-profile", *args],
             env=env,
@@ -83,13 +87,15 @@ class VmUpdateTests(unittest.TestCase):
         self.assertIn("No updates available", result.stdout)
         self.assertIn("Checking guest update availability", result.stdout)
         calls = self.ssh_calls()
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
         self.assertIn("find_interactive_tui", calls[0]["stdin"])
         check_script = calls[1]["stdin"]
         self.assertIn("targets=(\"$@\")", check_script)
         self.assertIn("requested_opencode_version=\"$2\"", check_script)
         self.assertNotIn("pgrep", check_script)
         self.assertIn("apt-get update -qq", check_script)
+        self.assertIn("pip list --outdated", calls[2]["stdin"])
+        self.assertEqual(calls[2]["args"][-1], "sudo bash -s -- check")
 
     def test_apt_candidate_parser_consumes_full_policy_output_under_pipefail(self):
         source = UPDATER.read_text()
@@ -155,11 +161,27 @@ printf '%s\n' "$candidate"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.ssh_calls()
-        self.assertEqual(len(calls), 4)
-        self.assertEqual(calls[3]["args"][-1], "sudo bash -s -- latest system")
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(calls[4]["args"][-1], "sudo bash -s -- latest system")
         self.assertIn("apt-get -s upgrade", calls[1]["stdin"])
-        self.assertIn("apt-get upgrade -y", calls[3]["stdin"])
-        self.assertIn("systemctl --user restart docker", calls[3]["stdin"])
+        self.assertIn("apt-get upgrade -y", calls[4]["stdin"])
+        self.assertIn("systemctl --user restart docker", calls[4]["stdin"])
+
+    def test_tools_update_refreshes_python_toolchain_only_when_reported_outdated(self):
+        result = self.run_updater(
+            "tools",
+            yes="1",
+            python_tools_output="UPDATE  Python tool ruff  0.17.2 -> 0.17.3",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Python developer tools (pip, Ruff, uv) installed/updated.", result.stdout)
+        calls = self.ssh_calls()
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(calls[2]["args"][-1], "sudo bash -s -- check")
+        self.assertEqual(calls[4]["args"][-1], "sudo bash -s -- latest tools")
+        self.assertEqual(calls[5]["args"][-1], "sudo bash -s -- install")
+        self.assertIn("pip ruff uv", calls[5]["stdin"])
+        self.assertIn("apt-get install -y python3-pip python3-venv", calls[5]["stdin"])
 
     def test_invalid_target_and_all_combination_refuse_before_ssh(self):
         result = self.run_updater("banana")

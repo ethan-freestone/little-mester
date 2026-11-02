@@ -47,6 +47,9 @@ source "$LAB_DIR/lib/vm/runner.sh"
 # shellcheck disable=SC1091
 source "$LAB_DIR/lib/vm/ssh.sh"
 
+python_tools_script="$LAB_DIR/scripts/vm-python-tools.sh"
+[[ -r "$python_tools_script" ]] || die 'The managed Python tool updater is missing.'
+
 vm_dir="$VM_DIR_BASE/$vm_name"
 [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
 status="$(vm_run_status "$vm_dir" 2>/dev/null)" || die "VM '$vm_name' is not running; start it with './lab-vm up $vm_name'."
@@ -197,6 +200,17 @@ if [[ -z "$check_output" ]]; then
   echo 'No update information was returned by the guest.' >&2
   exit 1
 fi
+
+python_tools_check=""
+if [[ " ${targets[*]} " == *' tools '* ]]; then
+  if python_tools_check="$(vm_ssh "$vm_dir" 'sudo bash -s -- check' <"$python_tools_script")"; then
+    check_output+=$'\n'"$python_tools_check"
+  else
+    check_status=$?
+    echo "ERROR: Python tool update check failed (SSH/guest status $check_status); no updates were applied." >&2
+    exit "$check_status"
+  fi
+fi
 printf '%s\n' "$check_output"
 
 if ! grep -q '^UPDATE  ' <<<"$check_output"; then
@@ -230,7 +244,7 @@ for target in "${targets[@]}"; do
       grep -q '^UPDATE  Little Mester config/plugins ' <<<"$check_output" && apply_targets+=(config)
       ;;
     tools)
-      grep -Eq '^UPDATE  (bats|shellcheck) ' <<<"$check_output" && apply_targets+=(tools)
+      grep -Eq '^UPDATE  (bats|shellcheck|Python tool)' <<<"$check_output" && apply_targets+=(tools)
       ;;
     docker)
       grep -Eq '^UPDATE  (docker-ce|docker-ce-cli|containerd.io|docker-compose-plugin|docker-buildx-plugin|docker-ce-rootless-extras) ' <<<"$check_output" && apply_targets+=(docker)
@@ -321,6 +335,11 @@ if [[ -f /var/run/reboot-required ]]; then
   echo 'NOTICE: guest packages were updated; Ubuntu reports that a VM reboot is required to finish applying some updates.'
 fi
 GUEST_UPDATE_APPLY
+fi
+
+if grep -q '^UPDATE  Python tool' <<<"$check_output"; then
+  vm_ssh "$vm_dir" 'sudo bash -s -- install' <"$python_tools_script"
+  echo 'Python developer tools (pip, Ruff, uv) installed/updated.'
 fi
 
 if grep -q '^UPDATE  Little Mester config/plugins ' <<<"$check_output"; then

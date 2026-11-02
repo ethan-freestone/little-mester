@@ -214,7 +214,7 @@ host-network changes are permitted to make it work. Manage the current host-to-g
     ./lab-vm context --json     # same information as machine-readable JSON
     ./lab-vm agent               # guest TUI; browser OAuth handoff is enabled by default
     ./lab-vm agent --no-browser-auth # skip the temporary host-browser bridge
-    ./lab-vm -d install-tools --name default --restart-opencode # install guest Bats/ShellCheck, then relaunch TUI
+    ./lab-vm -d install-tools --name default # install/refresh guest Bats, ShellCheck, pip, Ruff, and uv
     ./lab-vm update               # check managed tools/config, then confirm updates
     ./lab-vm update opencode      # check/update only OpenCode
     ./lab-vm update --all         # include guest OS packages and Docker Engine
@@ -222,16 +222,19 @@ host-network changes are permitted to make it work. Manage the current host-to-g
     ./lab-vm auth-forward default <port> # exact-port manual diagnostic fallback
 ```
 
-Exit the current TUI before `install-tools`. It updates packages in the selected running
-guest without reprovisioning or rebooting the VM; `--restart-opencode` starts a new TUI
-afterward. Use `--name <profile>` for a non-default guest, and `-v`/`-d` for verbose/debug
-diagnostics.
+Fresh guests include pip, Ruff, and uv in a dedicated Python virtual environment. Exit the
+current TUI before `install-tools`. It installs Bats/ShellCheck and refreshes pip, Ruff, and uv
+in the selected running guest without reprovisioning, rebooting, or replacing the VM; the
+optional `--restart-opencode` starts a new TUI afterward. Use `--name <profile>` for a
+non-default guest, and `-v`/`-d` for verbose/debug diagnostics.
 
 Fresh guests install the latest OpenCode CLI by default; ordinary `up` retains an already
 installed version. `update` checks first and asks before applying detected changes. Exit the
 TUI and any guest workloads first. A semantic-version `VM_OPENCODE_VERSION` pin is supported;
-`--all` also updates managed OS/Docker packages and refuses to proceed while guest containers
-are running. Updates do not recreate the VM or replace guest credentials.
+`update tools` checks installed validation packages and the pip/Ruff/uv environment against
+current package-index versions. `--all` also updates managed OS/Docker packages and refuses
+to proceed while guest containers are running. Updates do not recreate the VM or replace guest
+credentials.
 
 `verify-isolation` requires an already-running VM; it does not start or modify it. It verifies
 the live QEMU process uses `restrict=on`, the SSH host forward is loopback-only, and the four

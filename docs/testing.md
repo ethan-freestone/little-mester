@@ -147,12 +147,13 @@ isolation because its containers, networks, and volumes are shared with other wo
 - The **repo checkout is never the test target**. Tests run in a disposable workspace
   (`workspaces/test-<id>` or a fresh clone) so `--unsafe-recurse`, compose, and
   destructive lab cases cannot touch the developer's working tree.
-- Optional `bats` and `shellcheck` packages are installed into a running guest on demand with
-  `./lab-vm install-tools [--name <profile>]`; this is separate from base provisioning.
-  Exit the current TUI first, then add `--restart-opencode` to launch a fresh guest TUI after
-  installation. Checking those commands in the separate OpenCode execution runner does not
-  establish whether they exist in the guest.
-- `./lab-vm update` checks OpenCode, installed validation tools, and the guest config/plugins,
+- Fresh VM provisioning installs `pip`, Ruff, and uv into a dedicated Python virtual
+  environment. Optional `bats` and `shellcheck` packages, plus an in-place refresh of the Python
+  toolchain, are provided by `./lab-vm install-tools [--name <profile>]`. Exit the current TUI
+  first; this updates the running guest without replacing its overlay or rebooting it. Checking
+  tools in the separate OpenCode execution runner does not establish whether they exist in the
+  guest.
+- `./lab-vm update` checks OpenCode, installed validation tools and pip/Ruff/uv, and the guest config/plugins,
   then requests confirmation before applying changes. Use a target (for example `opencode`)
   to narrow the update; `--all` additionally upgrades guest OS packages and the managed Docker
   Engine. Updates happen in place and do not recreate the VM/base disk or replace guest auth.

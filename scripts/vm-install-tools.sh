@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Install optional developer validation tools into an existing VM guest.
-# This is intentionally separate from cloud-init/base VM provisioning.
+# Install/refresh validation tools in an existing guest without reprovisioning.
+# Bats/ShellCheck are optional; the Python CLI toolchain also matches base setup.
 set -euo pipefail
 
 LAB_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -46,12 +46,15 @@ for required_file in id_vm_control known_hosts ssh_port; do
 done
 
 [[ "${VM_DEBUG:-0}" =~ ^[0-9]+$ ]] || die 'VM_DEBUG must be a non-negative integer.'
-log "Installing Bats and ShellCheck into the running VM '$vm_name'."
-log_verbose "Guest package manager: apt; packages: bats shellcheck."
+python_tools_script="$LAB_DIR/scripts/vm-python-tools.sh"
+[[ -r "$python_tools_script" ]] || die 'The managed Python tool installer is missing.'
+log "Installing/updating Bats, ShellCheck, pip, Ruff, and uv in the running VM '$vm_name'."
+log_verbose "Guest package manager: apt; Python CLI tools use a dedicated virtual environment."
 log_debug "VM profile directory: $vm_dir"
 log_debug "VM status: $status"
 
-vm_ssh "$vm_dir" "sudo bash -s -- '${VM_DEBUG:-0}'" <<'GUEST_INSTALL'
+{
+  cat <<'GUEST_INSTALL'
 set -euo pipefail
 debug_level="$1"
 if (( debug_level >= 1 )); then
@@ -59,11 +62,16 @@ if (( debug_level >= 1 )); then
 fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y bats shellcheck
+apt-get install -y bats shellcheck python3-pip python3-venv
+shift
+GUEST_INSTALL
+  cat "$python_tools_script"
+  cat <<'GUEST_VERIFY'
 printf 'Bats: '
 bats --version
 printf 'ShellCheck: '
 shellcheck --version | sed -n '1,2p'
-GUEST_INSTALL
+GUEST_VERIFY
+} | vm_ssh "$vm_dir" "sudo bash -s -- '${VM_DEBUG:-0}' install"
 
-log "Bats and ShellCheck are installed and verified in VM '$vm_name'."
+log "Bats, ShellCheck, pip, Ruff, and uv are installed and verified in VM '$vm_name'."

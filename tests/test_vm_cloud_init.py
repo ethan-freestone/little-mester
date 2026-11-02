@@ -86,10 +86,10 @@ class CloudInitTests(unittest.TestCase):
 
     def test_generated_shell_scripts_parse(self):
         for name in ["/usr/local/sbin/mester-load-netfilter", "/usr/local/sbin/mester-configure-subids",
-                     "/usr/local/sbin/mester-provision"]:
+                     "/usr/local/sbin/mester-python-tools", "/usr/local/sbin/mester-provision"]:
             subprocess.run(["bash", "-n"], input=self.content(name), text=True, check=True)
 
-    def test_base_guest_provisioning_keeps_optional_validation_tools_out(self):
+    def test_base_guest_provisioning_includes_python_toolchain_but_keeps_validation_tools_optional(self):
         provision = self.content("/usr/local/sbin/mester-provision")
         package_installs = [
             line.lstrip().split() for line in provision.splitlines()
@@ -98,6 +98,12 @@ class CloudInitTests(unittest.TestCase):
         self.assertTrue(package_installs)
         self.assertFalse(any("bats" in packages for packages in package_installs))
         self.assertFalse(any("shellcheck" in packages for packages in package_installs))
+        self.assertTrue(any("python3-pip" in packages and "python3-venv" in packages for packages in package_installs))
+        self.assertIn("/usr/local/sbin/mester-python-tools install", provision)
+        python_tools = self.content("/usr/local/sbin/mester-python-tools")
+        self.assertIn("pip ruff uv", python_tools)
+        self.assertIn('link="/usr/local/bin/$tool"', python_tools)
+        self.assertIn("for tool in pip pip3 ruff uv", python_tools)
 
     def test_guest_user_gets_kvm_membership_without_recreating_base_group(self):
         # Top-level strings create groups; the Ubuntu base already has kvm.

@@ -57,21 +57,28 @@ class VmInstallToolsTests(unittest.TestCase):
     def test_installs_tools_only_in_the_selected_running_guest(self):
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Installing Bats and ShellCheck into the running VM 'test-profile'", result.stdout)
+        self.assertIn("Installing/updating Bats, ShellCheck, pip, Ruff, and uv in the running VM 'test-profile'", result.stdout)
         self.assertIn("[verbose] Guest package manager: apt", result.stdout)
         self.assertIn("[debug]", result.stdout)
 
         ssh_args = json.loads(self.args_capture.read_text())
         self.assertIn("22422", ssh_args)
         self.assertIn("mester@127.0.0.1", ssh_args)
-        self.assertIn("sudo bash -s -- '1'", ssh_args)
+        self.assertIn("sudo bash -s -- '1' install", ssh_args[-1])
 
         payload = self.stdin_capture.read_text()
         self.assertIn("apt-get update", payload)
-        self.assertIn("apt-get install -y bats shellcheck", payload)
+        self.assertIn("apt-get install -y bats shellcheck python3-pip python3-venv", payload)
+        self.assertIn("python3 -m venv", payload)
+        self.assertIn("pip ruff uv", payload)
+        self.assertIn('for tool in pip pip3 ruff uv', payload)
+        self.assertIn('link="/usr/local/bin/$tool"', payload)
         self.assertIn("bats --version", payload)
         self.assertIn("shellcheck --version", payload)
         self.assertIn("if (( debug_level >= 1 )); then", payload)
+        self.assertNotIn("reboot", payload)
+        self.assertNotIn("poweroff", payload)
+        self.assertNotIn("rm -rf", payload)
 
     def test_refuses_a_stopped_vm_without_ssh(self):
         (self.vm_dir / "qemu.pid").write_text("2147483647\n")
