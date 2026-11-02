@@ -47,10 +47,14 @@ manual review/confirmation step:
   private sibling backup. Rebuild is refused while a QEMU/virtiofsd process is
   exporting the snapshot; no live mount is changed.
 - The VM profile path is resolved with the same no-fallback environment-variable
-  semantics as `lib/vm/lifecycle.sh`. A single matching live outer profile is reused. If it
-  is missing, the runner checks an 8-GiB-plus-512-MiB RAM budget and provisions
-  it with recursion depth 0/max 1. Unusable existing profile state is left
-  untouched and a fresh unique profile is used instead.
+  semantics as `lib/vm/lifecycle.sh`. For `nested`, the runner uses only the
+  explicitly named outer profile: it reuses that exact live profile or creates
+  that profile if absent and the snapshot is not exported. It never substitutes
+  a different discovered profile; if another live profile exports the snapshot,
+  it blocks before guest SSH/bootstrap. The standalone `preflight` command may
+  still discover a single matching live outer. A new outer is checked against an
+  8-GiB-plus-512-MiB RAM budget and uses recursion depth 0/max 1. Existing
+  unusable state is left untouched.
 - Profile creation does not pass `--yes`, auto-install host packages, replace a
   bad base image, stop/down/clean a VM, or delete acceptance evidence. It has
   stdin closed so an unexpected prompt fails instead of waiting for manual

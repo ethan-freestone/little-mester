@@ -936,7 +936,8 @@ def memory_budget_ok(requested_mib: int, evidence: Evidence, label: str) -> bool
 
 
 def ensure_outer_profile(name: str, snapshot: Path, repo: Path, evidence: Evidence,
-                         *, allow_create: bool = True) -> tuple[str, Path] | None:
+                         *, allow_create: bool = True,
+                         allow_discovery: bool = True) -> tuple[str, Path] | None:
     """Reuse a matching live profile or provision a fresh non-destructive one.
 
     Existing incomplete, stopped, symlinked, or mismatched state is never
@@ -967,20 +968,26 @@ def ensure_outer_profile(name: str, snapshot: Path, repo: Path, evidence: Eviden
         )
         return None
 
-    discovered = discover_outer_profiles(snapshot, repo)
-    if len(discovered) == 1:
-        selected = discovered[0]
-        evidence.check("outer profile discovery", True, f"reused the single live safe profile {selected}")
-        return selected, profile_dir(selected, repo)
-    if len(discovered) > 1:
-        evidence.check("outer profile discovery", False, "multiple live profiles use the stable snapshot; no additional VM was started")
-        evidence.data["outer_profile_candidates"] = discovered
-        evidence.save()
-        return None
+    if allow_discovery:
+        discovered = discover_outer_profiles(snapshot, repo)
+        if len(discovered) == 1:
+            selected = discovered[0]
+            evidence.check("outer profile discovery", True, f"reused the single live safe profile {selected}")
+            return selected, profile_dir(selected, repo)
+        if len(discovered) > 1:
+            evidence.check("outer profile discovery", False, "multiple live profiles use the stable snapshot; no additional VM was started")
+            evidence.data["outer_profile_candidates"] = discovered
+            evidence.save()
+            return None
 
     active_users = active_snapshot_users(snapshot)
     if active_users:
-        evidence.check("outer profile discovery", False, "snapshot is exported by a VM whose profile cannot be verified; no additional VM was started")
+        detail = (
+            "stable snapshot is exported by a different live profile; the explicitly requested outer was not substituted"
+            if not allow_discovery else
+            "snapshot is exported by a VM whose profile cannot be verified; no additional VM was started"
+        )
+        evidence.check("outer profile discovery", False, detail)
         evidence.data["snapshot_export_processes"] = active_users
         evidence.save()
         return None
@@ -989,6 +996,12 @@ def ensure_outer_profile(name: str, snapshot: Path, repo: Path, evidence: Eviden
     if not lexists(requested) and not active_snapshot_users(requested):
         selected = name
         reason = "named profile is absent"
+    elif not allow_discovery:
+        evidence.check(
+            "outer profile selection", False,
+            "the explicitly requested outer profile already has unsafe or incomplete state; no alternate profile was selected",
+        )
+        return None
     else:
         selected = unique_profile_name(f"{name}-accept", repo)
         reason = "existing or unsafe profile state is preserved; using a fresh isolated profile"
@@ -2045,6 +2058,7 @@ def run_preflight(
     allow_active_source_overlay: bool = False,
     require_child_memory_budget: bool = True,
     allow_outer_create: bool = True,
+    allow_outer_discovery: bool = True,
     read_only: bool = False,
 ) -> tuple[bool, Path | None]:
     checkout_ok = repo.is_dir() and (repo / ".git").exists() and (repo / "lab-vm").is_file()
@@ -2076,7 +2090,11 @@ def run_preflight(
     selected_profile = outer_profile
     outer: Path | None = None
     if prerequisites_ready and snapshot_ok:
-        selected = ensure_outer_profile(outer_profile, snapshot, repo, evidence, allow_create=allow_outer_create)
+        selected = ensure_outer_profile(
+            outer_profile, snapshot, repo, evidence,
+            allow_create=allow_outer_create,
+            allow_discovery=allow_outer_discovery,
+        )
         if selected is not None:
             selected_profile, _directory = selected
             outer = outer_profile_checks(selected_profile, snapshot, repo, evidence)
@@ -2322,6 +2340,7 @@ def nested_gate(
         allow_active_source_overlay=True,
         require_child_memory_budget=not reuse_existing,
         allow_outer_create=not (require_existing_outer or reuse_existing),
+        allow_outer_discovery=False,
         read_only=reuse_existing,
     )
     if not ready or outer is None:

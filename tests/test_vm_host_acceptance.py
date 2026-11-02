@@ -577,6 +577,34 @@ class HostAcceptanceTests(unittest.TestCase):
             self.assertNotIn("stop", args)
             self.assertNotIn("down", args)
 
+    def test_exact_outer_request_never_reuses_a_different_live_snapshot_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "profiles"
+            base.mkdir(mode=0o700)
+            snapshot = Path(directory) / "snapshot"
+            snapshot.mkdir()
+            evidence = DummyEvidence(Path(directory) / "evidence")
+            with patch.dict(os.environ, {"VM_DIR_BASE": str(base)}), \
+                 patch.object(acceptance, "outer_profile_is_ready", return_value=False), \
+                 patch.object(
+                     acceptance, "discover_outer_profiles",
+                     side_effect=AssertionError("exact outer requests must not discover/reuse another profile"),
+                 ), \
+                 patch.object(acceptance, "active_snapshot_users", return_value=["4321"]), \
+                 patch.object(acceptance, "run", side_effect=AssertionError("must not start another profile")):
+                selected = acceptance.ensure_outer_profile(
+                    "nested-8g-fresh", snapshot, ROOT, evidence,
+                    allow_create=True, allow_discovery=False,
+                )
+
+        self.assertIsNone(selected)
+        discovery = next(
+            item for item in evidence.data["checks"] if item["name"] == "outer profile discovery"
+        )
+        self.assertEqual(discovery["result"], "FAIL")
+        self.assertIn("different live profile", discovery["detail"])
+        self.assertEqual(evidence.data["snapshot_export_processes"], ["4321"])
+
     def test_evidence_file_and_directory_are_private(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"XDG_STATE_HOME": directory}):
             evidence = acceptance.Evidence("test", "private report")
@@ -836,6 +864,7 @@ class HostAcceptanceTests(unittest.TestCase):
              redirect_stdout(io.StringIO()):
             result = acceptance.nested_gate(None, "launcher-smoke", Path("/snapshot"), ROOT)
         self.assertTrue(mock_preflight.call_args.kwargs["allow_active_source_overlay"])
+        self.assertFalse(mock_preflight.call_args.kwargs["allow_outer_discovery"])
         self.assertEqual(result, 3)
         outcomes = {check["name"]: check["result"] for check in evidence.data["checks"]}
         self.assertEqual(outcomes["child up"], "FAIL")
