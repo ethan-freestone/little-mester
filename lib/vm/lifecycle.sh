@@ -39,6 +39,184 @@ source "$LAB_DIR/lib/vm/ssh.sh"
 source "$LAB_DIR/lib/vm/runner.sh"
 source "$LAB_DIR/lib/vm/recursion.sh"
 
+_vm_auth_forward_validate_config() {
+  case "${VM_AUTH_FORWARD:-0}" in
+    0|1) return 0 ;;
+    *) echo 'REFUSED: VM_AUTH_FORWARD must be 0 or 1.' >&2; return 1 ;;
+  esac
+}
+
+_vm_auth_forward_enabled() {
+  [[ "${VM_AUTH_FORWARD:-0}" == 1 ]]
+}
+
+_vm_auth_escrow_resolve() {
+  local vm_dir="${1:-}" requested parent parent_real name default_path mode uid workspace repo resolved
+  uid="$(id -u)"
+  default_path="$VM_STATE_DIR/secrets/openai-auth.json"
+  requested="${VM_AUTH_ESCROW_FILE:-$default_path}"
+  [[ "$requested" == /* ]] || {
+    echo 'REFUSED: VM_AUTH_ESCROW_FILE must be an absolute path outside the workspace.' >&2
+    return 1
+  }
+  parent="$(dirname -- "$requested")"
+  name="$(basename -- "$requested")"
+  [[ -n "$name" && "$name" != . && "$name" != .. ]] || {
+    echo 'REFUSED: VM credential escrow path must name a regular file.' >&2
+    return 1
+  }
+  if [[ ! -e "$parent" ]]; then
+    [[ "$requested" == "$default_path" ]] || {
+      echo 'REFUSED: custom VM credential escrow directory does not exist.' >&2
+      return 1
+    }
+    [[ ! -L "$VM_STATE_DIR" ]] || {
+      echo 'REFUSED: VM state directory is a symlink; refusing credential escrow.' >&2
+      return 1
+    }
+    install -d -m 700 -- "$parent" || return 1
+  fi
+  [[ -d "$parent" && ! -L "$parent" ]] || {
+    echo 'REFUSED: VM credential escrow parent must be a real directory.' >&2
+    return 1
+  }
+  parent_real="$(realpath "$parent")" || return 1
+  [[ "$parent_real" == "$parent" ]] || {
+    echo 'REFUSED: VM credential escrow path must not traverse symlinked/non-canonical directories.' >&2
+    return 1
+  }
+  [[ "$(stat -c '%u' "$parent")" == "$uid" ]] || {
+    echo 'REFUSED: VM credential escrow directory is not owned by the current user.' >&2
+    return 1
+  }
+  mode="$(stat -c '%a' "$parent")" || return 1
+  (( (8#$mode & 077) == 0 )) || {
+    echo 'REFUSED: VM credential escrow directory must not be accessible by group or other users.' >&2
+    return 1
+  }
+  resolved="$parent_real/$name"
+  if [[ -e "$resolved" || -L "$resolved" ]]; then
+    [[ -f "$resolved" && ! -L "$resolved" ]] || {
+      echo 'REFUSED: VM credential escrow must be a regular file, not a symlink.' >&2
+      return 1
+    }
+    [[ "$(stat -c '%u' "$resolved")" == "$uid" ]] || {
+      echo 'REFUSED: VM credential escrow file is not owned by the current user.' >&2
+      return 1
+    }
+    mode="$(stat -c '%a' "$resolved")" || return 1
+    (( (8#$mode & 077) == 0 )) || {
+      echo 'REFUSED: VM credential escrow file must not be accessible by group or other users.' >&2
+      return 1
+    }
+  fi
+  if [[ -n "$vm_dir" && -f "$vm_dir/workspace" && ! -L "$vm_dir/workspace" ]]; then
+    workspace="$(realpath "$(cat "$vm_dir/workspace")" 2>/dev/null || true)"
+    repo="$(realpath "$LAB_DIR" 2>/dev/null || printf '%s' "$LAB_DIR")"
+    for resolved in "$workspace" "$repo"; do
+      [[ -n "$resolved" ]] || continue
+      [[ "$parent_real/$name" != "$resolved" && "$parent_real/$name" != "$resolved/"* ]] || {
+        echo 'REFUSED: VM credential escrow must be outside the selected workspace and Git checkout.' >&2
+        return 1
+      }
+    done
+  fi
+  VM_AUTH_ESCROW_PATH="$parent_real/$name"
+}
+
+_vm_auth_import_if_needed() {
+  local vm_dir="${1:?VM profile directory required}" marker marker_tmp
+  _vm_auth_forward_enabled || return 0
+  _vm_auth_forward_validate_config || return 1
+  _vm_auth_escrow_resolve "$vm_dir" || return 1
+  marker="$vm_dir/auth-forward-imported"
+  if [[ -e "$marker" || -L "$marker" ]]; then
+    [[ -f "$marker" && ! -L "$marker" && "$(stat -c '%u' "$marker")" == "$(id -u)" ]] || {
+      echo 'REFUSED: VM credential-import marker is unsafe; refusing to overwrite guest auth state.' >&2
+      return 1
+    }
+    return 0
+  fi
+  [[ -f "$VM_AUTH_ESCROW_PATH" && ! -L "$VM_AUTH_ESCROW_PATH" ]] || {
+    echo 'REFUSED: VM credential forwarding is enabled but the host escrow file is missing.' >&2
+    return 1
+  }
+  if ! vm_ssh "$vm_dir" 'opencode auth import' <"$VM_AUTH_ESCROW_PATH" >/dev/null 2>&1; then
+    echo 'Credential import failed; no credential contents were logged.' >&2
+    return 1
+  fi
+  marker_tmp="$(mktemp "$vm_dir/.auth-forward-imported.XXXXXX")" || return 1
+  (umask 077; printf 'v1\n' >"$marker_tmp") || { rm -f -- "$marker_tmp"; return 1; }
+  chmod 600 "$marker_tmp" && mv -f -- "$marker_tmp" "$marker" || {
+    rm -f -- "$marker_tmp"
+    echo 'Credential import succeeded but its private completion marker could not be saved.' >&2
+    return 1
+  }
+  echo 'Host credential escrow imported over the VM control channel; credential contents were not logged.'
+}
+
+_vm_auth_export_to_escrow() {
+  local vm_dir="${1:?VM profile directory required}" status temporary
+  _vm_auth_forward_validate_config || return 1
+  _vm_auth_forward_enabled || return 0
+  _vm_auth_escrow_resolve "$vm_dir" || return 1
+  status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status='stopped'
+  if [[ "$status" != running* && ! -e "$vm_dir/disk.qcow2" && ! -L "$vm_dir/disk.qcow2" ]]; then
+    echo 'No guest overlay remains; credential export is not needed for an already-removed profile.'
+    return 0
+  fi
+  [[ -f "$vm_dir/disk.qcow2" && ! -L "$vm_dir/disk.qcow2" ]] || {
+    echo 'REFUSED: VM overlay is missing or unsafe; refusing credential export or teardown.' >&2
+    return 1
+  }
+  [[ "$status" == running* ]] || {
+    echo 'REFUSED: credential escrow export requires the guest to be running; the VM overlay was preserved.' >&2
+    return 1
+  }
+  temporary="$(mktemp "${VM_AUTH_ESCROW_PATH%/*}/.opencode-auth.XXXXXX")" || return 1
+  chmod 600 "$temporary" || { rm -f -- "$temporary"; return 1; }
+  if ! vm_ssh "$vm_dir" 'opencode auth export openai' >"$temporary" 2>/dev/null; then
+    rm -f -- "$temporary"
+    echo 'Credential export failed; refusing destructive teardown and preserving the current escrow.' >&2
+    return 1
+  fi
+  if ! python3 - "$temporary" "$VM_AUTH_ESCROW_PATH" <<'PY'
+import json
+import os
+import stat
+import sys
+
+source, target = sys.argv[1:]
+try:
+    metadata = os.stat(source, follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+        raise ValueError("unsafe temporary export")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise ValueError("temporary export permissions are too broad")
+    with open(source, "r", encoding="utf-8") as stream:
+        payload = json.load(stream)
+    if not isinstance(payload, (dict, list)) or not payload:
+        raise ValueError("empty or unsupported export")
+    with open(source, "rb") as stream:
+        os.fsync(stream.fileno())
+    os.chmod(source, 0o600)
+    os.replace(source, target)
+    directory = os.open(os.path.dirname(target), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except Exception:
+    raise SystemExit(1)
+PY
+  then
+    rm -f -- "$temporary"
+    echo 'Credential export was empty, invalid, or could not be saved atomically; refusing destructive teardown.' >&2
+    return 1
+  fi
+  echo 'Refreshed credentials were atomically saved to the private host escrow; credential contents were not logged.'
+}
+
 # ─── Logging helpers (sourced from lab-vm's main script) ────────────
 # If log() is not defined by the caller, provide no-op stubs so
 # library files can safely call them without errors.
@@ -279,6 +457,7 @@ vm_cmd_up() {
   local vm_name="${1:-default}"
   local workspace="${2:-}"
   local vm_dir running_workspace virtiofsd_pid qemu_pid qemu_args status virtiofs_sock
+  _vm_auth_forward_validate_config || die 'Invalid credential-forwarding configuration.'
   vm_dir="$(_vm_resolve "$vm_name")"
   [[ ! -L "$vm_dir" ]] || die "VM profile directory must not be a symlink: $vm_dir"
 
@@ -392,6 +571,7 @@ vm_cmd_up() {
       vm_recursion_store_profile "$vm_dir"
       _vm_install_guest_recursion_identity "$vm_dir" || die 'Could not persist recursion identity inside the running guest.'
       _vm_install_guest_harness "$vm_dir"
+      _vm_auth_import_if_needed "$vm_dir" || die 'Host credential escrow could not be imported; guest auth state was preserved.'
       return 0
     fi
 
@@ -439,6 +619,7 @@ vm_cmd_up() {
   # Install the harness in the guest OS. Docker remains available for project
   # workloads; it is not the wrapper or security boundary around the agent.
   _vm_install_guest_harness "$vm_dir" || return $?
+  _vm_auth_import_if_needed "$vm_dir" || die 'Host credential escrow could not be imported; guest auth state was preserved.'
 
   VM_STARTING=0
 
@@ -1516,7 +1697,8 @@ vm_cmd_agent() {
   local cli_config cli_config_quoted
   cli_config='{"plugins":["/etc/opencode/plugins/little-mester-logo","/etc/opencode/plugins/host-metrics-tui","/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}'
   printf -v cli_config_quoted '%q' "$cli_config"
-  local remote_command browser_dir_quoted
+  local remote_command browser_dir_quoted agent_auto_args=''
+  [[ "${VM_AGENT_AUTO:-0}" == 1 ]] && agent_auto_args=' --auto'
   if [[ -n "${VM_BROWSER_BRIDGE_DIR:-}" ]]; then
     local browser_bridge_port_quoted browser_bridge_port_num
     [[ "${VM_BROWSER_BRIDGE_PORT:-}" =~ ^[0-9]+$ ]] || die 'Browser-auth session has no valid guest bridge port.'
@@ -1524,9 +1706,9 @@ vm_cmd_agent() {
     (( browser_bridge_port_num >= 1024 && browser_bridge_port_num <= 65535 )) || die 'Browser-auth session has no valid guest bridge port.'
     printf -v browser_dir_quoted '%q' "$VM_BROWSER_BRIDGE_DIR"
     printf -v browser_bridge_port_quoted '%q' "$browser_bridge_port_num"
-    remote_command="set -eu; browser_dir=$browser_dir_quoted; cleanup(){ rm -rf -- \"\$browser_dir\"; }; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' HUP TERM; export PATH=\"\$browser_dir:\$PATH\" VM_BROWSER_BRIDGE_TOKEN_FILE=\"\$browser_dir/token\" VM_BROWSER_BRIDGE_PORT=$browser_bridge_port_quoted $guest_recursion_env; cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=$metrics_url && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && opencode"
+    remote_command="set -eu; browser_dir=$browser_dir_quoted; cleanup(){ rm -rf -- \"\$browser_dir\"; }; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' HUP TERM; export PATH=\"\$browser_dir:\$PATH\" VM_BROWSER_BRIDGE_TOKEN_FILE=\"\$browser_dir/token\" VM_BROWSER_BRIDGE_PORT=$browser_bridge_port_quoted $guest_recursion_env; cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=$metrics_url && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && opencode$agent_auto_args"
   else
-    remote_command="cd /workspace && . /etc/profile.d/mester.sh && export $guest_recursion_env OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=$metrics_url && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && exec opencode"
+    remote_command="cd /workspace && . /etc/profile.d/mester.sh && export $guest_recursion_env OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=$metrics_url && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && exec opencode$agent_auto_args"
   fi
   ssh -t \
     -o BatchMode=yes -o ConnectTimeout=10 \
@@ -1606,6 +1788,77 @@ vm_cmd_recursion_clean() {
   echo "Recursive profile '$vm_name' and its disposable workspace/state were removed."
 }
 
+vm_cmd_suspend() {
+  local vm_name="${1:-default}" vm_dir asset
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" && ! -L "$vm_dir" ]] || die "No safe VM profile found for '$vm_name'."
+
+  # A profile configured to contain descendants cannot be powered off safely
+  # without first proving the child lifecycle. Refuse rather than orphaning or
+  # abruptly interrupting nested QEMU processes.
+  if [[ -e "$vm_dir/recursion_policy" || -L "$vm_dir/recursion_policy" ]]; then
+    vm_recursion_load_profile "$vm_dir" || die 'Could not verify recursion policy; refusing to suspend.'
+    [[ "${VM_AGENT_RECURSION_STATE_POSSIBLE:-1}" == 0 ]] || die \
+      'This profile may contain nested VM state; stop its child VMs explicitly before suspending the parent.'
+  fi
+
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do
+    [[ -f "$vm_dir/$asset" && ! -L "$vm_dir/$asset" ]] || die \
+      "Cannot safely suspend '$vm_name': required profile state is missing or unsafe ($asset)."
+  done
+
+  local status
+  status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status='stopped'
+  if [[ "$status" != running* ]]; then
+    echo "VM '$vm_name' is already suspended; overlay and guest state are preserved."
+    return 0
+  fi
+
+  echo "=== VM Suspend: $vm_name ==="
+  _vm_shutdown_for_workspace_switch "$vm_dir" 'suspending the VM' || return 1
+  status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status='stopped'
+  [[ "$status" != running* ]] || die \
+    "Guest shutdown helper returned while VM '$vm_name' is still running; profile state was preserved."
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do
+    [[ -f "$vm_dir/$asset" && ! -L "$vm_dir/$asset" ]] || die \
+      "VM stopped but required profile state changed during suspension ($asset); inspect before resuming."
+  done
+  echo "VM '$vm_name' suspended. Overlay, guest workloads, workspace selection, seed, and SSH identity were preserved."
+  echo "Resume with: ./lab-vm resume $vm_name"
+}
+
+vm_cmd_resume() {
+  local vm_name="${1:-default}" vm_dir status workspace
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" && ! -L "$vm_dir" ]] || die "No suspended VM profile found for '$vm_name'."
+  status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status='stopped'
+  if [[ "$status" == running* ]]; then
+    echo "VM '$vm_name' is already running; no restart was needed."
+    return 0
+  fi
+  [[ -f "$vm_dir/disk.qcow2" && ! -L "$vm_dir/disk.qcow2" ]] || die \
+    "VM '$vm_name' has no preserved overlay; use ./lab-vm up to provision it, not resume."
+  [[ -f "$vm_dir/workspace" && ! -L "$vm_dir/workspace" ]] || die \
+    "VM '$vm_name' has no safe recorded workspace; refusing to choose a replacement implicitly."
+  workspace="$(cat "$vm_dir/workspace")"
+  [[ "$workspace" == /* && -d "$workspace" && ! -L "$workspace" ]] || die \
+    "VM '$vm_name' recorded workspace is unavailable or unsafe; refusing to resume."
+
+  vm_recursion_load_profile "$vm_dir" || die 'Could not read the persisted recursion policy; refusing to resume.'
+  VM_GUEST_RECURSION_DEPTH="$VM_AGENT_RECURSION_DEPTH"
+  VM_EFFECTIVE_MAX_DEPTH="$VM_AGENT_MAX_DEPTH"
+  vm_recursion_validate_workspace "$workspace" "$LAB_DIR" || die 'Recorded workspace is incompatible with the current recursion policy.'
+  if (( VM_AGENT_RECURSION_DEPTH > 0 )); then
+    vm_recursion_require_nested_kvm || die 'Nested KVM is unavailable; suspended child profile was preserved.'
+  fi
+
+  echo "Resuming VM '$vm_name' on its recorded workspace and preserved overlay."
+  # vm_cmd_up repeats workspace, memory-budget, profile and QEMU validation.
+  # No caller-selected replacement is accepted; the persisted workspace is the
+  # only mount used for this resume.
+  vm_cmd_up "$vm_name" "$workspace"
+}
+
 vm_cmd_down() {
   local vm_name="${1:-default}"
   local vm_dir
@@ -1617,6 +1870,8 @@ vm_cmd_down() {
   fi
 
   vm_recursion_require_discard_ack "$vm_dir" || return 1
+
+  _vm_auth_export_to_escrow "$vm_dir" || return $?
 
   echo "=== VM Down: $vm_name ==="
 
@@ -1638,6 +1893,7 @@ vm_cmd_down() {
   # The persisted policy belongs to this discarded overlay; a later up will
   # write a fresh policy before starting the VM.
   vm_recursion_clear_profile "$vm_dir" || return 1
+  rm -f -- "$vm_dir/auth-forward-imported"
 
   echo "VM '$vm_name' removed. Base disk preserved for next VM."
 }
@@ -1651,6 +1907,11 @@ vm_cmd_stop() {
   # Refuse before tearing down guest workloads; down repeats the guard before
   # deleting the overlay in case it is called independently.
   vm_recursion_require_discard_ack "$vm_dir" || return 1
+
+  # The first export must happen before guest Docker volumes/workloads are
+  # removed. vm_cmd_down performs a second current-state export before it
+  # deletes the overlay; either failure leaves the overlay available.
+  _vm_auth_export_to_escrow "$vm_dir" || return $?
 
   echo "=== VM Stop: $vm_name ==="
 

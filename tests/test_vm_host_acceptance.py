@@ -15,8 +15,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
-from unittest.mock import patch
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from unittest.mock import call, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -218,6 +218,41 @@ class HostAcceptanceTests(unittest.TestCase):
                 self.assertFalse(acceptance.snapshot_checks(snapshot, preflight_evidence, checkout))
             for relative in acceptance.SNAPSHOT_FILES:
                 self.assertEqual((snapshot / relative).read_bytes(), before[relative])
+
+    def test_read_only_snapshot_preflight_refuses_rebuild_and_source_sync(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            checkout = base / "checkout"
+            snapshot = base / ".cache/lab-vm-recursion/initial-launcher-smoke/workspace"
+            create_snapshot_source_parents(checkout, snapshot)
+            for relative in acceptance.SNAPSHOT_FILES:
+                (checkout / relative).write_text(f"current:{relative}")
+                (snapshot / relative).write_text(f"old:{relative}")
+            before = {relative: (snapshot / relative).read_bytes() for relative in acceptance.SNAPSHOT_FILES}
+            evidence = DummyEvidence(base / "evidence")
+            with patch.object(acceptance, "DEFAULT_SNAPSHOT", snapshot), \
+                 patch.object(acceptance, "active_snapshot_users", return_value=[]), \
+                 patch.object(acceptance, "sync_snapshot_sources", side_effect=AssertionError("source sync is forbidden")), \
+                 patch.object(acceptance, "rebuild_safe_snapshot", side_effect=AssertionError("snapshot rebuild is forbidden")):
+                self.assertFalse(acceptance.snapshot_checks(
+                    snapshot, evidence, checkout,
+                    allow_active_source_overlay=True, allow_repair=False,
+                ))
+            self.assertEqual(
+                next(item for item in evidence.data["checks"] if item["name"] == "snapshot source repair")["result"],
+                "FAIL",
+            )
+            for relative in acceptance.SNAPSHOT_FILES:
+                self.assertEqual((snapshot / relative).read_bytes(), before[relative])
+
+            missing = base / "missing-snapshot"
+            missing_evidence = DummyEvidence(base / "missing-evidence")
+            with patch.object(acceptance, "DEFAULT_SNAPSHOT", missing), \
+                 patch.object(acceptance, "rebuild_safe_snapshot", side_effect=AssertionError("snapshot rebuild is forbidden")):
+                self.assertFalse(acceptance.snapshot_checks(
+                    missing, missing_evidence, checkout, allow_repair=False,
+                ))
+            self.assertFalse(missing.exists())
 
     def test_active_source_overlay_payload_is_allowlisted_and_hash_verified(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -475,6 +510,33 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertEqual(bootstrap["result"], "PASS")
         self.assertEqual(evidence.data["outer_guest_bootstrap_packages"], ["qemu-system-x86", "qemu-utils"])
 
+    def test_read_only_outer_guest_preflight_refuses_nested_tool_install(self):
+        payload = {
+            "context": {"runtime_kind": "vm", "depth": 0, "max_depth": 1,
+                        "child_depth_available": True, "device_present": True,
+                        "device_read_write": True, "nested_kvm_preflight_ready": True,
+                        "cpu_virtualization": ["svm"]},
+            "workspace_fstype": "virtiofs",
+            "checks": {"context_valid": True, "outer_guest": True, "nested_kvm": True,
+                        "workspace_root": True, "workspace_virtiofs": True,
+                        "host_state_excluded": True, "tools": False},
+            "tools": {"qemu-system-x86_64": False, "qemu-img": False},
+            "memory_budget": {},
+        }
+        evidence = DummyEvidence()
+        response = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+        with patch.object(acceptance, "ssh_command", return_value=["ssh"]), \
+             patch.object(acceptance, "run", return_value=response) as mocked_run, \
+             redirect_stdout(io.StringIO()):
+            self.assertFalse(acceptance.outer_guest_preflight(
+                Path("/profile"), evidence, allow_tool_bootstrap=False,
+            ))
+        mocked_run.assert_called_once()
+        self.assertEqual(mocked_run.call_args.kwargs["input_text"], acceptance.REMOTE_PREFLIGHT)
+        no_install = next(item for item in evidence.data["checks"] if item["name"] == "outer guest nested tools")
+        self.assertIn("read-only continuation will not install tools", no_install["detail"])
+        self.assertFalse(any(item["name"] == "outer guest nested-tool bootstrap" for item in evidence.data["checks"]))
+
     def test_nested_guest_tools_are_not_installed_if_another_preflight_fails(self):
         payload = {
             "context": {"runtime_kind": "vm", "depth": 0, "max_depth": 1,
@@ -587,6 +649,8 @@ class HostAcceptanceTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertFalse(mock_preflight.call_args.kwargs["require_child_memory_budget"])
+        self.assertTrue(mock_preflight.call_args.kwargs["read_only"])
+        self.assertFalse(mock_preflight.call_args.kwargs["allow_outer_create"])
         self.assertTrue(mock_remote.call_args.kwargs["resume_existing"])
         mock_outer_isolation.assert_called_once_with("outer-8g", evidence, "outer", ROOT)
         outcomes = {check["name"]: check["result"] for check in evidence.data["checks"]}
@@ -1099,6 +1163,331 @@ class HostAcceptanceTests(unittest.TestCase):
                 evidence = acceptance.Evidence("test", "scope")
             self.assertEqual(evidence.directory, Path(directory) / ".local/state/little-mester/host-acceptance")
             self.assertEqual(evidence.path.stat().st_mode & 0o777, 0o600)
+
+    def test_campaign_cli_requires_exact_preserved_outer_and_child_names(self):
+        args = acceptance.parser().parse_args([
+            "campaign", "--outer-profile", "nested-8g-20261102094820",
+            "--reuse-child", "nested-accept-20261102124501-ee957d5c",
+        ])
+        self.assertEqual(args.command, "campaign")
+        self.assertEqual(args.outer_profile, "nested-8g-20261102094820")
+        self.assertEqual(args.reuse_child, "nested-accept-20261102124501-ee957d5c")
+
+    def test_campaign_refuses_noninteractive_execution_before_creating_evidence_or_state(self):
+        class NonTerminal:
+            @staticmethod
+            def isatty():
+                return False
+
+        with patch.object(acceptance.sys, "stdin", NonTerminal()), \
+             patch.object(acceptance, "Evidence", side_effect=AssertionError("evidence must not be created")), \
+             patch.object(acceptance, "nested_gate", side_effect=AssertionError("no VM action allowed")):
+            with self.assertRaisesRegex(acceptance.AcceptanceError, "requires a terminal"):
+                acceptance.vm_campaign("outer-safe", "nested-accept-safe", Path("/snapshot"))
+
+    def test_campaign_stops_on_existing_nested_continuation_failure(self):
+        class Terminal:
+            @staticmethod
+            def isatty():
+                return True
+
+        created = []
+
+        def make_evidence(command, scope):
+            evidence = DummyEvidence()
+            evidence.data["command"] = command
+            created.append(evidence)
+            return evidence
+
+        with patch.object(acceptance.sys, "stdin", Terminal()), \
+             patch.object(acceptance, "Evidence", side_effect=make_evidence), \
+             patch.object(acceptance, "nested_gate", return_value=1) as nested, \
+             patch.object(acceptance, "run_campaign_vm", side_effect=AssertionError("downstream gate must not run")), \
+             patch.object(acceptance, "unique_profile_name", side_effect=AssertionError("no disposable profile")), \
+             redirect_stdout(io.StringIO()):
+            result = acceptance.vm_campaign(
+                "nested-8g-20261102094820",
+                "nested-accept-20261102124501-ee957d5c",
+                Path("/safe-snapshot"),
+            )
+
+        self.assertEqual(result, 1)
+        nested.assert_called_once_with(
+            "nested-accept-20261102124501-ee957d5c",
+            "nested-8g-20261102094820",
+            Path("/safe-snapshot"), ROOT,
+            reuse_existing=True, require_existing_outer=True,
+        )
+        self.assertEqual(created[0].data["preserved_profiles"], {
+            "outer": "nested-8g-20261102094820",
+            "child": "nested-accept-20261102124501-ee957d5c",
+        })
+        self.assertEqual(created[0].data["outcome"], "FAIL")
+
+    def test_campaign_preflight_does_not_bootstrap_a_replacement_outer_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "profiles"
+            base.mkdir(mode=0o700)
+            evidence = DummyEvidence()
+            with patch.object(acceptance, "profile_base", return_value=base), \
+                 patch.object(acceptance, "outer_profile_is_ready", return_value=False), \
+                 patch.object(acceptance, "run", side_effect=AssertionError("must not start a VM")):
+                selected = acceptance.ensure_outer_profile(
+                    "nested-8g-20261102094820", Path("/snapshot"), ROOT,
+                    evidence, allow_create=False,
+                )
+            self.assertIsNone(selected)
+            self.assertEqual(evidence.data["checks"][-1]["name"], "outer profile reuse")
+            self.assertEqual(evidence.data["checks"][-1]["result"], "FAIL")
+
+    def test_campaign_stops_before_guest_tui_if_read_only_model_status_fails(self):
+        class Terminal:
+            @staticmethod
+            def isatty():
+                return True
+
+        created = []
+
+        def make_evidence(command, scope):
+            evidence = DummyEvidence()
+            evidence.data["command"] = command
+            created.append(evidence)
+            return evidence
+
+        def run_vm(args):
+            status = 0 if args[0] == "egress-reload" else 1
+            return subprocess.CompletedProcess(args, status, "", "")
+
+        with patch.object(acceptance.sys, "stdin", Terminal()), \
+             patch.object(acceptance, "Evidence", side_effect=make_evidence), \
+             patch.object(acceptance, "nested_gate", return_value=0) as nested, \
+             patch.object(acceptance, "run_campaign_vm", side_effect=run_vm) as vm, \
+             patch.object(acceptance, "launch_campaign_agent", side_effect=AssertionError("model gate must pass before TUI")), \
+             patch.object(acceptance, "unique_profile_name", side_effect=AssertionError("no disposable profile")), \
+             redirect_stdout(io.StringIO()):
+            result = acceptance.vm_campaign(
+                "nested-8g-20261102094820",
+                "nested-accept-20261102124501-ee957d5c",
+                Path("/safe-snapshot"),
+            )
+
+        self.assertEqual(result, 1)
+        nested.assert_called_once()
+        self.assertEqual(vm.call_args_list, [
+            call(["egress-reload", "nested-8g-20261102094820"]),
+            call(["models", "status"]),
+        ])
+        self.assertEqual(created[0].data["outcome"], "FAIL")
+        self.assertEqual(created[0].data["checks"][-1]["name"], "selected host-side model endpoint status")
+
+    def test_campaign_order_and_destructive_actions_are_limited_to_generated_profile(self):
+        class Terminal:
+            @staticmethod
+            def isatty():
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            workspace_root = home / ".cache/little-mester/host-acceptance"
+            workspace = workspace_root / "vm-acceptance-disposable-test-workspace"
+            workspace_root.mkdir(mode=0o700, parents=True)
+            workspace.mkdir(mode=0o700)
+            profile = "vm-acceptance-disposable-test"
+            vm_base = home / "vm-state"
+            vm_base.mkdir(mode=0o700)
+            vm_dir = vm_base / profile
+            escrow = home / "secrets" / f"{profile}-auth.json"
+            evidence_items = []
+            events = []
+            vm_calls = []
+
+            def make_evidence(command, scope):
+                evidence = DummyEvidence()
+                evidence.data["command"] = command
+                evidence_items.append(evidence)
+                return evidence
+
+            def run_vm(args, **kwargs):
+                args = list(args)
+                vm_calls.append(args)
+                events.append("vm:" + " ".join(args))
+                if args[0] == "up":
+                    vm_dir.mkdir(mode=0o700, exist_ok=True)
+                    (vm_dir / "disk.qcow2").write_text("disposable-overlay")
+                    (vm_dir / "id_vm_control").write_text("disposable-key")
+                    (vm_dir / "workspace").write_text(str(workspace.resolve()))
+                elif args[0] in ("stop", "down"):
+                    for name in ("disk.qcow2", "id_vm_control"):
+                        try:
+                            (vm_dir / name).unlink()
+                        except FileNotFoundError:
+                            pass
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            def launch(profile_name, evidence, *, browser_auth, auto=False):
+                events.append(f"agent:{profile_name}:browser={browser_auth}:auto={auto}")
+                return True
+
+            def observe(gate, evidence):
+                events.append("observe:" + gate)
+                return 0
+
+            def guest_script(profile_name, script, *, timeout):
+                events.append("guest-script")
+                if "LIFECYCLE_DATA_WRITTEN" in script:
+                    return True, "LIFECYCLE_DATA_WRITTEN\n", "exit_0"
+                if "LIFECYCLE_DATA_PERSISTED" in script:
+                    return True, "LIFECYCLE_DATA_PERSISTED\n", "exit_0"
+                return True, "NO_HOST_PORTS\nWORKLOAD_QUERY_FIRST\nWORKLOAD_RESTART_QUERY\nWORKLOAD_DOWN\n", "exit_0"
+
+            def approval(label):
+                if "prerequisites" in label:
+                    event = "approval:oauth-prerequisites"
+                elif "OAuth" in label:
+                    event = "approval:oauth-start"
+                else:
+                    event = "approval:teardown"
+                events.append(event)
+                return "pass"
+
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(acceptance.Path, "home", return_value=home))
+                stack.enter_context(patch.object(acceptance.sys, "stdin", Terminal()))
+                stack.enter_context(patch.object(acceptance, "Evidence", side_effect=make_evidence))
+                stack.enter_context(patch.object(acceptance, "nested_gate", side_effect=lambda *a, **k: events.append("nested") or 0))
+                stack.enter_context(patch.object(acceptance, "run_campaign_vm", side_effect=run_vm))
+                stack.enter_context(patch.object(acceptance, "launch_campaign_agent", side_effect=launch))
+                stack.enter_context(patch.object(acceptance, "observe_gate", side_effect=observe))
+                stack.enter_context(patch.object(acceptance, "memory_budget_ok", return_value=True))
+                stack.enter_context(patch.object(acceptance, "unique_profile_name", return_value=profile))
+                stack.enter_context(patch.object(acceptance, "profile_base", return_value=vm_base))
+                stack.enter_context(patch.object(acceptance, "profile_dir", return_value=vm_dir))
+                stack.enter_context(patch.object(acceptance, "campaign_profile_storage_safe", return_value=True))
+                stack.enter_context(patch.object(acceptance, "private_acceptance_workspace", return_value=workspace))
+                stack.enter_context(patch.object(acceptance, "private_campaign_escrow", return_value=escrow))
+                stack.enter_context(patch.object(acceptance, "guest_openai_auth_stored", side_effect=[(True, "stored"), (True, "stored")]))
+                stack.enter_context(patch.object(acceptance, "run_guest_script", side_effect=guest_script))
+                stack.enter_context(patch.object(acceptance, "process_matches_profile", side_effect=[False, True, False]))
+                stack.enter_context(patch.object(acceptance, "escrow_file_is_private", return_value=True))
+                stack.enter_context(patch.object(acceptance, "prompt_result", side_effect=approval))
+                stack.enter_context(redirect_stdout(io.StringIO()))
+                result = acceptance.vm_campaign(
+                    "nested-8g-20261102094820",
+                    "nested-accept-20261102124501-ee957d5c",
+                    Path("/safe-snapshot"),
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(evidence_items[0].data["outcome"], "PASS")
+            self.assertLess(events.index("nested"), events.index("vm:egress-reload nested-8g-20261102094820"))
+            self.assertLess(events.index("vm:egress-reload nested-8g-20261102094820"), events.index("vm:models status"))
+            self.assertLess(events.index("vm:models status"), events.index("agent:nested-8g-20261102094820:browser=False:auto=False"))
+            self.assertLess(events.index("observe:tui"), events.index(f"agent:{profile}:browser=True:auto=False"))
+            self.assertLess(events.index("approval:oauth-prerequisites"), events.index("approval:oauth-start"))
+            self.assertLess(events.index("approval:oauth-start"), events.index(f"agent:{profile}:browser=True:auto=False"))
+            self.assertLess(events.index("observe:workload"), events.index("guest-script"))
+            self.assertLess(events.index("approval:teardown"), next(i for i, item in enumerate(events) if item.startswith("vm:stop ")))
+            destructive = [args for args in vm_calls if args[0] in ("stop", "down")]
+            self.assertTrue(destructive)
+            self.assertTrue(all(args[1] == profile for args in destructive))
+            self.assertFalse(workspace.exists())
+
+    def test_campaign_vm_environment_does_not_inherit_yes_or_unrelated_escrow(self):
+        escrow = Path("/private/campaign-auth.json")
+        with patch.dict(os.environ, {"VM_YES": "1", "LAB_YES": "1", "VM_AUTH_ESCROW_FILE": "/unexpected/escrow"}, clear=True), \
+             patch.object(acceptance, "LAB_VM", Path("/repo/lab-vm")), \
+             patch.object(acceptance, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as mocked:
+            acceptance.run_campaign_vm(["down", "disposable"], auth_forward=True, escrow=escrow)
+            enabled_env = mocked.call_args.kwargs["env"]
+            self.assertEqual(enabled_env["VM_YES"], "0")
+            self.assertEqual(enabled_env["LAB_YES"], "0")
+            self.assertEqual(enabled_env["VM_AUTH_FORWARD"], "1")
+            self.assertEqual(enabled_env["VM_AUTH_ESCROW_FILE"], str(escrow))
+
+            acceptance.run_campaign_vm(["up", "disposable"], auth_forward=False)
+            disabled_env = mocked.call_args.kwargs["env"]
+            self.assertEqual(disabled_env["VM_AUTH_FORWARD"], "0")
+            self.assertNotIn("VM_AUTH_ESCROW_FILE", disabled_env)
+
+    def test_campaign_agent_launch_disables_inherited_credential_forwarding(self):
+        evidence = DummyEvidence()
+        with patch.dict(os.environ, {
+            "VM_AUTH_FORWARD": "1", "VM_AUTH_ESCROW_FILE": "/private/other-profile-auth.json",
+            "VM_YES": "1", "LAB_YES": "1",
+        }, clear=True), \
+             patch.object(acceptance, "LAB_VM", Path("/repo/lab-vm")), \
+             patch.object(acceptance, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as mocked, \
+             redirect_stdout(io.StringIO()):
+            self.assertTrue(acceptance.launch_campaign_agent(
+                "vm-acceptance-disposable", evidence, browser_auth=True,
+            ))
+
+        self.assertEqual(mocked.call_args.args[0], [
+            "/repo/lab-vm", "agent", "vm-acceptance-disposable", "--browser-auth",
+        ])
+        env = mocked.call_args.kwargs["env"]
+        self.assertEqual(env["VM_AUTH_FORWARD"], "0")
+        self.assertNotIn("VM_AUTH_ESCROW_FILE", env)
+        self.assertEqual(env["VM_YES"], "0")
+        self.assertEqual(env["LAB_YES"], "0")
+        self.assertFalse(mocked.call_args.kwargs["capture"])
+        self.assertFalse(mocked.call_args.kwargs["no_input"])
+
+    def test_campaign_refuses_destructive_teardown_after_any_failed_or_blocked_gate(self):
+        for result, expected in (("FAIL", 1), ("BLOCKED", 2)):
+            with self.subTest(result=result):
+                evidence = DummyEvidence()
+                evidence.data["checks"].append({
+                    "name": "earlier gate", "result": result, "detail": "simulated result",
+                })
+                self.assertEqual(
+                    acceptance.refuse_campaign_teardown_after_incomplete_gates(evidence),
+                    expected,
+                )
+                self.assertEqual(evidence.data["outcome"], result)
+                teardown = next(item for item in evidence.data["checks"] if item["name"] == "disposable teardown")
+                self.assertEqual(teardown["result"], "BLOCKED")
+                self.assertIn("workspace were preserved", teardown["detail"])
+
+        passing = DummyEvidence()
+        passing.check("earlier gate", True, "simulated result")
+        self.assertIsNone(acceptance.refuse_campaign_teardown_after_incomplete_gates(passing))
+
+    def test_disposable_workspace_is_private_and_has_no_published_compose_ports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            state = home / "state"
+            with patch.object(acceptance.Path, "home", return_value=home), \
+                 patch.dict(os.environ, {"VM_STATE_DIR": str(state)}, clear=True):
+                workspace = acceptance.private_acceptance_workspace("vm-acceptance-test")
+                escrow = acceptance.private_campaign_escrow("vm-acceptance-test")
+
+            self.assertEqual(workspace.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((workspace / "compose.yaml").stat().st_mode & 0o777, 0o600)
+            compose = (workspace / "compose.yaml").read_text()
+            self.assertNotIn("ports:", compose)
+            config = json.loads((workspace / "opencode.json").read_text())
+            self.assertEqual(config["permissions"], [
+                {"action": "shell", "resource": "pwd", "effect": "ask"},
+                {"action": "shell", "resource": "echo VM_ACCEPTANCE_DENIED", "effect": "deny"},
+            ])
+            self.assertEqual(escrow.parent.stat().st_mode & 0o777, 0o700)
+            self.assertFalse(escrow.exists())
+            self.assertIn("compose down -v", acceptance.compose_feedback_script("vm-acceptance-test"))
+            self.assertIn("LIFECYCLE_DATA_PERSISTED", acceptance.lifecycle_workload_check_script("vm-acceptance-test"))
+            with self.assertRaises(acceptance.AcceptanceError):
+                acceptance.private_acceptance_workspace("../../unsafe")
+
+    def test_campaign_escrow_refuses_checkout_path_before_creating_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "checkout"
+            state_root = repo / ".local-state"
+            repo.mkdir()
+            with patch.object(acceptance, "ROOT", repo), \
+                 patch.object(acceptance, "vm_state_root", return_value=state_root):
+                with self.assertRaisesRegex(acceptance.AcceptanceError, "outside the checkout"):
+                    acceptance.private_campaign_escrow("vm-acceptance-test")
+            self.assertFalse((state_root / "secrets").exists())
 
 
 if __name__ == "__main__":

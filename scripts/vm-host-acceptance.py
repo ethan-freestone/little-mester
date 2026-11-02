@@ -4,9 +4,11 @@
 Keep this runner after merge: its bounded nested-KVM check can be repeated after
 launcher/provisioning changes. ``preflight`` and ``nested`` reconcile only the
 known acceptance snapshot and create an outer profile only when needed; prior
-snapshot data is retained as a private backup. They never stop/down/clean a VM
-or remove a child profile. Human TUI/auth/permission observations are separate
-and are never inferred from the automated nested gate.
+snapshot data is retained as a private backup. The ordered ``campaign`` instead
+requires already-running named outer/child profiles, then uses one unique
+disposable profile/workspace for human auth/permission and workload/lifecycle
+gates. It never cleans or mutates the preserved profiles. Human observations
+are never inferred from automated probes.
 """
 
 from __future__ import annotations
@@ -132,12 +134,13 @@ class Evidence:
 
 def run(args: list[str], *, env: dict[str, str] | None = None, cwd: Path = ROOT,
         capture: bool = True, input_text: str | None = None,
-        no_input: bool = False) -> subprocess.CompletedProcess[str]:
+        no_input: bool = False, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args, cwd=cwd, env=env, input=input_text, text=True,
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
         stdin=subprocess.DEVNULL if no_input and input_text is None else None,
+        timeout=timeout,
         check=False,
     )
 
@@ -601,6 +604,7 @@ def snapshot_checks(
     repo: Path = ROOT,
     *,
     allow_active_source_overlay: bool = False,
+    allow_repair: bool = True,
 ) -> bool:
     active_source_overlay = False
     expected = snapshot.resolve() == DEFAULT_SNAPSHOT.resolve()
@@ -616,6 +620,13 @@ def snapshot_checks(
         or not safe_snapshot_target(snapshot, snapshot / relative)
         for relative in SNAPSHOT_FILES
     )
+    if needs_rebuild and not allow_repair:
+        evidence.check(
+            "snapshot preparation", False,
+            "safe snapshot is missing or requires repair; read-only continuation refused without changing it",
+        )
+        evidence.check("existing safe snapshot", False, "snapshot is missing, contains control state, or has an unsafe target")
+        return False
     if needs_rebuild:
         rebuilt = rebuild_safe_snapshot(snapshot, evidence, repo)
         status_ok, parity = snapshot_status(snapshot, repo)
@@ -639,6 +650,14 @@ def snapshot_checks(
                 "active snapshot left unchanged; nested launcher will use a private guest runtime overlay",
             )
             evidence.save()
+        elif not allow_repair:
+            evidence.check(
+                "snapshot source repair", False,
+                "allowlisted sources differ from checkout; read-only continuation refused without synchronizing them",
+            )
+            evidence.data["snapshot_file_parity"] = parity
+            evidence.save()
+            return False
         else:
             repaired = sync_snapshot_sources(snapshot, evidence, repo)
             status_ok, parity = snapshot_status(snapshot, repo)
@@ -767,7 +786,8 @@ def memory_budget_ok(requested_mib: int, evidence: Evidence, label: str) -> bool
     return result.returncode == 0
 
 
-def ensure_outer_profile(name: str, snapshot: Path, repo: Path, evidence: Evidence) -> tuple[str, Path] | None:
+def ensure_outer_profile(name: str, snapshot: Path, repo: Path, evidence: Evidence,
+                         *, allow_create: bool = True) -> tuple[str, Path] | None:
     """Reuse a matching live profile or provision a fresh non-destructive one.
 
     Existing incomplete, stopped, symlinked, or mismatched state is never
@@ -790,6 +810,13 @@ def ensure_outer_profile(name: str, snapshot: Path, repo: Path, evidence: Eviden
     if outer_profile_is_ready(name, snapshot, repo):
         evidence.check("outer profile reuse", True, "existing named profile is live and uses the safe snapshot")
         return name, profile_dir(name, repo)
+
+    if not allow_create:
+        evidence.check(
+            "outer profile reuse", False,
+            "the exact named outer profile is not already live on the safe snapshot; no profile was started",
+        )
+        return None
 
     discovered = discover_outer_profiles(snapshot, repo)
     if len(discovered) == 1:
@@ -1436,6 +1463,7 @@ def outer_guest_preflight(
     evidence: Evidence,
     *,
     require_child_memory_budget: bool = True,
+    allow_tool_bootstrap: bool = True,
 ) -> bool:
     non_tool_checks = [
         "context_valid", "outer_guest", "nested_kvm", "workspace_root",
@@ -1462,7 +1490,8 @@ def outer_guest_preflight(
     ignored_initial_checks = {"tools"}
     if not require_child_memory_budget:
         ignored_initial_checks.add("memory_budget")
-    if (isinstance(initial_checks, dict) and initial_checks.get("tools") is False
+    if (allow_tool_bootstrap
+            and isinstance(initial_checks, dict) and initial_checks.get("tools") is False
             and isinstance(initial_tools, dict)
             and all(name in initial_checks and initial_checks[name] is True for name in non_tool_checks)
             and all(value is True for name, value in initial_checks.items() if name not in ignored_initial_checks)):
@@ -1507,6 +1536,13 @@ def outer_guest_preflight(
             evidence.save()
             evidence.check("outer guest nested-tool bootstrap", False, detail)
             return False
+    elif (not allow_tool_bootstrap and isinstance(initial_checks, dict)
+          and initial_checks.get("tools") is False):
+        missing = sorted(key for key, available in initial_tools.items() if available is not True)
+        evidence.check(
+            "outer guest nested tools", False,
+            f"missing or unavailable: {', '.join(missing) or 'tool inventory incomplete'}; read-only continuation will not install tools",
+        )
 
     ctx = parsed.get("context", {})
     if isinstance(ctx, dict):
@@ -1572,6 +1608,8 @@ def run_preflight(
     *,
     allow_active_source_overlay: bool = False,
     require_child_memory_budget: bool = True,
+    allow_outer_create: bool = True,
+    read_only: bool = False,
 ) -> tuple[bool, Path | None]:
     checkout_ok = repo.is_dir() and (repo / ".git").exists() and (repo / "lab-vm").is_file()
     evidence.check("checkout", checkout_ok, "repository and lab-vm found" if checkout_ok else "run from the owner checkout")
@@ -1593,6 +1631,7 @@ def run_preflight(
         snapshot_ok = snapshot_checks(
             snapshot, evidence, repo,
             allow_active_source_overlay=allow_active_source_overlay,
+            allow_repair=not read_only,
         )
     else:
         evidence.check("snapshot preparation", False, "owner-host, checkout, and VM-tool prerequisites are required; no snapshot/profile changes attempted")
@@ -1601,12 +1640,14 @@ def run_preflight(
     selected_profile = outer_profile
     outer: Path | None = None
     if prerequisites_ready and snapshot_ok:
-        selected = ensure_outer_profile(outer_profile, snapshot, repo, evidence)
+        selected = ensure_outer_profile(outer_profile, snapshot, repo, evidence, allow_create=allow_outer_create)
         if selected is not None:
             selected_profile, directory = selected
             outer = outer_profile_checks(selected_profile, snapshot, repo, evidence)
     guest_ok = outer_guest_preflight(
-        outer, evidence, require_child_memory_budget=require_child_memory_budget,
+        outer, evidence,
+        require_child_memory_budget=require_child_memory_budget,
+        allow_tool_bootstrap=not read_only,
     ) if outer is not None else False
     if not host_ok:
         evidence.check("outer guest access", False, "host/KVM context is not ready; no SSH or VM action attempted")
@@ -1818,10 +1859,11 @@ def nested_gate(
     repo: Path,
     *,
     reuse_existing: bool = False,
+    require_existing_outer: bool = False,
 ) -> int:
     command = "nested-resume" if reuse_existing else "nested"
     objective = (
-        "revalidate one existing nested child, depth-1 readiness, nested QEMU/network isolation, depth-2 refusal before state, and parent continuity; no new QEMU, teardown, model, or workload"
+        "read-only revalidation of one existing nested child, depth-1 readiness, nested QEMU/network isolation, depth-2 refusal before state, and parent continuity; no snapshot repair, guest-tool install, profile creation, new QEMU, or teardown"
         if reuse_existing else
         "one named disposable nested VM boot, depth-1 readiness, nested QEMU/network isolation, depth-2 refusal before state, and parent continuity; no model/TUI/auth/workload/teardown"
     )
@@ -1838,6 +1880,8 @@ def nested_gate(
         evidence, outer_profile, snapshot, repo,
         allow_active_source_overlay=True,
         require_child_memory_budget=not reuse_existing,
+        allow_outer_create=not (require_existing_outer or reuse_existing),
+        read_only=reuse_existing,
     )
     if not ready or outer is None:
         evidence.check(command, False, "preflight blocked; existing child was not changed")
@@ -2098,8 +2142,8 @@ def inspect_report(report_path: Path) -> int:
 
 OBSERVATIONS: dict[str, tuple[str, tuple[str, ...]]] = {
     "tui": (
-        "Record only when the latest #41 handoff permits it. Compare built-in and custom dialogs with host-Docker in the same terminal; do not restart QEMU or alter the overlay.",
-        ("built_in_dialog_legible", "custom_dialog_legible", "exit_cancel_stays_in_tui", "same_terminal_comparison_done"),
+        "Record only when the latest #41 handoff permits it. In this direct guest session, compare built-in/custom dialogs with host-Docker in the same terminal, exercise cancel/confirm, complete repeated selected-model streams, and verify metrics. Do not restart QEMU or alter the overlay.",
+        ("built_in_dialog_legible", "custom_dialog_legible", "exit_cancel_stays_in_tui", "exit_confirm_exits", "same_terminal_comparison_done", "metrics_displayed", "model_completion_succeeded", "repeated_streams_no_socket_disconnects"),
     ),
     "auth": (
         "Record only when the latest #41/#45 handoff permits it. Never enter or save OAuth URLs, state, codes, tokens, prompts, or raw logs.",
@@ -2108,6 +2152,10 @@ OBSERVATIONS: dict[str, tuple[str, tuple[str, ...]]] = {
     "permissions": (
         "Record only when the latest #35/#50 prerequisites pass. Use a disposable project and one narrow explicit deny; do not add blanket allows or recreate the host container.",
         ("displayed_mode_matches_requested", "harmless_tool_behavior_correct", "explicit_deny_still_blocks", "disposable_project_used"),
+    ),
+    "workload": (
+        "From the disposable guest TUI, use only the generated /workspace/compose.yaml: start PostgreSQL, wait for health, query 42, restart it, query again, then run compose down -v. Do not publish host ports or touch another project.",
+        ("agent_compose_started_stack", "agent_health_and_query_succeeded", "agent_restart_preserved_service", "agent_tore_down_stack", "no_host_port_published"),
     ),
 }
 
@@ -2120,13 +2168,16 @@ def prompt_result(label: str) -> str:
         print("Enter y, n, or u.")
 
 
-def observe_gate(gate: str) -> int:
+def observe_gate(gate: str, evidence: Evidence | None = None) -> int:
     instruction, questions = OBSERVATIONS[gate]
-    evidence = Evidence("observe", f"human-reported {gate} observations; not a ticket update or independent acceptance proof")
+    owns_evidence = evidence is None
+    if evidence is None:
+        evidence = Evidence("observe", f"human-reported {gate} observations; not a ticket update or independent acceptance proof")
     print(instruction)
     if prompt_result("Have you followed the current ticket handoff and prerequisites?") != "pass":
         evidence.check("observation prerequisites", False, "operator did not confirm the current ordered handoff")
-        evidence.finish("BLOCKED")
+        if owns_evidence:
+            evidence.finish("BLOCKED")
         return 2
     observation: dict[str, str] = {"gate": gate, "recorded_at": utc_now()}
     if gate in ("auth", "permissions"):
@@ -2151,8 +2202,631 @@ def observe_gate(gate: str) -> int:
     observations.append(observation)
     passed = all(observation[item] == "pass" for item in questions)
     evidence.check("human observation", passed, "all requested observations reported passing" if passed else "one or more observations failed or remain unknown; acceptance is not inferred")
-    evidence.finish("REPORTED_PASS" if passed else "REPORTED_INCOMPLETE")
+    if owns_evidence:
+        evidence.finish("REPORTED_PASS" if passed else "REPORTED_INCOMPLETE")
     return 0 if passed else 1
+
+
+def vm_state_root() -> Path:
+    explicit = os.environ.get("VM_STATE_DIR")
+    if explicit:
+        return Path(explicit).expanduser()
+    data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    return Path(data_home).expanduser() / "little-mester"
+
+
+def private_acceptance_workspace(profile: str) -> Path:
+    if not PROFILE_RE.fullmatch(profile):
+        raise AcceptanceError("Invalid disposable workspace profile name.")
+    root = Path.home() / ".cache/little-mester/host-acceptance"
+    if root.is_symlink() or path_has_symlink(root):
+        raise AcceptanceError("Disposable workspace root contains a symlink.")
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not root.is_dir() or root.stat().st_uid != os.getuid():
+        raise AcceptanceError("Disposable workspace root is not a user-owned directory.")
+    os.chmod(root, 0o700)
+    workspace = root / f"{profile}-workspace"
+    workspace.mkdir(mode=0o700)
+    os.chmod(workspace, 0o700)
+    if workspace.resolve().is_relative_to(ROOT.resolve()):
+        raise AcceptanceError("Disposable workspace must remain outside the source checkout.")
+
+    compose = '''services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: acceptance-only-not-a-secret
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 2s
+      retries: 45
+'''
+    project_config = {
+        "$schema": "https://opencode.ai/config.json",
+        "permissions": [
+            {"action": "shell", "resource": "pwd", "effect": "ask"},
+            {"action": "shell", "resource": "echo VM_ACCEPTANCE_DENIED", "effect": "deny"},
+        ],
+    }
+    (workspace / "compose.yaml").write_text(compose, encoding="utf-8")
+    (workspace / "opencode.json").write_text(json.dumps(project_config, indent=2) + "\n", encoding="utf-8")
+    os.chmod(workspace / "compose.yaml", 0o600)
+    os.chmod(workspace / "opencode.json", 0o600)
+    return workspace
+
+
+def private_campaign_escrow(profile: str) -> Path:
+    if not PROFILE_RE.fullmatch(profile):
+        raise AcceptanceError("Invalid disposable credential escrow profile name.")
+    directory = vm_state_root() / "secrets"
+    if directory.is_symlink() or path_has_symlink(directory):
+        raise AcceptanceError("Host credential escrow directory contains a symlink.")
+    directory = directory.resolve()
+    workspace = (Path.home() / ".cache/little-mester/host-acceptance" / f"{profile}-workspace").resolve()
+    if directory.is_relative_to(ROOT.resolve()) or directory.is_relative_to(workspace):
+        raise AcceptanceError("Host credential escrow directory must be outside the checkout and disposable workspace.")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not directory.is_dir() or directory.stat().st_uid != os.getuid():
+        raise AcceptanceError("Host credential escrow directory is not a user-owned directory.")
+    os.chmod(directory, 0o700)
+    target = directory / f"{profile}-auth.json"
+    if lexists(target):
+        raise AcceptanceError("Unique campaign credential escrow path already exists; refusing to overwrite it.")
+    return target
+
+
+def campaign_env(*, auth_forward: bool, escrow: Path | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    env["VM_AUTH_FORWARD"] = "1" if auth_forward else "0"
+    # Campaign teardown is gated by its own explicit human confirmation; do
+    # not inherit a shell-wide auto-accept setting for unrelated prompts.
+    env["VM_YES"] = "0"
+    env["LAB_YES"] = "0"
+    if escrow is not None:
+        env["VM_AUTH_ESCROW_FILE"] = str(escrow)
+    else:
+        env.pop("VM_AUTH_ESCROW_FILE", None)
+    return env
+
+
+def run_campaign_vm(args: list[str], *, auth_forward: bool = False,
+                    escrow: Path | None = None, capture: bool = True,
+                    timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+    return run(
+        [str(LAB_VM), *args], env=campaign_env(auth_forward=auth_forward, escrow=escrow),
+        capture=capture, no_input=True, timeout=timeout,
+    )
+
+
+def launch_campaign_agent(profile: str, evidence: Evidence, *, browser_auth: bool,
+                          auto: bool = False) -> bool:
+    command = [str(LAB_VM), "agent", profile]
+    if auto:
+        command.append("--auto")
+    command.append("--browser-auth" if browser_auth else "--no-browser-auth")
+    label = "browser-auth" if browser_auth else "direct guest"
+    print(f"\nStarting {label} OpenCode session for profile {profile}; output is not captured or written to the report.", flush=True)
+    if auto:
+        print("The disposable project contains only an ask rule for `pwd` and one exact harmless shell deny; no blanket allow is configured.", flush=True)
+    result = run(
+        command, env=campaign_env(auth_forward=False),
+        capture=False, no_input=False,
+    )
+    evidence.check(
+        f"{label} agent command", result.returncode == 0,
+        "guest OpenCode session exited successfully" if result.returncode == 0 else f"guest OpenCode session exited {result.returncode}; terminal output was not captured",
+    )
+    return result.returncode == 0
+
+
+def run_guest_script(vm_dir: Path, script: str, *, timeout: float = 120) -> tuple[bool, str, str]:
+    try:
+        result = subprocess.run(
+            ssh_command(vm_dir, "bash -s"), input=script, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "", "timed_out"
+    except (OSError, AcceptanceError):
+        return False, "", "transport_error"
+    return result.returncode == 0, result.stdout or "", f"exit_{result.returncode}"
+
+
+def guest_openai_auth_stored(vm_dir: Path) -> tuple[bool | None, str]:
+    try:
+        result = subprocess.run(
+            ssh_command(vm_dir, "opencode auth list"), text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "timed_out"
+    except (OSError, AcceptanceError):
+        return None, "transport_error"
+    if result.returncode != 0:
+        return None, f"exit_{result.returncode}"
+    lines = (result.stdout or "").splitlines()
+    stored = any(
+        "openai" in line.lower()
+        and any(word in line.lower() for word in ("stored", "connected", "oauth", "chatgpt"))
+        and "not connected" not in line.lower()
+        for line in lines
+    )
+    return stored, "stored" if stored else "not_stored"
+
+
+def escrow_file_is_private(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+        parent = path.parent.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(metadata.st_mode) and not path.is_symlink()
+        and metadata.st_uid == os.getuid() and stat.S_IMODE(metadata.st_mode) == 0o600
+        and stat.S_ISDIR(parent.st_mode) and parent.st_uid == os.getuid()
+        and stat.S_IMODE(parent.st_mode) == 0o700 and metadata.st_size > 0
+    )
+
+
+def compose_feedback_script(profile: str) -> str:
+    if not PROFILE_RE.fullmatch(profile):
+        raise AcceptanceError("Invalid disposable Compose project name.")
+    return r'''set -euo pipefail
+cd /workspace
+project='%s'
+docker() { command docker -H "unix:///run/user/$(id -u)/docker.sock" "$@"; }
+compose() { docker compose --project-name "$project" -f /workspace/compose.yaml "$@"; }
+compose config --quiet
+compose up -d --wait --wait-timeout 120
+container="$(compose ps -q db)"
+test -n "$container"
+bindings="$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$container")"
+python3 - "$bindings" <<'PY'
+import json, sys
+value = json.loads(sys.argv[1])
+if isinstance(value, dict) and any(entries for entries in value.values()):
+    raise SystemExit(1)
+PY
+printf 'NO_HOST_PORTS\n'
+value="$(compose exec -T db psql -U postgres -d postgres -tAc 'SELECT 42' | tr -d '[:space:]')"
+test "$value" = 42
+printf 'WORKLOAD_QUERY_FIRST\n'
+compose restart db
+for attempt in $(seq 1 60); do
+  health="$(docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null || true)"
+  [[ "$health" == healthy ]] && break
+  sleep 1
+done
+[[ "$(docker inspect --format '{{.State.Health.Status}}' "$container")" == healthy ]]
+value="$(compose exec -T db psql -U postgres -d postgres -tAc 'SELECT 42' | tr -d '[:space:]')"
+test "$value" = 42
+printf 'WORKLOAD_RESTART_QUERY\n'
+compose down -v --remove-orphans
+test -z "$(compose ps -q)"
+test -z "$(docker network ls -q --filter "label=com.docker.compose.project=$project")"
+test -z "$(docker volume ls -q --filter "label=com.docker.compose.project=$project")"
+printf 'WORKLOAD_DOWN\n'
+''' % profile
+
+
+def lifecycle_workload_start_script(profile: str) -> str:
+    if not PROFILE_RE.fullmatch(profile):
+        raise AcceptanceError("Invalid disposable lifecycle profile name.")
+    marker = f"/var/tmp/little-mester-acceptance-{profile}.state"
+    return r'''set -euo pipefail
+cd /workspace
+project='%s'
+marker='%s'
+docker() { command docker -H "unix:///run/user/$(id -u)/docker.sock" "$@"; }
+compose() { docker compose --project-name "$project" -f /workspace/compose.yaml "$@"; }
+compose up -d --wait --wait-timeout 120
+compose exec -T db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE TABLE IF NOT EXISTS lifecycle_probe (value integer PRIMARY KEY)'
+compose exec -T db psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'INSERT INTO lifecycle_probe(value) VALUES (271828) ON CONFLICT DO NOTHING'
+printf 'overlay-state-%s\n' >"$marker"
+chmod 600 "$marker"
+printf 'LIFECYCLE_DATA_WRITTEN\n'
+''' % (profile, marker, profile)
+
+
+def lifecycle_workload_check_script(profile: str) -> str:
+    if not PROFILE_RE.fullmatch(profile):
+        raise AcceptanceError("Invalid disposable lifecycle profile name.")
+    marker = f"/var/tmp/little-mester-acceptance-{profile}.state"
+    return r'''set -euo pipefail
+cd /workspace
+project='%s'
+marker='%s'
+docker() { command docker -H "unix:///run/user/$(id -u)/docker.sock" "$@"; }
+compose() { docker compose --project-name "$project" -f /workspace/compose.yaml "$@"; }
+test "$(cat "$marker")" = 'overlay-state-%s'
+compose up -d --wait --wait-timeout 120
+value="$(compose exec -T db psql -U postgres -d postgres -tAc 'SELECT count(*) FROM lifecycle_probe WHERE value=271828' | tr -d '[:space:]')"
+test "$value" = 1
+printf 'LIFECYCLE_DATA_PERSISTED\n'
+''' % (profile, marker, profile)
+
+
+def campaign_project_dir_safe(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(metadata.st_mode) and not path.is_symlink() and metadata.st_uid == os.getuid()
+
+
+def campaign_profile_storage_safe(repo: Path = ROOT) -> bool:
+    base = profile_base(repo)
+    if base.is_symlink() or path_has_symlink(base) or base.resolve().is_relative_to(repo.resolve()):
+        return False
+    anchor = base
+    while not anchor.exists() and anchor != anchor.parent:
+        anchor = anchor.parent
+    if not anchor.is_dir() or anchor.stat().st_uid != os.getuid() or not os.access(anchor, os.W_OK | os.X_OK):
+        return False
+    return not base.exists() or (base.is_dir() and base.stat().st_uid == os.getuid())
+
+
+def refuse_campaign_teardown_after_incomplete_gates(evidence: Evidence) -> int | None:
+    checks = evidence.data.get("checks", [])
+    if not isinstance(checks, list):
+        evidence.blocked("disposable teardown", "campaign check ledger is invalid; disposable state was preserved")
+        evidence.finish("BLOCKED")
+        return 2
+    failed = any(isinstance(item, dict) and item.get("result") == "FAIL" for item in checks)
+    blocked = any(isinstance(item, dict) and item.get("result") == "BLOCKED" for item in checks)
+    if not failed and not blocked:
+        return None
+    evidence.blocked(
+        "disposable teardown",
+        "an earlier gate failed or was not approved; the disposable VM and workspace were preserved",
+    )
+    evidence.finish("FAIL" if failed else "BLOCKED")
+    return 1 if failed else 2
+
+
+def vm_campaign(outer_profile: str, reuse_child: str, snapshot: Path) -> int:
+    if not PROFILE_RE.fullmatch(outer_profile) or not PROFILE_RE.fullmatch(reuse_child):
+        raise AcceptanceError("Campaign requires valid, existing outer and child profile names.")
+    if outer_profile == reuse_child:
+        raise AcceptanceError("Outer and child profile names must be distinct.")
+    if not sys.stdin.isatty():
+        raise AcceptanceError("The ordered VM campaign requires a terminal for TUI, permissions, and OAuth approval.")
+
+    evidence = Evidence(
+        "campaign",
+        "ordered owner-host campaign: preserved existing-child continuation, human direct-guest gates, and one generated disposable workload/lifecycle profile",
+    )
+    evidence.data["preserved_profiles"] = {"outer": outer_profile, "child": reuse_child}
+    evidence.save()
+    try:
+        print("=== 1/7: Existing-child nested continuation (read-only; no repairs, installs, or VM lifecycle changes) ===", flush=True)
+        nested_result = nested_gate(
+            reuse_child, outer_profile, snapshot, ROOT,
+            reuse_existing=True, require_existing_outer=True,
+        )
+        if nested_result == 2:
+            evidence.blocked(
+                "existing-child nested continuation",
+                "the read-only continuation was blocked; preserve both named profiles and its private report, then stop",
+            )
+        else:
+            evidence.check(
+                "existing-child nested continuation",
+                nested_result == 0,
+                "outer/child loopback and network-boundary continuation passed" if nested_result == 0 else "nested continuation failed; preserve both named profiles and its private report, then stop",
+            )
+        if nested_result != 0:
+            evidence.finish("BLOCKED" if nested_result == 2 else "FAIL")
+            return nested_result
+
+        print("=== 2/7: Reload approved egress policy, then verify model and direct-guest UI ===", flush=True)
+        reload_result = run_campaign_vm(["egress-reload", outer_profile])
+        reload_ready = reload_result.returncode == 0
+        evidence.check(
+            "outer egress policy reload",
+            reload_ready,
+            "running guest proxy reloaded the current approved policy" if reload_ready else f"lab-vm egress-reload exited {reload_result.returncode}; model/auth/TUI stages were not started",
+        )
+        if not reload_ready:
+            evidence.finish("FAIL")
+            return reload_result.returncode or 1
+        model_status = run_campaign_vm(["models", "status"])
+        model_ready = model_status.returncode == 0
+        evidence.check(
+            "selected host-side model endpoint status",
+            model_ready,
+            "configured host-side model API passed its loopback runtime-port and HTTP health checks" if model_ready else f"lab-vm models status exited {model_status.returncode}; no model service was started or changed",
+        )
+        if not model_ready:
+            evidence.finish("FAIL")
+            return model_status.returncode or 1
+        launch_campaign_agent(outer_profile, evidence, browser_auth=False)
+        observe_gate("tui", evidence)
+
+        profile = unique_profile_name("vm-acceptance-disposable", ROOT)
+        if not campaign_profile_storage_safe(ROOT):
+            raise AcceptanceError("Disposable profile storage is symlinked, inside the source checkout, or not safely writable by this user.")
+        vm_dir = profile_dir(profile, ROOT)
+        if path_has_symlink(vm_dir.parent) or vm_dir.resolve().is_relative_to(ROOT.resolve()):
+            raise AcceptanceError("Disposable VM profile storage is symlinked or inside the source checkout.")
+        if lexists(vm_dir):
+            raise AcceptanceError("Generated disposable profile already exists; refusing to reuse it.")
+        evidence.data["disposable_profile"] = profile
+        evidence.save()
+
+        print("=== 3/7: Fresh disposable profile, browser OAuth, and permissions ===", flush=True)
+        if not memory_budget_ok(2048, evidence, "disposable VM memory budget"):
+            evidence.finish("BLOCKED")
+            return 2
+        workspace = private_acceptance_workspace(profile)
+        evidence.data["disposable_workspace_created"] = True
+        evidence.save()
+        escrow = private_campaign_escrow(profile)
+        evidence.data["disposable_escrow_path_allocated"] = True
+        evidence.save()
+        up = run_campaign_vm(
+            ["up", profile, "--workspace", str(workspace), "--memory", "2", "--max-depth", "0"],
+            capture=False,
+        )
+        evidence.check(
+            "disposable profile provisioning",
+            up.returncode == 0,
+            "unique 2-GiB guest is ready" if up.returncode == 0 else f"lab-vm up exited {up.returncode}; preserve profile, workspace, and diagnostics",
+        )
+        if up.returncode != 0:
+            evidence.finish("FAIL")
+            return up.returncode or 1
+
+        auth_prerequisites = prompt_result(
+            "Have you reviewed the current #45 handoff and confirmed its prerequisites authorize this browser-auth test?"
+        )
+        approval = prompt_result(
+            "Do you separately approve starting the real host-browser OAuth flow in this disposable VM now?"
+        ) if auth_prerequisites == "pass" else "unknown"
+        auth_attempted = auth_prerequisites == "pass" and approval == "pass"
+        if auth_attempted:
+            print("OAuth safety: approve in your browser; never copy or record a URL, state, code, or token. TUI output is not captured.", flush=True)
+            launch_campaign_agent(profile, evidence, browser_auth=True)
+            observe_gate("auth", evidence)
+        else:
+            evidence.blocked(
+                "real OAuth login",
+                "current #45 prerequisites were not confirmed and separately approved; no browser OAuth command was started",
+            )
+
+        auth_result, auth_reason = guest_openai_auth_stored(vm_dir)
+        evidence.check(
+            "guest OpenAI auth list",
+            auth_result is True,
+            "OpenAI reports a stored guest account" if auth_result is True else (
+                "OpenAI account was not reported stored; raw auth-list output was not retained" if auth_result is False
+                else f"auth-list check could not be verified ({auth_reason}); preserve the profile"
+            ),
+        )
+        auth_ready = auth_result is True
+        if auth_result is None:
+            evidence.finish("BLOCKED")
+            return 2
+
+        print("=== 4/7: Guest permission mode and agent-controlled Compose feedback ===", flush=True)
+        print(
+            "In the disposable TUI, test the ask rule for `pwd` and confirm `--auto` avoids an approval prompt; "
+            "then request `echo VM_ACCEPTANCE_DENIED` and confirm the explicit deny blocks it. Also use the generated "
+            "Compose file for PostgreSQL up/health/query/restart/query/down. No host ports are configured.",
+            flush=True,
+        )
+        launch_campaign_agent(profile, evidence, browser_auth=False, auto=True)
+        observe_gate("permissions", evidence)
+        observe_gate("workload", evidence)
+
+        print("=== 5/7: Guest Docker/Compose feedback and no-host-port checks ===", flush=True)
+        ok, output, reason = run_guest_script(vm_dir, compose_feedback_script(profile), timeout=300)
+        markers = ("NO_HOST_PORTS", "WORKLOAD_QUERY_FIRST", "WORKLOAD_RESTART_QUERY", "WORKLOAD_DOWN")
+        feedback_passed = ok and all(marker in output for marker in markers)
+        evidence.check(
+            "automated guest Compose feedback loop",
+            feedback_passed,
+            "PostgreSQL health/query/restart/query/down passed and runtime host-port bindings were empty" if feedback_passed else f"guest Compose loop did not complete ({reason}); preserve profile/workspace and diagnostics",
+        )
+
+        print("=== 6/7: Non-destructive suspend/resume with guest workload data ===", flush=True)
+        state_ok, state_output, state_reason = run_guest_script(
+            vm_dir, lifecycle_workload_start_script(profile), timeout=180,
+        )
+        state_ok = state_ok and "LIFECYCLE_DATA_WRITTEN" in state_output
+        evidence.check(
+            "guest workload state prepared for suspend/resume",
+            state_ok,
+            "persistent PostgreSQL row and guest overlay marker were written" if state_ok else f"could not prepare persistence probe ({state_reason})",
+        )
+        disk_path, workspace_record = vm_dir / "disk.qcow2", vm_dir / "workspace"
+        try:
+            before_inode = disk_path.stat().st_ino
+            before_workspace = workspace_record.read_text(encoding="utf-8").strip()
+        except OSError:
+            before_inode, before_workspace = None, ""
+        suspend = run_campaign_vm(["suspend", profile], timeout=120)
+        suspended = suspend.returncode == 0 and not process_matches_profile(vm_dir)
+        evidence.check(
+            "disposable VM suspend",
+            suspended,
+            "guest shut down without deleting the overlay" if suspended else f"suspend failed or QEMU remains active (exit {suspend.returncode}); preserve state",
+        )
+        if suspended:
+            resume = run_campaign_vm(["resume", profile], timeout=600)
+            resumed = resume.returncode == 0 and process_matches_profile(vm_dir)
+            evidence.check(
+                "disposable VM resume",
+                resumed,
+                "same profile restarted" if resumed else f"resume failed (exit {resume.returncode}); preserve state",
+            )
+            if resumed:
+                try:
+                    same_overlay = disk_path.stat().st_ino == before_inode
+                    same_workspace = workspace_record.read_text(encoding="utf-8").strip() == before_workspace == str(workspace.resolve())
+                except OSError:
+                    same_overlay, same_workspace = False, False
+                evidence.check(
+                    "suspend/resume overlay and workspace identity", same_overlay and same_workspace,
+                    "overlay inode and recorded workspace were retained" if same_overlay and same_workspace else "overlay or workspace selection changed",
+                )
+                persisted, persisted_output, persisted_reason = run_guest_script(
+                    vm_dir, lifecycle_workload_check_script(profile), timeout=180,
+                )
+                persisted = persisted and "LIFECYCLE_DATA_PERSISTED" in persisted_output
+                evidence.check(
+                    "guest workload data after resume",
+                    persisted,
+                    "PostgreSQL row and guest overlay marker survived suspend/resume" if persisted else f"state was not verified after resume ({persisted_reason})",
+                )
+        else:
+            evidence.blocked("post-resume workload probe", "suspend did not establish a stopped state; disposable VM was preserved")
+
+        print("=== 7/7: Explicit disposable stop/down and credential export/import ===", flush=True)
+        teardown_blocked = refuse_campaign_teardown_after_incomplete_gates(evidence)
+        if teardown_blocked is not None:
+            return teardown_blocked
+        print(f"Only this generated profile/workspace may be destructively removed: {profile} / {workspace}", flush=True)
+        teardown_approval = prompt_result("Do you authorize stop/down only for this generated disposable profile and workspace?")
+        if teardown_approval != "pass":
+            evidence.blocked("disposable teardown approval", "operator declined; disposable VM and workspace were preserved")
+            evidence.finish("BLOCKED")
+            return 2
+
+        # Teardown and credential re-import continue in the following block.
+        evidence.data["campaign_teardown_authorized"] = True
+        evidence.save()
+
+        if auth_ready:
+            stop = run_campaign_vm(["stop", profile], auth_forward=True, escrow=escrow, timeout=300)
+            stop_export_ok = stop.returncode == 0 and escrow_file_is_private(escrow)
+            evidence.check(
+                "stop exported credentials before teardown",
+                stop_export_ok,
+                "credential export was saved privately before workload/overlay deletion" if stop_export_ok else f"stop/export failed (exit {stop.returncode}); guest state was not force-deleted",
+            )
+            if not stop_export_ok:
+                evidence.finish("FAIL")
+                return stop.returncode or 1
+
+            idempotent_stop = run_campaign_vm(["stop", profile], auth_forward=True, escrow=escrow, timeout=60)
+            evidence.check(
+                "destructive stop idempotency", idempotent_stop.returncode == 0,
+                "second stop was a safe no-op" if idempotent_stop.returncode == 0 else f"second stop exited {idempotent_stop.returncode}",
+            )
+            absent_after_stop = not (vm_dir / "disk.qcow2").exists() and not (vm_dir / "id_vm_control").exists()
+            evidence.check(
+                "stop removed disposable overlay and control keys", absent_after_stop,
+                "overlay and control keys are absent" if absent_after_stop else "disposable overlay/control state remains",
+            )
+            if not absent_after_stop:
+                evidence.finish("FAIL")
+                return 1
+
+            imported_up = run_campaign_vm(
+                ["up", profile, "--workspace", str(workspace), "--max-depth", "0"],
+                auth_forward=True, escrow=escrow, capture=False,
+            )
+            evidence.check(
+                "fresh overlay imports host credential escrow",
+                imported_up.returncode == 0,
+                "new overlay booted with opt-in credential import" if imported_up.returncode == 0 else f"importing up exited {imported_up.returncode}; preserve escrow and profile",
+            )
+            if imported_up.returncode != 0:
+                evidence.finish("FAIL")
+                return imported_up.returncode or 1
+
+            imported_auth, imported_reason = guest_openai_auth_stored(vm_dir)
+            evidence.check(
+                "OpenAI account available after fresh-overlay import",
+                imported_auth is True,
+                "OpenAI auth list reports stored without another browser login" if imported_auth is True else f"fresh overlay did not report stored OpenAI auth ({imported_reason}); preserve VM and escrow",
+            )
+            if imported_auth is not True:
+                evidence.finish("FAIL" if imported_auth is False else "BLOCKED")
+                return 1 if imported_auth is False else 2
+
+            down = run_campaign_vm(["down", profile], auth_forward=True, escrow=escrow, timeout=300)
+            down_export_ok = down.returncode == 0 and escrow_file_is_private(escrow)
+            evidence.check(
+                "direct down exported credentials before overlay deletion",
+                down_export_ok,
+                "latest credentials atomically saved before overlay deletion" if down_export_ok else f"down/export failed (exit {down.returncode}); preserve guest state",
+            )
+            if not down_export_ok:
+                evidence.finish("FAIL")
+                return down.returncode or 1
+            idempotent_down = run_campaign_vm(["down", profile], auth_forward=True, escrow=escrow, timeout=60)
+            evidence.check(
+                "direct down idempotency", idempotent_down.returncode == 0,
+                "second down was a safe no-op" if idempotent_down.returncode == 0 else f"second down exited {idempotent_down.returncode}",
+            )
+            evidence.data["credential_escrow_retained_private"] = escrow_file_is_private(escrow)
+        else:
+            evidence.blocked("credential export/import persistence", "no stored OpenAI account was verified; no credential-persistence pass is inferred")
+            no_auth_confirmed = prompt_result("Confirm this fresh disposable VM contains no saved provider credentials, so its overlay can be destroyed without escrow?")
+            if no_auth_confirmed != "pass":
+                evidence.blocked("disposable cleanup without credential escrow", "credential state is uncertain; profile and workspace were preserved")
+                evidence.finish("BLOCKED")
+                return 2
+            stop = run_campaign_vm(["stop", profile], timeout=300)
+            evidence.check(
+                "credential-free disposable stop", stop.returncode == 0,
+                "confirmed credential-free disposable profile was stopped" if stop.returncode == 0 else f"stop exited {stop.returncode}; preserve state",
+            )
+            if stop.returncode != 0:
+                evidence.finish("FAIL")
+                return stop.returncode or 1
+            down = run_campaign_vm(["down", profile], timeout=120)
+            evidence.check(
+                "credential-free disposable down", down.returncode == 0,
+                "confirmed credential-free disposable overlay was removed" if down.returncode == 0 else f"down exited {down.returncode}",
+            )
+            if down.returncode != 0:
+                evidence.finish("FAIL")
+                return down.returncode or 1
+
+        residue_free = not process_matches_profile(vm_dir) and all(
+            not (vm_dir / name).exists()
+            for name in ("disk.qcow2", "seed.iso", "id_vm_control", "id_vm_control.pub", "qemu.pid", "virtiofsd.pid", "proxy.pid")
+        )
+        evidence.check(
+            "disposable VM residue", residue_free,
+            "QEMU, overlay, seed, SSH keys, and recorded helper processes are absent" if residue_free else "disposable VM residue remains; preserve and inspect it",
+        )
+        if not residue_free:
+            evidence.finish("FAIL")
+            return 1
+
+        workspace_root = Path.home() / ".cache/little-mester/host-acceptance"
+        if campaign_project_dir_safe(workspace) and workspace.resolve().parent == workspace_root.resolve():
+            shutil.rmtree(workspace)
+            evidence.check(
+                "disposable workspace cleanup", not workspace.exists(),
+                "only the campaign-generated workspace was removed" if not workspace.exists() else "generated workspace remains",
+            )
+        else:
+            evidence.blocked("disposable workspace cleanup", "workspace path/ownership no longer matches generated private target; left untouched")
+
+        checks = evidence.data["checks"]
+        assert isinstance(checks, list)
+        failed = any(item.get("result") == "FAIL" for item in checks if isinstance(item, dict))
+        blocked = any(item.get("result") == "BLOCKED" for item in checks if isinstance(item, dict))
+        evidence.finish("FAIL" if failed else "BLOCKED" if blocked else "PASS")
+        return 1 if failed else 2 if blocked else 0
+    except KeyboardInterrupt:
+        evidence.blocked("campaign interrupted", "interactive campaign was interrupted; no automatic VM cleanup was attempted")
+        evidence.finish("BLOCKED")
+        return 130
+    except (AcceptanceError, OSError, subprocess.SubprocessError) as exc:
+        evidence.check("campaign runner", False, f"{type(exc).__name__}; profile/workspace state was not automatically cleaned")
+        evidence.finish("FAIL")
+        print(f"FAIL campaign runner: {type(exc).__name__}", file=sys.stderr)
+        return 2
 
 
 def parser() -> argparse.ArgumentParser:
@@ -2181,6 +2855,13 @@ def parser() -> argparse.ArgumentParser:
     report.add_argument("report", type=Path, help="path printed by the acceptance runner")
     observe = subs.add_parser("observe", help="record guided human TUI/auth/permission observations")
     observe.add_argument("--gate", choices=sorted(OBSERVATIONS), required=True)
+    campaign = subs.add_parser(
+        "campaign",
+        help="run the ordered existing-child, human TUI/auth/permissions, and disposable workload/lifecycle campaign",
+    )
+    campaign.add_argument("--outer-profile", required=True, help="preserved running outer profile")
+    campaign.add_argument("--reuse-child", required=True, help="preserved running child for the read-only nested continuation")
+    campaign.add_argument("--snapshot", type=Path, default=DEFAULT_SNAPSHOT)
     return root
 
 
@@ -2189,6 +2870,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "observe":
             return observe_gate(args.gate)
+        if args.command == "campaign":
+            return vm_campaign(args.outer_profile, args.reuse_child, args.snapshot.expanduser())
         if args.command == "inspect-interrupted":
             return inspect_interrupted(args.profile)
         if args.command == "inspect-report":

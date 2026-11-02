@@ -9,9 +9,11 @@ VM release is accepted.
 ## Before using it
 
 The latest #35/#41/#45/#50 tickets remain the source of truth for gate order.
-This runner automates safe-snapshot preparation, outer-guest readiness, and a
-bounded nested-VM gate. It does not perform model, TUI, browser-auth,
-permission, workload, or teardown acceptance.
+The `preflight` and `nested` commands automate safe-snapshot preparation,
+outer-guest readiness, and the bounded nested-VM gate. `campaign` is the ordered
+owner-host continuation: it requires the existing named outer/child profiles,
+does not start or clean either one, and uses a newly generated disposable
+profile/workspace for downstream human and destructive tests.
 
 Run commands from the CachyOS checkout root. The stable snapshot path is
 `$HOME/.cache/lab-vm-recursion/initial-launcher-smoke/workspace`; the default
@@ -175,6 +177,7 @@ After the current ticket order permits a human gate, run one of:
 ./scripts/vm-host-acceptance.py observe --gate tui
 ./scripts/vm-host-acceptance.py observe --gate auth
 ./scripts/vm-host-acceptance.py observe --gate permissions
+./scripts/vm-host-acceptance.py observe --gate workload
 ```
 
 These optional commands are the only interactive part: visual TUI behavior and
@@ -184,12 +187,71 @@ permission mode), never prompts, URLs, OAuth state/codes/tokens, screenshots, or
 raw logs. They are not prerequisites for or evidence of the automated nested
 gate, and they do not update tickets.
 
+### Ordered owner-host campaign
+
+After the current #35/#41/#45/#50 handoff explicitly permits the remaining
+gates, run this once from the physical CachyOS checkout root:
+
+```bash
+./scripts/vm-host-acceptance.py campaign \
+  --outer-profile nested-8g-20261102094820 \
+  --reuse-child nested-accept-20261102124501-ee957d5c
+```
+
+The first gate is the existing-child continuation from `nested --reuse-child`.
+The campaign requires that the exact named outer already be live on the safe
+snapshot; it will not provision a substitute profile. This gate is strictly
+read-only: it refuses a missing/stale snapshot rather than repairing it, refuses
+missing outer-guest QEMU tools rather than installing them, and refuses to
+create/restart an outer profile. It starts, stops, and cleans no VM. If it fails
+or blocks, the campaign stops before any agent or disposable-profile work. A
+pass there is only nested readiness,
+QEMU/listener/network-boundary, depth-refusal, and parent-continuity evidence.
+
+Next, it reloads the current approved outer guest egress policy, performs
+read-only `lab-vm models status`, opens the direct guest TUI for the
+model-stream/metrics/dialog/exit observations, then provisions
+one uniquely named 2-GiB disposable profile and a private scratch workspace
+outside the checkout. OAuth is not started until a separate interactive
+confirmation that the current #45 prerequisites authorize the test, followed
+by a second independent approval to start the real browser OAuth flow. Never
+copy or record OAuth URLs, state, codes, or tokens. The agent
+permission/workload gate uses only that scratch project's `opencode.json` and
+`compose.yaml`: an `ask` rule, one exact harmless `deny`, and a PostgreSQL
+Compose project with no host-published ports. Fixed human answers and sanitized
+gate results are saved; raw TUI, auth-list, Docker, and OAuth output is not put
+in the report.
+
+The final stages verify guest Compose health/query/restart/down, then put a
+known row in the guest workload, exercise non-destructive `suspend`/`resume`,
+and verify the same overlay/workspace and row survive. Before destructive
+`stop`/`down`, the runner asks for explicit confirmation naming only its
+generated disposable profile/workspace. If OpenAI credentials are stored, the
+campaign opts that profile into private host escrow, checks a fresh-overlay
+import, and leaves the mode-0600 escrow in the mode-0700 state directory; it
+does not touch host-Docker credentials or recreate its container. It removes
+only the generated scratch workspace after the disposable VM residue check.
+Declined approval, failed export/import, uncertain state, or failed gates leave
+VM/workspace state in place for review; never clean it manually as part of a
+retry. The campaign resets inherited `VM_YES`/`LAB_YES` so its explicit
+confirmation is not bypassed. Guest agent launches explicitly disable any
+ambient credential-forwarding environment; escrow is enabled only for the
+campaign's own generated profile during the authorized teardown/import gate.
+Any earlier failed or blocked gate prevents destructive cleanup and leaves the
+disposable guest and workspace available for review.
+
+Use `observe --gate workload` only when doing that human slice separately. The
+campaign's report records the unique disposable profile and fixed observations,
+not secret material or raw command output. A campaign result covers only these
+gates and does not imply overall VM/release acceptance.
+
 ## Post-merge disposition
 
 Keep this runner, `tests/test_vm_host_acceptance.py`, and this document. No CI
-job is needed. The safe-snapshot/profile reconciliation and nested gate are
-repeatable acceptance support, not one-time merge scaffolding. Do not add
-automatic VM teardown, ticket writes, model calls, or agent launches here.
+job is needed. The safe-snapshot/profile reconciliation, nested gate, and
+explicitly authorized disposable campaign are repeatable acceptance support,
+not one-time merge scaffolding. Do not add ticket writes or implicit
+model-service changes here.
 
 ## Evidence and exit status
 

@@ -65,6 +65,7 @@ VM_DISCARD_RECURSIVE=0
 VM_BROWSER_AUTH_MODE=auto
 VM_BROWSER_AUTH_ENABLE_FLAG=0
 VM_BROWSER_AUTH_DISABLE_FLAG=0
+VM_AGENT_AUTO=0
 VM_RESTART_OPENCODE=0
 VM_UPDATE_ALL=0
 VM_CONTEXT_JSON=0
@@ -218,6 +219,14 @@ VM lifecycle commands (epic #35, ticket #41):
       Stop the VM and remove per-VM artifacts (overlay disk, seed ISO, keys).
       Base disk is preserved.
 
+  ./lab-vm suspend [name]
+      Gracefully power off QEMU while preserving the overlay, guest workloads,
+      workspace selection, seed, and SSH keys. Refuses profiles that may have
+      live nested VM state. Resume with ./lab-vm resume [name].
+
+  ./lab-vm resume [name]
+      Restart a suspended profile on its recorded workspace and existing overlay.
+
   ./lab-vm recursion-clean <profile>
       Explicitly delete a stopped nested VM profile and its disposable workspace/state.
       Requires confirmation (or --yes); active recursive VMs are never removed.
@@ -295,9 +304,15 @@ Flags (any order):
   --discard-recursive  Acknowledge that down/stop/rebuild (or up --clean) may delete child VM state
   -v, --verbose        Extra progress info (SSH commands, qemu/virtiofsd output)
   -d, --debug          Everything from --verbose plus raw output and timing
+  --auto               For agent/run only: OpenCode auto-approves permissions
+                       except explicit denies; does not bypass configured denies.
 
 Environment:
   VM_BASE_SIZE         Override default base disk size (default: 20)
+  VM_AUTH_FORWARD=1    Import private host auth escrow on VM startup and atomically
+                       export refreshed credentials before stop/down deletion.
+                       Default escrow: ~/.local/share/little-mester/secrets/openai-auth.json;
+                       override with VM_AUTH_ESCROW_FILE. Disabled by default.
   VM_YES=1 / LAB_YES=1 Auto-accept all prompts (same as --yes)
   VM_VERBOSE=1         Equivalent to --verbose
   VM_DEBUG=1           Equivalent to --debug (implies --verbose)
@@ -334,6 +349,7 @@ for _i in "${_flags[@]}"; do
     --discard-recursive)      VM_DISCARD_RECURSIVE=1 ;;
     --browser-auth)           VM_BROWSER_AUTH_MODE=on; VM_BROWSER_AUTH_ENABLE_FLAG=1 ;;
     --no-browser-auth)        VM_BROWSER_AUTH_MODE=off; VM_BROWSER_AUTH_DISABLE_FLAG=1 ;;
+    --auto)                   VM_AGENT_AUTO=1 ;;
     --restart-opencode)       VM_RESTART_OPENCODE=1 ;;
     --json)                   VM_CONTEXT_JSON=1 ;;
     -v|--verbose)             VM_VERBOSE=1 ;;
@@ -382,7 +398,7 @@ for (( _fi=0; _fi<${#_flags[@]}; _fi++ )); do
     -h|--help) ;;
     --base-size|--workspace|--name|--max-depth|--memory) _fi=$(( _fi + 1 )) ;; # skip flag-pair
     --recurse|--unsafe-recurse|--clean|--discard-recursive|--all) ;;
-    --browser-auth|--no-browser-auth) ;;
+    --browser-auth|--no-browser-auth|--auto) ;;
     --restart-opencode) ;;
     --json) ;;
     -v|--verbose|-d|--debug) ;;
@@ -434,7 +450,7 @@ case "$cmd" in
     ;;
   *)
     case "$cmd" in
-      run|up|status|ssh|down|stop|resize|agent|auth-forward|egress-reload|verify-isolation|recursion-clean|base|rebuild|install-tools|update|models|metrics|context|extra|test|help|--help) ;;
+      run|up|status|ssh|down|stop|suspend|resume|resize|agent|auth-forward|egress-reload|verify-isolation|recursion-clean|base|rebuild|install-tools|update|models|metrics|context|extra|test|help|--help) ;;
       *)
         if [[ -d "$cmd" || "$cmd" == */* ]]; then
           if [[ ${#remaining[@]} -gt 1 ]]; then
@@ -476,7 +492,7 @@ elif [[ -n "${VM_WS_ARG:-}" && "$cmd" != up ]]; then
 elif [[ -n "$VM_NAME_ARG" && "$cmd" != install-tools && "$cmd" != update ]]; then
   die '--name is only valid with the run, install-tools, or update command.'
 fi
-if [[ "$cmd" == up || "$cmd" == resize ]]; then
+if [[ "$cmd" == up || "$cmd" == resize || "$cmd" == down || "$cmd" == stop || "$cmd" == suspend || "$cmd" == resume ]]; then
   [[ "$vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
 fi
 if [[ "$cmd" == resize ]]; then
@@ -596,7 +612,7 @@ fi
 # later lifecycle commands, not only the command that originally created it.
 if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" ]]; then
   case "$cmd" in
-    run|up|status|ssh|down|stop|resize|agent|egress-reload|verify-isolation|base|rebuild|install-tools|update)
+    run|up|status|ssh|down|stop|suspend|resume|resize|agent|egress-reload|verify-isolation|base|rebuild|install-tools|update)
       VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$vm_name")" || die 'Invalid recursive profile name.'
       VM_STATE_DIR="$VM_RECURSION_SESSION_DIR"
       VM_DIR_BASE="$VM_RECURSION_SESSION_DIR/vm"
@@ -623,6 +639,9 @@ if [[ "$VM_BROWSER_AUTH_ENABLE_FLAG" -eq 1 && "$VM_BROWSER_AUTH_DISABLE_FLAG" -e
 fi
 if [[ "$VM_BROWSER_AUTH_MODE" != auto && "$cmd" != "agent" && "$cmd" != "run" && ! ( "$cmd" == install-tools && "$VM_RESTART_OPENCODE" == 1 ) && "$cmd" != "--help" ]]; then
   die 'Browser-auth options are only valid with the agent or run command.'
+fi
+if [[ "$VM_AGENT_AUTO" == 1 && "$cmd" != agent && "$cmd" != run && "$cmd" != "--help" ]]; then
+  die 'The --auto permission option is only valid with the agent or run command.'
 fi
 
 # Context is intentionally read-only and bypasses the normal log rotation,
@@ -800,6 +819,12 @@ case "$cmd" in
     ;;
   stop)
     vm_cmd_stop "$vm_name"
+    ;;
+  suspend)
+    vm_cmd_suspend "$vm_name"
+    ;;
+  resume)
+    vm_cmd_resume "$vm_name"
     ;;
   resize)
     [[ ${#remaining[@]} -eq 3 ]] || die 'Usage: ./lab-vm resize <profile> <GiB>'

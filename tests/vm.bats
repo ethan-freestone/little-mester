@@ -529,6 +529,237 @@ LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
   [ ! -e "$vm_dir/recursion_policy" ]
 }
 
+@test "suspend gracefully powers off while preserving profile and guest workload state" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/suspend-state"
+  local vm_dir="$VM_DIR_BASE/work-profile"
+  mkdir -p "$vm_dir"
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do
+    printf 'preserve-%s\n' "$asset" >"$vm_dir/$asset"
+  done
+  printf '0 0 0\n' >"$vm_dir/recursion_policy"
+  VM_RUN_STATE=running
+  vm_run_status() { echo "$VM_RUN_STATE"; [[ "$VM_RUN_STATE" == running ]]; }
+  _vm_shutdown_for_workspace_switch() {
+    printf '%s\n' "$2" >"$BATS_TEST_TMPDIR/shutdown-reason"
+    VM_RUN_STATE=stopped
+    return 0
+  }
+  ssh() { echo 'suspend must not run guest compose down' >&2; return 99; }
+  vm_disk_delete() { echo 'suspend must preserve the overlay' >&2; return 99; }
+
+  run vm_cmd_suspend work-profile
+  [ "$status" -eq 0 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/shutdown-reason")" = 'suspending the VM' ]
+  [[ "$output" == *'Overlay, guest workloads, workspace selection, seed, and SSH identity were preserved'* ]]
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do
+    [ -f "$vm_dir/$asset" ]
+    [ "$(cat "$vm_dir/$asset")" = "preserve-$asset" ]
+  done
+}
+
+@test "suspend refuses descendant-capable profiles before guest or process changes" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/suspend-recursive-state"
+  local vm_dir="$VM_DIR_BASE/outer"
+  mkdir -p "$vm_dir"
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do : >"$vm_dir/$asset"; done
+  printf '0 2 1\n' >"$vm_dir/recursion_policy"
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  _vm_shutdown_for_workspace_switch() { echo called >"$BATS_TEST_TMPDIR/shutdown-called"; return 0; }
+
+  run vm_cmd_suspend outer
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'may contain nested VM state'* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/shutdown-called" ]
+  [ -f "$vm_dir/disk.qcow2" ]
+}
+
+@test "resume reuses only the recorded workspace and preserved overlay" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/resume-state"
+  local vm_dir="$VM_DIR_BASE/resume-profile" workspace="$BATS_TEST_TMPDIR/resume-workspace"
+  mkdir -p "$vm_dir" "$workspace"
+  : >"$vm_dir/disk.qcow2"
+  printf '%s\n' "$workspace" >"$vm_dir/workspace"
+  printf '0 0 0\n' >"$vm_dir/recursion_policy"
+  vm_run_status() { echo stopped; return 1; }
+  vm_cmd_up() {
+    [ "$1" = resume-profile ]
+    [ "$2" = "$workspace" ]
+    echo resumed
+  }
+
+  run vm_cmd_resume resume-profile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'preserved overlay'* ]]
+  [[ "$output" == *resumed* ]]
+}
+
+@test "resume refuses missing overlay or unsafe recorded workspace without provisioning" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/resume-refusal"
+  local vm_dir="$VM_DIR_BASE/resume-profile"
+  mkdir -p "$vm_dir"
+  printf '0 0 0\n' >"$vm_dir/recursion_policy"
+  vm_run_status() { echo stopped; return 1; }
+  vm_cmd_up() { echo called >"$BATS_TEST_TMPDIR/up-called"; return 0; }
+
+  run vm_cmd_resume resume-profile
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'no preserved overlay'* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/up-called" ]
+
+  : >"$vm_dir/disk.qcow2"
+  printf '%s\n' "$BATS_TEST_TMPDIR/missing-workspace" >"$vm_dir/workspace"
+  run vm_cmd_resume resume-profile
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'workspace is unavailable or unsafe'* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/up-called" ]
+}
+
+@test "credential forwarding imports only through SSH stdin and records no credential contents" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_AUTH_FORWARD=1
+  VM_AUTH_ESCROW_FILE="$BATS_TEST_TMPDIR/secrets/openai-auth.json"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/auth-import-state"
+  local vm_dir="$VM_DIR_BASE/profile" workspace="$BATS_TEST_TMPDIR/auth-workspace"
+  mkdir -p -m 700 "${VM_AUTH_ESCROW_FILE%/*}" "$vm_dir" "$workspace"
+  chmod 700 "${VM_AUTH_ESCROW_FILE%/*}"
+  : >"$vm_dir/disk.qcow2"
+  printf '%s\n' "$workspace" >"$vm_dir/workspace"
+  printf '{"openai":{"type":"oauth","access":"test-secret-value"}}\n' >"$VM_AUTH_ESCROW_FILE"
+  chmod 600 "$VM_AUTH_ESCROW_FILE"
+  vm_ssh() {
+    [ "$2" = 'opencode auth import' ]
+    cat >"$BATS_TEST_TMPDIR/guest-import.json"
+    printf '%s\n' imported >>"$BATS_TEST_TMPDIR/import-count"
+  }
+
+  run _vm_auth_import_if_needed "$vm_dir"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'credential contents were not logged'* ]]
+  [ "$(cat "$BATS_TEST_TMPDIR/guest-import.json")" = "$(cat "$VM_AUTH_ESCROW_FILE")" ]
+  [ "$(stat -c '%a' "$vm_dir/auth-forward-imported")" = 600 ]
+  [[ "$output" != *'test-secret-value'* ]]
+
+  run _vm_auth_import_if_needed "$vm_dir"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l <"$BATS_TEST_TMPDIR/import-count")" -eq 1 ]
+}
+
+@test "credential export atomically refreshes a private escrow without printing secrets" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_AUTH_FORWARD=1
+  VM_AUTH_ESCROW_FILE="$BATS_TEST_TMPDIR/secrets/openai-auth.json"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/auth-export-state"
+  local vm_dir="$VM_DIR_BASE/profile" workspace="$BATS_TEST_TMPDIR/export-workspace"
+  mkdir -p -m 700 "${VM_AUTH_ESCROW_FILE%/*}" "$vm_dir" "$workspace"
+  chmod 700 "${VM_AUTH_ESCROW_FILE%/*}"
+  : >"$vm_dir/disk.qcow2"
+  printf '%s\n' "$workspace" >"$vm_dir/workspace"
+  printf '{"openai":{"access":"older-secret"}}\n' >"$VM_AUTH_ESCROW_FILE"
+  chmod 600 "$VM_AUTH_ESCROW_FILE"
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  vm_ssh() { [ "$2" = 'opencode auth export openai' ]; printf '{"openai":{"access":"refreshed-secret"}}\n'; }
+
+  run _vm_auth_export_to_escrow "$vm_dir"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'atomically saved to the private host escrow'* ]]
+  [[ "$output" != *'refreshed-secret'* ]]
+  grep -q refreshed-secret "$VM_AUTH_ESCROW_FILE"
+  [ "$(stat -c '%a' "$VM_AUTH_ESCROW_FILE")" = 600 ]
+  [ "$(stat -c '%a' "${VM_AUTH_ESCROW_FILE%/*}")" = 700 ]
+}
+
+@test "failed credential export preserves the prior escrow and refuses destructive down" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_AUTH_FORWARD=1
+  VM_AUTH_ESCROW_FILE="$BATS_TEST_TMPDIR/secrets/openai-auth.json"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/auth-export-failure"
+  local vm_dir="$VM_DIR_BASE/profile" workspace="$BATS_TEST_TMPDIR/failure-workspace"
+  mkdir -p -m 700 "${VM_AUTH_ESCROW_FILE%/*}" "$vm_dir" "$workspace"
+  chmod 700 "${VM_AUTH_ESCROW_FILE%/*}"
+  : >"$vm_dir/disk.qcow2"
+  printf '%s\n' "$workspace" >"$vm_dir/workspace"
+  printf '{"openai":{"access":"last-known-good"}}\n' >"$VM_AUTH_ESCROW_FILE"
+  chmod 600 "$VM_AUTH_ESCROW_FILE"
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  vm_ssh() { [ "$2" = 'opencode auth export openai' ]; printf '{invalid-json'; return 0; }
+  vm_run_stop() { : >"$BATS_TEST_TMPDIR/down-was-run"; }
+  vm_disk_delete() { : >"$BATS_TEST_TMPDIR/disk-was-deleted"; }
+  vm_ssh_clean() { : >"$BATS_TEST_TMPDIR/keys-were-removed"; }
+  vm_recursion_require_discard_ack() { return 0; }
+
+  run vm_cmd_down profile
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'refusing destructive teardown'* ]]
+  grep -q last-known-good "$VM_AUTH_ESCROW_FILE"
+  [ ! -e "$BATS_TEST_TMPDIR/down-was-run" ]
+  [ ! -e "$BATS_TEST_TMPDIR/disk-was-deleted" ]
+  [ ! -e "$BATS_TEST_TMPDIR/keys-were-removed" ]
+}
+
+@test "credential forwarding is disabled by default and rejects unsafe escrow paths" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_AUTH_FORWARD=0
+  vm_ssh() { : >"$BATS_TEST_TMPDIR/ssh-was-run"; }
+  run _vm_auth_import_if_needed "$BATS_TEST_TMPDIR/no-profile"
+  [ "$status" -eq 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/ssh-was-run" ]
+
+  VM_AUTH_FORWARD=1
+  local private_dir="$BATS_TEST_TMPDIR/private" workspace="$BATS_TEST_TMPDIR/unsafe-workspace"
+  mkdir -p -m 700 "$private_dir" "$workspace"
+  VM_AUTH_ESCROW_FILE="$private_dir/auth.json"
+  printf '%s\n' "$workspace" >"$BATS_TEST_TMPDIR/profile-workspace"
+  mkdir -p "$BATS_TEST_TMPDIR/profile"
+  mv "$BATS_TEST_TMPDIR/profile-workspace" "$BATS_TEST_TMPDIR/profile/workspace"
+  run _vm_auth_escrow_resolve "$BATS_TEST_TMPDIR/profile"
+  [ "$status" -eq 0 ]
+
+  VM_AUTH_ESCROW_FILE="$workspace/auth.json"
+  run _vm_auth_escrow_resolve "$BATS_TEST_TMPDIR/profile"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'outside the selected workspace and Git checkout'* ]]
+
+  VM_AUTH_ESCROW_FILE="$BATS_TEST_TMPDIR/private-link/auth.json"
+  ln -s "$private_dir" "$BATS_TEST_TMPDIR/private-link"
+  run _vm_auth_escrow_resolve "$BATS_TEST_TMPDIR/profile"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'real directory'* || "$output" == *'symlinked/non-canonical'* ]]
+}
+
+@test "invalid credential-forwarding mode refuses destructive teardown" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_AUTH_FORWARD=maybe
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/auth-invalid-mode"
+  mkdir -p "$VM_DIR_BASE/profile"
+  vm_recursion_require_discard_ack() { return 0; }
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  vm_run_stop() { : >"$BATS_TEST_TMPDIR/invalid-mode-stopped"; }
+  vm_disk_delete() { : >"$BATS_TEST_TMPDIR/invalid-mode-deleted"; }
+
+  run vm_cmd_down profile
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM_AUTH_FORWARD must be 0 or 1'* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/invalid-mode-stopped" ]
+  [ ! -e "$BATS_TEST_TMPDIR/invalid-mode-deleted" ]
+}
+
 @test "lab-vm refuses an over-depth launch before prerequisite checks" {
   local workspace="$BATS_TEST_TMPDIR/recursion-preflight"
   mkdir -p "$workspace"
@@ -538,6 +769,20 @@ LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
   [[ "$output" == *'maximum nesting depth'* ]]
   [[ "$output" != *'Checking VM prerequisites'* ]]
   [[ "$output" != *'qemu-system-x86_64 not found'* ]]
+}
+
+@test "suspend and resume accept only safe named VM profiles" {
+  run "$REPO_ROOT/lab-vm" suspend ../default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM profile names must start with a letter or digit'* ]]
+
+  run "$REPO_ROOT/lab-vm" resume ../default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM profile names must start with a letter or digit'* ]]
+
+  run "$REPO_ROOT/lab-vm" suspend --workspace /tmp
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--workspace is only valid with the run or up command'* ]]
 }
 
 @test "lab-vm CLI parses recursion modes and refuses child limit reset or increase" {
@@ -785,6 +1030,18 @@ PY
   [[ "$remote_command" == *'LAB_VM_RECURSION_DEPTH=1 LAB_VM_MAX_DEPTH=2'* ]]
   [[ "$remote_command" == *'METRICS_URL=http://10.0.2.100:19532'* ]]
   [[ "$remote_command" != *'must-not-be-forwarded'* ]]
+
+  VM_AGENT_AUTO=1
+  run vm_cmd_agent default
+  [ "$status" -eq 0 ]
+  remote_command="$(python3 - "$VM_AGENT_CAPTURE" <<'PY'
+import sys
+args = open(sys.argv[1], "rb").read().decode().rstrip("\0").split("\0")
+print(args[-1])
+PY
+)"
+  [[ "$remote_command" == *'&& opencode --auto'* ]]
+  VM_AGENT_AUTO=0
 }
 
 @test "egress-reload signals only the matching running VM proxy and confirms policy reload" {

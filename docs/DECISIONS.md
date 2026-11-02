@@ -402,6 +402,10 @@ the VM and its evidence until the owner approves destructive cleanup. In particu
 the current `stop`/`down` behavior deletes guest state and is not a routine daily stop;
 see #41/#52 for the current lifecycle contract and evidence.
 
+The local implementation now provides explicit `suspend`/`resume` commands that preserve the
+overlay and workspace. They are not recommended for valuable state until the owner-host
+shutdown/resume and workload-persistence checks pass; `stop`/`down` remain destructive.
+
 #### C.9.8 User permission prompt before package installation
 
 **Decision:** Before running `sudo pacman -S`, `sudo apt install`, etc., the script

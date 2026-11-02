@@ -397,6 +397,21 @@ teardown() {
   [[ "$output" == *'Unknown command: auth'* ]]
 }
 
+@test "lab-vm --auto is agent/run-only and reaches OpenCode rather than auto-accepting host prompts" {
+  run ./lab-vm status --auto
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'The --auto permission option is only valid with the agent or run command.'* ]]
+
+  run ./lab-vm agent --auto --no-browser-auth
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'is not running'* ]]
+  [[ "$output" != *'Unknown command'* ]]
+
+  run ./lab-vm --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'--auto'*'explicit denies'* ]]
+}
+
 @test "lab-vm flags can be interleaved with subcommand" {
   run bash -c './lab-vm --unsafe-recurse --verbose -y test --debug 2>&1 | head -1'
   [ $status -eq 0 ]

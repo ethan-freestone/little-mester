@@ -187,10 +187,13 @@ path; local regressions do not replace the pending live nested-KVM acceptance ga
 6. The lifecycle can stop guest workloads and the outer VM. VM-state retention/deletion is
    an explicit lifecycle choice; recursive test sessions must not be silently destroyed.
 
-The current `lab-vm stop` and `lab-vm down` are destructive to guest state; they are not the
-target end-of-day operation. A resumable, non-destructive stop/restart path and command-by-
-command retention guarantees are required before the VM workflow is recommended for daily
-use (#41/#52).
+`lab-vm suspend` and `lab-vm resume` provide the non-destructive shutdown/restart path: suspend
+requests a clean guest poweroff and preserves the qcow2 overlay, guest Docker workloads/volumes,
+recorded workspace, seed, and SSH identity; resume starts the same profile on that workspace and
+existing overlay. Suspend refuses profiles whose persisted recursion policy says descendants may
+exist, because child QEMU lifecycle must be resolved first. `lab-vm stop` and `lab-vm down` remain
+destructive teardown commands. The new path is locally implemented but still requires owner-host
+KVM acceptance before recommending it for daily use (#41/#52).
 
 The Little Mester checkout is not part of the default workspace export. `--recurse` opts into
 bounded child-VM testing; repository-related workspaces are snapshotted so the direct guest

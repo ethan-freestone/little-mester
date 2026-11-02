@@ -91,7 +91,7 @@ qemu-system-x86_64 -enable-kvm -machine q35 -m 512 -drive file=/dev/null,format=
 
 ## 2. One-command bootstrap
 
-If the agent will use a ChatGPT Plus or Pro subscription, preserve existing auth using the host credential escrow procedure in [the auth runbook](chatgpt-auth.md). Browser/non-device-code login is a required #45 acceptance gate; only legacy device login has been verified so far. Automatic import into a disposable VM is not implemented yet; do not assume a login stored in the current container will follow the VM.
+If the agent will use a ChatGPT Plus or Pro subscription, preserve existing host-Docker auth using the procedure in [the auth runbook](chatgpt-auth.md). The guest's optional host escrow import/export is implemented locally but is disabled by default and still requires #45 host acceptance. Do not assume a login stored in the current container follows a VM, and do not recreate the host-Docker container during VM testing.
 
 **VM acceptance status:** The host lifecycle is still under test; the latest
 failure and current retry procedure are tracked on ticket #41. Follow that
@@ -157,9 +157,17 @@ meet the KVM requirements.
 ./lab-vm agent               # Guest TUI; browser OAuth bridge enabled by default
 ./lab-vm agent --no-browser-auth # Skip the temporary browser OAuth bridge
 ./lab-vm ssh                 # SSH into the VM
-./lab-vm down                # Stop and remove the VM
-./lab-vm stop                # Teardown containers + stop VM
+./lab-vm suspend             # Cleanly power off; preserve guest state/workloads
+./lab-vm resume              # Restart the same profile, overlay, and workspace
+./lab-vm stop                # Destructively tear down workloads and VM overlay
+./lab-vm down                # Remove VM overlay, seed, and control keys
 ```
+
+`suspend`/`resume` are the intended daily shutdown path. Suspend preserves the guest overlay,
+Docker volumes/workloads, workspace selection, seed, and SSH identity; it refuses a profile
+whose recursion metadata says nested VM state may exist. `stop` and `down` remain destructive.
+The resumable path is implemented locally but has not yet passed owner-host lifecycle acceptance;
+follow #41/#52 before relying on it for valuable guest state.
 
 ### Resize a running VM
 

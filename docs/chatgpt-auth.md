@@ -1,6 +1,6 @@
 # ChatGPT authentication runbook (container and VM)
 
-> **Status (2026-10-29):** The owner reports that VM browser authentication works. `./lab-vm agent` now enables its temporary host-browser handoff by default; use `--no-browser-auth` to skip it. The bridge derives the callback port from OpenCode's runtime `redirect_uri` and adds one loopback-only SSH forward. This behavior is source-verified for pinned OpenCode 2.2.0; broader auth cleanup/persistence acceptance remains open (#45). Public HTTP(S) agent work is now approved through the VM proxy; a successful real model completion and live host-isolation checks are not yet verified. VM/host credential escrow and export-before-delete are **not implemented**; the VM overlay remains the only persistence for guest-created auth. Preserve the current host-Docker session and VM state during testing.
+> **Status (2026-11-02):** The owner reports that VM browser authentication works. `./lab-vm agent` enables its temporary host-browser handoff by default; use `--no-browser-auth` to skip it. The bridge derives the callback port from OpenCode's runtime `redirect_uri` and adds one loopback-only SSH forward. This behavior is source-verified for pinned OpenCode 2.2.0; broader auth cleanup/persistence acceptance remains open (#45). Public HTTP(S) agent work is approved through the VM proxy, but completion and live host-isolation evidence remain separate gates. Opt-in (`VM_AUTH_FORWARD=1`) OpenAI credential escrow/import/export is implemented locally and covered by mocks; physical-host OAuth persistence acceptance is still pending. Preserve the current host-Docker session and VM state during testing.
 
 Use this for operational ChatGPT login and credential-preservation steps when OpenCode runs without a browser. The general auth boundary is [decision C.9.13](DECISIONS.md); acceptance criteria, implementation chronology, and test results belong to [ticket #45](tickets/ticket-045.json). This uses a ChatGPT Plus or Pro subscription; it does not require an OpenAI API key or separate API billing.
 
@@ -199,17 +199,42 @@ umask 077
 opencode auth export openai > /secure/host/path/openai-auth.json
 ```
 
-## Required VM bootstrap design
+## VM credential forwarding
 
-A disposable VM cannot be instantly connected without receiving persistent OAuth state. The intended lifecycle is:
+A disposable VM can import an OpenCode-supported credential export through its existing SSH
+control channel. Forwarding is **off by default**. Explicitly enable it in the environment of
+`lab-vm` commands with `VM_AUTH_FORWARD=1`; the default host escrow is
+`~/.local/share/little-mester/secrets/openai-auth.json`, and `VM_AUTH_ESCROW_FILE` can select a
+different absolute path. The escrow directory must be owned by the current user and inaccessible
+to group/other users; the file must be a regular user-owned file with no group/other permissions.
+The path must be outside the selected workspace and Git checkout.
+
+The lifecycle is:
 
 ```text
 One-time login: supported ChatGPT browser or device flow -> host credential escrow
-VM up:          host escrow -> control SSH/stdin -> opencode auth import
-Agent restart:  guest OpenCode data directory persists outside agent tmpfs
-VM down:        latest opencode auth export -> atomic host escrow update
+VM up:          when enabled, host escrow -> control SSH/stdin -> opencode auth import (once per overlay)
+Agent restart:  direct guest OpenCode state remains in the VM overlay
+VM suspend:     guest OpenCode state and credentials remain in the overlay
+VM stop/down:   when enabled, opencode auth export openai -> atomic host escrow update -> destructive teardown
 Next VM up:     import the latest host escrow
 ```
+
+Example:
+
+```bash
+VM_AUTH_FORWARD=1 ./lab-vm up my-profile --workspace /path/to/workspace
+VM_AUTH_FORWARD=1 ./lab-vm suspend my-profile
+VM_AUTH_FORWARD=1 ./lab-vm resume my-profile
+VM_AUTH_FORWARD=1 ./lab-vm stop my-profile
+```
+
+`up` imports only when that overlay has no successful-import marker, so a stale host escrow does
+not overwrite credentials refreshed inside a running VM. `stop` exports the OpenAI integration
+before removing guest workloads; `down` exports it again immediately before deleting the overlay. If the guest is stopped,
+the export is empty/invalid, the SSH transfer fails, or the atomic host save fails, teardown is
+refused and the overlay remains available. Start the guest and retry after resolving the issue.
+`suspend`/`resume` does not export because the VM overlay is preserved.
 
 ### Import without another login
 
@@ -219,7 +244,7 @@ OpenCode can read an exported credential document from stdin:
 opencode auth import < /secure/path/openai-auth.json
 ```
 
-For VM automation, stream the host file through the existing control SSH connection rather than adding it to the workspace or cloud-init data. The exact SSH wrapper belongs in `lab-vm`; conceptually it is:
+For VM automation, `lab-vm` streams the host file through the existing control SSH connection rather than adding it to the workspace or cloud-init data:
 
 ```bash
 ssh <vm-control-options> mester@127.0.0.1 \
@@ -227,37 +252,41 @@ ssh <vm-control-options> mester@127.0.0.1 \
   < "$HOME/.local/share/little-mester/secrets/openai-auth.json"
 ```
 
-If OpenCode runs only in the agent container, the import must execute in that container or in its startup entrypoint—not merely under the VM's `mester` account.
+OpenCode runs directly as the VM's `mester` guest user, so importing on that account updates the
+credential store used by the TUI. The host file is never mounted into the guest.
 
-### Persist state across agent-container recreation
+### Guest and host persistence boundaries
 
-The agent's whole home directory is currently tmpfs:
+The old host-Docker agent's whole home directory is tmpfs:
 
 ```yaml
 tmpfs:
   - /home/agent
 ```
 
-The VM implementation must mount a guest-side persistent directory over the narrower OpenCode data path, for example:
+That tmpfs does not contain the VM-native agent. VM OpenCode runs as the guest `mester` user and
+its data directory is part of the writable qcow2 overlay. `suspend`/`resume` therefore preserve
+the guest credential store without a second data-directory mount. Deleting the VM overlay still
+removes that state, which is why opted-in `stop`/`down` export it first.
 
-```yaml
-volumes:
-  - /home/mester/.local/share/opencode:/home/agent/.local/share/opencode
-```
-
-The guest directory must exist, be writable by the agent UID/GID, and remain private. This nested mount preserves refreshed credentials and OpenCode state across agent-container recreation while leaving the rest of `/home/agent` ephemeral.
+Recreating the host-Docker container still loses its tmpfs-local login. Before any such
+recreation, first use the host export procedure above. The VM forwarding implementation does not
+recreate or alter that container.
 
 ### Preserve refreshed credentials across VM deletion
 
-`lab-vm down` currently deletes the qcow2 overlay. Any guest-side OpenCode data therefore disappears at that point. OAuth refresh credentials may change while OpenCode is used, so repeatedly importing an old one-time export is not a durable design.
+`lab-vm stop` and `lab-vm down` delete the qcow2 overlay. OAuth refresh credentials may change
+while OpenCode is used, so repeatedly importing an old one-time export is not a durable design.
+With `VM_AUTH_FORWARD=1`, each command exports the current OpenAI credential state atomically
+before deleting it.
 
-Before deleting the overlay, `lab-vm down` should:
+Before deleting the overlay, `lab-vm stop/down`:
 
-1. Export the active OpenAI credential from the running OpenCode environment.
+1. Export only the OpenAI integration from the running guest account.
 2. Transfer it over the control SSH channel to a temporary host file with mode `0600`.
 3. Check that the export command succeeded and the file is non-empty.
 4. Atomically replace the host escrow file.
-5. Only then tear down the agent and delete the VM overlay.
+5. Only then tear down guest workloads and delete the VM overlay.
 
 An alternative is a small persistent state disk that `down` never deletes. Do not bake credentials into the shared base image.
 
@@ -303,7 +332,7 @@ opencode auth list
 opencode debug paths db
 ```
 
-If the database is under `/home/agent`, the tmpfs was probably recreated. Import the host escrow, then implement or repair the guest-side data-directory mount.
+If the database is under `/home/agent`, this is the host-Docker agent's tmpfs context; a recreated container loses its local login. Restore it from the private host export before using that workflow. VM-native OpenCode runs as guest user `mester` and stores auth in the VM overlay; if an overlay was destructively recreated, opt-in host escrow import is available with `VM_AUTH_FORWARD=1`. Do not copy `opencode.db` or assume host-Docker state is shared with the VM.
 
 ### Browser waits on a localhost callback
 
