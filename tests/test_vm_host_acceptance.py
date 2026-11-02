@@ -531,6 +531,34 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertTrue(delayed.killed)
         self.assertEqual(delayed.wait_calls, 2)
 
+    def test_inspect_interrupted_reads_summary_without_mutating_or_leaking_details(self):
+        profile = "nested-accept-20261102005812-6494102d"
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory)
+            report_path = state_dir / "vm-acceptance-interrupted.json"
+            report_path.write_text(json.dumps({
+                "command": "nested",
+                "started_at": "2026-11-02T01:00:00+00:00",
+                "child_profile": profile,
+                "checks": [{"name": "child up", "result": "PASS", "detail": "private-detail-marker"}],
+            }))
+            report_path.chmod(0o600)
+            before = report_path.read_bytes()
+            output = io.StringIO()
+            with patch.object(acceptance, "interrupted_processes", return_value=[]), \
+                 redirect_stdout(output):
+                result = acceptance.inspect_interrupted(profile, state_dir)
+            self.assertEqual(result, 0)
+            self.assertIn("Outcome: interrupted or unfinished", output.getvalue())
+            self.assertIn("PASS: child up", output.getvalue())
+            self.assertNotIn("private-detail-marker", output.getvalue())
+            self.assertIn("No matching local acceptance runner", output.getvalue())
+            self.assertEqual(report_path.read_bytes(), before)
+            self.assertEqual(report_path.stat().st_mode & 0o777, 0o600)
+        parsed = acceptance.parser().parse_args(["inspect-interrupted", profile])
+        self.assertEqual(parsed.command, "inspect-interrupted")
+        self.assertEqual(parsed.profile, profile)
+
     def test_nested_profile_is_automatically_generated_by_default(self):
         args = acceptance.parser().parse_args(["nested"])
         self.assertIsNone(args.profile)

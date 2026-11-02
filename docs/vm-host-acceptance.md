@@ -160,6 +160,19 @@ the acceptance runner (typically status 130) and closes its local SSH client;
 it does not stop or clean the nested VM. An interrupted run is not a pass, and
 must not be retried with the same child profile.
 
+For a run interrupted after child startup, inspect its private summary and
+matching local runner/SSH processes without changing state:
+
+```sh
+./scripts/vm-host-acceptance.py inspect-interrupted \
+  nested-accept-20261102005812-6494102d
+```
+
+Replace the profile with the exact child name printed by `lab-vm up`. This
+command prints check names/results only (not raw report details or command
+arguments); it does not signal processes, connect to a VM, or delete evidence.
+Keep the child profile and report. Do not treat an unfinished report as a pass.
+
 Exit status is zero only for a passed preflight/nested gate or a fully
 positive human observation; blocked or failed gates return nonzero. A runner
 PASS covers only the stated gate and must not be generalized to full VM,

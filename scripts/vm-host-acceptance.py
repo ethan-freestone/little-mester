@@ -1391,6 +1391,107 @@ def nested_gate(profile: str | None, outer_profile: str, snapshot: Path, repo: P
     return 0 if passed else (rc or 1)
 
 
+def interrupted_processes() -> list[dict[str, str]]:
+    """Describe matching local runner/SSH processes without exposing argv or signaling them."""
+    found: list[dict[str, str]] = []
+    proc = Path("/proc")
+    try:
+        entries = list(proc.iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.name.isdecimal() or int(entry.name) == os.getpid():
+            continue
+        try:
+            if entry.stat().st_uid != os.getuid():
+                continue
+            args = [part.decode("utf-8", "replace") for part in (entry / "cmdline").read_bytes().split(b"\0") if part]
+        except OSError:
+            continue
+        if not args:
+            continue
+        executable = Path(args[0]).name
+        kind = None
+        if executable.startswith("python") and any("vm-host-acceptance.py" in arg for arg in args) and "nested" in args:
+            kind = "nested-acceptance-runner"
+        elif executable == "ssh" and "mester@127.0.0.1" in args:
+            kind = "ssh-to-outer-guest"
+        if kind is None:
+            continue
+        try:
+            details = subprocess.run(
+                ["ps", "-o", "pid=,ppid=,stat=,etime=", "-p", entry.name],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                check=False, timeout=2,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            details = f"pid={entry.name} status=unavailable"
+        found.append({"kind": kind, "details": details or f"pid={entry.name} status=exited"})
+    return found
+
+
+def inspect_interrupted(profile: str, state_dir: Path | None = None) -> int:
+    """Read a partial private report and local process state; never changes or kills anything."""
+    if not PROFILE_RE.fullmatch(profile):
+        print("Invalid profile name.", file=sys.stderr)
+        return 2
+    directory = state_dir or (Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+                              / "little-mester" / "host-acceptance")
+    print(f"Inspection target: {profile}")
+    report_matches: list[tuple[float, Path, dict[str, object]]] = []
+    if directory.is_symlink() or not directory.is_dir():
+        print("No private host-acceptance report directory found.")
+    else:
+        for path in directory.glob("vm-acceptance-*.json"):
+            try:
+                metadata = path.lstat()
+                if path.is_symlink() or not path.is_file() or metadata.st_uid != os.getuid():
+                    continue
+                report = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if (isinstance(report, dict) and report.get("command") == "nested"
+                    and report.get("child_profile") == profile):
+                report_matches.append((metadata.st_mtime, path, report))
+    if report_matches:
+        _, path, report = max(report_matches, key=lambda item: item[0])
+        mode = stat.S_IMODE(path.stat().st_mode)
+        print(f"Report: {path} (mode {mode:04o})")
+        if mode & 0o077:
+            print("WARNING: report permissions are broader than 0600; do not share the file.")
+        print(f"Started: {report.get('started_at', 'unknown')}")
+        print(f"Finished: {report.get('finished_at', 'not recorded')}")
+        print(f"Outcome: {report.get('outcome', 'interrupted or unfinished')}")
+        checks = report.get("checks", [])
+        if isinstance(checks, list) and checks:
+            print("Recorded checks:")
+            for item in checks:
+                if isinstance(item, dict):
+                    print(f"  {item.get('result', 'UNKNOWN')}: {item.get('name', 'unnamed check')}")
+        else:
+            print("Recorded checks: none")
+        nested = report.get("nested_summary")
+        nested_checks = nested.get("checks") if isinstance(nested, dict) else None
+        if isinstance(nested_checks, dict):
+            print("Remote nested checks:")
+            for name, result in nested_checks.items():
+                print(f"  {'PASS' if result is True else 'FAIL' if result is False else 'UNKNOWN'}: {name}")
+    else:
+        print("No matching partial/final report found for this child profile.")
+
+    processes = interrupted_processes()
+    relevant = [item for item in processes if item["kind"] == "nested-acceptance-runner"]
+    relevant.extend(item for item in processes if item["kind"] == "ssh-to-outer-guest")
+    if relevant:
+        print("Matching local processes (inspection only; none were signaled):")
+        for item in relevant:
+            print(f"  {item['kind']}: {item['details']}")
+    else:
+        print("No matching local acceptance runner or outer-guest SSH process found.")
+    print("Read-only inspection complete. No VM, process, report, or workspace state was changed.")
+    return 0
+
+
 OBSERVATIONS: dict[str, tuple[str, tuple[str, ...]]] = {
     "tui": (
         "Record only when the latest #41 handoff permits it. Compare built-in and custom dialogs with host-Docker in the same terminal; do not restart QEMU or alter the overlay.",
@@ -1459,6 +1560,11 @@ def parser() -> argparse.ArgumentParser:
         cmd.add_argument("--snapshot", type=Path, default=DEFAULT_SNAPSHOT)
         if name == "nested":
             cmd.add_argument("--profile", help="optional child profile name; otherwise a unique name is generated and retained")
+    inspect = subs.add_parser(
+        "inspect-interrupted",
+        help="read a nested run's private report and matching local processes without changing state",
+    )
+    inspect.add_argument("profile", help="child profile name from the interrupted nested run")
     observe = subs.add_parser("observe", help="record guided human TUI/auth/permission observations")
     observe.add_argument("--gate", choices=sorted(OBSERVATIONS), required=True)
     return root
@@ -1469,6 +1575,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "observe":
             return observe_gate(args.gate)
+        if args.command == "inspect-interrupted":
+            return inspect_interrupted(args.profile)
         if args.command == "preflight":
             evidence = Evidence("preflight", "owner-host checks with safe snapshot reconciliation and non-destructive outer-profile bootstrap; no model services, agent, or teardown")
             ready, _ = run_preflight(evidence, args.outer_profile, args.snapshot.expanduser())
