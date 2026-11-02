@@ -184,6 +184,12 @@ continuity has a 30-second deadline. Timeouts fail the gate and preserve the
 child profile. The child `lab-vm up` stage is visible through streamed output
 and heartbeats; these do not imply that stage passed until its completion event
 and return code are recorded.
+The full remote child phase also has a 30-minute deadline. A structured terminal
+summary ends the runner's read immediately; it closes only its dedicated local
+SSH client instead of waiting indefinitely for EOF from inherited output
+descriptors. The summary is authoritative for the remote checks. A deadline or
+interrupt likewise closes only that local SSH client and preserves the outer
+and child VM state; neither action runs guest teardown.
 Ctrl-C exits the acceptance runner (typically status 130) and closes its local
 SSH client; it does not stop or clean the nested VM. An interrupted run is not
 a pass and must not be retried with the same child profile.

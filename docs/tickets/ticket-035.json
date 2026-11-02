@@ -8,7 +8,7 @@
   "title": "Epic: VM-native Little Mester agent and isolated workload environment",
   "objective": "CURRENT RELEASE COORDINATOR (2026-11-01): deliver the VM-first Little Mester release, preserve the Docker fallback as ./lab-docker, simplify and correct maintained docs, and do not claim merge-ready until code, host acceptance, docs, CI and PR evidence are complete. Follow the phased CURRENT RELEASE PLAN appended to tests.needed; newest phase pointer supersedes stale handoffs. Current owner-configured default guest recursion policy is depth 0 / max 2; host/KVM and release evidence remain separately scoped.",
   "created_at": "2026-10-26T17:39:37.714Z",
-  "updated_at": "2026-11-02T09:39:03.598Z",
+  "updated_at": "2026-11-02T11:48:56.869Z",
   "priority": "critical",
   "comments": [
     {
@@ -243,7 +243,8 @@
       "tests/vm.bats: CLI rejects missing/invalid/duplicate --memory values and commands outside up/run; help documents the option.",
       "2026-11-02 targeted nested image-download fix: nested curl explicitly uses the existing parent public-only proxy with no-proxy bypass disabled; the owner-host runner also sets the existing proxy environment for older guest helper sources. Top-level behavior and egress policy are unchanged. See #41 for exact implementation and retry handoff.",
       "2026-11-02: `lib/vm/runner.sh`, `lib/vm/lifecycle.sh`, `tests/vm.bats`, and `docs/vm-host-acceptance.md` contain the local AF_UNIX socket-path and virtiofsd diagnostic fix; Bats cases cover short path/legacy support and debug/startup diagnostics. Owner-host retry remains pending.",
-      "2026-11-02 local diagnostics commit fb94d1d: detailed outer-guest RAM reporting, streamed/persisted timestamped remote stages with 30-second silence heartbeats, separately bounded child readiness probes, and read-only inspect-report; docs/vm-host-acceptance.md updated."
+      "2026-11-02 local diagnostics commit fb94d1d: detailed outer-guest RAM reporting, streamed/persisted timestamped remote stages with 30-second silence heartbeats, separately bounded child readiness probes, and read-only inspect-report; docs/vm-host-acceptance.md updated.",
+      "#41 nested gate local regression/fix: corrected child SSH-control lookup from session/vm to session/vm/<profile>; structured terminal summaries no longer wait on inherited SSH stdout EOF; no-summary remote execution now has a 30-minute deadline. Python tests pass locally; owner-host gate remains failed/interrupted and unverified."
     ],
     "cases": [
       "topology decision review (full Linux VM + Docker)",
@@ -282,7 +283,8 @@
       "2026-11-02: live read-only component probe shows outer-guest MemAvailable is the limiter (3224 MiB), cgroup unlimited, QEMU RSS release 0; need 4608 MiB, short by 1384. No child started; no resize/retry authorized while active session is preserved.",
       "#41 carries the deferred per-profile cleanup plan; no VM cleanup is authorized or performed in this session.",
       "2026-11-02 owner authorized preserving/cleaning only the three failed nested children and one isolated 8-GiB outer-profile nested gate; default/launcher-smoke/host-Docker remain untouched. Execution is pending because this workspace is a VM without owner host state, and the acceptance runner currently cannot safely bind a unique snapshot/profile.",
-      "2026-11-02 owner superseded preserve-all instruction: all VM profiles except default and their associated reports/logs may be removed; default, base image, repo and host-Docker/auth remain. Cleanup/retry are pending owner-host execution; current workspace cannot perform them safely."
+      "2026-11-02 owner superseded preserve-all instruction: all VM profiles except default and their associated reports/logs may be removed; default, base image, repo and host-Docker/auth remain. Cleanup/retry are pending owner-host execution; current workspace cannot perform them safely.",
+      "2026-11-02 nested host run is not a pass. The read-only report showed host/outer KVM and RAM preflight passed; nested tools were installed by the bounded guest bootstrap and the later tool/memory checks passed (projected 7371 MiB vs 4608 MiB required). Child `up` returned 0, then child SSH controls were reported missing; runner waited on outer SSH output until Ctrl-C (exit 130). No local runner/SSH process remained. Root cause found locally: runner inspected the wrong child profile directory. Fix and regression coverage are local only; preserve child/report and wait for a new owner authorization before any host action."
     ]
   },
   "is_epic": true

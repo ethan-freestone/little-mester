@@ -506,6 +506,12 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertIn('"sudo", "-n", "apt-get", "-qq", "update"', acceptance.REMOTE_ENSURE_NESTED_TOOLS)
         self.assertIn("supports only the Ubuntu/Debian guest images", acceptance.REMOTE_ENSURE_NESTED_TOOLS)
         self.assertIn('env["VM_STATE_DIR"] = str(session)', acceptance.REMOTE_NESTED)
+        self.assertIn(
+            'session, vm_dir = sessions / profile, sessions / profile / "vm" / profile',
+            acceptance.REMOTE_NESTED,
+        )
+        self.assertIn('port_file, key_file, known_file = vm_dir / "ssh_port",', acceptance.REMOTE_NESTED)
+        self.assertIn('vm_dir / "id_vm_control", vm_dir / "known_hosts"', acceptance.REMOTE_NESTED)
         self.assertIn('parent_proxy = "http://10.0.2.100:3128"', acceptance.REMOTE_NESTED)
         self.assertIn(
             'env.update({key: parent_proxy for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")})',
@@ -580,6 +586,102 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertTrue(delayed.terminated)
         self.assertTrue(delayed.killed)
         self.assertEqual(delayed.wait_calls, 2)
+
+    def test_nested_remote_returns_on_terminal_summary_even_if_ssh_stream_stays_open(self):
+        class BlockingStream:
+            def __init__(self, lines):
+                from threading import Event
+                self.lines = lines
+                self.released = Event()
+
+            def __iter__(self):
+                yield from self.lines
+                self.released.wait(timeout=2)
+
+        class FakeProcess:
+            def __init__(self, lines):
+                self.stdin = io.StringIO()
+                self.stdout = BlockingStream(lines)
+                self.terminated = False
+                self.killed = False
+
+            def terminate(self):
+                self.terminated = True
+                self.stdout.released.set()
+
+            def wait(self, timeout=None):
+                return -15 if self.terminated else 0
+
+            def kill(self):
+                self.killed = True
+                self.stdout.released.set()
+
+        profile = "nested-accept-20261102095253-7d2d810a"
+        progress = acceptance.REMOTE_PROGRESS_MARKER + json.dumps({
+            "stage": "child_control_state", "status": "failed",
+            "reason": "ssh_controls_missing_or_unsafe",
+        }) + "\n"
+        expected = {
+            "checks": {"child_up": True},
+            "failure": "child SSH control files are missing or unsafe",
+        }
+        result = acceptance.REMOTE_SUMMARY_MARKER + json.dumps(expected) + "\n"
+        process = FakeProcess([progress, result])
+        evidence = DummyEvidence()
+
+        with patch.object(acceptance, "ssh_command", return_value=["ssh"]), \
+             patch.object(acceptance.subprocess, "Popen", return_value=process), \
+             redirect_stdout(io.StringIO()):
+            returncode, summary = acceptance.run_nested_remote(
+                Path("/outer"), profile, "depth-cap-0123456789", evidence, ROOT
+            )
+
+        self.assertEqual(returncode, 0)
+        self.assertEqual(summary, expected)
+        self.assertTrue(process.terminated)
+        self.assertFalse(process.killed)
+        self.assertEqual(evidence.data["nested_progress"][-1]["status"], "failed")
+
+    def test_nested_remote_has_overall_deadline_when_no_terminal_summary_arrives(self):
+        class BlockingStream:
+            def __init__(self):
+                from threading import Event
+                self.released = Event()
+
+            def __iter__(self):
+                yield from ()
+                self.released.wait(timeout=2)
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = io.StringIO()
+                self.stdout = BlockingStream()
+                self.terminated = False
+
+            def terminate(self):
+                self.terminated = True
+                self.stdout.released.set()
+
+            def wait(self, timeout=None):
+                return -15 if self.terminated else 0
+
+            def kill(self):
+                self.stdout.released.set()
+
+        process = FakeProcess()
+        evidence = DummyEvidence()
+        with patch.object(acceptance, "REMOTE_NESTED_TIMEOUT_SECONDS", 0.01), \
+             patch.object(acceptance, "ssh_command", return_value=["ssh"]), \
+             patch.object(acceptance.subprocess, "Popen", return_value=process), \
+             redirect_stdout(io.StringIO()):
+            returncode, summary = acceptance.run_nested_remote(
+                Path("/outer"), "nested-accept-test", "depth-cap-0123456789", evidence, ROOT
+            )
+
+        self.assertEqual(returncode, 124)
+        self.assertIn("overall deadline", summary["failure"])
+        self.assertTrue(process.terminated)
+        self.assertEqual(evidence.data["nested_progress"][-1]["status"], "timed_out")
 
     def test_remote_progress_events_are_allowlisted_and_persisted(self):
         line = acceptance.REMOTE_PROGRESS_MARKER + json.dumps({

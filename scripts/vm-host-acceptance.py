@@ -37,6 +37,8 @@ DEFAULT_SNAPSHOT = Path.home() / ".cache/lab-vm-recursion/initial-launcher-smoke
 PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 VERSION_RE = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
 REMOTE_PROGRESS_MARKER = "__LM_VM_ACCEPTANCE_PROGRESS__"
+REMOTE_SUMMARY_MARKER = "__LM_VM_ACCEPTANCE__"
+REMOTE_NESTED_TIMEOUT_SECONDS = 1800
 REMOTE_PROGRESS_STAGES = {
     "remote_script", "runtime_overlay", "child_vm_up", "child_control_state",
     "child_cloud_init_status", "child_context", "child_findmnt",
@@ -917,7 +919,7 @@ REMOTE_NESTED = r"""import base64, hashlib, json, os, pathlib, re, shutil, subpr
 profile, probe = sys.argv[1:3]
 root = pathlib.Path("/workspace")
 sessions = pathlib.Path.home() / ".cache/lab-vm-recursion"
-session, vm_dir = sessions / profile, sessions / profile / "vm"
+session, vm_dir = sessions / profile, sessions / profile / "vm" / profile
 source_overlay_payload = json.loads(SOURCE_OVERLAY_PAYLOAD_JSON)
 summary = {"profile": profile, "probe": probe, "checks": {}, "child": {}, "depth_limit": {}}
 def progress(stage, status="started", **fields):
@@ -1483,7 +1485,7 @@ def run_nested_remote(
             process.stdin.close()
         except BrokenPipeError:
             pass
-    marker = "__LM_VM_ACCEPTANCE__"
+    marker = REMOTE_SUMMARY_MARKER
     summary: dict[str, object] | None = None
     output_lines: Queue[str | None] = Queue()
 
@@ -1496,12 +1498,27 @@ def run_nested_remote(
     reader = Thread(target=read_output, daemon=True)
     reader.start()
     started = time.monotonic()
+    deadline = started + REMOTE_NESTED_TIMEOUT_SECONDS
     last_output = started
     last_stage = "outer_ssh_startup"
     try:
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                elapsed = int(time.monotonic() - started)
+                record_remote_progress(evidence, {
+                    "stage": last_stage,
+                    "status": "timed_out",
+                    "timeout_seconds": REMOTE_NESTED_TIMEOUT_SECONDS,
+                    "elapsed_seconds": elapsed,
+                })
+                terminate_local_ssh(process)
+                return 124, {
+                    "checks": {},
+                    "failure": "nested acceptance exceeded its overall deadline; preserve outer and child state",
+                }
             try:
-                line = output_lines.get(timeout=30)
+                line = output_lines.get(timeout=min(30, remaining))
             except Empty:
                 now = time.monotonic()
                 silence = int(now - last_output)
@@ -1529,6 +1546,12 @@ def run_nested_remote(
                     summary = value if isinstance(value, dict) else None
                 except json.JSONDecodeError:
                     summary = None
+                if summary is not None:
+                    # The remote script emits this marker only as its terminal
+                    # result. Close our SSH client now instead of waiting for
+                    # EOF from unrelated descendants that may inherit stdout.
+                    terminate_local_ssh(process)
+                    return 0, summary
             else:
                 sys.stdout.write(line)
                 sys.stdout.flush()
