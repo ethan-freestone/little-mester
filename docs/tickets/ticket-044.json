@@ -8,7 +8,7 @@
   "title": "Housekeeping: SECURITY/README drift and root DECISIONS sync",
   "objective": "Remove documentation drift that misstates the security model: align SECURITY.md and README with actual compose defaults, and replace or sync the stale root DECISIONS.md so there is one live decision log. Enforcement of .mester-egress allowed_domains lives in the workspace Docker ticket.",
   "created_at": "2026-10-26T20:39:18.838Z",
-  "updated_at": "2026-10-26T20:49:19.623Z",
+  "updated_at": "2026-10-28T11:49:05.367Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -21,7 +21,7 @@
       "id": "A2",
       "text": "README matches the same facts and the VM workflow; no 'no internet by default' or '4g' claim remains unless it is true.",
       "status": "passing",
-      "evidence": "README.md intro no longer says \"No internet by default\"; it states egress is enabled by default and --isolated removes it. A \"VM harness status (epic #35, in progress)\" section points at docs/vm-architecture.md and says host Docker is still the current mode. The architecture diagram is labelled current mode; the egress table, security table (8g/512), design-decision row, troubleshooting and Docker-group note now match compose/C.8. Stale \"4g\", \"egress is opt-in\" and \"internet off at runtime\" claims are gone and the drift check enforces that.",
+      "evidence": "2026-10-28 README repaired: egress enabled by default, --isolated request, advisory host-Docker domain parsing vs VM #43 enforcement, mem_limit: 8g/pids_limit: 512, diagram labelled current host-Docker mode with VM link. scripts/check-docs-consistency.py passes 109/109.",
       "note": "The full VM provisioning runbook remains #41 A8; this ticket corrects the current facts and labels the target."
     },
     {
@@ -34,13 +34,13 @@
       "id": "A4",
       "text": "A repeatable check (script or bats test) fails when SECURITY.md/README drift from compose defaults again, or the check is explicitly added to verify-lab.",
       "status": "passing",
-      "evidence": "scripts/check-docs-consistency.py parses the compose agent service (mem_limit, pids_limit, networks, read_only, cap_drop, no-new-privileges), compares SECURITY.md/README.md, rejects the known stale claims, verifies the root DECISIONS pointer, and checks local markdown links + conflict markers. verify-lab.sh calls it before the sandbox checks; bash -n verify-lab.sh passes. The script reports 88/88 checks passing."
+      "evidence": "2026-10-28 scripts/check-docs-consistency.py: 109/109 checks pass after repairing four docs/DECISIONS.md relative links and README drift. verify-lab still calls the checker; full Docker/VM verify-lab remains #41/#35 and is not claimed here."
     },
     {
       "id": "A5",
       "text": "All links in README, SECURITY.md and both decision logs resolve; no stale paths or conflict markers.",
       "status": "passing",
-      "evidence": "All local links in README.md, SECURITY.md, root DECISIONS.md, docs/DECISIONS.md, docs/tickets/architecture/DECISIONS.md, docs/vm-architecture.md and the archived root log resolve (same script). No conflict markers in those files. The only pre-existing broken links were the two DECISION-011 paths, now repaired."
+      "evidence": "2026-10-28 scripts/check-docs-consistency.py: 109/109 checks pass after repairing four docs/DECISIONS.md relative links and README drift. verify-lab still calls the checker; full Docker/VM verify-lab remains #41/#35 and is not claimed here."
     }
   ],
   "tests": {
@@ -59,7 +59,9 @@
       "Stale claims removed: \"No internet by default\", \"mem_limit: 4g\", \"Egress is opt-in\", \"Internet off at runtime\", \"zero route\", \"No proxy.\"",
       "Root DECISIONS.md is a pointer; DECISION-011 archive links resolve to ticket-014.json and ticket-015.json.",
       "Local markdown links and conflict markers checked across README, SECURITY, root/docs/architecture decision logs and the archived log: all resolve.",
-      "Full verify-lab run is deferred because this environment has no Docker CLI/daemon; #41 carries the clean-VM run."
+      "Full verify-lab run is deferred because this environment has no Docker CLI/daemon; #41 carries the clean-VM run.",
+      "2026-10-28 backtrack: check-docs-consistency.py at clean starting commit 7b54d26 reports 8 existing failures / 107 checks: README missing 8g/512 and repeating no-internet/opt-in claims; four docs/DECISIONS.md relative links broken. Reopened rather than retaining stale passing evidence; minimal doc corrections will accompany the VM failure decision log.",
+      "2026-10-28 repair and revalidation: updated README stale no-internet/opt-in/resource-limit claims and distinguished advisory host-Docker egress from VM target; fixed docs/DECISIONS.md SECURITY and plugin relative links. scripts/check-docs-consistency.py now 109/109 pass. Reopened via resolved→draft→active before correcting evidence; no full verify-lab/Docker pass claimed."
     ]
   },
   "priority": "minor",

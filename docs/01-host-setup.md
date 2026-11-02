@@ -1,0 +1,387 @@
+# Host Setup — VM Mode (Epic #35)
+
+> **Last updated:** 2026-11-01
+> **Target:** Experimental Linux x86_64 host profile for the disposable QEMU VM that hosts the agent sandbox. This is not yet a claim of support for every Unix system.
+> **Epic:** [#35](tickets/ticket-035.json) — VM-based Docker agent environment.
+> **Architectural reference:** [`vm-architecture.md`](vm-architecture.md), [`DECISIONS.md` §C.8](DECISIONS.md#c8-vm-harness-topology-transport-and-isolation-2026-10-26).
+
+---
+
+## 1. Prerequisites
+
+### 1.1 Required packages (Arch/CachyOS)
+
+```bash
+sudo pacman -S --needed \
+  qemu-system-x86 \
+  qemu-img \
+  virtiofsd \
+  cdrtools \
+  openssh \
+  socat \
+  curl \
+  python
+```
+
+### 1.2 Required packages (Debian/Ubuntu)
+
+```bash
+sudo apt-get install -y \
+  qemu-system-x86 \
+  qemu-utils \
+  virtiofsd \
+  genisoimage \
+  openssh-client \
+  socat \
+  curl \
+  python3
+```
+
+Host Docker, libvirt, and OVMF are not required to boot the VM. `lab-vm` launches QEMU directly with its default firmware, and cloud-init installs the guest workload runtime. **Current limitation:** the experimental `./lab-vm models up` path still uses host Docker Compose for optional model API forwarders; removing that host-Docker dependency is part of the portability work, not a host requirement for the agent/VM itself.
+
+### 1.3 Kernel requirements
+
+- `kvm-intel` or `kvm-amd` module loaded (check with `lsmod | grep kvm`)
+- `/dev/kvm` exists and is readable by the current user
+- Usable KVM is required even on CPU-only hosts; the VM launcher fails closed when `/dev/kvm` is unavailable
+
+```bash
+ls -la /dev/kvm
+# Should show: crw-rw---- 1 root:kvm ... /dev/kvm
+```
+
+Add your user to the `kvm` group if needed:
+
+```bash
+sudo usermod -aG kvm $(whoami)
+# Log out and back in for group membership to take effect
+```
+
+### 1.4 Optional model service (host-side)
+
+An OpenAI-compatible Ollama or llama.cpp service may run natively on the host and listen on `127.0.0.1`. The target design treats it as an optional, user-configured endpoint, reached through one narrow QEMU `guestfwd` mapping—not a required host Docker service or a LAN-published port. `./lab-vm models up/status/ensure` uses a healthy loopback endpoint directly; if none is running, `models up` can fall back to the experimental Compose forwarder. Normal `run`/`agent` launches automatically ensure the selected model API before OpenCode starts; recovery only starts a verified Compose backend when stopped, and fails closed for unknown or unhealthy-running services. No firewall, route, NAT, or host daemon changes are an acceptable prerequisite.
+
+```bash
+# Example: run ollama on host
+OLLAMA_HOST=127.0.0.1:11434 ollama serve &
+
+# Example: run llama.cpp on host
+./llama-server -m models/your-model.gguf --host 127.0.0.1 --port 8080 \
+  --alias qwen3.6-35b-a3b-q4_k_m
+```
+
+The selected provider/model must match `agent/opencode/opencode.json`. The VM agent reaches
+these endpoints only through the existing QEMU loopback guest forwards; it does not gain a
+general host route. `models status` checks the host listener and its health endpoint, not an
+actual model completion, which remains a separate acceptance test.
+
+### 1.5 Verify QEMU works
+
+```bash
+# Basic check
+qemu-system-x86_64 --version
+
+# KVM check
+qemu-system-x86_64 -enable-kvm -machine q35 -m 512 -drive file=/dev/null,format=raw \
+  -nographic -display none 2>&1 | head -5
+# Should start without errors (press Ctrl+A, X to exit)
+```
+
+---
+
+## 2. One-command bootstrap
+
+If the agent will use a ChatGPT Plus or Pro subscription, preserve existing host-Docker auth using the procedure in [the auth runbook](chatgpt-auth.md). The guest's optional host escrow import/export is implemented locally but is disabled by default and still requires #45 host acceptance. Do not assume a login stored in the current container follows a VM, and do not recreate the host-Docker container during VM testing.
+
+**VM acceptance status:** The host lifecycle is still under test; the latest
+failure and current retry procedure are tracked on ticket #41. Follow that
+ticket's current handoff before using `--clean`, `stop`, or `down` (these can
+delete guest state). `./lab vm <args>` is an explicit dispatcher to `./lab-vm`;
+ordinary `./lab` still keeps the host-Docker compatibility route, also available
+as `./lab-docker`. A successful `lab-vm up` alone is not an integrated-agent
+acceptance pass.
+
+**State location:** on the normal host configuration, VM profiles and base disks
+are under `~/.local/share/little-mester/vm/`, and both VM and host-Docker launcher
+logs are under `~/.local/share/little-mester/logs/`. Profile-specific QEMU,
+virtiofs, proxy, provisioning, and auth-bridge logs are kept with that profile.
+`XDG_DATA_HOME` or `MESTER_STATE_DIR` can relocate this single per-user root;
+`./lab-vm context` prints the effective profile directory. No VM state or launcher
+log is written into the checkout. Host-acceptance summary reports use a separate
+private XDG state directory.
+
+After installing prerequisites, run:
+
+```bash
+git clone <this-repo> little-mester
+cd little-mester
+
+# Download and verify the base image (roughly 600 MiB; 20 GiB virtual size)
+./lab-vm base
+
+# Start your first VM session
+./lab-vm up --workspace /path/to/project
+```
+
+The `vm up` command:
+
+1. Validates the workspace path (refuses `/`, `$HOME`, sensitive dirs, the lab repo without `--unsafe-recurse`)
+2. Creates per-VM SSH keys and profile state under `~/.local/share/little-mester/vm/<name>/`
+3. Downloads the pinned Ubuntu 24.04 cloud image, verifies its SHA-256, and creates a qcow2 overlay
+4. Generates a secret-free cloud-init seed ISO with rootless Docker provisioning
+5. Starts the loopback egress proxy, virtiofsd, and QEMU with KVM
+6. Waits for SSH to become available
+7. Confirms the guest Docker daemon is running rootless
+8. Installs pip, Ruff, and uv in a dedicated Python virtual environment, then installs the latest OpenCode CLI on a fresh guest and syncs its config/plugins into the guest OS (no agent container). Existing guests keep their installed versions on ordinary `up`.
+
+Optional Bats and ShellCheck packages are kept out of base provisioning. Install them and
+refresh pip/Ruff/uv in an already-running guest without reprovisioning by exiting the current
+TUI and running `./lab-vm install-tools --name <profile>`. Add `--restart-opencode` to start a
+fresh TUI afterward; `-v`/`-d` enable verbose/debug output. See [Testing](testing.md).
+
+To check for software changes in place, exit the OpenCode TUI and run `./lab-vm update`.
+It checks the OpenCode CLI, installed Bats/ShellCheck, pip/Ruff/uv, and the guest's managed
+OpenCode config/plugins, then asks before applying anything. Choose one target such as
+`./lab-vm update opencode` or `./lab-vm update tools`; `./lab-vm update --all` also checks
+and upgrades guest OS packages (including the managed Docker Engine). Docker/OS upgrades
+are refused while guest containers are running. `--yes` explicitly skips confirmation.
+Updates preserve the VM overlay, base image, workspace, and guest auth database. To pin a
+version for a fresh install or a later `up`, set `VM_OPENCODE_VERSION` to a semantic version.
+
+**CPU-only hosts:** VM mode does not require a GPU, but it does require usable KVM; it does not
+fall back to TCG emulation. If `/dev/kvm` is unavailable or unusable, the launcher refuses with
+an actionable prerequisite error. Host-Docker mode remains separate for machines that cannot
+meet the KVM requirements.
+
+---
+
+## 3. Everyday use
+
+### Reopen a profile or re-clone the source
+
+The source checkout and VM state are independent. Re-cloning the repository on the
+same host does not remove profiles in the per-user state root. From the new checkout,
+confirm which root and profiles the CLI will use before attempting to start anything:
+
+```bash
+./lab-vm context
+./lab-vm list
+./lab-vm status default
+```
+
+If the stopped profile's recorded workspace still exists, reopen it with
+`./lab-vm resume default`. If the checkout moved, select the new workspace explicitly
+with `./lab-vm up default --workspace /path/to/new/checkout`; review any confirmation
+before a running VM switches workspaces. Both preserve the existing overlay. Do not use
+`--clean`, `stop`, `down`, or `rebuild` to reopen it.
+
+This code never falls back to checkout-local runtime state. If the expected profile is
+missing under the path printed by `context`, stop before running `up`: an older
+checkout-local profile may still exist on the host. Inventory that profile and every
+qcow2 backing chain before any move/rebase decision. Do not copy or move an overlay
+blindly; no automatic migration is performed. A checkout-local `.mester` directory is
+not a valid runtime location and is refused as a shared workspace until its contents
+have been reviewed. The `.mester-egress` policy file in a selected workspace is a
+separate, unchanged setting.
+
+### Start / stop / inspect
+
+```bash
+./lab-vm up                  # Start the VM (idempotent)
+./lab-vm status              # Check if running, show containers
+./lab-vm list                # List managed profiles (read-only)
+./lab-vm agent               # Guest TUI; browser OAuth bridge enabled by default
+./lab-vm agent --no-browser-auth # Skip the temporary browser OAuth bridge
+./lab-vm ssh                 # SSH into the VM
+./lab-vm suspend             # Cleanly power off; preserve guest state/workloads
+./lab-vm suspend --poweroff-recursive # Gracefully suspend children first, then parent
+./lab-vm resume              # Restart the same profile, overlay, and workspace
+./lab-vm stop                # Destructively tear down workloads and VM overlay
+./lab-vm down                # Remove VM overlay, seed, and control keys
+```
+
+`suspend`/`resume` are the non-destructive shutdown path. Suspend preserves the guest overlay,
+Docker volumes/workloads, workspace selection, seed, and SSH identity. Before powering off, it
+checks the guest process table for nested QEMU: live child profiles are listed and block parent
+suspend; an untracked QEMU or failed probe also blocks. A recursion depth allowance by itself
+does not block an empty guest. `stop` and `down` remain destructive. This implementation has not
+yet passed owner-host lifecycle acceptance; follow #41/#52 before relying on it for valuable guest
+state.
+
+### Resize a running VM
+
+QEMU RAM is not changed live. Resize a running managed profile with a clean guest
+shutdown and restart:
+
+```bash
+./lab-vm resize default 32
+```
+
+Replace `default` with the profile name and `32` with the requested whole number of
+GiB (1–128). The command checks available/cgroup memory with 512 MiB headroom before
+stopping the guest, prompts before interrupting guest processes, and preserves the
+overlay, base image, seed, SSH identity, installed software, and guest data. It does not
+run `stop`, `down`, `rebuild`, or `docker compose down -v`. The profile must be running
+so the command can verify and remount its active workspace. `--yes` skips the restart
+confirmation only; it does not bypass the memory preflight.
+
+`lab-vm` can resize only a QEMU profile managed in the current host/process namespace.
+It cannot resize the ancestor VM that contains the current shell; that must be assigned
+more memory by its parent hypervisor/launcher and restarted there.
+
+Fresh profiles now default to 8 GiB at depth 0 and 4/2/1 GiB at nested depths 1/2/3+
+(1-GiB floor). Existing profiles without `memory_gib` metadata retain the legacy 4-GiB
+allocation. Set a different allocation only while creating a profile:
+
+```bash
+./lab-vm up project-x --workspace /path/to/project --memory 16
+```
+
+`--memory` also works with `run` for a new profile. It is refused for an existing
+profile; use `resize` to change that profile, or explicitly use `up --clean --memory N`
+when you intend to delete and recreate it. The resource preflight still applies.
+
+### Multi-VM support
+
+Named VM profiles are isolated under `~/.local/share/little-mester/vm/<name>/`:
+
+```bash
+./lab-vm up project-x        # Create a named VM
+./lab-vm status project-x    # Check state
+./lab-vm down project-x      # Remove it
+```
+
+### Workspace selection
+
+Pass a workspace directory:
+
+```bash
+./lab-vm up --workspace /path/to/your/project
+```
+
+The `check_workspace()` guard runs on the host **before** the workspace is exported to the VM. Refused paths are never mounted.
+
+---
+
+## 4. Isolation guarantees and current support limits
+
+| Guarantee | How it's enforced |
+|---|---|
+| **No published host ports** | QEMU uses `restrict=on`; only `guestfwd` and `hostfwd` for loopback SSH are allowed |
+| **Workspace isolation** | Only the single directory passed to `./lab-vm` is exported via `virtiofsd` |
+| **No host filesystem access** | The guest has an isolated writable qcow2 overlay; the selected workspace is its only host filesystem export |
+| **Optional model API via guestfwd** | A configured local API endpoint is intended to be reachable at one explicit `10.0.2.100:<port>` guest address; current fixed-port prototype is still under test |
+| **Egress proxy** | Public HTTP(S) goes through `10.0.2.100:3128`; QEMU direct networking remains disabled and host/private networks are denied (#43) |
+| **Guest authority** | OpenCode runs directly as `mester`; it can use guest Docker/Compose and administer the guest. The outer VM is the host boundary. |
+| **Per-VM SSH keys** | Each VM has its own key pair under `~/.local/share/little-mester/vm/<name>/` |
+
+The current implementation is tested only as an experimental Linux/QEMU profile. macOS,
+BSD, and other Unix systems need explicit hypervisor, architecture, workspace-sharing,
+networking and lifecycle profiles before support is claimed. Setup may detect prerequisites
+and ask before installing userland packages; it must not require firewall or host-network
+policy changes. See [`vm-architecture.md`](vm-architecture.md) for the use cases and target
+portability contract.
+
+---
+
+## 5. Teardown and cleanup
+
+```bash
+# Destructive: stop guest workloads and remove the VM overlay/state
+./lab-vm stop
+
+# Remove VM artifacts (overlay disk, seed ISO, keys)
+./lab-vm down
+
+# Rebuild the verified base image when needed
+./lab-vm rebuild --yes
+```
+
+After teardown, `git status --short` in the real workspace checkout should be empty (A6).
+
+---
+
+## 6. Troubleshooting
+
+### Existing base disk is empty or invalid
+
+Early VM code created a blank 20 GiB qcow2 instead of downloading an OS. Replace it once:
+
+```bash
+./lab-vm rebuild --yes
+```
+
+`up --yes` also replaces a detected legacy blank base automatically. The download is roughly 600 MiB; 20 GiB is its virtual expanded size.
+
+### QEMU fails to start
+
+```bash
+# Check QEMU log
+cat "$HOME/.local/share/little-mester/vm/<name>/qemu.log"
+
+# Check if KVM is available
+ls -la /dev/kvm
+# If missing: sudo modprobe kvm-intel (or kvm-amd)
+```
+
+### SSH not ready
+
+```bash
+# Check QEMU log for errors
+tail -50 "$HOME/.local/share/little-mester/vm/<name>/qemu.log"
+
+# Wait longer and retry
+./lab-vm up   # Re-running is safe (idempotent)
+```
+
+### Docker not ready inside VM
+
+```bash
+# SSH in and check
+./lab-vm ssh
+
+# Inside the VM:
+docker info
+# If socket doesn't exist, cloud-init may still be running
+journalctl -u cloud-init --no-pager -n 50
+```
+
+To start the direct guest agent rather than a shell, use `./lab-vm agent`. This requires
+the VM to be running and attaches the OpenCode TUI to the current terminal.
+
+### `Could not open guest forwarding device`
+
+This was caused by the old invalid destination `guestfwd=...-10.0.2.2:PORT`. The runner now uses QEMU's `cmd:` character-device form with `socat`, so optional host model services need not be listening when QEMU starts. Confirm the current command includes `guestfwd=...-cmd:socat` with `--debug`.
+
+### SSH port diagnostics
+
+The kernel assigns an available loopback port for SSH. The selected port is printed during startup and stored in the VM profile:
+
+```bash
+cat "$HOME/.local/share/little-mester/vm/<name>/ssh_port"
+ss -tlnp | grep "$(cat "$HOME/.local/share/little-mester/vm/<name>/ssh_port")"
+```
+
+---
+
+## 7. Migration status
+
+VM mode is still under acceptance testing. **Do not stop or replace the working
+host-Docker session yet.** The VM provisions guest Docker and `./lab-vm up` installs
+OpenCode directly in the guest. Run `./lab-vm agent` to open its TUI; this command checks
+the install and launches OpenCode without reinstalling it. TUI operation, provider auth,
+Compose feedback, permissions, nested virtualization and full lifecycle gates still need
+live verification.
+The current sequence and stop conditions are tracked on tickets #41–#45. Integration into
+`./lab` and retiring host-Docker mode happen only after those gates pass.
+
+---
+
+## 8. References
+
+- **Architecture:** [`vm-architecture.md`](vm-architecture.md)
+- **ChatGPT authentication:** [`docs/chatgpt-auth.md`](chatgpt-auth.md)
+- **Decisions:** [`DECISIONS.md` §C.8](DECISIONS.md#c8-vm-harness-topology-transport-and-isolation-current)
+- **Security:** [`../SECURITY.md`](../SECURITY.md)
+- **Epic:** [#35](tickets/ticket-035.json)
+- **Provisioning:** [#41](tickets/ticket-041.json) (this document satisfies A1 and A8)

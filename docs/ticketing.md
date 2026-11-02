@@ -70,7 +70,33 @@ draft ──► active ──► resolved ──► archived
 
 **Key design decision:** Status is a simple state machine ONLY. No dependency chains or business logic in the transitions themselves (dependency checks happen BEFORE entering `active`, not as part of the transition). The lifecycle path is intentionally flat: forward, backward to draft once, and terminal at archived. Anything more complex belongs in epics + dependencies, not status itself.
 
-### D.4 The tag problem — explicit decision
+### D.4 Delivery readiness and scope splitting (2026-11-01)
+
+**Decision:** Ticket lifecycle status and merge/integration readiness are separate concepts.
+`resolved` means the ticket's full scope is complete; it must not mean merely “this branch or
+slice can be merged.” A ticket may be integration-ready while still `active` if remaining scope
+is tracked separately. Do not encode readiness as a new lifecycle status or as a free-form label.
+
+**Current limitation:** The ticket model has acceptance-criterion verification and test-ledger
+evidence, plus relationship fields such as `parent`, `links`, and `subtickets`; however, the
+current CLI/MCP surfaces do not expose a complete, equivalent way to create/update/query
+merge-readiness and split relationships. Prose references can help humans temporarily but are not
+machine-authoritative. Do not add undocumented JSON fields or infer readiness from status,
+branch names, or a conversational claim.
+
+**Interim workflow:** Give each independently reviewable slice its own ticket with its own
+acceptance criteria and test evidence. Keep unfinished follow-on scope in a separate ticket (or
+an epic with full child tickets) and preserve explicit ticket-number references where the current
+tools allow. Mark the slice resolved only when that slice's complete acceptance criteria pass;
+record branch/commit and integration checks in its evidence. Treat “merge-ready” as a human
+review checkpoint until the engine can store and validate it directly.
+
+Ticket #57 tracks the canonical machine-readable readiness/split model and parity across schema,
+engine, CLI, MCP, validation, and query views. That change must remain harness-neutral and
+backward-compatible; all clients must operate on the same canonical data rather than maintaining
+per-harness workflow state.
+
+### D.5 The tag problem — explicit decision
 
 **Decision:** There is NO separate "tag" field. All tagging falls under `labels[]` with the namespace prefix system described in D.1. If you need ad-hoc classification that doesn't fit into scope/severity/any known set, use `user/custom-tag`. This prevents "tag proliferation" where every person invents their own classification without shared vocabulary.
 

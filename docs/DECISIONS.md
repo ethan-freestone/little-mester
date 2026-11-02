@@ -1,8 +1,15 @@
 # DECISIONS — How to use & improve little-mester (the product)
 
-> **What goes in here:** Decisions about how you use, configure, test, and modify little-mester the product day-to-day. This covers constraints that affect any session — not specific engineering designs.
+> **What goes in here:** Durable, project-wide product/workflow decisions and constraints intended to apply across tickets and sessions. Keep entries concise, state the rationale, and link to the implementing ticket when applicable.
 >
-> **Not here:** Engineering designs for subsystems (those go in their own scope — see below). Per-ticket planning (goes in ticket docs themselves).
+> **Not here:** Per-ticket plans, implementation details, test results, host-run transcripts, diagnostics, acceptance progress, retry commands, or handoffs. Those belong on the implementing ticket, maintained through the ticket engine. Cross-ticket engineering architecture belongs in `docs/tickets/architecture/DECISIONS.md`; ticket-specific engineering and delivery evidence belongs in that ticket. Do not duplicate a ticket's execution log here. Add a rule here only when it is a durable project-wide decision, not merely because implementation work changed code.
+
+### Documentation boundaries (required)
+
+- **Project decisions (`docs/DECISIONS.md`):** durable, cross-ticket policy, product workflow, and constraints. Record the decision and why; link to the ticket for implementation and evidence.
+- **Subsystem architecture (`docs/tickets/architecture/DECISIONS.md`):** durable technical architecture/conventions that govern multiple tickets in that subsystem.
+- **Implementing ticket:** scope, alternatives considered for that work, implementation plan, changes made, test evidence, host/CI attempts, failures/diagnosis, acceptance-criteria status, exact retry/handoff steps, and commit references. Use the ticket engine MCP/CLI; do not edit ticket JSON directly.
+- **Schema changes:** use existing ticket fields (`objective`, `acceptance_criteria[].evidence`, and `tests.needed/created/cases`) when they fit. If an actual gap requires a new field, first plan and discuss the schema change as a separate ticketed change, update the ticket schema/engine/validation/CLI/MCP together, and migrate/test it before using the field. Do not invent ad-hoc fields or move evidence into this file as a workaround.
 
 ## ⚠️ Read before every session
 
@@ -23,41 +30,47 @@ This rule applies to all future sessions. No implementation without prior writte
 
 ## A. How to use little-mester
 
-### A.1 Default workflow: --unsafe-recurse direct editing
-**You run:** `./lab <workspace> --unsafe-recurse` to launch an agent that directly edits files in the workspace. This includes editing little-mester itself when the workspace IS little-mester.
+### A.1 Default workflow — VM-native agent
+
+The owner-directed release target is a native OpenCode process inside a local
+QEMU/KVM guest. `./lab <workspace>` is the intended VM-first entry point; the former
+container launcher is retained separately as `./lab-docker`. The launcher cutover and
+VM acceptance are still in progress, so use the command behavior documented by the
+current README and ticket #35 until that cutover is implemented. `./lab-vm` remains the
+explicit lifecycle and diagnostic interface during this transition.
+
+The guest receives one selected workspace. It has broad authority inside the guest,
+but must not receive host credentials, host Docker, or files outside that workspace.
+Use `--recurse --max-depth N` only for bounded nested testing. `--unsafe-recurse`
+permits write access to a selected Little Mester checkout; it does not grant extra
+network or host access. Do not use write-enabled recursion while VM control keys/state
+are visible through the workspace share.
+
+### A.2 Configuration defaults
+
+| Setting | Default | Notes |
+|---|---|---|
+| Agent | OpenCode in the guest | Docker compatibility mode is explicit: `./lab-docker` |
+| Workspace | One selected directory at `/workspace` | Guarded before the host shares it |
+| Recursion | Disabled (`max-depth=0`) | Opt in explicitly; a child cannot raise the inherited maximum |
+| Public HTTP(S) | Through the policy-checked VM proxy | Direct guest egress and non-HTTP protocols are blocked |
+| Guest Docker | For project workloads | Not an agent wrapper or a host security boundary |
+| Permission mode | OpenCode default/ask | `--auto-accept` requests OpenCode `--auto`; explicit denies remain configured |
+
+Product direction does not imply acceptance. Check #35 and its linked ticket ledgers
+before describing host lifecycle, auth, permission UI, workload, or isolation behavior
+as accepted.
+
+### A.3 Verify the active runtime
 
 ```bash
-cd /path/to/little-mester
-./lab --unsafe-recurse    # agent can read/write the current directory
+./lab-vm context --json
+./lab-vm status default
+./lab-vm verify-isolation default
 ```
 
-- `--unsafe-recurse` lifts the guard that blocks self-mounting (`check_workspace`)
-- Agent edits, runs tests (`bats tests/`, `npm test`), and commits — all within its session
-- No temp clone bridge needed
-
-### A.4 Container environment — everything must live in the repo
-**Critical constraint:** The sandbox container is ephemeral and gets recreated from the built image. Any changes made inside the running container that aren't persisted will be lost on the next run.
-
-- **`/home/agent` is a tmpfs mount** — writable at runtime but completely wiped when the container is recreated. Do NOT put persistent configs, plugins, or customizations there. They will not survive.
-- **All persistent configuration must live in the little-mester repo** (or be baked into the agent Docker image). Files in the repo can be copied during image build or mounted in via compose.
-- **The workspace mount** (`/workspace`) persists as long as it's the host directory you choose — that's the only host filesystem the agent sees by design. But configs for the agent/tui/opencode itself need to go in the repo, not in `/home/agent`.
-- **When customizing the agent (logos, themes, plugins, TUI config),** put them in the repo (e.g., under `agent/` or a tracked location) and wire them up in `agent/Dockerfile` or compose so they persist across container rebuilds.
-- **Avoid duplication** — when adding assets like logos, keep the canonical copy in a single tracked location (ideally under `agent/`) and symlink or copy from there as needed. Do not create multiple scattered copies without documenting why.
-
-### A.2 Default configuration values
-| Setting | Value | How to change |
-|---------|-------|---------------|
-| Default agent | `opencode` | `./lab --aider <workspace>` for aider |
-| Default egress | `true` (internet on) | `--isolated` or `--egress-false` |
-| Self-edit guard | denies by default | `--unsafe-recurse` sets `UNSAFE_RECURSE=1` |
-| Network when egress=true | `[egress, internal]` | — |
-| Network when egress=false | `[internal]` only | — |
-
-### A.3 How to verify the sandbox
-```bash
-./verify-lab.sh    # proves security guarantees hold
-./lab shell <workspace>  # plain bash inside the sandbox for debugging
-```
+These report runtime/context and representative boundary checks; they are not a
+substitute for the full acceptance matrix or a proof against hypervisor vulnerabilities.
 
 ---
 
@@ -80,6 +93,76 @@ When ending a session mid-work, include at the top of relevant docs:
 ```
 
 Next session reads that first — never re-implement already-completed work.
+
+### B.4 Ticket edits — MCP/CLI only, enforced across ALL agent implementations
+
+**Rule:** Ticket data (`docs/tickets/*.json`, `_index.json`, `_audit.json`, `.engine.lock`) MUST
+ONLY be created, modified, or deleted through the ticket-engine CLI or the MCP server tools.
+Direct file edits are forbidden for every agent — opencode, Claude Code, Codex, or any other
+system that may be pointed at this workspace.
+
+- **CLI:** `./little-mester-mcp/scripts/ticket-engine <action> ...`
+- **MCP tools:** `mester_tickets_create`, `mester_tickets_update`, `mester_tickets_archive`,
+  `mester_tickets_validate`, `mester_tickets_audit`, etc.
+
+This is the same rule as C.3, but elevated to a **cross-agent architecture constraint**. The
+ticket engine is the sole write authority. Every agent implementation that touches this workspace
+must respect it, regardless of its native permissions or capabilities.
+
+**Why (one architecture, multiple implementations):**
+
+| Concern | What happens without the rule | What happens with it |
+|---|---|---|
+| **Index consistency** | `_index.json` drifts from ticket files — `next_number` resets, stale status/area snapshots | Engine recomputes atomically on every write |
+| **Audit trail** | Silent edits — no one knows who changed what, when, or why | Every write appends to `_audit.json` with timestamp and actor |
+| **Locking** | Two agents write the same ticket simultaneously, data loss | Engine holds a PID lock; conflicting writers get a clear error |
+| **Cross-agent consistency** | Opencode denies via permissions, Claude Code ignores it, Codex overwrites — the workspace becomes unreliable | All agents share the same contract; the workspace stays correct regardless of which agent runs |
+
+The workspace is the shared data store. The agent is just a transient reader/writer. The rule
+exists because the workspace cannot tolerate inconsistent writers — and different agents have
+different permission models that make it easy to bypass restrictions on one platform while
+enforcing them on another.
+
+**Enforcement per agent platform:**
+
+| Platform | Mechanism | Location in repo |
+|---|---|---|
+| **OpenCode** | `permission` deny rules on `docs/tickets/**/*.json` + `instructions` array reminder | `agent/opencode/opencode.json` |
+| **Claude Code** | `CLAUDE.md` system prompt (read at session start) | `CLAUDE.md` (in workspace root) |
+| **Codex** | `CODING.md` or agent config directive | `CODING.md` (in workspace root) |
+| **Any agent with file access** | Instruction file at workspace root; agents that read docs on session start will see it | `docs/tickets/README.md` or a top-level `AGENT-INSTRUCTIONS.md` |
+
+Every new agent integration must add the same constraint to its platform-specific config. The
+rule is not optional per-agent — it is a workspace invariant. If a platform does not support
+permission denies, the instruction must be prominent in the system prompt and the rationale
+(links to this decision) must be included so the agent understands it is an architecture
+constraint, not a preference.
+
+**What counts as a "ticket edit" (every action below requires the engine):**
+- Creating a new ticket file (use `ticket-engine create` or `mester_tickets_create`)
+- Changing any field in an existing ticket (use `ticket-engine update` or `mester_tickets_update`)
+- Changing a ticket's status (use `mester_tickets_update` — **not** a JSON edit)
+- Updating acceptance criteria, tests, evidence, or comments
+- Archiving a ticket (use `ticket-engine archive` or `mester_tickets_archive`)
+- Running `validate` or `audit` (safe — these are reads, not writes)
+
+**What does NOT require the engine:**
+- Reading ticket files (`cat`, `grep`, editor views) — reading is always allowed
+- Editing files outside `docs/tickets/` — product code, agent configs, docs, scripts, etc.
+- Deleting `_index.json` and letting the engine rebuild it (this is how you fix drift)
+
+**If a ticket file is already corrupted by a direct edit:**
+1. Do NOT attempt to repair it by hand.
+2. Run `./little-mester-mcp/scripts/ticket-engine validate` to see the extent of drift.
+3. If `_index.json` is out of sync, delete it and run `validate` to rebuild.
+4. If `_audit.json` is missing entries, treat affected tickets as orphans — stop and ask a
+   human before running `audit --baseline`.
+5. After repair, commit the fix with a conventional commit noting the repair.
+
+**Cross-agent note:** This is a deliberate architecture decision. The workspace is the contract;
+agents are transient. Whether you run opencode, Claude Code, Codex, or a future agent platform,
+the ticket store remains consistent because all paths converge on the same write authority.
+Enforcement is per-platform, but the rule is universal.
 
 ---
 
@@ -215,28 +298,11 @@ git show :3:docs/tickets/_audit.json > /tmp/theirs-audit.json
 evidence and must never lose a branch's writes silently. This keeps a merge auditable
 instead of producing a plausible-looking but incomplete history.
 
-### C.6 VM/Docker test environment (2026-10-26)
-> **Refined 2026-10-26 by C.8.** C.6 records the original VM-vs-remote-daemon call. C.8
-> now fixes the concrete topology, transport, daemon and model placement. Where the two
-> differ, C.8 wins: the repo is *not* checked out inside the VM by default, the workspace
-> is shared with virtiofs, and the agent runs in a container inside the VM rather than
-> running opencode directly on the VM.
+### C.6 VM test environment
 
-**Decision:** The disposable test environment is a **full Linux VM** with Docker, the
-repo checkout, and opencode installed inside it. Docker-in-Docker and a shared remote
-daemon were rejected: DinD needs privileged mode, and a remote daemon gives weaker
-isolation because its containers, networks, and volumes are shared with other work.
-
-- The **repo checkout is never the test target**. Tests run in a disposable workspace
-  (`workspaces/test-<id>` or a fresh clone) so `--unsafe-recurse`, compose, and
-  destructive lab cases cannot touch the developer's working tree.
-- Fresh provisioning is one documented runbook: install Docker (and the NVIDIA toolkit
-  when GPU-enabled), clone the repo, build the agent image, then run `./verify-lab.sh`.
-  A CPU-only host is supported; GPU tooling is optional.
-- Teardown removes the workspace's containers, networks, and volumes, then deletes the
-  disposable workspace. `git status --short` in the real checkout must be empty.
-- The VM supplies the Docker daemon that this development container lacks. Provisioning,
-  command-matrix, negative-case, and teardown evidence belongs on ticket #35.
+The current VM trust boundary and operating model are defined in [C.8](#c8-vm-harness-topology-transport-and-isolation).
+Ticket-specific provisioning, test, and teardown procedures belong on #41–#45, not in
+this decision log.
 
 ### C.7 Merge scope for `feat/ticket-context` (2026-10-26)
 **Decision:** Merge the **whole `feat/ticket-context` branch** into `main` rather than
@@ -250,23 +316,266 @@ clone of the branch passes `npm ci`, `npm run build`, `npm run check:package`, t
 Jest suite, and `ticket-engine validate`; those results are recorded on ticket #36.
 Merge is blocked until #35's VM evidence and #36's remaining criteria are complete.
 
-### C.8 VM harness topology, transport and isolation (2026-10-26)
-**Decision:** Little Mester runs the agent in a Docker container inside a **local,
-`./lab`-managed QEMU/KVM VM**. The host stays outside the blast radius: it runs QEMU and
-`virtiofsd` as the invoking user, not an agent container. The VM runs **rootless Docker**
-under a dedicated `mester` user, so the agent gets a real Docker CLI and compose plugin
-without root in the VM. The workspace enters the VM through **virtiofs**; model servers
-stay on the host and are reached through narrow, explicitly forwarded channels.
+### C.9 VM harness implementation details (2026-10-26)
 
-This refines C.6. The agent container, not opencode-on-the-VM, is the unit that runs; the
-workspace is shared live rather than checked out inside the VM.
+These decisions cover the `./lab-vm` scripts, `lib/vm/` modules, and the CachyOS testing
+work. They are tactical choices that don't change the topology in §C.8 but affect how the
+code is structured and what to watch for on other distros.
+
+#### C.9.1 VM control state is private and outside workspaces
+
+**Current decision (supersedes the original checkout-local-state rationale):** VM profiles,
+base disks, seeds, keys, sockets, PIDs, and per-profile logs live outside selected workspaces
+under `~/.local/share/little-mester/vm/`. Launcher and host-Docker logs use the same root's
+`logs/` directory. `XDG_DATA_HOME` or `MESTER_STATE_DIR` may relocate the complete per-user
+root. `./lab-vm context` reports the effective profile directory. Git-ignored state is not
+private if the agent can read it through the workspace share.
+
+The implementation does not fall back to checkout-local runtime state and does not move old
+profiles. A stale checkout-local `.mester` directory is refused as a selected workspace until
+reviewed; it is never used as a profile root. Inventory profiles and qcow2 backing chains before
+any manual move/rebase. Nested profiles remain in a private recursion session inside the
+containing guest.
+
+#### C.9.2 Prereq check runs only for state-changing commands
+
+**Decision:** The `_vm_prereqs_check()` function runs before `base`, `up`, `stop`, and
+`down`. It is skipped for `status`, `ssh`, and `test`.
+
+**Why:** `status` and `ssh` are read-only / interactive; running `pacman -S` or `apt install`
+mid-session is disruptive and unnecessary. `test` is a convenience wrapper that calls `up`
+internally, which will trigger prereqs.
+
+#### C.9.3 Distro auto-detection for package names
+
+**Decision:** `_vm_prereqs_resolve_packages()` maps each missing command to distro-specific
+package names using `/etc/os-release` (ID + VERSION_ID):
+
+| Distro | `virtiofsd` package | `qemu-img` package | `genisoimage` package |
+|---|---|---|---|
+| Debian/Ubuntu | `libvirt-daemon-system` | `qemu-utils` | `genisoimage` |
+| Fedora | `libvirt-daemon-config-nwfilter` | `qemu-img` | `genisoimage` |
+| RHEL/CentOS | `libvirt-daemon-config-nwfilter` | `qemu-img` | `genisoimage` |
+| Arch/CachyOS | `virtiofsd` | `qemu-img` | `genisoimage` |
+
+**Why:** The same command maps to different packages across distros. Hard-coding a single
+package name would break on half the distros.
+
+#### C.9.4 Loop variables prefixed with `_` to avoid caller clobbering
+
+**Decision:** All loop variables inside `lib/vm/prereqs.sh` use the `_` prefix
+(e.g. `_c`, `_c2`, `_miss`, `_clean`, `_pkg`, `_id`).
+
+**Why:** `prereqs.sh` is sourced (not executed), so its variables share the caller's
+namespace. Without the `_` prefix, a variable like `$cmd` inside the script would overwrite
+the caller's `$cmd` — and the main dispatch loop in `lab-vm` uses `$cmd` for the command
+argument. This caused silent command corruption in early iterations.
+
+#### C.9.5 `command -v` for binary detection (with Arch caveat)
+
+**Decision:** Use `command -v <name>` to check for required binaries. If a binary was
+installed but `command -v` returns nothing, the binary may live at a non-standard path
+(e.g. `/usr/lib/qemu/qemu-virtiofsd` on Arch). The fallback is to search with `find` or
+`pacman -Ql <pkg> | grep bin` to locate it, then either add a PATH extension or use the
+full path in the check.
+
+**CachyOS / Arch caveat:** The `virtiofsd` package may provide the binary as
+`/usr/lib/qemu/qemu-virtiofsd` rather than `/usr/bin/virtiofsd`. On Arch-derived distros,
+`command -v virtiofsd` will fail even though the package is installed. Workaround: check
+both `command -v virtiofsd` and `command -v qemu-virtiofsd`, or search with `find`.
+
+#### C.9.6 ISO generator: report only if *neither* exists
+
+**Decision:** `genisoimage` / `mkisofs` are reported as a pair — only if **both** are
+missing is the pair reported. If either exists, neither is flagged.
+
+**Why:** These two packages are interchangeable; the script tries `genisoimage` first and
+falls back to `mkisofs`. Reporting both when only one is missing would be redundant.
+
+#### C.9.7 Lifecycle acceptance is a set of independent gates
+
+There is no single canonical command sequence that establishes VM acceptance. Record
+base-image integrity, first provisioning, warm startup, guest readiness, agent attach,
+workspace switch, safe shutdown/resume, destructive teardown, auth/permission behavior,
+workload operation, and isolation as separate results on the relevant ticket. Preserve
+the VM and its evidence until the owner approves destructive cleanup. In particular,
+the current `stop`/`down` behavior deletes guest state and is not a routine daily stop;
+see #41/#52 for the current lifecycle contract and evidence.
+
+The local implementation now provides explicit `suspend`/`resume` commands that preserve the
+overlay and workspace. Suspend checks for live nested QEMU processes in the guest and fails
+closed on an untracked process or an unavailable probe; recursion capacity alone is not treated
+as evidence that a child exists. `suspend --poweroff-recursive` explicitly requests graceful,
+deepest-first child suspension before the parent. If any child cannot be stopped and verified,
+the parent remains running; child profile state is preserved. These commands are not recommended
+for valuable state until owner-host shutdown/resume and workload-persistence checks pass;
+`stop`/`down` remain destructive.
+
+#### C.9.8 User permission prompt before package installation
+
+**Decision:** Before running `sudo pacman -S`, `sudo apt install`, etc., the script
+prints the list of packages and prompts `[y/N]`. The default is `N` (no install).
+
+**Why:** The agent must never unilaterally install packages on the host. The user must
+explicitly confirm each installation. This is a security boundary: the VM harness is
+powerful enough to modify the host, but it asks before doing so.
+
+#### C.9.9 Ticket-level AC and procedures live on the ticket, not in separate docs
+
+**Decision:** Acceptance criteria and testing procedures that are specific to a single
+ticket belong in the ticket's `acceptance_criteria` and `tests` fields. Long-lived
+architecture decisions, topology, trade-offs, and cross-ticket patterns belong in
+`docs/DECISIONS.md` and `docs/vm-architecture.md`.
+
+**Why:** A separate testing plan doc drifts from the ticket state. When the ticket is
+closed, the doc becomes stale. Keeping procedures on the ticket means the AC status,
+evidence, and test steps are always co-located and reviewed together. The separate doc
+is for decisions that outlive any single ticket.
+
+**What goes where:**
+
+| Lives on the ticket | Lives in DECISIONS.md / vm-architecture.md |
+|---|---|
+| Per-ticket acceptance criteria with evidence | Cross-ticket architecture and topology |
+| Step-by-step testing procedures for that ticket | Design trade-off rationale |
+| Current status: pass / in-progress / pending | Rejected alternatives |
+| Session-specific notes and outcomes | Conventions and non-goals |
+| | Distro-specific implementation caveats (as reference) |
+
+Ticket-specific test setup and procedures live on the relevant ticket; do not duplicate
+them in separate test-plan documents. The ticket engine's current `tests` ledger records
+needed/created/cases, while a first-class planned test-plan field is tracked by #51.
+
+#### C.9.10 Log rotation — last 5 runs (original checkout-local path, 2026-10-27)
+
+**Decision:** Both `./lab` and `./lab-vm` rotate their stdout/stderr logs, keeping the
+last 5 timestamped runs. The original implementation stored logs under the checkout;
+the current location is `$HOME/.local/share/little-mester/logs/` (or the configured
+per-user state root), as recorded in C.9.25.
+
+Implementation: each script defines `rotate_logs()` which creates the log directory,
+generates a timestamped filename, and prunes to 5 files. The script then uses
+`exec 1> >(tee -a "$LOG_FILE")` and `exec 2> >(tee -a "$LOG_FILE" >&2)` to tee all
+output to both stdout and the log file.
+
+**Why:** Without log rotation, repeated runs accumulate indefinitely in the repo or
+get lost when the container is recreated. A 5-run window captures enough history for
+debugging while keeping disk usage bounded. Runtime logs no longer live in or depend on
+the source checkout.
+
+#### C.9.12 Human gates and session handoff (2026-10-28)
+
+**Project-wide workflow decision:** Before requesting an owner-operated test or a
+potentially destructive/environment-changing action, put the exact procedure,
+expected observations, stop conditions, evidence/secret safeguards, and current
+revision on the implementing ticket. Record the returned result there before
+planning a follow-up. Ticket fields, not this log, hold execution history and
+handoffs. Keep an existing working session available until its replacement path
+is verified; do not expose credentials in tickets or logs.
+
+#### C.9.13 Native provider auth and credential boundaries (2026-10-29)
+
+**General auth decision:** Authenticate in the OpenCode server/process that will
+use the account, using its native provider dialog where available. A host
+credential database or broad host credential directory must not be copied or
+mounted into the VM. Any optional escrow/import/export is runtime-only, private,
+auditable without secret output, provider-agnostic where supported, and must not
+put credentials in the workspace, Git, image, base disk, or seed. Persistence
+and safe export-before-delete are acceptance gates, not assumed behavior.
+
+If a provider uses a host-browser OAuth callback, route only the callback to the
+actual server namespace using a temporary, explicit host-loopback-to-control-SSH
+forward. Keep it alive only during the login attempt and close it on success or
+cancellation. Discover and pin the server namespace, auth method, and listener
+for the installed OpenCode version; port numbers are not a cross-version
+contract. Never publish a LAN callback, add a general host route, bypass the
+egress proxy's private-address denial, or substitute an API key/device-only
+flow for a required subscription browser flow. Route browser/model traffic only
+through the public-only VM proxy, and require owner-controlled success, cancellation,
+port-conflict, egress-denial, request, and persistence evidence before claiming
+auth accepted. Ticket #45 owns the implementation chronology and test ledger;
+the [auth runbook](chatgpt-auth.md) contains operator steps and secret handling.
+
+**Public VM HTTP(S) egress approval (2026-10-29):** The owner approved broad
+public-web access so the guest agent can do ordinary project work. Any public
+HTTP(S) hostname may use the existing host proxy when `.mester-egress`
+`allowed_domains` is blank. This does not create a direct guest route: QEMU stays
+`restrict=on`, and the proxy rejects private/reserved/multicast addresses, mixed
+public/non-public DNS answers, and the host's local/directly connected networks
+(including IPv4-embedded IPv6 destinations). Non-HTTP protocols remain denied. No host
+firewall, route, NAT, or LAN listener is added. Reload the running VM proxy after
+the manifest change; live positive/negative and nested-VM checks remain required.
+
+If the guest cannot launch the host browser, a host-resident MCP or equivalent
+may open an ephemeral authorization URL only for approved provider origins.
+Reach it only through a temporary per-VM SSH reverse forward bound to guest
+loopback; its host listener remains bound to host loopback. Expose only the
+provider-specific open-URL capability, with no general host access. Never log
+or retain the URL/state, and never capture the callback/code; the callback
+continues directly to the guest through the temporary loopback SSH forward.
+
+**Recursive information sharing (strict push-only direction, 2026-10-29; design in #55):**
+The initial sharing path must be parent-to-child only: the parent selects and validates a
+schema-limited snapshot, and the child cannot request data or send control metadata through
+that channel. Snapshot format, integrity, delivery, size limits, expiry, and revocation remain
+design work. Read-only MCP resources are a future alternative to investigate for their common
+resource shape, discovery/interoperability, and tooling; resource reads carry child request
+metadata upward and are not the current path. Any reconsideration requires an explicit owner
+decision. Neither design substitutes for `restrict=on` or proxy destination checks, and no
+generic parent/host tools or paths may be exposed to descendants.
+
+**OpenAI ChatGPT implementation for the pinned guest version:** OpenCode 2.2.0
+source commit `1097e2668b1e08ad63bdf0b1c4860b9bc01e420c`,
+`packages/core/src/plugin/provider/chatgpt.ts`, creates its OAuth callback
+listener with `server.listen(0, "127.0.0.1", ...)`, then uses the selected port
+in the OAuth `redirect_uri` (`/auth/callback`). This is confirmed by source
+inspection, **not a stable/documented OpenCode CLI or API contract**. The
+temporary `./lab-vm agent` host bridge (enabled by default; `--no-browser-auth`
+opts out) extracts the port from the actual
+validated authorize URL and asks its private OpenSSH control master to forward
+only `127.0.0.1:<port>` on the host to `127.0.0.1:<port>` in the guest before
+opening the unchanged URL. At most one callback forward is active; a new port
+replaces the previous one. Auth forwarding commands ignore host SSH configuration
+and explicitly disable SSH agent/X11 forwarding so inherited forwards, proxy
+commands or agent sockets cannot expand this capability.
+It fails closed if the authorization endpoint, callback URI, port,
+or control forward is unexpected; it does not guess a fixed port, rewrite the
+URL, open a range, or bind to a LAN interface. The independent diagnostic
+`./lab-vm auth-forward [name] <callback-port>` also takes exactly one locally
+observed port. This runtime URL parsing is a version-specific integration
+assumption, not an OpenCode API; on every pinned-version change inspect the
+provider source, update regression tests and this decision, and repeat the
+owner-controlled browser acceptance. The tunnel and allowlist are implemented;
+live browser login and persistence remain unverified under #45.
+
+**Permission decision:** `--unsafe-recurse` authorizes exporting the repo; it
+does not select an OpenCode permission mode. `--auto-accept` / `--permissions auto`
+request the supported client `--auto` flag, preserving explicit denies. Consume
+lab flags regardless of position and pass agent arguments unchanged. `ask` and
+auto-accept conflict; unsupported modes must fail clearly, not silently do
+nothing. Do not patch generated permissions into blanket allow rules.
+
+
+---
+
+### C.8 VM harness topology, transport and isolation (current)
+**Product architecture decision:** Little Mester runs the harness directly in a local,
+QEMU/KVM VM guest. The owner-directed default entry point is `./lab`; until that launcher
+cutover lands, the implementation remains split between the Docker launcher and
+`./lab-vm`. The guest VM, not a Docker container, is the intended host-isolation boundary.
+The agent is intentionally given guest-level control: it can use Docker/Compose for
+project services, install and configure guest software, and launch nested Little Mester
+QEMU/KVM VMs when supported. Docker is a workload tool inside the guest, never the outer
+agent sandbox. The selected workspace enters through virtiofs; model APIs and egress
+remain on narrowly forwarded, policy-controlled channels. Native provider auth belongs
+to the guest agent and its actual browser callback endpoint (#45).
 
 **Why this shape:**
 
 | Candidate | Isolation | GPU / models | Startup | Workspace I/O | Verdict |
 |---|---|---|---|---|---|
-| Local QEMU/KVM, `./lab`-managed | VM boundary + rootless Docker; no host ports; one exported path | Host-side model API, no VFIO | One command, image cached | virtiofs, live edits | **Chosen** |
-| Local default + remote Linux host over SSH | Same container hardening, but shares the remote host's daemon/network | Depends on host | Fast after provisioning | sshfs/rsync, extra moving parts | Follow-up: #47 |
+| Local QEMU/KVM, `./lab`-managed | VM boundary; agent has broad guest control; no host ports; one exported path | Host-side model API, no VFIO | One command, image cached | virtiofs, live edits | **Chosen** |
+| Local default + remote Linux host over SSH | Shares the remote host's VM/daemon/network rather than this local VM boundary | Depends on host | Fast after provisioning | sshfs/rsync, extra moving parts | Follow-up: #47 |
 | Cloud VM | Strong, but provider credentials and cost | GPU SKUs available | Slowest | Network filesystem or copy | Not now |
 | Docker-in-Docker on the host | Needs privileged containers; weak boundary | Host Docker | Fast | bind mount | Rejected (C.6) |
 | Shared remote Docker daemon | Containers/networks/volumes shared with other work | Host Docker | Fast | bind mount | Rejected (C.6) |
@@ -288,52 +597,322 @@ workspace is shared live rather than checked out inside the VM.
   that mount; nothing else from the host is exported. `check_workspace()` still runs on the
   host before export, so `/`, `$HOME`, the lab repo without `--unsafe-recurse`, and
   credential directories never reach the VM.
-- **Docker daemon:** rootless Docker under `mester` (`subuid`/`subgid`, systemd user
-  lingering, `DOCKER_HOST=unix:///run/user/<uid>/docker.sock`). A container escape lands as
-  an unprivileged VM user, not VM root; the VM is disposable regardless. The agent socket is
-  mounted only when Docker access is enabled (opt-in and visible), and the daemon is never
-  rootful by default. Rootful Docker is an explicit escape hatch, not the default.
+- **Guest authority:** the harness runs directly as a guest user with the ability to
+  administer the guest and control its Docker daemon. Rootful-in-guest Docker or equivalent
+  guest admin access is acceptable because the outer VM is the isolation boundary; guest
+  root is not claimed as a security boundary from the agent. Host Docker and host privilege
+  are never exposed.
 - **Control channel:** SSH over a QEMU user-network forward bound to `127.0.0.1` on an
-  ephemeral host port. `./lab vm` generates a per-VM ed25519 key under the gitignored
-  `.mester/vm/<name>/` state directory, uses a per-VM `known_hosts`, and never copies host
-  keys, cloud credentials, or `~/.ssh` into the VM. `qemu-guest-agent` handles lifecycle;
-  SSH handles commands and `./lab shell`.
-- **Model APIs:** ollama and llamacpp stay on the host, bound to loopback. The VM reaches
-  only their ports through QEMU `guestfwd` entries (`10.0.2.100:11434` and `:8080`), not
-  through a general host route. No model weights or GPUs enter the VM, and a CPU-only host
-  still works with the same flow.
-- **Egress:** QEMU user networking runs with `restrict=on`; the only way out is a host-side
-  allowlisting HTTP(S) proxy exposed through `guestfwd` (`10.0.2.100:3128`). Docker, apt,
-  npm and pip are configured to use it. This is where `.mester-egress` `allowed_domains`
-  is enforced (#43), instead of the current advisory parsing. A blank list keeps allow-all
-  at the *domain* level; non-HTTP protocols and DNS outside the proxy are follow-ups, not
-  silently allowed.
-- **No host ports:** the harness adds only the loopback SSH forward. The model servers
-  already listen on host loopback and are exposed to the VM only through their `guestfwd`
-  entries. Agent and workspace services are reachable only on the VM's internal Docker
-  networks. Nothing is published to the host LAN.
-- **Teardown:** `./lab stop` removes the agent and workspace containers/networks/volumes
-  inside the VM, then stops QEMU and deletes the overlay, seed and virtiofs sockets. The
-  cached base image and `./lab` state are the only things that survive. A VM is never
-  reused across unrelated workspaces without an explicit reset.
+  ephemeral host port. The intended private per-user state directory holds per-VM keys
+  and `known_hosts`; current profile paths are private to the host user's state root and
+  are not exported through the selected workspace. Host keys,
+  cloud credentials, and `~/.ssh` are never copied into the VM. `qemu-guest-agent` handles
+  lifecycle; SSH handles commands and shell access.
+- **Model APIs:** Model service is optional and configured independently of the VM runtime.
+  When selected, the VM may reach exactly one configured host-loopback API endpoint through
+  an explicit QEMU `guestfwd` mapping, not through a general host route. A native host
+  service or user-managed container may provide it; host Docker is not a prerequisite and
+  `lab-vm` does not implicitly install/manage a host model server. No model weights or GPUs
+  enter the VM; a VM without a model endpoint remains usable for shell/workload tasks.
+- **Egress:** QEMU user networking runs with `restrict=on`; the only Internet path is a
+  host-side HTTP(S) proxy exposed through `guestfwd` (`10.0.2.100:3128`). Docker, apt, npm,
+  and pip use it. A blank `.mester-egress` `allowed_domains` permits any public HTTP(S)
+  hostname; a populated list narrows destinations. The proxy rejects non-public addresses,
+  mixed DNS, and the host's local/directly connected networks before connecting. Non-HTTP
+  protocols and DNS outside the proxy remain denied.
+- **No host LAN ports:** the harness adds only loopback SSH control and any explicitly
+  configured loopback model endpoint. That endpoint crosses to the guest only through its
+  matching `guestfwd` entry. Guest services remain guest-local unless separately reviewed;
+  nothing is published to the host LAN. Setup must never modify host firewall, NAT, routing,
+  sysctl, or Docker daemon policy to make a crossing work; a profile that cannot satisfy
+  the contract without such changes is unsupported.
+- **Teardown and recursion:** guest workloads and nested VM state belong to the guest
+  lifecycle. Cleanup must be explicit and must not silently destroy a live recursive test
+  loop or its evidence. Separate/reused VM policy and snapshot/overlay retention require
+  lifecycle acceptance tests; no automatic destructive teardown is assumed.
 
 **Follow-ups (with defaults):**
 
 - A remote Linux host target is **#47**: opt-in, off by default, and documented as weaker
   isolation because it shares that host's Docker daemon. Default remains local QEMU/KVM.
-- Rootless Docker restrictions (ports <1024, some images, cgroup v2 delegation) are handled
-  per workspace by #42/#43; the default is to keep rootless and fix the workspace, not to
-  switch to rootful.
+- Nested virtualization is a requirement to investigate and prove, not an assumed feature:
+  test host nested-VMX/SVM exposure, guest `/dev/kvm`, and a nested boot/lifecycle before
+  claiming recursive support. Provide a clear unsupported/fallback result when unavailable.
+- Guest Docker/Compose must support normal project workflows (including Compose services,
+  ports within the guest, volumes and test start/stop cycles); the guest Docker daemon may be
+  rootful because it is contained by the outer VM. Never expose the host daemon.
 - GPU passthrough into the VM is explicitly out of scope; model servers stay on the host.
-- `guestfwd` + `restrict=on` behaviour and virtiofs mount semantics must be proven in #41;
-  the fallback is a host-side firewall/proxy pair with the same crossings, not opening a
-  general host route.
+- `guestfwd` + `restrict=on` behaviour and workspace-sharing semantics must be proven in
+  #41. There is no firewall or general-route fallback; an unsupported host profile must
+  fail clearly rather than weaken isolation.
 - Alternative container runtimes remain future scope in #46.
+
+#### C.9.15 Host portability and optional model services (2026-10-28)
+
+**Decision:** The VM product must not be coupled to one host's Docker Engine, firewall,
+networking setup, or model-serving container. Guest Docker/Compose remains an optional
+workload capability for project integration tests; it is not the agent wrapper and the host
+daemon/socket is never shared. Model inference is an optional provider configured through a
+stable API endpoint contract; when local to the host, only that endpoint's loopback port may
+be forwarded to the guest. Default setup/agent launch must not require any model server.
+
+“Any Unix” is a portability goal, not a claim that all Unix variants share VM and filesystem
+APIs. Publish explicit tested OS/architecture profiles. Each profile must pass hypervisor,
+selected-workspace share, control/network isolation, and teardown gates. Unknown profiles
+fail with actionable prerequisites; setup must not alter firewall/routing policy or silently
+select weaker isolation. The current Linux x86_64/QEMU/virtiofs profile remains experimental
+until its acceptance evidence is complete; macOS and BSD support must not be claimed before
+their own profile tests.
+
+**Reason:** A host Docker port-publication failure must be diagnosed as an implementation or
+support-profile failure, not worked around with host-specific relays or firewall changes.
+Keeping the host model provider and guest workload runtime behind optional interfaces allows
+the same VM flow to work with native host services and across tested Unix profiles.
+
+#### C.9.17 VM-first launcher, retained Docker mode, and bounded recursion (2026-11-01)
+
+**Owner-directed product decision:** `./lab <workspace>` is the VM-first default entry
+point and should start/reuse the guest and launch the interactive agent. Preserve the
+existing containerized single-agent workflow separately as `./lab-docker`; it is not
+Docker-in-Docker and must not acquire a host Docker socket or recursive agent capability.
+This decision supersedes the earlier decision to postpone switching the default until all
+acceptance gates passed. The staged dispatcher is implemented: `./lab vm <args>` reaches
+`./lab-vm`, and the former host-Docker launcher is `./lab-docker`. Ordinary `./lab` still
+delegates to Docker in this worktree, so the VM-default cutover is not complete. Do not
+describe the branch as accepted or merge-ready until the independent VM, auth, permission,
+workload, isolation, lifecycle, CI, and owner-review gates pass. Preserve a tested rollback
+path.
+
+**Setup versus daily use:** Host prerequisites, base-image download, and first guest
+provisioning are setup-time operations. Daily startup should reuse the provisioned VM, perform
+only bounded readiness/config checks, and land the user directly in the guest agent; `ssh`,
+`status`, `base`, and other component commands remain available for diagnostics. The normal
+daily path must not require a separate `up`, `ssh`, then `agent` sequence. VM commands must
+document whether they preserve or delete the writable overlay, guest Docker volumes, auth
+state, and logs. A non-destructive stop/suspend/restart policy must be implemented and
+verified before documenting an end-of-day shutdown recommendation. In the current
+experimental implementation, `up` provisions/starts but does not launch the TUI; `stop`
+tears down guest Compose volumes and then calls `down`; `down` deletes the VM overlay and
+control keys. These commands are destructive to guest state and are not a routine end-of-day
+stop.
+
+**Metrics compatibility:** Keep the existing host-Docker metrics integration working while
+developing and validating a separate VM metrics transport. VM metrics must use an explicitly
+configured, narrow endpoint/stream and preserve the host boundary; the guest must not depend
+on Compose DNS names such as `metrics`, host Docker access, or a general host route. Only
+retire or replace the Docker metrics path after both modes have their own verified acceptance
+coverage and the owner approves the transition.
+
+**Self-hosting and recursion:** Mount only the selected workspace by default; do not include
+the Little Mester checkout in a VM workspace unless recursion is explicitly requested.
+`--recurse` enables the bounded nested Little Mester test capability, while
+`--unsafe-recurse` explicitly permits self-modification and implies the required repository
+workspace. Both are governed by a maximum nesting depth, default `0`, configurable only via
+an explicit maximum-depth option. Depth is propagated and enforced at every launcher boundary;
+no child can reset/increase it implicitly, and exceeding the limit fails closed before VM or
+agent startup. Recursive tests use a distinct disposable workspace/checkout so the active
+outer implementation session remains intact. The outer VM remains the host boundary; nested
+VMs do not gain additional host paths, host Docker, credentials, LAN access, or egress rights.
+
+**Implementation note (2026-11-01):** the explicit `./lab vm <args>` dispatcher now reaches the
+standalone VM CLI, and the former host-Docker implementation is split out as `./lab-docker`.
+Ordinary `./lab` remains on the host-Docker compatibility path while the project release gates
+are open; this is not the final VM-first default cutover or an acceptance claim.
+
+**Implementation contract:** `lab-vm` accepts `--max-depth` from 0 through 32; the default is
+0, and a nested invocation inherits the parent maximum unless explicitly lowered. A safe
+repo-related workspace is copied to a stable private snapshot before it is shared; snapshots
+exclude `.mester` and `.little-mester.conf`, use independent Git metadata, and reject escaping
+symlinks and special files. Nested VM overlays/state are stored separately under the guest
+user's `~/.cache/lab-vm-recursion/<profile>` and persist until the explicit
+`recursion-clean <profile>` command is confirmed. Nested startup requires usable `/dev/kvm` and
+guest CPU `vmx`/`svm` flags, and fails before snapshot/provisioning when either is unavailable;
+it must not fall back to TCG for a recursive child. This implementation detail does not claim
+live nested-KVM or isolation acceptance; see #43/#52. The cache is inside the containing guest
+overlay: destructive outer `down`/`rebuild` can still remove it and must be treated as an
+independent destructive action until #43 A6/#52 lifecycle acceptance closes.
+When profile recursion metadata shows that descendants may exist, `down`, `stop`, `rebuild`,
+and `up --clean` refuse before destructive side effects unless the caller supplies
+`--discard-recursive`; `--yes` is not a substitute for this acknowledgement. The persisted
+“descendants may exist” bit is sticky if a profile's configured maximum is later lowered, and
+is cleared only when that profile's writable overlay is discarded.
+
+**Reason:** Make the intended VM the ordinary route without losing the useful, non-recursive
+Docker fallback; maintain metrics parity during migration; and support deliberate
+self-improvement without accidental or infinite agent/VM recursion. Implementation and
+acceptance evidence are tracked on #35, #41–#43, #50, and #52.
 
 The trust-boundary diagram and crossing table live in `docs/vm-architecture.md`; the
 engineering invariants are in `docs/tickets/architecture/DECISIONS.md` §K.
 
+#### C.9.18 Harness-neutral, data-first tooling (2026-11-01)
+
+**Decision:** Little Mester's operational workflows and project state should be available
+through stable, machine-oriented interfaces—CLI and/or MCP—with one canonical data model.
+Harness-specific integrations (OpenCode, Claude Code, Codex, or others) are adapters, not the
+source of truth; they should invoke the same operations and expose the same validation/results.
+Keep semantic decisions in versioned schemas, engine rules, and explicit data rather than
+prompts, agent-specific memory, or undocumented conventions. Natural-language interaction may
+help a user choose an operation, but must not be required to interpret or mutate canonical state.
+
+For ticket work, lifecycle status remains distinct from delivery/merge readiness. When a broad
+objective contains a separately integrable slice, split the remaining scope into separate tickets
+rather than marking unfinished work resolved. The current ticket schema/CLI/MCP do not yet offer
+a complete, equivalent machine-readable readiness-and-split workflow; do not invent an ad-hoc
+field or treat prose as authoritative. Ticket #57 tracks that schema/engine/CLI/MCP improvement.
+
+**Reason:** Reduce coupling to any one coding harness and minimize semantic state that must be
+reconstructed from conversation. A canonical programmatic workflow makes work portable between
+humans, agents, and harnesses and makes status auditable/queryable.
+
+#### C.9.19 Shell portability in user instructions (2026-11-01)
+
+**Decision:** User-facing command instructions must include both Bash and Fish forms. When a
+sequence is identical in both shells, explicitly label it as shared; when syntax differs (for
+example assignments, command substitution, loops, or environment-variable prefixes), show
+separate complete blocks. Do not assume the user's interactive shell is Bash.
+
+**Reason:** Bash-only snippets fail when copied into Fish, interrupting otherwise safe workflows.
+
+#### C.9.20 Managed VM memory resize (2026-11-01)
+
+`./lab-vm resize <profile> <GiB>` changes RAM for a VM profile controlled by that
+invocation of `lab-vm`. QEMU RAM is not hot-resized: for a running profile, the command
+must verify the requested budget first, request a clean guest shutdown, stop host-side
+VM helpers, preserve the overlay/base image/seed/SSH identity/installed guest state, and
+restart the same profile with the new RAM. If guest shutdown or resource preflight fails,
+leave the current VM running and unchanged. Never implement resize by `down`, `rebuild`,
+container-volume teardown, or overlay replacement.
+
+This command cannot resize an ancestor VM that contains the current shell: `lab-vm`
+controls only QEMU profiles it launches in the current host namespace. Assigning more RAM
+to the coding shell itself requires its parent hypervisor/launch configuration and a
+shutdown/restart there.
+
+**Reason:** Permit deliberate RAM changes without losing useful guest state or confusing
+a nested guest with the hypervisor that owns its parent.
+
+#### C.9.21 VM memory defaults, per-profile persistence, and setup override (2026-11-01)
+
+New depth-0 VM profiles default to **8 GiB**. New nested profiles default to half the
+parent-level allocation (8/4/2/1 GiB by depth, with 1 GiB as the floor); `--memory <GiB>`
+is an explicit setup-time override for a new profile. The selected allocation is persisted
+with that VM profile and reused on warm starts. Existing profiles without metadata retain
+the legacy 4-GiB allocation until explicitly resized. Changing a running VM's RAM requires
+`resize`; an override must not silently affect a running or existing profile.
+
+Before creating recursive snapshots, profile state, or QEMU processes—and before stopping
+a running profile to resize—check the available parent memory, any enforced cgroup memory
+limit, the requested guest RAM, and 512 MiB of safety headroom. Refuse before side effects
+when the budget is insufficient; do not rely on host swap or QEMU overcommit. Resource
+checks are safety gates, not proof that the guest workload fits its configured RAM.
+
+**Reason:** Keep the ordinary new guest useful while scaling deliberate recursion to fit
+inside its parent, preserve a per-profile operator override, and fail before disturbing
+valuable VM/workspace state when the enclosing machine cannot satisfy the request.
+
+#### C.9.22 Recursive source snapshots are filtered, bounded, and revision-bound (2026-11-01)
+
+An explicitly requested recursive child receives a private copy of the selected source, not
+the parent's state directory or a live shared checkout. Exclude `.mester`, `secrets.env`,
+`.env` files (except checked-in examples), auth/database files, private-key files, model
+weights, SQLite/database files, and regenerated dependency/runtime caches. Reject escaping
+symlinks and special files. Rewrite in-workspace symlinks to relative links within the child
+snapshot so they cannot point back to the parent checkout. Do not clone the source repository's
+history into the child: historical committed
+credentials must not be reachable through its Git object database. Preserve only a synthetic
+Git commit of the filtered current tree, including intended tracked, dirty, and untracked
+source files.
+
+Record the source HEAD plus a content manifest/hash outside the child's workspace. Before
+reusing a session, compare the current selected tree and refuse if its source revision changed;
+use a fresh profile for a new test attempt. Preflight the included file bytes against a 2-GiB
+default maximum and filesystem free space for the snapshot plus staging reserve before copying.
+An explicit `LAB_VM_MAX_SNAPSHOT_BYTES` may raise the cap up to 16 GiB; it never bypasses the
+free-space check. Snapshot preparation must fail closed without replacing an existing session.
+
+**Reason:** The child should test the parent's selected revision and intended work without
+inheriting host credentials, stale source, model caches, or unbounded disk consumption. This
+filtered child copy does not make a parent workspace safe if old checkout-local runtime data is
+still present; the launcher refuses that overlap until it is reviewed.
+
+#### C.9.23 VM control state is private to the host user (2026-11-01)
+
+VM profiles and base disks live under `~/.local/share/little-mester/vm/` outside every selected
+workspace; launcher logs are under `~/.local/share/little-mester/logs/`. The root may be
+relocated by `XDG_DATA_HOME` or `MESTER_STATE_DIR`. Restrict the state root and profile
+directories to mode 0700; individual control keys remain mode 0600. Nested profiles remain
+under the containing guest's private recursion session. Before sharing a workspace, reject any
+overlap with selected VM state or an unreviewed checkout-local `.mester` directory.
+
+There is no checkout-local fallback: old overlays and keys are neither discovered, moved, nor
+deleted automatically. Before a manual migration, inventory all profiles and each qcow2 backing
+chain. If an expected profile does not appear under the effective profile root printed by
+`./lab-vm context`, stop before provisioning another profile.
+
+#### C.9.24 Guest recursion identity and MCP runtime persist independently of the workspace (2026-11-01)
+
+Provision a root-owned recursion identity in guest OS state and load it into ordinary login
+shells and launcher processes. A caller-supplied recursion environment that disagrees with
+the persisted depth/maximum is refused. `lab-vm context` reports the persisted identity even
+when invoked outside the agent's original SSH command. It also reports the effective VM state
+root and profile directory. The maximum remains bounded at 32 and a child cannot raise its
+inherited maximum.
+
+The direct guest MCP server uses a guest-private runtime copy, not workspace `node_modules`.
+Provision Node.js 20 or newer, install dependencies from the checked-in lockfile, and build the
+MCP server before launch. Do not copy guest dependencies/caches into recursive source
+snapshots or mutate the selected workspace as a side effect of setup.
+
+#### C.9.25 One per-user state root; checkout clones contain source only (2026-11-02)
+
+The canonical host root defaults to `~/.local/share/little-mester`. VM profiles and base disks
+are under `vm/`; VM per-profile logs are stored with those profiles, and both `lab-vm` and
+`lab-docker` launcher logs are under `logs/`. Metrics service files use `vm-services/` under the
+same root. `XDG_DATA_HOME` or `MESTER_STATE_DIR` relocates the whole root. Host acceptance
+reports are private evidence under the XDG state directory and are not VM runtime logs.
+
+`VM_STATE_DIR` and `VM_DIR_BASE` remain explicit internal/test/recursion overrides, not a
+checkout-discovery mechanism. The default is never changed based on whether another directory
+exists. `./lab-vm context` reports the effective state/profile paths, so an operator can verify
+which location a command will use before provisioning or reopening.
+
+Re-cloning the source on the same host preserves home-directory profiles. `resume` uses the
+profile's recorded workspace; if that path moved, the operator selects the new workspace
+explicitly with `up --workspace`. Do not automatically move old profile data: inventory the
+overlay's qcow2 backing chain first. `.mester-egress` remains an independent workspace policy
+file and is not part of this runtime root.
+
+**Reason:** Keep private VM control state out of a writable self-development workspace while
+making the location and re-clone behavior predictable. `--unsafe-recurse` authorizes source
+workspace writes, not access to the parent VM's keys, disks, or control metadata.
+
 ---
+
+### C.9.14 Diagnostics are part of the workflow (2026-10-28)
+
+**Decision:** Software setup and lifecycle workflows must gather and present actionable
+diagnostics as part of the normal workflow, especially on failure. A user must not need to
+race a short-lived process with a separate SSH/debug command to collect evidence needed to
+diagnose a failure. `--verbose` and `--debug` may add progressively more detail, but the
+failure path must automatically capture the minimum useful context, preserve it in the
+workflow's existing state/log directory, print its location, and retain the original failure
+status. Diagnostics should be configurable when their volume or cost makes routine capture
+excessive, with the default still sufficient to explain common setup failures.
+
+**Safety:** Diagnostics must not print secrets (credentials, tokens, private keys), weaken
+security boundaries, or run unrelated/destructive commands. Bound noisy command output where
+appropriate, identify unavailable probes rather than silently omitting them, and keep raw
+artifacts in gitignored state/log locations. Implementations and evidence belong on their
+ticket; this is the cross-project product/workflow rule. See #41 for VM failure diagnostics.
+
+When an investigation requires the same multi-step host checks more than once, add a reusable
+diagnostic command to the relevant tool rather than asking the owner to compose bespoke shell
+commands. Keep ordinary `status` output concise and actionable; put detailed, read-only evidence
+behind an explicit `diagnose`/`doctor` command (or a documented verbosity flag). Agents should
+run the existing diagnostic entry point first and request extra manual commands only when it
+does not cover a specific evidence gap. Diagnostic helpers must not repair or restart services
+unless the user explicitly invokes a separate repair action.
 
 ## Licensing — standard AGPL (2026-10-28)
 
@@ -799,7 +1378,7 @@ no audit entry) are flagged for human review and never auto-deleted.
 
 ## L. Security caveats (what the sandbox does NOT protect against)
 
-Full security model: [SECURITY.md](SECURITY.md). This section lists the known blind spots
+Full security model: [SECURITY.md](../SECURITY.md). This section lists the known blind spots
 that the README originally included under "What this does NOT protect against."
 
 **Read this twice. These are real risks.**
@@ -931,10 +1510,10 @@ container, so the agent has real hardware visibility without breaking the sandbo
   `internal` network.
 
 > **Agent query tool**: `get_host_metrics` is registered by the
-> [`host-metrics` plugin](agent/opencode/plugins/host-metrics/). It returns a formatted
+> [`host-metrics` plugin](../agent/opencode/plugins/host-metrics/). It returns a formatted
 > report the agent can call before large model operations.
 >
-> **Live TUI view**: [`host-metrics-tui`](agent/opencode/plugins/host-metrics-tui/)
+> **Live TUI view**: [`host-metrics-tui`](../agent/opencode/plugins/host-metrics-tui/)
 > renders a compact GPU/VRAM sparkline in the sidebar footer, expandable for detail.
 >
 > **Acceptance verification**: run `./scripts/verify-metrics.sh` on the host.
@@ -1048,7 +1627,7 @@ program carries them out, and the results go back to the model.
 Do these in order. Each has its own README with goals, exercises, and "you should be able
 to explain" questions.
 
-1. Get the sandbox running and make `./verify-lab.sh` pass. Read [SECURITY.md](SECURITY.md).
+1. Get the sandbox running and make `./verify-lab.sh` pass. Read [SECURITY.md](../SECURITY.md).
 2. Use opencode (or `--agent aider`) on a small project. Review every diff. Journal what
    the model gets right and wrong.
 3. Build your own agent loop: `my-agent/` (planned).
@@ -1104,3 +1683,40 @@ standalone TUI through a pty and asserts Ctrl+D is inert, `yq` types with the di
 opens the dialog, Esc/N/Ctrl+C cancel without exiting, and q exits. It passed on OpenCode 2.1.4 in
 the agent container; the run is recorded on ticket #37. The image must be rebuilt/restarted for the
 baked `/etc/opencode` copy to replace any stale running copy.
+### J.11 Auto-accept: remove hardcoded permission block, rely on `--auto` CLI flag (2026-10-27)
+
+**Decision:** Remove the hardcoded `"permission": {"edit": "ask", "bash": "ask"}` block from
+`agent/opencode/opencode.json` and from `scripts/regen-configs`. Use the `opencode --auto`
+CLI flag at runtime to control permission mode, NOT config file modification.
+
+**Why:** The `opencode.json` config file is baked into the Docker image and sets permissions
+as a default. When the config file explicitly specifies `"ask"`, the `--auto` CLI flag does
+not override it — the config takes precedence. This makes `--auto` unusable for per-run
+permission control.
+
+Three rejected alternatives:
+
+| Approach | Why rejected |
+|----------|-------------|
+| `sed` live-patch of `opencode.json` before/after agent run | Modifies a tracked config file at runtime; leaves artifacts; race condition on restore |
+| `OPENCODE_CLI_CONFIG_CONTENT` env var override in `--env` | Overwrites the entire CLI config (plugins, keybinds); fragile — any future config change breaks the override |
+| Regenerate `opencode.json` with `regen-configs` per-run | Heavyweight; requires Python; breaks the "agent-only" loop since regen-configs touches config files outside the agent |
+
+**Chosen approach:**
+- Remove the `"permission"` block from the baked config. OpenCode's **default** (when no
+  `permission` block is present) is `ask` for tools that don't explicitly allow themselves.
+- In `./lab`, add `--auto-accept` / `-y` flag (alias for `--auto`). When set and
+  `AGENT=opencode`, run `opencode --auto "$@"` instead of just `$AGENT "$@"`.
+- Same pattern in `./lab-vm` for the `--auto-accept` alias on `lab-vm up`.
+- No config files are modified at runtime. No env var overrides. Clean and reversible.
+
+**Runtime behavior:**
+| Invocation | Permission mode | How |
+|---|---|---|
+| `./lab <workspace>` (no flags) | `ask` (default) | No hardcoded block → OpenCode's default `ask` |
+| `./lab --auto-accept <workspace>` | `auto` | `--auto` CLI flag overrides the default |
+| `./lab-vm up --auto-accept` | `auto` | Same `--auto` flag passed inside the VM |
+
+**Files changed:** `agent/opencode/opencode.json`, `scripts/regen-configs`, `./lab`,
+`./lab-vm` (the `--auto-accept` flag alias wiring). The Dockerfile is **not** changed —
+it already sets `OPENCODE_CLI_CONFIG_CONTENT` for plugins/keybinds, which is unaffected.

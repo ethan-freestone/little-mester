@@ -28,3 +28,6 @@ __pycache__/
 .tune-results/
 
 secrets.env
+
+# Legacy checkout-local runtime state is no longer used, but keep old data ignored while reviewed.
+.mester/

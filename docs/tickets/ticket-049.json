@@ -1,0 +1,40 @@
+{
+  "id": 49,
+  "file_path": "/workspace/docs/tickets/ticket-049.json",
+  "number": 49,
+  "area": "infra",
+  "type": "bug",
+  "status": "draft",
+  "title": "Updated CLI title test",
+  "objective": "The mester_tickets_update MCP tool returns the ticket JSON but never actually writes changes to disk. All field updates (title, acceptance_criteria, status, etc.) are silently ignored. This means ticket state cannot be modified programmatically through the MCP server.",
+  "created_at": "2026-10-27T12:47:22.688Z",
+  "updated_at": "2026-10-27T12:49:19.443Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "mester_tickets_update actually writes changes to the ticket JSON file on disk",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Updated ticket fields persist across subsequent mester_tickets_get calls",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Audit log entry is created for every successful update",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Updated_at timestamp is refreshed on each update",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}

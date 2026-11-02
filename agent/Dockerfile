@@ -15,8 +15,29 @@ RUN apt-get update \
 RUN python -m venv /opt/venv \
  && /opt/venv/bin/pip install --no-cache-dir aider-chat pytest
 
-# OpenCode. The version check makes the BUILD fail loudly if the binary isn't usable.
-RUN npm install -g @opencode/cli && opencode --version
+# OpenCode. Install without lifecycle scripts so platform selection can be diagnosed
+# before running the package's postinstall in its normal package directory.
+COPY diagnose-opencode-install.cjs /tmp/diagnose-opencode-install.cjs
+RUN npm install -g --ignore-scripts @opencode/cli || { \
+      status=$?; \
+      echo "OpenCode npm install failed (status ${status}); sanitized npm diagnostic tail follows:"; \
+      log="$(ls -t /root/.npm/_logs/*-debug-0.log 2>/dev/null | head -n 1)"; \
+      if [ -n "$log" ]; then \
+        grep -viE 'authorization|_auth|token|password' "$log" | tail -n 160; \
+      else \
+        echo "No npm debug log found under /root/.npm/_logs"; \
+      fi; \
+      exit "$status"; \
+    } \
+ && npm_root="$(npm root -g)" \
+ && node /tmp/diagnose-opencode-install.cjs "$npm_root" \
+ && (cd "$npm_root/@opencode/cli" && node ./postinstall.mjs) || { \
+      status=$?; \
+      echo "OpenCode postinstall failed (status ${status}); platform package files and postinstall source are printed above."; \
+      exit "$status"; \
+    } \
+ && rm /tmp/diagnose-opencode-install.cjs \
+ && opencode --version
 
 COPY opencode/opencode.json /etc/opencode/opencode/opencode.json
 COPY opencode/plugins/little-mester-logo/ /etc/opencode/plugins/little-mester-logo/

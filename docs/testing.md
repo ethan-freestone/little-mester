@@ -147,6 +147,16 @@ isolation because its containers, networks, and volumes are shared with other wo
 - The **repo checkout is never the test target**. Tests run in a disposable workspace
   (`workspaces/test-<id>` or a fresh clone) so `--unsafe-recurse`, compose, and
   destructive lab cases cannot touch the developer's working tree.
+- Fresh VM provisioning installs `pip`, Ruff, and uv into a dedicated Python virtual
+  environment. Optional `bats` and `shellcheck` packages, plus an in-place refresh of the Python
+  toolchain, are provided by `./lab-vm install-tools [--name <profile>]`. Exit the current TUI
+  first; this updates the running guest without replacing its overlay or rebooting it. Checking
+  tools in the separate OpenCode execution runner does not establish whether they exist in the
+  guest.
+- `./lab-vm update` checks OpenCode, installed validation tools and pip/Ruff/uv, and the guest config/plugins,
+  then requests confirmation before applying changes. Use a target (for example `opencode`)
+  to narrow the update; `--all` additionally upgrades guest OS packages and the managed Docker
+  Engine. Updates happen in place and do not recreate the VM/base disk or replace guest auth.
 - Fresh provisioning is one documented runbook: install Docker (and the NVIDIA toolkit
   when GPU-enabled), clone the repo, build the agent image, then run `./verify-lab.sh`.
   A CPU-only host is supported; GPU tooling is optional.

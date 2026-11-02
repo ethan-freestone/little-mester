@@ -93,10 +93,6 @@ def gen_opencode_json(models_by_backend):
             "/etc/opencode/plugins/host-metrics-tui",
             "/etc/opencode/plugins/little-mester-exit-confirm"
         ],
-        "permission": {
-            "edit": "ask",
-            "bash": "ask"
-        },
         "otel": {}
     }
     

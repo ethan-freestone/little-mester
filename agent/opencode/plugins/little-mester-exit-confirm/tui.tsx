@@ -51,10 +51,15 @@ export default Plugin.define({
             if (open()) return
             active = true
             setOpen(true)
-            context.ui.dialog.set({ centered: true, size: "medium" })
             context.ui.dialog.show(
               () => (
-                <box flexDirection="column" paddingX={2} paddingY={1} gap={1}>
+                <box
+                  flexDirection="column"
+                  paddingX={2}
+                  paddingY={1}
+                  gap={1}
+                  backgroundColor="#00000030"
+                >
                   <text fg="#e94560">
                     <strong>Close Little Mester?</strong>
                   </text>
@@ -73,6 +78,8 @@ export default Plugin.define({
                 setOpen(false)
               },
             )
+            // show() resets dialog layout state, so apply centering after it.
+            context.ui.dialog.set({ centered: true, size: "medium" })
           },
         },
       ],

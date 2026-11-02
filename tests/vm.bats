@@ -1,0 +1,2657 @@
+#!/usr/bin/env bats
+
+setup() {
+  REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
+  LAB_DIR="$REPO_ROOT"
+  unset LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH
+  source "$REPO_ROOT/lib/vm/runner.sh"
+}
+
+bats_vm_recursion_identity() {
+  local identity_file=/etc/lab-vm-recursion
+  if [[ -e "$identity_file" || -L "$identity_file" ]]; then
+    cat -- "$identity_file"
+  else
+    printf '0 0\n'
+  fi
+}
+
+bats_vm_has_guest_identity() {
+  [[ -e /etc/lab-vm-recursion || -L /etc/lab-vm-recursion ]]
+}
+
+@test "QEMU guestfwd uses lazy command targets, not invalid bare addresses" {
+  VM_PROXY_PORT=45678
+  run _vm_netdev_arg 22222
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostfwd=tcp:127.0.0.1:22222-:22"* ]]
+  [[ "$output" == *"guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:45678"* ]]
+  [[ "$output" == *"guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532"* ]]
+  [[ "$output" != *"-10.0.2.2:"* ]]
+}
+
+@test "virtiofs socket paths stay within AF_UNIX limits for nested profile names" {
+  local profile="nested-accept-20261102002328-3ccba458"
+  local vm_dir="$BATS_TEST_TMPDIR/home/.cache/lab-vm-recursion/$profile/vm/$profile"
+  local socket_path legacy_dir legacy_socket
+  mkdir -p "$vm_dir"
+
+  socket_path="$(_vm_virtiofs_short_socket_path "$vm_dir")"
+  [ "${#socket_path}" -lt 108 ]
+  [[ "$socket_path" == "/tmp/little-mester-vfs-$(id -u)/"*.sock ]]
+  [[ "$socket_path" != *"$profile"* ]]
+  [ "$(_vm_virtiofs_short_socket_path "$vm_dir")" = "$socket_path" ]
+
+  # Existing live profiles retain support for their legacy per-profile socket.
+  legacy_dir="$BATS_TEST_TMPDIR/legacy-vm"
+  mkdir -p "$legacy_dir"
+  legacy_socket="$legacy_dir/virtiofs.sock"
+  python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()' "$legacy_socket"
+  [ "$(_vm_virtiofs_socket_path "$legacy_dir")" = "$legacy_socket" ]
+}
+
+@test "virtiofsd debug enables daemon logs and startup failures preserve diagnostics" {
+  local vm_dir="$BATS_TEST_TMPDIR/virtiofsd-diagnostics"
+  mkdir -p "$vm_dir"
+  chmod 0700 "$vm_dir"
+  VM_DEBUG=0
+  _vm_virtiofsd_args /workspace /tmp/test.sock
+  [[ " ${VM_VIRTIOFSD_ARGS[*]} " != *" -d "* ]]
+  [[ " ${VM_VIRTIOFSD_ARGS[*]} " != *" --syslog "* ]]
+
+  VM_DEBUG=1
+  _vm_virtiofsd_args /workspace /tmp/test.sock
+  [[ " ${VM_VIRTIOFSD_ARGS[*]} " == *" -d "* ]]
+  [[ " ${VM_VIRTIOFSD_ARGS[*]} " != *" --syslog "* ]]
+
+  log() { echo "$*"; }
+  printf 'virtiofsd: bind failed: File name too long\n' >"$vm_dir/virtiofsd.log"
+  run _vm_virtiofsd_startup_diagnostics "$vm_dir" /tmp/test.sock 99999999 \
+    'process exited before the socket was created (status 1)' 0
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"virtiofsd-startup.log"* ]]
+  [[ "$output" == *"File name too long"* ]]
+  grep -Fq 'Linux AF_UNIX limit is 107' "$vm_dir/virtiofsd-startup.log"
+  grep -Fq 'process exited before the socket was created (status 1)' "$vm_dir/virtiofsd-startup.log"
+}
+
+@test "persisted guest recursion identity is inherited and cannot be overridden" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  local identity="$BATS_TEST_TMPDIR/recursion-identity"
+  printf '1 2\n' >"$identity"
+
+  unset LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH
+  vm_recursion_apply_guest_identity "$identity"
+  [ "$LAB_VM_RECURSION_DEPTH" = 1 ]
+  [ "$LAB_VM_MAX_DEPTH" = 2 ]
+
+  run env LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=2 bash -c \
+    'source "$1"; vm_recursion_apply_guest_identity "$2"' _ \
+    "$REPO_ROOT/lib/vm/recursion.sh" "$identity"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'do not match the guest'* ]]
+}
+
+@test "workspace boundary refuses checkout-local runtime data but allows private VM state" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  local workspace="$BATS_TEST_TMPDIR/workspace" private="$BATS_TEST_TMPDIR/home/.local/share/little-mester/vm"
+  mkdir -p "$workspace/.mester/vm" "$(dirname "$private")"
+  LAB_DIR="$workspace"
+  run vm_recursion_validate_state_boundary "$workspace" "$private"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'checkout-local runtime data'* ]]
+
+  LAB_DIR="$BATS_TEST_TMPDIR/source-repo"
+  mkdir -p "$LAB_DIR"
+  run vm_recursion_validate_state_boundary "$workspace" "$private"
+  [ "$status" -eq 0 ]
+}
+
+@test "workspace boundary refuses a parent workspace containing a symlinked stale checkout state" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  local workspace="$BATS_TEST_TMPDIR/worktree-parent" checkout="$BATS_TEST_TMPDIR/worktree-parent/repo" outside="$BATS_TEST_TMPDIR/outside-state"
+  mkdir -p "$checkout" "$outside"
+  ln -s "$outside" "$checkout/.mester"
+  LAB_DIR="$checkout"
+
+  run vm_recursion_validate_state_boundary "$workspace" "$BATS_TEST_TMPDIR/private/vm"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'contains a checkout with stale runtime data'* ]]
+}
+
+@test "VM state defaults to the per-user Little Mester root" {
+  local home="$BATS_TEST_TMPDIR/state-home"
+  mkdir -p "$home"
+  run env -u XDG_DATA_HOME -u MESTER_STATE_DIR -u VM_STATE_DIR -u VM_DIR_BASE \
+    HOME="$home" LAB_DIR="$REPO_ROOT" bash -c \
+    'source "$LAB_DIR/lib/vm/lifecycle.sh"; printf "%s\n%s\n" "$VM_STATE_DIR" "$VM_DIR_BASE"'
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "$home/.local/share/little-mester" ]
+  [ "${lines[1]}" = "$home/.local/share/little-mester/vm" ]
+}
+
+@test "only nested VM egress proxies use the parent proxy as an upstream" {
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/top-level-vm-state/vm"
+  VM_NESTED_LAUNCH=0
+  unset LAB_VM_RECURSION_DEPTH
+  _vm_proxy_upstream_args
+  [ "${#VM_PROXY_UPSTREAM_ARGS[@]}" -eq 0 ]
+
+  VM_NESTED_LAUNCH=1
+  _vm_proxy_upstream_args
+  [ "${VM_PROXY_UPSTREAM_ARGS[*]}" = "--upstream-proxy=http://10.0.2.100:3128" ]
+
+  VM_NESTED_LAUNCH=0
+  LAB_VM_RECURSION_DEPTH=0
+  VM_DIR_BASE="$HOME/.cache/lab-vm-recursion/recursion-smoke/vm"
+  _vm_proxy_upstream_args
+  [ "${VM_PROXY_UPSTREAM_ARGS[*]}" = "--upstream-proxy=http://10.0.2.100:3128" ]
+
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/top-level-vm-state/vm"
+  _vm_proxy_upstream_args
+  [ "${#VM_PROXY_UPSTREAM_ARGS[@]}" -eq 0 ]
+  grep -Fq '"${VM_PROXY_UPSTREAM_ARGS[@]}"' "$REPO_ROOT/lib/vm/runner.sh"
+  grep -Fq '"${upstream_args[@]}"' "$REPO_ROOT/lib/vm/lifecycle.sh"
+}
+
+@test "optional guest test tools use a separate installer and install into apt guest" {
+  local cloud_init="$REPO_ROOT/lib/vm/cloud-init.sh"
+  local installer="$REPO_ROOT/scripts/vm-install-tools.sh"
+  ! grep -Fq 'iptables bats shellcheck' "$cloud_init"
+  grep -Fq 'apt-get install -y bats shellcheck' "$installer"
+  grep -Fq 'vm_ssh "$vm_dir"' "$installer"
+  grep -Fq 'install-tools)' "$REPO_ROOT/lab-vm"
+  grep -Fq 'VM_NAME_ARG:-${remaining[1]:-default}' "$REPO_ROOT/lab-vm"
+  grep -Fq 'VM_RESTART_OPENCODE' "$REPO_ROOT/lab-vm"
+  grep -Fq 'vm_cmd_agent_with_browser_auth "$vm_name"' "$REPO_ROOT/lab-vm"
+  grep -Fq 'vm_cmd_agent "$vm_name"' "$REPO_ROOT/lab-vm"
+}
+
+@test "install-tools refuses unsafe profiles and restart flag on unrelated commands" {
+  run "$REPO_ROOT/lab-vm" -d install-tools --name ../escape
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM profile names must start with a letter or digit'* ]]
+
+  run "$REPO_ROOT/lab-vm" status --restart-opencode
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--restart-opencode is only valid with install-tools'* ]]
+}
+
+@test "QEMU isolation validator requires restrict=on and the reviewed loopback-only forwarding set" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  local args='qemu-system-x86_64 -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434,guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080,guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:45678,restrict=on -device virtio-net-pci,netdev=net0 -device vhost-user-fs-pci,chardev=charfs,tag=workspace'
+  run _vm_validate_qemu_isolation_args "$args" 22222 45678
+  [ "$status" -eq 0 ]
+  run _vm_validate_qemu_isolation_args "${args/,restrict=on/}" 22222 45678
+  [ "$status" -ne 0 ]
+  run _vm_validate_qemu_isolation_args "${args/127.0.0.1:22222/0.0.0.0:22222}" 22222 45678
+  [ "$status" -ne 0 ]
+  run _vm_validate_qemu_isolation_args "${args},guestfwd=tcp:10.0.2.100:9999-cmd:socat - TCP:127.0.0.1:9999" 22222 45678
+  [ "$status" -ne 0 ]
+  run _vm_validate_qemu_isolation_args "${args/127.0.0.1:45678/127.0.0.1:45679}" 22222 45678
+  [ "$status" -ne 0 ]
+}
+
+@test "QEMU SSH and egress proxy listeners must bind exclusively to loopback" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  ss() { printf '%s\n' "$VM_TEST_SS_OUTPUT"; }
+
+  export VM_TEST_SS_OUTPUT='LISTEN 0 128 127.0.0.1:22222 0.0.0.0:*
+LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
+  run _vm_validate_loopback_tcp_listeners 22222 45678
+  [ "$status" -eq 0 ]
+
+  export VM_TEST_SS_OUTPUT='LISTEN 0 128 0.0.0.0:22222 0.0.0.0:*
+LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
+  run _vm_validate_loopback_tcp_listeners 22222 45678
+  [ "$status" -ne 0 ]
+
+  export VM_TEST_SS_OUTPUT='LISTEN 0 128 [::]:22222 [::]:*
+LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
+  run _vm_validate_loopback_tcp_listeners 22222 45678
+  [ "$status" -ne 0 ]
+
+  export VM_TEST_SS_OUTPUT='LISTEN 0 128 127.0.0.1:22222 0.0.0.0:*
+LISTEN 0 128 [::1]:45678 [::]:*'
+  run _vm_validate_loopback_tcp_listeners 22222 45678
+  [ "$status" -ne 0 ]
+
+  export VM_TEST_SS_OUTPUT='LISTEN 0 128 127.0.0.1:22222 0.0.0.0:*
+LISTEN 0 128 0.0.0.0:22222 0.0.0.0:*
+LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
+  run _vm_validate_loopback_tcp_listeners 22222 45678
+  [ "$status" -ne 0 ]
+
+  export VM_TEST_SS_OUTPUT='LISTEN 0 128 127.0.0.1:22222 0.0.0.0:*'
+  run _vm_validate_loopback_tcp_listeners 22222 45678
+  [ "$status" -ne 0 ]
+
+  run _vm_validate_loopback_tcp_listeners 22222 99999
+  [ "$status" -ne 0 ]
+}
+
+@test "verify-isolation checks the running QEMU argv and streams guest probes over SSH" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_ISOLATION_TEST_DIR="$BATS_TEST_TMPDIR/vm-isolation"
+  VM_ISOLATION_CAPTURE="$BATS_TEST_TMPDIR/guest-probe.py"
+  VM_ISOLATION_COMMAND="$BATS_TEST_TMPDIR/guest-probe-command"
+  VM_ISOLATION_WORKSPACE="$BATS_TEST_TMPDIR/workspace"
+  VM_ISOLATION_ARGS='qemu-system-x86_64 -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22,guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434,guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080,guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:45678,restrict=on -device virtio-net-pci,netdev=net0 -device vhost-user-fs-pci,chardev=charfs,tag=workspace'
+  VM_TEST_SS_OUTPUT='LISTEN 0 128 127.0.0.1:22222 0.0.0.0:*
+LISTEN 0 128 127.0.0.1:45678 0.0.0.0:*'
+  export VM_ISOLATION_TEST_DIR VM_ISOLATION_CAPTURE VM_ISOLATION_COMMAND VM_ISOLATION_WORKSPACE VM_ISOLATION_ARGS
+  export VM_TEST_SS_OUTPUT
+  mkdir -p "$VM_ISOLATION_TEST_DIR" "$VM_ISOLATION_WORKSPACE"
+  printf '22222\n' >"$VM_ISOLATION_TEST_DIR/ssh_port"
+  printf '45678\n' >"$VM_ISOLATION_TEST_DIR/proxy_port"
+  printf '12345\n' >"$VM_ISOLATION_TEST_DIR/qemu.pid"
+  printf '%s\n' "$VM_ISOLATION_WORKSPACE" >"$VM_ISOLATION_TEST_DIR/workspace"
+  _vm_resolve() { echo "$VM_ISOLATION_TEST_DIR"; }
+  vm_run_status() { echo running; }
+  _vm_read_qemu_process_args() { echo "$VM_ISOLATION_ARGS"; }
+  _vm_validate_profile_workspace_boundary() { return 0; }
+  _vm_read_virtiofsd_shared_dir() { echo "$VM_ISOLATION_WORKSPACE"; }
+  vm_ssh() { printf '%s\n' "$*" >"$VM_ISOLATION_COMMAND"; cat >"$VM_ISOLATION_CAPTURE"; echo 'guest probes completed'; }
+  die() { echo "REFUSED: $*" >&2; return 1; }
+  run vm_cmd_verify_isolation default
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'QEMU configuration: restrict=on'* ]]
+  [[ "$output" == *'QEMU TCP listeners: SSH and egress proxy are loopback-only.'* ]]
+  [[ "$output" == *"Host workspace export: $VM_ISOLATION_WORKSPACE"* ]]
+  [[ "$output" == *'guest probes completed'* ]]
+  cmp -s "$VM_ISOLATION_CAPTURE" "$REPO_ROOT/scripts/vm-guest-isolation-check.py"
+
+  export VM_ISOLATION_SKIP_MODEL=1
+  run vm_cmd_verify_isolation default
+  [ "$status" -eq 0 ]
+  grep -Fq 'python3 - --skip-model' "$VM_ISOLATION_COMMAND"
+  unset VM_ISOLATION_SKIP_MODEL
+}
+
+@test "guest isolation probe covers blocked direct routes, constrained proxy and selected workspace/model exceptions" {
+  local probe="$REPO_ROOT/scripts/vm-guest-isolation-check.py"
+  grep -Fq '10.0.2.2' "$probe"
+  grep -Fq '1.1.1.1' "$probe"
+  grep -Fq 'direct_dns_responds' "$probe"
+  grep -Fq '1.1.1.1", 53' "$probe"
+  grep -Fq -- '--skip-model' "$probe"
+  grep -Fq 'SKIP: selected model availability' "$probe"
+  grep -Fq 'HTTP 403' "$probe"
+  grep -Fq '10.0.2.100", 3128' "$probe"
+  grep -Fq '10.0.2.100:8080/health' "$probe"
+  grep -Fq '10.0.2.100:11434/api/tags' "$probe"
+  grep -Fq 'workspace access is intentional' "$probe"
+  grep -Fq 'not a proof against every possible host service' "$probe"
+  grep -Fq 'verify-isolation)' "$REPO_ROOT/lab-vm"
+}
+
+@test "OpenAI auth-forward exposes only the requested callback port on loopback" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_AUTH_TEST_DIR="$BATS_TEST_TMPDIR/vm-auth-forward"
+  VM_AUTH_CAPTURE="$BATS_TEST_TMPDIR/auth-forward-ssh-args"
+  export VM_AUTH_TEST_DIR VM_AUTH_CAPTURE
+  mkdir -p "$VM_AUTH_TEST_DIR"
+  printf '22222\n' >"$VM_AUTH_TEST_DIR/ssh_port"
+  _vm_resolve() { echo "$VM_AUTH_TEST_DIR"; }
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ssh() { printf '%s\n' "$@" >"$VM_AUTH_CAPTURE"; }
+
+  run vm_cmd_auth_forward default 40391
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'host loopback'* ]]
+  [[ "$output" == *'press Ctrl-C'* ]]
+  grep -Fxq -- '-N' "$VM_AUTH_CAPTURE"
+  [ "$(grep -Fxc -- '-L' "$VM_AUTH_CAPTURE")" -eq 1 ]
+  grep -Fxq '127.0.0.1:40391:127.0.0.1:40391' "$VM_AUTH_CAPTURE"
+  grep -Fxq 'ExitOnForwardFailure=yes' "$VM_AUTH_CAPTURE"
+  grep -Fxq -- '-F' "$VM_AUTH_CAPTURE"
+  grep -Fxq '/dev/null' "$VM_AUTH_CAPTURE"
+  grep -Fxq 'IdentitiesOnly=yes' "$VM_AUTH_CAPTURE"
+  grep -Fxq 'IdentityAgent=none' "$VM_AUTH_CAPTURE"
+  grep -Fxq 'ForwardAgent=no' "$VM_AUTH_CAPTURE"
+  grep -Fxq 'ForwardX11=no' "$VM_AUTH_CAPTURE"
+  ! grep -Eq -- '(^-g$|0\.0\.0\.0|\*:[0-9])' "$VM_AUTH_CAPTURE"
+  grep -Fq 'auth-forward)' "$REPO_ROOT/lab-vm"
+
+  run vm_cmd_auth_forward 40391
+  [ "$status" -eq 0 ]
+  grep -Fxq '127.0.0.1:40391:127.0.0.1:40391' "$VM_AUTH_CAPTURE"
+
+  for bad_port in '' 80 65536 '-L' '40391:127.0.0.1:22'; do
+    run vm_cmd_auth_forward default "$bad_port"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'Usage:'* ]]
+  done
+  run vm_cmd_auth_forward default 40391 extra
+  [ "$status" -ne 0 ]
+}
+
+@test "OpenAI auth-forward refuses to start unless the VM is already running" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_AUTH_TEST_DIR="$BATS_TEST_TMPDIR/vm-auth-forward-stopped"
+  VM_AUTH_CAPTURE="$BATS_TEST_TMPDIR/auth-forward-should-not-run"
+  export VM_AUTH_TEST_DIR VM_AUTH_CAPTURE
+  mkdir -p "$VM_AUTH_TEST_DIR"
+  printf '22222\n' >"$VM_AUTH_TEST_DIR/ssh_port"
+  _vm_resolve() { echo "$VM_AUTH_TEST_DIR"; }
+  vm_run_status() { echo stopped; return 1; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ssh() { touch "$VM_AUTH_CAPTURE"; }
+
+  run vm_cmd_auth_forward test-vm 40391
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"VM 'test-vm' is not running"* ]]
+  [ ! -e "$VM_AUTH_CAPTURE" ]
+}
+
+@test "agent enables browser auth by default and keeps MCP bridge on SSH loopback" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  unset LAB_VM_RECURSION_DEPTH
+  _vm_browser_auth_enabled auto
+  LAB_VM_RECURSION_DEPTH=1
+  ! _vm_browser_auth_enabled auto
+  _vm_browser_auth_enabled on
+  ! _vm_browser_auth_enabled off
+
+  mapfile -d '' -t args < <(_vm_openai_browser_bridge_ssh_args 41701 42193)
+  [ "${#args[@]}" -eq 4 ]
+  [[ "${args[*]}" == *'-R 127.0.0.1:41701:127.0.0.1:42193'* ]]
+  [[ "${args[*]}" == *'-o ExitOnForwardFailure=yes'* ]]
+  ! [[ "${args[*]}" == *'0.0.0.0'* ]]
+  ! _vm_openai_browser_bridge_ssh_args 80 42193
+  ! _vm_openai_browser_bridge_ssh_args 41701 invalid
+  grep -Fq 'vm_cmd_agent_with_browser_auth "$vm_name"' "$REPO_ROOT/lab-vm"
+  grep -Fq -- '--browser-auth)' "$REPO_ROOT/lab-vm"
+  grep -Fq -- '--no-browser-auth)' "$REPO_ROOT/lab-vm"
+  grep -Fq 'if _vm_browser_auth_enabled "$VM_BROWSER_AUTH_MODE"; then' "$REPO_ROOT/lab-vm"
+  grep -Fq 'VM_AGENT_RECURSION_DEPTH' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  grep -Fq 'VM_AGENT_MAX_DEPTH' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  ! grep -Eq '^  auth\)' "$REPO_ROOT/lab-vm"
+  grep -Fq 'vm_cmd_agent_with_browser_auth()' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  grep -Fq 'ssh "${ssh_debug_args[@]}" -F /dev/null -M -S "$control_path" -N' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  grep -Fq 'VM_BROWSER_BRIDGE_SSH_CONTROL_PATH="$control_path"' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  grep -Fq 'VM_BROWSER_BRIDGE_PORT="$guest_bridge_port"' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  grep -Fq 'VM_BROWSER_BRIDGE_PORT=$browser_bridge_port_quoted' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  grep -Fq -- '-o IdentitiesOnly=yes -o IdentityAgent=none' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  grep -Fq -- '-o ForwardAgent=no -o ForwardX11=no' "$REPO_ROOT/lib/vm/lifecycle.sh"
+}
+
+@test "direct guest agent exports recursion marker for nested lab-vm launches" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  body="$(declare -f vm_cmd_agent)"
+  [[ "$body" == *'LAB_VM_RECURSION_DEPTH='* ]]
+  [[ "$body" == *'LAB_VM_MAX_DEPTH='* ]]
+}
+
+@test "recursion configuration defaults to depth zero and propagates an explicit limit" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  unset LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH
+  VM_RECURSE=0 VM_UNSAFE_RECURSE=0 VM_MAX_DEPTH=0 VM_MAX_DEPTH_EXPLICIT=0
+  vm_recursion_configure run
+  [ "$VM_GUEST_RECURSION_DEPTH" -eq 0 ]
+  [ "$VM_EFFECTIVE_MAX_DEPTH" -eq 0 ]
+
+  VM_RECURSE=1 VM_UNSAFE_RECURSE=0 VM_MAX_DEPTH=2 VM_MAX_DEPTH_EXPLICIT=1
+  vm_recursion_configure run
+  [ "$VM_GUEST_RECURSION_DEPTH" -eq 0 ]
+  [ "$VM_EFFECTIVE_MAX_DEPTH" -eq 2 ]
+}
+
+@test "nested recursion increments depth and refuses missing opt-in or over-depth launch" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  LAB_VM_RECURSION_DEPTH=0 LAB_VM_MAX_DEPTH=1
+  VM_RECURSE=1 VM_UNSAFE_RECURSE=0 VM_MAX_DEPTH=0 VM_MAX_DEPTH_EXPLICIT=0
+  vm_recursion_configure run
+  [ "$VM_GUEST_RECURSION_DEPTH" -eq 1 ]
+  [ "$VM_EFFECTIVE_MAX_DEPTH" -eq 1 ]
+
+  VM_RECURSE=0
+  if output="$(vm_recursion_configure run 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Nested VM launch requires --recurse'* ]]
+
+  LAB_VM_RECURSION_DEPTH=1
+  VM_RECURSE=1
+  if output="$(vm_recursion_configure run 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'maximum nesting depth'* ]]
+}
+
+@test "nested KVM absence fails closed and an available device passes preflight" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  _vm_kvm_available() { return 1; }
+  if output="$(vm_recursion_require_nested_kvm 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'requires usable /dev/kvm'* ]]
+
+  _vm_kvm_available() { return 0; }
+  _vm_nested_cpu_virtualization_available() { return 1; }
+  if output="$(vm_recursion_require_nested_kvm 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'requires a guest CPU with vmx or svm'* ]]
+
+  _vm_nested_cpu_virtualization_available() { return 0; }
+  vm_recursion_require_nested_kvm
+}
+
+@test "a child cannot reset or increase its inherited recursion maximum" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  LAB_VM_RECURSION_DEPTH=1 LAB_VM_MAX_DEPTH=2
+  VM_RECURSE=1 VM_UNSAFE_RECURSE=0 VM_MAX_DEPTH=3 VM_MAX_DEPTH_EXPLICIT=1
+  if output="$(vm_recursion_configure run 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'cannot exceed inherited maximum depth 2'* ]]
+
+  VM_MAX_DEPTH=0
+  if output="$(vm_recursion_configure run 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'below the current recursion depth 1'* ]]
+}
+
+@test "unsafe recursion implies recurse mode and requires repository workspace" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  unset LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH
+  VM_RECURSE=0 VM_UNSAFE_RECURSE=1 VM_MAX_DEPTH=1 VM_MAX_DEPTH_EXPLICIT=1
+  vm_recursion_configure run
+  [ "$VM_RECURSE" -eq 1 ]
+  run vm_recursion_validate_workspace "$REPO_ROOT" "$REPO_ROOT"
+  [ "$status" -eq 0 ]
+  run vm_recursion_validate_workspace "$BATS_TEST_TMPDIR" "$REPO_ROOT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--unsafe-recurse requires a workspace containing the Little Mester checkout'* ]]
+}
+
+@test "recursion policy is persisted with a VM profile and malformed metadata fails closed" {
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  local vm_dir="$BATS_TEST_TMPDIR/recursion-profile"
+  VM_GUEST_RECURSION_DEPTH=1 VM_EFFECTIVE_MAX_DEPTH=2
+  vm_recursion_store_profile "$vm_dir"
+  vm_recursion_load_profile "$vm_dir"
+  [ "$VM_AGENT_RECURSION_DEPTH" -eq 1 ]
+  [ "$VM_AGENT_MAX_DEPTH" -eq 2 ]
+  [ "$VM_AGENT_RECURSION_STATE_POSSIBLE" -eq 1 ]
+
+  # Lowering a reused profile's current limit must not erase the fact that an
+  # earlier launch could have left descendants in its overlay.
+  VM_GUEST_RECURSION_DEPTH=1 VM_EFFECTIVE_MAX_DEPTH=1
+  vm_recursion_store_profile "$vm_dir"
+  vm_recursion_load_profile "$vm_dir"
+  [ "$VM_AGENT_MAX_DEPTH" -eq 1 ]
+  [ "$VM_AGENT_RECURSION_STATE_POSSIBLE" -eq 1 ]
+  if output="$(vm_recursion_require_discard_ack "$vm_dir" 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'may contain nested VM state'* ]]
+
+  printf '1 33\n' >"$vm_dir/recursion_policy"
+  if output="$(vm_recursion_load_profile "$vm_dir" 2>&1)"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'invalid recursion metadata'* ]]
+}
+
+@test "recursion cleanup refuses live child VMs and explicitly removes stopped disposable state" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  export HOME="$BATS_TEST_TMPDIR/recursion-home"
+  local session="$HOME/.cache/lab-vm-recursion/child" vm_dir="$HOME/.cache/lab-vm-recursion/child/vm/child"
+  mkdir -p "$vm_dir" "$session/workspace"
+  printf '%s\n' "$REPO_ROOT" >"$session/source-path"
+  VM_YES=1
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  vm_run_status() { echo running; return 0; }
+  run vm_cmd_recursion_clean child
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'is still running'* ]]
+  [ -d "$session/workspace" ]
+
+  vm_run_status() { echo stopped; return 1; }
+  run vm_cmd_recursion_clean child
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'disposable workspace/state were removed'* ]]
+  [ ! -e "$session" ]
+
+  local initial_session="$HOME/.cache/lab-vm-recursion/initial-default" outer_vm="$BATS_TEST_TMPDIR/outer-vm-profile"
+  mkdir -p "$initial_session/workspace" "$outer_vm"
+  printf '%s\n' "$REPO_ROOT" >"$initial_session/source-path"
+  printf '%s\n' "$outer_vm" >"$initial_session/outer-vm-dir"
+  vm_run_status() { echo running; return 0; }
+  run vm_cmd_recursion_clean initial-default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'is still running'* ]]
+  [ -d "$initial_session/workspace" ]
+
+  vm_run_status() { echo stopped; return 1; }
+  run vm_cmd_recursion_clean initial-default
+  [ "$status" -eq 0 ]
+  [ ! -e "$initial_session" ]
+}
+
+@test "outer down stop and rebuild refuse possible recursive-state deletion before side effects" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/outer-vm-state"
+  local vm_dir="$VM_DIR_BASE/default" side_effects="$BATS_TEST_TMPDIR/teardown-side-effects"
+  mkdir -p "$vm_dir" "$VM_DIR_BASE"
+  printf '0 1\n' >"$vm_dir/recursion_policy"
+  : >"$VM_DIR_BASE/base.qcow2"
+  VM_DISCARD_RECURSIVE=0
+
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  vm_run_stop() { echo run-stop >>"$side_effects"; }
+  vm_disk_delete() { echo disk-delete >>"$side_effects"; }
+  vm_ssh_clean() { echo ssh-clean >>"$side_effects"; }
+  vm_disk_exists() { return 1; }
+  vm_disk_create_base() { echo base-create >>"$side_effects"; }
+  ssh() { echo ssh-command >>"$side_effects"; return 0; }
+
+  run vm_cmd_down default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'pass --discard-recursive'* ]]
+  [ ! -s "$side_effects" ]
+
+  run vm_cmd_stop default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'pass --discard-recursive'* ]]
+  [ ! -s "$side_effects" ]
+
+  run vm_cmd_rebuild default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'pass --discard-recursive'* ]]
+  [ ! -s "$side_effects" ]
+
+  VM_DISCARD_RECURSIVE=1
+  run vm_cmd_down default
+  [ "$status" -eq 0 ]
+  grep -q '^run-stop$' "$side_effects"
+  grep -q '^disk-delete$' "$side_effects"
+  [ ! -e "$vm_dir/recursion_policy" ]
+}
+
+@test "suspend gracefully powers off while preserving profile and guest workload state" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/suspend-state"
+  local vm_dir="$VM_DIR_BASE/work-profile"
+  mkdir -p "$vm_dir"
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do
+    printf 'preserve-%s\n' "$asset" >"$vm_dir/$asset"
+  done
+  printf '0 0 0\n' >"$vm_dir/recursion_policy"
+  VM_RUN_STATE=running
+  vm_run_status() { echo "$VM_RUN_STATE"; [[ "$VM_RUN_STATE" == running ]]; }
+  _vm_require_no_live_nested_qemu() { echo 'No live nested QEMU processes were found.'; }
+  _vm_shutdown_for_workspace_switch() {
+    printf '%s\n' "$2" >"$BATS_TEST_TMPDIR/shutdown-reason"
+    VM_RUN_STATE=stopped
+    return 0
+  }
+  ssh() { echo 'suspend must not run guest compose down' >&2; return 99; }
+  vm_disk_delete() { echo 'suspend must preserve the overlay' >&2; return 99; }
+
+  run vm_cmd_suspend work-profile
+  [ "$status" -eq 0 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/shutdown-reason")" = 'suspending the VM' ]
+  [[ "$output" == *'Overlay, guest workloads, workspace selection, seed, and SSH identity were preserved'* ]]
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do
+    [ -f "$vm_dir/$asset" ]
+    [ "$(cat "$vm_dir/$asset")" = "preserve-$asset" ]
+  done
+}
+
+@test "suspend permits a descendant-capable profile after proving no child QEMU is live" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/suspend-recursive-state"
+  local vm_dir="$VM_DIR_BASE/outer"
+  mkdir -p "$vm_dir"
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do : >"$vm_dir/$asset"; done
+  printf '0 2 1\n' >"$vm_dir/recursion_policy"
+  VM_RUN_STATE=running
+  vm_run_status() { echo "$VM_RUN_STATE"; [[ "$VM_RUN_STATE" == running ]]; }
+  _vm_require_no_live_nested_qemu() { echo 'No live nested QEMU processes were found.'; }
+  _vm_shutdown_for_workspace_switch() {
+    echo called >"$BATS_TEST_TMPDIR/shutdown-called"
+    VM_RUN_STATE=stopped
+    return 0
+  }
+
+  run vm_cmd_suspend outer
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'No live nested QEMU processes were found.'* ]]
+  [ -e "$BATS_TEST_TMPDIR/shutdown-called" ]
+  [ -f "$vm_dir/disk.qcow2" ]
+}
+
+@test "suspend refuses when a live child QEMU is found before powering off the parent" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/suspend-live-child-state"
+  local vm_dir="$VM_DIR_BASE/outer"
+  mkdir -p "$vm_dir"
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do : >"$vm_dir/$asset"; done
+  printf '0 2 1\n' >"$vm_dir/recursion_policy"
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  _vm_require_no_live_nested_qemu() {
+    echo 'LIVE nested VM profile: child-a' >&2
+    echo 'REFUSED: nested VM is live.' >&2
+    return 1
+  }
+  _vm_shutdown_for_workspace_switch() { echo called >"$BATS_TEST_TMPDIR/shutdown-called"; return 0; }
+
+  run vm_cmd_suspend outer
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'LIVE nested VM profile: child-a'* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/shutdown-called" ]
+  [ -f "$vm_dir/disk.qcow2" ]
+}
+
+@test "recursive suspend verifies children before shutting down the parent" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/suspend-child-first-state"
+  local vm_dir="$VM_DIR_BASE/outer"
+  mkdir -p "$vm_dir"
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do : >"$vm_dir/$asset"; done
+  VM_RUN_STATE=running
+  vm_run_status() { echo "$VM_RUN_STATE"; [[ "$VM_RUN_STATE" == running ]]; }
+  _vm_poweroff_recursive_children() {
+    echo children-stopped >"$BATS_TEST_TMPDIR/recursive-child-stop"
+  }
+  _vm_shutdown_for_workspace_switch() {
+    [ -f "$BATS_TEST_TMPDIR/recursive-child-stop" ]
+    echo parent-stopped >"$BATS_TEST_TMPDIR/recursive-parent-stop"
+    VM_RUN_STATE=stopped
+  }
+  VM_POWEROFF_RECURSIVE=1
+
+  run vm_cmd_suspend outer
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/recursive-child-stop" ]
+  [ -f "$BATS_TEST_TMPDIR/recursive-parent-stop" ]
+  [ -f "$vm_dir/disk.qcow2" ]
+}
+
+@test "recursive suspend leaves parent running when a child cannot be verified" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/suspend-child-failure-state"
+  local vm_dir="$VM_DIR_BASE/outer"
+  mkdir -p "$vm_dir"
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do : >"$vm_dir/$asset"; done
+  VM_POWEROFF_RECURSIVE=1
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  _vm_poweroff_recursive_children() {
+    echo 'REFUSED: child failed' >&2
+    return 1
+  }
+  _vm_shutdown_for_workspace_switch() { echo called >"$BATS_TEST_TMPDIR/unsafe-parent-shutdown"; }
+
+  run vm_cmd_suspend outer
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'child failed'* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/unsafe-parent-shutdown" ]
+  [ -f "$vm_dir/disk.qcow2" ]
+}
+
+@test "resume reuses only the recorded workspace and preserved overlay" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/resume-state"
+  local vm_dir="$VM_DIR_BASE/resume-profile" workspace="$BATS_TEST_TMPDIR/resume-workspace"
+  mkdir -p "$vm_dir" "$workspace"
+  : >"$vm_dir/disk.qcow2"
+  printf '%s\n' "$workspace" >"$vm_dir/workspace"
+  printf '0 0 0\n' >"$vm_dir/recursion_policy"
+  vm_run_status() { echo stopped; return 1; }
+  vm_cmd_up() {
+    [ "$1" = resume-profile ]
+    [ "$2" = "$workspace" ]
+    echo resumed
+  }
+
+  run vm_cmd_resume resume-profile
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'preserved overlay'* ]]
+  [[ "$output" == *resumed* ]]
+}
+
+@test "resume refuses missing overlay or unsafe recorded workspace without provisioning" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  source "$REPO_ROOT/lib/vm/recursion.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/resume-refusal"
+  local vm_dir="$VM_DIR_BASE/resume-profile"
+  mkdir -p "$vm_dir"
+  printf '0 0 0\n' >"$vm_dir/recursion_policy"
+  vm_run_status() { echo stopped; return 1; }
+  vm_cmd_up() { echo called >"$BATS_TEST_TMPDIR/up-called"; return 0; }
+
+  run vm_cmd_resume resume-profile
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'no preserved overlay'* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/up-called" ]
+
+  : >"$vm_dir/disk.qcow2"
+  printf '%s\n' "$BATS_TEST_TMPDIR/missing-workspace" >"$vm_dir/workspace"
+  run vm_cmd_resume resume-profile
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'workspace is unavailable or unsafe'* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/up-called" ]
+}
+
+@test "credential forwarding imports only through SSH stdin and records no credential contents" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_AUTH_FORWARD=1
+  VM_AUTH_ESCROW_FILE="$BATS_TEST_TMPDIR/secrets/openai-auth.json"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/auth-import-state"
+  local vm_dir="$VM_DIR_BASE/profile" workspace="$BATS_TEST_TMPDIR/auth-workspace"
+  mkdir -p -m 700 "${VM_AUTH_ESCROW_FILE%/*}" "$vm_dir" "$workspace"
+  chmod 700 "${VM_AUTH_ESCROW_FILE%/*}"
+  : >"$vm_dir/disk.qcow2"
+  printf '%s\n' "$workspace" >"$vm_dir/workspace"
+  printf '{"openai":{"type":"oauth","access":"test-secret-value"}}\n' >"$VM_AUTH_ESCROW_FILE"
+  chmod 600 "$VM_AUTH_ESCROW_FILE"
+  vm_ssh() {
+    [ "$2" = 'opencode auth import' ]
+    cat >"$BATS_TEST_TMPDIR/guest-import.json"
+    printf '%s\n' imported >>"$BATS_TEST_TMPDIR/import-count"
+  }
+
+  run _vm_auth_import_if_needed "$vm_dir"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'credential contents were not logged'* ]]
+  [ "$(cat "$BATS_TEST_TMPDIR/guest-import.json")" = "$(cat "$VM_AUTH_ESCROW_FILE")" ]
+  [ "$(stat -c '%a' "$vm_dir/auth-forward-imported")" = 600 ]
+  [[ "$output" != *'test-secret-value'* ]]
+
+  run _vm_auth_import_if_needed "$vm_dir"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l <"$BATS_TEST_TMPDIR/import-count")" -eq 1 ]
+}
+
+@test "credential export atomically refreshes a private escrow without printing secrets" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_AUTH_FORWARD=1
+  VM_AUTH_ESCROW_FILE="$BATS_TEST_TMPDIR/secrets/openai-auth.json"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/auth-export-state"
+  local vm_dir="$VM_DIR_BASE/profile" workspace="$BATS_TEST_TMPDIR/export-workspace"
+  mkdir -p -m 700 "${VM_AUTH_ESCROW_FILE%/*}" "$vm_dir" "$workspace"
+  chmod 700 "${VM_AUTH_ESCROW_FILE%/*}"
+  : >"$vm_dir/disk.qcow2"
+  printf '%s\n' "$workspace" >"$vm_dir/workspace"
+  printf '{"openai":{"access":"older-secret"}}\n' >"$VM_AUTH_ESCROW_FILE"
+  chmod 600 "$VM_AUTH_ESCROW_FILE"
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  vm_ssh() { [ "$2" = 'opencode auth export openai' ]; printf '{"openai":{"access":"refreshed-secret"}}\n'; }
+
+  run _vm_auth_export_to_escrow "$vm_dir"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'atomically saved to the private host escrow'* ]]
+  [[ "$output" != *'refreshed-secret'* ]]
+  grep -q refreshed-secret "$VM_AUTH_ESCROW_FILE"
+  [ "$(stat -c '%a' "$VM_AUTH_ESCROW_FILE")" = 600 ]
+  [ "$(stat -c '%a' "${VM_AUTH_ESCROW_FILE%/*}")" = 700 ]
+}
+
+@test "failed credential export preserves the prior escrow and refuses destructive down" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_AUTH_FORWARD=1
+  VM_AUTH_ESCROW_FILE="$BATS_TEST_TMPDIR/secrets/openai-auth.json"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/auth-export-failure"
+  local vm_dir="$VM_DIR_BASE/profile" workspace="$BATS_TEST_TMPDIR/failure-workspace"
+  mkdir -p -m 700 "${VM_AUTH_ESCROW_FILE%/*}" "$vm_dir" "$workspace"
+  chmod 700 "${VM_AUTH_ESCROW_FILE%/*}"
+  : >"$vm_dir/disk.qcow2"
+  printf '%s\n' "$workspace" >"$vm_dir/workspace"
+  printf '{"openai":{"access":"last-known-good"}}\n' >"$VM_AUTH_ESCROW_FILE"
+  chmod 600 "$VM_AUTH_ESCROW_FILE"
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  vm_ssh() { [ "$2" = 'opencode auth export openai' ]; printf '{invalid-json'; return 0; }
+  vm_run_stop() { : >"$BATS_TEST_TMPDIR/down-was-run"; }
+  vm_disk_delete() { : >"$BATS_TEST_TMPDIR/disk-was-deleted"; }
+  vm_ssh_clean() { : >"$BATS_TEST_TMPDIR/keys-were-removed"; }
+  vm_recursion_require_discard_ack() { return 0; }
+
+  run vm_cmd_down profile
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'refusing destructive teardown'* ]]
+  grep -q last-known-good "$VM_AUTH_ESCROW_FILE"
+  [ ! -e "$BATS_TEST_TMPDIR/down-was-run" ]
+  [ ! -e "$BATS_TEST_TMPDIR/disk-was-deleted" ]
+  [ ! -e "$BATS_TEST_TMPDIR/keys-were-removed" ]
+}
+
+@test "credential forwarding is disabled by default and rejects unsafe escrow paths" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_AUTH_FORWARD=0
+  vm_ssh() { : >"$BATS_TEST_TMPDIR/ssh-was-run"; }
+  run _vm_auth_import_if_needed "$BATS_TEST_TMPDIR/no-profile"
+  [ "$status" -eq 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/ssh-was-run" ]
+
+  VM_AUTH_FORWARD=1
+  local private_dir="$BATS_TEST_TMPDIR/private" workspace="$BATS_TEST_TMPDIR/unsafe-workspace"
+  mkdir -p -m 700 "$private_dir" "$workspace"
+  VM_AUTH_ESCROW_FILE="$private_dir/auth.json"
+  printf '%s\n' "$workspace" >"$BATS_TEST_TMPDIR/profile-workspace"
+  mkdir -p "$BATS_TEST_TMPDIR/profile"
+  mv "$BATS_TEST_TMPDIR/profile-workspace" "$BATS_TEST_TMPDIR/profile/workspace"
+  run _vm_auth_escrow_resolve "$BATS_TEST_TMPDIR/profile"
+  [ "$status" -eq 0 ]
+
+  VM_AUTH_ESCROW_FILE="$workspace/auth.json"
+  run _vm_auth_escrow_resolve "$BATS_TEST_TMPDIR/profile"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'outside the selected workspace and Git checkout'* ]]
+
+  VM_AUTH_ESCROW_FILE="$BATS_TEST_TMPDIR/private-link/auth.json"
+  ln -s "$private_dir" "$BATS_TEST_TMPDIR/private-link"
+  run _vm_auth_escrow_resolve "$BATS_TEST_TMPDIR/profile"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'real directory'* || "$output" == *'symlinked/non-canonical'* ]]
+}
+
+@test "invalid credential-forwarding mode refuses destructive teardown" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  die() { echo "ERROR: $*" >&2; exit 1; }
+  VM_AUTH_FORWARD=maybe
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/auth-invalid-mode"
+  mkdir -p "$VM_DIR_BASE/profile"
+  vm_recursion_require_discard_ack() { return 0; }
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  vm_run_stop() { : >"$BATS_TEST_TMPDIR/invalid-mode-stopped"; }
+  vm_disk_delete() { : >"$BATS_TEST_TMPDIR/invalid-mode-deleted"; }
+
+  run vm_cmd_down profile
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM_AUTH_FORWARD must be 0 or 1'* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/invalid-mode-stopped" ]
+  [ ! -e "$BATS_TEST_TMPDIR/invalid-mode-deleted" ]
+}
+
+@test "lab-vm refuses an over-depth launch before prerequisite checks" {
+  local workspace="$BATS_TEST_TMPDIR/recursion-preflight"
+  local identity_depth identity_max
+  read -r identity_depth identity_max < <(bats_vm_recursion_identity)
+  mkdir -p "$workspace"
+  run env LAB_VM_RECURSION_DEPTH="$identity_depth" LAB_VM_MAX_DEPTH="$identity_max" VM_SKIP_PREREQS_TEST=1 \
+    "$REPO_ROOT/lab-vm" run "$workspace" --recurse --max-depth "$identity_depth"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'maximum nesting depth'* ]]
+  [[ "$output" != *'Checking VM prerequisites'* ]]
+  [[ "$output" != *'qemu-system-x86_64 not found'* ]]
+}
+
+@test "suspend and resume accept only safe named VM profiles" {
+  run "$REPO_ROOT/lab-vm" suspend ../default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM profile names must start with a letter or digit'* ]]
+
+  run "$REPO_ROOT/lab-vm" resume ../default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM profile names must start with a letter or digit'* ]]
+
+  run "$REPO_ROOT/lab-vm" suspend --workspace /tmp
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--workspace is only valid with the run or up command'* ]]
+
+  run "$REPO_ROOT/lab-vm" base --poweroff-recursive
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--poweroff-recursive is only valid with suspend'* ]]
+
+  run "$REPO_ROOT/lab-vm" suspend ../default --poweroff-recursive
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM profile names must start with a letter or digit'* ]]
+}
+
+@test "lab-vm CLI parses recursion modes and refuses child limit reset or increase" {
+  local workspace="$BATS_TEST_TMPDIR/recursion-cli"
+  local identity_depth identity_max
+  read -r identity_depth identity_max < <(bats_vm_recursion_identity)
+  mkdir -p "$workspace"
+
+  run env LAB_VM_RECURSION_DEPTH="$identity_depth" LAB_VM_MAX_DEPTH="$identity_max" \
+    "$REPO_ROOT/lab-vm" run "$workspace" --recurse --max-depth "$identity_depth"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"maximum nesting depth $identity_max reached"* ]]
+
+  local excessive_max=$((identity_max + 1))
+  run env LAB_VM_RECURSION_DEPTH="$identity_depth" LAB_VM_MAX_DEPTH="$identity_max" \
+    "$REPO_ROOT/lab-vm" run "$workspace" --recurse --max-depth "$excessive_max"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot exceed inherited maximum depth $identity_max"* ]]
+
+  run env LAB_VM_RECURSION_DEPTH="$identity_depth" LAB_VM_MAX_DEPTH="$identity_max" \
+    "$REPO_ROOT/lab-vm" run "$workspace"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Nested VM launch requires --recurse'* ]]
+
+  run bash -c 'source "$1/lib/vm/recursion.sh"; LAB_DIR="$1"; VM_UNSAFE_RECURSE=1; vm_recursion_validate_workspace "$2" "$1"' \
+    _ "$REPO_ROOT" "$BATS_TEST_TMPDIR"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--unsafe-recurse requires a workspace containing the Little Mester checkout'* ]]
+
+  run "$REPO_ROOT/lab-vm" status --discard-recursive
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'only valid with down, stop, rebuild, or up --clean'* ]]
+
+  run env -u LAB_VM_RECURSION_DEPTH -u LAB_VM_MAX_DEPTH "$REPO_ROOT/lab-vm" up --discard-recursive
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'only valid with down, stop, rebuild, or up --clean'* ]]
+}
+
+@test "context reports runtime, recursion, and Little Mester checkout as JSON without a VM action" {
+  local commit
+  commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+
+  run "$REPO_ROOT/lab-vm" context --json
+  [ "$status" -eq 0 ]
+  python3 -c 'import json,sys; from pathlib import Path; c=json.loads(sys.argv[1]); p=Path("/etc/lab-vm-recursion"); expected=p.read_text().split() if p.exists() else None; depth,max_depth=(map(int,expected) if expected else (None,None)); metadata="configured" if expected else "unmarked"; assert c["schema_version"] == 1; assert c["recursion"]["depth"] == depth; assert c["recursion"]["max_depth"] == max_depth; assert c["recursion"]["metadata"] == metadata; assert c["little_mester"]["commit"] == sys.argv[2]; assert "runtime" in c and "kvm" in c' "$output" "$commit"
+
+  run "$REPO_ROOT/lab-vm" context
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Little Mester:"* ]]
+  [[ "$output" == *"Recursion:"* ]]
+
+  run "$REPO_ROOT/lab-vm" status --json
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--json is only valid with context'* ]]
+}
+
+@test "nested lifecycle commands resolve the isolated per-profile VM state root" {
+  local identity_depth identity_max
+  local recursion_root="$HOME/.cache/lab-vm-recursion"
+  read -r identity_depth identity_max < <(bats_vm_recursion_identity)
+  run env LAB_VM_RECURSION_DEPTH="$identity_depth" LAB_VM_MAX_DEPTH="$identity_max" \
+    "$REPO_ROOT/lab-vm" status child
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$recursion_root/child/vm/child"* ]]
+}
+
+@test "nested commands do not chmod the unrelated default VM state root" {
+  local home="$BATS_TEST_TMPDIR/nested-home"
+  local state_dir="$BATS_TEST_TMPDIR/default-vm-state"
+  local nested_session="$home/.cache/lab-vm-recursion/child"
+  local identity_depth identity_max
+  read -r identity_depth identity_max < <(bats_vm_recursion_identity)
+  mkdir -p "$home" "$state_dir/vm"
+  chmod 0755 "$state_dir"
+
+  run env HOME="$home" VM_STATE_DIR="$state_dir" \
+    LAB_VM_RECURSION_DEPTH="$identity_depth" LAB_VM_MAX_DEPTH="$identity_max" \
+    "$REPO_ROOT/lab-vm" status child
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$nested_session/vm/child"* ]]
+  [ "$(stat -c %a "$state_dir")" = 755 ]
+  [ "$(stat -c %a "$nested_session")" = 700 ]
+}
+
+@test "nested startup keeps its preflighted recursion session for snapshot preparation" {
+  local session_line reset_line prepare_line reset_context
+  session_line="$(grep -nF 'VM_RECURSION_SESSION_DIR="$(vm_recursion_session_dir "$vm_name")"' "$REPO_ROOT/lab-vm" | head -1 | cut -d: -f1)"
+  reset_line="$(grep -nF 'VM_RECURSION_SESSION_DIR=""' "$REPO_ROOT/lab-vm" | head -1 | cut -d: -f1)"
+  prepare_line="$(grep -nF 'vm-recursion-workspace.py" prepare --source' "$REPO_ROOT/lab-vm" | head -1 | cut -d: -f1)"
+  [ -n "$session_line" ] && [ -n "$reset_line" ] && [ -n "$prepare_line" ]
+  [ "$session_line" -lt "$reset_line" ]
+  [ "$reset_line" -lt "$prepare_line" ]
+  reset_context="$(sed -n "$((reset_line - 1)),$((reset_line + 2))p" "$REPO_ROOT/lab-vm")"
+  [[ "$reset_context" == *'if (( VM_NESTED_LAUNCH != 1 )); then'* ]]
+}
+
+@test "recursive workspace preparation snapshots changes into a separate disposable checkout" {
+  local source="$BATS_TEST_TMPDIR/source-repo" session="$BATS_TEST_TMPDIR/child-session" target
+  mkdir -p "$source/.mester" "$source/.bench-models" "$source/node_modules/pkg" \
+    "$source/.ssh" "$source/.aider.tags.cache.v4"
+  git -C "$source" init -q
+  git -C "$source" config user.email test@example.invalid
+  git -C "$source" config user.name test
+  printf 'committed\n' >"$source/tracked.txt"
+  git -C "$source" add tracked.txt
+  git -C "$source" commit -qm initial
+  printf 'credential in old history\n' >"$source/historical-credential.env"
+  git -C "$source" add historical-credential.env
+  git -C "$source" commit -qm 'temporary historical credential'
+  git -C "$source" rm -q historical-credential.env
+  git -C "$source" commit -qm 'remove temporary historical credential'
+  printf 'dirty snapshot\n' >"$source/tracked.txt"
+  printf 'untracked snapshot\n' >"$source/untracked.txt"
+  printf 'host state\n' >"$source/.mester/private"
+  printf 'host config\n' >"$source/.little-mester.conf"
+  printf 'host model cache\n' >"$source/.bench-models/model.gguf"
+  printf 'do not copy\n' >"$source/secrets.env"
+  printf 'do not copy\n' >"$source/.env.local"
+  printf 'safe example\n' >"$source/.env.example"
+  printf 'auth db\n' >"$source/opencode.db"
+  printf 'dependency\n' >"$source/node_modules/pkg/index.js"
+  printf 'private key\n' >"$source/.ssh/id_ed25519"
+  printf 'cache\n' >"$source/.aider.tags.cache.v4/cache.db"
+  ln -s "$source/tracked.txt" "$source/absolute-internal-link"
+
+  run python3 "$REPO_ROOT/scripts/vm-recursion-workspace.py" prepare --source "$source" --session "$session"
+  [ "$status" -eq 0 ]
+  target="$output"
+  [ -f "$target/.git/config" ]
+  [ "$target" != "$source" ]
+  [ "$(cat "$target/tracked.txt")" = 'dirty snapshot' ]
+  [ "$(cat "$target/untracked.txt")" = 'untracked snapshot' ]
+  [ ! -e "$target/.mester/private" ]
+  [ ! -e "$target/.little-mester.conf" ]
+  [ ! -e "$target/.bench-models/model.gguf" ]
+  [ ! -e "$target/secrets.env" ]
+  [ ! -e "$target/.env.local" ]
+  [ -f "$target/.env.example" ]
+  [ ! -e "$target/opencode.db" ]
+  [ ! -e "$target/node_modules/pkg/index.js" ]
+  [ ! -e "$target/.ssh/id_ed25519" ]
+  [ ! -e "$target/.aider.tags.cache.v4/cache.db" ]
+  [ "$(cat "$target/absolute-internal-link")" = 'dirty snapshot' ]
+  [[ "$(readlink "$target/absolute-internal-link")" != "$source/tracked.txt" ]]
+  [ "$(git -C "$target" rev-list --count HEAD)" -eq 1 ]
+  ! git -C "$target" show HEAD:historical-credential.env >/dev/null 2>&1
+  [ -f "$session/source-manifest.json" ]
+  [ "$(stat -c '%a' "$session/source-manifest.json")" = 600 ]
+  ! grep -q 'do not copy\|private key\|credential in old history' "$session/source-manifest.json"
+
+  printf 'child-only\n' >>"$target/tracked.txt"
+  run python3 "$REPO_ROOT/scripts/vm-recursion-workspace.py" prepare --source "$source" --session "$session"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$target" ]
+  [[ "$(cat "$target/tracked.txt")" == *child-only* ]]
+  [ "$(cat "$source/tracked.txt")" = 'dirty snapshot' ]
+
+  printf 'new parent source revision\n' >>"$source/tracked.txt"
+  run python3 "$REPO_ROOT/scripts/vm-recursion-workspace.py" prepare --source "$source" --session "$session"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'source changed since this profile was created'* ]]
+  [[ "$(cat "$target/tracked.txt")" == *child-only* ]]
+}
+
+@test "recursive workspace snapshot enforces size limits before creating session state" {
+  local source="$BATS_TEST_TMPDIR/oversized-source" session="$BATS_TEST_TMPDIR/oversized-session"
+  mkdir -p "$source"
+  printf 'larger than the configured byte cap\n' >"$source/source.txt"
+  run env LAB_VM_MAX_SNAPSHOT_BYTES=1 python3 "$REPO_ROOT/scripts/vm-recursion-workspace.py" \
+    prepare --source "$source" --session "$session"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'snapshot limit'* ]]
+  [ ! -e "$session" ]
+}
+
+@test "recursive workspace snapshot refuses symlinks that escape the selected workspace" {
+  local source="$BATS_TEST_TMPDIR/source-with-link" outside="$BATS_TEST_TMPDIR/outside" session="$BATS_TEST_TMPDIR/unsafe-child"
+  mkdir -p "$source" "$outside"
+  printf 'secret\n' >"$outside/secret"
+  ln -s "$outside/secret" "$source/escape"
+  run python3 "$REPO_ROOT/scripts/vm-recursion-workspace.py" prepare --source "$source" --session "$session"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'symlink escapes selected workspace'* ]]
+}
+
+@test "browser auth debug enables SSH transport tracing only on request" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_DEBUG=0
+  mapfile -t debug_args < <(_vm_auth_tunnel_debug_args)
+  [ "${#debug_args[@]}" -eq 0 ]
+
+  VM_DEBUG=1
+  mapfile -t debug_args < <(_vm_auth_tunnel_debug_args)
+  [ "${#debug_args[@]}" -eq 1 ]
+  [ "${debug_args[0]}" = '-vv' ]
+
+  mapfile -d '' -t forwards < <(_vm_openai_browser_bridge_ssh_args 41701 42193)
+  [[ "${forwards[*]}" == *'-R 127.0.0.1:41701:127.0.0.1:42193'* ]]
+  ! [[ "${forwards[*]}" == *'0.0.0.0'* ]]
+
+  mapfile -d '' -t callback < <(_vm_openai_callback_ssh_args 40391)
+  [[ "${callback[*]}" == *'-L 127.0.0.1:40391:127.0.0.1:40391'* ]]
+  ! _vm_openai_callback_ssh_args 0
+  ! _vm_openai_callback_ssh_args 65536
+}
+
+@test "temporary guest browser opener refuses URLs unless MCP handoff is configured" {
+  local wrapper="$REPO_ROOT/lib/vm/browser-open.sh" secret_url='https://auth.openai.com/oauth/authorize?state=must-not-echo'
+  run env -u VM_BROWSER_BRIDGE_TOKEN_FILE sh "$wrapper" "$secret_url"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *'must-not-echo'* ]]
+  [[ "$output" == *'Host browser bridge unavailable or authorization URL rejected.'* ]]
+}
+
+@test "browser-auth agent launch injects only the temporary opener and skips model probe" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_AGENT_TEST_DIR="$BATS_TEST_TMPDIR/vm-agent-browser"
+  VM_AGENT_CAPTURE="$BATS_TEST_TMPDIR/vm-agent-browser-ssh-args"
+  VM_BROWSER_TEST_DIR="/tmp/lab-vm-browser.Abc123"
+  export VM_AGENT_TEST_DIR VM_AGENT_CAPTURE VM_BROWSER_TEST_DIR
+  mkdir -p "$VM_AGENT_TEST_DIR"
+  mkdir -p "$BATS_TEST_TMPDIR/vm-agent-workspace"
+  printf '22222\n' >"$VM_AGENT_TEST_DIR/ssh_port"
+  printf '1 2\n' >"$VM_AGENT_TEST_DIR/recursion_policy"
+  printf '%s\n' "$BATS_TEST_TMPDIR/vm-agent-workspace" >"$VM_AGENT_TEST_DIR/workspace"
+  _vm_resolve() { echo "$VM_AGENT_TEST_DIR"; }
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  vm_cmd_metrics() { [[ "${1:-}" == up ]]; }
+  vm_ssh() {
+    case "$*" in
+      *'opencode --version'*) echo '2.2.0' ;;
+      *'test -r /etc/opencode/opencode.json'*) return 0 ;;
+      *'python3 -c'*) echo 'llamacpp' ;;
+      *'python3 -'*) echo 'guest metrics forward healthy: summary, metrics, history' ;;
+      *) echo "unexpected guest probe: $*" >&2; return 99 ;;
+    esac
+  }
+  ssh() { printf '%s\0' "$@" >"$VM_AGENT_CAPTURE"; }
+  VM_BROWSER_BRIDGE_DIR="$VM_BROWSER_TEST_DIR"
+  VM_BROWSER_BRIDGE_PORT=41701
+  VM_AGENT_SKIP_MODEL_PROBE=1
+  VM_BROWSER_BRIDGE_TOKEN=must-not-be-forwarded
+  run vm_cmd_agent default
+  [ "$status" -eq 0 ]
+  local remote_command
+  remote_command="$(python3 - "$VM_AGENT_CAPTURE" <<'PY'
+import sys
+args = open(sys.argv[1], "rb").read().decode().rstrip("\0").split("\0")
+print(args[-1])
+PY
+)"
+  [[ "$remote_command" == *'trap cleanup EXIT'* ]]
+  [[ "$remote_command" == *'PATH="$browser_dir:$PATH"'* ]]
+  [[ "$remote_command" == *'VM_BROWSER_BRIDGE_TOKEN_FILE="$browser_dir/token"'* ]]
+  [[ "$remote_command" == *'VM_BROWSER_BRIDGE_PORT=41701'* ]]
+  [[ "$remote_command" == *'LAB_VM_RECURSION_DEPTH=1 LAB_VM_MAX_DEPTH=2'* ]]
+  [[ "$remote_command" == *'METRICS_URL=http://10.0.2.100:19532'* ]]
+  [[ "$remote_command" != *'must-not-be-forwarded'* ]]
+
+  VM_AGENT_AUTO=1
+  run vm_cmd_agent default
+  [ "$status" -eq 0 ]
+  remote_command="$(python3 - "$VM_AGENT_CAPTURE" <<'PY'
+import sys
+args = open(sys.argv[1], "rb").read().decode().rstrip("\0").split("\0")
+print(args[-1])
+PY
+)"
+  [[ "$remote_command" == *'&& opencode --auto'* ]]
+  VM_AGENT_AUTO=0
+}
+
+@test "egress-reload signals only the matching running VM proxy and confirms policy reload" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_RELOAD_TEST_DIR="$BATS_TEST_TMPDIR/vm-egress-reload"
+  VM_RELOAD_CAPTURE="$BATS_TEST_TMPDIR/vm-egress-reload-signals"
+  VM_RELOAD_WORKSPACE="$BATS_TEST_TMPDIR/vm-egress-workspace"
+  export VM_RELOAD_TEST_DIR VM_RELOAD_CAPTURE VM_RELOAD_WORKSPACE
+  mkdir -p "$VM_RELOAD_TEST_DIR"
+  mkdir -p "$VM_RELOAD_WORKSPACE"
+  printf '12345\n' >"$VM_RELOAD_TEST_DIR/proxy.pid"
+  printf '31234\n' >"$VM_RELOAD_TEST_DIR/proxy_port"
+  printf '98766\n' >"$VM_RELOAD_TEST_DIR/virtiofsd.pid"
+  printf '12345 31234\n' >"$VM_RELOAD_TEST_DIR/proxy.reload-ready"
+  : >"$VM_RELOAD_TEST_DIR/proxy.log"
+  _vm_resolve() { echo "$VM_RELOAD_TEST_DIR"; }
+  vm_run_status() { echo 'running (PID: 98765)'; }
+  _vm_read_virtiofsd_shared_dir() { echo "$VM_RELOAD_WORKSPACE"; }
+  _vm_proxy_pid_matches() { [[ "$1" == 12345 && "$2" == "$VM_RELOAD_TEST_DIR" && "$3" == "$VM_RELOAD_WORKSPACE" ]]; }
+  _vm_proxy_supports_reload() { [[ "$1" == 12345 && "$2" == "$VM_RELOAD_TEST_DIR" && "$3" == 31234 ]]; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  kill() {
+    printf '%s\n' "$*" >>"$VM_RELOAD_CAPTURE"
+    case "$1" in
+      -0) return 0 ;;
+      -HUP) echo 'egress policy reloaded' >>"$VM_RELOAD_TEST_DIR/proxy.log" ;;
+      *) return 1 ;;
+    esac
+  }
+
+  run vm_cmd_egress_reload default
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'existing loopback listener'* ]]
+  [[ "$output" == *'QEMU and the overlay were not restarted'* ]]
+  grep -Fxq -- '-HUP 12345' "$VM_RELOAD_CAPTURE"
+}
+
+@test "egress-reload safely replaces a pre-reload proxy on the identical port" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_RELOAD_TEST_DIR="$BATS_TEST_TMPDIR/vm-egress-reload-old"
+  VM_RELOAD_CAPTURE="$BATS_TEST_TMPDIR/vm-egress-reload-old-signals"
+  VM_RELOAD_WORKSPACE="$BATS_TEST_TMPDIR/vm-egress-old-workspace"
+  VM_RELOAD_STOPPED="$BATS_TEST_TMPDIR/vm-egress-old-stopped"
+  export VM_RELOAD_TEST_DIR VM_RELOAD_CAPTURE VM_RELOAD_WORKSPACE VM_RELOAD_STOPPED
+  mkdir -p "$VM_RELOAD_TEST_DIR" "$VM_RELOAD_WORKSPACE"
+  printf '12345\n' >"$VM_RELOAD_TEST_DIR/proxy.pid"
+  printf '31234\n' >"$VM_RELOAD_TEST_DIR/proxy_port"
+  printf '98766\n' >"$VM_RELOAD_TEST_DIR/virtiofsd.pid"
+  : >"$VM_RELOAD_TEST_DIR/proxy.log"
+  _vm_resolve() { echo "$VM_RELOAD_TEST_DIR"; }
+  vm_run_status() { echo 'running (PID: 98765)'; }
+  _vm_read_virtiofsd_shared_dir() { echo "$VM_RELOAD_WORKSPACE"; }
+  _vm_proxy_pid_matches() { [[ "$1" == 12345 && "$2" == "$VM_RELOAD_TEST_DIR" && "$3" == "$VM_RELOAD_WORKSPACE" ]]; }
+  _vm_proxy_supports_reload() { return 1; }
+  _vm_start_proxy_at() { printf '%s\n%s\n%s\n' "$1" "$2" "$3" >"$VM_RELOAD_CAPTURE.start"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  kill() {
+    printf '%s\n' "$*" >>"$VM_RELOAD_CAPTURE"
+    case "$1" in
+      -0) [[ ! -e "$VM_RELOAD_STOPPED" ]] ;;
+      -TERM) touch "$VM_RELOAD_STOPPED" ;;
+      *) return 1 ;;
+    esac
+  }
+
+  run vm_cmd_egress_reload default
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'predates safe in-place reload'* ]]
+  grep -Fxq -- '-TERM 12345' "$VM_RELOAD_CAPTURE"
+  ! grep -Fxq -- '-HUP 12345' "$VM_RELOAD_CAPTURE"
+  [ "$(sed -n '3p' "$VM_RELOAD_CAPTURE.start")" = 31234 ]
+}
+
+@test "egress-reload restores a dead proxy on the port retained by running QEMU" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_RELOAD_TEST_DIR="$BATS_TEST_TMPDIR/vm-egress-reload-dead"
+  VM_RELOAD_CAPTURE="$BATS_TEST_TMPDIR/vm-egress-reload-dead-start"
+  VM_RELOAD_WORKSPACE="$BATS_TEST_TMPDIR/vm-egress-dead-workspace"
+  export VM_RELOAD_TEST_DIR VM_RELOAD_CAPTURE VM_RELOAD_WORKSPACE
+  mkdir -p "$VM_RELOAD_TEST_DIR" "$VM_RELOAD_WORKSPACE"
+  printf '12345\n' >"$VM_RELOAD_TEST_DIR/proxy.pid"
+  printf '31234\n' >"$VM_RELOAD_TEST_DIR/proxy_port"
+  printf '98766\n' >"$VM_RELOAD_TEST_DIR/virtiofsd.pid"
+  _vm_resolve() { echo "$VM_RELOAD_TEST_DIR"; }
+  vm_run_status() { echo 'running (PID: 98765)'; }
+  _vm_read_virtiofsd_shared_dir() { echo "$VM_RELOAD_WORKSPACE"; }
+  _vm_start_proxy_at() { printf '%s\n%s\n%s\n' "$1" "$2" "$3" >"$VM_RELOAD_CAPTURE"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  kill() { return 1; }
+
+  run vm_cmd_egress_reload default
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'existing loopback port'* ]]
+  [ "$(sed -n '3p' "$VM_RELOAD_CAPTURE")" = 31234 ]
+}
+
+@test "egress-reload refuses a stale or unrelated proxy PID" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_RELOAD_TEST_DIR="$BATS_TEST_TMPDIR/vm-egress-reload-mismatch"
+  VM_RELOAD_CAPTURE="$BATS_TEST_TMPDIR/vm-egress-reload-mismatch-signals"
+  VM_RELOAD_WORKSPACE="$BATS_TEST_TMPDIR/vm-egress-mismatch-workspace"
+  export VM_RELOAD_TEST_DIR VM_RELOAD_CAPTURE VM_RELOAD_WORKSPACE
+  mkdir -p "$VM_RELOAD_TEST_DIR" "$VM_RELOAD_WORKSPACE"
+  printf '12345\n' >"$VM_RELOAD_TEST_DIR/proxy.pid"
+  printf '31234\n' >"$VM_RELOAD_TEST_DIR/proxy_port"
+  printf '98766\n' >"$VM_RELOAD_TEST_DIR/virtiofsd.pid"
+  : >"$VM_RELOAD_TEST_DIR/proxy.log"
+  _vm_resolve() { echo "$VM_RELOAD_TEST_DIR"; }
+  vm_run_status() { echo 'running (PID: 98765)'; }
+  _vm_read_virtiofsd_shared_dir() { echo "$VM_RELOAD_WORKSPACE"; }
+  _vm_proxy_pid_matches() { return 1; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  kill() {
+    [[ "$1" == -0 ]] && return 0
+    printf '%s\n' "$*" >>"$VM_RELOAD_CAPTURE"
+  }
+
+  run vm_cmd_egress_reload default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'refusing to signal it'* ]]
+  [ ! -e "$VM_RELOAD_CAPTURE" ]
+}
+
+@test "egress-reload refuses to touch a stopped VM" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_RELOAD_TEST_DIR="$BATS_TEST_TMPDIR/vm-egress-reload-stopped"
+  VM_RELOAD_CAPTURE="$BATS_TEST_TMPDIR/vm-egress-reload-stopped-signal"
+  export VM_RELOAD_TEST_DIR VM_RELOAD_CAPTURE
+  mkdir -p "$VM_RELOAD_TEST_DIR"
+  _vm_resolve() { echo "$VM_RELOAD_TEST_DIR"; }
+  vm_run_status() { echo stopped; return 1; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  kill() { touch "$VM_RELOAD_CAPTURE"; }
+
+  run vm_cmd_egress_reload default
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"VM 'default' is not running"* ]]
+  [ ! -e "$VM_RELOAD_CAPTURE" ]
+}
+
+@test "VM-only local model forwarders bind host ports to loopback" {
+  local compose="$REPO_ROOT/compose.vm-model-api.yaml"
+  [ "$(grep -c '127.0.0.1:' "$compose")" -eq 2 ]
+  grep -Fq '127.0.0.1:11434:11434' "$compose"
+  grep -Fq '127.0.0.1:8080:8080' "$compose"
+  grep -Fq 'TCP:ollama:11434' "$compose"
+  grep -Fq 'TCP:llamacpp:11434' "$compose"
+  [ "$(grep -c 'networks: \[internal, vm-api-publish\]' "$compose")" -eq 2 ]
+  grep -Fq 'vm-api-publish:' "$compose"
+  grep -Fq 'com.docker.network.bridge.enable_ip_masquerade: "false"' "$compose"
+  grep -Fq 'profiles: [vm-model-api]' "$compose"
+  ! grep -Eq '0\.0\.0\.0:(8080|11434)' "$compose"
+  ! grep -Fq 'metrics-vm-api' "$compose"
+}
+
+@test "VM metrics service is native, loopback-only, and independent of Docker Compose" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  body="$(declare -f vm_cmd_metrics)"
+  [[ "$body" == *'METRICS_BIND_HOST=127.0.0.1'* ]]
+  [[ "$body" == *'METRICS_BIND_PORT=19532'* ]]
+  [[ "$body" == *'python3 "$LAB_DIR/agent/metrics/gather.py"'* ]]
+  [[ "$body" == *'flock -x "$lock_fd"'* ]]
+  [[ "$body" == *'http://127.0.0.1:19532/health'* ]]
+  [[ "$body" != *'docker compose'* ]]
+  grep -Fq 'guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532' "$REPO_ROOT/lib/vm/runner.sh"
+  grep -Fq 'metrics)' "$REPO_ROOT/lab-vm"
+}
+
+@test "VM guest metrics preflight bypasses egress proxy and verifies every TUI endpoint" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  body="$(declare -f _vm_guest_metrics_preflight)"
+  [[ "$body" == *'http://10.0.2.100:19532'* ]]
+  [[ "$body" == *'urllib.request.ProxyHandler({})'* ]]
+  [[ "$body" == *'("/summary", "/metrics", "/history?n=2")'* ]]
+  [[ "$body" == *'deadline = time.monotonic() + 10'* ]]
+  [[ "$body" == *'guest metrics forward healthy: summary, metrics, history'* ]]
+}
+
+@test "llama.cpp public model alias matches the direct guest model configuration" {
+  grep -Fq -- '--alias qwen3.6-35b-a3b-q4_k_m' "$REPO_ROOT/compose.yaml"
+  grep -Fq '"model": "llamacpp/qwen3.6-35b-a3b-q4_k_m"' "$REPO_ROOT/agent/opencode/opencode.json"
+  grep -Fq 'http://llamacpp:11434/v1' "$REPO_ROOT/agent/opencode/opencode.json"
+}
+
+@test "guest agent preflights the selected local model forwarder before OpenCode" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  body="$(declare -f vm_cmd_agent)"
+  local ensure_line probe_line
+  [[ "$body" == *'http://10.0.2.100:8080/health'* ]]
+  [[ "$body" == *'http://10.0.2.100:11434/api/tags'* ]]
+  [[ "$body" == *'curl --noproxy 10.0.2.100'* ]]
+  [[ "$body" == *'vm_cmd_metrics up'* ]]
+  [[ "$body" == *'vm_cmd_models ensure "$model_provider"'* ]]
+  [[ "$body" == *'_vm_guest_metrics_preflight "$vm_dir"'* ]]
+  [[ "$body" == *'OpenCode will start and the TUI will report/retry'* ]]
+  [[ "$body" == *'python3 -c'* ]]
+  [[ "$body" == *'./lab-vm models up $model_provider'* ]]
+  [[ "$body" == *'metrics_url="http://127.0.0.1:1"'* ]]
+  [[ "$body" == *'metrics_url="http://10.0.2.100:19532"'* ]]
+  [[ "$body" == *'METRICS_URL=$metrics_url'* ]]
+  [[ "$body" == *'log_verbose "Checking $model_provider API reachability'* ]]
+  [[ "$body" == *'Guest model probe: $probe_command'* ]]
+  [[ "$body" == *'--verbose --http1.1'* ]]
+  [[ "$body" == *'Guest model probe failed after ${elapsed}s'* ]]
+  ensure_line="$(grep -nF 'vm_cmd_models ensure "$model_provider"' <<<"$body" | cut -d: -f1)"
+  probe_line="$(grep -nF 'curl --noproxy 10.0.2.100' <<<"$body" | cut -d: -f1)"
+  [ "$ensure_line" -lt "$probe_line" ]
+  [[ "$body" == *'if [[ "${VM_AGENT_SKIP_MODEL_PROBE:-0}" != 1 ]]; then'*'vm_cmd_models ensure "$model_provider"'*'else'*'Skipping model API health probe for the browser-only authentication flow.'* ]]
+}
+
+@test "guest agent remote command preserves CLI JSON quotes and TUI plugin wiring" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  body="$(declare -f vm_cmd_agent)"
+  [[ "$body" == *"printf -v cli_config_quoted '%q' \"\$cli_config\""* ]]
+  [[ "$body" == *'/etc/opencode/plugins/host-metrics-tui/package.json'* ]]
+  [[ "$body" == *'/etc/opencode/plugins/little-mester-exit-confirm/package.json'* ]]
+  [[ "$body" == *'OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted'* ]]
+  remote='export OPENCODE_CLI_CONFIG_CONTENT='"$(printf '%q' '{"plugins":["/etc/opencode/plugins/host-metrics-tui"],"keybinds":{"app.exit":"none"}}')"
+  bash -n -c "$remote"
+  [[ "$remote" == *'\"plugins\"'* ]]
+  [[ "$remote" == *'\"app.exit\":\"none\"'* ]]
+  actual="$(bash -c "$remote; printf '%s' \"\$OPENCODE_CLI_CONFIG_CONTENT\"")"
+  [ "$actual" = '{"plugins":["/etc/opencode/plugins/host-metrics-tui"],"keybinds":{"app.exit":"none"}}' ]
+}
+
+@test "metrics TUI uses configurable VM endpoint and surfaces transport failure" {
+  local plugin="$REPO_ROOT/agent/opencode/plugins/host-metrics-tui/tui.tsx"
+  grep -Fq 'process.env.METRICS_URL || "http://metrics:19532"' "$plugin"
+  grep -Fq 'METRICS_REQUEST_TIMEOUT_MS = 3000' "$plugin"
+  grep -Fq 'fetchMetricsJson<MetricsPayload>("/metrics")' "$plugin"
+  grep -Fq 'fetchMetricsJson<Array<' "$plugin"
+  grep -Fq 'host metrics unavailable' "$plugin"
+  grep -Fq '"/history?n=60"' "$plugin"
+  grep -Fq 'metricsRequestInFlight' "$plugin"
+}
+
+@test "lab-vm models up uses standard loopback-only Compose API publication" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  docker() {
+    case "$*" in
+      info*) return 0 ;;
+      *llama-id*|*metrics-id*) echo '{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}' ;;
+    esac
+  }
+  compose_source="$(declare -f vm_model_compose)"
+  [[ "$compose_source" == *'WORKSPACE="${WORKSPACE:-$LAB_DIR}" docker compose'* ]]
+  vm_model_compose() {
+    if [[ "$*" == 'config --format json' ]]; then
+      cat <<'JSON'
+{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"127.0.0.1"}]}}}
+JSON
+    else printf 'compose:%s\n' "$*"; fi
+  }
+  ss() { :; }
+  curl() { return 0; }
+  run vm_cmd_models up
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'compose:config -q'* ]]
+  [[ "$output" == *'compose:up -d llamacpp-vm-api'* ]]
+  [[ "$output" == *'127.0.0.1:8080'* ]]
+  [[ "$output" == *'reachable through Docker loopback-only published ports'* ]]
+}
+
+@test "lab-vm models up accepts a healthy user-managed loopback API without Docker" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
+  curl() { return 0; }
+  docker() { echo 'Docker must not be queried for a healthy host API' >&2; return 1; }
+  vm_model_compose() { echo 'Compose must not be called for a healthy host API' >&2; return 1; }
+
+  run vm_cmd_models up
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'llama.cpp API is healthy on host loopback 127.0.0.1:8080.'* ]]
+  [[ "$output" == *'no model forwarder was started'* ]]
+}
+
+@test "models ensure is idempotent for a healthy native endpoint" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
+  curl() { return 0; }
+  docker() { echo 'Docker must not be queried for a healthy host API' >&2; return 1; }
+  vm_model_compose() { echo 'Compose must not be called for a healthy host API' >&2; return 1; }
+
+  run vm_cmd_models ensure
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'llama.cpp API is healthy on host loopback 127.0.0.1:8080.'* ]]
+  [[ "$output" == *'no model forwarder was started'* ]]
+}
+
+@test "lab-vm models up accepts a loopback Ollama API without Docker" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:11434 0.0.0.0:*'; }
+  curl() { [[ "$*" == *'/api/tags' ]] ; }
+  docker() { echo 'Docker must not be queried for a healthy host API' >&2; return 1; }
+  vm_model_compose() { echo 'Compose must not be called for a healthy host API' >&2; return 1; }
+
+  run vm_cmd_models up ollama
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'Ollama API is healthy on host loopback 127.0.0.1:11434.'* ]]
+}
+
+@test "lab-vm models up refuses a non-loopback native model listener" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 0.0.0.0:8080 0.0.0.0:*'; }
+  curl() { return 0; }
+  docker() { return 1; }
+  vm_model_compose() { echo 'Compose must not be called for an unsafe listener' >&2; return 1; }
+
+  run vm_cmd_models up
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'not loopback-only'* ]]
+  [[ "$output" == *'cannot be verified safely'* ]]
+}
+
+@test "lab-vm models up refuses an unhealthy loopback listener not owned by the model Compose service" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
+  curl() { return 7; }
+  docker() { [[ "$*" == info* ]]; }
+  vm_model_compose() {
+    case "$*" in
+      'config --format json')
+        echo '{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"127.0.0.1"}]}}}'
+        ;;
+      'config -q') return 0 ;;
+      'ps -a -q llamacpp-vm-api') echo '' ;;
+      *) echo "unexpected Compose mutation: $*" >&2; return 1 ;;
+    esac
+  }
+
+  run vm_cmd_models up
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'listening on 127.0.0.1:8080 but its /health health check failed'* ]]
+  [[ "$output" == *'Refusing automatic recovery'* ]]
+}
+
+@test "lab-vm models up recovers only a verified managed forwarder with a stopped backend" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
+  curl() { [[ "${MODEL_COMPOSE_STARTED:-0}" == 1 ]]; }
+  docker() {
+    case "$*" in
+      info*) return 0 ;;
+      'inspect --format {{json .}} api-container')
+        echo '{"Config":{"Labels":{"com.docker.compose.service":"llamacpp-vm-api","com.docker.compose.project":"little-mester"}},"State":{"Status":"running"},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}}}'
+        ;;
+      'inspect --format {{json .}} backend-container')
+        echo '{"Config":{"Labels":{"com.docker.compose.service":"llamacpp","com.docker.compose.project":"little-mester"}},"State":{"Status":"exited"},"NetworkSettings":{"Ports":{}}}'
+        ;;
+      *) echo "unexpected docker call: $*" >&2; return 1 ;;
+    esac
+  }
+  vm_model_compose() {
+    case "$*" in
+      'config --format json')
+        echo '{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"127.0.0.1"}]}}}'
+        ;;
+      'config -q') return 0 ;;
+      'ps -a -q llamacpp-vm-api') echo api-container ;;
+      'ps -a -q llamacpp') echo backend-container ;;
+      'up -d llamacpp-vm-api') MODEL_COMPOSE_STARTED=1; echo 'compose started selected model stack' ;;
+      *) echo "unexpected compose call: $*" >&2; return 1 ;;
+    esac
+  }
+
+  run vm_cmd_models up llamacpp
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'compose started selected model stack'* ]]
+  [[ "$output" == *'reachable through Docker loopback-only published ports'* ]]
+}
+
+@test "model recovery refuses an unowned or unverifiable unhealthy listener" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
+  curl() { return 7; }
+  docker() { return 0; }
+  local calls="$BATS_TEST_TMPDIR/model-recovery-calls"
+  vm_model_compose() {
+    printf '%s\n' "$*" >>"$calls"
+    case "$*" in
+      'config --format json')
+        echo '{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"127.0.0.1"}]}}}'
+        ;;
+      'ps -a -q llamacpp-vm-api') echo '' ;;
+      *) return 0 ;;
+    esac
+  }
+
+  run vm_cmd_models up llamacpp
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Refusing automatic recovery'* ]]
+  ! grep -Fq 'up -d' "$calls"
+}
+
+@test "model recovery refuses a running but unhealthy backend" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
+  curl() { [[ "${MODEL_COMPOSE_STARTED:-0}" == 1 ]]; }
+  docker() {
+    case "$*" in
+      info*) return 0 ;;
+      'inspect --format {{json .}} api-container')
+        echo '{"Config":{"Labels":{"com.docker.compose.service":"llamacpp-vm-api","com.docker.compose.project":"little-mester"}},"State":{"Status":"running"},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}}}'
+        ;;
+      'inspect --format {{json .}} backend-container')
+        echo '{"Config":{"Labels":{"com.docker.compose.service":"llamacpp","com.docker.compose.project":"little-mester"}},"State":{"Status":"running"},"NetworkSettings":{"Ports":{}}}'
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  vm_model_compose() {
+    case "$*" in
+      'config --format json')
+        echo '{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"127.0.0.1"}]}}}'
+        ;;
+      'config -q') return 0 ;;
+      'ps -a -q llamacpp-vm-api') echo api-container ;;
+      'ps -a -q llamacpp') echo backend-container ;;
+      'up -d llamacpp-vm-api') MODEL_COMPOSE_STARTED=1; echo unexpected-start ;;
+      *) return 1 ;;
+    esac
+  }
+
+  run vm_cmd_models up llamacpp
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'backend is running'* ]]
+  [[ "$output" != *'unexpected-start'* ]]
+}
+
+@test "lab-vm models up refuses Compose fallback when host listener inspection fails" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { return 127; }
+  docker() { return 0; }
+  local calls="$BATS_TEST_TMPDIR/model-compose-calls"
+  vm_model_compose() { printf '%s\n' "$*" >>"$calls"; return 0; }
+
+  run vm_cmd_models up
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Cannot verify host listeners'* ]]
+  [ ! -s "$calls" ]
+}
+
+@test "VM host-service debug traces do not corrupt captured Compose JSON" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  VM_DEBUG=1
+  log_debug() { echo "debug:$*"; }
+  docker() { echo '{"services":{"llamacpp-vm-api":{"ports":[]}}}'; }
+  local debug_output
+  debug_output="$(vm_model_compose config --format json 2>"$BATS_TEST_TMPDIR/compose-debug.log")"
+  [ "$debug_output" = '{"services":{"llamacpp-vm-api":{"ports":[]}}}' ]
+  grep -q 'debug:docker compose' "$BATS_TEST_TMPDIR/compose-debug.log"
+}
+
+@test "VM API ports are validated as loopback-only and live probes gate success" {
+  grep -Fq '_vm_validate_api_publish_config "$service" 127.0.0.1 8080' "$REPO_ROOT/lib/vm/host-services.sh"
+  grep -Fq '_vm_probe_published_api "$service" 8080 /health' "$REPO_ROOT/lib/vm/host-services.sh"
+  grep -Fq 'docker port "$container"' "$REPO_ROOT/lib/vm/host-services.sh"
+  grep -Fq 'configured_bindings={{json .HostConfig.PortBindings}} actual_bindings={{json .NetworkSettings.Ports}}' "$REPO_ROOT/lib/vm/host-services.sh"
+  ! grep -Eq 'TCP-LISTEN:|TCP:\$target_ip|socat.*relay' "$REPO_ROOT/lib/vm/host-services.sh"
+}
+
+@test "VM API publication validation rejects non-loopback bindings" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  die() { echo "REFUSED: $*" >&2; return 1; }
+  vm_model_compose() {
+    cat <<'JSON'
+{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"0.0.0.0"}]}}}
+JSON
+  }
+  run _vm_validate_api_publish_config llamacpp-vm-api 127.0.0.1 8080
+  [ "$status" -ne 0 ]
+
+  vm_model_compose() {
+    cat <<'JSON'
+{"services":{"llamacpp-vm-api":{"ports":[{"target":8080,"published":"8080","host_ip":"127.0.0.1"},{"target":8080,"published":"8080","host_ip":"0.0.0.0"}]}}}
+JSON
+  }
+  run _vm_validate_api_publish_config llamacpp-vm-api 127.0.0.1 8080
+  [ "$status" -ne 0 ]
+}
+
+@test "failed published API probe is reported as failure, not success" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  VM_DEBUG=0
+  curl() { return 7; }
+  sleep() { :; }
+  _vm_api_diagnostics() { echo "diagnostic:$*"; }
+  run _vm_probe_published_api llamacpp-vm-api 8080 /health
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'diagnostic:llamacpp-vm-api 8080 /health'* ]]
+}
+
+@test "models status checks the configured provider and rejects absent runtime publication" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  vm_model_compose() {
+    case "$*" in
+      'ps -q ollama-vm-api') echo '' ;;
+      'ps -q llamacpp-vm-api') echo 'llama-container-id' ;;
+    esac
+  }
+  docker() {
+    case "$*" in
+      inspect*State.Status*) echo running ;;
+      inspect*NetworkSettings.Ports*)
+        if [[ -n "${MOCK_PORTS_JSON:-}" ]]; then echo "$MOCK_PORTS_JSON"; else echo '{"8080/tcp":null}'; fi
+        ;;
+      *) return 0 ;;
+    esac
+  }
+  ss() { :; }
+  curl() { [[ "${MOCK_LOOPBACK_OK:-0}" == 1 ]]; }
+  run vm_cmd_models status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'llamacpp-vm-api: state=running; expected=127.0.0.1:8080; runtime_ports={"8080/tcp":null}'* ]]
+  [[ "$output" == *'Docker has no active 127.0.0.1:8080 runtime mapping'* ]]
+  [[ "$output" == *"run './lab-vm models diagnose'"* ]]
+  MOCK_PORTS_JSON='{"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"8080"}]}'
+  export MOCK_PORTS_JSON
+  run vm_cmd_models status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Docker has no active 127.0.0.1:8080 runtime mapping'* ]]
+
+  MOCK_PORTS_JSON='{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"},{"HostIp":"0.0.0.0","HostPort":"8080"}]}'
+  export MOCK_PORTS_JSON
+  run vm_cmd_models status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Docker has no active 127.0.0.1:8080 runtime mapping'* ]]
+
+  MOCK_PORTS_JSON='{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}'
+  MOCK_LOOPBACK_OK=1
+  export MOCK_PORTS_JSON MOCK_LOOPBACK_OK
+  run vm_cmd_models status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'llamacpp-vm-api: loopback HTTP probe passed.'* ]]
+}
+
+@test "models status fails clearly when the selected provider forwarder is absent" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  local calls="$BATS_TEST_TMPDIR/model-status-calls"
+  vm_model_compose() {
+    printf '%s\n' "$*" >>"$calls"
+    case "$*" in 'ps -q llamacpp-vm-api'|'ps -q ollama-vm-api') echo '' ;; esac
+  }
+  docker() { return 0; }
+  ss() { :; }
+
+  run vm_cmd_models status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"llamacpp-vm-api: not started. Start it with './lab-vm models up llamacpp'."* ]]
+  [ "$(cat "$calls")" = 'ps -q llamacpp-vm-api' ]
+
+  : >"$calls"
+  run vm_cmd_models status all
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'ollama-vm-api: not started'* ]]
+  [[ "$output" == *'llamacpp-vm-api: not started'* ]]
+  [ "$(cat "$calls")" = $'ps -q ollama-vm-api\nps -q llamacpp-vm-api' ]
+}
+
+@test "models status succeeds for a healthy native endpoint without Docker" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { echo 'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:*'; }
+  curl() { return 0; }
+  docker() { echo 'Docker must not be queried for a healthy host API' >&2; return 1; }
+  vm_model_compose() { echo 'Compose must not be called for a healthy host API' >&2; return 1; }
+
+  run vm_cmd_models status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'llama.cpp API is healthy on host loopback 127.0.0.1:8080.'* ]]
+}
+
+@test "models status fails closed when host listener inspection fails" {
+  source "$REPO_ROOT/lib/vm/host-services.sh"
+  LAB_DIR="$REPO_ROOT"
+  log() { echo "$*"; }
+  die() { echo "REFUSED: $*" >&2; exit 1; }
+  ss() { return 127; }
+  docker() { echo 'Docker must not be queried when host listener inspection fails' >&2; return 1; }
+  local calls="$BATS_TEST_TMPDIR/model-status-calls"
+  vm_model_compose() { printf '%s\n' "$*" >>"$calls"; return 1; }
+
+  run vm_cmd_models status
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Cannot verify host listeners for llama.cpp: ss failed'* ]]
+  [ ! -s "$calls" ]
+}
+
+@test "models diagnose helper is a separate read-only tool command" {
+  grep -Fq 'scripts/vm-models-diagnose.sh' "$REPO_ROOT/lab-vm"
+  grep -Fq 'docker port "$container"' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq "journalctl -u docker --since '1 hour ago'" "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq 'iptables-save -t nat' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq 'nft list ruleset' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq 'userland-proxy-path' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq 'internal={{.Internal}}' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq 'Host direct-container HTTP probe:' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq 'Forwarder container: not present (diagnostic did not start it).' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  grep -Fq 'sudo -n "$@"' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  ! grep -Eq 'docker compose (up|down|stop|restart)|docker (start|stop|restart|rm|system prune)' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+  ! grep -Eq 'iptables(-save)? .* (-F|-X|--flush|--delete)|nft (flush|delete|add|insert|replace)' "$REPO_ROOT/scripts/vm-models-diagnose.sh"
+}
+
+@test "hygiene ShellCheck covers VM entry points, browser opener, and lifecycle errors" {
+  grep -Fq 'shellcheck lab lab-docker scripts/*.sh lib/vm/cloud-init.sh lib/vm/host-services.sh lib/vm/browser-open.sh' "$REPO_ROOT/.github/workflows/ci.yml"
+  grep -Fq 'shellcheck --severity=error lab-vm lib/vm/lifecycle.sh lib/vm/recursion.sh' "$REPO_ROOT/.github/workflows/ci.yml"
+}
+
+@test "models diagnose captures publication failure without mutating Docker state" {
+  local fakebin="$BATS_TEST_TMPDIR/diagnose-bin"
+  mkdir -p "$fakebin"
+  cat >"$fakebin/docker" <<'MOCK_DOCKER'
+#!/usr/bin/env bash
+printf 'WORKSPACE=%s %s\n' "${WORKSPACE:-}" "$*" >>"$MOCK_DOCKER_CALLS"
+case "$*" in
+  'info') exit 0 ;;
+  'context show') echo default ;;
+  'version --format '* ) echo 'client=29.9.2 server=29.9.2' ;;
+  'info --format '* ) echo 'root=/var/lib/docker security=["name=seccomp"] firewall=iptables' ;;
+  *'config --format json') echo '{"services":{"llamacpp-vm-api":{"ports":[{"host_ip":"127.0.0.1","published":"8080","target":8080}]}}}' ;;
+  *' ps -a') echo 'SERVICE STATUS' ;;
+  *'ps -a -q llamacpp-vm-api')
+    if [[ "${MOCK_SIDECAR_PRESENT:-1}" == 1 ]]; then echo sidecar-id; fi
+    ;;
+  *'ps -q llamacpp') echo backend-id ;;
+  *'ps -a -q llamacpp')
+    if [[ "${MOCK_BACKEND_PRESENT:-1}" == 1 ]]; then echo backend-id; fi
+    ;;
+  'port sidecar-id')
+    if [[ "${MOCK_ACTIVE_MAPPING:-0}" == 1 ]]; then echo '8080/tcp -> 127.0.0.1:8080'; else exit 0; fi
+    ;;
+  *'index .NetworkSettings.Networks "little-mester_internal"'*) echo '172.18.0.2' ;;
+  *'index .NetworkSettings.Networks "little-mester_vm-api-publish"'*) echo '172.20.0.2' ;;
+  *'{{range $name, $config := .NetworkSettings.Networks}}'*) echo 'little-mester_internal little-mester_vm-api-publish' ;;
+  *'sidecar-id')
+    if [[ "${MOCK_ACTIVE_MAPPING:-0}" == 1 ]]; then
+      echo 'name=/api state=running health=none network_mode=internal configured_bindings={"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]} runtime_ports={"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]} networks={"internal":{"IPAMConfig":null,"Links":null}}'
+    else
+      echo 'name=/api state=running health=none network_mode=internal configured_bindings={"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]} runtime_ports={"8080/tcp":null} networks={}'
+    fi
+    ;;
+  *'backend-id') echo 'backend=/llamacpp state=running health=healthy networks={}' ;;
+  *'network inspect --format'*'{{.Internal}}'*'little-mester_internal') echo true ;;
+  *'network inspect --format'*'{{.Internal}}'*'little-mester_vm-api-publish') echo false ;;
+  *'network inspect --format'*'little-mester_internal') echo 'network=little-mester_internal driver=bridge internal=true options={} ipam=[]' ;;
+  *'network inspect --format'*'little-mester_vm-api-publish') echo 'network=little-mester_vm-api-publish driver=bridge internal=false options={"com.docker.network.bridge.enable_ip_masquerade":"false"} ipam=[]' ;;
+  exec\ sidecar-id\ sh\ -c\ *)
+    if [[ "${MOCK_EGRESS_REACHABLE:-0}" == 1 ]]; then exit 0; fi
+    echo 'socat: Connection timed out' >&2
+    exit 1
+    ;;
+  *) echo "unexpected docker invocation: $*" >&2; exit 1 ;;
+esac
+MOCK_DOCKER
+cat >"$fakebin/curl" <<'MOCK_CURL'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$MOCK_CURL_CALLS"
+if [[ "$*" == *'http://172.20.0.2:8080/health' ]]; then
+  echo 'http_status=200 remote_ip=172.20.0.2'
+  exit 0
+fi
+if [[ "${MOCK_ACTIVE_MAPPING:-0}" == 1 && "$*" == *'http://127.0.0.1:8080/health' ]]; then
+  echo 'http_status=200 remote_ip=127.0.0.1'
+  exit 0
+fi
+if [[ "$*" == *'http://192.0.2.10:8080/health' && "${MOCK_LAN_EXPOSED:-0}" == 1 ]]; then
+  echo 'http_status=200 remote_ip=192.0.2.10'
+  exit 0
+fi
+echo 'curl: (7) Connection refused' >&2
+exit 7
+MOCK_CURL
+  cat >"$fakebin/ip" <<'MOCK_IP'
+#!/usr/bin/env bash
+echo '1.1.1.1 via 192.0.2.1 dev eth0 src 192.0.2.10'
+MOCK_IP
+  cat >"$fakebin/ss" <<'MOCK_SS'
+#!/usr/bin/env bash
+echo 'State Recv-Q Send-Q Local Address:Port Peer Address:Port'
+MOCK_SS
+  cat >"$fakebin/journalctl" <<'MOCK_JOURNAL'
+#!/usr/bin/env bash
+echo '-- No entries --'
+MOCK_JOURNAL
+  cat >"$fakebin/iptables-save" <<'MOCK_IPTABLES'
+#!/usr/bin/env bash
+echo '*nat'
+echo ':DOCKER - [0:0]'
+echo '-A DOCKER -p tcp --dport 8080 -j DNAT --to-destination 172.18.0.2:8080'
+echo 'COMMIT'
+MOCK_IPTABLES
+  cat >"$fakebin/nft" <<'MOCK_NFT'
+#!/usr/bin/env bash
+echo 'table ip nat { chain DOCKER { tcp dport 8080 dnat to 172.18.0.2:8080 } }'
+MOCK_NFT
+  cat >"$fakebin/sudo" <<'MOCK_SUDO'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$MOCK_SUDO_CALLS"
+[[ "${1:-}" == -n ]] || exit 2
+shift
+exec "$@"
+MOCK_SUDO
+  chmod +x "$fakebin"/*
+  export MOCK_DOCKER_CALLS="$BATS_TEST_TMPDIR/docker-calls"
+  export MOCK_SUDO_CALLS="$BATS_TEST_TMPDIR/sudo-calls"
+  export MOCK_CURL_CALLS="$BATS_TEST_TMPDIR/curl-calls"
+
+  run env PATH="$fakebin:$PATH" bash -c 'docker info; printf "fake_status=%s\\n" "$?"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'fake_status=0'* ]]
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" llamacpp
+  if [ "$status" -ne 1 ]; then cat "$MOCK_DOCKER_CALLS" >&2; fi
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'runtime_ports={"8080/tcp":null}'* ]]
+  [[ "$output" == *'docker port: no active published-port mapping reported.'* ]]
+  [[ "$output" == *'Host direct-container HTTP probe: http://172.20.0.2:8080/health'* ]]
+  [[ "$output" == *'http_status=200 remote_ip=172.20.0.2'* ]]
+  [[ "$output" == *'Host loopback probe failed.'* ]]
+  [[ "$output" == *'Finding: the forwarder responds on its container IP, but the host-published loopback port is unavailable; investigate Docker port publication, not the model backend.'* ]]
+  grep -Fq 'http://172.20.0.2:8080/health' "$MOCK_CURL_CALLS"
+  grep -Fq "WORKSPACE=$REPO_ROOT" "$MOCK_DOCKER_CALLS"
+  ! grep -Eq 'compose .* (up|down|stop|restart)| (start|stop|restart|rm) ' "$MOCK_DOCKER_CALLS"
+
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 MOCK_ACTIVE_MAPPING=1 bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" llamacpp
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'runtime_ports={"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}'* ]]
+  [[ "$output" != *'Docker has no active runtime host-port mapping'* ]]
+  [[ "$output" == *'Host direct-container HTTP probe: http://172.20.0.2:8080/health'* ]]
+  [[ "$output" == *'Host loopback HTTP probe: http://127.0.0.1:8080/health'* ]]
+  [[ "$output" == *'Host non-loopback-address HTTP probe (local-only; not a remote LAN test): http://192.0.2.10:8080/health'* ]]
+
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 MOCK_ACTIVE_MAPPING=1 MOCK_LAN_EXPOSED=1 MOCK_EGRESS_REACHABLE=1 bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" --probe-egress llamacpp
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Non-loopback host-address probe succeeded; the published API may be reachable beyond loopback.'* ]]
+  [[ "$output" == *'Egress probe: TCP connection succeeded; publication-bridge egress is present.'* ]]
+
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 MOCK_ACTIVE_MAPPING=1 bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" --probe-egress llamacpp
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'Egress probe: TCP connection was not established'* ]]
+
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 MOCK_ACTIVE_MAPPING=1 bash "$REPO_ROOT/lab-vm" models diagnose --probe-egress llamacpp
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'Egress probe: TCP connection was not established'* ]]
+  [[ "$output" != *'Egress probe not run'* ]]
+
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" --sudo llamacpp
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'-A DOCKER -p tcp --dport 8080'* ]]
+  [[ "$output" == *'tcp dport 8080 dnat'* ]]
+  grep -Fxq -- '-n iptables-save -t nat' "$MOCK_SUDO_CALLS"
+  grep -Fxq -- '-n nft list ruleset' "$MOCK_SUDO_CALLS"
+
+  : >"$MOCK_SUDO_CALLS"
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 bash "$REPO_ROOT/lab-vm" models diagnose --sudo llamacpp
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Non-interactive sudo context:'* ]]
+  grep -Fxq -- '-n iptables-save -t nat' "$MOCK_SUDO_CALLS"
+  grep -Fxq -- '-n nft list ruleset' "$MOCK_SUDO_CALLS"
+
+  run env PATH="$fakebin:$PATH" VM_DEBUG=0 MOCK_SIDECAR_PRESENT=0 \
+    bash "$REPO_ROOT/scripts/vm-models-diagnose.sh" llamacpp
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Forwarder container: not present (diagnostic did not start it).'* ]]
+  [[ "$output" == *'backend=/llamacpp state=running health=healthy'* ]]
+  [[ "$output" == *'One or more Docker, listener, HTTP, or requested isolation checks failed'* ]]
+}
+
+@test "lab-vm extra delegates to the temporary script with a removal marker" {
+  grep -Fq 'exec bash "$LAB_DIR/scripts/vm-extra.sh" "${remaining[@]:1}"' "$REPO_ROOT/lab-vm"
+  grep -Fq 'MUST BE REMOVED once ticket #42' "$REPO_ROOT/scripts/vm-extra.sh"
+  grep -Fq 'diagnose-model-api' "$REPO_ROOT/scripts/vm-extra.sh"
+  grep -Fq 'repair-model-api' "$REPO_ROOT/scripts/vm-extra.sh"
+  grep -Fq 'docker inspect --format' "$REPO_ROOT/scripts/vm-extra.sh"
+  grep -Fq 'docker logs --tail 40' "$REPO_ROOT/scripts/vm-extra.sh"
+  grep -Fq 'VM_DEBUG' "$REPO_ROOT/scripts/vm-extra.sh"
+  grep -Fq 'VM_VERBOSE' "$REPO_ROOT/scripts/vm-extra.sh"
+  grep -Fq 'VM_VERBOSE="${VM_VERBOSE:-0}"' "$REPO_ROOT/lab-vm"
+  grep -Fq 'VM_DEBUG="${VM_DEBUG:-0}"' "$REPO_ROOT/lab-vm"
+}
+
+@test "default host-Docker compose publishes no model ports" {
+  ! grep -Eq '^\s*ports:' "$REPO_ROOT/compose.yaml"
+}
+
+@test "QEMU command pairs virtiofsd with vhost-user and shareable memory" {
+  VM_PROXY_PORT=45678
+  _vm_build_qemu_command /state demo /state/disk.qcow2 /state/virtiofs.sock 22222 tcg 0 ""
+  joined="$(printf '%s\n' "${VM_QEMU_CMD[@]}")"
+  [[ "$joined" == *$'-cpu\nWestmere'* ]]
+  [[ "$joined" == *"memory-backend-memfd,id=mem,size=4G,share=on"* ]]
+  [[ "$joined" == *"vhost-user-fs-pci,chardev=charfs,tag=workspace"* ]]
+  [[ "$joined" != *"virtio-9p"* ]]
+  [[ "$joined" != *"host-workspace"* ]]
+}
+
+@test "QEMU memory override keeps the memfd backend and guest RAM size in sync" {
+  VM_PROXY_PORT=45678
+  _vm_build_qemu_command /state demo /state/disk.qcow2 /state/virtiofs.sock 22222 tcg 0 "" 8
+  joined="$(printf '%s\n' "${VM_QEMU_CMD[@]}")"
+  [[ "$joined" == *$'-m\n8192'* ]]
+  [[ "$joined" == *"memory-backend-memfd,id=mem,size=8G,share=on"* ]]
+  [[ "$joined" != *"size=4G,share=on"* ]]
+}
+
+@test "VM profile memory metadata is private, validated, and legacy profiles remain 4 GiB" {
+  source "$REPO_ROOT/lib/vm/runner.sh"
+  local vm_dir="$BATS_TEST_TMPDIR/memory-profile"
+  mkdir -p "$vm_dir"
+
+  vm_memory_profile_load "$vm_dir"
+  [ "$VM_MEMORY_GIB" -eq 4 ]
+
+  vm_memory_profile_store "$vm_dir" 32
+  vm_memory_profile_load "$vm_dir"
+  [ "$VM_MEMORY_GIB" -eq 32 ]
+  [ "$(stat -c '%a' "$vm_dir/memory_gib")" = 600 ]
+
+  printf '0\n' >"$vm_dir/memory_gib"
+  run vm_memory_profile_load "$vm_dir"
+  [ "$status" -ne 0 ]
+
+  printf '8\n32\n' >"$vm_dir/memory_gib"
+  run vm_memory_profile_load "$vm_dir"
+  [ "$status" -ne 0 ]
+
+  rm -f "$vm_dir/memory_gib"
+  ln -s /etc/passwd "$vm_dir/memory_gib"
+  run vm_memory_profile_load "$vm_dir"
+  [ "$status" -ne 0 ]
+}
+
+@test "new VM profiles default to depth-scaled RAM while metadata-less existing profiles stay 4 GiB" {
+  source "$REPO_ROOT/lib/vm/runner.sh"
+  local vm_dir="$BATS_TEST_TMPDIR/memory-defaults"
+
+  [ "$(vm_memory_default_for_depth 0)" = 8 ]
+  [ "$(vm_memory_default_for_depth 1)" = 4 ]
+  [ "$(vm_memory_default_for_depth 2)" = 2 ]
+  [ "$(vm_memory_default_for_depth 3)" = 1 ]
+  [ "$(vm_memory_default_for_depth 32)" = 1 ]
+
+  vm_memory_profile_select_for_up "$vm_dir/depth0" 0
+  [ "$VM_MEMORY_GIB" -eq 8 ]
+  vm_memory_profile_select_for_up "$vm_dir/depth1" 1
+  [ "$VM_MEMORY_GIB" -eq 4 ]
+  vm_memory_profile_select_for_up "$vm_dir/depth2" 2
+  [ "$VM_MEMORY_GIB" -eq 2 ]
+  vm_memory_profile_select_for_up "$vm_dir/depth3" 3
+  [ "$VM_MEMORY_GIB" -eq 1 ]
+
+  mkdir -p "$vm_dir/legacy"
+  : >"$vm_dir/legacy/disk.qcow2"
+  vm_memory_profile_select_for_up "$vm_dir/legacy" 0
+  [ "$VM_MEMORY_GIB" -eq 4 ]
+
+  vm_memory_profile_select_for_up "$vm_dir/legacy" 0 1
+  [ "$VM_MEMORY_GIB" -eq 8 ]
+  [ ! -e "$vm_dir/legacy/memory_gib" ]
+
+  vm_memory_profile_store "$vm_dir/legacy" 16
+  vm_memory_profile_select_for_up "$vm_dir/legacy" 3
+  [ "$VM_MEMORY_GIB" -eq 16 ]
+
+  run vm_memory_default_for_depth invalid
+  [ "$status" -ne 0 ]
+}
+
+@test "setup memory override is restricted to a new profile or explicit clean replacement" {
+  source "$REPO_ROOT/lib/vm/runner.sh"
+  local new_profile="$BATS_TEST_TMPDIR/memory-override/new"
+  local existing_profile="$BATS_TEST_TMPDIR/memory-override/existing"
+
+  vm_memory_profile_apply_setup_override "$new_profile" 12
+  [ "$VM_MEMORY_GIB" -eq 12 ]
+  [ ! -e "$new_profile" ]
+
+  mkdir -p "$existing_profile"
+  : >"$existing_profile/disk.qcow2"
+  VM_MEMORY_GIB=8
+  run vm_memory_profile_apply_setup_override "$existing_profile" 16
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'only configures a new profile'* ]]
+  [ "$VM_MEMORY_GIB" -eq 8 ]
+
+  vm_memory_profile_apply_setup_override "$existing_profile" 16 1
+  [ "$VM_MEMORY_GIB" -eq 16 ]
+
+  run vm_memory_profile_apply_setup_override "$new_profile" 0
+  [ "$status" -ne 0 ]
+}
+
+@test "managed resize preflights before clean restart and preserves VM storage" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/resize-state"
+  VM_YES=1
+  local vm_dir="$VM_DIR_BASE/default" workspace="$BATS_TEST_TMPDIR/resize-workspace"
+  local calls="$BATS_TEST_TMPDIR/resize-calls"
+  export RESIZE_TEST_WORKSPACE="$workspace"
+  mkdir -p "$vm_dir" "$workspace"
+  printf 'base-data\n' >"$VM_DIR_BASE/base.qcow2"
+  printf 'overlay-data\n' >"$vm_dir/disk.qcow2"
+  printf 'seed-data\n' >"$vm_dir/seed.iso"
+  printf 'ssh-key-data\n' >"$vm_dir/id_vm_control"
+  printf 'ssh-pubkey-data\n' >"$vm_dir/id_vm_control.pub"
+  : >"$vm_dir/known_hosts"
+  printf '0 2 1\n' >"$vm_dir/recursion_policy"
+  printf '12345\n' >"$vm_dir/qemu.pid"
+
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  _vm_read_qemu_process_args() { echo 'qemu-system-x86_64 -m 4096 -object memory-backend-memfd,id=mem,size=4G,share=on'; }
+  _vm_read_virtiofsd_shared_dir() { echo "$RESIZE_TEST_WORKSPACE"; }
+  vm_memory_preflight() { echo "preflight:$1:${2:-}" >>"$calls"; }
+  _vm_shutdown_for_workspace_switch() { echo "shutdown:$1" >>"$calls"; }
+  vm_run_start() { echo "start:$3:$VM_MEMORY_GIB" >>"$calls"; }
+  _vm_wait_for_cloud_init() { echo cloud-init >>"$calls"; }
+  vm_ssh() {
+    echo guest-ready >>"$calls"
+    if [[ "${2:-}" == *awk* ]]; then echo 33554432; fi
+    return 0
+  }
+  _vm_ensure_rootless_docker() { return 0; }
+  _vm_install_guest_harness() { return 0; }
+
+  run vm_cmd_resize default 32
+  [ "$status" -eq 0 ]
+  grep -Fxq "preflight:32:12345" "$calls"
+  grep -Fxq "shutdown:$vm_dir" "$calls"
+  grep -Fxq "start:$workspace:32" "$calls"
+  grep -Fxq cloud-init "$calls"
+  [ "$(cat "$vm_dir/memory_gib")" = 32 ]
+  [ "$(cat "$vm_dir/disk.qcow2")" = overlay-data ]
+  [ "$(cat "$VM_DIR_BASE/base.qcow2")" = base-data ]
+  [ "$(cat "$vm_dir/seed.iso")" = seed-data ]
+  [ "$(cat "$vm_dir/id_vm_control")" = ssh-key-data ]
+  [ "$(cat "$vm_dir/recursion_policy")" = '0 2 1' ]
+}
+
+@test "managed resize resource refusal leaves the running profile untouched" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/resize-refusal"
+  local vm_dir="$VM_DIR_BASE/default" workspace="$BATS_TEST_TMPDIR/resize-workspace"
+  local calls="$BATS_TEST_TMPDIR/resize-refusal-calls"
+  export RESIZE_TEST_WORKSPACE="$workspace"
+  mkdir -p "$vm_dir" "$workspace"
+  : >"$VM_DIR_BASE/base.qcow2"
+  : >"$vm_dir/seed.iso"
+  printf 'overlay-data\n' >"$vm_dir/disk.qcow2"
+  printf '4\n' >"$vm_dir/memory_gib"
+  printf '0 0 0\n' >"$vm_dir/recursion_policy"
+  : >"$vm_dir/id_vm_control"
+  : >"$vm_dir/id_vm_control.pub"
+  : >"$vm_dir/known_hosts"
+  printf '12345\n' >"$vm_dir/qemu.pid"
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  _vm_read_qemu_process_args() { echo 'qemu-system-x86_64 -m 4096 -object memory-backend-memfd,id=mem,size=4G,share=on'; }
+  _vm_read_virtiofsd_shared_dir() { echo "$RESIZE_TEST_WORKSPACE"; }
+  vm_memory_preflight() { echo preflight >>"$calls"; return 1; }
+  _vm_shutdown_for_workspace_switch() { echo shutdown >>"$calls"; }
+  vm_run_start() { echo start >>"$calls"; }
+
+  run vm_cmd_resize default 32
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'memory budget'* ]]
+  [ "$(cat "$vm_dir/memory_gib")" = 4 ]
+  [ "$(cat "$vm_dir/disk.qcow2")" = overlay-data ]
+  [ "$(cat "$calls")" = preflight ]
+}
+
+@test "managed resize refuses an unclean shutdown before changing the requested RAM" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_DIR_BASE="$BATS_TEST_TMPDIR/resize-shutdown-refusal"
+  VM_YES=1
+  local vm_dir="$VM_DIR_BASE/default" workspace="$BATS_TEST_TMPDIR/resize-workspace"
+  local calls="$BATS_TEST_TMPDIR/resize-shutdown-calls"
+  export RESIZE_TEST_WORKSPACE="$workspace"
+  mkdir -p "$vm_dir" "$workspace"
+  : >"$VM_DIR_BASE/base.qcow2"
+  : >"$vm_dir/seed.iso"
+  printf 'overlay-data\n' >"$vm_dir/disk.qcow2"
+  printf '4\n' >"$vm_dir/memory_gib"
+  printf '0 0 0\n' >"$vm_dir/recursion_policy"
+  : >"$vm_dir/id_vm_control"
+  : >"$vm_dir/id_vm_control.pub"
+  : >"$vm_dir/known_hosts"
+  printf '12345\n' >"$vm_dir/qemu.pid"
+  vm_run_status() { echo 'running (PID: 12345)'; }
+  _vm_read_qemu_process_args() { echo 'qemu-system-x86_64 -m 4096 -object memory-backend-memfd,id=mem,size=4G,share=on'; }
+  _vm_read_virtiofsd_shared_dir() { echo "$RESIZE_TEST_WORKSPACE"; }
+  vm_memory_preflight() { echo preflight >>"$calls"; }
+  _vm_shutdown_for_workspace_switch() { echo shutdown >>"$calls"; return 1; }
+  vm_run_start() { echo start >>"$calls"; }
+
+  run vm_cmd_resize default 32
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'running VM and its overlay remain intact'* ]]
+  [ "$(cat "$vm_dir/memory_gib")" = 4 ]
+  [ "$(cat "$vm_dir/disk.qcow2")" = overlay-data ]
+  [ "$(cat "$calls")" = $'preflight\nshutdown' ]
+}
+
+@test "resize CLI rejects invalid profile, RAM, and arity before prerequisite checks" {
+  run "$REPO_ROOT/lab-vm" resize
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Usage: ./lab-vm resize <profile> <GiB>'* ]]
+  [[ "$output" != *'Checking VM prerequisites'* ]]
+
+  run "$REPO_ROOT/lab-vm" resize ../escape 8
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM profile names must start with a letter or digit'* ]]
+  [[ "$output" != *'Checking VM prerequisites'* ]]
+
+  run "$REPO_ROOT/lab-vm" resize default 0
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'whole number of GiB from 1 to 128'* ]]
+  [[ "$output" != *'Checking VM prerequisites'* ]]
+
+  run "$REPO_ROOT/lab-vm" resize default 129
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'whole number of GiB from 1 to 128'* ]]
+  [[ "$output" != *'Checking VM prerequisites'* ]]
+}
+
+@test "memory setup flag validates its value, cardinality, and command scope" {
+  run "$REPO_ROOT/lab-vm" up --memory 0
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--memory must be a whole number of GiB from 1 to 128'* ]]
+  [[ "$output" != *'Checking VM prerequisites'* ]]
+
+  run "$REPO_ROOT/lab-vm" up --memory
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'--memory requires a whole-number GiB value'* ]]
+
+  run "$REPO_ROOT/lab-vm" up --memory 8 --memory 16
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Pass --memory only once'* ]]
+
+  run "$REPO_ROOT/lab-vm" status --memory 8
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'only valid with up or run'* ]]
+
+  run "$REPO_ROOT/lab-vm" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'--memory <GiB>'* ]]
+}
+
+@test "KVM QEMU command passes host CPU features through to the guest" {
+  _vm_build_qemu_command /state demo /state/disk.qcow2 /state/virtiofs.sock 22222 kvm 1 ""
+  joined="$(printf '%s\n' "${VM_QEMU_CMD[@]}")"
+  [[ "$joined" == *$'-cpu\nhost'* ]]
+  [[ "$joined" == *"-enable-kvm"* ]]
+}
+
+@test "cloud-init mounts the matching workspace tag and provisions rootless Docker" {
+  run grep -F "mount -t virtiofs workspace /workspace" "$REPO_ROOT/lib/vm/cloud-init.sh"
+  [ "$status" -eq 0 ]
+  run grep -F "dockerd-rootless-setuptool.sh install" "$REPO_ROOT/lib/vm/cloud-init.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "base image is pinned and checksum verified" {
+  run grep -F "VM_IMAGE_SHA256=" "$REPO_ROOT/lib/vm/disk.sh"
+  [ "$status" -eq 0 ]
+  run grep -F "sha256sum --check --status" "$REPO_ROOT/lib/vm/disk.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "nested base image download uses the parent proxy while top-level download remains unchanged" {
+  local fakebin="$BATS_TEST_TMPDIR/curl-bin" args_file="$BATS_TEST_TMPDIR/curl-args" source_file="$BATS_TEST_TMPDIR/download.sh"
+  mkdir -p "$fakebin"
+  cat >"$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '<%s>\n' "$@" >"$CURL_ARGS_FILE"
+exit 23
+SH
+  chmod +x "$fakebin/curl"
+  cat >"$source_file" <<'SH'
+source "$LAB_DIR/lib/vm/disk.sh"
+log() { :; }
+vm_disk_create_base "$BASE_DIR/base.qcow2" 4
+SH
+
+  run env PATH="$fakebin:$PATH" LAB_DIR="$REPO_ROOT" BASE_DIR="$BATS_TEST_TMPDIR" \
+    CURL_ARGS_FILE="$args_file" VM_NESTED_LAUNCH=1 \
+    VM_IMAGE_URL=https://cloud-images.ubuntu.com/image.img bash "$source_file"
+  [ "$status" -ne 0 ]
+  grep -Fxq '<--proxy>' "$args_file"
+  grep -Fxq '<http://10.0.2.100:3128>' "$args_file"
+  grep -Fxq '<--noproxy>' "$args_file"
+  grep -Fxq '<>' "$args_file"
+
+  run env -u VM_NESTED_LAUNCH PATH="$fakebin:$PATH" LAB_DIR="$REPO_ROOT" \
+    BASE_DIR="$BATS_TEST_TMPDIR" CURL_ARGS_FILE="$args_file" \
+    VM_IMAGE_URL=https://cloud-images.ubuntu.com/image.img bash "$source_file"
+  [ "$status" -ne 0 ]
+  ! grep -Fxq '<--proxy>' "$args_file"
+  ! grep -Fxq '<--noproxy>' "$args_file"
+}
+
+@test "VM runtime installs OpenCode in the guest rather than building an agent container" {
+  run grep -F '_vm_install_guest_harness "$vm_dir"' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  [ "$status" -eq 0 ]
+  run grep -F 'npm install --global "@opencode/cli@$version"' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  [ "$status" -eq 0 ]
+  run grep -F 'exec opencode' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "fresh guest defaults to latest OpenCode while existing installs stay put until update" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  log() { echo "$*"; }
+  VM_OPENCODE_VERSION=not-a-version
+  run _vm_install_guest_harness /nonexistent
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"must be 'latest' or a pinned semantic version"* ]]
+
+  unset VM_OPENCODE_VERSION
+  installer="$(declare -f _vm_install_guest_harness)"
+  [[ "$installer" == *'${VM_OPENCODE_VERSION:-latest}'* ]]
+  [[ "$installer" == *'requested_version" == latest && -n "$current"'* ]]
+  [[ "$installer" == *'version="$current"'* ]]
+  [[ "$installer" == *'npm view @opencode/cli@latest version --json'* ]]
+  [[ "$installer" == *'npm install --global "@opencode/cli@$version"'* ]]
+  [[ "$installer" == *'.little-mester-config-hash'* ]]
+}
+
+@test "lab-vm exposes an interactive direct guest agent command" {
+  run grep -F 'vm_cmd_agent "$vm_name"' "$REPO_ROOT/lab-vm"
+  [ "$status" -eq 0 ]
+  run grep -F 'ssh -t' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "agent launch checks installed runtime and does not reinstall it" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  body="$(declare -f vm_cmd_agent)"
+  [[ "$body" == *'opencode --version'* ]]
+  [[ "$body" == *'Run ./lab-vm up'* ]]
+  [[ "$body" != *'_vm_install_guest_harness'* ]]
+  [[ "$body" == *'grep -Eo'* ]]
+  [[ "$body" != *'sub(/^v/, \\"'* ]]
+  [[ "$body" == *'/etc/opencode/opencode.json'* ]]
+  [[ "$body" != *'/etc/opencode/opencode/opencode.json'* ]]
+  [[ "$body" == *'/etc/opencode/plugins/little-mester-exit-confirm'* ]]
+  [[ "$body" == *'"app.exit":"none"'* ]]
+}
+
+@test "guest install copies config to the same path used by the launcher" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  installer="$(declare -f _vm_install_guest_harness)"
+  [[ "$installer" == *'tar -C "$LAB_DIR/agent/opencode" -cf - plugins'* ]]
+  [[ "$installer" == *'vm-opencode-config.py'* ]]
+  [[ "$installer" == *'--mcp-cwd /home/mester/.local/share/little-mester/mcp'* ]]
+  [[ "$installer" == *'tar -C "$config_dir" -cf - opencode.json'* ]]
+  [[ "$installer" == *'sudo tar -xf - -C /etc/opencode'* ]]
+}
+
+@test "lab-vm update supports default managed targets, one target, and explicit all" {
+  run "$REPO_ROOT/lab-vm" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'./lab-vm update [opencode|config|tools|docker|system ...]'* ]]
+  [[ "$output" == *'./lab-vm update --all'* ]]
+  [[ "$output" == *'default checks OpenCode, installed tools, and guest config/plugins'* ]]
+
+  run "$REPO_ROOT/lab-vm" update banana
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Unknown update target 'banana'"* ]]
+
+  run "$REPO_ROOT/lab-vm" update --all opencode
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Do not combine --all with individual update targets'* ]]
+
+  run "$REPO_ROOT/lab-vm" update --name ../escape
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM profile names must start with a letter or digit'* ]]
+}
+
+@test "guest update script checks before confirmation and scopes OS updates to explicit all" {
+  local updater="$REPO_ROOT/scripts/vm-update.sh"
+  grep -Fq 'apt-get -s upgrade' "$updater"
+  grep -Fq 'apt-get upgrade -y' "$updater"
+  grep -Fq 'Updates are available, but confirmation requires a terminal' "$updater"
+  grep -Fq 'No updates available for VM' "$updater"
+  grep -Fq 'VM overlay, base image, workspace and credential database were not replaced' "$updater"
+  grep -Fq 'OpenCode TUI is running in guest process' "$REPO_ROOT/scripts/vm-opencode-tui-check.py"
+  grep -Fq 'vm-opencode-tui-check.py' "$updater"
+  grep -Fq 'REFUSED: guest Docker workloads are running' "$updater"
+  grep -Fq 'REFUSED: could not verify guest Docker workloads' "$updater"
+  grep -Fq 'npm view @opencode/cli@latest version' "$updater"
+  grep -Fq 'npm install --global "@opencode/cli@$requested_opencode_version"' "$updater"
+}
+
+@test "guest compose teardown runs from the mounted workspace" {
+  run grep -F 'cd /workspace && docker -H' "$REPO_ROOT/lib/vm/lifecycle.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "cloud-init failure saves diagnostics before cleanup and preserves status" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  log() { echo "$*"; }
+  vm_ssh() {
+    case "$2" in
+      *"status --wait --long"*) echo 'status: done'; return 2 ;;
+      *"status --format json"*) echo '{"status":"done","extended_status":"degraded done","recoverable_errors":{"WARNING":["schema validation failed"]}}'; return 2 ;;
+      *"schema --system"*) echo 'schema error: unexpected configuration'; return 1 ;;
+      *) echo 'rootless setup completed' ;;
+    esac
+  }
+  vm_dir="$(mktemp -d)"
+  run _vm_wait_for_cloud_init "$vm_dir"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"exited with status 2"* ]]
+  [[ "$output" == *"schema error: unexpected configuration"* ]]
+  [[ "$output" == *"Preserve logs before --clean"* ]]
+  run cat "$vm_dir/provision.log"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rootless setup completed"* ]]
+  run cat "$vm_dir/cloud-init-status.json"
+  [[ "$output" == *'"recoverable_errors"'* ]]
+  run cat "$vm_dir/cloud-init-schema.log"
+  [[ "$output" == *"schema error"* ]]
+  rm -rf "$vm_dir"
+}
+
+@test "diagnostic failures do not mask cloud-init crash timeout or SSH status" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  log() { echo "$*"; }
+  vm_ssh() {
+    if [[ "$2" == *"status --wait --long"* ]]; then return "$TEST_CLOUD_STATUS"; fi
+    return 255
+  }
+  vm_dir="$(mktemp -d)"
+  for TEST_CLOUD_STATUS in 1 124 255; do
+    run _vm_wait_for_cloud_init "$vm_dir"
+    [ "$status" -eq "$TEST_CLOUD_STATUS" ]
+    [[ "$output" == *"exited with status $TEST_CLOUD_STATUS"* ]]
+  done
+  rm -rf "$vm_dir"
+}
+
+@test "cloud-init success does not fetch failure diagnostics" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  log() { :; }
+  vm_ssh() { [[ "$2" == *"cloud-init status"* ]]; }
+  vm_dir="$(mktemp -d)"
+  run _vm_wait_for_cloud_init "$vm_dir"
+  [ "$status" -eq 0 ]
+  [ ! -e "$vm_dir/provision.log" ]
+  rm -rf "$vm_dir"
+}
+
+mock_keyscan() {
+  mkdir -p "$1/bin"
+  export SCAN_ARGS="$1/scan-args"
+  cat > "$1/bin/ssh-keyscan" <<'MOCK'
+#!/bin/bash
+printf '%s\n' "$@" > "$SCAN_ARGS"
+printf '%s\n' "${SCAN_KEY:-|1|test|hash ssh-ed25519 AAAATEST}"
+echo 'mock scanner diagnostic' >&2
+exit "${SCAN_EXIT:-0}"
+MOCK
+  chmod +x "$1/bin/ssh-keyscan"
+  export PATH="$1/bin:$PATH"
+}
+
+@test "SSH readiness scans only ed25519 with bounded timeout and saves complete key" {
+  log_debug() { echo "$*"; }
+  vm_dir="$(mktemp -d)"
+  mock_keyscan "$vm_dir"
+  run _vm_scan_ssh_host_key "$vm_dir" 22222
+  [ "$status" -eq 0 ]
+  [ "$(cat "$SCAN_ARGS")" = $'-T\n2\n-t\ned25519\n-p\n22222\n-H\n127.0.0.1' ]
+  [ "$(cat "$vm_dir/known_hosts")" = '|1|test|hash ssh-ed25519 AAAATEST' ]
+  grep -q 'mock scanner diagnostic' "$vm_dir/ssh-keyscan.log"
+  rm -rf "$vm_dir"
+}
+
+@test "failed SSH scan logs status and never trusts partial output" {
+  log_debug() { echo "$*"; }
+  vm_dir="$(mktemp -d)"
+  mock_keyscan "$vm_dir"
+  echo 'previous trusted key' > "$vm_dir/known_hosts"
+  export SCAN_EXIT=124
+  run _vm_scan_ssh_host_key "$vm_dir" 22222
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"exited with status 124"* ]]
+  [ "$(cat "$vm_dir/known_hosts")" = 'previous trusted key' ]
+  rm -rf "$vm_dir"
+}
+
+@test "SSH scan with no ed25519 key does not claim readiness" {
+  log_debug() { echo "$*"; }
+  vm_dir="$(mktemp -d)"
+  mock_keyscan "$vm_dir"
+  export SCAN_KEY='|1|test|hash ssh-rsa AAAATEST'
+  run _vm_scan_ssh_host_key "$vm_dir" 22222
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no ed25519 key"* ]]
+  [ ! -f "$vm_dir/known_hosts" ]
+  rm -rf "$vm_dir"
+}
+
+@test "agent Dockerfile prints sanitized npm diagnostics when OpenCode install fails" {
+  dockerfile="$REPO_ROOT/agent/Dockerfile"
+  grep -Fq 'npm install -g --ignore-scripts @opencode/cli || {' "$dockerfile"
+  grep -Fq '/root/.npm/_logs/*-debug-0.log' "$dockerfile"
+  grep -Fq 'grep -viE '\''authorization|_auth|token|password'\''' "$dockerfile"
+  grep -Fq 'tail -n 160' "$dockerfile"
+  grep -Fq 'exit "$status"' "$dockerfile"
+  grep -Fq 'node /tmp/diagnose-opencode-install.cjs "$npm_root"' "$dockerfile"
+  grep -Fq 'node ./postinstall.mjs' "$dockerfile"
+  grep -Fq 'platform package files and postinstall source are printed above' "$dockerfile"
+  [[ -f "$REPO_ROOT/agent/diagnose-opencode-install.cjs" ]]
+  grep -Fq 'postinstall_source_begin' "$REPO_ROOT/agent/diagnose-opencode-install.cjs"
+  grep -Fq 'exports: pkg.exports' "$REPO_ROOT/agent/diagnose-opencode-install.cjs"
+}
+
+@test "rootless Docker startup diagnostics are run before startup failure cleanup" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  diagnostics="$(declare -f _vm_rootless_diagnostics)"
+  [[ "$diagnostics" == *"loginctl show-user mester -p Linger -p State -p RuntimePath"* ]]
+  [[ "$diagnostics" == *"systemctl --user is-enabled docker"* ]]
+  [[ "$diagnostics" == *"cat -n /etc/subuid /etc/subgid"* ]]
+  [[ "$diagnostics" == *"cat /home/mester/.config/docker/daemon.json"* ]]
+  [[ "$diagnostics" == *"systemctl --user show docker -p Environment"* ]]
+  [[ "$diagnostics" == *"getsubids mester"* ]]
+  [[ "$diagnostics" == *"journalctl --user -u docker -b"* ]]
+  [[ "$diagnostics" == *'rootless-diagnostics.log'* ]]
+  body="$(declare -f vm_cmd_up)"
+  [[ "$body" == *'_vm_rootless_diagnostics "$vm_dir"'* ]]
+  [[ "$body" == *'ERROR: guest Docker is not running rootless'* ]]
+  ensure="$(declare -f _vm_ensure_rootless_docker)"
+  [[ "$ensure" == *'vm_cloud_init_subid_script | vm_ssh'* ]]
+  [[ "$ensure" == *'/home/mester/.config/docker/daemon.json'* ]]
+  [[ "$ensure" == *'/home/mester/.config/systemd/user/docker.service.d/proxy.conf'* ]]
+  [[ "$ensure" == *'DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS=--cidr=10.0.3.0/24'* ]]
+  [[ "$ensure" == *'Environment=HTTP_PROXY=http://10.0.2.100:3128'* ]]
+  [[ "$ensure" == *'systemctl --user restart docker'* ]]
+}
+
+@test "workspace-driven CLI offers a one-command VM and agent launch" {
+  run "$REPO_ROOT/lab-vm" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'./lab-vm <workspace>'* ]]
+  [[ "$output" == *'./lab-vm run [workspace] [--name <profile>]'* ]]
+  grep -Fq 'VM_LAUNCH_AFTER_UP=1 vm_cmd_up "$vm_name" "$VM_WS_ARG"' "$REPO_ROOT/lab-vm"
+  grep -Fq 'vm_cmd_agent "$vm_name"' "$REPO_ROOT/lab-vm"
+  grep -Fq 'vm_cmd_agent_with_browser_auth "$vm_name"' "$REPO_ROOT/lab-vm"
+  grep -Fq 'if [[ -d "$cmd" || "$cmd" == */* ]]' "$REPO_ROOT/lab-vm"
+}
+
+@test "workspace shorthand and run validate dangerous paths before host prerequisites" {
+  if bats_vm_has_guest_identity; then
+    skip "host-mode workspace validation order cannot be exercised with a persisted guest identity"
+  fi
+
+  run "$REPO_ROOT/lab-vm" /
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Cannot mount filesystem root (/)'* ]]
+
+  run "$REPO_ROOT/lab-vm" run --workspace /
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Cannot mount filesystem root (/)'* ]]
+}
+
+@test "named run profile is validated and selected for both workspace forms" {
+  if bats_vm_has_guest_identity; then
+    skip "host-mode workspace validation order cannot be exercised with a persisted guest identity"
+  fi
+
+  run "$REPO_ROOT/lab-vm" run / --name ../escape
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'VM profile names must start with a letter or digit'* ]]
+
+  run "$REPO_ROOT/lab-vm" run --workspace / --name launcher-smoke
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Cannot mount filesystem root (/)'* ]]
+
+  run "$REPO_ROOT/lab-vm" / --name launcher-smoke
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Cannot mount filesystem root (/)'* ]]
+
+  run "$REPO_ROOT/lab-vm" run / --name launcher-smoke --name duplicate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'Pass --name only once'* ]]
+}
+
+@test "switching a running VM workspace requires explicit confirmation unless yes is set" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_YES=0
+  run _vm_confirm_workspace_switch /work/first /work/second
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'requires an interactive confirmation'* ]]
+
+  VM_YES=1
+  run _vm_confirm_workspace_switch /work/first /work/second
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'Auto-accept enabled'* ]]
+}
+
+@test "workspace switch cleanly powers off the guest and preserves the VM overlay" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  VM_SWITCH_STATUS=running
+  VM_SWITCH_STOP_MARKER="$BATS_TEST_TMPDIR/vm-switch-stop-called"
+  VM_SWITCH_OVERLAY="$BATS_TEST_TMPDIR/disk.qcow2"
+  export VM_SWITCH_STATUS VM_SWITCH_STOP_MARKER VM_SWITCH_OVERLAY
+  printf 'valuable overlay state\n' >"$VM_SWITCH_OVERLAY"
+
+  vm_ssh() {
+    [[ "$*" == *'sudo systemctl poweroff'* ]]
+    VM_SWITCH_STATUS=stopped
+  }
+  vm_run_status() {
+    echo "$VM_SWITCH_STATUS"
+    [[ "$VM_SWITCH_STATUS" == running ]]
+  }
+  vm_run_stop() { touch "$VM_SWITCH_STOP_MARKER"; }
+
+  run _vm_shutdown_for_workspace_switch "$BATS_TEST_TMPDIR/vm-switch"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'Requesting a clean guest shutdown'* ]]
+  [ -e "$VM_SWITCH_STOP_MARKER" ]
+  [ "$(cat "$VM_SWITCH_OVERLAY")" = 'valuable overlay state' ]
+}
+
+@test "workspace switch path preserves the overlay and refuses an unverified active mount" {
+  source "$REPO_ROOT/lib/vm/lifecycle.sh"
+  body="$(declare -f vm_cmd_up)"
+  [[ "$body" == *'_vm_read_virtiofsd_shared_dir'* ]]
+  [[ "$body" == *'_vm_confirm_workspace_switch'* ]]
+  [[ "$body" == *'_vm_shutdown_for_workspace_switch'* ]]
+  [[ "$body" == *'running_workspace" == "$workspace"'* ]]
+
+  switch_body="$(declare -f _vm_shutdown_for_workspace_switch)"
+  [[ "$switch_body" == *'vm_run_stop "$vm_dir"'* ]]
+  [[ "$switch_body" != *'vm_disk_delete'* ]]
+  [[ "$switch_body" != *'vm_ssh_clean'* ]]
+}

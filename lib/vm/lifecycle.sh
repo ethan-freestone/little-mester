@@ -1,0 +1,2045 @@
+#!/usr/bin/env bash
+# lifecycle.sh — High-level VM lifecycle commands for ./lab.
+#
+# Integrates with the main lab script and provides:
+#   vm up [vm_name]     — Provision and start the VM (idempotent)
+#   vm status [vm_name] — Check VM state
+#   vm ssh [vm_name]    — SSH into the VM
+#   vm down [vm_name]   — Stop and remove the VM
+#   vm base [vm_name]   — Create the base image (one-time)
+#
+# All commands are idempotent: re-running does not duplicate VMs,
+# disks, or networks.
+#
+# Usage: sourced from lab; entry points called as vm_cmd_<action> <args>
+
+set -euo pipefail
+
+: "${LAB_DIR:=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")/..")" && pwd)}"
+source "$LAB_DIR/lib/state.sh"
+VM_STATE_DIR="${VM_STATE_DIR:-$MESTER_STATE_DIR}"
+if [[ -n "${VM_DIR_BASE+x}" ]]; then
+  : # Explicit profile-root overrides are used by recursion and isolated tests.
+else
+  VM_DIR_BASE="$VM_STATE_DIR/vm"
+fi
+
+# Source library functions
+source "$LAB_DIR/lib/vm/cloud-init.sh"
+source "$LAB_DIR/lib/vm/disk.sh"
+source "$LAB_DIR/lib/vm/ssh.sh"
+source "$LAB_DIR/lib/vm/runner.sh"
+source "$LAB_DIR/lib/vm/recursion.sh"
+
+_vm_auth_forward_validate_config() {
+  case "${VM_AUTH_FORWARD:-0}" in
+    0|1) return 0 ;;
+    *) echo 'REFUSED: VM_AUTH_FORWARD must be 0 or 1.' >&2; return 1 ;;
+  esac
+}
+
+_vm_auth_forward_enabled() {
+  [[ "${VM_AUTH_FORWARD:-0}" == 1 ]]
+}
+
+_vm_auth_escrow_resolve() {
+  local vm_dir="${1:-}" requested parent parent_real name default_path mode uid workspace repo resolved
+  uid="$(id -u)"
+  default_path="$VM_STATE_DIR/secrets/openai-auth.json"
+  requested="${VM_AUTH_ESCROW_FILE:-$default_path}"
+  [[ "$requested" == /* ]] || {
+    echo 'REFUSED: VM_AUTH_ESCROW_FILE must be an absolute path outside the workspace.' >&2
+    return 1
+  }
+  parent="$(dirname -- "$requested")"
+  name="$(basename -- "$requested")"
+  [[ -n "$name" && "$name" != . && "$name" != .. ]] || {
+    echo 'REFUSED: VM credential escrow path must name a regular file.' >&2
+    return 1
+  }
+  if [[ ! -e "$parent" ]]; then
+    [[ "$requested" == "$default_path" ]] || {
+      echo 'REFUSED: custom VM credential escrow directory does not exist.' >&2
+      return 1
+    }
+    [[ ! -L "$VM_STATE_DIR" ]] || {
+      echo 'REFUSED: VM state directory is a symlink; refusing credential escrow.' >&2
+      return 1
+    }
+    install -d -m 700 -- "$parent" || return 1
+  fi
+  [[ -d "$parent" && ! -L "$parent" ]] || {
+    echo 'REFUSED: VM credential escrow parent must be a real directory.' >&2
+    return 1
+  }
+  parent_real="$(realpath "$parent")" || return 1
+  [[ "$parent_real" == "$parent" ]] || {
+    echo 'REFUSED: VM credential escrow path must not traverse symlinked/non-canonical directories.' >&2
+    return 1
+  }
+  [[ "$(stat -c '%u' "$parent")" == "$uid" ]] || {
+    echo 'REFUSED: VM credential escrow directory is not owned by the current user.' >&2
+    return 1
+  }
+  mode="$(stat -c '%a' "$parent")" || return 1
+  (( (8#$mode & 077) == 0 )) || {
+    echo 'REFUSED: VM credential escrow directory must not be accessible by group or other users.' >&2
+    return 1
+  }
+  resolved="$parent_real/$name"
+  if [[ -e "$resolved" || -L "$resolved" ]]; then
+    [[ -f "$resolved" && ! -L "$resolved" ]] || {
+      echo 'REFUSED: VM credential escrow must be a regular file, not a symlink.' >&2
+      return 1
+    }
+    [[ "$(stat -c '%u' "$resolved")" == "$uid" ]] || {
+      echo 'REFUSED: VM credential escrow file is not owned by the current user.' >&2
+      return 1
+    }
+    mode="$(stat -c '%a' "$resolved")" || return 1
+    (( (8#$mode & 077) == 0 )) || {
+      echo 'REFUSED: VM credential escrow file must not be accessible by group or other users.' >&2
+      return 1
+    }
+  fi
+  if [[ -n "$vm_dir" && -f "$vm_dir/workspace" && ! -L "$vm_dir/workspace" ]]; then
+    workspace="$(realpath "$(cat "$vm_dir/workspace")" 2>/dev/null || true)"
+    repo="$(realpath "$LAB_DIR" 2>/dev/null || printf '%s' "$LAB_DIR")"
+    for resolved in "$workspace" "$repo"; do
+      [[ -n "$resolved" ]] || continue
+      [[ "$parent_real/$name" != "$resolved" && "$parent_real/$name" != "$resolved/"* ]] || {
+        echo 'REFUSED: VM credential escrow must be outside the selected workspace and Git checkout.' >&2
+        return 1
+      }
+    done
+  fi
+  VM_AUTH_ESCROW_PATH="$parent_real/$name"
+}
+
+_vm_auth_import_if_needed() {
+  local vm_dir="${1:?VM profile directory required}" marker marker_tmp
+  _vm_auth_forward_enabled || return 0
+  _vm_auth_forward_validate_config || return 1
+  _vm_auth_escrow_resolve "$vm_dir" || return 1
+  marker="$vm_dir/auth-forward-imported"
+  if [[ -e "$marker" || -L "$marker" ]]; then
+    [[ -f "$marker" && ! -L "$marker" && "$(stat -c '%u' "$marker")" == "$(id -u)" ]] || {
+      echo 'REFUSED: VM credential-import marker is unsafe; refusing to overwrite guest auth state.' >&2
+      return 1
+    }
+    return 0
+  fi
+  [[ -f "$VM_AUTH_ESCROW_PATH" && ! -L "$VM_AUTH_ESCROW_PATH" ]] || {
+    echo 'REFUSED: VM credential forwarding is enabled but the host escrow file is missing.' >&2
+    return 1
+  }
+  if ! vm_ssh "$vm_dir" 'opencode auth import' <"$VM_AUTH_ESCROW_PATH" >/dev/null 2>&1; then
+    echo 'Credential import failed; no credential contents were logged.' >&2
+    return 1
+  fi
+  marker_tmp="$(mktemp "$vm_dir/.auth-forward-imported.XXXXXX")" || return 1
+  (umask 077; printf 'v1\n' >"$marker_tmp") || { rm -f -- "$marker_tmp"; return 1; }
+  chmod 600 "$marker_tmp" && mv -f -- "$marker_tmp" "$marker" || {
+    rm -f -- "$marker_tmp"
+    echo 'Credential import succeeded but its private completion marker could not be saved.' >&2
+    return 1
+  }
+  echo 'Host credential escrow imported over the VM control channel; credential contents were not logged.'
+}
+
+_vm_auth_export_to_escrow() {
+  local vm_dir="${1:?VM profile directory required}" status temporary
+  _vm_auth_forward_validate_config || return 1
+  _vm_auth_forward_enabled || return 0
+  _vm_auth_escrow_resolve "$vm_dir" || return 1
+  status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status='stopped'
+  if [[ "$status" != running* && ! -e "$vm_dir/disk.qcow2" && ! -L "$vm_dir/disk.qcow2" ]]; then
+    echo 'No guest overlay remains; credential export is not needed for an already-removed profile.'
+    return 0
+  fi
+  [[ -f "$vm_dir/disk.qcow2" && ! -L "$vm_dir/disk.qcow2" ]] || {
+    echo 'REFUSED: VM overlay is missing or unsafe; refusing credential export or teardown.' >&2
+    return 1
+  }
+  [[ "$status" == running* ]] || {
+    echo 'REFUSED: credential escrow export requires the guest to be running; the VM overlay was preserved.' >&2
+    return 1
+  }
+  temporary="$(mktemp "${VM_AUTH_ESCROW_PATH%/*}/.opencode-auth.XXXXXX")" || return 1
+  chmod 600 "$temporary" || { rm -f -- "$temporary"; return 1; }
+  if ! vm_ssh "$vm_dir" 'opencode auth export openai' >"$temporary" 2>/dev/null; then
+    rm -f -- "$temporary"
+    echo 'Credential export failed; refusing destructive teardown and preserving the current escrow.' >&2
+    return 1
+  fi
+  if ! python3 - "$temporary" "$VM_AUTH_ESCROW_PATH" <<'PY'
+import json
+import os
+import stat
+import sys
+
+source, target = sys.argv[1:]
+try:
+    metadata = os.stat(source, follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+        raise ValueError("unsafe temporary export")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise ValueError("temporary export permissions are too broad")
+    with open(source, "r", encoding="utf-8") as stream:
+        payload = json.load(stream)
+    if not isinstance(payload, (dict, list)) or not payload:
+        raise ValueError("empty or unsupported export")
+    with open(source, "rb") as stream:
+        os.fsync(stream.fileno())
+    os.chmod(source, 0o600)
+    os.replace(source, target)
+    directory = os.open(os.path.dirname(target), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+except Exception:
+    raise SystemExit(1)
+PY
+  then
+    rm -f -- "$temporary"
+    echo 'Credential export was empty, invalid, or could not be saved atomically; refusing destructive teardown.' >&2
+    return 1
+  fi
+  echo 'Refreshed credentials were atomically saved to the private host escrow; credential contents were not logged.'
+}
+
+# ─── Logging helpers (sourced from lab-vm's main script) ────────────
+# If log() is not defined by the caller, provide no-op stubs so
+# library files can safely call them without errors.
+: "${log:=echo}"
+: "${log_verbose:=:}"
+: "${log_debug:=:}"
+
+# ─── Resolve VM name and directory ──────────────────────────────────
+_vm_resolve() {
+  local name="${1:-default}"
+  local vm_dir="$VM_DIR_BASE/$name"
+  echo "$vm_dir"
+}
+
+# Capture first-boot diagnostics before lab-vm's failure trap stops the guest.
+_vm_wait_for_cloud_init() {
+  local vm_dir="$1" rc
+  log "Waiting for cloud-init (guest proxy 10.0.2.100:3128 via host loopback proxy)..."
+  if vm_ssh "$vm_dir" "sudo timeout ${VM_PROVISION_TIMEOUT:-1800} cloud-init status --wait --long"; then
+    return 0
+  else
+    rc=$?
+    log "ERROR: cloud-init status/SSH exited with status $rc (done can still include recoverable errors)."
+    # A final output tail can omit early schema warnings. Keep structured status
+    # and schema diagnostics too; do not turn exit 2 into unconditional success.
+    vm_ssh "$vm_dir" 'sudo cloud-init status --format json' > "$vm_dir/cloud-init-status.json" 2>&1 || true
+    vm_ssh "$vm_dir" 'sudo cloud-init schema --system' > "$vm_dir/cloud-init-schema.log" 2>&1 || true
+    cat "$vm_dir/cloud-init-status.json" "$vm_dir/cloud-init-schema.log"
+    vm_ssh "$vm_dir" 'sudo tail -200 /var/log/cloud-init-output.log' > "$vm_dir/provision.log" 2>&1 || true
+    cat "$vm_dir/provision.log"
+    log "ERROR: VM readiness blocked; diagnostics saved to $vm_dir/{cloud-init-status.json,cloud-init-schema.log,provision.log}. Preserve logs before --clean deletes the overlay."
+    return "$rc"
+  fi
+}
+
+_vm_install_guest_harness() (
+  local vm_dir="$1"
+  local version="${VM_OPENCODE_VERSION:-latest}"
+  local config_hash config_dir
+  [[ "$version" == latest || "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    log "ERROR: VM_OPENCODE_VERSION must be 'latest' or a pinned semantic version (for example 2.2.0)"
+    return 2
+  }
+  config_hash="$(
+    {
+      find "$LAB_DIR/agent/opencode" -type f \( -name opencode.json -o -path '*/plugins/*' \) -print0
+      printf '%s\0' "$LAB_DIR/little-mester-mcp/package.json" \
+        "$LAB_DIR/little-mester-mcp/package-lock.json" "$LAB_DIR/little-mester-mcp/tsconfig.json" \
+        "$LAB_DIR/scripts/vm-opencode-config.py"
+      find "$LAB_DIR/little-mester-mcp/src" -type f -print0
+    } | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+  )" || return $?
+  config_dir="$(mktemp -d "${TMPDIR:-/tmp}/lab-vm-opencode-config.XXXXXX")" || return 1
+  trap 'rm -rf -- "$config_dir"' EXIT
+  python3 "$LAB_DIR/scripts/vm-opencode-config.py" \
+    --input "$LAB_DIR/agent/opencode/opencode.json" \
+    --output "$config_dir/opencode.json" \
+    --mcp-cwd /home/mester/.local/share/little-mester/mcp || return $?
+
+  log "Ensuring direct guest OpenCode harness (requested version: $version)..."
+  vm_ssh "$vm_dir" "sudo bash -s -- '$version'" <<'GUEST_OPENCODE_INSTALL'
+set -euo pipefail
+requested_version="$1"
+. /etc/profile.d/mester.sh
+export DEBIAN_FRONTEND=noninteractive
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo apt-get install -y -qq nodejs npm
+fi
+node_major="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
+if [[ ! "$node_major" =~ ^[0-9]+$ ]] || (( node_major < 20 )); then
+  echo "Installing supported Node.js 22 runtime (current major: ${node_major:-unknown})."
+  npm install --global n
+  n 22
+  export PATH="/usr/local/bin:$PATH"
+  hash -r
+fi
+node_major="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
+[[ "$node_major" =~ ^[0-9]+$ ]] && (( node_major >= 20 )) || {
+  echo "Node.js 20 or newer is required by the Little Mester MCP server (found $(node --version 2>&1))." >&2
+  exit 1
+}
+current="$(opencode --version 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/) {sub(/^v/, "", $i); print $i; exit}}' || true)"
+if [[ "$requested_version" == latest && -n "$current" ]]; then
+  # `latest` is the fresh-install default, not an implicit upgrade channel.
+  # Existing guests are upgraded only by the explicit `lab-vm update` command.
+  version="$current"
+elif [[ "$requested_version" == latest ]]; then
+  version="$(npm view @opencode/cli@latest version --json | tr -d '"[:space:]')"
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Unexpected OpenCode package version: $version" >&2; exit 1; }
+else
+  version="$requested_version"
+fi
+if [[ "$current" != "$version" ]]; then
+  sudo env HTTP_PROXY="$HTTP_PROXY" HTTPS_PROXY="$HTTPS_PROXY" \
+    http_proxy="$http_proxy" https_proxy="$https_proxy" \
+    npm install --global "@opencode/cli@$version"
+fi
+installed="$(opencode --version | awk '{for (i=1; i<=NF; i++) if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/) {sub(/^v/, "", $i); print $i; exit}}')"
+test "$installed" = "$version"
+install -d -o root -g root -m 0755 /etc/opencode /etc/opencode/plugins
+GUEST_OPENCODE_INSTALL
+
+  if ! tar -C "$LAB_DIR/agent/opencode" -cf - plugins | \
+    vm_ssh "$vm_dir" "sudo tar -xf - -C /etc/opencode"; then
+    log "ERROR: failed to transfer guest OpenCode config/plugins"
+    return 1
+  fi
+  if ! tar -C "$config_dir" -cf - opencode.json | \
+    vm_ssh "$vm_dir" 'sudo tar -xf - -C /etc/opencode'; then
+    log 'ERROR: failed to transfer the rendered V2 guest OpenCode configuration.'
+    return 1
+  fi
+
+  vm_ssh "$vm_dir" 'sudo install -d -o mester -g mester -m 0700 /home/mester/.local/share/little-mester/mcp' || {
+    log 'ERROR: could not prepare the guest-private MCP runtime directory.'
+    return 1
+  }
+  if ! tar -C "$LAB_DIR/little-mester-mcp" -cf - package.json package-lock.json tsconfig.json src | \
+    vm_ssh "$vm_dir" 'sudo tar -xf - -C /home/mester/.local/share/little-mester/mcp && sudo chown -R mester:mester /home/mester/.local/share/little-mester/mcp'; then
+    log 'ERROR: failed to transfer the Little Mester MCP source into the guest-private runtime.'
+    return 1
+  fi
+  if vm_ssh "$vm_dir" "sudo test -r /etc/opencode/.little-mester-config-hash && test \"\$(sudo cat /etc/opencode/.little-mester-config-hash)\" = '$config_hash' && sudo -u mester test -r /home/mester/.local/share/little-mester/mcp/dist/mcp-server.js"; then
+    log 'Guest Node/MCP dependency image is current; skipping npm install/build.'
+  else
+    vm_ssh "$vm_dir" "sudo -u mester env HOME=/home/mester HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128 bash -c 'cd /home/mester/.local/share/little-mester/mcp && npm ci && npm run build'" || {
+      log 'ERROR: guest Node.js dependency install or Little Mester MCP build failed.'
+      return 1
+    }
+  fi
+
+  vm_ssh "$vm_dir" "sudo chown -R root:root /etc/opencode && sudo chmod -R a+rX /etc/opencode && printf '%s\\n' '$config_hash' | sudo tee /etc/opencode/.little-mester-config-hash >/dev/null && sudo -iu mester opencode --version && sudo -iu mester node --version && sudo -iu mester test -r /home/mester/.local/share/little-mester/mcp/dist/mcp-server.js"
+)
+
+_vm_install_guest_recursion_identity() {
+  local vm_dir="$1" depth="${VM_GUEST_RECURSION_DEPTH:-0}" maximum="${VM_EFFECTIVE_MAX_DEPTH:-0}"
+  [[ "$depth" =~ ^(0|[1-9][0-9]*)$ && "$maximum" =~ ^(0|[1-9][0-9]*)$ ]] || {
+    log 'ERROR: refusing to install an invalid guest recursion identity.'
+    return 1
+  }
+  (( depth <= VM_RECURSION_MAX_SUPPORTED && maximum <= VM_RECURSION_MAX_SUPPORTED && depth <= maximum )) || {
+    log 'ERROR: refusing to install a guest recursion identity outside the supported policy.'
+    return 1
+  }
+  vm_ssh "$vm_dir" "sudo bash -s -- '$depth' '$maximum'" <<'GUEST_RECURSION_IDENTITY'
+set -euo pipefail
+depth="$1"
+maximum="$2"
+[[ "$depth" =~ ^(0|[1-9][0-9]*)$ && "$maximum" =~ ^(0|[1-9][0-9]*)$ ]] || exit 2
+(( depth <= 32 && maximum <= 32 && depth <= maximum )) || exit 2
+policy_tmp="/etc/.lab-vm-recursion.$$"
+profile_tmp="/etc/profile.d/.lab-vm-recursion.sh.$$"
+trap 'rm -f -- "$policy_tmp" "$profile_tmp"' EXIT
+printf '%s %s\n' "$depth" "$maximum" >"$policy_tmp"
+cat >"$profile_tmp" <<'PROFILE_IDENTITY'
+if [ -r /etc/lab-vm-recursion ]; then
+  IFS=' ' read -r LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH < /etc/lab-vm-recursion
+  export LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH
+fi
+PROFILE_IDENTITY
+chown root:root "$policy_tmp" "$profile_tmp"
+chmod 0644 "$policy_tmp" "$profile_tmp"
+mv -f -- "$policy_tmp" /etc/lab-vm-recursion
+mv -f -- "$profile_tmp" /etc/profile.d/lab-vm-recursion.sh
+GUEST_RECURSION_IDENTITY
+}
+
+_vm_rootless_diagnostics() {
+  local vm_dir="$1" uid
+  uid="$(id -u)"
+  log "Capturing rootless Docker startup diagnostics before VM cleanup..."
+  vm_ssh "$vm_dir" "sudo bash -s -- '$uid'" <<'GUEST_DIAGNOSTICS' 2>&1 | tee "$vm_dir/rootless-diagnostics.log" || true
+set +e
+uid="$1"
+echo '=== identity and runtime ==='
+id; id mester
+loginctl show-user mester -p Linger -p State -p RuntimePath
+systemctl status "user@${uid}.service" --no-pager
+ls -ld "/run/user/${uid}" "/run/user/${uid}/bus" "/run/user/${uid}/docker.sock"
+test -S "/run/user/${uid}/docker.sock"; echo "docker_socket_status=$?"
+echo '=== subordinate ID configuration ==='
+getent passwd mester
+getent group mester
+stat -c '%a %U:%G %n' /etc/subuid /etc/subgid
+cat -n /etc/subuid /etc/subgid
+if command -v getsubids >/dev/null 2>&1; then getsubids mester; else echo 'getsubids command unavailable'; fi
+echo '=== Docker proxy configuration ==='
+cat /home/mester/.config/docker/daemon.json
+cat /home/mester/.config/systemd/user/docker.service.d/proxy.conf
+sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" systemctl --user show docker -p Environment
+echo '=== rootless Docker user service ==='
+sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" systemctl --user is-enabled docker; echo "docker_enabled_status=$?"
+sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" systemctl --user status docker --no-pager
+sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" systemctl --user cat docker
+echo '=== recent Docker user-service journal ==='
+sudo -iu mester env "XDG_RUNTIME_DIR=/run/user/${uid}" "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" journalctl --user -u docker -b --no-pager -n 100
+echo '=== linger and enablement files ==='
+loginctl show-user mester -p Linger -p RuntimePath
+ls -la /home/mester/.config/systemd/user/default.target.wants/
+GUEST_DIAGNOSTICS
+  log "Rootless Docker diagnostics saved to $vm_dir/rootless-diagnostics.log"
+}
+
+_vm_ensure_rootless_docker() {
+  local vm_dir="$1" uid
+  uid="$(id -u)"
+  vm_cloud_init_subid_script | vm_ssh "$vm_dir" "sudo bash -s -- mester" || return $?
+  vm_ssh "$vm_dir" "sudo bash -s -- '$uid'" <<'GUEST_DOCKER_PROXY' || return $?
+set -euo pipefail
+uid="$1"
+install -d -o mester -g mester /home/mester/.config/docker
+install -d -o mester -g mester /home/mester/.config/systemd/user/docker.service.d
+cat > /home/mester/.config/docker/daemon.json <<'DOCKER_PROXY'
+{
+  "proxies": {
+    "http-proxy": "http://10.0.2.100:3128",
+    "https-proxy": "http://10.0.2.100:3128",
+    "no-proxy": "localhost,127.0.0.1,10.0.2.100"
+  }
+}
+DOCKER_PROXY
+chown mester:mester /home/mester/.config/docker/daemon.json
+cat > /home/mester/.config/systemd/user/docker.service.d/proxy.conf <<'DOCKER_SERVICE_PROXY'
+[Service]
+Environment=HTTP_PROXY=http://10.0.2.100:3128
+Environment=HTTPS_PROXY=http://10.0.2.100:3128
+Environment=NO_PROXY=localhost,127.0.0.1,10.0.2.100
+Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS=--cidr=10.0.3.0/24
+DOCKER_SERVICE_PROXY
+chown mester:mester /home/mester/.config/systemd/user/docker.service.d/proxy.conf
+GUEST_DOCKER_PROXY
+  vm_ssh "$vm_dir" "sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user daemon-reload && sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user enable docker && sudo -iu mester env XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user restart docker"
+}
+
+# ─── vm up: provision and start VM ──────────────────────────────────
+vm_cmd_up() {
+  local vm_name="${1:-default}"
+  local workspace="${2:-}"
+  local vm_dir running_workspace virtiofsd_pid qemu_pid qemu_args status virtiofs_sock
+  _vm_auth_forward_validate_config || die 'Invalid credential-forwarding configuration.'
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ ! -L "$vm_dir" ]] || die "VM profile directory must not be a symlink: $vm_dir"
+
+  vm_memory_profile_load "$vm_dir" "${VM_MEMORY_GIB:-4}" || die 'Could not load VM memory configuration; refusing to start.'
+
+  # Check prerequisites
+  if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    die "qemu-system-x86_64 not found. Install QEMU packages (qemu-system-x86, qemu-utils, qemu-arch-extra)."
+  fi
+  if ! command -v virtiofsd >/dev/null 2>&1; then
+    die "virtiofsd not found. Install libvirt-daemon or spice-vdagent."
+  fi
+
+  local base_disk="$VM_DIR_BASE/base.qcow2"
+  local overlay_disk="$vm_dir/disk.qcow2"
+
+  echo "=== VM Up: $vm_name ==="
+  echo "VM directory: $vm_dir"
+
+  # ── 1. Workspace resolution & validation (A3) ───────────────────
+  # Use the workspace passed from lab-vm (set via --workspace flag).
+  # If no workspace is specified, default to the current working dir.
+  # An empty workspace would break virtiofsd, so we must always have
+  # a valid directory.
+  workspace="${workspace:-$(pwd)}"
+  # Resolve to absolute path
+  workspace="$(realpath "$workspace" 2>/dev/null || echo "$workspace")"
+
+  # Use the local check_workspace (from lab-vm) which properly checks
+  # VM_UNSAFE_RECURSE — not the UNSAFE_RECURSE from ./lab.
+  source "$LAB_DIR/lib/vm/prereqs.sh" 2>/dev/null || true
+  # check_workspace is defined in lab-vm's main script; if sourced
+  # from lifecycle.sh standalone it may not be available. Define a
+  # minimal fallback that matches lab-vm's behavior:
+  if ! declare -f check_workspace >/dev/null 2>&1; then
+    check_workspace() {
+      local ws="$1"
+      [[ -d "$ws" ]] || { echo "REFUSED: Not a directory: $ws" >&2; exit 1; }
+      ws="$(realpath "$ws")"
+      [[ "$ws" != "/" ]] || { echo "REFUSED: Cannot mount filesystem root (/)" >&2; exit 1; }
+      [[ "$ws" != "$HOME" ]] || { echo "REFUSED: Cannot mount entire home directory ($HOME)" >&2; exit 1; }
+      [[ -O "$ws" ]] || { echo "REFUSED: Workspace directory must be owned by you" >&2; exit 1; }
+      if [[ "$ws" == "$LAB_DIR" || "$LAB_DIR" == "$ws"/* ]]; then
+        if [[ "${VM_UNSAFE_RECURSE:-0}" != "1" ]]; then
+          echo "REFUSED: Workspace path would expose the little-mester repo itself. Use --unsafe-recurse to override." >&2
+          exit 1
+        fi
+      fi
+      VM_WORKSPACE="$ws"
+      local sensitive_paths=(
+        "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.config" "$HOME/.aws"
+        "$HOME/.kube" "$HOME/.local" "$HOME/.bashrc" "$HOME/.zshrc"
+      )
+      for s in "${sensitive_paths[@]}"; do
+        if [[ "$ws" == "$s" || "$ws" == "$s"/* || "$s" == "$ws"/* ]]; then
+          echo "REFUSED: Path overlaps with sensitive system/credential directory: $s" >&2
+          exit 1
+        fi
+      done
+    }
+  fi
+  check_workspace "$workspace"
+  workspace="$VM_WORKSPACE"
+  echo "Workspace: $workspace"
+
+  # Enforce the RAM budget before creating profile state, credentials, or a
+  # base disk. lab-vm also runs this before preparing recursive snapshots.
+  status="$(_vm_status "$vm_dir" 2>/dev/null)" || status="stopped"
+  if grep -q running <<<"$status"; then
+    qemu_pid="$(cat "$vm_dir/qemu.pid" 2>/dev/null || true)"
+    qemu_args="$(_vm_read_qemu_process_args "$qemu_pid")" || die "Cannot inspect the running QEMU process for VM '$vm_name'; refusing to proceed."
+    [[ "$qemu_args" == *qemu-system-x86_64* ]] || die "The recorded VM '$vm_name' PID is not QEMU; refusing to proceed."
+    vm_memory_qemu_matches "$qemu_args" "$VM_MEMORY_GIB" || die "VM '$vm_name' QEMU RAM does not match its profile metadata; use ./lab-vm resize after reviewing the profile."
+    vm_memory_preflight "$VM_MEMORY_GIB" "$qemu_pid" || die 'Insufficient memory budget to safely reuse or restart this VM profile.'
+  else
+    vm_memory_preflight "$VM_MEMORY_GIB" || die 'Insufficient memory budget to safely start this VM profile.'
+  fi
+
+  # ── 2. Create VM directory ──────────────────────────────────────
+  mkdir -p -m 0700 "$VM_DIR_BASE" "$vm_dir"
+  chmod 0700 "$VM_DIR_BASE" "$vm_dir"
+
+  # ── 3. SSH key initialization ───────────────────────────────────
+  vm_ssh_init_keys "$vm_dir"
+  local ssh_pubkey
+  ssh_pubkey="$(vm_ssh_get_host_key "$vm_dir")"
+
+  # ── 4. Create base disk if needed (one-time) ────────────────────
+  if ! vm_disk_exists "$base_disk"; then
+    echo "Creating base disk image..."
+  fi
+  vm_disk_create_base "$base_disk" "${VM_BASE_SIZE:-20}"
+
+  # ── 5. Check if VM already running (idempotency, A2) ───────────
+  status="$(_vm_status "$vm_dir" 2>/dev/null)" || true
+  if echo "$status" | grep -q "running"; then
+    qemu_pid="$(cat "$vm_dir/qemu.pid" 2>/dev/null || true)"
+    qemu_args="$(_vm_read_qemu_process_args "$qemu_pid")" || die "Cannot verify the QEMU process for VM '$vm_name'; refusing to reuse or switch it."
+    [[ "$qemu_args" == *qemu-system-x86_64* ]] || die "The recorded VM '$vm_name' PID is not QEMU; refusing to signal it."
+    vm_memory_qemu_matches "$qemu_args" "$VM_MEMORY_GIB" || die "VM '$vm_name' QEMU RAM does not match its profile metadata; use ./lab-vm resize after reviewing the profile."
+    vm_memory_preflight "$VM_MEMORY_GIB" "$qemu_pid" || die 'Insufficient memory budget to safely reuse or restart this VM profile.'
+    virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null || true)"
+    virtiofs_sock="$(_vm_virtiofs_socket_path "$vm_dir")" || die "Cannot safely resolve the virtiofs socket for VM '$vm_name'."
+    running_workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$(cat "$vm_dir/workspace")" "$virtiofs_sock")" || die "Cannot verify the workspace mounted by VM '$vm_name'; refusing to reuse or switch it."
+    running_workspace="$(realpath "$running_workspace")" || die "Cannot resolve the workspace mounted by VM '$vm_name'."
+    if [[ "$running_workspace" == "$workspace" ]]; then
+      echo "VM '$vm_name' is already running with workspace: $workspace"
+      echo "$status"
+      vm_memory_profile_store "$vm_dir" "$VM_MEMORY_GIB" || die 'Could not persist VM memory configuration.'
+      _vm_profile_workspace_store "$vm_dir" "$workspace" || die 'Could not persist the active VM workspace.'
+      vm_recursion_store_profile "$vm_dir"
+      _vm_install_guest_recursion_identity "$vm_dir" || die 'Could not persist recursion identity inside the running guest.'
+      _vm_install_guest_harness "$vm_dir"
+      _vm_auth_import_if_needed "$vm_dir" || die 'Host credential escrow could not be imported; guest auth state was preserved.'
+      return 0
+    fi
+
+    echo "VM '$vm_name' is currently mounted on: $running_workspace"
+    echo "Requested workspace: $workspace"
+    _vm_confirm_workspace_switch "$running_workspace" "$workspace" || die 'Workspace switch cancelled; the running VM was not changed.'
+    _vm_shutdown_for_workspace_switch "$vm_dir" || die 'Guest shutdown did not complete; the VM and current workspace were left in place.'
+    echo "Guest stopped cleanly. Reusing the existing VM overlay for the new workspace."
+  else
+    vm_memory_preflight "$VM_MEMORY_GIB" || die 'Insufficient memory budget to safely start this VM profile.'
+  fi
+
+  vm_memory_profile_store "$vm_dir" "$VM_MEMORY_GIB" || die 'Could not persist VM memory configuration.'
+  _vm_profile_workspace_store "$vm_dir" "$workspace" || die 'Could not persist the selected VM workspace.'
+
+  vm_recursion_store_profile "$vm_dir"
+
+  # ── 6. Create overlay disk ──────────────────────────────────────
+  vm_disk_create_overlay "$base_disk" "$overlay_disk" "${VM_BASE_SIZE:-20}"
+
+  # ── 7. Generate cloud-init seed ISO ─────────────────────────────
+  echo "Generating cloud-init seed ISO..."
+  vm_cloud_init_generate "$vm_dir" "$vm_name" "$(id -u)" "$(id -g)" "$ssh_pubkey" \
+    "${VM_GUEST_RECURSION_DEPTH:-0}" "${VM_EFFECTIVE_MAX_DEPTH:-0}"
+
+  # ── 8. Start QEMU + virtiofsd ──────────────────────────────────
+  echo "Starting VM..."
+  vm_run_start "$vm_dir" "$vm_name" "$workspace" "$base_disk" "$overlay_disk" "$ssh_pubkey"
+
+  # SSH may become ready long before first-boot package installation finishes.
+  _vm_wait_for_cloud_init "$vm_dir" || return $?
+  vm_ssh "$vm_dir" 'test -f /var/lib/mester-provisioned && mountpoint -q /workspace' || return 1
+  _vm_install_guest_recursion_identity "$vm_dir" || return $?
+  if ! _vm_ensure_rootless_docker "$vm_dir"; then
+    log "ERROR: could not enable/start the guest rootless Docker user service"
+    _vm_rootless_diagnostics "$vm_dir"
+    return 1
+  fi
+  if ! vm_ssh "$vm_dir" "docker -H unix:///run/user/$(id -u)/docker.sock info --format '{{json .SecurityOptions}}'" | grep -q rootless; then
+    log "ERROR: guest Docker is not running rootless"
+    _vm_rootless_diagnostics "$vm_dir"
+    return 1
+  fi
+
+  # Install the harness in the guest OS. Docker remains available for project
+  # workloads; it is not the wrapper or security boundary around the agent.
+  _vm_install_guest_harness "$vm_dir" || return $?
+  _vm_auth_import_if_needed "$vm_dir" || die 'Host credential escrow could not be imported; guest auth state was preserved.'
+
+  VM_STARTING=0
+
+  echo ""
+  echo "VM '$vm_name' is up and running."
+  echo "  Memory: ${VM_MEMORY_GIB} GiB"
+  echo "  Workspace: $workspace"
+  echo "  SSH:  ./lab-vm ssh $vm_name"
+  if [[ "${VM_LAUNCH_AFTER_UP:-0}" == 1 ]]; then
+    echo "  Starting OpenCode in the guest now."
+  else
+    echo "  Agent: ./lab-vm agent $vm_name"
+  fi
+  echo "  Stop: ./lab-vm down $vm_name"
+  echo ""
+
+  # A8: Confirm host no longer runs the agent container
+  echo "Host Docker is not running the agent container in VM mode."
+  echo "All agent execution is inside the VM."
+}
+
+_vm_profile_workspace_store() {
+  local vm_dir="${1:?VM profile directory required}" workspace="${2:?workspace required}" tmp
+  [[ -d "$workspace" && ! -L "$workspace" ]] || {
+    echo "REFUSED: VM workspace must be a real directory: $workspace" >&2
+    return 1
+  }
+  workspace="$(realpath "$workspace")" || return 1
+  [[ ! -L "$vm_dir" ]] || {
+    echo "REFUSED: VM profile directory must not be a symlink: $vm_dir" >&2
+    return 1
+  }
+  mkdir -p "$vm_dir"
+  [[ ! -L "$vm_dir/workspace" ]] || {
+    echo "REFUSED: VM workspace metadata must not be a symlink: $vm_dir/workspace" >&2
+    return 1
+  }
+  tmp="$(mktemp "$vm_dir/.workspace.tmp.XXXXXX")" || return 1
+  (umask 077; printf '%s\n' "$workspace" >"$tmp") || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp"
+  mv -f -- "$tmp" "$vm_dir/workspace"
+}
+
+_vm_confirm_workspace_switch() {
+  local old_workspace="$1" new_workspace="$2" answer
+  if [[ "${VM_YES:-0}" == 1 ]]; then
+    echo "Auto-accept enabled: stopping the guest to switch its single workspace mount."
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    echo "REFUSED: switching a running VM to another workspace requires an interactive confirmation (or --yes)." >&2
+    return 1
+  fi
+  echo "Switching workspaces will shut down the guest and stop its running processes/workloads."
+  echo "The VM overlay, installed tools, and control keys are preserved; neither host workspace is deleted."
+  read -r -p "Switch from '$old_workspace' to '$new_workspace'? [y/N] " answer
+  [[ "$answer" == [yY] || "$answer" == [yY][eE][sS] ]]
+}
+
+_vm_shutdown_for_workspace_switch() {
+  local vm_dir="$1" reason="${2:-changing the virtiofs workspace}"
+  local timeout="${VM_WORKSPACE_SWITCH_TIMEOUT:-60}" deadline status
+  [[ "$timeout" =~ ^[1-9][0-9]{0,2}$ ]] || {
+    echo 'REFUSED: VM_WORKSPACE_SWITCH_TIMEOUT must be an integer from 1 to 999 seconds.' >&2
+    return 2
+  }
+  echo "Requesting a clean guest shutdown before $reason."
+  # Graceful guest poweroff first. An SSH disconnect during shutdown is normal;
+  # the VM process status below decides whether it completed.
+  vm_ssh "$vm_dir" 'sudo systemctl poweroff' >/dev/null 2>&1 || true
+  deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status="stopped"
+    if ! grep -q 'running' <<<"$status"; then
+      # Remove only stale host-side processes/sockets. This does not delete the
+      # overlay, seed, SSH keys, or either host workspace.
+      vm_run_stop "$vm_dir"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Timed out waiting for the guest to power off; leaving the running VM and its current workspace untouched." >&2
+  return 1
+}
+
+# ─── vm status: check VM state ──────────────────────────────────────
+vm_cmd_status() {
+  local vm_name="${1:-default}"
+  local vm_dir
+  vm_dir="$(_vm_resolve "$vm_name")"
+
+  if [[ ! -d "$vm_dir" ]]; then
+    echo "No VM profile found at: $vm_dir"
+    return 1
+  fi
+
+  local status
+  status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status="stopped"
+
+  echo "VM: $vm_name"
+  echo "  State: $status"
+  echo "  Dir:   $vm_dir"
+  if vm_memory_profile_load "$vm_dir" 2>/dev/null; then
+    echo "  Memory: ${VM_MEMORY_GIB} GiB"
+  fi
+
+  if echo "$status" | grep -q running; then
+    local ssh_port
+    ssh_port=$(cat "$vm_dir/ssh_port" 2>/dev/null || echo '?')
+    echo "  SSH:   127.0.0.1:$ssh_port"
+
+    # Check Docker inside VM
+    local host_uid
+    host_uid="$(id -u)"
+    if ssh -o StrictHostKeyChecking=yes \
+           -o UserKnownHostsFile="$vm_dir/known_hosts" \
+           -i "$vm_dir/id_vm_control" \
+           -p "$ssh_port" \
+           mester@127.0.0.1 \
+           "docker -H unix:///run/user/${host_uid}/docker.sock ps --format '{{.Names}}' 2>/dev/null" 2>/dev/null | grep -q .; then
+      echo "  Docker: running"
+      ssh -o StrictHostKeyChecking=yes \
+          -o UserKnownHostsFile="$vm_dir/known_hosts" \
+          -i "$vm_dir/id_vm_control" \
+          -p "$ssh_port" \
+          mester@127.0.0.1 \
+          "docker -H unix:///run/user/${host_uid}/docker.sock ps --format 'table {{.Names}}\t{{.Status}}' 2>/dev/null" 2>/dev/null || true
+    else
+      echo "  Docker: no containers running"
+    fi
+  fi
+
+  return 0
+}
+
+_vm_list_profile_row() {
+  local name="${1:?VM profile name required}" vm_dir="${2:?VM profile directory required}"
+  local status state memory workspace
+
+  if [[ -L "$vm_dir" ]]; then
+    printf '%-32s %-10s %-16s %s\n' "$name" 'unsafe' '—' '(symlink; not inspected)'
+    return 0
+  fi
+  [[ -d "$vm_dir" ]] || return 0
+
+  if [[ -L "$vm_dir/qemu.pid" ]]; then
+    state='unsafe'
+  else
+    status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status='stopped'
+    if [[ "$status" == running* ]]; then state='running'; else state='stopped'; fi
+  fi
+
+  if [[ -L "$vm_dir/memory_gib" ]]; then
+    memory='unsafe'
+  elif [[ -e "$vm_dir/memory_gib" ]]; then
+    if vm_memory_profile_load "$vm_dir" >/dev/null 2>&1; then
+      memory="${VM_MEMORY_GIB} GiB"
+    else
+      memory='invalid'
+    fi
+  elif [[ -e "$vm_dir/disk.qcow2" || -e "$vm_dir/seed.iso" || -e "$vm_dir/qemu.pid" ]]; then
+    memory='4 GiB (legacy)'
+  else
+    memory='—'
+  fi
+
+  workspace='—'
+  if [[ -L "$vm_dir/workspace" ]]; then
+    workspace='[symlink]'
+  elif [[ -f "$vm_dir/workspace" ]]; then
+    IFS= read -r workspace <"$vm_dir/workspace" || workspace='[unreadable]'
+    [[ -n "$workspace" ]] || workspace='[empty]'
+  fi
+
+  # %q keeps whitespace and control characters in metadata from corrupting
+  # the table or being interpreted by the terminal.
+  printf '%-32s %-10s %-16s %q\n' "$name" "$state" "$memory" "$workspace"
+}
+
+_vm_list_profile_root() {
+  local root="${1:?VM profile root required}" vm_dir name found=0
+
+  if [[ "$root" == '/' ]]; then
+    echo 'REFUSED: VM profile root is /; check VM_DIR_BASE before listing.' >&2
+    return 1
+  fi
+  if [[ -L "$root" ]]; then
+    echo "REFUSED: VM profile root is a symlink: $root" >&2
+    return 1
+  fi
+  if [[ ! -e "$root" ]]; then
+    echo "No VM profiles found in $root."
+    return 0
+  fi
+  if [[ ! -d "$root" ]]; then
+    echo "REFUSED: VM profile root is not a directory: $root" >&2
+    return 1
+  fi
+
+  printf 'VM profiles in %q:\n' "$root"
+  printf '%-32s %-10s %-16s %s\n' 'PROFILE' 'STATE' 'MEMORY' 'WORKSPACE'
+  for vm_dir in "$root"/*; do
+    [[ -e "$vm_dir" || -L "$vm_dir" ]] || continue
+    name="${vm_dir##*/}"
+    if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+      printf 'Skipping invalid profile entry: %q\n' "$name" >&2
+      continue
+    fi
+    [[ -d "$vm_dir" || -L "$vm_dir" ]] || continue
+    _vm_list_profile_row "$name" "$vm_dir"
+    found=1
+  done
+  (( found == 1 )) || echo '(none)'
+}
+
+_vm_list_recursive_profiles() {
+  local root="${HOME%/}/.cache/lab-vm-recursion" session_dir name vm_dir found=0
+
+  if [[ -L "$root" ]]; then
+    echo "REFUSED: recursive VM profile root is a symlink: $root" >&2
+    return 1
+  fi
+  if [[ ! -e "$root" ]]; then
+    echo "No recursive VM profiles found in $root."
+    return 0
+  fi
+  if [[ ! -d "$root" ]]; then
+    echo "REFUSED: recursive VM profile root is not a directory: $root" >&2
+    return 1
+  fi
+
+  printf 'Recursive VM profiles in %q:\n' "$root"
+  printf '%-32s %-10s %-16s %s\n' 'PROFILE' 'STATE' 'MEMORY' 'WORKSPACE'
+  for session_dir in "$root"/*; do
+    [[ -e "$session_dir" || -L "$session_dir" ]] || continue
+    name="${session_dir##*/}"
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || continue
+    if [[ -L "$session_dir" ]]; then
+      printf '%-32s %-10s %-16s %s\n' "$name" 'unsafe' '—' '(symlink; not inspected)'
+      found=1
+      continue
+    fi
+    [[ -d "$session_dir" ]] || continue
+    vm_dir="$session_dir/vm/$name"
+    [[ -d "$vm_dir" || -L "$vm_dir" ]] || continue
+    _vm_list_profile_row "$name" "$vm_dir"
+    found=1
+  done
+  (( found == 1 )) || echo '(none)'
+}
+
+vm_cmd_list() {
+  # Recursive children use one private session directory per profile instead
+  # of sharing the current VM_DIR_BASE, so enumerate those sessions in guests.
+  if [[ -n "${LAB_VM_RECURSION_DEPTH+x}" ]]; then
+    _vm_list_recursive_profiles
+  else
+    _vm_list_profile_root "$VM_DIR_BASE"
+  fi
+}
+
+_vm_confirm_resize() {
+  local vm_name="$1" old_gib="$2" new_gib="$3" answer
+  if [[ "${VM_YES:-0}" == 1 ]]; then
+    echo 'Auto-accept enabled (VM_YES=1); continuing with a clean VM restart.'
+    return 0
+  fi
+  [[ -t 0 ]] || {
+    echo 'REFUSED: resizing a running VM requires an interactive confirmation or --yes.' >&2
+    return 1
+  }
+  echo "Resizing VM '$vm_name' from ${old_gib} GiB to ${new_gib} GiB requires a clean guest shutdown and restart."
+  echo 'The overlay, base image, seed, SSH identity, installed software, and guest data will be preserved; running guest processes will stop.'
+  read -r -p 'Proceed with resize? [y/N] ' answer
+  [[ "$answer" == [yY] || "$answer" == [yY][eE][sS] ]]
+}
+
+vm_cmd_resize() {
+  local vm_name="${1:-}" new_gib="${2:-}" vm_dir status qemu_pid qemu_args
+  local virtiofsd_pid workspace virtiofs_sock base_disk overlay_disk ssh_pubkey old_gib guest_mem_kib
+  [[ -n "$vm_name" && -n "$new_gib" ]] || {
+    echo 'Usage: ./lab-vm resize <profile> <GiB>' >&2
+    return 2
+  }
+  vm_memory_validate_gib "$new_gib" || {
+    echo 'REFUSED: requested memory must be a whole number of GiB from 1 to 128.' >&2
+    return 2
+  }
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" && ! -L "$vm_dir" ]] || {
+    echo "REFUSED: no safe VM profile found at $vm_dir" >&2
+    return 1
+  }
+  [[ -f "$vm_dir/disk.qcow2" && -f "$VM_DIR_BASE/base.qcow2" && -f "$vm_dir/seed.iso" ]] || {
+    echo "REFUSED: VM profile '$vm_name' is missing its overlay, base image, or seed; resize does not provision or rebuild profiles." >&2
+    return 1
+  }
+  [[ -f "$vm_dir/id_vm_control" && -f "$vm_dir/id_vm_control.pub" && -f "$vm_dir/known_hosts" ]] || {
+    echo "REFUSED: VM profile '$vm_name' is missing its SSH identity; resize will not recreate credentials." >&2
+    return 1
+  }
+  status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status='stopped'
+  [[ "$status" == *running* ]] || {
+    echo "REFUSED: VM '$vm_name' must be running so resize can verify and preserve its active workspace. Start it with ./lab-vm up $vm_name, then retry." >&2
+    return 1
+  }
+  qemu_pid="$(cat "$vm_dir/qemu.pid" 2>/dev/null || true)"
+  qemu_args="$(_vm_read_qemu_process_args "$qemu_pid")" || {
+    echo 'REFUSED: cannot inspect the running QEMU process; VM was not changed.' >&2
+    return 1
+  }
+  [[ "$qemu_args" == *qemu-system-x86_64* ]] || {
+    echo 'REFUSED: recorded PID is not a QEMU process; VM was not changed.' >&2
+    return 1
+  }
+  vm_memory_profile_load "$vm_dir" || return 1
+  old_gib="$VM_MEMORY_GIB"
+  vm_memory_qemu_matches "$qemu_args" "$old_gib" || {
+    echo 'REFUSED: running QEMU memory does not match profile metadata; VM was not changed.' >&2
+    return 1
+  }
+  if [[ "$new_gib" == "$old_gib" ]]; then
+    echo "VM '$vm_name' already uses ${old_gib} GiB; no restart needed."
+    return 0
+  fi
+  vm_memory_preflight "$new_gib" "$qemu_pid" || {
+    echo 'REFUSED: memory budget is insufficient; VM remains running and unchanged.' >&2
+    return 1
+  }
+  _vm_confirm_resize "$vm_name" "$old_gib" "$new_gib" || {
+    echo 'Resize cancelled; VM remains running and unchanged.' >&2
+    return 1
+  }
+
+  virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null || true)"
+  virtiofs_sock="$(_vm_virtiofs_socket_path "$vm_dir")" || {
+    echo 'REFUSED: cannot safely resolve the active virtiofs socket; VM was not changed.' >&2
+    return 1
+  }
+  workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$(cat "$vm_dir/workspace")" "$virtiofs_sock")" || {
+    echo 'REFUSED: cannot verify the active workspace export; VM was not changed.' >&2
+    return 1
+  }
+  [[ -d "$workspace" ]] || {
+    echo "REFUSED: active workspace is no longer a directory: $workspace" >&2
+    return 1
+  }
+  workspace="$(realpath "$workspace")" || return 1
+  _vm_profile_workspace_store "$vm_dir" "$workspace" || return 1
+  vm_recursion_load_profile "$vm_dir" || return 1
+  VM_GUEST_RECURSION_DEPTH="$VM_AGENT_RECURSION_DEPTH"
+  VM_EFFECTIVE_MAX_DEPTH="$VM_AGENT_MAX_DEPTH"
+
+  _vm_shutdown_for_workspace_switch "$vm_dir" 'resizing VM RAM' || {
+    echo 'Resize stopped before changing profile settings; the running VM and its overlay remain intact.' >&2
+    return 1
+  }
+
+  vm_memory_profile_store "$vm_dir" "$new_gib" || return 1
+  VM_MEMORY_GIB="$new_gib"
+  base_disk="$VM_DIR_BASE/base.qcow2"
+  overlay_disk="$vm_dir/disk.qcow2"
+  ssh_pubkey="$(vm_ssh_get_host_key "$vm_dir")" || return 1
+  echo "Restarting VM '$vm_name' with ${new_gib} GiB; preserving workspace '$workspace' and the existing overlay."
+  vm_run_start "$vm_dir" "$vm_name" "$workspace" "$base_disk" "$overlay_disk" "$ssh_pubkey" || {
+    echo "ERROR: resized VM did not start. The profile and overlay are preserved at $vm_dir; requested memory remains ${new_gib} GiB." >&2
+    return 1
+  }
+  VM_STARTING=0
+  _vm_wait_for_cloud_init "$vm_dir" || return 1
+  vm_ssh "$vm_dir" 'test -f /var/lib/mester-provisioned && mountpoint -q /workspace' || {
+    echo "ERROR: VM restarted but guest/workspace readiness failed; profile remains at $vm_dir." >&2
+    return 1
+  }
+  _vm_ensure_rootless_docker "$vm_dir" || {
+    echo "ERROR: VM restarted but rootless guest Docker did not become ready; profile remains at $vm_dir." >&2
+    return 1
+  }
+  guest_mem_kib="$(vm_ssh "$vm_dir" "awk '/^MemTotal:/ {print \$2}' /proc/meminfo")" || return 1
+  [[ "$guest_mem_kib" =~ ^[0-9]+$ ]] || {
+    echo 'ERROR: could not verify guest MemTotal after resize.' >&2
+    return 1
+  }
+  (( guest_mem_kib >= new_gib * 1024 * 900 )) || {
+    echo "ERROR: guest reports only $((guest_mem_kib / 1024)) MiB after requesting ${new_gib} GiB; profile remains running for inspection." >&2
+    return 1
+  }
+  echo "VM '$vm_name' resized to ${new_gib} GiB and restarted successfully."
+}
+
+# ─── vm ssh: SSH into the VM ────────────────────────────────────────
+vm_cmd_ssh() {
+  local vm_name="${1:-default}"
+  if [[ $# -gt 0 ]]; then shift; fi
+  local vm_dir
+  vm_dir="$(_vm_resolve "$vm_name")"
+
+  if [[ ! -d "$vm_dir" ]]; then
+    die "No VM profile found at: $vm_dir"
+  fi
+
+  if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
+  fi
+  _vm_validate_profile_workspace_boundary "$vm_dir" || die 'Refusing SSH because the active guest workspace overlaps VM control state.'
+
+  local ssh_port
+  ssh_port=$(cat "$vm_dir/ssh_port")
+
+  echo "SSH into VM '$vm_name' on 127.0.0.1:$ssh_port"
+  exec ssh \
+    -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile="$vm_dir/known_hosts" \
+    -i "$vm_dir/id_vm_control" \
+    -p "$ssh_port" \
+    mester@127.0.0.1 "$@"
+}
+
+_vm_validate_profile_workspace_boundary() {
+  local vm_dir="${1:?VM profile directory required}" workspace
+  [[ -f "$vm_dir/workspace" && ! -L "$vm_dir/workspace" ]] || {
+    echo "REFUSED: active VM workspace identity is missing or unsafe: $vm_dir" >&2
+    return 1
+  }
+  workspace="$(cat "$vm_dir/workspace")"
+  [[ -d "$workspace" ]] || {
+    echo "REFUSED: active VM workspace is not available: $workspace" >&2
+    return 1
+  }
+  vm_recursion_validate_state_boundary "$workspace" "$VM_DIR_BASE"
+}
+
+# OpenCode 2.2.0 chooses an ephemeral guest-loopback callback port at runtime.
+# The authenticated host browser bridge reads only that port from the approved
+# authorize URL and asks this SSH control master to forward that exact port.
+_vm_validate_auth_callback_port() {
+  local port="${1:-}" port_num
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] || return 1
+  port_num=$((10#$port))
+  (( port_num >= 1024 && port_num <= 65535 ))
+}
+
+_vm_openai_callback_ssh_args() {
+  local port="${1:-}" port_num
+  _vm_validate_auth_callback_port "$port" || return 2
+  port_num=$((10#$port))
+  printf '%s\0' \
+    -o ExitOnForwardFailure=yes \
+    -L "127.0.0.1:${port_num}:127.0.0.1:${port_num}"
+}
+
+_vm_openai_browser_bridge_ssh_args() {
+  local guest_port="${1:-}" host_port="${2:-}"
+  [[ "$guest_port" =~ ^[0-9]+$ && "$host_port" =~ ^[0-9]+$ ]] || return 2
+  (( guest_port >= 1024 && guest_port <= 65535 && host_port >= 1024 && host_port <= 65535 )) || return 2
+  printf '%s\0' \
+    -o ExitOnForwardFailure=yes \
+    -R "127.0.0.1:${guest_port}:127.0.0.1:${host_port}"
+}
+
+_vm_browser_auth_enabled() {
+  case "${1:-auto}" in
+    on) return 0 ;;
+    off) return 1 ;;
+    auto)
+      # The guest agent marks its environment so nested lab-vm launches
+      # default to no host-browser bridge. --browser-auth explicitly overrides.
+      [[ "${LAB_VM_RECURSION_DEPTH:-0}" =~ ^0+$ ]]
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+vm_cmd_auth_forward() {
+  local vm_name=default callback_port="" vm_dir
+  local -a forward_args=()
+  case "$#" in
+    1) callback_port="$1" ;;
+    2) vm_name="$1"; callback_port="$2" ;;
+    *) die 'Usage: ./lab-vm auth-forward [name] <callback-port>' ;;
+  esac
+  _vm_validate_auth_callback_port "$callback_port" || die 'Usage: ./lab-vm auth-forward [name] <callback-port> (read the port from the redirect_uri locally; do not share the URL).'
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
+  if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
+  fi
+
+  mapfile -d '' -t forward_args < <(_vm_openai_callback_ssh_args "$callback_port")
+  echo "Forwarding OpenAI browser callback port $callback_port on host loopback to guest loopback."
+  echo 'Keep this command running during /connect; press Ctrl-C after success or cancellation to close the tunnel.'
+  ssh -F /dev/null -N -o BatchMode=yes -o ConnectTimeout=10 \
+    -o IdentitiesOnly=yes -o IdentityAgent=none \
+    -o ForwardAgent=no -o ForwardX11=no \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$vm_dir/known_hosts" \
+    -i "$vm_dir/id_vm_control" -p "$(cat "$vm_dir/ssh_port")" \
+    "${forward_args[@]}" mester@127.0.0.1
+}
+
+_vm_browser_bridge_pid_matches() {
+  local pid="$1" expected_script="$2"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/cmdline" ]] || return 1
+  python3 - "$pid" "$expected_script" <<'PY'
+import os
+import sys
+
+pid, expected_script = sys.argv[1:]
+try:
+    argv = open(f"/proc/{pid}/cmdline", "rb").read().decode().rstrip("\0").split("\0")
+except OSError:
+    raise SystemExit(1)
+if not any(os.path.realpath(arg) == os.path.realpath(expected_script) for arg in argv):
+    raise SystemExit(1)
+PY
+}
+
+_vm_browser_bridge_health() {
+  local port="${1:-}"
+  [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) || return 1
+  python3 - "$port" <<'PY'
+import urllib.request
+import sys
+try:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(f"http://127.0.0.1:{sys.argv[1]}/health", timeout=0.5) as response:
+        raise SystemExit(0 if response.status == 200 else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
+_vm_auth_tunnel_pid_matches() {
+  local pid="${1:-}" guest_port="${2:-}" host_port="${3:-}"
+  [[ "$guest_port" =~ ^[0-9]+$ && "$host_port" =~ ^[0-9]+$ ]] || return 1
+  [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/cmdline" ]] || return 1
+  python3 - "$pid" "$guest_port" "$host_port" <<'PY'
+import os
+import sys
+try:
+    argv = open(f"/proc/{sys.argv[1]}/cmdline", "rb").read().decode().rstrip("\0").split("\0")
+except OSError:
+    raise SystemExit(1)
+if not argv or os.path.basename(argv[0]) != "ssh":
+    raise SystemExit(1)
+expected = f"127.0.0.1:{sys.argv[2]}:127.0.0.1:{sys.argv[3]}"
+if expected not in argv:
+    raise SystemExit(1)
+PY
+}
+
+_vm_auth_tunnel_debug_args() {
+  # OpenSSH verbose output reports listener/forward connection failures, but
+  # never the forwarded HTTP request payload that carries OAuth material.
+  if [[ "${VM_DEBUG:-0}" -ge 1 ]]; then
+    printf '%s\n' -vv
+  fi
+}
+
+vm_cmd_agent_with_browser_auth() (
+  local vm_name="${1:-default}" vm_dir bridge_script host_bridge_dir="" bridge_pid="" tunnel_pid="" guest_browser_dir="" bridge_token="" tmp_root control_path ssh_port bridge_log ssh_log bridge_port guest_bridge_port session_id
+  local -a forward_args=() ssh_debug_args=()
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
+  if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
+  fi
+  bridge_script="$LAB_DIR/lib/vm/browser-bridge-server.py"
+  command -v python3 >/dev/null 2>&1 || die 'The host browser MCP bridge requires Python 3.'
+  [[ -f "$bridge_script" ]] || die 'The host browser MCP bridge source is missing.'
+
+  _vm_auth_cleanup() {
+    local cleanup_dir="${guest_browser_dir:-}"
+    if [[ "$cleanup_dir" =~ ^/tmp/lab-vm-browser\.[A-Za-z0-9]+$ ]]; then
+      vm_ssh "$vm_dir" "rm -rf -- '$cleanup_dir'" </dev/null >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${tunnel_pid:-}" ]] && _vm_auth_tunnel_pid_matches "$tunnel_pid" "${guest_bridge_port:-}" "${bridge_port:-}"; then
+      kill -TERM "$tunnel_pid" 2>/dev/null || true
+      for _ in $(seq 1 20); do
+        _vm_auth_tunnel_pid_matches "$tunnel_pid" "${guest_bridge_port:-}" "${bridge_port:-}" || break
+        sleep 0.1
+      done
+      _vm_auth_tunnel_pid_matches "$tunnel_pid" "${guest_bridge_port:-}" "${bridge_port:-}" && kill -KILL "$tunnel_pid" 2>/dev/null || true
+      wait "$tunnel_pid" 2>/dev/null || true
+    fi
+    if [[ -n "${bridge_pid:-}" ]] && _vm_browser_bridge_pid_matches "$bridge_pid" "$bridge_script"; then
+      kill -TERM "$bridge_pid" 2>/dev/null || true
+      for _ in $(seq 1 30); do
+        _vm_browser_bridge_pid_matches "$bridge_pid" "$bridge_script" || break
+        sleep 0.1
+      done
+      _vm_browser_bridge_pid_matches "$bridge_pid" "$bridge_script" && kill -KILL "$bridge_pid" 2>/dev/null || true
+      wait "$bridge_pid" 2>/dev/null || true
+    fi
+    if [[ -n "${host_bridge_dir:-}" && -d "$host_bridge_dir" && -O "$host_bridge_dir" ]]; then
+      rm -rf -- "$host_bridge_dir"
+    fi
+  }
+  trap _vm_auth_cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+
+  bridge_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')" || die 'Could not create the temporary browser bridge credential.'
+  mkdir -p "$vm_dir"
+  tmp_root="${XDG_RUNTIME_DIR:-/tmp}"
+  [[ -d "$tmp_root" && -O "$tmp_root" ]] || tmp_root=/tmp
+  host_bridge_dir="$(mktemp -d "$tmp_root/lab-vm-browser-host.XXXXXX")" || die 'Could not create a private host runtime directory for the browser bridge.'
+  session_id="${host_bridge_dir##*/}"
+  chmod 700 "$host_bridge_dir"
+  control_path="$host_bridge_dir/ssh-control"
+  (( ${#control_path} < 100 )) || die 'Private SSH control socket path is too long; set a shorter XDG_RUNTIME_DIR and retry.'
+  bridge_script="$host_bridge_dir/browser-bridge-server.py"
+  bridge_log="$vm_dir/browser-bridge-${session_id}.log"
+  ssh_log="$vm_dir/browser-bridge-ssh-${session_id}.log"
+  install -m 700 "$LAB_DIR/lib/vm/browser-bridge-server.py" "$bridge_script" || die 'Could not stage the host browser bridge into private runtime storage.'
+  VM_BROWSER_BRIDGE_TOKEN="$bridge_token" VM_BROWSER_BRIDGE_PORT=0 \
+    VM_BROWSER_BRIDGE_SSH_CONTROL_PATH="$control_path" \
+    VM_BROWSER_BRIDGE_SSH_PORT="$(cat "$vm_dir/ssh_port")" \
+    VM_BROWSER_BRIDGE_SSH_LOG="$ssh_log" \
+    VM_BROWSER_BRIDGE_SSH_DEBUG="${VM_DEBUG:-0}" \
+    python3 "$bridge_script" </dev/null >>"$bridge_log" 2>&1 &
+  bridge_pid=$!
+
+  bridge_port=""
+  for _ in $(seq 1 50); do
+    kill -0 "$bridge_pid" 2>/dev/null || {
+      die "Host browser MCP bridge failed to start; inspect $bridge_log (OAuth URLs and tokens are not logged)."
+    }
+    bridge_port="$(sed -nE 's/^Host browser MCP bridge listening on 127\.0\.0\.1:([0-9]+)$/\1/p' "$bridge_log" | tail -n 1)"
+    if [[ "$bridge_port" =~ ^[0-9]+$ ]] && (( bridge_port >= 1024 && bridge_port <= 65535 )); then
+      _vm_browser_bridge_health "$bridge_port" && break
+    fi
+    sleep 0.1
+  done
+  [[ "$bridge_port" =~ ^[0-9]+$ ]] && (( bridge_port >= 1024 && bridge_port <= 65535 )) || die "Host browser MCP bridge did not report a valid dynamic loopback port; inspect $bridge_log."
+  _vm_browser_bridge_health "$bridge_port" || die "Host browser MCP bridge did not become ready on its dynamic port; inspect $bridge_log."
+
+  guest_bridge_port="$(vm_ssh "$vm_dir" "python3 -c 'import socket; s=socket.socket(); s.bind((\"127.0.0.1\", 0)); print(s.getsockname()[1]); s.close()'")" || die 'Could not allocate a guest-loopback port for this browser session.'
+  [[ "$guest_bridge_port" =~ ^[0-9]+$ ]] && (( guest_bridge_port >= 1024 && guest_bridge_port <= 65535 )) || die 'Guest returned an invalid browser bridge port.'
+  guest_browser_dir="$(vm_ssh "$vm_dir" 'umask 077 && mktemp -d /tmp/lab-vm-browser.XXXXXX')" || die 'Could not create temporary guest browser bridge files.'
+  [[ "$guest_browser_dir" =~ ^/tmp/lab-vm-browser\.[A-Za-z0-9]+$ ]] || die 'Guest returned an unexpected temporary directory; refusing to write bridge files.'
+  vm_ssh "$vm_dir" "install -m 700 /dev/stdin '$guest_browser_dir/xdg-open'" <"$LAB_DIR/lib/vm/browser-open.sh" || die 'Could not install the temporary guest browser opener.'
+  vm_ssh "$vm_dir" "install -m 700 /dev/stdin '$guest_browser_dir/browser-open.py'" <"$LAB_DIR/lib/vm/browser-open.py" || die 'Could not install the temporary guest MCP client.'
+  vm_ssh "$vm_dir" "ln -s xdg-open '$guest_browser_dir/open' && ln -s xdg-open '$guest_browser_dir/gio'" || die 'Could not prepare supported guest browser opener names.'
+  printf '%s' "$bridge_token" | vm_ssh "$vm_dir" "install -m 600 /dev/stdin '$guest_browser_dir/token'" || die 'Could not transfer the temporary bridge credential over SSH stdin.'
+  unset bridge_token
+
+  mapfile -d '' -t forward_args < <(_vm_openai_browser_bridge_ssh_args "$guest_bridge_port" "$bridge_port")
+  mapfile -t ssh_debug_args < <(_vm_auth_tunnel_debug_args)
+  ssh_port="$(cat "$vm_dir/ssh_port")"
+  if [[ "${VM_DEBUG:-0}" -ge 1 ]]; then
+    log_debug "OpenSSH control-master and callback-forward traces are recorded in $ssh_log; forwarded request data is not logged."
+  fi
+  ssh "${ssh_debug_args[@]}" -F /dev/null -M -S "$control_path" -N \
+    -o ControlPersist=no -o BatchMode=yes -o ConnectTimeout=10 \
+    -o IdentitiesOnly=yes -o IdentityAgent=none \
+    -o ForwardAgent=no -o ForwardX11=no \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$vm_dir/known_hosts" \
+    -i "$vm_dir/id_vm_control" -p "$ssh_port" \
+    "${forward_args[@]}" mester@127.0.0.1 \
+    </dev/null >>"$ssh_log" 2>&1 &
+  tunnel_pid=$!
+  for _ in $(seq 1 100); do
+    kill -0 "$tunnel_pid" 2>/dev/null || die "The temporary callback/browser SSH forwards failed to start; see $ssh_log."
+    if ssh -F /dev/null -S "$control_path" -O check -p "$ssh_port" mester@127.0.0.1 >/dev/null 2>&1; then break; fi
+    sleep 0.1
+  done
+  ssh -F /dev/null -S "$control_path" -O check -p "$ssh_port" mester@127.0.0.1 >/dev/null 2>&1 || die "The temporary SSH control master did not become ready; see $ssh_log."
+  _vm_auth_tunnel_pid_matches "$tunnel_pid" "$guest_bridge_port" "$bridge_port" || die 'The temporary SSH control master process could not be verified.'
+
+  echo "Starting guest OpenCode with per-session loopback ports (host $bridge_port, guest $guest_bridge_port) and temporary callback forwarding."
+  echo 'In the TUI, use /connect → OpenAI → Sign in with ChatGPT. The host browser opens automatically when OpenCode requests it.'
+  echo "The callback still returns through loopback SSH to the guest; exit OpenCode after success or cancellation to close all temporary access. Diagnostics: $ssh_log"
+  VM_BROWSER_BRIDGE_DIR="$guest_browser_dir" VM_BROWSER_BRIDGE_PORT="$guest_bridge_port" \
+    VM_AGENT_SKIP_MODEL_PROBE=1 vm_cmd_agent "$vm_name"
+)
+
+_vm_proxy_pid_matches() {
+  local proxy_pid="$1" vm_dir="$2" workspace="$3"
+  python3 - "$proxy_pid" "$LAB_DIR/lib/vm/proxy.py" "$vm_dir/proxy_port" "$workspace" <<'PY'
+import os
+import sys
+
+pid, expected_script, expected_port_file, expected_workspace = sys.argv[1:]
+try:
+    argv = open(f"/proc/{pid}/cmdline", "rb").read().decode().rstrip("\0").split("\0")
+except OSError:
+    raise SystemExit(1)
+if len(argv) < 2 or os.path.realpath(argv[1]) != os.path.realpath(expected_script):
+    raise SystemExit(1)
+try:
+    index = argv.index("--port-file")
+    actual_port_file = argv[index + 1]
+except (ValueError, IndexError):
+    raise SystemExit(1)
+if os.path.realpath(actual_port_file) != os.path.realpath(expected_port_file):
+    raise SystemExit(1)
+try:
+    index = argv.index("--workspace")
+    actual_workspace = argv[index + 1]
+except (ValueError, IndexError):
+    raise SystemExit(1)
+if os.path.realpath(actual_workspace) != os.path.realpath(expected_workspace):
+    raise SystemExit(1)
+PY
+}
+
+_vm_proxy_supports_reload() {
+  local proxy_pid="$1" vm_dir="$2" port="$3" marker_pid marker_port
+  [[ -s "$vm_dir/proxy.reload-ready" ]] || return 1
+  read -r marker_pid marker_port <"$vm_dir/proxy.reload-ready" || return 1
+  [[ "$marker_pid" == "$proxy_pid" && "$marker_port" == "$port" ]] || return 1
+  python3 - "$proxy_pid" "$vm_dir/proxy.reload-ready" <<'PY'
+import os
+import sys
+
+pid, marker = sys.argv[1:]
+try:
+    argv = open(f"/proc/{pid}/cmdline", "rb").read().decode().rstrip("\0").split("\0")
+    index = argv.index("--reload-marker")
+    actual = argv[index + 1]
+except (OSError, ValueError, IndexError):
+    raise SystemExit(1)
+if os.path.realpath(actual) != os.path.realpath(marker):
+    raise SystemExit(1)
+PY
+}
+
+_vm_start_proxy_at() {
+  local vm_dir="$1" workspace="$2" port="$3" proxy_pid marker_pid marker_port
+  local -a upstream_args=()
+  _vm_proxy_upstream_args
+  upstream_args=("${VM_PROXY_UPSTREAM_ARGS[@]}")
+  rm -f "$vm_dir/proxy.reload-ready"
+  python3 "$LAB_DIR/lib/vm/proxy.py" \
+    "${upstream_args[@]}" \
+    --workspace "$workspace" \
+    --port-file "$vm_dir/proxy_port" \
+    --port "$port" \
+    --reload-marker "$vm_dir/proxy.reload-ready" \
+    </dev/null >>"$vm_dir/proxy.log" 2>&1 &
+  proxy_pid=$!
+  echo "$proxy_pid" >"$vm_dir/proxy.pid"
+  for _ in $(seq 1 50); do
+    if [[ -s "$vm_dir/proxy.reload-ready" && -s "$vm_dir/proxy_port" ]]; then
+      read -r marker_pid marker_port <"$vm_dir/proxy.reload-ready" || true
+      if [[ "$marker_pid" == "$proxy_pid" && "$marker_port" == "$port" && "$(cat "$vm_dir/proxy_port")" == "$port" ]]; then
+        return 0
+      fi
+    fi
+    kill -0 "$proxy_pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  log "ERROR: egress proxy did not recover on 127.0.0.1:$port; inspect $vm_dir/proxy.log"
+  return 1
+}
+
+vm_cmd_egress_reload() {
+  local vm_name="${1:-default}" vm_dir proxy_pid proxy_port virtiofsd_pid virtiofs_sock expected_workspace workspace log_file log_offset reload_result
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
+  if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
+  fi
+  [[ -s "$vm_dir/proxy_port" ]] || die "VM '$vm_name' has no recorded egress proxy port; refusing to guess a QEMU guestfwd destination."
+  proxy_port="$(cat "$vm_dir/proxy_port")"
+  [[ "$proxy_port" =~ ^[1-9][0-9]*$ ]] && (( proxy_port <= 65535 )) || die "Invalid egress proxy port recorded for VM '$vm_name'."
+  virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null)"
+  expected_workspace="$(cat "$vm_dir/workspace" 2>/dev/null)"
+  virtiofs_sock="$(_vm_virtiofs_socket_path "$vm_dir")" || die 'Cannot safely resolve the virtiofs socket; refusing to reload proxy policy.'
+  workspace="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$expected_workspace" "$virtiofs_sock")" || die 'Cannot verify the running VM workspace export; refusing to reload proxy policy.'
+  workspace="$(realpath "$workspace")" || die 'Cannot resolve the VM workspace path.'
+  [[ -d "$workspace" ]] || die 'The VM workspace export is no longer available.'
+
+  proxy_pid="$(cat "$vm_dir/proxy.pid" 2>/dev/null || true)"
+  if [[ -n "$proxy_pid" && ! "$proxy_pid" =~ ^[1-9][0-9]*$ ]]; then
+    die "Invalid egress proxy PID recorded for VM '$vm_name'."
+  fi
+
+  if [[ -n "$proxy_pid" ]] && kill -0 "$proxy_pid" 2>/dev/null; then
+    _vm_proxy_pid_matches "$proxy_pid" "$vm_dir" "$workspace" || die "The recorded PID is not this VM's egress proxy; refusing to signal it."
+    if _vm_proxy_supports_reload "$proxy_pid" "$vm_dir" "$proxy_port"; then
+      log_file="$vm_dir/proxy.log"
+      [[ -f "$log_file" ]] || die "Egress proxy log is missing; cannot confirm policy reload."
+      log_offset="$(wc -c <"$log_file")"
+      kill -HUP "$proxy_pid" || die "Could not signal the reload-capable egress proxy."
+      reload_result=""
+      for _ in $(seq 1 20); do
+        reload_result="$(tail -c +$((log_offset + 1)) "$log_file" 2>/dev/null | grep -E 'egress policy reload failed|egress policy reloaded' | tail -n 1 || true)"
+        [[ -n "$reload_result" ]] && break
+        sleep 0.05
+      done
+      [[ "$reload_result" == *'egress policy reloaded'* ]] || die "Egress policy reload was not confirmed; inspect $log_file. The proxy was not restarted."
+      echo "Egress policy reloaded for VM '$vm_name' on its existing loopback listener; QEMU and the overlay were not restarted."
+      return 0
+    fi
+
+    echo "The recorded proxy predates safe in-place reload; replacing only that host proxy on 127.0.0.1:$proxy_port. Existing proxy connections may briefly drop."
+    kill -TERM "$proxy_pid" 2>/dev/null || die 'Could not stop the verified older egress proxy safely.'
+    for _ in $(seq 1 20); do
+      kill -0 "$proxy_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -0 "$proxy_pid" 2>/dev/null && die 'Older egress proxy did not exit; leaving QEMU and the overlay untouched.'
+  else
+    echo "Recorded egress proxy is not running; restoring it on QEMU's existing loopback port 127.0.0.1:$proxy_port."
+  fi
+
+  _vm_start_proxy_at "$vm_dir" "$workspace" "$proxy_port" || die "Could not restore the host egress proxy; QEMU and the overlay remain running. Inspect $vm_dir/proxy.log."
+  echo "Egress proxy is ready on the existing loopback port 127.0.0.1:$proxy_port with the current workspace policy; QEMU and the overlay were not restarted."
+}
+
+_vm_validate_qemu_isolation_args() {
+  local process_args="$1" ssh_port="$2" proxy_port="${3:-}" guestfwd_count hostfwd_count netdev_count net_device_count
+  [[ "$process_args" == *'restrict=on'* ]] || {
+    echo 'QEMU network is missing restrict=on.' >&2
+    return 1
+  }
+  guestfwd_count="$(grep -o 'guestfwd=' <<<"$process_args" | wc -l)"
+  [[ "$guestfwd_count" -eq 4 ]] || {
+    echo "Expected exactly four explicit guestfwd channels; found $guestfwd_count." >&2
+    return 1
+  }
+  hostfwd_count="$(grep -o 'hostfwd=' <<<"$process_args" | wc -l)"
+  [[ "$hostfwd_count" -eq 1 && "$process_args" == *"hostfwd=tcp:127.0.0.1:${ssh_port}-:22"* ]] || {
+    echo 'Expected exactly one SSH hostfwd bound to 127.0.0.1.' >&2
+    return 1
+  }
+  netdev_count="$(grep -o -- '-netdev' <<<"$process_args" | wc -l)"
+  net_device_count="$(grep -o -- '-device virtio-net-pci,netdev=net0' <<<"$process_args" | wc -l)"
+  [[ "$netdev_count" -eq 1 && "$net_device_count" -eq 1 && "$process_args" == *'-netdev user,id=net0,'* ]] || {
+    echo 'Expected exactly one QEMU user-mode network device.' >&2
+    return 1
+  }
+  [[ "$process_args" == *'-device vhost-user-fs-pci,'* && "$process_args" == *'tag=workspace'* ]] || {
+    echo 'QEMU workspace share is missing the reviewed virtiofs workspace device.' >&2
+    return 1
+  }
+  [[ "$process_args" == *'guestfwd=tcp:10.0.2.100:11434-cmd:socat - TCP:127.0.0.1:11434'* &&
+     "$process_args" == *'guestfwd=tcp:10.0.2.100:8080-cmd:socat - TCP:127.0.0.1:8080'* &&
+     "$process_args" == *'guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:19532'* &&
+     "$process_args" == *'guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:'* ]] || {
+    echo 'QEMU guestfwd channels do not match the reviewed loopback-only allowlist.' >&2
+    return 1
+  }
+  if [[ -n "$proxy_port" ]]; then
+    [[ "$proxy_port" =~ ^[1-9][0-9]{0,4}$ ]] && (( proxy_port <= 65535 )) &&
+      [[ "$process_args" == *"guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:$proxy_port,"* ]] || {
+      echo "QEMU egress guestfwd does not target this profile's recorded loopback proxy port." >&2
+      return 1
+    }
+  fi
+}
+
+_vm_read_qemu_process_args() {
+  local qemu_pid="$1"
+  [[ "$qemu_pid" =~ ^[0-9]+$ && -r "/proc/$qemu_pid/cmdline" ]] || return 1
+  tr '\0' ' ' <"/proc/$qemu_pid/cmdline"
+}
+
+_vm_validate_loopback_tcp_listeners() {
+  local port expected_ports
+  (($# >= 1)) || return 1
+  for port in "$@"; do
+    [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] && (( port <= 65535 )) || {
+      echo 'Invalid port supplied to the loopback-listener check.' >&2
+      return 1
+    }
+  done
+  command -v ss >/dev/null 2>&1 || {
+    echo 'Cannot verify QEMU listener bindings because ss is unavailable.' >&2
+    return 1
+  }
+  expected_ports="$*"
+  ss -H -ltn 2>/dev/null | awk -v expected_ports="$expected_ports" '
+    BEGIN {
+      count = split(expected_ports, values, /[[:space:]]+/)
+      for (i = 1; i <= count; i++) expected[values[i]] = 1
+    }
+    NF >= 4 {
+      endpoint = $4
+      port = endpoint
+      sub(/^.*:/, "", port)
+      if (!(port in expected)) next
+      address = endpoint
+      sub(/:[^:]*$/, "", address)
+      if (substr(address, 1, 1) == "[" && substr(address, length(address), 1) == "]") {
+        address = substr(address, 2, length(address) - 2)
+      }
+      seen[port] = 1
+      if (address != "127.0.0.1") unsafe[port] = 1
+    }
+    END {
+      failed = 0
+      for (port in expected) {
+        if (!seen[port]) {
+          print "A required SSH/proxy listener is missing."
+          failed = 1
+        }
+        if (unsafe[port]) {
+          print "An SSH/proxy listener is bound outside loopback."
+          failed = 1
+        }
+      }
+      exit failed
+    }
+  ' || return 1
+}
+
+_vm_read_virtiofsd_shared_dir() {
+  local virtiofsd_pid="$1" expected_workspace="$2" expected_socket="$3"
+  python3 - "$virtiofsd_pid" "$expected_workspace" "$expected_socket" <<'PY'
+import os
+import sys
+
+root_pid, expected_workspace, expected_socket = sys.argv[1:]
+expected_workspace = os.path.realpath(expected_workspace)
+expected_socket = os.path.realpath(expected_socket)
+pending = [root_pid]
+seen = set()
+
+while pending:
+    pid = pending.pop()
+    if pid in seen or not pid.isdecimal():
+        continue
+    seen.add(pid)
+    process_root = f"/proc/{pid}"
+    try:
+        if os.stat(process_root).st_uid != os.getuid():
+            continue
+        argv = open(f"{process_root}/cmdline", "rb").read().decode().rstrip("\0").split("\0")
+    except OSError:
+        continue
+
+    try:
+        executable = os.path.basename(os.readlink(f"{process_root}/exe"))
+    except OSError:
+        executable = ""
+
+    if executable == "virtiofsd":
+        try:
+            shared_index = argv.index("--shared-dir")
+            socket_index = argv.index("--socket-path")
+            shared_dir = os.path.realpath(argv[shared_index + 1])
+            socket_path = os.path.realpath(argv[socket_index + 1])
+        except (ValueError, IndexError):
+            shared_dir = socket_path = ""
+        if shared_dir == expected_workspace and socket_path == expected_socket:
+            print(shared_dir)
+            raise SystemExit(0)
+
+    try:
+        children = open(f"{process_root}/task/{pid}/children", encoding="ascii").read().split()
+    except OSError:
+        continue
+    pending.extend(children)
+
+raise SystemExit(1)
+PY
+}
+
+vm_cmd_verify_isolation() {
+  local vm_name="${1:-default}" vm_dir ssh_port proxy_port qemu_pid process_args virtiofsd_pid shared_dir sensitive_path expected_workspace virtiofs_sock guest_probe_command='python3 -'
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
+  if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
+  fi
+  _vm_validate_profile_workspace_boundary "$vm_dir" || die 'Refusing verification because the active guest workspace overlaps VM control state.'
+  ssh_port="$(cat "$vm_dir/ssh_port" 2>/dev/null)"
+  [[ -f "$vm_dir/proxy_port" && ! -L "$vm_dir/proxy_port" ]] || die 'VM egress proxy port metadata is missing or unsafe.'
+  proxy_port="$(cat "$vm_dir/proxy_port" 2>/dev/null)"
+  qemu_pid="$(cat "$vm_dir/qemu.pid" 2>/dev/null)"
+  process_args="$(_vm_read_qemu_process_args "$qemu_pid")" || die 'Cannot inspect the running QEMU process command line.'
+  [[ "$process_args" == *qemu-system-x86_64* ]] || die 'The recorded PID is not a QEMU x86_64 process.'
+  _vm_validate_qemu_isolation_args "$process_args" "$ssh_port" "$proxy_port" || die 'QEMU network configuration failed the isolation check.'
+  _vm_validate_loopback_tcp_listeners "$ssh_port" "$proxy_port" || die 'QEMU SSH or egress proxy listener is missing or bound outside loopback.'
+  virtiofsd_pid="$(cat "$vm_dir/virtiofsd.pid" 2>/dev/null)"
+  [[ -f "$vm_dir/workspace" && ! -L "$vm_dir/workspace" ]] || die 'VM workspace identity is missing or unsafe.'
+  expected_workspace="$(cat "$vm_dir/workspace")"
+  virtiofs_sock="$(_vm_virtiofs_socket_path "$vm_dir")" || die 'Cannot safely resolve the virtiofs socket.'
+  shared_dir="$(_vm_read_virtiofsd_shared_dir "$virtiofsd_pid" "$expected_workspace" "$virtiofs_sock")" || die 'Cannot inspect the running virtiofsd workspace export.'
+  shared_dir="$(realpath "$shared_dir")" || die 'Cannot resolve the virtiofsd shared directory.'
+  [[ -d "$shared_dir" && "$shared_dir" != '/' && "$shared_dir" != "$HOME" ]] || die "Unsafe or missing virtiofsd shared directory: $shared_dir"
+  for sensitive_path in "$HOME/.ssh" "$HOME/.gnupg" "$HOME/.config" "$HOME/.aws" "$HOME/.kube" "$HOME/.local" "$HOME/.bashrc" "$HOME/.zshrc"; do
+    if [[ "$shared_dir" == "$sensitive_path" || "$shared_dir" == "$sensitive_path"/* || "$sensitive_path" == "$shared_dir"/* ]]; then
+      die "virtiofsd export overlaps a sensitive host path: $sensitive_path"
+    fi
+  done
+
+  echo "QEMU configuration: restrict=on; SSH bound to 127.0.0.1:$ssh_port; only the four reviewed guestfwd channels are configured."
+  echo 'QEMU TCP listeners: SSH and egress proxy are loopback-only.'
+  echo "Host workspace export: $shared_dir (the guest can read/write this selected directory)."
+  echo 'Running network and approved-channel probes inside the guest (no VM or host settings will be changed).'
+  if [[ "${VM_ISOLATION_SKIP_MODEL:-0}" == 1 ]]; then
+    guest_probe_command='python3 - --skip-model'
+  fi
+  vm_ssh "$vm_dir" "$guest_probe_command" <"$LAB_DIR/scripts/vm-guest-isolation-check.py"
+}
+
+vm_cmd_agent() {
+  local vm_name="${1:-default}"
+  local vm_dir
+  local started_at elapsed probe_options probe_command probe_status metrics_url
+  local guest_recursion_env
+  vm_dir="$(_vm_resolve "$vm_name")"
+  log_verbose "Launching guest agent for VM '$vm_name'."
+  log_debug "VM directory: $vm_dir"
+  [[ -d "$vm_dir" ]] || die "No VM profile found at: $vm_dir"
+  if ! echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    die "VM '$vm_name' is not running. Start it with: ./lab-vm up $vm_name"
+  fi
+  _vm_validate_profile_workspace_boundary "$vm_dir" || die 'Refusing agent launch because the active guest workspace overlaps VM control state.'
+  vm_recursion_load_profile "$vm_dir" || die 'Could not load the VM recursion policy; refusing to start the agent.'
+  guest_recursion_env="LAB_VM_RECURSION_DEPTH=$VM_AGENT_RECURSION_DEPTH LAB_VM_MAX_DEPTH=$VM_AGENT_MAX_DEPTH"
+
+  # Metrics are optional to the agent runtime. Start the shared curated host
+  # service and check this guest's forward, but never block OpenCode on metrics;
+  # the TUI reports transport failure and continues polling if this path is down.
+  metrics_url="http://127.0.0.1:1"
+  if (vm_cmd_metrics up); then
+    metrics_url="http://10.0.2.100:19532"
+    if ! _vm_guest_metrics_preflight "$vm_dir"; then
+      echo "WARNING: VM host metrics are not ready through this guest's 10.0.2.100:19532 forward; OpenCode will start and the TUI will report/retry that guestfwd. See './lab-vm metrics status'." >&2
+    fi
+  else
+    echo "WARNING: VM host metrics service could not be started; OpenCode will start with metrics disabled for this session. See './lab-vm metrics status'." >&2
+  fi
+
+  local version="${VM_OPENCODE_VERSION:-latest}"
+  local installed_version
+  local model_provider model_url
+  log_verbose "Checking guest OpenCode version and configuration."
+  log_debug "Expected OpenCode version: $version"
+  installed_version="$(vm_ssh "$vm_dir" "opencode --version" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
+  log_debug "Guest OpenCode version: ${installed_version:-unavailable}"
+  if [[ ! "$installed_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    die "OpenCode is not installed in VM '$vm_name' (found ${installed_version:-none}). Run ./lab-vm up $vm_name to install it."
+  fi
+  if [[ "$version" != latest && "$installed_version" != "$version" ]]; then
+    die "OpenCode $version is not installed in VM '$vm_name' (found ${installed_version:-none}). Run ./lab-vm up $vm_name to install/update it."
+  fi
+  if ! vm_ssh "$vm_dir" "test -r /etc/opencode/opencode.json && test -r /etc/opencode/plugins/host-metrics-tui/package.json && test -r /etc/opencode/plugins/little-mester-exit-confirm/package.json && test -r /etc/opencode/plugins/little-mester-logo/package.json && node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 20 ? 0 : 1)' && test -r /home/mester/.local/share/little-mester/mcp/dist/mcp-server.js"; then
+    die "OpenCode/Node/MCP guest configuration is missing or unsupported in VM '$vm_name'. Run ./lab-vm up $vm_name to provision it."
+  fi
+  model_provider="$(vm_ssh "$vm_dir" "python3 -c 'import json; print(json.load(open(\"/etc/opencode/opencode.json\"))[\"model\"].split(\"/\", 1)[0])'")"
+  case "$model_provider" in
+    llamacpp) model_url="http://10.0.2.100:8080/health" ;;
+    ollama) model_url="http://10.0.2.100:11434/api/tags" ;;
+    *) die "OpenCode model provider '$model_provider' has no configured VM host forwarder." ;;
+  esac
+  if [[ "${VM_AGENT_SKIP_MODEL_PROBE:-0}" != 1 ]]; then
+    log_verbose "Ensuring the host model service for provider $model_provider."
+    vm_cmd_models ensure "$model_provider" || die "Could not ensure the host model API for $model_provider; OpenCode was not launched."
+    log_verbose "Checking $model_provider API reachability from the guest at $model_url."
+    probe_options="--fail --silent --show-error"
+    if [[ "$VM_DEBUG" -ge 1 ]]; then
+      probe_options="--fail --show-error --verbose --http1.1"
+    fi
+    probe_command="curl --noproxy 10.0.2.100 $probe_options --max-time 5 '$model_url' >/dev/null"
+    log_debug "Guest model probe: $probe_command"
+    started_at=$SECONDS
+    if vm_ssh "$vm_dir" "$probe_command"; then
+      elapsed=$((SECONDS - started_at))
+      log_debug "Guest model probe succeeded in ${elapsed}s."
+    else
+      probe_status=$?
+      elapsed=$((SECONDS - started_at))
+      log_debug "Guest model probe failed after ${elapsed}s (ssh/curl status=$probe_status)."
+      die "$model_provider API is not reachable from VM '$vm_name' at $model_url. Check the host forwarder with './lab-vm models status'; start it with './lab-vm models up $model_provider'. Metrics are managed separately with './lab-vm metrics status'."
+    fi
+  else
+    log_verbose 'Skipping model API health probe for the browser-only authentication flow.'
+  fi
+  echo "Launching OpenCode $version directly in VM '$vm_name' at /workspace."
+  local cli_config cli_config_quoted
+  cli_config='{"plugins":["/etc/opencode/plugins/little-mester-logo","/etc/opencode/plugins/host-metrics-tui","/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}'
+  printf -v cli_config_quoted '%q' "$cli_config"
+  local remote_command browser_dir_quoted agent_auto_args=''
+  [[ "${VM_AGENT_AUTO:-0}" == 1 ]] && agent_auto_args=' --auto'
+  if [[ -n "${VM_BROWSER_BRIDGE_DIR:-}" ]]; then
+    local browser_bridge_port_quoted browser_bridge_port_num
+    [[ "${VM_BROWSER_BRIDGE_PORT:-}" =~ ^[0-9]+$ ]] || die 'Browser-auth session has no valid guest bridge port.'
+    browser_bridge_port_num=$((10#$VM_BROWSER_BRIDGE_PORT))
+    (( browser_bridge_port_num >= 1024 && browser_bridge_port_num <= 65535 )) || die 'Browser-auth session has no valid guest bridge port.'
+    printf -v browser_dir_quoted '%q' "$VM_BROWSER_BRIDGE_DIR"
+    printf -v browser_bridge_port_quoted '%q' "$browser_bridge_port_num"
+    remote_command="set -eu; browser_dir=$browser_dir_quoted; cleanup(){ rm -rf -- \"\$browser_dir\"; }; trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' HUP TERM; export PATH=\"\$browser_dir:\$PATH\" VM_BROWSER_BRIDGE_TOKEN_FILE=\"\$browser_dir/token\" VM_BROWSER_BRIDGE_PORT=$browser_bridge_port_quoted $guest_recursion_env; cd /workspace && . /etc/profile.d/mester.sh && export OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=$metrics_url && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && opencode$agent_auto_args"
+  else
+    remote_command="cd /workspace && . /etc/profile.d/mester.sh && export $guest_recursion_env OPENCODE_CONFIG=/etc/opencode/opencode.json METRICS_URL=$metrics_url && export OPENCODE_CLI_CONFIG_CONTENT=$cli_config_quoted && exec opencode$agent_auto_args"
+  fi
+  ssh -t \
+    -o BatchMode=yes -o ConnectTimeout=10 \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$vm_dir/known_hosts" \
+    -i "$vm_dir/id_vm_control" -p "$(cat "$vm_dir/ssh_port")" \
+    mester@127.0.0.1 \
+    "$remote_command"
+}
+
+_vm_guest_metrics_preflight() {
+  local vm_dir="$1"
+  vm_ssh "$vm_dir" 'python3 -' <<'PY'
+import json
+import sys
+import time
+import urllib.request
+
+base = "http://10.0.2.100:19532"
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+deadline = time.monotonic() + 10
+last_error = "no response"
+while time.monotonic() < deadline:
+    try:
+        bodies = []
+        for path in ("/summary", "/metrics", "/history?n=2"):
+            with opener.open(base + path, timeout=4) as response:
+                bodies.append(response.read())
+        metrics = json.loads(bodies[1])
+        history = json.loads(bodies[2])
+        if not isinstance(metrics, dict) or not isinstance(history, list):
+            raise ValueError("unexpected metrics response shape")
+        print("guest metrics forward healthy: summary, metrics, history")
+        raise SystemExit(0)
+    except Exception as exc:
+        last_error = f"{type(exc).__name__}: {exc}"
+        time.sleep(0.5)
+
+print(f"guest metrics forward did not become ready: {last_error}", file=sys.stderr)
+raise SystemExit(1)
+PY
+}
+
+# ─── vm down: stop and remove VM ────────────────────────────────────
+vm_cmd_recursion_clean() {
+  local vm_name="${1:-}" session_dir vm_dir answer pid pid_file
+  [[ -n "$vm_name" ]] || die 'Usage: ./lab-vm recursion-clean <profile>'
+  [[ "$vm_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die 'VM profile names must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen (max 64 characters).'
+  session_dir="$(vm_recursion_session_dir "$vm_name")" || die 'Invalid recursive VM profile name.'
+  [[ -d "$session_dir" && ! -L "$session_dir" ]] || {
+    echo "No recursive session found for profile '$vm_name' (skipping)."
+    return 0
+  }
+  [[ "$(stat -c '%u' "$session_dir")" == "$(id -u)" ]] || die 'Recursive session is not owned by the current user.'
+  if [[ -e "$session_dir/outer-vm-dir" || -L "$session_dir/outer-vm-dir" ]]; then
+    [[ -f "$session_dir/outer-vm-dir" && ! -L "$session_dir/outer-vm-dir" ]] || die 'Recursive snapshot has invalid outer VM ownership metadata; refusing cleanup.'
+    vm_dir="$(cat "$session_dir/outer-vm-dir")"
+    [[ "$vm_dir" == /* && -d "$vm_dir" && ! -L "$vm_dir" ]] || die 'Cannot verify the outer VM profile associated with this snapshot; refusing cleanup.'
+  else
+    vm_dir="$session_dir/vm/$vm_name"
+  fi
+  if [[ -d "$vm_dir" ]] && echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    die "Recursive VM '$vm_name' is still running; stop it before cleanup."
+  fi
+  for pid_file in "$vm_dir/qemu.pid" "$vm_dir/virtiofsd.pid" "$vm_dir/proxy.pid"; do
+    [[ -f "$pid_file" ]] || continue
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      die "A process recorded for recursive VM '$vm_name' is still alive; refusing to remove its state."
+    fi
+  done
+  if [[ "${VM_YES:-0}" != 1 ]]; then
+    [[ -t 0 ]] || die 'Recursive cleanup is destructive and requires an interactive confirmation or --yes.'
+    read -r -p "Delete recursive VM '$vm_name', its overlay/base disk, and disposable workspace at '$session_dir'? [y/N] " answer
+    [[ "$answer" == [yY] || "$answer" == [yY][eE][sS] ]] || die 'Recursive cleanup cancelled; state was preserved.'
+  fi
+  rm -rf -- "$session_dir"
+  echo "Recursive profile '$vm_name' and its disposable workspace/state were removed."
+}
+
+vm_cmd_suspend() {
+  local vm_name="${1:-default}" vm_dir asset
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" && ! -L "$vm_dir" ]] || die "No safe VM profile found for '$vm_name'."
+
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do
+    [[ -f "$vm_dir/$asset" && ! -L "$vm_dir/$asset" ]] || die \
+      "Cannot safely suspend '$vm_name': required profile state is missing or unsafe ($asset)."
+  done
+
+  local status
+  status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status='stopped'
+  if [[ "$status" != running* ]]; then
+    echo "VM '$vm_name' is already suspended; overlay and guest state are preserved."
+    return 0
+  fi
+
+  if [[ "${VM_POWEROFF_RECURSIVE:-0}" == 1 ]]; then
+    _vm_poweroff_recursive_children "$vm_dir" || return 1
+  else
+    _vm_require_no_live_nested_qemu "$vm_dir" || return 1
+  fi
+
+  echo "=== VM Suspend: $vm_name ==="
+  _vm_shutdown_for_workspace_switch "$vm_dir" 'suspending the VM' || return 1
+  status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status='stopped'
+  [[ "$status" != running* ]] || die \
+    "Guest shutdown helper returned while VM '$vm_name' is still running; profile state was preserved."
+  for asset in disk.qcow2 seed.iso id_vm_control id_vm_control.pub known_hosts workspace; do
+    [[ -f "$vm_dir/$asset" && ! -L "$vm_dir/$asset" ]] || die \
+      "VM stopped but required profile state changed during suspension ($asset); inspect before resuming."
+  done
+  echo "VM '$vm_name' suspended. Overlay, guest workloads, workspace selection, seed, and SSH identity were preserved."
+  echo "Resume with: ./lab-vm resume $vm_name"
+}
+
+_vm_require_no_live_nested_qemu() {
+  local vm_dir="${1:?VM profile directory required}" probe_output="" probe_status=0
+  local probe_script="$LAB_DIR/scripts/vm-recursion-live-children.py"
+  [[ -r "$probe_script" ]] || {
+    echo 'REFUSED: nested-VM safety probe is missing; refusing to suspend.' >&2
+    return 1
+  }
+  probe_output="$(vm_ssh "$vm_dir" 'python3 -' <"$probe_script")" || probe_status=$?
+  if (( probe_status != 0 )); then
+    [[ -z "$probe_output" ]] || printf '%s\n' "$probe_output" >&2
+    echo 'REFUSED: could not prove the guest has no live nested QEMU; the VM and overlay were left unchanged.' >&2
+    return 1
+  fi
+  printf '%s\n' "$probe_output"
+}
+
+_vm_poweroff_recursive_children() {
+  local vm_dir="${1:?VM profile directory required}" probe_script probe_output="" probe_status=0
+  probe_script="$LAB_DIR/scripts/vm-recursion-live-children.py"
+  [[ -r "$probe_script" ]] || {
+    echo 'REFUSED: nested-VM lifecycle helper is missing; refusing to suspend the parent.' >&2
+    return 1
+  }
+  probe_output="$(vm_ssh "$vm_dir" python3 - --poweroff-recursive <"$probe_script")" || probe_status=$?
+  if (( probe_status != 0 )); then
+    [[ -z "$probe_output" ]] || printf '%s\n' "$probe_output" >&2
+    echo 'REFUSED: a child VM could not be gracefully suspended and verified; the parent and its overlay were left running.' >&2
+    return 1
+  fi
+  printf '%s\n' "$probe_output"
+}
+
+vm_cmd_resume() {
+  local vm_name="${1:-default}" vm_dir status workspace
+  vm_dir="$(_vm_resolve "$vm_name")"
+  [[ -d "$vm_dir" && ! -L "$vm_dir" ]] || die "No suspended VM profile found for '$vm_name'."
+  status="$(vm_run_status "$vm_dir" 2>/dev/null)" || status='stopped'
+  if [[ "$status" == running* ]]; then
+    echo "VM '$vm_name' is already running; no restart was needed."
+    return 0
+  fi
+  [[ -f "$vm_dir/disk.qcow2" && ! -L "$vm_dir/disk.qcow2" ]] || die \
+    "VM '$vm_name' has no preserved overlay; use ./lab-vm up to provision it, not resume."
+  [[ -f "$vm_dir/workspace" && ! -L "$vm_dir/workspace" ]] || die \
+    "VM '$vm_name' has no safe recorded workspace; refusing to choose a replacement implicitly."
+  workspace="$(cat "$vm_dir/workspace")"
+  [[ "$workspace" == /* && -d "$workspace" && ! -L "$workspace" ]] || die \
+    "VM '$vm_name' recorded workspace is unavailable or unsafe; refusing to resume."
+
+  vm_recursion_load_profile "$vm_dir" || die 'Could not read the persisted recursion policy; refusing to resume.'
+  VM_GUEST_RECURSION_DEPTH="$VM_AGENT_RECURSION_DEPTH"
+  VM_EFFECTIVE_MAX_DEPTH="$VM_AGENT_MAX_DEPTH"
+  vm_recursion_validate_workspace "$workspace" "$LAB_DIR" || die 'Recorded workspace is incompatible with the current recursion policy.'
+  if (( VM_AGENT_RECURSION_DEPTH > 0 )); then
+    vm_recursion_require_nested_kvm || die 'Nested KVM is unavailable; suspended child profile was preserved.'
+  fi
+
+  echo "Resuming VM '$vm_name' on its recorded workspace and preserved overlay."
+  # vm_cmd_up repeats workspace, memory-budget, profile and QEMU validation.
+  # No caller-selected replacement is accepted; the persisted workspace is the
+  # only mount used for this resume.
+  vm_cmd_up "$vm_name" "$workspace"
+}
+
+vm_cmd_down() {
+  local vm_name="${1:-default}"
+  local vm_dir
+  vm_dir="$(_vm_resolve "$vm_name")"
+
+  if [[ ! -d "$vm_dir" ]]; then
+    echo "No VM profile found at: $vm_dir (skipping)"
+    return 0
+  fi
+
+  vm_recursion_require_discard_ack "$vm_dir" || return 1
+
+  _vm_auth_export_to_escrow "$vm_dir" || return $?
+
+  echo "=== VM Down: $vm_name ==="
+
+  # 1. Stop QEMU + virtiofsd
+  vm_run_stop "$vm_dir"
+
+  # 2. Delete overlay disk (A6: clean VM-side state)
+  vm_disk_delete "$vm_dir/disk.qcow2"
+
+  # 3. Delete seed ISO
+  rm -f "$vm_dir/seed.iso"
+
+  # 4. Clean SSH keys
+  vm_ssh_clean "$vm_dir"
+
+  # 5. Clean mgmt socket
+  rm -f "$vm_dir/mgmt.sock"
+
+  # The persisted policy belongs to this discarded overlay; a later up will
+  # write a fresh policy before starting the VM.
+  vm_recursion_clear_profile "$vm_dir" || return 1
+  rm -f -- "$vm_dir/auth-forward-imported"
+
+  echo "VM '$vm_name' removed. Base disk preserved for next VM."
+}
+
+# ─── vm stop: teardown agent + workspace containers and VM ──────────
+vm_cmd_stop() {
+  local vm_name="${1:-default}"
+  local vm_dir
+  vm_dir="$(_vm_resolve "$vm_name")"
+
+  # Refuse before tearing down guest workloads; down repeats the guard before
+  # deleting the overlay in case it is called independently.
+  vm_recursion_require_discard_ack "$vm_dir" || return 1
+
+  # The first export must happen before guest Docker volumes/workloads are
+  # removed. vm_cmd_down performs a second current-state export before it
+  # deletes the overlay; either failure leaves the overlay available.
+  _vm_auth_export_to_escrow "$vm_dir" || return $?
+
+  echo "=== VM Stop: $vm_name ==="
+
+  # 1. If VM is running, SSH in and tear down Docker containers (A6)
+  if echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    local ssh_port
+    ssh_port=$(cat "$vm_dir/ssh_port")
+    local host_uid
+    host_uid="$(id -u)"
+    echo "Tearing down containers in VM..."
+    ssh -o StrictHostKeyChecking=yes \
+        -o UserKnownHostsFile="$vm_dir/known_hosts" \
+        -i "$vm_dir/id_vm_control" \
+        -p "$ssh_port" \
+        mester@127.0.0.1 \
+        "cd /workspace && docker -H unix:///run/user/${host_uid}/docker.sock compose down -v --remove-orphans 2>&1" 2>&1 || {
+      echo "WARNING: Container teardown may have failed. Check VM logs." >&2
+    }
+
+    # Verify git status is clean (A6)
+    echo "Checking git status..."
+    local git_status
+    git_status=$(ssh -o StrictHostKeyChecking=yes \
+      -o UserKnownHostsFile="$vm_dir/known_hosts" \
+      -i "$vm_dir/id_vm_control" \
+      -p "$ssh_port" \
+      mester@127.0.0.1 \
+      "cd /workspace && git status --short 2>/dev/null || echo 'Not a git repo'" 2>&1 || true)
+    if [[ -z "$git_status" ]]; then
+      echo "Git status is clean (no uncommitted changes)."
+    else
+      echo "WARNING: Git has uncommitted changes:"
+      echo "$git_status"
+    fi
+  fi
+
+  # 2. Stop and remove VM
+  vm_cmd_down "$vm_name"
+}
+
+# ─── vm rebuild: remove and recreate base disk ───────────────────────
+vm_cmd_rebuild() {
+  local vm_name="${1:-default}"
+  local base_disk="$VM_DIR_BASE/base.qcow2"
+  local vm_dir
+  vm_dir="$(_vm_resolve "$vm_name")"
+
+  # Rebuild removes the target overlay along with its base disk. Check before
+  # prompting or stopping anything so a refusal has no partial side effects.
+  vm_recursion_require_discard_ack "$vm_dir" || return 1
+
+  # Safety: never proceed without explicit confirmation
+  if [[ -f "$base_disk" ]]; then
+    local size
+    size=$(du -sh "$base_disk" 2>/dev/null | awk '{print $1}' || echo '?')
+    echo "=== VM Rebuild: $vm_name ==="
+    echo ""
+    echo "WARNING: This will DELETE the base disk and all data inside it."
+    echo "  Base disk: $base_disk ($size)"
+    echo ""
+    echo "A new base disk will be created in its place. Any running"
+    echo "VMs must be stopped first (./lab-vm down)."
+    echo ""
+
+    # Respect VM_YES for auto-accept (ticket #48, A7-A8)
+    if [[ "${VM_YES:-0}" != "1" ]]; then
+      read -r -p "Proceed with rebuild? [y/N] " _rebuild_choice
+      if [[ "$_rebuild_choice" != [yY] && "$_rebuild_choice" != [yY][eE][sS] ]]; then
+        log "Rebuild cancelled."
+        return 0
+      fi
+    else
+      echo "Auto-accept enabled (VM_YES=1) — proceeding."
+    fi
+  fi
+
+  # Stop any running VMs that use this base disk
+  if echo "$(vm_run_status "$vm_dir" 2>/dev/null)" | grep -q running; then
+    log "VM '$vm_name' is running. Stopping it first..."
+    vm_run_stop "$vm_dir"
+  fi
+
+  # Remove base disk (and any existing overlay that depends on it)
+  if vm_disk_exists "$base_disk"; then
+    log "Removing base disk: $base_disk"
+    vm_disk_delete "$base_disk"
+  fi
+  # Remove overlay if it exists (it references the old base)
+  local overlay_disk="$vm_dir/disk.qcow2"
+  if vm_disk_exists "$overlay_disk"; then
+    log "Removing overlay disk: $overlay_disk"
+    vm_disk_delete "$overlay_disk"
+  fi
+  vm_recursion_clear_profile "$vm_dir" || return 1
+
+  # Recreate base disk
+  echo "Creating new base disk image ($VM_BASE_SIZE GiB)..."
+  vm_disk_create_base "$base_disk" "${VM_BASE_SIZE:-20}"
+  echo "Base disk recreated. Next step: ./lab-vm up $vm_name"
+}
+
+# ─── vm base: create the base image (one-time) ──────────────────────
+vm_cmd_base() {
+  local vm_name="${1:-default}"
+  local base_disk="$VM_DIR_BASE/base.qcow2"
+
+  log "Creating base disk image (${VM_BASE_SIZE:-20} GiB)..."
+  vm_disk_create_base "$base_disk" "${VM_BASE_SIZE:-20}"
+  log "Base disk created. Next step: ./lab-vm up $vm_name"
+}

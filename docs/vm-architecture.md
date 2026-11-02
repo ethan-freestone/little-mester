@@ -1,82 +1,297 @@
 # VM harness architecture and trust boundary
 
 > Decision: `docs/DECISIONS.md` §C.8. Tickets: epic #35, spike #40, provisioning #41,
-> agent image #42, workspace Docker/egress #43, docs #44, model-agnostic harness #45.
+> direct guest harness #42, guest workloads/egress #43, docs #44, model-agnostic harness #45.
 > This page is the reviewer's one-page view; it is not a promise that every arrow is
 > implemented yet. #41–#43 carry the acceptance evidence.
 
 ## 1. Shape
 
 ```
-Host (your machine) — ./lab runs here as you, not as a service
+Host (your machine) — intended VM-default launcher runs here as you, not as a service
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  ./lab                                                                       │
+│  Target: ./lab <workspace> → VM host adapter                                 │
+│  Current: ./lab vm <args> → ./lab-vm; ./lab → ./lab-docker until cutover    │
 │   ├─ check_workspace()            path guards run BEFORE anything is shared   │
-│   ├─ qemu-system-x86_64          KVM, per-VM qcow2 overlay, cloud-init seed   │
+│   ├─ VM host adapter              QEMU + supported host acceleration          │
 │   ├─ virtiofsd                   exports ONLY the selected workspace          │
-│   ├─ egress proxy (allowlist)    exposed at 10.0.2.100:3128 via guestfwd      │
-│   └─ ollama / llamacpp           127.0.0.1:11434 / :8080 via guestfwd         │
+│   ├─ public HTTP(S) egress proxy exposed at 10.0.2.100:3128 via guestfwd      │
+│   └─ optional model API          user-configured loopback endpoint via guestfwd│
 │                                                                              │
 │   ┌────────────────────────── disposable VM ───────────────────────────────┐ │
 │   │  systemd                                                                │ │
-│   │  rootless Docker daemon           user: mester                           │ │
-│   │    unix:///run/user/<uid>/docker.sock                                   │ │
+│   │  Little Mester harness runs directly in the guest (no agent container)  │ │
+│   │    OpenCode / Aider / Claude Code / Codex adapter                       │ │
+│   │    native guest auth + temporary loopback browser callback via SSH      │ │
+│   │    /workspace (virtiofs, rw)                                            │ │
 │   │                                                                         │ │
-│   │  ┌──────────────── agent container ─────────────────┐                   │ │
-│   │  │ opencode + docker CLI + compose v2               │                   │ │
-│   │  │ /workspace  (virtiofs, rw)                       │                   │ │
-│   │  │ docker.sock (only when Docker access is enabled) │                   │ │
-│   │  └──────────────────────────────────────────────────┘                   │ │
-│   │                                                                         │ │
-│   │  ┌──────────── workspace containers (optional) ─────┐                   │ │
-│   │  │ postgres, redis, ...                             │                   │ │
-│   │  │ labelled, internal networks, no host ports       │                   │ │
-│   │  └──────────────────────────────────────────────────┘                   │ │
+│   │  optional guest Docker + Compose (project workload capability)          │ │
+│   │    postgres, redis, arbitrary project services                          │ │
+│   │    optional nested Little Mester QEMU/KVM VMs                           │ │
 │   └─────────────────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Only three kinds of traffic cross the VM boundary: the workspace (virtiofs), SSH control
-(loopback-only host forward), and explicitly forwarded model/egress endpoints. There is
-no general host route.
+The compatibility dispatcher routes `./lab vm <args>` to `./lab-vm`; `./lab-docker` is the
+explicit host-Docker entry. While the adoption gates remain open, ordinary `./lab <workspace>`
+still delegates to the old Docker workflow. The intended final default is `./lab <workspace>`
+starting/reusing the VM directly, but this worktree is not cut over or accepted yet.
+Only explicitly selected crossings traverse the VM boundary: the workspace (virtiofs), SSH
+control (loopback-only host forward), and named model, metrics, or egress endpoints. There is
+no general host route. VM metrics transport is a separate integration from the existing
+host-Docker metrics path; the latter remains in place during migration.
 
 ## 2. Crossings
 
 | Crossing | Direction | What is exposed | What is *not* exposed |
 |---|---|---|---|
-| `virtiofsd` → guest `/workspace` | host → VM | Exactly the directory passed to `./lab`, read/write | `$HOME`, `~/.ssh`, `~/.config`, the lab repo without `--unsafe-recurse`, Docker sockets, other checkouts |
+| `virtiofsd` → guest `/workspace` | host → VM | Exactly the directory passed to `./lab vm` (target default: `./lab`), read/write | `$HOME`, `~/.ssh`, `~/.config`, the lab repo without `--unsafe-recurse`, Docker sockets, other checkouts |
 | SSH control | host → VM | `127.0.0.1:<ephemeral>` → guest `:22`, per-VM key, per-VM `known_hosts` | Host keys/credentials inside the VM; VM listening on the host LAN |
-| Model API `guestfwd` | VM → host | ollama `:11434`, llamacpp `:8080` only | General host loopback, host filesystem, host Docker |
-| Egress proxy `guestfwd` | VM → internet | HTTP(S) destinations allowed by `.mester-egress` | Unlisted domains, non-HTTP protocols (until added deliberately), raw host routing |
-| Docker socket | agent container → VM daemon | Rootless daemon API, only when access is enabled | Host Docker daemon, rootful VM daemon by default |
+| VM state | host-local | Per-user data directory outside the selected workspace; nested state stays in a private guest session | VM disks, control keys, logs, or process state through virtiofs |
+| Optional model API `guestfwd` | VM → one configured host endpoint | One explicitly selected local API port | General host loopback, host filesystem, host Docker |
+| Optional metrics endpoint/stream | VM → one configured host metrics endpoint | Read-only metrics API/data needed by the guest plugin | Compose DNS assumptions, host `/proc` mounts, host filesystem, host Docker, general host loopback |
+| Egress proxy `guestfwd` | VM → public Internet; nested VMs chain through the immediate parent's proxy | Any public HTTP(S) destination when `allowed_domains` is blank, subject to each VM's policy | Host-local/directly connected networks, private/reserved/multicast IPs, mixed DNS, non-HTTP protocols, raw host routing |
+| Temporary browser OAuth callback | host browser → VM guest | One exact runtime-selected callback port, bound to host `127.0.0.1` and forwarded to guest `127.0.0.1` over the temporary SSH control master | Port ranges, LAN listeners, callback URL rewriting, general host route, callback/token capture |
+| Guest runtime | agent in guest → VM | Guest Docker/Compose, guest processes, optional nested VMs | Host Docker daemon, host filesystem outside the selected workspace |
+
+New VM profiles and base disks use `~/.local/share/little-mester/vm/`; launcher and host-Docker
+logs use `~/.local/share/little-mester/logs/`. `XDG_DATA_HOME` or `MESTER_STATE_DIR` relocates
+that per-user root, and `./lab-vm context` prints the effective profile path. There is no
+checkout-local fallback or automatic migration. A stale checkout-local `.mester` directory is
+not selected as VM state and is refused as a shared workspace until reviewed. Per-profile QEMU,
+proxy, and provisioning logs live in the profile directory. Nested state remains private inside
+the containing guest's recursion session. Guest recursion identity is stored in root-owned guest
+OS state and is not dependent on the agent SSH environment. The little-mester MCP server runs
+from a guest-private copy with Node.js 20+ and lockfile-installed dependencies; it does not
+create `node_modules` in the shared workspace.
+
+The current Linux VM implementation uses one native, curated host metrics service on
+`127.0.0.1:19532` per immediate VM host. Each QEMU profile has an independent guestfwd to
+that service, so multiple outer profiles do not need separate metrics listeners. Agent launch
+starts the service idempotently and verifies `/summary`, `/metrics`, and `/history` from inside
+the guest. Metrics are optional to the agent: if startup or the guestfwd preflight fails, the
+launcher warns and still opens OpenCode, whose TUI surfaces and retries the failure. Nested
+guests must not be pointed at an ancestor host's service by default; their
+parent must provide only an explicitly reviewed child-local endpoint. That nested path is not
+implemented or accepted yet.
+
+### Temporary browser OAuth callback: version-specific integration
+
+For pinned OpenCode 2.2.0, source commit
+`1097e2668b1e08ad63bdf0b1c4860b9bc01e420c` at
+`packages/core/src/plugin/provider/chatgpt.ts` calls
+`server.listen(0, "127.0.0.1", ...)` and places the chosen port in the OAuth
+`redirect_uri` as `http://127.0.0.1:<port>/auth/callback`. This is confirmed by
+source inspection, **not a documented/stable OpenCode CLI or API contract**.
+
+`./lab-vm agent` starts the guest agent with an SSH control
+master and host MCP browser bridge. When the guest opener requests the approved
+authorization URL, the bridge extracts only that `redirect_uri` port, validates
+the exact loopback host and callback
+path, then requests one SSH `-O forward` from host `127.0.0.1:<port>` to guest
+`127.0.0.1:<port>`. Only after the forward succeeds does it open the original
+URL unchanged. The forward exists only while the auth command's SSH master is
+alive. A new callback port replaces the previous forward before browser launch;
+there is at most one callback listener. Auth forwarding commands ignore user SSH
+config and disable SSH agent/X11 forwarding to prevent inherited forwards,
+proxy commands, or agent sockets from expanding this capability. The bridge
+accepts only the pinned authorization endpoint and callback shape. No port range
+is opened, and
+the browser URL, OAuth state, code and tokens are not logged or captured.
+
+Authentication does not grant host execution, host filesystem/Docker access, or
+a general network route. The existing public-destination proxy checks apply to
+login traffic as well: loopback, private, link-local, multicast and mixed
+public/non-public DNS answers are rejected before connection, and connections
+use the validated IP rather than resolving the hostname again.
+ChatGPT model requests and ordinary agent work use the same public-only HTTP(S)
+proxy. A blank `.mester-egress` domain list permits public hostnames, while address
+validation still rejects the parent host's local/directly connected networks and
+private, reserved, multicast, IPv4-embedded IPv6, or mixed-DNS destinations. The Linux
+route guard fails closed if local/direct network data cannot be inspected.
+
+This is intentionally runtime-derived to avoid a hardcoded ephemeral port, but
+it still depends on an internal OpenCode URL shape. Unexpected/missing redirect
+URIs fail closed before browser launch. On every OpenCode version bump, inspect
+the provider source and callback URL construction, update parser tests and this
+document, and require owner-controlled live acceptance before claiming auth
+works. See [the auth runbook](chatgpt-auth.md) and ticket #45 for operator steps
+and test evidence.
 
 ## 3. Boundaries and what a compromise buys
 
 | Compromised component | Can reach | Cannot reach (by design) |
 |---|---|---|
-| **Agent process / container** | `/workspace`, its own rootless containers, model APIs, allowlisted egress | Host filesystem outside the workspace, host loopback, host Docker, other VMs, VM root, host LAN |
-| **A container started from the workspace** | `/workspace` as mounted, other containers on its Docker networks, allowlisted egress | Host, VM root, the agent container (unless explicitly networked), host ports |
-| **The VM kernel / rootless daemon** | Other VM processes and the exported workspace | Host kernel, host files outside the export, host Docker, host credentials |
+| **Agent process in guest** | Guest OS with admin-equivalent control, guest Docker/Compose, nested VMs where supported, `/workspace`, public HTTP(S) through the proxy, and only configured guestfwd endpoints | Host filesystem outside the workspace, general host loopback/network routes, host-local/directly connected networks, host Docker, host LAN |
+| **A guest workload container** | Guest Docker networks/volumes and explicitly mounted guest paths | Host filesystem outside the selected workspace, host Docker, host LAN |
+| **A nested VM** | Its explicitly shared guest paths and its own virtual devices | Host filesystem outside the outer workspace export, host Docker, host LAN |
+| **The outer VM kernel** | Guest processes and the exported workspace | Host kernel, host files outside the export, host Docker, host credentials |
 | **The host user** | Everything (they own the machine) | — the harness does not pretend to protect the host from its owner |
 
-The workspace is the data boundary, the VM is the execution boundary, and rootless Docker
-is the privilege boundary inside the VM. A compromised agent can corrupt the workspace it
-was pointed at; that is the same authority the owner granted by choosing that directory.
+The selected workspace is the intentional host-data boundary and the outer VM is the
+execution boundary. The agent is intentionally trusted with broad control inside that guest;
+guest root or a Docker daemon is not treated as an additional host security boundary. A
+compromised agent can corrupt the workspace it was pointed at; that is the authority granted
+by choosing it. The design blocks ordinary guest routes to the host/LAN, but it is not a
+mathematical guarantee against vulnerabilities in QEMU/KVM, virtiofs, the host kernel, or
+other host components. Live checks are bounded evidence, not a proof against every breakout.
 
-## 4. Lifecycle
+Each recursively launched VM must repeat this boundary at its own level: `restrict=on`, a
+child-specific public HTTP(S) proxy, and denial of the parent VM's local/directly connected
+networks. The child must not inherit the parent's SSH/control endpoint, Docker socket, model
+service, browser bridge, or workspace by default. Nested HTTP/CONNECT proxy chaining is now
+implemented and locally regression-tested, but remains pending live nested-KVM acceptance.
+Other recursive crossings remain unimplemented and must not be inherited implicitly; if parent
+proxy chaining is unavailable, nested proxy requests must fail rather than bypass to direct egress.
 
-1. `./lab <dir>` validates the path on the host, resolves the pinned base image, and
-   creates `.mester/vm/<name>/` (overlay, seed, keys, sockets; gitignored).
+The initial parent-to-child sharing direction is strict push-only: the parent selects and
+validates a scoped snapshot, then delivers it to the child without a child request/response
+channel or upward control metadata. Snapshot schema, integrity, delivery, expiry, and revocation
+are design work in #55. Read-only MCP resources are a possible future option to investigate
+for their common resource shape, discovery/interoperability, and tooling; reads carry request
+metadata upward, so MCP is not the current sharing path. Reconsideration requires an explicit
+owner decision. Neither snapshots nor MCP replace `restrict=on` or proxy destination checks.
+
+## 4. Target lifecycle
+
+The VM primitives live in standalone `./lab-vm` and are available through explicit
+`./lab vm <args>` dispatch. The default-workspace cutover and its acceptance remain tracked on
+#35/#52. The intended integrated lifecycle is:
+
+1. `./lab-vm up --workspace <dir>` validates the path on the host, resolves the pinned base image, and
+   creates the profile's overlay, seed, keys, and sockets under the private per-user state root.
+   The CLI no longer selects or writes checkout-local VM state; `context` exposes the actual
+   resolved profile directory. Existing host profiles still require a read-only inventory before
+   any manual state relocation.
 2. `qemu-system-x86_64` starts with KVM, the virtiofs device, SSH on a loopback ephemeral
    port, model/egress `guestfwd` entries, and `restrict=on`.
-3. cloud-init creates `mester`, installs Docker/compose and configures rootless mode,
-   proxy settings and the workspace mount.
-4. `./lab` starts the agent container with the workspace mount and (optionally) the
-   rootless Docker socket.
-5. The agent runs `docker compose` for the workspace; containers are labelled with the
-   workspace path and project name.
-6. `./lab stop` runs the workspace/agent teardown, stops QEMU cleanly, and removes the
-   overlay, seed and sockets. The base image stays cached; nothing workspace-specific does.
+
+The concrete QEMU wiring is `vhost-user-fs-pci` with shareable memfd-backed guest RAM and
+the mount tag `workspace`. `guestfwd` targets use QEMU's per-connection `cmd:` character
+device form (`socat` to host loopback); a bare `-10.0.2.2:PORT` target is invalid QEMU syntax.
+The egress target is a loopback-only launcher proxy that rejects private/reserved addresses
+and applies `.mester-egress`; it is not a general route to host loopback. For a nested VM, its
+proxy applies the child's policy, then forwards HTTP and CONNECT through the immediate parent's
+existing `10.0.2.100:3128` proxy. The parent remains the final destination validator for DNS
+answers and local/directly connected networks. There is no direct-origin fallback when the
+configured parent proxy is unreachable. Top-level VM proxies retain the direct-to-public-origin
+path; local regressions do not replace the pending live nested-KVM acceptance gate (#41/#43).
+3. cloud-init provisions the guest user, direct harness runtime, optional guest workload
+   runtime (Docker/Compose), native
+   auth prerequisites, proxy settings and the workspace mount.
+4. `./lab-vm agent [name]` attaches the selected harness directly in the guest (not in a
+   container) to the invoking terminal. The explicit one-command VM route is
+   `./lab vm <workspace>`, which delegates to `lab-vm` and reuses/starts the selected profile;
+   provisioning and diagnostic commands remain available. Ordinary `./lab <workspace>` still
+   uses host Docker until the required release gates pass; that workflow is now available
+   explicitly as `./lab-docker`. Track the eventual default cutover on #35/#52; acceptance gates
+   remain independent.
+   Guest-native provider login and browser callback forwarding are tracked in #45.
+5. The agent controls guest Docker/Compose for project services and tests. It may launch
+   nested Little Mester VMs when nested virtualization is available and verified.
+6. The lifecycle can stop guest workloads and the outer VM. VM-state retention/deletion is
+   an explicit lifecycle choice; recursive test sessions must not be silently destroyed.
+
+`lab-vm suspend` and `lab-vm resume` provide the non-destructive shutdown/restart path: suspend
+requests a clean guest poweroff and preserves the qcow2 overlay, guest Docker workloads/volumes,
+recorded workspace, seed, and SSH identity; resume starts the same profile on that workspace and
+existing overlay. By default, suspend reads the guest process table and blocks if any nested QEMU
+is live or cannot be matched to a managed child profile. `suspend --poweroff-recursive` explicitly
+requests child-first graceful suspension, deepest-first; the parent is left running if any child
+cannot be stopped and verified. Both modes preserve child overlays and workspace state. A recursion
+depth allowance alone does not block an empty guest. `lab-vm stop` and `lab-vm down` remain
+destructive teardown commands. The implementation is locally tested but still requires
+owner-host KVM acceptance before recommending it for daily use (#41/#52).
+
+The Little Mester checkout is not part of the default workspace export. `--recurse` opts into
+bounded child-VM testing; repository-related workspaces are snapshotted so the direct guest
+cannot write back to the host checkout. `--unsafe-recurse` additionally requires and permits a
+read/write workspace containing the checkout. Each nested launch gets a separate disposable
+workspace and VM-state directory, increments the inherited depth, and refuses to exceed the
+outer `--max-depth` (0 by default; supported range 0–32). A child may lower but cannot raise
+the inherited maximum. `recursion-clean` explicitly removes a stopped child session and its
+snapshot. These are local implementation/test results tracked by #52; nested KVM boot,
+workload, and isolation acceptance are still pending and must not be inferred from mocks.
+Nested starts require usable `/dev/kvm` and guest CPU `vmx`/`svm` flags, and refuse before
+copying or provisioning if either is absent; recursive launches do not fall back to TCG.
+Fresh guest provisioning places `mester` in the `kvm` group so the nested-QEMU preflight can
+use the device when the outer hypervisor exposes it. Existing guests need an explicit, safe
+membership refresh; changing cloud-init source does not update an already-running guest.
+Snapshot copies exclude `.mester`, `.little-mester.conf`, `secrets.env`, local `.env` files,
+auth/database files, private keys, `.bench-models`, and regenerated dependency/runtime caches.
+In-workspace symlinks are rewritten as relative links inside the child copy; escaping links
+are refused. They preserve intended current work in a synthetic one-commit Git repository, not the source
+repository's full history; a private manifest records source HEAD and included content hashes.
+The default snapshot cap is 2 GiB, with a 128-MiB staging reserve and a checked free-space
+preflight; `LAB_VM_MAX_SNAPSHOT_BYTES` can explicitly raise the cap up to 16 GiB but cannot
+bypass available-space checks. Reusing a session refuses a changed source revision/tree, so a
+new test attempt needs a fresh profile. Escaping symlinks and special files are refused.
+Recursive cache/state lives inside the containing guest
+overlay, so a destructive outer `down`/`rebuild` can still remove it; this remains an open
+lifecycle acceptance gate under #43 A6/#52. If persisted policy permits descendants, outer
+`down`, `stop`, `rebuild`, and `up --clean` require explicit `--discard-recursive` before any
+destructive side effects; `--yes` alone does not bypass this guard. The descendant-possible
+marker remains set if the configured maximum is lowered, until the associated overlay is
+discarded.
+
+### VM memory budget and resize
+
+New depth-0 profiles request 8 GiB; nested profiles scale down by level (4/2/1 GiB,
+with a 1-GiB floor). `--memory <GiB>` overrides this only during setup of a new profile;
+`run` supports the same setup flag. Existing profiles reject the setup override and must
+use `resize`, or be explicitly replaced with `up --clean --memory <GiB>`. Each profile's
+allocation is persisted and warm starts reuse it. Existing profiles without memory
+metadata retain the legacy 4-GiB allocation until explicitly resized. `./lab-vm
+resize <profile> <GiB>` changes a managed VM's allocation by a clean guest shutdown and
+restart, preserving the writable overlay, base image, seed, keys, and installed guest
+state. QEMU live memory hotplug is not configured. This command cannot change the memory
+of the ancestor VM that contains the current `lab-vm` process; that requires its parent
+hypervisor/launcher and a restart at that layer.
+
+Before snapshot, profile creation, or QEMU startup—and before stopping a running VM to
+resize—preflight the requested RAM against current `MemAvailable` and any cgroup limit,
+retaining at least 512 MiB of headroom. For a running profile, account for its memory that
+will be released by a clean shutdown. Refuse without side effects when the projected budget
+is insufficient; do not silently rely on swap or overcommit. These rules are the design
+contract; implementation and local regression results are tracked by #41/#52, and live
+boot/resize acceptance still requires an appropriate host.
+
+`./lab-vm context` reports the current process's container/VM layer, recursion metadata,
+nested-KVM device/CPU readiness, workspace filesystem, and Little Mester commit. Use
+`./lab-vm context --json` for stable machine-readable output; this is a local CLI query, not a
+separate harness-specific MCP service. A depth marker without a maximum is reported as legacy
+or incomplete and is not treated as authorization to launch a child.
+
+**Self-development boundary:** VM state is resolved outside the shared workspace, and the CLI
+prints its effective profile root before use. `--unsafe-recurse` permits write access to the
+selected checkout but does not export the home state root. A leftover checkout-local `.mester`
+directory is refused rather than read as VM state; inventory any such directory and qcow2 backing
+chains before moving or removing it. The source-level path change is not proof that the physical
+host's existing profile was migrated or that its live virtiofs export is clear. Verify the exact
+host profile root and absence of checkout-local control files before write-enabled recursion; the
+owner-host boundary evidence remains tracked under #41/#43/#52.
+
+### Sessions, worktrees, and parallel agents
+
+A profile is one VM overlay plus **one** host workspace mount at `/workspace`. Use the
+following choices deliberately:
+
+| Goal | Current approach | Support boundary |
+|---|---|---|
+| Work on one project | Reuse one named profile and workspace | Implemented locally; warm same-workspace and workspace-switch behavior still needs the owner KVM acceptance recorded in #41/#52. |
+| Open multiple TUIs in one guest | Start separate `./lab-vm agent <profile>` sessions | Multiple SSH/TUI processes can share one guest; they see the same workspace and guest services. Avoid concurrent writes to one checkout. |
+| Work on parallel branches | Create distinct Git worktrees; mount each worktree in its own named profile for clear isolation | One profile still means one mount. A new named profile requires a fresh guest bootstrap the first time and consumes extra VM resources. |
+| Make several worktrees visible to one VM | Mount a common parent directory containing them | This exposes that entire parent. Per-session cwd/worktree selection is not yet a polished launcher feature; use manual guest navigation only if you understand the shared boundary. |
+| Spawn/coordinate agent loops | Future supervisor + worktree/session lifecycle | Not implemented: no ownership protocol, conflict resolution, resource budget, cancellation, or cleanup contract. See #56. |
+| Self-test Little Mester recursively | Explicit child VM with `--recurse`/`--unsafe-recurse` and a configured depth | Launcher depth/workspace/state guards are implemented locally; nested KVM and live isolation/workload gates remain unverified. |
+
+For sequential workspace changes, reusing the same profile restarts the guest against the new
+single mount while retaining its overlay; it does not mount both directories at once. `--name`
+chooses another VM profile, not a warm switch. Separate auth sessions use independent
+host/guest loopback ports; metrics are shared per immediate host. These port choices remove
+the known fixed `19533` auth-listener collision locally, but live concurrent-session acceptance
+still requires a supported KVM host. The inherited recursion marker now carries both current
+depth and maximum; browser-auth defaults remain a separate policy.
 
 ## 5. Deliberate non-goals
 
@@ -88,14 +303,89 @@ was pointed at; that is the same authority the owner granted by choosing that di
   as weaker isolation.
 - Alternative runtimes. They are evaluated in #46, not smuggled in here.
 
+## 6. Use cases, support contract, and portability
+
+### Use cases
+
+| Use case | Required capability | Must not depend on |
+|---|---|---|
+| Run an agent with broad project access inside a host-isolated guest | Supported VM backend, one guarded workspace share, SSH/control, native guest agent | Host Docker, a host agent container, host credentials or general host routing |
+| Test a project with services such as PostgreSQL/Redis | Optional workload runtime inside the guest (Docker/Compose is the first supported implementation) | The host's Docker daemon/socket or host-side Compose |
+| Use a local model | Optional configured OpenAI-compatible host endpoint, reached through one explicit guestfwd mapping | A particular host Docker installation, published LAN port, or auto-managed host model container |
+| Use hosted model APIs / approved package registries | Explicit provider credentials in the guest and mediated, configured egress | Unrestricted guest networking or implicit firewall edits |
+| Work without a model service | Direct agent/runtime and project shell tools | A model server being installed or started by `lab-vm` |
+
+Guest Docker/Compose is a **workload capability**, not the agent's wrapper or security
+boundary. It may be installed in the guest for the project-testing use case, but the core
+VM/agent launch path must not require the Docker CLI on the host. Host Docker may be one
+user-chosen way to run a local model server, but it is not part of the VM contract.
+
+### Host portability contract
+
+“Unix” is not one virtualization ABI. A usable profile needs working implementations for
+all of: hypervisor/acceleration, safe single-directory sharing, loopback-only control and
+guestfwd networking, guest image architecture, and setup/package detection. The project
+must therefore advertise explicit **tested host profiles**, not claim every Unix host works
+because QEMU happens to build there. Unknown hosts must fail with missing capabilities and
+supported alternatives; they must not silently fall back to weaker isolation or ask users
+to change firewall/routing policy.
+
+The current implementation is an **experimental Linux x86_64 profile**: QEMU, KVM when
+available, a Linux guest, `virtiofsd`, cloud-init, and QEMU user networking. Linux distro
+variation is handled by setup detection, but the VM acceptance gates remain incomplete.
+macOS (Intel/Apple Silicon) and BSD are not currently supported claims: each needs its own
+guest architecture/image, acceleration, workspace-sharing, and lifecycle acceptance tests.
+TCG, where available, is a performance choice and is not evidence that the security or
+workspace contract works on an otherwise unsupported host.
+
+The intended setup flow is host-adapter based:
+
+1. Detect OS, architecture, existing VM tools and available accelerators.
+2. Explain the selected support profile and required userland packages; ask before any host
+   package installation. Never install a daemon/service or alter firewall, NAT, routing,
+   sysctl, or host Docker configuration as an implicit setup step.
+3. Create a local config for the selected workspace, VM profile, optional guest workload
+   runtime, and optional model endpoint. Defaults should work without a model endpoint.
+4. Validate every host crossing before boot: exactly one selected workspace, loopback-only
+   SSH, `restrict=on`, public-only proxy egress, and—only when configured—one loopback model API
+   port. Refuse startup if the host platform cannot enforce these invariants.
+
+The configuration contract should separate independent choices rather than derive host
+behavior from the development Compose stack:
+
+```yaml
+host_profile: auto                 # resolves to an installed, tested adapter
+workload_runtime: docker-compose   # guest-only; also supports none for shell-only use
+model:
+  provider: none                   # none | local-openai-compatible | configured-remote
+  local_port: 8080                 # optional host-loopback port, forwarded by QEMU
+metrics: optional                  # current VM launcher auto-starts the host endpoint for agent runs
+```
+
+This is a design shape, not a committed config schema. The VM's guest address/port is a
+stable logical endpoint; the host adapter maps it to the configured `127.0.0.1` service
+using QEMU's supported `guestfwd` command target. It does not create a host listener,
+publish a Docker port, or expose a host network. Remote providers use the public-only proxy
+and credentials remain in the guest auth store. Metrics are optional and need a separately
+specified data source; the agent must still start if metrics are disabled/unavailable.
+
+Initial portability work should preserve the Linux profile while extracting interfaces for
+VM lifecycle, workspace sharing, network forwarding, and model-provider configuration.
+Additional Unix profiles are enabled only after CI/manual host evidence for each capability;
+they do not get host-specific firewall workarounds.
+
 ## 6. Open items to prove in implementation
 
-- `restrict=on` must still allow the explicit `guestfwd` entries and SSH `hostfwd`; if it
-  does not, the fallback is a host-side firewall + proxy with the same crossings, never a
-  general host route.
-- virtiofs mount/permission behaviour for UID-mapped rootless containers (#41/#43).
-- Rootless Docker port and image limitations, with per-workspace fixes rather than a
-  rootful default (#42/#43).
+- `restrict=on` must still allow explicit `guestfwd` entries and SSH `hostfwd`. If a
+  supported host cannot provide them without firewall/routing changes, that profile is
+  unsupported; do not add a host firewall fallback.
+- virtiofs mount/permission behaviour for the directly running guest agent and its
+  guest-local workloads (#41–#43).
+- Nested KVM availability and recursive VM lifecycle are unverified; host and guest CPU,
+  kernel and QEMU configuration must prove the capability before it is advertised.
+- Guest Docker/Compose behavior and the direct-agent execution model are implementation
+  work; Docker is a guest workload tool, not the agent's security wrapper (#41–#43). Host
+  Docker is not a VM prerequisite.
 - DNS and non-HTTP egress: only the proxy path is allowed initially; anything else is a
   documented follow-up, not an accidental hole (#43).
 - Remote host mode (#47) must repeat the same path guards, labels, teardown and egress

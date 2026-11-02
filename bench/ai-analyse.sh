@@ -112,7 +112,7 @@ BODY="$(jq -n \
 
 Benchmark results:
 $RESULTS" \
-  '{model: "llamacpp-main",
+  '{model: "qwen3.6-35b-a3b-q4_k_m",
     messages: [{role: "system", content: $system}, {role: "user", content: $user}],
     temperature: 0.2,
     max_tokens: 1500,

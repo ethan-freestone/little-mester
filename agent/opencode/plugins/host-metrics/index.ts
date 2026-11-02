@@ -140,7 +140,9 @@ export default Plugin.define({
             return {
               content:
                 `Could not read host metrics: ${message}\n` +
-                `The metrics sidecar may be down. Check: \`docker compose ps metrics\` and \`docker compose logs metrics\`.`,
+                (process.env.METRICS_URL
+                  ? "For VM mode, check `./lab-vm metrics status` and start it with `./lab-vm metrics up`."
+                  : "The metrics sidecar may be down. Check: `docker compose ps metrics` and `docker compose logs metrics`."),
             }
           }
         },

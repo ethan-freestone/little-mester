@@ -3,11 +3,11 @@
   "number": 6,
   "area": "general",
   "type": "feature",
-  "status": "draft",
+  "status": "active",
   "title": "Document workflow & update checklists",
-  "objective": "Update all relevant documentation so users understand the new defaults, guardrails, and how to safely improve little-mester itself.",
+  "objective": "Rewrite maintained user/operator documentation for the VM-first Little Mester workflow, including concise setup/daily-use guidance, accurate host/guest/child boundaries, VM lifecycle effects, recursion, auth, workloads, security and an explicit `./lab-docker` fallback. Treat docs as current only when checked against CLI behavior and mark host acceptance accurately. The #35 phased release plan coordinates documentation and code dependencies.",
   "created_at": "2026-10-20T09:09:49.606Z",
-  "updated_at": "2026-10-26T18:01:24.130Z",
+  "updated_at": "2026-11-01T18:08:41.276Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -28,9 +28,14 @@
   "tests": {
     "needed": [
       "documentation review against current CLI/lab behaviour",
-      "relative-link check across updated docs"
+      "relative-link check across updated docs",
+      "Maintained-doc inventory from #35 plan: README, SECURITY, root/docs decisions, host setup, VM architecture, auth, OpenCode, testing, workflows, CI/ticketing, runtime/plugin READMEs, module docs, and historical archive navigation. Preserve history; current guidance must be concise and accurate.",
+      "Replace contradictory container/Docker-first status where VM-first cutover is implemented; identify experimental/unaccepted pieces clearly. Document fresh setup, everyday warm launch and exact lifecycle retention/deletion, recursion max/default, auth and Docker fallback from current CLI behavior.",
+      "Validate all maintained-document links/anchors, commands and examples against CLI --help and code, Bash/Fish syntax, generated config, and script comments. Run disposable quickstart/resume/recursive walkthroughs only where runtime prerequisites/resources permit; record blocked host gates honestly."
     ],
     "created": [],
-    "cases": []
+    "cases": [
+      "2026-11-01: documentation rewrite activated. Current repo has contradictory Docker-first README/setup/workflow/security/decision wording and VM architecture says launcher merge is still future work. Rewriting current guidance while preserving the pending acceptance truth; links/schema checks are executable gates."
+    ]
   }
 }

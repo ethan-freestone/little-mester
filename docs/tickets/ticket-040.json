@@ -8,7 +8,7 @@
   "title": "Spike: VM topology, workspace transport and isolation boundary",
   "objective": "Decide the concrete VM architecture for the Docker-capable agent harness before implementation: where the VM runs, how the workspace is transported into it, how GPU-backed model servers are hosted, whether the in-VM Docker daemon is rootful or rootless, and how ./lab controls the VM. Output is a written decision plus a trust-boundary diagram, not code.",
   "created_at": "2026-10-26T20:39:18.830Z",
-  "updated_at": "2026-10-26T20:45:14.115Z",
+  "updated_at": "2026-10-28T16:22:13.581Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -70,7 +70,8 @@
       "Owner chose local QEMU/KVM + host-side model API + rootless Docker + virtiofs on 2026-10-26; remote override deferred to #47.",
       "Comparison table covers local QEMU/KVM, remote host, cloud, DinD and shared remote daemon, with a recommendation.",
       "Crossing/threat table names what a compromised agent, workspace container and VM can reach, and what they cannot.",
-      "C.6 carries a refinement note pointing to C.8; architecture §K records the invariants; vm-architecture.md carries the diagram."
+      "C.6 carries a refinement note pointing to C.8; architecture §K records the invariants; vm-architecture.md carries the diagram.",
+      "SUPERSEDED 2026-10-28 by owner clarification and docs/DECISIONS.md §C.8: the previously accepted containerized-agent/rootless-Docker architecture is not the intended product boundary. Little Mester harness must run directly in the outer VM guest; guest Docker/Compose are workload capabilities and nested QEMU/KVM is a target requirement to verify. Host remains protected by outer VM, selected workspace export, restricted egress and no host Docker/socket/credential mounts. Existing passing ACs document historical choice only and do not verify the superseding architecture."
     ]
   },
   "priority": "major",

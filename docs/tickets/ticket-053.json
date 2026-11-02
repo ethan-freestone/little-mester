@@ -1,0 +1,61 @@
+{
+  "id": 53,
+  "file_path": "/workspace/docs/tickets/ticket-053.json",
+  "number": 53,
+  "area": "docs",
+  "type": "feature",
+  "status": "draft",
+  "title": "Documentation MCP for consistent authoring and publishing",
+  "objective": "Design and implement a documentation MCP module that helps agents discover, author, validate, maintain, and publish project documentation consistently across repository docs, GitHub Pages, and other configured documentation destinations.",
+  "created_at": "2026-10-29T13:14:49.345Z",
+  "updated_at": "2026-10-29T13:14:49.345Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "A documented information architecture defines canonical documentation sources, document types, ownership, audience, lifecycle/status, metadata, and the relationship between docs, decisions, and tickets.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "The MCP exposes tools to discover/search/read documentation and to create, update, and deprecate/archive docs through validated, auditable engine-only writes constrained to configured documentation roots.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Document templates and validation enforce project conventions, required metadata/structure, link integrity, and cross-document consistency without duplicating ticket-specific test procedures or decision history.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "The module can build a deterministic, previewable publication output from canonical sources, with configurable navigation, relative-link handling, asset handling, and exclusion of private/internal material.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "A documented adapter boundary supports at least one code-documentation target (for example GitHub Pages) and one portable/wiki-oriented Markdown export, without coupling canonical content to a single hosting vendor.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "Publishing is explicit and safe: preview/dry-run is available, credentials are not stored in documentation or build artifacts, and a failed publish preserves source docs and reports actionable diagnostics.",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "Automated tests cover engine-only writes and audit/lock behavior, path traversal and duplicate handling, metadata/templates, broken links, deterministic build output, private-doc exclusion, and publication adapter failures.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Choose and document the documentation source/inventory and metadata schema, including canonical-source rules and how decisions/tickets are referenced.",
+      "Specify MCP tool contracts and engine-only write/audit/lock/index guarantees; identify whether this extends little-mester MCP or is a separately versioned module.",
+      "Select an initial code-doc publication adapter and a portable/wiki Markdown export target; document preview, credentials, and failure behavior.",
+      "Prototype CI validation and deterministic generated-site/export checks on representative existing project docs.",
+      "Define migration/ownership policy for existing README, docs, decisions, runbooks, and generated reference material without creating duplicate sources of truth."
+    ],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}
