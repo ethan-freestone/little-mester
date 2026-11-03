@@ -2,12 +2,12 @@
 
 ## Control state
 
-- Phase: **Round 2 active; C01–C04 committed, TASK-06/C05 not started**.
+- Phase: **Round 2 active; C01–C04 committed; TASK-06/C05 fixture-validated, checkpoint commit pending**.
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
-- Implementing branch: `feat/vm-approach-2` at
-  `68861dcccfee3d3d0f7a21383ad46fe02bd0cc21` after C02 commit.
+- Implementing branch: `feat/vm-approach-2`; C04 HEAD was
+  `2c1a82c333dad7b237b150574b198e3cb191ee1c` before the C05 checkpoint commit.
 - Inspected source: PR #13 at
   `97af1d83a16fce68ddcc3390276c218a1b0cd518`.
 - Assigned session: current coordinating OpenCode session; no subagents assigned.
@@ -165,8 +165,8 @@ was not a guest bootstrap or a passing host-provisioning result.
 
 ## Round 2 task execution table
 
-The owner resumed Round 2 after the model swap. TASK-01/02 through TASK-04 are
-committed at C01–C03; TASK-05/C04 is fixture-validated and awaiting its scoped
+The owner resumed Round 2 after the model swap. TASK-01/02 through TASK-05 are
+committed at C01–C04. TASK-06/C05 is fixture-validated and awaiting its scoped
 checkpoint commit. Later tasks retain their ordered preconditions. No live
 VM/network acceptance has occurred.
 
@@ -177,7 +177,7 @@ VM/network acceptance has occurred.
 | TASK-03 | C02 | DONE | Coordinator/2026-11-03/2026-11-03 | disk/cache/overlay/seed;65 Bats,30 Python;68861dc | Fixture-only; no real download/QEMU |
 | TASK-04 | C03 | DONE | Coordinator/2026-11-03/2026-11-03 | proxy policy/chaining;36 proxy Python,66 Bats,66 VM Python;8dc9816 | Loopback/mock fixtures only; no live SEC-NET |
 | TASK-05 | C04 | DONE | Coordinator/2026-11-03/2026-11-03 | runner/SSH/process supervision;77 Bats,76 VM Python;b530193 | Fake executable/temp/loopback fixtures only; no real KVM/QEMU/guest; lifecycle CLI wiring remains later work |
-| TASK-06 | C05 | NOT STARTED | Unassigned/—/— | — | Guest setup implementation; no host operations |
+| TASK-06 | C05 | VALIDATED (commit pending) | Coordinator/2026-11-03/2026-11-03/— | Guest bootstrap/config/hash/readiness;98 Python,77 Bats; cloud-init schema; static checks PASS | Fixture-only; no host install, real VM, image/network, SEC-NET or nested acceptance |
 | TASK-07 | C06 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-05/06 |
 | TASK-08 | C07 | NOT STARTED | Unassigned/—/— | — | Guest harness/provider parity |
 | TASK-09 | C08 | NOT STARTED | Unassigned/—/— | — | Depends on guest setup/runtime |
@@ -498,3 +498,54 @@ Exact12 planned C04 paths were committed with `git commit --only`; the staged-em
 mission file was excluded. No push or PR was created. The next ordered task is
 TASK-06/C05; real VM, host-network, image-download and fresh nested-VM gates remain
 pending and restricted as previously recorded.
+
+## TASK-06 / C05 — guest bootstrap and native payload
+
+**State:** implementation and fixture validation complete; C05 checkpoint commit
+pending. Coordinator execution on `feat/vm-approach-2`, 2026-11-03.
+
+Created `lib/vm/cloud-init.sh`, `lib/vm/guest.sh`,
+`lib/vm/guest-bootstrap.sh`, `scripts/vm-opencode-config.py`,
+`scripts/check-vm-cloud-init-schema.sh`, `scripts/vm-python-tools.sh`, and the
+cloud-init, guest, and config fixture suites. Updated `docs/vm-architecture.md` and
+ticket #41 evidence through the ticket MCP API. `vm-migration-plan.md` was not
+edited; its worktree SHA-256 remains
+`3d6ee2115423272b88a8efd8d4d33462318d5ae4c537841091e513ee5e2d1374` and its
+index entry remains empty. The detached source worktree remains clean at
+`97af1d83a16fce68ddcc3390276c218a1b0cd518`.
+
+Implemented the schema-valid secret-free NoCloud template, numeric UID/GID and
+public-key setup, recursion identity, explicit proxy, workspace-tag mount and
+guest-side mount/ownership checks. Bootstrap is one-shot, checks the mounted
+workspace payload hash before package operations, resolves `latest` once into an
+exact install manifest, installs a native guest OpenCode harness, privately stages
+and builds locked MCP sources, emits V2 server plus separate CLI plugin config,
+and writes readiness evidence only after all gates. Docker/Compose remains an
+optional rootful workload runtime; `none` does not invoke Docker. Recursion tools
+and KVM group membership are conditional on a child-depth allowance. Internal
+regular-file symlinks are preserved only when contained in the source subtree;
+external or escaping targets fail closed.
+
+Actual validation:
+
+| Command/check | Result |
+|---|---|
+| `python3 -B -m unittest discover -s tests -p 'test_vm_*.py' -v` |98/98 PASS; all new tests use local/fake fixtures |
+| `bats tests/` |77/77 PASS |
+| `shellcheck -x --severity=style` on five changed Bash files |PASS |
+| `ruff check` on the renderer and three changed Python test files |PASS |
+| `bash -n` on five changed Bash files; `git diff --check` |PASS |
+| Python `ast.parse` on four changed Python files |PASS |
+| `bash scripts/check-vm-cloud-init-schema.sh` |PASS; installed `cloud-init schema` accepted generated NoCloud data (validator emitted expected non-root instance-state warnings) |
+| `vm_guest_payload_hash /workspace docker opencode latest 0 2` |PASS; `5a017ba024394b5e2ab78e4b19ed4389afa5b55ac40685d72e785eae5c0c7068` |
+| `python3 scripts/check-docs-consistency.py` |8 failures, unchanged pre-existing README/DECISIONS assertions; no new architecture-doc link failures |
+
+Ticket #41 received the three C05 test files and fixture evidence through MCP;
+acceptance criteria A1–A8 remain **pending**. Ticket-store validation passed:
+index synchronized, audit intact (135 entries), no lock/orphans, and no quality
+issues. No MCP install/build command was run on the active host. No real VM,
+QEMU/KVM guest boot, image download, host-network change, live
+SEC-NET, credentials, or nested-VM operation was performed. C05 is local fixture
+evidence only, not host/VM acceptance.
+
+**Checkpoint commit pending:** `feat(vm): provision native guest harness and workloads`.

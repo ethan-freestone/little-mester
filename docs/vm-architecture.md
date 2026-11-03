@@ -6,10 +6,12 @@ The owner approved `PR_REIMPLEMENTATION_PLAN.md` for `feat/vm-approach-2`.
 The contract below supersedes the historical proposal later on this page.
 C01 CLI/configuration and private profile metadata; C02 fixture-tested
 image/overlay/seed primitives; C03 fixture-tested public-only proxy/chaining; and
-C04 fixture-tested process supervision/SSH primitives are implemented. **No image
-has been downloaded, no real QEMU/VM has been started, and no host/network
-acceptance is claimed.** `lab-vm` does not yet dispatch lifecycle commands;
-ordinary `./lab` remains the existing Docker launcher.
+C04 fixture-tested process supervision/SSH primitives are implemented. C05 adds a
+fixture-tested guest-native OpenCode bootstrap, private MCP/config payload, exact
+version manifest, payload identity and readiness checks. **No image has been
+downloaded, no real QEMU/VM has been started, and no host/network acceptance is
+claimed.** `lab-vm` does not yet dispatch lifecycle commands; ordinary `./lab`
+remains the existing Docker launcher.
 
 ### CLI and configuration contract
 
@@ -144,6 +146,39 @@ and loopback TCP/Unix sockets only. They do not exercise real QEMU, KVM, a guest
 boot, image availability, SSH guest authentication, live host networking or
 parent/child SEC-NET behavior. Lifecycle commands remain unavailable until later
 tasks wire these primitives into the profile/guest lifecycle.
+
+### Guest bootstrap and native runtime (implemented C05; fixtures only)
+
+`lib/vm/cloud-init.sh` renders one schema-valid, secret-free NoCloud document with
+the numeric guest UID/GID, public control key, recursion identity, explicit proxy
+environment, and only the `workspace` virtiofs mount. Bootstrap source scripts are
+base64-encoded in `write_files`; credentials and private keys are not seeded. The
+generated data is checked with the installed `cloud-init schema` validator.
+
+`lib/vm/guest-bootstrap.sh` is a first-boot, guest-root provisioner for the pinned
+Ubuntu 24.04 guest. It verifies the workspace mount and ownership, requires the
+explicit proxy for apt/curl/npm/pip and Docker, and installs supported Node.js plus
+isolated Python tools. The optional rootful Docker/Compose runtime is installed
+only when selected, with scoped daemon/client proxy settings; runtime `none` skips
+Docker completely. Recursion-only QEMU, virtiofs, cloud-image and test tools are
+installed only when the configured depth permits another child.
+
+The agent executes natively in the guest. Bootstrap copies the selected OpenCode
+sources/plugins and locked Little Mester MCP package into a guest-private runtime,
+runs `npm ci` and its build there, renders native V2 OpenCode config plus separate
+CLI-only TUI plugin config, and preserves explicit denies and unrelated provider
+settings. `latest` is resolved once and saved as an exact install manifest; the
+success marker is written only after version, MCP, config, tooling and mount checks
+pass. Before package operations, the guest recomputes the host-selected payload
+hash from the mounted workspace and refuses a mismatch. `lib/vm/guest.sh` hashes
+relative input paths, file modes, sizes, contents and runtime selectors and
+rejects cloud-init errors/recoverable errors during readiness validation.
+
+C05 tests use local fixtures and fake package/runtime commands only. They cover
+both Docker selections, private MCP build/retry behavior, exact-version reuse,
+warm-bootstrap refusal, payload/hash/readiness checks, config migration and secret
+handling. They do not install packages on this host or exercise a real guest. The
+real image, KVM, SSH and nested-VM acceptance gates remain restricted and pending.
 
 Examples shared by Bash and Fish (diagnostics only):
 
