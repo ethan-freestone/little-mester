@@ -2,7 +2,7 @@
 
 ## Control state
 
-- Phase: **Round 2 active; C01–C03 committed, TASK-05/C04 fixture validation complete**.
+- Phase: **Round 2 active; C01–C04 committed, TASK-06/C05 not started**.
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
@@ -176,7 +176,7 @@ VM/network acceptance has occurred.
 | TASK-02 | C01 | DONE | Delegated+coordinator/2026-11-03/2026-11-03 | Paths/tests;25 Python pass; f8aa799 | None; no VM operations |
 | TASK-03 | C02 | DONE | Coordinator/2026-11-03/2026-11-03 | disk/cache/overlay/seed;65 Bats,30 Python;68861dc | Fixture-only; no real download/QEMU |
 | TASK-04 | C03 | DONE | Coordinator/2026-11-03/2026-11-03 | proxy policy/chaining;36 proxy Python,66 Bats,66 VM Python;8dc9816 | Loopback/mock fixtures only; no live SEC-NET |
-| TASK-05 | C04 | VALIDATED | Coordinator/2026-11-03/2026-11-03 | runner/SSH/process supervision;77 Bats,76 VM Python;commit pending | Fake executable/temp/loopback fixtures only; no real KVM/QEMU/guest; lifecycle CLI wiring remains later work |
+| TASK-05 | C04 | DONE | Coordinator/2026-11-03/2026-11-03 | runner/SSH/process supervision;77 Bats,76 VM Python;b530193 | Fake executable/temp/loopback fixtures only; no real KVM/QEMU/guest; lifecycle CLI wiring remains later work |
 | TASK-06 | C05 | NOT STARTED | Unassigned/—/— | — | Guest setup implementation; no host operations |
 | TASK-07 | C06 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-05/06 |
 | TASK-08 | C07 | NOT STARTED | Unassigned/—/— | — | Guest harness/provider parity |
@@ -492,3 +492,9 @@ audit, no lock/orphans, and no ticket-quality issues.
 The original detached PR worktree remains outside this checkpoint; preserve it.
 The pre-existing staged-empty/worktree-populated `vm-migration-plan.md` remains
 excluded from all C04 commit paths.
+
+**C04 committed:** `b530193` (`feat(vm): launch owned restricted QEMU profiles`).
+Exact12 planned C04 paths were committed with `git commit --only`; the staged-empty
+mission file was excluded. No push or PR was created. The next ordered task is
+TASK-06/C05; real VM, host-network, image-download and fresh nested-VM gates remain
+pending and restricted as previously recorded.
