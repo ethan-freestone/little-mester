@@ -4,10 +4,11 @@
 
 The owner approved `PR_REIMPLEMENTATION_PLAN.md` for `feat/vm-approach-2`.
 The contract below supersedes the historical proposal later on this page.
-C01 CLI/configuration, path validation and private profile metadata, plus C02
-fixture-tested image/overlay/seed primitives, are implemented. **No image has
-been downloaded in this checkpoint; no VM boot/lifecycle support or real-host
-acceptance is claimed.** Ordinary `./lab` remains the existing Docker launcher.
+C01 CLI/configuration, path validation and private profile metadata; C02
+fixture-tested image/overlay/seed primitives; and C03 fixture-tested public-only
+proxy/chaining policy are implemented. **No image has been downloaded in these
+checkpoints; no VM boot/lifecycle support or real-host/network acceptance is
+claimed.** Ordinary `./lab` remains the existing Docker launcher.
 
 ### CLI and configuration contract
 
@@ -77,6 +78,33 @@ fallback. Cloud-init user-data is a generated nonsecret value, atomically writte
 inside the selected private profile; private keys, provider tokens and broad host
 data are not valid seed inputs. Fixture tests exercise these functions without network or
 QEMU boot; this contract is not host-image acceptance evidence.
+
+### Public-only proxy and nested chaining contract (implemented C03)
+
+The proxy listens only on `127.0.0.1`; host forwarding and guest `guestfwd` are
+separate explicit launcher responsibilities. It accepts HTTP only for port 80 and
+CONNECT only for port 443. Permission denial and an optional exact-host/domain
+allowlist are checked before DNS or socket contact. Direct egress resolves once,
+rejects every mixed/private/reserved/multicast answer and host-local or directly
+connected host network, then connects to one of those already-validated addresses.
+IPv4-mapped, 6to4, Teredo and the well-known NAT64 IPv4 embedding cannot bypass
+the address policy.
+
+A nested proxy receives its immediate parent endpoint as an explicit startup
+argument (`http://10.0.2.100:3128`, the restricted guestfwd channel); the parser
+rejects any other parent endpoint. It applies its own hostname policy first, then
+sends HTTP/CONNECT only to that parent; it does not resolve or connect to the
+origin and has no direct fallback. The parent remains the final DNS, address and
+host-route authority. Recursion configuration emits this argument only from a
+validated inherited depth identity; it never infers nesting from a path name.
+Proxy credentials and hop-by-hop request headers are not forwarded. Request and
+response headers, concurrent handlers and idle time are bounded, ambiguous
+request framing is refused, and request URLs/bodies/credentials are not logged.
+Policy reload parses a complete candidate before replacing the snapshot; missing,
+unreadable or malformed policy leaves the last-known-good policy in force.
+
+C03 validation uses local fixture sockets and mocked DNS/address responses only.
+It is not live LAN isolation, parent guestfwd wiring or nested-VM acceptance.
 
 Examples shared by Bash and Fish (diagnostics only):
 

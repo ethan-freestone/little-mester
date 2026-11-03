@@ -130,6 +130,25 @@ parse() {
   [[ "$output" == *"base                            Verify/download the pinned immutable base image"* ]]
 }
 
+@test "proxy upstream args are explicit and derived only from valid recursion identity" {
+  run bash -c 'source "$1/lib/vm/config.sh"; vm_proxy_upstream_args; declare -p VM_PROXY_UPSTREAM_ARGS' \
+    _ "$ROOT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'declare -a VM_PROXY_UPSTREAM_ARGS=()'* ]]
+  # shellcheck disable=SC2016 # Child Bash expands the result array after sourcing config.
+  run env LAB_VM_RECURSION_DEPTH=1 LAB_VM_MAX_DEPTH=2 bash -c \
+    'source "$1/lib/vm/config.sh"; vm_proxy_upstream_args; printf "<%s>\n" "${VM_PROXY_UPSTREAM_ARGS[@]}"' \
+    _ "$ROOT"
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = '<--upstream-proxy>' ]
+  [ "${lines[1]}" = '<http://10.0.2.100:3128>' ]
+  # shellcheck disable=SC2016 # Child Bash sources config and validates its inherited identity.
+  run env LAB_VM_RECURSION_DEPTH=1 LAB_VM_MAX_DEPTH=0 bash -c \
+    'source "$1/lib/vm/config.sh"; vm_proxy_upstream_args' _ "$ROOT"
+  [ "$status" -eq 2 ]
+  [[ "$output" != *'10.0.2.100'* ]]
+}
+
 @test "CLI help works without private config or runtime state" {
   run bash "$ROOT/lab-vm" --help
   [ "$status" -eq 0 ]

@@ -2,12 +2,12 @@
 
 ## Control state
 
-- Phase: **Round 2 resumed; TASK-03/C02 validated, preparing checkpoint commit**.
+- Phase: **Round 2 active; TASK-03/C02 and TASK-04/C03 validated, preparing C03 commit**.
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
 - Implementing branch: `feat/vm-approach-2` at
-  `f8aa799b165795f4235f70b42474ea7a02a0b122` before C02 commit.
+  `68861dcccfee3d3d0f7a21383ad46fe02bd0cc21` after C02 commit.
 - Inspected source: PR #13 at
   `97af1d83a16fce68ddcc3390276c218a1b0cd518`.
 - Assigned session: current coordinating OpenCode session; no subagents assigned.
@@ -166,16 +166,16 @@ was not a guest bootstrap or a passing host-provisioning result.
 ## Round 2 task execution table
 
 The owner resumed Round 2 after the model swap. TASK-01/02 are complete at C01;
-TASK-03 has completed fixture validation and is awaiting its C02 commit. Later
-tasks remain unstarted and retain their ordered preconditions. No live VM acceptance
-has occurred.
+TASK-03/C02 is committed; TASK-04/C03 has passed fixture and static validation and
+is awaiting its C03 commit. Later tasks retain their ordered preconditions. No live
+VM/network acceptance has occurred.
 
 | Task | Planned checkpoint | Status | Assigned/start/completion | Actual files/tests/results/SHA | Deviations/blockers |
 |---|---|---|---|---|---|
 | TASK-01 | C01 | DONE | Coordinator/2026-11-03/2026-11-03 | CLI/config/docs;50 Bats total pass; f8aa799 | None; no VM operations |
 | TASK-02 | C01 | DONE | Delegated+coordinator/2026-11-03/2026-11-03 | Paths/tests;25 Python pass; f8aa799 | None; no VM operations |
-| TASK-03 | C02 | VALIDATED | Coordinator/2026-11-03/2026-11-03 | disk/cache/overlay/seed;65 Bats,30 Python;pending C02 commit | Fixture-only; no real download/QEMU |
-| TASK-04 | C03 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-02; network policy tests next |
+| TASK-03 | C02 | DONE | Coordinator/2026-11-03/2026-11-03 | disk/cache/overlay/seed;65 Bats,30 Python;68861dc | Fixture-only; no real download/QEMU |
+| TASK-04 | C03 | VALIDATED | Coordinator/2026-11-03/2026-11-03 | proxy policy/chaining;36 Python,66 Bats;pending C03 commit | Loopback/mock fixtures only; no live SEC-NET |
 | TASK-05 | C04 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-02; process/SSH implementation |
 | TASK-06 | C05 | NOT STARTED | Unassigned/—/— | — | Guest setup implementation; no host operations |
 | TASK-07 | C06 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-05/06 |
@@ -189,9 +189,10 @@ has occurred.
 | TASK-15 | C13 | NOT STARTED | Unassigned/—/— | — | Exact fresh-host handoff still required |
 | TASK-16 | C14 | NOT STARTED | Unassigned/—/— | — | All live gates before cutover |
 
-**Handoff stop condition:** ask the mission's explicit architecture/execution
-approval question. Do not start TASK-01, commit, push, run owner-host tests or
-open the replacement PR merely because planning is complete.
+**Round 1 stop condition (satisfied):** explicit Round 2 approval was granted on
+2026-11-03. Continue only in task order and preserve each named checkpoint. Do not
+push or create a replacement PR absent explicit authorization; live host/network
+gates remain separately restricted by #41.
 
 The preceding stop condition was satisfied by the user's explicit approval.
 It remains a historical Round 1 instruction, not a new approval barrier.
@@ -299,9 +300,10 @@ Resume procedure for the next model:
    Do not run original-host lifecycle/auth/test handoffs or start VM tests now.
 5. C01 has no real VM acceptance; full changed-VM self-test remains TASK-13/15.
 
-Known limits: process ownership/signalling, image downloads/boot, native guest
-installation, actual agent permission behavior, OAuth and lifecycle are later
-tasks. Profile metadata stores runtime identity but does not authorize signalling.
+At C01 handoff, process ownership/signalling, image-cache code, boot, native guest
+installation, agent permission behavior, OAuth and lifecycle were not implemented.
+TASK-03 now provides fixture-tested image-cache code, but real image download/boot
+remains NOT_RUN. Profile metadata stores runtime identity but does not authorize signalling.
 An fsync failure after rename can report failure after the atomic replacement
 has committed; no false rollback guarantee is made.
 
@@ -363,4 +365,71 @@ for atomic no-clobber publication; absence of that primitive fails closed. Seed
 content rejects common secret-bearing field/value keywords but remains dependent
 on TASK-06's trusted generator and later secret-canary scan for broader detection.
 
-**C02 commit and SHA are recorded immediately after the commit below.**
+**C02 committed:** `68861dcccfee3d3d0f7a21383ad46fe02bd0cc21`
+(`feat(vm): add immutable base cache and profile disks`). Exact12 planned paths
+committed with `git commit --only`; the user's staged-empty mission file was
+deliberately excluded. This post-commit SHA/status ledger update is uncommitted
+and is included with C03 below; no push or PR created.
+
+## TASK-04 / C03 validation — 2026-11-03
+
+Implemented the reviewed public-only HTTP(S) proxy and explicit immediate-parent
+chaining contract. `lib/vm/proxy.py` retains the original normalization, host-route,
+all-answer DNS, validated-IP connect, domain-policy and protocol-forwarding core,
+with stricter parsing, bounded handling and private readiness records. `lib/vm/config.sh`
+now emits the fixed `--upstream-proxy http://10.0.2.100:3128` argv only for a
+validated inherited recursion identity; the proxy independently rejects every
+other configured parent endpoint. No parent path/profile-name inference is used.
+
+Key safeguards in the replacement:
+
+- Only HTTP port80 and CONNECT443; permission/domain policy runs before DNS or
+  parent contact. Direct mode rejects all non-public/mixed/reserved/multicast
+  answers and host-local/directly connected host networks, and connects only to
+  a previously validated IP. IPv4-mapped, 6to4, Teredo and well-known NAT64
+  IPv4 embedding remain covered.
+- Nested mode uses only the explicit private numeric parent guestfwd endpoint,
+  does not resolve/connect to the origin and has no direct fallback. Parent status
+  denials are preserved; parent outage is 502 and `connect_public` is not called.
+- Strict HTTP authority/Host checks; duplicate/conflicting Content-Length,
+  Transfer-Encoding, Expect, malformed connection tokens, oversized request line
+  or headers are rejected before upstream contact. Proxy credentials and
+  hop-by-hop/nominated headers are removed. Request logging is disabled; URLs,
+  query values and bodies are not emitted.
+- Concurrent handler slots, request/header bytes and idle/connect time are bounded.
+  Timeout/slot release is tested. Policy candidates are strict-parsed before the
+  lock-protected snapshot swap; malformed/unreadable/missing reload keeps last-good.
+- Loopback bind only. Port and JSON readiness identity are private atomic
+  no-replace files; marker contains PID/start ticks/executable/port and is published
+  last. Startup refuses stale records without overwriting/deleting them; shutdown
+  removes only exact matching records. Exact identity signaling remains TASK-05.
+
+Test-first evidence and exact validation:
+
+| Check | Result |
+|---|---|
+| New suite against original proxy in disposable temp tree |Expected red: ambiguous framing, header bound, idle bound, malformed-policy reload, private parent endpoint and readiness mode/identity failed; slot 503/recovery already passed |
+| Proxy test suite |36/36 PASS (28 original scenarios retained in meaning plus 8 hardening/fixture cases); all bound sockets are loopback; mixed DNS/route safety decisions are synthetic/mocked |
+| Idle-timeout release |3 consecutive targeted repetitions PASS |
+| `bats tests/` |66/66 PASS |
+| `python3 -B -m unittest discover -s tests -p 'test_vm_*.py' -v` |66/66 PASS |
+| `shellcheck -x lib/vm/config.sh tests/vm-cli.bats`; `bash -n lib/vm/config.sh` |PASS, full severity |
+| `ruff check lib/vm/proxy.py tests/test_vm_proxy.py`; AST parse |PASS |
+| `python3 lib/vm/proxy.py --help` |PASS; no server started |
+| `git diff --check` on C03 paths |PASS |
+| Docs consistency checker |8 failures; exact `main` Git-object baseline confirms same8 pre-existing README/DECISIONS failures |
+
+No external DNS lookup, public-origin connection, host route mutation, network
+configuration change, QEMU launch, VM, package/service action or credentials were
+used. C03 is code/fixture evidence only—not live SEC-NET, parent guestfwd wiring,
+host egress or nested-VM acceptance. Current workspace `.mester-egress` has a
+restricted allowlist unlike the detached PR fixture, so the original empty-list
+public-default scenario is retained as a separate explicit fixture test.
+
+No architecture deviation. The fixed upstream is the documented guestfwd parent
+address `10.0.2.100:3128`; integration into process/QEMU startup is TASK-05, and
+live parent/child denial verification remains a later authorized SEC-NET gate.
+Ticket #41 now records the C03 fixture/test evidence and the remaining TASK-05,
+live SEC-NET and fresh-nested-VM gates; ticket-store validation passed with no
+orphan, audit, index-sync or quality issues. No acceptance criterion was marked
+passing from fixture-only evidence.

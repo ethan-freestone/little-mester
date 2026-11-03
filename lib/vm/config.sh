@@ -32,6 +32,30 @@ vm_profile_name_valid() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; }
 vm_memory_valid() { [[ "$1" =~ ^[1-9][0-9]{0,2}$ ]] && (( 10#$1 <= 128 )); }
 vm_depth_valid() { [[ "$1" =~ ^(0|[1-9][0-9]?)$ ]] && (( 10#$1 <= 32 )); }
 
+vm_proxy_upstream_args() {
+  local depth max_depth
+  VM_PROXY_UPSTREAM_ARGS=()
+  if [[ ! -v LAB_VM_RECURSION_DEPTH && ! -v LAB_VM_MAX_DEPTH ]]; then
+    return 0
+  fi
+  if [[ ! -v LAB_VM_RECURSION_DEPTH || ! -v LAB_VM_MAX_DEPTH ]]; then
+    vm_error 'Incomplete inherited recursion identity for proxy chaining.'
+    return 2
+  fi
+  depth="$LAB_VM_RECURSION_DEPTH"
+  max_depth="$LAB_VM_MAX_DEPTH"
+  if ! vm_depth_valid "$depth" || ! vm_depth_valid "$max_depth" || (( 10#$depth > 10#$max_depth )); then
+    vm_error 'Invalid inherited recursion identity for proxy chaining.'
+    return 2
+  fi
+  if (( 10#$depth > 0 )); then
+    # The endpoint is the immediate parent guest's public-only proxy exposed by
+    # its restricted guestfwd channel; never infer it from profile/workspace paths.
+    # shellcheck disable=SC2034 # Consumed as an argv array by the runner in TASK-05.
+    VM_PROXY_UPSTREAM_ARGS=(--upstream-proxy http://10.0.2.100:3128)
+  fi
+}
+
 vm_cli_parse() {
   local option key value item profile_arg='' permissions_seen='' passthrough=0
   while (($#)); do
