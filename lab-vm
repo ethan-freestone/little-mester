@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# VM replacement CLI. C01 provides read-only discovery and validated private state.
+set -euo pipefail
+
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+  printf 'REFUSED: VM launcher requires Bash 4.4+ on the Linux x86_64 support profile.\n' >&2
+  exit 2
+fi
+
+VM_REPO="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=lib/state.sh
+source "$VM_REPO/lib/state.sh"
+# shellcheck source=lib/vm/config.sh
+source "$VM_REPO/lib/vm/config.sh"
+
+vm_usage() {
+  cat <<'HELP'
+Usage: ./lab-vm COMMAND|WORKSPACE [options] [-- agent arguments]
+
+Available now:
+  context [--json] [--name NAME]    Read-only config, private paths and capabilities
+  setup                           Read-only host prerequisite discovery
+  setup --install-prereqs          Explicit default-no userland package installation
+  --help                          Show this checkpoint's actual availability
+
+Not yet implemented (refuse with exit 2, never start or mutate a VM):
+  run [WORKSPACE], up [PROFILE] --workspace PATH, agent, ssh, status, list, doctor,
+  suspend, resume, resize PROFILE GiB, down, stop, rebuild, base, update,
+  install-tools, egress-reload, models status|diagnose, metrics up|status|down,
+  auth-forward [PROFILE] PORT, recursion-clean
+
+Options (before or after command/path; -- stops launcher parsing):
+  --name NAME, --workspace PATH, --memory GiB, --recurse, --unsafe-recurse,
+  --max-depth 0..32, --browser-auth|--no-browser-auth, --permissions ask|auto,
+  --auto-accept, -y|--yes, -v|--verbose, -d|--debug, --json,
+  --poweroff-recursive, --discard-recursive, --clean, --cwd RELATIVE_PATH,
+  --opencode-version latest|SEMVER, --agent opencode|aider,
+  --host-profile linux-x86_64, --workload-runtime docker|none,
+  --model-provider none|ollama|llamacpp|remote, --model-port PORT, --model-id ID,
+  --metrics on|off, --auth-forward off|auto|PROVIDER[,PROVIDER], --auth-escrow-dir PATH
+
+--yes confirms launcher actions only, never requests agent auto mode.
+No VM lifecycle or nested-KVM support is claimed by a successful context/setup.
+Ordinary ./lab remains the unchanged Docker launcher until final acceptance.
+HELP
+}
+
+vm_cli_defaults
+vm_cli_parse "$@" || exit 2
+if (( VM_HELP )); then vm_usage; exit 0; fi
+command -v python3 >/dev/null 2>&1 || {
+  vm_error 'Python 3 is required for safe configuration validation; install it manually before setup.'
+  exit 2
+}
+VM_STATE_ROOT="$(vm_state_root)"
+VM_PATHS_HELPER="$VM_REPO/lib/vm/paths.py"
+vm_config_overrides
+vm_config_load || exit 2
+
+# Resolve/validate exact paths even for unavailable operations; never mkdir or repair.
+context_args=(context --state-root "$VM_STATE_ROOT" --profile "$VM_PROFILE" --repository "$VM_REPO")
+if [[ -n "$VM_WORKSPACE" ]]; then context_args+=(--workspace "$VM_WORKSPACE"); fi
+if (( VM_RECURSE )); then context_args+=(--recurse); fi
+if (( VM_UNSAFE_RECURSE )); then context_args+=(--unsafe-recurse); fi
+VM_CONTEXT_JSON="$(python3 "$VM_PATHS_HELPER" "${context_args[@]}")" || exit 2
+
+case "$VM_COMMAND" in
+  setup) vm_setup ;;
+  context)
+    system="$(vm_host_system)"; arch="$(vm_host_arch)"
+    kvm=false; if vm_host_kvm; then kvm=true; fi
+    virtiofsd_path="$(vm_virtiofsd || true)"
+    missing="$(vm_host_missing)"
+    # Never put arbitrary agent arguments, environment dumps or config file contents in logs.
+    printf '%s\n%s\n' "$VM_CONTEXT_JSON" "$VM_CONFIG_JSON" | python3 -c '
+import json,sys
+context=json.loads(sys.stdin.readline())
+config=json.loads(sys.stdin.readline())
+yes,permissions,verbose,debug,maximum,system,arch,kvm,vfs,missing,formatted=sys.argv[1:]
+context["effective_config"]=config
+context["launcher"]={"yes":yes=="1","permissions":permissions,"verbose":int(verbose),"debug":int(debug),"max_depth":int(maximum)}
+context["host"]={"system":system,"architecture":arch,"supported":system=="Linux" and arch=="x86_64","kvm_usable":kvm=="true","virtiofsd":vfs or None,"missing_tools":missing.splitlines()}
+if formatted=="1":
+    print(json.dumps(context,sort_keys=True))
+else:
+    print("VM replacement context (no runtime acceptance implied)")
+    print("State root:",context["state_root"])
+    print("Exact profile:",context["profile_path"])
+    print("Host:",system,arch,"KVM usable:"+kvm)
+    print("Missing userland:",", ".join(missing.splitlines()) or "none")
+' "$VM_YES" "$VM_PERMISSIONS" "$VM_VERBOSE" "$VM_DEBUG" "$VM_MAX_DEPTH" \
+      "$system" "$arch" "$kvm" "$virtiofsd_path" "$missing" "$VM_JSON"
+    ;;
+  *) vm_error 'VM operation not yet implemented at this checkpoint; no VM or service was changed.'; exit 2 ;;
+esac

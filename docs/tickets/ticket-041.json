@@ -8,7 +8,7 @@
   "title": "VM provisioning and ./lab VM lifecycle",
   "objective": "Make the VM reproducible and controllable from the host: ./lab can provision or connect to the VM per #40, install Docker, transport the workspace, and run VM lifecycle commands idempotently. The host stops running the agent container itself.",
   "created_at": "2026-10-26T20:39:18.836Z",
-  "updated_at": "2026-10-26T20:50:56.504Z",
+  "updated_at": "2026-11-03T08:29:01.087Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -62,8 +62,14 @@
       "verify-lab inside the VM",
       "docs review"
     ],
-    "created": [],
-    "cases": []
+    "created": [
+      "tests/vm-cli.bats (replacement C01 CLI/config/setup boundary cases)",
+      "tests/test_vm_paths.py (replacement C01 private profile/config/runtime capture cases)"
+    ],
+    "cases": [
+      "2026-11-03 replacement branch feat/vm-approach-2: owner explicitly approved PR_REIMPLEMENTATION_PLAN.md and authorized Round 2. Preflight reverified PR13 head97af1d83a16fce68ddcc3390276c218a1b0cd518, main/replacement baseline efe77202594c79dc1a926fa84a7a5dbc8866c66a. Begin TASK-01/02 (C01) only: validated CLI/config, private state/workspace boundaries. Original source/host runtime unchanged; no VM/package/service operations or host acceptance claimed. Existing main-store criteria predate the approved native-guest design and are not marked passing by this checkpoint.",
+      "2026-11-03 replacement C01 TASK-01/02 validated locally: bats tests/ 50/50 PASS (26 existing +24 new), Python unittest test_vm_*.py 25/25 PASS; full-severity ShellCheck, Bash syntax and Ruff PASS. Tests first demonstrated missing implementations and regression failures before fixes. Coverage includes flags/-- passthrough, strict secret-safe JSON, CLI/env precedence/provider changes, explicit setup-only --yes (ambient LAB_YES cannot authorize installs), package metadata refusal before sudo, canonical private paths/ownership/modes, symlink/legacy refusals, root->profile multiprocess locks, atomic failure preservation, sticky descendant metadata and frozen runtime capture. No VM/package/service/auth operations or host acceptance performed. Existing docs checker fails eight pre-existing README/DECISIONS assertions; identical failures confirmed against main Git-object content, deferred to TASK-16. Owner requested pause for model swap at next checkpoint; stop after C01 handoff, TASK-03 not started."
+    ]
   },
   "priority": "major",
   "parent": 35,

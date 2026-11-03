@@ -1,5 +1,91 @@
 # VM harness architecture and trust boundary
 
+## Replacement implementation status (2026-11-03)
+
+The owner approved `PR_REIMPLEMENTATION_PLAN.md` for `feat/vm-approach-2`.
+The contract below supersedes the historical proposal later on this page.
+At checkpoint C01 only CLI/configuration, path validation and private profile
+metadata are being implemented. **No VM boot/lifecycle support or real-host
+acceptance is claimed yet.** Ordinary `./lab` remains the existing Docker launcher.
+
+### CLI and configuration contract
+
+- `./lab-vm --help`: command/options and actual checkpoint availability.
+- `./lab-vm context [--json] [--name NAME]`: read-only effective configuration,
+  private profile paths and host capabilities; no directory creation or repairs.
+- `./lab-vm setup`: read-only Linux x86_64/KVM/QEMU/virtiofs prerequisite report.
+  `setup --install-prereqs` is a separate explicitly approved package action with
+  default-no confirmation; normal launch/status/doctor never installs packages.
+  Ambient `VM_YES`/`LAB_YES` cannot approve a host package install: skipping its
+  confirmation requires `--yes` explicitly on that setup invocation.
+- Future `./lab-vm <workspace>` / `run <workspace>` selects the exact named profile
+  and enters a native guest agent. `up NAME --workspace PATH` is setup without
+  entering the agent. Until implemented, these operations refuse with exit2,
+  rather than returning fake success or starting a different profile.
+  `--memory` applies only to fresh-profile `run`/`up`, not prerequisite setup.
+- Global flags may precede or follow command/path. `--` ends launcher parsing and
+  preserves subsequent agent arguments. `--yes` only confirms launcher actions;
+  `--auto-accept`/`--permissions auto` requests agent auto mode, never overrides
+  an explicit deny. Conflicting modes/duplicate value options fail before state.
+- `--recurse` permits a filtered source snapshot; `--unsafe-recurse` separately
+  permits writable self-development and requires a workspace containing the
+  checkout. Both remain bounded by explicitly configured maximum depth (default0).
+
+Configuration is optional **private JSON data**, never a sourced shell file:
+`$MESTER_STATE_DIR/config.json`, default state root
+`${XDG_DATA_HOME:-$HOME/.local/share}/little-mester`. Precedence: CLI, supported
+environment values, private config, defaults. Schema version1 accepts only
+`host_profile`, `workload_runtime`, `opencode_version`, `agent`, `model`, `metrics`,
+`auth_forward`, `auth_escrow_dir`. It contains selectors, never credentials.
+Unknown fields/schema/types/duplicate JSON keys or insecure config paths refuse.
+
+Defaults: Linux x86_64, guest workload runtime Docker, OpenCode with latest resolved
+once at fresh setup, no selected model, top-level metrics on, credential forwarding
+off. Local Ollama/llama.cpp requires an explicit loopback API port; remote uses
+mediated public egress. No host Docker/model service is implicitly started.
+
+State is outside every workspace: `vm/profiles/NAME/profile.json` plus private
+runtime/disks/keys, immutable image cache, services, run evidence and logs. Profile
+names are validated, directories0700/files0600, metadata atomically replaced under
+ordered locks. Unknown/legacy state is never silently migrated/discovered.
+Read-only commands do not create/chmod state. Private control runtime captures
+explicit reviewed files independently of the mutable source; re-executing edited
+source on the host still requires review.
+
+Examples shared by Bash and Fish (diagnostics only):
+
+```sh
+./lab-vm --help
+./lab-vm context --json --name candidate
+./lab-vm setup
+```
+
+### Approved target trust boundary (not yet runtime acceptance)
+
+The agent runs **directly in a guest VM**, with guest administration authority.
+Guest Docker is for project workloads, not an agent wrapper or host security
+boundary. Only the chosen owned workspace is exported. Host state, credentials,
+Docker socket and other paths are not shared. QEMU restricted user networking
+and a public-only HTTP(S) proxy deny host/LAN/private destinations; there is no
+host firewall/routing fallback. Optional model/metrics/auth crossings are narrow
+and explicitly selected. Daily suspend/resume preserves state; deletion is scoped
+and separately acknowledged.
+
+Self-development must modify Little Mester including VM code, freeze a filtered
+revision-bound candidate, provision fresh nested VMs **from that changed code**,
+test failure→fix→fresh pass, and preserve parent usability. Additional agents in
+one guest are not equivalent evidence. Recursion policy is enforced by supported
+launchers, not a tamper-proof restriction on a guest administrator. Real KVM,
+workload, network, credentials and human TUI/auth evidence remain required.
+
+---
+
+## Historical proposal (superseded; NOT current implementation instructions)
+
+The remainder preserves the pre-replacement context until the final documentation
+checkpoint. Its agent-container/rootless/default-launch/firewall-fallback claims
+are superseded by the approved contract above and must not be used operationally.
+
 > Decision: `docs/DECISIONS.md` §C.8. Tickets: epic #35, spike #40, provisioning #41,
 > agent image #42, workspace Docker/egress #43, docs #44, model-agnostic harness #45.
 > This page is the reviewer's one-page view; it is not a promise that every arrow is
