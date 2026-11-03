@@ -211,7 +211,7 @@ def profile_name(name):
 def profile_path(root, name):
     name = profile_name(name)
     vm = root / "vm"
-    namespaces = {"profiles", "images", "services", "runs", "logs", ".locks"}
+    namespaces = {"profiles", "images", "services", "runs", "logs", "reports", ".locks"}
     require(not (vm / "base.qcow2").exists())
     if name not in namespaces:
         require(not (vm / name).exists())
@@ -316,8 +316,12 @@ TRANSITION_PATCH_FIELDS = {
     ("allocated", "starting"): {"runtime_payload_sha256"},
     ("starting", "provisioning"): {"runtime_identity"},
     ("provisioning", "ready"): {"opencode_version"},
-    ("suspending", "suspended"): {"memory_gib"},
-    ("suspended", "starting"): {"workspace", "memory_gib", "max_depth"},
+    ("provisioning", "failed"): {"runtime_identity"},
+    ("suspending", "suspended"): {"memory_gib", "runtime_identity"},
+    ("suspended", "starting"): {"workspace", "memory_gib", "max_depth", "guest_payload_sha256", "runtime_identity"},
+    ("suspended", "deleting"): {"runtime_identity"},
+    ("failed", "starting"): {"runtime_identity"},
+    ("failed", "deleting"): {"runtime_identity"},
 }
 
 
@@ -660,9 +664,122 @@ def profile_overlay_publish(root, name, staging):
     return target
 
 
+def profile_asset_publish(root, name, asset, staging):
+    """Publish one create-only private key or seed ISO in the exact profile."""
+    require(asset in {"control-key", "seed.iso"})
+    root = state_root(str(root), must_exist=True)
+    data = profile_read(root, name)
+    require(data["status"] == "starting")
+    profile = profile_path(root, name)
+    stage = canonical(staging, exists=True)
+    stage_dir = stage.parent
+    require(stage_dir.parent == profile and re.fullmatch(r"\.asset\.[A-Za-z0-9_-]{1,64}", stage_dir.name))
+    private_entry(stage_dir)
+    private_entry(stage)
+    require(stage.is_file() and not stage.is_symlink() and 0 < stage.stat().st_size <= 64 * 1024 * 1024)
+    payload = stage.read_bytes()
+    if asset == "control-key":
+        require(payload.startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----\n")
+                and payload.rstrip().endswith(b"-----END OPENSSH PRIVATE KEY-----"))
+    else:
+        offset = 16 * 2048
+        require(len(payload) >= offset + 2048 and payload[offset] == 1
+                and payload[offset + 1:offset + 6] == b"CD001" and payload[offset + 6] == 1)
+    target = profile / asset
+    require(not target.exists() and not target.is_symlink())
+    with profile_lock(root, name):
+        current = profile_read(root, name)
+        require(current["status"] == "starting")
+        require(not target.exists() and not target.is_symlink())
+        rename_noreplace(stage, target)
+        fsync_dir(profile)
+    return target
+
+
+def profile_asset_replace(root, name, asset, staging, user_data_staging):
+    """Replace a verified seed ISO and its user-data copy during a locked restart."""
+    require(asset == "seed.iso")
+    root = state_root(str(root), must_exist=True)
+    data = profile_read(root, name)
+    require(data["status"] == "starting")
+    profile = profile_path(root, name)
+    stage = canonical(staging, exists=True)
+    stage_dir = stage.parent
+    require(stage_dir.parent == profile and re.fullmatch(r"\.asset\.[A-Za-z0-9_-]{1,64}", stage_dir.name))
+    private_entry(stage_dir)
+    private_entry(stage)
+    require(stage.is_file() and not stage.is_symlink() and 0 < stage.stat().st_size <= 64 * 1024 * 1024)
+    offset = 16 * 2048
+    staged = stage.read_bytes()
+    require(len(staged) >= offset + 2048 and staged[offset] == 1
+            and staged[offset + 1:offset + 6] == b"CD001" and staged[offset + 6] == 1)
+    target = profile / asset
+    private_entry(target)
+    old = target.read_bytes()
+    require(len(old) >= offset + 2048 and old[offset] == 1
+            and old[offset + 1:offset + 6] == b"CD001" and old[offset + 6] == 1)
+    user_data_stage = canonical(user_data_staging, exists=True)
+    require(user_data_stage.parent == stage_dir and user_data_stage.name == "user-data")
+    private_entry(user_data_stage)
+    require(user_data_stage.is_file() and not user_data_stage.is_symlink()
+            and user_data_stage.stat().st_size <= 1024 * 1024)
+    new_user_data = user_data_stage.read_bytes()
+    seed_validate(new_user_data)
+    user_data_target = profile / "seed.user-data"
+    private_entry(user_data_target)
+    require(user_data_target.stat().st_size <= 1024 * 1024)
+    old_user_data = user_data_target.read_bytes()
+    for staged_file in (stage, user_data_stage):
+        with staged_file.open("rb") as stream:
+            os.fsync(stream.fileno())
+    with profile_lock(root, name):
+        current = profile_read(root, name)
+        require(current["status"] == "starting")
+        private_entry(target)
+        require(target.read_bytes() == old)
+        private_entry(user_data_target)
+        require(user_data_target.read_bytes() == old_user_data)
+        replaced_user_data = False
+        replaced_iso = False
+        try:
+            os.replace(user_data_stage, user_data_target)
+            replaced_user_data = True
+            os.replace(stage, target)
+            replaced_iso = True
+            fsync_dir(profile)
+        except BaseException:
+            # A normal publication error rolls back the duplicate user-data copy.
+            # A process crash leaves status=starting, which blocks lifecycle use.
+            rollback_errors = []
+            if replaced_iso:
+                try:
+                    atomic_bytes(target, old)
+                except (OSError, RuntimeError) as rollback_error:
+                    rollback_errors.append(rollback_error)
+            if replaced_user_data:
+                try:
+                    atomic_bytes(user_data_target, old_user_data)
+                except (OSError, RuntimeError) as rollback_error:
+                    rollback_errors.append(rollback_error)
+            if rollback_errors:
+                raise RuntimeError("seed asset replacement rollback failed") from rollback_errors[0]
+            raise
+    return target
+
+
 def seed_write(root, name, raw):
-    require(len(raw) <= 1024 * 1024)
+    seed_validate(raw)
     profile_read(root, name)
+    root = state_root(str(root), must_exist=True)
+    with profile_lock(root, name) as profile:
+        profile_read(root, name)
+        target = profile / "seed.user-data"
+        atomic_bytes(target, raw)
+    return target
+
+
+def seed_validate(raw):
+    require(isinstance(raw, bytes) and len(raw) <= 1024 * 1024)
     require(raw.startswith(b"#cloud-config\n") or raw == b"#cloud-config")
     require(b"\x00" not in raw and all(byte in (9, 10, 13) or byte >= 32 for byte in raw))
     sensitive = re.compile(
@@ -670,12 +787,7 @@ def seed_write(root, name, raw):
         rb"client[_-]?secret|private[_-]?key|credential)"
     )
     require(sensitive.search(raw) is None)
-    root = state_root(str(root), must_exist=True)
-    with profile_lock(root, name) as profile:
-        profile_read(root, name)
-        target = profile / "seed.user-data"
-        atomic_bytes(target, raw)
-    return target
+    return raw
 
 
 def profile_run(root, name, command):
@@ -732,6 +844,19 @@ def profile_write(root, name, data):
     return data
 
 
+def profile_create(root, name, data):
+    """Create one new allocated profile; never treat an existing profile as an update."""
+    profile_validate(data, root, name)
+    require(data["status"] == "allocated")
+    root = state_root(str(root), must_exist=True)
+    with profile_lock(root, name) as path:
+        target = path / "profile.json"
+        require(not target.exists() and not target.is_symlink())
+        require({entry.name for entry in path.iterdir()} == {".profile.lock"})
+        atomic_json(target, data)
+    return data
+
+
 def profile_transition(root, name, expected_status, target_status, patch=None):
     """Atomically apply one allowed state transition under root/profile locks."""
     require(expected_status in STATUSES and target_status in STATUSES)
@@ -745,7 +870,11 @@ def profile_transition(root, name, expected_status, target_status, patch=None):
         require(old["status"] == expected_status)
         require(target_status in PROFILE_TRANSITIONS[expected_status])
         updated = dict(old)
-        updated.update(patch)
+        for key, value in patch.items():
+            if key == "runtime_identity" and value is None:
+                updated.pop(key, None)
+            else:
+                updated[key] = value
         updated["status"] = target_status
         profile_validate(updated, root, name)
         require(updated["profile_id"] == old["profile_id"])
@@ -757,6 +886,85 @@ def profile_transition(root, name, expected_status, target_status, patch=None):
             require(updated["runtime_payload_sha256"] == hashlib.sha256(runtime.read_bytes()).hexdigest())
         atomic_json(path / "profile.json", updated)
     return updated
+
+
+def _profile_runs_stopped(profile):
+    runs = profile / "runs"
+    if not runs.exists() and not runs.is_symlink():
+        return
+    require(runs.is_dir() and not runs.is_symlink())
+    private_entry(runs)
+    process_path = Path(__file__).resolve().with_name("process.py")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("vm_delete_process", process_path)
+    require(spec is not None and spec.loader is not None)
+    process = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(process)
+    for run in sorted(runs.iterdir(), key=lambda item: item.name):
+        require(run.is_dir() and not run.is_symlink())
+        private_entry(run)
+        registry = run / "processes.json"
+        private_entry(registry)
+        status = process.registry_status(registry, run.name)
+        require(status["state"] == "stopped")
+    private_tree(runs)
+
+
+def profile_delete(root, name):
+    """Remove only a deleting exact profile after preserving its private run reports."""
+    root = state_root(str(root), must_exist=True)
+    with profile_lock(root, name) as profile:
+        data = profile_read(root, name)
+        require(data["status"] == "deleting" and "runtime_identity" not in data)
+        _profile_runs_stopped(profile)
+        runtime = profile / "runtime"
+        if runtime.exists() or runtime.is_symlink():
+            runtime_validate(root, name)
+        allowed = {".profile.lock", "profile.json", "runtime", "disk.qcow2", "seed.iso",
+                   "seed.user-data", "control-key", "runs"}
+        require({item.name for item in profile.iterdir()} <= allowed)
+        for item in profile.iterdir():
+            if item.name in {"runtime", "runs"}:
+                continue
+            private_entry(item)
+            if item.name not in {".profile.lock", "profile.json"}:
+                require(item.is_file())
+
+        reports = root / "vm/reports"
+        report_root = reports / data["profile_id"]
+        archived_runs = report_root / "runs"
+        runs = profile / "runs"
+        if reports.exists() or reports.is_symlink():
+            require(reports.is_dir() and not reports.is_symlink())
+            private_entry(reports)
+        elif runs.exists():
+            private_mkdir(reports)
+        if report_root.exists() or report_root.is_symlink():
+            require(report_root.is_dir() and not report_root.is_symlink())
+            private_entry(report_root)
+            require({item.name for item in report_root.iterdir()} <= {"runs"})
+            if archived_runs.exists() or archived_runs.is_symlink():
+                require(archived_runs.is_dir() and not archived_runs.is_symlink())
+                _profile_runs_stopped(report_root)
+                private_tree(archived_runs)
+        elif runs.exists():
+            private_mkdir(report_root)
+        if runs.exists():
+            require(runs.is_dir() and not runs.is_symlink())
+            require(not archived_runs.exists() and not archived_runs.is_symlink())
+            rename_noreplace(runs, archived_runs)
+            fsync_dir(profile)
+            fsync_dir(report_root)
+
+        # Recheck exact directory membership after moving reports, then unlink only
+        # this validated profile path while allocation/profile locks remain held.
+        require({item.name for item in profile.iterdir()} <= allowed - {"runs"})
+        shutil.rmtree(profile)
+        fsync_dir(profile.parent)
+        if reports.exists():
+            fsync_dir(reports)
+        return {"deleted": name, "profile_id": data["profile_id"],
+                "reports_path": str(report_root) if report_root.exists() else None}
 
 
 def file_capture(source, rel):
@@ -835,6 +1043,62 @@ def runtime_install(root, name, source_value, files):
     return {"schema_version": 1, "runtime_path": str(target), "runtime_payload_sha256": digest}
 
 
+def runtime_validate(root, name):
+    """Validate an installed immutable runtime without sourcing or mutating it."""
+    root = state_root(str(root), must_exist=True)
+    data = profile_read(root, name)
+    runtime = profile_path(root, name) / "runtime"
+    require(data["runtime_payload_sha256"] is not None)
+    require(runtime.is_dir() and not runtime.is_symlink())
+    private_entry(runtime)
+    manifest_path = runtime / "manifest.json"
+    private_entry(manifest_path)
+    require(manifest_path.stat().st_size <= 1024 * 1024)
+    manifest = decode(manifest_path.read_bytes())
+    require(isinstance(manifest, dict) and manifest.keys() == {"schema_version", "files"})
+    require(type(manifest["schema_version"]) is int and manifest["schema_version"] == 1)
+    require(isinstance(manifest["files"], list) and 1 <= len(manifest["files"]) <= 4096)
+    require(hashlib.sha256(encoded(manifest)).hexdigest() == data["runtime_payload_sha256"])
+    expected = {"manifest.json"}
+    total = 0
+    for item in manifest["files"]:
+        require(isinstance(item, dict) and item.keys() == {
+            "path", "mode", "installed_mode", "size", "sha256"})
+        relative_text = text(item["path"])
+        relative = Path(relative_text)
+        require(not relative.is_absolute() and str(relative) == relative_text
+                and ".." not in relative.parts and relative_text != "manifest.json")
+        require(type(item["mode"]) is int and 0 <= item["mode"] <= 0o7777)
+        require(item["installed_mode"] in (0o600, 0o700))
+        integer(item["size"], 0, 64 * 1024 * 1024)
+        require(isinstance(item["sha256"], str)
+                and re.fullmatch(r"[a-f0-9]{64}", item["sha256"]) is not None)
+        require(relative_text not in expected)
+        expected.add(relative_text)
+        target = canonical(str(runtime / relative), exists=True)
+        require(target.is_file())
+        info = target.lstat()
+        require(info.st_uid == os.getuid() and stat.S_ISREG(info.st_mode)
+                and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == item["installed_mode"])
+        require(info.st_size == item["size"] and hash_file(target) == item["sha256"])
+        total += info.st_size
+        require(total <= 256 * 1024 * 1024)
+    for directory, directories, files in os.walk(runtime, followlinks=False, onerror=walk_error):
+        current = Path(directory)
+        private_entry(current)
+        for name_part in directories:
+            child = current / name_part
+            require(not child.is_symlink())
+            private_entry(child)
+        for name_part in files:
+            child = current / name_part
+            require(not child.is_symlink())
+            require(str(child.relative_to(runtime)) in expected)
+    actual = {str(path.relative_to(runtime)) for path in runtime.rglob("*") if path.is_file()}
+    require(actual == expected)
+    return {"runtime_path": str(runtime), "runtime_payload_sha256": data["runtime_payload_sha256"]}
+
+
 class Parser(argparse.ArgumentParser):
     def error(self, message):
         raise PolicyError("Invalid VM policy command")
@@ -844,12 +1108,12 @@ def main():
     parser = Parser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
     for command in ("config", "validate-config", "context", "validate-workspace",
-                    "profile-read", "profile-list", "profile-write", "profile-transition", "runtime-install", "image-run",
-                    "image-publish", "profile-run", "overlay-publish", "seed-write"):
+                    "profile-read", "profile-list", "profile-write", "profile-create", "profile-transition", "runtime-install", "runtime-validate", "image-run",
+                    "image-publish", "profile-run", "profile-delete", "overlay-publish", "asset-publish", "asset-replace", "seed-write"):
         sub = commands.add_parser(command)
         sub.add_argument("--state-root", required=True)
-        if command in ("context", "profile-read", "profile-write", "profile-transition", "runtime-install",
-                       "profile-run", "overlay-publish", "seed-write"):
+        if command in ("context", "profile-read", "profile-write", "profile-create", "profile-transition", "runtime-install", "runtime-validate",
+                       "profile-run", "profile-delete", "overlay-publish", "asset-publish", "asset-replace", "seed-write"):
             sub.add_argument("--profile", required=True)
         if command == "profile-transition":
             sub.add_argument("--expected-status", required=True, choices=sorted(STATUSES))
@@ -866,8 +1130,13 @@ def main():
             sub.add_argument("--sha256", required=True)
         if command == "image-run" or command == "profile-run":
             sub.add_argument("command_argv", nargs=argparse.REMAINDER)
-        if command == "image-publish" or command == "overlay-publish":
+        if command in ("image-publish", "overlay-publish", "asset-publish", "asset-replace"):
             sub.add_argument("--staging", required=True)
+        if command == "asset-replace":
+            sub.add_argument("--user-data-staging", required=True)
+        if command in ("asset-publish", "asset-replace"):
+            sub.add_argument("--asset", required=True,
+                             choices=("seed.iso",) if command == "asset-replace" else ("control-key", "seed.iso"))
     args = parser.parse_args()
     root = state_root(args.state_root, scan=args.command not in ("profile-write", "runtime-install"))
     if hasattr(args, "profile"):
@@ -891,19 +1160,30 @@ def main():
         result = profile_list(root)
     elif args.command == "profile-write":
         result = profile_write(root, args.profile, decode(sys.stdin.buffer.read(1024 * 1024 + 1)))
+    elif args.command == "profile-create":
+        result = profile_create(root, args.profile, decode(sys.stdin.buffer.read(1024 * 1024 + 1)))
     elif args.command == "profile-transition":
         result = profile_transition(
             root, args.profile, args.expected_status, args.status,
             decode(sys.stdin.buffer.read(1024 * 1024 + 1)),
         )
+    elif args.command == "runtime-validate":
+        result = runtime_validate(root, args.profile)
     elif args.command == "image-run":
         return image_run(root, args.sha256, args.command_argv)
     elif args.command == "image-publish":
         result = {"published": str(image_publish(root, args.sha256, args.staging))}
     elif args.command == "profile-run":
         return profile_run(root, args.profile, args.command_argv)
+    elif args.command == "profile-delete":
+        result = profile_delete(root, args.profile)
     elif args.command == "overlay-publish":
         result = {"published": str(profile_overlay_publish(root, args.profile, args.staging))}
+    elif args.command == "asset-publish":
+        result = {"published": str(profile_asset_publish(root, args.profile, args.asset, args.staging))}
+    elif args.command == "asset-replace":
+        result = {"published": str(profile_asset_replace(
+            root, args.profile, args.asset, args.staging, args.user_data_staging))}
     elif args.command == "seed-write":
         result = {"seed_path": str(seed_write(root, args.profile, sys.stdin.buffer.read(1024 * 1024 + 1)))}
     else:

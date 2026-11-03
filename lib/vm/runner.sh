@@ -272,6 +272,7 @@ vm_runner_start() {
   local port_file marker proxy_port virtiofs_state ssh_timeout deadline role state cause
   local -a upstream_args=()
 
+  unset VM_RUNNER_PROFILE_DIR VM_RUNNER_RUN_DIR VM_RUNNER_PROCESS_REGISTRY VM_RUNNER_RUN_ID
   # Every capability check and tool lookup precedes state allocation or process launch.
   vm_runner_preflight || return $?
   if ! declare -F vm_ssh_trust_host_key >/dev/null; then
@@ -319,6 +320,16 @@ vm_runner_start() {
   (umask 077; mkdir -- "$run_dir") || return 2
   registry="$run_dir/processes.json"
   "$VM_RUNNER_PYTHON" "$VM_RUNNER_PROCESS_HELPER" init --registry "$registry" --run-id "$run_id" || return 2
+  # Publish exact owned run paths immediately so lifecycle rollback can distinguish
+  # a fully stopped failure from an ambiguous process that must remain reserved.
+  # shellcheck disable=SC2034 # Public run identity is consumed by lifecycle orchestration.
+  VM_RUNNER_PROFILE_DIR="$canonical_profile"
+  # shellcheck disable=SC2034 # Public run identity is consumed by lifecycle orchestration.
+  VM_RUNNER_RUN_DIR="$run_dir"
+  # shellcheck disable=SC2034 # Public run identity is consumed by lifecycle orchestration.
+  VM_RUNNER_PROCESS_REGISTRY="$registry"
+  # shellcheck disable=SC2034 # Public run identity is consumed by lifecycle orchestration.
+  VM_RUNNER_RUN_ID="$run_id"
 
   port_file="$run_dir/proxy.port"
   marker="$run_dir/proxy.ready"
@@ -393,12 +404,6 @@ vm_runner_start() {
     fi
     if vm_ssh_trust_host_key "$run_dir/known_hosts" "$VM_RUNNER_SSH_PORT" \
       "$registry" "$run_id" "$role"; then
-      # shellcheck disable=SC2034 # Public result values for the caller of vm_runner_start.
-      VM_RUNNER_PROFILE_DIR="$canonical_profile"
-      # shellcheck disable=SC2034 # Public result values for the caller of vm_runner_start.
-      VM_RUNNER_RUN_DIR="$run_dir"
-      # shellcheck disable=SC2034 # Public result values for the caller of vm_runner_start.
-      VM_RUNNER_PROCESS_REGISTRY="$registry"
       return 0
     fi
     sleep 1

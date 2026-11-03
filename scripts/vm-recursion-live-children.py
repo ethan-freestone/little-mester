@@ -128,7 +128,11 @@ def live_nested_qemu_profiles(
         disk = profile / "disk.qcow2"
         if (not _private_regular(disk) or identity.get("disk_path") != str(disk)
                 or Path(identity["executable"]).name not in {"qemu-system-x86_64", "qemu-system-x86"}
-                or disk not in _drive_files(identity["argv"])):
+                or identity["argv"][0].rsplit("/", 1)[-1] != Path(identity["executable"]).name
+                or disk not in _drive_files(identity["argv"])
+                or f"socket,id=charfs,path={identity['socket_path']}" not in identity["argv"]
+                or not any(f"hostfwd=tcp:127.0.0.1:{identity['ssh_port']}-:22" in arg
+                           for arg in identity["argv"])):
             unknown_pids.add(identity["pid"])
             continue
         if identity["pid"] in owned:

@@ -8,7 +8,7 @@
   "title": "VM provisioning and ./lab VM lifecycle",
   "objective": "Make the VM reproducible and controllable from the host: ./lab can provision or connect to the VM per #40, install Docker, transport the workspace, and run VM lifecycle commands idempotently. The host stops running the agent container itself.",
   "created_at": "2026-10-26T20:39:18.836Z",
-  "updated_at": "2026-11-03T11:05:47.248Z",
+  "updated_at": "2026-11-03T15:12:32.734Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -64,7 +64,11 @@
       "TASK-05 process integration and exact-identity readiness/signal lifecycle tests",
       "authorized live SEC-NET parent/child nested-VM denial and no-fallback acceptance",
       "authorized fresh nested-VM failure-then-fix run with parent continuity",
-      "C04 process/SSH primitives wired into the approved profile lifecycle and read-only context/doctor reporting; no CLI lifecycle dispatch is implemented yet"
+      "C04 process/SSH primitives wired into the approved profile lifecycle and read-only context/doctor reporting; no CLI lifecycle dispatch is implemented yet",
+      "TASK-07: idempotent up/resume with same-workspace no-bootstrap and A→B→B workspace-switch fixtures",
+      "TASK-07: resize resource preflight using only target QEMU private RSS and child-safe graceful restart",
+      "TASK-07: startup reservation release/rollback under exact controller identity, including unknown-process preservation",
+      "TASK-07: exact profile down/stop/rebuild deletion and auth-export fail-closed cases"
     ],
     "created": [
       "tests/vm-cli.bats (replacement C01 CLI/config/setup boundary cases)",
@@ -79,7 +83,13 @@
       "tests/test_vm_process.py::test_run_logged_records_exec_failure_without_orphaning_helper (status 127 is retained for a missing executable; supervisor identity stops cleanly)",
       "tests/test_vm_cloud_init.py (C05: generated NoCloud schema, public-key/UID/GID/proxy/recursion and secret-free seed fixtures)",
       "tests/test_vm_guest.py (C05: fixture bootstrap for Docker and none, exact-version retry/warm refusal, private MCP, hash/symlink/readiness and failure gates)",
-      "tests/test_vm_opencode_config.py (C05: V2 provider/permission/MCP migration, separate CLI plugin config, secret and private-output fixtures)"
+      "tests/test_vm_opencode_config.py (C05: V2 provider/permission/MCP migration, separate CLI plugin config, secret and private-output fixtures)",
+      "tests/vm-lifecycle.bats (C06 read-only process-status accuracy, RAM default/override selection, reservation ownership sequencing, preflight-before-profile-create, failed-budget no-profile, and create-race reservation release)",
+      "tests/test_vm_paths.py::test_profile_create_is_allocated_only_and_never_overwrites (absence-only locked profile creation)",
+      "tests/vm-lifecycle.bats: fresh-up reservation/frozen-worker ordering; A→B→B payload/seed refresh; exact-target resize success, budget refusal and graceful-shutdown timeout; exact-profile deletion/auth guard/reservation recovery; rebuild stops after deletion failure",
+      "tests/test_vm_paths.py::test_seed_iso_replace_is_atomic_profile_bound_and_starting_only: paired seed.iso and seed.user-data replacement, sensitive-data refusal and injected rename rollback",
+      "tests/test_vm_paths.py::test_exact_profile_delete_archives_stopped_runs_and_preserves_shared_state and test_exact_profile_delete_refuses_running_or_unknown_run_identity",
+      "tests/test_vm_memory_budget.py::test_explicit_recovery_uses_identity_not_reservation_age"
     ],
     "cases": [
       "2026-11-03 replacement branch feat/vm-approach-2: owner explicitly approved PR_REIMPLEMENTATION_PLAN.md and authorized Round 2. Preflight reverified PR13 head97af1d83a16fce68ddcc3390276c218a1b0cd518, main/replacement baseline efe77202594c79dc1a926fa84a7a5dbc8866c66a. Begin TASK-01/02 (C01) only: validated CLI/config, private state/workspace boundaries. Original source/host runtime unchanged; no VM/package/service operations or host acceptance claimed. Existing main-store criteria predate the approved native-guest design and are not marked passing by this checkpoint.",
@@ -89,7 +99,14 @@
       "2026-11-03 replacement C04 / TASK-05 fixture evidence: bats tests/ passed 77/77; python3 -B -m unittest discover -s tests -p 'test_vm_*.py' -v passed 75/75; ShellCheck, Bash syntax, Ruff, Python AST, process helper --help and git diff --check passed. New tests exercise KVM-only QEMU argv and selected crossings; SSH config/agent/forwarding isolation, explicit PTY and whole-command deadline; complete per-run Ed25519 TOFU only while QEMU owns the loopback port; exact PID/start_ticks/executable/argv verification with pidfd signalling; private atomic registry and absent/stopped/running/unknown distinctions; startup order proxy→virtiofsd→QEMU; partial helper rollback verifies all recorded children stopped and leaves a foreign process alive; bind-conflict retry never signals the port owner; early QEMU exit preserves status 37 and bounded log; serial flood drains to current plus one rotated segment; injected log ENOSPC continues draining. Tests use synthetic subprocesses, fake executables, private temp state and loopback TCP/Unix sockets only. No real KVM/QEMU, guest, live host network, package/service, image download or credential operation occurred. The docs consistency checker still reports the same eight pre-existing README/DECISIONS assertions recorded against main Git-object content; C04 added no new docs links/check failures. #41 acceptance criteria remain pending; this is not host/VM/SEC-NET or nested-self-test evidence.",
       "C04 final post-review rerun after adding launch-failure retention and exact proxy-listener ownership: bats tests/vm-process.bats passed 11/11; full bats tests/ passed 77/77; python3 -B -m unittest discover -s tests -p 'test_vm_*.py' -v passed 76/76 (paths32, process8, proxy36); ShellCheck, Bash syntax, Ruff, Python AST and git diff --check passed. Added fake-exec failure status127/log coverage; process shutdown now rechecks all recorded process identities, and proxy readiness confirms that the recorded proxy process owns the loopback port before and after connect. Fixture-only; no KVM/QEMU/guest or live network/SEC-NET operation.",
       "C04 final validation after making process-registry status read-only: the missing registry lock now yields unknown without creating a file; new unit coverage verifies the read leaves state unchanged. Full suites remain bats tests/ 77/77 and python3 -B -m unittest discover -s tests -p 'test_vm_*.py' -v 76/76; process registry updates remain atomic under its pre-created private lock. No C04 acceptance criterion is marked passing; this adds fixture evidence only.",
-      "2026-11-03 C05/TASK-06 fixture evidence: python3 -B -m unittest discover -s tests -p 'test_vm_*.py' -v passed 98/98; bats tests/ passed 77/77; ShellCheck, Ruff, Bash syntax, Python AST and git diff --check passed; scripts/check-vm-cloud-init-schema.sh generated NoCloud data accepted by the installed cloud-init schema validator. Covers both runtime choices, recursion-only tools, explicit proxy use, hash revalidation/path-escape refusal, native private MCP build, latest resolved once across retry, warm bootstrap refusal, failure without ready marker, cloud-init recoverable-error refusal, V2 config and secret handling. Fake/local fixtures only; no package installs/builds on the active host, real VM, image download, host network, live SEC-NET or nested-VM operation. Ticket acceptance criteria remain pending."
+      "2026-11-03 C05/TASK-06 fixture evidence: python3 -B -m unittest discover -s tests -p 'test_vm_*.py' -v passed 98/98; bats tests/ passed 77/77; ShellCheck, Ruff, Bash syntax, Python AST and git diff --check passed; scripts/check-vm-cloud-init-schema.sh generated NoCloud data accepted by the installed cloud-init schema validator. Covers both runtime choices, recursion-only tools, explicit proxy use, hash revalidation/path-escape refusal, native private MCP build, latest resolved once across retry, warm bootstrap refusal, failure without ready marker, cloud-init recoverable-error refusal, V2 config and secret handling. Fake/local fixtures only; no package installs/builds on the active host, real VM, image download, host network, live SEC-NET or nested-VM operation. Ticket acceptance criteria remain pending.",
+      "2026-11-03 TASK-07 partial fixture evidence: bats tests/*.bats passed 92/92; python3 -B -m unittest discover -s tests -p 'test_vm*.py' -v passed 127/127; Ruff, production Bash ShellCheck/syntax, error-severity Bats ShellCheck, Python compile checks and git diff --check passed. C06 dispatches status/list/graceful suspend and adds fixture-only profile allocation/RAM reservation helpers. No startup, resume, resize, destructive lifecycle, image download, real QEMU/KVM, host-network, SEC-NET, or nested-VM acceptance was performed; all A1–A8 criteria remain pending.",
+      "2026-11-03 C06 fixture milestone: bats tests/*.bats 106/106 PASS; python3 -B -m unittest discover -s tests -p 'test_vm*.py' 136/136 PASS; Ruff, production ShellCheck, Bats error-severity ShellCheck, Bash syntax and git diff --check PASS. Disposable filesystem, synthetic identity and fake process/tool fixtures only.",
+      "Fresh up reserves before image work and invokes a single validated frozen profile worker; no lifecycle commands beyond status/list/graceful suspend are dispatched.",
+      "Workspace A→B stages cloud-init and ISO first, recomputes the guest payload digest, commits metadata only after successful prebuild, and atomically replaces seed ISO plus saved user-data; B→B performs no restart. Overlay and control key remain unchanged.",
+      "Resize reserves exact target RAM before child-safe graceful shutdown; budget refusal leaves the running profile untouched and shutdown timeout restores ready state, preserves overlay/RAM metadata, and releases only the exact reservation.",
+      "Deletion requires auth and sticky-descendant guards, verified stopped profile/run identities, and stopped-owner reservation recovery; archives exact run reports and preserves other profiles, base image and workspace. Rebuild does not allocate replacement after delete failure.",
+      "Real image download, QEMU/KVM, live network/SEC-NET, guest and nested-VM acceptance were not run; all ticket #41 acceptance criteria remain pending."
     ]
   },
   "priority": "major",

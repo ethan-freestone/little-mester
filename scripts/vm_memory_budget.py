@@ -7,7 +7,9 @@ import argparse
 import importlib.util
 import json
 import os
+import shutil
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 MIB = 1024 * 1024
@@ -107,6 +109,17 @@ def read_process_private_rss_mib(pid: int, proc_root: Path = Path("/proc")) -> i
     if not totals:
         raise RuntimeError("target private resident memory is unavailable")
     return (sum(totals.values()) + 1023) // 1024
+
+
+def read_managed_private_rss_mib(identity: dict, proc_root: Path = Path("/proc")) -> int:
+    """Count only private RSS bracketed by exact live-process identity checks."""
+    _PROCESS._validate_identity(identity)
+    if identity_state(identity, proc_root) != "running":
+        raise RuntimeError("target QEMU identity is not verifiably running")
+    rss = read_process_private_rss_mib(identity["pid"], proc_root)
+    if identity_state(identity, proc_root) != "running":
+        raise RuntimeError("target QEMU identity changed during RAM preflight")
+    return rss
 
 
 def _cgroup_membership(pid: int, proc_root: Path) -> tuple[str, str] | None:
@@ -215,7 +228,7 @@ def read_cgroup_remaining_mib(
 def check_budget(
     requested_mib: int,
     reserve_mib: int = DEFAULT_RESERVE_MIB,
-    release_pid: int | None = None,
+    release_identity: dict | None = None,
     *,
     proc_root: Path = Path("/proc"),
     cgroup_root: Path = Path("/sys/fs/cgroup"),
@@ -224,7 +237,7 @@ def check_budget(
     _integer(reserve_mib, "reserve")
     memavailable = read_memavailable_mib(proc_root)
     cgroup_remaining = read_cgroup_remaining_mib(os.getpid(), proc_root=proc_root, cgroup_root=cgroup_root)
-    release_rss = read_process_private_rss_mib(release_pid, proc_root) if release_pid is not None else 0
+    release_rss = read_managed_private_rss_mib(release_identity, proc_root) if release_identity is not None else 0
     available = projected_available_mib(memavailable, cgroup_remaining, release_rss)
     details: dict[str, int | None] = {
         "memavailable_mib": memavailable,
@@ -237,17 +250,92 @@ def check_budget(
     return budget_satisfies(requested_mib, available, reserve_mib), details
 
 
-def capture_owner_identity() -> dict:
+def _profile_release_identity(root: Path, profile: str) -> dict:
+    """Return the QEMU identity only when exact profile metadata proves its argv."""
+    data = _PATHS.profile_read(root, profile)
+    if data["status"] != "ready" or not isinstance(data.get("runtime_identity"), dict):
+        raise ResourceRefusal("target profile is not a verified ready VM")
+    item = data["runtime_identity"]
+    identity = {key: item[key] for key in ("pid", "start_ticks", "executable", "argv")}
+    _PROCESS._validate_identity(identity)
+    profile_dir = _PATHS.profile_path(root, profile)
+    disk = profile_dir / "disk.qcow2"
+    socket = item["socket_path"]
+    port = item["ssh_port"]
+    argv = identity["argv"]
+    expected_drive = f"file={disk},format=qcow2,if=virtio"
+    expected_socket = f"socket,id=charfs,path={socket}"
+    expected_hostfwd = f"hostfwd=tcp:127.0.0.1:{port}-:22"
+    try:
+        qemu_path = Path(identity["executable"]).resolve(strict=True)
+        argv_zero = (
+            Path(argv[0]).resolve(strict=True)
+            if Path(argv[0]).is_absolute()
+            else Path(shutil.which(argv[0])).resolve(strict=True)
+        )
+    except OSError as error:
+        raise ResourceRefusal("target QEMU executable identity is unavailable") from error
+    if (
+        qemu_path.name != "qemu-system-x86_64"
+        or argv_zero != qemu_path
+        or "-enable-kvm" not in argv
+        or "-m" not in argv
+        or argv[argv.index("-m") + 1] != str(data["memory_gib"] * 1024)
+        or expected_drive not in argv
+        or expected_socket not in argv
+        or not any(expected_hostfwd in argument for argument in argv)
+    ):
+        raise ResourceRefusal("target process does not match the exact managed QEMU profile")
+    return identity
+
+
+def check_profile_budget(
+    root: Path,
+    profile: str,
+    requested_mib: int,
+    reserve_mib: int = DEFAULT_RESERVE_MIB,
+    *,
+    proc_root: Path = Path("/proc"),
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> tuple[bool, dict[str, int | None]]:
+    root = _PATHS.state_root(str(root), must_exist=True)
+    identity = _profile_release_identity(root, profile)
+    return check_budget(
+        requested_mib, reserve_mib, release_identity=identity,
+        proc_root=proc_root, cgroup_root=cgroup_root,
+    )
+
+
+def capture_owner_identity(pid: int | None = None) -> dict:
     """Bind a pending reservation to the still-running launcher Bash process."""
-    return _PROCESS.capture_identity(os.getppid())
+    selected_pid = os.getppid() if pid is None else pid
+    return _PROCESS.capture_identity(selected_pid)
 
 
-def identity_state(identity: dict) -> str:
-    return _PROCESS.identity_state(identity)
+def identity_state(identity: dict, proc_root: Path = Path("/proc")) -> str:
+    return _PROCESS.identity_state(identity, proc_root=proc_root)
 
 
 def _reservation_path(root: Path, profile: str) -> Path:
     return root / ".reservations" / f"{_PATHS.profile_name(profile)}.json"
+
+
+@contextmanager
+def _allocation_lock(root: Path):
+    """Reuse the verified root lock held by a profile worker when available."""
+    inherited_root = os.environ.get("VM_HELD_ALLOCATION_ROOT")
+    inherited_fd = os.environ.get("VM_HELD_ALLOCATION_FD")
+    if inherited_root is not None or inherited_fd is not None:
+        if inherited_root != str(root) or inherited_fd is None:
+            raise ResourceRefusal("inherited allocation lock does not match the requested state root")
+        try:
+            fd = _PATHS._inherited_lock_fd(root / ".allocation.lock", "VM_HELD_ALLOCATION_FD")
+        except (OSError, ValueError, TypeError) as error:
+            raise ResourceRefusal("inherited allocation lock is not verifiable") from error
+        yield fd
+        return
+    with _PATHS.lock_file(root / ".allocation.lock") as fd:
+        yield fd
 
 
 def _reservation_read(path: Path, expected_profile: str) -> dict:
@@ -310,19 +398,36 @@ def _reservations_locked(root: Path) -> list[tuple[Path, dict]]:
     return current
 
 
-def reserve_allocation(root: Path, profile: str, requested_mib: int) -> dict:
+def reserve_allocation(
+    root: Path,
+    profile: str,
+    requested_mib: int,
+    release_profile: str | None = None,
+) -> dict:
     """Check and reserve one startup budget under the root allocation lock."""
     _PATHS.profile_name(profile)
     _integer(requested_mib, "requested memory", minimum=1)
-    okay, _details = check_budget(requested_mib, DEFAULT_RESERVE_MIB)
+    if release_profile is not None and release_profile != profile:
+        raise ResourceRefusal("RAM may be reclaimed only from the target profile")
+    release_identity = None
+    if release_profile is not None:
+        release_identity = _profile_release_identity(Path(root), release_profile)
+    if release_identity is None:
+        okay, _details = check_budget(requested_mib, DEFAULT_RESERVE_MIB)
+    else:
+        okay, _details = check_budget(
+            requested_mib, DEFAULT_RESERVE_MIB, release_identity=release_identity
+        )
     if not okay:
         raise ResourceRefusal("insufficient RAM budget; no profile or reservation was written")
     root = _PATHS.ensure_private_root(Path(root))
-    with _PATHS.lock_file(root / ".allocation.lock"):
+    with _allocation_lock(root):
         reservations = _reservations_locked(root)
         target = _reservation_path(root, profile)
         owner = capture_owner_identity()
         _PROCESS._validate_identity(owner)
+        if release_profile is not None:
+            release_identity = _profile_release_identity(root, release_profile)
         existing = next((data for path, data in reservations if path == target), None)
         if existing is not None:
             if existing["owner_identity"] == owner and existing["requested_mib"] == requested_mib:
@@ -330,7 +435,13 @@ def reserve_allocation(root: Path, profile: str, requested_mib: int) -> dict:
                         "reserved_mib": sum(item["requested_mib"] for _, item in reservations)}
             raise ResourceRefusal("this profile already has a pending allocation reservation")
         reserved = sum(data["requested_mib"] for _, data in reservations)
-        okay, details = check_budget(requested_mib + reserved, DEFAULT_RESERVE_MIB)
+        if release_identity is None:
+            okay, details = check_budget(requested_mib + reserved, DEFAULT_RESERVE_MIB)
+        else:
+            okay, details = check_budget(
+                requested_mib + reserved, DEFAULT_RESERVE_MIB,
+                release_identity=release_identity,
+            )
         if not okay:
             raise ResourceRefusal("insufficient RAM budget; no profile or reservation was written")
         directory = root / ".reservations"
@@ -367,13 +478,20 @@ def reserve_allocation(root: Path, profile: str, requested_mib: int) -> dict:
                 "projected_available_mib": details.get("projected_available_mib")}
 
 
-def release_allocation(root: Path, profile: str, owner_identity: dict | None = None) -> dict:
+def release_allocation(
+    root: Path,
+    profile: str,
+    owner_identity: dict | None = None,
+    owner_pid: int | None = None,
+) -> dict:
     """Release only the reservation owned by this exact controller identity."""
     _PATHS.profile_name(profile)
+    if owner_identity is not None and owner_pid is not None:
+        raise ResourceRefusal("allocation release identity is ambiguous")
     root = _PATHS.state_root(str(root), must_exist=True)
-    owner = capture_owner_identity() if owner_identity is None else owner_identity
+    owner = capture_owner_identity(owner_pid) if owner_identity is None else owner_identity
     _PROCESS._validate_identity(owner)
-    with _PATHS.lock_file(root / ".allocation.lock"):
+    with _allocation_lock(root):
         target = _reservation_path(root, profile)
         if not target.exists() and not target.is_symlink():
             return {"profile": profile, "released": False}
@@ -384,6 +502,24 @@ def release_allocation(root: Path, profile: str, owner_identity: dict | None = N
         target.unlink()
         _PATHS.fsync_dir(target.parent)
         return {"profile": profile, "released": True}
+
+
+def recover_allocation(root: Path, profile: str) -> dict:
+    """Remove only a reservation whose recorded controller is proven stopped."""
+    _PATHS.profile_name(profile)
+    root = _PATHS.state_root(str(root), must_exist=True)
+    with _allocation_lock(root):
+        target = _reservation_path(root, profile)
+        if not target.exists() and not target.is_symlink():
+            return {"profile": profile, "recovered": False, "state": "absent"}
+        data = _reservation_read(target, profile)
+        state = identity_state(data["owner_identity"])
+        if state != "stopped":
+            raise ResourceRefusal(f"allocation reservation owner is {state}; reservation was preserved")
+        _PATHS.private_entry(target)
+        target.unlink()
+        _PATHS.fsync_dir(target.parent)
+        return {"profile": profile, "recovered": True, "state": state}
 
 
 class Parser(argparse.ArgumentParser):
@@ -399,28 +535,45 @@ def main() -> int:
     check = commands.add_parser("check")
     check.add_argument("--requested-mib", type=int, required=True)
     check.add_argument("--reserve-mib", type=int, default=DEFAULT_RESERVE_MIB)
-    check.add_argument("--release-pid", type=int)
+    check.add_argument("--state-root", type=Path)
+    check.add_argument("--release-profile")
     reserve = commands.add_parser("reserve")
     reserve.add_argument("--state-root", type=Path, required=True)
     reserve.add_argument("--profile", required=True)
     reserve.add_argument("--requested-mib", type=int, required=True)
+    reserve.add_argument("--release-profile")
     release = commands.add_parser("release")
     release.add_argument("--state-root", type=Path, required=True)
     release.add_argument("--profile", required=True)
+    release.add_argument("--owner-pid", type=int)
+    recover = commands.add_parser("recover")
+    recover.add_argument("--state-root", type=Path, required=True)
+    recover.add_argument("--profile", required=True)
     args = parser.parse_args()
     try:
         if args.command == "defaults":
             print(json.dumps({"depth": args.depth, "memory_gib": default_memory_gib(args.depth)}, sort_keys=True))
         elif args.command == "check":
-            okay, details = check_budget(args.requested_mib, args.reserve_mib, args.release_pid)
+            if args.release_profile is None:
+                if args.state_root is not None:
+                    raise ResourceRefusal("--state-root requires --release-profile")
+                okay, details = check_budget(args.requested_mib, args.reserve_mib)
+            else:
+                if args.state_root is None:
+                    raise ResourceRefusal("--release-profile requires --state-root")
+                okay, details = check_profile_budget(args.state_root, args.release_profile,
+                                                     args.requested_mib, args.reserve_mib)
             print(json.dumps({"ok": okay, **details}, sort_keys=True))
             if not okay:
                 print("REFUSED: insufficient memory budget for requested VM RAM.", file=sys.stderr)
                 return 1
         elif args.command == "reserve":
-            print(json.dumps(reserve_allocation(args.state_root, args.profile, args.requested_mib), sort_keys=True))
+            print(json.dumps(reserve_allocation(args.state_root, args.profile, args.requested_mib,
+                                                args.release_profile), sort_keys=True))
+        elif args.command == "release":
+            print(json.dumps(release_allocation(args.state_root, args.profile, owner_pid=args.owner_pid), sort_keys=True))
         else:
-            print(json.dumps(release_allocation(args.state_root, args.profile), sort_keys=True))
+            print(json.dumps(recover_allocation(args.state_root, args.profile), sort_keys=True))
     except (OSError, ResourceRefusal, ValueError, TypeError, RuntimeError) as error:
         print(f"REFUSED: {error}", file=sys.stderr)
         return 2

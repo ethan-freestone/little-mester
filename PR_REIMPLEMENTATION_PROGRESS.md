@@ -2,12 +2,14 @@
 
 ## Control state
 
-- Phase: **Round 2 active; C01–C05 committed; TASK-06/C05 fixture-validated**.
+- Phase: **Round 2 active; C01–C05 committed; TASK-07/C06 in progress**.
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
 - Implementing branch: `feat/vm-approach-2`; C05 implementation checkpoint is
   `cb7091a17720b59056bd2677f3af1aba5699f944`.
+- C06 working tree is checked out directly at `/workspace` on `feat/vm-approach-2`,
+  based at `5ecd200d32ba909e41d4a15885f57681a32f60d6`; C06 changes are uncommitted.
 - Inspected source: PR #13 at
   `97af1d83a16fce68ddcc3390276c218a1b0cd518`.
 - Assigned session: current coordinating OpenCode session; no subagents assigned.
@@ -178,7 +180,7 @@ VM/network acceptance has occurred.
 | TASK-04 | C03 | DONE | Coordinator/2026-11-03/2026-11-03 | proxy policy/chaining;36 proxy Python,66 Bats,66 VM Python;8dc9816 | Loopback/mock fixtures only; no live SEC-NET |
 | TASK-05 | C04 | DONE | Coordinator/2026-11-03/2026-11-03 | runner/SSH/process supervision;77 Bats,76 VM Python;b530193 | Fake executable/temp/loopback fixtures only; no real KVM/QEMU/guest; lifecycle CLI wiring remains later work |
 | TASK-06 | C05 | DONE | Coordinator/2026-11-03/2026-11-03 | Guest bootstrap/config/hash/readiness;98 Python,77 Bats; cloud-init schema; static checks PASS; cb7091a | Fixture-only; no host install, real VM, image/network, SEC-NET or nested acceptance |
-| TASK-07 | C06 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-05/06 |
+| TASK-07 | C06 | IMPLEMENTATION COMPLETE; CLOSEOUT PENDING | Coordinator/2026-11-03/2026-11-03 | Internal fresh-up/resume/A→B→B, exact-target resize, reservation recovery, exact deletion/report archive, and rebuild failure guard; 106 Bats,136 VM Python; static and ticket-store validation PASS | Fixture-only; lifecycle commands beyond status/list/suspend remain undispatched; #41 real-host/KVM/network/nested acceptance stays pending |
 | TASK-08 | C07 | NOT STARTED | Unassigned/—/— | — | Guest harness/provider parity |
 | TASK-09 | C08 | NOT STARTED | Unassigned/—/— | — | Depends on guest setup/runtime |
 | TASK-10 | C09 | NOT STARTED | Unassigned/—/— | — | Version qualification |
@@ -553,3 +555,36 @@ evidence only, not host/VM acceptance.
 No push or PR was created. This execution-ledger SHA closeout is a separate
 documentation-only commit; the staged-empty/worktree-populated
 `vm-migration-plan.md` remains excluded.
+
+## TASK-07 / C06 — safe lifecycle and resource integration
+
+**State:** IMPLEMENTATION COMPLETE; closeout pending on `feat/vm-approach-2`, based at checkpoint
+`5ecd200d32ba909e41d4a15885f57681a32f60d6`. No C06 commit has been created.
+
+The CLI still dispatches only read-only exact-profile `status`/`list` and graceful,
+descendant-safe `suspend`; startup, resume, resize and destructive operations
+continue to refuse. Internal fixture-tested orchestration covers fresh profile
+allocation/start through a frozen runtime, same-workspace warm resume, A→B→B
+workspace switching with staged seed/hash update, exact-target RAM reservation and
+graceful resize, identity-based reservation recovery, exact profile deletion with
+stopped run-report archival, and rebuild stopping if deletion fails. Status checks
+recorded process identity even for suspended/unknown profiles. Auth-enabled deletion
+and uncertain process/reservation states fail closed. No lifecycle implementation
+beyond status/list/suspend is user-facing.
+
+Current validation:
+
+| Command/check | Result |
+|---|---|
+| `bats --print-output-on-failure tests/*.bats` |106/106 PASS; fake executables and temporary state only |
+| `python3 -B -m unittest discover -s tests -p 'test_vm*.py' -v` |136/136 PASS |
+| Ruff on changed VM Python modules/tests |PASS |
+| `bash -n lab-vm lib/vm/lifecycle.sh lib/vm/config.sh lib/vm/runner.sh`; ShellCheck on production Bash modules |PASS |
+| ShellCheck Bats files at error severity; `git diff --check` |PASS |
+| `mester_tickets_validate` after appending C06 fixture evidence to #41 |PASS: index synced, audit intact (137 entries), no lock/orphans/quality issues; A1–A8 remain pending |
+
+The TASK-07 implementation and fixture milestone are complete; remaining C06
+closeout is the local checkpoint commit. No lifecycle implementation was exposed through the CLI. No
+VM/image/network operation was run; real acceptance gates remain restricted and
+pending under ticket #41. The pre-existing staged-empty/worktree-populated
+`vm-migration-plan.md` remains untouched and excluded from C06.

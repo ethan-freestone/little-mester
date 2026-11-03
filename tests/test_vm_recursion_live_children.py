@@ -66,6 +66,8 @@ class LiveChildTests(unittest.TestCase):
                 "/usr/bin/qemu-system-x86_64",
                 "-name", name,
                 "-drive", f"file={disk},format=qcow2,if=virtio",
+                "-chardev", f"socket,id=charfs,path={profile / 'runtime/vfs.sock'}",
+                "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{40220 + pid % 100}-:22,restrict=on",
             ],
         }
         data = {

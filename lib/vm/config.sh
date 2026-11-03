@@ -301,7 +301,7 @@ vm_virtiofsd() {
 
 vm_host_missing() {
   local tool
-  for tool in qemu-system-x86_64 qemu-img ssh ssh-keyscan curl python3 socat flock; do
+  for tool in qemu-system-x86_64 qemu-img ssh ssh-keyscan ssh-keygen curl python3 socat flock; do
     command -v "$tool" >/dev/null 2>&1 || printf '%s\n' "$tool"
   done
   vm_virtiofsd >/dev/null || printf 'virtiofsd\n'
@@ -319,7 +319,7 @@ vm_package_for() {
         qemu-system-x86_64) printf 'qemu-system-x86\n' ;;
         qemu-img) printf 'qemu-utils\n' ;;
         virtiofsd|genisoimage|curl|python3|socat) printf '%s\n' "$tool" ;;
-        ssh|ssh-keyscan) printf 'openssh-client\n' ;;
+        ssh|ssh-keyscan|ssh-keygen) printf 'openssh-client\n' ;;
         flock) printf 'util-linux\n' ;;
         *) return 2 ;;
       esac ;;
@@ -329,7 +329,7 @@ vm_package_for() {
         qemu-img|virtiofsd|curl|socat) printf '%s\n' "$tool" ;;
         genisoimage) printf 'cdrtools\n' ;;
         python3) printf 'python\n' ;;
-        ssh|ssh-keyscan) printf 'openssh\n' ;;
+        ssh|ssh-keyscan|ssh-keygen) printf 'openssh\n' ;;
         flock) printf 'util-linux\n' ;;
         *) return 2 ;;
       esac ;;

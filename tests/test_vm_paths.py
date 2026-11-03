@@ -133,6 +133,17 @@ class PathsTest(unittest.TestCase):
         self.cli("profile-write", "--profile", "test.v2", data=dotted)
         self.assertEqual(self.cli("profile-read", "--profile", "test.v2"), dotted)
 
+    def test_profile_create_is_allocated_only_and_never_overwrites(self):
+        data = self.profile()
+        self.assertEqual(self.cli("profile-create", "--profile", "test", data=data), data)
+        self.assertEqual(self.cli("profile-read", "--profile", "test"), data)
+        before = (self.root / "vm/profiles/test/profile.json").read_bytes()
+        self.cli("profile-create", "--profile", "test", data=data, ok=False)
+        self.cli("profile-create", "--profile", "other",
+                 data=dict(data, name="other", status="provisioning"), ok=False)
+        self.assertEqual((self.root / "vm/profiles/test/profile.json").read_bytes(), before)
+        self.assertFalse((self.root / "vm/profiles/other/profile.json").exists())
+
     def test_profile_list_is_readonly_and_rejects_ambiguous_entries(self):
         self.cli("profile-write", "--profile", "test", data=self.profile())
         before = set(self.root.rglob("*"))
@@ -189,14 +200,26 @@ class PathsTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             return json.loads(result.stdout)
 
+        disk = self.root / "vm/profiles/test/disk.qcow2"
+        socket = "/tmp/test-vm-profile.sock"
+        runtime_identity = {
+            "pid": 4321, "start_ticks": 12345, "executable": "/usr/bin/qemu-system-x86_64",
+            "disk_path": str(disk), "socket_path": socket, "ssh_port": 40222,
+            "argv": ["/usr/bin/qemu-system-x86_64", "-enable-kvm", "-m", "8192",
+                     "-drive", f"file={disk},format=qcow2,if=virtio", "-chardev",
+                     f"socket,id=charfs,path={socket}", "-netdev",
+                     "user,id=net0,hostfwd=tcp:127.0.0.1:40222-:22,restrict=on"],
+        }
         starting = transition("allocated", "starting")
         self.assertEqual(starting["status"], "starting")
-        provisioning = transition("starting", "provisioning")
+        provisioning = transition("starting", "provisioning", runtime_identity=runtime_identity)
         self.assertEqual(provisioning["status"], "provisioning")
         ready = transition("provisioning", "ready")
         self.assertEqual(ready["status"], "ready")
         self.assertEqual(transition("ready", "suspending")["status"], "suspending")
-        self.assertEqual(transition("suspending", "suspended")["status"], "suspended")
+        suspended = transition("suspending", "suspended", runtime_identity=None)
+        self.assertEqual(suspended["status"], "suspended")
+        self.assertNotIn("runtime_identity", suspended)
         before = self.cli("profile-read", "--profile", "test")
         for expected, target in (("ready", "suspending"), ("suspended", "ready"), ("suspended", "provisioning")):
             result = subprocess.run(
@@ -207,6 +230,9 @@ class PathsTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 2)
         self.assertEqual(self.cli("profile-read", "--profile", "test"), before)
+        resumed = transition("suspended", "starting", runtime_identity=None)
+        self.assertEqual(resumed["status"], "starting")
+        self.assertNotIn("runtime_identity", resumed)
 
     def test_unknown_profile_is_terminal_and_does_not_accept_metadata_repair(self):
         data = self.profile()
@@ -405,9 +431,17 @@ class PathsTest(unittest.TestCase):
         installed = self.cli("runtime-install", *args)
         frozen = Path(installed["runtime_path"]) / "launcher"
         self.assertEqual(frozen.read_text(), "trusted")
+        data = dict(self.profile(), runtime_payload_sha256=installed["runtime_payload_sha256"])
+        self.cli("profile-write", "--profile", "test", data=data)
+        self.assertEqual(
+            self.cli("runtime-validate", "--profile", "test"),
+            {"runtime_path": str(frozen.parent),
+             "runtime_payload_sha256": installed["runtime_payload_sha256"]},
+        )
         (source / "launcher").write_text("changed")
         self.cli("runtime-install", *args, ok=False)
         self.assertEqual(frozen.read_text(), "trusted")
+        self.assertEqual(self.cli("runtime-validate", "--profile", "test")["runtime_path"], str(frozen.parent))
         (source / "launcher").write_text("trusted")
         self.assertEqual(self.cli("runtime-install", *args), installed)
         self.cli("runtime-install", "--profile", "test", "--source", source,
@@ -421,10 +455,12 @@ class PathsTest(unittest.TestCase):
         data = dict(self.profile(), runtime_payload_sha256=result["runtime_payload_sha256"])
         self.cli("profile-write", "--profile", "test", data=data)
         self.cli("config")  # Nested payload directories must all be private.
+        self.assertEqual(self.cli("runtime-validate", "--profile", "test")["runtime_path"], result["runtime_path"])
         self.cli("profile-write", "--profile", "test", data=dict(data, runtime_payload_sha256=None), ok=False)
         installed = Path(result["runtime_path"]) / "lib/nested/helper"
         installed.write_text("tampered")
         self.cli("runtime-install", *args, ok=False)
+        self.cli("runtime-validate", "--profile", "test", ok=False)
 
     def test_runtime_symlink_source_refused_without_allocation(self):
         (self.repo / "link").symlink_to(self.workspace)
@@ -526,6 +562,177 @@ class PathsTest(unittest.TestCase):
         self.cli("overlay-publish", "--profile", "test", "--staging", second, ok=False)
         self.assertEqual(target.read_bytes(), old)
         self.assertTrue(second.exists())
+
+    def test_profile_asset_publish_is_create_only_and_restricted_to_key_or_seed_iso(self):
+        self.cli("profile-write", "--profile", "test", data=self.profile())
+        self.cli("profile-transition", "--profile", "test", "--expected-status", "allocated",
+                 "--status", "starting", data={})
+        profile = self.root / "vm/profiles/test"
+        stage_dir = profile / ".asset.first"
+        stage_dir.mkdir(mode=0o700)
+        key = stage_dir / "control-key"
+        key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n")
+        key.chmod(0o600)
+        key_payload = key.read_text()
+        result = self.cli("asset-publish", "--profile", "test", "--asset", "control-key", "--staging", key)
+        self.assertEqual(result["published"], str(profile / "control-key"))
+        self.assertEqual((profile / "control-key").read_text(), key_payload)
+
+        other_dir = profile / ".asset.second"
+        other_dir.mkdir(mode=0o700)
+        other = other_dir / "control-key"
+        other.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nreplacement\n-----END OPENSSH PRIVATE KEY-----\n")
+        other.chmod(0o600)
+        self.cli("asset-publish", "--profile", "test", "--asset", "control-key", "--staging", other, ok=False)
+        self.assertIn("replacement", other.read_text())
+        self.assertNotIn("replacement", (profile / "control-key").read_text())
+
+        malformed_dir = profile / ".asset.third"
+        malformed_dir.mkdir(mode=0o700)
+        malformed = malformed_dir / "seed.iso"
+        malformed.write_bytes(b"not an ISO")
+        malformed.chmod(0o600)
+        self.cli("asset-publish", "--profile", "test", "--asset", "seed.iso", "--staging", malformed, ok=False)
+        self.assertFalse((profile / "seed.iso").exists())
+
+    def test_seed_iso_replace_is_atomic_profile_bound_and_starting_only(self):
+        self.cli("profile-write", "--profile", "test", data=self.profile())
+        self.cli("profile-transition", "--profile", "test", "--expected-status", "allocated",
+                 "--status", "starting", data={})
+        profile = self.root / "vm/profiles/test"
+
+        def make_iso(stage_dir, name, marker):
+            stage_dir.mkdir(mode=0o700)
+            stage = stage_dir / name
+            payload = bytearray(17 * 2048)
+            payload[16 * 2048] = 1
+            payload[16 * 2048 + 1:16 * 2048 + 6] = b"CD001"
+            payload[16 * 2048 + 6] = 1
+            payload[17 * 2048 - 1] = marker
+            stage.write_bytes(payload)
+            stage.chmod(0o600)
+            return stage
+
+        original = make_iso(profile / ".asset.original", "seed.iso", 1)
+        self.cli("asset-publish", "--profile", "test", "--asset", "seed.iso", "--staging", original)
+        user_data_target = profile / "seed.user-data"
+        user_data_target.write_bytes(b"#cloud-config\nold: true\n")
+        user_data_target.chmod(0o600)
+        before = (profile / "seed.iso").read_bytes()
+        replacement = make_iso(profile / ".asset.replacement", "seed.iso", 2)
+        replacement_user_data = replacement.parent / "user-data"
+        replacement_user_data.write_bytes(b"#cloud-config\nnew: true\n")
+        replacement_user_data.chmod(0o600)
+        result = self.cli("asset-replace", "--profile", "test", "--asset", "seed.iso",
+                          "--staging", replacement, "--user-data-staging", replacement_user_data)
+        self.assertEqual(result["published"], str(profile / "seed.iso"))
+        self.assertNotEqual((profile / "seed.iso").read_bytes(), before)
+        self.assertEqual(user_data_target.read_bytes(), b"#cloud-config\nnew: true\n")
+        published = (profile / "seed.iso").read_bytes()
+        published_user_data = user_data_target.read_bytes()
+
+        rollback_iso = make_iso(profile / ".asset.rollback", "seed.iso", 5)
+        rollback_user_data = rollback_iso.parent / "user-data"
+        rollback_user_data.write_bytes(b"#cloud-config\nrollback: true\n")
+        rollback_user_data.chmod(0o600)
+        paths = load_module()
+        real_replace = os.replace
+        replace_count = 0
+
+        def fail_iso_replace(source, destination):
+            nonlocal replace_count
+            replace_count += 1
+            if replace_count == 2:
+                raise OSError("injected ISO rename failure")
+            return real_replace(source, destination)
+
+        with (mock.patch.object(paths.os, "replace", side_effect=fail_iso_replace),
+              self.assertRaises(OSError)):
+            paths.profile_asset_replace(self.root, "test", "seed.iso", rollback_iso, rollback_user_data)
+        self.assertEqual((profile / "seed.iso").read_bytes(), published)
+        self.assertEqual(user_data_target.read_bytes(), published_user_data)
+        self.assertTrue(rollback_iso.exists())
+        self.assertFalse(rollback_user_data.exists())
+
+        invalid = make_iso(profile / ".asset.invalid", "seed.iso", 4)
+        invalid_user_data = invalid.parent / "user-data"
+        invalid_user_data.write_bytes(b"#cloud-config\napi_token: do-not-store\n")
+        invalid_user_data.chmod(0o600)
+        self.cli("asset-replace", "--profile", "test", "--asset", "seed.iso",
+                 "--staging", invalid, "--user-data-staging", invalid_user_data, ok=False)
+        self.assertEqual((profile / "seed.iso").read_bytes(), published)
+        self.assertEqual(user_data_target.read_bytes(), published_user_data)
+
+        self.cli("profile-transition", "--profile", "test", "--expected-status", "starting",
+                 "--status", "failed", data={})
+        rejected = make_iso(profile / ".asset.failed", "seed.iso", 3)
+        rejected_user_data = rejected.parent / "user-data"
+        rejected_user_data.write_bytes(b"#cloud-config\nother: true\n")
+        rejected_user_data.chmod(0o600)
+        self.cli("asset-replace", "--profile", "test", "--asset", "seed.iso",
+                 "--staging", rejected, "--user-data-staging", rejected_user_data, ok=False)
+        self.assertEqual((profile / "seed.iso").read_bytes(), published)
+        self.assertEqual(user_data_target.read_bytes(), published_user_data)
+
+    def test_exact_profile_delete_archives_stopped_runs_and_preserves_shared_state(self):
+        digest = "d" * 64
+        image = self.root / "vm/images" / digest
+        image.mkdir(parents=True, mode=0o700)
+        (self.root / "vm").chmod(0o700)
+        (self.root / "vm/images").chmod(0o700)
+        image.chmod(0o700)
+        (image / "base.qcow2").write_bytes(b"immutable base")
+        (image / "base.qcow2").chmod(0o600)
+        data = dict(self.profile(), image_sha256=digest,
+                    image_path=str(image / "base.qcow2"), status="allocated")
+        self.cli("profile-create", "--profile", "test", data=data)
+        other = dict(self.profile(), name="other")
+        self.cli("profile-create", "--profile", "other", data=other)
+        profile = self.root / "vm/profiles/test"
+        runs = profile / "runs"
+        run = runs / "run-one"
+        run.mkdir(parents=True, mode=0o700)
+        runs.chmod(0o700)
+        run.chmod(0o700)
+        spec = importlib.util.spec_from_file_location("vm_paths_process_empty", SCRIPT.with_name("process.py"))
+        process = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(process)
+        process.registry_initialize(run / "processes.json", "run-one")
+        log = run / "qemu.log"
+        log.write_text("bounded fixture diagnostics\n")
+        log.chmod(0o600)
+        self.cli("profile-transition", "--profile", "test", "--expected-status", "allocated",
+                 "--status", "deleting", data={})
+
+        result = self.cli("profile-delete", "--profile", "test")
+        self.assertEqual(result["deleted"], "test")
+        self.assertFalse(profile.exists())
+        reports = Path(result["reports_path"])
+        self.assertEqual((reports / "runs/run-one/qemu.log").read_text(), "bounded fixture diagnostics\n")
+        self.assertTrue((self.root / "vm/profiles/other/profile.json").is_file())
+        self.assertEqual((image / "base.qcow2").read_bytes(), b"immutable base")
+        self.assertTrue(self.workspace.is_dir())
+
+    def test_exact_profile_delete_refuses_running_or_unknown_run_identity(self):
+        data = self.profile()
+        self.cli("profile-create", "--profile", "test", data=data)
+        profile = self.root / "vm/profiles/test"
+        run = profile / "runs/run-one"
+        run.mkdir(parents=True, mode=0o700)
+        (profile / "runs").chmod(0o700)
+        run.chmod(0o700)
+        helper_path = SCRIPT.with_name("process.py")
+        spec = importlib.util.spec_from_file_location("vm_paths_process_fixture", helper_path)
+        process = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(process)
+        identity = process.capture_identity(os.getpid())
+        process.registry_initialize(run / "processes.json", "run-one")
+        process.registry_add(run / "processes.json", "run-one", "qemu_1", identity)
+        self.cli("profile-transition", "--profile", "test", "--expected-status", "allocated",
+                 "--status", "deleting", data={})
+        self.cli("profile-delete", "--profile", "test", ok=False)
+        self.assertTrue((profile / "profile.json").is_file())
+        self.assertTrue((run / "processes.json").is_file())
 
     def test_seed_write_secret_refusal_and_atomic_failure_preserve_previous(self):
         self.cli("profile-write", "--profile", "test", data=self.profile())

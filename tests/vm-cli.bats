@@ -235,6 +235,39 @@ assert json.load(sys.stdin)["effective_config"]["model"] == {"provider":"none"}
   [ ! -e "$MESTER_STATE_DIR" ]
 }
 
+@test "CLI status and list are read-only exact-profile queries" {
+  mkdir -m 700 "$MESTER_STATE_DIR"
+  python3 - "$ROOT/lib/vm/paths.py" "$MESTER_STATE_DIR" "$BATS_TEST_TMPDIR/workspace" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("fixture_paths",sys.argv[1])
+paths=importlib.util.module_from_spec(spec); spec.loader.exec_module(paths)
+root=Path(sys.argv[2]); workspace=Path(sys.argv[3])
+data={"schema_version":1,"profile_id":"00000000-0000-4000-8000-000000000001",
+ "name":"daily","workspace":str(workspace),"image_sha256":None,"image_path":None,
+ "memory_gib":8,"depth":0,"max_depth":0,"descendants_possible":False,
+ "opencode_version":None,"guest_payload_sha256":None,"runtime_payload_sha256":None,
+ "status":"allocated"}
+paths.profile_write(root,"daily",data)
+PY
+  before="$(find "$MESTER_STATE_DIR" -printf '%P %y %m\n' | sort)"
+  run bash "$ROOT/lab-vm" status --json --name daily
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"status": "allocated"'* || "$output" == *'"status":"allocated"'* ]]
+  run bash "$ROOT/lab-vm" list --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"name": "daily"'* || "$output" == *'"name":"daily"'* ]]
+  after="$(find "$MESTER_STATE_DIR" -printf '%P %y %m\n' | sort)"
+  [ "$before" = "$after" ]
+}
+
+@test "suspend of an absent exact profile refuses without allocating state" {
+  run bash "$ROOT/lab-vm" suspend --name missing
+  [ "$status" -eq 2 ]
+  [ ! -e "$MESTER_STATE_DIR" ]
+}
+
 @test "CLI rejects malformed compatibility environment without side effects" {
   # shellcheck disable=SC2016 # Literal command-substitution payload must remain data.
   run env VM_YES='$(touch forbidden)' bash "$ROOT/lab-vm" context --json

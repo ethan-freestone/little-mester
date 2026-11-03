@@ -10,8 +10,12 @@ C04 fixture-tested process supervision/SSH primitives are implemented. C05 adds 
 fixture-tested guest-native OpenCode bootstrap, private MCP/config payload, exact
 version manifest, payload identity and readiness checks. **No image has been
 downloaded, no real QEMU/VM has been started, and no host/network acceptance is
-claimed.** `lab-vm` does not yet dispatch lifecycle commands; ordinary `./lab`
-remains the existing Docker launcher.
+claimed.** C06 now has fixture-tested internal controllers for fresh profile start,
+resume/workspace switch, resize, identity-bound reservation recovery, exact-profile
+deletion/report archiving, and rebuild sequencing. Only read-only `status`/`list`
+and graceful `suspend` are dispatched; all other lifecycle commands remain
+unavailable until complete runtime and CLI integration is approved. Ordinary
+`./lab` remains the existing Docker launcher.
 
 ### CLI and configuration contract
 
@@ -180,16 +184,19 @@ warm-bootstrap refusal, payload/hash/readiness checks, config migration and secr
 handling. They do not install packages on this host or exercise a real guest. The
 real image, KVM, SSH and nested-VM acceptance gates remain restricted and pending.
 
-### Lifecycle and resource contract (C06 fixture target)
+### Lifecycle and resource contract (C06 fixture-tested; commands undispatched)
 
 The profile state machine is `allocated → starting → provisioning → ready`,
-`ready → suspending → suspended → starting`, and `failed → starting` for an
-explicit retry. Ambiguous process identity becomes `unknown` and blocks mutation;
-status is read-only. Repeated same-workspace ready operations verify the exact
-owned runtime and bounded guest readiness without bootstrap, package, or config
-transfer. A workspace change goes through the same graceful shutdown and child
-inventory guard as suspend/resize, reuses the selected profile's overlay and key,
-and does not restart when the selected workspace is already B.
+`ready → suspending → suspended → starting`. Failed/ambiguous states do not enter
+the start path through the current lifecycle controller; unknown identity blocks
+mutation and status is read-only. Repeated same-workspace ready operations verify
+the exact owned runtime and bounded guest readiness without bootstrap, package, or
+config transfer. A workspace change recomputes the frozen guest payload digest,
+gracefully suspends through the same child-inventory guard as resize, stages the
+NoCloud seed before metadata commit, then replaces the seed ISO and saved user-data
+under the exact profile lock. It preserves the existing overlay and key; B→B is
+warm-idempotent. Seed-build failure leaves the suspended metadata and boot assets
+unchanged; uncertain publication never starts QEMU.
 
 Default guest RAM is 8/4/2/1 GiB at recursion depths 0/1/2/3+, with a validated
 1–128 GiB override only for a fresh profile. Resource checks use host
@@ -211,14 +218,17 @@ must preserve the immutable image cache, host workspace, and reports.
 
 These are C06 implementation contracts, not real-VM claims. The lifecycle, memory,
 and child-inventory suites use disposable state, synthetic procfs, and fake
-callbacks. The production lifecycle CLI remains unavailable until it can satisfy
-the complete runtime contracts; no command may report success for a stubbed VM.
+callbacks. Lifecycle implementations are fixture-only and undispatched beyond
+status/list/suspend. Real image, KVM, guest, live-network/SEC-NET, and nested-VM
+acceptance remains pending under ticket #41. No command may report success for a
+stubbed VM.
 
 Examples shared by Bash and Fish (diagnostics only):
 
 ```sh
 ./lab-vm --help
 ./lab-vm context --json --name candidate
+./lab-vm list --json
 ./lab-vm setup
 ```
 

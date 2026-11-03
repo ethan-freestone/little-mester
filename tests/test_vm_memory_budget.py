@@ -3,6 +3,8 @@
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -171,6 +173,108 @@ class MemoryBudgetTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             memory_budget.read_process_private_rss_mib(111, proc_root=self.proc)
 
+    def test_managed_release_rss_requires_exact_running_identity(self):
+        identity = {
+            "pid": 111, "start_ticks": 7, "executable": "/usr/bin/qemu-system-x86_64",
+            "argv": ["/usr/bin/qemu-system-x86_64", "-enable-kvm", "-drive",
+                     f"file={self.base}/vm/profiles/daily/disk.qcow2,format=qcow2,if=virtio"],
+        }
+        process = self.proc / "111"
+        process.mkdir()
+        (process / "smaps_rollup").write_text("Private_Clean: 100 kB\nPrivate_Dirty: 1948 kB\n", encoding="ascii")
+        with mock.patch.object(memory_budget, "identity_state", return_value="running"):
+            self.assertEqual(
+                memory_budget.read_managed_private_rss_mib(identity, self.proc), 2
+            )
+        with (
+            mock.patch.object(memory_budget, "identity_state", side_effect=("running", "unknown")),
+            self.assertRaises(RuntimeError),
+        ):
+            memory_budget.read_managed_private_rss_mib(identity, self.proc)
+        with (
+            mock.patch.object(memory_budget, "identity_state", return_value="stopped"),
+            self.assertRaises(RuntimeError),
+        ):
+            memory_budget.read_managed_private_rss_mib(identity, self.proc)
+
+    def test_profile_budget_selects_only_exact_ready_profile_qemu(self):
+        state = self.base / "state"
+        workspace = self.base / "workspace"
+        workspace.mkdir()
+        state.mkdir(mode=0o700)
+        paths = memory_budget._PATHS
+        paths.ensure_private_root(state)
+        image = "a" * 64
+        for directory in (state / "vm", state / "vm/images"):
+            paths.private_mkdir(directory)
+        image_dir = state / "vm/images" / image
+        paths.private_mkdir(image_dir)
+        base = image_dir / "base.qcow2"
+        base.write_text("fixture base\n", encoding="ascii")
+        base.chmod(0o600)
+        profile_dir = state / "vm/profiles/daily"
+        disk = profile_dir / "disk.qcow2"
+        socket = "/tmp/little-mester-budget-test.sock"
+        qemu = self.base / "qemu-system-x86_64"
+        qemu.write_text("fixture executable\n", encoding="ascii")
+        qemu.chmod(0o700)
+        identity = {
+            "pid": 111, "start_ticks": 7, "executable": str(qemu),
+            "disk_path": str(disk), "socket_path": socket, "ssh_port": 22222,
+            "argv": [str(qemu), "-enable-kvm", "-m", "8192",
+                     "-drive", f"file={disk},format=qcow2,if=virtio", "-chardev",
+                     f"socket,id=charfs,path={socket}", "-netdev",
+                     "user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22,restrict=on"],
+        }
+        data = {
+            "schema_version": 1, "profile_id": "00000000-0000-4000-8000-000000000002",
+            "name": "daily", "workspace": str(workspace), "image_sha256": image,
+            "image_path": str(base), "memory_gib": 8, "depth": 0, "max_depth": 0,
+            "descendants_possible": False, "opencode_version": "2.0.0",
+            "guest_payload_sha256": "b" * 64, "runtime_payload_sha256": "c" * 64,
+            "status": "ready", "runtime_identity": identity,
+        }
+        paths.profile_write(state, "daily", data)
+        with (mock.patch.object(memory_budget, "read_memavailable_mib", return_value=4096),
+              mock.patch.object(memory_budget, "read_cgroup_remaining_mib", return_value=4096),
+              mock.patch.object(memory_budget, "identity_state", return_value="running"),
+              mock.patch.object(memory_budget, "read_process_private_rss_mib", return_value=3072)):
+            okay, details = memory_budget.check_profile_budget(state, "daily", 4096)
+        self.assertTrue(okay)
+        self.assertEqual(details["release_rss_mib"], 3072)
+        paths.profile_transition(state, "daily", "ready", "unknown", {})
+        with self.assertRaises(memory_budget.ResourceRefusal):
+            memory_budget.check_profile_budget(state, "daily", 4096)
+
+    def test_resize_reservation_rechecks_only_its_exact_target_rss_under_allocation_lock(self):
+        state = self.base / "state"
+        state.mkdir(mode=0o700)
+        identity = {
+            "pid": 111, "start_ticks": 7, "executable": "/usr/bin/qemu-system-x86_64",
+            "argv": ["/usr/bin/qemu-system-x86_64", "-enable-kvm"],
+        }
+        owner = {"pid": 222, "start_ticks": 9, "executable": "/bin/bash", "argv": ["bash"]}
+        with (
+            mock.patch.object(memory_budget, "_profile_release_identity", return_value=identity),
+            mock.patch.object(memory_budget, "capture_owner_identity", return_value=owner),
+            mock.patch.object(memory_budget, "identity_state", return_value="running"),
+            mock.patch.object(memory_budget, "check_budget", return_value=(True, {"projected_available_mib": 9000})) as budget,
+        ):
+            reservation = memory_budget.reserve_allocation(state, "daily", 4096, "daily")
+        self.assertEqual(reservation["profile"], "daily")
+        self.assertEqual(budget.call_count, 2)
+        for call in budget.call_args_list:
+            self.assertEqual(call.kwargs["release_identity"], identity)
+        with mock.patch.object(memory_budget, "identity_state", return_value="running"):
+            memory_budget.release_allocation(state, "daily", owner_identity=owner)
+
+        with (
+            mock.patch.object(memory_budget, "_profile_release_identity") as release_identity,
+            self.assertRaises(memory_budget.ResourceRefusal),
+        ):
+            memory_budget.reserve_allocation(state, "daily", 4096, "other")
+        release_identity.assert_not_called()
+
     def test_budget_requires_requested_gib_plus_reserve(self):
         (self.proc / "meminfo").write_text("MemAvailable: 8388608 kB\n", encoding="ascii")
         process = self.proc / str(os.getpid())
@@ -217,8 +321,29 @@ class MemoryBudgetTests(unittest.TestCase):
             with self.assertRaises(memory_budget.ResourceRefusal):
                 memory_budget.release_allocation(state, "first", owner_identity={**owner, "start_ticks": 100})
             self.assertTrue((state / ".reservations/first.json").is_file())
-            memory_budget.release_allocation(state, "first", owner_identity=owner)
+            with mock.patch.object(memory_budget, "capture_owner_identity", return_value=owner) as capture:
+                memory_budget.release_allocation(state, "first", owner_pid=123)
+            capture.assert_called_once_with(123)
         self.assertFalse((state / ".reservations/first.json").exists())
+
+    def test_release_reuses_profile_workers_inherited_allocation_lock(self):
+        state = self.base / "state"
+        state.mkdir(mode=0o700)
+        owner = memory_budget._PROCESS.capture_identity(os.getpid())
+        path = self.reservation_fixture(state, "daily", owner, 4096)
+        lock_path = state / ".allocation.lock"
+        with memory_budget._PATHS.lock_file(lock_path) as fd:
+            os.set_inheritable(fd, True)
+            env = os.environ.copy()
+            env["VM_HELD_ALLOCATION_ROOT"] = str(state)
+            env["VM_HELD_ALLOCATION_FD"] = str(fd)
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "release", "--state-root", str(state),
+                 "--profile", "daily", "--owner-pid", str(os.getpid())],
+                env=env, pass_fds=(fd,), text=True, capture_output=True, timeout=5, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(path.exists())
 
     def test_only_confirmed_stopped_owner_clears_a_stale_reservation(self):
         state = self.base / "state"
@@ -231,6 +356,24 @@ class MemoryBudgetTests(unittest.TestCase):
             result = memory_budget.reserve_allocation(state, "new", 2048)
         self.assertEqual(result["reserved_mib"], 2048)
         self.assertFalse((state / ".reservations/old.json").exists())
+
+    def test_explicit_recovery_uses_identity_not_reservation_age(self):
+        state = self.base / "state"
+        state.mkdir(mode=0o700)
+        owner = {"pid": 123, "start_ticks": 99, "executable": "/bin/bash", "argv": ["bash"]}
+        path = self.reservation_fixture(state, "daily", owner, 4096)
+        with (mock.patch.object(memory_budget, "identity_state", return_value="unknown"),
+              self.assertRaises(memory_budget.ResourceRefusal)):
+            memory_budget.recover_allocation(state, "daily")
+        self.assertTrue(path.exists())
+        with (mock.patch.object(memory_budget, "identity_state", return_value="running"),
+              self.assertRaises(memory_budget.ResourceRefusal)):
+            memory_budget.recover_allocation(state, "daily")
+        self.assertTrue(path.exists())
+        with mock.patch.object(memory_budget, "identity_state", return_value="stopped"):
+            result = memory_budget.recover_allocation(state, "daily")
+        self.assertEqual(result, {"profile": "daily", "recovered": True, "state": "stopped"})
+        self.assertFalse(path.exists())
 
     def test_unknown_reservation_owner_blocks_new_allocation_without_cleanup(self):
         state = self.base / "state"

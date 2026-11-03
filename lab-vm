@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VM replacement CLI. C01 provides read-only discovery and validated private state.
+# VM replacement CLI. Lifecycle dispatch stays fail-closed until each command is implemented.
 set -euo pipefail
 
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
@@ -19,6 +19,9 @@ Usage: ./lab-vm COMMAND|WORKSPACE [options] [-- agent arguments]
 
 Available now:
   context [--json] [--name NAME]    Read-only config, private paths and capabilities
+  status [--json] [--name NAME]     Read-only exact-profile lifecycle and identity
+  list [--json]                     Read-only inventory of private VM profiles
+  suspend [--name NAME]             Graceful, descendant-safe guest shutdown
   setup                           Read-only host prerequisite discovery
   setup --install-prereqs          Explicit default-no userland package installation
   base                            Verify/download the pinned immutable base image
@@ -26,8 +29,8 @@ Available now:
   --help                          Show this checkpoint's actual availability
 
 Not yet implemented (refuse with exit 2, never start or mutate a VM):
-  run [WORKSPACE], up [PROFILE] --workspace PATH, agent, ssh, status, list, doctor,
-  suspend, resume, resize PROFILE GiB, down, stop, rebuild, update,
+  run [WORKSPACE], up [PROFILE] --workspace PATH, agent, ssh, doctor,
+  resume, resize PROFILE GiB, down, stop, rebuild, update,
   install-tools, egress-reload, models status|diagnose, metrics up|status|down,
   auth-forward [PROFILE] PORT, recursion-clean
 
@@ -41,8 +44,9 @@ Options (before or after command/path; -- stops launcher parsing):
   --model-provider none|ollama|llamacpp|remote, --model-port PORT, --model-id ID,
   --metrics on|off, --auth-forward off|auto|PROVIDER[,PROVIDER], --auth-escrow-dir PATH
 
---yes confirms launcher actions only, never requests agent auto mode.
-No VM lifecycle or nested-KVM support is claimed by a successful context/setup.
+--yes confirms launcher actions only, never requests agent auto mode. Suspend never
+force-kills QEMU; unknown children or process identities block shutdown.
+No VM startup or nested-KVM acceptance is claimed by a successful context/setup.
 Ordinary ./lab remains the unchanged Docker launcher until final acceptance.
 HELP
 }
@@ -58,6 +62,8 @@ VM_STATE_ROOT="$(vm_state_root)"
 VM_PATHS_HELPER="$VM_REPO/lib/vm/paths.py"
 # shellcheck source=lib/vm/disk.sh
 source "$VM_REPO/lib/vm/disk.sh"
+# shellcheck disable=SC1091
+source "$VM_REPO/lib/vm/lifecycle.sh"
 vm_config_overrides
 vm_config_load || exit 2
 
@@ -76,6 +82,46 @@ case "$VM_COMMAND" in
       exit 2
     fi
     vm_disk_create_base "$VM_STATE_ROOT"
+    ;;
+  status)
+    status_json="$(vm_lifecycle_status "$VM_STATE_ROOT" "$VM_PROFILE")" || exit $?
+    if (( VM_JSON )); then
+      printf '%s\n' "$status_json"
+    else
+      printf '%s\n' "$status_json" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print("VM profile status")
+print("Profile:",d["name"])
+print("Lifecycle:",d["status"])
+print("Runtime:",d["runtime_state"])
+print("Workspace:",d["workspace"])
+print("Memory:",str(d["memory_gib"])+" GiB")
+print("Depth:",d["depth"])
+'
+    fi
+    ;;
+  list)
+    list_json="$(vm_lifecycle_list "$VM_STATE_ROOT")" || exit $?
+    if (( VM_JSON )); then
+      printf '%s\n' "$list_json"
+    else
+      printf '%s\n' "$list_json" | python3 -c '
+import json,sys
+items=json.load(sys.stdin)
+if not items:
+    print("No VM profiles.")
+else:
+    print("NAME  STATUS  MEMORY  DEPTH")
+    for item in items:
+        print("{name}  {status}  {memory_gib} GiB  {depth}".format(**item))
+'
+    fi
+    ;;
+  suspend)
+    controller="$VM_STATE_ROOT/vm/profiles/$VM_PROFILE/runtime/lab-vm"
+    vm_lifecycle_suspend "$VM_STATE_ROOT" "$VM_PROFILE" "$VM_POWEROFF_RECURSIVE" \
+      "$VM_LIFECYCLE_DEFAULT_TIMEOUT" "$controller"
     ;;
   context)
     system="$(vm_host_system)"; arch="$(vm_host_arch)"
