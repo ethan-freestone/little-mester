@@ -566,7 +566,8 @@ vm_lifecycle_start_profile_locked() {
 vm_lifecycle_prepare_profile_assets_locked() {
   local root="$1" name="$2" workspace="$3" depth="$4" max_depth="$5"
   local workload="$6" agent="$7" version="$8" expected_payload="$9"
-  local uid="${10}" gid="${11}"
+  local uid="${10}" gid="${11}" model_provider="${12:-none}"
+  local model_port="${13:-}" model_id="${14:-}"
   local data status profile actual_payload stage_dir private_key public_key user_data path
   profile="$root/vm/profiles/$name"
   data="$(vm_lifecycle_profile_read "$root" "$name")" || return 2
@@ -591,7 +592,7 @@ vm_lifecycle_prepare_profile_assets_locked() {
     source "$VM_LIFECYCLE_ROOT/lib/vm/guest.sh"
   fi
   actual_payload="$(vm_guest_payload_hash "$workspace" "$workload" "$agent" \
-    "$version" "$depth" "$max_depth")" || {
+    "$version" "$depth" "$max_depth" "$model_provider" "$model_port" "$model_id")" || {
     vm_lifecycle_error 'Workspace guest payload could not be revalidated; no seed or key was written.'
     return 2
   }
@@ -612,7 +613,8 @@ vm_lifecycle_prepare_profile_assets_locked() {
   chmod 600 "$private_key" "$private_key.pub" || return 1
   public_key="$(cat -- "$private_key.pub")" || return 1
   user_data="$(vm_cloud_init_user_data "$name" "$uid" "$gid" "$public_key" \
-    "$depth" "$max_depth" "$workload" "$agent" "$version" "$expected_payload")" || {
+    "$depth" "$max_depth" "$workload" "$agent" "$version" "$expected_payload" \
+    http://10.0.2.100:3128 "$model_provider" "$model_port" "$model_id")" || {
     rm -f -- "$private_key" "$private_key.pub"
     rmdir -- "$stage_dir" 2>/dev/null || true
     return 2
@@ -658,6 +660,7 @@ vm_lifecycle_switch_seed_locked() {
   local root="$1" name="$2" workspace="$3" depth="$4" max_depth="$5"
   local workload="$6" agent="$7" version="$8" payload="$9"
   local uid="${10}" gid="${11}"
+  local model_provider="${12:-none}" model_port="${13:-}" model_id="${14:-}"
   local profile="$root/vm/profiles/$name" data status old_workspace key public_key user_data
   local instance_id stage_dir iso_tool
   data="$(vm_lifecycle_profile_read "$root" "$name")" || return 2
@@ -683,7 +686,8 @@ vm_lifecycle_switch_seed_locked() {
     return 2
   }
   user_data="$(vm_cloud_init_user_data "$name" "$uid" "$gid" "$public_key" \
-    "$depth" "$max_depth" "$workload" "$agent" "$version" "$payload")" || return 2
+    "$depth" "$max_depth" "$workload" "$agent" "$version" "$payload" \
+    http://10.0.2.100:3128 "$model_provider" "$model_port" "$model_id")" || return 2
   instance_id="$("$VM_LIFECYCLE_PYTHON" -c 'import uuid; print(uuid.uuid4())')" || return 2
   stage_dir="$(mktemp -d "$profile/.asset.XXXXXX")" || return 1
   if ! chmod 700 "$stage_dir" ||
@@ -752,9 +756,10 @@ vm_lifecycle_prepare_and_start_locked() {
   local workload="$6" agent="$7" version="$8" expected_payload="$9"
   local uid="${10}" gid="${11}" owner_pid="${12}"
   local model_kind="${13:-none}" model_port="${14:-}" metrics_port="${15:-}"
-  local readiness_timeout="${16:-1800}" rc
+  local readiness_timeout="${16:-1800}" model_provider="${17:-none}" model_id="${18:-}" rc
   if vm_lifecycle_prepare_profile_assets_locked "$root" "$name" "$workspace" \
-    "$depth" "$max_depth" "$workload" "$agent" "$version" "$expected_payload" "$uid" "$gid"; then
+    "$depth" "$max_depth" "$workload" "$agent" "$version" "$expected_payload" \
+    "$uid" "$gid" "$model_provider" "$model_port" "$model_id"; then
     :
   else
     rc=$?
@@ -771,7 +776,7 @@ vm_lifecycle_install_runtime() {
   local -a files=(
     lab-vm lib/state.sh lib/vm/config.sh lib/vm/cloud-init.sh lib/vm/disk.sh
     lib/vm/guest-bootstrap.sh lib/vm/guest.sh lib/vm/lifecycle.sh lib/vm/paths.py
-    lib/vm/process.py lib/vm/proxy.py lib/vm/runner.sh lib/vm/ssh.sh
+    lib/vm/process.py lib/vm/proxy.py lib/vm/runner.sh lib/vm/services.sh lib/vm/ssh.sh
     scripts/vm-opencode-config.py scripts/vm-python-tools.sh
     scripts/vm-recursion-live-children.py scripts/vm_memory_budget.py
   )
@@ -801,7 +806,7 @@ vm_lifecycle_up() {
   local depth="$5" max_depth="$6" requested_memory="$7" recurse="$8" unsafe="$9"
   local recursive="${10}" timeout="${11:-$VM_LIFECYCLE_DEFAULT_TIMEOUT}"
   local readiness_timeout="${12:-1800}" config workspace exists workload agent version provider model_port
-  local model_kind=none metrics_port='' memory payload data runtime_info runtime_hash patch owner_pid rc
+  local model_kind=none metrics_port='' memory payload data runtime_info runtime_hash patch owner_pid rc model_id
   [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$ ]] || {
     vm_lifecycle_error 'New VM profile names must be valid cloud-init hostnames.'
     return 2
@@ -813,6 +818,7 @@ vm_lifecycle_up() {
   version="$(vm_lifecycle_json_field "$config" opencode_version)" || return 2
   provider="$(vm_lifecycle_json_field "$config" model.provider)" || return 2
   model_port="$(vm_lifecycle_json_field "$config" model.port)" || return 2
+  model_id="$(vm_lifecycle_json_field "$config" model.id 2>/dev/null || true)"
   case "$provider" in
     none|remote)
       [[ -z "$model_port" ]] || { vm_lifecycle_error 'A model port is not valid for this provider.'; return 2; }
@@ -831,7 +837,8 @@ vm_lifecycle_up() {
   if [[ "$exists" == yes ]]; then
     vm_lifecycle_resume "$root" "$name" "$requested_workspace" "$repository" \
       "$recurse" "$unsafe" "$recursive" "$timeout" "$model_kind" \
-      "$model_port" "$metrics_port" "$readiness_timeout" "$workload" "$agent" "$version"
+      "$model_port" "$metrics_port" "$readiness_timeout" "$workload" "$agent" "$version" \
+      "$provider" "$model_id"
     return $?
   fi
   workspace="$(vm_lifecycle_workspace_resolve "$root" "$requested_workspace" "$repository" \
@@ -843,8 +850,8 @@ vm_lifecycle_up() {
     vm_setup || return $?
   fi
   case "$agent" in
-    opencode) ;;
-    *) vm_lifecycle_error 'This profile runtime supports only the native OpenCode harness at this checkpoint.'; return 2 ;;
+    opencode|aider) ;;
+    *) vm_lifecycle_error 'Unsupported native guest harness.'; return 2 ;;
   esac
   case "$workload" in docker|none) ;; *) vm_lifecycle_error 'Unsupported guest workload runtime.'; return 2 ;; esac
   if [[ ! "$depth" =~ ^(0|[1-9][0-9]?)$ ]] || (( 10#$depth > 32 )) ||
@@ -858,7 +865,7 @@ vm_lifecycle_up() {
     source "$VM_LIFECYCLE_ROOT/lib/vm/guest.sh"
   fi
   payload="$(vm_guest_payload_hash "$workspace" "$workload" "$agent" \
-    "$version" "$depth" "$max_depth")" || {
+    "$version" "$depth" "$max_depth" "$provider" "$model_port" "$model_id")" || {
     vm_lifecycle_error 'Selected workspace does not contain a valid native guest payload.'
     return 2
   }
@@ -922,7 +929,8 @@ except Exception: raise SystemExit(2)
   if vm_lifecycle_run_frozen_worker "$root" "$name" "$runtime" \
     vm_lifecycle_prepare_and_start_locked "$root" "$name" "$workspace" "$depth" \
     "$max_depth" "$workload" "$agent" "$version" "$payload" "$uid" "$gid" \
-    "$owner_pid" "$model_kind" "$model_port" "$metrics_port" "$readiness_timeout"; then
+    "$owner_pid" "$model_kind" "$model_port" "$metrics_port" "$readiness_timeout" \
+    "$provider" "$model_id"; then
     return 0
   else
     rc=$?
@@ -946,6 +954,7 @@ vm_lifecycle_resume_locked() {
   local model_kind="${10:-none}" model_port="${11:-}" metrics_port="${12:-}"
   local readiness_timeout="${13:-1800}" workload="${14:-docker}"
   local agent="${15:-opencode}" version="${16:-latest}"
+  local model_provider="${17:-$model_kind}" model_id="${18:-}"
   local data status stored_workspace workspace identity_state marker
   local depth max_depth payload uid gid
   data="$(vm_lifecycle_profile_read "$root" "$name")" || return 2
@@ -967,7 +976,7 @@ vm_lifecycle_resume_locked() {
     depth="$(vm_lifecycle_field "$data" depth)" || return 2
     max_depth="$(vm_lifecycle_field "$data" max_depth)" || return 2
     payload="$(vm_guest_payload_hash "$workspace" "$workload" "$agent" \
-      "$version" "$depth" "$max_depth")" || {
+      "$version" "$depth" "$max_depth" "$model_provider" "$model_port" "$model_id")" || {
       vm_lifecycle_error 'Selected workspace does not contain a valid frozen guest payload; current VM state was preserved.'
       return 2
     }
@@ -1014,7 +1023,8 @@ vm_lifecycle_resume_locked() {
   if [[ "$workspace" != "$stored_workspace" ]]; then
     uid="$(id -u)" && gid="$(id -g)" || return 2
     if vm_lifecycle_switch_seed_locked "$root" "$name" "$workspace" \
-      "$depth" "$max_depth" "$workload" "$agent" "$version" "$payload" "$uid" "$gid"; then
+      "$depth" "$max_depth" "$workload" "$agent" "$version" "$payload" "$uid" "$gid" \
+      "$model_provider" "$model_port" "$model_id"; then
       :
     else
       local seed_rc=$?
@@ -1278,7 +1288,8 @@ vm_lifecycle_profile_runtime() {
     "$runtime/lib/vm/paths.py" "$runtime/lib/vm/config.sh" "$runtime/lib/vm/disk.sh" \
     "$runtime/lib/vm/cloud-init.sh" "$runtime/lib/vm/guest.sh" \
     "$runtime/lib/vm/guest-bootstrap.sh" "$runtime/lib/vm/runner.sh" \
-    "$runtime/lib/vm/ssh.sh" "$runtime/lib/vm/process.py" "$runtime/lib/vm/proxy.py" \
+    "$runtime/lib/vm/ssh.sh" "$runtime/lib/vm/services.sh" \
+    "$runtime/lib/vm/process.py" "$runtime/lib/vm/proxy.py" \
     "$runtime/scripts/vm-opencode-config.py" "$runtime/scripts/vm-python-tools.sh" \
     "$runtime/scripts/vm-recursion-live-children.py" "$runtime/scripts/vm_memory_budget.py"; do
     [[ -f "$path" && ! -L "$path" ]] || {
@@ -1323,6 +1334,7 @@ vm_lifecycle_resume() {
   local timeout="${8:-$VM_LIFECYCLE_DEFAULT_TIMEOUT}" model_kind="${9:-none}"
   local model_port="${10:-}" metrics_port="${11:-}" readiness_timeout="${12:-1800}"
   local workload="${13:-}" agent="${14:-}" version="${15:-}"
+  local model_provider="${16:-$model_kind}" model_id="${17:-}"
   local data status stored_workspace workspace depth memory release_profile='' runtime owner_pid='' rc after after_status identity_state
   # shellcheck disable=SC2034 # The memory helper reads this dynamically scoped frozen-runtime path.
   local VM_LIFECYCLE_MEMORY_BUDGET
@@ -1375,7 +1387,7 @@ vm_lifecycle_resume() {
   if vm_lifecycle_run_frozen_worker "$root" "$name" "$runtime" vm_lifecycle_resume_locked \
     "$workspace" "$repository" "$recurse" "$unsafe" "$recursive" "$timeout" \
     "$owner_pid" "$model_kind" "$model_port" "$metrics_port" "$readiness_timeout" \
-    "$workload" "$agent" "$version"; then
+    "$workload" "$agent" "$version" "$model_provider" "$model_id"; then
     return 0
   else
     rc=$?

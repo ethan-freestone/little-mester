@@ -182,7 +182,7 @@ VM/network acceptance has occurred.
 | TASK-05 | C04 | DONE | Coordinator/2026-11-03/2026-11-03 | runner/SSH/process supervision;77 Bats,76 VM Python;b530193 | Fake executable/temp/loopback fixtures only; no real KVM/QEMU/guest; lifecycle CLI wiring remains later work |
 | TASK-06 | C05 | DONE | Coordinator/2026-11-03/2026-11-03 | Guest bootstrap/config/hash/readiness;98 Python,77 Bats; cloud-init schema; static checks PASS; cb7091a | Fixture-only; no host install, real VM, image/network, SEC-NET or nested acceptance |
 | TASK-07 | C06 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-03/2026-11-03 | Internal fresh-up/resume/A→B→B, exact-target resize, reservation recovery, exact deletion/report archive, and rebuild failure guard; 106 Bats,136 VM Python; `de5150e4` | Fixture-only; lifecycle commands beyond status/list/suspend remain undispatched; #41 real-host/KVM/network/nested acceptance stays pending |
-| TASK-08 | C07 | NOT STARTED | Unassigned/—/— | — | Guest harness/provider parity |
+| TASK-08 | C07 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-03/2026-11-03 | Native OpenCode V2/Aider adapters, explicit provider config and permission handling, ready-profile-bound diagnostics, constrained cwd; 148 VM Python, 116 Bats, Bash syntax, ShellCheck, and diff checks PASS | Fixture-only; no live Aider/provider/UI or human-permission acceptance, VM, image, or network operation; live gates remain separately approved |
 | TASK-09 | C08 | NOT STARTED | Unassigned/—/— | — | Depends on guest setup/runtime |
 | TASK-10 | C09 | NOT STARTED | Unassigned/—/— | — | Version qualification |
 | TASK-11 | C10 | NOT STARTED | Unassigned/—/— | — | Control key and secure path |

@@ -17,7 +17,7 @@ print("ssh-ed25519 " + base64.b64encode(blob).decode("ascii") + " fixture@invali
 PY
 )"
 
-# shellcheck source=lib/vm/cloud-init.sh
+# shellcheck disable=SC1091 # ROOT is the repository root; this runtime source is validated by the schema test.
 source "$ROOT/lib/vm/cloud-init.sh"
 vm_cloud_init_user_data schema-check 1000 1001 "$key" 0 2 none opencode latest \
   "$(printf '%064d' 0)" > "$USER_DATA"

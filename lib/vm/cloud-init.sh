@@ -16,6 +16,7 @@ vm_cloud_init_user_data() {
   local depth="${5:-0}" max_depth="${6:-0}" runtime="${7:-docker}"
   local agent="${8:-opencode}" opencode_version="${9:-latest}"
   local payload_sha256="${10:-}" proxy="${11:-http://10.0.2.100:3128}"
+  local model_provider="${12:-none}" model_port="${13:-}" model_id="${14:-}"
   local bootstrap="$VM_CLOUD_INIT_ROOT/lib/vm/guest-bootstrap.sh"
   local python_tools="$VM_CLOUD_INIT_ROOT/scripts/vm-python-tools.sh"
   local config_renderer="$VM_CLOUD_INIT_ROOT/scripts/vm-opencode-config.py"
@@ -30,6 +31,7 @@ vm_cloud_init_user_data() {
   "$VM_CLOUD_INIT_PYTHON" - \
     "$name" "$uid" "$gid" "$public_key" "$depth" "$max_depth" "$runtime" \
     "$agent" "$opencode_version" "$payload_sha256" "$proxy" \
+    "$model_provider" "$model_port" "$model_id" \
     "$bootstrap" "$python_tools" "$config_renderer" "$hash_helper" <<'PY'
 import base64
 import json
@@ -39,7 +41,8 @@ import sys
 from pathlib import Path
 
 (name, uid, gid, public_key, depth, max_depth, runtime, agent,
- version, payload_sha256, proxy, bootstrap_path, python_tools_path,
+ version, payload_sha256, proxy, model_provider, model_port, model_id,
+ bootstrap_path, python_tools_path,
  renderer_path, hash_helper_path) = sys.argv[1:]
 
 def fail():
@@ -61,10 +64,22 @@ depth_num = decimal(depth, 32)
 max_depth_num = decimal(max_depth, 32)
 if uid_num == 0 or gid_num == 0 or depth_num > max_depth_num:
     fail()
-if runtime not in {"docker", "none"} or agent != "opencode":
+if runtime not in {"docker", "none"} or agent not in {"opencode", "aider"}:
     fail()
+if model_provider not in {"none", "ollama", "llamacpp", "remote"}:
+    fail()
+if len(model_id) > 512 or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in model_id):
+    fail()
+if model_provider in {"ollama", "llamacpp"}:
+    model_port_num = decimal(model_port, 65535)
+    if model_port_num == 0:
+        fail()
+else:
+    if model_port:
+        fail()
+    model_port_num = None
 if version != "latest" and not re.fullmatch(
-    r"v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version
+    r"v?2\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version
 ):
     fail()
 if not re.fullmatch(r"[a-f0-9]{64}", payload_sha256):
@@ -175,6 +190,9 @@ config = {
         "--workspace", "/workspace",
         "--source-root", "/workspace",
         "--proxy", proxy,
+        "--model-provider", model_provider,
+        "--model-port", "" if model_port_num is None else str(model_port_num),
+        "--model-id", model_id,
     ]],
 }
 print("#cloud-config")

@@ -18,9 +18,10 @@ vm_guest_payload_hash() {
   local source_root="${1:-$VM_GUEST_ROOT_DIR}"
   local workload_runtime="${2:-docker}" agent="${3:-opencode}"
   local version="${4:-latest}" depth="${5:-0}" max_depth="${6:-0}"
+  local model_provider="${7:-none}" model_port="${8:-}" model_id="${9:-}"
 
   "$VM_GUEST_PYTHON" - "$source_root" "$workload_runtime" "$agent" \
-    "$version" "$depth" "$max_depth" <<'PY'
+    "$version" "$depth" "$max_depth" "$model_provider" "$model_port" "$model_id" <<'PY'
 import hashlib
 import json
 import os
@@ -30,11 +31,20 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1]).resolve(strict=True)
-runtime, agent, version, depth, max_depth = sys.argv[2:]
-if runtime not in {"docker", "none"} or agent != "opencode":
+runtime, agent, version, depth, max_depth, provider, model_port, model_id = sys.argv[2:]
+if runtime not in {"docker", "none"} or agent not in {"opencode", "aider"}:
+    raise SystemExit(2)
+if provider not in {"none", "ollama", "llamacpp", "remote"}:
+    raise SystemExit(2)
+if len(model_id) > 512 or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in model_id):
+    raise SystemExit(2)
+if provider in {"ollama", "llamacpp"}:
+    if not re.fullmatch(r"[1-9][0-9]{0,4}", model_port) or int(model_port) > 65535:
+        raise SystemExit(2)
+elif model_port:
     raise SystemExit(2)
 if version != "latest" and not re.fullmatch(
-    r"v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version
+    r"v?2\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version
 ):
     raise SystemExit(2)
 if not re.fullmatch(r"(?:0|[1-9][0-9]?)", depth) or not re.fullmatch(
@@ -129,6 +139,9 @@ manifest = {
         "opencode_version": version,
         "depth": int(depth),
         "max_depth": int(max_depth),
+        "model_provider": provider,
+        "model_port": int(model_port) if model_port else None,
+        "model_id": model_id,
     },
     "files": entries,
 }
@@ -179,9 +192,20 @@ try:
     assert marker.get("status") == "ready"
     assert marker.get("payload_sha256") == expected
     assert marker.get("workspace_mount") == "virtiofs"
-    assert marker.get("agent") == "opencode"
+    assert marker.get("agent") in {"opencode", "aider"}
     assert marker.get("mcp_build") is True
-    assert re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", marker.get("opencode_version", ""))
+    assert re.fullmatch(r"2\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", marker.get("opencode_version", ""))
+    assert re.fullmatch(r"[Aa]ider\s+\d+\.\d+(?:\.\d+)?", marker.get("aider_version", ""))
+    provider = marker.get("model_provider")
+    assert provider in {"none", "ollama", "llamacpp", "remote"}
+    model_port = marker.get("model_port")
+    assert (provider in {"ollama", "llamacpp"}
+            and type(model_port) is int and 1 <= model_port <= 65535) or (
+            provider in {"none", "remote"} and model_port is None
+    )
+    model_id = marker.get("model_id", "")
+    assert isinstance(model_id, str) and len(model_id) <= 512
+    assert not any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in model_id)
 except Exception:
     raise SystemExit(1)
 ' "$expected_sha256" >/dev/null 2>&1; then

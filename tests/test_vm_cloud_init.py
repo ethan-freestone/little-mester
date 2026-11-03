@@ -92,7 +92,8 @@ class CloudInitTests(unittest.TestCase):
             ("vm", 0, 1001, public_key(), 0, 0, "none", "opencode", "latest", "a" * 64),
             ("vm", 1000, 1001, public_key().replace(" ", "\n", 1), 0, 0, "none", "opencode", "latest", "a" * 64),
             ("vm", 1000, 1001, public_key(), 2, 1, "none", "opencode", "latest", "a" * 64),
-            ("vm", 1000, 1001, public_key(), 0, 0, "docker", "aider", "latest", "a" * 64),
+            ("vm", 1000, 1001, public_key(), 0, 0, "none", "opencode", "1.2.3", "a" * 64),
+            ("vm", 1000, 1001, public_key(), 0, 0, "docker", "claude", "latest", "a" * 64),
         )
         for args in bad_args:
             with self.subTest(args=args):
@@ -100,6 +101,19 @@ class CloudInitTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("#cloud-config", result.stdout)
                 self.assertNotIn("CANARY", result.stderr)
+
+    def test_aider_and_explicit_local_provider_reach_guest_bootstrap(self):
+        result = render(
+            "fixture-vm", 1000, 1001, public_key(), 0, 0, "none", "aider", "2.2.5",
+            "a" * 64, "http://10.0.2.100:3128", "llamacpp", 8088, "coder-q4",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads(result.stdout.split("\n", 1)[1])
+        command = config["runcmd"][0]
+        self.assertEqual(command[command.index("--agent") + 1], "aider")
+        self.assertEqual(command[command.index("--model-provider") + 1], "llamacpp")
+        self.assertEqual(command[command.index("--model-port") + 1], "8088")
+        self.assertEqual(command[command.index("--model-id") + 1], "coder-q4")
 
     def test_nonrecursive_guest_has_no_kvm_group_or_recursion_bootcmd(self):
         result = render("fixture-vm", 1000, 1001, public_key(), 0, 0, "none", "opencode", "latest", "a" * 64)

@@ -35,8 +35,8 @@ case "$action" in
       printf 'ERROR: isolated Python venv is incomplete.\n' >&2
       exit 1
     }
-    "$tools_bin/python" -m pip install --disable-pip-version-check --proxy "$proxy" --upgrade pip ruff uv
-    for tool in pip pip3 ruff uv; do
+    "$tools_bin/python" -m pip install --disable-pip-version-check --proxy "$proxy" --upgrade pip ruff uv aider-chat
+    for tool in pip pip3 ruff uv aider; do
       [[ -x "$tools_bin/$tool" ]] || {
         printf 'ERROR: isolated Python tool is missing: %s\n' "$tool" >&2
         exit 1
@@ -44,13 +44,13 @@ case "$action" in
     done
     ;;
   check)
-    for tool in pip pip3 ruff uv; do
+    for tool in pip pip3 ruff uv aider; do
       [[ -x "$tools_bin/$tool" ]] || {
         printf 'MISSING  Python tool %s\n' "$tool"
         exit 1
       }
     done
-    printf 'CURRENT  isolated Python tools: pip, ruff, uv\n'
+    printf 'CURRENT  isolated Python tools: pip, ruff, uv, aider\n'
     ;;
   *)
     printf 'Usage: %s [install|check]\n' "$0" >&2

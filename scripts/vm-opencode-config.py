@@ -210,6 +210,8 @@ def guest_config(
     mcp_cwd: str = DEFAULT_MCP_CWD,
     plugin_root: str = DEFAULT_PLUGIN_ROOT,
     plugin_source: str | Path | None = None,
+    model_provider: str | None = None,
+    model_id: str = "",
 ) -> dict:
     """Convert supported legacy fields to native V2 while preserving other values."""
     if not isinstance(source, dict):
@@ -268,6 +270,9 @@ def guest_config(
     if migrated_permissions or "permissions" in config:
         config["permissions"] = migrated_permissions
 
+    if model_provider is not None:
+        _select_model(config, model_provider, model_id)
+
     mcp = _object(config.setdefault("mcp", {}), "mcp")
     servers = _object(mcp.setdefault("servers", {}), "mcp.servers")
     legacy_servers = config.pop("mcpServers", {})
@@ -300,6 +305,49 @@ def guest_config(
     if config.get("otel") == {}:
         config.pop("otel")
     return config
+
+
+def _select_model(config: dict, provider: str, model_id: str) -> None:
+    """Apply only the explicitly selected provider; never retain a stale local default."""
+    if provider not in {"none", "ollama", "llamacpp", "remote"}:
+        raise ValueError("OpenCode model provider is unsupported")
+    if not isinstance(model_id, str) or len(model_id) > 512 or any(
+        ord(char) < 32 or 127 <= ord(char) <= 159 for char in model_id
+    ):
+        raise ValueError("OpenCode model id is invalid")
+
+    providers = _object(config.setdefault("providers", {}), "providers")
+    for local_provider in ("ollama", "llamacpp"):
+        if local_provider != provider:
+            providers.pop(local_provider, None)
+
+    title = _object(_object(config.setdefault("agents", {}), "agents").setdefault("title", {}), "agents.title")
+    if provider in {"ollama", "llamacpp"}:
+        selected = providers.get(provider)
+        if not isinstance(selected, dict):
+            raise ValueError("Selected OpenCode local provider is not configured")
+        models = _object(selected.get("models", {}), f"providers.{provider}.models")
+        current = config.get("model")
+        if model_id:
+            selected_model = model_id
+        elif isinstance(current, str) and current.startswith(provider + "/"):
+            selected_model = current.split("/", 1)[1]
+        elif models:
+            selected_model = next(iter(models))
+        else:
+            raise ValueError("Selected OpenCode provider has no configured model")
+        models.setdefault(selected_model, {})
+        config["model"] = f"{provider}/{selected_model}"
+        title["model"] = config["model"]
+        return
+
+    # The source config's default is a local llama.cpp model. Keeping it while
+    # selecting none or a remote provider would silently choose the wrong API.
+    config.pop("model", None)
+    title.pop("model", None)
+    if provider == "remote" and model_id:
+        config["model"] = model_id
+        title["model"] = model_id
 
 
 def guest_cli_config(
@@ -343,12 +391,21 @@ def main() -> int:
     parser.add_argument("--plugin-root", default=DEFAULT_PLUGIN_ROOT)
     parser.add_argument("--plugin-source", type=Path)
     parser.add_argument("--cli-output", type=Path)
+    parser.add_argument("--model-provider", choices=("none", "ollama", "llamacpp", "remote"))
+    parser.add_argument("--model-id", default="")
     args = parser.parse_args()
     try:
         source = json.loads(args.input.read_text(encoding="utf-8"))
         if not isinstance(source, dict):
             raise TypeError("OpenCode config root must be an object")
-        rendered = guest_config(source, args.mcp_cwd, args.plugin_root, args.plugin_source)
+        rendered = guest_config(
+            source,
+            args.mcp_cwd,
+            args.plugin_root,
+            args.plugin_source,
+            args.model_provider,
+            args.model_id,
+        )
         _write_json(args.output, rendered)
         if args.cli_output is not None:
             _write_json(args.cli_output, guest_cli_config(source, args.plugin_root, args.plugin_source))

@@ -108,6 +108,8 @@ class PathsTest(unittest.TestCase):
         self.assertEqual(data["model"], {"provider": "llamacpp", "port": 1234})
         self.cli("validate-config", data={"model": {"provider": "ollama"}}, ok=False)
         self.cli("validate-config", data={"model": {"provider": "remote", "port": 1234}}, ok=False)
+        self.cli("validate-config", data={"opencode_version": "1.2.3"}, ok=False)
+        self.cli("validate-config", data={"model": {"provider": "remote", "id": "x" * 513}}, ok=False)
         self.assertEqual(list(self.root.iterdir()), [])
 
     def test_absent_config_under_nonprivate_home_readonly(self):

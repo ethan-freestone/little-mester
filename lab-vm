@@ -9,6 +9,7 @@ fi
 
 VM_REPO="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=lib/state.sh
+# shellcheck disable=SC1091 # Repository root is resolved from this launcher at runtime.
 source "$VM_REPO/lib/state.sh"
 # shellcheck source=lib/vm/config.sh
 source "$VM_REPO/lib/vm/config.sh"
@@ -21,6 +22,8 @@ Available now:
   context [--json] [--name NAME]    Read-only config, private paths and capabilities
   status [--json] [--name NAME]     Read-only exact-profile lifecycle and identity
   list [--json]                     Read-only inventory of private VM profiles
+  agent [PROFILE] [-- <args>]       Attach to a ready profile's native guest agent
+  models status|diagnose [provider] [--name PROFILE] Read-only selected-provider check
   suspend [--name NAME]             Graceful, descendant-safe guest shutdown
   setup                           Read-only host prerequisite discovery
   setup --install-prereqs          Explicit default-no userland package installation
@@ -29,9 +32,9 @@ Available now:
   --help                          Show this checkpoint's actual availability
 
 Not yet implemented (refuse with exit 2, never start or mutate a VM):
-  run [WORKSPACE], up [PROFILE] --workspace PATH, agent, ssh, doctor,
+  run [WORKSPACE], up [PROFILE] --workspace PATH, ssh, doctor,
   resume, resize PROFILE GiB, down, stop, rebuild, update,
-  install-tools, egress-reload, models status|diagnose, metrics up|status|down,
+  install-tools, egress-reload, metrics up|status|down,
   auth-forward [PROFILE] PORT, recursion-clean
 
 Options (before or after command/path; -- stops launcher parsing):
@@ -46,6 +49,8 @@ Options (before or after command/path; -- stops launcher parsing):
 
 --yes confirms launcher actions only, never requests agent auto mode. Suspend never
 force-kills QEMU; unknown children or process identities block shutdown.
+agent requires an already-ready profile and never starts/resumes it. OpenCode's
+--permissions auto maps to its supported --auto; Aider remains in prompt mode.
 No VM startup or nested-KVM acceptance is claimed by a successful context/setup.
 Ordinary ./lab remains the unchanged Docker launcher until final acceptance.
 HELP
@@ -61,6 +66,7 @@ command -v python3 >/dev/null 2>&1 || {
 VM_STATE_ROOT="$(vm_state_root)"
 VM_PATHS_HELPER="$VM_REPO/lib/vm/paths.py"
 # shellcheck source=lib/vm/disk.sh
+# shellcheck disable=SC1091 # Repository root is resolved from this launcher at runtime.
 source "$VM_REPO/lib/vm/disk.sh"
 # shellcheck disable=SC1091
 source "$VM_REPO/lib/vm/lifecycle.sh"
@@ -122,6 +128,33 @@ else:
     controller="$VM_STATE_ROOT/vm/profiles/$VM_PROFILE/runtime/lab-vm"
     vm_lifecycle_suspend "$VM_STATE_ROOT" "$VM_PROFILE" "$VM_POWEROFF_RECURSIVE" \
       "$VM_LIFECYCLE_DEFAULT_TIMEOUT" "$controller"
+    ;;
+  agent)
+    runtime="$(vm_lifecycle_profile_runtime "$VM_STATE_ROOT" "$VM_PROFILE")" || exit $?
+    if [[ "$runtime" != "$VM_REPO" ]]; then
+      forward=(agent "$VM_PROFILE" --permissions "$VM_PERMISSIONS")
+      if [[ -v 'VM_SEEN[cwd]' ]]; then forward+=(--cwd "$VM_CWD"); fi
+      if [[ -v 'VM_SEEN[browser]' ]]; then
+        if [[ "$VM_BROWSER_AUTH" == on ]]; then forward+=(--browser-auth); else forward+=(--no-browser-auth); fi
+      fi
+      if ((${#VM_AGENT_ARGS[@]})); then forward+=(-- "${VM_AGENT_ARGS[@]}"); fi
+      exec "$runtime/lab-vm" "${forward[@]}"
+    fi
+    # shellcheck disable=SC1091 # Agent dispatch uses the selected profile's frozen module.
+    source "$runtime/lib/vm/services.sh"
+    vm_services_agent "$VM_STATE_ROOT" "$VM_PROFILE" "$VM_PERMISSIONS" \
+      "$VM_CWD" "$VM_BROWSER_AUTH" "${VM_AGENT_ARGS[@]}"
+    ;;
+  models)
+    runtime="$(vm_lifecycle_profile_runtime "$VM_STATE_ROOT" "$VM_PROFILE")" || exit $?
+    if [[ "$runtime" != "$VM_REPO" ]]; then
+      forward=(models "$VM_ACTION" --name "$VM_PROFILE")
+      if [[ -n "$VM_MODEL_PROVIDER_QUERY" ]]; then forward+=("$VM_MODEL_PROVIDER_QUERY"); fi
+      exec "$runtime/lab-vm" "${forward[@]}"
+    fi
+    # shellcheck disable=SC1091 # Model doctor uses the selected profile's frozen module.
+    source "$runtime/lib/vm/services.sh"
+    vm_services_models "$VM_ACTION" "$VM_MODEL_PROVIDER_QUERY" "$VM_STATE_ROOT" "$VM_PROFILE"
     ;;
   context)
     system="$(vm_host_system)"; arch="$(vm_host_arch)"

@@ -51,7 +51,11 @@ class GuestReadinessTests(unittest.TestCase):
             "workspace_mount": "virtiofs",
             "agent": "opencode",
             "mcp_build": True,
-            "opencode_version": "1.2.3",
+            "opencode_version": "2.2.5",
+            "aider_version": "aider 0.1.0",
+            "model_provider": "none",
+            "model_port": None,
+            "model_id": "",
         }
         self.assertEqual(self.validate(0, clean, marker).returncode, 0)
         for status in (
@@ -82,7 +86,7 @@ class GuestReadinessTests(unittest.TestCase):
         changed_mode = run_hash(first, "none", "opencode", "latest", 0, 2)
         self.assertNotEqual(baseline, changed_mode)
         path.chmod(path.stat().st_mode ^ 0o100)
-        self.assertNotEqual(baseline, run_hash(first, "none", "opencode", "1.2.3", 0, 2))
+        self.assertNotEqual(baseline, run_hash(first, "none", "opencode", "2.2.5", 0, 2))
         self.assertNotEqual(baseline, run_hash(first, "none", "opencode", "latest", 1, 2))
         self.assertNotEqual(baseline, run_hash(first, "none", "opencode", "latest", 0, 3))
 
@@ -154,6 +158,19 @@ class GuestBootstrapFixtures(unittest.TestCase):
                         "env": {"TICKET_DIR": "/workspace/docs/tickets"},
                     }
                 },
+                "provider": {
+                    "ollama": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "options": {"baseURL": "http://ollama:11434/v1"},
+                        "models": {"qwen3:8b": {}},
+                    },
+                    "llamacpp": {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "options": {"baseURL": "http://llamacpp:11434/v1"},
+                        "models": {"fixture-coder": {}},
+                    },
+                },
+                "model": "llamacpp/fixture-coder",
                 "plugins": [],
                 "permissions": [{"action": "edit", "resource": "secrets/*", "effect": "deny"}],
             }, indent=2),
@@ -181,7 +198,8 @@ class GuestBootstrapFixtures(unittest.TestCase):
         tools.write_text(
             "#!/usr/bin/env bash\nset -euo pipefail\n"
             "mkdir -p \"$VM_PYTHON_TOOLS_DIR/bin\"\n"
-            "for tool in pip pip3 ruff uv; do printf '#!/bin/sh\\nexit 0\\n' > \"$VM_PYTHON_TOOLS_DIR/bin/$tool\"; chmod 0755 \"$VM_PYTHON_TOOLS_DIR/bin/$tool\"; done\n",
+            "for tool in pip pip3 ruff uv; do printf '#!/bin/sh\\nexit 0\\n' > \"$VM_PYTHON_TOOLS_DIR/bin/$tool\"; chmod 0755 \"$VM_PYTHON_TOOLS_DIR/bin/$tool\"; done\n"
+            "cat > \"$VM_PYTHON_TOOLS_DIR/bin/aider\" <<'INNER'\n#!/usr/bin/env bash\ncase \"${1:-}\" in --version) echo 'aider 0.1.0' ;; --help) echo '--model <model>' ;; esac\nINNER\nchmod 0755 \"$VM_PYTHON_TOOLS_DIR/bin/aider\"\n",
             encoding="utf-8",
         )
         tools.chmod(0o755)
@@ -203,7 +221,7 @@ class GuestBootstrapFixtures(unittest.TestCase):
 set -euo pipefail
 printf '%s\\n' "$*" >> "$FAKE_NPM_LOG"
 case "${1:-}" in
-  view) printf '"%s"\\n' "${FAKE_OPENCODE_VERSION:-1.2.3}" ;;
+            view) printf '"%s"\\n' "${FAKE_OPENCODE_VERSION:-2.2.5}" ;;
   install) exit 0 ;;
   ci)
     if [[ -n "${FAKE_NPM_FAIL_CI_ONCE_FILE:-}" && ! -e "$FAKE_NPM_FAIL_CI_ONCE_FILE" ]]; then
@@ -226,7 +244,13 @@ case "${1:-}" in
 esac
 """,
         )
-        self.write_fake("opencode", '#!/usr/bin/env bash\necho "${FAKE_OPENCODE_VERSION:-1.2.3}"\n')
+        self.write_fake(
+            "opencode",
+            '#!/usr/bin/env bash\n'
+            'if [[ "${1:-}" == --version ]]; then echo "${FAKE_OPENCODE_VERSION:-2.2.5}"; exit 0; fi\n'
+            'if [[ "${1:-}" == run && "${2:-}" == --help ]]; then echo "--auto Auto-approve permissions not explicitly denied"; exit 0; fi\n'
+            'exit 2\n',
+        )
         self.write_fake("docker", '#!/usr/bin/env bash\n[[ "${1:-}" == compose && "${2:-}" == version ]] && { echo "Docker Compose version fixture"; exit 0; }\nexit 2\n')
         self.write_fake("runuser", '#!/usr/bin/env bash\nset -e\nif [[ "${1:-}" == -u ]]; then shift 2; fi\nif [[ "${1:-}" == -- ]]; then shift; fi\nexec "$@"\n')
         self.write_fake("mountpoint", '#!/usr/bin/env bash\nexit 0\n')
@@ -249,7 +273,10 @@ esac
         path.write_text(content, encoding="utf-8")
         path.chmod(0o755)
 
-    def run_bootstrap(self, *, runtime="none", depth=0, max_depth=0, extra_env=None, payload_hash=None):
+    def run_bootstrap(
+        self, *, runtime="none", agent="opencode", provider="none", model_port="",
+        model_id="", depth=0, max_depth=0, extra_env=None, payload_hash=None,
+    ):
         env = os.environ.copy()
         env.update({
             "PATH": f"{self.bin}:{env.get('PATH', '')}",
@@ -259,6 +286,7 @@ esac
             "VM_GUEST_NPM_BIN": "npm",
             "VM_GUEST_NODE_BIN": "node",
             "VM_GUEST_OPENCODE_BIN": "opencode",
+            "VM_GUEST_AIDER_BIN": str(self.guest / "opt/little-mester/python-tools/bin/aider"),
             "VM_GUEST_APT_GET_BIN": "apt-get",
             "VM_GUEST_CURL_BIN": "curl",
             "VM_GUEST_RUNUSER_BIN": "runuser",
@@ -272,16 +300,16 @@ esac
             "FAKE_NPM_LOG": str(self.npm_log),
             "FAKE_APT_LOG": str(self.apt_log),
             "FAKE_SYSTEM_LOG": str(self.system_log),
-            "FAKE_OPENCODE_VERSION": "1.2.3",
+            "FAKE_OPENCODE_VERSION": "2.2.5",
         })
         if extra_env:
             env.update(extra_env)
         expected_hash = payload_hash or run_hash(
-            self.workspace, runtime, "opencode", "latest", depth, max_depth
+            self.workspace, runtime, agent, "latest", depth, max_depth, provider, model_port, model_id
         )
         args = [
             "--runtime", runtime,
-            "--agent", "opencode",
+            "--agent", agent,
             "--depth", str(depth),
             "--max-depth", str(max_depth),
             "--opencode-version", "latest",
@@ -291,6 +319,9 @@ esac
             "--workspace", "/workspace",
             "--source-root", "/workspace",
             "--proxy", "http://10.0.2.100:3128",
+            "--model-provider", provider,
+            "--model-port", model_port,
+            "--model-id", model_id,
         ]
         return subprocess.run(["bash", str(BOOTSTRAP), *args], env=env, capture_output=True, text=True, check=False)
 
@@ -358,9 +389,24 @@ esac
         npm_calls = self.npm_log.read_text(encoding="utf-8")
         self.assertIn("ci --prefix", npm_calls)
         self.assertIn("run build --prefix", npm_calls)
-        self.assertIn("install --global --no-audit --no-fund opencode-ai@1.2.3", npm_calls)
+        self.assertIn("install --global --no-audit --no-fund @opencode/cli@2.2.5", npm_calls)
         self.assertNotIn("docker run", BOOTSTRAP.read_text(encoding="utf-8"))
         self.assertEqual((self.guest / "home/mester/.config/opencode/opencode.json").stat().st_mode & 0o777, 0o600)
+
+    def test_aider_and_selected_provider_are_recorded_without_unused_local_api_config(self):
+        result = self.run_bootstrap(
+            agent="aider", provider="ollama", model_port="11434", model_id="qwen3:8b"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        marker = json.loads((self.guest / "var/lib/lab-vm/guest-ready.json").read_text(encoding="utf-8"))
+        self.assertEqual(marker["agent"], "aider")
+        self.assertEqual(marker["model_provider"], "ollama")
+        self.assertEqual(marker["model_port"], 11434)
+        self.assertEqual(marker["model_id"], "qwen3:8b")
+        config = json.loads((self.guest / "home/mester/.config/opencode/opencode.json").read_text(encoding="utf-8"))
+        self.assertEqual(config["model"], "ollama/qwen3:8b")
+        self.assertIn("ollama", config["providers"])
+        self.assertNotIn("llamacpp", config["providers"])
 
     def test_latest_resolves_once_even_when_first_attempt_fails(self):
         fail_once = self.base / "fail-ci-once"
@@ -370,14 +416,14 @@ esac
         self.assertFalse(marker.exists())
         manifest_path = self.guest / "var/lib/lab-vm/install-manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        self.assertEqual(manifest["opencode_version"], "1.2.3")
+        self.assertEqual(manifest["opencode_version"], "2.2.5")
 
         result = self.run_bootstrap(extra_env={"FAKE_NPM_FAIL_CI_ONCE_FILE": str(fail_once)})
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.npm_log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(sum(line.startswith("view opencode-ai@latest version --json") for line in calls), 1)
+        self.assertEqual(sum(line.startswith("view @opencode/cli@latest version --json") for line in calls), 1)
         self.assertEqual(sum("install --global" in line for line in calls), 2)
-        self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))["opencode_version"], "1.2.3")
+        self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))["opencode_version"], "2.2.5")
 
     def test_bootstrap_failure_never_writes_success_marker(self):
         result = self.run_bootstrap(extra_env={"FAKE_NPM_FAIL_BUILD": "1"})
@@ -418,6 +464,7 @@ if [[ "${1:-}" == -m && "${2:-}" == venv ]]; then
 #!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$FAKE_PIP_LOG"
 for tool in pip pip3 ruff uv; do printf '#!/bin/sh\\nexit 0\\n' > "$FAKE_TOOLS_DIR/bin/$tool"; chmod 0755 "$FAKE_TOOLS_DIR/bin/$tool"; done
+printf '#!/bin/sh\\nexit 0\\n' > "$FAKE_TOOLS_DIR/bin/aider"; chmod 0755 "$FAKE_TOOLS_DIR/bin/aider"
 INNER
   chmod 0755 "$3/bin/python"
 fi
@@ -441,8 +488,10 @@ fi
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("--proxy http://10.0.2.100:3128", log.read_text(encoding="utf-8"))
-            for tool in ("pip", "pip3", "ruff", "uv"):
+            calls = log.read_text(encoding="utf-8")
+            self.assertIn("--proxy http://10.0.2.100:3128", calls)
+            self.assertIn("aider-chat", calls)
+            for tool in ("pip", "pip3", "ruff", "uv", "aider"):
                 self.assertTrue((tools_dir / "bin" / tool).is_file())
 
 

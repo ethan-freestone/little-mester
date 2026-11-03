@@ -12,6 +12,7 @@ VM_GUEST_CURL_BIN="${VM_GUEST_CURL_BIN:-curl}"
 VM_GUEST_NPM_BIN="${VM_GUEST_NPM_BIN:-npm}"
 VM_GUEST_NODE_BIN="${VM_GUEST_NODE_BIN:-node}"
 VM_GUEST_OPENCODE_BIN="${VM_GUEST_OPENCODE_BIN:-opencode}"
+VM_GUEST_AIDER_BIN="${VM_GUEST_AIDER_BIN:-/opt/little-mester/python-tools/bin/aider}"
 VM_GUEST_SYSTEMCTL_BIN="${VM_GUEST_SYSTEMCTL_BIN:-systemctl}"
 VM_GUEST_DOCKER_BIN="${VM_GUEST_DOCKER_BIN:-docker}"
 VM_GUEST_RUNUSER_BIN="${VM_GUEST_RUNUSER_BIN:-runuser}"
@@ -72,9 +73,10 @@ vm_guest_parse_args() {
   VM_GUEST_RUNTIME='' VM_GUEST_AGENT='' VM_GUEST_DEPTH='' VM_GUEST_MAX_DEPTH=''
   VM_GUEST_VERSION_SELECTOR='' VM_GUEST_PAYLOAD_SHA256='' VM_GUEST_UID='' VM_GUEST_GID=''
   VM_GUEST_WORKSPACE='' VM_GUEST_SOURCE_ROOT='' VM_GUEST_PROXY_ARG=''
+  VM_GUEST_MODEL_PROVIDER='' VM_GUEST_MODEL_PORT='' VM_GUEST_MODEL_ID=''
   while (($#)); do
     case "$1" in
-      --runtime|--agent|--depth|--max-depth|--opencode-version|--payload-sha256|--uid|--gid|--workspace|--source-root|--proxy)
+      --runtime|--agent|--depth|--max-depth|--opencode-version|--payload-sha256|--uid|--gid|--workspace|--source-root|--proxy|--model-provider|--model-port|--model-id)
         (($# >= 2)) || { vm_guest_bootstrap_error 'A bootstrap option is missing its value.'; return 2; }
         case "$1" in
           --runtime) VM_GUEST_RUNTIME="$2" ;;
@@ -88,21 +90,41 @@ vm_guest_parse_args() {
           --workspace) VM_GUEST_WORKSPACE="$2" ;;
           --source-root) VM_GUEST_SOURCE_ROOT="$2" ;;
           --proxy) VM_GUEST_PROXY_ARG="$2" ;;
+          --model-provider) VM_GUEST_MODEL_PROVIDER="$2" ;;
+          --model-port) VM_GUEST_MODEL_PORT="$2" ;;
+          --model-id) VM_GUEST_MODEL_ID="$2" ;;
         esac
         shift 2 ;;
       *) vm_guest_bootstrap_error 'Unknown guest bootstrap option.'; return 2 ;;
     esac
   done
   [[ "$VM_GUEST_RUNTIME" == docker || "$VM_GUEST_RUNTIME" == none ]] || { vm_guest_bootstrap_error 'Unsupported guest workload runtime.'; return 2; }
-  [[ "$VM_GUEST_AGENT" == opencode ]] || { vm_guest_bootstrap_error 'Only the native OpenCode guest harness is available in this checkpoint.'; return 2; }
+  [[ "$VM_GUEST_AGENT" == opencode || "$VM_GUEST_AGENT" == aider ]] || { vm_guest_bootstrap_error 'Unsupported native guest harness.'; return 2; }
   [[ "$VM_GUEST_DEPTH" =~ ^(0|[1-9][0-9]?)$ && "$VM_GUEST_MAX_DEPTH" =~ ^(0|[1-9][0-9]?)$ ]] || { vm_guest_bootstrap_error 'Invalid recursion identity.'; return 2; }
   (( 10#$VM_GUEST_DEPTH <= 10#$VM_GUEST_MAX_DEPTH && 10#$VM_GUEST_MAX_DEPTH <= 32 )) || { vm_guest_bootstrap_error 'Recursion identity is outside supported bounds.'; return 2; }
-  [[ "$VM_GUEST_VERSION_SELECTOR" == latest || "$VM_GUEST_VERSION_SELECTOR" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || { vm_guest_bootstrap_error 'Invalid OpenCode version selector.'; return 2; }
+  [[ "$VM_GUEST_VERSION_SELECTOR" == latest || "$VM_GUEST_VERSION_SELECTOR" =~ ^v?2\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || { vm_guest_bootstrap_error 'OpenCode must use the supported V2 version selector.'; return 2; }
   [[ "$VM_GUEST_PAYLOAD_SHA256" =~ ^[a-f0-9]{64}$ ]] || { vm_guest_bootstrap_error 'Invalid guest payload identity.'; return 2; }
   [[ "$VM_GUEST_UID" =~ ^[1-9][0-9]{0,9}$ && "$VM_GUEST_GID" =~ ^[1-9][0-9]{0,9}$ ]] || { vm_guest_bootstrap_error 'Invalid guest workspace ownership identity.'; return 2; }
   (( 10#$VM_GUEST_UID <= 2147483647 && 10#$VM_GUEST_GID <= 2147483647 )) || { vm_guest_bootstrap_error 'Guest ownership identity is outside supported bounds.'; return 2; }
   [[ "$VM_GUEST_WORKSPACE" == /workspace && "$VM_GUEST_SOURCE_ROOT" == /workspace ]] || { vm_guest_bootstrap_error 'Only the workspace-tag mount may be used as guest source.'; return 2; }
   [[ "$VM_GUEST_PROXY_ARG" == "$VM_GUEST_PROXY" ]] || { vm_guest_bootstrap_error 'The explicit guest proxy is required.'; return 2; }
+  [[ "$VM_GUEST_MODEL_PROVIDER" == none || "$VM_GUEST_MODEL_PROVIDER" == ollama ||
+     "$VM_GUEST_MODEL_PROVIDER" == llamacpp || "$VM_GUEST_MODEL_PROVIDER" == remote ]] || {
+    vm_guest_bootstrap_error 'Unsupported selected model provider.'
+    return 2
+  }
+  [[ "$VM_GUEST_MODEL_ID" != *$'\n'* && "$VM_GUEST_MODEL_ID" != *$'\r'* &&
+     ${#VM_GUEST_MODEL_ID} -le 512 ]] || { vm_guest_bootstrap_error 'Selected model id is invalid.'; return 2; }
+  case "$VM_GUEST_MODEL_PROVIDER" in
+    ollama|llamacpp)
+      if [[ ! "$VM_GUEST_MODEL_PORT" =~ ^[1-9][0-9]{0,4}$ ]] ||
+        (( 10#$VM_GUEST_MODEL_PORT > 65535 )); then
+        vm_guest_bootstrap_error 'Selected local model provider requires a valid host port.'
+        return 2
+      fi ;;
+    none|remote)
+      [[ -z "$VM_GUEST_MODEL_PORT" ]] || { vm_guest_bootstrap_error 'Model port is invalid for a nonlocal provider.'; return 2; } ;;
+  esac
 }
 
 vm_guest_set_proxy_environment() {
@@ -320,7 +342,8 @@ vm_guest_verify_payload_hash() {
   }
   actual="$(bash -c 'source "$1"; shift; vm_guest_payload_hash "$@"' _ \
     "$helper" "$workspace" "$VM_GUEST_RUNTIME" "$VM_GUEST_AGENT" \
-    "$VM_GUEST_VERSION_SELECTOR" "$VM_GUEST_DEPTH" "$VM_GUEST_MAX_DEPTH")" || {
+    "$VM_GUEST_VERSION_SELECTOR" "$VM_GUEST_DEPTH" "$VM_GUEST_MAX_DEPTH" \
+    "$VM_GUEST_MODEL_PROVIDER" "$VM_GUEST_MODEL_PORT" "$VM_GUEST_MODEL_ID")" || {
     vm_guest_bootstrap_error 'Guest workspace payload could not be hashed safely.'
     return 1
   }
@@ -392,7 +415,8 @@ vm_guest_normalize_version() {
 vm_guest_read_install_manifest() {
   local path="$1"
   "$VM_GUEST_PYTHON" - "$path" "$VM_GUEST_PAYLOAD_SHA256" "$VM_GUEST_RUNTIME" \
-    "$VM_GUEST_DEPTH" "$VM_GUEST_MAX_DEPTH" "$VM_GUEST_VERSION_SELECTOR" "$VM_GUEST_TEST_MODE" <<'PY'
+    "$VM_GUEST_AGENT" "$VM_GUEST_DEPTH" "$VM_GUEST_MAX_DEPTH" \
+    "$VM_GUEST_VERSION_SELECTOR" "$VM_GUEST_TEST_MODE" <<'PY'
 import json
 import re
 import stat
@@ -400,7 +424,7 @@ import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
-payload, runtime, depth, maximum, selector, test_mode = sys.argv[2:]
+payload, runtime, agent, depth, maximum, selector, test_mode = sys.argv[2:]
 try:
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
@@ -411,10 +435,12 @@ try:
     assert data["schema_version"] == 1
     assert data["payload_sha256"] == payload
     assert data["runtime"] == runtime
+    assert data["agent"] == agent
     assert data["depth"] == int(depth) and data["max_depth"] == int(maximum)
     assert data["version_selector"] == selector
+    assert data["opencode_package"] == "@opencode/cli"
     version = data["opencode_version"]
-    assert isinstance(version, str) and re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version)
+    assert isinstance(version, str) and re.fullmatch(r"2\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version)
 except Exception:
     raise SystemExit(1)
 print(version)
@@ -424,7 +450,8 @@ PY
 vm_guest_write_install_manifest() {
   local path="$1" version="$2"
   "$VM_GUEST_PYTHON" - "$path" "$VM_GUEST_PAYLOAD_SHA256" "$VM_GUEST_RUNTIME" \
-    "$VM_GUEST_DEPTH" "$VM_GUEST_MAX_DEPTH" "$VM_GUEST_VERSION_SELECTOR" "$version" <<'PY'
+    "$VM_GUEST_AGENT" "$VM_GUEST_DEPTH" "$VM_GUEST_MAX_DEPTH" \
+    "$VM_GUEST_VERSION_SELECTOR" "$version" <<'PY'
 import json
 import os
 import re
@@ -433,9 +460,9 @@ import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
-payload, runtime, depth, maximum, selector, version = sys.argv[2:]
+payload, runtime, agent, depth, maximum, selector, version = sys.argv[2:]
 if not re.fullmatch(r"[a-f0-9]{64}", payload) or not re.fullmatch(
-    r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version
+    r"2\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version
 ):
     raise SystemExit(1)
 path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
@@ -443,11 +470,11 @@ data = {
     "schema_version": 1,
     "payload_sha256": payload,
     "runtime": runtime,
-    "agent": "opencode",
+    "agent": agent,
     "depth": int(depth),
     "max_depth": int(maximum),
     "version_selector": selector,
-    "opencode_package": "opencode-ai",
+    "opencode_package": "@opencode/cli",
     "opencode_version": version,
 }
 encoded = (json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -485,7 +512,7 @@ vm_guest_resolve_opencode_version() {
     return 0
   fi
   if [[ "$VM_GUEST_VERSION_SELECTOR" == latest ]]; then
-    raw="$("$VM_GUEST_NPM_BIN" view opencode-ai@latest version --json)" || {
+    raw="$("$VM_GUEST_NPM_BIN" view @opencode/cli@latest version --json)" || {
       vm_guest_bootstrap_error 'OpenCode latest version could not be resolved through the guest proxy.'
       return 1
     }
@@ -511,9 +538,13 @@ print(value)
 }
 
 vm_guest_install_opencode() {
-  local manifest="$1" version reported rc
+  local manifest="$1" version reported rc adapter_help
   version="$(vm_guest_resolve_opencode_version "$manifest")" || return 1
-  "$VM_GUEST_NPM_BIN" install --global --no-audit --no-fund "opencode-ai@$version"
+  [[ "$version" =~ ^2\. ]] || {
+    vm_guest_bootstrap_error 'This OpenCode version is outside the verified V2 adapter range.'
+    return 1
+  }
+  "$VM_GUEST_NPM_BIN" install --global --no-audit --no-fund "@opencode/cli@$version"
   reported="$("$VM_GUEST_OPENCODE_BIN" --version 2>/dev/null)" || { vm_guest_bootstrap_error 'Installed OpenCode executable failed its version check.'; return 1; }
   "$VM_GUEST_PYTHON" - "$reported" "$version" <<'PY'
 import re
@@ -523,7 +554,40 @@ raise SystemExit(0 if re.search(r"(?<![0-9A-Za-z.])" + re.escape(expected) + r"(
 PY
   rc=$?
   (( rc == 0 )) || { vm_guest_bootstrap_error 'OpenCode executable version differs from the saved exact version.'; return 1; }
+  adapter_help="$("$VM_GUEST_OPENCODE_BIN" run --help 2>&1)" || {
+    vm_guest_bootstrap_error 'Installed OpenCode does not expose the V2 run adapter help.'
+    return 1
+  }
+  [[ "$adapter_help" == *--auto* ]] || {
+    vm_guest_bootstrap_error 'Installed OpenCode does not advertise the verified --auto permission option.'
+    return 1
+  }
   VM_GUEST_RESOLVED_VERSION="$version"
+}
+
+vm_guest_check_aider_adapter() {
+  local version help
+  [[ -x "$VM_GUEST_AIDER_BIN" ]] || {
+    vm_guest_bootstrap_error 'Aider is missing from the isolated guest Python tools environment.'
+    return 1
+  }
+  version="$("$VM_GUEST_AIDER_BIN" --version 2>/dev/null)" || {
+    vm_guest_bootstrap_error 'The installed Aider executable failed its version check.'
+    return 1
+  }
+  [[ "$version" =~ [Aa]ider[[:space:]]+[0-9]+\.[0-9]+ ]] || {
+    vm_guest_bootstrap_error 'The installed Aider version output is not recognized.'
+    return 1
+  }
+  help="$("$VM_GUEST_AIDER_BIN" --help 2>&1)" || {
+    vm_guest_bootstrap_error 'The installed Aider command failed its adapter help check.'
+    return 1
+  }
+  [[ "$help" == *--model* ]] || {
+    vm_guest_bootstrap_error 'The installed Aider command does not advertise the supported --model adapter.'
+    return 1
+  }
+  VM_GUEST_AIDER_VERSION="$version"
 }
 
 vm_guest_run_python_tools() {
@@ -579,7 +643,9 @@ vm_guest_build_private_payload() {
     --cli-output "$stage/generated/cli.json" \
     --mcp-cwd "$final/mcp" \
     --plugin-root "$final/opencode/plugins" \
-    --plugin-source "$stage/opencode/plugins"
+    --plugin-source "$stage/opencode/plugins" \
+    --model-provider "$VM_GUEST_MODEL_PROVIDER" \
+    --model-id "$VM_GUEST_MODEL_ID"
   "$VM_GUEST_PYTHON" - "$stage/generated/opencode.json" "$stage/generated/cli.json" "$stage/mcp" <<'PY'
 import json
 import stat
@@ -622,9 +688,11 @@ PY
 }
 
 vm_guest_write_success_marker() {
-  local marker="$1" version="$2" recursion_tools="$3"
+  local marker="$1" version="$2" recursion_tools="$3" aider_version="$4"
   "$VM_GUEST_PYTHON" - "$marker" "$VM_GUEST_PAYLOAD_SHA256" "$VM_GUEST_RUNTIME" \
-    "$VM_GUEST_DEPTH" "$VM_GUEST_MAX_DEPTH" "$version" "$recursion_tools" "$VM_GUEST_TEST_MODE" <<'PY'
+    "$VM_GUEST_AGENT" "$VM_GUEST_DEPTH" "$VM_GUEST_MAX_DEPTH" "$version" \
+    "$recursion_tools" "$aider_version" "$VM_GUEST_MODEL_PROVIDER" \
+    "$VM_GUEST_MODEL_PORT" "$VM_GUEST_MODEL_ID" "$VM_GUEST_TEST_MODE" <<'PY'
 import json
 import os
 import stat
@@ -633,7 +701,8 @@ import tempfile
 from pathlib import Path
 
 path = Path(sys.argv[1])
-payload, runtime, depth, maximum, version, recursion_tools, test_mode = sys.argv[2:]
+payload, runtime, agent, depth, maximum, version, recursion_tools, aider_version, \
+    provider, model_port, model_id, test_mode = sys.argv[2:]
 if test_mode != "1" and os.geteuid() != 0:
     raise SystemExit(1)
 path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
@@ -642,10 +711,14 @@ if path.exists() or path.is_symlink():
 data = {
     "schema_version": 1,
     "status": "ready",
-    "agent": "opencode",
+    "agent": agent,
     "workload_runtime": runtime,
     "payload_sha256": payload,
     "opencode_version": version,
+    "aider_version": aider_version,
+    "model_provider": provider,
+    "model_port": int(model_port) if model_port else None,
+    "model_id": model_id,
     "workspace_mount": "virtiofs",
     "mcp_build": True,
     "recursion_tools": recursion_tools == "true",
@@ -686,7 +759,7 @@ vm_guest_main() {
   vm_guest_require_root || return 1
   vm_guest_set_proxy_environment
 
-  local marker manifest version major recursion_tools=false
+  local marker manifest version major aider_version recursion_tools=false
   marker="$(vm_guest_rooted /var/lib/lab-vm/guest-ready.json)"
   manifest="$(vm_guest_rooted /var/lib/lab-vm/install-manifest.json)"
   [[ ! -e "$marker" && ! -L "$marker" ]] || { vm_guest_bootstrap_error 'A successful bootstrap marker already exists; no warm provisioning is allowed.'; return 1; }
@@ -709,6 +782,8 @@ vm_guest_main() {
 
   vm_guest_install_opencode "$manifest"
   version="$VM_GUEST_RESOLVED_VERSION"
+  vm_guest_check_aider_adapter
+  aider_version="$VM_GUEST_AIDER_VERSION"
   vm_guest_build_private_payload
 
   major="$(vm_guest_node_major)"
@@ -734,11 +809,12 @@ vm_guest_main() {
     vm_guest_bootstrap_error 'Native OpenCode config files are missing.'
     return 1
   }
-  vm_guest_write_success_marker "$marker" "$version" "$recursion_tools" || {
+  vm_guest_write_success_marker "$marker" "$version" "$recursion_tools" "$aider_version" || {
     vm_guest_bootstrap_error 'Root-owned success marker could not be committed.'
     return 1
   }
-  printf 'Guest bootstrap complete: OpenCode %s; payload %s\n' "$version" "$VM_GUEST_PAYLOAD_SHA256"
+  printf 'Guest bootstrap complete: OpenCode %s, Aider %s; payload %s\n' \
+    "$version" "$aider_version" "$VM_GUEST_PAYLOAD_SHA256"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

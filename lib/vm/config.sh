@@ -11,11 +11,11 @@ vm_cli_defaults() {
   VM_ENV_YES="${VM_YES:-${LAB_YES:-0}}"
   VM_ENV_VERBOSE="${VM_VERBOSE:-0}"
   VM_ENV_DEBUG="${VM_DEBUG:-0}"
-  VM_COMMAND='' VM_PROFILE=default VM_WORKSPACE='' VM_MEMORY='' VM_RESIZE_MEMORY=''
+  VM_COMMAND='' VM_PROFILE=default VM_WORKSPACE='' VM_MEMORY='' VM_RESIZE_MEMORY='' VM_CWD=''
   VM_YES=0 VM_PERMISSIONS=ask VM_VERBOSE=0 VM_DEBUG=0 VM_JSON=0 VM_HELP=0
   VM_RECURSE=0 VM_UNSAFE_RECURSE=0 VM_MAX_DEPTH=0 VM_BROWSER_AUTH=auto
   VM_INSTALL_PREREQS=0 VM_POWEROFF_RECURSIVE=0 VM_DISCARD_RECURSIVE=0 VM_CLEAN=0
-  VM_ACTION='' VM_CALLBACK_PORT='' VM_CONFIG_JSON=''
+  VM_ACTION='' VM_CALLBACK_PORT='' VM_CONFIG_JSON='' VM_MODEL_PROVIDER_QUERY=''
   VM_AGENT_ARGS=() VM_POSITIONALS=() VM_TARGETS=()
   declare -gA VM_SEEN=()
   declare -gA VM_OPTIONS=()
@@ -99,9 +99,11 @@ vm_cli_parse() {
         key="${option#--}"; value="$2"
         [[ "$value" != --* ]] || { vm_error 'Option requires a value.'; return 2; }
         vm_cli_singleton "$key" "$value" || return 2
+        # shellcheck disable=SC2034 # VM_CWD is part of the parser result consumed by lab-vm.
         case "$key" in
           name) VM_PROFILE="$value" ;;
           workspace) VM_WORKSPACE="$value" ;;
+          cwd) VM_CWD="$value" ;;
           memory) VM_MEMORY="$value" ;;
           max-depth) VM_MAX_DEPTH="$value" ;;
           permissions)
@@ -145,7 +147,13 @@ vm_cli_parse() {
     models)
       ((${#VM_POSITIONALS[@]} >= 1 && ${#VM_POSITIONALS[@]} <= 2)) || { vm_error 'Usage: models status|diagnose [provider]'; return 2; }
       VM_ACTION="${VM_POSITIONALS[0]}"
-      [[ "$VM_ACTION" == status || "$VM_ACTION" == diagnose ]] || { vm_error 'Model service mutation is not a VM operation.'; return 2; } ;;
+      [[ "$VM_ACTION" == status || "$VM_ACTION" == diagnose ]] || { vm_error 'Model service mutation is not a VM operation.'; return 2; }
+      if ((${#VM_POSITIONALS[@]} == 2)); then
+        VM_MODEL_PROVIDER_QUERY="${VM_POSITIONALS[1]}"
+        case "$VM_MODEL_PROVIDER_QUERY" in none|ollama|llamacpp|remote) ;;
+          *) vm_error 'Unknown model provider selector.'; return 2 ;;
+        esac
+      fi ;;
     metrics)
       ((${#VM_POSITIONALS[@]} == 1)) || { vm_error 'Usage: metrics up|status|down'; return 2; }
       VM_ACTION="${VM_POSITIONALS[0]}"
@@ -197,6 +205,14 @@ vm_cli_parse() {
   fi
   if [[ -v 'VM_SEEN[workspace]' ]]; then
     [[ "$VM_COMMAND" == up || "$VM_COMMAND" == run ]] || { vm_error '--workspace applies only to run/up.'; return 2; }
+  fi
+  if [[ "$VM_COMMAND" == agent || "$VM_COMMAND" == models ]]; then
+    if [[ -v 'VM_SEEN[agent]' || -v 'VM_SEEN[workload-runtime]' ||
+      -v 'VM_SEEN[opencode-version]' || -v 'VM_SEEN[model-provider]' ||
+      -v 'VM_SEEN[model-port]' || -v 'VM_SEEN[model-id]' ]]; then
+      vm_error 'Harness/provider selection is fixed by the ready profile for agent/models queries.'
+      return 2
+    fi
   fi
   if (( VM_JSON )); then
     case "$VM_COMMAND" in context|status|list|doctor) ;; *) vm_error '--json applies only to read-only queries.'; return 2 ;; esac

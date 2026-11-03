@@ -258,7 +258,7 @@ def config_validate(root, data):
     require(result["host_profile"] == "linux-x86_64")
     require(result["workload_runtime"] in ("docker", "none"))
     require(result["agent"] in ("opencode", "aider"))
-    version(result["opencode_version"], latest=True)
+    opencode_version(result["opencode_version"], latest=True)
     require(result["metrics"] in ("on", "off"))
     model = result["model"]
     require(isinstance(model, dict) and model.keys() <= {"provider", "port", "id"})
@@ -268,7 +268,7 @@ def config_validate(root, data):
     elif "port" in model:
         raise PolicyError("VM policy validation failed")
     if "id" in model:
-        text(model["id"])
+        require(len(text(model["id"])) <= 512)
     auth = result["auth_forward"]
     if isinstance(auth, list):
         require(bool(auth) and all(isinstance(p, str) and p in ("openai", "anthropic", "kimi") for p in auth))
@@ -293,6 +293,12 @@ def version(value, *, latest=False):
     text(value)
     require((latest and value == "latest") or re.fullmatch(
         r"v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", value) is not None)
+
+
+def opencode_version(value, *, latest=False):
+    version(value, latest=latest)
+    require(value == "latest" or re.fullmatch(
+        r"v?2\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", value) is not None)
 
 
 PROFILE_FIELDS = {
@@ -352,7 +358,7 @@ def profile_validate(data, root, name):
     if data["opencode_version"] is None:
         require(pending)
     else:
-        version(data["opencode_version"])
+        opencode_version(data["opencode_version"])
     if "runtime_identity" in data:
         identity = data["runtime_identity"]
         require(isinstance(identity, dict) and identity.keys() == {

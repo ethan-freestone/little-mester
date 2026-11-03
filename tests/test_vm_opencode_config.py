@@ -130,6 +130,62 @@ class GuestConfigTests(unittest.TestCase):
         self.assertEqual(result["permissions"], source["permissions"])
         self.assertEqual(source["mcp"]["servers"]["little-mester"]["command"], ["old-command"])
 
+    def test_explicit_provider_selection_isolated_and_preserves_denies(self):
+        source = json.loads((ROOT / "agent/opencode/opencode.json").read_text(encoding="utf-8"))
+        source["permissions"] = [
+            {"action": "edit", "resource": "secrets/*", "effect": "deny"},
+            {"action": "shell", "resource": "git push *", "effect": "deny"},
+        ]
+        cases = (
+            ("none", "", None, set()),
+            ("ollama", "qwen3:14b", "ollama/qwen3:14b", {"ollama"}),
+            ("llamacpp", "coder-q4", "llamacpp/coder-q4", {"llamacpp"}),
+            ("remote", "openai/gpt-4.1", "openai/gpt-4.1", set()),
+            ("remote", "", None, set()),
+        )
+        for provider, model_id, expected_model, expected_providers in cases:
+            with self.subTest(provider=provider, model_id=model_id):
+                result = vm_opencode_config.guest_config(
+                    source,
+                    "/private/mcp",
+                    model_provider=provider,
+                    model_id=model_id,
+                )
+                self.assertEqual(result.get("model"), expected_model)
+                self.assertEqual(
+                    {name for name in ("ollama", "llamacpp") if name in result["providers"]},
+                    expected_providers,
+                )
+                self.assertIn(
+                    {"action": "edit", "resource": "secrets/*", "effect": "deny"},
+                    result["permissions"],
+                )
+                self.assertIn(
+                    {"action": "shell", "resource": "git push *", "effect": "deny"},
+                    result["permissions"],
+                )
+                if provider == "ollama":
+                    self.assertEqual(
+                        result["providers"]["ollama"]["settings"]["baseURL"],
+                        "http://10.0.2.100:11434/v1",
+                    )
+                if provider == "llamacpp":
+                    self.assertEqual(
+                        result["providers"]["llamacpp"]["settings"]["baseURL"],
+                        "http://10.0.2.100:8080/v1",
+                    )
+
+    def test_unconfigured_model_removes_legacy_default_and_small_model(self):
+        source = json.loads((ROOT / "agent/opencode/opencode.json").read_text(encoding="utf-8"))
+        result = vm_opencode_config.guest_config(
+            source,
+            "/private/mcp",
+            model_provider="none",
+            model_id="",
+        )
+        self.assertNotIn("model", result)
+        self.assertNotIn("model", result.get("agents", {}).get("title", {}))
+
     def test_other_legacy_command_mcp_servers_receive_native_local_type(self):
         source = {
             "mcpServers": {
