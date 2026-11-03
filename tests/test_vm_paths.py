@@ -64,6 +64,44 @@ class PathsTest(unittest.TestCase):
         self.assertEqual(data["auth_escrow_dir"], str(self.root / "secrets"))
         self.assertEqual(list(self.root.iterdir()), before)
 
+    def test_bounded_log_writer_rotates_only_current_and_one_prior_segment(self):
+        paths = load_module()
+        log = self.root / "serial.log"
+        writer = paths.BoundedLogWriter(log, max_bytes=16)
+        writer.write(b"a" * 10)
+        writer.write(b"b" * 10)
+        writer.write(b"c" * 10)
+        writer.close()
+
+        rotated = self.root / "serial.log.1"
+        self.assertEqual(rotated.read_bytes() + log.read_bytes(), b"a" * 10 + b"b" * 10 + b"c" * 10)
+        self.assertEqual(rotated.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+        self.assertLessEqual(rotated.stat().st_size, 16)
+        self.assertLessEqual(log.stat().st_size, 16)
+        self.assertEqual(set(self.root.glob("serial.log*")), {log, rotated})
+
+    def test_bounded_log_writer_refuses_existing_files_symlinks_and_oversize(self):
+        paths = load_module()
+        with self.assertRaises(paths.PolicyError):
+            paths.BoundedLogWriter(self.root / "serial.log", max_bytes=paths.LOG_SEGMENT_BYTES + 1)
+
+        existing = self.root / "existing.log"
+        existing.write_text("preserve")
+        existing.chmod(0o600)
+        with self.assertRaises(paths.PolicyError):
+            paths.BoundedLogWriter(existing)
+        self.assertEqual(existing.read_text(), "preserve")
+
+        target = self.root / "target.log"
+        target.write_text("target")
+        target.chmod(0o600)
+        link = self.root / "linked.log"
+        link.symlink_to(target)
+        with self.assertRaises(paths.PolicyError):
+            paths.BoundedLogWriter(link)
+        self.assertEqual(target.read_text(), "target")
+
     def test_validate_config_stdin_defaults_and_no_write(self):
         data = self.cli("validate-config", data={"model": {"provider": "llamacpp", "port": 1234}})
         self.assertEqual(data["schema_version"], 1)

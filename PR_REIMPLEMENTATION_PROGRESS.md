@@ -2,7 +2,7 @@
 
 ## Control state
 
-- Phase: **Round 2 active; TASK-03/C02 and TASK-04/C03 validated, preparing C03 commit**.
+- Phase: **Round 2 active; C01–C03 committed, TASK-05/C04 fixture validation complete**.
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
@@ -165,9 +165,9 @@ was not a guest bootstrap or a passing host-provisioning result.
 
 ## Round 2 task execution table
 
-The owner resumed Round 2 after the model swap. TASK-01/02 are complete at C01;
-TASK-03/C02 is committed; TASK-04/C03 has passed fixture and static validation and
-is awaiting its C03 commit. Later tasks retain their ordered preconditions. No live
+The owner resumed Round 2 after the model swap. TASK-01/02 through TASK-04 are
+committed at C01–C03; TASK-05/C04 is fixture-validated and awaiting its scoped
+checkpoint commit. Later tasks retain their ordered preconditions. No live
 VM/network acceptance has occurred.
 
 | Task | Planned checkpoint | Status | Assigned/start/completion | Actual files/tests/results/SHA | Deviations/blockers |
@@ -175,8 +175,8 @@ VM/network acceptance has occurred.
 | TASK-01 | C01 | DONE | Coordinator/2026-11-03/2026-11-03 | CLI/config/docs;50 Bats total pass; f8aa799 | None; no VM operations |
 | TASK-02 | C01 | DONE | Delegated+coordinator/2026-11-03/2026-11-03 | Paths/tests;25 Python pass; f8aa799 | None; no VM operations |
 | TASK-03 | C02 | DONE | Coordinator/2026-11-03/2026-11-03 | disk/cache/overlay/seed;65 Bats,30 Python;68861dc | Fixture-only; no real download/QEMU |
-| TASK-04 | C03 | VALIDATED | Coordinator/2026-11-03/2026-11-03 | proxy policy/chaining;36 Python,66 Bats;pending C03 commit | Loopback/mock fixtures only; no live SEC-NET |
-| TASK-05 | C04 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-02; process/SSH implementation |
+| TASK-04 | C03 | DONE | Coordinator/2026-11-03/2026-11-03 | proxy policy/chaining;36 proxy Python,66 Bats,66 VM Python;8dc9816 | Loopback/mock fixtures only; no live SEC-NET |
+| TASK-05 | C04 | VALIDATED | Coordinator/2026-11-03/2026-11-03 | runner/SSH/process supervision;77 Bats,76 VM Python;commit pending | Fake executable/temp/loopback fixtures only; no real KVM/QEMU/guest; lifecycle CLI wiring remains later work |
 | TASK-06 | C05 | NOT STARTED | Unassigned/—/— | — | Guest setup implementation; no host operations |
 | TASK-07 | C06 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-05/06 |
 | TASK-08 | C07 | NOT STARTED | Unassigned/—/— | — | Guest harness/provider parity |
@@ -433,3 +433,62 @@ Ticket #41 now records the C03 fixture/test evidence and the remaining TASK-05,
 live SEC-NET and fresh-nested-VM gates; ticket-store validation passed with no
 orphan, audit, index-sync or quality issues. No acceptance criterion was marked
 passing from fixture-only evidence.
+
+## TASK-05 / C04 validation — 2026-11-03
+
+Implemented the low-level owned-process startup and SSH primitives in `lib/vm/runner.sh`,
+`lib/vm/ssh.sh` and `lib/vm/process.py`. `runner.sh` builds a KVM-only argv array
+with two host-CPU vCPUs, shareable memfd RAM, virtiofs, per-profile seed/overlay,
+loopback SSH, `restrict=on`, and only the selected proxy/model/metrics channels.
+Startup orders proxy → virtiofsd → QEMU. The bounded three-attempt host-forward
+collision retry starts only a new QEMU process and never signals the port owner.
+KVM/device/tool and input checks precede profile-run allocation; no TCG fallback
+exists.
+
+Process records are private and atomically replaced. Read-only status does not
+create the registry lock (a missing lock fails closed as unknown). Identity
+comparisons include PID, `/proc` start ticks, executable and complete argv; pidfd
+signaling is used only after revalidation. Rollback signals only recorded
+logger/supervisor identities and then rechecks every recorded child. An
+early-exiting child records its original exit status without a signalable identity.
+Bounded logs use the new
+`paths.py` `BoundedLogWriter`: 10-MiB current plus one rotated segment, while
+continuing to drain child output if log writes fail. SSH ignores user config,
+agents and implicit forwards, verifies QEMU ownership of the loopback listener
+before and after a complete Ed25519 first-use scan, never replaces a pinned key,
+and applies a deadline to the complete remote command. C04 docs describe the
+trust-on-first-use assumption and fixture-only boundary. `lab-vm` lifecycle
+dispatch, guest readiness and profile/doctor integration remain later tasks; the
+new startup primitives are not yet the user-facing lifecycle.
+
+Actual validation:
+
+| Command/check | Result |
+|---|---|
+| `bats tests/` |77/77 PASS, including11 C04 fake-process cases |
+| `python3 -B -m unittest discover -s tests -p 'test_vm_*.py' -v` |76/76 PASS (paths32, process8, proxy36) |
+| `shellcheck -x lib/vm/runner.sh lib/vm/ssh.sh tests/vm-process.bats` |PASS, full severity |
+| `bash -n lib/vm/runner.sh lib/vm/ssh.sh` |PASS |
+| `ruff check lib/vm/paths.py lib/vm/process.py tests/test_vm_paths.py tests/test_vm_process.py` and Python AST parse |PASS |
+| `python3 lib/vm/process.py --help` |PASS; helper CLI only, no process operation |
+| `git diff --check` |PASS |
+| `python3 scripts/check-docs-consistency.py` |8 failures; same pre-existing README/DECISIONS assertions recorded against main Git objects; C04 adds no links |
+
+The C04 fixtures cover strict argv/path validation, unavailable-KVM refusal before
+run-state allocation, process absent/stopped/running/unknown states, PID/start-tick/
+argv mismatch never signaling a live process, owned-listener detection, complete
+host-key validation and mismatch preservation, bounded remote timeout, flood
+rotation and injected ENOSPC drain, launch failure status127, early exit status37,
+port collision without owner signaling, startup ordering and partial rollback with
+foreign-process continuity. Only fake executables, synthetic subprocesses, private temporary files,
+and loopback TCP/Unix sockets were used. No real KVM/QEMU/guest, host network
+configuration, package/service, image download, credential, live SEC-NET or
+nested-VM operation occurred. This is fixture evidence only; ticket #41 acceptance
+criteria remain pending and no host/VM acceptance is claimed.
+
+Ticket #41 now contains C04 test-file/case evidence and the remaining lifecycle and
+live acceptance gaps. Ticket-store validation passed: synced index, intact 134-entry
+audit, no lock/orphans, and no ticket-quality issues.
+The original detached PR worktree remains outside this checkpoint; preserve it.
+The pre-existing staged-empty/worktree-populated `vm-migration-plan.md` remains
+excluded from all C04 commit paths.

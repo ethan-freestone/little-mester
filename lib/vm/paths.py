@@ -39,6 +39,72 @@ class PolicyError(ValueError):
     """Untrusted input or unsafe filesystem state; never include input values."""
 
 
+LOG_SEGMENT_BYTES = 10 * 1024 * 1024
+
+
+class BoundedLogWriter:
+    """Write a continuously drained stream to one bounded current + prior file."""
+
+    def __init__(self, path, max_bytes=LOG_SEGMENT_BYTES):
+        require(type(max_bytes) is int and 1 <= max_bytes <= LOG_SEGMENT_BYTES)
+        self.path = canonical(str(path))
+        self.parent = self.path.parent
+        require(self.parent.is_dir() and not self.parent.is_symlink())
+        private_entry(self.parent)
+        self.rotated = self.path.with_name(self.path.name + ".1")
+        require(not self.path.exists() and not self.path.is_symlink())
+        require(not self.rotated.exists() and not self.rotated.is_symlink())
+        self.max_bytes = max_bytes
+        self.current_size = 0
+        self.fd = None
+
+    def _open_current(self):
+        self.fd = os.open(
+            self.path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+
+    def _rotate(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        if self.rotated.exists() or self.rotated.is_symlink():
+            private_entry(self.rotated)
+            require(self.rotated.stat().st_size <= self.max_bytes)
+            self.rotated.unlink()
+        if self.path.exists():
+            private_entry(self.path)
+            require(self.path.stat().st_size <= self.max_bytes)
+            self.path.replace(self.rotated)
+        self.current_size = 0
+        self._open_current()
+
+    def write(self, data):
+        view = memoryview(data)
+        while view:
+            if self.fd is None:
+                self._open_current()
+            remaining = self.max_bytes - self.current_size
+            if remaining <= 0:
+                self._rotate()
+                remaining = self.max_bytes
+            chunk = view[:remaining]
+            offset = 0
+            while offset < len(chunk):
+                offset += os.write(self.fd, chunk[offset:])
+            self.current_size += len(chunk)
+            view = view[len(chunk):]
+
+    def close(self):
+        if self.fd is not None:
+            fd, self.fd = self.fd, None
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+
 def require(condition):
     if not condition:
         raise PolicyError("VM policy validation failed")

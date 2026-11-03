@@ -4,11 +4,12 @@
 
 The owner approved `PR_REIMPLEMENTATION_PLAN.md` for `feat/vm-approach-2`.
 The contract below supersedes the historical proposal later on this page.
-C01 CLI/configuration, path validation and private profile metadata; C02
-fixture-tested image/overlay/seed primitives; and C03 fixture-tested public-only
-proxy/chaining policy are implemented. **No image has been downloaded in these
-checkpoints; no VM boot/lifecycle support or real-host/network acceptance is
-claimed.** Ordinary `./lab` remains the existing Docker launcher.
+C01 CLI/configuration and private profile metadata; C02 fixture-tested
+image/overlay/seed primitives; C03 fixture-tested public-only proxy/chaining; and
+C04 fixture-tested process supervision/SSH primitives are implemented. **No image
+has been downloaded, no real QEMU/VM has been started, and no host/network
+acceptance is claimed.** `lab-vm` does not yet dispatch lifecycle commands;
+ordinary `./lab` remains the existing Docker launcher.
 
 ### CLI and configuration contract
 
@@ -105,6 +106,44 @@ unreadable or malformed policy leaves the last-known-good policy in force.
 
 C03 validation uses local fixture sockets and mocked DNS/address responses only.
 It is not live LAN isolation, parent guestfwd wiring or nested-VM acceptance.
+
+### Process supervision and SSH contract (implemented C04; fixtures only)
+
+`lib/vm/runner.sh` builds QEMU argv without shell evaluation and requires Linux
+x86_64 plus accessible `/dev/kvm` before startup state or processes are created.
+There is no TCG fallback. The argv uses two host-CPU vCPUs, shareable memfd RAM,
+the profile seed and overlay, `vhost-user-fs-pci`, a private short virtiofs socket,
+loopback-only SSH forwarding, and `restrict=on`. Only the fixed proxy channel and
+explicitly selected model/metrics channels are forwarded. Startup order is proxy,
+virtiofsd, then QEMU. A bounded three-attempt SSH-forward bind retry starts a new
+QEMU process each time and never signals the process already holding a port.
+
+`lib/vm/process.py` keeps a private atomic process registry containing PID, start
+ticks, executable and exact argv. A PID alone never authorizes signalling:
+identity comparisons fail closed, and pidfds are used for verified signals. Startup
+rollback TERM-sends only the run's recorded logger/supervisor processes, then
+rechecks every recorded child; an unknown or still-running process preserves the
+run state. A child that exits before its `/proc` argv can be captured is recorded
+as already stopped with its original exit status, not as a signalable identity.
+QEMU/virtiofs/proxy output is continuously drained into private 10-MiB segments
+(current plus one rotated file); logging write failures do not stop pipe draining.
+Failure metadata retains the stage, original exit status and bounded log paths.
+
+`lib/vm/ssh.sh` disables user SSH config, agent/X11 forwarding and implicit
+forwardings; it pins one per-run `known_hosts` key, requests no PTY for
+noninteractive commands, uses an explicit PTY only for interactive commands, and
+bounds the complete SSH process with a deadline. Initial trust is necessarily
+trust-on-first-use: a complete Ed25519 scan is accepted only while the recorded
+QEMU process owns the loopback listener, with ownership checked again after scan.
+This ties acceptance to a listener owned by the recorded host process immediately
+before and after scanning; it is not independent guest-image attestation. Existing
+key mismatches and partial scans never replace trust.
+
+C04 tests use fake executables, synthetic subprocesses, private temporary files
+and loopback TCP/Unix sockets only. They do not exercise real QEMU, KVM, a guest
+boot, image availability, SSH guest authentication, live host networking or
+parent/child SEC-NET behavior. Lifecycle commands remain unavailable until later
+tasks wire these primitives into the profile/guest lifecycle.
 
 Examples shared by Bash and Fish (diagnostics only):
 
