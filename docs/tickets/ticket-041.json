@@ -8,7 +8,7 @@
   "title": "VM provisioning and ./lab VM lifecycle",
   "objective": "Make the VM reproducible and controllable from the host: ./lab can provision or connect to the VM per #40, install Docker, transport the workspace, and run VM lifecycle commands idempotently. The host stops running the agent container itself.",
   "created_at": "2026-10-26T20:39:18.836Z",
-  "updated_at": "2026-11-03T08:29:01.087Z",
+  "updated_at": "2026-11-03T08:54:11.707Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -64,11 +64,14 @@
     ],
     "created": [
       "tests/vm-cli.bats (replacement C01 CLI/config/setup boundary cases)",
-      "tests/test_vm_paths.py (replacement C01 private profile/config/runtime capture cases)"
+      "tests/test_vm_paths.py (replacement C01 private profile/config/runtime capture cases)",
+      "tests/vm-disk.bats (C02 deterministic image/cache/overlay/seed fixture tests)",
+      "tests/test_vm_paths.py (C02 secure image-lock and atomic publish/seed helper tests)"
     ],
     "cases": [
       "2026-11-03 replacement branch feat/vm-approach-2: owner explicitly approved PR_REIMPLEMENTATION_PLAN.md and authorized Round 2. Preflight reverified PR13 head97af1d83a16fce68ddcc3390276c218a1b0cd518, main/replacement baseline efe77202594c79dc1a926fa84a7a5dbc8866c66a. Begin TASK-01/02 (C01) only: validated CLI/config, private state/workspace boundaries. Original source/host runtime unchanged; no VM/package/service operations or host acceptance claimed. Existing main-store criteria predate the approved native-guest design and are not marked passing by this checkpoint.",
-      "2026-11-03 replacement C01 TASK-01/02 validated locally: bats tests/ 50/50 PASS (26 existing +24 new), Python unittest test_vm_*.py 25/25 PASS; full-severity ShellCheck, Bash syntax and Ruff PASS. Tests first demonstrated missing implementations and regression failures before fixes. Coverage includes flags/-- passthrough, strict secret-safe JSON, CLI/env precedence/provider changes, explicit setup-only --yes (ambient LAB_YES cannot authorize installs), package metadata refusal before sudo, canonical private paths/ownership/modes, symlink/legacy refusals, root->profile multiprocess locks, atomic failure preservation, sticky descendant metadata and frozen runtime capture. No VM/package/service/auth operations or host acceptance performed. Existing docs checker fails eight pre-existing README/DECISIONS assertions; identical failures confirmed against main Git-object content, deferred to TASK-16. Owner requested pause for model swap at next checkpoint; stop after C01 handoff, TASK-03 not started."
+      "2026-11-03 replacement C01 TASK-01/02 validated locally: bats tests/ 50/50 PASS (26 existing +24 new), Python unittest test_vm_*.py 25/25 PASS; full-severity ShellCheck, Bash syntax and Ruff PASS. Tests first demonstrated missing implementations and regression failures before fixes. Coverage includes flags/-- passthrough, strict secret-safe JSON, CLI/env precedence/provider changes, explicit setup-only --yes (ambient LAB_YES cannot authorize installs), package metadata refusal before sudo, canonical private paths/ownership/modes, symlink/legacy refusals, root->profile multiprocess locks, atomic failure preservation, sticky descendant metadata and frozen runtime capture. No VM/package/service/auth operations or host acceptance performed. Existing docs checker fails eight pre-existing README/DECISIONS assertions; identical failures confirmed against main Git-object content, deferred to TASK-16. Owner requested pause for model swap at next checkpoint; stop after C01 handoff, TASK-03 not started.",
+      "2026-11-03 C02 / TASK-03: bats tests/ passed 65/65; python3 -B -m unittest discover -s tests -p test_vm_*.py -v passed 30/30; ShellCheck (full severity), Bash syntax, Ruff and Python AST passed. C01 baseline targeted helper tests were replayed in a disposable temp tree and failed as expected before image-run/image-publish/overlay-publish/seed-write helper APIs. C02 tests mock curl and qemu-img only: URL/hash pin, checksum-before-qemu, qcow2 standalone and MBR signature, conversion/download failures leave no hash cache, atomic no-replace publication, parallel same-pin single download, corrupt/tampered/unknown cache preservation, free-space refusal before staging, nested proxy with --noproxy empty, two private overlays exact base backing/idempotency, wrong backing refusal, secret-pattern seed rejection and atomic-write failure preserving old output. No real curl/image download/qemu-img/QEMU/VM/package/service/host acceptance operation was performed. Source pin reused from detached PR13 lib/vm/disk.sh after offline inspection; remote bytes/availability remain unverified. Docs consistency checker still has same 8 baseline README/DECISIONS failures, confirmed against main Git objects; no new failure. Ticket #41 criteria remain pending because no host VM acceptance."
     ]
   },
   "priority": "major",

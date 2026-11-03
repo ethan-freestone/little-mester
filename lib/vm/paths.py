@@ -18,6 +18,7 @@ create locks or directories; atomic replacement makes unlocked reads coherent.
 """
 
 import argparse
+import ctypes
 import fcntl
 import hashlib
 import json
@@ -25,11 +26,13 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 class PolicyError(ValueError):
@@ -141,7 +144,7 @@ def profile_name(name):
 def profile_path(root, name):
     name = profile_name(name)
     vm = root / "vm"
-    namespaces = {"profiles", "images", "services", "runs", "logs"}
+    namespaces = {"profiles", "images", "services", "runs", "logs", ".locks"}
     require(not (vm / "base.qcow2").exists())
     if name not in namespaces:
         require(not (vm / name).exists())
@@ -291,6 +294,22 @@ def fsync_dir(path):
         os.close(fd)
 
 
+def atomic_bytes(path, payload):
+    if path.exists() or path.is_symlink():
+        private_entry(path)
+    fd, temp = tempfile.mkstemp(prefix=".data-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+        fsync_dir(path.parent)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
 def atomic_json(path, data):
     fd, temp = tempfile.mkstemp(prefix=".metadata-", dir=path.parent)
     try:
@@ -314,6 +333,20 @@ def private_mkdir(path):
     private_entry(path)
 
 
+def ensure_private_root(root):
+    root = state_root(str(root), scan=False)
+    if not root.exists():
+        missing = []
+        current = root
+        while not current.exists():
+            missing.append(current)
+            current = current.parent
+        require(current.is_dir())
+        for directory in reversed(missing):
+            private_mkdir(directory)
+    return root
+
+
 @contextmanager
 def lock_file(path):
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -329,18 +362,7 @@ def lock_file(path):
 def profile_lock(root, name):
     """Mutating API: validate/create private state; lock allocation then profile."""
     profile_name(name)
-    root = state_root(str(root), scan=False)
-    if not root.exists():
-        # Create only missing ancestors after validating the entire existing
-        # ancestry. Existing HOME/XDG parents are never chmodded or replaced.
-        missing = []
-        current = root
-        while not current.exists():
-            missing.append(current)
-            current = current.parent
-        require(current.is_dir())
-        for directory in reversed(missing):
-            private_mkdir(directory)
+    root = ensure_private_root(root)
     with lock_file(root / ".allocation.lock"):
         state_root(str(root), must_exist=True)
         path = profile_path(root, name)
@@ -350,6 +372,172 @@ def profile_lock(root, name):
             if not (path / "profile.json").exists():
                 require(all(p.name in {".profile.lock", "runtime"} for p in path.iterdir()))
             yield path
+
+
+@contextmanager
+def image_cache_lock(root, digest):
+    require(isinstance(digest, str) and re.fullmatch(r"[a-f0-9]{64}", digest) is not None)
+    root = ensure_private_root(root)
+    lock_path = root / "vm/.locks" / f"{digest}.lock"
+    with lock_file(root / ".allocation.lock"):
+        state_root(str(root), must_exist=True)
+        vm = root / "vm"
+        private_mkdir(vm)
+        private_mkdir(vm / ".locks")
+        private_mkdir(vm / "images")
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            private_entry(lock_path)
+        except BaseException:
+            os.close(fd)
+            raise
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield root / "vm/images"
+    finally:
+        os.close(fd)
+
+
+def private_tree(path):
+    require(path.is_dir() and not path.is_symlink())
+    private_entry(path)
+    for directory, dirs, files in os.walk(path, followlinks=False, onerror=walk_error):
+        current = Path(directory)
+        private_entry(current)
+        for name in dirs:
+            child = current / name
+            require(not child.is_symlink())
+            private_entry(child)
+        for name in files:
+            child = current / name
+            private_entry(child)
+            with child.open("rb") as stream:
+                os.fsync(stream.fileno())
+        fsync_dir(current)
+
+
+def hash_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def rename_noreplace(source, destination):
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    require(renameat2 is not None)
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1)
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def image_publish(root, digest, staging):
+    require(isinstance(digest, str) and re.fullmatch(r"[a-f0-9]{64}", digest) is not None)
+    root = state_root(str(root), must_exist=True)
+    images = root / "vm/images"
+    private_entry(images)
+    stage = canonical(staging, exists=True)
+    require(stage.parent == images and stage.name.startswith(f".staging.{digest}."))
+    target = images / digest
+    require(not target.exists() and not target.is_symlink())
+    private_tree(stage)
+    names = {item.name for item in stage.iterdir()}
+    require(names == {"base.qcow2", "manifest.json"})
+    manifest_path = stage / "manifest.json"
+    require(manifest_path.stat().st_size <= 4096)
+    manifest = decode(manifest_path.read_bytes())
+    require(isinstance(manifest, dict) and manifest.keys() == {
+        "schema_version", "source_url", "source_sha256", "artifact_sha256", "virtual_size_bytes", "format"})
+    require(type(manifest["schema_version"]) is int and manifest["schema_version"] == 1
+            and manifest["format"] == "qcow2")
+    require(manifest["source_sha256"] == digest)
+    url = text(manifest["source_url"])
+    parsed_url = urlsplit(url)
+    require(parsed_url.scheme == "https" and bool(parsed_url.hostname)
+            and parsed_url.username is None and parsed_url.password is None
+            and parsed_url.port in (None, 443) and not parsed_url.query and not parsed_url.fragment)
+    require(isinstance(manifest["artifact_sha256"], str) and
+            re.fullmatch(r"[a-f0-9]{64}", manifest["artifact_sha256"]) is not None)
+    integer(manifest["virtual_size_bytes"], 1024**3, 1024**4)
+    artifact = stage / "base.qcow2"
+    require(artifact.stat().st_size > 0)
+    digest_file = hash_file(artifact)
+    require(digest_file == manifest["artifact_sha256"])
+    rename_noreplace(stage, target)
+    fsync_dir(images)
+    return target
+
+
+def profile_overlay_publish(root, name, staging):
+    root = state_root(str(root), must_exist=True)
+    data = profile_read(root, name)
+    profile = profile_path(root, name)
+    stage = canonical(staging, exists=True)
+    require(stage.parent.parent == profile and stage.parent.name.startswith(".overlay."))
+    require(stage.name == "disk.qcow2")
+    private_entry(stage)
+    require(stage.stat().st_size > 0)
+    target = profile / "disk.qcow2"
+    require(not target.exists() and not target.is_symlink())
+    require(data["image_path"] is not None)
+    with stage.open("rb") as stream:
+        os.fsync(stream.fileno())
+    rename_noreplace(stage, target)
+    fsync_dir(profile)
+    return target
+
+
+def seed_write(root, name, raw):
+    require(len(raw) <= 1024 * 1024)
+    profile_read(root, name)
+    require(raw.startswith(b"#cloud-config\n") or raw == b"#cloud-config")
+    require(b"\x00" not in raw and all(byte in (9, 10, 13) or byte >= 32 for byte in raw))
+    sensitive = re.compile(
+        rb"(?i)(?:password|passwd|token|api[_-]?key|access[_-]?token|refresh[_-]?token|"
+        rb"client[_-]?secret|private[_-]?key|credential)"
+    )
+    require(sensitive.search(raw) is None)
+    root = state_root(str(root), must_exist=True)
+    with profile_lock(root, name) as profile:
+        profile_read(root, name)
+        target = profile / "seed.user-data"
+        atomic_bytes(target, raw)
+    return target
+
+
+def profile_run(root, name, command):
+    require(command)
+    if command and command[0] == "--":
+        command = command[1:]
+    require(command)
+    root = state_root(str(root), must_exist=True)
+    profile_read(root, name)
+    with profile_lock(root, name) as profile:
+        data = profile_read(root, name)
+        env = os.environ.copy()
+        env["VM_PROFILE_PATH"] = str(profile)
+        env["VM_PROFILE_IMAGE_PATH"] = data["image_path"] or ""
+        env["VM_PROFILE_IMAGE_SHA256"] = data["image_sha256"] or ""
+        return subprocess.run(command, env=env, check=False).returncode
+
+
+def image_run(root, digest, command):
+    require(command)
+    if command and command[0] == "--":
+        command = command[1:]
+    require(command)
+    with image_cache_lock(root, digest) as images:
+        env = os.environ.copy()
+        env["VM_IMAGE_IMAGES_DIR"] = str(images)
+        env["VM_IMAGE_CACHE_DIR"] = str(images / digest)
+        env["VM_IMAGE_STATE_ROOT"] = str(root)
+        env["VM_IMAGE_SHA256"] = digest
+        return subprocess.run(command, env=env, check=False).returncode
 
 
 def profile_write(root, name, data):
@@ -452,10 +640,12 @@ def main():
     parser = Parser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
     for command in ("config", "validate-config", "context", "validate-workspace",
-                    "profile-read", "profile-write", "runtime-install"):
+                    "profile-read", "profile-write", "runtime-install", "image-run",
+                    "image-publish", "profile-run", "overlay-publish", "seed-write"):
         sub = commands.add_parser(command)
         sub.add_argument("--state-root", required=True)
-        if command in ("context", "profile-read", "profile-write", "runtime-install"):
+        if command in ("context", "profile-read", "profile-write", "runtime-install",
+                       "profile-run", "overlay-publish", "seed-write"):
             sub.add_argument("--profile", required=True)
         if command in ("context", "validate-workspace"):
             sub.add_argument("--repository", required=True)
@@ -465,6 +655,12 @@ def main():
         if command == "runtime-install":
             sub.add_argument("--source", required=True)
             sub.add_argument("--files", nargs="+", required=True)
+        if command in ("image-run", "image-publish"):
+            sub.add_argument("--sha256", required=True)
+        if command == "image-run" or command == "profile-run":
+            sub.add_argument("command_argv", nargs=argparse.REMAINDER)
+        if command == "image-publish" or command == "overlay-publish":
+            sub.add_argument("--staging", required=True)
     args = parser.parse_args()
     root = state_root(args.state_root, scan=args.command not in ("profile-write", "runtime-install"))
     if hasattr(args, "profile"):
@@ -486,14 +682,27 @@ def main():
         result = profile_read(root, args.profile)
     elif args.command == "profile-write":
         result = profile_write(root, args.profile, decode(sys.stdin.buffer.read(1024 * 1024 + 1)))
+    elif args.command == "image-run":
+        return image_run(root, args.sha256, args.command_argv)
+    elif args.command == "image-publish":
+        result = {"published": str(image_publish(root, args.sha256, args.staging))}
+    elif args.command == "profile-run":
+        return profile_run(root, args.profile, args.command_argv)
+    elif args.command == "overlay-publish":
+        result = {"published": str(profile_overlay_publish(root, args.profile, args.staging))}
+    elif args.command == "seed-write":
+        result = {"seed_path": str(seed_write(root, args.profile, sys.stdin.buffer.read(1024 * 1024 + 1)))}
     else:
         result = runtime_install(root, args.profile, args.source, args.files)
     sys.stdout.buffer.write(encoded(result))
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        main()
+        status = main()
+        if status is not None:
+            sys.exit(status)
     except (ValueError, TypeError, KeyError, OSError, RuntimeError):
         print("VM policy validation failed; check command, schema and private paths", file=sys.stderr)
         sys.exit(2)

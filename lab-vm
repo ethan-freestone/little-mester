@@ -21,11 +21,13 @@ Available now:
   context [--json] [--name NAME]    Read-only config, private paths and capabilities
   setup                           Read-only host prerequisite discovery
   setup --install-prereqs          Explicit default-no userland package installation
+  base                            Verify/download the pinned immutable base image
+                                  Never replaces an existing cache entry
   --help                          Show this checkpoint's actual availability
 
 Not yet implemented (refuse with exit 2, never start or mutate a VM):
   run [WORKSPACE], up [PROFILE] --workspace PATH, agent, ssh, status, list, doctor,
-  suspend, resume, resize PROFILE GiB, down, stop, rebuild, base, update,
+  suspend, resume, resize PROFILE GiB, down, stop, rebuild, update,
   install-tools, egress-reload, models status|diagnose, metrics up|status|down,
   auth-forward [PROFILE] PORT, recursion-clean
 
@@ -54,6 +56,8 @@ command -v python3 >/dev/null 2>&1 || {
 }
 VM_STATE_ROOT="$(vm_state_root)"
 VM_PATHS_HELPER="$VM_REPO/lib/vm/paths.py"
+# shellcheck source=lib/vm/disk.sh
+source "$VM_REPO/lib/vm/disk.sh"
 vm_config_overrides
 vm_config_load || exit 2
 
@@ -66,6 +70,13 @@ VM_CONTEXT_JSON="$(python3 "$VM_PATHS_HELPER" "${context_args[@]}")" || exit 2
 
 case "$VM_COMMAND" in
   setup) vm_setup ;;
+  base)
+    if [[ "$(vm_host_system)" != Linux || "$(vm_host_arch)" != x86_64 ]]; then
+      vm_error 'Pinned base preparation is supported only on Linux x86_64.'
+      exit 2
+    fi
+    vm_disk_create_base "$VM_STATE_ROOT"
+    ;;
   context)
     system="$(vm_host_system)"; arch="$(vm_host_arch)"
     kvm=false; if vm_host_kvm; then kvm=true; fi

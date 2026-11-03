@@ -112,7 +112,7 @@ vm_cli_parse() {
         VM_WORKSPACE="${VM_POSITIONALS[0]}"
       fi
       VM_WORKSPACE="${VM_WORKSPACE:-$PWD}" ;;
-    setup|context|list)
+    setup|context|list|base)
       ((${#VM_POSITIONALS[@]} == 0)) || { vm_error 'Unexpected positional argument.'; return 2; } ;;
     resize)
       ((${#VM_POSITIONALS[@]} == 2)) || { vm_error 'Usage: resize PROFILE GiB'; return 2; }

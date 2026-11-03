@@ -4,9 +4,10 @@
 
 The owner approved `PR_REIMPLEMENTATION_PLAN.md` for `feat/vm-approach-2`.
 The contract below supersedes the historical proposal later on this page.
-At checkpoint C01 only CLI/configuration, path validation and private profile
-metadata are being implemented. **No VM boot/lifecycle support or real-host
-acceptance is claimed yet.** Ordinary `./lab` remains the existing Docker launcher.
+C01 CLI/configuration, path validation and private profile metadata, plus C02
+fixture-tested image/overlay/seed primitives, are implemented. **No image has
+been downloaded in this checkpoint; no VM boot/lifecycle support or real-host
+acceptance is claimed.** Ordinary `./lab` remains the existing Docker launcher.
 
 ### CLI and configuration contract
 
@@ -52,6 +53,31 @@ Read-only commands do not create/chmod state. Private control runtime captures
 explicit reviewed files independently of the mutable source; re-executing edited
 source on the host still requires review.
 
+### Immutable image and per-profile disk contract (implemented C02)
+
+`base` uses an explicit HTTPS URL/SHA-256 pair and stores the converted standalone
+qcow2 at `vm/images/<source-sha256>/base.qcow2`. Download bytes are verified before
+conversion; the standalone qcow2 format, absence of a backing file, and guest boot
+signature are checked before publication. A private manifest records the source
+pin and converted artifact hash. Population is serialized per source hash and
+published atomically from private staging. An existing valid cache entry is reused;
+an existing corrupt/partial entry is preserved and blocks use. A different pin
+gets a different cache key—there is no in-place replacement or cache GC.
+The initial pin is the URL/SHA pair in `lib/vm/disk.sh` (retained from the
+reference implementation); C02 fixture tests validate the enforcement logic,
+not the remote endpoint's current availability or bytes. `./lab-vm base` is an
+explicit network-writing command and was not invoked for this checkpoint.
+
+Each named profile owns one writable overlay whose absolute backing chain must
+match its immutable cached base and profile metadata. Creating an existing overlay
+is idempotent only after chain validation; it never silently repairs or resets it.
+Later rebuilds may replace only the selected profile overlay, not a shared base.
+Nested base downloads must use the parent's public-only proxy with no direct
+fallback. Cloud-init user-data is a generated nonsecret value, atomically written
+inside the selected private profile; private keys, provider tokens and broad host
+data are not valid seed inputs. Fixture tests exercise these functions without network or
+QEMU boot; this contract is not host-image acceptance evidence.
+
 Examples shared by Bash and Fish (diagnostics only):
 
 ```sh
@@ -59,6 +85,10 @@ Examples shared by Bash and Fish (diagnostics only):
 ./lab-vm context --json --name candidate
 ./lab-vm setup
 ```
+
+`./lab-vm base` is deliberately omitted from the diagnostic examples because it
+downloads the pinned image into private state. It never boots a VM or replaces a
+cache member.
 
 ### Approved target trust boundary (not yet runtime acceptance)
 

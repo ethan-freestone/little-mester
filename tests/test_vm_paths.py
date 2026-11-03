@@ -320,6 +320,110 @@ class PathsTest(unittest.TestCase):
         self.cli("context", "--profile", "test", "--repository", self.repo, ok=False)
         self.assertEqual(leaf.read_text(), "unrelated")
 
+    def test_image_run_creates_private_hash_lock_and_passes_paths(self):
+        digest = "a" * 64
+        script = "import os,stat; p=os.environ['VM_IMAGE_IMAGES_DIR']; assert os.environ['VM_IMAGE_SHA256']=='" + digest + "'; assert stat.S_IMODE(os.stat(p).st_mode)==0o700; assert os.environ['VM_IMAGE_CACHE_DIR']==p+'/'+'" + digest + "'"
+        result = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "image-run", "--state-root", str(self.root),
+             "--sha256", digest, "--", sys.executable, "-c", script],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lock = self.root / "vm/.locks" / f"{digest}.lock"
+        self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
+
+    def test_image_publish_is_atomic_and_never_replaces_existing_hash(self):
+        digest = "a" * 64
+        result = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "image-run", "--state-root", str(self.root),
+             "--sha256", digest, "--", sys.executable, "-c", "pass"],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        images = self.root / "vm/images"
+        stage = images / f".staging.{digest}.first"
+        stage.mkdir(mode=0o700)
+        artifact = b"standalone qcow fixture"
+        (stage / "base.qcow2").write_bytes(artifact)
+        (stage / "base.qcow2").chmod(0o600)
+        manifest = {"schema_version": 1, "source_url": "https://example.invalid/image.img",
+                    "source_sha256": digest, "artifact_sha256": __import__("hashlib").sha256(artifact).hexdigest(),
+                    "virtual_size_bytes": 20 * 1024**3, "format": "qcow2"}
+        (stage / "manifest.json").write_text(json.dumps(manifest))
+        (stage / "manifest.json").chmod(0o600)
+        self.cli("image-publish", "--sha256", digest, "--staging", stage)
+        target = images / digest
+        old = (target / "base.qcow2").read_bytes()
+        second = images / f".staging.{digest}.second"
+        second.mkdir(mode=0o700)
+        (second / "marker").write_text("must not replace")
+        (second / "marker").chmod(0o600)
+        self.cli("image-publish", "--sha256", digest, "--staging", second, ok=False)
+        self.assertEqual((target / "base.qcow2").read_bytes(), old)
+        self.assertTrue(second.exists())
+
+    def test_overlay_publish_is_profile_bound_and_no_replace(self):
+        digest = "b" * 64
+        data = dict(self.profile(), image_sha256=digest,
+                    image_path=str(self.root / "vm/images" / digest / "base.qcow2"))
+        self.cli("profile-write", "--profile", "test", data=data)
+        profile = self.root / "vm/profiles/test"
+        stage_dir = profile / ".overlay.first"
+        stage_dir.mkdir(mode=0o700)
+        staged = stage_dir / "disk.qcow2"
+        staged.write_bytes(b"qcow overlay fixture")
+        staged.chmod(0o600)
+        self.cli("overlay-publish", "--profile", "test", "--staging", staged)
+        target = profile / "disk.qcow2"
+        old = target.read_bytes()
+        second_dir = profile / ".overlay.second"
+        second_dir.mkdir(mode=0o700)
+        second = second_dir / "disk.qcow2"
+        second.write_bytes(b"replacement forbidden")
+        second.chmod(0o600)
+        self.cli("overlay-publish", "--profile", "test", "--staging", second, ok=False)
+        self.assertEqual(target.read_bytes(), old)
+        self.assertTrue(second.exists())
+
+    def test_seed_write_secret_refusal_and_atomic_failure_preserve_previous(self):
+        self.cli("profile-write", "--profile", "test", data=self.profile())
+        safe = b"#cloud-config\npackages:\n - qemu-guest-agent\n"
+        result = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "seed-write", "--state-root", str(self.root), "--profile", "test"],
+            input=safe, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        target = self.root / "vm/profiles/test/seed.user-data"
+        self.assertEqual(target.read_bytes(), safe)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        public_key_seed = b"#cloud-config\nssh_authorized_keys:\n - ssh-ed25519 AAAATEST public-only\n"
+        public = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "seed-write", "--state-root", str(self.root), "--profile", "test"],
+            input=public_key_seed, capture_output=True, check=False,
+        )
+        self.assertEqual(public.returncode, 0, public.stderr)
+        self.assertEqual(target.read_bytes(), public_key_seed)
+        before = target.read_bytes()
+        bad = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "seed-write", "--state-root", str(self.root), "--profile", "test"],
+            input=b"#cloud-config\napi_token: SECRET_CANARY\n", capture_output=True, check=False,
+        )
+        self.assertEqual(bad.returncode, 2)
+        self.assertNotIn(b"SECRET_CANARY", bad.stderr)
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_seed_atomic_write_failure_preserves_existing_file(self):
+        module = load_module()
+        self.cli("profile-write", "--profile", "test", data=self.profile())
+        target = self.root / "vm/profiles/test/seed.user-data"
+        target.write_bytes(b"#cloud-config\nold: value\n")
+        target.chmod(0o600)
+        with (mock.patch.object(module.os, "replace", side_effect=OSError("fixture failure")),
+              self.assertRaises(OSError)):
+            module.seed_write(self.root, "test", b"#cloud-config\nnew: value\n")
+        self.assertEqual(target.read_bytes(), b"#cloud-config\nold: value\n")
+        self.assertEqual(list(target.parent.glob(".data-*")), [])
+
 
 if __name__ == "__main__":
     unittest.main()

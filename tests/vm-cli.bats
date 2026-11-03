@@ -8,7 +8,8 @@ setup() {
   VM_TEST_ROOT="$(mktemp -d /tmp/little-mester-cli.XXXXXX)"
   export HOME="$VM_TEST_ROOT/home"
   export MESTER_STATE_DIR="$HOME/state"
-  mkdir -m 700 -p "$HOME" "$BATS_TEST_TMPDIR/workspace"
+  mkdir -m 700 "$HOME"
+  mkdir -p "$BATS_TEST_TMPDIR/workspace"
   unset VM_YES LAB_YES VM_VERBOSE VM_DEBUG VM_OPENCODE_VERSION
   unset LAB_VM_RECURSION_DEPTH LAB_VM_MAX_DEPTH VM_STATE_DIR VM_DIR_BASE
 }
@@ -73,6 +74,7 @@ parse() {
       '--max-depth 33 --recurse' '--max-depth -1 --recurse' '--max-depth 1' \
       '--browser-auth --no-browser-auth' '--unknown'; do
     # Intentional fixture word splitting: every case above consists of simple tokens.
+    # shellcheck disable=SC2086 # Matrix entries are intentionally simple argv tokens.
     run bash -c 'source "$1/lib/vm/config.sh"; vm_cli_defaults; shift; vm_cli_parse run "$@"' \
       _ "$ROOT" $args
     [ "$status" -eq 2 ]
@@ -116,6 +118,16 @@ parse() {
   [ "${lines[1]}" = target ]
   run parse up target --name other
   [ "$status" -eq 2 ]
+}
+
+@test "CLI recognizes explicit base-cache action without doing state work while parsing" {
+  run parse base
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = base ]
+  [ ! -e "$MESTER_STATE_DIR" ]
+  run bash "$ROOT/lab-vm" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"base                            Verify/download the pinned immutable base image"* ]]
 }
 
 @test "CLI help works without private config or runtime state" {
@@ -205,6 +217,7 @@ assert json.load(sys.stdin)["effective_config"]["model"] == {"provider":"none"}
 }
 
 @test "CLI rejects malformed compatibility environment without side effects" {
+  # shellcheck disable=SC2016 # Literal command-substitution payload must remain data.
   run env VM_YES='$(touch forbidden)' bash "$ROOT/lab-vm" context --json
   [ "$status" -eq 2 ]
   [[ "$output" != *'touch forbidden'* ]]

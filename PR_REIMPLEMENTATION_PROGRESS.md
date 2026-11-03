@@ -2,12 +2,12 @@
 
 ## Control state
 
-- Phase: **Round 2 paused at C01 at owner request for model swap**.
+- Phase: **Round 2 resumed; TASK-03/C02 validated, preparing checkpoint commit**.
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
 - Implementing branch: `feat/vm-approach-2` at
-  `efe77202594c79dc1a926fa84a7a5dbc8866c66a`.
+  `f8aa799b165795f4235f70b42474ea7a02a0b122` before C02 commit.
 - Inspected source: PR #13 at
   `97af1d83a16fce68ddcc3390276c218a1b0cd518`.
 - Assigned session: current coordinating OpenCode session; no subagents assigned.
@@ -163,29 +163,31 @@ was not a guest bootstrap or a passing host-provisioning result.
 - Required changed actual VM launch parameter plus guest bootstrap sentinel and
   failure42→fresh fixed candidate, not just copied source hashes or agent nesting.
 
-## Round 2 task execution table (all NOT STARTED)
+## Round 2 task execution table
 
-No agent is assigned, no implementation start/completion time, no changed product
-files, no replacement tests/results and no commit SHA exist for these tasks yet.
+The owner resumed Round 2 after the model swap. TASK-01/02 are complete at C01;
+TASK-03 has completed fixture validation and is awaiting its C02 commit. Later
+tasks remain unstarted and retain their ordered preconditions. No live VM acceptance
+has occurred.
 
 | Task | Planned checkpoint | Status | Assigned/start/completion | Actual files/tests/results/SHA | Deviations/blockers |
 |---|---|---|---|---|---|
-| TASK-01 | C01 | VALIDATED | Coordinator/2026-11-03/2026-11-03 | CLI/config/docs;50 Bats total pass; C01 commit at handoff | None; no VM operations |
-| TASK-02 | C01 | VALIDATED | Delegated+coordinator/2026-11-03/2026-11-03 | Paths/tests;25 Python pass; C01 commit at handoff | None; no VM operations |
-| TASK-03 | C02 | NOT STARTED | Unassigned/—/— | — | Await approval |
-| TASK-04 | C03 | NOT STARTED | Unassigned/—/— | — | Await approval |
-| TASK-05 | C04 | NOT STARTED | Unassigned/—/— | — | Await approval |
-| TASK-06 | C05 | NOT STARTED | Unassigned/—/— | — | Await approval/rootful decision |
-| TASK-07 | C06 | NOT STARTED | Unassigned/—/— | — | Await approval |
-| TASK-08 | C07 | NOT STARTED | Unassigned/—/— | — | Await approval/provider behavior choice |
-| TASK-09 | C08 | NOT STARTED | Unassigned/—/— | — | Await approval |
-| TASK-10 | C09 | NOT STARTED | Unassigned/—/— | — | Await approval/version qualification |
-| TASK-11 | C10 | NOT STARTED | Unassigned/—/— | — | Await approval |
-| TASK-12 | C10 | NOT STARTED | Unassigned/—/— | — | Await approval |
-| TASK-13 | C11 | NOT STARTED | Unassigned/—/— | — | Await approval/real nested hardware |
-| TASK-14 | C12 | NOT STARTED | Unassigned/—/— | — | Await approval |
-| TASK-15 | C13 | NOT STARTED | Unassigned/—/— | — | Await approval/exact fresh-host handoff |
-| TASK-16 | C14 | NOT STARTED | Unassigned/—/— | — | All required live gates before cutover |
+| TASK-01 | C01 | DONE | Coordinator/2026-11-03/2026-11-03 | CLI/config/docs;50 Bats total pass; f8aa799 | None; no VM operations |
+| TASK-02 | C01 | DONE | Delegated+coordinator/2026-11-03/2026-11-03 | Paths/tests;25 Python pass; f8aa799 | None; no VM operations |
+| TASK-03 | C02 | VALIDATED | Coordinator/2026-11-03/2026-11-03 | disk/cache/overlay/seed;65 Bats,30 Python;pending C02 commit | Fixture-only; no real download/QEMU |
+| TASK-04 | C03 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-02; network policy tests next |
+| TASK-05 | C04 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-02; process/SSH implementation |
+| TASK-06 | C05 | NOT STARTED | Unassigned/—/— | — | Guest setup implementation; no host operations |
+| TASK-07 | C06 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-05/06 |
+| TASK-08 | C07 | NOT STARTED | Unassigned/—/— | — | Guest harness/provider parity |
+| TASK-09 | C08 | NOT STARTED | Unassigned/—/— | — | Depends on guest setup/runtime |
+| TASK-10 | C09 | NOT STARTED | Unassigned/—/— | — | Version qualification |
+| TASK-11 | C10 | NOT STARTED | Unassigned/—/— | — | Control key and secure path |
+| TASK-12 | C10 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-11 |
+| TASK-13 | C11 | NOT STARTED | Unassigned/—/— | — | Real nested hardware gate remains |
+| TASK-14 | C12 | NOT STARTED | Unassigned/—/— | — | Depends on prior implementation |
+| TASK-15 | C13 | NOT STARTED | Unassigned/—/— | — | Exact fresh-host handoff still required |
+| TASK-16 | C14 | NOT STARTED | Unassigned/—/— | — | All live gates before cutover |
 
 **Handoff stop condition:** ask the mission's explicit architecture/execution
 approval question. Do not start TASK-01, commit, push, run owner-host tests or
@@ -227,8 +229,9 @@ unchanged pre-existing `AM vm-migration-plan.md`. No staging/commit performed.
 
 ## C01 validation and model-swap handoff — 2026-11-03
 
-**Owner requested stop at the next available point. Stop after this checkpoint;
-TASK-03 is NOT STARTED. No background agent remains running.**
+**Historical handoff:** the owner requested a stop for model swap after C01.
+That pause ended with the user's subsequent “Continue please”; TASK-03 is now
+validated below. No background agent remains running.
 
 Implemented:
 
@@ -301,3 +304,63 @@ installation, actual agent permission behavior, OAuth and lifecycle are later
 tasks. Profile metadata stores runtime identity but does not authorize signalling.
 An fsync failure after rename can report failure after the atomic replacement
 has committed; no false rollback guarantee is made.
+
+**C01 committed:** `f8aa799b165795f4235f70b42474ea7a02a0b122`
+(`feat(vm): define validated profiles and workspace boundaries`). Exact15 planned
+files staged/committed using `git commit --only`; user's staged-empty mission file
+was deliberately excluded. This post-commit SHA/DONE update is an uncommitted
+ledger-only change to include with the next checkpoint. No push or PR created.
+At the time, the next task was TASK-03/C02; execution resumed at the owner's
+request. C01 has no real VM acceptance; full changed-VM self-test remains
+TASK-13/15.
+
+## TASK-03 / C02 validation — 2026-11-03
+
+Implemented the checksum-keyed immutable base cache and selected-profile disk/seed
+primitives. Changes:
+
+- Created `lib/vm/disk.sh`: fixed initial URL/SHA pin from the detached PR13 disk
+  module; size-bounded HTTPS curl, mandatory hash check before qemu-img use,
+  standalone qcow2/boot-sector validation, bounded free-space preflight, private
+  staging and atomic no-replace cache publication. Existing corrupt/partial cache
+  is diagnosed and never removed/replaced, including with ambient yes. New source
+  digest gets a separate cache key. Nested mode forces the parent proxy and an
+  empty `--noproxy` exclusion; there is no direct fallback.
+- Added private per-hash cache locking and safe `image-run`/`image-publish`,
+  profile-locked execution and no-replace overlay publication, and atomic bounded
+  seed writes to `lib/vm/paths.py`. Profile overlays bind to exact image hash/path,
+  preserve the shared base and other profiles, and existing chains must match.
+- Updated `lab-vm`/`lib/vm/config.sh` to expose explicit `base` preparation only;
+  unsupported lifecycle commands continue to refuse. Updated CLI/architecture
+  docs. Added `tests/vm-disk.bats` and helper cases in `tests/test_vm_paths.py`.
+- The source pin was inspected/reused offline from
+  `/tmp/vm-migration-source/lib/vm/disk.sh` at PR13 head. Remote URL availability
+  and bytes are **not** claimed verified; the explicit download path verifies the
+  configured SHA before any qemu-img operation. No `base` command was invoked.
+
+Test-first evidence and exact validation:
+
+| Check | Result |
+|---|---|
+| Initial `bats tests/vm-disk.bats` before disk module |10/10 expected FAIL: module absent |
+| C01 baseline (`git show HEAD:lib/vm/paths.py`) with five targeted C02 helper tests |Expected red: 4 failures +1 error (image-run, image-publish, overlay-publish, seed-write absent) |
+| Final `bats tests/` |65/65 PASS; disk suite includes all fixtures; no real network/QEMU |
+| Final `python3 -B -m unittest discover -s tests -p 'test_vm_*.py' -v` |30/30 PASS |
+| `shellcheck -x lab-vm lib/state.sh lib/vm/config.sh lib/vm/disk.sh tests/vm-cli.bats tests/vm-disk.bats` |PASS, full severity |
+| `bash -n lab-vm lib/state.sh lib/vm/config.sh lib/vm/disk.sh` |PASS |
+| `ruff check lib/vm/paths.py tests/test_vm_paths.py` and AST parse |PASS |
+| `python3 scripts/check-docs-consistency.py` |8 existing README/DECISIONS drift/link failures |
+| Docs checker reading exact main Git-object versions |Same8 failures, no new failure from C02 |
+| MCP `mester_tickets_validate` after recording C02 evidence on replacement #41 |PASS: synced, audit intact (130 entries), no lock/orphans/quality issues; criteria remain pending |
+
+Covered failures preserve prior cache/profile bytes and private fixture state. No
+real curl download, actual host `qemu-img`, QEMU launch, VM, package, service or
+credential action occurred. These fixtures are code-level evidence only, not
+V-IMAGE host acceptance, guest bootability or nested-self-test evidence.
+
+No architecture deviations. Implementation relies on Linux `renameat2(RENAME_NOREPLACE)`
+for atomic no-clobber publication; absence of that primitive fails closed. Seed
+content rejects common secret-bearing field/value keywords but remains dependent
+on TASK-06's trusted generator and later secret-canary scan for broader detection.
+
+**C02 commit and SHA are recorded immediately after the commit below.**
