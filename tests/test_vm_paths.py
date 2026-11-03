@@ -133,6 +133,16 @@ class PathsTest(unittest.TestCase):
         self.cli("profile-write", "--profile", "test.v2", data=dotted)
         self.assertEqual(self.cli("profile-read", "--profile", "test.v2"), dotted)
 
+    def test_profile_list_is_readonly_and_rejects_ambiguous_entries(self):
+        self.cli("profile-write", "--profile", "test", data=self.profile())
+        before = set(self.root.rglob("*"))
+        listed = self.cli("profile-list")
+        self.assertEqual([item["name"] for item in listed], ["test"])
+        self.assertEqual(set(self.root.rglob("*")), before)
+        bad = self.root / "vm/profiles/unknown"
+        bad.mkdir(mode=0o700)
+        self.cli("profile-list", ok=False)
+
     def test_profile_memory_bounds(self):
         for memory in (0, 129, 1048576, True):
             self.cli("profile-write", "--profile", "test", data=dict(self.profile(), memory_gib=memory), ok=False)
@@ -150,6 +160,80 @@ class PathsTest(unittest.TestCase):
         self.assertEqual(self.cli("profile-read", "--profile", "pending"), provisioning)
         for status in ("ready", "suspending", "suspended"):
             self.cli("profile-write", "--profile", "pending", data=dict(provisioning, status=status), ok=False)
+
+    def test_profile_state_machine_requires_expected_status_and_verified_transitions(self):
+        image_hash = "a" * 64
+        image_dir = self.root / "vm/images"
+        (self.root / "vm").mkdir(mode=0o700)
+        image_dir.mkdir(mode=0o700)
+        image_dir.chmod(0o700)
+        image_cache = image_dir / image_hash
+        image_cache.mkdir(mode=0o700)
+        base = image_cache / "base.qcow2"
+        base.write_text("base\n", encoding="ascii")
+        base.chmod(0o600)
+        data = dict(
+            self.profile(), image_sha256=image_hash, image_path=str(base),
+            opencode_version="2.0.0", guest_payload_sha256="b" * 64,
+            runtime_payload_sha256="c" * 64,
+        )
+        self.cli("profile-write", "--profile", "test", data=data)
+
+        def transition(expected, target, **patch):
+            result = subprocess.run(
+                [sys.executable, "-B", str(SCRIPT), "profile-transition",
+                 "--state-root", str(self.root), "--profile", "test",
+                 "--expected-status", expected, "--status", target],
+                input=json.dumps(patch), text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+
+        starting = transition("allocated", "starting")
+        self.assertEqual(starting["status"], "starting")
+        provisioning = transition("starting", "provisioning")
+        self.assertEqual(provisioning["status"], "provisioning")
+        ready = transition("provisioning", "ready")
+        self.assertEqual(ready["status"], "ready")
+        self.assertEqual(transition("ready", "suspending")["status"], "suspending")
+        self.assertEqual(transition("suspending", "suspended")["status"], "suspended")
+        before = self.cli("profile-read", "--profile", "test")
+        for expected, target in (("ready", "suspending"), ("suspended", "ready"), ("suspended", "provisioning")):
+            result = subprocess.run(
+                [sys.executable, "-B", str(SCRIPT), "profile-transition",
+                 "--state-root", str(self.root), "--profile", "test",
+                 "--expected-status", expected, "--status", target],
+                input="{}", text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.cli("profile-read", "--profile", "test"), before)
+
+    def test_unknown_profile_is_terminal_and_does_not_accept_metadata_repair(self):
+        data = self.profile()
+        self.cli("profile-write", "--profile", "test", data=data)
+        result = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "profile-transition",
+             "--state-root", str(self.root), "--profile", "test",
+             "--expected-status", "allocated", "--status", "starting"],
+            input="{}", text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "profile-transition",
+             "--state-root", str(self.root), "--profile", "test",
+             "--expected-status", "starting", "--status", "unknown"],
+            input="{}", text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        unknown = self.cli("profile-read", "--profile", "test")
+        result = subprocess.run(
+            [sys.executable, "-B", str(SCRIPT), "profile-transition",
+             "--state-root", str(self.root), "--profile", "test",
+             "--expected-status", "unknown", "--status", "failed"],
+            input=json.dumps({"memory_gib": 4}), text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.cli("profile-read", "--profile", "test"), unknown)
 
     def test_home_local_shell_credentials_and_aliases(self):
         home = self.base / "home"
@@ -261,6 +345,7 @@ class PathsTest(unittest.TestCase):
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         changed = dict(data, profile_id=str(uuid.uuid4()))
         self.cli("profile-write", "--profile", "test", data=changed, ok=False)
+        self.cli("profile-write", "--profile", "test", data=dict(data, memory_gib=4), ok=False)
         data["descendants_possible"] = True
         self.cli("profile-write", "--profile", "test", data=data)
         self.cli("profile-write", "--profile", "test", data=dict(data, descendants_possible=False), ok=False)
@@ -292,6 +377,25 @@ class PathsTest(unittest.TestCase):
             worker.join(10)
             self.assertEqual(worker.exitcode, 0)
         self.assertEqual(json.loads((self.root / "counter").read_text()), 60)
+
+    def test_profile_run_holds_ordered_locks_for_nested_state_transition(self):
+        paths = load_module()
+        self.cli("profile-write", "--profile", "test", data=self.profile())
+        other = dict(self.profile(), name="child")
+        self.cli("profile-write", "--profile", "child", data=other)
+        nested = (
+            "import importlib.util,sys; from pathlib import Path; "
+            f"spec=importlib.util.spec_from_file_location('nested_paths',{str(SCRIPT)!r}); "
+            "module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); "
+            "module.profile_transition(Path(sys.argv[1]),sys.argv[2],'allocated','starting',{})"
+        )
+        command = [sys.executable, "-c", nested, str(self.root), "test"]
+        self.assertEqual(paths.profile_run(self.root, "test", command), 0)
+        self.assertEqual(self.cli("profile-read", "--profile", "test")["status"], "starting")
+
+        command = [sys.executable, "-c", nested, str(self.root), "child"]
+        self.assertEqual(paths.profile_run(self.root, "test", command), 0)
+        self.assertEqual(self.cli("profile-read", "--profile", "child")["status"], "starting")
 
     def test_frozen_runtime_manifest_immutable(self):
         source = self.repo

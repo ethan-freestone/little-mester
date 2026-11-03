@@ -19,6 +19,7 @@ create locks or directories; atomic replacement makes unlocked reads coherent.
 
 import argparse
 import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -300,6 +301,24 @@ PROFILE_FIELDS = {
     "runtime_payload_sha256", "status",
 }
 STATUSES = {"allocated", "starting", "provisioning", "ready", "suspending", "suspended", "failed", "deleting", "unknown"}
+PROFILE_TRANSITIONS = {
+    "allocated": {"starting", "failed", "deleting"},
+    "starting": {"provisioning", "ready", "failed", "unknown"},
+    "provisioning": {"ready", "failed", "unknown"},
+    "ready": {"suspending", "unknown"},
+    "suspending": {"suspended", "ready", "unknown"},
+    "suspended": {"starting", "deleting", "unknown"},
+    "failed": {"starting", "deleting", "unknown"},
+    "deleting": set(),
+    "unknown": set(),
+}
+TRANSITION_PATCH_FIELDS = {
+    ("allocated", "starting"): {"runtime_payload_sha256"},
+    ("starting", "provisioning"): {"runtime_identity"},
+    ("provisioning", "ready"): {"opencode_version"},
+    ("suspending", "suspended"): {"memory_gib"},
+    ("suspended", "starting"): {"workspace", "memory_gib", "max_depth"},
+}
 
 
 def profile_validate(data, root, name):
@@ -350,6 +369,25 @@ def profile_read(root, name):
     path = profile_path(root, name) / "profile.json"
     require(path.is_file())
     return profile_validate(decode(path.read_bytes()), root, name)
+
+
+def profile_list(root):
+    """Read every exact private profile without creating or repairing state."""
+    root = state_root(str(root), must_exist=False, scan=True)
+    if not root.exists():
+        return []
+    profiles = root / "vm/profiles"
+    if not profiles.exists() and not profiles.is_symlink():
+        return []
+    require(profiles.is_dir() and not profiles.is_symlink())
+    private_entry(profiles)
+    result = []
+    for path in sorted(profiles.iterdir(), key=lambda item: item.name):
+        require(path.is_dir() and not path.is_symlink())
+        profile_name(path.name)
+        private_entry(path)
+        result.append(profile_read(root, path.name))
+    return result
 
 
 def fsync_dir(path):
@@ -419,25 +457,89 @@ def lock_file(path):
     try:
         private_entry(path)
         fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        yield fd
     finally:
         os.close(fd)
+
+
+def _inherited_lock_fd(path, variable):
+    raw = os.environ.get(variable)
+    require(raw is not None and re.fullmatch(r"[0-9]+", raw) is not None)
+    fd = int(raw)
+    info = os.fstat(fd)
+    target = os.stat(path, follow_symlinks=False)
+    require(stat.S_ISREG(info.st_mode) and info.st_dev == target.st_dev and info.st_ino == target.st_ino)
+    private_entry(Path(path))
+    probe = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            require(error.errno in (errno.EAGAIN, errno.EACCES))
+        else:
+            fcntl.flock(probe, fcntl.LOCK_UN)
+            require(False)
+    finally:
+        os.close(probe)
+    return fd
+
+
+def _inherited_profile_locks(root, name, path):
+    allocation_root = os.environ.get("VM_HELD_ALLOCATION_ROOT")
+    allocation_fd_value = os.environ.get("VM_HELD_ALLOCATION_FD")
+    profile_variables = ("VM_HELD_PROFILE_ROOT", "VM_HELD_PROFILE_NAME", "VM_HELD_PROFILE_PATH", "VM_HELD_PROFILE_FD")
+    profile_present = [variable in os.environ for variable in profile_variables]
+    if allocation_root is None and allocation_fd_value is None and not any(profile_present):
+        return None
+    require(allocation_root == str(root) and allocation_fd_value is not None)
+    allocation_fd = _inherited_lock_fd(root / ".allocation.lock", "VM_HELD_ALLOCATION_FD")
+    if not any(profile_present):
+        return allocation_fd, None
+    require(all(profile_present))
+    inherited_name = profile_name(os.environ["VM_HELD_PROFILE_NAME"])
+    inherited_path = profile_path(root, inherited_name)
+    require(os.environ["VM_HELD_PROFILE_ROOT"] == str(root))
+    require(os.environ["VM_HELD_PROFILE_PATH"] == str(inherited_path))
+    profile_fd = _inherited_lock_fd(inherited_path / ".profile.lock", "VM_HELD_PROFILE_FD")
+    if inherited_name != name:
+        return allocation_fd, None
+    require(inherited_path == path)
+    return allocation_fd, profile_fd
+
+
+@contextmanager
+def profile_lock_details(root, name):
+    """Lock root then exact profile; nested managed workers reuse inherited fds."""
+    profile_name(name)
+    root = ensure_private_root(root)
+    path = profile_path(root, name)
+    inherited = _inherited_profile_locks(root, name, path)
+    if inherited is not None:
+        allocation_fd, profile_fd = inherited
+        state_root(str(root), must_exist=True)
+        private_entry(path)
+        require((path / "profile.json").exists())
+        if profile_fd is not None:
+            yield path, allocation_fd, profile_fd
+        else:
+            with lock_file(path / ".profile.lock") as acquired_profile_fd:
+                yield path, allocation_fd, acquired_profile_fd
+        return
+    with lock_file(root / ".allocation.lock") as allocation_fd:
+        state_root(str(root), must_exist=True)
+        for directory in (root / "vm", root / "vm/profiles", path):
+            private_mkdir(directory)
+        with lock_file(path / ".profile.lock") as profile_fd:
+            if not (path / "profile.json").exists():
+                require(all(p.name in {".profile.lock", "runtime"} for p in path.iterdir()))
+            yield path, allocation_fd, profile_fd
 
 
 @contextmanager
 def profile_lock(root, name):
     """Mutating API: validate/create private state; lock allocation then profile."""
-    profile_name(name)
-    root = ensure_private_root(root)
-    with lock_file(root / ".allocation.lock"):
-        state_root(str(root), must_exist=True)
-        path = profile_path(root, name)
-        for directory in (root / "vm", root / "vm/profiles", path):
-            private_mkdir(directory)
-        with lock_file(path / ".profile.lock"):
-            if not (path / "profile.json").exists():
-                require(all(p.name in {".profile.lock", "runtime"} for p in path.iterdir()))
-            yield path
+    with profile_lock_details(root, name) as (path, _allocation_fd, _profile_fd):
+        yield path
 
 
 @contextmanager
@@ -583,13 +685,19 @@ def profile_run(root, name, command):
     require(command)
     root = state_root(str(root), must_exist=True)
     profile_read(root, name)
-    with profile_lock(root, name) as profile:
+    with profile_lock_details(root, name) as (profile, allocation_fd, profile_fd):
         data = profile_read(root, name)
         env = os.environ.copy()
         env["VM_PROFILE_PATH"] = str(profile)
         env["VM_PROFILE_IMAGE_PATH"] = data["image_path"] or ""
         env["VM_PROFILE_IMAGE_SHA256"] = data["image_sha256"] or ""
-        return subprocess.run(command, env=env, check=False).returncode
+        env["VM_HELD_ALLOCATION_ROOT"] = str(root)
+        env["VM_HELD_PROFILE_ROOT"] = str(root)
+        env["VM_HELD_PROFILE_NAME"] = name
+        env["VM_HELD_PROFILE_PATH"] = str(profile)
+        env["VM_HELD_ALLOCATION_FD"] = str(allocation_fd)
+        env["VM_HELD_PROFILE_FD"] = str(profile_fd)
+        return subprocess.run(command, env=env, pass_fds=(allocation_fd, profile_fd), check=False).returncode
 
 
 def image_run(root, digest, command):
@@ -614,11 +722,41 @@ def profile_write(root, name, data):
             require(all(data[key] == old[key] for key in ("profile_id", "name", "depth")))
             require(data["max_depth"] <= old["max_depth"])
             require(not old["descendants_possible"] or data["descendants_possible"])
+            require(data["status"] == old["status"])
+            for key in PROFILE_FIELDS - {"max_depth", "descendants_possible"}:
+                require(data[key] == old[key])
         runtime = path / "runtime/manifest.json"
         if runtime.exists():
             require(data["runtime_payload_sha256"] == hashlib.sha256(runtime.read_bytes()).hexdigest())
         atomic_json(path / "profile.json", data)
     return data
+
+
+def profile_transition(root, name, expected_status, target_status, patch=None):
+    """Atomically apply one allowed state transition under root/profile locks."""
+    require(expected_status in STATUSES and target_status in STATUSES)
+    patch = {} if patch is None else patch
+    require(isinstance(patch, dict)
+            and patch.keys() <= TRANSITION_PATCH_FIELDS.get((expected_status, target_status), set()))
+    root = state_root(str(root), must_exist=True)
+    with profile_lock(root, name) as path:
+        require((path / "profile.json").is_file())
+        old = profile_read(root, name)
+        require(old["status"] == expected_status)
+        require(target_status in PROFILE_TRANSITIONS[expected_status])
+        updated = dict(old)
+        updated.update(patch)
+        updated["status"] = target_status
+        profile_validate(updated, root, name)
+        require(updated["profile_id"] == old["profile_id"])
+        require(updated["depth"] == old["depth"])
+        require(updated["max_depth"] <= old["max_depth"])
+        require(not old["descendants_possible"] or updated["descendants_possible"])
+        runtime = path / "runtime/manifest.json"
+        if runtime.exists():
+            require(updated["runtime_payload_sha256"] == hashlib.sha256(runtime.read_bytes()).hexdigest())
+        atomic_json(path / "profile.json", updated)
+    return updated
 
 
 def file_capture(source, rel):
@@ -706,13 +844,16 @@ def main():
     parser = Parser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
     for command in ("config", "validate-config", "context", "validate-workspace",
-                    "profile-read", "profile-write", "runtime-install", "image-run",
+                    "profile-read", "profile-list", "profile-write", "profile-transition", "runtime-install", "image-run",
                     "image-publish", "profile-run", "overlay-publish", "seed-write"):
         sub = commands.add_parser(command)
         sub.add_argument("--state-root", required=True)
-        if command in ("context", "profile-read", "profile-write", "runtime-install",
+        if command in ("context", "profile-read", "profile-write", "profile-transition", "runtime-install",
                        "profile-run", "overlay-publish", "seed-write"):
             sub.add_argument("--profile", required=True)
+        if command == "profile-transition":
+            sub.add_argument("--expected-status", required=True, choices=sorted(STATUSES))
+            sub.add_argument("--status", required=True, choices=sorted(STATUSES))
         if command in ("context", "validate-workspace"):
             sub.add_argument("--repository", required=True)
             sub.add_argument("--workspace", required=command == "validate-workspace")
@@ -746,8 +887,15 @@ def main():
                                                       args.recurse, args.unsafe_recurse))
     elif args.command == "profile-read":
         result = profile_read(root, args.profile)
+    elif args.command == "profile-list":
+        result = profile_list(root)
     elif args.command == "profile-write":
         result = profile_write(root, args.profile, decode(sys.stdin.buffer.read(1024 * 1024 + 1)))
+    elif args.command == "profile-transition":
+        result = profile_transition(
+            root, args.profile, args.expected_status, args.status,
+            decode(sys.stdin.buffer.read(1024 * 1024 + 1)),
+        )
     elif args.command == "image-run":
         return image_run(root, args.sha256, args.command_argv)
     elif args.command == "image-publish":

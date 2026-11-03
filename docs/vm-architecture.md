@@ -180,6 +180,40 @@ warm-bootstrap refusal, payload/hash/readiness checks, config migration and secr
 handling. They do not install packages on this host or exercise a real guest. The
 real image, KVM, SSH and nested-VM acceptance gates remain restricted and pending.
 
+### Lifecycle and resource contract (C06 fixture target)
+
+The profile state machine is `allocated → starting → provisioning → ready`,
+`ready → suspending → suspended → starting`, and `failed → starting` for an
+explicit retry. Ambiguous process identity becomes `unknown` and blocks mutation;
+status is read-only. Repeated same-workspace ready operations verify the exact
+owned runtime and bounded guest readiness without bootstrap, package, or config
+transfer. A workspace change goes through the same graceful shutdown and child
+inventory guard as suspend/resize, reuses the selected profile's overlay and key,
+and does not restart when the selected workspace is already B.
+
+Default guest RAM is 8/4/2/1 GiB at recursion depths 0/1/2/3+, with a validated
+1–128 GiB override only for a fresh profile. Resource checks use host
+`MemAvailable`, every applicable cgroup v1/v2 ancestor, and a 512 MiB reserve.
+Managed resize may project only the target QEMU's verified private resident pages
+as releasable. A private root allocation lock and process-identity-backed
+reservations serialize starts; stale reservations are reclaimed only after their
+exact owner identity is confirmed stopped. Unreadable cgroup/identity state fails
+closed.
+
+Suspend preserves the overlay, guest data, and auth state. Unknown or unmanaged
+QEMU children block shutdown; explicit recursive suspend calls a frozen controller
+and verifies each child stopped before powering off its parent. Shutdown timeout
+never force-kills QEMU and preserves the profile. Destructive down/stop/rebuild
+requires exact effect confirmation and a separate sticky-descendant acknowledgement;
+`--yes` alone is insufficient. Enabled auth forwarding fails closed until the
+TASK-10 exporter exists. Reset/deletion scope is the selected profile only and
+must preserve the immutable image cache, host workspace, and reports.
+
+These are C06 implementation contracts, not real-VM claims. The lifecycle, memory,
+and child-inventory suites use disposable state, synthetic procfs, and fake
+callbacks. The production lifecycle CLI remains unavailable until it can satisfy
+the complete runtime contracts; no command may report success for a stubbed VM.
+
 Examples shared by Bash and Fish (diagnostics only):
 
 ```sh
