@@ -2,12 +2,12 @@
 
 ## Control state
 
-- Phase: **Round 2 active; C01–C04 committed; TASK-06/C05 fixture-validated, checkpoint commit pending**.
+- Phase: **Round 2 active; C01–C05 committed; TASK-06/C05 fixture-validated**.
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
-- Implementing branch: `feat/vm-approach-2`; C04 HEAD was
-  `2c1a82c333dad7b237b150574b198e3cb191ee1c` before the C05 checkpoint commit.
+- Implementing branch: `feat/vm-approach-2`; C05 implementation checkpoint is
+  `cb7091a17720b59056bd2677f3af1aba5699f944`.
 - Inspected source: PR #13 at
   `97af1d83a16fce68ddcc3390276c218a1b0cd518`.
 - Assigned session: current coordinating OpenCode session; no subagents assigned.
@@ -166,8 +166,8 @@ was not a guest bootstrap or a passing host-provisioning result.
 ## Round 2 task execution table
 
 The owner resumed Round 2 after the model swap. TASK-01/02 through TASK-05 are
-committed at C01–C04. TASK-06/C05 is fixture-validated and awaiting its scoped
-checkpoint commit. Later tasks retain their ordered preconditions. No live
+committed at C01–C04. TASK-06/C05 is fixture-validated and committed. Later tasks
+retain their ordered preconditions. No live
 VM/network acceptance has occurred.
 
 | Task | Planned checkpoint | Status | Assigned/start/completion | Actual files/tests/results/SHA | Deviations/blockers |
@@ -177,7 +177,7 @@ VM/network acceptance has occurred.
 | TASK-03 | C02 | DONE | Coordinator/2026-11-03/2026-11-03 | disk/cache/overlay/seed;65 Bats,30 Python;68861dc | Fixture-only; no real download/QEMU |
 | TASK-04 | C03 | DONE | Coordinator/2026-11-03/2026-11-03 | proxy policy/chaining;36 proxy Python,66 Bats,66 VM Python;8dc9816 | Loopback/mock fixtures only; no live SEC-NET |
 | TASK-05 | C04 | DONE | Coordinator/2026-11-03/2026-11-03 | runner/SSH/process supervision;77 Bats,76 VM Python;b530193 | Fake executable/temp/loopback fixtures only; no real KVM/QEMU/guest; lifecycle CLI wiring remains later work |
-| TASK-06 | C05 | VALIDATED (commit pending) | Coordinator/2026-11-03/2026-11-03/— | Guest bootstrap/config/hash/readiness;98 Python,77 Bats; cloud-init schema; static checks PASS | Fixture-only; no host install, real VM, image/network, SEC-NET or nested acceptance |
+| TASK-06 | C05 | DONE | Coordinator/2026-11-03/2026-11-03 | Guest bootstrap/config/hash/readiness;98 Python,77 Bats; cloud-init schema; static checks PASS; cb7091a | Fixture-only; no host install, real VM, image/network, SEC-NET or nested acceptance |
 | TASK-07 | C06 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-05/06 |
 | TASK-08 | C07 | NOT STARTED | Unassigned/—/— | — | Guest harness/provider parity |
 | TASK-09 | C08 | NOT STARTED | Unassigned/—/— | — | Depends on guest setup/runtime |
@@ -501,8 +501,8 @@ pending and restricted as previously recorded.
 
 ## TASK-06 / C05 — guest bootstrap and native payload
 
-**State:** implementation and fixture validation complete; C05 checkpoint commit
-pending. Coordinator execution on `feat/vm-approach-2`, 2026-11-03.
+**State:** implementation, fixture validation and C05 code checkpoint complete.
+Coordinator execution on `feat/vm-approach-2`, 2026-11-03.
 
 Created `lib/vm/cloud-init.sh`, `lib/vm/guest.sh`,
 `lib/vm/guest-bootstrap.sh`, `scripts/vm-opencode-config.py`,
@@ -548,4 +548,8 @@ QEMU/KVM guest boot, image download, host-network change, live
 SEC-NET, credentials, or nested-VM operation was performed. C05 is local fixture
 evidence only, not host/VM acceptance.
 
-**Checkpoint commit pending:** `feat(vm): provision native guest harness and workloads`.
+**C05 committed:** `cb7091a17720b59056bd2677f3af1aba5699f944`
+(`feat(vm): provision native guest harness and workloads`), 14 exact C05 paths.
+No push or PR was created. This execution-ledger SHA closeout is a separate
+documentation-only commit; the staged-empty/worktree-populated
+`vm-migration-plan.md` remains excluded.
