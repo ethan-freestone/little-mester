@@ -10,7 +10,9 @@
   `cb7091a17720b59056bd2677f3af1aba5699f944`.
 - C06 implementation commit: `de5150ed80789583db7dc483422ac918df4d60ec`, on
   `feat/vm-approach-2`, based at `5ecd200d32ba909e41d4a15885f57681a32f60d6`;
-  the SHA ledger closeout is being committed separately.
+  its SHA ledger closeout is recorded separately.
+- C10 implementation commit: `272140ec0fb7798f96d759623bcf6699e13f16a6`, on
+  `feat/vm-approach-2`, based on C09 `13a2292`; no push was performed.
 - Inspected source: PR #13 at
   `97af1d83a16fce68ddcc3390276c218a1b0cd518`.
 - Assigned session: current coordinating OpenCode session; no subagents assigned.
@@ -185,8 +187,8 @@ VM/network acceptance has occurred.
 | TASK-08 | C07 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-03/2026-11-03 | Native OpenCode V2/Aider adapters, explicit provider config and permission handling, ready-profile-bound diagnostics, constrained cwd; 148 VM Python, 116 Bats, Bash syntax, ShellCheck, and diff checks PASS | Fixture-only; no live Aider/provider/UI or human-permission acceptance, VM, image, or network operation; live gates remain separately approved |
 | TASK-09 | C08 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Verified loopback metrics service and selected QEMU guestfwd; collector concurrency/history, optional guest plugin retry/disabled state, child metrics isolation, and distinct exit-confirm callbacks; 160 VM Python tests, 122 Bats tests, Bash syntax, ShellCheck, Python compilation, JSX, and diff checks PASS | Fixture-only; no live VM, GPU, Docker, or TUI renderer actions; HUMAN-TUI and host/VM acceptance remain separate approved gates |
 | TASK-10 | C09 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Scoped native auth/browser bridge, private escrow, runtime key adapters, lifecycle export guard; 36 auth/browser Python tests, 196 full Python tests, 123 Bats; Ruff, ShellCheck, Bash syntax, Python compilation, diff checks PASS | Local fixture checkpoint only; no live login, auth-store inspection, credential export/import, guest, or host browser acceptance; TASK-15 HUMAN-AUTH and refreshed-token owner proof remain pending |
-| TASK-11 | C10 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Filtered Git-HEAD-bound snapshots; exclusions, race/capacity checks, synthetic Git and retained-snapshot verification; snapshot Python fixtures pass | Fixture-only; commit SHA closeout follows; no live VM or host acceptance |
-| TASK-12 | C10 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Persisted identity/depth guards, KVM/CPU preflight, isolated candidate state/argv, immediate-parent proxy depth and exact descendant-safe cleanup; 5 recursion Python cases, 6 recursion Bats cases; full 214 VM Python and 129 Bats pass | Public `run`/`up` remain undispatched until TASK-16; real nested KVM/VM and host/human acceptance remain pending |
+| TASK-11 | C10 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Filtered Git-HEAD-bound snapshots; exclusions, race/capacity checks, synthetic Git and retained-snapshot verification; snapshot Python fixtures pass; `272140e` | Fixture-only; no live VM or host acceptance |
+| TASK-12 | C10 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Persisted identity/depth guards, KVM/CPU preflight, isolated candidate state/argv, immediate-parent proxy depth and exact descendant-safe cleanup; 5 recursion Python cases, 6 recursion Bats cases; full 214 VM Python and 129 Bats pass; `272140e` | Public `run`/`up` remain undispatched until TASK-16; real nested KVM/VM and host/human acceptance remain pending |
 | TASK-13 | C11 | NOT STARTED | Unassigned/—/— | — | Real nested hardware gate remains |
 | TASK-14 | C12 | NOT STARTED | Unassigned/—/— | — | Depends on prior implementation |
 | TASK-15 | C13 | NOT STARTED | Unassigned/—/— | — | Exact fresh-host handoff still required |
@@ -649,9 +651,9 @@ gates; this fixture milestone does not claim those live outcomes.
 
 ## TASK-11/12 / C10 — revision-bound snapshots and bounded recursion
 
-**State:** implementation and fixture validation complete on `feat/vm-approach-2`;
-local C10 code checkpoint is being committed. Coordinator execution on 2026-11-04.
-No push or PR update was performed.
+**State:** implementation and fixture validation committed locally on
+`feat/vm-approach-2` as `272140ec0fb7798f96d759623bcf6699e13f16a6` (based on C09
+`13a2292`). Coordinator execution on 2026-11-04. No push or PR update was performed.
 
 Implemented `scripts/vm-recursion-workspace.py` for private, filtered snapshots of
 the selected self-write checkout. The source must have a canonical Git HEAD;
