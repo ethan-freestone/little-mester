@@ -802,7 +802,7 @@ vm_lifecycle_install_runtime() {
     lib/vm/lifecycle.sh lib/vm/paths.py lib/vm/process.py lib/vm/proxy.py
     lib/vm/runner.sh lib/vm/services.sh lib/vm/ssh.sh
     scripts/vm-opencode-config.py scripts/vm-python-tools.sh
-    scripts/vm-recursion-live-children.py scripts/vm-recursion-workspace.py scripts/vm_memory_budget.py
+     scripts/vm-recursion-live-children.py scripts/vm-recursion-workspace.py scripts/vm-self-test.py scripts/vm_memory_budget.py
     lib/vm/metrics_service.py agent/metrics/gather.py
   )
   "$VM_LIFECYCLE_PYTHON" "$VM_LIFECYCLE_PATHS" runtime-install --state-root "$root" --profile "$name" \
@@ -1350,9 +1350,11 @@ vm_lifecycle_profile_runtime() {
     "$runtime/lib/vm/cloud-init.sh" "$runtime/lib/vm/guest.sh" \
     "$runtime/lib/vm/guest-bootstrap.sh" "$runtime/lib/vm/runner.sh" \
     "$runtime/lib/vm/ssh.sh" "$runtime/lib/vm/services.sh" \
-    "$runtime/lib/vm/process.py" "$runtime/lib/vm/proxy.py" \
-    "$runtime/scripts/vm-opencode-config.py" "$runtime/scripts/vm-python-tools.sh" \
-    "$runtime/scripts/vm-recursion-live-children.py" "$runtime/scripts/vm_memory_budget.py"; do
+     "$runtime/lib/vm/process.py" "$runtime/lib/vm/proxy.py" \
+     "$runtime/scripts/vm-opencode-config.py" "$runtime/scripts/vm-python-tools.sh" \
+     "$runtime/scripts/vm-recursion-live-children.py" "$runtime/scripts/vm-recursion-workspace.py" \
+     "$runtime/scripts/vm-self-test.py" \
+     "$runtime/scripts/vm_memory_budget.py"; do
     [[ -f "$path" && ! -L "$path" ]] || {
       vm_lifecycle_error 'The selected profile has no complete frozen lifecycle runtime; source-tree control was not executed.'
       return 2

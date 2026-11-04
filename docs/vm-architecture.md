@@ -20,6 +20,23 @@ fixture-tested exact-run `recursion-clean` operation are dispatched. Public `run
 and `up` remain fail-closed until TASK-16; ordinary `./lab` remains the existing
 Docker launcher.
 
+### C11 changed-VM self-test status
+
+`scripts/vm-self-test.py` defines a bounded, ordered evidence state machine and
+private 0600 no-clobber reports. Fixture coverage creates filtered source copies,
+injects a guest bootstrap sentinel `A` plus exit 42 and one-vCPU argv/assertion,
+then fixes only a second copy to sentinel `B` and snapshots it afresh. Tests run
+the copied bootstrap prefix in an isolated temporary guest root, inspect the
+copied QEMU argv and execute the copied process Bats suite; the selected source
+checkout is hash-checked as unchanged. The report distinguishes fixture evidence
+from live E2E acceptance, records exact hashes/deadlines/causes and marks live
+acceptance `NOT_RUN`.
+
+The live self-test adapter is deliberately unavailable pending the TASK-15 handoff.
+The CLI therefore fails closed without starting a VM; fixture success is not
+changed-VM, nested-VM, host, network, agent, or human acceptance. Public `run`/`up`
+dispatch remains deferred to TASK-16.
+
 ### CLI and configuration contract
 
 - `./lab-vm --help`: command/options and actual checkpoint availability.
