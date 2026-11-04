@@ -5,9 +5,8 @@
 // https://opencode.ai/v2/docs/build/plugins/ (ctx.tool.transform -> editor.add).
 // A markdown file in a `tools/` directory is NOT a tool in v2; that was v1.
 //
-// The tool queries the metrics sidecar over the compose `internal` network
-// (Docker DNS name `metrics`). No host port is published for that service, so
-// the endpoint is only reachable from inside the compose network.
+// Docker mode uses Compose DNS inside its private network. A native VM agent is
+// given an explicit endpoint only after its host verifies the selected guestfwd.
 
 import { Plugin } from "@opencode/plugin"
 
@@ -18,10 +17,12 @@ const DEFAULT_TIMEOUT_MS = 5000
 //  - 127.0.0.1     -> sidecar running in the same network namespace (e.g. `docker exec`)
 // Override with METRICS_URL when the sidecar lives somewhere else.
 function endpoints() {
-  const list: string[] = []
-  if (process.env.METRICS_URL) list.push(process.env.METRICS_URL.replace(/\/+$/, ""))
-  list.push("http://metrics:19532", "http://127.0.0.1:19532")
-  return [...new Set(list)]
+  const configured = process.env.METRICS_URL?.trim()
+  if (configured !== undefined) {
+    if (!configured || configured.toLowerCase() === "disabled") return []
+    return [configured.replace(/\/+$/, "")]
+  }
+  return ["http://metrics:19532", "http://127.0.0.1:19532"]
 }
 
 type Metrics = {
@@ -48,20 +49,31 @@ type Metrics = {
 
 async function fetchMetrics(signal?: AbortSignal) {
   const tried: string[] = []
-  for (const base of endpoints()) {
-    const url = `${base}/metrics`
-    tried.push(url)
-    try {
-      const res = await fetch(url, {
-        signal,
-        headers: { accept: "application/json" },
-      })
-      if (!res.ok) continue
-      return { base, data: (await res.json()) as Metrics }
-    } catch {
-      // try the next candidate
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+  const abort = () => controller.abort()
+  signal?.addEventListener("abort", abort, { once: true })
+  try {
+    for (const base of endpoints()) {
+      const url = `${base}/metrics`
+      tried.push(url)
+      try {
+        const res = await fetch(url, {
+          signal: controller.signal,
+          headers: { accept: "application/json" },
+        })
+        if (!res.ok) continue
+        return { base, data: (await res.json()) as Metrics }
+      } catch {
+        if (controller.signal.aborted) break
+        // try the next candidate
+      }
     }
+  } finally {
+    clearTimeout(timeout)
+    signal?.removeEventListener("abort", abort)
   }
+  if (!tried.length) throw new Error("metrics are disabled for this VM profile")
   throw new Error(`metrics sidecar unreachable (tried: ${tried.join(", ")})`)
 }
 
@@ -137,10 +149,12 @@ export default Plugin.define({
             return { content: formatReport(data, base) }
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err)
+            const dockerHint = process.env.METRICS_URL === undefined
+              ? " Check: `docker compose ps metrics` and `docker compose logs metrics`."
+              : " The native agent remains usable; retry after its verified host metrics service is available."
             return {
-              content:
-                `Could not read host metrics: ${message}\n` +
-                `The metrics sidecar may be down. Check: \`docker compose ps metrics\` and \`docker compose logs metrics\`.`,
+              content: `Could not read host metrics: ${message}\n` +
+                `Metrics are optional and do not block the agent.${dockerHint}`,
             }
           }
         },

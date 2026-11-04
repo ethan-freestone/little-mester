@@ -251,12 +251,19 @@ vm_config_load() {
       VM_MAX_DEPTH="$LAB_VM_MAX_DEPTH"
     fi
   fi
+  if [[ -v LAB_VM_RECURSION_DEPTH ]] && (( 10#$LAB_VM_RECURSION_DEPTH > 0 )) &&
+    [[ -v 'VM_SEEN[metrics]' && "${VM_OPTIONS[metrics]}" == on ]]; then
+    vm_error 'Nested profiles cannot forward ancestor host metrics; a child-local metrics endpoint is not implemented.'
+    return 2
+  fi
   config="$(python3 "$VM_PATHS_HELPER" config --state-root "$VM_STATE_ROOT")" || return 2
   # JSON parsing only. Keys come from a fixed CLI whitelist, never evaluated shell code.
   config="$(printf '%s' "$config" | python3 -c '
 import json,os,sys
 c=json.load(sys.stdin)
 args=sys.argv[1:]
+if os.environ.get("LAB_VM_RECURSION_DEPTH") not in (None,"0"):
+    c["metrics"]="off"
 if os.environ.get("VM_OPENCODE_VERSION"):
     c["opencode_version"]=os.environ["VM_OPENCODE_VERSION"]
 for key,value in zip(args[::2],args[1::2]):

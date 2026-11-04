@@ -466,6 +466,7 @@ vm_lifecycle_start_profile_locked() {
   local model_kind="${5:-none}" model_port="${6:-}" metrics_port="${7:-}"
   local readiness_timeout="${8:-1800}"
   local profile data status memory run_id runtime_identity patch runner_rc state marker version
+  local profile_depth
   profile="$root/vm/profiles/$name"
   data="$(vm_lifecycle_profile_read "$root" "$name")" || return 2
   status="$(vm_lifecycle_field "$data" status)" || return 2
@@ -492,6 +493,8 @@ vm_lifecycle_start_profile_locked() {
     [[ -z "$owner_pid" ]] || vm_lifecycle_memory_release "$root" "$name" "$owner_pid" >/dev/null || true
     return 2
   fi
+  profile_depth="$(vm_lifecycle_field "$data" depth)" || return 2
+  [[ "$profile_depth" == 0 ]] || metrics_port=''
   if vm_runner_start "$profile" "$run_id" "$name" "$workspace" \
     "$profile/seed.iso" "$profile/disk.qcow2" "$memory" \
     "$model_kind" "$model_port" "$metrics_port"; then
@@ -779,6 +782,7 @@ vm_lifecycle_install_runtime() {
     lib/vm/process.py lib/vm/proxy.py lib/vm/runner.sh lib/vm/services.sh lib/vm/ssh.sh
     scripts/vm-opencode-config.py scripts/vm-python-tools.sh
     scripts/vm-recursion-live-children.py scripts/vm_memory_budget.py
+    lib/vm/metrics_service.py agent/metrics/gather.py
   )
   "$VM_LIFECYCLE_PYTHON" "$VM_LIFECYCLE_PATHS" runtime-install --state-root "$root" --profile "$name" \
     --source "$source_root" --files "${files[@]}"
@@ -799,6 +803,37 @@ try:
 except Exception:
     raise SystemExit(2)
 ' "$expression"
+}
+
+vm_lifecycle_metrics_select_port() {
+  local root="$1" runtime="$2" config="$3" depth="$4"
+  local enabled service collector port
+  if [[ "$depth" != 0 ]]; then
+    # No ancestor-host metrics are forwarded into nested child profiles.
+    printf '\n'
+    return 0
+  fi
+  enabled="$(vm_lifecycle_json_field "$config" metrics 2>/dev/null || true)"
+  case "$enabled" in
+    off) printf '\n'; return 0 ;;
+    on)
+      service="$runtime/lib/vm/metrics_service.py"
+      collector="$runtime/agent/metrics/gather.py"
+      if [[ -f "$service" && ! -L "$service" && -f "$collector" && ! -L "$collector" ]]; then
+        port="$("$VM_LIFECYCLE_PYTHON" "$service" ensure --state-root "$root" \
+          --port 19532 --collector "$collector" 2>/dev/null)" || port=''
+      else
+        port=''
+      fi
+      if [[ "$port" != 19532 ]]; then
+        printf 'WARNING: host metrics service is unavailable or unverified; VM startup will continue without the metrics forward.\n' >&2
+        printf '\n'
+      else
+        printf '%s\n' "$port"
+      fi
+      ;;
+    *) printf '\n' ;;
+  esac
 }
 
 vm_lifecycle_up() {
@@ -924,6 +959,7 @@ except Exception: raise SystemExit(2)
     vm_lifecycle_memory_release "$root" "$name" "$owner_pid" >/dev/null || true
     return 2
   }
+  metrics_port="$(vm_lifecycle_metrics_select_port "$root" "$runtime" "$config" "$depth" "$metrics_port")" || return 2
   local uid gid
   uid="$(id -u)" && gid="$(id -g)" || return 2
   if vm_lifecycle_run_frozen_worker "$root" "$name" "$runtime" \
@@ -1094,6 +1130,8 @@ vm_lifecycle_resize() {
   VM_LIFECYCLE_MEMORY_BUDGET="$runtime/scripts/vm_memory_budget.py"
   local depth
   depth="$(vm_lifecycle_field "$data" depth)" || return 2
+  metrics_port="$(vm_lifecycle_metrics_select_port "$root" "$runtime" \
+    "${VM_CONFIG_JSON:-}" "$depth" "$metrics_port")" || return 2
   local release_profile=''
   [[ "$status" != ready ]] || release_profile="$name"
   vm_lifecycle_memory_reserve "$root" "$name" "$depth" "$requested_memory" "$release_profile" || return $?
@@ -1377,9 +1415,15 @@ vm_lifecycle_resume() {
     *) vm_lifecycle_error "Profile '$name' is not ready or suspended; no startup was attempted."; return 2 ;;
   esac
   runtime="$(vm_lifecycle_profile_runtime "$root" "$name")" || return 2
+  depth="$(vm_lifecycle_field "$data" depth)" || return 2
+  if [[ "$status" == suspended || -n "$release_profile" ]]; then
+    metrics_port="$(vm_lifecycle_metrics_select_port "$root" "$runtime" \
+      "${VM_CONFIG_JSON:-}" "$depth" "$metrics_port")" || return 2
+  elif [[ "$depth" != 0 ]]; then
+    metrics_port=''
+  fi
   VM_LIFECYCLE_MEMORY_BUDGET="$runtime/scripts/vm_memory_budget.py"
   if [[ -n "$release_profile" || "$status" == suspended ]]; then
-    depth="$(vm_lifecycle_field "$data" depth)" || return 2
     memory="$(vm_lifecycle_field "$data" memory_gib)" || return 2
     vm_lifecycle_memory_reserve "$root" "$name" "$depth" "$memory" "$release_profile" || return $?
     owner_pid="$VM_LIFECYCLE_MEMORY_OWNER_PID"

@@ -2,6 +2,10 @@
 # VM replacement CLI. Lifecycle dispatch stays fail-closed until each command is implemented.
 set -euo pipefail
 
+# A native agent may itself have an explicitly selected parent metrics URL in
+# its environment. Never let that capability flow into a child launcher.
+unset METRICS_URL
+
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
   printf 'REFUSED: VM launcher requires Bash 4.4+ on the Linux x86_64 support profile.\n' >&2
   exit 2
@@ -24,6 +28,7 @@ Available now:
   list [--json]                     Read-only inventory of private VM profiles
   agent [PROFILE] [-- <args>]       Attach to a ready profile's native guest agent
   models status|diagnose [provider] [--name PROFILE] Read-only selected-provider check
+  metrics up|status|down        Manage the verified per-user loopback metrics service
   suspend [--name NAME]             Graceful, descendant-safe guest shutdown
   setup                           Read-only host prerequisite discovery
   setup --install-prereqs          Explicit default-no userland package installation
@@ -34,7 +39,7 @@ Available now:
 Not yet implemented (refuse with exit 2, never start or mutate a VM):
   run [WORKSPACE], up [PROFILE] --workspace PATH, ssh, doctor,
   resume, resize PROFILE GiB, down, stop, rebuild, update,
-  install-tools, egress-reload, metrics up|status|down,
+  install-tools, egress-reload,
   auth-forward [PROFILE] PORT, recursion-clean
 
 Options (before or after command/path; -- stops launcher parsing):
@@ -155,6 +160,23 @@ else:
     # shellcheck disable=SC1091 # Model doctor uses the selected profile's frozen module.
     source "$runtime/lib/vm/services.sh"
     vm_services_models "$VM_ACTION" "$VM_MODEL_PROVIDER_QUERY" "$VM_STATE_ROOT" "$VM_PROFILE"
+    ;;
+  metrics)
+    case "$VM_ACTION" in
+      up)
+        port="$(python3 "$VM_REPO/lib/vm/metrics_service.py" ensure \
+          --state-root "$VM_STATE_ROOT" --port 19532 \
+          --collector "$VM_REPO/agent/metrics/gather.py")" || exit $?
+        printf 'Verified loopback metrics service listening on 127.0.0.1:%s.\n' "$port"
+        ;;
+      status)
+        python3 "$VM_REPO/lib/vm/metrics_service.py" status --state-root "$VM_STATE_ROOT" --port 19532
+        ;;
+      down)
+        python3 "$VM_REPO/lib/vm/metrics_service.py" stop --state-root "$VM_STATE_ROOT" --port 19532
+        ;;
+      *) vm_error 'Unknown metrics action.'; exit 2 ;;
+    esac
     ;;
   context)
     system="$(vm_host_system)"; arch="$(vm_host_arch)"

@@ -254,6 +254,40 @@ except Exception:
   IFS=$'\t' read -r VM_SERVICES_FORWARD_PROVIDER VM_SERVICES_FORWARD_PORT <<<"$result"
 }
 
+vm_services_profile_metrics_forward() {
+  local data="${1:-}" result
+  result="$(printf '%s' "$data" | python3 -c '
+import json,re,sys
+try:
+    data=json.load(sys.stdin)
+    argv=data["runtime_identity"]["argv"]
+    assert isinstance(argv,list) and all(isinstance(item,str) for item in argv)
+    netdevs=[argv[index+1] for index,item in enumerate(argv[:-1]) if item == "-netdev"]
+    assert len(netdevs) == 1
+    segments=netdevs[0].split(",")
+    assert "restrict=on" in segments
+    matches=[]
+    for segment in segments:
+        if segment.startswith("guestfwd=tcp:10.0.2.100:19532-"):
+            match=re.fullmatch(
+                r"guestfwd=tcp:10\.0\.2\.100:19532-cmd:([A-Za-z0-9_./+-]+) - TCP:127\.0\.0\.1:([1-9][0-9]{0,4})",
+                segment,
+            )
+            assert match is not None
+            command,host_port=match.groups()
+            assert command and int(host_port) <= 65535
+            matches.append(int(host_port))
+    assert len(matches) <= 1
+    print(matches[0] if matches else "")
+except Exception:
+    raise SystemExit(2)
+')" || {
+    vm_services_error 'The exact profile QEMU argv has no unambiguous restricted metrics-forward identity.'
+    return 2
+  }
+  VM_SERVICES_METRICS_FORWARD_PORT="$result"
+}
+
 # Resolve a ready profile's provider selection against its host-owned QEMU
 # argv. A guest marker never grants a host network destination by itself.
 vm_services_profile_selection() {
@@ -354,7 +388,7 @@ vm_services_agent() {
   local requested_cwd="${4:-}" browser_mode="${5:-auto}"
   shift $(( $# >= 5 ? 5 : $# ))
   local data workspace info registry run_id role run_dir
-  local key known_hosts port agent provider model_id model_port remote_rc
+  local key known_hosts port agent provider model_id model_port remote_rc metrics_port
   local -a agent_args=("$@")
 
   case "$browser_mode" in
@@ -376,6 +410,21 @@ vm_services_agent() {
   model_port="$VM_SERVICES_SELECTED_MODEL_PORT"
   VM_SERVICES_MODEL_PORT="$model_port" vm_services_build_agent_argv \
     "$agent" "$permissions" "$provider" "$model_id" "${agent_args[@]}" || return $?
+
+  # VM plugins never guess Docker DNS or inherit an ancestor endpoint. Only use
+  # the one guestfwd proven by the host-owned QEMU identity and service registry.
+  VM_SERVICES_AGENT_ENV+=("METRICS_URL=disabled")
+  if vm_services_profile_metrics_forward "$data"; then
+    metrics_port="$VM_SERVICES_METRICS_FORWARD_PORT"
+    if [[ -n "$metrics_port" && -f "$VM_SERVICES_ROOT/lib/vm/metrics_service.py" &&
+          ! -L "$VM_SERVICES_ROOT/lib/vm/metrics_service.py" ]] &&
+      python3 "$VM_SERVICES_ROOT/lib/vm/metrics_service.py" verify \
+        --state-root "$root" --port "$metrics_port" --quiet >/dev/null 2>&1; then
+      VM_SERVICES_AGENT_ENV[-1]='METRICS_URL=http://10.0.2.100:19532'
+    elif [[ -n "$metrics_port" ]]; then
+      printf 'WARNING: the selected VM metrics forward is unavailable or unverified; the native agent will start without host metrics.\n' >&2
+    fi
+  fi
 
   if [[ "$provider" == ollama || "$provider" == llamacpp ]]; then
     if ! vm_services_model_probe "$provider" "$model_port"; then
