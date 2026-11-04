@@ -235,7 +235,7 @@ class SelfTestTests(unittest.TestCase):
                 adapter = FixtureAdapter()
                 original = adapter.run_stage
 
-                def mutate(name, context, field=field, value=value):
+                def mutate(name, context, field=field, value=value, original=original):
                     result = original(name, context)
                     if name == "expected_boot_failure":
                         result["evidence"][field] = value
