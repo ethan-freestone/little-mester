@@ -22,6 +22,7 @@ import ctypes
 import errno
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -459,6 +460,115 @@ def ensure_private_root(root):
         for directory in reversed(missing):
             private_mkdir(directory)
     return root
+
+
+def _recursion_run_base(root, *, create):
+    root = state_root(str(root), scan=False)
+    suffix = hashlib.sha256(os.fsencode(root)).hexdigest()[:24]
+    base = root.parent / f".little-mester-recursion-{suffix}"
+    if create:
+        base = ensure_private_root(base)
+    else:
+        canonical(str(base), exists=True)
+        private_entry(base)
+    return root, base
+
+
+def recursion_run_create(root, run_name):
+    """Return one exact private recursive snapshot/run namespace and state root."""
+    profile_name(run_name)
+    root = ensure_private_root(root)
+    state_root(str(root), must_exist=True, scan=True)
+    with lock_file(root / ".allocation.lock"):
+        state_root(str(root), must_exist=True, scan=True)
+        _root, base = _recursion_run_base(root, create=True)
+        with lock_file(base / ".runs.lock"):
+            run_root = base / run_name
+            if run_root.exists() or run_root.is_symlink():
+                private_entry(run_root)
+            else:
+                private_mkdir(run_root)
+            state = ensure_private_root(run_root / "state")
+    return {"run_root": str(run_root), "state_root": str(state)}
+
+
+def _nested_recursion_report_roots(run_root):
+    """Find private nested-run report namespaces; any retained run blocks cleanup."""
+    report_roots = []
+    for directory, dirs, files in os.walk(run_root, followlinks=False, onerror=walk_error):
+        current = Path(directory)
+        require(not any(name.startswith(".little-mester-recursion-") for name in files))
+        for name in list(dirs):
+            if not name.startswith(".little-mester-recursion-"):
+                continue
+            require(re.fullmatch(r"\.little-mester-recursion-[a-f0-9]{24}", name) is not None)
+            nested_base = current / name
+            private_entry(nested_base)
+            dirs.remove(name)
+            entries = {item.name for item in nested_base.iterdir()}
+            require(".runs.lock" in entries and entries <= {".runs.lock", "reports"})
+            private_entry(nested_base / ".runs.lock")
+            if "reports" in entries:
+                report_path = nested_base / "reports"
+                private_tree(report_path)
+                report_roots.append(report_path)
+            run_entries = entries - {".runs.lock", "reports"}
+            require(not run_entries)
+    return report_roots
+
+
+def recursion_run_delete(root, run_name, confirmed_name, proc_root):
+    """Delete only one confirmed run after proving all exact child QEMU stopped."""
+    profile_name(run_name)
+    require(confirmed_name == run_name)
+    _root, base = _recursion_run_base(root, create=False)
+    run_root = base / run_name
+    private_entry(run_root)
+    state = run_root / "state"
+    state_root(str(state), must_exist=True, scan=True)
+
+    with lock_file(state / ".allocation.lock"), lock_file(base / ".runs.lock"):
+        state_root(str(state), must_exist=True, scan=True)
+        profiles = profile_list(state)
+        require(all(item["status"] in {"allocated", "failed", "suspended"} for item in profiles))
+
+        child_script = Path(__file__).resolve().parents[2] / "scripts/vm-recursion-live-children.py"
+        spec = importlib.util.spec_from_file_location("vm_recursion_cleanup_children", child_script)
+        require(spec is not None and spec.loader is not None)
+        children = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(children)
+        live_profiles, unknown_pids = children.live_nested_qemus(state, proc_root=Path(proc_root))
+        require(not live_profiles and not unknown_pids)
+
+        report_path = state / "vm/reports"
+        report_roots = _nested_recursion_report_roots(run_root)
+        if report_path.exists() or report_path.is_symlink():
+            private_tree(report_path)
+            report_roots.insert(0, report_path)
+        archived = []
+        if report_roots:
+            archive_root = base / "reports"
+            if not archive_root.exists():
+                private_mkdir(archive_root)
+            else:
+                private_entry(archive_root)
+            for index, source_report in enumerate(report_roots):
+                destination = archive_root / f"{run_name}-{uuid.uuid4().hex}-{index}"
+                rename_noreplace(source_report, destination)
+                archived.append(str(destination))
+                fsync_dir(archive_root)
+                fsync_dir(source_report.parent)
+
+        # Recheck the exact private run directory immediately before removing
+        # only this caller-confirmed child namespace.
+        private_entry(run_root)
+        shutil.rmtree(run_root)
+        fsync_dir(base)
+    return {
+        "deleted_run": run_name,
+        "reports_path": archived[0] if archived else None,
+        "archived_reports": archived,
+    }
 
 
 @contextmanager
@@ -1115,7 +1225,8 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
     for command in ("config", "validate-config", "context", "validate-workspace",
                     "profile-read", "profile-list", "profile-write", "profile-create", "profile-transition", "runtime-install", "runtime-validate", "image-run",
-                    "image-publish", "profile-run", "profile-delete", "overlay-publish", "asset-publish", "asset-replace", "seed-write"):
+                    "image-publish", "profile-run", "profile-delete", "overlay-publish", "asset-publish", "asset-replace", "seed-write",
+                    "recursion-run-create", "recursion-run-delete"):
         sub = commands.add_parser(command)
         sub.add_argument("--state-root", required=True)
         if command in ("context", "profile-read", "profile-write", "profile-create", "profile-transition", "runtime-install", "runtime-validate",
@@ -1143,6 +1254,11 @@ def main():
         if command in ("asset-publish", "asset-replace"):
             sub.add_argument("--asset", required=True,
                              choices=("seed.iso",) if command == "asset-replace" else ("control-key", "seed.iso"))
+        if command in ("recursion-run-create", "recursion-run-delete"):
+            sub.add_argument("--run-name", required=True)
+        if command == "recursion-run-delete":
+            sub.add_argument("--confirm-run", required=True)
+            sub.add_argument("--proc-root", type=Path, default=Path("/proc"))
     args = parser.parse_args()
     root = state_root(args.state_root, scan=args.command not in ("profile-write", "runtime-install"))
     if hasattr(args, "profile"):
@@ -1192,6 +1308,10 @@ def main():
             root, args.profile, args.asset, args.staging, args.user_data_staging))}
     elif args.command == "seed-write":
         result = {"seed_path": str(seed_write(root, args.profile, sys.stdin.buffer.read(1024 * 1024 + 1)))}
+    elif args.command == "recursion-run-create":
+        result = recursion_run_create(root, args.run_name)
+    elif args.command == "recursion-run-delete":
+        result = recursion_run_delete(root, args.run_name, args.confirm_run, args.proc_root)
     else:
         result = runtime_install(root, args.profile, args.source, args.files)
     sys.stdout.buffer.write(encoded(result))

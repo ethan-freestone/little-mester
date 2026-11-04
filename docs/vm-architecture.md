@@ -1,6 +1,6 @@
 # VM harness architecture and trust boundary
 
-## Replacement implementation status (2026-11-03)
+## Replacement implementation status (2026-11-04)
 
 The owner approved `PR_REIMPLEMENTATION_PLAN.md` for `feat/vm-approach-2`.
 The contract below supersedes the historical proposal later on this page.
@@ -8,14 +8,17 @@ C01 CLI/configuration and private profile metadata; C02 fixture-tested
 image/overlay/seed primitives; C03 fixture-tested public-only proxy/chaining; and
 C04 fixture-tested process supervision/SSH primitives are implemented. C05 adds a
 fixture-tested guest-native OpenCode bootstrap, private MCP/config payload, exact
-version manifest, payload identity and readiness checks. **No image has been
-downloaded, no real QEMU/VM has been started, and no host/network acceptance is
-claimed.** C06 now has fixture-tested internal controllers for fresh profile start,
-resume/workspace switch, resize, identity-bound reservation recovery, exact-profile
-deletion/report archiving, and rebuild sequencing. Only read-only `status`/`list`
-and graceful `suspend` are dispatched; all other lifecycle commands remain
-unavailable until complete runtime and CLI integration is approved. Ordinary
-`./lab` remains the existing Docker launcher.
+version manifest, payload identity and readiness checks. C06 adds fixture-tested
+internal profile start/resume/resize/delete/rebuild controllers; C07 adapters,
+C08 metrics isolation and C09 scoped auth/browser primitives are also fixture
+validated. C10 adds a revision-bound filtered source snapshot, persistent recursion
+identity/depth guards, KVM/CPU preflight, isolated per-run state, candidate argv
+binding, and exact recursive cleanup/report preservation. **No image has been
+downloaded, no real QEMU/VM has been started, and no host/network or nested-VM
+acceptance is claimed.** Only read-only `status`/`list`, graceful `suspend`, and the
+fixture-tested exact-run `recursion-clean` operation are dispatched. Public `run`
+and `up` remain fail-closed until TASK-16; ordinary `./lab` remains the existing
+Docker launcher.
 
 ### CLI and configuration contract
 
@@ -216,12 +219,12 @@ requires exact effect confirmation and a separate sticky-descendant acknowledgem
 TASK-10 exporter exists. Reset/deletion scope is the selected profile only and
 must preserve the immutable image cache, host workspace, and reports.
 
-These are C06 implementation contracts, not real-VM claims. The lifecycle, memory,
-and child-inventory suites use disposable state, synthetic procfs, and fake
-callbacks. Lifecycle implementations are fixture-only and undispatched beyond
-status/list/suspend. Real image, KVM, guest, live-network/SEC-NET, and nested-VM
-acceptance remains pending under ticket #41. No command may report success for a
-stubbed VM.
+These are implementation contracts, not real-VM claims. The lifecycle, memory,
+child-inventory and recursion suites use disposable state, synthetic procfs and
+fake callbacks. Lifecycle implementations remain fixture-only and undispatched
+beyond status/list/suspend/recursion-clean. Real image, KVM, guest,
+live-network/SEC-NET, and nested-VM acceptance remains pending under ticket #41.
+No command may report success for a stubbed VM.
 
 Examples shared by Bash and Fish (diagnostics only):
 
@@ -253,6 +256,28 @@ test failure→fix→fresh pass, and preserve parent usability. Additional agent
 one guest are not equivalent evidence. Recursion policy is enforced by supported
 launchers, not a tamper-proof restriction on a guest administrator. Real KVM,
 workload, network, credentials and human TUI/auth evidence remain required.
+
+### C10 recursion and candidate-source boundary (fixture milestone)
+
+The selected self-write workspace is copied into a private per-run candidate
+snapshot. Its canonical manifest binds the source Git HEAD and current tracked,
+dirty and untracked content while excluding credentials, state, databases, model
+weights, caches and `.git` history. File modes and safe in-scope symlinks are
+preserved; escaping/excluded/dangling links, special files, source races, changed
+source for an existing run and modified retained snapshots refuse. Copy limits and
+free-space reserve are checked before staging, and publication is no-clobber.
+
+Nested launch identity is loaded from the guest's private persisted depth/maximum;
+environment conflicts fail closed. Nested launches require `--recurse`, an
+explicit non-increasing `--max-depth` (0–32), and usable supported-profile KVM plus
+guest CPU virtualization flags before child state or snapshot creation. The private
+candidate launcher and workspace are verified against the retained manifest, and
+the prepared child argv points only to that snapshot with a clean, fixed environment
+and a separate per-run state root. `recursion-clean RUN` requires an exact run-name
+confirmation or explicit `--yes`, refuses live/unknown processes and retained
+descendant runs, and preserves report archives. These are fixture-tested boundaries;
+they do not claim a real child VM boot, changed seed/bootstrap execution, KVM
+availability from `/dev/kvm` inspection, or root-proof recursion enforcement.
 
 ---
 

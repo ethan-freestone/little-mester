@@ -4,6 +4,8 @@ import importlib.util
 import json
 import multiprocessing
 import os
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -129,6 +131,92 @@ class PathsTest(unittest.TestCase):
             self.cli("config")
             self.cli("validate-config", data={"auth_escrow_dir": str(home / "custom-escrow")}, ok=False)
             self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_recursive_run_roots_are_private_separate_and_idempotent(self):
+        helper = load_module()
+        first = helper.recursion_run_create(self.root, "child-one")
+        second = helper.recursion_run_create(self.root, "child-one")
+        run_root = Path(first["run_root"])
+        child_state = Path(first["state_root"])
+        self.assertEqual(first, second)
+        self.assertEqual(run_root.parent.parent, self.root.parent)
+        self.assertNotEqual(child_state, self.root)
+        self.assertEqual(stat.S_IMODE(run_root.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(child_state.stat().st_mode), 0o700)
+        self.assertFalse(helper.overlaps(run_root, self.workspace))
+        allocation_lock = self.root / ".allocation.lock"
+        self.assertTrue(allocation_lock.is_file())
+        self.assertEqual(stat.S_IMODE(allocation_lock.stat().st_mode), 0o600)
+
+    def test_recursive_run_cleanup_requires_exact_confirmation_and_stopped_inventory(self):
+        helper = load_module()
+        created = helper.recursion_run_create(self.root, "child-clean")
+        run_root = Path(created["run_root"])
+        child_state = Path(created["state_root"])
+        proc_root = self.base / "proc-fixture"
+        proc_root.mkdir(mode=0o700)
+
+        with self.assertRaises(helper.PolicyError):
+            helper.recursion_run_delete(self.root, "child-clean", "other", proc_root)
+
+        qemu = proc_root / "8841"
+        qemu.mkdir()
+        (qemu / "comm").write_text("qemu-system-x86_64\n", encoding="ascii")
+        with self.assertRaises(helper.PolicyError):
+            helper.recursion_run_delete(self.root, "child-clean", "child-clean", proc_root)
+        self.assertTrue(run_root.is_dir())
+
+        shutil.rmtree(qemu)
+        vm_dir = child_state / "vm"
+        vm_dir.mkdir(mode=0o700)
+        reports = vm_dir / "reports"
+        reports.mkdir(mode=0o700)
+        report = reports / "result.json"
+        report.write_text('{"result":"fixture"}\n', encoding="ascii")
+        report.chmod(0o600)
+        result = helper.recursion_run_delete(
+            self.root, "child-clean", "child-clean", proc_root,
+        )
+        self.assertFalse(run_root.exists())
+        self.assertEqual(result["deleted_run"], "child-clean")
+        archive = Path(result["reports_path"])
+        self.assertEqual((archive / "result.json").read_text(), '{"result":"fixture"}\n')
+        self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o700)
+
+    def test_recursive_cleanup_requires_descendant_run_first_and_preserves_its_reports(self):
+        helper = load_module()
+        outer = helper.recursion_run_create(self.root, "outer")
+        outer_state = Path(outer["state_root"])
+        inner = helper.recursion_run_create(outer_state, "inner")
+        inner_run_root = Path(inner["run_root"])
+        proc_root = self.base / "empty-proc"
+        proc_root.mkdir(mode=0o700)
+
+        with self.assertRaises(helper.PolicyError):
+            helper.recursion_run_delete(self.root, "outer", "outer", proc_root)
+        self.assertTrue(Path(outer["run_root"]).is_dir())
+
+        vm_dir = Path(inner["state_root"]) / "vm"
+        vm_dir.mkdir(mode=0o700)
+        reports = vm_dir / "reports"
+        reports.mkdir(mode=0o700)
+        result = reports / "nested-report.json"
+        result.write_text('{"descendant":true}\n', encoding="ascii")
+        result.chmod(0o600)
+
+        cleaned_inner = helper.recursion_run_delete(
+            outer_state, "inner", "inner", proc_root,
+        )
+        self.assertFalse(inner_run_root.exists())
+        first_archive = Path(cleaned_inner["reports_path"])
+        self.assertEqual((first_archive / "nested-report.json").read_text(), '{"descendant":true}\n')
+
+        cleaned_outer = helper.recursion_run_delete(self.root, "outer", "outer", proc_root)
+        self.assertFalse(Path(outer["run_root"]).exists())
+        self.assertTrue(cleaned_outer["archived_reports"])
+        final_archive = Path(cleaned_outer["archived_reports"][0])
+        archived_result = next(final_archive.rglob("nested-report.json"))
+        self.assertEqual(archived_result.read_text(), '{"descendant":true}\n')
 
     def test_profile_dotted_names(self):
         dotted = dict(self.profile(), name="test.v2")

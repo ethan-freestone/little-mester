@@ -2,7 +2,7 @@
 
 ## Control state
 
-- Phase: **Round 2 active; C01–C06 implementation committed; TASK-07 fixture milestone complete; real acceptance remains pending**.
+- Phase: **Round 2 active; C01–C09 implementation committed; C10 TASK-11/12 fixture milestone complete; real acceptance remains pending**.
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
@@ -185,8 +185,8 @@ VM/network acceptance has occurred.
 | TASK-08 | C07 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-03/2026-11-03 | Native OpenCode V2/Aider adapters, explicit provider config and permission handling, ready-profile-bound diagnostics, constrained cwd; 148 VM Python, 116 Bats, Bash syntax, ShellCheck, and diff checks PASS | Fixture-only; no live Aider/provider/UI or human-permission acceptance, VM, image, or network operation; live gates remain separately approved |
 | TASK-09 | C08 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Verified loopback metrics service and selected QEMU guestfwd; collector concurrency/history, optional guest plugin retry/disabled state, child metrics isolation, and distinct exit-confirm callbacks; 160 VM Python tests, 122 Bats tests, Bash syntax, ShellCheck, Python compilation, JSX, and diff checks PASS | Fixture-only; no live VM, GPU, Docker, or TUI renderer actions; HUMAN-TUI and host/VM acceptance remain separate approved gates |
 | TASK-10 | C09 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Scoped native auth/browser bridge, private escrow, runtime key adapters, lifecycle export guard; 36 auth/browser Python tests, 196 full Python tests, 123 Bats; Ruff, ShellCheck, Bash syntax, Python compilation, diff checks PASS | Local fixture checkpoint only; no live login, auth-store inspection, credential export/import, guest, or host browser acceptance; TASK-15 HUMAN-AUTH and refreshed-token owner proof remain pending |
-| TASK-11 | C10 | NOT STARTED | Unassigned/—/— | — | Control key and secure path |
-| TASK-12 | C10 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-11 |
+| TASK-11 | C10 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Filtered Git-HEAD-bound snapshots; exclusions, race/capacity checks, synthetic Git and retained-snapshot verification; snapshot Python fixtures pass | Fixture-only; commit SHA closeout follows; no live VM or host acceptance |
+| TASK-12 | C10 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Persisted identity/depth guards, KVM/CPU preflight, isolated candidate state/argv, immediate-parent proxy depth and exact descendant-safe cleanup; 5 recursion Python cases, 6 recursion Bats cases; full 214 VM Python and 129 Bats pass | Public `run`/`up` remain undispatched until TASK-16; real nested KVM/VM and host/human acceptance remain pending |
 | TASK-13 | C11 | NOT STARTED | Unassigned/—/— | — | Real nested hardware gate remains |
 | TASK-14 | C12 | NOT STARTED | Unassigned/—/— | — | Depends on prior implementation |
 | TASK-15 | C13 | NOT STARTED | Unassigned/—/— | — | Exact fresh-host handoff still required |
@@ -646,3 +646,47 @@ auth data was inspected, no active credentials were used, and no live login,
 credential export/import, VM, or host browser was performed. Human callback,
 credential persistence/refresh and owner proof remain separate TASK-15 acceptance
 gates; this fixture milestone does not claim those live outcomes.
+
+## TASK-11/12 / C10 — revision-bound snapshots and bounded recursion
+
+**State:** implementation and fixture validation complete on `feat/vm-approach-2`;
+local C10 code checkpoint is being committed. Coordinator execution on 2026-11-04.
+No push or PR update was performed.
+
+Implemented `scripts/vm-recursion-workspace.py` for private, filtered snapshots of
+the selected self-write checkout. The source must have a canonical Git HEAD;
+tracked, dirty and untracked intended files are manifested with path/type/mode/size
+and content hashes, while credentials, state, databases, model weights, caches and
+`.git` history are excluded. Safe in-tree symlinks and modes are retained. Source
+replacement/races, special or escaping/excluded targets, capacity/free-space
+violations, changed source for an existing run, modified retained snapshots and
+bundle aliases fail closed. Snapshot publication is private, locked and no-clobber.
+
+Implemented `lib/vm/recursion.sh` and path/lifecycle integration for persisted
+guest depth/maximum identity, caller-environment conflict detection, explicit
+recursive opt-in, non-increasing depth limits (0–32), supported-profile KVM/CPU
+preflight before candidate allocation, and a fresh per-run private state root.
+Candidate argv points to the verified frozen `lab-vm` and workspace, with a fixed
+clean environment and optional capabilities disabled by default. Nested proxy
+selection is bound to the immediate parent depth. Exact recursive cleanup refuses
+live/unknown descendants or retained child runs and archives reports before removing
+only the confirmed run. Fixture tests inspect the candidate argv and changed source
+snapshot; they do not start that candidate as a VM.
+
+Validation:
+
+| Command/check | Result |
+|---|---|
+| `python3 -B -m unittest discover -s tests -p 'test_vm_*.py' -v` |214/214 PASS; local fixtures only |
+| `bats tests/` |129/129 PASS |
+| Ruff on changed Python implementation/tests |PASS |
+| ShellCheck on changed Bash modules/fixtures; `bash -n` |PASS |
+| Python `ast.parse` on changed Python files; `git diff --check` |PASS |
+| `python3 scripts/check-docs-consistency.py` |8 existing README/DECISIONS drift/link failures; same baseline failures |
+| `sha256sum vm-migration-plan.md` |`3d6ee2115423272b88a8efd8d4d33462318d5ae4c537841091e513ee5e2d1374` unchanged |
+
+No VM was launched; no live KVM/nested-guest, credentials, network, or host
+acceptance activity occurred. `run`/`up` remain unavailable until TASK-16; only
+the exact-run cleanup command is dispatched. Real nested-VM and TASK-15 host/human
+acceptance remain pending. The staged-empty/worktree-populated
+`vm-migration-plan.md` is excluded from the C10 commit.

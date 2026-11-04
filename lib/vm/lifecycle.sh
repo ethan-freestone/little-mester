@@ -465,12 +465,24 @@ d=json.loads(sys.argv[1]); print(d["registry"],d["run_id"],d["role"])
   return 124
 }
 
+vm_lifecycle_runner_start_for_depth() {
+  local depth="$1" maximum="$2"
+  shift 2
+  if (( depth > 0 )); then
+    # The QEMU/proxy being started belongs to the child depth, not the current
+    # launcher process. This selects the immediate parent's proxy upstream.
+    LAB_VM_RECURSION_DEPTH="$depth" LAB_VM_MAX_DEPTH="$maximum" vm_runner_start "$@"
+  else
+    vm_runner_start "$@"
+  fi
+}
+
 vm_lifecycle_start_profile_locked() {
   local root="$1" name="$2" workspace="$3" owner_pid="${4:-}"
   local model_kind="${5:-none}" model_port="${6:-}" metrics_port="${7:-}"
   local readiness_timeout="${8:-1800}"
   local profile data status memory run_id runtime_identity patch runner_rc state marker version
-  local profile_depth
+  local profile_depth profile_max_depth
   profile="$root/vm/profiles/$name"
   data="$(vm_lifecycle_profile_read "$root" "$name")" || return 2
   status="$(vm_lifecycle_field "$data" status)" || return 2
@@ -498,8 +510,10 @@ vm_lifecycle_start_profile_locked() {
     return 2
   fi
   profile_depth="$(vm_lifecycle_field "$data" depth)" || return 2
+  profile_max_depth="$(vm_lifecycle_field "$data" max_depth)" || return 2
   [[ "$profile_depth" == 0 ]] || metrics_port=''
-  if vm_runner_start "$profile" "$run_id" "$name" "$workspace" \
+  if vm_lifecycle_runner_start_for_depth "$profile_depth" "$profile_max_depth" \
+    "$profile" "$run_id" "$name" "$workspace" \
     "$profile/seed.iso" "$profile/disk.qcow2" "$memory" \
     "$model_kind" "$model_port" "$metrics_port"; then
     runner_rc=0
@@ -782,12 +796,13 @@ vm_lifecycle_install_runtime() {
   local root="$1" name="$2" source_root="$3"
   local -a files=(
     lab-vm lib/state.sh lib/vm/config.sh lib/vm/cloud-init.sh lib/vm/disk.sh
+    lib/vm/recursion.sh
     lib/vm/auth.sh lib/vm/browser-bridge-server.py lib/vm/browser-open.py
     lib/vm/browser-open.sh lib/vm/guest-bootstrap.sh lib/vm/guest.sh
     lib/vm/lifecycle.sh lib/vm/paths.py lib/vm/process.py lib/vm/proxy.py
     lib/vm/runner.sh lib/vm/services.sh lib/vm/ssh.sh
     scripts/vm-opencode-config.py scripts/vm-python-tools.sh
-    scripts/vm-recursion-live-children.py scripts/vm_memory_budget.py
+    scripts/vm-recursion-live-children.py scripts/vm-recursion-workspace.py scripts/vm_memory_budget.py
     lib/vm/metrics_service.py agent/metrics/gather.py
   )
   "$VM_LIFECYCLE_PYTHON" "$VM_LIFECYCLE_PATHS" runtime-install --state-root "$root" --profile "$name" \

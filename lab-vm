@@ -23,6 +23,8 @@ VM_REPO="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 source "$VM_REPO/lib/state.sh"
 # shellcheck source=lib/vm/config.sh
 source "$VM_REPO/lib/vm/config.sh"
+# shellcheck source=lib/vm/recursion.sh
+source "$VM_REPO/lib/vm/recursion.sh"
 
 vm_usage() {
   cat <<'HELP'
@@ -36,6 +38,7 @@ Available now:
   models status|diagnose [provider] [--name PROFILE] Read-only selected-provider check
   metrics up|status|down        Manage the verified per-user loopback metrics service
   suspend [--name NAME]             Graceful, descendant-safe guest shutdown
+  recursion-clean RUN              Confirmed cleanup of one stopped recursive run
   setup                           Read-only host prerequisite discovery
   setup --install-prereqs          Explicit default-no userland package installation
   base                            Verify/download the pinned immutable base image
@@ -45,8 +48,7 @@ Available now:
 Not yet implemented (refuse with exit 2, never start or mutate a VM):
   run [WORKSPACE], up [PROFILE] --workspace PATH, ssh, doctor,
   resume, resize PROFILE GiB, down, stop, rebuild, update,
-  install-tools, egress-reload,
-  auth-forward [PROFILE] PORT, recursion-clean
+  install-tools, egress-reload, auth-forward [PROFILE] PORT
 
 Options (before or after command/path; -- stops launcher parsing):
   --name NAME, --workspace PATH, --memory GiB, --recurse, --unsafe-recurse,
@@ -74,6 +76,7 @@ command -v python3 >/dev/null 2>&1 || {
   vm_error 'Python 3 is required for safe configuration validation; install it manually before setup.'
   exit 2
 }
+vm_recursion_apply_guest_identity /etc/lab-vm-recursion || exit 2
 VM_STATE_ROOT="$(vm_state_root)"
 VM_PATHS_HELPER="$VM_REPO/lib/vm/paths.py"
 # shellcheck source=lib/vm/disk.sh
@@ -83,6 +86,11 @@ source "$VM_REPO/lib/vm/disk.sh"
 source "$VM_REPO/lib/vm/lifecycle.sh"
 vm_config_overrides
 vm_config_load || exit 2
+vm_recursion_configure "$VM_COMMAND" || exit 2
+vm_recursion_validate_candidate_handoff || exit 2
+if (( VM_NESTED_LAUNCH )); then
+  vm_recursion_require_nested_kvm /dev/kvm /proc/cpuinfo || exit 2
+fi
 
 # Resolve/validate exact paths even for unavailable operations; never mkdir or repair.
 context_args=(context --state-root "$VM_STATE_ROOT" --profile "$VM_PROFILE" --repository "$VM_REPO")
@@ -140,6 +148,11 @@ else:
     vm_lifecycle_suspend "$VM_STATE_ROOT" "$VM_PROFILE" "$VM_POWEROFF_RECURSIVE" \
       "$VM_LIFECYCLE_DEFAULT_TIMEOUT" "$controller"
     ;;
+  recursion-clean)
+    recursion_confirmed=0
+    [[ ! -v 'VM_SEEN[yes]' ]] || recursion_confirmed=1
+    vm_recursion_clean_run "$VM_STATE_ROOT" "$VM_PROFILE" "$recursion_confirmed"
+    ;;
   agent)
     runtime="$(vm_lifecycle_profile_runtime "$VM_STATE_ROOT" "$VM_PROFILE")" || exit $?
     if [[ "$runtime" != "$VM_REPO" ]]; then
@@ -191,12 +204,13 @@ else:
     missing="$(vm_host_missing)"
     # Never put arbitrary agent arguments, environment dumps or config file contents in logs.
     printf '%s\n%s\n' "$VM_CONTEXT_JSON" "$VM_CONFIG_JSON" | python3 -c '
-import json,sys
+import json,os,sys
 context=json.loads(sys.stdin.readline())
 config=json.loads(sys.stdin.readline())
-yes,permissions,verbose,debug,maximum,system,arch,kvm,vfs,missing,formatted=sys.argv[1:]
+yes,permissions,verbose,debug,maximum,system,arch,kvm,vfs,missing,formatted,next_depth,nested,handoff=sys.argv[1:]
 context["effective_config"]=config
 context["launcher"]={"yes":yes=="1","permissions":permissions,"verbose":int(verbose),"debug":int(debug),"max_depth":int(maximum)}
+context["recursion"]={"current_depth":int(os.environ.get("LAB_VM_RECURSION_DEPTH","0")),"next_child_depth":int(next_depth),"max_depth":int(maximum),"nested_launch":nested=="1","candidate_handoff":handoff=="1"}
 context["host"]={"system":system,"architecture":arch,"supported":system=="Linux" and arch=="x86_64","kvm_usable":kvm=="true","virtiofsd":vfs or None,"missing_tools":missing.splitlines()}
 if formatted=="1":
     print(json.dumps(context,sort_keys=True))
@@ -207,7 +221,8 @@ else:
     print("Host:",system,arch,"KVM usable:"+kvm)
     print("Missing userland:",", ".join(missing.splitlines()) or "none")
 ' "$VM_YES" "$VM_PERMISSIONS" "$VM_VERBOSE" "$VM_DEBUG" "$VM_MAX_DEPTH" \
-      "$system" "$arch" "$kvm" "$virtiofsd_path" "$missing" "$VM_JSON"
+      "$system" "$arch" "$kvm" "$virtiofsd_path" "$missing" "$VM_JSON" \
+      "$VM_GUEST_RECURSION_DEPTH" "$VM_NESTED_LAUNCH" "${VM_RECURSION_CANDIDATE_HANDOFF:-0}"
     ;;
   *) vm_error 'VM operation not yet implemented at this checkpoint; no VM or service was changed.'; exit 2 ;;
 esac

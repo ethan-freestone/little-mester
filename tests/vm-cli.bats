@@ -229,7 +229,7 @@ assert json.load(sys.stdin)["effective_config"]["model"] == {"provider":"none"}
 }
 
 @test "CLI unavailable operations refuse truthfully without state allocation" {
-  run bash "$ROOT/lab-vm" up candidate --workspace "$BATS_TEST_TMPDIR/workspace"
+  run bash "$ROOT/lab-vm" doctor
   [ "$status" -eq 2 ]
   [[ "$output" == *'not yet implemented'* ]]
   [ ! -e "$MESTER_STATE_DIR" ]
