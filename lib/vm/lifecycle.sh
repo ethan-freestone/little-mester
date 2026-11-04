@@ -10,6 +10,10 @@ VM_LIFECYCLE_CHILDREN="${VM_LIFECYCLE_CHILDREN:-$VM_LIFECYCLE_ROOT/scripts/vm-re
 VM_LIFECYCLE_MEMORY_BUDGET="${VM_LIFECYCLE_MEMORY_BUDGET:-$VM_LIFECYCLE_ROOT/scripts/vm_memory_budget.py}"
 VM_LIFECYCLE_DEFAULT_TIMEOUT=60
 
+# shellcheck source=lib/vm/auth.sh
+# shellcheck disable=SC1091 # Frozen runtime path is derived from this module.
+source "$VM_LIFECYCLE_ROOT/lib/vm/auth.sh"
+
 vm_lifecycle_error() {
   printf 'REFUSED: %s\n' "$*" >&2
   return 2
@@ -71,17 +75,17 @@ except Exception:
 }
 
 vm_lifecycle_memory_gib() {
-  local depth="$1" requested="${2:-}" defaults memory
+  local depth="$1" requested_gib="${2:-}" defaults memory
   if [[ ! "$depth" =~ ^(0|[1-9][0-9]?)$ ]] || (( 10#$depth > 32 )); then
     vm_lifecycle_error 'Recursion depth must be a whole number from 0 to 32.'
     return 2
   fi
-  if [[ -n "$requested" ]]; then
-    if [[ ! "$requested" =~ ^[1-9][0-9]{0,2}$ ]] || (( 10#$requested > 128 )); then
+  if [[ -n "$requested_gib" ]]; then
+    if [[ ! "$requested_gib" =~ ^[1-9][0-9]{0,2}$ ]] || (( 10#$requested_gib > 128 )); then
       vm_lifecycle_error 'Requested VM memory must be whole GiB from 1 to 128.'
       return 2
     fi
-    printf '%s\n' "$((10#$requested))"
+    printf '%s\n' "$((10#$requested_gib))"
     return 0
   fi
   defaults="$(vm_lifecycle_memory_helper defaults --depth "$depth")" || return 2
@@ -108,10 +112,10 @@ vm_lifecycle_memory_helper() {
 }
 
 vm_lifecycle_memory_reserve() {
-  local root="$1" name="$2" depth="$3" requested="${4:-}" release_profile="${5:-}"
+  local root="$1" name="$2" depth="$3" requested_gib="${4:-}" release_profile="${5:-}"
   local memory requested_mib
   unset VM_LIFECYCLE_MEMORY_GIB VM_LIFECYCLE_MEMORY_OWNER_PID
-  memory="$(vm_lifecycle_memory_gib "$depth" "$requested")" || return $?
+  memory="$(vm_lifecycle_memory_gib "$depth" "$requested_gib")" || return $?
   requested_mib=$((10#$memory * 1024))
   # Do not capture this command's stdout with $(...): reservation identity is
   # bound to this long-lived controller shell and must survive the call.
@@ -138,12 +142,12 @@ vm_lifecycle_memory_release() {
 }
 
 vm_lifecycle_memory_check() {
-  local root="$1" name="$2" requested="$3" requested_mib
-  if [[ ! "$requested" =~ ^[1-9][0-9]{0,2}$ ]] || (( 10#$requested > 128 )); then
+  local root="$1" name="$2" requested_gib="$3" requested_mib
+  if [[ ! "$requested_gib" =~ ^[1-9][0-9]{0,2}$ ]] || (( 10#$requested_gib > 128 )); then
     vm_lifecycle_error 'Requested VM memory must be whole GiB from 1 to 128.'
     return 2
   fi
-  requested_mib=$((10#$requested * 1024))
+  requested_mib=$((10#$requested_gib * 1024))
   vm_lifecycle_memory_helper check --state-root "$root" \
     --release-profile "$name" --requested-mib "$requested_mib"
 }
@@ -169,11 +173,11 @@ except Exception:
 
 vm_lifecycle_profile_allocate() {
   # Call directly in the controller shell; its reservation must outlive this function.
-  local root="$1" name="$2" depth="$3" requested="${4:-}"
+  local root="$1" name="$2" depth="$3" requested_gib="${4:-}"
   local raw memory prepared profiles existing created create_rc
   unset VM_LIFECYCLE_MEMORY_GIB VM_LIFECYCLE_MEMORY_OWNER_PID
   raw="$(cat)" || return 2
-  memory="$(vm_lifecycle_memory_gib "$depth" "$requested")" || return $?
+  memory="$(vm_lifecycle_memory_gib "$depth" "$requested_gib")" || return $?
   prepared="$(printf '%s' "$raw" | "$VM_LIFECYCLE_PYTHON" -c '
 import importlib.util,json,sys
 from pathlib import Path
@@ -778,8 +782,10 @@ vm_lifecycle_install_runtime() {
   local root="$1" name="$2" source_root="$3"
   local -a files=(
     lab-vm lib/state.sh lib/vm/config.sh lib/vm/cloud-init.sh lib/vm/disk.sh
-    lib/vm/guest-bootstrap.sh lib/vm/guest.sh lib/vm/lifecycle.sh lib/vm/paths.py
-    lib/vm/process.py lib/vm/proxy.py lib/vm/runner.sh lib/vm/services.sh lib/vm/ssh.sh
+    lib/vm/auth.sh lib/vm/browser-bridge-server.py lib/vm/browser-open.py
+    lib/vm/browser-open.sh lib/vm/guest-bootstrap.sh lib/vm/guest.sh
+    lib/vm/lifecycle.sh lib/vm/paths.py lib/vm/process.py lib/vm/proxy.py
+    lib/vm/runner.sh lib/vm/services.sh lib/vm/ssh.sh
     scripts/vm-opencode-config.py scripts/vm-python-tools.sh
     scripts/vm-recursion-live-children.py scripts/vm_memory_budget.py
     lib/vm/metrics_service.py agent/metrics/gather.py
@@ -1322,7 +1328,9 @@ vm_lifecycle_suspend_locked() {
 vm_lifecycle_profile_runtime() {
   local root="$1" name="$2" runtime path
   runtime="$root/vm/profiles/$name/runtime"
-  for path in "$runtime/lab-vm" "$runtime/lib/state.sh" "$runtime/lib/vm/lifecycle.sh" \
+  for path in "$runtime/lab-vm" "$runtime/lib/state.sh" "$runtime/lib/vm/auth.sh" \
+    "$runtime/lib/vm/browser-bridge-server.py" "$runtime/lib/vm/browser-open.py" \
+    "$runtime/lib/vm/browser-open.sh" "$runtime/lib/vm/lifecycle.sh" \
     "$runtime/lib/vm/paths.py" "$runtime/lib/vm/config.sh" "$runtime/lib/vm/disk.sh" \
     "$runtime/lib/vm/cloud-init.sh" "$runtime/lib/vm/guest.sh" \
     "$runtime/lib/vm/guest-bootstrap.sh" "$runtime/lib/vm/runner.sh" \
@@ -1452,38 +1460,63 @@ vm_lifecycle_resume() {
 }
 
 vm_lifecycle_auth_delete_guard() {
-  local config="${VM_CONFIG_JSON:-}" auth_forward
+  local root="$1" name="$2" data="$3" phase="${4:-export}" config="${VM_CONFIG_JSON:-}"
+  local fields auth_forward escrow_dir version workspace
   [[ -n "$config" ]] || {
     vm_lifecycle_error 'Deletion requires validated configuration so auth export policy can be checked.'
     return 2
   }
-  auth_forward="$(printf '%s' "$config" | "$VM_LIFECYCLE_PYTHON" -c '
+  fields="$(printf '%s' "$config" | "$VM_LIFECYCLE_PYTHON" -c '
 import json,sys
 try:
-    value=json.load(sys.stdin)["auth_forward"]
-    print("off" if value=="off" else "enabled")
+    config=json.load(sys.stdin)
+    value=config["auth_forward"]
+    selector=",".join(value) if isinstance(value,list) else value
+    print("\t".join((selector,config.get("auth_escrow_dir", ""))))
 except Exception:
     raise SystemExit(2)
 ')" || {
     vm_lifecycle_error 'Auth export policy is missing or invalid; destructive action was refused.'
     return 2
   }
-  [[ "$auth_forward" == off ]] || {
-    vm_lifecycle_error 'Auth forwarding is enabled; deletion requires TASK-10 auth export. Resume the guest and export auth before retrying.'
-    return 2
-  }
+  IFS=$'\t' read -r auth_forward escrow_dir <<<"$fields"
+  [[ "$auth_forward" == off ]] && return 0
+  [[ "$phase" == preflight || "$phase" == export ]] || return 2
+  version="$(vm_lifecycle_field "$data" opencode_version)" || return 2
+  workspace="$(vm_lifecycle_field "$data" workspace)" || return 2
+  [[ -n "$escrow_dir" ]] || escrow_dir="$root/secrets"
+  if [[ "$phase" == preflight ]]; then
+    vm_auth_resolve_providers "$auth_forward" "$version" >/dev/null || {
+      vm_lifecycle_error 'Auth forwarding is enabled; destructive action requires TASK-10 auth export, which is unavailable for this profile version.'
+      return 2
+    }
+    [[ "$(vm_lifecycle_field "$data" status)" == ready ]] || {
+      vm_lifecycle_error 'Auth export requires the guest to be running; resume it and retry. The profile overlay was preserved.'
+      return 2
+    }
+    local identity_state
+    identity_state="$(vm_lifecycle_identity_state "$data" "$root" "$name")" || identity_state=unknown
+    [[ "$identity_state" == running ]] || {
+      vm_lifecycle_error 'Guest is not running as the verified profile; auth export was refused and the overlay was preserved.'
+      return 2
+    }
+    return 0
+  fi
+  vm_auth_export_before_delete "$root" "$name" "$data" "$auth_forward" \
+    "$version" "$escrow_dir" "$workspace" "$VM_LIFECYCLE_ROOT"
 }
 
 vm_lifecycle_delete() {
   local root="$1" name="$2" discard_recursive="${3:-0}" yes="${4:-0}"
   local recursive="${5:-0}" timeout="${6:-$VM_LIFECYCLE_DEFAULT_TIMEOUT}"
   local data status identity_state runtime
-  vm_lifecycle_auth_delete_guard || return 2
   data="$(vm_lifecycle_profile_read "$root" "$name")" || return 2
   vm_lifecycle_destructive_guard down "$data" off "$discard_recursive" || return 2
+  vm_lifecycle_auth_delete_guard "$root" "$name" "$data" preflight || return $?
   vm_lifecycle_require_confirmation down "$name" \
     'remove only this exact profile overlay, seed, key and frozen runtime; archive run reports; preserve workspace, shared base cache and other profiles' \
     "$yes" || return 2
+  vm_lifecycle_auth_delete_guard "$root" "$name" "$data" export || return $?
   status="$(vm_lifecycle_field "$data" status)" || return 2
   case "$status" in
     ready)

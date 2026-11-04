@@ -108,6 +108,39 @@ vm_test_netdev() {
   [[ " ${VM_SSH_ARGV[*]} " == *' -tt '* ]]
 }
 
+@test "SSH control socket opt-in requires an owned private socket" {
+  local rc
+  python3 - "$TEST_ROOT/control.sock" <<'PY'
+import os,socket,sys
+listener=socket.socket(socket.AF_UNIX)
+listener.bind(sys.argv[1])
+os.chmod(sys.argv[1],0o600)
+listener.close()
+PY
+  export VM_SSH_CONTROL_PATH="$TEST_ROOT/control.sock"
+  vm_ssh_build_argv "$TEST_ROOT/control-key" "$TEST_ROOT/known_hosts" 40222 noninteractive
+  [[ " ${VM_SSH_ARGV[*]} " == *" -S $TEST_ROOT/control.sock "* ]]
+
+  chmod 644 "$TEST_ROOT/control.sock"
+  if vm_ssh_build_argv "$TEST_ROOT/control-key" "$TEST_ROOT/known_hosts" 40222 noninteractive; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 2 ]
+
+  chmod 600 "$TEST_ROOT/control.sock"
+  mv "$TEST_ROOT/control.sock" "$TEST_ROOT/real.sock"
+  ln -s "$TEST_ROOT/real.sock" "$TEST_ROOT/control.sock"
+  if vm_ssh_build_argv "$TEST_ROOT/control-key" "$TEST_ROOT/known_hosts" 40222 noninteractive; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 2 ]
+  unset VM_SSH_CONTROL_PATH
+}
+
 @test "partial Ed25519 key scan never creates or replaces known_hosts" {
   cat >"$TEST_ROOT/bin/ssh-keyscan" <<'SCAN'
 #!/bin/sh

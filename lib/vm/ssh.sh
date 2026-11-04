@@ -46,6 +46,15 @@ vm_ssh_build_argv() {
     -o UpdateHostKeys=no
     -p "$port"
   )
+  if [[ -n "${VM_SSH_CONTROL_PATH:-}" ]]; then
+    local socket_owner socket_mode socket_links
+    [[ "$VM_SSH_CONTROL_PATH" == /* && ${#VM_SSH_CONTROL_PATH} -lt 100 &&
+       "$VM_SSH_CONTROL_PATH" != *','* && "$VM_SSH_CONTROL_PATH" != *$'\n'* &&
+       -S "$VM_SSH_CONTROL_PATH" && ! -L "$VM_SSH_CONTROL_PATH" ]] || return 2
+    read -r socket_owner socket_mode socket_links < <(stat -c '%u %a %h' -- "$VM_SSH_CONTROL_PATH") || return 2
+    [[ "$socket_owner" == "$(id -u)" && "$socket_mode" == 600 && "$socket_links" == 1 ]] || return 2
+    VM_SSH_ARGV+=(-S "$VM_SSH_CONTROL_PATH")
+  fi
   if [[ "$mode" == interactive ]]; then
     VM_SSH_ARGV+=(-tt)
   else

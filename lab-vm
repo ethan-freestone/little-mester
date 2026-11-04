@@ -5,6 +5,12 @@ set -euo pipefail
 # A native agent may itself have an explicitly selected parent metrics URL in
 # its environment. Never let that capability flow into a child launcher.
 unset METRICS_URL
+# Internal one-session SSH/browser values are never accepted from the caller.
+unset VM_SSH_CONTROL_PATH VM_BROWSER_BRIDGE_DIR VM_BROWSER_BRIDGE_TOKEN_FILE \
+  VM_BROWSER_BRIDGE_PORT VM_BROWSER_BRIDGE_SSH_CONTROL_PATH \
+  VM_BROWSER_BRIDGE_SSH_PORT VM_BROWSER_BRIDGE_SSH_KEY \
+  VM_BROWSER_BRIDGE_KNOWN_HOSTS VM_BROWSER_BRIDGE_SSH_LOG \
+  VM_BROWSER_BRIDGE_SSH_DEBUG VM_BROWSER_BRIDGE_SSH_BIN
 
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
   printf 'REFUSED: VM launcher requires Bash 4.4+ on the Linux x86_64 support profile.\n' >&2

@@ -184,7 +184,7 @@ VM/network acceptance has occurred.
 | TASK-07 | C06 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-03/2026-11-03 | Internal fresh-up/resume/A→B→B, exact-target resize, reservation recovery, exact deletion/report archive, and rebuild failure guard; 106 Bats,136 VM Python; `de5150e4` | Fixture-only; lifecycle commands beyond status/list/suspend remain undispatched; #41 real-host/KVM/network/nested acceptance stays pending |
 | TASK-08 | C07 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-03/2026-11-03 | Native OpenCode V2/Aider adapters, explicit provider config and permission handling, ready-profile-bound diagnostics, constrained cwd; 148 VM Python, 116 Bats, Bash syntax, ShellCheck, and diff checks PASS | Fixture-only; no live Aider/provider/UI or human-permission acceptance, VM, image, or network operation; live gates remain separately approved |
 | TASK-09 | C08 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Verified loopback metrics service and selected QEMU guestfwd; collector concurrency/history, optional guest plugin retry/disabled state, child metrics isolation, and distinct exit-confirm callbacks; 160 VM Python tests, 122 Bats tests, Bash syntax, ShellCheck, Python compilation, JSX, and diff checks PASS | Fixture-only; no live VM, GPU, Docker, or TUI renderer actions; HUMAN-TUI and host/VM acceptance remain separate approved gates |
-| TASK-10 | C09 | NOT STARTED | Unassigned/—/— | — | Version qualification |
+| TASK-10 | C09 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Scoped native auth/browser bridge, private escrow, runtime key adapters, lifecycle export guard; 36 auth/browser Python tests, 196 full Python tests, 123 Bats; Ruff, ShellCheck, Bash syntax, Python compilation, diff checks PASS | Local fixture checkpoint only; no live login, auth-store inspection, credential export/import, guest, or host browser acceptance; TASK-15 HUMAN-AUTH and refreshed-token owner proof remain pending |
 | TASK-11 | C10 | NOT STARTED | Unassigned/—/— | — | Control key and secure path |
 | TASK-12 | C10 | NOT STARTED | Unassigned/—/— | — | Depends on TASK-11 |
 | TASK-13 | C11 | NOT STARTED | Unassigned/—/— | — | Real nested hardware gate remains |
@@ -591,3 +591,58 @@ implementation was exposed through the CLI. No VM/image/network operation was
 run; real acceptance gates remain restricted and pending under ticket #41. The
 pre-existing staged-empty/worktree-populated `vm-migration-plan.md` remains
 untouched and excluded from C06.
+
+## TASK-10 / C09 — scoped native OAuth and provider credential persistence
+
+**State:** fixture implementation and C09 verification complete; committed locally
+on `feat/vm-approach-2` as C09. Coordinator execution on 2026-11-04. No push or
+PR update was performed.
+
+The compatibility boundary is the reviewed OpenCode v2.2.5 release only. The
+owner-provided guest version and `opencode auth` help output were used to confirm
+the scoped `auth export openai` and stdin-based `auth import` CLI forms. Tagged
+upstream sources were reviewed for the exact loopback callback, authorize URL,
+credential schema, and Anthropic/Moonshot provider paths. No login, account listing,
+credential-store read, export, import, or active credential use was performed.
+
+Implemented:
+
+- `lib/vm/auth.sh`: version-gated provider resolution, scoped OpenAI export/import,
+  fixture-safe validation, private escrow/path checks, staged export, fsync and
+  atomic replace, once-per-profile import markers, and runtime Anthropic/Kimi API-key
+  installation without raw auth-database access.
+- `lib/vm/browser-bridge-server.py`, `browser-open.py`, and `browser-open.sh`:
+  per-session authenticated single-tool MCP, exact authorize/redirect validation,
+  host-loopback SSH callback forwarding and readiness probe, bounded callback
+  leases, and private guest shim/token handoff. Callback completion cannot be
+  reliably observed through the supported v2.2.5 interface, so the documented
+  120-second default (configurable through 600 seconds) remains the cleanup bound;
+  session close and process exit also release the forward.
+- `lib/vm/services.sh`, `lib/vm/ssh.sh`, `lab-vm`, and `lib/vm/lifecycle.sh`:
+  native-agent import/runtime injection, browser bridge startup/cleanup, validated
+  SSH control-socket reuse, frozen-runtime inclusion, and fail-closed export checks
+  before the internal destructive lifecycle delete hook. User-facing down/rebuild
+  dispatch remains unavailable at this checkpoint.
+- `docs/chatgpt-auth.md`, `tests/test_vm_auth.py`, `tests/test_vm_browser_bridge.py`,
+  and `tests/vm-process.bats`: exact compatibility/runbook, synthetic-only auth and
+  callback fixtures, secret-output canaries, and SSH control-socket policy coverage.
+
+Final validation:
+
+| Command/check | Result |
+|---|---|
+| `python3 -B -m unittest discover -s tests -p 'test_*.py'` |196/196 PASS; fixtures only |
+| `python3 -B -m unittest tests.test_vm_auth tests.test_vm_browser_bridge` |36/36 PASS |
+| `bats tests/` |123/123 PASS |
+| Ruff on changed auth/browser Python modules and suites |PASS |
+| ShellCheck warnings on changed Bash modules/launcher |PASS |
+| `bash -n` on changed Bash modules/launcher |PASS |
+| `python3 -m py_compile` on bridge/client/path helpers |PASS |
+| `git diff --check` |PASS |
+| `sha256sum vm-migration-plan.md` |`3d6ee2115423272b88a8efd8d4d33462318d5ae4c537841091e513ee5e2d1374` unchanged |
+
+All tests used synthetic credentials and local temporary files/sockets. No guest
+auth data was inspected, no active credentials were used, and no live login,
+credential export/import, VM, or host browser was performed. Human callback,
+credential persistence/refresh and owner proof remain separate TASK-15 acceptance
+gates; this fixture milestone does not claim those live outcomes.
