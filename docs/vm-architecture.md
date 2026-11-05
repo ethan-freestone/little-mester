@@ -34,10 +34,12 @@ checkout is hash-checked as unchanged. The report distinguishes fixture evidence
 from live E2E acceptance, records exact hashes/deadlines/causes and marks live
 acceptance `NOT_RUN`.
 
-The live self-test adapter is deliberately unavailable pending the TASK-15 handoff.
+The live self-test adapter is currently unimplemented; TASK-15 must implement and
+test it using the existing frozen lifecycle APIs before requesting a live run.
 The CLI therefore fails closed without starting a VM; fixture success is not
 changed-VM, nested-VM, host, network, agent, or human acceptance. Public `run`/`up`
-dispatch remains deferred to TASK-16.
+dispatch remains deferred to TASK-16, but the explicit acceptance adapter need
+not wait for the production dispatcher/default switch.
 
 ### C12 explicit guest update status (fixture-only)
 
@@ -64,6 +66,18 @@ C12 tests use fixture guest roots, fake package commands, synthetic `/proc`, and
 private metadata only. They do not run a live VM, alter host packages, fetch
 network resources, or establish host/guest acceptance. Live update gates remain
 deferred to TASK-15 and must use its current owner-reviewed handoff.
+
+### TASK-15 acceptance preparation (2026-11-05)
+
+`PR_REIMPLEMENTATION_PLAN.md` §9 and the TASK-15 specification define the current
+replacement campaign. Original-branch tickets are historical evidence, not an
+extra approval chain. No acceptance driver/live adapter or live result is claimed
+by this planning update. After those tools pass local checks, one owner-reviewed
+campaign scope covers fresh uniquely owned profiles/snapshots, bounded diagnosed
+retries and exact-run cleanup; it never discovers/reuses a legacy stable export
+or changes a protected working VM/Docker session. Human UI/permission/auth checks
+begin once a disposable guest is usable; expensive recursive proof remains a
+separate required gate. All live acceptance and VM-default cutover remain pending.
 
 ### CLI and configuration contract
 

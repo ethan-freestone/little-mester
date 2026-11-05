@@ -41,8 +41,10 @@ Never edit ticket JSON. No task may modify the user's `vm-migration-plan.md`.
   private evidence, fix only in-scope defects, rerun failed and related regression
   tests. Retry deterministic tests in disposable fixtures safely. Stop/escalate
   if a required behavior/security/interface must change or valuable host state is
-  implicated. No rollback/reset of user work. Live tests require a separately
-  scoped host handoff, not authority inferred from this task list.
+  implicated. No rollback/reset of user work. Live tests require the scoped
+  replacement campaign approval in master §9, not authority inferred from this
+  task list. Historical ticket handoffs are evidence, not additional vetoes or
+  per-command reapproval requirements for disjoint replacement-owned test assets.
 
 ## TASK-01: Define CLI/configuration and support-profile contracts
 
@@ -932,17 +934,27 @@ with bounded reproducible evidence for all required behaviors.
 **Dependencies:** TASK-14.
 
 **Execution context:** plan §9 complete gate definitions; original representative
-isolation/Compose/provenance tests and campaign exclusions; current #41/#45/#50
-must be reread through MCP before any host request.
+isolation/Compose/provenance tests and campaign exclusions. Original #35/#41–43/#45/
+#48/#50/#52/#55/#56 were reread through MCP on 2026-11-05 from `feat/vm-approach`
+at `97af1d83a16fce68ddcc3390276c218a1b0cd518`; reconciliation is recorded in master
+§9 and progress. Those tickets are branch-local historical inputs. Their absence
+or older versions in the replacement store are not blockers; no ticket migration,
+reconstruction of old handoffs, or old-state repair is required for C13.
 
 **Preconditions:** local full fast suite passes; owner-reviewed exact fresh
 replacement run/state/profile scope documented through MCP, credential safeguards
-and preservation plan. Original active stable snapshot/VMs must not be touched.
+and preservation plan before live mutation (not before local implementation).
+Original active snapshots/VMs and the working Docker/auth session must not be
+touched. This 2026-11-05 reconciliation authorizes planning edits only, not host
+execution. One later campaign approval covers its recorded stages/retry/cleanup
+bounds; no fresh authorization per routine command inside that scope.
 
 **Files affected:** CREATE proposed `scripts/vm-host-acceptance.py`,
 `scripts/vm-guest-isolation-check.py`, `tests/test_vm_host_acceptance.py`,
 `tests/test_vm_guest_isolation_check.py`, `docs/vm-host-acceptance.md`;
-REUSE proposed self-test driver and public CLI; fixtures for PostgreSQL and
+MODIFY `scripts/vm-self-test.py` and `tests/test_vm_self_test.py` to implement and
+test the unavailable live adapter; REUSE existing frozen lifecycle/agent/recursion
+APIs and available CLI; fixtures for PostgreSQL and
 approved harmless agent tasks. No historical repair/source overlays or arbitrary
 report-process PID signaling.
 
@@ -950,27 +962,53 @@ report-process PID signaling.
 1. Implement suites clean/daily/workload/boundary/lifecycle/agents/human with exact
    generated run ownership. Preflight read-only; setup/create is separate explicit
    stage, no implicit package/VM/profile repair. Dry-run lists planned assets/effects.
+   Allocate a unique immutable source snapshot and private state root per campaign;
+   refuse a name/path collision without selecting another existing profile. No
+   stable-snapshot requirement, active-export repair or auto-discovered outer VM.
 2. Run all HOST/E2E/SEC/HUMAN groups in master §9; call E2E-SELF driver, don't
-   duplicate VM lifecycle code. Record each independent gate + NOT_RUN/BLOCKED;
+   duplicate VM lifecycle code. Implement its real stage adapter, using the frozen
+   lifecycle APIs; do not leave a stub or substitute fixtures/manual assertions for
+   live VM proof. Keep normal public `run`/`up` gated until TASK-16; the explicit
+   acceptance entry can invoke those APIs without changing the production default.
+   Record each independent gate + NOT_RUN/BLOCKED;
    aggregate PASS only if every required selected gate actually passes. Never
    infer user observations from an Enter/default answer or basic health response.
 3. Preserve meaningful original negative tests: guest/child/direct/mixed/private/
    ancestor/LAN listeners, files/credentials, guest Compose and repeated streams,
-   real permissions and auth lifetime/refresh, resize/suspend/cleanup. Require
-   second LAN host and human observations where not automatable.
+   real permissions and auth lifetime/refresh, resize/suspend/update/cleanup.
+   Verify actual listener bind addresses/ownership at host and outer, alongside
+   QEMU argv and guest/child probes. Per master §9/#43's historical owner decision,
+   a second LAN device is supplementary, not required. Human observations remain
+   required for actual TUI/permissions/browser behavior, never inferred from mocks.
 4. Evidence scoped to exact revision/runtime/versions and stage; report structural
    sanitized fields and fixed observation enums, no raw prompt/token/URL dumps.
    Run ownership manifest drives explicit cleanup, failures preserve reports.
-5. Before requesting host action put exact future command/expected effects/stop
-   conditions/revision/evidence paths on owning ticket via MCP. Current R34 blocks
-   touching original profiles; separate replacement campaign authority is needed.
-   Do not treat absence of owner access as passing or run in this coding shell as
-   if it were the physical CachyOS host.
+5. Prepare one concise campaign handoff with revision, dry-run/commands, expected
+   effects, protected assets, evidence paths, selected providers, budgets and
+   retry/cleanup bounds; record through MCP when applicable. Obtain approval before
+   live mutation, not a chain of legacy-ticket signoffs. Execute master §9's order:
+   preflight→clean→usable guest/model/human checks→work/state retention→recursive
+   proof/boundaries/concurrency→scoped cleanup/evidence review. Allow independent
+   checks to retain results if another gate is blocked. Do not claim this coding
+   shell is the owner's physical host; check capabilities and label the actual
+   execution context. A qualified nested VM is not categorically forbidden.
+6. Failure stops dependent stages; bounded diagnosis/fix/revalidation and fresh
+   attempts within the approved campaign do not need new per-command permission.
+   Default limit: one fresh retry per diagnosed failure per revision, within
+   resource/time budgets. Retain evidence, clean only verified run-owned assets
+   via supported lifecycle operations, and preserve unknown/unresponsive state.
+   Scope expansion/protected-state changes require owner review; persistent
+   failure is BLOCKED, not an automatic indefinite retry or a passing result.
 
 **Tests to implement:** V-SELF/V-LIFE driver mock tests for every suite failure/
 timeout/interrupt/no-default/no-profile-discovery; `report_scope_complete` maps all
 required gates, human missing=BLOCKED; `no_secret_raw_output`; `cleanup_exact_run`;
-`active_original_untouched`. SEC/E2E/HUMAN actual results recorded separately.
+`active_original_untouched`; immutable unique snapshots despite unrelated live
+exporters; exact requested outer or refusal; component RAM-budget evidence;
+bounded inherited-stdout/SSH completion; retry/resource limits; actual socket
+bind/ownership verification; live-adapter integration contract. SEC/E2E/HUMAN
+actual results recorded separately. E2E-LIFE includes live C12 scan/cancel/no-op,
+selected exact-version apply and state/auth retention, not only suspend/resize.
 
 **Tests to execute:** **P** host-acceptance/guest-isolation Python suites; full fast
 suite/static; planned host commands from §9 only after --help verification and
@@ -988,9 +1026,11 @@ commit before owner results, but release remains BLOCKED until all live boxes pa
 TASK-15 test driver/docs/fixtures and passing local checks. Record live outcomes
 as evidence, not fabricated commit prerequisites; C14 consumes required live results.
 
-**Failure and recovery:** stop at first unsafe/failed stage, retain candidate
-state/report, record through MCP; no broad cleanup/retry/model repair. A new
-attempt after diagnosis uses a fresh run ID within explicit approved scope.
+**Failure and recovery:** stop dependent execution at the first unsafe/failed
+stage, retain evidence and record through MCP when applicable; no broad cleanup
+or implicit model repair. A diagnosed retry uses a fresh attempt ID inside the
+approved campaign limits. Do not make unrelated legacy-run repair or a fresh
+ticket authorization a prerequisite for ordinary local fixes or scoped retries.
 
 **Definition of done:** DD for code checkpoint; live acceptance checklist remains
 visible and must pass before default cutover/final completion. TASK-15 remains
@@ -1003,11 +1043,14 @@ acceptance checkbox passes; C13 alone does not satisfy TASK-16's prerequisite.
 primitives or a misleading default switch.
 
 **Dependencies:** TASK-15, with all required real-host gates passing for cutover.
+TASK-16's non-default explicit route, Docker rollback and documentation/CI staging
+may be prepared while TASK-15 is open; final default/rollback route smoke belongs
+to TASK-16 and must not circularly block preparation of the route it tests.
 
 **Execution context:** main `lab`, CI, verify-lab/docs consistency, existing
 Docker metrics/config; master approval choices, review path dispositions.
 
-**Preconditions:** required acceptance evidence reviewed; dirty/source revisions
+**Preconditions:** for cutover, required C13 evidence reviewed; dirty/source revisions
 still match approved contract. If host gates incomplete, stop at staged explicit
 VM route; do NOT commit final default switch or claim scope finished.
 

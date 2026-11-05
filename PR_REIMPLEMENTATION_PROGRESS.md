@@ -2,7 +2,7 @@
 
 ## Control state
 
-- Phase: **Round 2 active; C01–C09 implementation committed; C10 TASK-11/12 fixture milestone complete; real acceptance remains pending**.
+- Phase: **Round 2 active; C01–C12 local checkpoints committed; TASK-13 live adapter/acceptance still open; TASK-15 planning reconciled, C13 implementation not started; real acceptance pending**.
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
@@ -12,7 +12,12 @@
   `feat/vm-approach-2`, based at `5ecd200d32ba909e41d4a15885f57681a32f60d6`;
   its SHA ledger closeout is recorded separately.
 - C10 implementation commit: `272140ec0fb7798f96d759623bcf6699e13f16a6`, on
-  `feat/vm-approach-2`, based on C09 `13a2292`; no push was performed.
+   `feat/vm-approach-2`, based on C09 `13a2292`; no push was performed.
+- C11 fixture closeout: `668147b`; C12: `65a798d080f9470dfc43ccd907f448c9022fc77f`.
+- Current owner direction (2026-11-05): read original ticket history through MCP,
+  reconcile this branch's plan/tasks/progress, commit locally and stop. No C13
+  implementation, host action or push in this reconciliation session. Master §9's
+  replacement campaign policy, not legacy handoff locks, controls the next work.
 - Inspected source: PR #13 at
   `97af1d83a16fce68ddcc3390276c218a1b0cd518`.
 - Assigned session: current coordinating OpenCode session; no subagents assigned.
@@ -69,15 +74,14 @@ actual outcomes are recorded below; no replacement implementation exists yet.
 
 ## Next resumption action
 
-Read the completed plan/review/task package and wait for explicit Round 2 approval.
-Do not resume the superseded kickoff investigation queue as if no plan existed.
-Before implementation, verify Git/API revisions and preserve existing user changes.
-If `/tmp/vm-migration-source` no longer exists, recreate a detached inspection
-worktree at the recorded source SHA in a writable external location and update
-paths in this ledger. Do not switch/reset the replacement or original branch.
-
-The latest #41 restriction remains a **host-execution blocker**, not a planning
-blocker. Do not request original-host commands merely to advance this review.
+After the owner resumes implementation, read master §9's TASK-15 execution policy
+and the amended TASK-15 spec. Implement C13 acceptance tools/docs/tests and the
+missing TASK-13 live adapter locally first. No new architecture approval or
+original-ticket repair is required. Preserve `vm-migration-plan.md` and the
+working Docker session. Prepare one scoped replacement campaign handoff after
+local checks, then obtain owner approval before live mutation. Do not run old
+branch commands or reuse its stable snapshot/profile discovery. See the final
+2026-11-05 reconciliation record below for scope and ordered remaining steps.
 
 ## Round 2 execution ledger contract
 
@@ -191,7 +195,7 @@ VM/network acceptance has occurred.
 | TASK-12 | C10 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Persisted identity/depth guards, KVM/CPU preflight, isolated candidate state/argv, immediate-parent proxy depth and exact descendant-safe cleanup; 5 recursion Python cases, 6 recursion Bats cases; full 214 VM Python and 129 Bats pass; `272140e` | Public `run`/`up` remain undispatched until TASK-16; real nested KVM/VM and host/human acceptance remain pending |
 | TASK-13 | C11 | PARTIAL (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Evidence-gated self-test state machine, atomic private reports, disposable failed-A/fixed-B full-source copies, copied QEMU/Bats checks; 11 focused tests, 225 VM Python tests, 129 Bats tests PASS | Live adapter deliberately unavailable; no changed VM/agent/nested/hardware/host/network acceptance; E2E-SELF remains blocked pending TASK-15 handoff |
 | TASK-14 | C12 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-05/2026-11-05 | Guest update scan/apply, exact-version tools installer, `/proc` TUI guard, CLI/cloud-init/profile integration; 249 Python and 131 Bats tests PASS; changed-file Ruff/ShellCheck, Bash syntax, Python compilation, cloud-init schema and diff checks PASS | Fixture-only; no live VM, package/network, credential, host or lifecycle acceptance; TASK-15 remains the live gate |
-| TASK-15 | C13 | NOT STARTED | Unassigned/—/— | — | Exact fresh-host handoff still required |
+| TASK-15 | C13 | PLANNING RECONCILED; CODE NOT STARTED | Coordinator/2026-11-05/— | Original ticket history reread through MCP; replacement campaign scope/order/retry policy clarified in plan §9 and TASK-15 | Implement tools and real self-test adapter, pass local checks, then approve one disposable campaign before live mutation; no legacy handoff dependency |
 | TASK-16 | C14 | NOT STARTED | Unassigned/—/— | — | All live gates before cutover |
 
 **Round 1 stop condition (satisfied):** explicit Round 2 approval was granted on
@@ -740,3 +744,97 @@ No live guest, VM, host package, network, credential, or host acceptance was run
 Fixture results do not satisfy E2E-LIFE or other live acceptance. Update/host
 gates remain deferred to TASK-15 and its current owner-reviewed handoff. The
 untracked `vm-migration-plan.md` was not modified or included.
+
+## TASK-15 planning reconciliation / model handoff — 2026-11-05
+
+**Owner request:** inspect the old branch and its MCP tickets, treat the approved
+replacement plan as authority, rectify the plan/tasks/progress here, commit and
+stop for a model swap. Do not implement C13 or perform host acceptance in this
+session. This record supersedes the preceding response's suggestion that missing
+old tickets or unresolved old handoffs must be repaired before work can proceed.
+
+### Historical inspection and findings
+
+Temporarily switched the clean tracked checkout from `feat/vm-approach-2` at
+`65a798d` to `feat/vm-approach` at
+`97af1d83a16fce68ddcc3390276c218a1b0cd518`, read original tickets #35/#41–43/#45/#48–57
+through MCP with explicit `ticket_dir=/workspace/docs/tickets`, then returned to
+`feat/vm-approach-2` before making edits. No old-branch file/ticket was changed.
+The default replacement store's missing #50 is expected historical divergence;
+it was never a permission blocker. No ticket copying/migration is needed.
+
+| Historical evidence | Replacement disposition |
+|---|---|
+| #41 runner selected `launcher-smoke` despite a fresh outer name, interrupted apt, then refused a fresh outer because the stable snapshot was actively exported | Keep exact-name, ownership, immutable source and deadline protections; remove stable-snapshot discovery/reuse. Use unique campaign state/snapshots, not a repair/restart of the old exporter |
+| #35/#41 accumulated one-attempt approvals, preserve-all locks and conflicting superseding order instructions | One owner-approved replacement scope covers ordinary stages, bounded diagnosed retries and exact-run cleanup; escalate actual scope/protected-state changes, not every routine command |
+| #41 hung SSH stream, mistaken process candidates and memory blocks (roughly 3.2 GiB available vs 4 GiB + reserve) | Require bounded completion, component resource evidence and verified ownership. Never signal raw PIDs or ignore RAM/cgroup limits; do not require a literal physical CachyOS host when a qualified nested test context is intended |
+| #41/#52 old A→B→B and limited nested continuation had owner evidence | Historical learning only: repeat replacement gates at its revision; old partial passes do not establish changed-VM G1/G2/fail→fix→fresh proof |
+| #42 default update scan passed without status 141, but apply/retention remained open | Keep draining parser coverage and explicitly include live scan/cancel/no-op/selected exact-version apply and state retention in E2E-LIFE |
+| #45 superseded provider-only egress with public HTTP(S) through the proxy; browser sign-in was not persistence/refresh proof | Retain replacement public-only proxy boundary and independent auth lifecycle/secret gates; no obsolete domain-approval hurdle or raw auth-store copy |
+| #50 correct argv did not settle actual prompt/deny UI; #56 live concurrency remained unproven | Require real harmless allow/deny, UI and concurrent-session observations; use the replacement's reviewed version, not old 2.2.0 behavior as acceptance |
+| #43 owner replaced mandatory second-device inbound test with actual host/outer loopback listener checks | Amend SEC-NET to inspect real OS binds/process ownership plus QEMU argv and guest/child probes; second LAN device optional. Do not claim measured LAN reachability without that extra measurement |
+| #55 push-only sharing; #53/#54/#57 future documentation/usage/readiness work | Keep the existing push-only boundary and exclusions; no future MCP/schema feature becomes a TASK-15 prerequisite |
+
+### Changes to the replacement plan
+
+- R34 now preserves valuable original state without importing its campaign's
+  no-retry lock. Master §9 defines one bounded campaign scope, explicit recovery,
+  cleanup, gate ownership and usable-guest-first/human checkpoints.
+- TASK-15 explicitly owns the real adapter missing from C11, not only a report
+  wrapper. It reuses frozen lifecycle/agent/recursion APIs while public `run/up`
+  stay gated. This avoids a TASK-15↔TASK-16 dependency deadlock.
+- TASK-16 may stage explicit routing/Docker rollback before live completion; the
+  final route/default/rollback smoke stays its responsibility. VM-default cutover
+  still requires the other live gates and final smoke, never just C13 fixtures.
+- Human observations can start once the clean disposable guest/model path works;
+  they need not wait for expensive recursive proof. All required gates still
+  block release if incomplete. Missing human input never becomes PASS by default.
+- Updated architecture status to name the pending adapter implementation and
+  canonical campaign policy rather than imply that a historical handoff unlocks
+  an already-complete live backend.
+
+### Remaining work / resumption order
+
+1. **Next implementation session:** build C13 acceptance/isolation tools, the real
+   self-test adapter and docs, with fixture/mock failure/timeout/resource/ownership
+   tests. Run impacted and full fast checks; commit locally. Do not push or run
+   live tests just because these planning amendments exist.
+2. **Before live testing:** generate/verify `--help` and dry-run, then present one
+   revision-bound campaign handoff with unique state/snapshots/profiles, protected
+   assets, resource/retry/cleanup limits, selected model/auth options and private
+   evidence paths. Owner approves that scope; normal OAuth/destructive prompts
+   remain explicit. No old ticket signoff chain.
+3. **Actual supported test environment:** read-only preflight → separately approved
+   setup/clean guest → basic warm/model streaming + human TUI/permission/auth
+   checkpoint → Compose/project feedback and A→B→B/update/lifecycle retention →
+   changed-VM fail/fix G1/G2/depth refusal and outer/child boundaries/concurrency →
+   exact-run cleanup/evidence review. Independent gates can retain results while
+   another is BLOCKED. Stop dependent stages on failure; diagnose and use only
+   bounded, campaign-scoped retries.
+4. **TASK-16:** staged explicit route/Docker rollback/docs/CI, acceptance review,
+   then accepted VM-default switch and final default/rollback smoke. Keep Docker
+   working/auth intact until acceptance. Publishing/merge remains owner-controlled.
+
+### Verification and scope
+
+This is documentation-only; no application/test code, VM, host setup/network,
+model service, credential workflow or ticket data changed. The C12 results
+(249 Python/131 Bats and changed-file checks) are prior evidence, not rerun by
+this planning session. Documentation validation commands/results are recorded
+below after execution. Pre-existing eight README/DECISIONS consistency findings
+and unrelated repository-wide lint findings remain deferred as recorded at C12.
+`vm-migration-plan.md` remains untracked and byte-identical at SHA-256
+`3d6ee2115423272b88a8efd8d4d33462318d5ae4c537841091e513ee5e2d1374`.
+
+Planning-session validation:
+
+| Check | Result |
+|---|---|
+| `git diff --check` |PASS |
+| Python stdlib Markdown/plan integrity check over the four changed docs |PASS: local Markdown links, balanced fenced blocks, no conflict markers; 34 requirements, 16 task sections and all 15 independent live gates retained; only four documentation paths changed |
+| `python3 -B scripts/check-docs-consistency.py` |Exit 1: same eight pre-existing README/`docs/DECISIONS.md` drift/link failures across 106 checks; no new failure |
+| Branch/status and mission hash |Returned to `feat/vm-approach-2`; original branch untouched; mission file hash unchanged and excluded |
+
+No application suites were rerun for these documentation-only changes. No push,
+ticket write, host acceptance or C13 implementation was performed. Stop after the
+local planning commit for the owner's model swap.

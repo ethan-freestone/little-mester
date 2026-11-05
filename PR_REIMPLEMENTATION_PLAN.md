@@ -2,6 +2,11 @@
 
 **Approved by the owner on 2026-11-03. Round 2 in progress on `feat/vm-approach-2`.**
 
+**2026-11-05 clarification:** this replacement plan controls execution. Original
+branch tickets provide requirements, failure history and observations, not an
+additional approval workflow. The TASK-15 campaign policy in §9 supersedes legacy
+handoff ordering and retry restrictions for new replacement-owned test assets.
+
 ## 1. Mission, scope and decisive requirement
 
 Replace PR [#13](https://github.com/ethan-freestone/little-mester/pull/13) independently
@@ -110,7 +115,7 @@ the interpretation, not whether implementation has passed. Verification IDs in
 | R31 QUALITY P1 E 10 | Bash/Fish documented commands, one decision log, correct README/SECURITY/setup/testing, engine-only ticket writes; Node/MCP private lockfile build. #44; C.9.18–19/24. | V-DOCS, V-GUEST, HOST-CLEAN |
 | R32 OPTIONAL P2 E 10 | Remote/cloud VM hosts, BSD/macOS adapters, alternate runtimes, GPU passthrough excluded from this release; no weakened fallback advertised. C.8/C.9.15, #46/#47. | V-CONFIG refusal; docs exclusion |
 | R33 EXPERIMENTAL P2 E 10 | #53 docs MCP, #54 usage counters, #55 structured sharing/MCP research, #57 readiness schema and #51 ticket test-plan field are separate work. Do not import ticket-store churn or implement upward sharing. | V-DOCS scope check |
-| R34 UNRESOLVED P0 E 9 | Live original #41 gate: interrupted apt/report state and active stable exporter require owner review, no retry. This blocks original owner-host actions, NOT replacement planning. New replacement host campaign needs separate exact scope/handoff. | HOST-PREFLIGHT approval/evidence |
+| R34 OPERATIONAL P0 E 9 | Preserve original/valuable sessions, profiles, credentials and exports. Legacy interrupted apt/report state is relevant only if that asset is deliberately reused; it is not a prerequisite to a fresh isolated replacement campaign. Approve the replacement run scope once, preflight actual resources and collisions, and never substitute an existing profile/export. | HOST-PREFLIGHT scope/ownership/evidence |
 
 ## 4. Architecture decisions and alternatives
 
@@ -176,7 +181,12 @@ the interpretation, not whether implementation has passed. Verification IDs in
   recursive self-test, and human OAuth/TUI observations. Test runner receives exact
   names/run IDs, never discovers or repairs the developer environment. FAIL,
   BLOCKED, NOT_RUN and PASS are distinct. Report original stage/cause, not raw
-  guest output or arbitrary host commands.
+   guest output or arbitrary host commands.
+  One reviewed campaign scope covers its ordinary stages, bounded retries and
+  run-owned cleanup; do not demand a new ticket authorization for each command.
+  Stop the affected stage on failure, preserve diagnostics and continue only after
+  diagnosis/revalidation. Widening scope or touching protected state needs owner
+  approval; fixing a candidate inside the approved scope does not.
 - **D10 — compatibility and delivery discipline.** Preserve main behavior in
   `lab-docker`; expose VM mode explicitly until replacement acceptance, then
   VM-default dispatcher. Original ticket/audit history stays on its original
@@ -388,7 +398,8 @@ passing recursive VM support. Optional research R32/R33 is deliberately deferred
 Each essential requirement has an original evidence path in §3, a replacement
 decision and task below, meaningful verification in §9, and commit checkpoint.
 No untracked required behavior is intentionally dropped. R32/R33 are explicit
-exclusions; R34 is a host execution condition, not implementation functionality.
+exclusions; R34 is a preservation/scope condition, not a requirement to repair the
+old branch's interrupted host campaign before testing the replacement.
 
 | Requirements | Decision → task | Test groups | Commit |
 |---|---|---|---|
@@ -493,19 +504,102 @@ Use unique generated disposable profiles/state roots. No defaults to a developer
 profile or stable exported snapshot. These are future interfaces, NOT commands
 to run in the existing environment now.
 
+### TASK-15 execution policy and order (2026-11-05 reconciliation)
+
+The owner requested a planning-only reconciliation on 2026-11-05, not live-test
+execution. Historical source was reread through MCP at original branch revision
+`97af1d83a16fce68ddcc3390276c218a1b0cd518`; the active replacement baseline is C12
+`65a798d`. The default replacement ticket store does not contain #50 or the
+original #41 handoff. This is expected branch-local history, not a missing
+permission or reason to recreate old tickets. For historical inspection use an
+explicit MCP `ticket_dir` in an original-source checkout. Never copy that store
+into the replacement, run its old commands here, or wait for an old ticket to
+change before advancing this plan.
+
+1. **Finish the C13 implementation locally first.** Implement acceptance suites,
+   guest-isolation probes, reports/docs and a real adapter for TASK-13's currently
+   unavailable live backend. Wire the adapter to the existing frozen lifecycle,
+   agent and recursion APIs; do not write a second lifecycle controller. Test the
+   complete dry-run/failure/interrupt/cleanup contracts and verify actual `--help`.
+   A report aggregator or fixture adapter alone is not sufficient. Public `run`
+   and `up` remain gated; the explicit acceptance path can exercise those existing
+   APIs without enabling the production default or waiting for TASK-16.
+2. **Prepare one replacement campaign handoff.** Record exact tested revision,
+   source/snapshot and private run-state/evidence roots, protected assets, resource
+   limits, selected providers, expected side effects and cleanup/retry bounds.
+   Present the generated dry-run to the owner. Authorize the scoped campaign once
+   before live mutation; record the scope/results through MCP when applicable,
+   using the plan/progress as the canonical cross-stage checklist. No new schema,
+   ticket migration or chain of per-command approvals is a prerequisite.
+3. **Read-only preflight, then explicit clean setup.** Check the actual executing
+   host or supported enclosing VM: KVM/nested CPU access, tools, disk/RAM/cgroups,
+   mount/listener collisions and exact identities. Do not infer capability from
+   the words “host”, “container” or “CachyOS”; do not impose a physical-host-only
+   check when a qualified nested environment is the intended execution context.
+   Report that context accurately. Missing capabilities block before mutation;
+   prerequisite installation remains a separately confirmed setup operation.
+   Start only fresh run-owned profiles against unique immutable snapshots. Do
+   not reuse the old stable snapshot or auto-select its live exporter. An unrelated
+   exporter or interrupted apt on an untouched legacy profile does not block a
+   disjoint run; real resource/path collisions do.
+4. **Cheap usability checks before expensive recursion.** Establish HOST-CLEAN,
+   basic warm launch and model-none behavior, then actual repeated selected-model
+   streaming. Perform human TUI/metrics/exit, permission and browser-auth checks
+   once this disposable guest is usable. Automation must offer a human checkpoint,
+   not mark a default/Enter as an observation. Skip unavailable human observations
+   as BLOCKED while retaining independent automated results; do not require all
+   recursion to pass before a person may inspect a working TUI.
+5. **Exercise retained state and real work.** Run guest-only PostgreSQL Compose
+   and failing-test→fix→pass, same-profile A→B→B and warm PID/identity checks,
+   suspend/resume/resize and update scan/cancel/selected apply with auth, keys,
+   tools and workload-volume retention. Use separate disposable assets for
+   destructive auth export/reimport/failure tests. Actual update acceptance is
+   required; the old branch's successful scan does not establish it here.
+6. **Prove recursive self-development and boundaries.** Run the TASK-13 adapter:
+   changed VM bootstrap and launcher, intentional failure→fixed fresh candidate,
+   G1/G2 at max2, G3 refused before state/QEMU, an actual child-agent task and
+   parent continuity. Check filesystem/secret/network boundaries at outer and
+   child, plus concurrent same-guest agents and auth-port isolation. Resource
+   preflight applies at each enclosing level, including retained failed children.
+   Independent boundary checks may run earlier; successful boot/apt/health does
+   not stand in for them.
+7. **Close out safely, then TASK-16.** Persist private reports and explicitly clean
+   only manifest-owned disposable assets using verified lifecycle operations;
+   never raw PID signaling or broad discovery/deletion. Verify no residue or
+   protected-state change. Review every gate below, including any BLOCKED items.
+   TASK-16 stages explicit routing/Docker rollback and validates its route-specific
+   smoke; only then, with the other required acceptance passed, enable the VM
+   default and run the final default/rollback smoke. Final delivery/merge remains
+   separately authorized; a C13 code commit does not imply release acceptance.
+
+**Recovery without deadlock:** each live command has a deadline, original exit
+cause and structural stage evidence; SSH completion must not wait indefinitely
+on inherited stdout. Failure stops dependent stages, not unrelated local work.
+Inspect/fix/test locally, then resume or use a fresh generated attempt within the
+approved run/resource budget. Default retry limit is one fresh retry per diagnosed
+failure per revision; persistent failure or a depleted budget is BLOCKED pending
+review, not an endless automatic loop. Cleanup of verified stopped run-owned
+failed candidates after evidence retention is included in the campaign scope;
+unknown/unresponsive ownership is preserved for review. Normal explicit human
+OAuth approval and destructive-action confirmations still apply. No standing
+approval authorizes changes to legacy/default VMs, active snapshots, host Docker
+sessions, host services, firewall policy or credentials outside the chosen narrow
+auth workflow. Keep the working Docker session and private credentials intact;
+privately export/verify before any separately approved container recreation.
+
 | Gate | Observable pass and important failures |
 |---|---|
-| HOST-PREFLIGHT | Owner-approved exact revision/profile scope; KVM/CPU/tools/virtiofs sandbox, RAM/cgroup and disk budget; preserve active profiles/auth; failed check BLOCKED before mutation |
+| HOST-PREFLIGHT | One owner-approved replacement campaign scope/revision; KVM/CPU/tools/virtiofs sandbox, RAM/cgroup and disk budget in actual execution context; unique exact-owned profiles/snapshots; preserve protected sessions/auth; failed check BLOCKED before mutation |
 | HOST-CLEAN | Fresh cached-image integrity, fresh boot/schema/cloud-init clean state, virtiofs UID/GID, Node/MCP, guest Docker and no host Docker requirement; CPU-only evidence separately labeled |
 | E2E-DAILY | One command enters native TUI; two identical starts no reboot/install; A→B→B same overlay/keys; normal warm same PID; Docker rollback opens existing supported path without recreation |
 | E2E-MODEL | Each configured Ollama/llama.cpp plus selected remote provider completes actual repeated streaming requests (5 per configured provider); health only insufficient; denial/missing credentials/outage actionable; model-none shell/auth works |
 | E2E-WORK | Agent creates guest-only PostgreSQL Compose stack, health/query, failing project test→fix→pass, stop/restart/query persisted volume, down; bind/guest-loopback port works; H has no published guest service/socket |
 | E2E-SELF | Full changed-VM workflow §5: edit candidate VM bootstrap AND lifecycle/command construction, fresh G1 then G2, runtime/source hashes match, intentional failure→fixed fresh pass, child agent task, parent remains usable, scoped cleanup; unchanged boot/mock is FAIL |
 | E2E-DEPTH | Actual depth0→1→2 boots, persisted max2 after independent login; depth3 refused before state/QEMU; unauthorized reset/increase/missing KVM similarly denied |
-| E2E-LIFE | Repeated suspend/resume preserves auth/DB volume/installed tools/keys/workspace; live child blocks parent; explicit deepest-first shutdown; graceful resize verifies guest MemTotal/preserved identity; destructive exact profile teardown leaves no helper/socket residue and base/workspace/reports intact |
+| E2E-LIFE | Repeated suspend/resume preserves auth/DB volume/installed tools/keys/workspace; update scan/cancel/no-op and selected apply preserve that state with exact installed-version evidence; live child blocks parent; explicit deepest-first shutdown; graceful resize verifies guest MemTotal/preserved identity; destructive exact profile teardown leaves no helper/socket residue and base/workspace/reports intact |
 | E2E-AGENTS | Two same-guest agents complete separate authorized file/test tasks, independent auth ports and clean cancellation; document shared-workspace risk, no supervisor claim |
 | SEC-FS | Guest/child can't read out-of-scope host files/control keys/socket; escaping symlinks refused; state-root overlap blocked, one export verified |
-| SEC-NET | At outer and child: public HTTP/HTTPS via policy works; direct Internet/raw DNS/UDP/non-HTTP, loopback host, local/direct public subnet, private/LAN/metadata/ancestor targets denied; configured denied hostname and mixed DNS mocked deterministically plus bounded live probes; second LAN host verifies listeners inaccessible |
+| SEC-NET | At outer and child: public HTTP/HTTPS via policy works; direct Internet/raw DNS/UDP/non-HTTP, loopback host, local/direct public subnet, private/LAN/metadata/ancestor targets denied; configured denied hostname and mixed DNS mocked deterministically plus bounded live probes; inspect actual host/outer listener bind addresses and owning identities as well as QEMU argv; no wildcard/LAN binds or host-published Compose ports |
 | SEC-SECRET | Canary credential absent in snapshot/Git history/seed/base/log/report; per-provider opt-in only; import/export private and atomic; induced export failure prevents deletion; refreshed guest state survives restart/import |
 | HUMAN-TUI | Same terminal compare supported guest dialogs, metrics sidebar/tool, Ctrl-C cancel/confirm and retry rendering; record version, no secret screenshots |
 | HUMAN-PERM | Actual guest harmless allowed tool without prompt under requested auto, explicit deny stays denied; compare ask and shared/standalone same version; argv/UI/action all recorded |
@@ -540,10 +634,16 @@ observations and preserved diagnostic paths. No model prompts/auth URLs/tokens.
 Reports survive failure/interruption and are outside exported workspaces. Failed
 run cleanup is an explicit run-ID operation; no wildcard/default profile sweep.
 
-Human OAuth/terminal rendering and physical LAN reachability cannot be fully
-established by local unit tests. Require owner observations/second-host evidence;
-mark unavailable evidence BLOCKED, not waived. Fresh OpenCode compatibility is
-tested in an isolated guest, never by modifying the active harness session.
+Human OAuth/terminal rendering/actual permissions require explicit observations;
+mark unavailable required evidence BLOCKED, not waived. For inbound listener
+exposure, adopt the original owner's #43 clarification: actual OS socket/address
+and process-ownership checks at host and outer replace a mandatory second LAN
+device. Pair them with guest/child negative egress probes; QEMU argv alone is
+insufficient. A second-device probe is useful supplementary evidence, not a new
+blocking prerequisite; absent such a probe, do not claim measured physical-LAN
+reachability. Fresh OpenCode compatibility is tested in an isolated guest, never
+by modifying the active harness session. Legacy 2.2.0 auth observations do not
+replace tests at the replacement's reviewed 2.2.5 compatibility version.
 
 ## 10. Risk register and confidence
 
@@ -559,7 +659,7 @@ tested in an isolated guest, never by modifying the active harness session.
 | Resource estimation races/overcommit | High: allocation lock/reservations plus cgroup/host preflight; recheck before start; preserve on failure; not arbitrary guest-workload quota enforcement |
 | Rewrite loses tested behavior while shrinking runner | High: full path dispositions/test obligation map, negative scenarios preserved, complete traceability; smaller line count not success criterion |
 | Rootful guest choice/state-layout change rejected | Medium: approval decisions explicit; no implementation before approval |
-| Original host currently blocked/valuable state | High: preserve #41 restriction, no retry or restart; replacement campaign needs scoped owner handoff through MCP |
+| Original host valuable/interrupted state | High: preserve those assets; use a separate campaign scope and unique snapshots/profiles, not legacy retry locks or an active stable exporter |
 | Task/commit integration drift | Medium: bounded contexts, one coordinator, test-first commits, revalidate revisions, stop for material redesign |
 
 Confidence **8/10** in requirements reconstruction and the architecture/plan.
