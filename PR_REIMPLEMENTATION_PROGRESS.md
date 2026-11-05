@@ -1248,3 +1248,7 @@ plan. Tests do not contact a registry or invoke host/guest Docker.
 No registry was contacted and no host Docker, guest Docker, VM/service, provider,
 credential, campaign, push, merge or C14 operation was used. The follow-up commit
 is local only and remains unpushed.
+
+**Follow-up implementation commit:** `50c671b6b04903eb491a6ce40436be9cc8b69dcd`
+(`Allow bounded guest-only PostgreSQL pull`); no push was made. This SHA closeout
+is recorded in a separate local progress-ledger commit.
