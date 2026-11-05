@@ -2,13 +2,20 @@
 
 ## Control state
 
-- Phase: **C13b committed locally; bounded local-first §1 implementation completed and fixture-validated locally; no live VM acceptance; C14 pending**.
+- Phase: **C13b committed locally; package 1 experimental development entry committed locally at `6cec2ae`; first owner-started VM handoff ready; package 2 security closeout, frozen-candidate acceptance and C14 remain ahead**.
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
-- Current authorization: the owner explicitly switched back to **local §1
-  implementation** under [the local-first C14 handoff plan](docs/vm-c14-handoff-plan.md).
-  Fixture tests/docs are in scope; no campaign, VM/service startup, provider
-  discovery, credentials, C14 cutover, push or merge is authorized.
+- Current authorization: the owner approved the fixed four-package sequence in
+  [the local-first C14 handoff plan](docs/vm-c14-handoff-plan.md): (1) experimental
+  explicit development entry and first owner-started VM on this branch, (2) the
+  remaining bounded security/evidence implementation, (3) integrated acceptance
+  on a frozen candidate, and (4) C14 default/rollback and closeout. The owner starts
+  the VM; the assistant must not. The useful-evidence campaign is approved within
+  a 360-minute ceiling including cleanup and one diagnosed retry; do not request
+  campaign approval again. Pause for genuine owner observations or new effects.
+  Manual owner OpenAI authentication experimentation is allowed in the disposable
+  VM; no paid streams or credential export/import are included. No push, merge or
+  C14 activation is authorized.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
 - Implementing branch: `feat/vm-approach-2`; C05 implementation checkpoint is
   `cb7091a17720b59056bd2677f3af1aba5699f944`.
@@ -27,12 +34,13 @@
   ticket history through MCP, reconcile this branch's plan/tasks/progress, commit
   locally and stop; no C13 or host action in that session. This was superseded by
   the later request to finish C13 locally only.
-- Current scope: complete the owner-approved **local-first §1 handoff only**;
-  its bounded code/tests/docs are now implemented and locally validated.
-  Live OpenAI testing is deferred, not a merge/C14 blocker. Required auth
-  regression/safety tests and non-auth security gates remain.
-  Keep `lab` on Docker and `lab vm` gated until reviewed local-first acceptance
-  and separate C14 approval. Old host preflight is not evidence for a new SHA.
+- Current scope: package 1's explicit `lab vm run/up` entry is committed and
+  fixture-validated; hand off the exact start command to the owner.
+  Keep ordinary `lab` on Docker; this does not count as host acceptance or switch
+  the product default. The prior read-only host preflight passed at `422a523`
+  (run ID `2fb37d376f9040b3bbc6be4a5d216dd7`), but predates this entry and is not
+  preflight evidence for a later frozen acceptance revision. Do not expand beyond
+  the four approved packages; classify unrelated enhancements separately.
 - Inspected source: PR #13 at
   `97af1d83a16fce68ddcc3390276c218a1b0cd518`.
 - Assigned session: current coordinating OpenCode session; no subagents assigned.
@@ -189,8 +197,9 @@ was not a guest bootstrap or a passing host-provisioning result.
 
 The owner resumed Round 2 after the model swap. TASK-01/02 through TASK-05 are
 committed at C01–C04. TASK-06/C05 is fixture-validated and committed. Later tasks
-retain their ordered preconditions. No live
-VM/network acceptance has occurred.
+retain their ordered preconditions. Rows below record each checkpoint's state at
+that time; later approvals and amendments supersede stale routing restrictions.
+No live VM/network acceptance has occurred.
 
 | Task | Planned checkpoint | Status | Assigned/start/completion | Actual files/tests/results/SHA | Deviations/blockers |
 |---|---|---|---|---|---|
@@ -859,7 +868,9 @@ local planning commit for the owner's model swap.
 **Scope resumed:** complete the C13 code checkpoint only. The earlier planning-only
 direction above is historical and superseded for this resumed session. No live
 acceptance, host mutation, network probe, credential action, human test, TASK-16
-work, or push was authorized or performed. Public `run`/`up` remain fail-closed.
+work, or push was authorized or performed at that checkpoint. `run`/`up` were
+fail-closed at that checkpoint; the later package-1 approval supersedes that
+restriction for the experimental route only. Ordinary `lab` remains on Docker.
 
 **Implementation:** added `scripts/vm-host-acceptance.py` with read-only scoped
 preflight, explicit confirmed execution, generated private run/snapshot ownership,
@@ -1252,3 +1263,51 @@ is local only and remains unpushed.
 **Follow-up implementation commit:** `50c671b6b04903eb491a6ce40436be9cc8b69dcd`
 (`Allow bounded guest-only PostgreSQL pull`); no push was made. This SHA closeout
 is recorded in a separate local progress-ledger commit.
+
+## Experimental explicit development VM entry — 2026-11-05
+
+**Authority and boundary:** the owner approved the fixed four-package sequence
+recorded above and in `docs/vm-c14-handoff-plan.md`. Package 1 is the experimental
+explicit run/up entry and the first VM started by the owner on this branch. The
+assistant did not and must not start a VM. Ordinary `./lab` remains on Docker.
+The 360-minute campaign ceiling (including cleanup and one diagnosed retry) is
+already approved; do not request campaign approval again. Pause for genuine owner
+observations or new effects. Manual owner OpenAI authentication experimentation
+is optional in the disposable VM; paid streams and credential export/import are
+excluded. No provider/model has been selected; the default remains `none`.
+
+**Implemented in `6cec2ae18fa1d23178ce3276d14a75009f0a814f`:**
+
+- Wired `lab-vm run/up` to the existing lifecycle controller. `up` returns after
+  successful readiness without attaching an agent; `run` attaches through the
+  profile's frozen runtime only after lifecycle success and preserves argument
+  boundaries/exit status.
+- Kept unsupported cleanup acknowledgements (`--clean` and
+  `--discard-recursive`) fail-closed for this experimental entry. No default
+  `lab` route change, host package install, VM startup or provider discovery.
+- Reconciled CLI/Docker help, README, architecture, acceptance handoff/runbook,
+  task/plan authority and route fixtures. Handoff names the writable checkout
+  flag and depth-0 cap; it warns that the named profile persists and can resume.
+- Preserved the pre-existing untracked `vm-migration-plan.md`; SHA-256 remains
+  `3d6ee2115423272b88a8efd8d4d33462318d5ae4c537841091e513ee5e2d1374`.
+
+**Validation:**
+
+| Command/check | Result |
+|---|---|
+| `python3 -B -m unittest discover -s tests` | **324 tests PASS** |
+| `bats --print-output-on-failure tests/*.bats` | **145/145 PASS** |
+| `bash -n lab lab-docker lab-vm lib/vm/lifecycle.sh` + ShellCheck on those paths | PASS |
+| `lab --help`, `lab-vm --help`, acceptance-runner `--help` | PASS; read-only help only |
+| Markdown fences and local links in seven touched plan/runbook/readme files | PASS |
+| `git diff --check` | PASS |
+| `python3 -B scripts/check-docs-consistency.py` | **8 existing README/DECISIONS drift/link findings across 106 checks**; no new category |
+
+No image was downloaded; no QEMU/VM/service, provider discovery, live
+authentication, campaign, host Docker, push or merge operation occurred. The old read-only
+preflight passed at `422a523` (run ID `2fb37d376f9040b3bbc6be4a5d216dd7`), but
+predates this entry and is not acceptance-candidate preflight evidence. Commit
+`6cec2ae` is local and unpushed; the progress-ledger SHA closeout follows
+separately. Owner may start the dedicated development profile only from a target-
+host checkout containing this commit; if that checkout does not contain this
+exact revision, stop rather than use a stale tree or assume a push.
