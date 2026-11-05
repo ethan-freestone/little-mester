@@ -45,8 +45,8 @@ synthetic atomic export/import lifecycle checks, and provider-forwarding
 acceptance also remain explicit blockers rather than implied PASS results.
 
 No real target-host discovery or acceptance has occurred. Local fixtures do not
-prove boot, model availability, filesystem isolation, database image
-availability, nested KVM, human UI behavior, or exact real cleanup.
+prove boot, model availability, filesystem isolation, guest registry access for
+the database image, nested KVM, human UI behavior, or exact real cleanup.
 
 ### A. Minimal synthetic-canary checker
 
@@ -114,14 +114,14 @@ implement live acceptance.
   agent failing-test→fix→pass, two authorized concurrent tasks, retention,
   selected config/tools apply, boundaries and actual nested fail/fix/depth proof
   need actual operations/evidence, not wholesale checklist attestation.
-- Resolve guest `postgres:16-alpine` availability: the runner currently requires
-  it preloaded and refuses pulls. If absent, stop at BLOCKED. A possible separately
-  approved remedy is to stage an owner-approved OCI archive into the disposable
-  guest only, verify its immutable digest before `docker load`, cap the archive at
-  an owner-approved size (proposed ceiling: 2 GiB), and reserve at least that
-  amount plus 1 GiB free guest disk before transfer. Never use host Docker or
-  silently pull images. The archive source, exact digest, and limits still require
-  owner approval; this preparation path is not implemented.
+- The guest workload now checks for `postgres:16-alpine` inside the VM and makes
+  one guest-only `docker pull` attempt, bounded to 180 seconds, when absent, using
+  the guest-local socket and a fresh empty Docker config. It verifies the image
+  afterward; failure remains BLOCKED. Compose is configured with
+  `pull_policy: never` and `up --pull never` to prevent implicit pulls. Never use
+  host Docker for this workload. Fixture tests cover both successful guest-side
+  download and unavailable-image blocking; they do not prove target-host registry
+  access or run a campaign.
 - The runner must stop before expensive recursion until the exact-run
   `HUMAN-TUI` observation is recorded PASS; neither boot nor a stage result proves
   usability. The local runner now adds this fail-closed prerequisite; fixture

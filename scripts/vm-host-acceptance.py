@@ -1081,13 +1081,13 @@ print(json.dumps({"checks":checks,"opencode_version":opencode_version},sort_keys
             "host_docker_dependency": "NOT_REQUIRED", "result": "PASS" if passed else "FAIL"}
 
 
-GUEST_WORKLOAD_CODE = r'''import json,os,re,socket,subprocess
+GUEST_WORKLOAD_CODE = r'''import json,os,re,socket,subprocess,tempfile
 from pathlib import Path
 
 run_id=os.environ["LM_WORKLOAD_ID"]
 relative=os.environ["LM_WORKLOAD_RELATIVE"]
 project=os.environ["LM_WORKLOAD_PROJECT"]
-checks={"postgres_image_preloaded":False,"compose_health":False,"query_ok":False,
+checks={"postgres_image_available":False,"compose_health":False,"query_ok":False,
  "bind_mount_readable":False,"volume_survives_container_restart":False,
  "no_published_service":False,"guest_loopback_only":False,"compose_down":False,
  "volume_retained_for_vm_suspend":False}
@@ -1096,17 +1096,27 @@ root=Path("/workspace")/relative
 compose_path=root/"compose.yaml"
 started=False
 
-def call(argv,timeout=30):
+def call(argv,timeout=30,env=None):
+ if argv and argv[0]=="docker":
+  env=dict(os.environ if env is None else env)
+  env["DOCKER_HOST"]="unix:///var/run/docker.sock"
+  env.pop("DOCKER_CONTEXT",None)
  return subprocess.run(argv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
-  stderr=subprocess.DEVNULL,timeout=timeout,check=False)
+  stderr=subprocess.DEVNULL,timeout=timeout,check=False,env=env)
 
 try:
  if (not re.fullmatch(r"\.lm-acceptance-work-[a-f0-9]{12}",relative)
      or not re.fullmatch(r"[a-f0-9]{32}",run_id)):
   raise ValueError
  image=call(["docker","image","inspect","postgres:16-alpine"],10)
- checks["postgres_image_preloaded"]=image.returncode==0
- if checks["postgres_image_preloaded"]:
+ if image.returncode!=0:
+  with tempfile.TemporaryDirectory(prefix="lm-postgres-docker-config-") as docker_config:
+   pull_env=os.environ.copy()
+   pull_env["DOCKER_CONFIG"]=docker_config
+   call(["docker","pull","postgres:16-alpine"],180,env=pull_env)
+  image=call(["docker","image","inspect","postgres:16-alpine"],10)
+ checks["postgres_image_available"]=image.returncode==0
+ if checks["postgres_image_available"]:
   if root.exists() or root.is_symlink(): raise FileExistsError
   root.mkdir(mode=0o700)
   bind=root/"bind"
@@ -1190,7 +1200,7 @@ volumes:
    checks["volume_retained_for_vm_suspend"]=volume.returncode==0
    status="PASS" if all(checks.values()) else "FAIL"
 except (OSError,subprocess.SubprocessError,ValueError,FileExistsError):
- status="FAIL" if checks["postgres_image_preloaded"] else "BLOCKED"
+ status="FAIL" if checks["postgres_image_available"] else "BLOCKED"
 finally:
  if started and root.exists():
   try:
@@ -1209,7 +1219,7 @@ def _workload_relative(run_id: str) -> str:
 
 
 def _run_guest_workload_code(state_root: Path, profile: str, run_id: str,
-                             code: str, timeout: int = 300) -> dict[str, Any]:
+                             code: str, timeout: int = 480) -> dict[str, Any]:
     relative = _workload_relative(run_id)
     project = f"lmacc-{run_id[:12]}"
     environment = " ".join((
@@ -1227,7 +1237,7 @@ def _run_guest_workload_code(state_root: Path, profile: str, run_id: str,
             or value.get("schema_version") != 1 or value.get("result") not in {"PASS", "FAIL", "BLOCKED"}
             or not isinstance(value.get("checks"), dict)
             or set(value["checks"]) != {
-                "postgres_image_preloaded", "compose_health", "query_ok", "bind_mount_readable",
+                "postgres_image_available", "compose_health", "query_ok", "bind_mount_readable",
                 "volume_survives_container_restart", "no_published_service", "guest_loopback_only",
                 "compose_down", "volume_retained_for_vm_suspend",
             }
@@ -1235,7 +1245,7 @@ def _run_guest_workload_code(state_root: Path, profile: str, run_id: str,
         raise AcceptanceError("guest workload report does not match the fixed schema")
     checks_pass = all(value["checks"].values())
     if ((value["result"] == "PASS") != checks_pass
-            or (value["result"] == "BLOCKED" and value["checks"]["postgres_image_preloaded"])):
+            or (value["result"] == "BLOCKED" and value["checks"]["postgres_image_available"])):
         raise AcceptanceError("guest workload result does not match its check outcomes")
     return value
 
@@ -1247,7 +1257,7 @@ def _guest_workload_checks(state_root: Path, profile: str, run_id: str) -> dict[
         return {"status": "BLOCKED", "reason_code": "guest_workload_deadline_exceeded"}
     except AcceptanceError:
         return {"status": "BLOCKED", "reason_code": "guest_workload_unavailable"}
-    reason = ("guest_postgres_image_not_preloaded" if value["result"] == "BLOCKED"
+    reason = ("guest_postgres_image_unavailable" if value["result"] == "BLOCKED"
               else "guest_workload_check_failed" if value["result"] == "FAIL" else None)
     return {"status": value["result"], "reason_code": reason, "checks": value["checks"],
             "project": f"lmacc-{run_id[:12]}", "workload_path": _workload_relative(run_id)}

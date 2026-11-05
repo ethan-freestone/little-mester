@@ -1057,7 +1057,7 @@ historical and does not validate C13b commit `d3751e4`.
   credential-free provider/model configuration. OpenAI browser sign-in remains
   optional/owner-controlled; skipping blocks dependent checks only. No host auth
   is imported and no model transcript is retained.
-- Connected guest-only preloaded-image Compose/PostgreSQL health/query/bind and
+- Connected guest-only Compose/PostgreSQL health/query/bind and
   container-restart checks to a DB-canary VM suspend/resume probe and exact
   generated-project/volume/workspace cleanup. Compose health now requires a
   successful `up --wait`; unavailable cleanup evidence stays BLOCKED.
@@ -1200,13 +1200,51 @@ provider discovery, credential activity, push, merge or C14 activation.
   export-import/failure-before-delete checks are also not yet campaign evidence.
   Canary absence alone is never a security PASS.
 - `SEC-FS` remains BLOCKED pending real filesystem-isolation campaign evidence.
-- Guest `postgres:16-alpine` availability is unverified and the runner refuses
-  pulls. If absent, stop BLOCKED. A guest-only OCI archive is only a proposal:
-  source, immutable digest and size/disk limits require separate owner approval;
-  no preparation path was implemented.
+- Target-guest registry access for `postgres:16-alpine` remains unverified. The
+  follow-up implementation now makes one bounded guest-only pull if missing and
+  verifies local availability; failure stays BLOCKED. Fixture coverage does not
+  prove target-host registry access, and host Docker is not used.
 - No target-host model availability, boot, TUI, workload, network/nesting,
   isolation or exact real teardown was tested. Local fixtures do not replace
   those gates. Ordinary `lab` remains on Docker; C14 remains pending.
 
-All changes remain **uncommitted**. No campaign, VM/service, provider discovery,
-credential, push, merge or C14 operation was performed.
+The local-first §1 checkpoint is committed locally as `8171011`; the guest-pull
+follow-up has now been validated for a separate local-only commit. No campaign,
+VM/service, provider discovery, credential, push, merge or C14 operation was
+performed.
+
+## Guest-only PostgreSQL download follow-up — 2026-11-05
+
+**Owner decision:** permit downloading `postgres:16-alpine` inside the disposable
+guest when it is absent. This does not authorize host Docker, a campaign, or any
+live VM/service operation.
+
+The workload now inspects the image in the guest, attempts one `docker pull`
+bounded to 180 seconds when absent, using the guest-local Unix socket and a fresh
+empty Docker config, then inspects again before creating the Compose workspace.
+The fixed report exposes only `postgres_image_available`. Compose has
+`pull_policy: never` and is always invoked with `--pull never`; unavailable image
+or failed verification stays BLOCKED. The guest command deadline is 480 seconds
+to leave room for the bounded download and workload checks.
+
+Added fixture coverage for both the mocked successful pull path and unavailable-
+image BLOCKED path, including pull order/deadline, no Compose startup on failure,
+and the no-implicit-pull Compose settings. Updated the owner runbook and handoff
+plan. Tests do not contact a registry or invoke host/guest Docker.
+
+### Follow-up validation
+
+| Check | Result |
+|---|---|
+| `python3 -B -m unittest discover -s tests` | **324 tests PASS**, fixture-only |
+| `bats --print-output-on-failure tests/*.bats` | **141/141 PASS** |
+| Ruff on acceptance runner and tests | PASS |
+| Python compilation, including embedded guest workload code | PASS |
+| Bash syntax and ShellCheck on production lifecycle scripts | PASS |
+| Acceptance CLI help; updated Markdown fences/local links | PASS |
+| `git diff --check` | PASS |
+| `python3 -B scripts/check-docs-consistency.py` | 8 existing README/DECISIONS drift/link failures across 106 checks; unchanged |
+
+No registry was contacted and no host Docker, guest Docker, VM/service, provider,
+credential, campaign, push, merge or C14 operation was used. The follow-up commit
+is local only and remains unpushed.

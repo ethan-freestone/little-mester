@@ -58,10 +58,14 @@ before anyone can claim local-first readiness.
 For nested suites, `HUMAN-TUI` is automatically a required gate; the exact-run
 runner refuses the costly nested stage until the owner records a complete PASS
 observation. Non-teardown stages leave a 35-minute portion of the approved total
-budget reserved for exact teardown. The guest workload runner still requires
-`postgres:16-alpine` preloaded and refuses pulls; if absent, stop BLOCKED. Any
-guest-only image preparation needs separate approval for the exact OCI digest,
-archive source, size limit, and disk reserve (see the handoff plan).
+budget reserved for exact teardown. The guest workload runner checks for
+`postgres:16-alpine` inside the guest and, if absent, attempts one guest-only
+`docker pull` with a 180-second deadline, the guest-local Docker socket, and a
+fresh empty Docker config (no stored registry credentials). It then verifies the
+image is locally available before creating the workload. Compose uses
+`pull_policy: never` and `up --pull never`, so there are no implicit follow-up
+pulls. If the bounded download or verification fails, the workload stays
+BLOCKED. Host Docker is never used for this image.
 
 ## 1. Prepare a disposable scope
 
@@ -445,7 +449,7 @@ behavioral PASS.
 | `HOST-CLEAN` | Start the exact fresh profile; verify pinned image integrity, clean cloud-init, virtiofs workspace UID/GID, guest Docker, Node, MCP files and exact OpenCode version. | Profile/runtime/image/payload hashes and boolean check map. | Keep only this run's profile; use exact cleanup on any failed start. |
 | `E2E-DAILY` | Runner performs repeated start/warm identity and A→B→B same-overlay/workspace switch. Owner enters native TUI and tests `lab-docker` rollback without recreating the host Docker session. | Runtime identity, overlay/key digests, workspace tree hashes, checklist IDs. | Stop if `lab-docker` is unavailable or rollback would recreate/alter the working Docker container. |
 | `E2E-MODEL` | Five bounded streams per explicitly selected available local provider; separately observe model-none shell/auth and local-provider denial/missing-model errors. | Provider enum, attempted/passed counts, schema boolean; no prompt or response text. | Provider profiles are run-owned and suspended after checks. Missing selected local service/model blocks the local gate. OpenAI live streams/auth remain DEFERRED and are not attempted. |
-| `E2E-WORK` | Runner uses only preloaded `postgres:16-alpine` inside guest Compose, checks health/query, bind canary, restart persistence, no published container service, guest-loopback binding, VM suspend/resume DB canary, then removes exact volume/path. Owner performs failing-test→fix→pass and verifies no host socket/service. | Boolean Compose/query/bind/retention/cleanup checks and the fixed owner checklist. | The runner refuses image pulls; exact Compose project and generated workspace path only. Stop if cleanup cannot confirm volume/path removal. |
+| `E2E-WORK` | Runner checks for `postgres:16-alpine` inside the guest and makes one bounded 180-second guest-only pull using the guest-local socket and a fresh empty Docker config if absent; Compose uses `pull_policy: never` and `up --pull never`. It checks health/query, bind canary, restart persistence, no published container service, guest-loopback binding, VM suspend/resume DB canary, then removes exact volume/path. Owner performs failing-test→fix→pass and verifies no host socket/service. | Boolean Compose/query/bind/retention/cleanup checks and the fixed owner checklist. | No host Docker use. If guest pull/image verification fails, stop BLOCKED. Exact Compose project and generated workspace path only; stop if cleanup cannot confirm volume/path removal. |
 | `E2E-LIFE` | Runner checks suspend/resume identity, local DB/tools/keys/workspace retention, update scan/cancel, separately authorized exact `config`/`tools` apply, resize and memory identity. Live OpenAI auth-state retention is DEFERRED. | Exit/status enums, version, RAM readings, profile/overlay/key/workspace digests. | Do not apply updates without exact plan+execution approval. Leave ambiguous children or auth state intact for owner review. |
 | `E2E-AGENTS` | Two owner-authorized same-guest harmless tasks run concurrently in separate terminals; verify distinct session/auth ports, clean cancellation, and discuss shared-workspace collision risk. | Four checklist IDs and observed booleans only; never save agent transcripts. | Stop both exact tasks normally; do not claim file isolation, a supervisor or safe shared-workspace concurrency. |
 | `SEC-FS` | Required host/guest file-read, control-key/socket, child out-of-scope, symlink and source/state-overlap probes. The live disposable-credential export item is individually DEFERRED. | Fixed subcheck statuses only; never the canary value, private key or socket data. | Current campaign implementation lacks the real filesystem probes, so keep the gate BLOCKED. No live credential export is attempted. |

@@ -671,7 +671,7 @@ class HostAcceptanceTests(unittest.TestCase):
 
     def test_guest_workload_reports_are_schema_bound_and_use_only_generated_paths(self):
         checks = {
-            "postgres_image_preloaded": True, "compose_health": True, "query_ok": True,
+            "postgres_image_available": True, "compose_health": True, "query_ok": True,
             "bind_mount_readable": True, "volume_survives_container_restart": True,
             "no_published_service": True, "guest_loopback_only": True,
             "compose_down": True, "volume_retained_for_vm_suspend": True,
@@ -682,10 +682,13 @@ class HostAcceptanceTests(unittest.TestCase):
         with mock.patch.object(acceptance, "_guest_exec", return_value=completed) as guest_exec:
             result = acceptance._guest_workload_checks(self.state_root, "accept-123456789abc-outer", RUN_ID)
         self.assertEqual(result["status"], "PASS")
+        self.assertEqual(guest_exec.call_args.kwargs["timeout"], 480)
         command = guest_exec.call_args.args[2]
         self.assertIn(".lm-acceptance-work-123456781234", command)
         self.assertIn("lmacc-123456781234", command)
-        self.assertNotIn("/var/run/docker.sock", command)
+        self.assertIn('DOCKER_HOST"]="unix:///var/run/docker.sock"', command)
+        self.assertNotIn(" -v /var/run/docker.sock", command)
+        self.assertNotIn("--volume /var/run/docker.sock", command)
 
         unsafe = subprocess.CompletedProcess([], 0, json.dumps({
             "schema_version": 1, "result": "PASS", "checks": {**checks, "transcript": True},
@@ -695,6 +698,88 @@ class HostAcceptanceTests(unittest.TestCase):
             acceptance._run_guest_workload_code(
                 self.state_root, "accept-123456789abc-outer", RUN_ID, acceptance.GUEST_WORKLOAD_CODE,
             )
+
+    def test_guest_workload_pulls_missing_postgres_only_inside_guest_with_a_deadline(self):
+        def run_fixture(image_available_after_pull):
+            calls = []
+            image_inspections = 0
+            compose_active = False
+
+            def completed(returncode=0, stdout=b""):
+                return subprocess.CompletedProcess([], returncode, stdout, b"")
+
+            def fake_run(argv, **kwargs):
+                nonlocal image_inspections, compose_active
+                args = list(argv)
+                calls.append((args, kwargs))
+                self.assertEqual(kwargs["env"]["DOCKER_HOST"], "unix:///var/run/docker.sock")
+                self.assertNotIn("DOCKER_CONTEXT", kwargs["env"])
+                if args[:3] == ["docker", "image", "inspect"]:
+                    image_inspections += 1
+                    available = image_inspections > 1 and image_available_after_pull
+                    return completed(0 if available else 1)
+                if args[:2] == ["docker", "pull"]:
+                    docker_config = Path(kwargs["env"]["DOCKER_CONFIG"])
+                    self.assertTrue(docker_config.is_dir())
+                    self.assertFalse((docker_config / "config.json").exists())
+                    return completed(0 if image_available_after_pull else 1)
+                if args[:2] == ["docker", "inspect"]:
+                    return completed(stdout=b"{}")
+                if args[:2] == ["docker", "volume"]:
+                    return completed()
+                if args[:2] == ["docker", "compose"]:
+                    operation = args[args.index("-f") + 2]
+                    if operation == "up":
+                        compose_active = True
+                    elif operation == "down":
+                        compose_active = False
+                    elif operation == "ps":
+                        return completed(stdout=b"container-id\n" if compose_active else b"")
+                    elif (operation == "exec" and "psql" in args
+                          and args[-1].startswith("SELECT marker")):
+                        return completed(stdout=RUN_ID.encode("ascii"))
+                    return completed()
+                self.fail(f"unexpected guest command: {args!r}")
+
+            with tempfile.TemporaryDirectory(prefix="lm-guest-workload-") as guest_workspace:
+                code = acceptance.GUEST_WORKLOAD_CODE.replace(
+                    'Path("/workspace")', f"Path({guest_workspace!r})",
+                )
+                env = {
+                    "LM_WORKLOAD_ID": RUN_ID,
+                    "LM_WORKLOAD_RELATIVE": f".lm-acceptance-work-{RUN_ID[:12]}",
+                    "LM_WORKLOAD_PROJECT": f"lmacc-{RUN_ID[:12]}",
+                }
+                output = io.StringIO()
+                with mock.patch.dict("os.environ", env, clear=False), \
+                        mock.patch("subprocess.run", side_effect=fake_run), \
+                        contextlib.redirect_stdout(output):
+                    exec(compile(code, "<guest-workload-fixture>", "exec"), {})  # noqa: S102 -- Execute fixed guest script with Docker mocked.
+                compose_path = (Path(guest_workspace) / env["LM_WORKLOAD_RELATIVE"] / "compose.yaml")
+                compose_text = compose_path.read_text(encoding="ascii") if compose_path.exists() else None
+                return json.loads(output.getvalue()), calls, compose_text
+
+        report, calls, compose_text = run_fixture(image_available_after_pull=True)
+        self.assertEqual(report["result"], "PASS")
+        self.assertTrue(report["checks"]["postgres_image_available"])
+        docker_steps = [args[1:4] for args, _kwargs in calls if args[:1] == ["docker"]]
+        self.assertEqual(docker_steps[:3], [
+            ["image", "inspect", "postgres:16-alpine"],
+            ["pull", "postgres:16-alpine"],
+            ["image", "inspect", "postgres:16-alpine"],
+        ])
+        pull_call = next((args, kwargs) for args, kwargs in calls if args[:2] == ["docker", "pull"])
+        self.assertEqual(pull_call[1]["timeout"], 180)
+        self.assertIn("pull_policy: never", compose_text)
+        self.assertTrue(any(args[:2] == ["docker", "compose"] and "--pull" in args
+                            and args[args.index("--pull") + 1] == "never" for args, _ in calls))
+
+        blocked, blocked_calls, compose_text = run_fixture(image_available_after_pull=False)
+        self.assertEqual(blocked["result"], "BLOCKED")
+        self.assertFalse(blocked["checks"]["postgres_image_available"])
+        self.assertEqual(sum(args[:2] == ["docker", "pull"] for args, _ in blocked_calls), 1)
+        self.assertFalse(any(args[:2] == ["docker", "compose"] for args, _ in blocked_calls))
+        self.assertIsNone(compose_text)
 
     def test_lifecycle_checks_report_workload_canary_retention_after_vm_resume(self):
         profile = acceptance._profile_name(RUN_ID)
