@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VM replacement CLI. Lifecycle dispatch stays fail-closed until each command is implemented.
+# VM replacement CLI. Only explicitly implemented lifecycle commands are dispatched.
 set -euo pipefail
 
 # A native agent may itself have an explicitly selected parent metrics URL in
@@ -33,6 +33,8 @@ vm_usage() {
 Usage: ./lab-vm COMMAND|WORKSPACE [options] [-- agent arguments]
 
 Available now:
+  run [WORKSPACE] [--name NAME]      Start/resume a profile and attach its native agent
+  up [PROFILE] --workspace PATH     Start/resume a profile without attaching an agent
   context [--json] [--name NAME]    Read-only config, private paths and capabilities
   status [--json] [--name NAME]     Read-only exact-profile lifecycle and identity
   list [--json]                     Read-only inventory of private VM profiles
@@ -49,8 +51,8 @@ Available now:
                                   Never replaces an existing cache entry
   --help                          Show this checkpoint's actual availability
 
-Not yet implemented (refuse with exit 2, never start or mutate a VM):
-  run [WORKSPACE], up [PROFILE] --workspace PATH, ssh, doctor,
+Not yet implemented (refuse with exit 2):
+  ssh, doctor,
   resume, resize PROFILE GiB, down, stop, rebuild, egress-reload,
   auth-forward [PROFILE] PORT
 
@@ -69,9 +71,13 @@ force-kills QEMU; unknown children or process identities block shutdown.
 agent requires an already-ready profile and never starts/resumes it. OpenCode's
 --permissions auto maps to its supported --auto; Aider remains in prompt mode.
 No VM startup or nested-KVM acceptance is claimed by a successful context/setup.
-Transition-stage routing: ./lab vm selects this explicit, currently gated CLI;
+Transition-stage routing: ./lab vm selects this explicit experimental CLI;
 ./lab without "vm" still delegates to Docker until acceptance. The intended
 C14 released default is VM, with ./lab-docker retained as optional Docker use.
+The experimental run/up entry may start or resume a profile; use a dedicated
+--name for development work. Use --unsafe-recurse only to share this checkout as
+the writable guest workspace, and pair it with --max-depth 0 when child VMs are
+not wanted. These commands do not change ordinary ./lab routing.
 HELP
 }
 
@@ -106,6 +112,10 @@ if (( VM_UNSAFE_RECURSE )); then context_args+=(--unsafe-recurse); fi
 VM_CONTEXT_JSON="$(python3 "$VM_PATHS_HELPER" "${context_args[@]}")" || exit 2
 
 case "$VM_COMMAND" in
+  run|up)
+    vm_lifecycle_cli_run_up "$VM_COMMAND" "$VM_STATE_ROOT" "$VM_PROFILE" \
+      "$VM_WORKSPACE" "$VM_REPO"
+    ;;
   setup) vm_setup ;;
   base)
     if [[ "$(vm_host_system)" != Linux || "$(vm_host_arch)" != x86_64 ]]; then

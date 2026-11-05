@@ -97,10 +97,11 @@ PY
   [ "$output" = "<>" ]
 }
 
-@test "VM metrics management does not enable VM run or up" {
+@test "VM metrics management remains separate from experimental run/up" {
   run bash "$ROOT/lab-vm" --help
   [ "$status" -eq 0 ]
   [[ "$output" == *"metrics up|status|down"* ]]
-  [[ "$output" == *"run [WORKSPACE], up [PROFILE]"* ]]
+  [[ "$output" == *"run [WORKSPACE] [--name NAME]"* ]]
+  [[ "$output" == *"up [PROFILE] --workspace PATH"* ]]
   [[ "$output" == *"Not yet implemented"* ]]
 }

@@ -1006,6 +1006,34 @@ except Exception: raise SystemExit(2)
   return "$rc"
 }
 
+vm_lifecycle_cli_run_up() {
+  local command="$1" root="$2" name="$3" workspace="$4" repository="$5"
+  local runtime
+  local -a agent_argv
+  [[ "$command" == run || "$command" == up ]] || return 2
+  if (( VM_CLEAN || VM_DISCARD_RECURSIVE )); then
+    vm_lifecycle_error '--clean and --discard-recursive are not enabled for the experimental VM entry; no existing profile was changed.'
+    return 2
+  fi
+  vm_lifecycle_up "$root" "$name" "$workspace" "$repository" \
+    "$VM_GUEST_RECURSION_DEPTH" "$VM_EFFECTIVE_MAX_DEPTH" "$VM_MEMORY" \
+    "$VM_RECURSE" "$VM_UNSAFE_RECURSE" 0 "$VM_LIFECYCLE_DEFAULT_TIMEOUT" 1800 || return $?
+  [[ "$command" == run ]] || return 0
+
+  runtime="$(vm_lifecycle_profile_runtime "$root" "$name")" || return $?
+  agent_argv=(agent "$name" --permissions "$VM_PERMISSIONS")
+  if [[ -v 'VM_SEEN[cwd]' ]]; then agent_argv+=(--cwd "$VM_CWD"); fi
+  if [[ -v 'VM_SEEN[browser]' ]]; then
+    if [[ "$VM_BROWSER_AUTH" == on ]]; then
+      agent_argv+=(--browser-auth)
+    else
+      agent_argv+=(--no-browser-auth)
+    fi
+  fi
+  if ((${#VM_AGENT_ARGS[@]})); then agent_argv+=(-- "${VM_AGENT_ARGS[@]}"); fi
+  exec "$runtime/lab-vm" "${agent_argv[@]}"
+}
+
 vm_lifecycle_resume_locked() {
   local root="$1" name="$2" requested_workspace="${3:-}" repository="$4"
   local recurse="${5:-0}" unsafe="${6:-0}" recursive="${7:-0}"

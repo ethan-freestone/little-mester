@@ -9,6 +9,19 @@ All VM paths here are proposed CREATE paths on `main` unless labeled confirmed;
 original-PR versions are reference inputs, not wholesale cherry-pick instructions.
 Never edit ticket JSON. No task may modify the user's `vm-migration-plan.md`.
 
+**Current authorization amendment — 2026-11-05:** the owner approved the fixed
+four-package sequence recorded in `PR_REIMPLEMENTATION_PLAN.md` and
+`docs/vm-c14-handoff-plan.md`: explicit experimental development entry + first
+owner-started VM; bounded remaining security/evidence work; frozen-candidate
+integrated acceptance; then C14 default/rollback closeout. Old task text saying
+public `run`/`up` must remain gated is historical and superseded for the explicit
+experimental route only; ordinary `lab` stays on Docker. The campaign is already
+approved within 360 minutes including cleanup and one diagnosed retry; do not seek
+campaign approval again. The assistant must not start a VM. Manual owner OpenAI
+auth experimentation is optional; paid streams and credential export/import are
+excluded. Pause for genuine owner observations or new effects. Push, merge and
+C14 activation remain unauthorized.
+
 ## Common execution contract (part of EVERY task)
 
 - Prerequisites must be integrated and their required tests passing. Inspect Git
@@ -928,12 +941,14 @@ Owner handoff for interrupted apt, never automatic clean rebuild.
 
 ## TASK-15: Scoped real-host, security and human acceptance suites
 
-**Current sequencing amendment (2026-11-05):** C13's local code checkpoint is
+**Historical TASK-15 sequencing checkpoint (2026-11-05; superseded by the current
+authorization above):** C13's local code checkpoint is
 committed; it is not complete live acceptance. The owner's preflight on `336cf69`
 passed after the cgroup fix, but no guest has been started. Follow master §9's
 "Acceptance-readiness revision" and TASK-15A/15B below before the next full host
-campaign. C13a implementation is now user-authorized and implemented locally;
-C13b, live campaign, credential action and VM-default cutover remain unauthorized.
+campaign. At that checkpoint, C13a was user-authorized and implemented locally;
+C13b, live campaign, credential action and VM-default cutover remained
+unauthorized.
 These task sections specify execution; they do not themselves authorize live work.
 
 **Purpose:** R05–R25,R30,R34; D09. Replace historical campaign/repair machinery

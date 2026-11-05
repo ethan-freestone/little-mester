@@ -495,7 +495,7 @@ HELPTEXT
       echo "  ./lab-docker exec <path-to-workspace> '<command>'"
       echo "  ./lab-docker setup | build | pull | stop | bench [--json] [-n N]"
       echo "  ./lab-docker restart-llama [--cache] | tune [--analyse] | ai-analyze [OPTIONS]"
-      echo "  ./lab vm COMMAND [options]     Use the explicit VM route (run/up remain gated)"
+      echo "  ./lab vm COMMAND [options]     Experimental VM route (run/up available; acceptance pending)"
       echo "Transition only: ./lab currently routes to Docker; C14 intends VM-default with this Docker route optional."
       echo
       echo "Launcher flags (before or after a workspace path):"
@@ -534,7 +534,7 @@ HELPTEXT
         echo "  ./lab-docker [flags] shell <path-to-workspace>"
         echo "  ./lab-docker exec <path-to-workspace> '<command>'"
         echo "  ./lab-docker setup | build | pull | stop | bench | restart-llama | tune | ai-analyze"
-        echo "  ./lab vm COMMAND [options]     Use the explicit VM route (run/up remain gated)"
+        echo "  ./lab vm COMMAND [options]     Experimental VM route (run/up available; acceptance pending)"
         echo "Transition only: ./lab currently routes to Docker; C14 intends VM-default with this Docker route optional."
         echo
         echo "Flags (before path):"

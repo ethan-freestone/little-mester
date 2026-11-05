@@ -15,12 +15,15 @@ validated. C10 adds a revision-bound filtered source snapshot, persistent recurs
 identity/depth guards, KVM/CPU preflight, isolated per-run state, candidate argv
 binding, and exact recursive cleanup/report preservation. C12 adds the explicit
 guest update scan/apply and selected-tools commands, validated with isolated
-fixtures only. **No image has been downloaded, no real QEMU/VM has been started,
-and no host/network or nested-VM acceptance is claimed.** `status`/`list`, graceful
-`suspend`, exact-run `recursion-clean`, and update commands for an already-ready
-managed guest are dispatched; update commands do not create or resume profiles.
-Public `run` and `up` remain fail-closed until TASK-16; ordinary `./lab` remains
-the existing Docker launcher.
+fixtures only. **No image has been downloaded and no real QEMU/VM has been started
+by this coding session; no host/network or nested-VM acceptance is claimed.**
+`status`/`list`, graceful `suspend`, exact-run `recursion-clean`, and update
+commands for an already-ready managed guest are dispatched; update commands do
+not create or resume profiles. The later owner-approved experimental `run`/`up`
+entry is now dispatched through the existing lifecycle controller. It may
+start/resume a named profile when the owner invokes it; this is not live
+acceptance or C14. Ordinary `./lab` remains on Docker until the separately
+authorized cutover.
 
 ### C11 changed-VM self-test status
 
@@ -34,12 +37,12 @@ checkout is hash-checked as unchanged. The report distinguishes fixture evidence
 from live E2E acceptance, records exact hashes/deadlines/causes and marks live
 acceptance `NOT_RUN`.
 
-The live self-test adapter is currently unimplemented; TASK-15 must implement and
-test it using the existing frozen lifecycle APIs before requesting a live run.
-The CLI therefore fails closed without starting a VM; fixture success is not
-changed-VM, nested-VM, host, network, agent, or human acceptance. Public `run`/`up`
-dispatch remains deferred to TASK-16, but the explicit acceptance adapter need
-not wait for the production dispatcher/default switch.
+At the C13 baseline the live self-test adapter was unimplemented. The subsequent
+local-first implementation added its lifecycle adapter and fixtures using the
+existing frozen APIs. Fixture success is not changed-VM, nested-VM, host, network,
+agent, or human acceptance. The experimental CLI entry may start a development
+VM, but does not replace the later frozen-candidate acceptance or C14 default
+switch.
 
 ### C12 explicit guest update status (fixture-only)
 
@@ -71,13 +74,14 @@ deferred to TASK-15 and must use its current owner-reviewed handoff.
 
 `PR_REIMPLEMENTATION_PLAN.md` §9 and the TASK-15 specification define the current
 replacement campaign. Original-branch tickets are historical evidence, not an
-extra approval chain. No acceptance driver/live adapter or live result is claimed
-by this planning update. After those tools pass local checks, one owner-reviewed
-campaign scope covers fresh uniquely owned profiles/snapshots, bounded diagnosed
-retries and exact-run cleanup; it never discovers/reuses a legacy stable export
-or changes a protected working VM/Docker session. Human UI/permission/auth checks
-begin once a disposable guest is usable; expensive recursive proof remains a
-separate required gate. All live acceptance and VM-default cutover remain pending.
+extra approval chain. At the initial planning checkpoint the acceptance driver
+was not implemented; the later local-first work added and fixture-tested it. No
+live result is claimed. The approved campaign covers fresh uniquely owned
+profiles/snapshots, bounded diagnosed retries and exact-run cleanup; it never
+discovers/reuses a legacy stable export or changes a protected working VM/Docker
+session. Human UI/permission/auth checks begin once a disposable guest is usable;
+expensive recursive proof remains a separate required gate. All live acceptance
+and VM-default cutover remain pending.
 
 ### CLI and configuration contract
 
@@ -89,11 +93,13 @@ separate required gate. All live acceptance and VM-default cutover remain pendin
   default-no confirmation; normal launch/status/doctor never installs packages.
   Ambient `VM_YES`/`LAB_YES` cannot approve a host package install: skipping its
   confirmation requires `--yes` explicitly on that setup invocation.
-- Future `./lab-vm <workspace>` / `run <workspace>` selects the exact named profile
-  and enters a native guest agent. `up NAME --workspace PATH` is setup without
-  entering the agent. Until implemented, these operations refuse with exit2,
-  rather than returning fake success or starting a different profile.
-  `--memory` applies only to fresh-profile `run`/`up`, not prerequisite setup.
+- Experimental `./lab vm run <workspace> --name NAME` starts/resumes the named
+  profile and attaches the native guest agent after lifecycle readiness. `up NAME
+  --workspace PATH` starts/resumes without attaching the agent. For a writable
+  checkout use `--unsafe-recurse --max-depth 0`; do not treat this development
+  route as campaign or release evidence. `--clean` and `--discard-recursive` are
+  refused by this entry. `--memory` applies only to fresh-profile `run`/`up`, not
+  prerequisite setup.
 - Global flags may precede or follow command/path. `--` ends launcher parsing and
   preserves subsequent agent arguments. `--yes` only confirms launcher actions;
   `--auto-accept`/`--permissions auto` requests agent auto mode, never overrides

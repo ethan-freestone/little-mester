@@ -521,8 +521,24 @@ The owner subsequently authorized **local §1 implementation** under the handoff
 plan. The canary checker, local-first runner reconciliation and fixture tests are
 implemented and locally validated; no live action is authorized. This bounded
 scope supersedes conflicting older all-auth-before-C14 language below and in
-TASK-15/TASK-16. C13b remains committed at `d3751e4`, ledger `777f5a9`; the
-current uncommitted changes are not live campaign evidence.
+TASK-15/TASK-16. C13b remains committed at `d3751e4`, ledger `777f5a9`; at that
+checkpoint the uncommitted changes were not live campaign evidence.
+
+#### Current execution amendment — 2026-11-05
+
+The owner subsequently approved this fixed order: (1) implement an experimental
+explicit development entry and hand off the first VM for the owner to start on
+this branch, (2) implement the remaining bounded security/evidence work, (3) run
+integrated acceptance on a frozen candidate, then (4) perform C14 default/rollback
+and closeout. The owner-approved useful-evidence campaign has a 360-minute ceiling
+including cleanup and the one diagnosed retry; do not ask for campaign approval
+again. Pause for real owner observations or effects outside scope. Manual owner
+OpenAI authentication experimentation is allowed in the disposable VM but is not
+acceptance; paid streams and credential export/import are excluded. The assistant
+must not start a VM. Ordinary `lab` remains on Docker until C14; no push, merge or
+C14 activation is authorized. This amendment supersedes the earlier local-only
+execution boundary below while retaining the security exclusions and required
+campaign evidence.
 
 ### Acceptance-readiness revision — 2026-11-05 (historical; amended above)
 

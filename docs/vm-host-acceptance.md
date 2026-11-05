@@ -1,19 +1,22 @@
 # VM host acceptance runbook
 
-> **Local-first implementation checkpoint:** see the
-> [local-first C14 handoff plan](vm-c14-handoff-plan.md). Local §1 code and
-> fixture tests have been reconciled locally. No live campaign, VM, service,
-> provider or credential operation has been authorized or run. Live OpenAI auth/paid
-> use is deferred from merge/C14; automated auth regressions remain required.
+> **Current status:** see the [local-first C14 handoff plan](vm-c14-handoff-plan.md).
+> The explicit experimental development entry is fixture-validated; the owner is
+> authorized to start that VM after the reviewed handoff. No VM or campaign has
+> been run by this coding session. The bounded useful-evidence campaign is already
+> approved within its 360-minute ceiling; do not seek campaign approval again.
+> Owner-only manual OpenAI authentication experimentation is optional and excluded
+> from campaign PASS; paid streams and credential export/import remain out of scope.
+> Automated auth regressions remain required.
 
 This is the owner-run procedure for TASK-15/C13. The runner is opt-in and
-fail-closed: planning is read-only, live work needs staged `--start`/`--resume`
-plus the exact `--confirm-run-id` and approved total-time budget, and cleanup is
-a separate exact-run operation. A green
-preflight is **not** acceptance. Do not use this runbook against a default or
-existing VM, active snapshot, working host-Docker session, or real credentials
-unless the exact campaign and any credential actions have been separately
-reviewed and approved.
+fail-closed: planning is read-only, live work uses staged `--start`/`--resume`,
+the exact `--confirm-run-id` to bind execution to the already-approved scope, and
+the approved total-time ceiling. Cleanup is a separate exact-run operation. A
+green preflight is **not** acceptance. Do not use this runbook against a default
+or unrelated existing VM, active snapshot, or working host-Docker session. Any
+effect outside the approved scope requires a pause; there is no repeated campaign
+approval checkpoint for already-approved effects.
 
 The C13 code checkpoint does not mean live acceptance passed. Automated reports
 leave required owner-observed gates BLOCKED until their complete fixed checklist

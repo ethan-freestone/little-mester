@@ -46,18 +46,20 @@ teardown() {
   [ "$output" = $'vm-route\n<--permissions>\n<ask>\n<run>\n<--name>\n<candidate profile>' ]
 }
 
-@test "launcher help distinguishes transition routing from the intended VM default" {
+@test "launcher help distinguishes experimental VM entry from the Docker transition default" {
   run "$ROOT/lab" --help
   [ "$status" -eq 0 ]
   [[ "$output" == *"./lab vm COMMAND"* ]]
-  [[ "$output" == *"run/up remain gated"* ]]
+  [[ "$output" == *"Experimental VM route (run/up available; acceptance pending)"* ]]
   [[ "$output" == *"C14 intends VM-default"* ]]
 }
 
-@test "public lab vm help exposes the fail-closed transition without creating state" {
+@test "public lab vm help lists experimental entry without creating state" {
   local private_state="$TEST_ROOT/private-vm-state"
   run env MESTER_STATE_DIR="$private_state" "$ROOT/lab" vm --help
   [ "$status" -eq 0 ]
+  [[ "$output" == *"run [WORKSPACE] [--name NAME]"* ]]
+  [[ "$output" == *"up [PROFILE] --workspace PATH"* ]]
   [[ "$output" == *"Not yet implemented"* ]]
   [ ! -e "$private_state" ]
 }

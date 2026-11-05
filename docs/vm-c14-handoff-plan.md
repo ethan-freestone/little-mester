@@ -7,8 +7,9 @@ Owner decisions recorded after C13b closeout:
 - This document was originally a planning-only handoff. The owner subsequently
   explicitly switched back to **local §1 implementation**. That authorizes code,
   fixture tests, and documentation reconciliation only; it does **not** authorize
-  provider discovery, VM/service startup, a campaign, credential activity, push,
-  merge, or C14 activation.
+  provider discovery or VM/service startup by the assistant, push, merge, or C14
+  activation. The later package-1 approval allows the owner—not this coding
+  session—to start the development VM described below.
 - Choose **1A**: implement a minimal repository-owned, redacting synthetic-canary
   checker, not an owner-supplied tool or a new testing framework.
 - Choose **local models first**. Ollama and llama.cpp previously worked on the old
@@ -24,11 +25,28 @@ Owner decisions recorded after C13b closeout:
   needs no real OpenAI credentials.
 - Keep VM as intended release default and Docker as optional explicit fallback.
   Ordinary `lab` remains on Docker until separately approved C14 activation.
+- The owner approved a fixed four-package sequence: (1) an experimental explicit
+  development entry and the first owner-started VM on this branch, (2) the bounded
+  remaining security/evidence implementation, (3) integrated acceptance on a
+  frozen candidate, then (4) C14 default/rollback and closeout. Keep the scope to
+  this sequence; classify unrelated enhancements separately.
+- The owner has approved the useful-evidence campaign within a 360-minute ceiling
+  including cleanup and the one bounded diagnosed retry. Do not ask for campaign
+  approval again. Pause only for genuine owner observations, provider/model choice,
+  or effects outside the approved scope. The assistant must not start the VM.
+- Manual OpenAI authentication experimentation by the owner is allowed in the
+  disposable development VM. It is not a required acceptance result; no paid
+  streams or credential export/import are included. Semi-automated auth testing is
+  future scope. The default profile provider remains `none` until explicitly
+  selected after read-only discovery.
 
 Implementation baseline: `d3751e4fbda25349de5cbcb1f1e6400ae3e489c8`;
 ledger closeout: `777f5a9f9716d83da254b01b96b93bb308021177`. No campaign ran.
 This document supersedes older blanket requirements that every historical auth
 subcheck must pass before merge/C14. It does not waive non-auth security gates.
+The prior read-only host preflight passed at `422a523` (run ID
+`2fb37d376f9040b3bbc6be4a5d216dd7`), but it predates the experimental CLI entry
+and is not preflight evidence for a later frozen acceptance revision.
 
 ## 1. Bounded implementation handoff
 
@@ -44,9 +62,31 @@ filesystem contents; those checks remain BLOCKED. Guest filesystem isolation,
 synthetic atomic export/import lifecycle checks, and provider-forwarding
 acceptance also remain explicit blockers rather than implied PASS results.
 
-No real target-host discovery or acceptance has occurred. Local fixtures do not
-prove boot, model availability, filesystem isolation, guest registry access for
-the database image, nested KVM, human UI behavior, or exact real cleanup.
+No target-host provider discovery, VM boot, or acceptance has occurred. The
+read-only preflight noted above does not prove boot, model availability,
+filesystem isolation, guest registry access for the database image, nested KVM,
+human UI behavior, or exact real cleanup.
+
+The experimental `./lab vm run` / `up` entry is now wired to the existing lifecycle
+and frozen-agent paths. It does not change ordinary `./lab` (still Docker), prove
+acceptance, or activate the C14 default. The first owner-started development VM is
+only a boot/workspace/TUI usability observation; the later integrated campaign
+must use its separately frozen candidate and current-revision preflight.
+
+For a target-host checkout of the reviewed branch, the intended development
+command is:
+
+```bash
+./lab vm run "$PWD" --name branch-dev-20261105 --unsafe-recurse --max-depth 0
+```
+
+This explicitly mounts the current checkout writable in the guest, disables child
+VM depth, and starts or resumes only the `branch-dev-20261105` profile. It can download the
+pinned base image and creates private profile, disk, key, seed and frozen-runtime
+state outside the workspace. It does not automatically install missing host
+packages; missing prerequisites fail closed. Ordinary `./lab` remains Docker.
+Because this profile persists and `run` can resume it, stop and report if
+`branch-dev-20261105` already exists but is not the dedicated development profile.
 
 ### A. Minimal synthetic-canary checker
 
@@ -135,24 +175,27 @@ implement live acceptance.
 - Fix known docs-consistency failures within the already-planned C14 docs work,
   not as a new feature project.
 
-Before a future live handoff: review the exact diff; require full Python/Bats,
-affected static/compile/shell, embedded guest-script, help and Bash/Fish docs
-checks; record any missing required procedure as an explicit blocker, never
-“ready” by assertion. This local checkpoint remains uncommitted unless separately
-requested; validation grants no push, live action or C14 permission.
+Before the later frozen-candidate campaign handoff: review the exact diff; require
+full Python/Bats, affected static/compile/shell, embedded guest-script, help and
+Bash/Fish docs checks; record any missing required procedure as an explicit
+blocker, never “ready” by assertion. Package 1 is the exception already approved:
+the owner may start the development VM with the exact command above. That boot is
+not the package-3 campaign, C14 permission, or authority for the assistant to start
+a VM.
 
 ## 2. Execution responsibilities and mandatory pauses
 
 All live operations run on the **actual target Linux host**, not an assumed
 equivalent coding container. Where this session cannot reach that host, the owner
 runs the supplied commands and returns sanitized output. No remote access is
-assumed. The following are future checkpoints, not authorization to run now.
+assumed. The first package-1 development VM is owner-approved; P1–P8 below describe
+the subsequent campaign and C14 checkpoints, within the current approval boundary.
 
 | Checkpoint | Automatable work | Required owner input / explicit instruction |
 |---|---|---|
-| P0: implementation permission | Local §1 code/tests/docs | Satisfied by the subsequent explicit implementation request. No campaign permission included. |
+| P0: implementation permission | Local §1 code/tests/docs and package-1 explicit development entry | Satisfied. Owner-started package-1 VM is separately approved; the fixed campaign and 360-minute ceiling are already approved, with no repeat approval request. |
 | P1: read-only host/provider discovery | Exact revision/tool/KVM/RAM/disk checks and fixed loopback model-list queries; no VM/service/model mutation | Run the supplied read-only command on the target host, return sanitized result. Select discovered provider/model IDs; do not infer approval from availability. |
-| P2: freeze campaign and approve effects | Produce one reviewed plan with hashes, exact paths, required/deferred subchecks and budgets | Approve run ID, revision, selected models, memory, total minutes, disk/download ceiling, guest PostgreSQL preparation if needed, selected config/tools updates and exact cleanup. OpenAI/paid API scope stays off. |
+| P2: freeze the approved campaign effects | Produce one reviewed plan with hashes, exact paths, required/deferred subchecks and budgets, within the already approved 360-minute total | No second campaign approval. Pause only if a newly discovered effect exceeds the approved scope/ceiling or needs a real owner choice. OpenAI paid streams and credential export/import stay off. |
 | P3: fresh usability | Start only the disposable campaign VM; boot/mount/tools checks, warm identity and local-model smoke | **STOP before recursion.** Open exact ready profile in the owner's terminal; perform TUI/metrics/cancel/permission actions using the supplied checklist. Explicitly continue only if usable. Diagnose failures first. |
 | P4: work and lifecycle | Bounded local streams, agent test fail/fix/pass, guest Compose/query, retention, scan/cancel and approved config/tools apply, resize | Pause only for actual ask-mode/UI decisions or unexpected effects. Never accept permissions on the owner's behalf. Show exact test purpose and expected action. |
 | P5: nesting/security/concurrency | Actual nested placement/fail/fix/depth, per-level budgets, isolation/canary checks, authorized concurrent harmless tasks | Confirm continuation into the costly stage as agreed at P3; pause on unavailable prerequisites, scope changes, uncertain ownership or resource exhaustion. |
@@ -188,14 +231,15 @@ revision, after exact cleanup, using the same STATE_ROOT and original total.
 Do not make the owner solve these before implementation has produced useful
 read-only discovery and a concrete handoff:
 
-- **P1:** Is the current session the acceptance host, or will the owner run host
-  commands? Which discovered Ollama/llama.cpp model(s) should be tested? Prefer
-  sequential tests; a missing service gets reported, never started automatically.
-  If neither provider is usable, present a bounded remedy for separate approval.
-- **P2:** Approve measured memory/storage/network requirements and a concrete
-  total-time ceiling including teardown and any retry; do not silently inherit
-  illustrative 360-minute examples. Confirm guest-only PostgreSQL preparation
-  and selected config/tools apply. Paid API ceiling is zero for this campaign.
+- **P1:** The owner runs target-host commands. Which discovered Ollama/llama.cpp
+  model(s) should be tested? Prefer sequential tests; a missing service gets
+  reported, never started automatically. If neither provider is usable, present a
+  bounded remedy only if it introduces effects outside the approved sequence.
+- **P2:** The total campaign ceiling is already approved at 360 minutes, including
+  teardown and the one diagnosed retry. Freeze measured resource requirements,
+  guest-only PostgreSQL preparation and selected config/tools apply within that
+  ceiling; pause only for a new effect outside the approved scope. Paid API ceiling
+  is zero.
 - **P3:** Confirm usable TUI and local agent behavior, then explicitly continue
   to the remaining costly acceptance stages or stop and diagnose.
 - **P7:** Review the required local-first results and visible deferred auth list;
@@ -224,6 +268,10 @@ earlier SHA.
 No new supervisor, model manager, service startup automation, scanner framework,
 automatic credential harvesting, broad host changes, unrelated cleanup, or
 optional provider expansion. Preserve `vm-migration-plan.md` and working Docker
-state. The subsequent instruction authorizes only local §1 implementation and
-fixture validation. VM startup, provider discovery, credential activity, campaign
-execution, push, merge and C14 cutover remain unauthorized.
+state. The owner—not the assistant—starts the approved development VM using the
+exact reviewed command above. Provider discovery and later campaign stages remain
+owner-operated as specified; the bounded 360-minute campaign is already approved,
+so do not ask for approval again unless a new effect or scope change is found.
+Manual OpenAI authentication is optional owner experimentation only; paid streams
+and credential export/import remain excluded. Push, merge and C14 cutover are not
+authorized by this plan.

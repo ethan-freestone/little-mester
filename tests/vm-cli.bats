@@ -183,8 +183,82 @@ parse() {
 @test "CLI help works without private config or runtime state" {
   run bash "$ROOT/lab-vm" --help
   [ "$status" -eq 0 ]
-  [[ "$output" == *'Not yet implemented'* ]]
+  [[ "$output" == *'run [WORKSPACE] [--name NAME]'* ]]
+  [[ "$output" == *'Not yet implemented (refuse with exit 2)'* ]]
   [ ! -e "$MESTER_STATE_DIR" ]
+}
+
+@test "experimental up invokes lifecycle without attaching an agent" {
+  run bash -c '
+    source "$1/lib/vm/lifecycle.sh"
+    vm_lifecycle_up() { printf "UP"; printf " <%s>" "$@"; printf "\n"; }
+    vm_lifecycle_profile_runtime() { printf "RUNTIME_LOOKUP_IS_FORBIDDEN\n"; return 88; }
+    VM_CLEAN=0 VM_DISCARD_RECURSIVE=0
+    VM_GUEST_RECURSION_DEPTH=0 VM_EFFECTIVE_MAX_DEPTH=0 VM_MEMORY=8
+    VM_RECURSE=0 VM_UNSAFE_RECURSE=0 VM_LIFECYCLE_DEFAULT_TIMEOUT=60
+    vm_lifecycle_cli_run_up up "$2" dev "$3" "$4"
+  ' _ "$ROOT" "$MESTER_STATE_DIR" "$BATS_TEST_TMPDIR/workspace" "$ROOT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"UP <$MESTER_STATE_DIR> <dev> <$BATS_TEST_TMPDIR/workspace> <$ROOT> <0> <0> <8> <0> <0> <0> <60> <1800>"* ]]
+  [[ "$output" != *RUNTIME_LOOKUP_IS_FORBIDDEN* ]]
+  [ ! -e "$MESTER_STATE_DIR/vm" ]
+}
+
+@test "experimental run attaches only after lifecycle readiness and preserves argv" {
+  local runtime="$BATS_TEST_TMPDIR/frozen" log="$BATS_TEST_TMPDIR/agent-argv"
+  mkdir -m 700 "$runtime"
+  cat > "$runtime/lab-vm" <<'SH'
+#!/usr/bin/env bash
+printf '<%s>\n' "$@" > "$VM_TEST_AGENT_ARGV"
+SH
+  chmod 700 "$runtime/lab-vm"
+  run env VM_TEST_RUNTIME="$runtime" VM_TEST_AGENT_ARGV="$log" \
+    bash -c '
+      source "$1/lib/vm/lifecycle.sh"
+      vm_lifecycle_up() { printf "UP:<%s>\n" "$@"; }
+      vm_lifecycle_profile_runtime() { printf "%s\n" "$VM_TEST_RUNTIME"; }
+      VM_CLEAN=0 VM_DISCARD_RECURSIVE=0
+      VM_GUEST_RECURSION_DEPTH=0 VM_EFFECTIVE_MAX_DEPTH=0 VM_MEMORY=8
+      VM_RECURSE=1 VM_UNSAFE_RECURSE=1 VM_LIFECYCLE_DEFAULT_TIMEOUT=60
+      VM_PERMISSIONS=ask VM_CWD="src dir" VM_BROWSER_AUTH=off
+      VM_AGENT_ARGS=(--help "literal value")
+      declare -A VM_SEEN=([cwd]=1 [browser]=1)
+      vm_lifecycle_cli_run_up run "$2" dev "$3" "$4"
+    ' _ "$ROOT" "$MESTER_STATE_DIR" "$ROOT" "$ROOT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'UP:<'* ]]
+  [ "$(cat "$log")" = $'<agent>\n<dev>\n<--permissions>\n<ask>\n<--cwd>\n<src dir>\n<--no-browser-auth>\n<-->\n<--help>\n<literal value>' ]
+}
+
+@test "experimental run does not attach after a failed lifecycle start" {
+  run bash -c '
+    source "$1/lib/vm/lifecycle.sh"
+    vm_lifecycle_up() { return 47; }
+    vm_lifecycle_profile_runtime() { printf "RUNTIME_LOOKUP_IS_FORBIDDEN\n"; return 88; }
+    VM_CLEAN=0 VM_DISCARD_RECURSIVE=0
+    VM_GUEST_RECURSION_DEPTH=0 VM_EFFECTIVE_MAX_DEPTH=0 VM_MEMORY=8
+    VM_RECURSE=0 VM_UNSAFE_RECURSE=0 VM_LIFECYCLE_DEFAULT_TIMEOUT=60
+    vm_lifecycle_cli_run_up run "$2" dev "$3" "$4"
+  ' _ "$ROOT" "$MESTER_STATE_DIR" "$BATS_TEST_TMPDIR/workspace" "$ROOT"
+  [ "$status" -eq 47 ]
+  [[ "$output" != *RUNTIME_LOOKUP_IS_FORBIDDEN* ]]
+}
+
+@test "experimental up refuses unimplemented clean and recursive discard flags" {
+  local clean discard
+  for flags in '1 0' '0 1'; do
+    read -r clean discard <<< "$flags"
+    run bash -c '
+      source "$1/lib/vm/lifecycle.sh"
+      vm_lifecycle_up() { printf "LIFECYCLE_MUST_NOT_RUN\n"; }
+      VM_CLEAN="$5" VM_DISCARD_RECURSIVE="$6"
+      vm_lifecycle_cli_run_up up "$2" dev "$3" "$4"
+    ' _ "$ROOT" "$MESTER_STATE_DIR" "$BATS_TEST_TMPDIR/workspace" "$ROOT" \
+      "$clean" "$discard"
+    [ "$status" -eq 2 ]
+    [[ "$output" != *LIFECYCLE_MUST_NOT_RUN* ]]
+    [[ "$output" == *'--clean and --discard-recursive are not enabled'* ]]
+  done
 }
 
 @test "CLI context is valid JSON and never creates private state" {
