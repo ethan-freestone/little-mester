@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 """Plan and run one bounded, run-owned Little Mester VM acceptance campaign.
 
-Planning is read-only. Live work requires ``--execute`` and repeating the exact
-plan ID with ``--confirm-run-id``. The runner never selects a pre-existing VM,
-installs host packages, changes host networking, or cleans assets outside its
-private run manifest. Human observations remain BLOCKED until recorded by a
-person through the documented checkpoint.
+Planning is read-only. Live work uses exact-run ``--start``/``--resume`` stages,
+an explicit total-time ceiling, and ``--confirm-run-id``. The one-shot ``--execute``
+path is disabled. The runner never selects a pre-existing VM, installs host
+packages, changes host networking, or cleans assets outside its private run
+manifest. Human observations remain BLOCKED until recorded by a person through
+the documented checkpoint.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
+import functools
 import hashlib
+import http.client
 import importlib.util
 import json
 import os
 import platform
 import re
+import select
 import shlex
 import shutil
 import stat
@@ -28,6 +34,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 PATHS_PATH = ROOT / "lib/vm/paths.py"
@@ -35,10 +42,18 @@ SNAPSHOT_PATH = ROOT / "scripts/vm-recursion-workspace.py"
 MEMORY_PATH = ROOT / "scripts/vm_memory_budget.py"
 ISOLATION_PATH = ROOT / "scripts/vm-guest-isolation-check.py"
 RUN_NAME_RE = re.compile(r"accept-[a-f0-9]{12}")
-PROFILE_RE = re.compile(r"accept-[a-f0-9]{12}-(?:outer|agent|workload)")
+PROFILE_RE = re.compile(
+    r"accept-[a-f0-9]{12}-(?:outer|agent|workload|provider-(?:ollama|llamacpp|openai))"
+)
 RUN_ID_RE = re.compile(r"[a-f0-9]{32}")
 MAX_REPORT_BYTES = 2 * 1024 * 1024
+MAX_PROVIDER_CONFIG_BYTES = 16 * 1024
 DEFAULT_RESERVE_MIB = 512
+PROVIDER_DISCOVERY_ENDPOINTS = {
+    "ollama": "http://127.0.0.1:11434",
+    "llamacpp": "http://127.0.0.1:8080",
+}
+PROVIDER_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}")
 OWNER_CHECKLISTS = {
     "E2E-DAILY": (
         "native-tui-entry", "two-identical-starts-no-reboot-or-install", "A-B-B-same-overlay-and-keys",
@@ -106,10 +121,78 @@ SUITE_GATES = {
     "self": ("HOST-PREFLIGHT", "HOST-CLEAN", "E2E-SELF", "E2E-DEPTH"),
 }
 ALL_SUITES = tuple(SUITE_GATES)
+STAGE_ORDER = (
+    "clean-usability", "early-auth", "providers-daily-permissions",
+    "workload-retention-lifecycle", "nested-boundaries-agents", "final-auth", "teardown",
+)
+STAGE_SUITES = {
+    "clean-usability": ("clean",),
+    "early-auth": (),
+    "providers-daily-permissions": ("model", "daily", "human"),
+    "workload-retention-lifecycle": ("workload", "lifecycle"),
+    "nested-boundaries-agents": ("self", "boundary", "agents"),
+    "final-auth": (),
+    "teardown": (),
+}
+STAGE_BUDGET_SECONDS = 60 * 60
+MAX_APPROVED_TOTAL_MINUTES = 720
+_STAGE_DEADLINE: float | None = None
+_STAGE_STARTED_AT: float | None = None
 
 
 class AcceptanceError(ValueError):
     """Unsafe scope, unavailable precondition, or invalid evidence."""
+
+
+@contextlib.contextmanager
+def _stage_budget():
+    global _STAGE_DEADLINE, _STAGE_STARTED_AT
+    previous = _STAGE_DEADLINE
+    previous_started = _STAGE_STARTED_AT
+    stage_started = time.monotonic()
+    requested_deadline = time.monotonic() + STAGE_BUDGET_SECONDS
+    _STAGE_DEADLINE = min(previous, requested_deadline) if previous is not None else requested_deadline
+    _STAGE_STARTED_AT = previous_started if previous_started is not None else stage_started
+    try:
+        yield
+    finally:
+        _STAGE_DEADLINE = previous
+        _STAGE_STARTED_AT = previous_started
+
+
+def _bounded_timeout(requested: int) -> int:
+    if type(requested) is not int or requested < 1:
+        raise AcceptanceError("operation deadline is invalid")
+    if _STAGE_DEADLINE is None:
+        return requested
+    remaining = int(_STAGE_DEADLINE - time.monotonic())
+    if remaining <= 0:
+        raise TimeoutError("automated stage exceeded its 60-minute budget")
+    return min(requested, remaining)
+
+
+def _tighten_stage_budget(total_remaining_seconds: int) -> None:
+    global _STAGE_DEADLINE
+    if type(total_remaining_seconds) is not int or total_remaining_seconds < 1:
+        raise AcceptanceError("approved campaign time budget is exhausted or invalid")
+    if _STAGE_DEADLINE is None or _STAGE_STARTED_AT is None:
+        raise AcceptanceError("stage deadline was not initialized")
+    candidate = _STAGE_STARTED_AT + total_remaining_seconds
+    _STAGE_DEADLINE = min(_STAGE_DEADLINE, candidate)
+
+
+def _stage_elapsed_ms() -> int:
+    if _STAGE_STARTED_AT is None:
+        return 0
+    return max(0, int((time.monotonic() - _STAGE_STARTED_AT) * 1000))
+
+
+def _bounded_stage(function):
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        with _stage_budget():
+            return function(*args, **kwargs)
+    return wrapped
 
 
 def _load_module(name: str, path: Path):
@@ -154,7 +237,7 @@ def _run_name(run_id: str) -> str:
 
 
 def _profile_name(run_id: str, role: str = "outer") -> str:
-    if role not in {"outer", "agent", "workload"}:
+    if role not in {"outer", "agent", "workload", "provider-ollama", "provider-llamacpp", "provider-openai"}:
         raise AcceptanceError("unknown acceptance profile role")
     return f"{_run_name(run_id)}-{role}"
 
@@ -173,6 +256,155 @@ def _source_identity(source: Path) -> dict[str, Any]:
         "entry_count": manifest["entry_count"],
         "total_bytes": manifest["total_bytes"],
     }
+
+
+def _provider_endpoint(value: object, provider: str) -> tuple[str, int]:
+    if provider not in PROVIDER_DISCOVERY_ENDPOINTS or not isinstance(value, str):
+        raise AcceptanceError("provider endpoint is unsupported")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as error:
+        raise AcceptanceError("provider endpoint is invalid") from error
+    if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or port is None
+            or not 1024 <= port <= 65535 or parsed.username is not None or parsed.password is not None
+            or parsed.path not in {"", "/"} or parsed.query or parsed.fragment
+            or value != f"http://127.0.0.1:{port}"):
+        raise AcceptanceError("provider endpoints must be canonical loopback HTTP origins")
+    return parsed.hostname, port
+
+
+def _decode_json_no_duplicates(raw: bytes) -> Any:
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=pairs,
+                          parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()))
+    except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise AcceptanceError("provider configuration is invalid JSON") from error
+
+
+def load_provider_config(path_value: str | os.PathLike[str] | None) -> tuple[dict[str, Any], str]:
+    """Read a private, credential-free explicit set of provider/model selections."""
+    if path_value is None:
+        return {"schema_version": 1, "providers": []}, hashlib.sha256(b'{"schema_version":1,"providers":[]}').hexdigest()
+    path = Path(path_value)
+    try:
+        lexical_info = path.lstat()
+    except OSError as error:
+        raise AcceptanceError("provider configuration is unavailable") from error
+    if (not stat.S_ISREG(lexical_info.st_mode) or path.is_symlink()
+            or path.resolve(strict=True) != path):
+        raise AcceptanceError("provider configuration must be a canonical private 0600 regular file")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as error:
+        raise AcceptanceError("provider configuration changed during validation") from error
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > MAX_PROVIDER_CONFIG_BYTES):
+            raise AcceptanceError("provider configuration must be a canonical private 0600 regular file")
+        chunks = bytearray()
+        while len(chunks) <= MAX_PROVIDER_CONFIG_BYTES:
+            chunk = os.read(fd, min(4096, MAX_PROVIDER_CONFIG_BYTES + 1 - len(chunks)))
+            if not chunk:
+                break
+            chunks.extend(chunk)
+        raw = bytes(chunks)
+        if len(raw) != info.st_size or len(raw) > MAX_PROVIDER_CONFIG_BYTES:
+            raise AcceptanceError("provider configuration changed or exceeds its size limit")
+    finally:
+        os.close(fd)
+    config = _decode_json_no_duplicates(raw)
+    if (not isinstance(config, dict) or set(config) != {"schema_version", "providers"}
+            or type(config.get("schema_version")) is not int or config["schema_version"] != 1
+            or not isinstance(config.get("providers"), list) or len(config["providers"]) > 3):
+        raise AcceptanceError("provider configuration schema is invalid")
+    seen: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for item in config["providers"]:
+        if not isinstance(item, dict) or set(item) - {"provider", "endpoint", "model_id"}:
+            raise AcceptanceError("provider configuration entry is invalid")
+        provider = item.get("provider")
+        model_id = item.get("model_id")
+        if (not isinstance(provider, str) or provider not in {"ollama", "llamacpp", "openai"}
+                or provider in seen
+                or not isinstance(model_id, str) or not PROVIDER_ID_RE.fullmatch(model_id)):
+            raise AcceptanceError("provider/model selection is invalid or duplicated")
+        if provider == "openai":
+            if "endpoint" in item or not model_id.startswith("openai/"):
+                raise AcceptanceError("OpenAI selection must name an OpenAI model and use the browser bridge")
+            normalized.append({"provider": provider, "model_id": model_id})
+        else:
+            host, port = _provider_endpoint(item.get("endpoint"), provider)
+            normalized.append({"provider": provider, "endpoint": f"http://{host}:{port}",
+                               "port": port, "model_id": model_id})
+        seen.add(provider)
+    return {"schema_version": 1, "providers": normalized}, hashlib.sha256(raw).hexdigest()
+
+
+def _discover_provider_models(provider: str, host: str, port: int, *, timeout: float = 2.0) -> list[str]:
+    """Read only model identifiers from a fixed local provider health/model API."""
+    if provider not in PROVIDER_DISCOVERY_ENDPOINTS or host != "127.0.0.1" or type(port) is not int \
+            or not 1024 <= port <= 65535:
+        raise AcceptanceError("provider discovery target is outside the loopback allowlist")
+    route = "/api/tags" if provider == "ollama" else "/v1/models"
+    connection = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        connection.request("GET", route, headers={"Accept": "application/json", "Connection": "close"})
+        response = connection.getresponse()
+        if response.status != 200:
+            return []
+        raw = response.read(256 * 1024 + 1)
+        if len(raw) > 256 * 1024:
+            return []
+        value = _decode_json_no_duplicates(raw)
+    except (OSError, http.client.HTTPException, TimeoutError, AcceptanceError):
+        return []
+    finally:
+        connection.close()
+    if provider == "ollama":
+        items = value.get("models") if isinstance(value, dict) else None
+        names = [item.get("name") for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    else:
+        items = value.get("data") if isinstance(value, dict) else None
+        names = [item.get("id") for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    return sorted({name for name in names if isinstance(name, str) and PROVIDER_ID_RE.fullmatch(name)})
+
+
+def discover_local_providers() -> dict[str, Any]:
+    results = {}
+    for provider, endpoint in PROVIDER_DISCOVERY_ENDPOINTS.items():
+        host, port = _provider_endpoint(endpoint, provider)
+        models = _discover_provider_models(provider, host, port)
+        results[provider] = {"endpoint": endpoint, "status": "AVAILABLE" if models else "UNAVAILABLE",
+                             "model_ids": models}
+    return {"schema_version": 1, "discovery": results,
+            "note": "Read-only loopback discovery; no service was started or changed."}
+
+
+def validate_provider_selections(config: dict[str, Any]) -> dict[str, Any]:
+    selections: list[dict[str, Any]] = []
+    for item in config["providers"]:
+        if item["provider"] == "openai":
+            selections.append({"provider": "openai", "model_id": item["model_id"],
+                               "status": "OWNER_AUTH_REQUIRED"})
+            continue
+        host, port = _provider_endpoint(item["endpoint"], item["provider"])
+        models = _discover_provider_models(item["provider"], host, port)
+        found = item["model_id"] in models
+        selections.append({"provider": item["provider"], "model_id": item["model_id"],
+                           "endpoint": item["endpoint"], "status": "AVAILABLE" if found else "BLOCKED",
+                           "reason_code": None if found else "selected_model_not_discovered"})
+    return {"providers": selections,
+            "result": "PASS" if all(item["status"] != "BLOCKED" for item in selections) else "BLOCKED"}
 
 
 def _read_mem_budget(requested_mib: int, reserve_mib: int) -> dict[str, Any]:
@@ -203,11 +435,19 @@ def _socket_listener_summary() -> dict[str, int | bool]:
 
 
 def preflight(source: Path, state_root: Path, run_id: str, memory_gib: int = 8,
-              suites: list[str] | None = None) -> dict[str, Any]:
+              suites: list[str] | None = None,
+              provider_config_path: str | os.PathLike[str] | None = None,
+              *, resume: bool = False) -> dict[str, Any]:
     """Read-only capability, ownership, resource, revision and collision check."""
     _private_directory(state_root)
     selected_suites = set(suites or ())
     source_identity = _source_identity(source)
+    provider_config, provider_config_sha256 = load_provider_config(provider_config_path)
+    provider_config_file = Path(provider_config_path) if provider_config_path is not None else None
+    if provider_config_file is not None and (provider_config_file == source or source in provider_config_file.parents
+                                             or provider_config_file == state_root
+                                             or state_root in provider_config_file.parents):
+        raise AcceptanceError("provider configuration must remain outside the checkout and state root")
     if source == state_root or source in state_root.parents or state_root in source.parents:
         raise AcceptanceError("source checkout and private VM state root must be disjoint")
     if not 1 <= memory_gib <= 128:
@@ -278,9 +518,27 @@ def preflight(source: Path, state_root: Path, run_id: str, memory_gib: int = 8,
         "loopback_count": listener_summary["loopback"],
     }, blocked=not listener_summary["readable"])
 
+    # Service/model availability is reported independently: an unavailable
+    # optional provider blocks only E2E-MODEL, not clean guest or security work.
+    provider_selection_check = validate_provider_selections(provider_config)
+
     namespace = _namespace_path(state_root, _run_name(run_id))
     collision = namespace.exists() or namespace.is_symlink()
-    record("unique_run_namespace", not collision, {"collision": collision}, blocked=collision)
+    existing_owned = False
+    report_path = namespace.parent / "reports" / f"{_run_name(run_id)}.json"
+    if resume:
+        try:
+            _private_directory(namespace)
+            _private_directory(report_path.parent)
+            manifest = _read_private_json(report_path)
+            existing_owned = (manifest.get("run_id") == run_id
+                              and manifest.get("run_name") == _run_name(run_id))
+        except (AcceptanceError, OSError):
+            existing_owned = False
+        record("unique_run_namespace", existing_owned,
+               {"existing_exact_run": existing_owned}, blocked=not existing_owned)
+    else:
+        record("unique_run_namespace", not collision, {"collision": collision}, blocked=collision)
     namespace_parent = namespace.parent
     parent_safe = True
     if namespace_parent.exists() or namespace_parent.is_symlink():
@@ -289,10 +547,10 @@ def preflight(source: Path, state_root: Path, run_id: str, memory_gib: int = 8,
         except AcceptanceError:
             parent_safe = False
     record("private_campaign_parent", parent_safe, blocked=not parent_safe)
-    report_path = namespace.parent / "reports" / f"{_run_name(run_id)}.json"
     report_collision = report_path.exists() or report_path.is_symlink()
-    record("unique_run_evidence", not report_collision,
-           {"collision": report_collision}, blocked=report_collision)
+    record("unique_run_evidence", existing_owned if resume else not report_collision,
+           {"existing_exact_run": existing_owned} if resume else {"collision": report_collision},
+           blocked=resume and not existing_owned or not resume and report_collision)
     report_root_safe = True
     if report_path.parent.exists() or report_path.parent.is_symlink():
         try:
@@ -310,6 +568,12 @@ def preflight(source: Path, state_root: Path, run_id: str, memory_gib: int = 8,
         },
         "execution_context": {"system": platform.system(), "machine": platform.machine()},
         "source": source_identity,
+        "provider_config": {
+            "sha256": provider_config_sha256,
+            "providers": [{key: item[key] for key in ("provider", "endpoint", "port", "model_id") if key in item}
+                          for item in provider_config["providers"]],
+            "selections": provider_selection_check["providers"],
+        },
         "memory": {key: memory.get(key) for key in (
             "memavailable_mib", "cgroup_remaining_mib", "projected_available_mib",
             "requested_mib", "reserve_mib", "passed",
@@ -321,6 +585,7 @@ def preflight(source: Path, state_root: Path, run_id: str, memory_gib: int = 8,
 
 LIFECYCLE_SCRIPT = r'''set -euo pipefail
 repo=$1 state_root=$2 profile=$3 workspace=$4 operation=$5 memory=$6 confirm=$7 depth=$8 maximum=$9
+model_provider=${10} model_port=${11} model_id=${12}
 source "$repo/lib/vm/config.sh"
 vm_cli_defaults
 VM_STATE_ROOT="$state_root"
@@ -328,6 +593,15 @@ VM_PATHS_HELPER="$repo/lib/vm/paths.py"
 source "$repo/lib/vm/disk.sh"
 source "$repo/lib/vm/recursion.sh"
 source "$repo/lib/vm/lifecycle.sh"
+if [[ "$model_provider" != none ]]; then
+  VM_SEEN[model-provider]=1 VM_OPTIONS[model-provider]="$model_provider"
+  if [[ -n "$model_port" ]]; then
+    VM_SEEN[model-port]=1 VM_OPTIONS[model-port]="$model_port"
+  fi
+  if [[ -n "$model_id" ]]; then
+    VM_SEEN[model-id]=1 VM_OPTIONS[model-id]="$model_id"
+  fi
+fi
 vm_config_overrides
 vm_config_load
 case "$operation" in
@@ -378,13 +652,26 @@ esac
 
 def _lifecycle_call(state_root: Path, profile: str, workspace: Path, operation: str,
                     memory_gib: int = 8, *, depth: int = 0, maximum: int = 2,
-                    confirm: str = "", timeout: int = 1900) -> subprocess.CompletedProcess:
+                    confirm: str = "", timeout: int = 1900,
+                    provider_selection: dict[str, Any] | None = None) -> subprocess.CompletedProcess:
     if PROFILE_RE.fullmatch(profile) is None:
         raise AcceptanceError("profile is outside the generated campaign namespace")
     if operation == "delete" and confirm != profile:
         raise AcceptanceError("exact profile confirmation is required for cleanup")
+    timeout = _bounded_timeout(timeout)
+    provider, port, model_id = "none", "", ""
+    if provider_selection is not None:
+        provider = provider_selection.get("provider", "")
+        model_id = provider_selection.get("model_id", "")
+        if provider == "openai":
+            provider = "remote"
+        elif provider in {"ollama", "llamacpp"}:
+            port = str(provider_selection.get("port", ""))
+        if provider not in {"ollama", "llamacpp", "remote"}:
+            raise AcceptanceError("provider profile selection is invalid")
     args = ["bash", "-c", LIFECYCLE_SCRIPT, "vm-acceptance", str(ROOT), str(state_root),
-            profile, str(workspace), operation, str(memory_gib), confirm, str(depth), str(maximum)]
+            profile, str(workspace), operation, str(memory_gib), confirm, str(depth), str(maximum),
+            provider, port, model_id]
     try:
         return subprocess.run(
             args, cwd=ROOT, stdin=subprocess.DEVNULL, capture_output=True,
@@ -402,7 +689,7 @@ def _profile_record(state_root: Path, profile: str) -> dict[str, Any]:
         result = subprocess.run(
             [sys.executable, str(PATHS_PATH), "profile-read", "--state-root", str(state_root), "--profile", profile],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            check=False, timeout=10,
+            check=False, timeout=_bounded_timeout(10),
         )
     except subprocess.TimeoutExpired as error:
         raise TimeoutError("profile identity read exceeded its bounded deadline") from error
@@ -541,6 +828,7 @@ def _listener_owned_loopback(profile: dict[str, Any]) -> bool:
 
 
 def _guest_exec(state_root: Path, profile: str, command: str, *, timeout: int = 120) -> subprocess.CompletedProcess:
+    timeout = _bounded_timeout(timeout)
     if (PROFILE_RE.fullmatch(profile) is None or "\n" in command or len(command) > 60_000
             or type(timeout) is not int or not 1 <= timeout <= 1800):
         raise AcceptanceError("guest command is outside the fixed campaign contract")
@@ -564,7 +852,8 @@ role="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["role"])' <<<"$i
 port="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["runtime_identity"]["ssh_port"])' <<<"$data")"
 source "$repo/lib/vm/ssh.sh"
 vm_ssh_listener_verified "$registry" "$run_id" "$role" "$port"
-vm_ssh_noninteractive "$key" "$known_hosts" "$port" "$deadline" mester@127.0.0.1 "$command"
+vm_ssh_noninteractive "$key" "$known_hosts" "$port" "$((deadline + 5))" mester@127.0.0.1 \
+  "timeout --foreground --signal=TERM --kill-after=2s ${deadline}s bash -lc $(printf '%q' "$command")"
 '''
     try:
         completed = subprocess.run(
@@ -629,6 +918,351 @@ print(json.dumps({"checks":checks,"opencode_version":opencode_version},sort_keys
             "host_docker_dependency": "NOT_REQUIRED", "result": "PASS" if passed else "FAIL"}
 
 
+GUEST_WORKLOAD_CODE = r'''import json,os,re,socket,subprocess
+from pathlib import Path
+
+run_id=os.environ["LM_WORKLOAD_ID"]
+relative=os.environ["LM_WORKLOAD_RELATIVE"]
+project=os.environ["LM_WORKLOAD_PROJECT"]
+checks={"postgres_image_preloaded":False,"compose_health":False,"query_ok":False,
+ "bind_mount_readable":False,"volume_survives_container_restart":False,
+ "no_published_service":False,"guest_loopback_only":False,"compose_down":False,
+ "volume_retained_for_vm_suspend":False}
+status="BLOCKED"
+root=Path("/workspace")/relative
+compose_path=root/"compose.yaml"
+started=False
+
+def call(argv,timeout=30):
+ return subprocess.run(argv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+  stderr=subprocess.DEVNULL,timeout=timeout,check=False)
+
+try:
+ if (not re.fullmatch(r"\.lm-acceptance-work-[a-f0-9]{12}",relative)
+     or not re.fullmatch(r"[a-f0-9]{32}",run_id)):
+  raise ValueError
+ image=call(["docker","image","inspect","postgres:16-alpine"],10)
+ checks["postgres_image_preloaded"]=image.returncode==0
+ if checks["postgres_image_preloaded"]:
+  if root.exists() or root.is_symlink(): raise FileExistsError
+  root.mkdir(mode=0o700)
+  bind=root/"bind"
+  bind.mkdir(mode=0o700)
+  (bind/"canary").write_text("BIND-"+run_id,encoding="ascii")
+  compose_path.write_text("""services:
+  db:
+    image: postgres:16-alpine
+    pull_policy: never
+    environment:
+      POSTGRES_DB: lm_acceptance
+      POSTGRES_USER: lm_acceptance
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+      - ./bind:/acceptance-bind:ro
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U lm_acceptance -d lm_acceptance]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+volumes:
+  dbdata:
+""",encoding="ascii")
+
+  def compose(*args,timeout=150):
+   return call(["docker","compose","--project-directory",str(root),"-p",project,
+    "-f",str(compose_path),*args],timeout)
+
+  started=True
+  up=compose("up","-d","--pull","never","--wait","--wait-timeout","120")
+  checks["compose_health"]=up.returncode==0
+  if up.returncode!=0:
+   status="FAIL"
+  else:
+   container=compose("ps","-q","db")
+   container_id=container.stdout.decode("ascii","ignore").strip()
+   inspect=(call(["docker","inspect","--format","{{json .NetworkSettings.Ports}}",container_id],10)
+            if container_id else None)
+   try:
+    ports=json.loads(inspect.stdout) if inspect and inspect.returncode==0 else None
+    checks["no_published_service"]=(isinstance(ports,dict)
+                                     and all(not value for value in ports.values()))
+   except Exception:
+    pass
+   insert=compose("exec","-T","db","psql","-U","lm_acceptance","-d","lm_acceptance",
+    "-v","ON_ERROR_STOP=1","-Atc",
+    "CREATE TABLE IF NOT EXISTS acceptance_probe(marker text PRIMARY KEY); "
+    f"INSERT INTO acceptance_probe VALUES ('{run_id}') ON CONFLICT DO NOTHING")
+   query=compose("exec","-T","db","psql","-U","lm_acceptance","-d","lm_acceptance",
+    "-Atc",f"SELECT marker FROM acceptance_probe WHERE marker='{run_id}'")
+   checks["query_ok"]=(insert.returncode==0 and query.returncode==0
+                       and query.stdout.strip()==run_id.encode())
+   bind_check=compose("exec","-T","db","sh","-c",
+    "test \"$(cat /acceptance-bind/canary)\" = \"$1\"","sh","BIND-"+run_id)
+   checks["bind_mount_readable"]=bind_check.returncode==0
+   stopped=compose("stop","db")
+   restarted=(compose("up","-d","--pull","never","--wait","--wait-timeout","120")
+              if stopped.returncode==0 else None)
+   query_after=(compose("exec","-T","db","psql","-U","lm_acceptance","-d","lm_acceptance",
+    "-Atc",f"SELECT marker FROM acceptance_probe WHERE marker='{run_id}'")
+    if restarted and restarted.returncode==0 else None)
+   checks["volume_survives_container_restart"]=(
+    bool(query_after and query_after.returncode==0 and query_after.stdout.strip()==run_id.encode()))
+   try:
+    with socket.socket() as listener:
+     listener.bind(("127.0.0.1",0))
+     listener.listen(1)
+     address=listener.getsockname()
+     with socket.create_connection(address,timeout=2) as client:
+      accepted,_peer=listener.accept()
+      with accepted:
+       checks["guest_loopback_only"]=address[0]=="127.0.0.1"
+   except Exception:
+    pass
+   down=compose("down",timeout=60)
+   empty=compose("ps","-q","db",timeout=10)
+   checks["compose_down"]=(down.returncode==0 and empty.returncode==0
+                           and not empty.stdout.strip())
+   volume=call(["docker","volume","inspect",project+"_dbdata"],10)
+   checks["volume_retained_for_vm_suspend"]=volume.returncode==0
+   status="PASS" if all(checks.values()) else "FAIL"
+except (OSError,subprocess.SubprocessError,ValueError,FileExistsError):
+ status="FAIL" if checks["postgres_image_preloaded"] else "BLOCKED"
+finally:
+ if started and root.exists():
+  try:
+   call(["docker","compose","--project-directory",str(root),"-p",project,
+    "-f",str(root/"compose.yaml"),"down"],60)
+  except Exception:
+   pass
+print(json.dumps({"schema_version":1,"result":status,"checks":checks},
+ sort_keys=True,separators=(",",":")))'''
+
+
+def _workload_relative(run_id: str) -> str:
+    if RUN_ID_RE.fullmatch(run_id) is None:
+        raise AcceptanceError("workload run identity is invalid")
+    return f".lm-acceptance-work-{run_id[:12]}"
+
+
+def _run_guest_workload_code(state_root: Path, profile: str, run_id: str,
+                             code: str, timeout: int = 300) -> dict[str, Any]:
+    relative = _workload_relative(run_id)
+    project = f"lmacc-{run_id[:12]}"
+    environment = " ".join((
+        "LM_WORKLOAD_ID=" + shlex.quote(run_id),
+        "LM_WORKLOAD_RELATIVE=" + shlex.quote(relative),
+        "LM_WORKLOAD_PROJECT=" + shlex.quote(project),
+    ))
+    command = f"env {environment} python3 -c {shlex.quote(code)}"
+    result = _guest_exec(state_root, profile, command, timeout=timeout)
+    try:
+        value = json.loads(result.stdout)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise AcceptanceError("guest workload report is invalid") from error
+    if (not isinstance(value, dict) or set(value) != {"schema_version", "result", "checks"}
+            or value.get("schema_version") != 1 or value.get("result") not in {"PASS", "FAIL", "BLOCKED"}
+            or not isinstance(value.get("checks"), dict)
+            or set(value["checks"]) != {
+                "postgres_image_preloaded", "compose_health", "query_ok", "bind_mount_readable",
+                "volume_survives_container_restart", "no_published_service", "guest_loopback_only",
+                "compose_down", "volume_retained_for_vm_suspend",
+            }
+            or any(type(check) is not bool for check in value["checks"].values())):
+        raise AcceptanceError("guest workload report does not match the fixed schema")
+    checks_pass = all(value["checks"].values())
+    if ((value["result"] == "PASS") != checks_pass
+            or (value["result"] == "BLOCKED" and value["checks"]["postgres_image_preloaded"])):
+        raise AcceptanceError("guest workload result does not match its check outcomes")
+    return value
+
+
+def _guest_workload_checks(state_root: Path, profile: str, run_id: str) -> dict[str, Any]:
+    try:
+        value = _run_guest_workload_code(state_root, profile, run_id, GUEST_WORKLOAD_CODE)
+    except TimeoutError:
+        return {"status": "BLOCKED", "reason_code": "guest_workload_deadline_exceeded"}
+    except AcceptanceError:
+        return {"status": "BLOCKED", "reason_code": "guest_workload_unavailable"}
+    reason = ("guest_postgres_image_not_preloaded" if value["result"] == "BLOCKED"
+              else "guest_workload_check_failed" if value["result"] == "FAIL" else None)
+    return {"status": value["result"], "reason_code": reason, "checks": value["checks"],
+            "project": f"lmacc-{run_id[:12]}", "workload_path": _workload_relative(run_id)}
+
+
+GUEST_WORKLOAD_RETENTION_CODE = r'''import json,os,subprocess
+from pathlib import Path
+run_id=os.environ["LM_WORKLOAD_ID"]; relative=os.environ["LM_WORKLOAD_RELATIVE"]
+project=os.environ["LM_WORKLOAD_PROJECT"]; root=Path("/workspace")/relative
+result=False; stopped=False
+args=["docker","compose","--project-directory",str(root),"-p",project,"-f",str(root/"compose.yaml")]
+try:
+ up=subprocess.run([*args,"up","-d","--pull","never","--wait","--wait-timeout","120"],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=150,check=False)
+ if up.returncode==0:
+  query=subprocess.run([*args,"exec","-T","db","psql","-U","lm_acceptance","-d","lm_acceptance","-Atc",f"SELECT marker FROM acceptance_probe WHERE marker='{run_id}'"],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=20,check=False)
+  result=query.returncode==0 and query.stdout.strip()==run_id.encode()
+except Exception: pass
+try:
+ down=subprocess.run([*args,"down"],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=60,check=False)
+ ps=subprocess.run([*args,"ps","-q","db"],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=10,check=False)
+ stopped=down.returncode==0 and ps.returncode==0 and not ps.stdout.strip()
+except Exception: stopped=False
+print(json.dumps({"database_canary_retained":result,"compose_stopped":stopped},sort_keys=True,separators=(",",":")))'''
+
+
+def _guest_workload_retention(state_root: Path, profile: str, run_id: str) -> dict[str, bool]:
+    # The retention probe has a deliberately smaller result schema than setup.
+    environment = " ".join((
+        "LM_WORKLOAD_ID=" + shlex.quote(run_id),
+        "LM_WORKLOAD_RELATIVE=" + shlex.quote(_workload_relative(run_id)),
+        "LM_WORKLOAD_PROJECT=" + shlex.quote(f"lmacc-{run_id[:12]}"),
+    ))
+    command = f"env {environment} python3 -c {shlex.quote(GUEST_WORKLOAD_RETENTION_CODE)}"
+    completed = _guest_exec(state_root, profile, command, timeout=240)
+    try:
+        result = json.loads(completed.stdout)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise AcceptanceError("workload retention report is invalid") from error
+    if (not isinstance(result, dict) or set(result) != {"database_canary_retained", "compose_stopped"}
+            or any(type(value) is not bool for value in result.values())):
+        raise AcceptanceError("workload retention report does not match its fixed schema")
+    return result
+
+
+GUEST_WORKLOAD_CLEANUP_CODE = r'''import json,os,re,shutil,subprocess
+from pathlib import Path
+run_id=os.environ["LM_WORKLOAD_ID"]; relative=os.environ["LM_WORKLOAD_RELATIVE"]
+project=os.environ["LM_WORKLOAD_PROJECT"]; root=Path("/workspace")/relative
+removed=False; artifacts=False
+def volume_present(name):
+ result=subprocess.run(["docker","volume","ls","--filter","name=^"+name+"$","--format","{{.Name}}"],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=10,check=False)
+ if result.returncode!=0: raise RuntimeError
+ names=result.stdout.decode("ascii","strict").splitlines()
+ if any(item!=name for item in names): raise RuntimeError
+ return bool(names)
+def remove_volume(name):
+ if volume_present(name):
+  drop=subprocess.run(["docker","volume","rm",name],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15,check=False)
+  if drop.returncode!=0: return False
+ return not volume_present(name)
+try:
+ if (not re.fullmatch(r"[a-f0-9]{32}",run_id)
+     or relative!=".lm-acceptance-work-"+run_id[:12]
+     or project!="lmacc-"+run_id[:12]
+     or root.is_symlink() or root.parent.resolve(strict=True)!=Path("/workspace").resolve(strict=True)): raise ValueError
+ info=subprocess.run(["docker","info"],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10,check=False)
+ if info.returncode!=0: raise RuntimeError
+ compose=root/"compose.yaml"
+ if root.exists():
+  if compose.is_file() and not compose.is_symlink():
+   args=["docker","compose","--project-directory",str(root),"-p",project,"-f",str(compose)]
+   down=subprocess.run([*args,"down","--volumes"],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=60,check=False)
+   removed=down.returncode==0 and not volume_present(project+"_dbdata")
+   if not removed: raise RuntimeError
+  else:
+   removed=remove_volume(project+"_dbdata")
+   if not removed: raise RuntimeError
+  shutil.rmtree(root)
+  artifacts=not root.exists() and not root.is_symlink()
+ else:
+  removed=remove_volume(project+"_dbdata")
+  artifacts=True
+except Exception: pass
+print(json.dumps({"volume_removed":removed,"workspace_artifacts_removed":artifacts},sort_keys=True,separators=(",",":")))'''
+
+
+def _guest_workload_cleanup(state_root: Path, profile: str, run_id: str) -> dict[str, bool]:
+    environment = " ".join((
+        "LM_WORKLOAD_ID=" + shlex.quote(run_id),
+        "LM_WORKLOAD_RELATIVE=" + shlex.quote(_workload_relative(run_id)),
+        "LM_WORKLOAD_PROJECT=" + shlex.quote(f"lmacc-{run_id[:12]}"),
+    ))
+    command = f"env {environment} python3 -c {shlex.quote(GUEST_WORKLOAD_CLEANUP_CODE)}"
+    result = _guest_exec(state_root, profile, command, timeout=120)
+    try:
+        value = json.loads(result.stdout)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise AcceptanceError("workload cleanup report is invalid") from error
+    if (not isinstance(value, dict) or set(value) != {"volume_removed", "workspace_artifacts_removed"}
+            or any(type(item) is not bool for item in value.values())):
+        raise AcceptanceError("workload cleanup report does not match its fixed schema")
+    return value
+
+
+def _workload_suspend_resume_retention(state_root: Path, profile: str,
+                                       workspace: Path, memory_gib: int,
+                                       run_id: str) -> dict[str, Any]:
+    try:
+        before = _profile_record(state_root, profile)
+        key_path = state_root / "vm/profiles" / profile / "control-key"
+        key_hash = _hash_file(key_path)
+        overlay = _overlay_identity(state_root, profile)
+        if (before.get("status") != "ready" or key_hash is None or overlay is None
+                or not _listener_owned_loopback(before)):
+            return {"status": "BLOCKED", "reason_code": "outer_profile_not_verified_ready"}
+        identity = (before.get("profile_id"), before.get("image_sha256"),
+                    before.get("runtime_payload_sha256"), before.get("workspace"))
+        suspended = _lifecycle_call(state_root, profile, workspace, "suspend", memory_gib, timeout=90)
+        if suspended.returncode != 0:
+            return {"status": "BLOCKED" if suspended.returncode == 2 else "FAIL",
+                    "reason_code": "workload_suspend_failed"}
+        state = _profile_record(state_root, profile)
+        if (state.get("status") != "suspended" or state.get("profile_id") != identity[0]
+                or _overlay_identity(state_root, profile) != overlay or _hash_file(key_path) != key_hash):
+            return {"status": "FAIL", "reason_code": "workload_suspend_identity_changed"}
+        resumed = _lifecycle_call(state_root, profile, workspace, "resume", memory_gib, timeout=1900)
+        if resumed.returncode != 0:
+            return {"status": "BLOCKED" if resumed.returncode == 2 else "FAIL",
+                    "reason_code": "workload_resume_failed"}
+        after = _profile_record(state_root, profile)
+        if (after.get("status") != "ready"
+                or (after.get("profile_id"), after.get("image_sha256"),
+                    after.get("runtime_payload_sha256"), after.get("workspace")) != identity
+                or _overlay_identity(state_root, profile) != overlay
+                or _hash_file(key_path) != key_hash or not _listener_owned_loopback(after)):
+            return {"status": "FAIL", "reason_code": "workload_resume_identity_changed"}
+        retained = _guest_workload_retention(state_root, profile, run_id)
+    except TimeoutError:
+        return {"status": "BLOCKED", "reason_code": "workload_retention_deadline_exceeded"}
+    except (AcceptanceError, OSError, RuntimeError, ValueError, KeyError):
+        return {"status": "BLOCKED", "reason_code": "workload_retention_unavailable"}
+    passed = retained["database_canary_retained"] and retained["compose_stopped"]
+    return {"status": "PASS" if passed else "FAIL",
+            "reason_code": None if passed else "workload_data_not_retained",
+            **retained, "profile_identity_retained": True}
+
+
+def _workload_gate_result(setup: dict[str, Any] | None,
+                          retention: dict[str, Any] | None,
+                          cleanup: dict[str, bool] | None) -> dict[str, Any]:
+    if not isinstance(setup, dict):
+        return {"status": "BLOCKED", "reason_code": "guest_workload_not_run"}
+    setup_status = setup.get("status")
+    if setup_status == "FAIL":
+        return {"status": "FAIL", "reason_code": setup.get("reason_code", "guest_workload_failed"),
+                "automated_status": "FAIL", "setup_checks": setup.get("checks")}
+    if setup_status != "PASS":
+        return {"status": "BLOCKED", "reason_code": setup.get("reason_code", "guest_workload_unavailable"),
+                "automated_status": "BLOCKED", "setup_checks": setup.get("checks")}
+    if not isinstance(retention, dict) or retention.get("status") != "PASS":
+        status = "FAIL" if isinstance(retention, dict) and retention.get("status") == "FAIL" else "BLOCKED"
+        return {"status": status,
+                "reason_code": (retention.get("reason_code") if isinstance(retention, dict)
+                                else "workload_vm_retention_not_verified"),
+                "automated_status": status, "setup_checks": setup.get("checks"),
+                "retention": retention}
+    if not isinstance(cleanup, dict) or not cleanup.get("volume_removed") \
+            or not cleanup.get("workspace_artifacts_removed"):
+        return {"status": "BLOCKED", "reason_code": "exact_workload_cleanup_unconfirmed",
+                "automated_status": "BLOCKED", "setup_checks": setup.get("checks"),
+                "retention": retention, "cleanup": cleanup}
+    return {"status": "BLOCKED", "reason_code": "owner_live_evidence_required",
+            "automated_status": "PASS", "setup_checks": setup.get("checks"),
+            "retention": retention, "cleanup": cleanup,
+            "pending_owner_checklist": ["failing-test-fix-pass", "bind-and-guest-loopback-port",
+                                        "no-host-published-service-or-socket"]}
+
+
 def _cached_image_integrity(state_root: Path, profile: str) -> dict[str, Any]:
     data = _profile_record(state_root, profile)
     digest = data.get("image_sha256")
@@ -647,7 +1281,7 @@ vm_disk_manifest_valid "$cache" "$VM_DISK_PIN_URL" "$VM_DISK_PIN_SHA256" \
             ["bash", "-c", command, "vm-acceptance-image", str(ROOT),
              str(Path(image_path).parent)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            check=False, timeout=30,
+            check=False, timeout=_bounded_timeout(30),
         )
     except subprocess.TimeoutExpired:
         return {"status": "BLOCKED", "artifact_sha256": None, "reason_code": "image_check_timeout"}
@@ -845,8 +1479,307 @@ def _guest_memory_mib(state_root: Path, profile: str) -> int | None:
     return kib // 1024 if type(kib) is int and kib > 0 else None
 
 
+def _provider_config_entry(report: dict[str, Any], provider: str) -> dict[str, Any] | None:
+    config = report.get("provider_config")
+    entries = config.get("providers") if isinstance(config, dict) else None
+    if not isinstance(entries, list):
+        return None
+    return next((item for item in entries if isinstance(item, dict)
+                 and item.get("provider") == provider), None)
+
+
+def _suspend_profile(state_root: Path, profile: str, memory_gib: int) -> bool:
+    data = _profile_record(state_root, profile)
+    if data.get("status") in {"allocated", "failed", "suspended"}:
+        return True
+    if data.get("status") != "ready" or not _listener_owned_loopback(data):
+        return False
+    result = _lifecycle_call(state_root, profile, Path(data["workspace"]), "suspend",
+                             int(data["memory_gib"]), timeout=90)
+    if result.returncode != 0:
+        return False
+    after = _profile_record(state_root, profile)
+    return after.get("status") == "suspended" and after.get("profile_id") == data.get("profile_id")
+
+
+def _suspend_other_campaign_profiles(state_root: Path, run_id: str, report: dict[str, Any],
+                                     keep_profile: str, memory_gib: int) -> bool:
+    for item in report.get("owned_profiles", []):
+        if not isinstance(item, dict) or item.get("run_id") != run_id:
+            return False
+        name = item.get("profile_name")
+        if not isinstance(name, str) or PROFILE_RE.fullmatch(name) is None:
+            return False
+        if name == keep_profile:
+            continue
+        profile_path = state_root / "vm/profiles" / name
+        if not profile_path.exists():
+            continue
+        try:
+            if not _suspend_profile(state_root, name, memory_gib):
+                return False
+        except (AcceptanceError, OSError, RuntimeError, ValueError):
+            return False
+    return True
+
+
+def _resume_campaign_profile(state_root: Path, run_id: str, report: dict[str, Any],
+                             profile: str, memory_gib: int) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        data = _profile_record(state_root, profile)
+        if data.get("status") == "suspended":
+            if not _suspend_other_campaign_profiles(state_root, run_id, report, profile, memory_gib):
+                return None, "other_campaign_profile_not_safely_suspended"
+            budget = _read_mem_budget(int(data["memory_gib"]) * 1024, DEFAULT_RESERVE_MIB)
+            if not budget.get("passed"):
+                return None, "campaign_profile_resume_memory_budget_blocked"
+            resumed = _lifecycle_call(state_root, profile, Path(data["workspace"]), "resume",
+                                      int(data["memory_gib"]), timeout=1900)
+            data = _profile_record(state_root, profile)
+            if resumed.returncode != 0 or data.get("status") != "ready":
+                return None, "campaign_profile_resume_failed"
+        if data.get("status") != "ready" or not _listener_owned_loopback(data):
+            return None, "campaign_profile_identity_unverified"
+        return data, None
+    except (AcceptanceError, OSError, RuntimeError, ValueError, KeyError):
+        return None, "campaign_profile_identity_unavailable"
+
+
+def _model_selection_matches(state_root: Path, profile: str, selection: dict[str, Any]) -> bool:
+    provider = "openai" if selection["provider"] == "openai" else selection["provider"]
+    expected = selection["model_id"] if provider == "openai" else f"{provider}/{selection['model_id']}"
+    code = r'''import json
+from pathlib import Path
+try:
+ data=json.loads(Path("/home/mester/.config/opencode/opencode.json").read_text())
+ print(json.dumps({"model_matches":data.get("model")==__import__("os").environ["LM_EXPECTED_MODEL"]}))
+except Exception:
+ print(json.dumps({"model_matches":False}))'''
+    command = "env LM_EXPECTED_MODEL=" + shlex.quote(expected) + " python3 -c " + shlex.quote(code)
+    try:
+        result = _guest_exec(state_root, profile, command, timeout=30)
+        value = json.loads(result.stdout)
+    except (AcceptanceError, TimeoutError, UnicodeError, json.JSONDecodeError):
+        return False
+    return value == {"model_matches": True}
+
+
+def _ensure_provider_profile(state_root: Path, run_id: str, workspace: Path,
+                             report: dict[str, Any], selection: dict[str, Any],
+                             memory_gib: int) -> tuple[str, dict[str, Any] | None, str | None]:
+    provider = selection.get("provider")
+    profile = _profile_name(run_id, f"provider-{provider}")
+    if not _suspend_other_campaign_profiles(state_root, run_id, report, profile, memory_gib):
+        return profile, None, "another_campaign_profile_not_safely_suspended"
+    budget = _read_mem_budget(memory_gib * 1024, DEFAULT_RESERVE_MIB)
+    if not budget.get("passed"):
+        return profile, None, "provider_profile_memory_budget_blocked"
+    path = state_root / "vm/profiles" / profile
+    owned = report.setdefault("owned_profiles", [])
+    if not any(isinstance(item, dict) and item.get("profile_name") == profile for item in owned):
+        owned.append({"profile_name": profile, "depth": 0, "run_id": run_id})
+        _atomic_replace_json(_campaign_report_path(state_root, run_id), report)
+
+    def remember(data: dict[str, Any]) -> None:
+        report.setdefault("provider_profiles", {})[provider] = {
+            "profile_name": profile, "profile_id": data.get("profile_id"),
+            "image_sha256": data.get("image_sha256"),
+            "guest_payload_sha256": data.get("guest_payload_sha256"),
+            "runtime_payload_sha256": data.get("runtime_payload_sha256"),
+            "model_id": selection["model_id"],
+        }
+        _atomic_replace_json(_campaign_report_path(state_root, run_id), report)
+
+    if path.exists() or path.is_symlink():
+        try:
+            data = _profile_record(state_root, profile)
+            if data.get("status") == "suspended":
+                resumed = _lifecycle_call(state_root, profile, Path(data["workspace"]), "resume",
+                                          memory_gib, timeout=1900, provider_selection=selection)
+                if resumed.returncode != 0:
+                    return profile, None, "provider_profile_resume_failed"
+                data = _profile_record(state_root, profile)
+            if (data.get("status") != "ready" or data.get("depth") != 0
+                    or not _listener_owned_loopback(data)
+                    or not _model_selection_matches(state_root, profile, selection)):
+                return profile, None, "provider_profile_identity_or_model_mismatch"
+            remember(data)
+            return profile, data, None
+        except (AcceptanceError, OSError, RuntimeError, ValueError):
+            return profile, None, "provider_profile_identity_unavailable"
+    result = _lifecycle_call(state_root, profile, workspace, "up", memory_gib,
+                             timeout=1900, provider_selection=selection)
+    if result.returncode != 0:
+        return profile, None, "provider_profile_start_failed"
+    try:
+        data = _profile_record(state_root, profile)
+    except (AcceptanceError, OSError, RuntimeError, ValueError):
+        return profile, None, "provider_profile_identity_unavailable"
+    if (data.get("status") != "ready" or data.get("depth") != 0
+            or not _listener_owned_loopback(data)
+            or not _model_selection_matches(state_root, profile, selection)):
+        return profile, None, "provider_profile_identity_or_model_mismatch"
+    remember(data)
+    return profile, data, None
+
+
+def _validate_provider_stream_report(raw: bytes, provider: str) -> dict[str, Any] | None:
+    try:
+        value = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError):
+        return None
+    if (not isinstance(value, dict)
+            or set(value) != {"provider", "streams_attempted", "streams_passed", "schema_valid"}
+            or value.get("provider") != provider
+            or type(value.get("streams_attempted")) is not int or value["streams_attempted"] != 5
+            or type(value.get("streams_passed")) is not int
+            or not 0 <= value["streams_passed"] <= 5
+            or type(value.get("schema_valid")) is not bool):
+        return None
+    return value
+
+
+def _provider_stream_check(state_root: Path, profile: str,
+                           selection: dict[str, Any]) -> dict[str, Any]:
+    script = r'''import http.client,json,os,subprocess
+provider=os.environ["LM_PROVIDER"]; model=os.environ["LM_MODEL"]
+passed=0; schema=True
+for _ in range(5):
+ try:
+  if provider=="ollama":
+   conn=http.client.HTTPConnection("10.0.2.100",11434,timeout=60)
+   payload=json.dumps({"model":model,"prompt":"Reply with OK only.","stream":True}).encode()
+   conn.request("POST","/api/generate",payload,{"Content-Type":"application/json","Connection":"close"})
+   response=conn.getresponse(); done=False; chunks=0; valid=response.status==200
+   for line in response:
+    if len(line)>65536: valid=False; break
+    if not line.strip(): continue
+    item=json.loads(line); valid=valid and isinstance(item,dict) and isinstance(item.get("response"),str) and type(item.get("done")) is bool
+    chunks+=bool(item.get("response")); done=done or item.get("done") is True
+   conn.close(); passed+=bool(valid and done and chunks)
+  elif provider=="llamacpp":
+   conn=http.client.HTTPConnection("10.0.2.100",8080,timeout=60)
+   payload=json.dumps({"model":model,"messages":[{"role":"user","content":"Reply with OK only."}],"stream":True}).encode()
+   conn.request("POST","/v1/chat/completions",payload,{"Content-Type":"application/json","Connection":"close"})
+   response=conn.getresponse(); chunks=0; done=False; valid=response.status==200
+   for line in response:
+    if len(line)>65536: valid=False; break
+    line=line.strip()
+    if not line: continue
+    if line==b"data: [DONE]": done=True; continue
+    if not line.startswith(b"data: "): continue
+    item=json.loads(line[6:]); choices=item.get("choices") if isinstance(item,dict) else None
+    valid=valid and isinstance(choices,list) and bool(choices) and isinstance(choices[0],dict) and isinstance(choices[0].get("delta"),dict)
+    chunks+=1
+   conn.close(); passed+=bool(valid and done and chunks)
+  elif provider=="openai":
+   proc=subprocess.Popen(["opencode","run","--model",model,"--format","json","Reply with OK only."],
+                         stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+   events=0; response_events=0; bytes_seen=0
+   for line in proc.stdout:
+    bytes_seen+=len(line)
+    if len(line)>16384 or bytes_seen>262144: raise ValueError
+    event=json.loads(line); schema_ok=isinstance(event,dict) and isinstance(event.get("type"),str)
+    if not schema_ok: raise ValueError
+    events+=1; response_events+=event.get("type") in {"text","step-finish","message"}
+   code=proc.wait(timeout=60)
+   passed+=bool(code==0 and events>0 and response_events>0)
+  else: schema=False; break
+ except Exception:
+  schema=False
+print(json.dumps({"provider":provider,"streams_attempted":5,"streams_passed":passed,"schema_valid":schema}))'''
+    env_values = {"ollama": {"LM_PROVIDER": "ollama"},
+                  "llamacpp": {"LM_PROVIDER": "llamacpp"},
+                  "openai": {"LM_PROVIDER": "openai"}}.get(selection["provider"], {})
+    command = "env " + " ".join(f"{key}={shlex.quote(value)}" for key, value in
+                                 {**env_values, "LM_MODEL": selection["model_id"]}.items())
+    command += " python3 -c " + shlex.quote(script)
+    try:
+        completed = _guest_exec(state_root, profile, command, timeout=420)
+    except TimeoutError:
+        return {"status": "BLOCKED", "reason_code": "provider_stream_deadline_exceeded",
+                "streams_attempted": 0, "streams_passed": 0}
+    except AcceptanceError:
+        return {"status": "BLOCKED", "reason_code": "provider_guest_unavailable",
+                "streams_attempted": 0, "streams_passed": 0}
+    parsed = _validate_provider_stream_report(completed.stdout, selection["provider"])
+    if parsed is None:
+        return {"status": "FAIL", "reason_code": "provider_stream_schema_invalid",
+                "streams_attempted": 0, "streams_passed": 0}
+    passed = parsed["schema_valid"] and parsed["streams_passed"] == 5
+    return {"status": "PASS" if passed else "BLOCKED",
+            "reason_code": None if passed else "provider_stream_incomplete",
+            "streams_attempted": parsed["streams_attempted"],
+            "streams_passed": parsed["streams_passed"]}
+
+
+def _provider_stream_checks(state_root: Path, run_id: str, workspace: Path,
+                            report: dict[str, Any], memory_gib: int) -> dict[str, Any]:
+    entries = report.get("provider_config", {}).get("providers", [])
+    if not entries:
+        return {"status": "BLOCKED", "reason_code": "no_provider_selected",
+                "providers": [], "automated_status": "BLOCKED"}
+    provider_results: list[dict[str, Any]] = []
+    selections = {item.get("provider"): item for item in entries if isinstance(item, dict)}
+    discovery = {item.get("provider"): item for item in
+                 report.get("provider_config", {}).get("selections", []) if isinstance(item, dict)}
+    for provider in ("ollama", "llamacpp", "openai"):
+        selection = selections.get(provider)
+        if selection is None:
+            continue
+        validation = discovery.get(provider, {})
+        if provider != "openai" and validation.get("status") != "AVAILABLE":
+            provider_results.append({"provider": provider, "status": "BLOCKED",
+                                     "reason_code": "selected_provider_unavailable",
+                                     "streams_attempted": 0, "streams_passed": 0})
+            continue
+        if provider == "openai" and report.get("early_auth", {}).get("status") != "PASS":
+            provider_results.append({"provider": provider, "status": "BLOCKED",
+                                     "reason_code": "owner_auth_checkpoint_unavailable",
+                                     "streams_attempted": 0, "streams_passed": 0})
+            continue
+        profile, data, reason = _ensure_provider_profile(
+            state_root, run_id, workspace, report, selection, memory_gib,
+        )
+        if data is None:
+            provider_results.append({"provider": provider, "status": "BLOCKED",
+                                     "reason_code": reason,
+                                     "streams_attempted": 0, "streams_passed": 0})
+            continue
+        result = _provider_stream_check(state_root, profile, selection)
+        result["provider"] = provider
+        result["profile_name"] = profile
+        result["profile_id"] = data.get("profile_id")
+        result["guest_payload_sha256"] = data.get("guest_payload_sha256")
+        result["runtime_payload_sha256"] = data.get("runtime_payload_sha256")
+        report.setdefault("provider_profiles", {})[provider] = {
+            "profile_name": profile, "profile_id": data.get("profile_id"),
+            "image_sha256": data.get("image_sha256"),
+            "guest_payload_sha256": data.get("guest_payload_sha256"),
+            "runtime_payload_sha256": data.get("runtime_payload_sha256"),
+            "model_id": selection["model_id"],
+        }
+        if not _suspend_profile(state_root, profile, memory_gib):
+            result["status"] = "BLOCKED"
+            result["reason_code"] = "provider_profile_suspend_unconfirmed"
+        provider_results.append(result)
+        _atomic_replace_json(_campaign_report_path(state_root, run_id), report)
+    all_passed = bool(provider_results) and all(item.get("status") == "PASS" for item in provider_results)
+    primary_profile = _profile_name(run_id)
+    _primary, restore_reason = _resume_campaign_profile(
+        state_root, run_id, report, primary_profile, memory_gib,
+    )
+    all_passed = all_passed and restore_reason is None
+    return {"status": "PASS" if all_passed else "BLOCKED",
+            "automated_status": "PASS" if all_passed else "BLOCKED",
+            "reason_code": None if all_passed else restore_reason or "provider_or_owner_evidence_incomplete",
+            "providers": provider_results}
+
+
 def _lifecycle_retention_checks(state_root: Path, profile: str, workspace: Path,
-                                memory_gib: int, apply_selected_updates: bool) -> dict[str, Any]:
+                                memory_gib: int, apply_selected_updates: bool,
+                                workload_run_id: str | None = None,
+                                workload_evidence: dict[str, Any] | None = None) -> dict[str, Any]:
     if memory_gib < 8:
         return {"status": "BLOCKED", "reason_code": "lifecycle_resize_requires_8_gib_outer_guest"}
     before = _profile_record(state_root, profile)
@@ -881,6 +1814,27 @@ def _lifecycle_retention_checks(state_root: Path, profile: str, workspace: Path,
             or _hash_file(key_path) != key_hash or not _listener_owned_loopback(after)):
         return {"status": "FAIL", "reason_code": "resume_state_not_retained"}
 
+    workload_retention = None
+    if workload_run_id is not None:
+        try:
+            workload_retention = _guest_workload_retention(state_root, profile, workload_run_id)
+        except (AcceptanceError, OSError, RuntimeError, TimeoutError, ValueError):
+            if workload_evidence is not None:
+                workload_evidence.update({"status": "BLOCKED",
+                                          "reason_code": "workload_retention_probe_unavailable"})
+            return {"status": "BLOCKED", "reason_code": "workload_retention_probe_unavailable"}
+        workload_status = ("PASS" if workload_retention["database_canary_retained"]
+                           and workload_retention["compose_stopped"] else "FAIL")
+        if workload_evidence is not None:
+            workload_evidence.update({
+                "status": workload_status,
+                "reason_code": None if workload_status == "PASS" else "workload_state_not_retained_across_vm_suspend",
+                **workload_retention,
+            })
+        if not workload_retention["database_canary_retained"] or not workload_retention["compose_stopped"]:
+            return {"status": "FAIL", "reason_code": "workload_state_not_retained_across_vm_suspend",
+                    "workload_retention": workload_retention}
+
     scan = _lifecycle_call(state_root, profile, workspace, "update-scan", memory_gib, timeout=360)
     scan_text = scan.stdout.decode("ascii", "ignore")
     if scan.returncode != 0 or not any(marker in scan_text for marker in (
@@ -893,10 +1847,11 @@ def _lifecycle_retention_checks(state_root: Path, profile: str, workspace: Path,
     if apply_selected_updates:
         applied = _lifecycle_call(state_root, profile, workspace, "update-apply", memory_gib, timeout=960)
         apply_text = applied.stdout.decode("ascii", "ignore")
-        if (applied.returncode != 0 or not any(marker in apply_text for marker in
-                                                ("selected guest updates completed", "CURRENT"))):
+        if applied.returncode != 0:
             return {"status": "BLOCKED" if applied.returncode == 2 else "FAIL",
                     "reason_code": "selected_update_apply_failed", "update_apply_exit_code": applied.returncode}
+        if re.search(r"(?m)^UPDATED\s+selected guest updates completed;", apply_text) is None:
+            return {"status": "BLOCKED", "reason_code": "selected_update_apply_not_performed"}
         after_update = _profile_record(state_root, profile)
         if (after_update.get("profile_id") != profile_identity
                 or after_update.get("workspace") != workspace_path
@@ -943,6 +1898,7 @@ def _lifecycle_retention_checks(state_root: Path, profile: str, workspace: Path,
         "opencode_version": after.get("opencode_version"),
         "resize_memory_before_mib": memory_before,
         "resize_restore_verified": memory_gib >= 8,
+        "workload_retention": workload_retention,
     }
 
 
@@ -956,6 +1912,7 @@ def _self_test_gate(state_root: Path, parent_profile: str, workspace: Path,
     )
     runner = self_test.SelfTestRunner(
         workspace, report_root, adapter, max_depth=2, yes=True, run_id=run_id,
+        total_deadline_seconds=_bounded_timeout(STAGE_BUDGET_SECONDS),
     )
     report, exit_code = runner.run()
     report_path = report_root / f"{run_id}.json"
@@ -1006,6 +1963,7 @@ def _self_test_gate(state_root: Path, parent_profile: str, workspace: Path,
     stages = report.get("stages", {})
     result = report.get("result")
     depth_status = stages.get("depth", {}).get("status")
+    depth_evidence = stages.get("depth", {}).get("evidence", {})
     passed = exit_code == 0 and result == "PASS" and cleanup_status == "PASS"
     status = "PASS" if passed else "FAIL" if result == "FAIL" else "BLOCKED"
     return {
@@ -1018,6 +1976,9 @@ def _self_test_gate(state_root: Path, parent_profile: str, workspace: Path,
         "cleanup_status": cleanup_status,
         "report_ref": archive_path.name,
         "report_sha256": digest,
+        "g1_boundary_status": stages.get("boundary", {}).get("status"),
+        "g2_boundary_verified": depth_evidence.get("g2_boundary_verified") is True,
+        "g2_boundary_report_sha256": depth_evidence.get("g2_boundary_report_sha256"),
         "stage_statuses": {
             name: item.get("status") for name, item in stages.items()
             if name in self_test.STAGE_ORDER
@@ -1067,12 +2028,19 @@ def _new_campaign(state_root: Path, run_id: str, source: Path, suites: list[str]
     snapshot = _load_module("vm_host_acceptance_snapshot", SNAPSHOT_PATH)
     report = {
         "schema_version": 1,
+        "workflow_version": 1,
         "run_id": run_id,
         "run_name": _run_name(run_id),
         "created_utc": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         "source": preflight_report["source"],
         "snapshot": {"tree_sha256": None, "entry_count": None, "total_bytes": None},
         "suites": suites,
+        "required_gates": sorted({gate for suite in suites for gate in SUITE_GATES[suite]}),
+        "stages": {stage: "NOT_RUN" for stage in STAGE_ORDER},
+        "stage_elapsed_ms": {stage: 0 for stage in STAGE_ORDER},
+        "legacy_elapsed_ms": 0,
+        "approved_total_budget_seconds": preflight_report.get("approved_total_budget_seconds"),
+        "provider_config_sha256": preflight_report.get("provider_config", {}).get("sha256"),
         "protected_assets": ["default profiles", "shared state outside this run", "host Docker session", "credentials"],
         "owned_profiles": [],
         "gates": {gate: {"status": "NOT_RUN"} for gate in GATE_IDS},
@@ -1091,6 +2059,295 @@ def _new_campaign(state_root: Path, run_id: str, source: Path, suites: list[str]
     return run_root, child_state, workspace
 
 
+def _campaign_report_path(state_root: Path, run_id: str) -> Path:
+    run_root = _namespace_path(state_root, _run_name(run_id))
+    return run_root.parent / "reports" / f"{_run_name(run_id)}.json"
+
+
+def _approved_budget_seconds(minutes: int | None) -> int:
+    if type(minutes) is not int or not 1 <= minutes <= MAX_APPROVED_TOTAL_MINUTES:
+        raise AcceptanceError(
+            f"staged execution requires an explicit total budget from 1 to {MAX_APPROVED_TOTAL_MINUTES} minutes"
+        )
+    return minutes * 60
+
+
+def _campaign_elapsed_ms(report: dict[str, Any]) -> int:
+    values = report.get("stage_elapsed_ms")
+    if not isinstance(values, dict) or set(values) != set(STAGE_ORDER):
+        raise AcceptanceError("campaign stage-time ledger is invalid")
+    elapsed = 0
+    for value in values.values():
+        if type(value) is not int or not 0 <= value <= STAGE_BUDGET_SECONDS * 1000:
+            raise AcceptanceError("campaign stage-time entry is outside the fixed stage budget")
+        elapsed += value
+    return elapsed
+
+
+def _campaign_result(report: dict[str, Any]) -> str:
+    required = report.get("required_gates", [])
+    gates = report.get("gates", {})
+    if not isinstance(required, list) or not required or not isinstance(gates, dict):
+        return "BLOCKED"
+    statuses = [gates.get(gate, {}).get("status", "NOT_RUN") for gate in required]
+    if "FAIL" in statuses:
+        return "FAIL"
+    cleanup = report.get("cleanup", {})
+    stages = report.get("stages", {})
+    if (not all(status == "PASS" for status in statuses)
+            or not isinstance(cleanup, dict) or cleanup.get("status") != "PASS"
+            or not isinstance(stages, dict) or stages.get("teardown") != "PASS"):
+        return "BLOCKED"
+    return "PASS"
+
+
+def _attempt_revision(source_identity: dict[str, Any], provider_config_sha256: str) -> str:
+    payload = json.dumps([
+        source_identity.get("source_head"), source_identity.get("tree_sha256"),
+        provider_config_sha256,
+    ], separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _diagnostic_reason_codes(value: Any) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, dict):
+        reason = value.get("reason_code")
+        if isinstance(reason, str) and re.fullmatch(r"[a-z][a-z0-9_]{1,95}", reason):
+            found.add(reason)
+        for child in value.values():
+            found.update(_diagnostic_reason_codes(child))
+    elif isinstance(value, list):
+        for child in value:
+            found.update(_diagnostic_reason_codes(child))
+    return found
+
+
+def _load_attempt_ledger(state_root: Path) -> tuple[dict[str, Any], Path]:
+    path = state_root / "acceptance-attempts.json"
+    if path.exists() or path.is_symlink():
+        if path.is_symlink():
+            raise AcceptanceError("acceptance attempt ledger must not be a symlink")
+        ledger = _read_private_json(path, maximum=256 * 1024)
+        if set(ledger) != {"schema_version", "attempts"} or ledger.get("schema_version") != 1 \
+                or not isinstance(ledger.get("attempts"), list):
+            raise AcceptanceError("acceptance attempt ledger schema is invalid")
+        for item in ledger["attempts"]:
+            required = {"revision_sha256", "run_id", "source_head", "source_tree_sha256",
+                        "provider_config_sha256", "approved_total_budget_seconds",
+                        "prior_elapsed_ms", "started_utc", "retry_of", "retry_reason"}
+            if (not isinstance(item, dict) or set(item) != required
+                    or not isinstance(item.get("revision_sha256"), str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", item["revision_sha256"])
+                    or not isinstance(item.get("run_id"), str) or RUN_ID_RE.fullmatch(item["run_id"]) is None
+                    or not isinstance(item.get("source_head"), str)
+                    or not isinstance(item.get("source_tree_sha256"), str)
+                    or re.fullmatch(r"[a-f0-9]{64}", item["source_tree_sha256"]) is None
+                    or not isinstance(item.get("provider_config_sha256"), str)
+                    or re.fullmatch(r"[a-f0-9]{64}", item["provider_config_sha256"]) is None
+                    or type(item.get("approved_total_budget_seconds")) is not int
+                    or not 60 <= item["approved_total_budget_seconds"] <= MAX_APPROVED_TOTAL_MINUTES * 60
+                    or type(item.get("prior_elapsed_ms")) is not int or item["prior_elapsed_ms"] < 0
+                    or not isinstance(item.get("started_utc"), str)
+                    or (item.get("retry_of") is not None
+                        and (not isinstance(item.get("retry_of"), str)
+                             or RUN_ID_RE.fullmatch(item["retry_of"]) is None))
+                    or (item.get("retry_reason") is not None
+                        and (not isinstance(item.get("retry_reason"), str)
+                             or re.fullmatch(r"[a-z][a-z0-9_]{1,95}", item["retry_reason"]) is None))
+                    or ((item.get("retry_of") is None) != (item.get("retry_reason") is None))):
+                raise AcceptanceError("acceptance attempt ledger contains an invalid entry")
+        if len(ledger["attempts"]) > 512:
+            raise AcceptanceError("acceptance attempt ledger exceeds its bounded history")
+        return ledger, path
+    return {"schema_version": 1, "attempts": []}, path
+
+
+def _register_campaign_attempt(state_root: Path, run_id: str, source_identity: dict[str, Any],
+                               provider_config_sha256: str, *, retry_of: str | None,
+                               retry_reason: str | None,
+                               approved_total_budget_seconds: int) -> dict[str, Any]:
+    if (retry_of is None) != (retry_reason is None):
+        raise AcceptanceError("a fresh retry requires both --retry-of and --retry-reason")
+    revision = _attempt_revision(source_identity, provider_config_sha256)
+    ledger, path = _load_attempt_ledger(state_root)
+    prior = [item for item in ledger["attempts"] if item["revision_sha256"] == revision]
+    if not 60 <= approved_total_budget_seconds <= MAX_APPROVED_TOTAL_MINUTES * 60:
+        raise AcceptanceError("approved campaign budget is outside the bounded time range")
+    if len(prior) >= 2:
+        raise AcceptanceError("the one fresh retry limit for this source/config revision is exhausted")
+    prior_elapsed_ms = 0
+    if not prior:
+        if retry_of is not None or retry_reason is not None:
+            raise AcceptanceError("--retry-of is valid only after one prior exact-revision attempt")
+    else:
+        previous = prior[0]
+        if any(item["approved_total_budget_seconds"] != approved_total_budget_seconds for item in prior):
+            raise AcceptanceError("approved total campaign budget cannot increase or change on retry")
+        if (retry_of != previous["run_id"] or retry_reason is None
+                or not re.fullmatch(r"[a-z][a-z0-9_]{1,95}", retry_reason)
+                or retry_reason in {"not_run", "owner_observation_required", "owner_live_evidence_required"}):
+            raise AcceptanceError("fresh retry must identify the prior run and a diagnosed operational reason")
+        previous_path = _campaign_report_path(state_root, retry_of)
+        previous_report = _read_private_json(previous_path)
+        if (previous_report.get("run_id") != retry_of
+                or previous_report.get("result") not in {"FAIL", "BLOCKED"}
+                or not isinstance(previous_report.get("cleanup"), dict)
+                or previous_report["cleanup"].get("status") != "PASS"
+                or previous_report.get("stages", {}).get("teardown") != "PASS"
+                or previous_report.get("source", {}).get("source_head") != source_identity.get("source_head")
+                or previous_report.get("source", {}).get("tree_sha256") != source_identity.get("tree_sha256")
+                or previous_report.get("provider_config_sha256") != provider_config_sha256
+                or retry_reason not in _diagnostic_reason_codes(previous_report)):
+            raise AcceptanceError("retry reason is not diagnosed in the prior exact-revision campaign report")
+        for item in prior:
+            if item["approved_total_budget_seconds"] != approved_total_budget_seconds:
+                raise AcceptanceError("prior attempt budget does not match this retry")
+            report_path = _campaign_report_path(state_root, item["run_id"])
+            report = _read_private_json(report_path)
+            if (report.get("run_id") != item["run_id"]
+                    or report.get("approved_total_budget_seconds") != approved_total_budget_seconds
+                    or report.get("stages", {}).get("teardown") != "PASS"
+                    or not isinstance(report.get("cleanup"), dict)
+                    or report["cleanup"].get("status") != "PASS"):
+                raise AcceptanceError("prior attempt time accounting is incomplete")
+            prior_elapsed_ms += _campaign_elapsed_ms(report)
+        if prior_elapsed_ms >= approved_total_budget_seconds * 1000:
+            raise AcceptanceError("approved total campaign budget is exhausted; retry is refused")
+    if any(item["run_id"] == run_id for item in ledger["attempts"]):
+        raise AcceptanceError("run ID already exists in the acceptance attempt ledger")
+    entry = {
+        "revision_sha256": revision,
+        "run_id": run_id,
+        "source_head": source_identity.get("source_head"),
+        "source_tree_sha256": source_identity.get("tree_sha256"),
+        "provider_config_sha256": provider_config_sha256,
+        "approved_total_budget_seconds": approved_total_budget_seconds,
+        "prior_elapsed_ms": prior_elapsed_ms,
+        "started_utc": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
+        "retry_of": retry_of,
+        "retry_reason": retry_reason,
+    }
+    ledger["attempts"].append(entry)
+    if path.exists():
+        _atomic_replace_json(path, ledger)
+    else:
+        _atomic_json(path, ledger)
+    return {"ordinal": len(prior) + 1, "retry_of": retry_of, "retry_reason": retry_reason,
+            "prior_elapsed_ms": prior_elapsed_ms}
+
+
+def _mark_stage_running(report: dict[str, Any], stage: str) -> None:
+    states = report.get("stages")
+    if stage not in STAGE_ORDER or not isinstance(states, dict) or set(states) != set(STAGE_ORDER):
+        raise AcceptanceError("workflow stage manifest is invalid")
+    index = STAGE_ORDER.index(stage)
+    prior_states = [states.get(prior) for prior in STAGE_ORDER[:index]]
+    out_of_order = (False if stage == "teardown"
+                    else any(value in {"NOT_RUN", "RUNNING"} for value in prior_states))
+    if states.get(stage) != "NOT_RUN" or out_of_order:
+        raise AcceptanceError("workflow stages must be attempted once and in documented order")
+    states[stage] = "RUNNING"
+
+
+@contextlib.contextmanager
+def _campaign_lock(state_root: Path, run_id: str):
+    _private_directory(state_root)
+    _run_name(run_id)
+    lock_path = state_root / ".vm-host-acceptance.lock"
+    flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        fd = os.open(lock_path, flags, 0o600)
+    except OSError as error:
+        raise AcceptanceError("campaign stage lock is unavailable") from error
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
+            raise AcceptanceError("campaign stage lock is unsafe")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise AcceptanceError("another exact-run stage or cleanup is active") from error
+        yield lock_path
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+
+
+def _resume_campaign(state_root: Path, source: Path, run_id: str,
+                     suites: list[str], provider_config_sha256: str,
+                     source_identity: dict[str, Any]) -> tuple[dict[str, Any], Path, Path, Path]:
+    run_root = _namespace_path(state_root, _run_name(run_id))
+    report_path = _campaign_report_path(state_root, run_id)
+    _private_directory(run_root)
+    _private_directory(report_path.parent)
+    _private_directory(run_root / "state")
+    report = _read_private_json(report_path)
+    if (report.get("schema_version") != 1 or report.get("workflow_version") != 1
+            or report.get("run_id") != run_id or report.get("run_name") != _run_name(run_id)
+            or report.get("suites") != suites
+            or report.get("required_gates") != sorted({gate for suite in suites for gate in SUITE_GATES[suite]})
+            or report.get("provider_config_sha256") != provider_config_sha256):
+        raise AcceptanceError("resume manifest revision, suite, provider configuration, or schema changed")
+    stored_source = report.get("source")
+    if (not isinstance(stored_source, dict)
+            or stored_source.get("source_head") != source_identity.get("source_head")
+            or stored_source.get("tree_sha256") != source_identity.get("tree_sha256")):
+        raise AcceptanceError("source revision changed; resume requires a fresh scoped attempt")
+    workspace = run_root / "candidate-snapshot" / "workspace"
+    if (not workspace.is_dir() or workspace.is_symlink()
+            or _source_identity(workspace).get("tree_sha256") != report.get("snapshot", {}).get("tree_sha256")):
+        raise AcceptanceError("immutable campaign snapshot changed; resume was refused")
+    child_state = run_root / "state"
+    ready_profiles: list[str] = []
+    clean = report.get("gates", {}).get("HOST-CLEAN", {})
+    if isinstance(clean, dict) and clean.get("status") == "PASS":
+        profile = _profile_name(run_id)
+        current = _profile_record(child_state, profile)
+        if (current.get("name") != profile or current.get("depth") != 0
+                or current.get("status") not in {"ready", "suspended"}
+                or current.get("profile_id") != clean.get("profile_id")
+                or current.get("image_sha256") != clean.get("image_sha256")
+                or current.get("guest_payload_sha256") != clean.get("guest_payload_sha256")
+                or current.get("runtime_payload_sha256") != clean.get("runtime_payload_sha256")):
+            raise AcceptanceError("campaign profile/runtime identity changed; resume was refused")
+        if current.get("status") == "ready" and not _listener_owned_loopback(current):
+            raise AcceptanceError("ready campaign process/listener ownership changed; resume was refused")
+        if current.get("status") == "ready":
+            ready_profiles.append(profile)
+    provider_profiles = report.get("provider_profiles", {})
+    if not isinstance(provider_profiles, dict):
+        raise AcceptanceError("provider profile identity manifest is invalid")
+    for provider, expected in provider_profiles.items():
+        selection = _provider_config_entry(report, provider)
+        if (provider not in {"ollama", "llamacpp", "openai"} or selection is None
+                or not isinstance(expected, dict)):
+            raise AcceptanceError("provider profile selection is outside the exact campaign configuration")
+        name = _profile_name(run_id, f"provider-{provider}")
+        if expected.get("profile_name") != name or expected.get("model_id") != selection.get("model_id"):
+            raise AcceptanceError("provider profile model identity changed; resume was refused")
+        current = _profile_record(run_root / "state", name)
+        if (current.get("name") != name or current.get("depth") != 0
+                or current.get("status") not in {"ready", "suspended"}
+                or current.get("profile_id") != expected.get("profile_id")
+                or current.get("image_sha256") != expected.get("image_sha256")
+                or current.get("guest_payload_sha256") != expected.get("guest_payload_sha256")
+                or current.get("runtime_payload_sha256") != expected.get("runtime_payload_sha256")):
+            raise AcceptanceError("provider profile/runtime identity changed; resume was refused")
+        if current.get("status") == "ready":
+            if (not _listener_owned_loopback(current)
+                    or not _model_selection_matches(run_root / "state", name, selection)):
+                raise AcceptanceError("provider process or selected model ownership changed; resume was refused")
+            ready_profiles.append(name)
+    if len(ready_profiles) > 1:
+        raise AcceptanceError("multiple campaign guests are active; exact-run resume was refused")
+    return report, run_root, child_state, workspace
+
+
 def _safe_status(result: subprocess.CompletedProcess) -> str:
     if result.returncode == 0:
         return "PASS"
@@ -1099,32 +2356,105 @@ def _safe_status(result: subprocess.CompletedProcess) -> str:
     return "FAIL"
 
 
+@_bounded_stage
 def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[str],
                      memory_gib: int, confirm_run_id: str, *,
-                     apply_selected_updates: bool = False) -> tuple[dict[str, Any], Path]:
+                     apply_selected_updates: bool = False,
+                     provider_config_path: str | os.PathLike[str] | None = None,
+                     campaign_suites: list[str] | None = None,
+                     workflow_stage: str | None = None,
+                     resume: bool = False,
+                     approved_total_minutes: int | None = None,
+                     retry_of: str | None = None,
+                     retry_reason: str | None = None) -> tuple[dict[str, Any], Path]:
     if confirm_run_id != run_id:
         raise AcceptanceError("execution requires the exact plan run ID")
-    if apply_selected_updates and "lifecycle" not in suites:
+    selected_suites = list(suites)
+    full_suites = list(campaign_suites if campaign_suites is not None else suites)
+    if any(suite not in ALL_SUITES for suite in selected_suites + full_suites):
+        raise AcceptanceError("execution suite is outside the fixed campaign contract")
+    if workflow_stage is not None and workflow_stage not in STAGE_ORDER:
+        raise AcceptanceError("workflow stage is unsupported")
+    if workflow_stage == STAGE_ORDER[0] and resume:
+        raise AcceptanceError("the clean-usability stage cannot resume an existing campaign")
+    if workflow_stage not in {None, STAGE_ORDER[0]} and not resume:
+        raise AcceptanceError("later campaign stages require an exact-run resume")
+    approved_seconds = (_approved_budget_seconds(approved_total_minutes)
+                        if workflow_stage is not None or approved_total_minutes is not None else None)
+    if workflow_stage is None and approved_seconds is None:
+        raise AcceptanceError("live campaign execution requires an explicit total time budget")
+    if workflow_stage is None and (retry_of is not None or retry_reason is not None):
+        raise AcceptanceError("fresh retry authorization is valid only for a staged campaign start")
+    if resume and (retry_of is not None or retry_reason is not None):
+        raise AcceptanceError("retry authorization cannot be changed while resuming an existing run")
+    if apply_selected_updates and "lifecycle" not in full_suites:
         raise AcceptanceError("selected update apply is valid only with the lifecycle suite")
-    initial = preflight(source, state_root, run_id, memory_gib, suites)
+    initial = preflight(source, state_root, run_id, memory_gib, full_suites,
+                        provider_config_path, resume=resume)
     if initial["result"] != "PASS":
         return {"run_id": run_id, "result": "BLOCKED", "preflight": initial, "gates": {}}, Path()
-    if not any(suite != "preflight" for suite in suites):
+    if not any(suite != "preflight" for suite in full_suites):
         return {"run_id": run_id, "result": "PASS", "preflight": initial,
                 "gates": {"HOST-PREFLIGHT": {"status": "PASS", "checks": initial["checks"]}}}, Path()
-    run_root, child_state, workspace = _new_campaign(state_root, run_id, source, suites, initial)
-    report_path = run_root.parent / "reports" / f"{_run_name(run_id)}.json"
-    report = _read_private_json(report_path)
-    report["preflight"] = initial
-    report["requested_effects"] = {
+    provider_config_sha256 = initial.get("provider_config", {}).get("sha256", "")
+    attempt_info: dict[str, Any] | None = None
+    if resume:
+        report, run_root, child_state, workspace = _resume_campaign(
+            state_root, source, run_id, full_suites, provider_config_sha256, initial["source"],
+        )
+        if report.get("approved_total_budget_seconds") != approved_seconds:
+            raise AcceptanceError("approved total campaign budget changed; resume was refused")
+        elapsed_ms = _campaign_elapsed_ms(report)
+        attempt = report.get("attempt", {})
+        prior_elapsed_ms = attempt.get("prior_elapsed_ms", 0) if isinstance(attempt, dict) else None
+        if type(prior_elapsed_ms) is not int or prior_elapsed_ms < 0:
+            raise AcceptanceError("prior-attempt time accounting is invalid")
+        remaining_seconds = approved_seconds - (prior_elapsed_ms + elapsed_ms + _stage_elapsed_ms()) // 1000
+        _tighten_stage_budget(remaining_seconds)
+        report["resume_preflight"] = initial
+        if workflow_stage is not None:
+            _mark_stage_running(report, workflow_stage)
+    else:
+        if approved_seconds is not None:
+            initial["approved_total_budget_seconds"] = approved_seconds
+        if workflow_stage is not None:
+            attempt_info = _register_campaign_attempt(
+                state_root, run_id, initial["source"], provider_config_sha256,
+                retry_of=retry_of, retry_reason=retry_reason,
+                approved_total_budget_seconds=approved_seconds,
+            )
+        if approved_seconds is not None:
+            prior_elapsed_ms = attempt_info.get("prior_elapsed_ms", 0) if attempt_info else 0
+            remaining_seconds = approved_seconds - (prior_elapsed_ms + _stage_elapsed_ms()) // 1000
+            _tighten_stage_budget(remaining_seconds)
+        run_root, child_state, workspace = _new_campaign(state_root, run_id, source, full_suites, initial)
+        report = _read_private_json(_campaign_report_path(state_root, run_id))
+        if attempt_info is not None:
+            report["attempt"] = attempt_info
+            _atomic_replace_json(_campaign_report_path(state_root, run_id), report)
+        if workflow_stage is not None:
+            if workflow_stage != STAGE_ORDER[0]:
+                raise AcceptanceError("a new campaign must begin with clean-usability")
+            _mark_stage_running(report, workflow_stage)
+        report["preflight"] = initial
+    report_path = _campaign_report_path(state_root, run_id)
+    if "provider_config" in initial:
+        report["provider_config"] = initial["provider_config"]
+    requested_effects = {
         "selected_guest_update_targets": ["config", "tools"] if apply_selected_updates else [],
         "selected_guest_updates_authorized": apply_selected_updates,
     }
+    if resume and report.get("requested_effects") != requested_effects:
+        raise AcceptanceError("selected campaign effects changed; resume requires a fresh attempt")
+    report["requested_effects"] = requested_effects
     report["execution_context"] = initial["execution_context"]
-    report["source"]["workspace_tree_sha256"] = _source_identity(workspace)["tree_sha256"]
-    selected_gates = {gate for suite in suites for gate in SUITE_GATES[suite]}
+    if not resume:
+        report["source"]["workspace_tree_sha256"] = _source_identity(workspace)["tree_sha256"]
+    stage_suites = selected_suites
+    selected_gates = {gate for suite in stage_suites for gate in SUITE_GATES[suite]}
     for gate in selected_gates:
-        report["gates"][gate] = {"status": "BLOCKED", "reason_code": "not_run"}
+        if report["gates"].get(gate, {}).get("status") == "NOT_RUN":
+            report["gates"][gate] = {"status": "BLOCKED", "reason_code": "not_run"}
 
     active_gate: str | None = None
     active_gate_started_at: float | None = None
@@ -1152,56 +2482,84 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
         report["gates"][gate] = {"status": status, **evidence}
         _atomic_replace_json(report_path, report)
 
-    set_gate("HOST-PREFLIGHT", "PASS", checks=initial["checks"], memory=initial["memory"])
+    if report["gates"].get("HOST-PREFLIGHT", {}).get("status") in {"NOT_RUN", "BLOCKED"}:
+        set_gate("HOST-PREFLIGHT", "PASS", checks=initial["checks"], memory=initial["memory"])
     profile = _profile_name(run_id)
     guest_ready = False
+    outer_boundary_status: str | None = None
+    outer_boundary_evidence: dict[str, Any] | None = None
+    nested_boundary_evidence: dict[str, Any] = {}
+    workload_setup: dict[str, Any] | None = None
+    workload_retention: dict[str, Any] | None = None
+    workload_cleanup: dict[str, bool] | None = None
 
     try:
-        profile_needed = any(suite != "preflight" for suite in suites)
+        profile_needed = any(suite != "preflight" for suite in stage_suites)
         if profile_needed:
-            report["owned_profiles"] = [{"profile_name": profile, "depth": 0, "run_id": run_id}]
-            _atomic_replace_json(report_path, report)
-            begin_gate("HOST-CLEAN")
-            completed = _lifecycle_call(child_state, profile, workspace, "up", memory_gib, timeout=1900)
-            if completed.returncode == 0:
+            if not any(item.get("profile_name") == profile for item in report.get("owned_profiles", [])
+                       if isinstance(item, dict)):
+                report.setdefault("owned_profiles", []).append(
+                    {"profile_name": profile, "depth": 0, "run_id": run_id},
+                )
+                _atomic_replace_json(report_path, report)
+            clean_gate = report["gates"].get("HOST-CLEAN", {})
+            if clean_gate.get("status") == "PASS":
                 data = _profile_record(child_state, profile)
-                lifecycle_ready = data.get("status") == "ready" and data.get("runtime_identity") is not None
-                clean = None
-                clean_error = None
-                image_integrity = _cached_image_integrity(child_state, profile)
-                if lifecycle_ready:
-                    try:
-                        clean = _guest_clean_checks(child_state, profile, workspace, os.getuid(), os.getgid())
-                    except TimeoutError:
-                        clean_error = "guest_clean_probe_timeout"
-                    except AcceptanceError:
-                        clean_error = "guest_clean_probe_failed"
-                clean_status = "PASS" if (
-                    lifecycle_ready and clean is not None and clean.get("result") == "PASS"
-                    and image_integrity["status"] == "PASS"
-                ) else "FAIL" if (
-                    (clean is not None and clean.get("result") == "FAIL")
-                    or image_integrity["status"] == "FAIL"
-                ) else "BLOCKED"
-                guest_ready = clean_status == "PASS"
-                set_gate("HOST-CLEAN", clean_status,
-                         reason_code=clean_error or image_integrity.get("reason_code"),
-                         profile_name=profile, readiness_verified=lifecycle_ready,
-                         checks=clean.get("checks") if clean else None,
-                         host_docker_dependency=clean.get("host_docker_dependency") if clean else "NOT_REQUIRED",
-                         image_integrity=image_integrity["status"],
-                         image_artifact_sha256=image_integrity.get("artifact_sha256"),
-                         image_sha256=data.get("image_sha256"),
-                         guest_payload_sha256=data.get("guest_payload_sha256"),
-                          runtime_payload_sha256=data.get("runtime_payload_sha256"),
-                          opencode_version=data.get("opencode_version"),
-                          guest_opencode_version=clean.get("opencode_version") if clean else None)
-                if clean_status == "PASS":
-                    report["verified_guest_opencode_version"] = clean.get("opencode_version")
-                    _atomic_replace_json(report_path, report)
-            else:
-                set_gate("HOST-CLEAN", _safe_status(completed), reason_code="fresh_guest_start_failed",
-                         cause_exit_code=completed.returncode)
+                if data.get("status") == "suspended":
+                    if not _suspend_other_campaign_profiles(child_state, run_id, report,
+                                                            profile, memory_gib):
+                        raise AcceptanceError("other exact campaign profiles could not be suspended")
+                    resumed = _lifecycle_call(child_state, profile, Path(data["workspace"]),
+                                              "resume", memory_gib, timeout=1900)
+                    data = _profile_record(child_state, profile)
+                    if resumed.returncode != 0 or data.get("status") != "ready":
+                        raise AcceptanceError("exact campaign profile could not be resumed safely")
+                guest_ready = data.get("status") == "ready" and _listener_owned_loopback(data)
+                if not guest_ready:
+                    raise AcceptanceError("exact campaign guest process ownership is not verified")
+            elif "clean" in stage_suites:
+                begin_gate("HOST-CLEAN")
+                completed = _lifecycle_call(child_state, profile, workspace, "up", memory_gib, timeout=1900)
+                if completed.returncode == 0:
+                    data = _profile_record(child_state, profile)
+                    lifecycle_ready = data.get("status") == "ready" and data.get("runtime_identity") is not None
+                    clean = None
+                    clean_error = None
+                    image_integrity = _cached_image_integrity(child_state, profile)
+                    if lifecycle_ready:
+                        try:
+                            clean = _guest_clean_checks(child_state, profile, workspace, os.getuid(), os.getgid())
+                        except TimeoutError:
+                            clean_error = "guest_clean_probe_timeout"
+                        except AcceptanceError:
+                            clean_error = "guest_clean_probe_failed"
+                    clean_status = "PASS" if (
+                        lifecycle_ready and clean is not None and clean.get("result") == "PASS"
+                        and image_integrity["status"] == "PASS"
+                    ) else "FAIL" if (
+                        (clean is not None and clean.get("result") == "FAIL")
+                        or image_integrity["status"] == "FAIL"
+                    ) else "BLOCKED"
+                    guest_ready = clean_status == "PASS"
+                    set_gate("HOST-CLEAN", clean_status,
+                             reason_code=clean_error or image_integrity.get("reason_code"),
+                             profile_name=profile, readiness_verified=lifecycle_ready,
+                             profile_id=data.get("profile_id"), depth=data.get("depth"),
+                             checks=clean.get("checks") if clean else None,
+                             host_docker_dependency=clean.get("host_docker_dependency") if clean else "NOT_REQUIRED",
+                             image_integrity=image_integrity["status"],
+                             image_artifact_sha256=image_integrity.get("artifact_sha256"),
+                             image_sha256=data.get("image_sha256"),
+                             guest_payload_sha256=data.get("guest_payload_sha256"),
+                             runtime_payload_sha256=data.get("runtime_payload_sha256"),
+                             opencode_version=data.get("opencode_version"),
+                             guest_opencode_version=clean.get("opencode_version") if clean else None)
+                    if clean_status == "PASS":
+                        report["verified_guest_opencode_version"] = clean.get("opencode_version")
+                        _atomic_replace_json(report_path, report)
+                else:
+                    set_gate("HOST-CLEAN", _safe_status(completed), reason_code="fresh_guest_start_failed",
+                             cause_exit_code=completed.returncode)
 
         if "daily" in suites:
             if guest_ready:
@@ -1232,54 +2590,42 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
                 begin_gate("SEC-NET")
                 outer_boundary = _guest_isolation(child_state, profile, workspace, run_id)
                 network_status = outer_boundary.pop("status")
-                child_profile = _profile_name(run_id, "agent")
-                nested_budget = _read_mem_budget(4 * 1024, DEFAULT_RESERVE_MIB)
-                nested_budget_safe = nested_budget["passed"]
-                child_status = "BLOCKED"
-                child_boundary: dict[str, Any] = {"reason_code": "nested_ram_budget_blocked"}
-                if nested_budget_safe:
-                    report["owned_profiles"].append({
-                        "profile_name": child_profile, "depth": 1, "run_id": run_id,
-                    })
-                    _atomic_replace_json(report_path, report)
-                    child_up = _lifecycle_call(
-                        child_state, child_profile, workspace, "up", 4,
-                        depth=1, maximum=2, timeout=1900,
-                    )
-                    if child_up.returncode == 0:
-                        child_data = _profile_record(child_state, child_profile)
-                        child_isolation = _guest_isolation(child_state, child_profile, workspace, run_id)
-                        child_status = child_isolation.pop("status")
-                        child_boundary = {
-                            "profile_name": child_profile,
-                            "listener_verified": _listener_owned_loopback(child_data),
-                            "guest_checks": child_isolation.get("guest_checks"),
-                            "source_tree_sha256": child_isolation.get("source_tree_sha256"),
-                        }
-                    else:
-                        child_status = _safe_status(child_up)
-                        child_boundary = {"reason_code": "nested_profile_start_failed"}
-                network_pass = network_status == "PASS" and child_status == "PASS"
-                set_gate("SEC-NET", "PASS" if network_pass else
-                         "FAIL" if "FAIL" in {network_status, child_status} else "BLOCKED",
-                         outer=outer_boundary, child={"status": child_status, **child_boundary},
-                         nested_memory_budget_passed=nested_budget_safe)
+                outer_boundary_status = network_status
+                outer_boundary_evidence = outer_boundary
+                # A depth-1 profile started by the host is a sibling, not an
+                # enclosing guest's child. Keep the measured outer evidence but
+                # refuse SEC-NET PASS until the live self-test proves actual
+                # G0→G1→G2 placement and obtains a G2 isolation report.
+                set_gate("SEC-NET", "FAIL" if network_status == "FAIL" else "BLOCKED",
+                         reason_code="actual_nested_child_boundary_evidence_required",
+                         outer=outer_boundary, nested_child_status="NOT_RUN")
             else:
                 set_gate("SEC-NET", "BLOCKED", reason_code="outer_guest_not_verified_ready")
             set_gate("SEC-FS", "BLOCKED", reason_code="owner_live_evidence_required")
             set_gate("SEC-SECRET", "BLOCKED", reason_code="owner_live_evidence_required")
 
+        if "workload" in suites:
+            if guest_ready:
+                begin_gate("E2E-WORK")
+                workload_setup = _guest_workload_checks(child_state, profile, run_id)
+            else:
+                workload_setup = {"status": "BLOCKED", "reason_code": "outer_guest_not_verified_ready"}
+
         if guest_ready and "lifecycle" in suites:
             begin_gate("E2E-LIFE")
             life_workspace = Path(_profile_record(child_state, profile)["workspace"])
+            lifecycle_workload_evidence: dict[str, Any] = {}
             try:
                 life = _lifecycle_retention_checks(
                     child_state, profile, life_workspace, memory_gib, apply_selected_updates,
+                    run_id if workload_setup and workload_setup.get("status") == "PASS" else None,
+                    lifecycle_workload_evidence,
                 )
             except TimeoutError:
                 life = {"status": "FAIL", "reason_code": "lifecycle_deadline_exceeded"}
             except (AcceptanceError, OSError, RuntimeError, ValueError):
                 life = {"status": "BLOCKED", "reason_code": "lifecycle_environment_unavailable"}
+            workload_retention = lifecycle_workload_evidence or life.get("workload_retention")
             life_status = life.pop("status")
             if life_status == "FAIL":
                 set_gate("E2E-LIFE", "FAIL", **life)
@@ -1295,11 +2641,32 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
         elif "lifecycle" in suites:
             set_gate("E2E-LIFE", "BLOCKED", reason_code="outer_guest_not_verified_ready")
 
+        if "workload" in suites:
+            if (workload_setup and workload_setup.get("status") == "PASS"
+                    and "lifecycle" not in suites and guest_ready):
+                workload_retention = _workload_suspend_resume_retention(
+                    child_state, profile, Path(_profile_record(child_state, profile)["workspace"]),
+                    memory_gib, run_id,
+                )
+            if guest_ready:
+                try:
+                    workload_cleanup = _guest_workload_cleanup(child_state, profile, run_id)
+                except (AcceptanceError, OSError, RuntimeError, TimeoutError, ValueError):
+                    workload_cleanup = None
+            result = _workload_gate_result(workload_setup, workload_retention, workload_cleanup)
+            gate_status = result.pop("status")
+            set_gate("E2E-WORK", gate_status, **result)
+
         if "self" in suites:
             if guest_ready:
                 try:
                     begin_gate("E2E-SELF")
                     self_evidence = _self_test_gate(child_state, profile, workspace, report_path.parent)
+                    nested_boundary_evidence = {
+                        key: self_evidence.get(key) for key in (
+                            "g1_boundary_status", "g2_boundary_verified", "g2_boundary_report_sha256",
+                        )
+                    }
                     self_status = self_evidence.pop("status")
                     depth_status = self_evidence.pop("depth_gate_status", "NOT_RUN")
                     set_gate("E2E-SELF", self_status, **self_evidence)
@@ -1311,10 +2678,60 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
                 set_gate("E2E-SELF", "BLOCKED", reason_code="outer_guest_not_verified_ready")
                 set_gate("E2E-DEPTH", "BLOCKED", reason_code="outer_guest_not_verified_ready")
 
+        if "boundary" in suites and "self" in suites:
+            g1_status = nested_boundary_evidence.get("g1_boundary_status")
+            g2_verified = nested_boundary_evidence.get("g2_boundary_verified") is True
+            g2_digest = nested_boundary_evidence.get("g2_boundary_report_sha256")
+            complete = (
+                outer_boundary_status == "PASS" and g1_status == "PASS" and g2_verified
+                and isinstance(g2_digest, str) and re.fullmatch(r"[a-f0-9]{64}", g2_digest)
+            )
+            set_gate("SEC-NET", "PASS" if complete else "FAIL" if "FAIL" in {
+                outer_boundary_status, g1_status,
+            } else "BLOCKED",
+                reason_code=None if complete else "actual_nested_child_boundary_evidence_incomplete",
+                outer=outer_boundary_evidence, g1_status=g1_status,
+                g2_verified=g2_verified, g2_boundary_report_sha256=g2_digest,
+                topology="campaign-depth-0→self-test-depth-1→self-test-depth-2")
+
+        if "model" in suites:
+            if guest_ready:
+                begin_gate("E2E-MODEL")
+                try:
+                    model_evidence = _provider_stream_checks(
+                        child_state, run_id, workspace, report, memory_gib,
+                    )
+                except TimeoutError:
+                    model_evidence = {"status": "BLOCKED", "automated_status": "BLOCKED",
+                                      "reason_code": "provider_stage_deadline_exceeded", "providers": []}
+                except (AcceptanceError, OSError, RuntimeError, ValueError):
+                    model_evidence = {"status": "BLOCKED", "automated_status": "BLOCKED",
+                                      "reason_code": "provider_environment_unavailable", "providers": []}
+                provider_statuses = {item.get("status") for item in model_evidence.get("providers", [])}
+                if "FAIL" in provider_statuses:
+                    set_gate("E2E-MODEL", "FAIL", reason_code="provider_stream_schema_invalid",
+                             automated_status="FAIL", providers=model_evidence.get("providers", []))
+                elif model_evidence.get("reason_code") not in {
+                        None, "no_provider_selected", "provider_or_owner_evidence_incomplete"}:
+                    set_gate("E2E-MODEL", "BLOCKED", reason_code=model_evidence["reason_code"],
+                             automated_status=model_evidence.get("automated_status"),
+                             providers=model_evidence.get("providers", []))
+                elif any(item.get("status") == "BLOCKED" for item in model_evidence.get("providers", [])):
+                    blocked_reason = next(item.get("reason_code") for item in model_evidence["providers"]
+                                          if item.get("status") == "BLOCKED")
+                    set_gate("E2E-MODEL", "BLOCKED", reason_code=blocked_reason or "provider_stream_incomplete",
+                             automated_status="BLOCKED", providers=model_evidence["providers"])
+                else:
+                    set_gate("E2E-MODEL", "BLOCKED", reason_code="owner_live_evidence_required",
+                             automated_status=model_evidence.get("automated_status", "BLOCKED"),
+                             automated_reason_code=model_evidence.get("reason_code"),
+                             providers=model_evidence.get("providers", []))
+            else:
+                set_gate("E2E-MODEL", "BLOCKED", reason_code="outer_guest_not_verified_ready")
+
         # Owner checkpoints are explicit, version-bound attestations. No health
         # check or default/Enter response is promoted into a behavioral PASS.
         for suite, gates in {
-            "model": ("E2E-MODEL",), "workload": ("E2E-WORK",),
             "agents": ("E2E-AGENTS",),
             "human": ("HUMAN-TUI", "HUMAN-PERM", "HUMAN-AUTH"),
         }.items():
@@ -1323,10 +2740,18 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
                     reason = "owner_observation_required" if gate.startswith("HUMAN-") else "owner_live_evidence_required"
                     set_gate(gate, "BLOCKED", reason_code=reason)
 
-        selected = [report["gates"][gate]["status"] for gate in selected_gates]
-        report["result"] = "PASS" if selected and all(value == "PASS" for value in selected) else (
-            "FAIL" if "FAIL" in selected else "BLOCKED"
-        )
+        report["result"] = _campaign_result(report)
+        if workflow_stage is not None:
+            stage_results = [report["gates"].get(gate, {}).get("status", "NOT_RUN")
+                             for gate in selected_gates]
+            report["stages"][workflow_stage] = (
+                "FAIL" if "FAIL" in stage_results else
+                "PASS" if stage_results and all(value == "PASS" for value in stage_results) else
+                "BLOCKED"
+            )
+            report["stage_elapsed_ms"][workflow_stage] = _stage_elapsed_ms()
+        else:
+            report["legacy_elapsed_ms"] = _stage_elapsed_ms()
         report["finished_utc"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
         _atomic_replace_json(report_path, report)
     except KeyboardInterrupt:
@@ -1338,6 +2763,12 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
             }
             report.pop("active_gate", None)
         report["result"] = "BLOCKED"
+        if workflow_stage is not None and report.get("stages", {}).get(workflow_stage) == "RUNNING":
+            report["stages"][workflow_stage] = "BLOCKED"
+        if workflow_stage is not None:
+            report["stage_elapsed_ms"][workflow_stage] = _stage_elapsed_ms()
+        else:
+            report["legacy_elapsed_ms"] = _stage_elapsed_ms()
         report["interrupted"] = True
         report["finished_utc"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
         _atomic_replace_json(report_path, report)
@@ -1351,6 +2782,14 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
             }
             report.pop("active_gate", None)
         report["result"] = "FAIL"
+        if workflow_stage is not None and report.get("stages", {}).get(workflow_stage) == "RUNNING":
+            report["stages"][workflow_stage] = "FAIL"
+        if workflow_stage is not None:
+            report["stage_elapsed_ms"][workflow_stage] = min(
+                STAGE_BUDGET_SECONDS * 1000, _stage_elapsed_ms(),
+            )
+        else:
+            report["legacy_elapsed_ms"] = min(STAGE_BUDGET_SECONDS * 1000, _stage_elapsed_ms())
         report["reason_code"] = "deadline_exceeded"
         report["finished_utc"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
         _atomic_replace_json(report_path, report)
@@ -1363,6 +2802,14 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
             }
             report.pop("active_gate", None)
         report["result"] = "BLOCKED"
+        if workflow_stage is not None and report.get("stages", {}).get(workflow_stage) == "RUNNING":
+            report["stages"][workflow_stage] = "BLOCKED"
+        if workflow_stage is not None:
+            report["stage_elapsed_ms"][workflow_stage] = min(
+                STAGE_BUDGET_SECONDS * 1000, _stage_elapsed_ms(),
+            )
+        else:
+            report["legacy_elapsed_ms"] = min(STAGE_BUDGET_SECONDS * 1000, _stage_elapsed_ms())
         report["reason_code"] = "environment_unavailable"
         report["finished_utc"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
         _atomic_replace_json(report_path, report)
@@ -1396,7 +2843,8 @@ def _atomic_replace_json(path: Path, data: dict[str, Any]) -> None:
         raise
 
 
-def cleanup_campaign(state_root: Path, run_id: str, confirm_run_id: str) -> dict[str, Any]:
+def cleanup_campaign(state_root: Path, run_id: str, confirm_run_id: str, *,
+                     staged_teardown: bool = False) -> dict[str, Any]:
     if run_id != confirm_run_id:
         raise AcceptanceError("cleanup requires the exact campaign run ID")
     run_root = _namespace_path(state_root, _run_name(run_id))
@@ -1418,7 +2866,8 @@ def cleanup_campaign(state_root: Path, run_id: str, confirm_run_id: str) -> dict
         raise AcceptanceError("owned profile manifest is invalid")
     checked_profiles: list[dict[str, Any]] = []
     seen_profiles: set[str] = set()
-    role_depth = {"outer": 0, "agent": 1, "workload": 1}
+    role_depth = {"outer": 0, "agent": 1, "workload": 1,
+                  "provider-ollama": 0, "provider-llamacpp": 0, "provider-openai": 0}
     for item in owned_profiles:
         if not isinstance(item, dict) or set(item) != {"profile_name", "depth", "run_id"}:
             raise AcceptanceError("owned profile manifest is invalid")
@@ -1430,7 +2879,19 @@ def cleanup_campaign(state_root: Path, run_id: str, confirm_run_id: str) -> dict
             raise AcceptanceError("cleanup target is outside this exact campaign run")
         seen_profiles.add(name)
         checked_profiles.append(item)
+    prior_cleanup = report.get("cleanup", {})
+    prior_deleted = prior_cleanup.get("deleted_profiles", []) if isinstance(prior_cleanup, dict) else []
+    if (not isinstance(prior_deleted, list) or len(prior_deleted) != len(set(prior_deleted))
+            or any(name not in seen_profiles for name in prior_deleted)):
+        raise AcceptanceError("partial cleanup manifest is invalid")
+    deleted: list[str] = list(prior_deleted)
     child_state = run_root / "state"
+    profile_root = child_state / "vm/profiles"
+    if profile_root.exists():
+        _private_directory(profile_root)
+        observed_profiles = {item.name for item in profile_root.iterdir()}
+        if not observed_profiles <= seen_profiles or not (seen_profiles - observed_profiles) <= set(deleted):
+            raise AcceptanceError("campaign profile directory contains unmanifested or missing ownership")
     self_gate = gates.get("E2E-SELF", {})
     self_run_id = self_gate.get("run_id") if isinstance(self_gate, dict) else None
     if self_run_id is not None and ("self" not in suites or not isinstance(self_run_id, str)
@@ -1448,12 +2909,13 @@ def cleanup_campaign(state_root: Path, run_id: str, confirm_run_id: str) -> dict
                 _atomic_replace_json(self_archive, nested_report)
         self_gate["cleanup_status"] = "PASS"
         _atomic_replace_json(report_path, report)
-    deleted: list[str] = []
     for item in sorted(checked_profiles, key=lambda value: (-value["depth"], value["profile_name"])):
         name = item["profile_name"]
         profile_path = child_state / "vm/profiles" / name
         if not profile_path.exists():
-            continue
+            if name in deleted:
+                continue
+            raise AcceptanceError("manifested campaign profile is missing without prior cleanup evidence")
         data = _profile_record(child_state, name)
         if data.get("status") in {"starting", "provisioning", "unknown", "deleting"}:
             raise AcceptanceError("ambiguous profile state is preserved for owner review")
@@ -1471,14 +2933,83 @@ def cleanup_campaign(state_root: Path, run_id: str, confirm_run_id: str) -> dict
                                  int(data["memory_gib"]), confirm=name, timeout=180)
         if result.returncode != 0:
             raise AcceptanceError("supported lifecycle cleanup did not confirm exact profile deletion")
+        if profile_path.exists() or profile_path.is_symlink():
+            raise AcceptanceError("exact profile residue remained after lifecycle cleanup")
         deleted.append(name)
-    report["cleanup"] = {"status": "PASS", "deleted_profiles": deleted}
+        report["cleanup"] = {"status": "BLOCKED", "deleted_profiles": deleted}
+        _atomic_replace_json(report_path, report)
+    report["cleanup"] = {"status": "RUNNING", "deleted_profiles": deleted}
+    report["result"] = "BLOCKED"
     report["finished_utc"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
     _atomic_replace_json(report_path, report)
     paths = _load_module("vm_host_acceptance_paths_cleanup", PATHS_PATH)
     paths.recursion_run_delete(state_root, _run_name(run_id), _run_name(run_id), Path("/proc"))
+    if run_root.exists() or run_root.is_symlink() or not report_path.is_file() or report_path.is_symlink():
+        raise AcceptanceError("campaign teardown residue or report preservation check failed")
+    report = _read_private_json(report_path)
+    report["cleanup"] = {
+        "status": "PASS", "deleted_profiles": deleted,
+        "profile_residue": "NONE", "protected_run_report_preserved": True,
+        "host_docker_session_touched": False,
+    }
+    if staged_teardown:
+        report["stages"]["teardown"] = "PASS"
+        report["stage_elapsed_ms"]["teardown"] = min(
+            STAGE_BUDGET_SECONDS * 1000, _stage_elapsed_ms(),
+        )
+    report["result"] = _campaign_result(report)
+    report["finished_utc"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+    _atomic_replace_json(report_path, report)
+    if run_root.exists() or run_root.is_symlink() or not report_path.is_file() or report_path.is_symlink():
+        raise AcceptanceError("campaign teardown residue or report preservation check failed")
     return {"run_id": run_id, "cleanup": "PASS", "deleted_profiles": deleted,
             "report_path": str(report_path)}
+
+
+@_bounded_stage
+def execute_teardown_stage(state_root: Path, run_id: str, confirm_run_id: str,
+                           approved_total_minutes: int) -> tuple[dict[str, Any], Path]:
+    if run_id != confirm_run_id:
+        raise AcceptanceError("teardown requires the exact campaign run ID")
+    approved_seconds = _approved_budget_seconds(approved_total_minutes)
+    report_path = _campaign_report_path(state_root, run_id)
+    _private_directory(report_path.parent)
+    report = _read_private_json(report_path)
+    if (report.get("workflow_version") != 1 or report.get("run_id") != run_id
+            or report.get("approved_total_budget_seconds") != approved_seconds):
+        raise AcceptanceError("teardown revision or approved total budget does not match the campaign")
+    attempt = report.get("attempt", {})
+    prior_elapsed = attempt.get("prior_elapsed_ms", 0) if isinstance(attempt, dict) else None
+    if type(prior_elapsed) is not int or prior_elapsed < 0:
+        raise AcceptanceError("prior-attempt time accounting is invalid")
+    campaign_elapsed = _campaign_elapsed_ms(report)
+    _tighten_stage_budget(
+        approved_seconds - (prior_elapsed + campaign_elapsed + _stage_elapsed_ms()) // 1000,
+    )
+    _mark_stage_running(report, "teardown")
+    _atomic_replace_json(report_path, report)
+    try:
+        cleanup_campaign(state_root, run_id, confirm_run_id, staged_teardown=True)
+    except BaseException:
+        try:
+            report = _read_private_json(report_path)
+            report.setdefault("stages", {})["teardown"] = "BLOCKED"
+            report.setdefault("stage_elapsed_ms", {})["teardown"] = min(
+                STAGE_BUDGET_SECONDS * 1000, _stage_elapsed_ms(),
+            )
+            cleanup = report.get("cleanup")
+            if not isinstance(cleanup, dict):
+                cleanup = {}
+                report["cleanup"] = cleanup
+            cleanup["status"] = "BLOCKED"
+            cleanup.setdefault("reason_code", "exact_teardown_unconfirmed")
+            report["result"] = _campaign_result(report)
+            _atomic_replace_json(report_path, report)
+        except (OSError, AcceptanceError, UnicodeError, json.JSONDecodeError):
+            pass
+        raise
+    report = _read_private_json(report_path)
+    return report, report_path
 
 
 def record_human_observation(state_root: Path, run_id: str, confirm_run_id: str,
@@ -1521,6 +3052,8 @@ def record_human_observation(state_root: Path, run_id: str, confirm_run_id: str,
     if (not isinstance(clean_gate, dict) or clean_gate.get("status") != "PASS"
             or not isinstance(verified_version, str) or verified_version != version):
         raise AcceptanceError("owner observation version does not match the verified fresh guest")
+    if isinstance(report.get("cleanup"), dict) and report["cleanup"].get("status") == "PASS":
+        raise AcceptanceError("the exact campaign is finalized; owner observations cannot change its report")
     existing = report_gates.get(gate)
     if not isinstance(existing, dict) or existing.get("status") not in {"BLOCKED", "NOT_RUN"}:
         raise AcceptanceError("gate is not awaiting an owner observation")
@@ -1531,13 +3064,13 @@ def record_human_observation(state_root: Path, run_id: str, confirm_run_id: str,
     }
     if existing.get("reason_code") not in allowed_reasons:
         raise AcceptanceError("automated failure or prerequisite block cannot be overridden by an owner attestation")
+    if existing.get("automated_status") in {"FAIL", "BLOCKED"}:
+        raise AcceptanceError("owner observation cannot override a failed or blocked automated subcheck")
     prior = dict(existing)
-    prior_status = prior.pop("status")
+    prior.pop("status")
     prior_reason = prior.pop("reason_code", None)
-    if prior_status == "BLOCKED":
-        prior["automated_status"] = "BLOCKED"
     if prior_reason is not None:
-        prior["automated_reason_code"] = prior_reason
+        prior["pending_reason_code"] = prior_reason
     report_gates[gate] = {
         **prior,
         "status": outcome,
@@ -1546,14 +3079,260 @@ def record_human_observation(state_root: Path, run_id: str, confirm_run_id: str,
         "opencode_version": version,
         "checklist_ids": list(checklist),
     }
-    statuses = [report_gates.get(name, {}).get("status", "NOT_RUN") for name in selected_gates]
-    report["result"] = "PASS" if statuses and all(value == "PASS" for value in statuses) else (
-        "FAIL" if "FAIL" in statuses else "BLOCKED"
-    )
+    for stage in STAGE_ORDER:
+        if report.get("stages", {}).get(stage) not in {"PASS", "FAIL", "BLOCKED"}:
+            continue
+        if stage == "early-auth":
+            continue
+        if stage == "final-auth":
+            report["stages"][stage] = (
+                "PASS" if report_gates.get("HUMAN-AUTH", {}).get("status") == "PASS" else "BLOCKED"
+            )
+            continue
+        stage_suites = [suite for suite in STAGE_SUITES[stage] if suite in selected_suites]
+        stage_gates = {item for suite in stage_suites for item in SUITE_GATES[suite]}
+        statuses_for_stage = [report_gates.get(item, {}).get("status", "NOT_RUN") for item in stage_gates]
+        report["stages"][stage] = (
+            "FAIL" if "FAIL" in statuses_for_stage else
+            "PASS" if statuses_for_stage and all(item == "PASS" for item in statuses_for_stage) else
+            "BLOCKED"
+        )
+    report["result"] = _campaign_result(report)
     report["last_observation_utc"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
     _atomic_replace_json(report_path, report)
     return {"run_id": run_id, "gate": gate, "status": outcome,
             "campaign_result": report["result"], "report_path": str(report_path)}
+
+
+def campaign_status(state_root: Path, run_id: str) -> dict[str, Any]:
+    report_path = _campaign_report_path(state_root, run_id)
+    _private_directory(report_path.parent)
+    report = _read_private_json(report_path)
+    if (report.get("run_id") != run_id or report.get("run_name") != _run_name(run_id)
+            or report.get("workflow_version") != 1):
+        raise AcceptanceError("campaign status is not bound to the exact staged run")
+    gates = report.get("gates")
+    stages = report.get("stages")
+    if not isinstance(gates, dict) or not isinstance(stages, dict):
+        raise AcceptanceError("campaign status manifest is invalid")
+    elapsed_ms = _campaign_elapsed_ms(report)
+    legacy_elapsed = report.get("legacy_elapsed_ms", 0)
+    attempt = report.get("attempt", {})
+    prior_elapsed = attempt.get("prior_elapsed_ms", 0) if isinstance(attempt, dict) else None
+    if (type(legacy_elapsed) is not int or not 0 <= legacy_elapsed <= STAGE_BUDGET_SECONDS * 1000
+            or type(prior_elapsed) is not int or prior_elapsed < 0):
+        raise AcceptanceError("campaign status time accounting is invalid")
+    elapsed_ms += legacy_elapsed + prior_elapsed
+    total_seconds = report.get("approved_total_budget_seconds")
+    if type(total_seconds) is not int or total_seconds < 1:
+        raise AcceptanceError("campaign status has no valid approved total budget")
+    return {
+        "run_id": run_id,
+        "result": report.get("result", "BLOCKED"),
+        "stages": {stage: stages.get(stage, "NOT_RUN") for stage in STAGE_ORDER},
+        "gates": {gate: gates.get(gate, {}).get("status", "NOT_RUN")
+                  for gate in report.get("required_gates", [])},
+        "report_path": str(report_path),
+        "cleanup": report.get("cleanup", {}).get("status", "NOT_RUN"),
+        "approved_total_minutes": total_seconds // 60,
+        "elapsed_minutes": elapsed_ms // 60_000,
+        "remaining_minutes": max(0, total_seconds - elapsed_ms // 1000) // 60,
+    }
+
+
+def _openai_auth_checkpoint(state_root: Path, run_id: str, workspace: Path,
+                            memory_gib: int, report: dict[str, Any],
+                            report_path: Path) -> dict[str, Any]:
+    selected = report.get("provider_config", {}).get("providers", [])
+    if not any(isinstance(item, dict) and item.get("provider") == "openai" for item in selected):
+        return {"status": "BLOCKED", "reason_code": "openai_model_not_selected"}
+    clean = report.get("gates", {}).get("HOST-CLEAN", {})
+    if not isinstance(clean, dict) or clean.get("status") != "PASS":
+        return {"status": "BLOCKED", "reason_code": "fresh_guest_not_usable"}
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return {"status": "BLOCKED", "reason_code": "interactive_terminal_unavailable"}
+    selection = _provider_config_entry(report, "openai")
+    if selection is None:
+        return {"status": "BLOCKED", "reason_code": "openai_model_not_selected"}
+    print("Optional OpenAI browser sign-in: credentials stay in the host browser. "
+          "Choose y to open the campaign guest's native bridge; press Enter to skip.")
+    try:
+        print("Open browser sign-in now? [y/N] ", end="", flush=True)
+        ready, _, _ = select.select([sys.stdin], [], [], min(120, _bounded_timeout(120)))
+        if not ready:
+            return {"status": "BLOCKED", "reason_code": "owner_checkpoint_timeout"}
+        answer = sys.stdin.readline().strip().lower()
+    except (EOFError, KeyboardInterrupt, OSError, ValueError):
+        return {"status": "BLOCKED", "reason_code": "owner_checkpoint_skipped"}
+    if answer not in {"y", "yes"}:
+        return {"status": "BLOCKED", "reason_code": "owner_checkpoint_skipped"}
+    marker = report_path.parent / f"auth-callback-{run_id}.json"
+    if marker.exists() or marker.is_symlink():
+        return {"status": "BLOCKED", "reason_code": "callback_evidence_collision"}
+    profile, data, reason = _ensure_provider_profile(
+        state_root, run_id, workspace, report, selection, memory_gib,
+    )
+    if data is None:
+        return {"status": "BLOCKED", "reason_code": reason or "openai_profile_unavailable"}
+    command = [str(ROOT / "lab-vm"), "agent", "--name", profile,
+               "--permissions", "ask", "--browser-auth"]
+    bridge_exit_code: int | None = None
+    bridge_failure = "browser_bridge_unavailable"
+    try:
+        completed = subprocess.run(
+            command, cwd=ROOT, env={**os.environ, "MESTER_STATE_DIR": str(state_root),
+                                    "VM_AUTH_ACCEPTANCE_MARKER": str(marker)},
+            stdin=None, stdout=None, stderr=None, check=False, timeout=_bounded_timeout(1800),
+        )
+        bridge_exit_code = completed.returncode
+    except subprocess.TimeoutExpired:
+        bridge_failure = "browser_checkpoint_timeout"
+    except OSError:
+        pass
+    except KeyboardInterrupt:
+        bridge_failure = "browser_checkpoint_interrupted"
+
+    callback_cleanup = False
+    try:
+        marker_report = _read_private_json(marker, maximum=4096)
+        callback_cleanup = marker_report == {"callback_cleanup": "PASS"}
+    except AcceptanceError:
+        pass
+    finally:
+        if marker.exists() and not marker.is_symlink():
+            marker.unlink()
+
+    auth_code = r'''import json,subprocess
+try:
+ p=subprocess.run(["opencode","auth","list","--format","json"],stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=15,check=False)
+ data=json.loads(p.stdout) if p.returncode==0 and len(p.stdout)<=65536 else None
+ def has_openai(value):
+  if isinstance(value,dict):
+   if value.get("provider")=="openai" or value.get("name")=="openai": return True
+   if "openai" in value: return True
+   return any(has_openai(item) for item in value.values())
+  if isinstance(value,list): return any(has_openai(item) for item in value)
+  return False
+ print(json.dumps({"auth_list_completed":p.returncode==0,"openai_present":has_openai(data)}))
+except Exception:
+ print(json.dumps({"auth_list_completed":False,"openai_present":False}))'''
+    guest_command = "python3 -c " + shlex.quote(auth_code)
+    try:
+        if bridge_exit_code != 0:
+            raise AcceptanceError("browser bridge did not complete successfully")
+        auth_result = _guest_exec(state_root, profile, guest_command, timeout=30)
+        auth_value = json.loads(auth_result.stdout)
+        auth_verified = (auth_value == {"auth_list_completed": True, "openai_present": True})
+    except (AcceptanceError, TimeoutError, UnicodeError, json.JSONDecodeError):
+        auth_verified = False
+    try:
+        profile_suspended = _suspend_profile(state_root, profile, memory_gib)
+    except (AcceptanceError, OSError, RuntimeError, ValueError):
+        profile_suspended = False
+    passed = bridge_exit_code == 0 and callback_cleanup and auth_verified and profile_suspended
+    return {
+        "status": "PASS" if passed else "BLOCKED",
+        "reason_code": None if passed else (
+            bridge_failure if bridge_exit_code is None else "browser_login_or_callback_verification_incomplete"
+        ),
+        "bridge_command_exit_code": bridge_exit_code,
+        "auth_list_verified": auth_verified,
+        "temporary_callbacks_removed": callback_cleanup,
+        "provider_profile_suspended": profile_suspended,
+    }
+
+
+@_bounded_stage
+def execute_stage(source: Path, state_root: Path, run_id: str, suites: list[str],
+                  memory_gib: int, confirm_run_id: str, stage: str, *,
+                  start: bool = False, apply_selected_updates: bool = False,
+                  provider_config_path: str | os.PathLike[str] | None = None,
+                  approved_total_minutes: int | None = None,
+                  retry_of: str | None = None,
+                  retry_reason: str | None = None) -> tuple[dict[str, Any], Path]:
+    if stage not in STAGE_ORDER or confirm_run_id != run_id:
+        raise AcceptanceError("staged execution requires an exact run ID and supported stage")
+    if stage == "teardown":
+        if start:
+            raise AcceptanceError("teardown can only resume an existing exact campaign")
+        if approved_total_minutes is None:
+            raise AcceptanceError("teardown requires the original explicit total campaign budget")
+        return execute_teardown_stage(
+            state_root, run_id, confirm_run_id, approved_total_minutes,
+        )
+    if start and stage != STAGE_ORDER[0]:
+        raise AcceptanceError("a new staged campaign must start at clean-usability")
+    if not start and stage == STAGE_ORDER[0]:
+        raise AcceptanceError("clean-usability is available only to a new campaign")
+    if not any(suite != "preflight" for suite in suites):
+        raise AcceptanceError("staged campaign requires at least one acceptance suite")
+    approved_seconds = _approved_budget_seconds(approved_total_minutes)
+    if start and stage != STAGE_ORDER[0]:
+        raise AcceptanceError("fresh attempts must restart at clean-usability")
+    if not start and (retry_of is not None or retry_reason is not None):
+        raise AcceptanceError("retry authorization can be supplied only with --start")
+    stage_suites = [suite for suite in STAGE_SUITES[stage] if suite in suites]
+    if stage == "clean-usability":
+        stage_suites = ["clean"]
+
+    if stage in {"early-auth", "final-auth"}:
+        initial = preflight(source, state_root, run_id, memory_gib, suites,
+                            provider_config_path, resume=True)
+        if initial["result"] != "PASS":
+            return {"run_id": run_id, "result": "BLOCKED", "preflight": initial}, Path()
+        report, _run_root, child_state, _workspace = _resume_campaign(
+            state_root, source, run_id, suites,
+            initial.get("provider_config", {}).get("sha256", ""), initial["source"],
+        )
+        if report.get("approved_total_budget_seconds") != approved_seconds:
+            raise AcceptanceError("approved total campaign budget changed; resume was refused")
+        elapsed_ms = _campaign_elapsed_ms(report)
+        attempt = report.get("attempt", {})
+        prior_elapsed_ms = attempt.get("prior_elapsed_ms", 0) if isinstance(attempt, dict) else None
+        if type(prior_elapsed_ms) is not int or prior_elapsed_ms < 0:
+            raise AcceptanceError("prior-attempt time accounting is invalid")
+        _tighten_stage_budget(
+            approved_seconds - (prior_elapsed_ms + elapsed_ms + _stage_elapsed_ms()) // 1000,
+        )
+        report_path = _campaign_report_path(state_root, run_id)
+        expected_effects = {
+            "selected_guest_update_targets": ["config", "tools"] if apply_selected_updates else [],
+            "selected_guest_updates_authorized": apply_selected_updates,
+        }
+        if report.get("requested_effects") != expected_effects:
+            raise AcceptanceError("selected campaign effects changed; resume requires a fresh attempt")
+        _mark_stage_running(report, stage)
+        states = report["stages"]
+        _atomic_replace_json(report_path, report)
+        if stage == "early-auth":
+            workspace = _workspace
+            evidence = _openai_auth_checkpoint(
+                child_state, run_id, workspace, memory_gib, report, report_path,
+            )
+            report["early_auth"] = evidence
+            states[stage] = evidence["status"]
+        else:
+            auth_gate = report.get("gates", {}).get("HUMAN-AUTH", {})
+            states[stage] = "PASS" if auth_gate.get("status") == "PASS" else "BLOCKED"
+            report["final_auth"] = {
+                "status": states[stage],
+                "reason_code": None if states[stage] == "PASS" else "owner_final_auth_evidence_required",
+            }
+        report["stage_elapsed_ms"][stage] = _stage_elapsed_ms()
+        report["result"] = _campaign_result(report)
+        report["finished_utc"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+        _atomic_replace_json(report_path, report)
+        return report, report_path
+
+    return execute_campaign(
+        source, state_root, run_id, stage_suites, memory_gib, confirm_run_id,
+        apply_selected_updates=apply_selected_updates,
+        provider_config_path=provider_config_path,
+        campaign_suites=suites, workflow_stage=stage, resume=not start,
+        approved_total_minutes=approved_total_minutes,
+        retry_of=retry_of, retry_reason=retry_reason,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1566,11 +3345,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--memory-gib", type=int, default=8, help="requested outer guest memory (default: 8 GiB)")
     parser.add_argument("--apply-selected-updates", action="store_true",
                         help="plan and explicitly apply only the lifecycle suite's config/tools update targets")
+    parser.add_argument("--provider-config", help="private credential-free explicit provider/model selections (0600 JSON)")
+    parser.add_argument("--discover-providers", action="store_true",
+                        help="read model IDs from existing loopback Ollama and llama.cpp services only")
     action = parser.add_mutually_exclusive_group()
-    action.add_argument("--execute", action="store_true", help="perform the explicitly selected live campaign")
-    action.add_argument("--cleanup", action="store_true", help="clean only assets in this run's ownership manifest")
-    action.add_argument("--record-observation", action="store_true",
+    action.add_argument("--execute", dest="operation", action="store_const", const="execute",
+                        help="disabled one-shot path; use the exact staged workflow")
+    action.add_argument("--start", dest="operation", action="store_const", const="start",
+                        help="start a new staged campaign at clean-usability")
+    action.add_argument("--resume", dest="operation", action="store_const", const="resume",
+                        help="run the next named stage for the exact unchanged campaign")
+    action.add_argument("--status", dest="operation", action="store_const", const="status",
+                        help="show a concise sanitized summary for one exact run")
+    action.add_argument("--cleanup", dest="operation", action="store_const", const="cleanup",
+                        help="clean only assets in this run's ownership manifest")
+    action.add_argument("--record-observation", dest="operation", action="store_const", const="observation",
                         help="record one explicit owner observation against a fixed gate checklist")
+    parser.add_argument("--stage", choices=STAGE_ORDER, help="exact staged campaign step")
+    parser.add_argument("--approved-total-minutes", type=int,
+                        help=f"owner-reviewed campaign time ceiling (1–{MAX_APPROVED_TOTAL_MINUTES} minutes)")
+    parser.add_argument("--retry-of", help="exact prior run ID for the single diagnosed fresh retry")
+    parser.add_argument("--retry-reason", help="exact operational reason_code in the prior report")
     parser.add_argument("--confirm-run-id", help="repeat the exact planned ID to authorize execution/cleanup")
     parser.add_argument("--observation-gate", choices=tuple(OWNER_CHECKLISTS))
     parser.add_argument("--observation-result", choices=("PASS", "FAIL", "BLOCKED"))
@@ -1580,22 +3375,42 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.discover_providers:
+            if args.source or args.provider_config or args.operation is not None:
+                parser.error("--discover-providers is a standalone read-only operation")
+            print(json.dumps(discover_local_providers(), sort_keys=True))
+            return 0
         if not args.state_root:
             parser.error("--state-root is required")
         state_root = _canonical_directory(args.state_root)
         run_id = _run_id(args.run_id)
-        if args.cleanup:
-            result = cleanup_campaign(state_root, run_id, args.confirm_run_id or "")
+        if args.operation == "status":
+            result = campaign_status(state_root, run_id)
             print(json.dumps(result, sort_keys=True))
             return 0
-        if args.record_observation:
+        if args.operation == "cleanup":
+            if args.approved_total_minutes is None:
+                parser.error("--cleanup requires the original --approved-total-minutes ceiling")
+            if args.stage:
+                parser.error("--cleanup is the teardown stage; do not also supply --stage")
+            with _campaign_lock(state_root, run_id):
+                report, report_path = execute_teardown_stage(
+                    state_root, run_id, args.confirm_run_id or "", args.approved_total_minutes,
+                )
+            result = {"run_id": run_id, "cleanup": report.get("cleanup", {}).get("status", "BLOCKED"),
+                      "stage_status": report.get("stages", {}).get("teardown", "BLOCKED"),
+                      "report_path": str(report_path)}
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        if args.operation == "observation":
             if not args.observation_gate or not args.observation_result or not args.observed_version \
                     or not args.observation_check:
                 parser.error("--record-observation requires a gate, result, version and one or more --observation-check IDs")
-            result = record_human_observation(
-                state_root, run_id, args.confirm_run_id or "", args.observation_gate,
-                args.observation_result, args.observed_version, args.observation_check,
-            )
+            with _campaign_lock(state_root, run_id):
+                result = record_human_observation(
+                    state_root, run_id, args.confirm_run_id or "", args.observation_gate,
+                    args.observation_result, args.observed_version, args.observation_check,
+                )
             print(json.dumps(result, sort_keys=True))
             return 0 if result["campaign_result"] == "PASS" else 1 if result["campaign_result"] == "FAIL" else 2
         if not args.source:
@@ -1606,7 +3421,44 @@ def main(argv: list[str] | None = None) -> int:
         suites = list(ALL_SUITES) if "all" in args.suite else list(dict.fromkeys(args.suite))
         if args.apply_selected_updates and "lifecycle" not in suites:
             parser.error("--apply-selected-updates requires --suite lifecycle")
-        plan = preflight(source, state_root, run_id, args.memory_gib, suites)
+        if args.operation == "execute":
+            parser.error("one-shot execution is disabled; use --start/--resume staged campaign commands")
+        if args.operation in {"start", "resume"}:
+            if not args.stage:
+                parser.error("--start/--resume requires --stage")
+            if not args.confirm_run_id:
+                parser.error("--start/--resume requires --confirm-run-id with the exact run ID")
+            if args.approved_total_minutes is None:
+                parser.error("--start/--resume requires the explicitly approved --approved-total-minutes ceiling")
+            if args.operation == "resume" and (args.retry_of or args.retry_reason):
+                parser.error("--retry-of/--retry-reason are valid only with --start")
+            if args.operation == "start":
+                start = True
+            else:
+                start = False
+            with _campaign_lock(state_root, run_id):
+                report, report_path = execute_stage(
+                    source, state_root, run_id, suites, args.memory_gib, args.confirm_run_id,
+                    args.stage, start=start, apply_selected_updates=args.apply_selected_updates,
+                    provider_config_path=args.provider_config,
+                    approved_total_minutes=args.approved_total_minutes,
+                    retry_of=args.retry_of, retry_reason=args.retry_reason,
+                )
+            summary = {"run_id": run_id, "result": report.get("result", "BLOCKED"),
+                       "stage": args.stage,
+                       "stage_status": report.get("stages", {}).get(args.stage, "BLOCKED"),
+                       "report_path": str(report_path) if report_path != Path() else None,
+                       "gates": {name: item.get("status") for name, item in report.get("gates", {}).items()
+                                 if name in report.get("required_gates", [])}}
+            print(json.dumps(summary, sort_keys=True))
+            return 0 if summary["stage_status"] == "PASS" else 1 if summary["stage_status"] == "FAIL" else 2
+        if args.stage:
+            parser.error("--stage is used only with --start or --resume")
+        if args.retry_of or args.retry_reason:
+            parser.error("retry options are valid only with --start")
+        if args.approved_total_minutes is not None:
+            parser.error("--approved-total-minutes is used only with live execution")
+        plan = preflight(source, state_root, run_id, args.memory_gib, suites, args.provider_config)
         plan["suites"] = suites
         plan["requested_effects"] = {
             "selected_guest_update_targets": ["config", "tools"] if args.apply_selected_updates else [],
@@ -1620,19 +3472,8 @@ def main(argv: list[str] | None = None) -> int:
             "report": f"reports/{_run_name(run_id)}.json",
         }
         plan["protected"] = ["existing/default profiles", "shared VM bases", "host Docker/auth session", "credentials"]
-        if not args.execute:
-            print(json.dumps(plan, sort_keys=True))
-            return 0 if plan["result"] == "PASS" else 2
-        report, report_path = execute_campaign(
-            source, state_root, run_id, suites, args.memory_gib, args.confirm_run_id or "",
-            apply_selected_updates=args.apply_selected_updates,
-        )
-        summary = {"run_id": run_id, "result": report["result"],
-                   "report_path": str(report_path) if report_path != Path() else None,
-                   "gates": {name: item.get("status") for name, item in report.get("gates", {}).items()
-                             if name in {gate for suite in suites for gate in SUITE_GATES[suite]}}}
-        print(json.dumps(summary, sort_keys=True))
-        return 0 if report["result"] == "PASS" else 1 if report["result"] == "FAIL" else 2
+        print(json.dumps(plan, sort_keys=True))
+        return 0 if plan["result"] == "PASS" else 2
     except KeyboardInterrupt:
         print("BLOCKED: campaign interrupted; run-owned report and uncertain assets are preserved.", file=sys.stderr)
         return 130

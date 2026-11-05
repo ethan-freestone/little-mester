@@ -615,17 +615,53 @@ except Exception:
 PY
 }
 
+vm_services_auth_acceptance_marker() {
+  local marker="${VM_AUTH_ACCEPTANCE_MARKER:-}"
+  [[ -n "$marker" ]] || return 0
+  python3 - "$marker" <<'PY'
+import os,re,stat,sys
+from pathlib import Path
+try:
+    path=Path(sys.argv[1])
+    parent=path.parent
+    info=parent.lstat()
+    if (not path.is_absolute() or path.resolve(strict=False)!=path
+        or parent.is_symlink() or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o700
+        or re.fullmatch(r"auth-callback-[a-f0-9]{32}\.json",path.name) is None
+        or path.exists() or path.is_symlink()):
+        raise ValueError
+    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_CLOEXEC|os.O_NOFOLLOW,0o600)
+    try:
+        payload=b'{"callback_cleanup":"PASS"}\n'
+        if os.write(fd,payload)!=len(payload):
+            raise OSError
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    dfd=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try: os.fsync(dfd)
+    finally: os.close(dfd)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
 vm_services_auth_cleanup() {
   local root="$1" name="$2" key="$3" known_hosts="$4" ssh_port="$5"
   local bridge_script="$6" bridge_pid="$7" host_dir="$8" guest_dir="$9"
   local control_path="${10}" master_pid="${11}" reverse_forward="${12}"
-  local host="${15}" i
+  local host="${15}" i cleanup_ok=1
 
   if [[ "$guest_dir" =~ ^/tmp/lm-vm-auth\.[A-Za-z0-9]{6}$ ]] &&
      [[ -S "$control_path" ]] && vm_services_auth_master_matches "$master_pid" "$control_path" "$reverse_forward"; then
-    VM_SSH_CONTROL_PATH="$control_path" vm_ssh_noninteractive \
-      "$key" "$known_hosts" "$ssh_port" 10 "$host" "rm -rf -- '$guest_dir'" \
-      </dev/null >/dev/null 2>&1 || true
+    if ! VM_SSH_CONTROL_PATH="$control_path" vm_ssh_noninteractive \
+      "$key" "$known_hosts" "$ssh_port" 10 "$host" "rm -rf -- '$guest_dir' && test ! -e '$guest_dir'" \
+      </dev/null >/dev/null 2>&1; then
+      cleanup_ok=0
+    fi
+  elif [[ -n "$guest_dir" ]]; then
+    cleanup_ok=0
   fi
   if [[ -n "$bridge_pid" ]] && vm_services_auth_bridge_matches "$bridge_pid" "$bridge_script"; then
     kill -TERM "$bridge_pid" 2>/dev/null || true
@@ -635,6 +671,7 @@ vm_services_auth_cleanup() {
     done
     vm_services_auth_bridge_matches "$bridge_pid" "$bridge_script" && kill -KILL "$bridge_pid" 2>/dev/null || true
     wait "$bridge_pid" 2>/dev/null || true
+    vm_services_auth_bridge_matches "$bridge_pid" "$bridge_script" && cleanup_ok=0
   fi
   if [[ -n "$master_pid" ]] && vm_services_auth_master_matches "$master_pid" "$control_path" "$reverse_forward"; then
     ssh -F /dev/null -S "$control_path" -O exit -p "$ssh_port" "$host" \
@@ -645,9 +682,16 @@ vm_services_auth_cleanup() {
     done
     vm_services_auth_master_matches "$master_pid" "$control_path" "$reverse_forward" && kill -TERM "$master_pid" 2>/dev/null || true
     wait "$master_pid" 2>/dev/null || true
+    vm_services_auth_master_matches "$master_pid" "$control_path" "$reverse_forward" && cleanup_ok=0
   fi
   if [[ "$host_dir" =~ ^/tmp/lm-vm-auth\.[A-Za-z0-9]{6}$ && -d "$host_dir" && ! -L "$host_dir" && -O "$host_dir" ]]; then
     rm -rf -- "$host_dir"
+    [[ ! -e "$host_dir" && ! -L "$host_dir" ]] || cleanup_ok=0
+  elif [[ -n "$host_dir" ]]; then
+    cleanup_ok=0
+  fi
+  if (( cleanup_ok )) && [[ -n "$guest_dir" && -n "$bridge_pid" && -n "$master_pid" ]]; then
+    vm_services_auth_acceptance_marker || true
   fi
   unset VM_SSH_CONTROL_PATH VM_SERVICES_BROWSER_DIR VM_SERVICES_BROWSER_PORT
 }

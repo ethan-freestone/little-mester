@@ -99,7 +99,8 @@ EVIDENCE_FIELDS = {
               "g3_refused", "refused_before_state", "refused_before_qemu", "parent_chain_verified",
               "reset_refused", "increase_refused", "missing_kvm_refused",
               "candidate_lifecycle_sha256", "g2_runtime_payload_sha256",
-              "g2_installed_lifecycle_sha256", "lifecycle_mutation_observed"},
+              "g2_installed_lifecycle_sha256", "lifecycle_mutation_observed",
+              "g2_boundary_verified", "g2_boundary_report_sha256"},
     "agent_task": {"agent_completed", "task_id", "result_sha256"},
     "parent_continuity": {"parent_session_alive", "source_mount_readable", "parent_workload_alive"},
 }
@@ -360,6 +361,8 @@ def _stage_evidence_valid(name: str, evidence: object, context: dict[str, Any]) 
             and _hash(evidence.get("g2_runtime_payload_sha256"))
             and evidence.get("g2_installed_lifecycle_sha256") == evidence.get("candidate_lifecycle_sha256")
             and evidence.get("lifecycle_mutation_observed") is True
+            and type(evidence.get("g2_boundary_verified")) is bool
+            and _hash(evidence.get("g2_boundary_report_sha256"))
         )
     if name == "agent_task":
         return (
@@ -931,7 +934,7 @@ class LiveSelfTestAdapter:
             "refused_before_state", "refused_before_qemu", "parent_chain_verified",
             "reset_refused", "increase_refused", "missing_kvm_refused",
             "g2_runtime_payload_sha256", "g2_installed_lifecycle_sha256",
-            "lifecycle_mutation_observed",
+            "lifecycle_mutation_observed", "g2_boundary_verified", "g2_boundary_report_sha256",
         }
         if (not isinstance(evidence, dict) or evidence.keys() != allowed
                 or evidence.get("g2_profile_name") != _expected_profile(self.run_id, "fix2")):
@@ -949,6 +952,8 @@ class LiveSelfTestAdapter:
             "g2_runtime_payload_sha256": evidence["g2_runtime_payload_sha256"],
             "g2_installed_lifecycle_sha256": evidence["g2_installed_lifecycle_sha256"],
             "lifecycle_mutation_observed": evidence["lifecycle_mutation_observed"],
+            "g2_boundary_verified": evidence["g2_boundary_verified"],
+            "g2_boundary_report_sha256": evidence["g2_boundary_report_sha256"],
         }
 
     def _agent_task(self, name: str) -> dict[str, Any]:
@@ -1334,6 +1339,42 @@ def _nested_depth_check_local(source_value: str, run_id: str, confirm_run_id: st
         os.fsync(marker_fd)
     finally:
         os.close(marker_fd)
+
+    isolation_command = (
+        "python3 /workspace/scripts/vm-guest-isolation-check.py --execute "
+        f"--run-id {run_id} --confirm-run-id {run_id} "
+        "--expected-depth 2 --expected-max-depth 2"
+    )
+    isolation_result = adapter._ssh(nested_state_root, profile, isolation_command, timeout=120)
+    if isolation_result.returncode not in {0, 1}:
+        raise LiveSelfTestBlocked("G2 nested guest boundary probes could not be completed")
+    try:
+        isolation_report = json.loads(isolation_result.stdout)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise SelfTestError("G2 nested guest boundary report is invalid") from error
+    expected_checks = {
+        "guest_identity", "workspace_mount", "ancestor_capabilities_absent",
+        "qemu_host_gateway_blocked", "metadata_endpoint_blocked", "direct_private_subnet_blocked",
+        "direct_public_tcp_blocked", "direct_dns_blocked", "direct_udp_blocked",
+        "proxy_private_destination_denied", "proxy_public_http_available", "proxy_public_https_available",
+    }
+    checks = isolation_report.get("checks") if isinstance(isolation_report, dict) else None
+    if (not isinstance(isolation_report, dict)
+            or set(isolation_report) != {"schema_version", "run_id", "created_utc", "result", "elapsed_ms", "checks"}
+            or isolation_report.get("schema_version") != 1 or isolation_report.get("run_id") != run_id
+            or not isinstance(isolation_report.get("created_utc"), str)
+            or type(isolation_report.get("elapsed_ms")) is not int or isolation_report["elapsed_ms"] < 0
+            or not isinstance(checks, list) or len(checks) != len(expected_checks)
+            or {item.get("id") for item in checks if isinstance(item, dict)} != expected_checks
+            or any(not isinstance(item, dict) or set(item) != {"id", "status"}
+                   or item["status"] not in {"PASS", "FAIL"} for item in checks)):
+        raise SelfTestError("G2 nested guest boundary report does not match the fixed schema")
+    g2_boundary_verified = (isolation_report.get("result") == "PASS"
+                            and all(item["status"] == "PASS" for item in checks)
+                            and isolation_result.returncode == 0)
+    g2_boundary_digest = hashlib.sha256(
+        json.dumps(isolation_report, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     parent_profile = _expected_profile(run_id, "fix1")
     parent_data = adapter._profile(state_root, parent_profile)
     parent_identity = parent_data.get("runtime_identity")
@@ -1410,6 +1451,8 @@ python3 -c 'import json; print(json.dumps({"g2_depth":2,"max_depth":2,"g3_refuse
         "g2_runtime_payload_sha256": profile_data.get("runtime_payload_sha256"),
         "g2_installed_lifecycle_sha256": installed_lifecycle,
         "lifecycle_mutation_observed": True,
+        "g2_boundary_verified": g2_boundary_verified,
+        "g2_boundary_report_sha256": g2_boundary_digest,
     }
 
 

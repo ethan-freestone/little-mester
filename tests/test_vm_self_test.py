@@ -129,6 +129,8 @@ class FixtureAdapter:
                 "g2_runtime_payload_sha256": digest("g2-runtime-payload"),
                 "g2_installed_lifecycle_sha256": candidate_lifecycle,
                 "lifecycle_mutation_observed": True,
+                "g2_boundary_verified": True,
+                "g2_boundary_report_sha256": digest("g2-boundary-report"),
             },
             "agent_task": {
                 "agent_completed": True, "task_id": "harmless-file-test",
@@ -321,6 +323,8 @@ class SelfTestTests(unittest.TestCase):
             "g2_runtime_payload_sha256": digest("runtime-payload"),
             "g2_installed_lifecycle_sha256": digest("candidate-lifecycle"),
             "lifecycle_mutation_observed": True,
+            "g2_boundary_verified": True,
+            "g2_boundary_report_sha256": digest("g2-boundary-report"),
         }
         adapter._ssh = lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0, stdout=json.dumps(payload).encode("ascii"),
