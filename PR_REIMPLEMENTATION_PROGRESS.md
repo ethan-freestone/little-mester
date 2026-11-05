@@ -925,4 +925,6 @@ in `tests/test_vm_memory_budget.py`.
 
 This was fixture/local validation only; the owner's host preflight has not yet
 been rerun with the fix, and no VM or live acceptance campaign was started. The
-follow-up fix commit and ledger SHA closeout are recorded separately.
+follow-up fix is committed locally as
+`232180b0a1c9440d40c29adbf256f0bd995dc3e7`; this ledger-only commit records its
+SHA. No push was performed.
