@@ -130,6 +130,37 @@ parse() {
   [[ "$output" == *"base                            Verify/download the pinned immutable base image"* ]]
 }
 
+@test "update targets and all conflicts are rejected before state or SSH work" {
+  run bash -c 'source "$1/lib/vm/config.sh"; vm_cli_defaults; shift; vm_cli_parse "$@"; printf "%s\n" "${VM_COMMAND}" "${VM_TARGETS[*]}"' \
+    _ "$ROOT" update config opencode
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = update ]
+  [ "${lines[1]}" = "config opencode" ]
+
+  run bash -c 'source "$1/lib/vm/config.sh"; vm_cli_defaults; shift; vm_cli_parse "$@"' \
+    _ "$ROOT" --all update
+  [ "$status" -eq 0 ]
+  run bash -c 'source "$1/lib/vm/config.sh"; vm_cli_defaults; shift; vm_cli_parse "$@"' \
+    _ "$ROOT" update --all tools
+  [ "$status" -eq 2 ]
+  run bash -c 'source "$1/lib/vm/config.sh"; vm_cli_defaults; shift; vm_cli_parse "$@"' \
+    _ "$ROOT" update config config
+  [ "$status" -eq 2 ]
+  run bash -c 'source "$1/lib/vm/config.sh"; vm_cli_defaults; shift; vm_cli_parse "$@"' \
+    _ "$ROOT" update host
+  [ "$status" -eq 2 ]
+  run bash -c 'source "$1/lib/vm/config.sh"; vm_cli_defaults; shift; vm_cli_parse "$@"' \
+    _ "$ROOT" install-tools target --all
+  [ "$status" -eq 2 ]
+  [ ! -e "$MESTER_STATE_DIR" ]
+}
+
+@test "update refuses an absent profile before VM state allocation or SSH" {
+  run "$ROOT/lab-vm" update
+  [ "$status" -eq 2 ]
+  [ ! -e "$MESTER_STATE_DIR/vm" ]
+}
+
 @test "proxy upstream args are explicit and derived only from valid recursion identity" {
   run bash -c 'source "$1/lib/vm/config.sh"; vm_proxy_upstream_args; declare -p VM_PROXY_UPSTREAM_ARGS' \
     _ "$ROOT"

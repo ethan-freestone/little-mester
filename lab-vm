@@ -24,6 +24,7 @@ source "$VM_REPO/lib/state.sh"
 # shellcheck source=lib/vm/config.sh
 source "$VM_REPO/lib/vm/config.sh"
 # shellcheck source=lib/vm/recursion.sh
+# shellcheck disable=SC1091 # Repository root is resolved from this launcher at runtime.
 source "$VM_REPO/lib/vm/recursion.sh"
 
 vm_usage() {
@@ -38,6 +39,8 @@ Available now:
   models status|diagnose [provider] [--name PROFILE] Read-only selected-provider check
   metrics up|status|down        Manage the verified per-user loopback metrics service
   suspend [--name NAME]             Graceful, descendant-safe guest shutdown
+  update [TARGET...] [--all]        Scan exact guest updates; confirm before apply
+  install-tools [PROFILE]            Update Python tools in the selected guest only
   recursion-clean RUN              Confirmed cleanup of one stopped recursive run
   setup                           Read-only host prerequisite discovery
   setup --install-prereqs          Explicit default-no userland package installation
@@ -47,14 +50,14 @@ Available now:
 
 Not yet implemented (refuse with exit 2, never start or mutate a VM):
   run [WORKSPACE], up [PROFILE] --workspace PATH, ssh, doctor,
-  resume, resize PROFILE GiB, down, stop, rebuild, update,
-  install-tools, egress-reload, auth-forward [PROFILE] PORT
+  resume, resize PROFILE GiB, down, stop, rebuild, egress-reload,
+  auth-forward [PROFILE] PORT
 
 Options (before or after command/path; -- stops launcher parsing):
   --name NAME, --workspace PATH, --memory GiB, --recurse, --unsafe-recurse,
   --max-depth 0..32, --browser-auth|--no-browser-auth, --permissions ask|auto,
   --auto-accept, -y|--yes, -v|--verbose, -d|--debug, --json,
-  --poweroff-recursive, --discard-recursive, --clean, --cwd RELATIVE_PATH,
+  --poweroff-recursive, --discard-recursive, --clean, --all, --cwd RELATIVE_PATH,
   --opencode-version latest|SEMVER, --agent opencode|aider,
   --host-profile linux-x86_64, --workload-runtime docker|none,
   --model-provider none|ollama|llamacpp|remote, --model-port PORT, --model-id ID,
@@ -147,6 +150,15 @@ else:
     controller="$VM_STATE_ROOT/vm/profiles/$VM_PROFILE/runtime/lab-vm"
     vm_lifecycle_suspend "$VM_STATE_ROOT" "$VM_PROFILE" "$VM_POWEROFF_RECURSIVE" \
       "$VM_LIFECYCLE_DEFAULT_TIMEOUT" "$controller"
+    ;;
+  update)
+    update_all=0
+    [[ ! -v 'VM_SEEN[all]' ]] || update_all=1
+    vm_lifecycle_update "$VM_STATE_ROOT" "$VM_PROFILE" "$VM_YES" "$update_all" 0 \
+      "${VM_TARGETS[@]}"
+    ;;
+  install-tools)
+    vm_lifecycle_update "$VM_STATE_ROOT" "$VM_PROFILE" "$VM_YES" 0 1
     ;;
   recursion-clean)
     recursion_confirmed=0

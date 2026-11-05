@@ -190,7 +190,7 @@ VM/network acceptance has occurred.
 | TASK-11 | C10 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Filtered Git-HEAD-bound snapshots; exclusions, race/capacity checks, synthetic Git and retained-snapshot verification; snapshot Python fixtures pass; `272140e` | Fixture-only; no live VM or host acceptance |
 | TASK-12 | C10 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Persisted identity/depth guards, KVM/CPU preflight, isolated candidate state/argv, immediate-parent proxy depth and exact descendant-safe cleanup; 5 recursion Python cases, 6 recursion Bats cases; full 214 VM Python and 129 Bats pass; `272140e` | Public `run`/`up` remain undispatched until TASK-16; real nested KVM/VM and host/human acceptance remain pending |
 | TASK-13 | C11 | PARTIAL (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Evidence-gated self-test state machine, atomic private reports, disposable failed-A/fixed-B full-source copies, copied QEMU/Bats checks; 11 focused tests, 225 VM Python tests, 129 Bats tests PASS | Live adapter deliberately unavailable; no changed VM/agent/nested/hardware/host/network acceptance; E2E-SELF remains blocked pending TASK-15 handoff |
-| TASK-14 | C12 | NOT STARTED | Unassigned/—/— | — | Depends on prior implementation |
+| TASK-14 | C12 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-05/2026-11-05 | Guest update scan/apply, exact-version tools installer, `/proc` TUI guard, CLI/cloud-init/profile integration; 249 Python and 131 Bats tests PASS; changed-file Ruff/ShellCheck, Bash syntax, Python compilation, cloud-init schema and diff checks PASS | Fixture-only; no live VM, package/network, credential, host or lifecycle acceptance; TASK-15 remains the live gate |
 | TASK-15 | C13 | NOT STARTED | Unassigned/—/— | — | Exact fresh-host handoff still required |
 | TASK-16 | C14 | NOT STARTED | Unassigned/—/— | — | All live gates before cutover |
 
@@ -692,3 +692,51 @@ acceptance activity occurred. `run`/`up` remain unavailable until TASK-16; only
 the exact-run cleanup command is dispatched. Real nested-VM and TASK-15 host/human
 acceptance remain pending. The staged-empty/worktree-populated
 `vm-migration-plan.md` is excluded from the C10 commit.
+
+## TASK-14 / C12 — explicit guest updates and validation tools
+
+**State:** implemented and fixture-validated locally on `feat/vm-approach-2` on
+2026-11-05. The C12 checkpoint is local only; no push or PR update was performed.
+
+Implemented guest-side `scripts/vm-update.sh` scan/apply plans with a private,
+expiring plan, exact selected targets/versions, read-only scans, stale-plan and
+state rechecks, explicit cancel/confirmation, auth compatibility blocking, and
+partial-result reporting. Apply rechecks the active OpenCode process using full
+`/proc` argv and controlling-TTY evidence, and applies the guest-workload guard to
+disruptive OS/Docker updates. Host lifecycle integration only targets an already
+ready and verified-running managed guest; it does not provision or resume one.
+Warm agent/setup paths remain separate from update.
+
+Added the exact-version selected Python tools installer and the reusable
+`scripts/vm-opencode-tui-check.py` process guard. Config/runtime refresh reuses the
+setup payload hash and staged guest-private replacement; it preserves the original
+ready-marker payload identity and tracks update hashes separately. Profile
+OpenCode version metadata is committed only after guest success. Failure handling
+preserves workspace, overlay, auth and existing runtime/config state where
+possible, without claiming rollback for package-manager partial operations.
+CLI parsing, cloud-init provisioning, guest source identity and profile-lock
+helpers were integrated; C12 fixture acceptance is marked in
+`PR_REIMPLEMENTATION_TASKS.md`, and `docs/vm-architecture.md` records the live
+acceptance boundary.
+
+Validation:
+
+| Command/check | Result |
+|---|---|
+| `python3 -B -m unittest discover -s tests -p 'test_*.py' -q` |249/249 PASS; fixture-only |
+| `bats tests/*.bats` |131/131 PASS |
+| Ruff on changed Python implementation/tests |PASS |
+| ShellCheck on changed Bash implementation/launcher |PASS |
+| `bash -n lab-vm lib/vm/*.sh scripts/*.sh` |PASS |
+| Python compilation for changed helpers |PASS |
+| `bash scripts/check-vm-cloud-init-schema.sh` |PASS |
+| `git diff --check` |PASS |
+| `python3 -B scripts/check-docs-consistency.py` |8 existing README/`docs/DECISIONS.md` drift/link failures |
+| Repository-wide `ruff check .` |Existing unrelated findings: `metrics_service.py` F841/BLE001 and `test_vm_agent.py` ISC004 |
+| Repository-wide default ShellCheck |Existing informational findings in unchanged `lib/vm/auth.sh` and `lib/vm/services.sh`; changed-file checks pass |
+| `sha256sum vm-migration-plan.md` |`3d6ee2115423272b88a8efd8d4d33462318d5ae4c537841091e513ee5e2d1374` unchanged; untracked and excluded |
+
+No live guest, VM, host package, network, credential, or host acceptance was run.
+Fixture results do not satisfy E2E-LIFE or other live acceptance. Update/host
+gates remain deferred to TASK-15 and its current owner-reviewed handoff. The
+untracked `vm-migration-plan.md` was not modified or included.

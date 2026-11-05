@@ -801,7 +801,8 @@ vm_lifecycle_install_runtime() {
     lib/vm/browser-open.sh lib/vm/guest-bootstrap.sh lib/vm/guest.sh
     lib/vm/lifecycle.sh lib/vm/paths.py lib/vm/process.py lib/vm/proxy.py
     lib/vm/runner.sh lib/vm/services.sh lib/vm/ssh.sh
-    scripts/vm-opencode-config.py scripts/vm-python-tools.sh
+    scripts/vm-install-tools.sh scripts/vm-opencode-config.py \
+    scripts/vm-opencode-tui-check.py scripts/vm-python-tools.sh scripts/vm-update.sh
     scripts/vm-recursion-live-children.py scripts/vm-recursion-workspace.py \
     scripts/vm-self-test.py scripts/vm_memory_budget.py
     lib/vm/metrics_service.py agent/metrics/gather.py
@@ -1369,11 +1370,192 @@ vm_lifecycle_profile_runtime() {
   printf '%s\n' "$runtime"
 }
 
+vm_lifecycle_update_locked() {
+  local root="$1" name="$2" yes="$3" auth_enabled="$4"
+  shift 4
+  local data status identity registry_info registry run_id role known_hosts key port
+  local targets_csv scan_json plan_id blocked changed answer apply_json applied_status new_version old_version
+  local -a targets=()
+  data="$(vm_lifecycle_profile_read "$root" "$name")" || return 2
+  status="$(vm_lifecycle_field "$data" status)" || return 2
+  [[ "$status" == ready ]] || { vm_lifecycle_error 'Only an already-ready guest can be updated; no resume or startup was attempted.'; return 2; }
+  identity="$(vm_lifecycle_identity_state "$data" "$root" "$name")" || identity=unknown
+  [[ "$identity" == running ]] || { vm_lifecycle_error 'Guest process identity is not verifiably running; update was not attempted.'; return 2; }
+  for file in "$VM_LIFECYCLE_ROOT/scripts/vm-update.sh" \
+    "$VM_LIFECYCLE_ROOT/scripts/vm-install-tools.sh" \
+    "$VM_LIFECYCLE_ROOT/scripts/vm-opencode-tui-check.py"; do
+    [[ -f "$file" && ! -L "$file" ]] || {
+      vm_lifecycle_error 'Frozen profile runtime predates the guest updater; source-tree control was not executed.'
+      return 2
+    }
+  done
+  if (($#)); then
+    targets=("$@")
+  else
+    targets=(opencode config tools)
+  fi
+  ((${#targets[@]})) || targets=(opencode config tools)
+  local item
+  for item in "${targets[@]}"; do
+    case "$item" in opencode|config|tools|system|docker) ;; *) vm_lifecycle_error 'Invalid update target reached lifecycle dispatch.'; return 2 ;; esac
+  done
+  targets_csv="$(IFS=,; printf '%s' "${targets[*]}")"
+
+  registry_info="$(vm_lifecycle_registry_for_profile "$root" "$name" "$data")" || {
+    vm_lifecycle_error 'The exact QEMU process registry could not be established; update was not attempted.'
+    return 2
+  }
+  read -r registry run_id role < <("$VM_LIFECYCLE_PYTHON" -c '
+import json,sys
+d=json.loads(sys.argv[1]); print(d["registry"],d["run_id"],d["role"])
+' "$registry_info") || return 2
+  key="$root/vm/profiles/$name/control-key"
+  known_hosts="$(dirname "$registry")/known_hosts"
+  port="$(printf '%s' "$data" | "$VM_LIFECYCLE_PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["runtime_identity"]["ssh_port"])')" || return 2
+  [[ -f "$key" && ! -L "$key" && -f "$known_hosts" && ! -L "$known_hosts" ]] || {
+    vm_lifecycle_error 'The exact profile SSH identity is missing; update was not attempted.'; return 2;
+  }
+  # shellcheck disable=SC1091 # This worker always uses its exact frozen SSH transport.
+  source "$VM_LIFECYCLE_ROOT/lib/vm/ssh.sh"
+  vm_ssh_listener_verified "$registry" "$run_id" "$role" "$port" || {
+    vm_lifecycle_error 'The selected guest SSH listener is not owned by this profile.'; return 2;
+  }
+  vm_lifecycle_guest_readiness "$root" "$name" "$data" 30 >/dev/null || {
+    vm_lifecycle_error 'Guest readiness was not re-proven before update.'; return 2;
+  }
+  local scan_command="sudo /usr/local/sbin/lab-vm-update scan --targets $targets_csv --auth-enabled $auth_enabled"
+  if ! scan_json="$(vm_ssh_noninteractive "$key" "$known_hosts" "$port" 300 \
+    mester@127.0.0.1 "$scan_command")"; then
+    vm_lifecycle_error 'Guest update scan failed; no apply command was sent.'
+    return 1
+  fi
+  plan_id="$(printf '%s' "$scan_json" | "$VM_LIFECYCLE_PYTHON" -c '
+import json,re,sys
+try:
+    d=json.load(sys.stdin)
+    assert d["schema_version"]==1 and re.fullmatch(r"[a-f0-9]{32}",d["plan_id"])
+    assert isinstance(d["targets"],list) and d["targets"]
+    assert d["targets_selected"]==sys.argv[1].split(",")
+    allowed={"opencode","config","tools","system","docker"}
+    assert all(x["name"] in allowed and x["status"] in {"CURRENT","UPDATE","BLOCKED","NOT_APPLICABLE"} for x in d["targets"])
+    assert [x["name"] for x in d["targets"]]==sys.argv[1].split(",")
+    for item in d["targets"]:
+        if item["name"]=="opencode":
+            assert re.fullmatch(r"2\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?",item["current"])
+            assert re.fullmatch(r"2\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?",item["candidate"])
+        if item["name"]=="config":
+            assert re.fullmatch(r"[a-f0-9]{64}",item["current_hash"])
+            assert re.fullmatch(r"[a-f0-9]{64}",item["candidate_hash"])
+    print(d["plan_id"])
+except Exception: raise SystemExit(2)
+' "$targets_csv")" || {
+    vm_lifecycle_error 'Guest update scan returned an invalid plan; no apply command was sent.'
+    return 2
+  }
+  printf '%s\n' "$scan_json" | "$VM_LIFECYCLE_PYTHON" -c '
+import json,sys
+d=json.load(sys.stdin)
+print("Guest update scan (no package or config changes applied)")
+for item in d["targets"]:
+    name,status=item["name"],item["status"]
+    print("{}: {}".format(name,status))
+    if name=="opencode": print("  OpenCode {} -> {}".format(item["current"],item["candidate"]))
+    if name=="config": print("  payload {} -> {}".format(item["current_hash"],item["candidate_hash"]))
+    for package in item.get("packages",[]): print("  {} {} -> {}".format(package["name"],package["current"],package["candidate"]))
+'
+  blocked="$(printf '%s' "$scan_json" | "$VM_LIFECYCLE_PYTHON" -c 'import json,sys; print("1" if any(x["status"]=="BLOCKED" for x in json.load(sys.stdin)["targets"]) else "0")')" || return 2
+  changed="$(printf '%s' "$scan_json" | "$VM_LIFECYCLE_PYTHON" -c 'import json,sys; print("1" if any(x["status"]=="UPDATE" for x in json.load(sys.stdin)["targets"]) else "0")')" || return 2
+  if [[ "$blocked" == 1 ]]; then
+    vm_ssh_noninteractive "$key" "$known_hosts" "$port" 15 mester@127.0.0.1 \
+      "sudo /usr/local/sbin/lab-vm-update cancel --plan $plan_id" >/dev/null 2>&1 || true
+    vm_lifecycle_error 'One or more selected updates are blocked by the reviewed auth compatibility policy; select safe targets separately.'
+    return 2
+  fi
+  if [[ "$changed" == 0 ]]; then
+    vm_ssh_noninteractive "$key" "$known_hosts" "$port" 15 mester@127.0.0.1 \
+      "sudo /usr/local/sbin/lab-vm-update cancel --plan $plan_id" >/dev/null 2>&1 || true
+    printf 'CURRENT  selected guest targets already match; no install was attempted.\n'
+    return 0
+  fi
+  if (( yes )); then
+    answer=y
+  else
+    printf 'Apply only the reported selected guest updates? [y/N] ' >&2
+    if ! IFS= read -r answer || [[ "$answer" != y && "$answer" != Y ]]; then
+      vm_ssh_noninteractive "$key" "$known_hosts" "$port" 15 mester@127.0.0.1 \
+        "sudo /usr/local/sbin/lab-vm-update cancel --plan $plan_id" >/dev/null 2>&1 || true
+      printf 'CANCELLED  guest and profile state were not changed.\n'
+      return 0
+    fi
+  fi
+  identity="$(vm_lifecycle_identity_state "$data" "$root" "$name")" || identity=unknown
+  if [[ "$identity" != running ]] || ! vm_ssh_listener_verified "$registry" "$run_id" "$role" "$port"; then
+    vm_lifecycle_error 'Guest identity changed after scan; no apply command was sent.'; return 2;
+  fi
+  local apply_command="sudo /usr/local/sbin/lab-vm-update apply --plan $plan_id"
+  if ! apply_json="$(vm_ssh_noninteractive "$key" "$known_hosts" "$port" 900 \
+    mester@127.0.0.1 "$apply_command")"; then
+    vm_lifecycle_error 'Guest update apply failed; any completed package operations are retained and reported as partial.'
+    return 1
+  fi
+  read -r applied_status new_version < <(printf '%s' "$apply_json" | "$VM_LIFECYCLE_PYTHON" -c '
+import json,re,sys
+try:
+ d=json.load(sys.stdin); status=d["status"]; version=d["opencode_version"]
+ assert status in {"UPDATED","CURRENT"}
+ assert re.fullmatch(r"2\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?",version)
+ print(status,version)
+except Exception: raise SystemExit(2)
+') || {
+    vm_lifecycle_error 'Guest updater returned an invalid completion record; no metadata was changed.'
+    return 2
+  }
+  old_version="$(vm_lifecycle_field "$data" opencode_version)" || return 2
+  if [[ "$new_version" != "$old_version" ]]; then
+    "$VM_LIFECYCLE_PYTHON" "$VM_LIFECYCLE_PATHS" profile-version-update \
+      --state-root "$root" --profile "$name" --expected-version "$old_version" \
+      --version "$new_version" >/dev/null || {
+      vm_lifecycle_error 'Guest OpenCode changed but exact host profile version metadata could not be committed; profile and guest data were preserved.'
+      return 2
+    }
+  fi
+  printf '%s  selected guest updates completed; profile overlay, keys, workspace and auth data were preserved.\n' "$applied_status"
+}
+
+vm_lifecycle_update() {
+  local root="$1" name="$2" yes="$3" all="${4:-0}" install_tools="${5:-0}" auth_enabled runtime item
+  shift 5
+  local -a targets=("$@")
+  if (( install_tools )); then
+    targets=(tools)
+  elif ((${#targets[@]} == 0)); then
+    targets=(opencode config tools)
+  fi
+  if (( all )) && (( !install_tools )); then targets+=(system docker); fi
+  auth_enabled="$(printf '%s' "${VM_CONFIG_JSON:-{}}" | "$VM_LIFECYCLE_PYTHON" -c '
+import json,sys
+try:
+ value=json.load(sys.stdin).get("auth_forward","off")
+ print("0" if value=="off" else "1")
+except Exception: raise SystemExit(2)
+')" || return 2
+  runtime="$(vm_lifecycle_profile_runtime "$root" "$name")" || return 2
+  for item in "$runtime/scripts/vm-update.sh" "$runtime/scripts/vm-install-tools.sh" \
+    "$runtime/scripts/vm-opencode-tui-check.py"; do
+    [[ -f "$item" && ! -L "$item" ]] || {
+      vm_lifecycle_error 'Selected frozen profile has no C12 updater; no source-tree control was executed.'
+      return 2
+    }
+  done
+  vm_lifecycle_run_frozen_worker "$root" "$name" "$runtime" vm_lifecycle_update_locked \
+    "$root" "$name" "$yes" "$auth_enabled" "${targets[@]}"
+}
+
 vm_lifecycle_run_frozen_worker() {
   local root="$1" name="$2" runtime="$3" callback="$4"
   shift 4
   case "$callback" in
-    vm_lifecycle_suspend_locked|vm_lifecycle_resume_locked|vm_lifecycle_resize_locked|vm_lifecycle_delete_locked|vm_lifecycle_prepare_and_start_locked) ;;
+    vm_lifecycle_suspend_locked|vm_lifecycle_resume_locked|vm_lifecycle_resize_locked|vm_lifecycle_delete_locked|vm_lifecycle_prepare_and_start_locked|vm_lifecycle_update_locked) ;;
     *) vm_lifecycle_error 'Invalid frozen lifecycle callback.'; return 2 ;;
   esac
   # shellcheck disable=SC2016 # This callback is evaluated by the frozen locked profile worker.

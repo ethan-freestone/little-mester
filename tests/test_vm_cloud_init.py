@@ -70,6 +70,9 @@ class CloudInitTests(unittest.TestCase):
         for target in (
             "/usr/local/sbin/lab-vm-guest-bootstrap",
             "/usr/local/sbin/lab-vm-python-tools",
+            "/usr/local/sbin/lab-vm-update",
+            "/usr/local/sbin/lab-vm-install-tools",
+            "/usr/local/libexec/lab-vm-opencode-tui-check.py",
             "/usr/local/libexec/lab-vm-opencode-config.py",
             "/usr/local/libexec/lab-vm-guest-hash.sh",
         ):

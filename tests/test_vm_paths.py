@@ -249,6 +249,34 @@ class PathsTest(unittest.TestCase):
             self.cli("profile-write", "--profile", "test", data=dict(self.profile(), memory_gib=memory), ok=False)
         self.cli("profile-write", "--profile", "test", data=dict(self.profile(), memory_gib=128))
 
+    def test_profile_version_update_is_exact_and_keeps_ready_state(self):
+        image = "a" * 64
+        profile = self.profile()
+        profile.update({
+            "image_sha256": image,
+            "image_path": str(self.root / "vm/images" / image / "base.qcow2"),
+            "opencode_version": "2.2.5",
+            "guest_payload_sha256": "b" * 64,
+            "runtime_payload_sha256": "c" * 64,
+            "status": "ready",
+        })
+        self.cli("profile-write", "--profile", "test", data=profile)
+
+        updated = self.cli(
+            "profile-version-update", "--profile", "test",
+            "--expected-version", "2.2.5", "--version", "2.2.6",
+        )
+        self.assertEqual(updated["status"], "ready")
+        self.assertEqual(updated["opencode_version"], "2.2.6")
+        self.assertEqual(updated["guest_payload_sha256"], "b" * 64)
+
+        stale = self.cli(
+            "profile-version-update", "--profile", "test",
+            "--expected-version", "2.2.5", "--version", "2.2.7", ok=False,
+        )
+        self.assertEqual(stale.returncode, 2)
+        self.assertEqual(self.cli("profile-read", "--profile", "test")["opencode_version"], "2.2.6")
+
     def test_profile_recursive_allocation_requires_sticky_bit(self):
         recursive = dict(self.profile(), name="recursive", max_depth=1)
         self.cli("profile-write", "--profile", "recursive", data=recursive, ok=False)

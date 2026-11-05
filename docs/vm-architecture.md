@@ -1,6 +1,6 @@
 # VM harness architecture and trust boundary
 
-## Replacement implementation status (2026-11-04)
+## Replacement implementation status (2026-11-05)
 
 The owner approved `PR_REIMPLEMENTATION_PLAN.md` for `feat/vm-approach-2`.
 The contract below supersedes the historical proposal later on this page.
@@ -13,12 +13,14 @@ internal profile start/resume/resize/delete/rebuild controllers; C07 adapters,
 C08 metrics isolation and C09 scoped auth/browser primitives are also fixture
 validated. C10 adds a revision-bound filtered source snapshot, persistent recursion
 identity/depth guards, KVM/CPU preflight, isolated per-run state, candidate argv
-binding, and exact recursive cleanup/report preservation. **No image has been
-downloaded, no real QEMU/VM has been started, and no host/network or nested-VM
-acceptance is claimed.** Only read-only `status`/`list`, graceful `suspend`, and the
-fixture-tested exact-run `recursion-clean` operation are dispatched. Public `run`
-and `up` remain fail-closed until TASK-16; ordinary `./lab` remains the existing
-Docker launcher.
+binding, and exact recursive cleanup/report preservation. C12 adds the explicit
+guest update scan/apply and selected-tools commands, validated with isolated
+fixtures only. **No image has been downloaded, no real QEMU/VM has been started,
+and no host/network or nested-VM acceptance is claimed.** `status`/`list`, graceful
+`suspend`, exact-run `recursion-clean`, and update commands for an already-ready
+managed guest are dispatched; update commands do not create or resume profiles.
+Public `run` and `up` remain fail-closed until TASK-16; ordinary `./lab` remains
+the existing Docker launcher.
 
 ### C11 changed-VM self-test status
 
@@ -36,6 +38,32 @@ The live self-test adapter is deliberately unavailable pending the TASK-15 hando
 The CLI therefore fails closed without starting a VM; fixture success is not
 changed-VM, nested-VM, host, network, agent, or human acceptance. Public `run`/`up`
 dispatch remains deferred to TASK-16.
+
+### C12 explicit guest update status (fixture-only)
+
+`./lab-vm update` scans `opencode`, `config`, and `tools`; named targets narrow
+that set, while `--all` adds guest OS and Docker packages. The scan records exact
+versions/hashes in a private, one-hour guest-side plan and performs no package
+installation. The host displays the selected changes and requires confirmation
+before apply; `--yes` is the explicit confirmation override. `install-tools`
+limits the operation to the selected guest's isolated Python tools. Current plans
+and cancellation are no-ops. Apply consumes only the scanned selection, rechecks
+the OpenCode `/proc` argv/TTY guard and, for disruptive OS/Docker changes, the
+running workload guard. Auth-enabled OpenCode upgrades outside the reviewed
+compatibility version are blocked.
+
+Config payload refresh reuses the setup hash function and staged guest-private
+runtime/config replacement. The original ready-marker payload identity remains
+unchanged; a separate private update-state hash records a successful refresh.
+OpenCode/profile version metadata changes only after the exact guest install and
+marker verification succeed. Failure paths retain source workspace, overlay,
+keys, and auth data; partial package results are reported without claiming a
+rollback. Warm `run`/`up`/`agent` paths do not invoke the updater.
+
+C12 tests use fixture guest roots, fake package commands, synthetic `/proc`, and
+private metadata only. They do not run a live VM, alter host packages, fetch
+network resources, or establish host/guest acceptance. Live update gates remain
+deferred to TASK-15 and must use its current owner-reviewed handoff.
 
 ### CLI and configuration contract
 

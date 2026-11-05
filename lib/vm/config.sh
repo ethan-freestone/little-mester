@@ -167,8 +167,11 @@ vm_cli_parse() {
       fi ;;
     update)
       VM_TARGETS=("${VM_POSITIONALS[@]}")
+      declare -A update_seen=()
       for item in "${VM_TARGETS[@]}"; do
         case "$item" in opencode|config|tools|docker|system) ;; *) vm_error 'Unknown update target.'; return 2 ;; esac
+        [[ ! -v "update_seen[$item]" ]] || { vm_error 'Duplicate update target.'; return 2; }
+        update_seen["$item"]=1
       done
       [[ ! -v 'VM_SEEN[all]' || ${#VM_TARGETS[@]} == 0 ]] || { vm_error '--all conflicts with selected update targets.'; return 2; } ;;
     *)

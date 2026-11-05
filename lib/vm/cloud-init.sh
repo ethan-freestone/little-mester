@@ -19,10 +19,16 @@ vm_cloud_init_user_data() {
   local model_provider="${12:-none}" model_port="${13:-}" model_id="${14:-}"
   local bootstrap="$VM_CLOUD_INIT_ROOT/lib/vm/guest-bootstrap.sh"
   local python_tools="$VM_CLOUD_INIT_ROOT/scripts/vm-python-tools.sh"
+  local update_helper="$VM_CLOUD_INIT_ROOT/scripts/vm-update.sh"
+  local tools_installer="$VM_CLOUD_INIT_ROOT/scripts/vm-install-tools.sh"
+  local tui_checker="$VM_CLOUD_INIT_ROOT/scripts/vm-opencode-tui-check.py"
   local config_renderer="$VM_CLOUD_INIT_ROOT/scripts/vm-opencode-config.py"
   local hash_helper="$VM_CLOUD_INIT_ROOT/lib/vm/guest.sh"
 
   [[ -f "$bootstrap" && ! -L "$bootstrap" && -f "$python_tools" && ! -L "$python_tools" &&
+    -f "$update_helper" && ! -L "$update_helper" &&
+    -f "$tools_installer" && ! -L "$tools_installer" &&
+    -f "$tui_checker" && ! -L "$tui_checker" &&
     -f "$config_renderer" && ! -L "$config_renderer" && -f "$hash_helper" && ! -L "$hash_helper" ]] || {
     vm_cloud_init_error 'Guest bootstrap inputs are unavailable.'
     return 2
@@ -32,7 +38,8 @@ vm_cloud_init_user_data() {
     "$name" "$uid" "$gid" "$public_key" "$depth" "$max_depth" "$runtime" \
     "$agent" "$opencode_version" "$payload_sha256" "$proxy" \
     "$model_provider" "$model_port" "$model_id" \
-    "$bootstrap" "$python_tools" "$config_renderer" "$hash_helper" <<'PY'
+    "$bootstrap" "$python_tools" "$update_helper" "$tools_installer" \
+    "$tui_checker" "$config_renderer" "$hash_helper" <<'PY'
 import base64
 import json
 import re
@@ -42,8 +49,8 @@ from pathlib import Path
 
 (name, uid, gid, public_key, depth, max_depth, runtime, agent,
  version, payload_sha256, proxy, model_provider, model_port, model_id,
- bootstrap_path, python_tools_path,
- renderer_path, hash_helper_path) = sys.argv[1:]
+ bootstrap_path, python_tools_path, update_helper_path, tools_installer_path,
+ tui_checker_path, renderer_path, hash_helper_path) = sys.argv[1:]
 
 def fail():
     raise SystemExit("REFUSED: Invalid cloud-init input.")
@@ -104,6 +111,9 @@ if key_type != parts[0] or any(ord(char) < 32 or ord(char) == 127 for char in pu
 
 bootstrap = Path(bootstrap_path).read_text(encoding="utf-8")
 python_tools = Path(python_tools_path).read_text(encoding="utf-8")
+update_helper = Path(update_helper_path).read_text(encoding="utf-8")
+tools_installer = Path(tools_installer_path).read_text(encoding="utf-8")
+tui_checker = Path(tui_checker_path).read_text(encoding="utf-8")
 renderer = Path(renderer_path).read_text(encoding="utf-8")
 hash_helper = Path(hash_helper_path).read_text(encoding="utf-8")
 proxy_profile = "\n".join((
@@ -174,6 +184,9 @@ config = {
         write_file("/etc/profile.d/lab-vm-recursion.sh", recursion_profile),
         write_file("/usr/local/sbin/lab-vm-guest-bootstrap", bootstrap, "0755", True),
         write_file("/usr/local/sbin/lab-vm-python-tools", python_tools, "0755", True),
+        write_file("/usr/local/sbin/lab-vm-update", update_helper, "0755", True),
+        write_file("/usr/local/sbin/lab-vm-install-tools", tools_installer, "0755", True),
+        write_file("/usr/local/libexec/lab-vm-opencode-tui-check.py", tui_checker, "0755", True),
         write_file("/usr/local/libexec/lab-vm-opencode-config.py", renderer, "0755", True),
         write_file("/usr/local/libexec/lab-vm-guest-hash.sh", hash_helper, "0755", True),
     ],

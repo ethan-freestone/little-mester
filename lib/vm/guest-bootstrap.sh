@@ -600,21 +600,41 @@ vm_guest_run_python_tools() {
 
 vm_guest_build_private_payload() {
   local share_root final stage workspace_source mcp_source config_dir renderer
+  local update_mode="${VM_GUEST_UPDATE_MODE:-0}" backup file destination staged_config
+  local -a config_stages=()
   share_root="$(vm_guest_rooted /home/mester/.local/share/little-mester)"
   final="$share_root/guest-runtime"
   workspace_source="$(vm_guest_rooted /workspace)"
   mcp_source="$workspace_source/little-mester-mcp"
   config_dir="$(vm_guest_rooted /home/mester/.config/opencode)"
   renderer="$(vm_guest_rooted "$VM_GUEST_CONFIG_RENDERER")"
-  install -d -m 0700 "$share_root"
-  [[ ! -e "$final" && ! -L "$final" ]] || { vm_guest_bootstrap_error 'A guest runtime payload already exists; it was not replaced.'; return 1; }
-  stage="$(mktemp -d "$share_root/.guest-runtime.XXXXXX")"
+  install -d -m 0700 "$share_root" || return 1
+  if [[ "$update_mode" == 1 ]]; then
+    [[ -d "$final" && ! -L "$final" ]] || {
+      vm_guest_bootstrap_error 'Existing private guest runtime is missing or unsafe; it was preserved.'
+      return 1
+    }
+    [[ -d "$config_dir" && ! -L "$config_dir" ]] || {
+      vm_guest_bootstrap_error 'Existing generated config directory is missing or unsafe; it was preserved.'
+      return 1
+    }
+    for file in opencode.json cli.json; do
+      destination="$config_dir/$file"
+      [[ -f "$destination" && ! -L "$destination" ]] || {
+        vm_guest_bootstrap_error 'Existing generated config is missing or unsafe; no source was overwritten.'
+        return 1
+      }
+    done
+  else
+    [[ ! -e "$final" && ! -L "$final" ]] || { vm_guest_bootstrap_error 'A guest runtime payload already exists; it was not replaced.'; return 1; }
+  fi
+  stage="$(mktemp -d "$share_root/.guest-runtime.XXXXXX")" || return 1
   VM_GUEST_STAGE="$stage"
   trap 'if [[ -n "${VM_GUEST_STAGE:-}" && -d "$VM_GUEST_STAGE" ]]; then rm -rf -- "$VM_GUEST_STAGE"; fi' EXIT
 
-  vm_guest_copy_tree "$workspace_source/agent/opencode" "$stage/opencode" opencode
-  vm_guest_copy_tree "$mcp_source" "$stage/mcp" mcp
-  vm_guest_chown_mester "$VM_GUEST_UID" "$VM_GUEST_GID" "$stage"
+  vm_guest_copy_tree "$workspace_source/agent/opencode" "$stage/opencode" opencode || return 1
+  vm_guest_copy_tree "$mcp_source" "$stage/mcp" mcp || return 1
+  vm_guest_chown_mester "$VM_GUEST_UID" "$VM_GUEST_GID" "$stage" || return 1
 
   LAB_VM_PROXY="$VM_GUEST_PROXY" "$VM_GUEST_RUNUSER_BIN" -u mester -- env \
     HOME="$(vm_guest_rooted /home/mester)" \
@@ -624,7 +644,7 @@ vm_guest_build_private_payload() {
     npm_config_proxy="$VM_GUEST_PROXY" npm_config_https_proxy="$VM_GUEST_PROXY" \
     npm_config_noproxy='localhost,127.0.0.1,10.0.2.100' \
     npm_config_cache="$(vm_guest_rooted /home/mester/.cache/lab-vm-npm)" \
-    "$VM_GUEST_NPM_BIN" ci --prefix "$stage/mcp"
+    "$VM_GUEST_NPM_BIN" ci --prefix "$stage/mcp" || return 1
   LAB_VM_PROXY="$VM_GUEST_PROXY" "$VM_GUEST_RUNUSER_BIN" -u mester -- env \
     HOME="$(vm_guest_rooted /home/mester)" \
     HTTP_PROXY="$VM_GUEST_PROXY" HTTPS_PROXY="$VM_GUEST_PROXY" \
@@ -633,10 +653,10 @@ vm_guest_build_private_payload() {
     npm_config_proxy="$VM_GUEST_PROXY" npm_config_https_proxy="$VM_GUEST_PROXY" \
     npm_config_noproxy='localhost,127.0.0.1,10.0.2.100' \
     npm_config_cache="$(vm_guest_rooted /home/mester/.cache/lab-vm-npm)" \
-    "$VM_GUEST_NPM_BIN" run build --prefix "$stage/mcp"
+    "$VM_GUEST_NPM_BIN" run build --prefix "$stage/mcp" || return 1
   [[ -s "$stage/mcp/dist/mcp-server.js" ]] || { vm_guest_bootstrap_error 'Private MCP build output is missing.'; return 1; }
 
-  install -d -m 0700 "$stage/generated"
+  install -d -m 0700 "$stage/generated" || return 1
   "$VM_GUEST_PYTHON" "$renderer" \
     --input "$stage/opencode/opencode.json" \
     --output "$stage/generated/opencode.json" \
@@ -645,8 +665,8 @@ vm_guest_build_private_payload() {
     --plugin-root "$final/opencode/plugins" \
     --plugin-source "$stage/opencode/plugins" \
     --model-provider "$VM_GUEST_MODEL_PROVIDER" \
-    --model-id "$VM_GUEST_MODEL_ID"
-  "$VM_GUEST_PYTHON" - "$stage/generated/opencode.json" "$stage/generated/cli.json" "$stage/mcp" <<'PY'
+    --model-id "$VM_GUEST_MODEL_ID" || return 1
+  if ! "$VM_GUEST_PYTHON" - "$stage/generated/opencode.json" "$stage/generated/cli.json" "$stage/mcp" <<'PY'
 import json
 import stat
 import sys
@@ -669,29 +689,112 @@ for path in (config_path, cli_path):
     info = path.lstat()
     assert stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
 PY
+  then
+    return 1
+  fi
 
-  vm_guest_chown_mester "$VM_GUEST_UID" "$VM_GUEST_GID" "$stage"
-  mv -- "$stage" "$final"
-  VM_GUEST_STAGE=''
-  trap - EXIT
-
-  install -d -m 0700 "$config_dir"
-  for file in opencode.json cli.json; do
-    local source="$final/generated/$file" destination="$config_dir/$file"
-    [[ ! -e "$destination" && ! -L "$destination" ]] || {
-      vm_guest_bootstrap_error 'Existing guest OpenCode config was preserved; a fresh profile is required.'
+  vm_guest_chown_mester "$VM_GUEST_UID" "$VM_GUEST_GID" "$stage" || return 1
+  if [[ "$update_mode" == 1 ]]; then
+    backup="$(mktemp -d "$share_root/.guest-runtime-backup.XXXXXX")" || return 1
+    chmod 0700 "$backup" || { rmdir -- "$backup" 2>/dev/null || true; return 1; }
+    install -d -m 0700 "$backup/config" || { rmdir -- "$backup" 2>/dev/null || true; return 1; }
+    for file in opencode.json cli.json; do
+      install -m 0600 "$config_dir/$file" "$backup/config/$file" || {
+        for staged_config in "${config_stages[@]}"; do rm -f -- "$staged_config"; done
+        rm -rf -- "$backup"
+        return 1
+      }
+      staged_config="$config_dir/.$file.update.$$.${RANDOM}"
+      install -m 0600 "$stage/generated/$file" "$staged_config" || {
+        rm -f -- "$staged_config"
+        for staged_config in "${config_stages[@]}"; do rm -f -- "$staged_config"; done
+        rm -rf -- "$backup"
+        return 1
+      }
+      vm_guest_chown_mester "$VM_GUEST_UID" "$VM_GUEST_GID" "$staged_config" || {
+        rm -f -- "$staged_config"
+        for staged_config in "${config_stages[@]}"; do rm -f -- "$staged_config"; done
+        rm -rf -- "$backup"
+        return 1
+      }
+      config_stages+=("$staged_config")
+    done
+    mv -- "$final" "$backup/guest-runtime" || {
+      for staged_config in "${config_stages[@]}"; do rm -f -- "$staged_config"; done
+      rm -rf -- "$backup"
       return 1
     }
-    install -m 0600 "$source" "$destination"
-  done
-  vm_guest_chown_mester "$VM_GUEST_UID" "$VM_GUEST_GID" "$config_dir" "$final"
+    if ! mv -- "$stage" "$final"; then
+      mv -- "$backup/guest-runtime" "$final" || {
+        for staged_config in "${config_stages[@]}"; do rm -f -- "$staged_config"; done
+        vm_guest_bootstrap_error 'Runtime swap failed and the original remains in its private backup.'
+        return 1
+      }
+      for staged_config in "${config_stages[@]}"; do rm -f -- "$staged_config"; done
+      rm -rf -- "$backup"
+      return 1
+    fi
+    VM_GUEST_STAGE=''
+    local config_swap_failed=0
+    local index=0
+    for file in opencode.json cli.json; do
+      staged_config="${config_stages[$index]}"
+      index=$((index + 1))
+      if [[ -z "$staged_config" || -L "$staged_config" ]] || ! mv -f -- "$staged_config" "$config_dir/$file"; then
+        config_swap_failed=1
+        break
+      fi
+    done
+    if (( config_swap_failed )); then
+      for staged_config in "${config_stages[@]}"; do rm -f -- "$staged_config"; done
+      for file in opencode.json cli.json; do
+        staged_config="$config_dir/.$file.restore.$$.${RANDOM}"
+        if install -m 0600 "$backup/config/$file" "$staged_config" &&
+          mv -f -- "$staged_config" "$config_dir/$file"; then
+          :
+        else
+          rm -f -- "$staged_config"
+          vm_guest_bootstrap_error 'Config rollback failed; original runtime and config copies remain in the private backup.'
+          return 1
+        fi
+      done
+      rm -rf -- "$final"
+      mv -- "$backup/guest-runtime" "$final" || {
+        vm_guest_bootstrap_error 'Runtime rollback failed; the original runtime remains in its private backup.'
+        return 1
+      }
+      rm -rf -- "$backup"
+      vm_guest_bootstrap_error 'Generated config replacement failed; prior runtime and config were restored.'
+      return 1
+    fi
+    vm_guest_chown_mester "$VM_GUEST_UID" "$VM_GUEST_GID" "$config_dir" "$final" || {
+      vm_guest_bootstrap_error 'Updated runtime ownership check failed; the prior runtime backup was retained.'
+      return 1
+    }
+    rm -rf -- "$backup"
+    trap - EXIT
+  else
+    mv -- "$stage" "$final" || return 1
+    VM_GUEST_STAGE=''
+    trap - EXIT
+    install -d -m 0700 "$config_dir" || return 1
+    for file in opencode.json cli.json; do
+      destination="$config_dir/$file"
+      [[ ! -e "$destination" && ! -L "$destination" ]] || {
+        vm_guest_bootstrap_error 'Existing guest OpenCode config was preserved; a fresh profile is required.'
+        return 1
+      }
+      install -m 0600 "$final/generated/$file" "$destination" || return 1
+    done
+    vm_guest_chown_mester "$VM_GUEST_UID" "$VM_GUEST_GID" "$config_dir" "$final" || return 1
+  fi
 }
 
 vm_guest_write_success_marker() {
   local marker="$1" version="$2" recursion_tools="$3" aider_version="$4"
   "$VM_GUEST_PYTHON" - "$marker" "$VM_GUEST_PAYLOAD_SHA256" "$VM_GUEST_RUNTIME" \
     "$VM_GUEST_AGENT" "$VM_GUEST_DEPTH" "$VM_GUEST_MAX_DEPTH" "$version" \
-    "$recursion_tools" "$aider_version" "$VM_GUEST_MODEL_PROVIDER" \
+    "$recursion_tools" "$aider_version" "$VM_GUEST_VERSION_SELECTOR" "$VM_GUEST_MODEL_PROVIDER" \
     "$VM_GUEST_MODEL_PORT" "$VM_GUEST_MODEL_ID" "$VM_GUEST_TEST_MODE" <<'PY'
 import json
 import os
@@ -702,7 +805,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 payload, runtime, agent, depth, maximum, version, recursion_tools, aider_version, \
-    provider, model_port, model_id, test_mode = sys.argv[2:]
+    version_selector, provider, model_port, model_id, test_mode = sys.argv[2:]
 if test_mode != "1" and os.geteuid() != 0:
     raise SystemExit(1)
 path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
@@ -715,6 +818,7 @@ data = {
     "workload_runtime": runtime,
     "payload_sha256": payload,
     "opencode_version": version,
+    "opencode_version_selector": version_selector,
     "aider_version": aider_version,
     "model_provider": provider,
     "model_port": int(model_port) if model_port else None,

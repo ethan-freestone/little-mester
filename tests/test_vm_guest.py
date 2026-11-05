@@ -111,7 +111,10 @@ class GuestReadinessTests(unittest.TestCase):
             "lib/vm/guest.sh",
             "lib/vm/guest-bootstrap.sh",
             "scripts/vm-opencode-config.py",
+            "scripts/vm-install-tools.sh",
+            "scripts/vm-opencode-tui-check.py",
             "scripts/vm-python-tools.sh",
+            "scripts/vm-update.sh",
             "agent/opencode/opencode.json",
             "agent/opencode/little-mester-logo.txt",
             "agent/opencode/plugins/host-metrics/index.ts",
@@ -140,7 +143,10 @@ class GuestBootstrapFixtures(unittest.TestCase):
             "lib/vm/guest.sh",
             "lib/vm/guest-bootstrap.sh",
             "scripts/vm-opencode-config.py",
+            "scripts/vm-install-tools.sh",
+            "scripts/vm-opencode-tui-check.py",
             "scripts/vm-python-tools.sh",
+            "scripts/vm-update.sh",
         ):
             target = self.workspace / relative
             target.parent.mkdir(parents=True, exist_ok=True)

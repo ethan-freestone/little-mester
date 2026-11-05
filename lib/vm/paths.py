@@ -960,6 +960,21 @@ def profile_write(root, name, data):
     return data
 
 
+def profile_version_update(root, name, expected, candidate):
+    """Commit one exact guest OpenCode version after a verified in-place update."""
+    opencode_version(expected)
+    opencode_version(candidate)
+    require(expected != candidate)
+    root = state_root(str(root), must_exist=True)
+    with profile_lock(root, name) as path:
+        data = profile_read(root, name)
+        require(data["status"] == "ready" and data["opencode_version"] == expected)
+        data["opencode_version"] = candidate
+        profile_validate(data, root, name)
+        atomic_json(path / "profile.json", data)
+    return data
+
+
 def profile_create(root, name, data):
     """Create one new allocated profile; never treat an existing profile as an update."""
     profile_validate(data, root, name)
@@ -1224,17 +1239,20 @@ def main():
     parser = Parser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
     for command in ("config", "validate-config", "context", "validate-workspace",
-                    "profile-read", "profile-list", "profile-write", "profile-create", "profile-transition", "runtime-install", "runtime-validate", "image-run",
+                    "profile-read", "profile-list", "profile-write", "profile-create", "profile-transition", "profile-version-update", "runtime-install", "runtime-validate", "image-run",
                     "image-publish", "profile-run", "profile-delete", "overlay-publish", "asset-publish", "asset-replace", "seed-write",
                     "recursion-run-create", "recursion-run-delete"):
         sub = commands.add_parser(command)
         sub.add_argument("--state-root", required=True)
-        if command in ("context", "profile-read", "profile-write", "profile-create", "profile-transition", "runtime-install", "runtime-validate",
+        if command in ("context", "profile-read", "profile-write", "profile-create", "profile-transition", "profile-version-update", "runtime-install", "runtime-validate",
                        "profile-run", "profile-delete", "overlay-publish", "asset-publish", "asset-replace", "seed-write"):
             sub.add_argument("--profile", required=True)
         if command == "profile-transition":
             sub.add_argument("--expected-status", required=True, choices=sorted(STATUSES))
             sub.add_argument("--status", required=True, choices=sorted(STATUSES))
+        if command == "profile-version-update":
+            sub.add_argument("--expected-version", required=True)
+            sub.add_argument("--version", required=True)
         if command in ("context", "validate-workspace"):
             sub.add_argument("--repository", required=True)
             sub.add_argument("--workspace", required=command == "validate-workspace")
@@ -1289,6 +1307,8 @@ def main():
             root, args.profile, args.expected_status, args.status,
             decode(sys.stdin.buffer.read(1024 * 1024 + 1)),
         )
+    elif args.command == "profile-version-update":
+        result = profile_version_update(root, args.profile, args.expected_version, args.version)
     elif args.command == "runtime-validate":
         result = runtime_validate(root, args.profile)
     elif args.command == "image-run":

@@ -58,7 +58,10 @@ paths = [
     "lib/vm/guest.sh",
     "lib/vm/guest-bootstrap.sh",
     "scripts/vm-opencode-config.py",
+    "scripts/vm-install-tools.sh",
+    "scripts/vm-opencode-tui-check.py",
     "scripts/vm-python-tools.sh",
+    "scripts/vm-update.sh",
 ]
 
 def collect_tree(relative):

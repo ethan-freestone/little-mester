@@ -911,8 +911,9 @@ TASK-15, no original guest update authorized by task implementation.
 **Expected verification outcome:** clear CURRENT/UPDATE/BLOCKED, only approved
 selected changes applied; no overlay/credential/workspace deletion or warm install.
 
-**Acceptance criteria:** [ ] explicit scan/apply split; [ ] precise guards;
-[ ] one payload hash; [ ] in-place retention; [ ] no host installs.
+**Acceptance criteria (fixture milestone):** [x] explicit scan/apply split;
+[x] precise guards; [x] one payload hash; [x] in-place retention;
+[x] no host installs. Live update acceptance remains TASK-15.
 
 **Commit checkpoint:** COMMIT C12 `feat(vm): add explicit state-preserving guest updates`;
 TASK-14 scope, full fast milestone and static checks.
