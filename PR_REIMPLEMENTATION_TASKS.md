@@ -928,6 +928,14 @@ Owner handoff for interrupted apt, never automatic clean rebuild.
 
 ## TASK-15: Scoped real-host, security and human acceptance suites
 
+**Current sequencing amendment (2026-11-05):** C13's local code checkpoint is
+committed; it is not complete live acceptance. The owner's preflight on `336cf69`
+passed after the cgroup fix, but no guest has been started. Follow master §9's
+"Acceptance-readiness revision" and TASK-15A/15B below before the next full host
+campaign. C13a implementation is now user-authorized and implemented locally;
+C13b, live campaign, credential action and VM-default cutover remain unauthorized.
+These task sections specify execution; they do not themselves authorize live work.
+
 **Purpose:** R05–R25,R30,R34; D09. Replace historical campaign/repair machinery
 with bounded reproducible evidence for all required behaviors.
 
@@ -1037,6 +1045,149 @@ visible and must pass before default cutover/final completion. TASK-15 remains
 IN PROGRESS or BLOCKED after its local code commit until every required live
 acceptance checkbox passes; C13 alone does not satisfy TASK-16's prerequisite.
 
+## TASK-15A: Prepare explicit routes and Docker rollback (C13a)
+
+**Purpose/dependency:** R01,R29–R33; TASK-15's E2E-DAILY requires a supported
+rollback entry point that does not yet exist. This is TASK-16's non-default
+preparation slice, not default cutover and not a new architecture. Depends on
+C13 plus the cgroup fix at `232180b` / ledger `336cf69`.
+
+**Files:** confirmed `lab`, CLI/helpers under `lib/`, relevant Docker and VM
+parser/permission/metrics fixtures; proposed `lab-docker`, route tests, and
+truthful route documentation. Inspect contracts before selecting exact paths.
+Do not modify auth stores, active container state or public VM startup gates.
+
+**Implementation, only after later authorization:**
+1. Extract the supported Docker launcher preserving helper sourcing, argument
+   forwarding, current-container identity/reuse, metrics and safety behavior.
+   Correct required permission-parser defects with explicit tests, not silent
+   compatibility with ignored flags. Preserve denies and Aider restrictions.
+2. Route ordinary `lab` to Docker and `lab vm` explicitly to the gated VM entry;
+   `lab-docker` exposes the supported fallback. `lab-vm run/up` and their aliases
+   remain fail-closed; only the scoped acceptance path invokes lifecycle APIs.
+3. Document that staging is not release acceptance. Specify a host smoke that
+   records the existing Docker container's identity before/after invocation and
+   refuses creation/rebuild/recreation; actual UI/session observation remains
+   required. No need to exercise that live session in this implementation shell.
+
+**Tests/outcome:** fixture dispatch/source-helper/flags-before-after-workspace,
+exact-once OpenCode auto, ask/auto conflicts, denies, Aider, metrics and exit-code
+parity; no accidental VM startup, host Docker socket sharing or DinD. Bats/full
+Python regression, changed-shell syntax and full-severity ShellCheck, docs/diff
+checks. Existing unrelated failures must be labeled, not suppressed or called PASS.
+
+**Commit:** C13a `feat(lab): stage explicit VM and Docker rollback routes`.
+**Done:** executable rollback/explicit routes locally tested; the transition-stage
+dispatcher remains routed to Docker until acceptance, while VM remains the intended
+released default and Docker becomes its explicit optional fallback. Live rollback
+smoke pending; TASK-16/C14 default cutover remains unstarted.
+
+## TASK-15B: Complete staged provider and owner acceptance workflow (C13b)
+
+**Purpose/dependency:** R05–R25,R30,R34; depends on TASK-15A. Turn C13 gate reporting
+and partial automation into an executable owner campaign. Master §9's current
+readiness revision is authoritative. No live mutation or credential permission is
+inferred from this specification.
+
+**Files:** reuse `scripts/vm-host-acceptance.py`, `scripts/vm-self-test.py`,
+`scripts/vm-guest-isolation-check.py`, existing frozen lifecycle/agent/auth/recursion
+APIs, tests and `docs/vm-host-acceptance.md`. Add small gate-specific fixtures or
+helpers only where necessary; no second controller or generic campaign framework.
+The C13a route slice is reused rather than redone.
+
+**Implementation units (docs→tests→code after authorization):**
+1. **Coverage audit first.** Build the complete gate/subcheck/procedure/evidence/
+   cleanup matrix, distinguishing automatic checks, real human observations and
+   current gaps. Audit actual nested process ancestry versus depth labels or
+   sibling profiles, per-enclosing-level RAM, frozen runtime/config propagation,
+   working-directory changes, listener ownership and exact cleanup. Fix any
+   false PASS paths. Keep all fifteen gates and their original obligations.
+2. **Explicit provider configuration.** Plan bounded read-only discovery for
+   existing Ollama and llama.cpp services; owner selects endpoint/model explicitly.
+   Validate private campaign config and per-profile selected forwards/model IDs;
+   no host auth/config copying or automatic service start/model downloads. Allow
+   separate run-owned provider profiles/config slices where the existing one-
+   provider profile contract requires them, preserving the intended same-profile
+   state tests. Never silently switch a live profile's immutable configuration.
+   Execute five real streams per selected local provider and OpenAI; probe health
+   alone is insufficient. Record result enums/counts only, never prompts/responses.
+3. **Semi-automatic OpenAI login.** Early optional human checkpoint calls the
+   existing browser bridge, opens the host browser and waits for the owner's
+   direct sign-in with a bounded callback. The owner supplies no credentials to
+   the agent/chat. Verify provider completion and removal of temporary callbacks.
+   Reuse only this campaign's authorized guest session between stages; do not
+   repeatedly ask for login or use ordinary host/Docker auth. Missing terminal,
+   EOF/skip/timeout/cancel keeps affected subchecks BLOCKED and continues independent
+   tests. Human interaction cannot be inferred from a default/Enter response.
+4. **Staged operation and budget.** Add a documented exact-run stage/resume/status
+   interface using the existing private manifest. Stages: clean/usability → early
+   human/auth → providers/daily/permissions → workload/retention/lifecycle → nested
+   proof/boundaries/concurrent agents → final auth → teardown. Pause before costly
+   recursion so a usable TUI can be reviewed first. Revalidate revision/config/
+   runtime/process ownership on resume; reject duplicate/concurrent unsafe work.
+   Preserve independent results. New code/config requires a fresh scoped attempt;
+   no auto-adoption of ready profiles. At most 60 minutes per automated stage/
+   attempt with tighter operation deadlines; interactive pauses do not extend
+   callback expiry. The live handoff must bound total time, download/disk and
+   paid-provider use. One diagnosed fresh retry per revision within total budget.
+5. **Execute real work and negatives.** Automate guest PostgreSQL Compose health/
+   query/persistence/down plus real agent failing-test→fix→pass and two concurrent
+   authorized tasks with separate auth ports. Capture DB/tools/auth/key/workspace
+   canaries before suspend/resume, selected config/tools apply and resize. Both
+   selected apply and scan/cancel/no-op need real evidence; selecting no updates
+   cannot satisfy the apply subcheck. Implement outer/child filesystem/network/
+   secret boundary operations and actual self-development fail/fix/depth proof.
+   Use local models for provider-independent agent tests if explicitly selected;
+   never substitute them for missing OpenAI acceptance.
+6. **Final credential/cleanup checks.** Optional end checkpoint handles real
+   refresh persistence and browser negatives. Provider-specific escrow/export,
+   destructive failure/delete/reimport and recursive import require separate
+   confirmation and disposable run-owned profiles; never destroy the sole auth
+   copy or read/copy unrelated credentials. Skipping keeps those required gates
+   BLOCKED. Expiry/refresh unavailable within budget is BLOCKED, not simulated
+   success. Verify deepest-first exact teardown and residue/protected assets;
+   finalize report after cleanup so teardown evidence is not required before it
+   can occur. No premature PASS checklist recording or wholesale attestation.
+7. **Approachable owner handoff.** Update the runbook with implemented commands,
+   Bash/Fish forms, expected output/time/stop conditions and sanitized status/report
+   viewing. Include clean worktree revision update, private config/state creation,
+   dry-run review, start, skip, pause/resume and exact cleanup. Do not ask the owner
+   to diagnose controller files or invent test commands. Human-only tests need
+   actual UI actions and outcomes, not just abstract checklist labels. Keep evidence
+   outside exported snapshots; protect `vm-migration-plan.md` and existing runtime.
+
+**Tests to implement:** config/endpoint/model validation and provider-none/selected/
+missing-service cases; positive/negative streaming schemas and redaction; native
+browser open/wait/success/cancel/EOF/timeout and callbacks removed; no secret state
+in logs/argv/report; owner skip blocks only dependencies; authorized session reuse
+without repeat login; manifest-version/revision/config/process checks, serialized
+stage resume, duplicate mutation refusal, wall-clock and retry bounds; actual
+parent/child placement and per-level budgets; fixture Compose/project/volume and
+concurrent-agent failures; pre-mutation retention baselines; selected apply and
+negative export/delete refusal; final post-cleanup evidence. No mock is live proof.
+
+**Tests to execute:** all affected Python/Bats fixtures, full Python/Bats suite,
+changed-file Ruff/compile/shell checks, real `--help`, docs links/fences/consistency,
+exact staged diff/scope review. Do not execute the campaign while implementing.
+
+**Commit:** C13b `test(vm): complete staged provider and owner acceptance workflow`.
+Record gate matrix and remaining operational choices in progress. If necessary
+split this checkpoint into documented tested commits without claiming readiness
+early. **Done:** no known absent prerequisite for the selected full campaign;
+every gate has a real test procedure; local tests pass; a dry-run-ready owner
+handoff exists. Actual host acceptance is still pending.
+
+### TASK-15 live execution after C13a/C13b (separate approval)
+
+Record selected provider endpoints/model IDs (read-only discovery first), exact
+revision/config hashes, total time/disk/download/API ceiling, optional checkpoint
+choices and auth-storage/export consent. Rerun preflight on that revision; approve
+the exact scope once. Execute stages in master §9 order and preserve partial
+results without waivers. Use only campaign-owned credentials created by the owner
+through the browser and separately approved private forwarding where selected.
+Review all required gates and cleanup evidence before C14. Owner choosing to skip
+auth is valid for a partial run but does not make full acceptance complete.
+
 ## TASK-16: Documentation, CI, accepted VM default and preserved Docker rollback
 
 **Purpose:** R01,R29–R33; D10. Deliver coherent reviewable product, not only new
@@ -1046,6 +1197,10 @@ primitives or a misleading default switch.
 TASK-16's non-default explicit route, Docker rollback and documentation/CI staging
 may be prepared while TASK-15 is open; final default/rollback route smoke belongs
 to TASK-16 and must not circularly block preparation of the route it tests.
+The explicit route/rollback preparation is now named TASK-15A/C13a and must occur
+before C13b and live E2E-DAILY. Reuse that slice; C14 does not postpone creation of
+the rollback route until after a gate requiring it. Planning this order does not
+authorize either slice's implementation.
 
 **Execution context:** main `lab`, CI, verify-lab/docs consistency, existing
 Docker metrics/config; master approval choices, review path dispositions.
@@ -1106,7 +1261,8 @@ live evidence, true default VM and verified rollback; no secrets/unrelated chang
 
 **Commit checkpoint:** COMMIT C14 `feat(lab): enable accepted VM workflow with Docker rollback`;
 TASK-16 exact docs/CI/dispatcher/tests, full final validations required. If blocked,
-keep C14 pending; a staged draft slice is a recorded plan deviation, not final pass.
+keep C14 pending; TASK-15A/C13a is the planned pre-acceptance route slice, not C14
+completion or permission to switch the default. Any further split is recorded.
 
 **Failure and recovery:** preserve Docker mode/auth and named original profiles;
 no cutover on regression. Fix bounded documentation/dispatch failures, rerun all

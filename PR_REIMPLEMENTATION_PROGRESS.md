@@ -2,9 +2,12 @@
 
 ## Control state
 
-- Phase: **Round 2 active; C01–C13 committed locally; TASK-13 live proof and TASK-15 external acceptance remain pending; TASK-16 not started**.
+- Phase: **Round 2 active; C01–C13, cgroup fix, and C13a route checkpoint committed locally; local checks pass; C13b not authorized; owner host preflight PASS on `336cf69`; no live VM acceptance; C14 VM-default cutover pending**.
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
+- Current implementation authorization: **C13a only**, user request 2026-11-05,
+  after confirming the intended released default is VM with optional Docker. No
+  C13b, live host acceptance, public VM startup, default cutover or push approval.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
 - Implementing branch: `feat/vm-approach-2`; C05 implementation checkpoint is
   `cb7091a17720b59056bd2677f3af1aba5699f944`.
@@ -20,10 +23,10 @@
   ticket history through MCP, reconcile this branch's plan/tasks/progress, commit
   locally and stop; no C13 or host action in that session. This was superseded by
   the later request to finish C13 locally only.
-- Current resumed scope: implement/validate/commit C13 locally; do not run live
-  VM/host/network/credential/human acceptance, do not enable public `run`/`up`,
-  do not start TASK-16, and do not push. Live acceptance remains pending owner
-  scope review and separate authorization.
+- Current scope (2026-11-05): **C13a only**. Stage `lab-docker` and explicit
+  fail-closed `lab vm`; retain transition-stage Docker dispatch pending the C14
+  acceptance gate. No live test, credential action, public VM startup, VM-default
+  cutover, push or release authorization. C13b requires later authorization.
 - Inspected source: PR #13 at
   `97af1d83a16fce68ddcc3390276c218a1b0cd518`.
 - Assigned session: current coordinating OpenCode session; no subagents assigned.
@@ -199,8 +202,10 @@ VM/network acceptance has occurred.
 | TASK-12 | C10 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Persisted identity/depth guards, KVM/CPU preflight, isolated candidate state/argv, immediate-parent proxy depth and exact descendant-safe cleanup; 5 recursion Python cases, 6 recursion Bats cases; full 214 VM Python and 129 Bats pass; `272140e` | Public `run`/`up` remain undispatched until TASK-16; real nested KVM/VM and host/human acceptance remain pending |
 | TASK-13 | C11+C13 | PARTIAL (LOCAL CODE + FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-05 | C11 evidence-gated state machine plus C13 opt-in nested-VM adapter, candidate lifecycle/bootstrap mutations, exact G1/G2/G3 evidence and cleanup; local tests recorded in C13 closeout below | No live VM/agent/nested-KVM/host/network acceptance; E2E-SELF remains pending owner campaign |
 | TASK-14 | C12 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-05/2026-11-05 | Guest update scan/apply, exact-version tools installer, `/proc` TUI guard, CLI/cloud-init/profile integration; 249 Python and 131 Bats tests PASS; changed-file Ruff/ShellCheck, Bash syntax, Python compilation, cloud-init schema and diff checks PASS | Fixture-only; no live VM, package/network, credential, host or lifecycle acceptance; TASK-15 remains the live gate |
-| TASK-15 | C13 | LOCAL CODE CHECKPOINT READY; LIVE ACCEPTANCE PENDING | Coordinator/2026-11-05/2026-11-05 | Added scoped host acceptance runner, bounded guest isolation probes, human/owner checklist evidence, exact cleanup, runbook, and fixtures; see C13 closeout below | No live acceptance; gates needing actual model/workload/agent/filesystem/secret/human behavior remain blocked. Do not enter TASK-16 |
-| TASK-16 | C14 | NOT STARTED | Unassigned/—/— | — | All live gates before cutover |
+| TASK-15 | C13 | CODE COMMITTED; READINESS INCOMPLETE; LIVE ACCEPTANCE PENDING | Coordinator/2026-11-05/2026-11-05 | C13 runner/probes/adapter/reporting/fixtures; cgroup fix `232180b`; owner read-only preflight PASS on `336cf69` | Reporting/checklists alone are not complete procedures; C13a/C13b readiness work and real host evidence required |
+| TASK-15A | C13a | COMMITTED LOCALLY; CHECKS PASS | Coordinator/2026-11-05/2026-11-05 | `599e9ef` `lab` dispatcher, preserved `lab-docker`, explicit `lab vm`; local route/permission fixtures | Transition dispatcher stays Docker until acceptance; released default remains VM, with Docker optional; host rollback smoke pending |
+| TASK-15B | C13b | PLANNED; IMPLEMENTATION NOT AUTHORIZED | Unassigned/—/— | Gate-coverage audit, staged campaign, Ollama/llama.cpp/OpenAI and semi-automatic auth | C13a prerequisite; owner-controlled login; complete real procedures before full host campaign |
+| TASK-16 | C14 | CUTOVER NOT STARTED | Unassigned/—/— | Non-default preparation delegated to TASK-15A/C13a | All required live gates reviewed before default cutover; final default/rollback smoke after activation |
 
 **Round 1 stop condition (satisfied):** explicit Round 2 approval was granted on
 2026-11-03. Continue only in task order and preserve each named checkpoint. Do not
@@ -928,3 +933,95 @@ been rerun with the fix, and no VM or live acceptance campaign was started. The
 follow-up fix is committed locally as
 `232180b0a1c9440d40c29adbf256f0bd995dc3e7`; this ledger-only commit records its
 SHA. No push was performed.
+
+## Acceptance-readiness planning revision — 2026-11-05
+
+**Authority:** owner requested a plan only, no implementation, to resolve the
+known blockers before host acceptance and the next phase. Updated canonical
+plan/tasks/progress; application code, working runtime and credentials untouched.
+
+**Owner-reported host evidence:** clean detached worktree on
+`336cf69c8b287f3c7f6e3539efdae7c1d5bf9503`; run ID
+`ec97a5616e63467b961ccb8d1649a6bb`. Memory diagnostic returned `ok: true`,
+36,224 MiB available and no finite cgroup cap. Full read-only preflight returned
+PASS on all checks with 36,201 MiB available, 8,192 MiB requested + 512 MiB reserve,
+no missing tools and no run/evidence collision. Source tree hash:
+`d610355c86bdd89ce2d6de4670e6d57fb2cc717bb0fbfbddaeafd9dfd8e8a39c`.
+These are the owner's supplied results, not tests run by this planning session.
+No VM boot, live acceptance campaign or credential operation was reported.
+
+**Decisions confirmed with owner:**
+- Named separate prerequisites: C13a routes/rollback, then C13b campaign completion.
+  The transition dispatcher stays routed to Docker pending acceptance; the
+  intended released default remains VM, with Docker optional. C14 is the later
+  cutover, not a blocker to preparing the route E2E-DAILY tests.
+- Test Ollama and llama.cpp using existing services; perform read-only discovery
+  later and explicitly select endpoints/model IDs before live execution.
+- Remote provider is OpenAI through human browser sign-in. The runner must open
+  the browser and wait; credentials are never supplied to the agent/chat. Offer
+  opt-out early and at final auth checks; reuse the campaign's authorized login
+  during intermediate stages, with no unnecessary repeated prompts. Skip blocks
+  dependent OpenAI/auth gates, not independent local/boot/security work.
+- Staged bounded sessions: up to 60 minutes per automated stage/attempt, tighter
+  operation/callback deadlines retained, human pauses distinct from automation;
+  one diagnosed fresh retry per revision inside the approved total budget.
+
+**Remaining pre-execution choices:** exact local/remote model IDs/endpoints,
+supported pinned OpenCode comparison version, paid OpenAI usage allowance, total
+campaign/download/disk limits, and explicit consent for sensitive guest storage,
+run-owned private auth export/reimport/recursive forwarding and destructive test
+profiles. Browser interaction is not blanket permission for those operations.
+Refresh unavailable in the budget stays BLOCKED rather than being fabricated.
+
+**Next work after C13a:**
+1. TASK-15B/C13b only after separate authorization: first audit all gate/subcheck
+   procedures and actual nested topology;
+   implement missing drivers, private selected-provider config, exact-run staged
+   resume, optional human browser checkpoints, workload/state-retention and final
+   cleanup evidence; publish a friendly stepwise host handoff and pass local tests.
+2. Review exact final revision/plan and obtain scoped campaign approval. Fresh
+   preflight → clean/usability → optional early login → providers/daily/permissions
+   → real work/retention/lifecycle → recursion/boundaries/agents → final optional
+   auth → exact teardown/evidence review. Preserve independent partial results.
+3. Only once required gates pass and are reviewed: remaining TASK-16/C14 docs/CI,
+   separately authorized default activation, final default/rollback smoke. No
+   final delivery/merge authority implied.
+
+The planning session did not run commands against the owner's host. This C13a
+implementation ran only local fixture/regression checks; it did not exercise the
+working Docker session, create a VM, run acceptance, or touch credentials.
+
+Planning validation: `git diff --check` PASS; Python stdlib integrity check of
+the three changed Markdown files PASS (local links, balanced fences, no conflict
+markers, all fifteen gates and eighteen task sections retained). The repository
+docs-consistency command (`python3 -B scripts/check-docs-consistency.py`) exits 1
+with the same eight pre-existing README/decision-log drift/link findings across
+106 checks (same eight README/decision-log findings reported before C13a; no new
+failure category). `vm-migration-plan.md` remains untracked, excluded and unchanged at SHA-256
+`3d6ee2115423272b88a8efd8d4d33462318d5ae4c537841091e513ee5e2d1374`.
+
+## C13a implementation closeout — 2026-11-05
+
+**Authorization:** user authorized implementation mode for C13a only, reaffirming
+the final product default is VM and Docker is an optional fallback. This is a
+transition-stage route: until C14 acceptance/cutover, `lab` continues to delegate
+to Docker; `lab-docker` makes Docker explicit, and `lab vm` invokes the existing
+fail-closed VM CLI. VM `run`/`up` gates are unchanged.
+
+**Changes:** moved the existing Docker launcher intact to executable `lab-docker`
+and made `lab` a thin dispatcher that preserves argv and legacy source-helper
+behavior. Added Docker-side permission parsing because the old `--permissions`
+flag was silently ignored: ask omits auto, auto/`--auto-accept` emits one OpenCode
+`--auto`, conflicts/unsupported modes fail, Aider rejects auto, and permission
+override flags after `--` are refused. No permission config is rewritten, so
+native OpenCode explicit deny rules remain in force. Updated route help/README for
+the temporary transition and intended VM default. Acceptance fixture now expects
+the staged rollback executable while keeping live no-recreation smoke BLOCKED.
+
+**Local validation:** `bats tests/` 141 PASS; Python unittest discovery for
+`test_vm_*.py` 281 PASS; `bash -n lab lab-docker lab-vm`, ShellCheck on those three
+launchers and `git diff --check` PASS. `scripts/check-docs-consistency.py` remains
+exit 1 with eight previously recorded README/decision-log drift/link findings
+across 106 checks. No live acceptance, actual Docker invocation, host session
+reuse test, VM boot or credential activity. C13a is committed locally at
+`599e9ef`; C13b and C14 remain pending later authorization. No push.
