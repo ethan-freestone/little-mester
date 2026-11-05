@@ -85,7 +85,7 @@ class HostAcceptanceTests(unittest.TestCase):
                 "supported_linux_x86_64", "kvm_device_read_write", "cpu_virtualization_exposed",
                 "required_tools", "memory_budget", "snapshot_disk_budget",
                 "listener_inventory_readable", "unique_run_namespace", "private_campaign_parent",
-                "unique_run_evidence", "private_evidence_directory",
+                "unique_run_evidence", "unique_run_canary", "private_evidence_directory",
             },
         )
         self.assertFalse(acceptance._namespace_path(self.state_root, acceptance._run_name(RUN_ID)).exists())
@@ -213,21 +213,28 @@ class HostAcceptanceTests(unittest.TestCase):
         report_root = run_root.parent / "reports"
         report_root.mkdir(mode=0o700)
         report = {
-            "schema_version": 1, "workflow_version": 1, "run_id": RUN_ID,
+            "schema_version": 1, "workflow_version": acceptance.WORKFLOW_VERSION, "run_id": RUN_ID,
             "run_name": acceptance._run_name(RUN_ID),
             "created_utc": "2026-11-05T00:00:00+00:00",
             "source": {"source_head": "a" * 40, "tree_sha256": "b" * 64,
                        "entry_count": 10, "total_bytes": 4096},
             "snapshot": {"tree_sha256": "c" * 64, "entry_count": 10, "total_bytes": 4096},
             "suites": suites,
-            "required_gates": sorted({gate for suite in suites for gate in acceptance.SUITE_GATES[suite]}),
+            "required_gates": acceptance._required_gates(suites),
+            "acceptance_scope": acceptance._acceptance_scope(suites),
+            "campaign_scope": acceptance._campaign_scope(suites, 8, None, False, 3600),
+            "synthetic_canary": {"status": "PENDING", "encoding_checks": ["raw", "hex", "base64"]},
             "stages": {stage: "NOT_RUN" for stage in acceptance.STAGE_ORDER},
             "stage_elapsed_ms": {stage: 0 for stage in acceptance.STAGE_ORDER},
             "legacy_elapsed_ms": 0,
             "approved_total_budget_seconds": 3600,
             "provider_config_sha256": None,
             "owned_profiles": [],
-            "gates": {name: {"status": "NOT_RUN"} for name in acceptance.GATE_IDS},
+            "gates": {
+                name: ({"status": "DEFERRED", "reason_code": acceptance.DEFERRED_GATE_REASONS[name]}
+                       if name in acceptance.DEFERRED_GATE_REASONS else {"status": "NOT_RUN"})
+                for name in acceptance.GATE_IDS
+            },
             "result": "BLOCKED",
         }
         report_path = report_root / f"{acceptance._run_name(RUN_ID)}.json"
@@ -248,17 +255,80 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(lock_path.stat().st_mode), 0o600)
 
     def test_campaign_cannot_report_pass_before_exact_teardown(self):
-        gates = {gate: {"status": "PASS"} for gate in acceptance.SUITE_GATES["clean"]}
+        gates = {gate: {"status": "PASS"} for gate in acceptance._required_gates(["clean"])}
         report = {
-            "required_gates": list(acceptance.SUITE_GATES["clean"]),
+            "suites": ["clean"],
+            "required_gates": acceptance._required_gates(["clean"]),
+            "acceptance_scope": acceptance._acceptance_scope(["clean"]),
             "gates": gates,
-            "cleanup": {"status": "PASS"},
+            "cleanup": {"status": "PASS", "synthetic_canary_removed": True},
+            "synthetic_canary": {"status": "REMOVED"},
             "stages": {stage: "PASS" for stage in acceptance.STAGE_ORDER},
+        }
+        report["gates"]["SEC-SECRET"] = {
+            "status": "NOT_RUN", "final_report_check": {"status": "PASS"},
         }
         report["stages"]["teardown"] = "NOT_RUN"
         self.assertEqual(acceptance._campaign_result(report), "BLOCKED")
         report["stages"]["teardown"] = "PASS"
+        report["synthetic_canary"]["status"] = "GENERATED"
+        self.assertEqual(acceptance._campaign_result(report), "BLOCKED")
+        report["synthetic_canary"]["status"] = "REMOVED"
         self.assertEqual(acceptance._campaign_result(report), "PASS")
+
+    def test_deferred_live_auth_does_not_mask_required_local_failure(self):
+        suites = ["human"]
+        required = acceptance._required_gates(suites)
+        gates = {gate: {"status": "PASS"} for gate in required}
+        gates["HUMAN-AUTH"] = {
+            "status": "DEFERRED", "reason_code": acceptance.DEFERRED_GATE_REASONS["HUMAN-AUTH"],
+        }
+        report = {
+            "suites": suites, "required_gates": required,
+            "acceptance_scope": acceptance._acceptance_scope(suites), "gates": gates,
+            "cleanup": {"status": "PASS", "synthetic_canary_removed": True},
+            "synthetic_canary": {"status": "REMOVED"},
+            "stages": {stage: "PASS" for stage in acceptance.STAGE_ORDER},
+        }
+        report["gates"]["SEC-SECRET"] = {
+            "status": "NOT_RUN", "final_report_check": {"status": "PASS"},
+        }
+        self.assertNotIn("HUMAN-AUTH", required)
+        self.assertEqual(acceptance._campaign_result(report), "PASS")
+        report["gates"]["HUMAN-PERM"] = {"status": "BLOCKED", "reason_code": "fixture_failure"}
+        self.assertEqual(acceptance._campaign_result(report), "BLOCKED")
+
+    def test_nested_campaign_scope_requires_tui_and_reserves_teardown_budget(self):
+        required = acceptance._required_gates(["boundary"])
+        self.assertIn("HUMAN-TUI", required)
+        self.assertEqual(
+            acceptance._remaining_campaign_seconds(3600, 0, 0, stage="nested-boundaries-agents"),
+            3600 - acceptance.TEARDOWN_RESERVE_SECONDS,
+        )
+        self.assertEqual(
+            acceptance._remaining_campaign_seconds(3600, 0, 0, stage="teardown"), 3600,
+        )
+
+    def test_canary_subchecks_reflect_only_their_manifested_artifacts(self):
+        scan = {"checks": [
+            {"id": "snapshot_workspace", "status": "PASS"},
+            {"id": "snapshot_git_history", "status": "PASS"},
+            {"id": "profile_overlay_outer", "status": "BLOCKED"},
+            {"id": "campaign_logs_outer", "status": "PASS"},
+        ]}
+        self.assertEqual(acceptance._canary_check_status(
+            scan, exact_ids={"snapshot_workspace", "snapshot_git_history"},
+        ), "PASS")
+        self.assertEqual(acceptance._canary_check_status(
+            scan, prefixes=("profile_overlay_", "campaign_logs_"),
+        ), "BLOCKED")
+        scan["checks"][0]["status"] = "FAIL"
+        self.assertEqual(acceptance._canary_check_status(
+            scan, exact_ids={"snapshot_workspace", "snapshot_git_history"},
+        ), "FAIL")
+        self.assertEqual(acceptance._canary_check_status(
+            scan, exact_ids={"snapshot_workspace", "snapshot_git_history", "missing"},
+        ), "BLOCKED")
 
     def test_teardown_can_follow_an_early_stop_or_stale_stage_marker(self):
         report = {"stages": {stage: "NOT_RUN" for stage in acceptance.STAGE_ORDER}}
@@ -304,7 +374,6 @@ class HostAcceptanceTests(unittest.TestCase):
         report = acceptance._read_private_json(report_path)
         report["stages"]["teardown"] = "RUNNING"
         acceptance._atomic_replace_json(report_path, report)
-
         def exact_delete(_state_root, run_name, confirm_name, _proc):
             self.assertEqual(run_name, acceptance._run_name(RUN_ID))
             self.assertEqual(confirm_name, run_name)
@@ -370,6 +439,12 @@ class HostAcceptanceTests(unittest.TestCase):
                     self.state_root, self.source, RUN_ID, ["clean", "model"], "d" * 64,
                     {**identity, "tree_sha256": "f" * 64},
                 )
+            changed_scope = {**report["campaign_scope"], "memory_gib": 4}
+            with self.assertRaises(acceptance.AcceptanceError):
+                acceptance._resume_campaign(
+                    self.state_root, self.source, RUN_ID, ["clean", "model"], "d" * 64,
+                    identity, changed_scope,
+                )
 
     def test_campaign_resume_revalidates_profile_and_listener_identity(self):
         _run_root, _child_state, _workspace, report_path = self._new_campaign_fixture(["clean"])
@@ -402,10 +477,41 @@ class HostAcceptanceTests(unittest.TestCase):
         acceptance._mark_stage_running(report, "clean-usability")
         report["stages"]["clean-usability"] = "BLOCKED"
         acceptance._mark_stage_running(report, "early-auth")
-        report["stages"]["early-auth"] = "BLOCKED"
+        report["stages"]["early-auth"] = "DEFERRED"
         acceptance._mark_stage_running(report, "providers-daily-permissions")
         with self.assertRaises(acceptance.AcceptanceError):
             acceptance._mark_stage_running(report, "providers-daily-permissions")
+
+    def test_openai_auth_compatibility_stages_are_explicitly_deferred_without_auth_calls(self):
+        run_root, _child_state, workspace, report_path = self._new_campaign_fixture(["clean", "human"])
+        report = acceptance._read_private_json(report_path)
+        self.assertEqual(report["gates"]["HUMAN-AUTH"]["status"], "DEFERRED")
+        report["campaign_scope"] = acceptance._campaign_scope(
+            ["clean", "human"], 8, "", False, 3600,
+        )
+        report["provider_config_sha256"] = ""
+        report["requested_effects"] = {
+            "selected_guest_update_targets": [], "selected_guest_updates_authorized": False,
+        }
+        report["stages"]["clean-usability"] = "PASS"
+        acceptance._atomic_replace_json(report_path, report)
+        preflight = {"result": "PASS", "provider_config": {"sha256": ""},
+                     "source": report["source"]}
+
+        with mock.patch.object(acceptance, "preflight", return_value=preflight), \
+                mock.patch.object(acceptance, "_resume_campaign",
+                                  return_value=(report, run_root, run_root / "state", workspace)), \
+                mock.patch.object(acceptance, "_openai_auth_checkpoint") as auth_checkpoint, \
+                mock.patch.object(acceptance, "_provider_stream_checks") as stream_checks:
+            early, _ = acceptance.execute_stage(
+                self.source, self.state_root, RUN_ID, ["clean", "human"], 8, RUN_ID,
+                "early-auth", approved_total_minutes=60,
+            )
+            self.assertEqual(early["early_auth"]["status"], "DEFERRED")
+            self.assertEqual(early["stages"]["early-auth"], "DEFERRED")
+            self.assertEqual(early["early_auth"]["reason_code"], "owner_deferred_live_openai")
+            auth_checkpoint.assert_not_called()
+            stream_checks.assert_not_called()
 
     def test_approved_time_budget_is_explicit_and_tightens_automation_deadline(self):
         self.assertEqual(acceptance._approved_budget_seconds(30), 1800)
@@ -415,6 +521,22 @@ class HostAcceptanceTests(unittest.TestCase):
         with acceptance._stage_budget():
             acceptance._tighten_stage_budget(5)
             self.assertLessEqual(acceptance._bounded_timeout(60), 5)
+
+    def test_insufficient_teardown_reserve_is_rejected_before_attempt_registration(self):
+        initial = {
+            "result": "PASS", "provider_config": {"sha256": "c" * 64},
+            "source": {"source_head": "a" * 40, "tree_sha256": "b" * 64},
+        }
+        with mock.patch.object(acceptance, "preflight", return_value=initial), \
+                mock.patch.object(acceptance, "_register_campaign_attempt") as register, \
+                mock.patch.object(acceptance, "_new_campaign") as create, \
+                self.assertRaises(acceptance.AcceptanceError):
+            acceptance.execute_campaign(
+                self.source, self.state_root, RUN_ID, ["clean"], 8, RUN_ID,
+                workflow_stage="clean-usability", approved_total_minutes=30,
+            )
+        register.assert_not_called()
+        create.assert_not_called()
 
     def test_attempt_ledger_allows_one_diagnosed_retry_and_binds_exact_revision(self):
         source_identity = {"source_head": "a" * 40, "tree_sha256": "b" * 64}
@@ -433,6 +555,11 @@ class HostAcceptanceTests(unittest.TestCase):
             "schema_version": 1, "run_id": prior_id,
             "run_name": acceptance._run_name(prior_id), "result": "BLOCKED",
             "source": source_identity, "provider_config_sha256": "c" * 64,
+            "campaign_scope": {
+                "scope_id": acceptance.LOCAL_FIRST_SCOPE_ID, "suites": [], "memory_gib": 8,
+                "provider_config_sha256": "c" * 64, "apply_selected_updates": False,
+                "approved_total_budget_seconds": 3600,
+            },
             "approved_total_budget_seconds": 3600,
             "stages": {stage: ("PASS" if stage == "teardown" else "BLOCKED")
                        for stage in acceptance.STAGE_ORDER},
@@ -501,6 +628,21 @@ class HostAcceptanceTests(unittest.TestCase):
             acceptance._register_campaign_attempt(
                 self.state_root, "d" * 32, source_identity, "c" * 64,
                 retry_of=RUN_ID, retry_reason="not_run", approved_total_budget_seconds=3600,
+            )
+
+    def test_retry_cannot_change_local_first_scope_or_teardown_budget(self):
+        source_identity = {"source_head": "a" * 40, "tree_sha256": "b" * 64}
+        scope = acceptance._campaign_scope(["clean", "boundary"], 8, "c" * 64, False, 3600)
+        acceptance._register_campaign_attempt(
+            self.state_root, RUN_ID, source_identity, "c" * 64,
+            retry_of=None, retry_reason=None, approved_total_budget_seconds=3600,
+            campaign_scope=scope,
+        )
+        with self.assertRaises(acceptance.AcceptanceError):
+            acceptance._register_campaign_attempt(
+                self.state_root, "abcdefabcdefabcdefabcdefabcdefab", source_identity, "c" * 64,
+                retry_of=RUN_ID, retry_reason="diagnosed_failure", approved_total_budget_seconds=3600,
+                campaign_scope={**scope, "memory_gib": 4},
             )
 
     def test_workload_gate_requires_compose_retention_and_exact_cleanup_before_owner_step(self):
@@ -601,7 +743,7 @@ class HostAcceptanceTests(unittest.TestCase):
         ))
         self.assertIsNone(acceptance._validate_provider_stream_report(b"not json", "ollama"))
 
-    def test_openai_noninteractive_skip_does_not_touch_guest_or_block_local_provider(self):
+    def test_openai_live_auth_is_deferred_without_blocking_local_provider(self):
         report = {"provider_config": {"providers": [{"provider": "openai", "model_id": "openai/gpt-4.1"}]},
                   "gates": {"HOST-CLEAN": {"status": "PASS"}}}
         with mock.patch.object(acceptance.sys, "stdin", SimpleNamespace(isatty=lambda: False)), \
@@ -635,9 +777,12 @@ class HostAcceptanceTests(unittest.TestCase):
             outcome = acceptance._provider_stream_checks(
                 self.state_root, RUN_ID, self.source, selections, 8,
             )
-        self.assertEqual(outcome["status"], "BLOCKED")
-        self.assertEqual([item["status"] for item in outcome["providers"]], ["PASS", "BLOCKED"])
-        self.assertEqual(outcome["providers"][1]["reason_code"], "owner_auth_checkpoint_unavailable")
+        self.assertEqual(outcome["status"], "PASS")
+        statuses = {item["provider"]: item["status"] for item in outcome["providers"]}
+        self.assertEqual(statuses, {"ollama": "PASS", "openai": "DEFERRED"})
+        self.assertEqual(next(item for item in outcome["providers"]
+                              if item["provider"] == "openai")["reason_code"],
+                         "owner_deferred_live_openai")
 
     def test_execute_timeout_retains_gate_cause_and_exact_run_report(self):
         run_root, child_state, workspace, report_path = self._new_campaign_fixture(["clean"])
@@ -743,9 +888,11 @@ class HostAcceptanceTests(unittest.TestCase):
         report_root.mkdir(mode=0o700, exist_ok=True)
         report_path = report_root / f"{acceptance._run_name(RUN_ID)}.json"
         report = {
-            "schema_version": 1, "workflow_version": 1, "run_id": RUN_ID,
+            "schema_version": 1, "workflow_version": acceptance.WORKFLOW_VERSION, "run_id": RUN_ID,
             "run_name": acceptance._run_name(RUN_ID), "suites": suites,
-            "required_gates": sorted({gate for suite in suites for gate in acceptance.SUITE_GATES[suite]}),
+            "required_gates": acceptance._required_gates(suites),
+            "acceptance_scope": acceptance._acceptance_scope(suites),
+            "campaign_scope": acceptance._campaign_scope(suites, 8, None, False, 3600),
             "stages": {stage: ("NOT_RUN" if stage == "teardown" else "BLOCKED")
                        for stage in acceptance.STAGE_ORDER},
             "stage_elapsed_ms": {stage: (0 if stage == "teardown" else 10_000)
@@ -754,6 +901,7 @@ class HostAcceptanceTests(unittest.TestCase):
             "approved_total_budget_seconds": 3600,
             "provider_config_sha256": None,
             "gates": gates or {name: {"status": "BLOCKED"} for name in acceptance.GATE_IDS},
+            "synthetic_canary": {"status": "PENDING", "encoding_checks": ["raw", "hex", "base64"]},
             "owned_profiles": owned or [], "result": "BLOCKED",
             "verified_guest_opencode_version": "2.2.5",
         }
@@ -787,6 +935,33 @@ class HostAcceptanceTests(unittest.TestCase):
                 list(acceptance.HUMAN_CHECKLISTS["HUMAN-PERM"]),
             )
 
+    def test_deferred_auth_does_not_block_completed_owner_stage(self):
+        _run_root, report_path = self._campaign_report(["human"])
+        report = acceptance._read_private_json(report_path)
+        for gate in report["required_gates"]:
+            report["gates"][gate] = {"status": "PASS"}
+        report["gates"]["HOST-CLEAN"] = {"status": "PASS"}
+        report["gates"]["HUMAN-TUI"] = {
+            "status": "BLOCKED", "reason_code": "owner_observation_required",
+        }
+        report["gates"]["HUMAN-AUTH"] = {
+            "status": "DEFERRED", "reason_code": "owner_deferred_live_openai",
+        }
+        report["stages"]["providers-daily-permissions"] = "BLOCKED"
+        acceptance._atomic_replace_json(report_path, report)
+        acceptance.record_human_observation(
+            self.state_root, RUN_ID, RUN_ID, "HUMAN-TUI", "PASS", "2.2.5",
+            list(acceptance.HUMAN_CHECKLISTS["HUMAN-TUI"]),
+        )
+        report = acceptance._read_private_json(report_path)
+        self.assertEqual(report["stages"]["providers-daily-permissions"], "PASS")
+        self.assertEqual(report["gates"]["HUMAN-AUTH"]["status"], "DEFERRED")
+        with self.assertRaises(acceptance.AcceptanceError):
+            acceptance.record_human_observation(
+                self.state_root, RUN_ID, RUN_ID, "HUMAN-AUTH", "PASS", "2.2.5",
+                list(acceptance.HUMAN_CHECKLISTS["HUMAN-AUTH"]),
+            )
+
     def test_owner_cannot_override_missing_docker_rollback_prerequisite(self):
         gates = {name: {"status": "BLOCKED", "reason_code": "not_run"}
                  for name in acceptance.GATE_IDS}
@@ -815,6 +990,49 @@ class HostAcceptanceTests(unittest.TestCase):
             self.state_root, acceptance._run_name(RUN_ID), acceptance._run_name(RUN_ID), Path("/proc"),
         )
         self.assertEqual(acceptance._read_private_json(report_path)["cleanup"]["status"], "PASS")
+
+    def test_cleanup_removes_only_the_exact_private_canary_and_redacts_final_report(self):
+        run_root, report_path = self._campaign_report(["clean"], owned=[])
+        acceptance._create_canary_fixture(self.state_root, RUN_ID)
+        canary_path = acceptance._canary_path(self.state_root, RUN_ID)
+        checker = acceptance._load_module("fixture_canary", acceptance.CANARY_CHECK_PATH)
+        canary = checker.read_canary(canary_path)
+        report = acceptance._read_private_json(report_path)
+        report["synthetic_canary"] = {
+            "status": "GENERATED", "encoding_checks": ["raw", "hex", "base64"],
+        }
+        acceptance._atomic_replace_json(report_path, report)
+        original_load_module = acceptance._load_module
+
+        def remove_run(*_args):
+            shutil.rmtree(run_root)
+            return {"deleted_run": acceptance._run_name(RUN_ID)}
+
+        def load_module(name, path):
+            if name == "vm_host_acceptance_canary_cleanup":
+                return checker
+            if name == "vm_host_acceptance_canary_finalize":
+                return checker
+            if name == "vm_host_acceptance_paths_cleanup":
+                return SimpleNamespace(recursion_run_delete=remove_run)
+            return original_load_module(name, path)
+
+        with mock.patch.object(acceptance, "_load_module", side_effect=load_module):
+            result = acceptance.cleanup_campaign(self.state_root, RUN_ID, RUN_ID)
+
+        self.assertEqual(result["cleanup"], "PASS")
+        self.assertFalse(canary_path.exists())
+        final_report = acceptance._read_private_json(report_path)
+        self.assertEqual(final_report["synthetic_canary"]["status"], "REMOVED")
+        self.assertTrue(final_report["cleanup"]["synthetic_canary_removed"])
+        self.assertEqual(final_report["gates"]["SEC-SECRET"]["final_report_check"]["status"], "PASS")
+        self.assertEqual(
+            final_report["gates"]["SEC-SECRET"]["required_subchecks"]
+            ["canary-absent-from-campaign-and-self-test-reports"], "PASS",
+        )
+        raw_report = report_path.read_bytes()
+        self.assertNotIn(canary, raw_report)
+        self.assertNotIn(canary.hex().encode("ascii"), raw_report)
 
     def test_cleanup_gracefully_suspends_owned_profiles_deepest_first_before_delete(self):
         owned = [

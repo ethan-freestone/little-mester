@@ -5,8 +5,8 @@ Planning is read-only. Live work uses exact-run ``--start``/``--resume`` stages,
 an explicit total-time ceiling, and ``--confirm-run-id``. The one-shot ``--execute``
 path is disabled. The runner never selects a pre-existing VM, installs host
 packages, changes host networking, or cleans assets outside its private run
-manifest. Human observations remain BLOCKED until recorded by a person through
-the documented checkpoint.
+manifest. Required human observations remain BLOCKED until recorded by a person;
+the local-first scope records live OpenAI auth gates as DEFERRED without action.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import select
 import shlex
 import shutil
@@ -41,6 +42,7 @@ PATHS_PATH = ROOT / "lib/vm/paths.py"
 SNAPSHOT_PATH = ROOT / "scripts/vm-recursion-workspace.py"
 MEMORY_PATH = ROOT / "scripts/vm_memory_budget.py"
 ISOLATION_PATH = ROOT / "scripts/vm-guest-isolation-check.py"
+CANARY_CHECK_PATH = ROOT / "scripts/vm-canary-check.py"
 RUN_NAME_RE = re.compile(r"accept-[a-f0-9]{12}")
 PROFILE_RE = re.compile(
     r"accept-[a-f0-9]{12}-(?:outer|agent|workload|provider-(?:ollama|llamacpp|openai))"
@@ -48,6 +50,7 @@ PROFILE_RE = re.compile(
 RUN_ID_RE = re.compile(r"[a-f0-9]{32}")
 MAX_REPORT_BYTES = 2 * 1024 * 1024
 MAX_PROVIDER_CONFIG_BYTES = 16 * 1024
+WORKFLOW_VERSION = 2
 DEFAULT_RESERVE_MIB = 512
 PROVIDER_DISCOVERY_ENDPOINTS = {
     "ollama": "http://127.0.0.1:11434",
@@ -60,8 +63,9 @@ OWNER_CHECKLISTS = {
         "warm-start-same-process-identity", "docker-rollback-without-recreation",
     ),
     "E2E-MODEL": (
-        "model-none-shell-and-auth", "each-configured-provider-selected", "five-real-streams-per-provider",
-        "provider-denial-and-missing-credential-errors", "no-model-response-or-credential-recorded",
+        "model-none-shell-and-auth", "each-selected-local-provider-selected",
+        "five-real-streams-per-selected-local-provider",
+        "local-provider-denial-and-missing-model-errors", "no-model-response-or-credential-recorded",
     ),
     "E2E-WORK": (
         "guest-only-postgres-compose", "health-and-query", "failing-test-fix-pass",
@@ -69,7 +73,7 @@ OWNER_CHECKLISTS = {
         "no-host-published-service-or-socket",
     ),
     "E2E-LIFE": (
-        "suspend-resume-identity", "auth-db-tools-keys-workspace-retained", "update-scan-cancel-noop",
+        "suspend-resume-identity", "local-db-tools-keys-workspace-retained", "update-scan-cancel-noop",
         "selected-apply-exact-version", "live-child-blocks-parent", "deepest-first-shutdown",
         "resize-memtotal-and-identity", "exact-teardown-no-residue", "base-workspace-reports-preserved",
     ),
@@ -82,9 +86,10 @@ OWNER_CHECKLISTS = {
         "escaping-symlinks-refused", "state-root-overlap-blocked", "one-export-verified",
     ),
     "SEC-SECRET": (
-        "canary-absent-from-snapshot-and-history", "canary-absent-from-seed-base-log-report",
-        "provider-forwarding-opt-in-only", "private-atomic-export-import", "export-failure-prevents-delete",
-        "refreshed-state-survives-restart-and-import",
+        "canary-absent-from-snapshot-and-history", "canary-absent-from-seed-base-and-logs",
+        "canary-absent-from-campaign-and-self-test-reports",
+        "provider-forwarding-opt-in-only", "synthetic-private-state-persistence-and-atomic-export-import",
+        "synthetic-export-failure-prevents-delete", "synthetic-refreshed-state-survives-restart-and-import",
     ),
     "HUMAN-TUI": (
         "single-command-entry", "warm-start-no-reboot", "metrics-sidebar-and-tool",
@@ -102,6 +107,17 @@ OWNER_CHECKLISTS = {
 }
 HUMAN_CHECKLISTS = {key: value for key, value in OWNER_CHECKLISTS.items() if key.startswith("HUMAN-")}
 OWNER_OBSERVATION_GATES = frozenset(OWNER_CHECKLISTS)
+LOCAL_FIRST_SCOPE_ID = "local-first-c14-v1"
+DEFERRED_GATE_REASONS = {"HUMAN-AUTH": "owner_deferred_live_openai"}
+DEFERRED_CHECKS = {
+    "E2E-MODEL": ("live-openai-browser-login", "live-openai-streaming-and-paid-use",
+                  "live-openai-refresh-and-expiry"),
+    "E2E-LIFE": ("live-openai-auth-state-retained",),
+    "SEC-FS": ("one-export-verified",),
+    "SEC-SECRET": ("live-disposable-credential-atomic-export-import",
+                    "live-export-failure-before-delete", "live-refreshed-credential-state-import"),
+    "HUMAN-AUTH": OWNER_CHECKLISTS["HUMAN-AUTH"],
+}
 
 GATE_IDS = (
     "HOST-PREFLIGHT", "HOST-CLEAN", "E2E-DAILY", "E2E-MODEL", "E2E-WORK",
@@ -135,6 +151,7 @@ STAGE_SUITES = {
     "teardown": (),
 }
 STAGE_BUDGET_SECONDS = 60 * 60
+TEARDOWN_RESERVE_SECONDS = 35 * 60
 MAX_APPROVED_TOTAL_MINUTES = 720
 _STAGE_DEADLINE: float | None = None
 _STAGE_STARTED_AT: float | None = None
@@ -179,6 +196,20 @@ def _tighten_stage_budget(total_remaining_seconds: int) -> None:
         raise AcceptanceError("stage deadline was not initialized")
     candidate = _STAGE_STARTED_AT + total_remaining_seconds
     _STAGE_DEADLINE = min(_STAGE_DEADLINE, candidate)
+
+
+def _remaining_campaign_seconds(approved_seconds: int, prior_elapsed_ms: int,
+                               campaign_elapsed_ms: int, *, stage: str | None) -> int:
+    if (type(approved_seconds) is not int or type(prior_elapsed_ms) is not int
+            or type(campaign_elapsed_ms) is not int or prior_elapsed_ms < 0
+            or campaign_elapsed_ms < 0):
+        raise AcceptanceError("campaign time accounting is invalid")
+    reserve = TEARDOWN_RESERVE_SECONDS if stage != "teardown" else 0
+    elapsed_seconds = (prior_elapsed_ms + campaign_elapsed_ms + _stage_elapsed_ms()) // 1000
+    remaining = approved_seconds - elapsed_seconds - reserve
+    if remaining < 1:
+        raise AcceptanceError("approved campaign budget cannot preserve the 35-minute teardown reserve")
+    return remaining
 
 
 def _stage_elapsed_ms() -> int:
@@ -234,6 +265,125 @@ def _run_id(value: str | None) -> str:
 
 def _run_name(run_id: str) -> str:
     return f"accept-{run_id[:12]}"
+
+
+def _canary_path(state_root: Path, run_id: str) -> Path:
+    if RUN_ID_RE.fullmatch(run_id) is None:
+        raise AcceptanceError("campaign canary identity is invalid")
+    return state_root / f".vm-host-acceptance-canary-{run_id}.bin"
+
+
+def _create_canary_fixture(state_root: Path, run_id: str) -> None:
+    path = _canary_path(state_root, run_id)
+    token = secrets.token_urlsafe(48).encode("ascii")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as error:
+        raise AcceptanceError("private synthetic canary fixture could not be created") from error
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb", closefd=False) as stream:
+            stream.write(token)
+            stream.flush()
+            os.fsync(stream.fileno())
+    finally:
+        os.close(fd)
+
+
+def _remove_canary_fixture(state_root: Path, run_id: str, expected: bytes | None) -> bool:
+    path = _canary_path(state_root, run_id)
+    parent_fd = -1
+    fd = -1
+    try:
+        parent_fd = os.open(state_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        parent_info = os.fstat(parent_fd)
+        if (parent_info.st_uid != os.getuid() or stat.S_IMODE(parent_info.st_mode) != 0o700):
+            return False
+        if expected is None:
+            try:
+                os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                return False
+            except FileNotFoundError:
+                return True
+        fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     dir_fd=parent_fd)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size != len(expected)):
+            return False
+        content = bytearray()
+        while len(content) <= len(expected):
+            chunk = os.read(fd, len(expected) + 1 - len(content))
+            if not chunk:
+                break
+            content.extend(chunk)
+        if bytes(content) != expected or _canary_file_signature(info) != _canary_file_signature(os.fstat(fd)):
+            return False
+        named = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        if _canary_file_signature(named) != _canary_file_signature(info):
+            return False
+        os.unlink(path.name, dir_fd=parent_fd)
+        return True
+    except OSError:
+        return False
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
+def _canary_file_signature(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _required_gates(suites: list[str]) -> list[str]:
+    selected = {gate for suite in suites for gate in SUITE_GATES[suite]
+                if gate not in DEFERRED_GATE_REASONS}
+    if selected.intersection({"E2E-SELF", "E2E-DEPTH", "SEC-NET", "E2E-AGENTS"}):
+        selected.add("HUMAN-TUI")
+    return sorted(selected)
+
+
+def _acceptance_scope(suites: list[str]) -> dict[str, Any]:
+    selected = {gate for suite in suites for gate in SUITE_GATES[suite]}
+    deferred_gates = [
+        {"id": gate, "status": "DEFERRED", "reason_code": reason}
+        for gate, reason in DEFERRED_GATE_REASONS.items() if gate in selected
+    ]
+    deferred_checks = {
+        gate: [{"id": item, "status": "DEFERRED", "reason_code": "owner_deferred_live_openai"}
+               for item in checks]
+        for gate, checks in DEFERRED_CHECKS.items() if gate in selected
+    }
+    return {
+        "id": LOCAL_FIRST_SCOPE_ID,
+        "required_gates": _required_gates(suites),
+        "deferred_gates": deferred_gates,
+        "deferred_stages": [
+            {"id": stage, "status": "DEFERRED", "reason_code": "owner_deferred_live_openai"}
+            for stage in ("early-auth", "final-auth")
+        ],
+        "deferred_checks": deferred_checks,
+        "automated_auth_regressions": {
+            "status": "REQUIRED_OUTSIDE_CAMPAIGN",
+            "suite": "tests/test_vm_auth.py and related local auth regression tests",
+        },
+    }
+
+
+def _campaign_scope(suites: list[str], memory_gib: int, provider_config_sha256: str | None,
+                    apply_selected_updates: bool, approved_total_budget_seconds: int) -> dict[str, Any]:
+    return {
+        "scope_id": LOCAL_FIRST_SCOPE_ID,
+        "suites": list(suites),
+        "memory_gib": memory_gib,
+        "provider_config_sha256": provider_config_sha256,
+        "apply_selected_updates": apply_selected_updates,
+        "approved_total_budget_seconds": approved_total_budget_seconds,
+    }
 
 
 def _profile_name(run_id: str, role: str = "outer") -> str:
@@ -551,6 +701,19 @@ def preflight(source: Path, state_root: Path, run_id: str, memory_gib: int = 8,
     record("unique_run_evidence", existing_owned if resume else not report_collision,
            {"existing_exact_run": existing_owned} if resume else {"collision": report_collision},
            blocked=resume and not existing_owned or not resume and report_collision)
+    canary_path = _canary_path(state_root, run_id)
+    canary_collision = canary_path.exists() or canary_path.is_symlink()
+    canary_safe = False
+    if resume:
+        try:
+            canary_info = canary_path.lstat()
+            canary_safe = (stat.S_ISREG(canary_info.st_mode) and canary_info.st_uid == os.getuid()
+                           and canary_info.st_nlink == 1 and stat.S_IMODE(canary_info.st_mode) == 0o600
+                           and not canary_path.is_symlink())
+        except OSError:
+            canary_safe = False
+    record("unique_run_canary", canary_safe if resume else not canary_collision,
+           {"collision": canary_collision}, blocked=resume and not canary_safe or not resume and canary_collision)
     report_root_safe = True
     if report_path.parent.exists() or report_path.parent.is_symlink():
         try:
@@ -1716,14 +1879,23 @@ print(json.dumps({"provider":provider,"streams_attempted":5,"streams_passed":pas
 def _provider_stream_checks(state_root: Path, run_id: str, workspace: Path,
                             report: dict[str, Any], memory_gib: int) -> dict[str, Any]:
     entries = report.get("provider_config", {}).get("providers", [])
-    if not entries:
-        return {"status": "BLOCKED", "reason_code": "no_provider_selected",
+    if not isinstance(entries, list):
+        return {"status": "BLOCKED", "reason_code": "provider_manifest_invalid",
                 "providers": [], "automated_status": "BLOCKED"}
-    provider_results: list[dict[str, Any]] = []
+    provider_results: list[dict[str, Any]] = [
+        {"provider": "openai", "model_id": item.get("model_id"), "status": "DEFERRED",
+         "reason_code": "owner_deferred_live_openai"}
+        for item in entries if isinstance(item, dict) and item.get("provider") == "openai"
+    ]
+    local_entries = [item for item in entries if isinstance(item, dict)
+                     and item.get("provider") in {"ollama", "llamacpp"}]
+    if not local_entries:
+        return {"status": "BLOCKED", "reason_code": "local_provider_not_selected",
+                "providers": provider_results, "automated_status": "BLOCKED"}
     selections = {item.get("provider"): item for item in entries if isinstance(item, dict)}
     discovery = {item.get("provider"): item for item in
                  report.get("provider_config", {}).get("selections", []) if isinstance(item, dict)}
-    for provider in ("ollama", "llamacpp", "openai"):
+    for provider in ("ollama", "llamacpp"):
         selection = selections.get(provider)
         if selection is None:
             continue
@@ -1731,11 +1903,6 @@ def _provider_stream_checks(state_root: Path, run_id: str, workspace: Path,
         if provider != "openai" and validation.get("status") != "AVAILABLE":
             provider_results.append({"provider": provider, "status": "BLOCKED",
                                      "reason_code": "selected_provider_unavailable",
-                                     "streams_attempted": 0, "streams_passed": 0})
-            continue
-        if provider == "openai" and report.get("early_auth", {}).get("status") != "PASS":
-            provider_results.append({"provider": provider, "status": "BLOCKED",
-                                     "reason_code": "owner_auth_checkpoint_unavailable",
                                      "streams_attempted": 0, "streams_passed": 0})
             continue
         profile, data, reason = _ensure_provider_profile(
@@ -1764,7 +1931,8 @@ def _provider_stream_checks(state_root: Path, run_id: str, workspace: Path,
             result["reason_code"] = "provider_profile_suspend_unconfirmed"
         provider_results.append(result)
         _atomic_replace_json(_campaign_report_path(state_root, run_id), report)
-    all_passed = bool(provider_results) and all(item.get("status") == "PASS" for item in provider_results)
+    local_results = [item for item in provider_results if item.get("provider") in {"ollama", "llamacpp"}]
+    all_passed = bool(local_results) and all(item.get("status") == "PASS" for item in local_results)
     primary_profile = _profile_name(run_id)
     _primary, restore_reason = _resume_campaign_profile(
         state_root, run_id, report, primary_profile, memory_gib,
@@ -2011,7 +2179,7 @@ def _atomic_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def _new_campaign(state_root: Path, run_id: str, source: Path, suites: list[str],
-                  preflight_report: dict[str, Any]) -> tuple[Path, Path, Path]:
+                  preflight_report: dict[str, Any], campaign_scope: dict[str, Any]) -> tuple[Path, Path, Path]:
     paths = _load_module("vm_host_acceptance_paths", PATHS_PATH)
     created = paths.recursion_run_create(state_root, _run_name(run_id))
     run_root = Path(created["run_root"])
@@ -2028,14 +2196,17 @@ def _new_campaign(state_root: Path, run_id: str, source: Path, suites: list[str]
     snapshot = _load_module("vm_host_acceptance_snapshot", SNAPSHOT_PATH)
     report = {
         "schema_version": 1,
-        "workflow_version": 1,
+        "workflow_version": WORKFLOW_VERSION,
         "run_id": run_id,
         "run_name": _run_name(run_id),
         "created_utc": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         "source": preflight_report["source"],
         "snapshot": {"tree_sha256": None, "entry_count": None, "total_bytes": None},
         "suites": suites,
-        "required_gates": sorted({gate for suite in suites for gate in SUITE_GATES[suite]}),
+        "required_gates": _required_gates(suites),
+        "acceptance_scope": _acceptance_scope(suites),
+        "campaign_scope": campaign_scope,
+        "synthetic_canary": {"status": "PENDING", "encoding_checks": ["raw", "hex", "base64"]},
         "stages": {stage: "NOT_RUN" for stage in STAGE_ORDER},
         "stage_elapsed_ms": {stage: 0 for stage in STAGE_ORDER},
         "legacy_elapsed_ms": 0,
@@ -2043,11 +2214,20 @@ def _new_campaign(state_root: Path, run_id: str, source: Path, suites: list[str]
         "provider_config_sha256": preflight_report.get("provider_config", {}).get("sha256"),
         "protected_assets": ["default profiles", "shared state outside this run", "host Docker session", "credentials"],
         "owned_profiles": [],
-        "gates": {gate: {"status": "NOT_RUN"} for gate in GATE_IDS},
+        "gates": {
+            gate: ({"status": "DEFERRED", "reason_code": DEFERRED_GATE_REASONS[gate]}
+                   if gate in DEFERRED_GATE_REASONS else {"status": "NOT_RUN"})
+            for gate in GATE_IDS
+        },
         "result": "BLOCKED",
     }
     report_path = report_root / f"{_run_name(run_id)}.json"
     _atomic_json(report_path, report)
+    report["synthetic_canary"]["status"] = "GENERATING"
+    _atomic_replace_json(report_path, report)
+    _create_canary_fixture(state_root, run_id)
+    report["synthetic_canary"]["status"] = "GENERATED"
+    _atomic_replace_json(report_path, report)
     prepared = snapshot.prepare(source, run_root, 2 * 1024**3)
     workspace = Path(prepared["workspace"])
     report["snapshot"] = {
@@ -2089,13 +2269,25 @@ def _campaign_result(report: dict[str, Any]) -> str:
     gates = report.get("gates", {})
     if not isinstance(required, list) or not required or not isinstance(gates, dict):
         return "BLOCKED"
+    suites = report.get("suites")
+    if (not isinstance(suites, list) or any(suite not in ALL_SUITES for suite in suites)
+            or report.get("required_gates") != _required_gates(suites)
+            or report.get("acceptance_scope") != _acceptance_scope(suites)):
+        return "BLOCKED"
     statuses = [gates.get(gate, {}).get("status", "NOT_RUN") for gate in required]
     if "FAIL" in statuses:
         return "FAIL"
     cleanup = report.get("cleanup", {})
     stages = report.get("stages", {})
+    canary = report.get("synthetic_canary", {})
+    security = gates.get("SEC-SECRET", {})
     if (not all(status == "PASS" for status in statuses)
             or not isinstance(cleanup, dict) or cleanup.get("status") != "PASS"
+            or cleanup.get("synthetic_canary_removed") is not True
+            or not isinstance(canary, dict) or canary.get("status") != "REMOVED"
+            or not isinstance(security, dict)
+            or not isinstance(security.get("final_report_check"), dict)
+            or security["final_report_check"].get("status") != "PASS"
             or not isinstance(stages, dict) or stages.get("teardown") != "PASS"):
         return "BLOCKED"
     return "PASS"
@@ -2135,7 +2327,7 @@ def _load_attempt_ledger(state_root: Path) -> tuple[dict[str, Any], Path]:
         for item in ledger["attempts"]:
             required = {"revision_sha256", "run_id", "source_head", "source_tree_sha256",
                         "provider_config_sha256", "approved_total_budget_seconds",
-                        "prior_elapsed_ms", "started_utc", "retry_of", "retry_reason"}
+                        "scope_sha256", "prior_elapsed_ms", "started_utc", "retry_of", "retry_reason"}
             if (not isinstance(item, dict) or set(item) != required
                     or not isinstance(item.get("revision_sha256"), str)
                     or not re.fullmatch(r"[a-f0-9]{64}", item["revision_sha256"])
@@ -2145,6 +2337,8 @@ def _load_attempt_ledger(state_root: Path) -> tuple[dict[str, Any], Path]:
                     or re.fullmatch(r"[a-f0-9]{64}", item["source_tree_sha256"]) is None
                     or not isinstance(item.get("provider_config_sha256"), str)
                     or re.fullmatch(r"[a-f0-9]{64}", item["provider_config_sha256"]) is None
+                    or not isinstance(item.get("scope_sha256"), str)
+                    or re.fullmatch(r"[a-f0-9]{64}", item["scope_sha256"]) is None
                     or type(item.get("approved_total_budget_seconds")) is not int
                     or not 60 <= item["approved_total_budget_seconds"] <= MAX_APPROVED_TOTAL_MINUTES * 60
                     or type(item.get("prior_elapsed_ms")) is not int or item["prior_elapsed_ms"] < 0
@@ -2166,10 +2360,18 @@ def _load_attempt_ledger(state_root: Path) -> tuple[dict[str, Any], Path]:
 def _register_campaign_attempt(state_root: Path, run_id: str, source_identity: dict[str, Any],
                                provider_config_sha256: str, *, retry_of: str | None,
                                retry_reason: str | None,
-                               approved_total_budget_seconds: int) -> dict[str, Any]:
+                               approved_total_budget_seconds: int,
+                               campaign_scope: dict[str, Any] | None = None) -> dict[str, Any]:
     if (retry_of is None) != (retry_reason is None):
         raise AcceptanceError("a fresh retry requires both --retry-of and --retry-reason")
     revision = _attempt_revision(source_identity, provider_config_sha256)
+    scope = campaign_scope or {
+        "scope_id": LOCAL_FIRST_SCOPE_ID, "suites": [], "memory_gib": 8,
+        "provider_config_sha256": provider_config_sha256, "apply_selected_updates": False,
+        "approved_total_budget_seconds": approved_total_budget_seconds,
+    }
+    scope_raw = json.dumps(scope, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    scope_sha256 = hashlib.sha256(scope_raw).hexdigest()
     ledger, path = _load_attempt_ledger(state_root)
     prior = [item for item in ledger["attempts"] if item["revision_sha256"] == revision]
     if not 60 <= approved_total_budget_seconds <= MAX_APPROVED_TOTAL_MINUTES * 60:
@@ -2182,6 +2384,8 @@ def _register_campaign_attempt(state_root: Path, run_id: str, source_identity: d
             raise AcceptanceError("--retry-of is valid only after one prior exact-revision attempt")
     else:
         previous = prior[0]
+        if any(item.get("scope_sha256") != scope_sha256 for item in prior):
+            raise AcceptanceError("suite, memory, provider, update effects, or total budget changed; retry refused")
         if any(item["approved_total_budget_seconds"] != approved_total_budget_seconds for item in prior):
             raise AcceptanceError("approved total campaign budget cannot increase or change on retry")
         if (retry_of != previous["run_id"] or retry_reason is None
@@ -2198,6 +2402,7 @@ def _register_campaign_attempt(state_root: Path, run_id: str, source_identity: d
                 or previous_report.get("source", {}).get("source_head") != source_identity.get("source_head")
                 or previous_report.get("source", {}).get("tree_sha256") != source_identity.get("tree_sha256")
                 or previous_report.get("provider_config_sha256") != provider_config_sha256
+                or previous_report.get("campaign_scope") != scope
                 or retry_reason not in _diagnostic_reason_codes(previous_report)):
             raise AcceptanceError("retry reason is not diagnosed in the prior exact-revision campaign report")
         for item in prior:
@@ -2212,8 +2417,9 @@ def _register_campaign_attempt(state_root: Path, run_id: str, source_identity: d
                     or report["cleanup"].get("status") != "PASS"):
                 raise AcceptanceError("prior attempt time accounting is incomplete")
             prior_elapsed_ms += _campaign_elapsed_ms(report)
-        if prior_elapsed_ms >= approved_total_budget_seconds * 1000:
-            raise AcceptanceError("approved total campaign budget is exhausted; retry is refused")
+        if (prior_elapsed_ms + TEARDOWN_RESERVE_SECONDS * 1000
+                >= approved_total_budget_seconds * 1000):
+            raise AcceptanceError("approved budget cannot preserve the teardown reserve; retry is refused")
     if any(item["run_id"] == run_id for item in ledger["attempts"]):
         raise AcceptanceError("run ID already exists in the acceptance attempt ledger")
     entry = {
@@ -2223,6 +2429,7 @@ def _register_campaign_attempt(state_root: Path, run_id: str, source_identity: d
         "source_tree_sha256": source_identity.get("tree_sha256"),
         "provider_config_sha256": provider_config_sha256,
         "approved_total_budget_seconds": approved_total_budget_seconds,
+        "scope_sha256": scope_sha256,
         "prior_elapsed_ms": prior_elapsed_ms,
         "started_utc": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         "retry_of": retry_of,
@@ -2235,6 +2442,255 @@ def _register_campaign_attempt(state_root: Path, run_id: str, source_identity: d
         _atomic_json(path, ledger)
     return {"ordinal": len(prior) + 1, "retry_of": retry_of, "retry_reason": retry_reason,
             "prior_elapsed_ms": prior_elapsed_ms}
+
+
+def _canary_artifact_manifest(state_root: Path, run_id: str, report: dict[str, Any],
+                              report_path: Path) -> tuple[dict[str, Any], list[Path]]:
+    run_root = _namespace_path(state_root, _run_name(run_id))
+    child_state = run_root / "state"
+    workspace = run_root / "candidate-snapshot" / "workspace"
+    artifacts: list[dict[str, str]] = []
+    roots = [run_root, report_path.parent]
+
+    def add(artifact_id: str, path: Path, kind: str, reason_code: str | None = None) -> None:
+        entry = {"id": artifact_id, "path": str(path), "kind": kind}
+        if reason_code is not None:
+            entry["reason_code"] = reason_code
+        artifacts.append(entry)
+
+    add("snapshot_workspace", workspace, "tree")
+    add("snapshot_git_history", workspace / ".git", "git-loose")
+
+    profiles = report.get("owned_profiles")
+    if not isinstance(profiles, list):
+        raise AcceptanceError("campaign profile manifest is invalid for canary inspection")
+    role_depth = {"outer": 0, "agent": 1, "workload": 1,
+                  "provider-ollama": 0, "provider-llamacpp": 0, "provider-openai": 0}
+    seen: set[str] = set()
+    image_paths: dict[str, Path] = {}
+    image_unavailable = False
+    for item in profiles:
+        if not isinstance(item, dict) or set(item) != {"profile_name", "depth", "run_id"}:
+            raise AcceptanceError("campaign profile manifest is invalid for canary inspection")
+        name = item["profile_name"]
+        role = next((key for key in role_depth if name == _profile_name(run_id, key)), None) \
+            if isinstance(name, str) else None
+        if (role is None or item["run_id"] != run_id or item["depth"] != role_depth[role]
+                or name in seen):
+            raise AcceptanceError("campaign profile ownership is invalid for canary inspection")
+        seen.add(name)
+        profile_dir = child_state / "vm/profiles" / name
+        suffix = role.replace("-", "_")
+        add(f"seed_user_data_{suffix}", profile_dir / "seed.user-data", "file")
+        add(f"seed_iso_{suffix}", profile_dir / "seed.iso", "iso9660")
+        add(f"campaign_logs_{suffix}", profile_dir / "runs", "logs")
+        add(f"profile_overlay_{suffix}", profile_dir / "disk.qcow2", "opaque-qcow2")
+        try:
+            data = _profile_record(child_state, name)
+            image_path = Path(data["image_path"])
+            image_digest = data.get("image_sha256")
+            if (not isinstance(image_digest, str) or re.fullmatch(r"[a-f0-9]{64}", image_digest) is None
+                    or image_path != child_state / "vm/images" / image_digest / "base.qcow2"):
+                raise ValueError
+            image_paths[image_digest] = image_path
+        except (AcceptanceError, OSError, RuntimeError, ValueError, KeyError, TypeError):
+            image_unavailable = True
+
+    for digest, image_path in sorted(image_paths.items()):
+        image_id = f"base_image_{digest[:16]}"
+        add(image_id, image_path, "opaque-qcow2")
+        add(f"base_manifest_{digest[:16]}", image_path.parent / "manifest.json", "file")
+    if image_unavailable or not profiles:
+        missing_image = child_state / "vm/images/unverified/base.qcow2"
+        add("base_image_unverified", missing_image, "opaque-qcow2")
+
+    self_gate = report.get("gates", {}).get("E2E-SELF", {})
+    self_report_ref = self_gate.get("report_ref") if isinstance(self_gate, dict) else None
+    if self_report_ref is not None:
+        self_run_id = self_gate.get("run_id")
+        if (not isinstance(self_run_id, str) or RUN_ID_RE.fullmatch(self_run_id) is None
+                or self_report_ref != f"selftest-{self_run_id}.json"):
+            raise AcceptanceError("self-test report reference is invalid for canary inspection")
+        add("nested_self_test_report", report_path.parent / self_report_ref, "file")
+        diagnostics = self_gate.get("preserved_diagnostic_refs", [])
+        if not isinstance(diagnostics, list) or len(diagnostics) > 32:
+            raise AcceptanceError("self-test diagnostic manifest is invalid for canary inspection")
+        for index, reference in enumerate(diagnostics):
+            if (not isinstance(reference, dict) or reference.get("stage") != "expected_boot_failure"
+                    or not isinstance(reference.get("path"), str)
+                    or reference["path"] != f"selftest-{self_run_id}-failure.json"):
+                raise AcceptanceError("self-test diagnostic reference is invalid for canary inspection")
+            add(f"nested_self_test_diagnostic_{index}", report_path.parent / reference["path"], "file")
+        # The live self-test removes nested seed/images before returning its
+        # archive. Do not imply those transient artifacts were inspected.
+        add("nested_transient_images", run_root, "unsupported",
+            "nested_transient_images_not_available_for_post_run_inspection")
+
+    manifest = {
+        "schema_version": 1,
+        "required_ids": [item["id"] for item in artifacts],
+        "artifacts": artifacts,
+    }
+    return manifest, roots
+
+
+def _run_canary_scan(state_root: Path, run_id: str, report: dict[str, Any],
+                     report_path: Path) -> dict[str, Any]:
+    checker = _load_module("vm_host_acceptance_canary", CANARY_CHECK_PATH)
+    try:
+        canary = checker.read_canary(_canary_path(state_root, run_id))
+        manifest, roots = _canary_artifact_manifest(state_root, run_id, report, report_path)
+        return checker.scan_manifest(
+            canary, manifest, roots, timeout_seconds=_bounded_timeout(60),
+        )
+    except (AcceptanceError, OSError, RuntimeError, ValueError, KeyError, TypeError):
+        return {"schema_version": 1, "result": "BLOCKED",
+                "checks": [{"id": "campaign_manifest", "status": "BLOCKED",
+                            "reason_code": "canary_inspection_unavailable"}],
+                "limits": {"files_scanned": 0, "bytes_scanned": 0,
+                           "timeout_seconds": 60}}
+
+
+def _canary_result_reason(scan: dict[str, Any]) -> str | None:
+    checks = scan.get("checks")
+    if not isinstance(checks, list):
+        return "canary_inspection_unavailable"
+    for item in checks:
+        if isinstance(item, dict) and item.get("status") in {"FAIL", "BLOCKED"}:
+            reason = item.get("reason_code")
+            if isinstance(reason, str) and re.fullmatch(r"[a-z][a-z0-9_]{1,63}", reason):
+                return reason
+            return "canary_inspection_incomplete"
+    return None
+
+
+def _canary_check_status(scan: dict[str, Any], *, exact_ids: set[str] | None = None,
+                         prefixes: tuple[str, ...] = ()) -> str:
+    checks = scan.get("checks")
+    if not isinstance(checks, list):
+        return "BLOCKED"
+    selected = [item for item in checks if isinstance(item, dict)
+                and ((exact_ids is not None and item.get("id") in exact_ids)
+                     or any(isinstance(item.get("id"), str)
+                            and item["id"].startswith(prefix) for prefix in prefixes))]
+    if not selected or (exact_ids is not None
+                        and {item.get("id") for item in selected} != exact_ids):
+        return "BLOCKED"
+    statuses = [item.get("status") for item in selected]
+    if "FAIL" in statuses:
+        return "FAIL"
+    if any(status != "PASS" for status in statuses):
+        return "BLOCKED"
+    return "PASS"
+
+
+def _finalize_canary_report_check(report_path: Path, report: dict[str, Any],
+                                  canary: bytes | None) -> dict[str, Any]:
+    checker = _load_module("vm_host_acceptance_canary_finalize", CANARY_CHECK_PATH)
+    security = report.setdefault("gates", {}).setdefault("SEC-SECRET", {"status": "BLOCKED"})
+    if canary is None:
+        if security.get("status") != "FAIL":
+            security["status"] = "BLOCKED"
+            security["reason_code"] = "canary_fixture_unavailable"
+        security["final_report_check"] = {
+            "status": "BLOCKED", "reason_code": "canary_fixture_unavailable",
+        }
+        security.setdefault("required_subchecks", {})[
+            "canary-absent-from-campaign-and-self-test-reports"
+        ] = "BLOCKED"
+        report["result"] = _campaign_result(report)
+        _atomic_replace_json(report_path, report)
+        return report
+    final_artifacts = [{"id": "campaign_report", "path": str(report_path), "kind": "file"}]
+    self_gate = report.get("gates", {}).get("E2E-SELF", {})
+    self_report_ref = self_gate.get("report_ref") if isinstance(self_gate, dict) else None
+    if self_report_ref is not None:
+        self_run_id = self_gate.get("run_id")
+        if (not isinstance(self_run_id, str) or RUN_ID_RE.fullmatch(self_run_id) is None
+                or self_report_ref != f"selftest-{self_run_id}.json"):
+            security["status"] = "BLOCKED"
+            security["reason_code"] = "self_test_report_reference_invalid"
+            security["final_report_check"] = {
+                "status": "BLOCKED", "reason_code": "self_test_report_reference_invalid",
+            }
+            security.setdefault("required_subchecks", {})[
+                "canary-absent-from-campaign-and-self-test-reports"
+            ] = "BLOCKED"
+            report["result"] = _campaign_result(report)
+            _atomic_replace_json(report_path, report)
+            return report
+        final_artifacts.append({"id": "nested_self_test_report",
+                                "path": str(report_path.parent / self_report_ref), "kind": "file"})
+        references = self_gate.get("preserved_diagnostic_refs", [])
+        if not isinstance(references, list) or len(references) > 32:
+            references = None
+        if references is None:
+            security["status"] = "BLOCKED"
+            security["reason_code"] = "self_test_diagnostic_manifest_invalid"
+            security["final_report_check"] = {
+                "status": "BLOCKED", "reason_code": "self_test_diagnostic_manifest_invalid",
+            }
+            security.setdefault("required_subchecks", {})[
+                "canary-absent-from-campaign-and-self-test-reports"
+            ] = "BLOCKED"
+            report["result"] = _campaign_result(report)
+            _atomic_replace_json(report_path, report)
+            return report
+        for index, reference in enumerate(references):
+            if (not isinstance(reference, dict) or reference.get("stage") != "expected_boot_failure"
+                    or not isinstance(reference.get("path"), str)
+                    or reference["path"] != f"selftest-{self_run_id}-failure.json"):
+                security["status"] = "BLOCKED"
+                security["reason_code"] = "self_test_diagnostic_reference_invalid"
+                security["final_report_check"] = {
+                    "status": "BLOCKED", "reason_code": "self_test_diagnostic_reference_invalid",
+                }
+                security.setdefault("required_subchecks", {})[
+                    "canary-absent-from-campaign-and-self-test-reports"
+                ] = "BLOCKED"
+                report["result"] = _campaign_result(report)
+                _atomic_replace_json(report_path, report)
+                return report
+            final_artifacts.append({"id": f"nested_self_test_diagnostic_{index}",
+                                    "path": str(report_path.parent / reference["path"]), "kind": "file"})
+    manifest = {"schema_version": 1,
+                "required_ids": [item["id"] for item in final_artifacts],
+                "artifacts": final_artifacts}
+    result = checker.scan_manifest(
+        canary, manifest, [report_path.parent], timeout_seconds=_bounded_timeout(60),
+    )
+    scan_status = result.get("result", "BLOCKED")
+    reason = _canary_result_reason(result)
+    for _attempt in range(3):
+        security["final_report_check"] = {"status": scan_status, "reason_code": reason}
+        security.setdefault("required_subchecks", {})[
+            "canary-absent-from-campaign-and-self-test-reports"
+        ] = scan_status
+        if scan_status == "FAIL":
+            security["status"] = "FAIL"
+            security["reason_code"] = reason or "canary_present"
+        elif scan_status == "BLOCKED" and security.get("status") != "FAIL":
+            security["status"] = "BLOCKED"
+            security["reason_code"] = reason or "final_report_not_inspected"
+        report["result"] = _campaign_result(report)
+        encoded = (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+        current = report_path.read_bytes()
+        if current == encoded:
+            return report
+        _atomic_replace_json(report_path, report)
+        result = checker.scan_manifest(
+            canary, manifest, [report_path.parent], timeout_seconds=_bounded_timeout(60),
+        )
+        scan_status = result.get("result", "BLOCKED")
+        reason = _canary_result_reason(result)
+    # If report content cannot reach a stable redacted result, fail closed.
+    security["status"] = "BLOCKED"
+    security["reason_code"] = "final_report_check_did_not_stabilize"
+    security["final_report_check"] = {"status": "BLOCKED",
+                                      "reason_code": "final_report_check_did_not_stabilize"}
+    report["result"] = _campaign_result(report)
+    _atomic_replace_json(report_path, report)
+    return report
 
 
 def _mark_stage_running(report: dict[str, Any], stage: str) -> None:
@@ -2280,17 +2736,20 @@ def _campaign_lock(state_root: Path, run_id: str):
 
 def _resume_campaign(state_root: Path, source: Path, run_id: str,
                      suites: list[str], provider_config_sha256: str,
-                     source_identity: dict[str, Any]) -> tuple[dict[str, Any], Path, Path, Path]:
+                     source_identity: dict[str, Any],
+                     campaign_scope: dict[str, Any] | None = None) -> tuple[dict[str, Any], Path, Path, Path]:
     run_root = _namespace_path(state_root, _run_name(run_id))
     report_path = _campaign_report_path(state_root, run_id)
     _private_directory(run_root)
     _private_directory(report_path.parent)
     _private_directory(run_root / "state")
     report = _read_private_json(report_path)
-    if (report.get("schema_version") != 1 or report.get("workflow_version") != 1
+    if (report.get("schema_version") != 1 or report.get("workflow_version") != WORKFLOW_VERSION
             or report.get("run_id") != run_id or report.get("run_name") != _run_name(run_id)
             or report.get("suites") != suites
-            or report.get("required_gates") != sorted({gate for suite in suites for gate in SUITE_GATES[suite]})
+            or report.get("required_gates") != _required_gates(suites)
+            or report.get("acceptance_scope") != _acceptance_scope(suites)
+            or (campaign_scope is not None and report.get("campaign_scope") != campaign_scope)
             or report.get("provider_config_sha256") != provider_config_sha256):
         raise AcceptanceError("resume manifest revision, suite, provider configuration, or schema changed")
     stored_source = report.get("source")
@@ -2397,10 +2856,16 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
         return {"run_id": run_id, "result": "PASS", "preflight": initial,
                 "gates": {"HOST-PREFLIGHT": {"status": "PASS", "checks": initial["checks"]}}}, Path()
     provider_config_sha256 = initial.get("provider_config", {}).get("sha256", "")
+    if approved_seconds is None:
+        raise AcceptanceError("campaign scope requires its approved total time budget")
+    campaign_scope = _campaign_scope(
+        full_suites, memory_gib, provider_config_sha256, apply_selected_updates, approved_seconds,
+    )
     attempt_info: dict[str, Any] | None = None
     if resume:
         report, run_root, child_state, workspace = _resume_campaign(
             state_root, source, run_id, full_suites, provider_config_sha256, initial["source"],
+            campaign_scope,
         )
         if report.get("approved_total_budget_seconds") != approved_seconds:
             raise AcceptanceError("approved total campaign budget changed; resume was refused")
@@ -2409,25 +2874,36 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
         prior_elapsed_ms = attempt.get("prior_elapsed_ms", 0) if isinstance(attempt, dict) else None
         if type(prior_elapsed_ms) is not int or prior_elapsed_ms < 0:
             raise AcceptanceError("prior-attempt time accounting is invalid")
-        remaining_seconds = approved_seconds - (prior_elapsed_ms + elapsed_ms + _stage_elapsed_ms()) // 1000
+        remaining_seconds = _remaining_campaign_seconds(
+            approved_seconds, prior_elapsed_ms, elapsed_ms, stage=workflow_stage,
+        )
         _tighten_stage_budget(remaining_seconds)
         report["resume_preflight"] = initial
         if workflow_stage is not None:
+            if (workflow_stage == "nested-boundaries-agents"
+                    and report.get("gates", {}).get("HUMAN-TUI", {}).get("status") != "PASS"):
+                raise AcceptanceError("owner must verify and record a usable TUI before recursion")
             _mark_stage_running(report, workflow_stage)
     else:
         if approved_seconds is not None:
             initial["approved_total_budget_seconds"] = approved_seconds
+            _remaining_campaign_seconds(approved_seconds, 0, 0, stage=workflow_stage)
         if workflow_stage is not None:
             attempt_info = _register_campaign_attempt(
                 state_root, run_id, initial["source"], provider_config_sha256,
                 retry_of=retry_of, retry_reason=retry_reason,
                 approved_total_budget_seconds=approved_seconds,
+                campaign_scope=campaign_scope,
             )
         if approved_seconds is not None:
             prior_elapsed_ms = attempt_info.get("prior_elapsed_ms", 0) if attempt_info else 0
-            remaining_seconds = approved_seconds - (prior_elapsed_ms + _stage_elapsed_ms()) // 1000
+            remaining_seconds = _remaining_campaign_seconds(
+                approved_seconds, prior_elapsed_ms, 0, stage=workflow_stage,
+            )
             _tighten_stage_budget(remaining_seconds)
-        run_root, child_state, workspace = _new_campaign(state_root, run_id, source, full_suites, initial)
+        run_root, child_state, workspace = _new_campaign(
+            state_root, run_id, source, full_suites, initial, campaign_scope,
+        )
         report = _read_private_json(_campaign_report_path(state_root, run_id))
         if attempt_info is not None:
             report["attempt"] = attempt_info
@@ -2469,7 +2945,7 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
 
     def set_gate(gate: str, status: str, **evidence: Any) -> None:
         nonlocal active_gate, active_gate_started_at
-        if gate not in selected_gates:
+        if gate not in report.get("required_gates", []):
             return
         if status not in {"PASS", "FAIL", "BLOCKED", "NOT_RUN"}:
             raise AcceptanceError("gate result is outside the fixed status enum")
@@ -2601,8 +3077,18 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
                          outer=outer_boundary, nested_child_status="NOT_RUN")
             else:
                 set_gate("SEC-NET", "BLOCKED", reason_code="outer_guest_not_verified_ready")
-            set_gate("SEC-FS", "BLOCKED", reason_code="owner_live_evidence_required")
-            set_gate("SEC-SECRET", "BLOCKED", reason_code="owner_live_evidence_required")
+            set_gate(
+                "SEC-FS", "BLOCKED", reason_code="required_filesystem_evidence_unavailable",
+                required_subchecks={
+                    "host_file_unreadable": "BLOCKED", "control_key_and_socket_unreadable": "BLOCKED",
+                    "child_out_of_scope_files_unreadable": "BLOCKED", "escaping_symlinks_refused": "BLOCKED",
+                    "state_root_overlap_blocked": "BLOCKED",
+                },
+                deferred_checks=[
+                    {"id": item, "status": "DEFERRED", "reason_code": "owner_deferred_live_openai"}
+                    for item in DEFERRED_CHECKS["SEC-FS"]
+                ],
+            )
 
         if "workload" in suites:
             if guest_ready:
@@ -2712,7 +3198,7 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
                     set_gate("E2E-MODEL", "FAIL", reason_code="provider_stream_schema_invalid",
                              automated_status="FAIL", providers=model_evidence.get("providers", []))
                 elif model_evidence.get("reason_code") not in {
-                        None, "no_provider_selected", "provider_or_owner_evidence_incomplete"}:
+                        None, "provider_or_owner_evidence_incomplete"}:
                     set_gate("E2E-MODEL", "BLOCKED", reason_code=model_evidence["reason_code"],
                              automated_status=model_evidence.get("automated_status"),
                              providers=model_evidence.get("providers", []))
@@ -2722,7 +3208,7 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
                     set_gate("E2E-MODEL", "BLOCKED", reason_code=blocked_reason or "provider_stream_incomplete",
                              automated_status="BLOCKED", providers=model_evidence["providers"])
                 else:
-                    set_gate("E2E-MODEL", "BLOCKED", reason_code="owner_live_evidence_required",
+                    set_gate("E2E-MODEL", "BLOCKED", reason_code="owner_local_model_observation_required",
                              automated_status=model_evidence.get("automated_status", "BLOCKED"),
                              automated_reason_code=model_evidence.get("reason_code"),
                              providers=model_evidence.get("providers", []))
@@ -2740,10 +3226,49 @@ def execute_campaign(source: Path, state_root: Path, run_id: str, suites: list[s
                     reason = "owner_observation_required" if gate.startswith("HUMAN-") else "owner_live_evidence_required"
                     set_gate(gate, "BLOCKED", reason_code=reason)
 
+        if "boundary" in suites:
+            canary_scan = _run_canary_scan(state_root, run_id, report, report_path)
+            canary_status = canary_scan.get("result")
+            if canary_status not in {"PASS", "FAIL", "BLOCKED"}:
+                canary_status = "BLOCKED"
+            snapshot_status = _canary_check_status(
+                canary_scan, exact_ids={"snapshot_workspace", "snapshot_git_history"},
+            )
+            seed_image_log_status = _canary_check_status(
+                canary_scan, prefixes=(
+                    "seed_user_data_", "seed_iso_", "campaign_logs_", "profile_overlay_",
+                    "base_image_", "base_manifest_", "nested_transient_images",
+                ),
+            )
+            set_gate(
+                "SEC-SECRET", ("FAIL" if canary_status == "FAIL" else "BLOCKED"),
+                reason_code=(_canary_result_reason(canary_scan)
+                             or "required_private_state_subchecks_not_run"),
+                canary_check=canary_scan,
+                required_subchecks={
+                    "canary-absent-from-snapshot-and-history": snapshot_status,
+                    "canary-absent-from-seed-base-and-logs": seed_image_log_status,
+                    "canary-absent-from-campaign-and-self-test-reports": "BLOCKED",
+                    "provider-forwarding-opt-in-only": "BLOCKED",
+                    "synthetic-private-state-persistence-and-atomic-export-import": "BLOCKED",
+                    "synthetic-export-failure-prevents-delete": "BLOCKED",
+                    "synthetic-refreshed-state-survives-restart-and-import": "BLOCKED",
+                },
+                deferred_checks=[
+                    {"id": item, "status": "DEFERRED", "reason_code": "owner_deferred_live_openai"}
+                    for item in DEFERRED_CHECKS["SEC-SECRET"]
+                ],
+            )
+
+        if ("HUMAN-TUI" in report.get("required_gates", [])
+                and report.get("gates", {}).get("HUMAN-TUI", {}).get("status") == "NOT_RUN"):
+            set_gate("HUMAN-TUI", "BLOCKED", reason_code="owner_observation_required")
+
         report["result"] = _campaign_result(report)
         if workflow_stage is not None:
+            required_for_stage = selected_gates.intersection(report.get("required_gates", []))
             stage_results = [report["gates"].get(gate, {}).get("status", "NOT_RUN")
-                             for gate in selected_gates]
+                             for gate in required_for_stage]
             report["stages"][workflow_stage] = (
                 "FAIL" if "FAIL" in stage_results else
                 "PASS" if stage_results and all(value == "PASS" for value in stage_results) else
@@ -2854,12 +3379,33 @@ def cleanup_campaign(state_root: Path, run_id: str, confirm_run_id: str, *,
     report = _read_private_json(report_path)
     if report.get("run_id") != run_id or report.get("run_name") != _run_name(run_id):
         raise AcceptanceError("campaign manifest ownership does not match the requested run")
+    if (report.get("workflow_version") != WORKFLOW_VERSION
+            or not isinstance(report.get("suites"), list)
+            or report.get("required_gates") != _required_gates(report["suites"])
+            or report.get("acceptance_scope") != _acceptance_scope(report["suites"])):
+        raise AcceptanceError("campaign workflow scope is invalid for exact cleanup")
+    canary_expected: bytes | None = None
+    canary_marker = report.get("synthetic_canary")
+    if (not isinstance(canary_marker, dict)
+            or canary_marker.get("status") not in {"PENDING", "GENERATING", "GENERATED", "REMOVED"}):
+        raise AcceptanceError("campaign canary ownership marker is missing or invalid")
+    canary_state = canary_marker["status"]
+    canary_cleanup_required = canary_state in {"PENDING", "GENERATING", "GENERATED", "REMOVED"}
+    if canary_cleanup_required:
+        try:
+            if canary_state in {"PENDING", "GENERATING"}:
+                canary_expected = None
+            elif canary_state == "GENERATED":
+                checker = _load_module("vm_host_acceptance_canary_cleanup", CANARY_CHECK_PATH)
+                canary_expected = checker.read_canary(_canary_path(state_root, run_id))
+        except (AcceptanceError, OSError, RuntimeError, ValueError):
+            canary_expected = None
     suites = report.get("suites")
     gates = report.get("gates")
     if (not isinstance(suites, list) or not suites or any(item not in ALL_SUITES for item in suites)
             or len(set(suites)) != len(suites) or not isinstance(gates, dict)
             or any(not isinstance(item, dict) or item.get("status") not in
-                   {"PASS", "FAIL", "BLOCKED", "NOT_RUN"} for item in gates.values())):
+                   {"PASS", "FAIL", "BLOCKED", "NOT_RUN", "DEFERRED"} for item in gates.values())):
         raise AcceptanceError("campaign suite or gate manifest is invalid")
     owned_profiles = report.get("owned_profiles", [])
     if not isinstance(owned_profiles, list):
@@ -2960,6 +3506,20 @@ def cleanup_campaign(state_root: Path, run_id: str, confirm_run_id: str, *,
     report["result"] = _campaign_result(report)
     report["finished_utc"] = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
     _atomic_replace_json(report_path, report)
+    if canary_cleanup_required:
+        if not _remove_canary_fixture(state_root, run_id, canary_expected):
+            report["cleanup"]["status"] = "BLOCKED"
+            report["cleanup"]["reason_code"] = "canary_fixture_cleanup_unconfirmed"
+            if staged_teardown:
+                report["stages"]["teardown"] = "BLOCKED"
+            report["result"] = _campaign_result(report)
+            _atomic_replace_json(report_path, report)
+            raise AcceptanceError("private synthetic canary fixture cleanup was not confirmed")
+        report["synthetic_canary"]["status"] = "REMOVED"
+        report["cleanup"]["synthetic_canary_removed"] = True
+        report["result"] = _campaign_result(report)
+        _atomic_replace_json(report_path, report)
+        report = _finalize_canary_report_check(report_path, report, canary_expected)
     if run_root.exists() or run_root.is_symlink() or not report_path.is_file() or report_path.is_symlink():
         raise AcceptanceError("campaign teardown residue or report preservation check failed")
     return {"run_id": run_id, "cleanup": "PASS", "deleted_profiles": deleted,
@@ -2975,7 +3535,7 @@ def execute_teardown_stage(state_root: Path, run_id: str, confirm_run_id: str,
     report_path = _campaign_report_path(state_root, run_id)
     _private_directory(report_path.parent)
     report = _read_private_json(report_path)
-    if (report.get("workflow_version") != 1 or report.get("run_id") != run_id
+    if (report.get("workflow_version") != WORKFLOW_VERSION or report.get("run_id") != run_id
             or report.get("approved_total_budget_seconds") != approved_seconds):
         raise AcceptanceError("teardown revision or approved total budget does not match the campaign")
     attempt = report.get("attempt", {})
@@ -2983,9 +3543,9 @@ def execute_teardown_stage(state_root: Path, run_id: str, confirm_run_id: str,
     if type(prior_elapsed) is not int or prior_elapsed < 0:
         raise AcceptanceError("prior-attempt time accounting is invalid")
     campaign_elapsed = _campaign_elapsed_ms(report)
-    _tighten_stage_budget(
-        approved_seconds - (prior_elapsed + campaign_elapsed + _stage_elapsed_ms()) // 1000,
-    )
+    _tighten_stage_budget(_remaining_campaign_seconds(
+        approved_seconds, prior_elapsed, campaign_elapsed, stage="teardown",
+    ))
     _mark_stage_running(report, "teardown")
     _atomic_replace_json(report_path, report)
     try:
@@ -3020,6 +3580,8 @@ def record_human_observation(state_root: Path, run_id: str, confirm_run_id: str,
         raise AcceptanceError("human observation requires the exact campaign run ID")
     if gate not in OWNER_CHECKLISTS:
         raise AcceptanceError("owner observation gate is not supported")
+    if gate in DEFERRED_GATE_REASONS:
+        raise AcceptanceError("this live provider gate is deferred from the local-first campaign")
     if outcome not in {"PASS", "FAIL", "BLOCKED"}:
         raise AcceptanceError("human observation outcome must be PASS, FAIL, or BLOCKED")
     if not isinstance(checklist, list) or not checklist or len(checklist) != len(set(checklist)):
@@ -3042,9 +3604,11 @@ def record_human_observation(state_root: Path, run_id: str, confirm_run_id: str,
     selected_suites = report.get("suites")
     report_gates = report.get("gates")
     if (not isinstance(selected_suites, list) or any(item not in ALL_SUITES for item in selected_suites)
-            or not isinstance(report_gates, dict)):
+            or not isinstance(report_gates, dict)
+            or report.get("required_gates") != _required_gates(selected_suites)
+            or report.get("acceptance_scope") != _acceptance_scope(selected_suites)):
         raise AcceptanceError("campaign suite or gate manifest is invalid")
-    selected_gates = {name for suite in selected_suites for name in SUITE_GATES[suite]}
+    selected_gates = set(report.get("required_gates", []))
     if gate not in selected_gates:
         raise AcceptanceError("this gate was not selected for the exact campaign")
     clean_gate = report_gates.get("HOST-CLEAN", {})
@@ -3059,6 +3623,7 @@ def record_human_observation(state_root: Path, run_id: str, confirm_run_id: str,
         raise AcceptanceError("gate is not awaiting an owner observation")
     allowed_reasons = {
         "not_run", "owner_observation_required", "owner_live_evidence_required",
+        "owner_local_model_observation_required",
         "docker_rollback_smoke_required",
         "full_lifecycle_suite_incomplete",
     }
@@ -3091,6 +3656,7 @@ def record_human_observation(state_root: Path, run_id: str, confirm_run_id: str,
             continue
         stage_suites = [suite for suite in STAGE_SUITES[stage] if suite in selected_suites]
         stage_gates = {item for suite in stage_suites for item in SUITE_GATES[suite]}
+        stage_gates.intersection_update(report["required_gates"])
         statuses_for_stage = [report_gates.get(item, {}).get("status", "NOT_RUN") for item in stage_gates]
         report["stages"][stage] = (
             "FAIL" if "FAIL" in statuses_for_stage else
@@ -3108,8 +3674,12 @@ def campaign_status(state_root: Path, run_id: str) -> dict[str, Any]:
     report_path = _campaign_report_path(state_root, run_id)
     _private_directory(report_path.parent)
     report = _read_private_json(report_path)
+    suites = report.get("suites")
     if (report.get("run_id") != run_id or report.get("run_name") != _run_name(run_id)
-            or report.get("workflow_version") != 1):
+            or report.get("workflow_version") != WORKFLOW_VERSION
+            or not isinstance(suites, list)
+            or report.get("required_gates") != _required_gates(suites)
+            or report.get("acceptance_scope") != _acceptance_scope(suites)):
         raise AcceptanceError("campaign status is not bound to the exact staged run")
     gates = report.get("gates")
     stages = report.get("stages")
@@ -3132,6 +3702,9 @@ def campaign_status(state_root: Path, run_id: str) -> dict[str, Any]:
         "stages": {stage: stages.get(stage, "NOT_RUN") for stage in STAGE_ORDER},
         "gates": {gate: gates.get(gate, {}).get("status", "NOT_RUN")
                   for gate in report.get("required_gates", [])},
+        "acceptance_scope": report["acceptance_scope"],
+        "deferred_gates": report["acceptance_scope"]["deferred_gates"],
+        "deferred_checks": report["acceptance_scope"]["deferred_checks"],
         "report_path": str(report_path),
         "cleanup": report.get("cleanup", {}).get("status", "NOT_RUN"),
         "approved_total_minutes": total_seconds // 60,
@@ -3281,9 +3854,13 @@ def execute_stage(source: Path, state_root: Path, run_id: str, suites: list[str]
                             provider_config_path, resume=True)
         if initial["result"] != "PASS":
             return {"run_id": run_id, "result": "BLOCKED", "preflight": initial}, Path()
-        report, _run_root, child_state, _workspace = _resume_campaign(
+        config_sha = initial.get("provider_config", {}).get("sha256", "")
+        scope = _campaign_scope(
+            suites, memory_gib, config_sha, apply_selected_updates, approved_seconds,
+        )
+        report, _run_root, _child_state, _workspace = _resume_campaign(
             state_root, source, run_id, suites,
-            initial.get("provider_config", {}).get("sha256", ""), initial["source"],
+            config_sha, initial["source"], scope,
         )
         if report.get("approved_total_budget_seconds") != approved_seconds:
             raise AcceptanceError("approved total campaign budget changed; resume was refused")
@@ -3292,9 +3869,9 @@ def execute_stage(source: Path, state_root: Path, run_id: str, suites: list[str]
         prior_elapsed_ms = attempt.get("prior_elapsed_ms", 0) if isinstance(attempt, dict) else None
         if type(prior_elapsed_ms) is not int or prior_elapsed_ms < 0:
             raise AcceptanceError("prior-attempt time accounting is invalid")
-        _tighten_stage_budget(
-            approved_seconds - (prior_elapsed_ms + elapsed_ms + _stage_elapsed_ms()) // 1000,
-        )
+        _tighten_stage_budget(_remaining_campaign_seconds(
+            approved_seconds, prior_elapsed_ms, elapsed_ms, stage=stage,
+        ))
         report_path = _campaign_report_path(state_root, run_id)
         expected_effects = {
             "selected_guest_update_targets": ["config", "tools"] if apply_selected_updates else [],
@@ -3306,18 +3883,16 @@ def execute_stage(source: Path, state_root: Path, run_id: str, suites: list[str]
         states = report["stages"]
         _atomic_replace_json(report_path, report)
         if stage == "early-auth":
-            workspace = _workspace
-            evidence = _openai_auth_checkpoint(
-                child_state, run_id, workspace, memory_gib, report, report_path,
-            )
-            report["early_auth"] = evidence
-            states[stage] = evidence["status"]
+            report["early_auth"] = {
+                "status": "DEFERRED", "reason_code": "owner_deferred_live_openai",
+                "campaign_effect": "none",
+            }
+            states[stage] = "DEFERRED"
         else:
-            auth_gate = report.get("gates", {}).get("HUMAN-AUTH", {})
-            states[stage] = "PASS" if auth_gate.get("status") == "PASS" else "BLOCKED"
+            states[stage] = "DEFERRED"
             report["final_auth"] = {
-                "status": states[stage],
-                "reason_code": None if states[stage] == "PASS" else "owner_final_auth_evidence_required",
+                "status": "DEFERRED", "reason_code": "owner_deferred_live_openai",
+                "campaign_effect": "none",
             }
         report["stage_elapsed_ms"][stage] = _stage_elapsed_ms()
         report["result"] = _campaign_result(report)

@@ -1177,16 +1177,39 @@ early. **Done:** no known absent prerequisite for the selected full campaign;
 every gate has a real test procedure; local tests pass; a dry-run-ready owner
 handoff exists. Actual host acceptance is still pending.
 
-### TASK-15 live execution after C13a/C13b (separate approval)
+### Owner scope amendment after C13b — local implementation authorized
 
-Record selected provider endpoints/model IDs (read-only discovery first), exact
+The [local-first C14 handoff plan](docs/vm-c14-handoff-plan.md) is the current
+contract for TASK-15B, live TASK-15 acceptance, and TASK-16. The owner has
+authorized local §1 implementation: minimal repository-owned synthetic-canary
+checker, required/deferred subcheck separation, focused regression tests, and
+runbook reconciliation. No new framework. Local Ollama/llama.cpp discovery and
+exact owner selection are future, separately authorized live-work steps.
+
+Live OpenAI login/streams/refresh and real provider credential roundtrips are
+deferred, visible evidence, **not merge/C14 blockers**. Native browser auth and
+automated auth/security regressions remain required; deferred checks must not be
+reported PASS. Non-auth filesystem/network/secret isolation and real local
+workload/lifecycle/nesting/cleanup gates remain required. Split mixed checklist
+obligations explicitly rather than waiving entire security gates. The local
+runner reconciliation is implemented and fixture-validated; real campaign
+evidence remains pending or BLOCKED as listed in the handoff plan.
+
+This amendment supersedes contrary live-auth prerequisites below and TASK-15B's
+owner-supplied-checker assumption. Only local code/tests/docs are authorized; no
+campaign, service/model startup, credentials, push, merge or C14 activation.
+
+### TASK-15 live execution after C13a/C13b (separate approval; scope amended above)
+
+Record selected local provider/model IDs (read-only discovery only after separate
+authorization), exact
 revision/config hashes, total time/disk/download/API ceiling, optional checkpoint
 choices and auth-storage/export consent. Rerun preflight on that revision; approve
 the exact scope once. Execute stages in master §9 order and preserve partial
-results without waivers. Use only campaign-owned credentials created by the owner
-through the browser and separately approved private forwarding where selected.
-Review all required gates and cleanup evidence before C14. Owner choosing to skip
-auth is valid for a partial run but does not make full acceptance complete.
+results without waivers. The local-first campaign does not perform live OpenAI
+login or credential forwarding. Review all required gates and cleanup evidence
+before C14. Deferred live auth remains outside the local-first result; it does
+not satisfy the separate historical live-auth follow-up.
 
 ## TASK-16: Documentation, CI, accepted VM default and preserved Docker rollback
 

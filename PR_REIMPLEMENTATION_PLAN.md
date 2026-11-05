@@ -504,10 +504,27 @@ Implemented entry points are `scripts/vm-self-test.py` and
 historical proposed CLI, control available commands. C13b extends these existing
 tools rather than creating a parallel campaign controller. Use unique generated
 disposable profiles/state roots. No defaults to a developer profile or stable
-exported snapshot. New stage/provider/resume options below are design requirements,
-not commands currently available or authorization to execute them.
+exported snapshot. Consult the actual `--help` and current runbook for available
+stage/provider/resume options; their availability does not authorize execution.
 
-### Acceptance-readiness revision — 2026-11-05 (current next-work authority)
+### Local-first acceptance scope — owner revision after C13b
+
+**Current next-work authority:** [local-first C14 handoff plan](docs/vm-c14-handoff-plan.md).
+The owner selected a minimal repository-owned canary checker (1A), existing local
+models first, and disposable campaign credentials where separately approved.
+Live OpenAI/provider credential acceptance is deferred follow-up, not a merge or
+C14 blocker. Preserve native browser auth and required automated regression and
+credential-safety tests; never mark deferred live evidence PASS. Required
+non-auth security/workload/lifecycle/nesting evidence is unchanged.
+
+The owner subsequently authorized **local §1 implementation** under the handoff
+plan. The canary checker, local-first runner reconciliation and fixture tests are
+implemented and locally validated; no live action is authorized. This bounded
+scope supersedes conflicting older all-auth-before-C14 language below and in
+TASK-15/TASK-16. C13b remains committed at `d3751e4`, ledger `777f5a9`; the
+current uncommitted changes are not live campaign evidence.
+
+### Acceptance-readiness revision — 2026-11-05 (historical; amended above)
 
 This section supersedes stale C12-baseline/finish-C13-first/"TASK-16 not started"
 sequencing below, but does not waive any gate. C13 code is committed at `1e0b0ba`;
