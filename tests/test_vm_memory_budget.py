@@ -27,6 +27,11 @@ class MemoryBudgetTests(unittest.TestCase):
         self.cgroups = self.base / "cgroups"
         self.proc.mkdir()
         self.cgroups.mkdir()
+        proc_self = self.proc / "self"
+        proc_self.mkdir()
+        (proc_self / "mountinfo").write_text(
+            f"29 23 0:42 / {self.cgroups} rw - cgroup2 cgroup rw\n", encoding="ascii",
+        )
 
     def reservation_fixture(self, state, profile, owner, requested_mib):
         reservations = state / ".reservations"
@@ -94,11 +99,11 @@ class MemoryBudgetTests(unittest.TestCase):
         (process / "cgroup").write_text("0::/user.slice/mester\n", encoding="ascii")
         child = self.cgroups / "user.slice/mester"
         child.mkdir(parents=True)
+        (child / "cgroup.procs").write_text("123\n", encoding="ascii")
         parent = self.cgroups / "user.slice"
         for path, limit, usage in (
             (child, 8_000, 3_000),
             (parent, 6_000, 2_000),
-            (self.cgroups, 12_000, 1_000),
         ):
             (path / "memory.max").write_text(str(limit * 1024 * 1024), encoding="ascii")
             (path / "memory.current").write_text(str(usage * 1024 * 1024), encoding="ascii")
@@ -106,6 +111,27 @@ class MemoryBudgetTests(unittest.TestCase):
             memory_budget.read_cgroup_remaining_mib(123, proc_root=self.proc, cgroup_root=self.cgroups),
             4_000,
         )
+
+    def test_cgroup_v2_hierarchy_root_must_be_visible_and_unambiguous(self):
+        mountinfo = self.proc / "self/mountinfo"
+        mountinfo.write_text(
+            f"29 23 0:42 /delegated {self.cgroups} rw - cgroup2 cgroup rw\n", encoding="ascii",
+        )
+        with self.assertRaisesRegex(RuntimeError, "hides ancestor limits"):
+            memory_budget._require_cgroup2_hierarchy_root(self.proc, self.cgroups)
+        mountinfo.write_text("", encoding="ascii")
+        with self.assertRaisesRegex(RuntimeError, "missing or ambiguous"):
+            memory_budget._require_cgroup2_hierarchy_root(self.proc, self.cgroups)
+
+    def test_cgroup_v2_path_must_contain_the_target_process(self):
+        process = self.proc / "123"
+        process.mkdir()
+        (process / "cgroup").write_text("0::/user.slice/mester\n", encoding="ascii")
+        child = self.cgroups / "user.slice/mester"
+        child.mkdir(parents=True)
+        (child / "cgroup.procs").write_text("456\n", encoding="ascii")
+        with self.assertRaisesRegex(RuntimeError, "does not contain the target process"):
+            memory_budget.read_cgroup_remaining_mib(123, proc_root=self.proc, cgroup_root=self.cgroups)
 
     def test_cgroup_v1_reads_memory_controller_and_nested_ancestors(self):
         process = self.proc / "321"
@@ -129,6 +155,7 @@ class MemoryBudgetTests(unittest.TestCase):
         (process / "cgroup").write_text("0::/unlimited\n", encoding="ascii")
         group = self.cgroups / "unlimited"
         group.mkdir()
+        (group / "cgroup.procs").write_text("456\n", encoding="ascii")
         (group / "memory.max").write_text("max\n", encoding="ascii")
         (group / "memory.current").write_text("1048576\n", encoding="ascii")
         (self.cgroups / "memory.max").write_text("max\n", encoding="ascii")

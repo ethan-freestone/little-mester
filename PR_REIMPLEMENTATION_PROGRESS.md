@@ -895,3 +895,34 @@ changed-VM nested proof, and exact live teardown have not been run. C13 is
 committed locally as `1e0b0bacfd99234b12b69cc4a53fa7f1e4eff53c`; this separate
 ledger-only commit records that SHA. No push is planned. Preserve the untracked
 `vm-migration-plan.md` unchanged and exclude it from C13.
+
+## Cgroup v2 memory-preflight compatibility fix — 2026-11-05
+
+The owner ran the read-only host preflight from a clean C13 worktree. Linux and
+KVM, CPU virtualization, required tools, disk budget, and path/listener checks all
+passed, but memory accounting was BLOCKED. The follow-up diagnostic showed about
+36 GiB `MemAvailable`; cgroup v2 memory files existed in the owner's session
+cgroup but not at `/sys/fs/cgroup`. The previous checker incorrectly required
+`memory.max` and `memory.current` at the v2 hierarchy root, even though the root
+cgroup is exempt from controller resource interface files.
+
+Updated `scripts/vm_memory_budget.py` to accept both files absent only at a
+verified cgroup v2 hierarchy root, while still requiring files at every visible
+non-root ancestor. It verifies that exactly one cgroup2 mount exposes the real
+hierarchy root, that the mapped `cgroup.procs` contains the target process, and
+that the process membership remains stable during the read. Missing controller
+files below root, hidden ancestor hierarchies, and ambiguous mappings still fail
+closed. Added fixture tests for the root-file exception and these safety guards
+in `tests/test_vm_memory_budget.py`.
+
+| Exact local command | Observed result |
+|---|---|
+| `python3 -m unittest tests.test_vm_memory_budget` |21 tests, OK |
+| `python3 -m unittest discover -s tests -p 'test_*.py'` |281 tests, OK; 60.386s |
+| `ruff check scripts/vm_memory_budget.py tests/test_vm_memory_budget.py` |PASS |
+| `python3 -m py_compile scripts/vm_memory_budget.py tests/test_vm_memory_budget.py` |PASS |
+| `git diff --check` |PASS |
+
+This was fixture/local validation only; the owner's host preflight has not yet
+been rerun with the fix, and no VM or live acceptance campaign was started. The
+follow-up fix commit and ledger SHA closeout are recorded separately.

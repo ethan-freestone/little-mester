@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sys
 from contextlib import contextmanager
@@ -154,6 +155,55 @@ def _cgroup_membership(pid: int, proc_root: Path) -> tuple[str, str] | None:
     return None
 
 
+def _mountinfo_unescape(value: str) -> str:
+    """Decode the octal escapes used for paths in /proc/PID/mountinfo."""
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+
+def _require_cgroup2_hierarchy_root(proc_root: Path, mountpoint: Path) -> None:
+    """Require a unique cgroup2 mount exposing the real hierarchy root.
+
+    A delegated subtree can have additional ancestor limits outside the mount;
+    those cannot be safely inferred from MemAvailable or the visible descendants.
+    """
+    try:
+        mountinfo = (proc_root / "self/mountinfo").read_text(encoding="ascii").splitlines()
+        expected_mountpoint = mountpoint.resolve(strict=True)
+    except (OSError, UnicodeError, RuntimeError) as error:
+        raise RuntimeError("cgroup2 mount information is unavailable") from error
+
+    matches: list[str] = []
+    for line in mountinfo:
+        before, separator, after = line.partition(" - ")
+        if not separator:
+            continue
+        fields = before.split()
+        filesystem = after.split()
+        if len(fields) < 6 or not filesystem or filesystem[0] != "cgroup2":
+            continue
+        try:
+            entry_mountpoint = Path(_mountinfo_unescape(fields[4])).resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if entry_mountpoint == expected_mountpoint:
+            matches.append(_mountinfo_unescape(fields[3]))
+
+    if len(matches) != 1:
+        raise RuntimeError("cgroup2 mount is missing or ambiguous")
+    if matches[0] != "/":
+        raise RuntimeError("cgroup2 mount hides ancestor limits outside its visible hierarchy")
+
+
+def _verify_cgroup_process_membership(pid: int, cgroup: Path) -> None:
+    """Ensure the proc membership path resolves to the cgroup containing pid."""
+    try:
+        entries = (cgroup / "cgroup.procs").read_text(encoding="ascii").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise RuntimeError("cgroup process membership is unreadable") from error
+    if any(not entry.isdecimal() for entry in entries) or str(pid) not in entries:
+        raise RuntimeError("cgroup path does not contain the target process")
+
+
 def _read_decimal(path: Path, label: str) -> int:
     try:
         value = path.read_text(encoding="ascii").strip()
@@ -181,6 +231,7 @@ def read_cgroup_remaining_mib(
         root = root / "memory"
         limit_name, usage_name = "memory.limit_in_bytes", "memory.usage_in_bytes"
     else:
+        _require_cgroup2_hierarchy_root(Path(proc_root), root)
         limit_name, usage_name = "memory.max", "memory.current"
     try:
         root_real = root.resolve(strict=True)
@@ -190,6 +241,8 @@ def read_cgroup_remaining_mib(
         raise RuntimeError("memory cgroup path is unavailable or escapes its controller mount") from error
 
     remaining: list[int] = []
+    if version == "v2":
+        _verify_cgroup_process_membership(pid, current)
     while True:
         try:
             current.relative_to(root_real)
@@ -198,9 +251,16 @@ def read_cgroup_remaining_mib(
         if not current.is_dir() or current.is_symlink():
             raise RuntimeError("memory cgroup ancestry is unreadable")
         limit_path, usage_path = current / limit_name, current / usage_name
-        if not limit_path.is_file() or not usage_path.is_file():
-            raise RuntimeError("memory cgroup limit or usage is missing; refusing to assume unlimited")
-        if version == "v2":
+        has_limit, has_usage = limit_path.is_file(), usage_path.is_file()
+        if version == "v2" and current == root_real and not has_limit and not has_usage:
+            # The cgroup v2 hierarchy root is exempt from controller resource
+            # interface files. All non-root visible ancestors were still checked.
+            pass
+        elif not has_limit or not has_usage:
+            raise RuntimeError(
+                f"memory cgroup limit or usage is missing at {current}; refusing to assume unlimited"
+            )
+        elif version == "v2":
             try:
                 limit_text = limit_path.read_text(encoding="ascii").strip()
             except (OSError, UnicodeError) as error:
@@ -222,6 +282,8 @@ def read_cgroup_remaining_mib(
         if parent == current:
             raise RuntimeError("memory cgroup ancestry does not reach its mount root")
         current = parent
+    if version == "v2" and _cgroup_membership(pid, Path(proc_root)) != membership:
+        raise RuntimeError("process cgroup membership changed during memory preflight")
     return min(remaining) if remaining else None
 
 
