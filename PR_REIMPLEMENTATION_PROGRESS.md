@@ -2,12 +2,13 @@
 
 ## Control state
 
-- Phase: **Round 2 active; C01–C13, cgroup fix, and C13a route checkpoint committed locally; local checks pass; C13b not authorized; owner host preflight PASS on `336cf69`; no live VM acceptance; C14 VM-default cutover pending**.
+- Phase: **Round 2 active; C01–C13, C13a, and C13b readiness implementation committed locally; full local tests pass; no live VM acceptance; C14 VM-default cutover pending**.
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
-- Current implementation authorization: **C13a only**, user request 2026-11-05,
-  after confirming the intended released default is VM with optional Docker. No
-  C13b, live host acceptance, public VM startup, default cutover or push approval.
+- Current implementation authorization: **C13b local readiness only**, user
+  request in this session after C13a, with the intended released default VM and
+  optional Docker preserved. No live host campaign, VM startup, credential
+  activity, C14 cutover or push is authorized.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
 - Implementing branch: `feat/vm-approach-2`; C05 implementation checkpoint is
   `cb7091a17720b59056bd2677f3af1aba5699f944`.
@@ -19,14 +20,19 @@
 - C11 fixture closeout: `668147b`; C12: `65a798d080f9470dfc43ccd907f448c9022fc77f`.
 - C13 implementation commit: `1e0b0bacfd99234b12b69cc4a53fa7f1e4eff53c` on
   `feat/vm-approach-2`; no push. This ledger-only SHA closeout follows separately.
+- C13b readiness implementation commit:
+  `d3751e4fbda25349de5cbcb1f1e6400ae3e489c8` on `feat/vm-approach-2`; local only,
+  no push. This progress-ledger SHA closeout follows separately.
 - Historical owner direction (2026-11-05, planning reconciliation): read original
   ticket history through MCP, reconcile this branch's plan/tasks/progress, commit
   locally and stop; no C13 or host action in that session. This was superseded by
   the later request to finish C13 locally only.
-- Current scope (2026-11-05): **C13a only**. Stage `lab-docker` and explicit
-  fail-closed `lab vm`; retain transition-stage Docker dispatch pending the C14
-  acceptance gate. No live test, credential action, public VM startup, VM-default
-  cutover, push or release authorization. C13b requires later authorization.
+- Current scope (2026-11-05): **C13b local acceptance-readiness implementation**
+  after the C13a route checkpoint. Keep `lab` on transition-stage Docker,
+  `lab-docker` explicit, and `lab vm` gated until reviewed live acceptance and
+  separately authorized C14. No campaign, VM startup, credentials, cutover, push
+  or release acceptance. The historical host preflight PASS on `336cf69` is not a
+  fresh preflight for C13b commit `d3751e4`.
 - Inspected source: PR #13 at
   `97af1d83a16fce68ddcc3390276c218a1b0cd518`.
 - Assigned session: current coordinating OpenCode session; no subagents assigned.
@@ -204,7 +210,7 @@ VM/network acceptance has occurred.
 | TASK-14 | C12 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-05/2026-11-05 | Guest update scan/apply, exact-version tools installer, `/proc` TUI guard, CLI/cloud-init/profile integration; 249 Python and 131 Bats tests PASS; changed-file Ruff/ShellCheck, Bash syntax, Python compilation, cloud-init schema and diff checks PASS | Fixture-only; no live VM, package/network, credential, host or lifecycle acceptance; TASK-15 remains the live gate |
 | TASK-15 | C13 | CODE COMMITTED; READINESS INCOMPLETE; LIVE ACCEPTANCE PENDING | Coordinator/2026-11-05/2026-11-05 | C13 runner/probes/adapter/reporting/fixtures; cgroup fix `232180b`; owner read-only preflight PASS on `336cf69` | Reporting/checklists alone are not complete procedures; C13a/C13b readiness work and real host evidence required |
 | TASK-15A | C13a | COMMITTED LOCALLY; CHECKS PASS | Coordinator/2026-11-05/2026-11-05 | `599e9ef` `lab` dispatcher, preserved `lab-docker`, explicit `lab vm`; local route/permission fixtures | Transition dispatcher stays Docker until acceptance; released default remains VM, with Docker optional; host rollback smoke pending |
-| TASK-15B | C13b | PLANNED; IMPLEMENTATION NOT AUTHORIZED | Unassigned/—/— | Gate-coverage audit, staged campaign, Ollama/llama.cpp/OpenAI and semi-automatic auth | C13a prerequisite; owner-controlled login; complete real procedures before full host campaign |
+| TASK-15B | C13b | LOCAL IMPLEMENTATION COMMITTED; OWNER CAMPAIGN NOT AUTHORIZED | Coordinator/2026-11-05/2026-11-05 | `d3751e4` staged exact-run campaign, retry/budget ledger, optional read-only provider discovery/config, OpenAI skip/login bridge, Compose+VM retention, teardown stage, gate procedures and Bash/Fish runbook; see C13b closeout | Fixture/local validation only; no host campaign. Canary redaction checker is owner-supplied/unavailable, so dependent secret-absence checks remain BLOCKED until reviewed checker and separate disposable-credential approval |
 | TASK-16 | C14 | CUTOVER NOT STARTED | Unassigned/—/— | Non-default preparation delegated to TASK-15A/C13a | All required live gates reviewed before default cutover; final default/rollback smoke after activation |
 
 **Round 1 stop condition (satisfied):** explicit Round 2 approval was granted on
@@ -1025,3 +1031,71 @@ exit 1 with eight previously recorded README/decision-log drift/link findings
 across 106 checks. No live acceptance, actual Docker invocation, host session
 reuse test, VM boot or credential activity. C13a is committed locally at
 `599e9ef`; C13b and C14 remain pending later authorization. No push.
+
+## C13b local readiness closeout — 2026-11-05
+
+**Authorization and boundary:** the user requested completion of C13b acceptance
+readiness locally and then confirmed the local commit closeout. This does not
+authorize an owner-host campaign, VM/service startup, credentials/browser sign-in,
+Docker-session changes, C14 cutover, or push. Keep the transition routing from
+C13a unchanged: ordinary `lab` uses Docker, `lab-docker` remains explicit, and
+`lab vm` remains gated. The old read-only host preflight PASS on `336cf69` is
+historical and does not validate C13b commit `d3751e4`.
+
+**Implemented locally:**
+
+- Replaced the live one-shot `--execute` path with exact-run `--start`/`--resume`,
+  sanitized `--status`, serialized mutations, revision/config/profile/listener
+  resume checks, and a final budgeted exact `--cleanup`/teardown stage. A report
+  cannot become PASS before successful teardown.
+- Added explicit 1–720 minute campaign ceilings and 60-minute stage caps. The
+  private state-root attempt ledger binds source/config revision, same approved
+  total, prior elapsed stage time, and at most one diagnosed fresh run-ID retry.
+  Resume/retry must preserve the same private `STATE_ROOT`; retry also preserves
+  the exact provider-config bytes and source revision.
+- Added bounded read-only loopback Ollama/llama.cpp discovery and explicit
+  credential-free provider/model configuration. OpenAI browser sign-in remains
+  optional/owner-controlled; skipping blocks dependent checks only. No host auth
+  is imported and no model transcript is retained.
+- Connected guest-only preloaded-image Compose/PostgreSQL health/query/bind and
+  container-restart checks to a DB-canary VM suspend/resume probe and exact
+  generated-project/volume/workspace cleanup. Compose health now requires a
+  successful `up --wait`; unavailable cleanup evidence stays BLOCKED.
+- SEC-NET requires actual depth-0/G1/G2 evidence, including G2's own isolation
+  report. Browser-bridge cleanup emits only a fixed success marker after exact
+  temporary-resource cleanup.
+- Added a per-gate procedure/evidence/cleanup matrix, staged Bash/Fish commands,
+  ordering for owner observations before teardown, and explicit retry instructions.
+  **Known owner-side gap:** this repository does not ship a redacting canary
+  scanner. It is marked owner-supplied/unavailable; canary-absence/SEC-SECRET
+  subchecks must remain BLOCKED until a reviewed checker exists. Credential
+  export/delete/reimport also needs separate consent and disposable credentials.
+
+**Files changed:** `scripts/vm-host-acceptance.py`, `scripts/vm-self-test.py`,
+`lib/vm/services.sh`, `tests/test_vm_host_acceptance.py`,
+`tests/test_vm_self_test.py`, `docs/vm-host-acceptance.md`, and this progress
+ledger. No changes were made to the pre-existing untracked `vm-migration-plan.md`;
+its SHA-256 remains
+`3d6ee2115423272b88a8efd8d4d33462318d5ae4c537841091e513ee5e2d1374`.
+
+**Local validation:**
+
+| Command/check | Result |
+|---|---|
+| `python3 -B -m unittest discover -s tests` | 305 tests PASS |
+| `bats tests/` | 141 tests PASS |
+| Changed-file Ruff | PASS |
+| Python compilation for acceptance/self-test/config/isolation scripts | PASS |
+| `bash -n lib/vm/services.sh` | PASS |
+| Compile embedded workload setup/retention/cleanup guest scripts | PASS |
+| Runbook Markdown fences, local links, retry guidance and stage/evidence order | PASS |
+| `git diff --check` | PASS |
+| `scripts/check-docs-consistency.py` | 8 pre-existing README/DECISIONS.md drift/link failures across 106 checks; unchanged by C13b |
+
+No campaign, VM, provider service, browser, credential, Docker session, or live
+acceptance command was run. C13b implementation is committed locally at
+`d3751e4fbda25349de5cbcb1f1e6400ae3e489c8`; no push was made. This progress-ledger
+SHA closeout is recorded in a separate local commit. Live acceptance still requires
+exact-revision review, fresh preflight, the owner's separate campaign approval,
+and the owner-supplied canary-checker/credential decisions above. C14 and release
+acceptance remain unproven and unauthorized.
