@@ -2,7 +2,7 @@
 
 ## Control state
 
-- Phase: **Round 2 active; C01–C12 local checkpoints committed; TASK-13 live adapter/acceptance still open; TASK-15 planning reconciled, C13 implementation not started; real acceptance pending**.
+- Phase: **Round 2 active; C01–C12 committed; C13 implementation locally validated and ready for commit; TASK-13 live proof and TASK-15 external acceptance remain pending; TASK-16 not started**.
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
@@ -14,10 +14,14 @@
 - C10 implementation commit: `272140ec0fb7798f96d759623bcf6699e13f16a6`, on
    `feat/vm-approach-2`, based on C09 `13a2292`; no push was performed.
 - C11 fixture closeout: `668147b`; C12: `65a798d080f9470dfc43ccd907f448c9022fc77f`.
-- Current owner direction (2026-11-05): read original ticket history through MCP,
-  reconcile this branch's plan/tasks/progress, commit locally and stop. No C13
-  implementation, host action or push in this reconciliation session. Master §9's
-  replacement campaign policy, not legacy handoff locks, controls the next work.
+- Historical owner direction (2026-11-05, planning reconciliation): read original
+  ticket history through MCP, reconcile this branch's plan/tasks/progress, commit
+  locally and stop; no C13 or host action in that session. This was superseded by
+  the later request to finish C13 locally only.
+- Current resumed scope: implement/validate/commit C13 locally; do not run live
+  VM/host/network/credential/human acceptance, do not enable public `run`/`up`,
+  do not start TASK-16, and do not push. Live acceptance remains pending owner
+  scope review and separate authorization.
 - Inspected source: PR #13 at
   `97af1d83a16fce68ddcc3390276c218a1b0cd518`.
 - Assigned session: current coordinating OpenCode session; no subagents assigned.
@@ -40,8 +44,9 @@
 | Define executable tasks, tests and commit plan | PENDING | No implementation task or commit is authorized |
 | Validate traceability / present approval checkpoint | PENDING | Do not request approval before complete planning package |
 
-The table above is the historical kickoff ledger. The completion ledger below
-supersedes its STARTED/PENDING investigation statuses; implementation remains unstarted.
+The table above is the historical kickoff ledger. The completed Round 2
+investigation and execution records below supersede its STARTED/PENDING statuses;
+those rows describe the initial kickoff state only.
 
 ## Kickoff environment observations
 
@@ -66,22 +71,19 @@ Files created during kickoff:
 - `PR_REIMPLEMENTATION_PLAN.md` — preliminary authoritative plan and evidence map.
 - `PR_REIMPLEMENTATION_PROGRESS.md` — this ledger.
 
-Application files changed: **none**. Ticket writes: **none**. Implementation
-commits/pushes/PRs: **none**. VM/service operations: **none**.
+At kickoff, application files changed: **none**. Ticket writes: **none**.
+Implementation commits/pushes/PRs: **none**. VM/service operations: **none**.
 
-Tests executed at kickoff: **none**. Completion-session diagnostic tests and
-actual outcomes are recorded below; no replacement implementation exists yet.
+Tests executed at kickoff: **none**. Later implementation and validation results
+are recorded in the completion ledger and C13 entry below.
 
-## Next resumption action
+## Historical next resumption action (superseded)
 
-After the owner resumes implementation, read master §9's TASK-15 execution policy
-and the amended TASK-15 spec. Implement C13 acceptance tools/docs/tests and the
-missing TASK-13 live adapter locally first. No new architecture approval or
-original-ticket repair is required. Preserve `vm-migration-plan.md` and the
-working Docker session. Prepare one scoped replacement campaign handoff after
-local checks, then obtain owner approval before live mutation. Do not run old
-branch commands or reuse its stable snapshot/profile discovery. See the final
-2026-11-05 reconciliation record below for scope and ordered remaining steps.
+The next local C13 implementation action was completed in the resumed session.
+The next operational milestone is an owner-reviewed, exact-scope campaign
+handoff; it remains unapproved and unrun here. Preserve `vm-migration-plan.md`
+and the working Docker session. Do not run old-branch commands or reuse its
+stable snapshot/profile discovery.
 
 ## Round 2 execution ledger contract
 
@@ -193,9 +195,9 @@ VM/network acceptance has occurred.
 | TASK-10 | C09 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Scoped native auth/browser bridge, private escrow, runtime key adapters, lifecycle export guard; 36 auth/browser Python tests, 196 full Python tests, 123 Bats; Ruff, ShellCheck, Bash syntax, Python compilation, diff checks PASS | Local fixture checkpoint only; no live login, auth-store inspection, credential export/import, guest, or host browser acceptance; TASK-15 HUMAN-AUTH and refreshed-token owner proof remain pending |
 | TASK-11 | C10 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Filtered Git-HEAD-bound snapshots; exclusions, race/capacity checks, synthetic Git and retained-snapshot verification; snapshot Python fixtures pass; `272140e` | Fixture-only; no live VM or host acceptance |
 | TASK-12 | C10 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Persisted identity/depth guards, KVM/CPU preflight, isolated candidate state/argv, immediate-parent proxy depth and exact descendant-safe cleanup; 5 recursion Python cases, 6 recursion Bats cases; full 214 VM Python and 129 Bats pass; `272140e` | Public `run`/`up` remain undispatched until TASK-16; real nested KVM/VM and host/human acceptance remain pending |
-| TASK-13 | C11 | PARTIAL (FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-04 | Evidence-gated self-test state machine, atomic private reports, disposable failed-A/fixed-B full-source copies, copied QEMU/Bats checks; 11 focused tests, 225 VM Python tests, 129 Bats tests PASS | Live adapter deliberately unavailable; no changed VM/agent/nested/hardware/host/network acceptance; E2E-SELF remains blocked pending TASK-15 handoff |
+| TASK-13 | C11+C13 | PARTIAL (LOCAL CODE + FIXTURE MILESTONE) | Coordinator/2026-11-04/2026-11-05 | C11 evidence-gated state machine plus C13 opt-in nested-VM adapter, candidate lifecycle/bootstrap mutations, exact G1/G2/G3 evidence and cleanup; local tests recorded in C13 closeout below | No live VM/agent/nested-KVM/host/network acceptance; E2E-SELF remains pending owner campaign |
 | TASK-14 | C12 | DONE (FIXTURE MILESTONE) | Coordinator/2026-11-05/2026-11-05 | Guest update scan/apply, exact-version tools installer, `/proc` TUI guard, CLI/cloud-init/profile integration; 249 Python and 131 Bats tests PASS; changed-file Ruff/ShellCheck, Bash syntax, Python compilation, cloud-init schema and diff checks PASS | Fixture-only; no live VM, package/network, credential, host or lifecycle acceptance; TASK-15 remains the live gate |
-| TASK-15 | C13 | PLANNING RECONCILED; CODE NOT STARTED | Coordinator/2026-11-05/— | Original ticket history reread through MCP; replacement campaign scope/order/retry policy clarified in plan §9 and TASK-15 | Implement tools and real self-test adapter, pass local checks, then approve one disposable campaign before live mutation; no legacy handoff dependency |
+| TASK-15 | C13 | LOCAL CODE CHECKPOINT READY; LIVE ACCEPTANCE PENDING | Coordinator/2026-11-05/2026-11-05 | Added scoped host acceptance runner, bounded guest isolation probes, human/owner checklist evidence, exact cleanup, runbook, and fixtures; see C13 closeout below | No live acceptance; gates needing actual model/workload/agent/filesystem/secret/human behavior remain blocked. Do not enter TASK-16 |
 | TASK-16 | C14 | NOT STARTED | Unassigned/—/— | — | All live gates before cutover |
 
 **Round 1 stop condition (satisfied):** explicit Round 2 approval was granted on
@@ -838,3 +840,55 @@ Planning-session validation:
 No application suites were rerun for these documentation-only changes. No push,
 ticket write, host acceptance or C13 implementation was performed. Stop after the
 local planning commit for the owner's model swap.
+
+## C13 local implementation and validation — 2026-11-05
+
+**Scope resumed:** complete the C13 code checkpoint only. The earlier planning-only
+direction above is historical and superseded for this resumed session. No live
+acceptance, host mutation, network probe, credential action, human test, TASK-16
+work, or push was authorized or performed. Public `run`/`up` remain fail-closed.
+
+**Implementation:** added `scripts/vm-host-acceptance.py` with read-only scoped
+preflight, explicit confirmed execution, generated private run/snapshot ownership,
+fresh clean guest checks, exact listener/process verification, daily warm/A→B→B,
+outer/child network probes, bounded lifecycle/update/resize checks, live self-test
+adapter integration, sanitized fixed-enum gate reports, owner checklist recording,
+and manifest-only graceful deepest-first cleanup. Added
+`scripts/vm-guest-isolation-check.py` with fixed bounded guest probes and private
+sanitized reports. Completed the `--live` nested-VM adapter in
+`scripts/vm-self-test.py`, including candidate bootstrap/lifecycle mutations,
+G1/G2/G3 evidence, refusal-before-state/QEMU checks, parent continuity, exact
+cleanup, and the existing frozen lifecycle interfaces. Added fixture coverage in
+`tests/test_vm_host_acceptance.py`, `tests/test_vm_guest_isolation_check.py`, and
+`tests/test_vm_self_test.py`, plus the owner handoff in
+`docs/vm-host-acceptance.md`.
+
+Review corrections included enforcing the SSH deadline at both host and guest,
+selecting only the registry for the exact live process identity, treating any
+correlated direct DNS reply (including empty-answer/NXDOMAIN) as egress, blocking
+lifecycle resize campaigns below the required 8 GiB, graceful exact cleanup of
+ready profiles, and preventing an owner attestation from overriding an unstaged
+Docker rollback prerequisite. Some behavior gates remain deliberately BLOCKED
+until real owner evidence is recorded; no fixture or health result is described
+as live PASS. The isolated campaign does not import host provider configuration
+or credentials, so configured-model streams and model-dependent agent work remain
+BLOCKED until a reviewed provider-specific campaign configuration is available.
+
+| Exact local command | Observed result |
+|---|---|
+| `python3 -m unittest discover -s tests -p 'test_*.py'` |279 tests, OK, exit 0; 67.910s |
+| `bats tests/` |131/131 pass, exit 0 |
+| `python3 -m unittest tests.test_vm_self_test tests.test_vm_host_acceptance tests.test_vm_guest_isolation_check` |41 tests, OK, exit 0; 13.689s |
+| `ruff check scripts/vm-self-test.py scripts/vm-host-acceptance.py scripts/vm-guest-isolation-check.py tests/test_vm_self_test.py tests/test_vm_host_acceptance.py tests/test_vm_guest_isolation_check.py` |PASS |
+| `python3 -m py_compile scripts/vm-self-test.py scripts/vm-host-acceptance.py scripts/vm-guest-isolation-check.py tests/test_vm_self_test.py tests/test_vm_host_acceptance.py tests/test_vm_guest_isolation_check.py` |PASS |
+| `bash -n lab-vm` |PASS |
+| `shellcheck -x lab-vm` |PASS |
+| `python3 scripts/vm-host-acceptance.py --help`; `python3 scripts/vm-guest-isolation-check.py --help`; `python3 scripts/vm-self-test.py --help` |PASS; explicit confirmation/cleanup/observation options displayed |
+| `git diff --check` |PASS |
+
+Live gates remain **PENDING/BLOCKED** until a later owner-reviewed exact campaign
+is authorized and performed. Actual model streams, guest Compose/project fix,
+multi-agent work, filesystem/secret canaries, UI/permission/auth observations,
+changed-VM nested proof, and exact live teardown have not been run. The C13
+commit SHA and its follow-up ledger-only record are pending; no push is planned.
+Preserve the untracked `vm-migration-plan.md` unchanged and exclude it from C13.

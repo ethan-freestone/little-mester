@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +48,8 @@ class FixtureAdapter:
         broken_tree = digest("candidate-A")
         fixed_tree = digest("candidate-B")
         payload = digest("guest-payload")
+        base_lifecycle = digest("base-lifecycle")
+        candidate_lifecycle = digest("candidate-lifecycle")
         common_snapshot = {
             "source_head": source["source_head"],
             "base_source_tree_sha256": source["tree_sha256"],
@@ -64,25 +67,31 @@ class FixtureAdapter:
                 **common_snapshot, "profile_name": bad_profile,
                 "candidate_tree_sha256": broken_tree, "candidate_payload_sha256": digest("payload-A"),
                 "manifest_sha256": digest("manifest-A"),
-                "seed_sha256": digest("seed-A"), "bootstrap_sha256": digest("bootstrap-A"),
+                "bootstrap_sha256": digest("bootstrap-A"),
                 "runner_sha256": digest("runner-A"), "runner_test_sha256": digest("runner-test-A"),
+                "base_lifecycle_sha256": base_lifecycle,
+                "candidate_lifecycle_sha256": candidate_lifecycle,
             },
             "expected_boot_failure": {
                 "profile_name": bad_profile, "source_head": source["source_head"],
                 "candidate_tree_sha256": broken_tree, "manifest_sha256": digest("manifest-A"),
                 "seed_sha256": digest("seed-A"), "bootstrap_sha256": digest("bootstrap-A"),
                 "runner_sha256": digest("runner-A"), "runner_test_sha256": digest("runner-test-A"),
+                "candidate_lifecycle_sha256": candidate_lifecycle,
                 "depth": 1, "failure_stage": "guest_provisioning",
                 "observed_exit_code": 42, "sentinel": "A", "qemu_vcpus": 1,
                 "effective_qemu_argv_sha256": digest("qemu-smp-1"),
-                "failure_evidence_preserved": True, "diagnostic_refs": ["runs/bad1/guest-provision.log"],
+                "failure_evidence_preserved": True,
+                "diagnostic_refs": [f"{run_id}-failure.json"],
             },
             "fixed_snapshot": {
                 **common_snapshot, "profile_name": fix_profile,
                 "candidate_tree_sha256": fixed_tree, "candidate_payload_sha256": payload,
                 "manifest_sha256": digest("manifest-B"),
-                "seed_sha256": digest("seed-B"), "bootstrap_sha256": digest("bootstrap-B"),
+                "bootstrap_sha256": digest("bootstrap-B"),
                 "runner_sha256": digest("runner-A"), "runner_test_sha256": digest("runner-test-A"),
+                "base_lifecycle_sha256": base_lifecycle,
+                "candidate_lifecycle_sha256": candidate_lifecycle,
             },
             "fixed_boot": {
                 "profile_name": fix_profile, "ready": True, "depth": 1, "max_depth": 2,
@@ -92,11 +101,14 @@ class FixtureAdapter:
                 "manifest_sha256": digest("manifest-B"), "bootstrap_sha256": digest("bootstrap-B"),
                 "runner_sha256": digest("runner-A"), "runner_test_sha256": digest("runner-test-A"),
                 "guest_source_tree_sha256": fixed_tree,
+                "candidate_lifecycle_sha256": candidate_lifecycle,
+                "installed_lifecycle_sha256": candidate_lifecycle,
             },
             "source_parity": {
                 "source_head": source["source_head"], "guest_source_tree_sha256": fixed_tree,
                 "test_source_tree_sha256": fixed_tree, "expected_payload_sha256": payload,
                 "installed_payload_sha256": payload,
+                "guest_lifecycle_sha256": candidate_lifecycle,
             },
             "candidate_tests": {
                 "source_tree_sha256": fixed_tree, "exit_code": 0, "tests_passed": 3, "tests_failed": 0,
@@ -111,7 +123,12 @@ class FixtureAdapter:
                 "g2_profile_name": self_test._expected_profile(run_id, "fix2"),
                 "g1_depth": 1, "g2_depth": 2, "max_depth": 2, "g3_refused": True,
                 "refused_before_state": True, "refused_before_qemu": True,
-                "parent_chain_verified": True,
+                "parent_chain_verified": True, "reset_refused": True,
+                "increase_refused": True, "missing_kvm_refused": True,
+                "candidate_lifecycle_sha256": candidate_lifecycle,
+                "g2_runtime_payload_sha256": digest("g2-runtime-payload"),
+                "g2_installed_lifecycle_sha256": candidate_lifecycle,
+                "lifecycle_mutation_observed": True,
             },
             "agent_task": {
                 "agent_completed": True, "task_id": "harmless-file-test",
@@ -182,7 +199,7 @@ class SelfTestTests(unittest.TestCase):
         self.assertEqual(report["provenance"]["parent_image_sha256"], digest("parent-image"))
         self.assertEqual(report["provenance"]["candidate_image_sha256"], digest("candidate-image"))
         self.assertEqual(report["preserved_diagnostic_refs"], [{
-            "stage": "expected_boot_failure", "path": "runs/bad1/guest-provision.log",
+            "stage": "expected_boot_failure", "path": f"{report['run_id']}-failure.json",
         }])
         self.assertEqual(len(report["owned_profiles"]), 3)
         report_path = Path(report["report_path"])
@@ -194,21 +211,21 @@ class SelfTestTests(unittest.TestCase):
         self.assertEqual(stored["report_ref"], report_path.name)
         self.assertNotIn("report_path", stored)
 
-    def test_stale_source_and_mismatched_candidate_parity_cannot_pass(self):
-        stale = FixtureAdapter()
-        original = stale.run_stage
+    def test_parent_identity_and_mismatched_candidate_parity_cannot_pass(self):
+        invalid_parent = FixtureAdapter()
+        original = invalid_parent.run_stage
 
-        def same_as_parent(name, context):
+        def missing_parent_identity(name, context):
             result = original(name, context)
             if name == "preflight":
-                result["evidence"]["parent_source_tree_sha256"] = context["source"]["tree_sha256"]
+                result["evidence"]["parent_identity_verified"] = False
             return result
 
-        stale.run_stage = same_as_parent
-        stale_report, stale_status = self.new_runner(stale).run()
-        self.assertEqual(stale_status, 1)
-        self.assertEqual(stale_report["stages"]["preflight"]["status"], "FAIL")
-        self.assertEqual(stale_report["stages"]["broken_snapshot"]["status"], "NOT_RUN")
+        invalid_parent.run_stage = missing_parent_identity
+        parent_report, parent_status = self.new_runner(invalid_parent).run()
+        self.assertEqual(parent_status, 1)
+        self.assertEqual(parent_report["stages"]["preflight"]["status"], "FAIL")
+        self.assertEqual(parent_report["stages"]["broken_snapshot"]["status"], "NOT_RUN")
 
         parity = FixtureAdapter()
         original = parity.run_stage
@@ -247,6 +264,78 @@ class SelfTestTests(unittest.TestCase):
                 self.assertEqual(report["stages"]["expected_boot_failure"]["status"], "FAIL")
                 self.assertEqual(report["stages"]["expected_boot_failure"]["reason_code"], "invalid_evidence")
                 self.assertEqual(report["stages"]["fixed_snapshot"]["status"], "NOT_RUN")
+
+    def test_live_lifecycle_mutation_and_installed_runtime_hash_are_required(self):
+        for stage, field, value in (
+            ("broken_snapshot", "candidate_lifecycle_sha256", digest("base-lifecycle")),
+            ("fixed_boot", "installed_lifecycle_sha256", digest("different-installed-lifecycle")),
+        ):
+            with self.subTest(stage=stage):
+                adapter = FixtureAdapter()
+                original = adapter.run_stage
+
+                def mutate(name, context, stage=stage, field=field, value=value, original=original):
+                    result = original(name, context)
+                    if name == stage:
+                        result["evidence"][field] = value
+                    return result
+
+                adapter.run_stage = mutate
+                report, status = self.new_runner(adapter).run()
+                self.assertEqual(status, 1)
+                self.assertEqual(report["stages"][stage]["reason_code"], "invalid_evidence")
+
+    def test_live_lifecycle_probe_inserts_only_at_exact_allocation_anchor(self):
+        candidate = self.base / "candidate"
+        lifecycle = candidate / self_test.FIXTURE_LIFECYCLE
+        lifecycle.parent.mkdir(parents=True)
+        anchor = (
+            b'  vm_lifecycle_profile_allocate "$root" "$name" "$depth" "$memory" '
+            b'<<<"$data" >/dev/null || return $?\n'
+        )
+        lifecycle.write_bytes(b"#!/usr/bin/env bash\nvm_lifecycle_up() {\n" + anchor + b"}\n")
+        lifecycle.chmod(0o755)
+        run_id = "12345678123456781234567812345678"
+        self_test._insert_live_lifecycle_probe(candidate, run_id)
+        modified = lifecycle.read_bytes()
+        self.assertIn(f".vm-self-test-lifecycle-{run_id}".encode(), modified)
+        self.assertIn(b"VM_SELF_TEST_LIFECYCLE_RUN_ID", modified)
+        self.assertEqual(lifecycle.stat().st_mode & 0o777, 0o755)
+        with self.assertRaises(self_test.SelfTestError):
+            self_test._insert_live_lifecycle_probe(candidate, run_id)
+
+    def test_nested_depth_adapter_transports_and_validates_live_runtime_evidence(self):
+        run_id = "12345678123456781234567812345678"
+        adapter = self_test.LiveSelfTestAdapter.__new__(self_test.LiveSelfTestAdapter)
+        adapter.run_id = run_id
+        adapter.child_state = Path("/fixture/state")
+        adapter.fixed = {"candidate_lifecycle_sha256": digest("candidate-lifecycle")}
+        remembered = []
+        adapter._remember = lambda name, depth: remembered.append((name, depth))
+        payload = {
+            "g2_profile_name": self_test._expected_profile(run_id, "fix2"),
+            "g2_depth": 2, "max_depth": 2, "g3_refused": True,
+            "refused_before_state": True, "refused_before_qemu": True,
+            "parent_chain_verified": True, "reset_refused": True,
+            "increase_refused": True, "missing_kvm_refused": True,
+            "g2_runtime_payload_sha256": digest("runtime-payload"),
+            "g2_installed_lifecycle_sha256": digest("candidate-lifecycle"),
+            "lifecycle_mutation_observed": True,
+        }
+        adapter._ssh = lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=json.dumps(payload).encode("ascii"),
+        )
+        evidence = adapter._nested_depth_check()
+        self.assertEqual(remembered, [(self_test._expected_profile(run_id, "fix2"), 2)])
+        self.assertEqual(evidence["candidate_lifecycle_sha256"], digest("candidate-lifecycle"))
+        self.assertEqual(evidence["g2_installed_lifecycle_sha256"], digest("candidate-lifecycle"))
+        self.assertTrue(evidence["lifecycle_mutation_observed"])
+
+        payload["unexpected"] = True
+        with mock.patch.object(adapter, "_ssh", return_value=SimpleNamespace(
+                returncode=0, stdout=json.dumps(payload).encode("ascii"))), \
+                self.assertRaises(self_test.SelfTestError):
+            adapter._nested_depth_check()
 
     def test_missing_agent_is_blocked_and_untrusted_evidence_is_not_serialized(self):
         adapter = FixtureAdapter({"agent_task": {
