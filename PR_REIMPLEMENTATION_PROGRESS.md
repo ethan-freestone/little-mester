@@ -2,7 +2,7 @@
 
 ## Control state
 
-- Phase: **Round 2 active; C01–C12 committed; C13 implementation locally validated and ready for commit; TASK-13 live proof and TASK-15 external acceptance remain pending; TASK-16 not started**.
+- Phase: **Round 2 active; C01–C13 committed locally; TASK-13 live proof and TASK-15 external acceptance remain pending; TASK-16 not started**.
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
@@ -14,6 +14,8 @@
 - C10 implementation commit: `272140ec0fb7798f96d759623bcf6699e13f16a6`, on
    `feat/vm-approach-2`, based on C09 `13a2292`; no push was performed.
 - C11 fixture closeout: `668147b`; C12: `65a798d080f9470dfc43ccd907f448c9022fc77f`.
+- C13 implementation commit: `1e0b0bacfd99234b12b69cc4a53fa7f1e4eff53c` on
+  `feat/vm-approach-2`; no push. This ledger-only SHA closeout follows separately.
 - Historical owner direction (2026-11-05, planning reconciliation): read original
   ticket history through MCP, reconcile this branch's plan/tasks/progress, commit
   locally and stop; no C13 or host action in that session. This was superseded by
@@ -889,6 +891,7 @@ BLOCKED until a reviewed provider-specific campaign configuration is available.
 Live gates remain **PENDING/BLOCKED** until a later owner-reviewed exact campaign
 is authorized and performed. Actual model streams, guest Compose/project fix,
 multi-agent work, filesystem/secret canaries, UI/permission/auth observations,
-changed-VM nested proof, and exact live teardown have not been run. The C13
-commit SHA and its follow-up ledger-only record are pending; no push is planned.
-Preserve the untracked `vm-migration-plan.md` unchanged and exclude it from C13.
+changed-VM nested proof, and exact live teardown have not been run. C13 is
+committed locally as `1e0b0bacfd99234b12b69cc4a53fa7f1e4eff53c`; this separate
+ledger-only commit records that SHA. No push is planned. Preserve the untracked
+`vm-migration-plan.md` unchanged and exclude it from C13.
