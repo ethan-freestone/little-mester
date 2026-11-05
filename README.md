@@ -110,13 +110,22 @@ mkdir -p workspaces/my-project
 cd workspaces/my-project
 git init
 
-# Start the agent
+# Start the agent (Docker route during the acceptance transition)
 ./lab .
 ```
 
 **Requirements:** Docker with GPU support (`nvidia-smi` works on host), `sudo`, and a working GPU driver. Other distros and GPU vendors may need adjustments to `./lab setup` — see [`docs/`](docs/).
 
 Hardware configuration lives in [`machine.conf.example`](machine.conf.example). Copy it to `machine.conf` (gitignored) and fill in your specs. The benchmark tools use it to suggest optimal starting points.
+
+### VM migration status
+
+The **intended released default is the VM**, with Docker retained as an optional
+route. During the acceptance transition, the ordinary `./lab <workspace>` path
+still delegates to Docker; it is not a decision to keep Docker as the product
+default. `./lab-docker <workspace>` names that Docker route explicitly, and
+`./lab vm ...` selects the VM CLI. VM `run`/`up` remain fail-closed until the
+required host acceptance and separately authorized C14 cutover are complete.
 
 ---
 
@@ -126,6 +135,8 @@ Hardware configuration lives in [`machine.conf.example`](machine.conf.example). 
 ./lab <workspace>                   # start opencode (default agent)
 ./lab --aider    <workspace>        # use Aider for this session
 ./lab shell <workspace>             # plain bash inside the sandbox
+./lab-docker <workspace>            # explicit Docker route (optional after VM cutover)
+./lab vm status                     # explicit VM route; read-only example
 ./lab stop                          # stop all containers
 ./lab pull                          # re-pull models after editing models.txt
 ./lab build                         # rebuild agent image

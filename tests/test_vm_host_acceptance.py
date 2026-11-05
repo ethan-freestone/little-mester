@@ -440,7 +440,7 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertTrue(result["same_overlay_and_key"])
         self.assertTrue(result["warm_process_identity_stable"])
         self.assertEqual([item[0] for item in calls], ["resume"] * 5)
-        self.assertFalse(result["docker_rollback_route_staged"])
+        self.assertTrue(result["docker_rollback_route_staged"])
 
     def test_lifecycle_suite_scans_cancel_and_applies_only_explicit_targets(self):
         base = {
