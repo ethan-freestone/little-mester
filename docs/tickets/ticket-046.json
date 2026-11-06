@@ -6,9 +6,9 @@
   "type": "spike",
   "status": "draft",
   "title": "Spike: alternative container runtimes for the VM harness (future scope)",
-  "objective": "Evaluate whether a runtime other than Docker (rootless Podman, containerd/nerdctl, systemd-nspawn, etc.) would better serve the VM-based harness. This is future scope and does not block epic #35; no implementation is done here.",
+  "objective": "IGNORE ME AS AN EXECUTION PLAN FOR feat/vm-approach-2. Start with PR_REIMPLEMENTATION_HANDOFF.md; PR_REIMPLEMENTATION_PLAN.md / TASKS.md / PROGRESS.md control replacement work. Historical ticket details below are retained, not current gates or permission to resume legacy procedures. PR_IMPLEMENTATION is a conversational shorthand; actual files are named PR_REIMPLEMENTATION.\n\nORIGINAL OBJECTIVE (preserved):\nEvaluate whether a runtime other than Docker (rootless Podman, containerd/nerdctl, systemd-nspawn, etc.) would better serve the VM-based harness. This is future scope and does not block epic #35; no implementation is done here.",
   "created_at": "2026-10-26T20:39:18.843Z",
-  "updated_at": "2026-10-26T20:39:18.843Z",
+  "updated_at": "2026-11-06T22:26:14.201Z",
   "acceptance_criteria": [
     {
       "id": "A1",

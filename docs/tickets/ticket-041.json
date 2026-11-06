@@ -6,9 +6,9 @@
   "type": "feature",
   "status": "draft",
   "title": "VM provisioning and ./lab VM lifecycle",
-  "objective": "Make the VM reproducible and controllable from the host: ./lab can provision or connect to the VM per #40, install Docker, transport the workspace, and run VM lifecycle commands idempotently. The host stops running the agent container itself.",
+  "objective": "IGNORE ME AS AN EXECUTION PLAN FOR feat/vm-approach-2. Start with PR_REIMPLEMENTATION_HANDOFF.md; PR_REIMPLEMENTATION_PLAN.md / TASKS.md / PROGRESS.md control replacement work. Historical ticket details below are retained, not current gates or permission to resume legacy procedures. PR_IMPLEMENTATION is a conversational shorthand; actual files are named PR_REIMPLEMENTATION.\n\nORIGINAL OBJECTIVE (preserved):\nMake the VM reproducible and controllable from the host: ./lab can provision or connect to the VM per #40, install Docker, transport the workspace, and run VM lifecycle commands idempotently. The host stops running the agent container itself.",
   "created_at": "2026-10-26T20:39:18.836Z",
-  "updated_at": "2026-11-03T15:12:32.734Z",
+  "updated_at": "2026-11-06T22:26:14.173Z",
   "acceptance_criteria": [
     {
       "id": "A1",

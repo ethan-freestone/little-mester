@@ -1,14 +1,29 @@
 # Local-first VM acceptance → C14 handoff plan
 
-> **Current control state — 2026-11-06: PAUSE after planning.** Owner approved
-> shared-inference/security/performance direction, current-work checkpoint commits
-> and detailed planning, then a pause to choose an implementation model. Start with
-> [the controlling inference/performance amendment](vm-inference-performance-plan.md),
-> INF-00 and its decision register. Implementation checkpoint: `ca6da6c`.
+> **SUPERSEDED AS THE SESSION HANDOFF — owner reset 2026-11-06.**
+> Use [the single current handoff](../PR_REIMPLEMENTATION_HANDOFF.md). This file is
+> retained as historical implementation/evidence/runbook detail, NOT next commands.
+> Planning only now; no tests/implementation. On resume, OpenAI-based development
+> migration comes before local-inference work or release acceptance. Historical
+> local-first auth deferral, stop-after-each-observation and single-retry wording
+> must not be used to block that migration or routine diagnosed development fixes.
+> Do not start/recover/delete a VM by copying commands below.
+
+## Historical handoff below — retained, not current instructions
+
+> **Current control state — 2026-11-06:** the planning pause was later superseded
+> by the owner's resume for fixture-first INF-01 local implementation/review.
+> Shared-inference/security/performance direction and the planning baseline remain
+> controlled by [the inference/performance amendment](vm-inference-performance-plan.md).
+> Implementation checkpoint: `ca6da6c`.
 > **Do not execute older discovery, repair, retry or campaign commands below as
 > the current next action.** They are retained chronological handoff evidence.
 > Topology-aware discovery (INF-01) replaces the fixed-parent-loopback assumption.
-> No new inference implementation/live operations/push/merge/default cutover now.
+> The owner has supplied one read-only exact-profile INF-01 report: provider
+> `none`, no model forward or endpoint contact; outer execution identity remains
+> unknown. No VM/service/provider operation, push, merge or default cutover is
+> authorized by the local-code resume. This report does not establish H/G0/G1 or
+> identify an upstream serving backend.
 
 ## Approved pre-C14 additions and current evidence
 

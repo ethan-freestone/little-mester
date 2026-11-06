@@ -23,6 +23,7 @@ acceptance = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(acceptance)
 
 RUN_ID = "12345678123456781234567812345678"
+UNSPECIFIED_MODELS = object()
 
 
 class HostAcceptanceTests(unittest.TestCase):
@@ -123,7 +124,7 @@ class HostAcceptanceTests(unittest.TestCase):
         with self.assertRaises(acceptance.AcceptanceError):
             acceptance.load_provider_config(path)
 
-    def test_provider_discovery_contacts_fixed_loopback_routes_and_redacts_payloads(self):
+    def test_provider_probe_uses_only_the_exact_selected_loopback_endpoint(self):
         calls = []
 
         class Response:
@@ -140,36 +141,268 @@ class HostAcceptanceTests(unittest.TestCase):
                 self.host, self.port, self.timeout = host, port, timeout
 
             def request(self, method, route, headers):
-                calls.append((self.host, self.port, method, route, headers["Connection"]))
+                calls.append((self.host, self.port, self.timeout, method, route, headers["Connection"]))
 
             def getresponse(self):
-                body = (b'{"models":[{"name":"qwen3:8b"}]}' if self.port == 11434
-                        else b'{"data":[{"id":"coder-q4"}]}')
-                return Response(body)
+                return Response(b'{"data":[{"id":"coder-q4"}]}')
 
             def close(self):
                 pass
 
         with mock.patch.object(acceptance.http.client, "HTTPConnection", Connection):
-            result = acceptance.discover_local_providers()
-        self.assertEqual(result["discovery"]["ollama"]["model_ids"], ["qwen3:8b"])
-        self.assertEqual(result["discovery"]["llamacpp"]["model_ids"], ["coder-q4"])
-        self.assertEqual(calls, [
-            ("127.0.0.1", 11434, "GET", "/api/tags", "close"),
-            ("127.0.0.1", 8080, "GET", "/v1/models", "close"),
-        ])
+            result = acceptance._probe_provider_models("llamacpp", "127.0.0.1", 43210)
+        self.assertEqual(result, ["coder-q4"])
+        self.assertEqual(calls, [("127.0.0.1", 43210, 2.0, "GET", "/v1/models", "close")])
 
-    def test_provider_unavailability_blocks_only_provider_subchecks(self):
+    def test_provider_probe_caps_response_and_timeout(self):
+        observed = []
+
+        class Response:
+            status = 200
+
+            def read(self, limit):
+                observed.append(("read", limit))
+                return b"{" * limit
+
+        class Connection:
+            def __init__(self, host, port, timeout):
+                observed.append(("connect", host, port, timeout))
+
+            def request(self, method, route, headers):
+                observed.append(("request", method, route))
+
+            def getresponse(self):
+                return Response()
+
+            def close(self):
+                observed.append(("close",))
+
+        with mock.patch.object(acceptance.http.client, "HTTPConnection", Connection):
+            result = acceptance._probe_provider_models("ollama", "127.0.0.1", 43210)
+        self.assertIsNone(result)
+        self.assertIn(("read", acceptance.MAX_PROVIDER_RESPONSE_BYTES + 1), observed)
+        self.assertIn(("connect", "127.0.0.1", 43210, 2.0), observed)
+        self.assertEqual(observed[-1], ("close",))
+
+    def _topology_profile(self, *, depth=0, provider="ollama", model_port=43210,
+                          forward_port=None, model_id="qwen3:8b"):
+        name = "topology-fixture"
+        forward_port = model_port if forward_port is None else forward_port
+        guest_model_port = {"ollama": 11434, "llamacpp": 8080}.get(provider)
+        netdev = (
+            "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,"
+            "guestfwd=tcp:10.0.2.100:3128-cmd:/usr/bin/socat - TCP:127.0.0.1:60000"
+        )
+        if guest_model_port is not None:
+            netdev += (f",guestfwd=tcp:10.0.2.100:{guest_model_port}-cmd:/usr/bin/socat "
+                       f"- TCP:127.0.0.1:{forward_port}")
+        netdev += ",restrict=on"
+        socket_path = str(self.base / "profile-control.sock")
+        disk_path = str(self.state_root / "vm/profiles" / name / "disk.qcow2")
+        profile = {
+            "name": name, "status": "ready", "profile_id": "12345678-1234-5678-1234-567812345678",
+            "depth": depth, "max_depth": 3, "guest_payload_sha256": "a" * 64,
+            "runtime_identity": {
+                "pid": 12345, "start_ticks": 98765, "executable": "/usr/bin/qemu-system-x86_64",
+                "disk_path": disk_path, "socket_path": socket_path, "ssh_port": 2222,
+                "argv": [
+                    "/usr/bin/qemu-system-x86_64", "-enable-kvm",
+                    "-drive", "file=/tmp/seed.iso,format=raw,if=none,id=cloud_disk,readonly=on",
+                    "-drive", f"file={disk_path},format=qcow2,if=virtio",
+                    "-chardev", f"socket,id=charfs,path={socket_path}", "-netdev", netdev,
+                ],
+            },
+        }
+        marker = {
+            "schema_version": 1, "status": "ready", "agent": "opencode", "workload_runtime": "none",
+            "payload_sha256": "a" * 64, "opencode_version": "2.2.0",
+            "opencode_version_selector": "latest", "aider_version": "", "model_provider": provider,
+            "model_port": model_port if guest_model_port is not None else None,
+            "model_id": model_id, "workspace_mount": "virtiofs", "mcp_build": True,
+            "recursion_tools": True, "depth": depth, "max_depth": 3,
+        }
+        return name, profile, marker
+
+    def _discover_topology_fixture(self, *, depth=0, provider="ollama", model_port=43210,
+                                   forward_port=None, model_id="qwen3:8b", marker=None,
+                                   context=None, process_live=True, runtime_valid=True,
+                                   listener_state="PRESENT",
+                                   models=UNSPECIFIED_MODELS):
+        name, profile, ready_marker = self._topology_profile(
+            depth=depth, provider=provider, model_port=model_port,
+            forward_port=forward_port, model_id=model_id,
+        )
+        if marker is not None:
+            ready_marker = marker
+        if context is None:
+            context = {"state": "ABSENT", "depth": None, "max_depth": None}
+        probe = mock.Mock(return_value=[model_id] if models is UNSPECIFIED_MODELS else models)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(acceptance, "_profile_record", return_value=profile))
+            stack.enter_context(mock.patch.object(
+                acceptance, "_validate_profile_runtime", return_value=runtime_valid,
+            ))
+            stack.enter_context(mock.patch.object(acceptance, "_listener_owned_loopback", return_value=process_live))
+            stack.enter_context(mock.patch.object(
+                acceptance, "_read_discovery_guest_marker", return_value=ready_marker,
+            ))
+            stack.enter_context(mock.patch.object(acceptance, "_read_current_recursion_identity", return_value=context))
+            stack.enter_context(mock.patch.object(acceptance, "_loopback_listener_state", return_value=listener_state))
+            stack.enter_context(mock.patch.object(acceptance, "_probe_provider_models", probe))
+            report = acceptance.discover_profile_topology(self.state_root, name)
+        return report, probe
+
+    def test_nested_profile_reports_immediate_parent_and_probes_only_its_selected_forward(self):
+        report, probe = self._discover_topology_fixture(
+            depth=1, context={"state": "PERSISTED", "depth": 0, "max_depth": 3},
+        )
+        self.assertEqual(report["status"], "AVAILABLE")
+        self.assertEqual(report["execution_context"], {"identity": "PERSISTED", "level": "G0", "depth": 0})
+        self.assertEqual(report["profile"], {"name": "topology-fixture", "level": "G1", "depth": 1})
+        self.assertEqual(report["forward"]["destination_class"], "immediate_parent_loopback")
+        self.assertEqual(report["forward"]["destination_port"], 43210)
+        self.assertEqual(report["relay"]["status"], "MISSING")
+        self.assertEqual(report["capability_boundary"]["status"], "MISSING")
+        probe.assert_called_once_with("ollama", "127.0.0.1", 43210, timeout=2.0)
+        self.assertNotIn("argv", json.dumps(report))
+
+    def test_unmarked_outer_context_is_not_mislabeled_as_physical_host(self):
+        report, _probe = self._discover_topology_fixture()
+        self.assertEqual(report["status"], "AVAILABLE")
+        self.assertEqual(report["execution_context"]["level"], "UNKNOWN")
+        self.assertEqual(report["forward"]["destination_class"], "outer_launcher_loopback")
+        self.assertEqual(report["relay"]["status"], "NOT_REQUIRED")
+        self.assertEqual(report["capability_boundary"]["status"], "MISSING")
+
+    def test_missing_selected_loopback_listener_is_unavailable_without_contact(self):
+        report, probe = self._discover_topology_fixture(
+            depth=1, context={"state": "PERSISTED", "depth": 0, "max_depth": 3},
+            listener_state="ABSENT",
+        )
+        self.assertEqual(report["status"], "ENDPOINT_UNAVAILABLE")
+        self.assertEqual(report["reason_code"], "selected_loopback_listener_absent")
+        self.assertEqual(report["forward"]["destination_class"], "immediate_parent_loopback")
+        probe.assert_not_called()
+
+    def test_selected_endpoint_failure_is_distinct_from_missing_model(self):
+        report, probe = self._discover_topology_fixture(models=None)
+        self.assertEqual(report["status"], "ENDPOINT_UNAVAILABLE")
+        self.assertEqual(report["reason_code"], "selected_endpoint_unavailable")
+        probe.assert_called_once()
+        report, probe = self._discover_topology_fixture(models=[])
+        # The valid empty model list means the selected model is not listed.
+        self.assertEqual(report["status"], "MODEL_NOT_LISTED")
+        self.assertEqual(report["reason_code"], "selected_model_not_listed")
+        probe.assert_called_once()
+
+    def test_wrong_profile_port_never_probes_any_endpoint(self):
+        report, probe = self._discover_topology_fixture(model_port=43210, forward_port=43211)
+        self.assertEqual(report["status"], "IDENTITY_UNKNOWN")
+        self.assertEqual(report["reason_code"], "profile_selection_forward_mismatch")
+        probe.assert_not_called()
+
+    def test_stale_profile_identity_never_probes_any_endpoint(self):
+        report, probe = self._discover_topology_fixture(process_live=False)
+        self.assertEqual(report["status"], "IDENTITY_UNKNOWN")
+        probe.assert_not_called()
+
+    def test_unverified_frozen_runtime_never_probes_any_endpoint(self):
+        report, probe = self._discover_topology_fixture(runtime_valid=False)
+        self.assertEqual(report["status"], "IDENTITY_UNKNOWN")
+        probe.assert_not_called()
+
+    def test_nonprivate_state_root_never_probes_any_endpoint(self):
+        self.state_root.chmod(0o755)
+        report, probe = self._discover_topology_fixture()
+        self.assertEqual(report["status"], "IDENTITY_UNKNOWN")
+        self.assertEqual(report["reason_code"], "profile_or_forward_identity_unverified")
+        probe.assert_not_called()
+
+    def test_malformed_guest_marker_never_probes_any_endpoint(self):
+        report, probe = self._discover_topology_fixture(marker={"model_provider": "ollama"})
+        self.assertEqual(report["status"], "IDENTITY_UNKNOWN")
+        probe.assert_not_called()
+
+    def test_wrong_execution_context_never_probes_any_endpoint(self):
+        report, probe = self._discover_topology_fixture(
+            depth=1, context={"state": "ABSENT", "depth": None, "max_depth": None},
+        )
+        self.assertEqual(report["status"], "WRONG_CONTEXT")
+        self.assertEqual(report["reason_code"], "nested_parent_identity_absent")
+        probe.assert_not_called()
+
+    def test_malformed_recursion_identity_never_probes_any_endpoint(self):
+        report, probe = self._discover_topology_fixture(
+            context={"state": "INVALID", "depth": None, "max_depth": None},
+        )
+        self.assertEqual(report["status"], "WRONG_CONTEXT")
+        probe.assert_not_called()
+
+    def test_no_capability_never_probes_any_endpoint(self):
+        report, probe = self._discover_topology_fixture(provider="none", model_id="")
+        self.assertEqual(report["status"], "NO_CAPABILITY")
+        probe.assert_not_called()
+
+    def test_local_provider_without_an_explicit_model_id_is_not_probed(self):
+        report, probe = self._discover_topology_fixture(model_id="")
+        self.assertEqual(report["status"], "NO_CAPABILITY")
+        self.assertEqual(report["forward"]["status"], "MATCHED")
+        self.assertEqual(report["reason_code"], "selected_model_id_absent")
+        probe.assert_not_called()
+
+    def test_profile_forward_parser_rejects_non_loopback_destination(self):
+        name, profile, _marker = self._topology_profile()
+        netdev_index = profile["runtime_identity"]["argv"].index("-netdev") + 1
+        profile["runtime_identity"]["argv"][netdev_index] = profile["runtime_identity"]["argv"][
+            netdev_index
+        ].replace("TCP:127.0.0.1:43210", "TCP:10.0.0.1:43210")
+        self.assertIsNone(acceptance._profile_model_forward_identity(profile, self.state_root, name))
+
+    def test_persisted_recursion_identity_is_private_bounded_and_context_matched(self):
+        path = self.base / "recursion-identity"
+        path.write_text("0 3\n", encoding="ascii")
+        path.chmod(0o600)
+        self.assertEqual(acceptance._read_current_recursion_identity(path, {}),
+                         {"state": "PERSISTED", "depth": 0, "max_depth": 3})
+        self.assertEqual(acceptance._read_current_recursion_identity(
+            path, {"LAB_VM_RECURSION_DEPTH": "1", "LAB_VM_MAX_DEPTH": "3"},
+        )["state"], "INVALID")
+        path.write_text("0 33\n", encoding="ascii")
+        self.assertEqual(acceptance._read_current_recursion_identity(path, {})["state"], "INVALID")
+
+    def test_provider_summary_never_contacts_unbound_endpoints(self):
         config = {"schema_version": 1, "providers": [
             {"provider": "ollama", "endpoint": "http://127.0.0.1:11434", "port": 11434,
              "model_id": "missing-model"},
             {"provider": "openai", "model_id": "openai/gpt-4.1"},
         ]}
-        with mock.patch.object(acceptance, "_discover_provider_models", return_value=[]):
-            result = acceptance.validate_provider_selections(config)
-        self.assertEqual(result["result"], "BLOCKED")
+        with mock.patch.object(acceptance, "_probe_provider_models", side_effect=AssertionError("unexpected endpoint contact")):
+            result = acceptance.summarize_provider_selections(config)
+        self.assertEqual(result["result"], "NOT_PROBED")
         self.assertEqual([item["status"] for item in result["providers"]],
-                         ["BLOCKED", "OWNER_AUTH_REQUIRED"])
+                         ["PROFILE_BOUND_DISCOVERY_REQUIRED", "OWNER_AUTH_REQUIRED"])
+
+    def test_discovery_cli_rejects_non_discovery_options(self):
+        for extra in (("--memory-gib", "8"), ("--provider-config", "unused.json"),
+                      ("--suite", "model")):
+            with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit):
+                acceptance.main([
+                    "--discover-providers", "--state-root", "/unused/state",
+                    "--profile", "exact-profile", *extra,
+                ])
+
+    def test_preflight_provider_config_is_not_a_probe_capability(self):
+        path = self._provider_config_file({"schema_version": 1, "providers": [
+            {"provider": "ollama", "endpoint": "http://127.0.0.1:45678", "model_id": "qwen3:8b"},
+        ]})
+        with self.successful_preflight_environment(), mock.patch.object(
+                acceptance, "_probe_provider_models", side_effect=AssertionError("unbound endpoint contact")):
+            plan = acceptance.preflight(
+                self.source, self.state_root, RUN_ID, 8, provider_config_path=path,
+            )
+        self.assertEqual(plan["provider_config"]["selections"][0]["status"],
+                         "PROFILE_BOUND_DISCOVERY_REQUIRED")
 
     def test_preflight_collision_blocks_before_campaign_mutation(self):
         namespace = acceptance._namespace_path(self.state_root, acceptance._run_name(RUN_ID))

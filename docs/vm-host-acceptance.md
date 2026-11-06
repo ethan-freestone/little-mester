@@ -1,15 +1,38 @@
 # VM host acceptance runbook
 
+> **Owner reset 2026-11-06:** [PR_REIMPLEMENTATION_HANDOFF.md](../PR_REIMPLEMENTATION_HANDOFF.md)
+> is the single current-session entry point. This is the later campaign/reference
+> runbook, not the short-term migration workflow. No tests/implementation now.
+> On implementation resume, use the handoff's bounded development-evidence loop;
+> do not require the full campaign/local-inference gates to use the experimental
+> OpenAI-authenticated replacement development VM.
+
 > **Controlling amendment2026-11-06:** see
 > [pre-C14 inference isolation/performance tasks](vm-inference-performance-plan.md).
-> Current instruction is **pause after planning**, not run the commands below.
-> Existing runner commands do not yet implement the new V-INFERENCE and
-> E2E-MODEL-PERF gates or topology-aware discovery. Those are required before
-> final campaign/C14. Fixed parent-loopback discovery is insufficient when the
-> actual provider is an upstream capability. Proposed new flags/interfaces in
-> planning are not executable commands until implemented and verified with --help.
-> No raw backend forward, recursive model copies, security/performance waiver or
-> new auth/paid campaign is authorized. Historical procedure text follows.
+> INF-01 local topology discovery is implemented and fixture-tested. Owner-run
+> exact-profile observation on 2026-11-06 found profile `branch-dev-20261105`
+> ready at G0/depth 0 with provider `none`, no model forward, and `NO_CAPABILITY`;
+> no provider endpoint was contacted. Persisted recursion identity was absent, so
+> the outer execution context remains unknown, not physical host H. This does not
+> identify an upstream serving backend; INF-02/03 remain open. The read-only
+> command requires one canonical private state root and an exact ready profile;
+> it validates profile/runtime/process/listener, recursion identity, guest
+> selection and the matching restricted QEMU forward before any selected-forward
+> check:
+>
+> ```sh
+> python3 scripts/vm-host-acceptance.py --discover-providers \
+>   --state-root /absolute/private/state --profile exact-profile-name
+> ```
+>
+> No profile listing or automatic profile selection, fixed-port fallback,
+> private-address scan, service start, or backend mutation occurs. An unmarked
+> outer context is reported as unknown,
+> not as physical host H. `AVAILABLE` is only a model-list observation: current
+> raw TCP forwarding is not an operation-constrained inference boundary, and a
+> nested relay is reported missing. No VM, live discovery, auth/paid campaign,
+> recursive model copies, security/performance waiver, push, merge or C14 cutover
+> is authorized by this local implementation. Historical procedures follow.
 
 > **Current status:** see the [local-first C14 handoff plan](vm-c14-handoff-plan.md).
 > The explicit experimental development entry is fixture-validated; the owner is
@@ -122,7 +145,14 @@ the selected scope, exact checkout revision, budgets, protected assets, and
 expected side effects with the campaign owner. A passing plan alone does not
 authorize live mutation.
 
-## 3. Provider choice and read-only plan
+## 3. Historical provider choice and read-only plan (superseded)
+
+This archived campaign procedure predates exact-profile discovery. Its
+`--discover-providers` example below omits required arguments and is intentionally
+rejected by the current CLI. Do not run the historical campaign commands in this
+section or later sections under the current INF-01 authorization. If the owner
+chooses to perform the read-only observation after review, use only the exact
+profile command at the top of this document.
 
 Only at separately approved target-host P1, provider discovery is optional and
 read-only. It queries only the fixed loopback Ollama and llama.cpp model-list

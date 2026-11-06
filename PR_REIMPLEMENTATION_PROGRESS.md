@@ -2,7 +2,14 @@
 
 ## Control state
 
-- Phase: **CI/current implementation checkpoint committed at `ca6da6c`; owner-confirmed boot/version and partial TUI usability; inference/security/performance amendment approved; detailed planning followed by mandatory pause for owner model selection. C14/merge not started.**
+> **Current single handoff:** [PR_REIMPLEMENTATION_HANDOFF.md](PR_REIMPLEMENTATION_HANDOFF.md).
+> The owner reset on 2026-11-06 supersedes older next steps throughout this ledger.
+> This session is planning only, no tests or implementation. Next resumed sequence
+> is Luna max implementation -> real evidence -> Sol medium diagnosis/fix, M0–M4.
+> First get OpenAI-backed implementation INSIDE the replacement VM; then metrics
+> and recursive VM work there. Historical tickets are not another authority.
+
+- Phase: **Planning-only reset; single migration/evidence handoff prepared. Existing INF-01 evidence retained; no local-inference gate before OpenAI development migration.**
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
 - Current authorization: the owner approved the fixed four-package sequence in
@@ -16,14 +23,14 @@
   Manual owner OpenAI authentication experimentation is allowed in the disposable
   VM; no paid streams or credential export/import are included. No push, merge or
   C14 activation is authorized.
-- Latest2026-11-06 authority supersedes older next commands: checkpoint existing
-  work and reported CI fix, document all approved inference/performance changes,
-  commit planning and **pause**. No INF implementation, live discovery/VM/service/
-  provider operation, push, merge or default cutover during this phase.
-- Controlling new task source:
-  [inference/performance execution plan](docs/vm-inference-performance-plan.md),
-  INF-00–12 plus conditional VM-local F1–F8. Owner always chooses the model;
-  higher-thinking review labels are recommendations, never automatic switches.
+- The 2026-11-06 planning pause was superseded by the owner's later request to
+  resume local INF-01 implementation, followed by one owner-run read-only
+  exact-profile report recorded below. No provider endpoint request, VM lifecycle
+  or service operation, push, merge or default cutover is authorized by that resume.
+- Controlling next-session task source: `PR_REIMPLEMENTATION_HANDOFF.md`, M0–M4.
+  INF-00–12/F1–F8 retain shared-local-inference/release obligations but are not
+  prerequisites to experimental OpenAI development migration or first child boot.
+  Owner selected Luna max implementation and Sol medium planning/evidence review.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
 - Implementing branch: `feat/vm-approach-2`; C05 implementation checkpoint is
   `cb7091a17720b59056bd2677f3af1aba5699f944`.
@@ -42,12 +49,12 @@
   ticket history through MCP, reconcile this branch's plan/tasks/progress, commit
   locally and stop; no C13 or host action in that session. This was superseded by
   the later request to finish C13 locally only.
-- Current scope: preserve the already-ready run71ff52d4 and parent; do not issue
-  a new start/recovery command. Shared inference capability/isolation, actual
-  recursive relay and >=95% one-level benchmark extend package2/3 via approved
-  R35–R38/D11–D13. Ordinary lab stays Docker. Old preflight/partial owner boot
-  observations are not final-candidate acceptance. VM-local artifact push is a
-  conditional alternative; no automatic model copies or GPU passthrough scope.
+- Current scope: preserve ready run71ff52d4 and old parent; no live operations in
+  this planning reset. On resume, M1 specifies a separate recursion-capable
+  development candidate rather than modifying the valuable cap-0 profile. M2
+  moves implementation into that VM as soon as OpenAI login/coding work succeeds;
+  metrics/nesting continue there. Ordinary lab remains Docker pending C14. Shared
+  local-inference >=95% requirements are retained for that feature, not for M2.
 - Inspected source: PR #13 at
   `97af1d83a16fce68ddcc3390276c218a1b0cd518`.
 - Assigned session: current coordinating OpenCode session; no subagents assigned.
@@ -2028,3 +2035,156 @@ directly. Do not request arbitrary service location/port choices before source/
 read-only topology explains what is missing. Preserve the ready development VM,
 parent/legacy state, all archives/auth and unverified metrics listener. No more
 implementation, discovery, VM/service/model operation, push/merge or C14 now.
+
+## INF-01 local implementation resumed — fixture-only checkpoint
+
+The owner later resumed local INF-01 code and fixture work. This supersedes the
+historical STOP above for local discovery implementation/review. Before the
+owner-run observation below, no live topology report, provider request, VM/service
+operation, or endpoint observation had been run. Source tracing found that
+`vm_services_profile_selection` already binds a
+ready profile, live QEMU process identity, guest readiness/provider selection and
+restricted QEMU model-forward port; the new acceptance report mirrors that
+profile-scoped contract and adds persisted recursion-context reporting.
+
+`scripts/vm-host-acceptance.py --discover-providers` now requires an exact
+`--state-root` and `--profile`. It validates private profile state, the frozen
+runtime, QEMU/SSH listener identity, bounded guest readiness marker, recursion
+depth relationship and exact loopback-only QEMU forward before checking the exact
+selected loopback listener. It makes at most one GET to the selected provider's
+model-list route (2-second socket timeout, response capped at 256 KiB); it has no fixed
+port fallback, alternate-provider contact, profile listing/auto-selection or
+private-address scan. Provider-config preflight is now syntax/selection summary
+only and does not probe unbound configured endpoints. Statuses distinguish
+`NO_CAPABILITY`, `WRONG_CONTEXT`, `ENDPOINT_UNAVAILABLE`, `MODEL_NOT_LISTED`,
+`IDENTITY_UNKNOWN` and `AVAILABLE`.
+Absent recursion identity is shown as unknown outer context, never asserted to be
+H. Nested profiles report the immediate-parent loopback class and missing
+operation-constrained relay. An `AVAILABLE` response is not inference security,
+performance, or acceptance evidence; current raw TCP forwarding remains outside
+the reviewed gateway boundary.
+
+Local validation to date:
+
+| Command/check | Observed result |
+|---|---|
+| `python3 -B -m unittest tests.test_vm_host_acceptance` |72/72 PASS; fixture/mock coverage only|
+| `python3 -B -m unittest discover -s tests -p 'test_vm_*.py'` |398/398 PASS; local tests/fixtures|
+| `bats tests/` |149/149 PASS; local mocks/fixtures|
+| `ruff check scripts/vm-host-acceptance.py tests/test_vm_host_acceptance.py` |PASS|
+| Python AST parse of changed code/tests; `git diff --check` |PASS|
+| `python3 -B scripts/vm-host-acceptance.py --help` |PASS; exact-profile discovery flags visible|
+| `python3 -B scripts/check-docs-consistency.py` |Same8 existing README/DECISIONS drift/link failures across109 checks; no new failures|
+
+Fixtures cover exact nested profile selection, absent selected loopback, malformed
+guest/recursion identity, wrong context/forward port, stale process/runtime,
+no-capability and selected-model availability/miss, exact single-endpoint contact,
+unbound provider-config no-contact, and bounded responses. The owner-run command
+template is recorded at the top of `docs/vm-host-acceptance.md`.
+
+### Owner-run exact-profile INF-01 observation — 2026-11-06
+
+The owner ran the read-only `context --json -d`, exact `status`, and discovery
+commands. The targeted profile was `branch-dev-20261105`; `status` reported it
+`ready`/`running` at depth 0. `context` selected `default` and reported recursion
+depth 0, but the discovery helper found no persisted `/etc/lab-vm-recursion`
+identity, so the report correctly leaves execution context `UNKNOWN`; do not
+infer physical host H from that absence.
+
+Sanitized discovery result: profile `G0`, provider `none`, no selected model ID,
+`NO_MODEL_FORWARD`, relay and gateway `NOT_APPLICABLE`, overall `NO_CAPABILITY`
+(`no_locally_discoverable_selected_model`). No provider endpoint was contacted,
+and no service or VM lifecycle action was performed. This is evidence that this
+exact profile has no locally selected inference capability, not evidence that an
+upstream service is absent or available. INF-01 has not identified a serving
+backend/topology for INF-02; no endpoint should be guessed or scanned.
+
+Next, owner must clarify whether `none` is intentional for this profile or identify
+the exact already-selected serving capability/provider/model and authorize its
+bounded read-only isolation/resource inventory. INF-02/03 decisions remain open;
+gateway/relay implementation has not started. These local changes are uncommitted;
+no push, merge, or coding-session live discovery/VM operation was performed.
+
+## Owner reset — planning only; migrate development, not gate it — 2026-11-06
+
+The owner explicitly rejected the repeated discovery/refusal/gate loop and asked
+for a single new-session handoff, no tests and no implementation in this session.
+Immediate objective: implementation INSIDE the replacement VM (this session is in
+the old vm-approach VM), native OpenAI auth, metrics, and actual recursive VM
+creation. Model roles are now owner-selected: Luna max implementation, Sol medium
+planning/review, with evidence after every implementation and diagnosed fix loops.
+
+Created `PR_REIMPLEMENTATION_HANDOFF.md` as the one current entry point and
+`AGENTS.md` to load that authority before stale ticket instructions. Updated master
+plan/tasks and companion headers to redirect there, preserving historical details.
+The handoff freezes M0–M4: minimal evidence inspect; fresh recursion-capable candidate
+if existing cap0 is confirmed; native OpenAI auth + actual coding smoke and immediate
+session migration; metrics end-to-end; changed-code child boot/fail/fix from N.
+It reuses existing acceptance/self-test helpers rather than introducing another
+runner framework. Full feature/release security and local-inference obligations
+remain later; provider `none` is not an OpenAI or credential-free child-boot gate.
+
+Read-only source inspection confirms `vm-self-test.py` live preflight currently
+requires a ready depth0 parent profile in the controller's local state. The handoff
+requires an explicit guest-local adapter entry rather than leaking O's control
+state into N or presenting O-run tests as in-N development. Existing cap0 cannot
+be raised by editing metadata; preserve that profile and create a new candidate
+through the supported launcher under the owner's launch policy after resume.
+
+Owner explicitly authorized one-time historical-ticket redirects. Through MCP
+only, added an objective banner to #35, #37, #40–47 saying IGNORE AS EXECUTION PLAN,
+read PR_REIMPLEMENTATION_HANDOFF/PLAN/TASKS/PROGRESS. The entire original objective
+is retained below each banner; status, criteria, tests and comments were not supplied
+for replacement. Current MCP update schema has no comment input, so a literal
+comment could not be added without implementation; used its supported objective
+field instead. #48–56, notably #50, are absent in this checkout/store. No fabricated
+ticket, old-branch migration or ticket-engine change was made. The root AGENTS
+redirect applies even when a cited ticket is missing. Future models must not query
+tickets as a startup/approval/host-gate procedure for this branch.
+
+Only documentation/instruction edits and the explicitly requested ticket metadata
+redirects were made in this reset. No tests, lint/check suites, help execution,
+application implementation, VM/service/provider/auth actions, credential reads,
+commits, pushes, merges or C14 cutover. Read-only source/Git/model-catalog and
+ticket metadata operations were used to ground the plan. Existing uncommitted
+Python/tests and the untracked mission file were preserved, not implemented anew.
+Previously reported test counts remain historical; they are not a reset-session run.
+
+Next session: read the single handoff and start M0 on explicit owner implementation
+resume, with Luna max; Sol medium reviews evidence and defines M1. Continue the
+bounded packets without a fresh broad approval for each routine in-scope fix.
+Do not resume
+the old fixed-loopback discovery or ask the owner to identify known root/profile
+again. No implementation in O after M2 migration except explicitly required outer
+control-plane maintenance; preserve O as rollback.
+
+### Handoff made executable as a plan — owner clarification, same planning session
+
+The owner rejected another abstract "inspect then plan next" loop. Strengthened
+the SAME `PR_REIMPLEMENTATION_HANDOFF.md`, rather than adding another handoff:
+
+- Frozen ordered implementation table M0, M1, M2a/b, M3, M4a/b, with source/test
+  paths, proposed exact runner/guest-entry inputs and positive runtime evidence.
+- Separate implementation status, per-check acceptance status and later release
+  readiness. A failing acceptance check explicitly opens the repair and cannot
+  prohibit implementing/testing that repair. No aggregate campaign prerequisites
+  in the development runner path. No Sol signoff needed to start a listed fix.
+- Deterministic failure-to-fix matrix for transport, guest paths, bootstrap,
+  proxy403, browser/auth, native agent work, metrics links, KVM/cap and child boot.
+  Only true live dependencies stop their dependent action; independent work proceeds.
+- Reuse existing acceptance script for --dev-step; controller campaign unchanged.
+  No additional runner framework. Source inspection confirmed metrics lifecycle
+  hardcodes host19532 and rejects other ports. Plan specifies optional validated
+  metrics_port and existing service/forward verification before candidate freeze;
+  this is proposed implementation, NOT an executed fix. Proxy already supports
+  SIGHUP reload; launcher egress-reload needs exact-owned dispatch implementation.
+- Guest-local self-test entry input is frozen, avoiding O-private parent-profile
+  dependence. First real child boot is a milestone; full changed-code fail/fix
+  and depth/boundary proof follow, not a prerequisite to implementing child boot.
+- Exact CLI examples in the handoff are marked NOT IMPLEMENTED; Luna must implement
+  and verify them on resume, not ask the owner to run nonexistent flags.
+
+Only planning/instruction documents edited during this clarification; source read
+to ground the contract. No tests, linters, help commands, application code changes,
+VM/provider/auth actions or ticket MCP operations. Existing runtime acceptance
+remains unpassed; this entry documents how to repair it, not another closed gate.

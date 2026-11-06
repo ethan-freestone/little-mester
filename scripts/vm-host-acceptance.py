@@ -47,14 +47,17 @@ RUN_NAME_RE = re.compile(r"accept-[a-f0-9]{12}")
 PROFILE_RE = re.compile(
     r"accept-[a-f0-9]{12}-(?:outer|agent|workload|provider-(?:ollama|llamacpp|openai))"
 )
+PROFILE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 RUN_ID_RE = re.compile(r"[a-f0-9]{32}")
 MAX_REPORT_BYTES = 2 * 1024 * 1024
 MAX_PROVIDER_CONFIG_BYTES = 16 * 1024
+MAX_PROVIDER_RESPONSE_BYTES = 256 * 1024
+MAX_GUEST_MARKER_BYTES = 16 * 1024
 WORKFLOW_VERSION = 2
 DEFAULT_RESERVE_MIB = 512
-PROVIDER_DISCOVERY_ENDPOINTS = {
-    "ollama": "http://127.0.0.1:11434",
-    "llamacpp": "http://127.0.0.1:8080",
+PROVIDER_DISCOVERY_ROUTES = {
+    "ollama": "/api/tags",
+    "llamacpp": "/v1/models",
 }
 PROVIDER_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}")
 OWNER_CHECKLISTS = {
@@ -409,7 +412,7 @@ def _source_identity(source: Path) -> dict[str, Any]:
 
 
 def _provider_endpoint(value: object, provider: str) -> tuple[str, int]:
-    if provider not in PROVIDER_DISCOVERY_ENDPOINTS or not isinstance(value, str):
+    if provider not in PROVIDER_DISCOVERY_ROUTES or not isinstance(value, str):
         raise AcceptanceError("provider endpoint is unsupported")
     try:
         parsed = urlsplit(value)
@@ -500,61 +503,387 @@ def load_provider_config(path_value: str | os.PathLike[str] | None) -> tuple[dic
     return {"schema_version": 1, "providers": normalized}, hashlib.sha256(raw).hexdigest()
 
 
-def _discover_provider_models(provider: str, host: str, port: int, *, timeout: float = 2.0) -> list[str]:
-    """Read only model identifiers from a fixed local provider health/model API."""
-    if provider not in PROVIDER_DISCOVERY_ENDPOINTS or host != "127.0.0.1" or type(port) is not int \
-            or not 1024 <= port <= 65535:
-        raise AcceptanceError("provider discovery target is outside the loopback allowlist")
-    route = "/api/tags" if provider == "ollama" else "/v1/models"
+def _probe_provider_models(provider: str, host: str, port: int, *, timeout: float = 2.0) -> list[str] | None:
+    """Read model identifiers from one already-selected loopback endpoint.
+
+    ``None`` means the selected endpoint did not produce a bounded, valid model
+    response. An empty list is a valid response with no models.
+    """
+    if (provider not in PROVIDER_DISCOVERY_ROUTES or host != "127.0.0.1"
+            or type(port) is not int or not 1 <= port <= 65535
+            or not isinstance(timeout, (int, float)) or not 0 < timeout <= 2.0):
+        raise AcceptanceError("provider discovery target is outside the selected loopback policy")
     connection = http.client.HTTPConnection(host, port, timeout=timeout)
     try:
-        connection.request("GET", route, headers={"Accept": "application/json", "Connection": "close"})
+        connection.request("GET", PROVIDER_DISCOVERY_ROUTES[provider],
+                           headers={"Accept": "application/json", "Connection": "close"})
         response = connection.getresponse()
         if response.status != 200:
-            return []
-        raw = response.read(256 * 1024 + 1)
-        if len(raw) > 256 * 1024:
-            return []
+            return None
+        raw = response.read(MAX_PROVIDER_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_PROVIDER_RESPONSE_BYTES:
+            return None
         value = _decode_json_no_duplicates(raw)
     except (OSError, http.client.HTTPException, TimeoutError, AcceptanceError):
-        return []
+        return None
     finally:
         connection.close()
     if provider == "ollama":
         items = value.get("models") if isinstance(value, dict) else None
-        names = [item.get("name") for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+        if not isinstance(items, list) or any(
+                not isinstance(item, dict) or not isinstance(item.get("name"), str)
+                for item in items):
+            return None
+        names = [item["name"] for item in items]
     else:
         items = value.get("data") if isinstance(value, dict) else None
-        names = [item.get("id") for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+        if not isinstance(items, list) or any(
+                not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                for item in items):
+            return None
+        names = [item["id"] for item in items]
     return sorted({name for name in names if isinstance(name, str) and PROVIDER_ID_RE.fullmatch(name)})
 
 
-def discover_local_providers() -> dict[str, Any]:
-    results = {}
-    for provider, endpoint in PROVIDER_DISCOVERY_ENDPOINTS.items():
-        host, port = _provider_endpoint(endpoint, provider)
-        models = _discover_provider_models(provider, host, port)
-        results[provider] = {"endpoint": endpoint, "status": "AVAILABLE" if models else "UNAVAILABLE",
-                             "model_ids": models}
-    return {"schema_version": 1, "discovery": results,
-            "note": "Read-only loopback discovery; no service was started or changed."}
-
-
-def validate_provider_selections(config: dict[str, Any]) -> dict[str, Any]:
+def summarize_provider_selections(config: dict[str, Any]) -> dict[str, Any]:
+    """Summarize configured selections without contacting unbound endpoints."""
     selections: list[dict[str, Any]] = []
     for item in config["providers"]:
         if item["provider"] == "openai":
             selections.append({"provider": "openai", "model_id": item["model_id"],
                                "status": "OWNER_AUTH_REQUIRED"})
             continue
-        host, port = _provider_endpoint(item["endpoint"], item["provider"])
-        models = _discover_provider_models(item["provider"], host, port)
-        found = item["model_id"] in models
         selections.append({"provider": item["provider"], "model_id": item["model_id"],
-                           "endpoint": item["endpoint"], "status": "AVAILABLE" if found else "BLOCKED",
-                           "reason_code": None if found else "selected_model_not_discovered"})
-    return {"providers": selections,
-            "result": "PASS" if all(item["status"] != "BLOCKED" for item in selections) else "BLOCKED"}
+                           "status": "PROFILE_BOUND_DISCOVERY_REQUIRED",
+                           "reason_code": "no_endpoint_contact_before_exact_profile"})
+    return {"providers": selections, "result": "NOT_PROBED"}
+
+
+def _read_current_recursion_identity(path: Path = Path("/etc/lab-vm-recursion"),
+                                    environ: dict[str, str] | None = None) -> dict[str, Any]:
+    """Read the same bounded persisted depth identity enforced by recursion.sh."""
+    environment = os.environ if environ is None else environ
+    depth_env = environment.get("LAB_VM_RECURSION_DEPTH")
+    maximum_env = environment.get("LAB_VM_MAX_DEPTH")
+    has_depth = "LAB_VM_RECURSION_DEPTH" in environment
+    has_maximum = "LAB_VM_MAX_DEPTH" in environment
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except FileNotFoundError:
+        if has_depth or has_maximum:
+            return {"state": "INVALID", "depth": None, "max_depth": None}
+        return {"state": "ABSENT", "depth": None, "max_depth": None}
+    except OSError:
+        return {"state": "INVALID", "depth": None, "max_depth": None}
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.getuid())
+                or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o022
+                or info.st_size > 128):
+            return {"state": "INVALID", "depth": None, "max_depth": None}
+        raw = os.read(fd, 129)
+        if len(raw) != info.st_size or len(raw) > 128:
+            return {"state": "INVALID", "depth": None, "max_depth": None}
+    except OSError:
+        return {"state": "INVALID", "depth": None, "max_depth": None}
+    finally:
+        os.close(fd)
+    match = re.fullmatch(rb"(0|[1-9][0-9]?) (0|[1-9][0-9]?)\n?", raw)
+    if match is None:
+        return {"state": "INVALID", "depth": None, "max_depth": None}
+    depth, maximum = (int(value) for value in match.groups())
+    if (depth > 32 or maximum > 32 or depth > maximum or has_depth != has_maximum
+            or (has_depth and (depth_env != str(depth) or maximum_env != str(maximum)))):
+        return {"state": "INVALID", "depth": None, "max_depth": None}
+    return {"state": "PERSISTED", "depth": depth, "max_depth": maximum}
+
+
+def _loopback_listener_state(port: int, proc_net: Path = Path("/proc/net")) -> str:
+    """Classify only the exact selected port; never enumerate or contact networks."""
+    if type(port) is not int or not 1 <= port <= 65535:
+        return "UNKNOWN"
+    matches: list[bool] = []
+    for table_name, loopback_hex in (
+        ("tcp", "0100007F"),
+        ("tcp6", "00000000000000000000000001000000"),
+    ):
+        try:
+            rows = (proc_net / table_name).read_text(encoding="ascii").splitlines()[1:]
+        except (OSError, UnicodeError):
+            return "UNKNOWN"
+        for row in rows:
+            fields = row.split()
+            if len(fields) < 10 or fields[3] != "0A":
+                continue
+            try:
+                local_address, local_port = fields[1].split(":", 1)
+                if int(local_port, 16) == port:
+                    matches.append(local_address.upper() == loopback_hex)
+            except (ValueError, TypeError):
+                return "UNKNOWN"
+    if not matches:
+        return "ABSENT"
+    if len(matches) != 1 or not matches[0]:
+        return "UNKNOWN"
+    return "PRESENT"
+
+
+def _profile_model_forward_identity(profile: dict[str, Any], state_root: Path,
+                                    name: str) -> dict[str, Any] | None:
+    """Validate the exact profile's restricted QEMU argv without exposing it."""
+    try:
+        identity = profile["runtime_identity"]
+        argv = identity["argv"]
+        if (not isinstance(argv, list) or not argv or not all(isinstance(item, str) for item in argv)
+                or Path(identity["executable"]).name != "qemu-system-x86_64"
+                or Path(argv[0]).name != "qemu-system-x86_64" or "-enable-kvm" not in argv):
+            return None
+        netdevs = [argv[index + 1] for index, item in enumerate(argv[:-1]) if item == "-netdev"]
+        drives = [argv[index + 1] for index, item in enumerate(argv[:-1]) if item == "-drive"]
+        chardevs = [item for item in argv if item.startswith("socket,id=charfs,path=")]
+        expected_disk = state_root / "vm/profiles" / name / "disk.qcow2"
+        expected_drive = f"file={expected_disk},format=qcow2,if=virtio"
+        if (len(netdevs) != 1 or len(chardevs) != 1 or len(drives) != 2 or drives.count(expected_drive) != 1
+                or chardevs[0] != f"socket,id=charfs,path={identity['socket_path']}"):
+            return None
+        segments = netdevs[0].split(",")
+        if segments.count("restrict=on") != 1:
+            return None
+        if any(segment not in {"user", "id=net0", "restrict=on"}
+               and not segment.startswith(("hostfwd", "guestfwd")) for segment in segments):
+            return None
+        hostfwds = [segment for segment in segments if segment.startswith("hostfwd")]
+        expected_ssh = f"hostfwd=tcp:127.0.0.1:{identity['ssh_port']}-:22"
+        if hostfwds != [expected_ssh]:
+            return None
+
+        forwards: dict[str, tuple[int, str]] = {}
+        forward_pattern = re.compile(
+            r"guestfwd=tcp:10\.0\.2\.100:(3128|11434|8080|19532)-cmd:([A-Za-z0-9_./+-]+) "
+            r"- TCP:127\.0\.0\.1:([1-9][0-9]{0,4})"
+        )
+        guestfwds = [segment for segment in segments if segment.startswith("guestfwd")]
+        for segment in guestfwds:
+            match = forward_pattern.fullmatch(segment)
+            if match is None:
+                return None
+            guest_port, command, host_port_text = match.groups()
+            host_port = int(host_port_text)
+            if host_port > 65535 or Path(command).name != "socat" or guest_port in forwards:
+                return None
+            forwards[guest_port] = (host_port, command)
+        if "3128" not in forwards or len({port for port, _command in forwards.values()}) != len(forwards):
+            return None
+        if len({command for _port, command in forwards.values()}) != 1:
+            return None
+        model_forwards = {key: value for key, value in forwards.items() if key in {"11434", "8080"}}
+        if len(model_forwards) > 1:
+            return None
+        if model_forwards:
+            guest_port, (host_port, _command) = next(iter(model_forwards.items()))
+            return {"provider": "ollama" if guest_port == "11434" else "llamacpp",
+                    "guest_port": int(guest_port), "destination_port": host_port,
+                    "transport": "socat-tcp"}
+        return {"provider": None, "guest_port": None, "destination_port": None,
+                "transport": None}
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
+
+
+def _read_discovery_guest_marker(state_root: Path, profile: str) -> dict[str, Any]:
+    # The remote reader accepts only the fixed root-owned readiness file and caps
+    # output before it crosses SSH. No guest command or endpoint is caller supplied.
+    code = (
+        "import os,stat; p='/var/lib/lab-vm/guest-ready.json'; "
+        "fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK); "
+        "s=os.fstat(fd); "
+        "ok=stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 "
+        "and stat.S_IMODE(s.st_mode)==0o644 and s.st_size<=16384; "
+        "d=os.read(fd,16385); os.close(fd); "
+        "(ok and len(d)==s.st_size) or (_ for _ in ()).throw(SystemExit(2)); "
+        "os.write(1,d)"
+    )
+    command = "sudo python3 -c " + shlex.quote(code)
+    completed = _guest_exec(state_root, profile, command, timeout=15, campaign_profile=False)
+    if completed.returncode != 0 or len(completed.stdout) > MAX_GUEST_MARKER_BYTES:
+        raise AcceptanceError("exact profile readiness identity is unavailable")
+    value = _decode_json_no_duplicates(completed.stdout)
+    if not isinstance(value, dict):
+        raise AcceptanceError("exact profile readiness identity is malformed")
+    return value
+
+
+def _validate_discovery_guest_marker(marker: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    expected = {
+        "schema_version", "status", "agent", "workload_runtime", "payload_sha256",
+        "opencode_version", "opencode_version_selector", "aider_version", "model_provider",
+        "model_port", "model_id", "workspace_mount", "mcp_build", "recursion_tools", "depth", "max_depth",
+    }
+    if marker.keys() != expected:
+        raise AcceptanceError("exact profile readiness identity is malformed")
+    provider = marker["model_provider"]
+    port = marker["model_port"]
+    model_id = marker["model_id"]
+    depth = marker["depth"]
+    maximum = marker["max_depth"]
+    version = marker["opencode_version"]
+    version_selector = marker["opencode_version_selector"]
+    aider_version = marker["aider_version"]
+    if (type(marker["schema_version"]) is not int or marker["schema_version"] != 1
+            or marker["status"] != "ready" or marker["agent"] not in {"opencode", "aider"}
+            or marker["workload_runtime"] not in {"none", "docker"}
+            or marker["payload_sha256"] != profile.get("guest_payload_sha256")
+            or marker["workspace_mount"] != "virtiofs" or marker["mcp_build"] is not True
+            or type(marker["recursion_tools"]) is not bool
+            or type(depth) is not int or type(maximum) is not int
+            or not 0 <= depth <= maximum <= 32
+            or depth != profile.get("depth") or maximum != profile.get("max_depth")
+            or not isinstance(version_selector, str)
+            or (version_selector != "latest" and re.fullmatch(
+                r"v?2\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version_selector
+            ) is None)
+            or not isinstance(aider_version, str)
+            or not isinstance(model_id, str) or len(model_id) > 512
+            or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in model_id)
+            or provider not in {"none", "ollama", "llamacpp", "remote"}):
+        raise AcceptanceError("exact profile readiness identity is malformed")
+    if marker["agent"] == "opencode":
+        if not isinstance(version, str) or re.fullmatch(r"2\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version) is None:
+            raise AcceptanceError("exact profile readiness identity is malformed")
+    elif re.fullmatch(r"[Aa]ider\s+\d+\.\d+(?:\.\d+)?", aider_version) is None:
+        raise AcceptanceError("exact profile readiness identity is malformed")
+    if provider in {"ollama", "llamacpp"}:
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise AcceptanceError("exact profile readiness identity is malformed")
+    elif port is not None:
+        raise AcceptanceError("exact profile readiness identity is malformed")
+    return {"provider": provider, "model_id": model_id, "model_port": port,
+            "depth": depth, "max_depth": maximum}
+
+
+def _empty_topology_report(profile: str) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "execution_context": {"identity": "UNKNOWN", "level": "UNKNOWN", "depth": None},
+        "profile": {"name": profile, "level": "UNKNOWN", "depth": None},
+        "selection": {"provider": None, "model_id": None},
+        "forward": {"status": "UNKNOWN", "destination_class": "UNKNOWN", "destination_port": None},
+        "relay": {"status": "UNKNOWN", "kind": "immediate-parent-relay"},
+        "capability_boundary": {"status": "UNKNOWN", "kind": "operation-constrained-gateway"},
+        "status": "IDENTITY_UNKNOWN",
+        "reason_code": "profile_identity_unverified",
+        "note": "Read-only selected-profile inventory; availability is not a security or acceptance result.",
+    }
+
+
+def discover_profile_topology(state_root: Path, profile_name: str, *,
+                              recursion_marker: Path = Path("/etc/lab-vm-recursion"),
+                              environ: dict[str, str] | None = None) -> dict[str, Any]:
+    """Inventory exactly one ready profile and probe only its verified model forward."""
+    report = _empty_topology_report(profile_name if isinstance(profile_name, str) else "invalid")
+    context = _read_current_recursion_identity(recursion_marker, environ)
+    if context["state"] == "INVALID":
+        report["status"] = "WRONG_CONTEXT"
+        report["reason_code"] = "recursion_identity_invalid"
+        return report
+    if context["state"] == "PERSISTED":
+        report["execution_context"] = {"identity": "PERSISTED", "level": f"G{context['depth']}",
+                                        "depth": context["depth"]}
+    else:
+        report["execution_context"] = {"identity": "ABSENT", "level": "UNKNOWN", "depth": None}
+
+    try:
+        root = _canonical_directory(state_root)
+        _private_directory(root)
+        if not isinstance(profile_name, str) or PROFILE_NAME_RE.fullmatch(profile_name) is None:
+            raise AcceptanceError("profile name is outside the permitted exact-profile syntax")
+        profile = _profile_record(root, profile_name, campaign_profile=False)
+        if profile.get("status") != "ready" or not isinstance(profile.get("runtime_identity"), dict):
+            raise AcceptanceError("exact profile is not ready")
+        if not _validate_profile_runtime(root, profile_name):
+            raise AcceptanceError("exact profile runtime identity is unavailable")
+        if not _listener_owned_loopback(profile):
+            raise AcceptanceError("exact profile process or SSH listener identity is unavailable")
+        marker = _validate_discovery_guest_marker(_read_discovery_guest_marker(root, profile_name), profile)
+        forward = _profile_model_forward_identity(profile, root, profile_name)
+        if forward is None:
+            raise AcceptanceError("exact profile QEMU forward identity is malformed")
+    except (AcceptanceError, OSError, RuntimeError, TimeoutError, ValueError, KeyError, TypeError):
+        report["reason_code"] = "profile_or_forward_identity_unverified"
+        return report
+
+    depth = profile["depth"]
+    maximum = profile["max_depth"]
+    report["profile"] = {"name": profile_name, "level": f"G{depth}", "depth": depth}
+    if context["state"] == "PERSISTED":
+        if depth != context["depth"] + 1 or maximum > context["max_depth"]:
+            report["status"] = "WRONG_CONTEXT"
+            report["reason_code"] = "profile_not_immediate_child"
+            return report
+    elif depth != 0:
+        report["status"] = "WRONG_CONTEXT"
+        report["reason_code"] = "nested_parent_identity_absent"
+        return report
+
+    provider = marker["provider"]
+    model_id = marker["model_id"]
+    report["selection"] = {"provider": provider, "model_id": model_id or None}
+    destination_class = "outer_launcher_loopback" if depth == 0 else "immediate_parent_loopback"
+    if provider in {"none", "remote"}:
+        if forward["provider"] is not None:
+            report["reason_code"] = "profile_selection_forward_mismatch"
+            return report
+        report["relay"] = {"status": "NOT_APPLICABLE", "kind": "immediate-parent-relay"}
+        report["capability_boundary"] = {
+            "status": "NOT_APPLICABLE", "kind": "operation-constrained-gateway",
+        }
+        report["forward"] = {"status": "NO_MODEL_FORWARD", "destination_class": "NONE",
+                              "destination_port": None}
+        report["status"] = "NO_CAPABILITY"
+        report["reason_code"] = "no_locally_discoverable_selected_model"
+        return report
+
+    expected_guest_port = 11434 if provider == "ollama" else 8080
+    if (forward["provider"] != provider or forward["guest_port"] != expected_guest_port
+            or forward["destination_port"] != marker["model_port"]):
+        report["reason_code"] = "profile_selection_forward_mismatch"
+        return report
+    destination_port = forward["destination_port"]
+    report["forward"] = {
+        "status": "MATCHED", "provider": provider, "guest_port": expected_guest_port,
+        "destination_class": destination_class, "destination_port": destination_port,
+        "transport": forward["transport"],
+    }
+    report["relay"] = {
+        "status": "MISSING" if depth > 0 else "NOT_REQUIRED",
+        "kind": "immediate-parent-relay",
+    }
+    report["capability_boundary"] = {
+        "status": "MISSING", "kind": "operation-constrained-gateway",
+    }
+    if not model_id:
+        report["status"] = "NO_CAPABILITY"
+        report["reason_code"] = "selected_model_id_absent"
+        return report
+    listener_state = _loopback_listener_state(destination_port)
+    if listener_state == "UNKNOWN":
+        report["reason_code"] = "selected_listener_identity_unknown"
+        return report
+    if listener_state == "ABSENT":
+        report["status"] = "ENDPOINT_UNAVAILABLE"
+        report["reason_code"] = "selected_loopback_listener_absent"
+        return report
+    models = _probe_provider_models(provider, "127.0.0.1", destination_port, timeout=2.0)
+    if models is None:
+        report["status"] = "ENDPOINT_UNAVAILABLE"
+        report["reason_code"] = "selected_endpoint_unavailable"
+    elif model_id not in models:
+        report["status"] = "MODEL_NOT_LISTED"
+        report["reason_code"] = "selected_model_not_listed"
+    else:
+        report["status"] = "AVAILABLE"
+        report["reason_code"] = "selected_model_listed"
+    return report
 
 
 def _read_mem_budget(requested_mib: int, reserve_mib: int) -> dict[str, Any]:
@@ -668,9 +997,9 @@ def preflight(source: Path, state_root: Path, run_id: str, memory_gib: int = 8,
         "loopback_count": listener_summary["loopback"],
     }, blocked=not listener_summary["readable"])
 
-    # Service/model availability is reported independently: an unavailable
-    # optional provider blocks only E2E-MODEL, not clean guest or security work.
-    provider_selection_check = validate_provider_selections(provider_config)
+    # Configured endpoints are not contacted during preflight. Availability is
+    # checked only after an exact ready profile and its selected forward are bound.
+    provider_selection_check = summarize_provider_selections(provider_config)
 
     namespace = _namespace_path(state_root, _run_name(run_id))
     collision = namespace.exists() or namespace.is_symlink()
@@ -845,9 +1174,10 @@ def _lifecycle_call(state_root: Path, profile: str, workspace: Path, operation: 
         raise TimeoutError("lifecycle operation exceeded its bounded deadline") from error
 
 
-def _profile_record(state_root: Path, profile: str) -> dict[str, Any]:
-    if PROFILE_RE.fullmatch(profile) is None:
-        raise AcceptanceError("profile is outside the generated campaign namespace")
+def _profile_record(state_root: Path, profile: str, *, campaign_profile: bool = True) -> dict[str, Any]:
+    allowed_name = PROFILE_RE if campaign_profile else PROFILE_NAME_RE
+    if not isinstance(profile, str) or allowed_name.fullmatch(profile) is None:
+        raise AcceptanceError("profile name is outside the permitted exact-profile syntax")
     try:
         result = subprocess.run(
             [sys.executable, str(PATHS_PATH), "profile-read", "--state-root", str(state_root), "--profile", profile],
@@ -859,12 +1189,26 @@ def _profile_record(state_root: Path, profile: str) -> dict[str, Any]:
     if result.returncode != 0:
         raise AcceptanceError("generated profile metadata is unavailable")
     try:
-        value = json.loads(result.stdout)
-    except (UnicodeError, json.JSONDecodeError) as error:
+        value = _decode_json_no_duplicates(result.stdout)
+    except (AcceptanceError, UnicodeError, json.JSONDecodeError) as error:
         raise AcceptanceError("generated profile metadata is invalid") from error
-    if value.get("name") != profile:
+    if not isinstance(value, dict) or value.get("name") != profile:
         raise AcceptanceError("profile name did not match the exact campaign target")
     return value
+
+
+def _validate_profile_runtime(state_root: Path, profile: str) -> bool:
+    """Verify the exact profile's frozen runtime before using its identity."""
+    try:
+        result = subprocess.run(
+            [sys.executable, str(PATHS_PATH), "runtime-validate", "--state-root", str(state_root),
+             "--profile", profile],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False, timeout=_bounded_timeout(15),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _profile_run_directory(state_root: Path, profile: str, data: dict[str, Any]) -> Path:
@@ -990,12 +1334,15 @@ def _listener_owned_loopback(profile: dict[str, Any]) -> bool:
     return bool(found) and ssh_listener_found
 
 
-def _guest_exec(state_root: Path, profile: str, command: str, *, timeout: int = 120) -> subprocess.CompletedProcess:
+def _guest_exec(state_root: Path, profile: str, command: str, *, timeout: int = 120,
+                campaign_profile: bool = True) -> subprocess.CompletedProcess:
     timeout = _bounded_timeout(timeout)
-    if (PROFILE_RE.fullmatch(profile) is None or "\n" in command or len(command) > 60_000
+    allowed_name = PROFILE_RE if campaign_profile else PROFILE_NAME_RE
+    if (not isinstance(profile, str) or allowed_name.fullmatch(profile) is None
+            or "\n" in command or len(command) > 60_000
             or type(timeout) is not int or not 1 <= timeout <= 1800):
         raise AcceptanceError("guest command is outside the fixed campaign contract")
-    data = _profile_record(state_root, profile)
+    data = _profile_record(state_root, profile, campaign_profile=campaign_profile)
     if data.get("status") != "ready" or not _listener_owned_loopback(data):
         raise AcceptanceError("profile or owned loopback listener is not verified")
     run_dir = _profile_run_directory(state_root, profile, data)
@@ -3927,12 +4274,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--suite", action="append", choices=(*ALL_SUITES, "all"),
                         help="select one or more independent acceptance suites")
     parser.add_argument("--run-id", help="32 lowercase hexadecimal ID; plan output supplies one if omitted")
-    parser.add_argument("--memory-gib", type=int, default=8, help="requested outer guest memory (default: 8 GiB)")
+    parser.add_argument("--memory-gib", type=int, help="requested outer guest memory (default: 8 GiB)")
     parser.add_argument("--apply-selected-updates", action="store_true",
                         help="plan and explicitly apply only the lifecycle suite's config/tools update targets")
     parser.add_argument("--provider-config", help="private credential-free explicit provider/model selections (0600 JSON)")
     parser.add_argument("--discover-providers", action="store_true",
-                        help="read model IDs from existing loopback Ollama and llama.cpp services only")
+                        help="read only the model selected by one exact ready profile and verified forward")
+    parser.add_argument("--profile", help="exact ready profile name for --discover-providers")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--execute", dest="operation", action="store_const", const="execute",
                         help="disabled one-shot path; use the exact staged workflow")
@@ -3961,10 +4309,20 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.discover_providers:
-            if args.source or args.provider_config or args.operation is not None:
-                parser.error("--discover-providers is a standalone read-only operation")
-            print(json.dumps(discover_local_providers(), sort_keys=True))
+            if (args.source or args.provider_config or args.operation is not None or args.suite
+                    or args.run_id or args.stage or args.retry_of or args.retry_reason
+                    or args.confirm_run_id or args.approved_total_minutes is not None
+                    or args.memory_gib is not None
+                    or args.apply_selected_updates or args.observation_gate or args.observation_result
+                    or args.observed_version or args.observation_check
+                    or args.profile is None or args.state_root is None):
+                parser.error("--discover-providers requires only --state-root and exact --profile")
+            state_root = _canonical_directory(args.state_root)
+            print(json.dumps(discover_profile_topology(state_root, args.profile), sort_keys=True))
             return 0
+        if args.profile is not None:
+            parser.error("--profile is used only with --discover-providers")
+        memory_gib = 8 if args.memory_gib is None else args.memory_gib
         if not args.state_root:
             parser.error("--state-root is required")
         state_root = _canonical_directory(args.state_root)
@@ -4023,7 +4381,7 @@ def main(argv: list[str] | None = None) -> int:
                 start = False
             with _campaign_lock(state_root, run_id):
                 report, report_path = execute_stage(
-                    source, state_root, run_id, suites, args.memory_gib, args.confirm_run_id,
+                    source, state_root, run_id, suites, memory_gib, args.confirm_run_id,
                     args.stage, start=start, apply_selected_updates=args.apply_selected_updates,
                     provider_config_path=args.provider_config,
                     approved_total_minutes=args.approved_total_minutes,
@@ -4043,7 +4401,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("retry options are valid only with --start")
         if args.approved_total_minutes is not None:
             parser.error("--approved-total-minutes is used only with live execution")
-        plan = preflight(source, state_root, run_id, args.memory_gib, suites, args.provider_config)
+        plan = preflight(source, state_root, run_id, memory_gib, suites, args.provider_config)
         plan["suites"] = suites
         plan["requested_effects"] = {
             "selected_guest_update_targets": ["config", "tools"] if args.apply_selected_updates else [],

@@ -1,5 +1,20 @@
 # Little Mester VM reimplementation: architecture and execution contract
 
+> **2026-11-06 owner reset — current execution authority:**
+> [PR_REIMPLEMENTATION_HANDOFF.md](PR_REIMPLEMENTATION_HANDOFF.md).
+> This session is planning only: no implementation or tests. On owner resume,
+> Luna max implements bounded packets, real evidence follows each packet, Sol
+> medium diagnoses/reviews, and fixes iterate. First migrate implementation into
+> the replacement VM using OpenAI auth, then finish metrics and recursive VM work
+> there. INF/local-model discovery, shared-inference gateway/performance and full
+> release acceptance are NOT prerequisites to that experimental migration.
+> This reset supersedes conflicting sequencing/model/next-step language below;
+> safety requirements and historical evidence remain. Tickets are not the plan.
+> **Execution clarification:** the single handoff now freezes per-file M0–M4
+> implementation, CLI/report contracts, gate dependency and failure-to-fix tables.
+> Failed acceptance opens repair work; it is not permission to prohibit that work.
+> No separate planning packet/Sol signoff is required to begin a specified repair.
+
 **Approved by the owner on 2026-11-03. Round 2 in progress on `feat/vm-approach-2`.**
 
 **Current controlling amendment — owner approved 2026-11-06:**
@@ -12,9 +27,12 @@ VM-local cached artifact push is a defined optional alternative, not automatical
 implemented before C14. The companion specifies INF-00–12, detailed substeps,
 tests/evidence/stop conditions, owner decisions and review/model-choice rules.
 It supersedes conflicting older model-discovery/relay/acceptance instructions.
-Current phase: commit CI/existing work, detailed planning, then **pause** for the
-owner to choose an implementation model. No new inference implementation, live
-operations, push, merge or C14 activation during this phase. Checkpoint `ca6da6c`.
+Current phase: **planning-only reset and single-session handoff**. One owner-run
+INF-01 report found provider `none`, no forward and no endpoint contact; that is
+not an OpenAI auth blocker. The next resumed implementation sequence is M0–M4 in
+the single handoff. No tests, implementation, live operation, push, merge or C14
+activation in the reset session. Existing implementation checkpoint: `ca6da6c`;
+current Git HEAD at reset: `e0ca2e3`, with uncommitted work preserved.
 
 **2026-11-05 clarification:** this replacement plan controls execution. Original
 branch tickets provide requirements, failure history and observations, not an

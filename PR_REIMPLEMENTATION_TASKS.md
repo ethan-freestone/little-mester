@@ -1,5 +1,17 @@
 # Executable VM replacement tasks
 
+> **Current owner reset, 2026-11-06:** start at
+> [PR_REIMPLEMENTATION_HANDOFF.md](PR_REIMPLEMENTATION_HANDOFF.md), packets M0–M4.
+> Planning only now; no tests/implementation. On resume use Luna max -> real
+> evidence runner -> Sol medium review -> diagnosed fix/advance. Get development
+> into the replacement VM with OpenAI auth before local-inference architecture or
+> full release acceptance. The task specifications below retain requirements, not
+> a competing sequence. Missing historical tickets, especially #50, are not gates;
+> do not query/reconstruct them. Keep evidence in PROGRESS, not tickets/MCP.
+> The handoff's frozen implementation order and failure-to-fix matrix control the
+> next edits. A failed gate requires its repair plus affected rerun, NOT waiting
+> for that same gate to pass before implementing its fix. No new planning round.
+
 **Approved 2026-11-03; execute in order, with actual evidence in the progress ledger.**
 
 **Current amendment, approved2026-11-06:**
@@ -19,8 +31,9 @@ rules for handing work to a less-capable model. Read its universal task packet
 and whole selected INF section before coding. Higher-thinking reviews are
 recommended at marked H decisions; **the owner always chooses the model**.
 Do not auto-switch/spawn reviewers or silently invent a security/performance
-decision. Current instruction is CI/current-work commit -> detailed planning
-commit -> **pause**, not immediate inference implementation or host operations.
+decision. Current execution is the planning-only reset described in the single
+handoff; M0–M4 begin on implementation resume. The older INF-first instruction is
+superseded for development migration; C14 still needs separate approval.
 
 Read `PR_REIMPLEMENTATION_PLAN.md` (requirements R01–R38, decisions D01–D13,
 interfaces, gates) first. A task agent receives that contract plus its complete
@@ -998,8 +1011,9 @@ at `97af1d83a16fce68ddcc3390276c218a1b0cd518`; reconciliation is recorded in mas
 or older versions in the replacement store are not blockers; no ticket migration,
 reconstruction of old handoffs, or old-state repair is required for C13.
 
-**Preconditions:** local full fast suite passes; owner-reviewed exact fresh
-replacement run/state/profile scope documented through MCP, credential safeguards
+**Preconditions:** local full fast suite passes for the later integrated campaign;
+owner-reviewed exact fresh replacement run/state/profile scope documented in
+PR_REIMPLEMENTATION_PROGRESS.md, credential safeguards
 and preservation plan before live mutation (not before local implementation).
 Original active snapshots/VMs and the working Docker/auth session must not be
 touched. This 2026-11-05 reconciliation authorizes planning edits only, not host
@@ -1042,7 +1056,7 @@ report-process PID signaling.
    Run ownership manifest drives explicit cleanup, failures preserve reports.
 5. Prepare one concise campaign handoff with revision, dry-run/commands, expected
    effects, protected assets, evidence paths, selected providers, budgets and
-   retry/cleanup bounds; record through MCP when applicable. Obtain approval before
+   retry/cleanup bounds; record in PR_REIMPLEMENTATION_PROGRESS.md. Obtain approval before
    live mutation, not a chain of legacy-ticket signoffs. Execute master §9's order:
    preflight→clean→usable guest/model/human checks→work/state retention→recursive
    proof/boundaries/concurrency→scoped cleanup/evidence review. Allow independent

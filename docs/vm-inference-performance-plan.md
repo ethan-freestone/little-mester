@@ -1,15 +1,26 @@
 # Pre-C14 inference isolation, performance and execution handoff
 
-**Status: owner-approved direction; detailed execution plan; implementation NOT started.**
+> **2026-11-06 owner reset:** [PR_REIMPLEMENTATION_HANDOFF.md](../PR_REIMPLEMENTATION_HANDOFF.md)
+> supersedes this document as current execution sequence. Planning only now, no
+> tests/implementation. On resume: Luna max implementation, runnable runtime
+> evidence, Sol medium diagnosis, bounded fixes. OpenAI-authenticated development
+> migration, metrics and credential-free recursive VM creation are NOT dependent
+> on INF-02–08/local-model discovery/gateway/benchmark completion. Requirements
+> below remain for delivering the shared-local-inference feature and final release;
+> they are not additional gates to experimental development. Do not grow the
+> gateway scope or infer topology from `provider=none` to delay migration.
+
+**Status: owner-approved direction; INF-01 local implementation resumed; one owner-run exact-profile report found no selected model capability.**
 **Approval: 2026-11-06. Implementation checkpoint: `ca6da6c`.**
 
 This is the normative amendment to `PR_REIMPLEMENTATION_PLAN.md`, not a second
 independent architecture. Read this document before executing any older model
 discovery, configuration or campaign handoff. The owner approved the proposal in
 the conversation, then requested: fix reported CI, commit existing work, write
-very detailed steps, **pause**, and only later resume implementation/testing with
-an owner-selected model. No new inference implementation or live operation is
-authorized during this documentation phase. No push, merge or C14 activation now.
+very detailed steps and **pause**. That historical planning pause was later
+superseded by the owner's resume for fixture-first INF-01 local implementation and
+review only. No live operation, push, merge or C14 activation is authorized by
+that resume.
 
 ## 1. Executive decisions and approval boundary
 
@@ -317,13 +328,13 @@ do not hand a model only a title. Supply:
 - **H (higher-thinking review recommended):** security boundary, protocol design,
   statistical/performance interpretation, feature/scope change or release decision.
 
-These labels are recommendations, not automatic model-selection instructions.
-**The owner always chooses the model**, including continuing with a less-capable
-model or supplying a decision directly. On uncertainty the implementer must stop
-the affected work, report evidence and a specific bounded question, and ask the
-owner whether to resolve it or switch models. Do not silently improvise a security
-contract, auto-spawn a stronger agent or weaken acceptance. An H decision needs
-recorded owner disposition, regardless of which model helped evaluate it.
+The owner has now selected **Luna max** for implementation and **Sol medium** for
+planning/evidence review; the single handoff defines that loop. Uncertainty about
+an in-scope fault goes to Sol with concrete diagnostics and a proposed fix, not a
+new blanket stop/owner permission request. Pause only the affected unsafe action
+or genuinely new effect/decision; independent fixes continue. Do not silently
+invent security contracts or weaken acceptance. Owner disposition is still needed
+for new deployments, billing/credential scope or material architecture changes.
 
 ### Local validation and commit rules
 
@@ -345,6 +356,11 @@ recorded owner disposition, regardless of which model helped evaluate it.
   FAIL/BLOCKED/NOT_RUN visible. Do not copy a failed observation into PASS prose.
 
 ## 6. Dependency graph and commit checkpoints
+
+**Feature-specific, not the development migration critical path.** M0–M4 in the
+single handoff may proceed without this graph closing. The graph below orders
+the shared-local-inference feature and its release evidence only. OpenAI native
+auth and credential-free nested VM smoke are independent of it.
 
 ```
 INF-00 current-state handoff
@@ -861,9 +877,8 @@ against hypervisor vulnerabilities by itself.
 | Required procedure missing | Implement within approved task or report BLOCKED | Ask owner to attest a whole checklist PASS |
 | Context/model too weak for uncertainty | Give owner bounded evidence/question/recommended review | Auto-switch/spawn agents or guess |
 
-**Current stop:** CI/current implementation checkpoint is committed; this planning
-amendment is to be committed separately, then report recommendations and pause.
-No INF-01 implementation or live discovery starts until owner resumes. The next
-recommended implementation task is **INF-01.1–01.5 local topology/discovery work**,
-followed by its reviewed owner-run read-only report. Do not rerun old recovery or
-provider commands merely because they appear earlier in the historical handoff.
+**Current next action:** follow the planning-only reset and M0–M4 single handoff,
+not the historical INF-first sequence above. The owner-run `NO_CAPABILITY` result
+is retained; it does not block OpenAI auth or a credential-free child VM. Shared
+inference serving/isolation/performance work remains open and resumes separately
+after development migration; do not rerun discovery to delay that migration.
