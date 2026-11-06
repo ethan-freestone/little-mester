@@ -6,9 +6,9 @@
   "type": "infra",
   "status": "active",
   "title": "Epic: VM-based Docker agent environment (all-in-one, model-agnostic harness)",
-  "objective": "Deliver an all-in-one, model-agnostic harness: point Little Mester at a directory and run an agent there, with real Docker capability for the workspace's dependencies, while keeping the agent's blast radius inside a disposable VM. The agent runs in a Docker container inside a full Linux VM (not on the host), with a Docker CLI that can run the workspace's compose files; ./lab on the host orchestrates VM lifecycle, workspace transport, the agent container and teardown. Works with local models and no subscription, and can use cloud providers (Kimi, Claude, OpenAI) when available. Includes documentation, egress and decision-log housekeeping.",
+  "objective": "IGNORE ME AS AN EXECUTION PLAN FOR feat/vm-approach-2. Start with PR_REIMPLEMENTATION_HANDOFF.md; PR_REIMPLEMENTATION_PLAN.md / TASKS.md / PROGRESS.md control replacement work. Historical ticket details below are retained, not current gates or permission to resume legacy procedures. PR_IMPLEMENTATION is a conversational shorthand; actual files are named PR_REIMPLEMENTATION.\n\nORIGINAL OBJECTIVE (preserved):\nDeliver an all-in-one, model-agnostic harness: point Little Mester at a directory and run an agent there, with real Docker capability for the workspace's dependencies, while keeping the agent's blast radius inside a disposable VM. The agent runs in a Docker container inside a full Linux VM (not on the host), with a Docker CLI that can run the workspace's compose files; ./lab on the host orchestrates VM lifecycle, workspace transport, the agent container and teardown. Works with local models and no subscription, and can use cloud providers (Kimi, Claude, OpenAI) when available. Includes documentation, egress and decision-log housekeeping.",
   "created_at": "2026-10-26T17:39:37.714Z",
-  "updated_at": "2026-10-26T20:50:56.495Z",
+  "updated_at": "2026-11-06T22:26:14.147Z",
   "priority": "critical",
   "comments": [
     {

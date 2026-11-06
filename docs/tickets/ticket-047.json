@@ -6,9 +6,9 @@
   "type": "feature",
   "status": "draft",
   "title": "Opt-in remote Linux host target for ./lab (follow-up to epic #35)",
-  "objective": "Add an explicit remote-target mode so ./lab can run the agent container on an existing Linux host over SSH, while local QEMU/KVM stays the default. This is deliberately outside epic #35's completion criteria: it is the second topology the owner asked to track, not the one being implemented now.",
+  "objective": "IGNORE ME AS AN EXECUTION PLAN FOR feat/vm-approach-2. Start with PR_REIMPLEMENTATION_HANDOFF.md; PR_REIMPLEMENTATION_PLAN.md / TASKS.md / PROGRESS.md control replacement work. Historical ticket details below are retained, not current gates or permission to resume legacy procedures. PR_IMPLEMENTATION is a conversational shorthand; actual files are named PR_REIMPLEMENTATION.\n\nORIGINAL OBJECTIVE (preserved):\nAdd an explicit remote-target mode so ./lab can run the agent container on an existing Linux host over SSH, while local QEMU/KVM stays the default. This is deliberately outside epic #35's completion criteria: it is the second topology the owner asked to track, not the one being implemented now.",
   "created_at": "2026-10-26T20:45:14.103Z",
-  "updated_at": "2026-10-26T20:45:14.105Z",
+  "updated_at": "2026-11-06T22:26:14.207Z",
   "acceptance_criteria": [
     {
       "id": "A1",

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "bootstrap_path": "lib/vm/guest-bootstrap.sh",
+  "runner_path": "lib/vm/runner.sh",
+  "runner_test_path": "tests/vm-process.bats",
+  "guest_sentinel_path": "/var/lib/little-mester/selftest-candidate",
+  "failed_sentinel": "A",
+  "failed_exit_code": 42,
+  "fixed_sentinel": "B",
+  "baseline_vcpus": 2,
+  "candidate_vcpus": 1
+}

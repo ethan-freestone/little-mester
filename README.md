@@ -110,13 +110,24 @@ mkdir -p workspaces/my-project
 cd workspaces/my-project
 git init
 
-# Start the agent
+# Start the agent (Docker route during the acceptance transition)
 ./lab .
 ```
 
 **Requirements:** Docker with GPU support (`nvidia-smi` works on host), `sudo`, and a working GPU driver. Other distros and GPU vendors may need adjustments to `./lab setup` — see [`docs/`](docs/).
 
 Hardware configuration lives in [`machine.conf.example`](machine.conf.example). Copy it to `machine.conf` (gitignored) and fill in your specs. The benchmark tools use it to suggest optimal starting points.
+
+### VM migration status
+
+The **intended released default is the VM**, with Docker retained as an optional
+route. During the acceptance transition, the ordinary `./lab <workspace>` path
+still delegates to Docker; it is not a decision to keep Docker as the product
+default. `./lab-docker <workspace>` names that Docker route explicitly, and
+`./lab vm ...` selects the experimental VM CLI. Its explicit `run`/`up` entry can
+start or resume a named development profile, but this is not release acceptance
+and does not switch ordinary `lab` to VM. The owner starts the first development
+VM on the approved branch; the coding session does not start it.
 
 ---
 
@@ -126,6 +137,10 @@ Hardware configuration lives in [`machine.conf.example`](machine.conf.example). 
 ./lab <workspace>                   # start opencode (default agent)
 ./lab --aider    <workspace>        # use Aider for this session
 ./lab shell <workspace>             # plain bash inside the sandbox
+./lab-docker <workspace>            # explicit Docker route (optional after VM cutover)
+./lab vm status                     # explicit VM route; read-only example
+./lab vm run "$PWD" --name branch-dev-20261105 --unsafe-recurse --max-depth 0
+                                    # experimental writable checkout in a named VM; owner-started
 ./lab stop                          # stop all containers
 ./lab pull                          # re-pull models after editing models.txt
 ./lab build                         # rebuild agent image
@@ -133,6 +148,14 @@ Hardware configuration lives in [`machine.conf.example`](machine.conf.example). 
 ```
 
 `<workspace>` can be a single repo or a parent folder holding several repos. The launcher refuses `/`, `$HOME`, sensitive paths (`~/.ssh`, `~/.config`, etc.), and by default any path that would expose the little-mester repo itself.
+
+The VM example above is different: `--unsafe-recurse` explicitly lets the guest
+edit the mounted checkout. Use it only when that is intended, and keep
+`--max-depth 0` unless nested VMs are separately in scope. The named profile and
+its private VM state persist after the command; `run` may resume an existing
+profile. The initial boot may download the pinned base image and create private
+profile/runtime/disk state. Missing host prerequisites fail closed; no host
+packages are installed automatically.
 
 ### Key flags
 

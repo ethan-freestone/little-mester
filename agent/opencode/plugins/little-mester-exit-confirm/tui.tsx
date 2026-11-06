@@ -26,12 +26,19 @@ export default Plugin.define({
     const [open, setOpen] = createSignal(false)
     let active = false
 
-    const finish = (confirmed: boolean) => {
+    const cancelExit = () => {
       if (!active) return
       active = false
       setOpen(false)
       context.ui.dialog.clear()
-      if (confirmed) context.keymap.dispatch("app.exit")
+    }
+
+    const confirmExit = () => {
+      if (!active) return
+      active = false
+      setOpen(false)
+      context.ui.dialog.clear()
+      context.keymap.dispatch("app.exit")
     }
 
     // The only binding available from the prompt. Priority 100 beats the
@@ -89,21 +96,21 @@ export default Plugin.define({
           title: "Close Little Mester",
           group: "Little Mester",
           bind: "y,shift+y",
-          run: () => finish(true),
+          run: confirmExit,
         },
         {
           id: "little-mester.exit-confirm.yes-q",
           title: "Close Little Mester",
           group: "Little Mester",
           bind: "q,shift+q",
-          run: () => finish(true),
+          run: confirmExit,
         },
         {
           id: "little-mester.exit-confirm.no",
           title: "Cancel closing Little Mester",
           group: "Little Mester",
           bind: "escape,n,shift+n,ctrl+c",
-          run: () => finish(false),
+          run: cancelExit,
         },
       ],
     }))

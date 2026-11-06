@@ -57,8 +57,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
-      - name: ShellCheck (lab + shell scripts)
-        run: shellcheck lab scripts/*.sh
+      - name: ShellCheck (all launchers + shell scripts)
+        run: shellcheck lab lab-docker lab-vm scripts/*.sh
 
       - name: Python compile check (scripts/*.py)
         run: python3 -m py_compile scripts/*.py

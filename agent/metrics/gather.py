@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
-"""Hardware metrics sidecar - collects GPU, CPU, RAM, and temperature data from the host
-and exposes them over HTTP for the agent container to query.
+"""Collect curated host hardware metrics for Docker and VM guest agents.
 
-Listens on 0.0.0.0:19532 *inside this container's network namespace* so sibling
-containers on the compose `internal` network can reach it via Docker DNS
-(http://metrics:19532). No host port is published, so it is not reachable from
-outside the Docker network -- see compose.yaml (no `ports:` entry) and
-scripts/verify-metrics.sh acceptance criterion A7.
+Docker keeps its existing 0.0.0.0 bind inside the private Compose namespace.
+The VM host service explicitly sets 127.0.0.1 and QEMU forwards only that
+selected loopback listener into the guest.
 
 Exposes three endpoints:
     GET /metrics  -- JSON blob with all four metric categories
     GET /summary  -- one-line human-readable string
-    GET /history?n=N -- last N ring-buffer samples (default 120 = 60s)
+    GET /history?n=N -- last N ring-buffer samples (0..240; default 120)
 """
 
 import collections
@@ -22,7 +19,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -36,11 +33,12 @@ HOST_PROC = os.environ.get("METRICS_HOST_PROC", "/host/proc")
 HOST_HWMON = os.environ.get("METRICS_HOST_HWMON", "/host/hwmon")
 HOST_THERMAL = os.environ.get("METRICS_HOST_THERMAL", "/host/thermal")
 
-# Bind address. 0.0.0.0 = all interfaces in this container's netns (required for
-# cross-container reachability). The container publishes no host ports, so the
-# service stays invisible to the host and to anything outside the compose network.
+# Bind address. Docker keeps 0.0.0.0 inside its unpublished private container
+# namespace; the VM host launcher explicitly supplies 127.0.0.1.
 BIND_HOST = os.environ.get("METRICS_BIND_HOST", "0.0.0.0")
-BIND_PORT = int(os.environ.get("METRICS_BIND_PORT", "19532"))
+BIND_PORT = os.environ.get("METRICS_BIND_PORT", "19532")
+MAX_HISTORY = 240
+SAMPLE_INTERVAL = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +47,8 @@ BIND_PORT = int(os.environ.get("METRICS_BIND_PORT", "19532"))
 
 _lock = threading.Lock()
 _latest: dict | None = None          # Current snapshot (served by GET /metrics)
-_history: collections.deque = collections.deque(maxlen=240)  # 120 s at 2 Hz
+_history: collections.deque = collections.deque(maxlen=MAX_HISTORY)  # 120 s at 2 Hz
+_gpu_latest: list = []
 
 
 def _collect_gpu():
@@ -88,13 +87,16 @@ def _collect_cpu():
     }
 
 
-def _aggregate():
-    """Collect *all* hardware metrics and return as a single dict."""
+def _aggregate(gpu=None):
+    """Collect quick metrics and attach the last asynchronous GPU sample."""
+    if gpu is None:
+        with _lock:
+            gpu = list(_gpu_latest)
     return {
         "timestamp": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "cpu": _collect_cpu(),
         "memory": _collect_ram(),
-        "gpu": _collect_gpu(),
+        "gpu": gpu,
         "temperatures": _collect_temperatures(),
     }
 
@@ -136,18 +138,23 @@ def _format_summary(data: dict):
     )
 
 
+def _snapshot():
+    """Return a cached snapshot without holding the lock during collection."""
+    with _lock:
+        data = _latest
+    return dict(data) if data is not None else _aggregate()
+
+
 def _sampler():
-    """Background thread that polls _aggregate() every 500 ms and maintains
-    the `_latest` snapshot plus a rolling-ring of recent samples."""
+    """Refresh CPU/RAM/temperature and history independently of GPU tools."""
     global _latest
     while True:
-        with _lock:
-            snap = _aggregate()
-            g = (snap["gpu"] or [{}])[0]   # first GPU, empty dict if no data
-            vram_pct = round(
-                100 * g.get("memory_used_mb", 0)
-                / max(g.get("memory_total_mb", 1), 1), 4
-            )
+        snap = _aggregate()
+        g = (snap["gpu"] or [{}])[0]   # first GPU, empty dict if no data
+        vram_pct = round(
+            100 * g.get("memory_used_mb", 0)
+            / max(g.get("memory_total_mb", 1), 1), 4
+        )
 
         history_entry = collections.OrderedDict([
             ("t", snap["timestamp"]),
@@ -161,7 +168,23 @@ def _sampler():
             _latest = snap
             _history.append(history_entry)
 
-        time.sleep(0.5)
+        time.sleep(SAMPLE_INTERVAL)
+
+
+def _gpu_sampler():
+    """Poll optional GPU tools serially on a worker that cannot block HTTP."""
+    global _gpu_latest
+    _initialize_gpu_backend()
+    while True:
+        try:
+            result = _collect_gpu()
+            if not isinstance(result, list):
+                result = []
+        except Exception:  # noqa: BLE001 — hardware probing is best effort
+            result = []
+        with _lock:
+            _gpu_latest = result
+        time.sleep(SAMPLE_INTERVAL)
 
 
 # ---------------------------------------------------------------------------
@@ -180,30 +203,31 @@ def _safe_int(value, default: int = 0):
         return default
 
 
-# Probe NVML at import time — if pynvml isn't available or the device
-# nodes aren't readable, we fall back to nvidia-smi subprocess calls.
 _NVML_OK = False
-try:
-    import pynvml
-    pynvml.nvmlInit()
-    _NVML_OK = True
-except Exception:  # noqa: S110, BLE001 — pynvml may not be installed
-    pass
-
-# Probe for nvidia-smi binary at import time (avoids a subprocess check
-# on every call).
 _HAS_SMI = False
-try:
-    result = subprocess.run(
-        ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
-        capture_output=True, text=True, check=True, timeout=5,
-    )
-    _HAS_SMI = bool(result.stdout.strip())
-except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-    pass
+pynvml = None
 
-# ── Start sampler thread ─────────────────────────────────────
-threading.Thread(target=_sampler, daemon=True).start()
+
+def _initialize_gpu_backend():
+    """Probe optional GPU tooling on its worker, never during module import."""
+    global _NVML_OK, _HAS_SMI, pynvml
+    try:
+        import pynvml as nvml
+        nvml.nvmlInit()
+        pynvml = nvml
+        _NVML_OK = True
+    except Exception:  # noqa: BLE001 — pynvml may be absent or device-inaccessible
+        _NVML_OK = False
+    if _NVML_OK:
+        return
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, check=True, timeout=5,
+        )
+        _HAS_SMI = bool(result.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        _HAS_SMI = False
 
 
 def _collect_gpu_nvml():
@@ -373,21 +397,27 @@ class _MetricsHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         if parsed.path == "/metrics":
-            with _lock:
-                data = dict(_latest) if _latest else _aggregate()
+            data = _snapshot()
             payload = json.dumps(data, indent=2)
             content_type = "application/json"
 
         elif parsed.path == "/summary":
-            with _lock:
-                data = dict(_latest) if _latest else _aggregate()
+            data = _snapshot()
             payload = _format_summary(data)
             content_type = "text/plain"
 
         elif parsed.path == "/history":
-            n = int(query.get("n", ["120"])[0])
+            values = query.get("n", ["120"])
+            if len(values) != 1 or not values[0].isascii() or not values[0].isdecimal():
+                self.send_error(400, "n must be an integer from 0 to 240")
+                return
+            n = int(values[0])
+            if n > MAX_HISTORY:
+                self.send_error(400, "n must be an integer from 0 to 240")
+                return
             with _lock:
-                recent = list(_history)[-n:]
+                recent = list(_history)
+            recent = recent[-n:] if n else []
             payload = json.dumps(recent, indent=2)
             content_type = "application/json"
 
@@ -415,8 +445,16 @@ class _MetricsHandler(BaseHTTPRequestHandler):
 
 def main():
     host = BIND_HOST
-    port = BIND_PORT
-    server = HTTPServer((host, port), _MetricsHandler)
+    try:
+        port = int(BIND_PORT)
+    except ValueError as error:
+        raise SystemExit("METRICS_BIND_PORT must be an integer from 1 to 65535") from error
+    if not 1 <= port <= 65535:
+        raise SystemExit("METRICS_BIND_PORT must be an integer from 1 to 65535")
+    server = ThreadingHTTPServer((host, port), _MetricsHandler)
+    server.daemon_threads = True
+    threading.Thread(target=_sampler, name="metrics-sampler", daemon=True).start()
+    threading.Thread(target=_gpu_sampler, name="gpu-sampler", daemon=True).start()
     print(f"[metrics-sidecar] listening on {host}:{port}", file=sys.stderr)
     try:
         server.serve_forever()
