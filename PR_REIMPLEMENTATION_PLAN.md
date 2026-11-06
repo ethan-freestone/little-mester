@@ -2,6 +2,20 @@
 
 **Approved by the owner on 2026-11-03. Round 2 in progress on `feat/vm-approach-2`.**
 
+**Current controlling amendment — owner approved 2026-11-06:**
+[Pre-C14 inference isolation/performance execution plan](docs/vm-inference-performance-plan.md).
+Prioritize the persistent one-level VM; shared accelerator-backed inference via
+an operation-constrained capability is the default candidate, not raw backend TCP
+access or recursive model copies. Require >=95% comparable direct-baseline warmed
+generation throughput plus owner-frozen latency/reliability/security gates.
+VM-local cached artifact push is a defined optional alternative, not automatically
+implemented before C14. The companion specifies INF-00–12, detailed substeps,
+tests/evidence/stop conditions, owner decisions and review/model-choice rules.
+It supersedes conflicting older model-discovery/relay/acceptance instructions.
+Current phase: commit CI/existing work, detailed planning, then **pause** for the
+owner to choose an implementation model. No new inference implementation, live
+operations, push, merge or C14 activation during this phase. Checkpoint `ca6da6c`.
+
 **2026-11-05 clarification:** this replacement plan controls execution. Original
 branch tickets provide requirements, failure history and observations, not an
 additional approval workflow. The TASK-15 campaign policy in §9 supersedes legacy
@@ -21,8 +35,9 @@ testing only application code does not meet this requirement. This is R20–R24 
 the release-blocking E2E-SELF test below. Ordinary additional agents may share a VM;
 recursive VM implementation testing actually requires nested virtualization.
 
-This package specifies 16 implementation tasks and 14 commit checkpoints. All
-paths named as proposed are design choices, not files already implemented.
+The original package specified 16 implementation tasks and 14 commit checkpoints;
+later C13a/C13b and the approved INF-00–12/C13c amendment supplement that baseline.
+All paths named as proposed are design choices, not files already implemented.
 
 ### Package index
 
@@ -33,6 +48,9 @@ paths named as proposed are design choices, not files already implemented.
   path disposition, retained test obligations and adversarial self-review.
 - `PR_REIMPLEMENTATION_PROGRESS.md`: actual observations and execution ledger.
 - `PR_REIMPLEMENTATION_BASELINE.md`: historical kickoff; not a competing plan.
+- [Pre-C14 inference/performance amendment](docs/vm-inference-performance-plan.md):
+  approved2026-11-06 R35–R38/D11–D13, INF-00–12 and conditional VM-local F1–F8;
+  controlling next-step/owner-model/pause and measurable acceptance contract.
 
 No application code or original-branch work is authorized during Round 1. Planning
 artifacts are in `/workspace` on the replacement branch, outside the detached
@@ -116,6 +134,10 @@ the interpretation, not whether implementation has passed. Verification IDs in
 | R32 OPTIONAL P2 E 10 | Remote/cloud VM hosts, BSD/macOS adapters, alternate runtimes, GPU passthrough excluded from this release; no weakened fallback advertised. C.8/C.9.15, #46/#47. | V-CONFIG refusal; docs exclusion |
 | R33 EXPERIMENTAL P2 E 10 | #53 docs MCP, #54 usage counters, #55 structured sharing/MCP research, #57 readiness schema and #51 ticket test-plan field are separate work. Do not import ticket-store churn or implement upward sharing. | V-DOCS scope check |
 | R34 OPERATIONAL P0 E 9 | Preserve original/valuable sessions, profiles, credentials and exports. Legacy interrupted apt/report state is relevant only if that asset is deliberately reused; it is not a prerequisite to a fresh isolated replacement campaign. Approve the replacement run scope once, preflight actual resources and collisions, and never substitute an existing profile/export. | HOST-PREFLIGHT scope/ownership/evidence |
+| R35 SECURITY P0 E 10 | External local-model access grants only a reviewed inference capability, not raw model administration, server-side tools, host files/URLs, unrelated services or general ancestor routing. Backend itself has a verified isolation envelope; arbitrary guest HTTP clients/root cannot bypass the gateway. Owner amendment2026-11-06. | INF-02–06, INF-08/10; SEC-NET, SEC-FS, SEC-SECRET |
+| R36 QUALITY P0 E 10 | Prioritize persistent one-level VM performance. Same-model/device/settings benchmark requires >=95% comparable direct-baseline warmed generation throughput and explicitly frozen TTFT/concurrency/reliability/resource criteria. No security relaxation, cherry-picked samples or changing model/device to pass. Owner amendment2026-11-06. | INF-07/08; E2E-MODEL-PERF |
+| R37 OPERATIONAL P0 E 10 | Topology-aware discovery and explicitly selected immediate-parent inference relays work without recursive weights/server deployment. Absent parent loopback is not proof of physical-host absence. Missing capability fails closed with no scan/service-start/direct fallback; tools execute only in the selected guest. | INF-01/05/06/10; V-RECURSE, E2E-SELF |
+| R38 OPTIONAL P2 E 10 | Define VM-local inference as alternative placement with owner-controlled verified artifact cache and parent-pushed VM-owned copies, persistence and explicit per-level resources. Implementation deferred unless owner brings it forward; no cache export, implicit downloads/copies or GPU passthrough authority. | Companion §9; conditional future scope, not current C14 gate |
 
 ## 4. Architecture decisions and alternatives
 
@@ -191,6 +213,22 @@ the interpretation, not whether implementation has passed. Verification IDs in
   `lab-docker`; expose VM mode explicitly until replacement acceptance, then
   VM-default dispatcher. Original ticket/audit history stays on its original
   branch; any new execution-ticket records go through MCP, not copied files.
+- **D11 — inference capability, not model-server authority (2026-11-06).**
+  Shared serving retains accelerator efficiency but must enforce exact allowed
+  inference/model-list operations and safe backend isolation, selected upstream/
+  models, bounded streaming/cancellation and no administrative/host-tool capability.
+  Existing raw socat model forwarding is not sufficient acceptance. Optional
+  relays repeat only the selected immediate-parent capability; no model copies.
+- **D12 — benchmark before changing placement (2026-11-06).** Optimize one-level
+  persistent VM first against identical warmed model/device/settings. Require
+  >=95% baseline generation ratio, owner-frozen first-token/concurrency/resource
+  budgets, reliability and negative isolation evidence. Missing measurements are
+  BLOCKED, not an assertion that tunneling is slow or per-VM inference is faster.
+- **D13 — optional VM-local artifact push (2026-11-06).** Preserve a defined
+  alternative using a verified owner-side cache and explicit parent push into
+  VM-owned storage; no host-cache mounts or automatic nested deployment. Bring
+  implementation forward only by owner decision. GPU passthrough remains excluded
+  without a separate hardware/authority decision.
 
 ## 5. Concrete interfaces and data/control flow
 
@@ -368,6 +406,15 @@ Optional credentials are parent-pushed over SSH using supported provider adapter
 do not inherit ancestor escrow paths. Metrics/browser are off in child by default;
 browser flow only on explicitly approved immediate-parent capability.
 
+**2026-11-06 refinement:** the selected model API must be operation-constrained,
+not merely port-constrained. Backend isolation, gateway protocol/resource rules,
+per-hop identity and no raw-backend bypass are specified in the controlling
+[inference amendment](docs/vm-inference-performance-plan.md). Existing launcher
+TCP forwards do not establish these properties. An external model returns data;
+guest harness executes tools in the guest, never on the serving host. The selected
+workspace, curated metrics and optional browser action remain explicit exceptions
+to a no-general-host-access boundary; do not advertise literal zero crossings.
+
 ## 7. Intentional behavior changes requiring approval
 
 Approval of Round 2 must cover these explicit design choices:
@@ -419,6 +466,9 @@ old branch's interrupted host campaign before testing the replacement.
 | R27 | D04,D06 → TASK-14 | V-UPDATE,E2E-LIFE | C12 |
 | R05–R25,R30,R34 | D09 → TASK-15 | HOST-/E2E-/SEC-/HUMAN- suites | C13 |
 | R01,R29,R30,R31,R32,R33 | D10 → TASK-16 | V-DISPATCH,V-DOCS,E2E-DAILY | C14 |
+| R35,R37 | D11 → INF-01–06/10 | V-INFERENCE, SEC-NET/FS/SECRET, E2E-SELF | C13c-a/b/c/f |
+| R36 | D12 → INF-07/08/11 | E2E-MODEL-PERF, E2E-MODEL | C13c-d/f |
+| R38 | D13 → companion §9 F1–F8 | Conditional VM-local artifact/placement tests | Deferred; owner must bring forward |
 
 Commit scopes/files/tests are exactly the associated task specs. Dependency order
 is C01→C02→…→C14 as the reviewed execution order; do not commit known broken
@@ -508,6 +558,14 @@ exported snapshot. Consult the actual `--help` and current runbook for available
 stage/provider/resume options; their availability does not authorize execution.
 
 ### Local-first acceptance scope — owner revision after C13b
+
+**2026-11-06 approved extension:** execute the controlling inference amendment's
+INF-00–12 in addition to the required local-first gates. Its C13c checkpoints
+close inference isolation, topology/relay, measured one-level performance and
+remaining usability/security procedures before final frozen acceptance/C14.
+No command that assumes parent-loopback model servers may substitute for
+topology-aware discovery. Approval of planning/checkpoint commits is not permission
+to start that implementation or live campaign before the owner's requested pause.
 
 **Current next-work authority:** [local-first C14 handoff plan](docs/vm-c14-handoff-plan.md).
 The owner selected a minimal repository-owned canary checker (1A), existing local
@@ -761,6 +819,8 @@ privately export/verify before any separately approved container recreation.
 | HOST-CLEAN | Fresh cached-image integrity, fresh boot/schema/cloud-init clean state, virtiofs UID/GID, Node/MCP, guest Docker and no host Docker requirement; CPU-only evidence separately labeled |
 | E2E-DAILY | One command enters native TUI; two identical starts no reboot/install; A→B→B same overlay/keys; normal warm same PID; Docker rollback opens existing supported path without recreation |
 | E2E-MODEL | Each configured Ollama/llama.cpp plus selected remote provider completes actual repeated streaming requests (5 per configured provider); health only insufficient; denial/missing credentials/outage actionable; model-none shell/auth works |
+| V-INFERENCE | Synthetic exact method/path/schema/model/upstream validation, hostile framing/URL/file/admin/tool fields denied before backend contact; incremental bounded streaming/cancel/backpressure, exact relay identity/no fallback; actual backend protocol contract reviewed |
+| E2E-MODEL-PERF | Owner-frozen same-model/device/config direct B vs gateway/G0 measurements; >=95% warmed one-level generation ratio per required serial case, agreed TTFT/concurrency/resource/reliability gates; absolute samples and nested deltas reported without transcript/secret capture; isolation independently required |
 | E2E-WORK | Agent creates guest-only PostgreSQL Compose stack, health/query, failing project test→fix→pass, stop/restart/query persisted volume, down; bind/guest-loopback port works; H has no published guest service/socket |
 | E2E-SELF | Full changed-VM workflow §5: edit candidate VM bootstrap AND lifecycle/command construction, fresh G1 then G2, runtime/source hashes match, intentional failure→fixed fresh pass, child agent task, parent remains usable, scoped cleanup; unchanged boot/mock is FAIL |
 | E2E-DEPTH | Actual depth0→1→2 boots, persisted max2 after independent login; depth3 refused before state/QEMU; unauthorized reset/increase/missing KVM similarly denied |
@@ -829,6 +889,10 @@ replace tests at the replacement's reviewed 2.2.5 compatibility version.
 | Rootful guest choice/state-layout change rejected | Medium: approval decisions explicit; no implementation before approval |
 | Original host valuable/interrupted state | High: preserve those assets; use a separate campaign scope and unique snapshots/profiles, not legacy retry locks or an active stable exporter |
 | Task/commit integration drift | Medium: bounded contexts, one coordinator, test-first commits, revalidate revisions, stop for material redesign |
+| Port-limited model access still exposes backend administration/SSRF/tools | Critical: operation/schema-constrained gateway, isolated serving envelope, no raw bypass; INF-02–06/08/10 |
+| Shared inference misses performance/reliability expectations | High: matched direct baseline, explicit >=95% one-level gate and owner TTFT budget; diagnose transport/queue/device separately, never weaken isolation; INF-07/08 |
+| New gateway parsing/dependency adds attack surface | High: freeze protocol/library/limits before coding, maintained streaming implementation, hostile framing/schema/cancel/backpressure fixtures and owner H-review disposition; INF-03/04 |
+| Weak-model handoff invents topology/security decisions | High: full task packets/substeps, explicit unknowns and R/I/H labels; owner chooses model and resolves questions, no auto-switch or speculative host effects |
 
 Confidence **8/10** in requirements reconstruction and the architecture/plan.
 The user's VM-self-modification goal is now explicit and traceable. Source proves

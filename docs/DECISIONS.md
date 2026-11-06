@@ -19,6 +19,25 @@ Always read both this file and the per-subsystem decision logs before starting w
 
 This rule applies to all future sessions. No implementation without prior written decision when the choice is non-obvious or architectural.
 
+### Replacement VM workflow amendment (owner approved2026-11-06)
+
+For `feat/vm-approach-2`, the current control state is CI/current-work checkpoint
+commit, detailed planning commit, then **pause for the owner to choose the
+implementation model**. Original ticket handoffs are historical requirements,
+not a second execution workflow; keep tickets untouched during this phase.
+Use [the replacement master plan](../PR_REIMPLEMENTATION_PLAN.md) and its
+[detailed pre-C14 inference/performance amendment](vm-inference-performance-plan.md).
+Those hold the engineering decision/specification; this is the workflow pointer.
+
+The approved direction prioritizes secure high-performance ordinary one-level
+VM operation, not recursive model deployment. New serving/hardware/credential
+effects still need a concrete scoped owner decision. Model-review difficulty
+labels recommend when deeper reasoning would help; the owner always chooses
+the model, with no automatic switch/delegation. C14/default activation and final
+publication/merge have explicit evidence/owner checkpoints; the goal of eventual
+merge never waives failed tests or protected-state preservation. Ordinary lab
+continues on Docker until cutover; no live work follows from this planning note.
+
 ---
 
 ## A. How to use little-mester

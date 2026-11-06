@@ -1,5 +1,29 @@
 # VM harness architecture and trust boundary
 
+## Controlling inference amendment (approved2026-11-06; implementation pending)
+
+See [the detailed pre-C14 execution plan](vm-inference-performance-plan.md) and
+master R35–R38/D11–D13. Prioritize the persistent one-level VM with shared
+accelerator-backed inference behind an operation-constrained gateway and explicit
+immediate-parent relays. Do not recursively deploy model servers/weights by
+default. The reviewed raw socat forward is a port restriction, **not** proof of
+inference-only isolation; the complete selected recursive relay and measured
+performance/isolation gates still need implementation/evidence.
+
+Agent tools/MCP/shell/workloads execute inside the agent VM, never on the model
+serving host. No general host files, credentials, Docker socket, network or model
+administration is exposed. Selected workspace, inference, curated metrics and
+optional browser auth are explicit separately bounded crossings; do not claim
+literal zero access outside the VM. Inference backend isolation is required too.
+Hypervisor/kernel/serving-library vulnerabilities are not claimed impossible.
+
+Require >=95% comparable direct-baseline warmed one-level generation throughput,
+owner-frozen latency/concurrency/resources and independent security/reliability
+evidence. A VM-local cached artifact-push backend is defined future/conditional
+scope, not a silent fallback, recursive copy policy or GPU passthrough approval.
+Current phase: checkpoint CI/work, detailed planning, then pause for owner model
+selection. Older descriptions below are subordinate; ordinary lab remains Docker.
+
 ## Replacement implementation status (2026-11-05)
 
 The owner approved `PR_REIMPLEMENTATION_PLAN.md` for `feat/vm-approach-2`.

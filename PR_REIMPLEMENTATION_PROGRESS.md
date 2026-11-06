@@ -2,7 +2,7 @@
 
 ## Control state
 
-- Phase: **C13b committed locally; package 1 experimental development entry committed locally at `6cec2ae`; first owner-started VM handoff ready; package 2 security closeout, frozen-candidate acceptance and C14 remain ahead**.
+- Phase: **CI/current implementation checkpoint committed at `ca6da6c`; owner-confirmed boot/version and partial TUI usability; inference/security/performance amendment approved; detailed planning followed by mandatory pause for owner model selection. C14/merge not started.**
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
 - Current authorization: the owner approved the fixed four-package sequence in
@@ -16,6 +16,14 @@
   Manual owner OpenAI authentication experimentation is allowed in the disposable
   VM; no paid streams or credential export/import are included. No push, merge or
   C14 activation is authorized.
+- Latest2026-11-06 authority supersedes older next commands: checkpoint existing
+  work and reported CI fix, document all approved inference/performance changes,
+  commit planning and **pause**. No INF implementation, live discovery/VM/service/
+  provider operation, push, merge or default cutover during this phase.
+- Controlling new task source:
+  [inference/performance execution plan](docs/vm-inference-performance-plan.md),
+  INF-00–12 plus conditional VM-local F1–F8. Owner always chooses the model;
+  higher-thinking review labels are recommendations, never automatic switches.
 - Authoritative plan: `PR_REIMPLEMENTATION_PLAN.md`.
 - Implementing branch: `feat/vm-approach-2`; C05 implementation checkpoint is
   `cb7091a17720b59056bd2677f3af1aba5699f944`.
@@ -34,13 +42,12 @@
   ticket history through MCP, reconcile this branch's plan/tasks/progress, commit
   locally and stop; no C13 or host action in that session. This was superseded by
   the later request to finish C13 locally only.
-- Current scope: package 1's explicit `lab vm run/up` entry is committed and
-  fixture-validated; hand off the exact start command to the owner.
-  Keep ordinary `lab` on Docker; this does not count as host acceptance or switch
-  the product default. The prior read-only host preflight passed at `422a523`
-  (run ID `2fb37d376f9040b3bbc6be4a5d216dd7`), but predates this entry and is not
-  preflight evidence for a later frozen acceptance revision. Do not expand beyond
-  the four approved packages; classify unrelated enhancements separately.
+- Current scope: preserve the already-ready run71ff52d4 and parent; do not issue
+  a new start/recovery command. Shared inference capability/isolation, actual
+  recursive relay and >=95% one-level benchmark extend package2/3 via approved
+  R35–R38/D11–D13. Ordinary lab stays Docker. Old preflight/partial owner boot
+  observations are not final-candidate acceptance. VM-local artifact push is a
+  conditional alternative; no automatic model copies or GPU passthrough scope.
 - Inspected source: PR #13 at
   `97af1d83a16fce68ddcc3390276c218a1b0cd518`.
 - Assigned session: current coordinating OpenCode session; no subagents assigned.
@@ -1956,3 +1963,68 @@ untracked mission file remains SHA256
 from staging. SHA of this implementation checkpoint is recorded by the subsequent
 planning-only commit, which will define executable pre-C14 inference/performance
 steps and an explicit pause for the owner to choose the implementation model.
+
+## Approved inference/performance amendment and implementation-model pause
+
+**Authority2026-11-06:** owner accepted the benchmark-first shared-inference
+proposal and optional VM-local alternative, then requested CI repair/current-work
+commit, very detailed planning capable of substep handoff to a less-capable model,
+commit planning, pause/recommendations, later implementation/testing and eventual
+merge only after required gates. Current-work checkpoint is
+`ca6da6cd7c4889fb190d809086ca62cfb9488fd6`; nothing was pushed or merged.
+
+**Planning deliverable:** docs/vm-inference-performance-plan.md (863 lines at
+initial validation), normative companion to master plan. Thirteen INF-00–12 tasks
+with dependency graph/C13c checkpoints, complete numbered substeps, scope/files,
+deliverables/exit conditions, positive/negative test obligations, owner-live effects,
+failure/preservation rules, review recommendations and explicit owner decision
+register. Universal task-packet instructions prevent handing a model only a title.
+Owner always chooses the model; R/I/H labels do not auto-switch or delegate.
+
+**Approved engineering deltas captured:**
+- R35–R38 and D11–D13 supplement original requirements/decisions: inference-only
+  capability + backend isolation; comparable >=95% warmed one-level generation
+  target; topology-aware discovery/per-hop relays; conditional VM-local cache/push.
+- Shared model deployment uses selected accelerator outside agent VMs; no recursive
+  weights/server copies, no host tools/MCP/shell execution by the model service.
+  Raw TCP destination restriction is not sufficient inference isolation.
+- Freeze actual protocol/schema/unsafe fields, transport library/dependency and
+  numerical resource/timeout bounds before coding; explicit backend-isolation/
+  deployment and hardware/service effects need owner disposition, not guesses.
+- Measurement controls direct B vs gateway/G0 vs nesting; identical model/device/
+  settings, warmups/paired samples, per-case ratios, actual token/TTFT/error/queue/
+  cancel data and no transcripts. TTFT/concurrency budgets selected by owner from
+  measured baseline before scoring; missing values are BLOCKED. No security waiver.
+- Conditional VM-local F1–F8 defines checksum/license cache, parent-push VM-owned
+  storage/persistence and explicit per-level resources; no host-cache mount, auto
+  download/copy, automatic implementation or implicit GPU passthrough authority.
+- Keep metrics/browser cleanup/permissions/public-egress403 and QCOW2/filesystem/
+  synthetic credential procedure gaps explicit. Live OpenAI acceptance remains
+  deferred; current optional features/regressions are not removed.
+- INF-11 freezes/revalidates integrated evidence and exact cleanup; INF-12 preserves
+  existing TASK-16/C14, requires8 docs failures closed, default/rollback proof,
+  exact-head CI and explicit cutover/publication/final merge checkpoints.
+
+Master plan/tasks/current progress, C14 handoff, host acceptance and architecture
+pages now point at the controlling amendment and current PAUSE; earlier operational
+commands are historical, not the next action. Product decisions contains a workflow
+pointer rather than a competing engineering specification. Original plans/history
+retained; no ticket calls/writes or source/runtime mutation during planning.
+
+Validation: eight-document Markdown fences/local-link/conflict integrity PASS;
+38 unique requirements;13 ordered INF task sections each with deliverable/exit;
+8 conditional VM-local steps; preserved mission hash unchanged. git diff --check
+PASS. Docs consistency retains exactly the8 known failures across109 checks after
+new links, with no new failed check. Existing full380 Python/149 Bats/143 Node and
+CI static/build results belong to checkpointca6da6c; not rerun or relabeled as new
+host evidence for documentation-only changes. All new files remain proposed APIs
+until implemented; no fabricated gateway/relay/benchmark result.
+
+**STOP after planning commit.** Recommend owner select implementation model and
+resume INF-01.1–01.5 local topology/discovery tests/code first. Recommend deeper
+reasoning review at INF-02 serving isolation, INF-03 protocol/dependency/limits and
+INF-08 performance interpretation; owner may instead choose any model or decide
+directly. Do not request arbitrary service location/port choices before source/
+read-only topology explains what is missing. Preserve the ready development VM,
+parent/legacy state, all archives/auth and unverified metrics listener. No more
+implementation, discovery, VM/service/model operation, push/merge or C14 now.

@@ -1,5 +1,39 @@
 # Local-first VM acceptance → C14 handoff plan
 
+> **Current control state — 2026-11-06: PAUSE after planning.** Owner approved
+> shared-inference/security/performance direction, current-work checkpoint commits
+> and detailed planning, then a pause to choose an implementation model. Start with
+> [the controlling inference/performance amendment](vm-inference-performance-plan.md),
+> INF-00 and its decision register. Implementation checkpoint: `ca6da6c`.
+> **Do not execute older discovery, repair, retry or campaign commands below as
+> the current next action.** They are retained chronological handoff evidence.
+> Topology-aware discovery (INF-01) replaces the fixed-parent-loopback assumption.
+> No new inference implementation/live operations/push/merge/default cutover now.
+
+## Approved pre-C14 additions and current evidence
+
+- Preserve ready development run `71ff52d4-d3d5-4394-a43d-440b1929f07c`, all
+  archives/legacy state, parent session and unverified metrics listener. Owner
+  confirmed mester --version after targeted corrections and partial TUI/Escape
+  usability; model completion/metrics/permissions/isolation remain unaccepted.
+- Ordinary persistent one-level VM is the performance priority. Default candidate
+  is shared accelerator-backed inference behind an inference-only capability,
+  explicit per-hop relay and no raw backend/host authority or recursive model copies.
+- Required new gates: V-INFERENCE and E2E-MODEL-PERF, >=95% comparable direct
+  warmed one-level generation throughput plus owner-frozen TTFT/concurrency/
+  reliability/resource bounds. Security is independent and never waived for speed.
+- VM-local verified cache/parent-push inference is a defined conditional alternative,
+  not automatically another required backend before C14 or GPU passthrough approval.
+- Execute INF-01–11 before INF-12/TASK-16. Each detailed task has substeps, inputs,
+  files, tests, expected evidence, failure/stop behavior and decision points.
+  R/I/H thinking labels recommend review; the owner always chooses the model.
+- Remain within scoped owner-run effects and360min campaign ceiling, retain35min
+  cleanup reserve and diagnosed retry policy. New deployments/downloads/hardware/
+  credentials require concrete owner choice. No broad service repair or cleanup.
+- Next recommendation after the owner's model swap/resume: INF-01.1–01.5 local
+  topology/discovery implementation, then its reviewed read-only owner handoff.
+  No restart or immediate provider/port questionnaire is the next step now.
+
 ## Authority and current state
 
 Owner decisions recorded after C13b closeout:

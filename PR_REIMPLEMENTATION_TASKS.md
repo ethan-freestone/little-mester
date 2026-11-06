@@ -2,7 +2,27 @@
 
 **Approved 2026-11-03; execute in order, with actual evidence in the progress ledger.**
 
-Read `PR_REIMPLEMENTATION_PLAN.md` (requirements R01–R34, decisions D01–D10,
+**Current amendment, approved2026-11-06:**
+[Detailed pre-C14 inference/performance tasks](docs/vm-inference-performance-plan.md)
+are normative. INF-00–12 supplement the existing tasks and precede final C14:
+topology-aware discovery; serving isolation; exact protocol/limits/dependency
+decision; inference-only gateway; selected per-hop relays; frozen profile/client
+integration; benchmark driver; real one-level >=95% performance plus security;
+remaining metrics/browser/permission/security procedure closure; real nested
+proof; frozen integrated acceptance; existing TASK-16 release/delivery.
+No recursive model copies by default. VM-local cache/push placement is defined
+future/conditional scope only. R35–R38 and D11–D13 extend the master contract.
+
+The companion contains complete substeps, likely files, test/expected outcomes,
+dependencies/checkpoint boundaries, operational authority and stop/escalation
+rules for handing work to a less-capable model. Read its universal task packet
+and whole selected INF section before coding. Higher-thinking reviews are
+recommended at marked H decisions; **the owner always chooses the model**.
+Do not auto-switch/spawn reviewers or silently invent a security/performance
+decision. Current instruction is CI/current-work commit -> detailed planning
+commit -> **pause**, not immediate inference implementation or host operations.
+
+Read `PR_REIMPLEMENTATION_PLAN.md` (requirements R01–R38, decisions D01–D13,
 interfaces, gates) first. A task agent receives that contract plus its complete
 task section and prerequisite commit evidence. It must not redesign interfaces.
 All VM paths here are proposed CREATE paths on `main` unless labeled confirmed;
@@ -742,6 +762,12 @@ concurrent writes and create a fresh run after diagnosis. Never mutate active ex
 
 ## TASK-12: Bounded candidate VM launch and repeated boundary
 
+**Approved refinement2026-11-06:** INF-01/03/05/06/10 supply the missing complete
+model-capability relay and security/performance proof. A raw loopback TCP forward
+or passing model flags is not sufficient: the upstream is an inference-only
+gateway, identity-bound at each hop, with no raw backend/ancestor fallback.
+Default children still inherit no capability and no weights/model-server copies.
+
 **Purpose:** R07,R21,R22,R25; D03,D07. Actually run changed VM implementation and
 propagate bounded recursive authority, not simply start another agent.
 
@@ -940,6 +966,14 @@ Owner handoff for interrupted apt, never automatic clean rebuild.
 **Definition of done:** DD; precise update/retention live evidence tracked.
 
 ## TASK-15: Scoped real-host, security and human acceptance suites
+
+**Current extension2026-11-06:** INF-01–11 from the controlling inference amendment
+are prerequisites to final acceptance: operation-level model isolation, real
+per-hop relays, measured one-level performance and existing procedure/usability
+gaps. V-INFERENCE and E2E-MODEL-PERF are required alongside existing local-first
+gates. Older fixed-loopback discovery/raw-forward assumptions are not sufficient.
+Live OpenAI-specific acceptance remains deferred; required synthetic credential
+safety and non-auth security are not deferred. Current phase ends in a pause.
 
 **Historical TASK-15 sequencing checkpoint (2026-11-05; superseded by the current
 authorization above):** C13's local code checkpoint is
@@ -1227,6 +1261,14 @@ before C14. Deferred live auth remains outside the local-first result; it does
 not satisfy the separate historical live-auth follow-up.
 
 ## TASK-16: Documentation, CI, accepted VM default and preserved Docker rollback
+
+**Current prerequisite2026-11-06:** complete INF-11 owner acceptance review and
+INF-12 delivery/cutover checklist. C13c-a–f supplement earlier code milestones;
+none is automatic C14 approval. Close eight known docs consistency findings,
+keep the mission file and private runtime/evidence out of commits, run remote CI
+on the actual PR head, and obtain explicit cutover/publication/final merge
+instructions at the named checkpoints. The owner's goal to merge does not waive
+failed or unperformed tests, uncertain cleanup or preservation requirements.
 
 **Purpose:** R01,R29–R33; D10. Deliver coherent reviewable product, not only new
 primitives or a misleading default switch.

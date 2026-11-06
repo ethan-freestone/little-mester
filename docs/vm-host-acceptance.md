@@ -1,5 +1,16 @@
 # VM host acceptance runbook
 
+> **Controlling amendment2026-11-06:** see
+> [pre-C14 inference isolation/performance tasks](vm-inference-performance-plan.md).
+> Current instruction is **pause after planning**, not run the commands below.
+> Existing runner commands do not yet implement the new V-INFERENCE and
+> E2E-MODEL-PERF gates or topology-aware discovery. Those are required before
+> final campaign/C14. Fixed parent-loopback discovery is insufficient when the
+> actual provider is an upstream capability. Proposed new flags/interfaces in
+> planning are not executable commands until implemented and verified with --help.
+> No raw backend forward, recursive model copies, security/performance waiver or
+> new auth/paid campaign is authorized. Historical procedure text follows.
+
 > **Current status:** see the [local-first C14 handoff plan](vm-c14-handoff-plan.md).
 > The explicit experimental development entry is fixture-validated; the owner is
 > authorized to start that VM after the reviewed handoff. No VM or campaign has
