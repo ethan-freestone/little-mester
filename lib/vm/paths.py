@@ -41,6 +41,15 @@ class PolicyError(ValueError):
     """Untrusted input or unsafe filesystem state; never include input values."""
 
 
+def _policy_debug_enabled():
+    return os.environ.get("VM_POLICY_DEBUG") == "1"
+
+
+def _policy_debug(message):
+    if _policy_debug_enabled():
+        print(f"[debug] {message}", file=sys.stderr)
+
+
 LOG_SEGMENT_BYTES = 10 * 1024 * 1024
 
 
@@ -164,43 +173,170 @@ def private_entry(path):
         require(info.st_nlink == 1)
 
 
+def _private_entry_issue(path, *, runtime=False):
+    """Return a safe reason code and metadata for a private-entry violation."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return "entry_unreadable", None
+    if info.st_uid != os.getuid():
+        return "owner_mismatch", info
+    if stat.S_ISLNK(info.st_mode):
+        return "symlink", info
+    mode = stat.S_IMODE(info.st_mode)
+    if stat.S_ISDIR(info.st_mode):
+        return ("directory_mode", info) if mode != 0o700 else (None, info)
+    if not stat.S_ISREG(info.st_mode):
+        return "not_regular_file", info
+    if info.st_nlink != 1:
+        return "hard_link_count", info
+    allowed_modes = (0o600, 0o700) if runtime else (0o600,)
+    if mode not in allowed_modes:
+        return "file_mode", info
+    return None, info
+
+
 def walk_error(error):
     raise error
 
 
+def _debug_state_root_scan(root):
+    """Scan all descendants and report bounded, content-free policy diagnostics."""
+    checked = 0
+    issue_count = 0
+    walk_error_count = 0
+    issues = []
+    walk_errors = []
+
+    def relative_path(path):
+        try:
+            relative = Path(path).relative_to(root).as_posix()
+        except (TypeError, ValueError):
+            relative = "<unavailable>"
+        return relative[:512]
+
+    def onerror(error):
+        nonlocal walk_error_count
+        walk_error_count += 1
+        if len(walk_errors) < 25:
+            walk_errors.append((relative_path(getattr(error, "filename", None)), type(error).__name__))
+
+    for directory, dirs, files in os.walk(root, followlinks=False, onerror=onerror):
+        for name in dirs + files:
+            child = Path(directory) / name
+            checked += 1
+            parts = child.relative_to(root).parts
+            runtime = len(parts) >= 4 and parts[:2] == ("vm", "profiles") and parts[3] == "runtime"
+            reason, info = _private_entry_issue(child, runtime=runtime)
+            if reason:
+                issue_count += 1
+                if len(issues) < 25:
+                    issues.append((relative_path(child), reason, info))
+
+    if not issue_count and not walk_error_count:
+        _policy_debug(f"state_root.private_tree=PASS entries_checked={checked}")
+        return
+
+    _policy_debug(
+        "state_root.private_tree=FAIL "
+        f"entries_checked={checked} violations={issue_count} walk_errors={walk_error_count}"
+    )
+    displayed = 0
+    for relative, reason, info in issues[:25]:
+        metadata = ""
+        if info is not None:
+            metadata = (
+                f" uid={info.st_uid} mode={stat.S_IMODE(info.st_mode):04o}"
+                f" links={info.st_nlink}"
+            )
+        _policy_debug(
+            f"state_root.entry=FAIL path={json.dumps(relative, ensure_ascii=True)} "
+            f"reason={reason}{metadata}"
+        )
+        displayed += 1
+    for relative, error_type in walk_errors[: max(0, 25 - displayed)]:
+        _policy_debug(
+            f"state_root.walk=FAIL path={json.dumps(relative, ensure_ascii=True)} "
+            f"reason={error_type}"
+        )
+        displayed += 1
+    omitted = issue_count + walk_error_count - displayed
+    if omitted:
+        _policy_debug(f"state_root.additional_violations_omitted={omitted}")
+    raise PolicyError("VM policy validation failed")
+
+
 def state_root(value, *, must_exist=False, scan=True):
-    root = canonical(value, exists=must_exist)
-    require(root != Path("/") and root != Path.home().resolve())
-    for ancestor in root.parents:
-        if ancestor.exists():
-            info = ancestor.stat()
-            require(stat.S_ISDIR(info.st_mode))
-            require(info.st_uid in (0, os.getuid()))
-            # Root-owned sticky temp directories are safe namespace ancestors,
-            # not private state. Other writable ancestry is not trusted.
-            writable = info.st_mode & 0o022
-            require(not writable or (info.st_uid == 0 and info.st_mode & stat.S_ISVTX))
+    try:
+        root = canonical(value, exists=must_exist)
+    except (OSError, PolicyError):
+        _policy_debug("state_root.canonical=FAIL")
+        raise
+    _policy_debug("state_root.canonical=PASS")
+    try:
+        require(root != Path("/") and root != Path.home().resolve())
+        for ancestor in root.parents:
+            if ancestor.exists():
+                info = ancestor.stat()
+                require(stat.S_ISDIR(info.st_mode))
+                require(info.st_uid in (0, os.getuid()))
+                # Root-owned sticky temp directories are safe namespace ancestors,
+                # not private state. Other writable ancestry is not trusted.
+                writable = info.st_mode & 0o022
+                require(not writable or (info.st_uid == 0 and info.st_mode & stat.S_ISVTX))
+    except (OSError, PolicyError):
+        _policy_debug("state_root.ancestors=FAIL")
+        raise
+    _policy_debug("state_root.ancestors=PASS")
     if root.exists():
-        require(root.is_dir())
-        private_entry(root)
+        try:
+            require(root.is_dir())
+            private_entry(root)
+        except (OSError, PolicyError):
+            info = None
+            try:
+                info = root.lstat()
+            except OSError:
+                pass
+            if info is None:
+                _policy_debug("state_root.root_metadata=FAIL reason=unreadable")
+            else:
+                reason = "not_directory"
+                if stat.S_ISDIR(info.st_mode):
+                    reason, _ = _private_entry_issue(root)
+                _policy_debug(
+                    "state_root.root_metadata=FAIL "
+                    f"reason={reason or 'policy_violation'} uid={info.st_uid} "
+                    f"mode={stat.S_IMODE(info.st_mode):04o} links={info.st_nlink}"
+                )
+            raise
+        _policy_debug("state_root.root_metadata=PASS")
         if not scan:
+            _policy_debug("state_root.private_tree=SKIPPED")
             return root
-        for directory, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
-            for name in dirs + files:
-                child = Path(directory) / name
-                # Runtime executable files are private 0700, not metadata 0600.
-                parts = child.relative_to(root).parts
-                if len(parts) >= 4 and parts[:2] == ("vm", "profiles") and parts[3] == "runtime":
-                    info = child.lstat()
-                    require(info.st_uid == os.getuid())
-                    require(not stat.S_ISLNK(info.st_mode))
-                    require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
-                    if stat.S_ISDIR(info.st_mode):
-                        require(stat.S_IMODE(info.st_mode) == 0o700)
+        if _policy_debug_enabled():
+            _debug_state_root_scan(root)
+        else:
+            for directory, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
+                for name in dirs + files:
+                    child = Path(directory) / name
+                    # Runtime executable files are private 0700, not metadata 0600.
+                    parts = child.relative_to(root).parts
+                    if len(parts) >= 4 and parts[:2] == ("vm", "profiles") and parts[3] == "runtime":
+                        info = child.lstat()
+                        require(info.st_uid == os.getuid())
+                        require(not stat.S_ISLNK(info.st_mode))
+                        require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+                        if stat.S_ISDIR(info.st_mode):
+                            require(stat.S_IMODE(info.st_mode) == 0o700)
+                        else:
+                            require(info.st_nlink == 1 and stat.S_IMODE(info.st_mode) in (0o600, 0o700))
                     else:
-                        require(info.st_nlink == 1 and stat.S_IMODE(info.st_mode) in (0o600, 0o700))
-                else:
-                    private_entry(child)
+                        private_entry(child)
+    else:
+        _policy_debug("state_root.root_metadata=ABSENT")
+        if scan:
+            _policy_debug("state_root.private_tree=PASS entries_checked=0")
     return root
 
 

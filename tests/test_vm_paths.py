@@ -45,10 +45,15 @@ class PathsTest(unittest.TestCase):
         self.workspace = self.base / "work"
         self.workspace.mkdir()
 
-    def cli(self, command, *args, data=None, ok=True):
+    def cli(self, command, *args, data=None, ok=True, debug=False):
+        env = os.environ.copy()
+        env.pop("VM_POLICY_DEBUG", None)
+        if debug:
+            env["VM_POLICY_DEBUG"] = "1"
         result = subprocess.run(
             [sys.executable, "-B", str(SCRIPT), command, "--state-root", str(self.root), *map(str, args)],
-            input=json.dumps(data) if data is not None else None, text=True, capture_output=True, check=False,
+            input=json.dumps(data) if data is not None else None, text=True, capture_output=True,
+            check=False, env=env,
         )
         self.assertEqual(result.returncode, 0 if ok else 2, result.stderr)
         return json.loads(result.stdout) if ok else result
@@ -436,6 +441,30 @@ class PathsTest(unittest.TestCase):
         self.root = old
         (self.root / "leak").symlink_to(self.workspace)
         self.cli("config", ok=False)
+
+    def test_private_tree_debug_is_bounded_and_never_prints_contents(self):
+        for index in range(30):
+            unsafe = self.root / f"unsafe-{index:02d}"
+            unsafe.write_text("CANARY_SECRET_CONTENT")
+            unsafe.chmod(0o644)
+
+        plain = self.cli("config", ok=False)
+        self.assertNotIn("state_root.entry=FAIL", plain.stderr)
+
+        result = self.cli("config", ok=False, debug=True)
+        self.assertIn("[debug] state_root.canonical=PASS", result.stderr)
+        self.assertIn("[debug] state_root.ancestors=PASS", result.stderr)
+        self.assertIn("[debug] state_root.root_metadata=PASS", result.stderr)
+        self.assertIn(
+            "[debug] state_root.private_tree=FAIL entries_checked=30 violations=30 walk_errors=0",
+            result.stderr,
+        )
+        self.assertIn('path="unsafe-', result.stderr)
+        self.assertIn("reason=file_mode uid=", result.stderr)
+        self.assertIn("mode=0644 links=1", result.stderr)
+        self.assertIn("[debug] state_root.additional_violations_omitted=5", result.stderr)
+        self.assertEqual(result.stderr.count("[debug] state_root.entry=FAIL"), 25)
+        self.assertNotIn("CANARY_SECRET_CONTENT", result.stderr)
 
     def test_insecure_ancestor_and_foreign_owner(self):
         self.base.chmod(0o777)

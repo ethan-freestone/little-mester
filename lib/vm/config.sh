@@ -259,7 +259,7 @@ vm_config_load() {
     vm_error 'Nested profiles cannot forward ancestor host metrics; a child-local metrics endpoint is not implemented.'
     return 2
   fi
-  config="$(python3 "$VM_PATHS_HELPER" config --state-root "$VM_STATE_ROOT")" || return 2
+  config="$(VM_POLICY_DEBUG="$VM_DEBUG" python3 "$VM_PATHS_HELPER" config --state-root "$VM_STATE_ROOT")" || return 2
   # JSON parsing only. Keys come from a fixed CLI whitelist, never evaluated shell code.
   config="$(printf '%s' "$config" | python3 -c '
 import json,os,sys
@@ -286,7 +286,8 @@ for key,value in zip(args[::2],args[1::2]):
 print(json.dumps(c))
 ' "${VM_CONFIG_OVERRIDES[@]}")" || { vm_error 'Invalid configuration override.'; return 2; }
   # shellcheck disable=SC2034 # Validated JSON is consumed by lab-vm, never evaluated as shell.
-  VM_CONFIG_JSON="$(printf '%s' "$config" | python3 "$VM_PATHS_HELPER" validate-config --state-root "$VM_STATE_ROOT")" || return 2
+  VM_CONFIG_JSON="$(printf '%s' "$config" | VM_POLICY_DEBUG="$VM_DEBUG" \
+    python3 "$VM_PATHS_HELPER" validate-config --state-root "$VM_STATE_ROOT")" || return 2
 }
 
 vm_config_overrides() {

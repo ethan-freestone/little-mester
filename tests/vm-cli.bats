@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
 # V-CONFIG: launcher parsing and read-only setup; never run real installers/VMs.
+bats_require_minimum_version 1.5.0
 
 setup() {
   ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
@@ -112,6 +113,22 @@ parse() {
   [[ "$output" != *'+ '* ]]
 }
 
+@test "CLI debug explains private-state rejection without exposing file contents" {
+  mkdir -m 700 "$MESTER_STATE_DIR"
+  mkdir -m 700 "$MESTER_STATE_DIR/logs"
+  printf '%s\n' 'CANARY_SECRET_CONTENT' > "$MESTER_STATE_DIR/logs/legacy.log"
+  chmod 644 "$MESTER_STATE_DIR/logs/legacy.log"
+
+  run "$ROOT/lab-vm" list -d
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"[debug] state_root.canonical=PASS"* ]]
+  [[ "$output" == *"[debug] state_root.root_metadata=PASS"* ]]
+  [[ "$output" == *"[debug] state_root.private_tree=FAIL"* ]]
+  [[ "$output" == *'path="logs/legacy.log" reason=file_mode'* ]]
+  [[ "$output" == *"mode=0644 links=1"* ]]
+  [[ "$output" != *"CANARY_SECRET_CONTENT"* ]]
+}
+
 @test "CLI profile positional selection is exact and not duplicated by name flag" {
   run parse up target --workspace "$BATS_TEST_TMPDIR/workspace"
   [ "$status" -eq 0 ]
@@ -212,6 +229,7 @@ parse() {
 printf '<%s>\n' "$@" > "$VM_TEST_AGENT_ARGV"
 SH
   chmod 700 "$runtime/lab-vm"
+  # shellcheck disable=SC2016 # The child Bash receives positional arguments explicitly.
   run env VM_TEST_RUNTIME="$runtime" VM_TEST_AGENT_ARGV="$log" \
     bash -c '
       source "$1/lib/vm/lifecycle.sh"
@@ -262,8 +280,10 @@ SH
 }
 
 @test "CLI context is valid JSON and never creates private state" {
-  run bash "$ROOT/lab-vm" -d context --json --name candidate
+  run --separate-stderr bash "$ROOT/lab-vm" -d context --json --name candidate
   [ "$status" -eq 0 ]
+  # shellcheck disable=SC2154 # Bats sets stderr when run uses --separate-stderr.
+  [[ "$stderr" == *"[debug] state_root.private_tree=PASS"* ]]
   printf '%s' "$output" | python3 -c '
 import json,sys
 x=json.load(sys.stdin)
