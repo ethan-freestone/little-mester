@@ -1,0 +1,243 @@
+{
+  "id": 48,
+  "file_path": "/workspace/docs/tickets/ticket-048.json",
+  "number": 48,
+  "area": "engine",
+  "type": "improvement",
+  "status": "draft",
+  "title": "Executable work plans: deterministic implementation, review, evidence and repair workflows",
+  "objective": "Upgrade the existing JSON-first ticket engine so a frontier planner can publish a versioned, sufficiently detailed implementation plan that a low-reasoning implementer can execute through programmatic steps, editable discussion, scoped review, truthful evidence and non-deadlocking acceptance/repair loops.",
+  "created_at": "2026-11-06T23:17:17.902Z",
+  "updated_at": "2026-11-06T23:17:17.902Z",
+  "acceptance_criteria": [
+    {
+      "id": "A01",
+      "text": "OUTCOME AND SCOPE. Turn the existing JSON-first ticket engine into an executable, versioned work-plan system: a strong planner specifies a complete task and a simpler implementation model obtains one unambiguous next action, implements it, executes scoped evidence, submits review, and iterates on diagnosed repairs. The engine remains the authoritative state/transition library, exposed consistently through MCP and CLI. This is one implementation ticket with ordered phases, not authority to start all work simultaneously. Deliver a usable vertical slice before advanced orchestration. Do not build a general autonomous-agent platform, VM manager, model provider, billing service, distributed scheduler or new web UI as prerequisites. Preserve existing ticket history and the four legacy ticket statuses. Passing means the programmatic workflow demonstrably advances through a real implementation/evidence/repair example; a richer store of Markdown plus another closed gate is insufficient. The current VM reimplementation is motivation, not this ticket's execution target: do not reopen or block its migration workflow.",
+      "status": "pending"
+    },
+    {
+      "id": "A02",
+      "text": "GROUND THE CHANGE IN CURRENT CAPABILITIES. Inspect little-mester-mcp/src/engine.ts, mcp-server.ts, cli.ts, discovery/config code, current JSON Schema, decisions, package exports and tests before editing. Publish a compact capability-to-gap table in the design section of this ticket's future plan: existing CRUD, private store selection, locks, audit/index, legacy ACs and merged test ledger versus typed plans, attempts, evidence, reviews, comment operations and deterministic readiness. Current concrete gaps include comment support in engine types/CLI but no comment input in the exposed MCP update tool; dependency fields that do not deliver an executable per-action workflow; replacing whole AC arrays; weakly structured evidence; and branch/store ambiguity for missing historical ticket numbers. Distinguish observed implementation from documentation claims. Reuse existing audit/lock/index primitives and tests; do not copy VM lifecycle code or rewrite the engine merely to reorganize files. No baseline test failure may silently become a passing claim.",
+      "status": "pending"
+    },
+    {
+      "id": "A03",
+      "text": "IDENTITY AND STORAGE CONTRACT. Retain the human ticket number and existing JSON storage, but add a stable opaque ticket UID and store/project UID for new workflow objects, plus a monotonic entity revision. References carry store UID + ticket UID + object ID; human numbers are display aliases, not globally unique identity. Define how legacy tickets acquire UIDs via explicit, previewable migration without rewriting their substantive content. get/next/context responses identify canonical selected store, worktree/branch context when available, ticket UID, number, revision and active plan revision. A ticket number missing in one branch/store must return not_found_in_selected_store with the selected identity and an optional explicitly recorded supersession reference, not silently search another checkout, invent a ticket or adopt a default store. Branch merges with colliding human numbers require an explicit audited resolution preserving both UIDs. This feature must explain historical references such as a missing #50 without causing a task or approval deadlock.",
+      "status": "pending"
+    },
+    {
+      "id": "A04",
+      "text": "VERSIONED PLAN ENTITY. Add an optional structured plan namespace with its own schema version while preserving legacy tickets. A plan revision contains stable plan ID, immutable revision ID/content digest, goal, success outcome, in-scope/out-of-scope lists, requirements with IDs, assumptions with verification actions, decisions with rationale/owner/disposition, protected assets, execution contexts, allowed effects, resource/time budgets, model/role hints, steps, gates, dependency edges, repair routes, review policy and evidence requirements. Plan statuses are draft, in_review, approved, superseded, archived; execution is bound to a specific approved revision. Draft plans remain editable. Approved revisions are immutable: corrections create a successor draft with a structured diff, scoped invalidation and explicit activation. Do not mutate an approved plan beneath a running implementer. A fresh implementation step has no requirement that its own future acceptance gate already pass. Provide TypeScript types, runtime validation, JSON Schema and serialization roundtrips for the same fields.",
+      "status": "pending"
+    },
+    {
+      "id": "A05",
+      "text": "LOW-REASONING IMPLEMENTATION PACKET. Every executable step must state: stable ID; one user-visible outcome; exact inputs and their sources; execution context; permitted file/path/module scope; ordered implementation instructions; frozen APIs/data shapes and examples; explicit decisions the implementer must not redesign; positive/negative regression cases; expected outputs; live evidence procedure; exact success/failure conditions; prerequisites by action kind; timeout/resource limits; protected assets; scoped recovery/rollback; reviewer role; and the next action on each outcome. Instructions must be sufficient without reconstructing a conversation or asking the implementer to design the architecture. Distinguish existing commands from proposed interfaces to implement. Unimplemented proposed commands cannot be returned as executable owner instructions. Missing plan detail creates a precise planner-owned question/repair item, not permission for a low-capability implementer to improvise security, nor an aggregate block on unrelated ready work. A plan completeness validator reports field/object IDs and bounded actionable defects.",
+      "status": "pending"
+    },
+    {
+      "id": "A06",
+      "text": "THREE DISTINCT STATE MACHINES. Preserve ticket lifecycle draft/active/resolved/archived. Separately track implementation step state (todo, in_progress, implemented, superseded/cancelled), evidence attempt state (queued, running, passed, failed, timed_out, cancelled, waiting_owner, blocked_external) and gate evaluation (not_run, pass, fail, waiting_owner, blocked_external, stale). Reviews have their own requested/changes_requested/approved/superseded disposition. Release/aggregate readiness is a derived evaluation, never an implementation permission. Document each transition's actor, input, preconditions and audit effect. Gate FAIL opens the defined repair action; it must not make the repair implementation action unready. Approval/review and evidence are not inferred from a comment, checkbox, existing test filename or a shell exit0 without required assertions. Cancelled work and waived requirements are explicit historical dispositions, not PASS synonyms. Reject malformed transitions atomically with typed reasons.",
+      "status": "pending"
+    },
+    {
+      "id": "A07",
+      "text": "TYPED LOGICAL DEPENDENCIES, NOT ONE CLOSED GATE. Represent at least implementation_requires (prerequisite artifacts/decisions), execution_requires (safe runtime inputs), review_requires and release_requires as distinct edge types. Model alternative prerequisites as named any_of groups and joint prerequisites as all_of groups; do not evaluate expressions or shell from ticket strings. Validate all object references and cycles in the static prerequisite graph, reporting the exact cycle. Repair/retry transitions are workflow events, not cyclic static prerequisites. A metrics failure may prevent declaring metrics complete; it cannot prevent coding its fix, collecting safe diagnostics or running an independent child-VM probe. A missing auth session may prevent a model request but not auth code/fixtures. Reject the anti-pattern where repair R requires gate G pass and R is the action designated to make G pass. Legacy dependency fields remain informational unless explicitly mapped to typed semantics; never silently reinterpret them as hard implementation blockers.",
+      "status": "pending"
+    },
+    {
+      "id": "A08",
+      "text": "DETERMINISTIC NEXT-ACTION AND EXPLAIN API. Implement next(ticket, planRevision, actorRole, context, actionKind, optionalTarget) as a pure deterministic evaluation over explicit state. Return ready actions with priority/order, their exact implementation packets, blocked actions with typed cause IDs and smallest unmet prerequisite set, waiting owner actions and independently executable alternatives. explain(action) identifies the rule, evidence/decision IDs and affected scope, not just BLOCKED. Gate fail must normally return its repair as ready for implementation while dependent live execution remains appropriately blocked. Tie-breaking is stable and testable (explicit plan priority, step order, stable ID), not a model-generated recommendation. No persisted previous aggregate FAIL may be used as an input that blocks starting a repaired step. If no action is ready, return a concrete owner/planner operation or explain a real external/safety constraint; do not fabricate a safe action to conceal a dead end. Evaluate all independent actions, not fail-fast on the first missing gate.",
+      "status": "pending"
+    },
+    {
+      "id": "A09",
+      "text": "FAILURE-TO-REPAIR ROUTING. Every required evidence check specifies expected failure categories, diagnostic collection, repair step/action, retryable conditions, independent work and escalation conditions. Finishing a failed attempt records its first operational cause/exit status, attaches bounded diagnostics and activates or creates a repair item within this same ticket, linked to the failed gate and source attempt. A deterministic template may generate a bounded repair item, but must not invent architecture or authorization. Unclassified failures go to the planner/reviewer with exact missing information; independent ready work remains available. Repair completion schedules the affected evidence rerun; it does not clear or overwrite the failed attempt. A guard-only change does not satisfy a repair whose expected output is working behavior. Define limits for unchanged-hypothesis retries versus changed code/input attempts. After a plan-defined no-new-information threshold, request a different diagnostic/approach, not another identical invocation or broader guard. Budgets remain enforced across attempts.",
+      "status": "pending"
+    },
+    {
+      "id": "A10",
+      "text": "EVIDENCE AND ATTEMPT MODEL. Evidence attempts have stable IDs; plan revision; step/gate/check IDs; operation descriptor; actor/runner identity; start/end timestamps; actual execution context; source commit and working-tree digest when applicable; runtime/artifact identity separately from source; selected nonsecret inputs; expected assertions; per-check observed result; actual exit/cause code; duration; classification; artifact references/digests; redaction policy; and affected repair route. Distinguish fixture/mock, synthetic integration, real-runtime and human-observed evidence levels; gate policy selects the required level. One fixture success cannot pass a real boot/auth/metrics/recursion requirement. Network reachability is not authenticated model success; model self-report is not independent test verification. Preserve failed/timed-out attempts and partial independent successes. Gate evaluation links the evidence it used. It must be possible to answer what actually ran, where, against which code/runtime, and why this gate passed or failed without opening private raw logs.",
+      "status": "pending"
+    },
+    {
+      "id": "A11",
+      "text": "REVIEW STEPS AS FIRST-CLASS WORK. A review request includes target step/plan revision, diff/artifact IDs, evidence summary, concrete review questions, required reviewer role, allowable decisions and the next action for approval/changes_requested. Record reviewer/actor identity, time, disposition, reason and requested edits in a review entity. Changes requested returns an implementation repair to ready; it does not require an already-approved review to implement that repair. Review approval is scoped to the reviewed digest and declared affected area, not an entire mutable ticket forever. Changed code invalidates only reviews whose scope changed; unrelated approved steps remain usable where policy permits. Support human-only, planner, implementation and evidence-runner roles with configurable separation-of-duty policy. A model name is a routing hint, not authentication or an authorization boundary. Explicit audited override requires the configured authorized actor and reason; no implicit self-approval masquerading as independent review.",
+      "status": "pending"
+    },
+    {
+      "id": "A12",
+      "text": "ROLE/MODEL HANDOFF WITHOUT REPLANNING. Store optional provider-neutral role assignments and model/reference hints such as planner, implementer, reviewer and evidence runner, including reasoning variant where supported. Resolve availability through an external adapter, not hardcoded model names in core engine. Export a minimal task packet for the selected action: objective, frozen decisions, prerequisites satisfied, actual inputs, allowed paths/effects, exact steps, test/evidence command descriptors, expected result, fail-to-fix table and next action. Include source/store/plan revision identity and unresolved questions relevant to this action only. Avoid dumping the entire ticket history/board into every implementation session. Support an acknowledgement of the packet revision and a completion submission with diff/evidence IDs. A weak implementer follows the packet; a planner handles genuinely unresolved design. Unavailable preferred model yields an explicit routing decision, not silent substitution or a new code gate. No automatic paid model invocation is part of this ticket's core slice.",
+      "status": "pending"
+    },
+    {
+      "id": "A13",
+      "text": "COMMENTS, DISCUSSION AND EDITABLE CONTENT THROUGH MCP/CLI. Add native comment.add, comment.edit and comment.redact/tombstone operations, not whole-objective replacement. Comments have stable ID, ticket/object/revision target, author/actor, created/edited timestamps, body format, parent/thread ID and optional explicit resolution metadata. Editing creates a retained revision; concurrent edits use expected revision; deletion is a tombstone with actor/reason. Expose these operations via MCP and CLI with parity tests. Comments may attach to the ticket, step, gate, attempt or review; a discussion may resolve without passing a gate. Editing a comment must not silently alter approved plans/evidence/review disposition. Planner/owner decisions arising from discussion are recorded as separate explicit operations with provenance links. Ordinary comment edits preserve other comments and histories. Redaction must support removing accidentally stored secrets under a documented exceptional policy without claiming ordinary immutable history can safely retain the secret forever. Never require a ticket engine code change just to post a supersession notice.",
+      "status": "pending"
+    },
+    {
+      "id": "A14",
+      "text": "EDITABILITY, OPTIMISTIC CONCURRENCY AND IDEMPOTENCY. Provide targeted create/edit/reorder/supersede operations for plan steps, requirements, gates, comments, decisions and review requests rather than replacing large arrays through generic update. Each write supplies expected entity/plan revision and an idempotency key. A stale revision returns a conflict containing safe changed-field/object references and does not clobber work. Repeating the same key/payload returns the same logical result; reusing a key with different payload is rejected. Keep existing lock discipline and atomic file replacement; specify bounded crash recovery for operations touching ticket/index/audit/event state so no partial success is reported. Failed validation/authorization/conflict must leave persisted state unchanged. Keep structured schema validation at every public entry, not just MCP. Arbitrary JSON patches must not bypass gate policy, role checks, budgets or immutable evidence. Unknown legacy fields remain preserved during scoped migration and updates.",
+      "status": "pending"
+    },
+    {
+      "id": "A15",
+      "text": "PLAN REVISION AND TARGETED INVALIDATION. Editing approved requirements/instructions/API contracts creates a successor draft, with machine-readable affected objects and dependency impact. A planner/reviewer approves activation of that successor; no auto-upgrade of a running packet. Evidence remains historical and linked to original revisions. Reuse on a successor requires explicit compatibility rules based on unchanged scoped inputs/artifacts/check contract and records why it remains valid; otherwise evaluation is stale/not_run, never quietly PASS. Fixing a metrics renderer should not force replay of unrelated completed VM boot/auth if those artifacts and assumptions are unchanged and policy permits reuse. Changing a frozen runtime or auth transport must invalidate its affected runtime checks. Gate rule edits cannot erase old failures or count a lower evidence level as the old stronger requirement. Publish before/after evaluation explaining which checks require rerun, and keep in-flight attempts bound to their original revision.",
+      "status": "pending"
+    },
+    {
+      "id": "A16",
+      "text": "SAFE EXECUTION CONTRACT AND AUTHORIZATION BOUNDARIES. The core engine schedules/evaluates DESCRIPTORS and records evidence; it must never execute a ticket body or arbitrary shell command. Define an optional runner adapter with explicit operation IDs, argv arrays (not shell interpolation), fixed/validated cwd and input bindings, allowed effects and context, timeouts, output bounds, cancellation and redaction. Register supported operations outside untrusted ticket text. Plan approval is not automatically permission to launch a VM, read credentials, install packages, deploy a service or incur API charges. Separate implementation consent, runtime effects authorization and owner-only interactions. Runtime authorization binds operation, resource/asset scope, budget and expiry/revocation as appropriate; repeated in-scope repairs need not request broad approval again. Stale identity/unsafe path/missing consent blocks that live action but not code/fixture work or independent diagnostics. State clearly that engine policy is not an OS sandbox; actual host/guest/container isolation is the runner's responsibility.",
+      "status": "pending"
+    },
+    {
+      "id": "A17",
+      "text": "RESOURCE/TIME/RETRY ACCOUNTING. Plans declare applicable elapsed-time, concurrency, download/disk/memory/charge envelopes and cleanup reserve, with a minimal required subset for the selected runner; do not make every unit-test task specify VM resources. Record reservations and measured consumption per attempt under the ticket/plan's explicit budget scope; idempotent retries cannot double-count or reset a ceiling. Distinguish development attempts with changed source/input from a frozen acceptance campaign's limited retry policy. No blanket single-retry counter that prevents all future development, and no source-revision churn that replenishes the same live budget. Runner crash/cancel releases only safely attributable reservations or reports uncertainty; never kill/adopt an unverified process. Exceeding budget returns exact remaining/required figures and a bounded authorized decision, while unaffected no-cost implementation actions remain ready. Enforcement must not pretend estimates are measured consumption. Cleanup applies only to manifest-owned resources, preserving protected assets and evidence.",
+      "status": "pending"
+    },
+    {
+      "id": "A18",
+      "text": "WORKED ANTI-DEADLOCK EXAMPLE REQUIRED IN FIXTURES/DOCS. Encode a small plan with steps S-BOOT, S-AUTH-FIX, S-METRICS-FIX, S-CHILD and reviews/evidence gates G-BOOT, G-AUTH, G-METRICS, G-CHILD. Live auth evidence depends on guest transport and owner login; implementation of S-AUTH-FIX depends only on frozen inputs, not G-AUTH pass. Child model-none boot depends on KVM/depth/snapshot/budget, not G-METRICS or local inference. Simulate G-AUTH failing with proxy403: next(implementation) returns S-AUTH-FIX with the exact rule-reload repair; next(runtime) refuses only authenticated work. Simulate metrics failure: S-METRICS-FIX and safe child work are ready. Submit a reviewed auth fix and new real-runtime proof: auth gate passes with its new attempt while failed attempt remains. Reject a plan adding G-AUTH pass as prerequisite of its own repair. Never mark whole release ready from those partial successes. This is a synthetic workflow fixture, not a request to access or alter the real VM project.",
+      "status": "pending"
+    },
+    {
+      "id": "A19",
+      "text": "LIVENESS/DEAD-END VALIDATION WITH TRUTHFUL EXCEPTIONS. Static plan validation must flag unresolved references, prerequisite cycles, self-gating repairs, required gates with no evidence producer, failures with no repair/escalation route, reviews with no changes-requested path, unbounded automatic retry and a required release result that no declared action can produce. Include alternative-branch coverage checks. Do not claim arbitrary plan liveness can be mathematically guaranteed: actual external/human/unsafe conditions may legitimately block runtime actions. Runtime next/explain should then expose the smallest external decision and independent implementation options. Plan completeness/liveness errors prevent declaring a plan approved/executable where appropriate, but editing the draft to fix those errors must stay permitted. A missing optional feature must be skipped/not_applicable under explicit applicability rules, never forged into PASS or used to close an unrelated action gate.",
+      "status": "pending"
+    },
+    {
+      "id": "A20",
+      "text": "HUMAN INTERACTION AND APPROVAL SEMANTICS. Define request/record operations for owner actions such as login, UI confirmation, model/billing selection or out-of-scope effects. Requests contain exactly the missing decision/action, why it is needed, affected live checks, safe alternatives and resumable continuation IDs. Acknowledgement/Enter/default response does not count as observed UI/auth success; record explicit evidence/observation or structured failure. Human requests remain scoped and deduplicated: completed valid consent is not requested again for every routine repair inside the same envelope. Distinguish account credentials remaining private from a safe credential-presence enum. An owner may cancel/defer a step or approve a documented requirement change; engine retains who/why and recomputes only affected readiness. A model cannot use comments or a generic ticket resolved status to manufacture owner consent.",
+      "status": "pending"
+    },
+    {
+      "id": "A21",
+      "text": "MCP FIRST-CLASS OPERATIONS AND CLI PARITY. Add typed tools/commands for plan.create/get/edit/validate/submit_review/approve/activate_revision; step.get/edit/claim/submit; gate.evaluate/explain; attempt.start/finish/cancel; evidence.attach; review.request/decide; comment.add/edit/tombstone; decision.record; next; context; and packet.export. Treat these as logical operations, grouping public tools into a small explicit discriminated-action facade if necessary to avoid a huge tool catalog. Do not pass unvalidated free-form action/property names to generic update. Freeze concrete request/response schemas with expected_revision/idempotency/actor/scope in the design phase and generate/reuse common validators/types across MCP, CLI and library. Preserve existing CRUD calls for legacy use; generic update cannot override immutable workflow facts. Domain errors are structured codes with object IDs, safe details, repair action and exit/error mapping. Provide discoverable help/examples including comments and repair iteration, not only CRUD.",
+      "status": "pending"
+    },
+    {
+      "id": "A22",
+      "text": "AUTHORITATIVE WORKSTREAM CONTEXT AND SUPERSESSION. Add a small explicit workstream context record identifying store/project/worktree scope, active plan/ticket revisions and optional external source-of-truth references. A supersession operation preserves historical content/status and records target, scope, actor, time and reason; get/list/search/packet output displays the redirect prominently. When PR_REIMPLEMENTATION documents are the selected authority, context must point there and must not tell a fresh agent to follow obsolete ticket gates or reconstruct missing branch-local tickets. External references are inert, validated local/declared URIs plus optional content digest; no arbitrary filesystem traversal, HTTP fetching, commands or prompt injection from reference bodies. Broken references yield a specific scoped error, not silent fallback. Supersession affects current next-action selection explicitly; it must not rewrite historical acceptance facts, globally disable unrelated workstreams, or treat a ticket's user-authored text as higher-priority agent instructions.",
+      "status": "pending"
+    },
+    {
+      "id": "A23",
+      "text": "CONCURRENT WORK WITHOUT CLOBBERING OR OWNERSHIP FICTION. Add optional step claim leases with actor, context and expiry, acquired/renewed/released using expected revision. No distributed scheduler required. Competing implementers cannot both silently own an exclusive file-scoped step; read-only reviews/evidence can coexist if declared safe. Expired lease is evidence of lease expiry, not proof that the old agent/process stopped: report reassignment decision and preserve resources. Claim conflict must not block independent nonoverlapping steps. Require declared editable paths/context and warn on shared-source overlap; do not claim path hints enforce OS sandboxing. Evidence submission is idempotent and can arrive after a lease expires, tagged to its original actor/plan/attempt for reviewer disposition. Plan edits while a worker holds a packet cannot silently change that packet. Include deterministic two-writer conflict and unrelated-step progress tests.",
+      "status": "pending"
+    },
+    {
+      "id": "A24",
+      "text": "PERSISTENCE, AUDIT AND PRIVACY. All ticket/workflow writes go through engine operations and existing lock/audit/index enforcement. Audit meaningful domain events with actor, operation, object IDs, previous/new revisions, idempotency and referenced evidence/review IDs, not only a generic ticket updated marker. State/event projection must be reconstructible or consistency-checkable with a documented bounded recovery path. Never claim a hash chain alone authenticates actors or prevents all filesystem tampering. Keep private artifacts outside published ticket/source trees by default; references include digest/type/size/provenance and access policy without embedding raw secrets. Bound body/artifact/log sizes. Redact tokens, credential DBs, callback URLs, environment dumps and owner prompt transcripts before public persistence. Add secret-canary tests for normal/error/conflict/export paths and a documented emergency redaction procedure for already-stored sensitive content. Audit must record that redaction occurred without retaining the secret in an allegedly immutable copy.",
+      "status": "pending"
+    },
+    {
+      "id": "A25",
+      "text": "MIGRATION AND BACKWARD COMPATIBILITY. Existing tickets, comments, AC IDs/status/evidence, merged tests, unknown extended fields and audit histories remain readable and semantically intact. Legacy resolved/archived tickets do not acquire invented executable plans or fake passing evidence. Provide an explicit migration preview that names selected store, affected objects, ID assignments, schema changes and backups; apply only scoped approved conversion with atomic/recoverable behavior. Generic list/get/board/search and original CLI/MCP calls remain functional. Missing original-branch tickets are not recreated from guesses. A required legacy AC maps to a structured gate only through an explicit conversion/disposition. Stable branch/store IDs must support subsequent merges without dropping either history; index/audit merges require deterministic deduplication and conflict reporting. Add fixtures for divergent branches allocating the same human ticket number and different plan revisions, plus unrecognized old fields and malformed/orphan state.",
+      "status": "pending"
+    },
+    {
+      "id": "A26",
+      "text": "PROGRAMMATIC API, EXPORT AND VIEWS. Expose reusable typed library functions with no CLI stdout side effects, canonical JSON output on request, deterministic task-packet exports and concise human-readable board/status/why views. Summaries show current implementation action, acceptance failures with ready repairs, waiting owner action and later release readiness separately; do not collapse all into a red BLOCKED badge. Search may filter plan/step/gate/review status, role, requirement ID, failed reason or supersession without loading every ticket into model context. Packet export is bounded, includes only relevant history, and can be roundtripped/imported only under explicit schema/authority policy. A read-only view must never allocate directories/locks, fix indexes, migrate stores or alter claims. A small Markdown rendering of the same packet is enough; web UI/editor is follow-up, not an implementation prerequisite. Document editing through MCP/CLI as the primary interface.",
+      "status": "pending"
+    },
+    {
+      "id": "A27",
+      "text": "PHASE 0 IMPLEMENTATION ORDER: CONTRACT AND FAILING WORKFLOW FIXTURE. Before new production workflow code, add a concise versioned design/spec in the package docs with entity schemas, transition table, dependency evaluation, API payload examples, error codes, migration strategy and threat/authority boundaries reflecting A01-A26. Map each criterion to its implementation phase and named tests, identify existing reusable helpers and freeze the first vertical slice. Write the anti-deadlock scenario in A18 as a failing unit/integration fixture. The planner/reviewer resolves real schema/semantics choices once and records the decision; do not pass those choices to the simple implementer as open-ended design work. Exit is a reviewed concrete contract plus failing test demonstrating the missing workflow, not a large pile of prose or a requirement that the entire future system already work. No VM work, broad dependency overhaul or additional ticket hierarchy required to start.",
+      "status": "pending"
+    },
+    {
+      "id": "A28",
+      "text": "PHASE 1 IMPLEMENTATION ORDER: PLAN/COMMENT/REVISION PRIMITIVES. Implement typed optional plan storage/validation, stable object IDs and targeted revision-checked writes using existing lock/audit/index mechanisms. Deliver native MCP/CLI comment add/edit/tombstone with retained revisions early so planning/review discussion no longer needs objective banners. Add plan draft editing and immutable approved-revision primitives. Positive/negative tests cover roundtrip, preserved legacy fields, stale writes, idempotency, comment edits, schema mismatch and atomic failure. Expose only operations implemented; help must not advertise placeholders as runnable. Produce a small real engine/CLI/MCP read-write/readback artifact against a disposable store. This phase need not wait for next-action scheduling or an autonomous runner, and its failure opens a primitive repair rather than closing the entire ticket.",
+      "status": "pending"
+    },
+    {
+      "id": "A29",
+      "text": "PHASE 2 IMPLEMENTATION ORDER: FIRST COMPLETE VERTICAL SLICE. Implement the pure typed prerequisite evaluator, next/explain, per-check gates, attempt/evidence recording and failure-to-repair route needed for A18. Connect these to Phase1 persistence and public API. Drive a disposable scenario through draft plan -> approved revision -> ready implementation -> failed evidence -> ready repair -> submitted diff -> requested review -> changes_requested -> revised repair -> approved review -> passing evidence. All historical failures remain visible; independent step stays ready during the failure. Use an existing synthetic runner adapter/fixture without actual VM/cloud services. Exit is programmatic progress through the full loop with exact next actions, not CRUD that requires a frontier model to reconstruct transitions by hand. Only after this slice works add generalized alternatives, impact invalidation and richer routing from the frozen contract.",
+      "status": "pending"
+    },
+    {
+      "id": "A30",
+      "text": "PHASE 3 IMPLEMENTATION ORDER: REVIEW, PACKETS, CONTEXT AND SAFE RUNNER INTEGRATION. Complete role-scoped review operations, task packet exports, workstream/supersession context, targeted revision invalidation and claim leases from A11-A15/A22-A23. Add the minimal registered-operation runner adapter and scoped owner consent/timeout/output handling from A16-A20. Do not turn it into an unrestricted shell runner, automatically invoke expensive models or add remote agents. Integration fixtures exercise real local subprocess success/failure/cancel/timeout only in a disposable workspace. Frontier planner writes the frozen packet; a deterministic dummy implementer (which cannot make planning choices) follows only declared inputs/actions and finishes a tiny fixture task. Introduce an actual failed assertion, let next route the listed repair and run it to PASS, demonstrating that the engine is not dependent on a smart model to rescue missing plan semantics.",
+      "status": "pending"
+    },
+    {
+      "id": "A31",
+      "text": "PHASE 4 IMPLEMENTATION ORDER: MIGRATION, PARITY, DOCS AND DELIVERY. Finish explicit migration/branch collision handling, public schema/CLI/MCP parity, library package exports, build/package/clean-clone workflow tests and bounded views. Run existing engine/CLI/MCP suites plus new workflow tests in CI; unrelated VM/cloud acceptance is not a dependency of this engine ticket. Provide operator docs for plan authoring, comments, reviews, next/explain, failure/repair, missing-store references, approvals, secrets and resume after crash/model change. Keep generated files/index/audit policy explicit and test package consumption. Inspect exact diff and committed artifacts; no secret or disposable execution output in Git. A ticket-draft branch is not feature delivery: after future implementation, merge requires the relevant real test/build/packaging evidence and explicit owner instruction. No force push or automatic branch deletion implied.",
+      "status": "pending"
+    },
+    {
+      "id": "A32",
+      "text": "TEST AND EVIDENCE ACCEPTANCE MATRIX. Every contract operation has positive, malformed input, stale revision, unauthorized effect and error-report tests where applicable. Pure evaluator property/table tests cover deterministic ordering, all_of/any_of, cycles, failed-gate repair readiness, independent progress, genuine external blocks, partial successes and scoped invalidation. Persistence tests cover concurrent writers, crash boundaries, idempotent replay, audit/index consistency and legacy preservation. End-to-end library/CLI/MCP parity tests drive the exact same vertical-slice fixture and compare resulting state/next actions, not just strings printed. Runner tests include timeout/cancellation/output flood/secret redaction and never require network credentials or actual infrastructure. An always-PASS evaluator, an always-BLOCKED evaluator and an unconditional readiness bypass must each fail the suite. Keep a requirement-to-test mapping with exact commands/results and evidence levels; unsupported/missing checks stay explicit, not implied PASS.",
+      "status": "pending"
+    },
+    {
+      "id": "A33",
+      "text": "DEFINITION OF DONE AND NON-CIRCULAR ACCEPTANCE. Feature completion requires the frozen schemas/types/APIs, native editable comments, versioned implementation packets, typed logical prerequisites, scoped reviews/attempts/evidence, deterministic next/explain, failed-check repair readiness, targeted invalidation, migration/branch identity handling, safe optional runner adapter, documented operating model and passing relevant tests/build/package/CI. The demonstrated dummy implementer must complete the supplied failed-check repair loop without reconstructing a conversation or inventing the next task. A frontier reviewer can amend a successor plan, hand it off and explain exactly which evidence remains valid. Readiness aggregates may block declaring release done, never editing or exercising the repair. Existing tests and historical information stay intact. No acceptance criterion may be marked passing because this detailed ticket exists; every one starts pending until implemented and supported by the specified evidence.",
+      "status": "pending"
+    },
+    {
+      "id": "A34",
+      "text": "PACKET/TYPED REFERENCE EXAMPLES TO FREEZE IN PHASE0. Document concrete JSON examples for at least: one step with artifact prerequisites and explicit file scope; one runtime evidence gate with check IDs/evidence level; one failed proxy check that activates a ready implementation repair but blocks only an authenticated runtime task; a review changes_requested response; a comment edit with expected_revision; a plan successor with scoped invalidation; a next response with ready/blocked/owner-action alternatives; and store-qualified not-found/supersession. Inputs/outputs must be schema-valid examples, not illustrative undocumented fields. A command descriptor uses an operation registry ID plus argv/input bindings and explicit context, never an interpolated shell string. A proposed operation carries implemented=false and cannot be returned by next as an executable operation until its producer step delivers it. Textual instructions remain human-editable and fully auditable; structured transitions are the source of programmatic readiness, not natural-language keyword parsing.",
+      "status": "pending"
+    },
+    {
+      "id": "A35",
+      "text": "IMPLEMENTER SESSION CONTRACT AND STOP RULES. Each future implementation session receives current plan revision, exactly one ready packet, relevant source paths, prior attempt/evidence IDs, scope/budget and expected output. It reads actual APIs/help, writes the specified regression, makes the smallest fix, runs focused evidence, submits diff/results and updates the same ticket through engine tools. Routine repair inside that packet proceeds without fresh broad approval. It stops only the affected unsafe live operation, genuine missing external/human decision, budget exhaustion or explicit owner pause; independent ready implementation work can continue. After the plan's no-new-information threshold, escalate a precise diagnostic/design question to the planner rather than create another gate. Do not spawn subagents, bill a model, execute infrastructure commands or broaden schema/architecture merely because a ticket suggests a role. Session handoff comes from packet.export/next, not another manually maintained competing plan file.",
+      "status": "pending"
+    },
+    {
+      "id": "A36",
+      "text": "ONE-TICKET BOUNDARY AND FUTURE EXTENSION POLICY. Keep the initial improvement specification and phase progress in this one ticket; phase/step IDs are enough, do not auto-create dozens of child tickets to make the engine usable. Additional UIs, distributed workers, provider-specific model execution, forecasting and broad graph analytics are optional follow-ups after the complete vertical slice, not blockers or presumed scope. This ticket is independent of feat/vm-approach-2 and must merge separately. Its newly allocated human number is local to the selected main-derived store and must not be confused with historical similarly numbered VM tickets on other branches. The active VM workstream remains governed by its PR_REIMPLEMENTATION documents until an explicit later migration to the implemented plan engine. Writing this draft changes no VM gate, source/runtime, owner authorization or active workflow.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Phase0: versioned schema/type/API examples validate and reproduce the failed-gate repair deadlock before the implementation.",
+      "Plan completeness: exact missing step fields and proposed/unimplemented command handling.",
+      "Legacy ticket/comment/AC/test-ledger/unknown-field roundtrip without invented plans or passing evidence.",
+      "Store UID and ticket UID migration preview/apply; selected-store not-found; no implicit cross-worktree fallback.",
+      "Divergent-branch same-human-number collision retains both stable ticket identities and histories.",
+      "Pure next/explain determinism and stable tie-breaking with explicit blocked-cause object IDs.",
+      "all_of/any_of alternatives, invalid references and exact static cycle reporting.",
+      "Failed auth gate returns its implementation repair ready; repair cannot require that same gate pass.",
+      "Failed metrics does not block independent child-runtime readiness or auth repair implementation.",
+      "Real external KVM/credential/budget limitation blocks only its live dependent actions.",
+      "Required gates without evidence producers, missing failure routes, and impossible self-gating plans rejected without blocking draft edits.",
+      "No aggregate previous FAIL can prevent starting an affected repaired evidence step.",
+      "Separate ticket/implementation/attempt/gate/review/release transition matrices.",
+      "comments MCP/CLI add/edit/thread/tombstone, optimistic conflicts and retained body revisions.",
+      "Comment text cannot impersonate review approval, owner consent or control transitions.",
+      "Approved plan immutability, successor activation and packet revision acknowledgement.",
+      "Targeted source/runtime/evidence invalidation; unaffected artifact evidence retained with explicit compatibility reason.",
+      "Evidence fixture versus runtime versus human distinction; reachability is not auth, exit0 is not assertions.",
+      "Attempts: success/failure/timeout/cancel retain first cause, bounded diagnostics and partial independent results.",
+      "Review changes_requested routes to ready repair; approval bound to scoped artifact/diff digest.",
+      "Role/actor separation policy; audited explicit authorized override; no model-name-as-authentication.",
+      "Targeted writes stale expected_revision leave state unchanged; idempotency same-payload replay and mismatched-payload rejection.",
+      "Atomic ticket/index/audit recovery at every declared crash boundary; concurrent two-writer integrity.",
+      "Claim overlap conflict, unrelated work readiness, lease expiry not proof of stopped process, late evidence attribution.",
+      "Budget reservations/consumption/cancel accounting; changed revision does not replenish an existing live envelope.",
+      "Distinguish development repair iterations from frozen-campaign one-retry policy.",
+      "Registered argv operation execution only, validated cwd/context/input bindings and no ticket-shell interpolation.",
+      "Observe mode zero effects; revoked/missing runtime consent blocks action but not implementation packet export.",
+      "Runner timeout/cancellation/output flood/process-identity uncertainty and exact resource cleanup.",
+      "Secret canaries across normal/error/conflict/comment/export/artifact paths; exceptional redaction does not retain secret history.",
+      "Human Enter/default acknowledgement cannot count as successful UI/auth observation.",
+      "Deduplicated owner decisions and in-scope approval reuse without repeated broad permission requests.",
+      "Supersession/context packet redirects obsolete work without deleting history or affecting unrelated workstreams.",
+      "Read-only get/list/board/search/context/next/export never creates or repairs private state.",
+      "Bounded packet contains only selected-step inputs, frozen decisions and fail-to-fix actions, not full unrelated ticket history.",
+      "Library/CLI/MCP drive identical full vertical slice and yield equivalent state and next actions.",
+      "Dummy low-reasoning implementer fixture performs tiny task failure -> repair -> review changes -> repair -> PASS using packet alone.",
+      "Always-PASS, always-BLOCKED and unconditional prerequisite-bypass mutants/scenarios are rejected by assertions.",
+      "Existing engine/CLI/MCP suites, TypeScript build, package exports/clean consumer smoke and CI compatibility on future implementation branch.",
+      "No actual VM/cloud account/provider service required by this ticket draft or synthetic engine integration suite."
+    ],
+    "created": [],
+    "cases": [
+      "Planning-only draft created on docs/ticket-engine-executable-plans from main; no engine implementation, tests, VM/provider operations or acceptance PASS performed."
+    ]
+  },
+  "models_used": []
+}
