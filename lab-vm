@@ -109,7 +109,7 @@ context_args=(context --state-root "$VM_STATE_ROOT" --profile "$VM_PROFILE" --re
 if [[ -n "$VM_WORKSPACE" ]]; then context_args+=(--workspace "$VM_WORKSPACE"); fi
 if (( VM_RECURSE )); then context_args+=(--recurse); fi
 if (( VM_UNSAFE_RECURSE )); then context_args+=(--unsafe-recurse); fi
-VM_CONTEXT_JSON="$(python3 "$VM_PATHS_HELPER" "${context_args[@]}")" || exit 2
+VM_CONTEXT_JSON="$(VM_POLICY_DEBUG="$VM_DEBUG" python3 "$VM_PATHS_HELPER" "${context_args[@]}")" || exit 2
 
 case "$VM_COMMAND" in
   run|up)

@@ -358,25 +358,49 @@ def profile_path(root, name):
 
 
 def workspace_path(value, root, repository, recurse=False, unsafe=False):
-    workspace = Path(text(str(value))).resolve(strict=True)
-    repo = Path(text(str(repository))).resolve(strict=True)
-    require(workspace.is_dir() and workspace.stat().st_uid == os.getuid())
-    require(repo.is_dir())
+    try:
+        workspace = Path(text(str(value))).resolve(strict=True)
+        repo = Path(text(str(repository))).resolve(strict=True)
+    except (OSError, PolicyError, RuntimeError):
+        _policy_debug("workspace.canonical=FAIL")
+        raise
+    _policy_debug("workspace.canonical=PASS")
+
+    try:
+        workspace_owned = workspace.is_dir() and workspace.stat().st_uid == os.getuid()
+    except OSError:
+        workspace_owned = False
+    _workspace_policy_check("directory_owner", workspace_owned)
+    _workspace_policy_check("repository_directory", repo.is_dir())
     home = Path.home().resolve()
-    require(workspace not in (Path("/"), home))
+    _workspace_policy_check("not_root_or_home", workspace not in (Path("/"), home))
     sensitive = [home / name for name in (
         ".ssh", ".aws", ".azure", ".gnupg", ".kube", ".docker", ".config", ".local",
         ".cache", ".netrc", ".npmrc", ".pypirc", ".git-credentials", ".bashrc", ".zshrc",
     )]
     sensitive += [Path(p) for p in ("/etc", "/proc", "/sys", "/dev", "/run", "/boot", "/var/lib")]
-    require(not any(overlaps(workspace, item.resolve()) for item in sensitive + [root]))
-    for parent in (workspace, *workspace.parents):
-        require(not (parent / ".mester").exists() and not (parent / ".mester").is_symlink())
+    _workspace_policy_check(
+        "sensitive_overlap",
+        not any(overlaps(workspace, item.resolve()) for item in sensitive + [root]),
+    )
+    try:
+        no_mester_marker = all(
+            not (parent / ".mester").exists() and not (parent / ".mester").is_symlink()
+            for parent in (workspace, *workspace.parents)
+        )
+    except OSError:
+        no_mester_marker = False
+    _workspace_policy_check("mester_marker", no_mester_marker)
     if unsafe:
-        require(workspace == repo or workspace in repo.parents)
+        _workspace_policy_check("unsafe_scope", workspace == repo or workspace in repo.parents)
     if overlaps(workspace, repo):
-        require(recurse or unsafe)
+        _workspace_policy_check("repository_overlap", recurse or unsafe)
     return workspace
+
+
+def _workspace_policy_check(name, condition):
+    _policy_debug(f"workspace.{name}={'PASS' if condition else 'FAIL'}")
+    require(condition)
 
 
 def config_read(root):

@@ -73,8 +73,60 @@ acceptance, or activate the C14 default. The first owner-started development VM 
 only a boot/workspace/TUI usability observation; the later integrated campaign
 must use its separately frozen candidate and current-revision preflight.
 
-For a target-host checkout of the reviewed branch, the intended development
-command is:
+For this package, run the commands from the already-running `feat/vm-approach`
+parent VM, in its `feat/vm-approach-2` checkout. Its nested-KVM capability is the
+relevant runtime; native-host or generic-container command results do not establish
+that this child launch works. Keep the parent VM and its state/processes untouched.
+The child development profile must use an isolated state root. The parent VM's default
+`$XDG_DATA_HOME/little-mester` (or `$HOME/.local/share/little-mester`) currently
+contains legacy VM/service state and fails the private-tree policy check. That is
+an intentional refusal under the new schema, not a reason to chmod, delete, migrate,
+or exempt the legacy tree. Keep it and its running processes untouched.
+
+In the parent-VM Bash session, select the dedicated root and verify it read-only
+before startup:
+
+```bash
+export MESTER_STATE_DIR="$HOME/.local/share/little-mester-branch-dev-vm-approach-2"
+if [[ -e "$MESTER_STATE_DIR" || -L "$MESTER_STATE_DIR" ]]; then
+  echo "STOP: dedicated development state root already exists" >&2
+else
+  ./lab vm context --json -d
+fi
+```
+
+For a Fish session, use:
+
+```fish
+set -gx MESTER_STATE_DIR "$HOME/.local/share/little-mester-branch-dev-vm-approach-2"
+if test -e "$MESTER_STATE_DIR"; or test -L "$MESTER_STATE_DIR"
+  echo "STOP: dedicated development state root already exists" >&2
+else
+  ./lab vm context --json -d
+end
+```
+
+Expected diagnostics include `state_root.root_metadata=ABSENT` and
+`state_root.private_tree=PASS entries_checked=0`. Stop if the root is present or
+any check fails; do not choose a different profile/root automatically. If debug
+output reports `workspace.mester_marker=FAIL`, stop. That guard rejects
+stale checkout-local `.mester` state even with `--unsafe-recurse`; identify the
+marker and its owner/mode read-only. Do not remove or move it unless the owner has
+verified that it contains no live state and explicitly chooses to remove it; never
+exempt the guard. If it contains state, use a clean checkout/worktree outside that
+marker tree, with the launcher run from that checkout so workspace and repository
+identities match. In this run, the owner confirmed `$HOME/.mester` was empty and
+removed it; the subsequent read-only workspace check passed.
+
+If the policy checks pass, repeat the read-only RAM/disk check with the same
+`MESTER_STATE_DIR` immediately before startup:
+
+```sh
+python3 "$PWD/scripts/vm_memory_budget.py" check --requested-mib 8192 --reserve-mib 512
+df -h "$HOME/.local/share"
+```
+
+Once those checks pass, the owner—not the assistant—starts the development VM:
 
 ```bash
 ./lab vm run "$PWD" --name branch-dev-20261105 --unsafe-recurse --max-depth 0
@@ -83,10 +135,20 @@ command is:
 This explicitly mounts the current checkout writable in the guest, disables child
 VM depth, and starts or resumes only the `branch-dev-20261105` profile. It can download the
 pinned base image and creates private profile, disk, key, seed and frozen-runtime
-state outside the workspace. It does not automatically install missing host
-packages; missing prerequisites fail closed. Ordinary `./lab` remains Docker.
-Because this profile persists and `run` can resume it, stop and report if
-`branch-dev-20261105` already exists but is not the dedicated development profile.
+state outside the workspace and the legacy state root. Metrics remain **on by
+default**, as requested. If the parent-VM metrics service is unavailable or unverified,
+the launcher warns and continues without its forward; do not turn metrics off as a
+precaution. It does not automatically install missing parent-VM packages; missing
+prerequisites fail closed.
+Ordinary `./lab` remains Docker. Keep `MESTER_STATE_DIR` set for every later
+operation on this profile. The `run` command can resume it: stop and report if the
+profile already exists but is not the dedicated development profile.
+
+The first boot is a usability observation, not recursive acceptance. Manual
+OpenAI login is optional owner experimentation inside the disposable guest; no
+automated live-auth test, paid stream, credential export/import, or refresh test is
+part of this step. Recursive G0→G1→G2 and changed-VM fail/fix proof remain in the
+later integrated acceptance package.
 
 ### A. Minimal synthetic-canary checker
 

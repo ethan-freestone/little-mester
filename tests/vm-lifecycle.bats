@@ -289,7 +289,7 @@ PY
 ISO
   chmod 700 "$TEST_ROOT/bin/ssh-keygen" "$TEST_ROOT/bin/genisoimage"
   export PATH="$TEST_ROOT/bin:$PATH"
-  VM_CONFIG_JSON='{"agent":"opencode","model":{"port":null,"provider":"none"},"opencode_version":"2.0.0","workload_runtime":"none"}'
+  VM_CONFIG_JSON='{"agent":"opencode","model":{"provider":"none"},"opencode_version":"2.0.0","workload_runtime":"none"}'
   vm_setup() { printf 'setup\n' >> "$LIFE_LOG"; }
   vm_lifecycle_memory_reserve() {
     printf 'reserve\n' >> "$LIFE_LOG"

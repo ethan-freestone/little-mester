@@ -1308,6 +1308,52 @@ authentication, campaign, host Docker, push or merge operation occurred. The old
 preflight passed at `422a523` (run ID `2fb37d376f9040b3bbc6be4a5d216dd7`), but
 predates this entry and is not acceptance-candidate preflight evidence. Commit
 `6cec2ae` is local and unpushed; the progress-ledger SHA closeout follows
-separately. Owner may start the dedicated development profile only from a target-
-host checkout containing this commit; if that checkout does not contain this
+separately. Owner may start the dedicated development profile only from a parent-
+VM checkout containing this commit; if that checkout does not contain this
 exact revision, stop rather than use a stale tree or assume a push.
+
+## Owner-reported legacy state rejection and isolated development root — 2026-11-06
+
+The owner ran `./lab vm list -d` on the target host. Canonical path, ancestors and
+root metadata passed; the private-tree scan checked 126 entries and found 112
+violations with zero walk errors. The diagnostic displayed 25 entries and omitted
+87. Reported examples include `vm-services` mode 0755 and legacy log/VM files mode
+0644. Exit status was 2. This is the default legacy state tree, not a false positive
+or a repair request. Do not chmod, delete, migrate, or exempt it; preserve the
+legacy VM/processes and ordinary Docker route.
+
+**Package-1 way forward:** run from the already-running `feat/vm-approach` parent
+VM, using its nested-KVM environment and the already-supported `MESTER_STATE_DIR`
+override for a fresh, dedicated `little-mester-branch-dev-vm-approach-2` root. Do
+not treat native-host or generic-container runs as evidence for this child launch.
+The owner must recheck that exact path is absent and rerun read-only resource capacity checks
+immediately before startup; the earlier absence/capacity observation can go stale.
+The updated `docs/vm-c14-handoff-plan.md` gives a read-only `context --json -d`
+check followed by the owner-only start command with metrics on by default.
+The assistant does not start a VM. The first boot is only the package-1 usability
+observation; recursive G0→G1→G2 changed-VM fail/fix proof remains package 3.
+OpenAI login stays optional and manual in the disposable guest; no automated live
+OpenAI auth test, paid stream, credential export/import or refresh test is added.
+
+The owner then attempted that `run` command and received the generic VM policy
+validation refusal after the state-root diagnostics passed. A read-only rerun in the
+parent VM confirmed the dedicated root and profile were absent, and isolated the
+failure to `workspace.mester_marker=FAIL`; all preceding workspace checks passed.
+The marker was `/home/ethan/.mester` (directory, mode 0755, uid 1000). The owner
+confirmed it was empty and removed it. A subsequent read-only check reports the
+dedicated state root/profile absent and all workspace-policy checks passing for
+`/home/ethan/Development/little-mester`. The subsequent start attempt exited 2
+without allocating a profile. Source tracing found the silent pre-allocation cause:
+default `model.provider=none` omits `model.port`, but lifecycle treated that
+optional JSON key as required. The lifecycle now treats an absent port as empty;
+local-model providers still require a valid explicit port. The fresh-up fixture now
+uses the actual default shape, and its targeted Bats test passes. Owner rerun remains
+pending.
+
+TASK-02 continues to refuse checkout-local `.mester` state even with
+`--unsafe-recurse`; do not weaken the guard. Inspect any such marker read-only and
+only remove it if the owner confirms it is empty and explicitly chooses removal;
+otherwise use a clean checkout outside that marker tree. The CLI's debug flag
+previously did not reach workspace-policy validation, so the follow-up adds bounded,
+content-free workspace check labels and propagates `-d` to that path. Metrics stay
+enabled by default; the handoff command no longer overrides them off.

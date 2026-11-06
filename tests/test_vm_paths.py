@@ -508,6 +508,17 @@ class PathsTest(unittest.TestCase):
         (self.workspace / ".mester").mkdir()
         validate(self.workspace, ok=False)
 
+    def test_workspace_debug_reports_failed_check_without_paths(self):
+        (self.workspace / ".mester").mkdir()
+        result = self.cli(
+            "validate-workspace", "--repository", self.repo, "--workspace", self.workspace,
+            ok=False, debug=True,
+        )
+        self.assertIn("[debug] workspace.canonical=PASS", result.stderr)
+        self.assertIn("[debug] workspace.directory_owner=PASS", result.stderr)
+        self.assertIn("[debug] workspace.mester_marker=FAIL", result.stderr)
+        self.assertNotIn(str(self.workspace), result.stderr)
+
     def test_profile_schema_sticky_identity_and_readonly(self):
         self.cli("profile-read", "--profile", "test", ok=False)
         self.assertEqual(list(self.root.iterdir()), [])

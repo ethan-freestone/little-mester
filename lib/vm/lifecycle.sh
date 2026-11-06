@@ -62,7 +62,8 @@ vm_lifecycle_workspace_resolve() {
     --repository "$repository" --workspace "$workspace")
   (( recurse == 0 )) || args+=(--recurse)
   (( unsafe == 0 )) || args+=(--unsafe-recurse)
-  result="$("$VM_LIFECYCLE_PYTHON" "$VM_LIFECYCLE_PATHS" "${args[@]}")" || return $?
+  result="$(VM_POLICY_DEBUG="${VM_DEBUG:-0}" "$VM_LIFECYCLE_PYTHON" \
+    "$VM_LIFECYCLE_PATHS" "${args[@]}")" || return $?
   printf '%s' "$result" | "$VM_LIFECYCLE_PYTHON" -c '
 import json,sys
 try:
@@ -875,7 +876,9 @@ vm_lifecycle_up() {
   agent="$(vm_lifecycle_json_field "$config" agent)" || return 2
   version="$(vm_lifecycle_json_field "$config" opencode_version)" || return 2
   provider="$(vm_lifecycle_json_field "$config" model.provider)" || return 2
-  model_port="$(vm_lifecycle_json_field "$config" model.port)" || return 2
+  # `port` is absent for none/remote providers in the validated default schema.
+  # Local providers still fail closed below unless their explicit port is valid.
+  model_port="$(vm_lifecycle_json_field "$config" model.port 2>/dev/null || true)"
   model_id="$(vm_lifecycle_json_field "$config" model.id 2>/dev/null || true)"
   case "$provider" in
     none|remote)
