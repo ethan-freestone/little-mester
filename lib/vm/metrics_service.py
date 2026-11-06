@@ -17,6 +17,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# This helper dynamically loads sibling policy modules from the frozen runtime.
+# Never emit __pycache__ into that private, immutable runtime tree.
+sys.dont_write_bytecode = True
+
 
 def _load_sibling(name: str, filename: str):
     spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(filename))

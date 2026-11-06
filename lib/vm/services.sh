@@ -651,7 +651,9 @@ vm_services_auth_cleanup() {
   local root="$1" name="$2" key="$3" known_hosts="$4" ssh_port="$5"
   local bridge_script="$6" bridge_pid="$7" host_dir="$8" guest_dir="$9"
   local control_path="${10}" master_pid="${11}" reverse_forward="${12}"
-  local host="${15}" i cleanup_ok=1
+  # The session and every cleanup caller use this fixed guest SSH endpoint.
+  # Arguments 13/14 are the bridge ports, not an optional host argument 15.
+  local host='mester@127.0.0.1' i cleanup_ok=1
 
   if [[ "$guest_dir" =~ ^/tmp/lm-vm-auth\.[A-Za-z0-9]{6}$ ]] &&
      [[ -S "$control_path" ]] && vm_services_auth_master_matches "$master_pid" "$control_path" "$reverse_forward"; then

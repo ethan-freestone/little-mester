@@ -482,6 +482,20 @@ vm_services_agent /unused fixture ask "" on
         self.assertIn("reviewed OpenCode v2.2.5", result.stderr)
         self.assertNotIn("Host browser MCP bridge listening", result.stdout + result.stderr)
 
+    def test_browser_cleanup_accepts_actual_fourteen_argument_contract_under_nounset(self):
+        result = subprocess.run(
+            ["bash", "-c", r'''
+set -euo pipefail
+source "$1/lib/vm/services.sh"
+# No resources acquired yet: cleanup must be safe even on early session failure.
+vm_services_auth_cleanup /unused fixture /unused/key /unused/known 40222 \
+  /unused/bridge '' '' '' '' '' '' '' ''
+printf 'cleanup-complete\n'
+''', "_", str(ROOT)], capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "cleanup-complete")
+
 
 if __name__ == "__main__":
     unittest.main()

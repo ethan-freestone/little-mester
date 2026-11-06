@@ -160,6 +160,21 @@ SCAN
   [ "$(cat "$TEST_ROOT/known_hosts")" = established-key ]
 }
 
+@test "SSH readiness records fixed ownership and scan failure reasons without argv" {
+  vm_ssh_listener_verified() { return 1; }
+  if vm_ssh_trust_host_key "$TEST_ROOT/known_hosts" 40222 "$TEST_ROOT/registry.json" run-a qemu; then
+    return 1
+  fi
+  [ "$VM_SSH_TRUST_STAGE" = listener-ownership-before-scan ]
+  vm_ssh_listener_verified() { return 0; }
+  VM_SSH_KEYSCAN_BIN=/bin/false
+  if vm_ssh_trust_host_key "$TEST_ROOT/known_hosts" 40222 "$TEST_ROOT/registry.json" run-a qemu; then
+    return 1
+  fi
+  [ "$VM_SSH_TRUST_STAGE" = keyscan-unavailable ]
+  [ ! -e "$TEST_ROOT/known_hosts" ]
+}
+
 @test "remote command deadline bounds SSH transport" {
   cat >"$TEST_ROOT/bin/fake-ssh" <<'SSH'
 #!/bin/sh

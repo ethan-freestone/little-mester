@@ -88,6 +88,51 @@ profile_status() {
   [ "$(cat "$LIFE_LOG")" = $'children:0\nshutdown\nwait:5\nsidecars' ]
 }
 
+@test "terminal cloud-init failure exits immediately even when SSH command returns two" {
+  local profile="$STATE/vm/profiles/daily" run_dir="$STATE/vm/profiles/daily/runs/check"
+  mkdir -p "$run_dir"
+  chmod 700 "$profile/runs" "$run_dir"
+  printf fixture > "$profile/control-key"
+  printf fixture > "$run_dir/known_hosts"
+  chmod 600 "$profile/control-key" "$run_dir/known_hosts"
+  VM_SSH_BIN="$TEST_ROOT/fake-ssh"
+  cat > "$VM_SSH_BIN" <<'SSH'
+#!/bin/sh
+printf 'ssh-call\n' >> "$LIFE_LOG"
+printf '%s\n' '{"status":"error","errors":["SECRET_CANARY"]}'
+exit 2
+SSH
+  chmod 700 "$VM_SSH_BIN"
+  vm_lifecycle_registry_for_profile() {
+    printf '{"registry":"%s/vm/profiles/daily/runs/check/processes.json","run_id":"check","role":"qemu_1"}\n' "$STATE"
+  }
+  run vm_lifecycle_guest_readiness "$STATE" daily "$PROFILE_JSON" 1800
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"cloud-init failed terminally"* ]]
+  [[ "$output" != *SECRET_CANARY* ]]
+  [ "$(cat "$LIFE_LOG")" = ssh-call ]
+}
+
+@test "real shutdown waiter polls a registered running QEMU until stopped" {
+  source "$ROOT/lib/vm/lifecycle.sh"
+  vm_lifecycle_registry_for_profile() {
+    printf '{"registry":"%s/registry.json","run_id":"check","role":"qemu_1"}\n' "$TEST_ROOT"
+  }
+  VM_LIFECYCLE_PROCESS="$TEST_ROOT/helper.py"
+  export WAIT_COUNTER="$TEST_ROOT/counter"
+  cat > "$VM_LIFECYCLE_PROCESS" <<'PY'
+import os
+from pathlib import Path
+p=Path(os.environ["WAIT_COUNTER"])
+n=int(p.read_text()) if p.exists() else 0
+p.write_text(str(n+1))
+print("running" if n==0 else "stopped")
+PY
+  run vm_lifecycle_wait_qemu_stopped "$STATE" daily "$PROFILE_JSON" 5
+  [ "$status" -eq 0 ]
+  [ "$(cat "$WAIT_COUNTER")" = 2 ]
+}
+
 @test "already suspended is idempotent and performs no process action" {
   python3 - "$VM_LIFECYCLE_PATHS" "$STATE" <<'PY'
 import importlib.util,sys

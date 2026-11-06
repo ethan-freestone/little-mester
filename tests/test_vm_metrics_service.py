@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -17,7 +18,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import urlopen
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -145,6 +145,34 @@ class CollectorHTTPTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=8) as pool:
             results = list(pool.map(lambda _item: self.get("/metrics")[0], range(8)))
         self.assertEqual(results, [200] * 8)
+
+
+class FrozenRuntimeBytecodeTests(unittest.TestCase):
+    def test_metrics_and_process_helpers_do_not_create_runtime_pycache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime/lib/vm"
+            runtime.mkdir(parents=True)
+            for name in ("metrics_service.py", "paths.py", "process.py"):
+                shutil.copyfile(ROOT / "lib/vm" / name, runtime / name)
+
+            env = os.environ.copy()
+            env.pop("PYTHONDONTWRITEBYTECODE", None)
+            metrics = subprocess.run(
+                [sys.executable, str(runtime / "metrics_service.py"), "status",
+                 "--state-root", str(Path(temporary) / "state")],
+                capture_output=True, text=True, check=False, env=env,
+            )
+            self.assertEqual(metrics.returncode, 0, metrics.stderr)
+            self.assertFalse((runtime / "__pycache__").exists())
+
+            process = subprocess.run(
+                [sys.executable, str(runtime / "process.py"), "status",
+                 "--registry", str(Path(temporary) / "missing/processes.json"),
+                 "--run-id", "fixture"],
+                capture_output=True, text=True, check=False, env=env,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertFalse((runtime / "__pycache__").exists())
 
 
 class HostServiceTests(unittest.TestCase):

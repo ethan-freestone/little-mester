@@ -1,4 +1,5 @@
 import base64
+import fcntl
 import importlib.util
 import os
 import signal
@@ -7,6 +8,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -18,6 +20,46 @@ SPEC.loader.exec_module(process)
 
 
 class ProcessTests(unittest.TestCase):
+    def test_supervisor_drops_inherited_locks_without_unlocking_controller(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptors = []
+            for name in (".allocation.lock", ".profile.lock"):
+                fd = os.open(root / name, os.O_RDWR | os.O_CREAT, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                descriptors.append(fd)
+            env = dict(os.environ, VM_HELD_ALLOCATION_ROOT=directory, VM_HELD_PROFILE_PATH=directory,
+                       VM_HELD_ALLOCATION_FD=str(descriptors[0]), VM_HELD_PROFILE_FD=str(descriptors[1]))
+            registry = root / "processes.json"
+            process.registry_initialize(registry, "lock-test")
+            supervisor = subprocess.Popen(
+                [sys.executable, "-B", str(PROCESS_PATH), "run-logged", "--registry", str(registry),
+                 "--run-id", "lock-test", "--role", "proxy", "--log", str(root / "proxy.log"),
+                 "--", sys.executable, "-c", "import time; time.sleep(60)"],
+                env=env, pass_fds=tuple(descriptors), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    state = process.registry_status(registry, "lock-test")
+                    if state["processes"].get("proxy", {}).get("state") == "running":
+                        break
+                    time.sleep(0.02)
+                self.assertEqual(state["processes"].get("proxy", {}).get("state"), "running")
+                with (root / ".allocation.lock").open("rb") as probe, self.assertRaises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                for fd in descriptors:
+                    os.close(fd)
+                descriptors.clear()
+                for name in (".allocation.lock", ".profile.lock"):
+                    with (root / name).open("rb") as probe:
+                        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                for fd in descriptors:
+                    os.close(fd)
+                process.registry_stop(registry, "lock-test", 2)
+                supervisor.wait(timeout=5)
+
     def run_logged(self, registry, run_id, role, log, argv, max_bytes=None):
         command = [
             sys.executable, str(PROCESS_PATH), "run-logged",
@@ -183,6 +225,34 @@ class ProcessTests(unittest.TestCase):
             with self.assertRaises(process.ProcessPolicyError):
                 process.trust_host_key(known_hosts, mismatch)
             self.assertEqual(known_hosts.read_bytes(), valid)
+
+    def test_keyscan_comments_are_scan_only_and_extra_keys_remain_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            known_hosts = Path(directory) / "known_hosts"
+            blob = struct.pack("!I", 11) + b"ssh-ed25519" + struct.pack("!I", 32) + b"k" * 32
+            key = base64.b64encode(blob).decode()
+            scanned = f"[127.0.0.1]:40222 ssh-ed25519 {key}\n".encode()
+            comment = b"# 127.0.0.1:40222 SSH-2.0-OpenSSH_9.6p1 Ubuntu\n"
+            self.assertEqual(process.trust_host_key(known_hosts, comment + scanned, port=40222), "created")
+            stored = known_hosts.read_bytes()
+            self.assertFalse(stored.startswith(b"#"))
+            self.assertEqual(process.trust_host_key(known_hosts, scanned + comment, port=40222), "matched")
+            for bad in (scanned + scanned, comment, b"unknown-output\n" + scanned,
+                        b"# bad\x00comment\n" + scanned,
+                        scanned.replace(b"40222", b"40223"), b"#" * 65537 + scanned):
+                with self.subTest(shape=len(bad)), self.assertRaises(process.ProcessPolicyError):
+                    process.trust_host_key(known_hosts, bad, port=40222)
+                self.assertEqual(known_hosts.read_bytes(), stored)
+            result = subprocess.run(
+                [sys.executable, "-B", str(PROCESS_PATH), "trust-key", "--known-hosts", str(known_hosts),
+                 "--port", "40222"], input=scanned + scanned, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, b"scan-lines=2,comments=0,records=2\n")
+            self.assertNotIn(key.encode(), result.stdout + result.stderr)
+            known_hosts.write_bytes(comment + stored)
+            with self.assertRaises(process.ProcessPolicyError):
+                process.trust_host_key(known_hosts, scanned, port=40222)
 
 
 if __name__ == "__main__":

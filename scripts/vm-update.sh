@@ -206,7 +206,7 @@ vm_update_current_opencode() {
   reported="$("$VM_UPDATE_OPENCODE_BIN" --version 2>/dev/null)" || return 1
   normalized="$(printf '%s' "$reported" | "$VM_UPDATE_PYTHON" -c '
 import re,sys
-m=re.search(r"(?<![0-9A-Za-z.])(2\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?![0-9A-Za-z.])",sys.stdin.read())
+m=re.search(r"(?<![0-9A-Za-z.])v?(2\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?![0-9A-Za-z.])",sys.stdin.read())
 if not m: raise SystemExit(2)
 print(m.group(1))
 ')" || return 1

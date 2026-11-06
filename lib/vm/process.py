@@ -24,6 +24,10 @@ import tempfile
 import time
 from pathlib import Path
 
+# `paths.py` is loaded dynamically from the frozen runtime. Keep Python caches
+# out of that private tree; its files must remain exactly manifest-validated.
+sys.dont_write_bytecode = True
+
 _PATHS_SPEC = importlib.util.spec_from_file_location("vm_process_paths", Path(__file__).with_name("paths.py"))
 if _PATHS_SPEC is None or _PATHS_SPEC.loader is None:
     raise RuntimeError("VM paths helper is unavailable")
@@ -445,7 +449,28 @@ def wait_for_role(path, run_id, role, timeout):
         time.sleep(min(0.05, max(0, deadline - time.monotonic())))
 
 
+def release_supervisor_lifecycle_fds():
+    """Drop inherited references, not LOCK_UN: the controller still owns its locks."""
+    for fd_key, path_key, filename in (
+        ("VM_HELD_ALLOCATION_FD", "VM_HELD_ALLOCATION_ROOT", ".allocation.lock"),
+        ("VM_HELD_PROFILE_FD", "VM_HELD_PROFILE_PATH", ".profile.lock"),
+    ):
+        raw = os.environ.get(fd_key)
+        if raw is None:
+            continue
+        require(raw.isdecimal() and int(raw) >= 3 and path_key in os.environ)
+        fd = int(raw)
+        path = Path(os.environ[path_key]) / filename
+        info, expected = os.fstat(fd), path.stat(follow_symlinks=False)
+        require(stat.S_ISREG(info.st_mode) and info.st_dev == expected.st_dev and info.st_ino == expected.st_ino)
+        os.close(fd)
+    for key in list(os.environ):
+        if key.startswith("VM_HELD_"):
+            del os.environ[key]
+
+
 def run_logged(registry, run_id, role, log_path, argv, max_bytes=LOG_SEGMENT_BYTES):
+    release_supervisor_lifecycle_fds()
     _validate_run_id(run_id)
     role = _validate_role(role)
     require(isinstance(argv, list) and bool(argv)
@@ -602,7 +627,13 @@ def trust_host_key(path, scan_output, expected_host="127.0.0.1", port=22):
     require(expected_host == "127.0.0.1")
     require(type(port) is int and 1 <= port <= 65535)
     scan_host = expected_host if port == 22 else f"[{expected_host}]:{port}"
-    scanned = _host_key_line(scan_output, scan_host)
+    require(isinstance(scan_output, bytes) and len(scan_output) <= 65536)
+    require(all(byte in (9, 10, 13) or 32 <= byte <= 126 for byte in scan_output))
+    # Scanner commentary is not key data. Filter it only at this boundary;
+    # existing known_hosts below still requires exactly one bare valid key.
+    records = [line.strip() for line in scan_output.splitlines()
+               if line.strip() and not line.strip().startswith(b"#")]
+    scanned = _host_key_line(b"\n".join(records), scan_host)
     _, key_type, key_data = scanned.split()
     line = f"{expected_host} {key_type} {key_data}"
     path = Path(path)
@@ -781,7 +812,15 @@ def main():
         sys.stdout.write(f"{port}\n")
         return 0
     if args.command == "trust-key":
-        result = trust_host_key(args.known_hosts, sys.stdin.buffer.read(65537), args.host, args.port)
+        scan = sys.stdin.buffer.read(65537)
+        try:
+            result = trust_host_key(args.known_hosts, scan, args.host, args.port)
+        except (ProcessPolicyError, OSError, ValueError, TypeError):
+            lines = [line.strip() for line in scan.splitlines() if line.strip()]
+            comments = sum(line.startswith(b"#") for line in lines)
+            # Counts only: never return key material or filesystem error text.
+            print(f"scan-lines={len(lines)},comments={comments},records={len(lines) - comments}")
+            return 2
         sys.stdout.write(result + "\n")
         return 0
     if args.command == "failure":

@@ -332,6 +332,7 @@ vm_runner_start() {
   VM_RUNNER_RUN_ID="$run_id"
 
   port_file="$run_dir/proxy.port"
+  printf '[startup] Starting verified proxy and workspace filesystem service.\n' >&2
   marker="$run_dir/proxy.ready"
   vm_runner_spawn_logged "$registry" "$run_id" proxy "$run_dir/proxy.log" \
     "$VM_RUNNER_PYTHON" "$VM_RUNNER_PROXY" "${upstream_args[@]}" \
@@ -391,6 +392,9 @@ vm_runner_start() {
     return 1
   fi
 
+  printf '[startup] QEMU running; waiting up to %ss for guest SSH. Console: %s/%s.log\n' \
+    "$ssh_timeout" "$run_dir" "$VM_RUNNER_QEMU_ROLE" >&2
+  local ssh_started="$SECONDS" next_progress="$SECONDS"
   deadline=$((SECONDS + 10#$ssh_timeout))
   while (( SECONDS < deadline )); do
     role="$VM_RUNNER_QEMU_ROLE"
@@ -404,10 +408,18 @@ vm_runner_start() {
     fi
     if vm_ssh_trust_host_key "$run_dir/known_hosts" "$VM_RUNNER_SSH_PORT" \
       "$registry" "$run_id" "$role"; then
+      printf '[startup] Guest SSH host key verified.\n' >&2
       return 0
+    fi
+    if (( SECONDS >= next_progress )); then
+      printf '[startup] Waiting for SSH: elapsed=%ss limit=%ss check=%s\n' \
+        "$((SECONDS - ssh_started))" "$ssh_timeout" "${VM_SSH_TRUST_STAGE:-unknown}" >&2
+      next_progress=$((SECONDS + 15))
     fi
     sleep 1
   done
+  printf '[startup] SSH deadline expired; last check=%s. Console: %s/%s.log\n' \
+    "${VM_SSH_TRUST_STAGE:-unknown}" "$run_dir" "$VM_RUNNER_QEMU_ROLE" >&2
   vm_runner_write_failure "$run_dir" "$run_id" ssh 124 "$run_dir/${VM_RUNNER_QEMU_ROLE}.log" || true
   vm_runner_rollback "$registry" "$run_id" || true
   return 124

@@ -27,6 +27,12 @@ VM_GUEST_HASH_HELPER="${VM_GUEST_HASH_HELPER:-/usr/local/libexec/lab-vm-guest-ha
 VM_GUEST_PROXY="http://10.0.2.100:3128"
 VM_GUEST_VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'
 VM_GUEST_STAGE=''
+VM_GUEST_BOOT_STAGE=initialization
+
+vm_guest_boot_stage() {
+  VM_GUEST_BOOT_STAGE="$1"
+  printf '[bootstrap] stage=%s\n' "$VM_GUEST_BOOT_STAGE" >&2
+}
 
 vm_guest_bootstrap_error() {
   printf 'GUEST BOOTSTRAP FAILED: %s\n' "$*" >&2
@@ -49,6 +55,32 @@ vm_guest_chown_mester() {
     return 0
   fi
   chown -R "$uid:$gid" -- "$@"
+}
+
+vm_guest_prepare_home_parents() {
+  # Root may have created these XDG parents while installing other payloads.
+  # Assign only the parents, never recurse into runtime or credential storage.
+  "$VM_GUEST_PYTHON" - "$(vm_guest_rooted /home/mester)" "$VM_GUEST_UID" "$VM_GUEST_GID" "$VM_GUEST_TEST_MODE" <<'PY'
+import os,stat,sys
+from pathlib import Path
+home,uid,gid,test = Path(sys.argv[1]),int(sys.argv[2]),int(sys.argv[3]),sys.argv[4] == "1"
+parents = [home/".local", home/".local/share", home/".config"]
+if not home.is_dir() or home.is_symlink() or home.resolve(strict=True) != home:
+    raise SystemExit(1)
+for path in parents:
+    if path.is_symlink():
+        raise SystemExit(1)
+    if path.exists():
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode) or (not test and (
+                info.st_uid not in (0,uid) or stat.S_IMODE(info.st_mode) not in (0o700,0o755))):
+            raise SystemExit(1)
+for path in parents:
+    if not path.exists():
+        path.mkdir(mode=0o700)
+    if not test:
+        os.chown(path,uid,gid,follow_symlinks=False)
+PY
 }
 
 vm_guest_require_root() {
@@ -139,11 +171,27 @@ vm_guest_set_proxy_environment() {
 vm_guest_system_preflight() {
   local os_release
   os_release="$(vm_guest_rooted /etc/os-release)"
-  [[ -f "$os_release" && ! -L "$os_release" ]] || { vm_guest_bootstrap_error 'Guest OS identity is unavailable.'; return 1; }
-  "$VM_GUEST_PYTHON" - "$os_release" <<'PY'
+  "$VM_GUEST_PYTHON" - "$os_release" "$VM_GUEST_ROOT" <<'PY'
+import os
 import sys
+from pathlib import Path
+root = Path(sys.argv[2]).resolve(strict=True)
+source = Path(sys.argv[1])
+try:
+    if source.is_symlink():
+        # Ubuntu's standard relative (or absolute) OS identity link only.
+        if os.readlink(source) not in ("../usr/lib/os-release", "/usr/lib/os-release"):
+            raise ValueError
+        source = root / "usr/lib/os-release"
+    if source.is_symlink() or not source.is_file() or not source.resolve(strict=True).is_relative_to(root):
+        raise ValueError
+    if source.stat().st_size > 65536:
+        raise ValueError
+    content = source.read_text(encoding="utf-8")
+except (OSError, ValueError):
+    raise SystemExit(1) from None
 values = {}
-for line in open(sys.argv[1], encoding="utf-8"):
+for line in content.splitlines():
     if "=" in line:
         key, value = line.rstrip("\n").split("=", 1)
         values[key] = value.strip('"')
@@ -538,22 +586,40 @@ print(value)
 }
 
 vm_guest_install_opencode() {
-  local manifest="$1" version reported rc adapter_help
+  local manifest="$1" version reported adapter_help user_path
   version="$(vm_guest_resolve_opencode_version "$manifest")" || return 1
   [[ "$version" =~ ^2\. ]] || {
     vm_guest_bootstrap_error 'This OpenCode version is outside the verified V2 adapter range.'
     return 1
   }
-  "$VM_GUEST_NPM_BIN" install --global --no-audit --no-fund "@opencode/cli@$version"
-  reported="$("$VM_GUEST_OPENCODE_BIN" --version 2>/dev/null)" || { vm_guest_bootstrap_error 'Installed OpenCode executable failed its version check.'; return 1; }
-  "$VM_GUEST_PYTHON" - "$reported" "$version" <<'PY'
+  vm_guest_boot_stage opencode-package-install
+  # This system CLI must be executable by mester, not just the root installer.
+  # Keep the provisioner's private 077 mask everywhere outside this subprocess.
+  (umask 022; "$VM_GUEST_NPM_BIN" install --global --no-audit --no-fund "@opencode/cli@$version")
+  vm_guest_boot_stage opencode-version-check
+  vm_guest_prepare_home_parents || {
+    vm_guest_bootstrap_error 'Guest home parent preparation failed.'
+    return 1
+  }
+  user_path=/opt/little-mester/python-tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  [[ "$VM_GUEST_TEST_MODE" != 1 ]] || user_path="$PATH"
+  reported="$("$VM_GUEST_RUNUSER_BIN" -u mester -- env HOME="$(vm_guest_rooted /home/mester)" \
+    PATH="$user_path" "$VM_GUEST_OPENCODE_BIN" --version 2>/dev/null)" || {
+    vm_guest_bootstrap_error 'Installed OpenCode executable failed its guest-user version check.'
+    return 1
+  }
+  if ! "$VM_GUEST_PYTHON" - "$reported" "$version" <<'PY'
 import re
 import sys
 reported, expected = sys.argv[1:]
-raise SystemExit(0 if re.search(r"(?<![0-9A-Za-z.])" + re.escape(expected) + r"(?![0-9A-Za-z.])", reported) else 1)
+match = re.fullmatch(r"(?:[Oo]pen[Cc]ode\s+)?v?(2\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)", reported.strip())
+raise SystemExit(0 if match and match[1] == expected else 1)
 PY
-  rc=$?
-  (( rc == 0 )) || { vm_guest_bootstrap_error 'OpenCode executable version differs from the saved exact version.'; return 1; }
+  then
+    vm_guest_bootstrap_error 'OpenCode executable version differs from the saved exact version or has an unsupported format.'
+    return 1
+  fi
+  vm_guest_boot_stage opencode-adapter-check
   adapter_help="$("$VM_GUEST_OPENCODE_BIN" run --help 2>&1)" || {
     vm_guest_bootstrap_error 'Installed OpenCode does not expose the V2 run adapter help.'
     return 1
@@ -609,6 +675,12 @@ vm_guest_build_private_payload() {
   config_dir="$(vm_guest_rooted /home/mester/.config/opencode)"
   renderer="$(vm_guest_rooted "$VM_GUEST_CONFIG_RENDERER")"
   install -d -m 0700 "$share_root" || return 1
+  # npm runs as mester: owning only the staging subtree is insufficient when
+  # this root-created private ancestor is 0700. Do not broaden its mode or
+  # recursively change ownership of an existing runtime during updates.
+  if [[ "$VM_GUEST_TEST_MODE" != 1 ]]; then
+    chown "$VM_GUEST_UID:$VM_GUEST_GID" -- "$share_root" || return 1
+  fi
   if [[ "$update_mode" == 1 ]]; then
     [[ -d "$final" && ! -L "$final" ]] || {
       vm_guest_bootstrap_error 'Existing private guest runtime is missing or unsafe; it was preserved.'
@@ -859,6 +931,9 @@ PY
 }
 
 vm_guest_main() {
+  # Fixed stage/exit only: BASH_COMMAND and argv can contain credentials.
+  trap 'rc=$?; printf "GUEST BOOTSTRAP FAILED: stage=%s exit=%s\n" "$VM_GUEST_BOOT_STAGE" "$rc" >&2' ERR
+  vm_guest_boot_stage argument-validation
   vm_guest_parse_args "$@" || return $?
   vm_guest_require_root || return 1
   vm_guest_set_proxy_environment
@@ -868,28 +943,39 @@ vm_guest_main() {
   manifest="$(vm_guest_rooted /var/lib/lab-vm/install-manifest.json)"
   [[ ! -e "$marker" && ! -L "$marker" ]] || { vm_guest_bootstrap_error 'A successful bootstrap marker already exists; no warm provisioning is allowed.'; return 1; }
 
+  vm_guest_boot_stage os-preflight
   vm_guest_system_preflight
+  vm_guest_boot_stage workspace-validation
   vm_guest_validate_workspace_mount
   vm_guest_verify_payload_hash
   [[ -f "$(vm_guest_rooted /etc/apt/apt.conf.d/80lab-vm-proxy)" ]] || { vm_guest_bootstrap_error 'Explicit apt proxy configuration is missing.'; return 1; }
+  vm_guest_boot_stage base-packages
   vm_guest_install_base_packages
+  vm_guest_boot_stage node-install
   vm_guest_install_node
+  vm_guest_boot_stage python-tools
   vm_guest_run_python_tools
 
   if [[ "$VM_GUEST_RUNTIME" == docker ]]; then
+    vm_guest_boot_stage docker-install
     vm_guest_install_docker
   fi
   if (( 10#$VM_GUEST_MAX_DEPTH > 10#$VM_GUEST_DEPTH )); then
+    vm_guest_boot_stage recursion-tools
     vm_guest_install_recursion_tools
     recursion_tools=true
   fi
 
+  vm_guest_boot_stage opencode-resolve
   vm_guest_install_opencode "$manifest"
   version="$VM_GUEST_RESOLVED_VERSION"
+  vm_guest_boot_stage aider-adapter-check
   vm_guest_check_aider_adapter
   aider_version="$VM_GUEST_AIDER_VERSION"
+  vm_guest_boot_stage private-payload-build
   vm_guest_build_private_payload
 
+  vm_guest_boot_stage final-readiness
   major="$(vm_guest_node_major)"
   if [[ ! "$major" =~ ^[0-9]+$ ]] || (( major < 20 )); then
     vm_guest_bootstrap_error 'Node.js readiness check failed.'

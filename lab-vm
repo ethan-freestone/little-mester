@@ -2,6 +2,10 @@
 # VM replacement CLI. Only explicitly implemented lifecycle commands are dispatched.
 set -euo pipefail
 
+# All helper imports, including inline identity checks in frozen launchers, must
+# leave the manifest-validated private runtime unchanged.
+export PYTHONDONTWRITEBYTECODE=1
+
 # A native agent may itself have an explicitly selected parent metrics URL in
 # its environment. Never let that capability flow into a child launcher.
 unset METRICS_URL

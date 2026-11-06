@@ -341,19 +341,26 @@ d=json.loads(sys.argv[1]); print(d["registry"],d["run_id"],d["role"])
 }
 
 vm_lifecycle_wait_qemu_stopped() {
-  local root="$1" name="$2" data="$3" timeout="$4" registry_info registry run_id role state
+  local root="$1" name="$2" data="$3" timeout="$4" registry_info registry run_id role state deadline
+  [[ "$timeout" =~ ^[1-9][0-9]?$ ]] && (( 10#$timeout <= 60 )) || return 2
   registry_info="$(vm_lifecycle_registry_for_profile "$root" "$name" "$data")" || return 2
   read -r registry run_id role < <("$VM_LIFECYCLE_PYTHON" -c '
 import json,sys
 d=json.loads(sys.argv[1]); print(d["registry"],d["run_id"],d["role"])
 ' "$registry_info") || return 2
-  state="$("$VM_LIFECYCLE_PYTHON" "$VM_LIFECYCLE_PROCESS" wait-role \
-    --registry "$registry" --run-id "$run_id" --role "$role" --timeout "$timeout" 2>/dev/null || true)"
-  case "$state" in
-    stopped) printf '%s\n' "$registry" "$run_id"; return 0 ;;
-    running) return 124 ;;
-    *) return 2 ;;
-  esac
+  # wait-role waits for registration, not for an already-registered role to exit.
+  deadline=$((SECONDS + 10#$timeout))
+  while :; do
+    state="$("$VM_LIFECYCLE_PYTHON" "$VM_LIFECYCLE_PROCESS" wait-role \
+      --registry "$registry" --run-id "$run_id" --role "$role" --timeout 0 2>/dev/null || true)"
+    case "$state" in
+      stopped) printf '%s\n' "$registry" "$run_id"; return 0 ;;
+      running) ;;
+      *) return 2 ;;
+    esac
+    (( SECONDS < deadline )) || return 124
+    sleep 0.2
+  done
 }
 
 vm_lifecycle_stop_sidecars() {
@@ -429,7 +436,7 @@ PY
 
 vm_lifecycle_guest_readiness() {
   local root="$1" name="$2" data="$3" timeout="$4"
-  local info registry run_id role run_dir key port status_json marker_json state
+  local info registry run_id role run_dir key port status_json marker_json state status_rc
   info="$(vm_lifecycle_registry_for_profile "$root" "$name" "$data")" || return 2
   read -r registry run_id role < <("$VM_LIFECYCLE_PYTHON" -c '
 import json,sys
@@ -445,9 +452,17 @@ d=json.loads(sys.argv[1]); print(d["registry"],d["run_id"],d["role"])
   # shellcheck disable=SC1091 # The frozen runtime module is selected by its exact profile root.
   source "$VM_LIFECYCLE_ROOT/lib/vm/guest.sh"
   local deadline=$((SECONDS + timeout))
+  local readiness_started="$SECONDS" next_progress="$SECONDS"
   while (( SECONDS < deadline )); do
-    if status_json="$(vm_ssh_noninteractive "$key" "$run_dir/known_hosts" "$port" \
-      15 mester@127.0.0.1 'sudo cloud-init status --long --format=json' 2>/dev/null)" &&
+    status_rc=0
+    status_json="$(vm_ssh_noninteractive "$key" "$run_dir/known_hosts" "$port" \
+      15 mester@127.0.0.1 'sudo cloud-init status --long --format=json' 2>/dev/null)" || status_rc=$?
+    if vm_guest_cloud_init_terminal_failure "$status_json"; then
+      vm_lifecycle_error 'Startup stage cloud-init failed terminally; use vm-start-diagnostics.py --logs. Guest disk and run evidence were preserved.'
+      (( status_rc != 0 )) || status_rc=1
+      return "$status_rc"
+    fi
+    if (( status_rc == 0 )) &&
       marker_json="$(vm_ssh_noninteractive "$key" "$run_dir/known_hosts" "$port" \
         15 mester@127.0.0.1 'sudo cat /var/lib/lab-vm/guest-ready.json' 2>/dev/null)" &&
       vm_guest_readiness_validate 0 "$status_json" "$marker_json" \
@@ -460,6 +475,11 @@ d=json.loads(sys.argv[1]); print(d["registry"],d["run_id"],d["role"])
       vm_lifecycle_error 'QEMU stopped or became ambiguous before guest readiness; profile evidence was preserved.'
       return 1
     }
+    if (( SECONDS >= next_progress )); then
+      printf '[startup] Waiting for guest readiness: elapsed=%ss limit=%ss; console=%s/%s.log\n' \
+        "$((SECONDS - readiness_started))" "$timeout" "$run_dir" "$role" >&2
+      next_progress=$((SECONDS + 15))
+    fi
     sleep 2
   done
   vm_lifecycle_error 'Guest did not reach bounded cloud-init, workspace and native-harness readiness.'
@@ -553,6 +573,7 @@ vm_lifecycle_start_profile_locked() {
   fi
   data="$(vm_lifecycle_profile_read "$root" "$name")" || return 2
 
+  printf '[startup] Waiting up to %ss for cloud-init and guest agent readiness.\n' "$readiness_timeout" >&2
   if marker="$(vm_lifecycle_guest_readiness "$root" "$name" "$data" "$readiness_timeout")"; then
     version="$(printf '%s' "$marker" | "$VM_LIFECYCLE_PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["opencode_version"])')" || version=''
   else
@@ -639,11 +660,13 @@ vm_lifecycle_prepare_profile_assets_locked() {
     http://10.0.2.100:3128 "$model_provider" "$model_port" "$model_id")" || {
     rm -f -- "$private_key" "$private_key.pub"
     rmdir -- "$stage_dir" 2>/dev/null || true
+    vm_lifecycle_error 'Startup stage seed-render failed; overlay was preserved.'
     return 2
   }
   if ! printf '%s' "$user_data" | vm_disk_write_seed "$root" "$name" >/dev/null; then
     rm -f -- "$private_key" "$private_key.pub"
     rmdir -- "$stage_dir" 2>/dev/null || true
+    vm_lifecycle_error 'Startup stage seed-write failed policy validation; overlay was preserved.'
     return 2
   fi
   local profile_id iso_tool
@@ -668,9 +691,15 @@ vm_lifecycle_prepare_profile_assets_locked() {
   fi
   chmod 600 "$stage_dir/seed.iso" || return 1
   "$VM_LIFECYCLE_PYTHON" "$VM_LIFECYCLE_PATHS" asset-publish --state-root "$root" --profile "$name" \
-    --asset control-key --staging "$private_key" >/dev/null || return 2
+    --asset control-key --staging "$private_key" >/dev/null || {
+      vm_lifecycle_error 'Startup stage control-key-publish failed; staging and overlay were preserved.'
+      return 2
+    }
   "$VM_LIFECYCLE_PYTHON" "$VM_LIFECYCLE_PATHS" asset-publish --state-root "$root" --profile "$name" \
-    --asset seed.iso --staging "$stage_dir/seed.iso" >/dev/null || return 2
+    --asset seed.iso --staging "$stage_dir/seed.iso" >/dev/null || {
+      vm_lifecycle_error 'Startup stage seed-iso-publish failed; staging and overlay were preserved.'
+      return 2
+    }
   rm -f -- "$private_key.pub" "$stage_dir/meta-data" "$stage_dir/user-data"
   rmdir -- "$stage_dir" || {
     vm_lifecycle_error 'Startup assets were published but private staging cleanup could not be verified.'
@@ -844,7 +873,7 @@ vm_lifecycle_metrics_select_port() {
       service="$runtime/lib/vm/metrics_service.py"
       collector="$runtime/agent/metrics/gather.py"
       if [[ -f "$service" && ! -L "$service" && -f "$collector" && ! -L "$collector" ]]; then
-        port="$("$VM_LIFECYCLE_PYTHON" "$service" ensure --state-root "$root" \
+        port="$(PYTHONDONTWRITEBYTECODE=1 "$VM_LIFECYCLE_PYTHON" "$service" ensure --state-root "$root" \
           --port 19532 --collector "$collector" 2>/dev/null)" || port=''
       else
         port=''
@@ -1590,7 +1619,8 @@ vm_lifecycle_run_frozen_worker() {
     *) vm_lifecycle_error 'Invalid frozen lifecycle callback.'; return 2 ;;
   esac
   # shellcheck disable=SC2016 # This callback is evaluated by the frozen locked profile worker.
-  "$VM_LIFECYCLE_PYTHON" "$runtime/lib/vm/paths.py" profile-run --state-root "$root" --profile "$name" -- \
+  VM_POLICY_DEBUG="${VM_DEBUG:-0}" PYTHONDONTWRITEBYTECODE=1 "$VM_LIFECYCLE_PYTHON" \
+    "$runtime/lib/vm/paths.py" profile-run --state-root "$root" --profile "$name" -- \
     bash -c 'set -euo pipefail; unset VM_LIFECYCLE_ROOT VM_LIFECYCLE_PYTHON VM_LIFECYCLE_PATHS VM_LIFECYCLE_PROCESS VM_LIFECYCLE_CHILDREN VM_LIFECYCLE_MEMORY_BUDGET VM_LIFECYCLE_DEFAULT_TIMEOUT VM_LIFECYCLE_SOURCE_FILE; source "$1"; shift; callback="$1"; shift; "$callback" "$@"' \
     _ "$runtime/lib/vm/lifecycle.sh" "$callback" "$@"
 }

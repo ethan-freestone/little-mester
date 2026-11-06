@@ -150,6 +150,385 @@ automated live-auth test, paid stream, credential export/import, or refresh test
 part of this step. Recursive G0→G1→G2 and changed-VM fail/fix proof remain in the
 later integrated acceptance package.
 
+### Package-1 interrupted prestart recovery
+
+**Latest usability observation — TUI opens, features still blocked:** owner
+confirms native TUI opens and Escape handling works. Metrics absent, no local
+models, browser auth absent under the explicit --no-browser-auth attach, and
+a remote model retries with ERR_PROXY_TUNNEL/403. Cancel retries; no paid requests
+or authentication experimentation needed. This is partial usability, not full
+package1 or acceptance PASS. Checkout egress still explicitly lists package
+domains, so cloud destinations may be denied; exact denied hostname/ancestor
+policy is not established. Do not clear the allowlist or bypass public-IP guards.
+
+Current next step in a second terminal of the same parent VM/replacement checkout:
+
+```sh
+python3 -B scripts/vm-host-acceptance.py --discover-providers
+```
+
+This standalone read-only operation queries fixed parent-loopback model-list
+endpoints with bounded responses/timeouts, and reports AVAILABLE/UNAVAILABLE plus
+safe model IDs. It does not start services, select models, send completions,
+copy credentials, change VM configuration or start an acceptance campaign.
+Return the JSON and stop; owner then selects an exact discovered provider/model.
+Keep the ready guest and parent unchanged. Metrics listener verification, model
+forwarding/configuration, bounded remote egress diagnosis and browser cleanup/
+optional manual auth remain separate open steps, not removed features or PASSes.
+
+**Current owner step — attach the repaired ready VM:** owner --apply --repair-home
+succeeded with both correction markers and `opencode v2.2.5` as mester. No restart
+or reprovision was needed. From the same parent-VM replacement checkout:
+
+```sh
+MESTER_STATE_DIR="$HOME/.local/share/little-mester-branch-dev-vm-approach-2" \
+./lab vm agent branch-dev-20261105 --permissions ask --no-browser-auth
+```
+
+This attaches through the existing frozen controller to the existing profile;
+it does not install/update/rebuild. Browser bridge is explicitly disabled for
+this usability check because the frozen controller retains the known cleanup
+argument defect. This does not remove browser support or count as auth evidence.
+Expect the native TUI at the intended workspace. Observe rendering, keyboard
+response and any startup/plugin errors; no login/model selection/agent task is
+needed yet. Report observations and pause before further acceptance. No launch
+means no TUI PASS by assumption. Metrics forwarding remains unavailable/unverified,
+and possible old browser helpers still require exact-identity review later.
+
+**Current handoff — correct three confirmed root-owned XDG parents:** owner audit
+shows home uid1000 mode0750, .local/.local/share/.config uid0 mode0755, cache
+uid1000 mode0700, and OpenCode data directory absent. These parent owners block
+guest-user application data creation. Source bootstrap now validates/prepares
+these three parents before the guest-user version probe: create missing parents
+privately, nonrecursively assign existing safe parents to the selected guest UID/
+GID, preserve existing modes and contents. No recursive home/auth chown.
+
+From the updated replacement checkout in the parent VM, Bash or Fish:
+
+```sh
+python3 -B scripts/vm-agent-permissions.py \
+  --state-root "$HOME/.local/share/little-mester-branch-dev-vm-approach-2" \
+  --profile branch-dev-20261105 \
+  --run-id 71ff52d4-d3d5-4394-a43d-440b1929f07c --apply --repair-home
+```
+
+The explicit new --repair-home option requires --apply, validates guest mester
+account/home ownership and all three canonical parent directory types/owners/
+modes before mutation. It nonrecursively chowns only .local, .local/share and
+.config to mester's UID/GID, preserving their modes and every child's contents/
+ownership. The public package directory correction remains idempotent. No auth
+storage inspection, reinstall, services, restart or frozen-runtime edits. Same
+exact ready-run/listener/trust gates and20s guest/25s wrapper bounds. Expected:
+home-parent ownership corrected, package modes corrected, and OpenCode version
+as mester. No interactive input. Return short output and stop; refuse any changed
+shape rather than bypass checks. Next after version success remains explicit
+--no-browser-auth attachment for package1 usability. Metrics/old helper cleanup
+and later integrated gates remain open. This supersedes the audit-only pause.
+
+**Current result — public package modes corrected, guest home write blocked:**
+owner --apply printed corrected, then OpenCode --version reached its own startup
+and failed creating `/home/mester/.local/share/opencode`. The three public package
+directories have now been changed; do not describe that operation as rolled back.
+No version/TUI success yet. Current next step is the same exact helper/run ID
+**without --apply**. Its audit now includes metadata only for home, .local,
+.local/share, .local/share/opencode, .config and .cache (fixed paths; no directory
+enumeration, auth/config data or file bodies). Return the short result and stop.
+Do not recursively chown home or OpenCode storage, retry attach, reinstall or
+restart the ready VM. Determine actual parent ownership before a narrow correction.
+
+**Latest audit resolved — binary hardlinks do not block directory-only repair:**
+owner audit reports executable-links, mode0755, uid0, links2. The single-link
+predicate was unnecessarily restrictive: this operation never writes or chmods
+the executable inode, only its three public parent directories. Removed only
+that link-count restriction; canonical paths, exact symlink, type/root-owner and
+mode checks remain. Real two-hardlink fixture now verifies both links retain
+inode, mode, owner, link count, mtime and contents after directory correction.
+Seven repair fixtures and changed-file Ruff/diff checks pass.
+Next owner step: run the exact --apply command below for run71ff52d4, return
+the correction/version result and stop. No reinstall/restart/frozen-runtime edit.
+The earlier audit-only pause is superseded by this diagnosed correction.
+
+**Latest repair result — audit only before any retry:** owner --apply refused
+`guest installation differs from the diagnosed shape` before mode changes. The
+helper now reports a fixed failed-check label plus numeric mode/UID/link count;
+no predicate was relaxed. Next step: rerun the same vm-agent-permissions.py command
+with the exact run71ff52d4 arguments **without --apply**, return its short result
+and stop. This is read-only, bounded to the same20s guest/25s wrapper deadlines.
+Do not repeat --apply or archive/restart the ready VM. A hardlink count, for
+example, was not visible in namei output and is now reported if that check fails;
+it is not assumed to be the owner-side cause without this audit.
+
+**Current next step — preserve ready run, correct installed CLI modes:** owner
+collector for run `71ff52d4-d3d5-4394-a43d-440b1929f07c` confirms ready/running,
+clean cloud-init and private MCP build. Root resolves `/usr/bin/opencode`, mester
+does not. The link points to `/usr/lib/node_modules/@opencode/cli/bin/opencode.exe`:
+the scope/package/bin directories are root0700, executable root0755. This proves
+global npm inherited bootstrap's077 umask, rather than a missing package/PATH-only
+issue. Source now scopes022 to the global install subprocess only and verifies
+the installed version as mester before readiness. Private runtime/config modes
+remain0700/0600. The shared bootstrap install function also serves future updates.
+Cleanup source now uses the session's fixed mester@127.0.0.1 endpoint instead of
+reading missing argument15; actual callers pass14. Both regressions reproduced
+before fixes. These changes do not modify the existing profile's frozen runtime.
+
+From the same updated replacement checkout in the parent VM (Bash or Fish), run:
+
+```sh
+python3 -B scripts/vm-agent-permissions.py \
+  --state-root "$HOME/.local/share/little-mester-branch-dev-vm-approach-2" \
+  --profile branch-dev-20261105 \
+  --run-id 71ff52d4-d3d5-4394-a43d-440b1929f07c --apply
+```
+
+This new narrow helper validates the exact ready profile/run/SSH listener and
+existing host trust, then validates all guest paths/types/root ownership/modes and
+the exact diagnosed symlink before any chmod. It sets only the scope/package/bin
+directories to0755, without recursive chmod, file-content changes, reinstall,
+credentials, VM restart or frozen-runtime edits. It then runs only --version as
+mester. Guest command deadline20s, wrapper25s. Without --apply it only audits.
+Expected output: `guest_opencode_directory_modes=corrected` and the installed
+OpenCode version. No interactive input. Return that short result and stop; a
+refusal must not be bypassed. Even on timeout/refusal, do not archive this ready VM.
+
+After successful owner confirmation, next step is explicit frozen-controller
+agent attach with --no-browser-auth to avoid the still-frozen cleanup defect for
+this usability check; do not reprovision to test the host source patch. Optional
+browser feature remains supported in source and separately unverified here.
+Potential leftover browser helpers from the earlier failed cleanup remain an
+exact-identity inspection/cleanup obligation; this permission repair does not
+claim to stop or inventory them. Parent metrics listener remains untouched.
+
+**Latest owner result — ready VM, attachment blocked:** fresh run
+`71ff52d4-d3d5-4394-a43d-440b1929f07c` reached `Profile ... is ready` after
+SSH/provisioning. The following native attach failed `exec: opencode: not found`,
+then browser-session EXIT cleanup raised `15: unbound variable`. Keep this ready
+VM and overlay; do not run any archive/reprovision command below for it. Source
+inspection confirms cleanup expects argument15 while its callers pass14. Guest
+executable visibility still needs diagnosis: root bootstrap's successful version
+check does not prove mester can traverse/execute the installation.
+
+Current next owner action is only the existing `vm-start-diagnostics.py --logs`
+command below from this replacement checkout. Its updated current-source collector
+adds user/root command lookup and bounded namei metadata for the two standard
+OpenCode bin paths; it neither runs OpenCode nor reads auth/configuration. Existing
+SSH ownership/trust gates and20s/64KiB bounds remain. Return the report, especially
+AGENT_EXECUTABLE sections, and stop. Do not patch frozen runtime or remove browser
+helpers manually. The failed cleanup may have left session-specific helpers;
+no broad kill or assumption that those helpers were cleaned is justified.
+
+**Current handoff — private MCP build ownership (2026-11-06):** run
+`5d202308-f537-44ba-8487-4e68d8fa9515` passed SSH, then failed at
+`private-payload-build`: npm ci reported EUSAGE/unusable lockfile. The post-failure
+collector confirms profile `failed`, every recorded run process stopped, and no
+runtime identity. Guest SSH collection is unavailable after orderly poweroff.
+This supersedes the older unknown-profile/proxy recovery instructions below.
+
+Source creates the private runtime parent as root/0700, but previously chowned
+only its staging subtree before running npm as mester. A local offline real-npm
+fixture with a valid dependency-free lockfile reproduces the exact EUSAGE when
+the parent cannot be traversed; restoring access succeeds. Bootstrap now chowns
+only that parent to the guest UID/GID before staging/build, retaining 0700 and
+avoiding recursive ownership changes to an existing runtime. The production-path
+ownership-order fixture fails before this fix and passes after it. Host bootstrap
+success is still unverified; no lockfile regeneration or npm install fallback.
+
+After local validation, the owner runs this from the same replacement checkout
+in the parent VM, in Bash (the command also works in the owner's current Fish):
+
+```bash
+python3 -B scripts/vm-recover-prestart.py \
+  --state-root "$HOME/.local/share/little-mester-branch-dev-vm-approach-2" \
+  --profile branch-dev-20261105 --archive-stopped-failed --apply &&
+MESTER_STATE_DIR="$HOME/.local/share/little-mester-branch-dev-vm-approach-2" \
+./lab vm run "$PWD" --name branch-dev-20261105 \
+  --unsafe-recurse --max-depth 0 --debug
+```
+
+The archiver rechecks stopped identities, reservations, locks and descendant
+guards, and preserves the entire old profile in a private sibling archive before
+a fresh launch captures fixed source. It does not patch the failed runtime.
+Stop if archival refuses; do not change modes or kill processes. The launch can
+download/install guest packages and uses the existing 300s SSH/1800s provisioning
+bounds. Expected: pass private-payload-build, then reach ready/native TUI. No
+input is needed during provisioning; do not log in or configure a provider for
+this check. If it fails, return the existing --logs collector report and stop;
+do not repeat recovery blindly. Keep the parent VM, all archives, legacy state
+and unverified metrics listener untouched. Metrics remains enabled by default,
+with unavailable forwarding nonfatal and not accepted as working.
+
+**Inherited-lock correction:** if unknown cleanup previously refused
+BlockingIOError, update source and reuse the same command below. Old proxy
+supervisors could retain inherited lifecycle locks after the controller exited.
+New supervisors close only their inherited FD copies (not LOCK_UN on the shared
+controller lock). Recovery may retire the verified orphan proxy before acquiring
+normal locks only when kernel lock owner/waiter and proxy FD checks exclude any
+other live holder, alongside stopped VM/dead-controller/no-descendant guards.
+It refuses a real active controller; no locks are forcibly unlocked.
+
+OpenCode version policy is unchanged: latest resolves once per bootstrap attempt,
+explicit pins remain possible, and the in-VM updater is retained. The observed
+2.2.5 display is a test example, not a hard-coded installation version.
+
+**Latest post-npm version fix and unknown/proxy cleanup:** read-only local CLI
+verification prints `opencode v2.2.5`; the guest's old version regex rejected the
+`v` prefix and could exit silently after successful npm installation. The source
+now accepts the known plain/v-prefixed/labelled version formats, still requires
+the exact saved version, and emits fixed bootstrap stages plus stage/exit ERR
+diagnostics (never BASH_COMMAND or raw reported output). Updater parsing accepts
+the same v prefix. This reproduces the observed silent post-npm failure pattern;
+successful provisioning on the owner VM remains unverified.
+
+Current profile is unknown after the earlier premature shutdown wait, with QEMU/
+virtiofsd stopped and only proxy/logger running. Use the new explicit guarded mode:
+
+```bash
+python3 -B scripts/vm-recover-prestart.py \
+  --state-root "$HOME/.local/share/little-mester-branch-dev-vm-approach-2" \
+  --profile branch-dev-20261105 --archive-unknown-cleanup --apply &&
+MESTER_STATE_DIR="$HOME/.local/share/little-mester-branch-dev-vm-approach-2" \
+./lab vm run "$PWD" --name branch-dev-20261105 \
+  --unsafe-recurse --max-depth 0 --debug
+```
+
+This requires unknown metadata, recorded stopped QEMU matching its run registry,
+no descendants, free existing allocation/profile locks, dead/absent controller
+reservation and stopped non-proxy processes. Only exact run-bound verified proxy/
+logger identities may remain live. It stops their supervisor through process.py,
+rechecks all stopped, then archives the entire profile with unknown metadata
+unchanged. No unknown->failed transition, runtime patch, QEMU signal, broad kill,
+parent listener operation or disk deletion. Without --apply it is read-only.
+If refused, report output and do not loosen checks or rerun blindly.
+
+**Current package-domain/fail-fast fix:** checkout policy explicitly adds only
+`deb.nodesource.com`, `download.docker.com`, `registry.npmjs.org`, and
+`files.pythonhosted.org` to existing permitted domains (Node22/Docker APT keys
+and repositories, npm artifacts, and PyPI wheels). No allow-all, proxy bypass,
+public-address filtering change or parent listener takeover. An independent
+ancestor allowlist can still deny these; it must be diagnosed, not bypassed.
+Future frozen source now recognizes terminal cloud-init error/degraded completion
+even when `cloud-init status` exits2, preserving exit status without printing its
+raw error data. Running/malformed status still uses the bounded readiness wait.
+
+Owner interrupted the last launcher; list still says provisioning. That is not
+process state. The existing `--archive-stopped-failed` command below now also
+accepts interrupted starting/provisioning metadata **only if all existing stopped
+identity/run/reservation/no-descendant checks pass**. It never stops a VM or edits
+metadata to pretend it failed. If refused because a process is live/unknown, use
+the collector below and stop; no force kill, metadata rewrite or another launch.
+
+**One-command diagnostics (running or failed VM):** run from the replacement
+checkout; no state-root export or per-run UUID needed:
+
+```bash
+python3 -B scripts/vm-start-diagnostics.py \
+  --state-root "$HOME/.local/share/little-mester-branch-dev-vm-approach-2" \
+  --profile branch-dev-20261105 --logs
+```
+
+This reports lifecycle/assets/process states plus bounded latest-run QEMU/proxy/
+virtiofsd excerpts. When the exact QEMU-owned loopback SSH listener and existing
+known_hosts/key are available, it also reads cloud-init status, output and service
+logs through the isolated SSH transport. No host-key learning, installs, service
+changes, VM signals, raw-log persistence or frozen-runtime edits. SSH is bounded
+to20s/64KiB; unavailable guest collection is explicit. Redaction removes SSH keys,
+fingerprints/key blocks, credential-like lines, URLs and long blobs. It is
+best-effort, not a universal secret detector: review output before sharing. Never
+collect seed/control-key/auth files. Default inventory without --logs is unchanged.
+
+**Latest SSH retry:** run `43ec03cc-d7a5-4bbb-a34f-50dbfb33f937` timed out
+at host-key validation. Owner's read-only scan exited0 with two stdout lines;
+run directory was owned/0700 and known_hosts absent. The second line's contents
+were not captured. Source now accepts ASCII `#` comment lines only on the scan
+boundary, with a strict 64 KiB bound and exactly one complete expected-host key.
+Stored known_hosts remains strict and extra keys/unknown lines still fail.
+If this was scanner commentary, the latest fix should unblock SSH; that remains
+unverified on the owner VM. Other two-line shapes now produce content-free
+`scan-lines/comments/records` counts in the wait diagnostic. Use the stopped-failed
+archive/retry command below once; it verifies rollback before touching the profile.
+
+**Latest observation/retry:** the owner booted the guest; cloud-init reported
+`Guest OS identity is unavailable` because Ubuntu's standard `/etc/os-release`
+symlink was rejected. Host SSH trust readiness separately timed out after 300s;
+rollback verified all recorded run processes stopped. Profile is failed, with
+ISO/overlay/runs, so neither earlier prestart mode applies. Source now supports
+only Ubuntu's standard OS-release link targets, confined to the guest root, and
+adds bounded progress plus fixed SSH failure-check labels (no argv/key output).
+The SSH root cause remains unproven; the next launch is diagnostic as well as a
+boot retry, not evidence that SSH has been fixed.
+
+After updating the replacement checkout, the owner can preserve this stopped
+booted profile with the new explicit mode and capture fixed source in a fresh run:
+
+```bash
+python3 -B scripts/vm-recover-prestart.py \
+  --state-root "$MESTER_STATE_DIR" --profile branch-dev-20261105 \
+  --archive-stopped-failed --apply &&
+./lab vm run "$PWD" --name branch-dev-20261105 \
+  --unsafe-recurse --max-depth 0 --debug
+```
+
+Archive mode verifies every run stopped, no live profile process reference,
+stopped/absent controller reservation, any recorded runtime identity stopped,
+and no possible descendants. It acquires existing allocation/profile locks and
+moves the entire disk/runtime/keys/runs/logs intact to a private sibling archive.
+It never signals processes, patches frozen source, deletes disks or restarts a
+running/unknown profile. Keep all prior archives and the working parent VM.
+If SSH still waits, share its `check=` label and startup inventory immediately
+from a second terminal. Do not interrupt the bounded run or repeat recovery.
+
+**Earlier seed-preparation retry (historical; not for the current booted profile):** the owner already
+archived the original prestart profile. A subsequent fresh launch created an
+overlay, then failed at seed-write: the generic secret guard rejected the
+renderer-owned `lock_passwd: true` and fixed `NOPASSWD` sudo entry. The exact
+structured values are now allowed; arbitrary password/token material remains
+refused. The current profile is `failed`, has no seed ISO/runs/runtime identity,
+and must use the explicit overlay-preserving archive mode. Do not patch its frozen
+runtime, delete its disk, or use ordinary resume on it.
+
+```bash
+python3 -B scripts/vm-recover-prestart.py \
+  --state-root "$MESTER_STATE_DIR" --profile branch-dev-20261105 \
+  --archive-failed-before-boot --apply &&
+./lab vm run "$PWD" --name branch-dev-20261105 \
+  --unsafe-recurse --max-depth 0 --debug
+```
+
+This archives the whole failed profile including its overlay, then allows a fresh
+profile with fixed frozen source. It refuses a published ISO, any runs, recorded
+runtime identity, active profile references, or live/unknown reservation ownership.
+If refused, report its output; do not loosen its checks. The diagnostic script
+below also reports whether the fixed metrics port has a listener. An existing
+unverified parent/legacy listener must not be killed or adopted to make metrics
+work; metrics forwarding remains nonfatal and its actual acceptance stays open.
+
+The observed `starting` profile with no runtime identity/run registry and a
+generated runtime `__pycache__` is handled by the bounded recovery script below.
+The owner runs this from the parent VM's current replacement checkout. It archives
+the entire never-booted profile outside the dedicated state root (prints its path),
+preserves all evidence, and releases only a verified stopped-owner reservation.
+It refuses guest assets, runs, live/unknown owners or active profile references.
+It does not patch the frozen runtime; the next fresh launch captures fixed source.
+No legacy/default-root cleanup or extra historical ticket gate is involved.
+
+```bash
+export MESTER_STATE_DIR="$HOME/.local/share/little-mester-branch-dev-vm-approach-2"
+python3 -B scripts/vm-recover-prestart.py \
+  --state-root "$MESTER_STATE_DIR" --profile branch-dev-20261105 --apply &&
+./lab vm run "$PWD" --name branch-dev-20261105 \
+  --unsafe-recurse --max-depth 0 --debug
+```
+
+If either command fails, do not repeat recovery blindly. Collect content-free
+startup inventory, without depending on the full-tree status guard:
+
+```bash
+python3 -B scripts/vm-start-diagnostics.py \
+  --state-root "$MESTER_STATE_DIR" --profile branch-dev-20261105
+```
+
+Metrics remain on. A successful development boot is package-1 usability evidence,
+not completion of integrated acceptance or approval to activate C14.
+
 ### A. Minimal synthetic-canary checker
 
 Reuse the acceptance runner/report and existing snapshot/guest mechanisms. Use

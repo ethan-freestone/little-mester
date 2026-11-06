@@ -153,6 +153,25 @@ print(hashlib.sha256(encoded).hexdigest())
 PY
 }
 
+vm_guest_cloud_init_terminal_failure() {
+  # Running/unknown/malformed output is not proof of a terminal failure.
+  printf '%s' "${1:-}" | "$VM_GUEST_PYTHON" -c '
+import json,sys
+try:
+    data=json.load(sys.stdin)
+    assert isinstance(data,dict)
+    status=data.get("status")
+    terminal=status in ("error", "disabled", "degraded done")
+    if status=="done":
+        terminal=(data.get("errors",[])!=[] or
+                  data.get("recoverable_errors",{}) not in ({}, []) or
+                  data.get("extended_status","done")!="done")
+    raise SystemExit(0 if terminal else 1)
+except (ValueError, TypeError, AssertionError):
+    raise SystemExit(1)
+' >/dev/null 2>&1
+}
+
 vm_guest_cloud_init_status_clean() {
   local status_json="${1:-}"
   [[ -n "$status_json" ]] || { vm_guest_error 'Cloud-init status output is missing.'; return 1; }

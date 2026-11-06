@@ -1,6 +1,7 @@
 """Secret-free NoCloud generation tests; no VM, network or package operations."""
 
 import base64
+import importlib.util
 import json
 import os
 import struct
@@ -31,6 +32,25 @@ def render(*args, env=None):
 
 
 class CloudInitTests(unittest.TestCase):
+    def test_real_generated_seed_passes_publication_secret_guard(self):
+        spec = importlib.util.spec_from_file_location("seed_policy", ROOT / "lib/vm/paths.py")
+        paths = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(paths)
+        result = render("fixture-vm", 1000, 1000, public_key(), 0, 0,
+                        "docker", "opencode", "latest", "a" * 64)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        raw = result.stdout.encode()
+        self.assertEqual(paths.seed_validate(raw), raw)
+        config = json.loads(result.stdout.split("\n", 1)[1])
+        for field, value in (("lock_passwd", False), ("passwd", "SECRET_CANARY"),
+                             ("api_token", "SECRET_CANARY"),
+                             ("sudo", ["ALL=(ALL) NOPASSWD:ALL SECRET_CANARY api_token"])):
+            with self.subTest(field=field):
+                bad = json.loads(json.dumps(config))
+                bad["users"][0][field] = value
+                with self.assertRaises(paths.PolicyError):
+                    paths.seed_validate(("#cloud-config\n" + json.dumps(bad)).encode())
+
     def test_generated_schema_and_scripts_are_valid(self):
         env = os.environ.copy()
         env["CANARY_SEED_SECRET"] = "must-not-enter-seed"

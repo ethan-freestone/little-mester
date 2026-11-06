@@ -36,6 +36,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
+# Some policy operations dynamically load fixed sibling helpers. The VM runtime
+# is immutable/private, so do not create bytecode caches beside those helpers.
+sys.dont_write_bytecode = True
+
 
 class PolicyError(ValueError):
     """Untrusted input or unsafe filesystem state; never include input values."""
@@ -348,7 +352,7 @@ def profile_name(name):
 def profile_path(root, name):
     name = profile_name(name)
     vm = root / "vm"
-    namespaces = {"profiles", "images", "services", "runs", "logs", "reports", ".locks"}
+    namespaces = {"profiles", "images", "services", "metrics", "runs", "logs", "reports", ".locks"}
     require(not (vm / "base.qcow2").exists())
     if name not in namespaces:
         require(not (vm / name).exists())
@@ -1062,7 +1066,24 @@ def seed_validate(raw):
         rb"(?i)(?:password|passwd|token|api[_-]?key|access[_-]?token|refresh[_-]?token|"
         rb"client[_-]?secret|private[_-]?key|credential)"
     )
-    require(sensitive.search(raw) is None)
+    checked = raw
+    body = raw.partition(b"\n")[2].strip()
+    if body.startswith(b"{"):
+        # Our renderer emits JSON cloud-config. These exact account-hardening
+        # values contain 'passwd' but no credentials. Exempt only their known
+        # structure/values, never arbitrary password fields or sudo strings.
+        config = decode(body)
+        require(isinstance(config, dict))
+        users = config.get("users", [])
+        require(isinstance(users, list))
+        for user in users:
+            require(isinstance(user, dict))
+            if user.get("lock_passwd") is True:
+                del user["lock_passwd"]
+            if user.get("sudo") == ["ALL=(ALL) NOPASSWD:ALL"]:
+                del user["sudo"]
+        checked = encoded(config)
+    require(sensitive.search(checked) is None)
     return raw
 
 

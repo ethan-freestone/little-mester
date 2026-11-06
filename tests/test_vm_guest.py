@@ -69,6 +69,19 @@ class GuestReadinessTests(unittest.TestCase):
         self.assertNotEqual(self.validate(2, clean, marker).returncode, 0)
         self.assertNotEqual(self.validate(0, clean, dict(marker, payload_sha256="b" * 64)).returncode, 0)
 
+    def test_terminal_failure_is_distinct_from_running_or_unknown(self):
+        for status, failed in (({"status": "error"}, True),
+                               ({"status": "done", "errors": ["failed"]}, True),
+                               ({"status": "done", "recoverable_errors": {"x": ["failed"]}}, True),
+                               ({"status": "done", "extended_status": "degraded done"}, True),
+                               ({"status": "running", "errors": ["in-progress"]}, False),
+                               ({"status": "done"}, False), ({}, False)):
+            result = subprocess.run(
+                ["bash", "-c", 'source "$1"; vm_guest_cloud_init_terminal_failure "$2"',
+                 "_", str(GUEST_SH), json.dumps(status)], capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0 if failed else 1, status)
+
     def test_payload_hash_is_relative_complete_and_mode_sensitive(self):
         first = self.base / "source-a"
         second = self.base / "source-b"
@@ -228,7 +241,9 @@ set -euo pipefail
 printf '%s\\n' "$*" >> "$FAKE_NPM_LOG"
 case "${1:-}" in
             view) printf '"%s"\\n' "${FAKE_OPENCODE_VERSION:-2.2.5}" ;;
-  install) exit 0 ;;
+  install)
+    if [[ -n "${FAKE_NPM_UMASK_LOG:-}" ]]; then umask > "$FAKE_NPM_UMASK_LOG"; fi
+    exit 0 ;;
   ci)
     if [[ -n "${FAKE_NPM_FAIL_CI_ONCE_FILE:-}" && ! -e "$FAKE_NPM_FAIL_CI_ONCE_FILE" ]]; then
       : > "$FAKE_NPM_FAIL_CI_ONCE_FILE"
@@ -253,7 +268,7 @@ esac
         self.write_fake(
             "opencode",
             '#!/usr/bin/env bash\n'
-            'if [[ "${1:-}" == --version ]]; then echo "${FAKE_OPENCODE_VERSION:-2.2.5}"; exit 0; fi\n'
+            'if [[ "${1:-}" == --version ]]; then echo "${FAKE_OPENCODE_REPORTED_VERSION:-opencode v${FAKE_OPENCODE_VERSION:-2.2.5}}"; exit 0; fi\n'
             'if [[ "${1:-}" == run && "${2:-}" == --help ]]; then echo "--auto Auto-approve permissions not explicitly denied"; exit 0; fi\n'
             'exit 2\n',
         )
@@ -343,6 +358,87 @@ esac
         self.assertEqual(marker["workload_runtime"], "none")
         self.assertFalse(marker["recursion_tools"])
 
+    def test_global_cli_install_is_traversable_without_relaxing_private_payloads(self):
+        modes = self.base / "install-umask"
+        result = self.run_bootstrap(extra_env={"FAKE_NPM_UMASK_LOG": str(modes)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(int(modes.read_text().strip(), 8), 0o022)
+        private = self.guest / "home/mester/.local/share/little-mester/guest-runtime"
+        self.assertEqual(private.stat().st_mode & 0o777, 0o700)
+        config = self.guest / "home/mester/.config/opencode/opencode.json"
+        self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+
+    def test_root_only_cli_cannot_pass_guest_readiness(self):
+        self.write_fake("runuser", '#!/usr/bin/env bash\nexit 126\n')
+        result = self.run_bootstrap()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("guest-user version check", result.stderr)
+        self.assertIn("stage=opencode-version-check", result.stderr)
+        self.assertFalse((self.guest / "var/lib/lab-vm/guest-ready.json").exists())
+
+    def test_home_parents_are_prepared_before_guest_cli_probe_without_recursive_chown(self):
+        source = BOOTSTRAP.read_text()
+        prepare = source.split("vm_guest_prepare_home_parents() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('os.chown(path,uid,gid,follow_symlinks=False)', prepare)
+        self.assertNotIn("rglob", prepare)
+        self.assertNotIn("walk(", prepare)
+        result = self.run_bootstrap()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for relative in (".local", ".local/share", ".config"):
+            self.assertTrue((self.guest / "home/mester" / relative).is_dir())
+
+    def test_symlinked_home_parent_blocks_before_guest_probe(self):
+        target = self.guest / "home/mester/.local"
+        outside = self.base / "outside-local"
+        outside.mkdir()
+        target.symlink_to(outside)
+        result = self.run_bootstrap()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Guest home parent preparation failed", result.stderr)
+        self.assertFalse((self.guest / "var/lib/lab-vm/guest-ready.json").exists())
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_wrong_reported_opencode_version_fails_with_stage_without_raw_output(self):
+        result = self.run_bootstrap(extra_env={"FAKE_OPENCODE_REPORTED_VERSION": "opencode v2.2.4 SECRET_CANARY"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("stage=opencode-version-check", result.stderr)
+        self.assertIn("version differs", result.stderr)
+        self.assertNotIn("SECRET_CANARY", result.stderr)
+        self.assertFalse((self.guest / "var/lib/lab-vm/guest-ready.json").exists())
+
+    def test_silent_subcommand_failure_reports_stage_and_exit(self):
+        result = self.run_bootstrap(extra_env={"FAKE_NPM_FAIL_BUILD": "1"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("stage=private-payload-build", result.stderr)
+        self.assertRegex(result.stderr, r"stage=private-payload-build exit=\d+")
+
+    def test_ubuntu_standard_os_release_symlink_bootstraps(self):
+        source = self.guest / "etc/os-release"
+        target = self.guest / "usr/lib/os-release"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.rename(target)
+        source.symlink_to("../usr/lib/os-release")
+        result = self.run_bootstrap()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_os_release_unexpected_symlink_is_refused_before_packages(self):
+        source = self.guest / "etc/os-release"
+        outside = self.base / "outside-os-release"
+        source.rename(outside)
+        source.symlink_to(outside)
+        result = self.run_bootstrap()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.apt_log.exists())
+
+    def test_ubuntu_absolute_os_release_link_stays_inside_fixture_guest(self):
+        source = self.guest / "etc/os-release"
+        target = self.guest / "usr/lib/os-release"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.rename(target)
+        source.symlink_to("/usr/lib/os-release")
+        result = self.run_bootstrap()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_runtime_docker_installs_rootful_compose_and_explicit_proxy(self):
         docker_config = self.guest / "home/mester/.docker/config.json"
         docker_config.parent.mkdir(parents=True)
@@ -398,6 +494,35 @@ esac
         self.assertIn("install --global --no-audit --no-fund @opencode/cli@2.2.5", npm_calls)
         self.assertNotIn("docker run", BOOTSTRAP.read_text(encoding="utf-8"))
         self.assertEqual((self.guest / "home/mester/.config/opencode/opencode.json").stat().st_mode & 0o777, 0o600)
+
+    def test_private_build_assigns_parent_to_guest_before_switching_user(self):
+        # Exercise production ownership calls, unlike the bootstrap fixture's
+        # test-mode chown bypass. Audit only; no privilege or foreign UID needed.
+        ownership = self.base / "ownership.log"
+        self.write_fake("chown", '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$OWNERSHIP_LOG"\n')
+        self.write_fake("runuser", '''#!/usr/bin/env bash
+set -euo pipefail
+parent="$VM_GUEST_ROOT/home/mester/.local/share/little-mester"
+# A subtree chown alone cannot make a root-owned 0700 ancestor traversable.
+grep -Fx -- "1000:1000 -- $parent" "$OWNERSHIP_LOG" >/dev/null || exit 91
+[[ "$(/usr/bin/stat -c %a "$parent")" == 700 ]] || exit 92
+if [[ "${1:-}" == -u ]]; then shift 2; fi
+if [[ "${1:-}" == -- ]]; then shift; fi
+exec "$@"
+''')
+        env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
+                   VM_GUEST_ROOT=str(self.guest), VM_GUEST_TEST_MODE="0",
+                   OWNERSHIP_LOG=str(ownership), FAKE_NPM_LOG=str(self.npm_log))
+        result = subprocess.run([
+            "bash", "-c", '''
+source "$1"
+VM_GUEST_UID=1000 VM_GUEST_GID=1000 VM_GUEST_MODEL_PROVIDER=none
+VM_GUEST_MODEL_PORT='' VM_GUEST_MODEL_ID=''
+vm_guest_build_private_payload
+''', "_", str(BOOTSTRAP)], env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ci --prefix", self.npm_log.read_text())
+        self.assertTrue((self.guest / "home/mester/.local/share/little-mester/guest-runtime/mcp/package-lock.json").is_file())
 
     def test_aider_and_selected_provider_are_recorded_without_unused_local_api_config(self):
         result = self.run_bootstrap(

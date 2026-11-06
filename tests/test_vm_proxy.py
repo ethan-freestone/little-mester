@@ -115,6 +115,15 @@ class _SilentUpstreamServer(socketserver.ThreadingTCPServer):
 
 
 class ProxyTests(unittest.TestCase):
+    def test_checkout_bootstrap_domains_are_explicit_without_allow_all(self):
+        enabled, domains = proxy.policy(Path(__file__).parents[1] / ".mester-egress")
+        self.assertTrue(enabled)
+        self.assertTrue(domains)
+        for host in ("deb.nodesource.com", "download.docker.com", "registry.npmjs.org",
+                     "pypi.org", "files.pythonhosted.org", "archive.ubuntu.com"):
+            self.assertTrue(proxy.allowed(host, enabled, domains), host)
+        self.assertFalse(proxy.allowed("unrelated.example", enabled, domains))
+
     def test_policy_defaults_to_public_egress_enabled(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(proxy.policy(Path(directory) / ".mester-egress"), (True, set()))
@@ -599,11 +608,13 @@ class ProxyTests(unittest.TestCase):
         enabled, domains = proxy.policy(Path(__file__).parents[1] / ".mester-egress")
         self.assertEqual(
             (enabled, domains),
-            (True, {"pypi.org", "github.com", "npmjs.com", "ubuntu.com", "deb.debian.org"}),
+            (True, {"pypi.org", "files.pythonhosted.org", "github.com", "npmjs.com",
+                    "registry.npmjs.org", "ubuntu.com", "deb.debian.org", "deb.nodesource.com",
+                    "download.docker.com"}),
         )
         for host in ("pypi.org", "github.com", "npmjs.com", "pkg.npmjs.com"):
             self.assertTrue(proxy.allowed(host, enabled, domains), host)
-        self.assertFalse(proxy.allowed("files.pythonhosted.org", enabled, domains))
+        self.assertTrue(proxy.allowed("files.pythonhosted.org", enabled, domains))
         self.assertFalse(proxy.allowed("agent-work.example", enabled, domains))
         self.assertFalse(proxy.allowed("github.com.attacker.invalid", enabled, domains))
 

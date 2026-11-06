@@ -1357,3 +1357,602 @@ otherwise use a clean checkout outside that marker tree. The CLI's debug flag
 previously did not reach workspace-policy validation, so the follow-up adds bounded,
 content-free workspace check labels and propagates `-d` to that path. Metrics stay
 enabled by default; the handoff command no longer overrides them off.
+
+### Package-1 prestart cache failure and bounded recovery
+
+Owner's next start passed workspace/resource prerequisites, then warned that
+metrics forwarding was unavailable and exited 2. Inventory identified a 0755
+`runtime/lib/vm/__pycache__`; direct read-only metadata inspection confirmed
+`starting`, no runtime identity, and no printed run/metrics registries. Source
+ordering identifies dynamic sibling imports before the frozen worker scan as the
+likely cause. Suppress bytecode in the metrics/process/path helpers and launch
+environment; propagate debug policy labels to the frozen worker.
+
+`scripts/vm-recover-prestart.py` defaults to read-only. Explicit `--apply` accepts
+only a starting profile without runtime identity, runs or guest assets, checks
+live process references and stopped reservation ownership, acquires existing
+nonblocking allocation/profile locks, and atomically archives the entire profile
+outside the state root. It preserves cache evidence/runtime exactly, then requires
+normal full-tree validation before releasing the exact dead-owner reservation.
+No chmod, disk deletion, legacy cleanup, runtime patch or metadata transition.
+Fresh owner launch recaptures the fixed source under the original profile name.
+`scripts/vm-start-diagnostics.py` reports selected metadata/assets and verified
+run/metrics process states without argv or full file contents, even when an
+unrelated tree-mode violation prevents normal status. PR_REIMPLEMENTATION controls
+this work; superseded original-branch handoffs are not an additional gate.
+Default-root UX remains deferred until acceptance. Ordinary lab stays Docker.
+Local validation: recovery/diagnostic fixtures 7/7, metrics Python fixtures 13/13,
+lifecycle/metrics Bats 32/32, CLI Bats 35/35 PASS. New scripts/tests Ruff,
+launcher/lifecycle ShellCheck, Bash syntax and diff checks PASS. Launcher exports
+bytecode suppression for all helper imports, including inline identity checks.
+No owner VM lifecycle operation or host acceptance was performed by the assistant.
+
+Owner ran recovery successfully: exact prestart profile preserved at the printed
+private sibling archive, dead-owner reservation released. The next launch failed
+before workspace validation/profile allocation. Source review found that the
+metrics helper creates `vm/metrics`, but `profile_path` omitted `metrics` from
+its allowed namespaces. Added that existing service namespace without allowing
+arbitrary entries. Paths fixtures pass 48/48, including metrics present before
+profile creation and continued refusal of unknown namespaces. Startup inventory
+now reports absent profiles instead of FileNotFoundError. No second recovery is
+needed: retry the fresh launch from updated source, retaining metrics and archive.
+
+### Immediate execution plan to C14
+
+1. Owner retries the same dedicated-profile launch from fixed source. Preserve
+   both parent VM and prestart archive. On failure collect debug output plus
+   startup inventory; diagnose that stage, never restart a live/unknown profile
+   or apply prestart recovery blindly.
+2. Once ready, owner verifies native TUI, writable intended workspace, metrics,
+   and requested permission behavior. This closes package-1 usability only.
+3. Finish package-2 remaining bounded security/evidence implementation listed in
+   docs/vm-c14-handoff-plan.md. Reuse existing fixtures; no new auth campaign,
+   default-root migration, historical ticket gating or unrelated enhancements.
+4. Freeze the candidate and run the already-approved package-3 integrated campaign:
+   actual host preflight, owner-selected local model streams/agent work, Docker
+   workload, lifecycle persistence, host/guest isolation, and changed-VM recursive
+   fail/fix proof with parent continuity. Retain structured evidence; mocks do not
+   replace real observations. Manual OpenAI auth remains optional and deferred.
+5. Required evidence passes -> request C14 activation approval once, implement
+   TASK-16 default/rollback/docs/CI closeout and rerun affected checks. Merge/push
+   only with explicit authorization. Do not bypass functionality/security gates.
+
+### Seed-write root cause and next implementation-model handoff
+
+Owner's fresh retry cleared the namespace/cache refusals. Inventory: `failed`,
+overlay present, seed ISO absent, no runs or runtime identity; metrics registry
+absent. Reproduced failure locally by passing actual renderer output into
+`seed_validate`: the broad secret regex rejected `lock_passwd: true` and the
+fixed `ALL=(ALL) NOPASSWD:ALL` sudo value. JSON cloud-config now exempts only
+those exact structured values before scanning; arbitrary password/token fields,
+lock_passwd=false, and altered sudo strings remain refused. YAML input keeps
+the existing conservative scan. This heuristic is not a universal secret scanner.
+
+Added stage-specific seed-render/write/key-publish/ISO-publish errors. A local
+integration fixture uses real ssh-keygen and genisoimage, actual renderer and
+publication policy, with only overlay creation and payload hashing stubbed; all
+four assets publish privately and staging cleans up. No QEMU/network/guest run.
+Recovery now has explicit `--archive-failed-before-boot` mode: only failed
+profiles without ISO/runs/runtime identity, with stopped ownership and no live
+profile references. Archives the entire overlay/runtime intact outside state,
+then releases a verified dead-owner reservation. No in-place runtime updates.
+
+Next owner action is the current retry command in docs/vm-c14-handoff-plan.md.
+Next implementation model must read this checkpoint plus the immediate execution
+plan above, not restart historical ticket handoffs. Await the owner-run result;
+do not launch VMs from this assistant. If another failure occurs, collect debug
+output and startup inventory before choosing recovery. Frozen active profiles
+must not be patched. Metrics warning is not a proven code defect: absent registry
+can mean a parent/legacy port conflict; startup diagnostics now report listener
+presence. Never kill or adopt an unverified listener. Resolve from actual output.
+Once boot works, close package-1 usability, then package-2 gaps and the already
+approved frozen integrated campaign before C14. Boot alone is not release acceptance.
+Validation for this checkpoint: paths 49/49 (including real local seed publication),
+recovery/diagnostics 9/9, cloud-init 6/6, metrics Python 13/13, lifecycle/disk/metrics
+Bats 46/46 PASS; changed Python Ruff, launcher/lifecycle ShellCheck and diff checks
+PASS. No host VM boot, metrics-forwarding success, or C14 acceptance is claimed.
+
+### Boot observed; Ubuntu identity fix and SSH diagnostic handoff
+
+Owner's next launch booted Ubuntu 24.04.5; serial log shows ssh.service started
+and cloud-init final failed with `Guest OS identity is unavailable`. The guest
+preflight rejected Ubuntu's standard os-release symlink. Fixed exact relative
+`../usr/lib/os-release` and absolute `/usr/lib/os-release` targets, resolved under
+the selected guest root; arbitrary links, symlinked final targets, escapes,
+oversize identity files and non-pinned OS identities remain refused. No shell
+sourcing of OS data. Fixture tests cover normal, relative/absolute and escape.
+
+Host runner independently timed out at 300s waiting for SSH key trust. Owner
+inventory after exit124 verifies proxy/virtiofsd/QEMU and all logger identities
+stopped; profile failed, no recorded runtime identity. The QEMU exit0 and
+virtiofsd exit1 after rollback are not proof of original failure causes. Source
+review has not established why SSH key trust failed; do not claim it fixed.
+Added named proxy/filesystem/QEMU/SSH/cloud-init stages, 15-second wait progress,
+elapsed/limit and console paths. SSH exposes fixed check labels for port validation,
+listener ownership before/after scan, scan unavailable/timeout, host-key
+validation/persistence and verified. No argv, key payloads or arbitrary stderr.
+
+New explicit `--archive-stopped-failed` recovery supports this booted failed
+profile only after verifying all run registries stopped, no live references,
+stopped recorded identity/reservation, and no possible descendants. Whole overlay,
+ISO, keys, frozen runtime and run evidence are archived intact, never patched or
+deleted. Existing prestart modes remain narrow and refuse booted profiles. The
+latest owner command is in docs/vm-c14-handoff-plan.md.
+
+**Implementation-model continuation (only if SSH still fails):**
+1. Collect next runner `check=` label, startup inventory and bounded console tail;
+   do not infer SSH success from ssh.service startup or root cause from rollback.
+2. If ownership fails, inspect the exact registry QEMU identity, selected loopback
+   hostfwd port and `/proc/net/tcp` socket inode ownership using a content-free
+   report. Check FD enumeration races/permissions and IPv4 parsing; never bypass
+   ownership or trust a foreign/legacy listener.
+3. If keyscan fails, use the verified run's exact loopback port for a bounded
+   scan, report exit/result shape only (not raw argv/keys). Verify guest network
+   and restrict=on hostfwd wiring; no broad network relaxation.
+4. If key validation/persistence fails, fixture-reproduce the actual scan shape
+   (nondefault-port host syntax, complete Ed25519 wire blob, single-key rules)
+   and private known_hosts publication/permissions. No StrictHostKeyChecking
+   relaxation, host-file trust fallback or blind retry.
+5. Fix only the reproduced defect and retain regression coverage. Do not patch
+   active frozen runtime. Any new retry must preserve the stopped profile/run
+   and recapture source; no cache cleanup, old handoff gate or legacy changes.
+6. Once SSH succeeds, cloud-init/harness has its own bounded readiness gate;
+   fail early on terminal cloud-init failure with fixed reason codes in a future
+   scoped change rather than letting known failures consume the full deadline.
+   Remaining security/integrated campaign and C14 ordering above still apply.
+Local validation: guest fixtures 15/15, recovery fixtures 12/12, process/lifecycle
+Bats 40/40 PASS; changed Python Ruff, production Bash ShellCheck and diff checks
+PASS. These are fixture results, not a successful owner boot or SSH fix claim.
+
+### SSH two-line scan boundary fix / immediate next owner run
+
+Run43ec03cc-d7a5-4bbb-a34f-50dbfb33f937 exited124 after300s at
+host-key-validation-or-persistence. During the run, owner scan exited0 with two
+stdout lines; strict `_host_key_line` failed, run directory owned0700, known_hosts
+absent. This narrows failure to scan parsing, but does not identify the second
+line as commentary. No raw keys/stdout were collected. OS-release bootstrap fix
+still lacks successful owner evidence; do not imply guest readiness.
+
+Implemented scan-boundary-only ASCII comment/blank filtering with 64KiB bound;
+still require exactly one complete Ed25519 key for exact host/port. Stored
+known_hosts parser remains strict, no comment filtering on stored files; extra
+keys, unknown lines, controls, wrong host/port, partial blobs, and changed keys
+remain refused. Failed trust CLI emits only line/comment/record counts; SSH
+propagates only an allowlisted counts format into progress labels. No key/raw
+stderr output or host-check relaxation. Fixture first reproduced comment+key
+rejection before fix. This handles the likely commentary case, not arbitrary
+two-line scanner output, and is not yet an owner-verified SSH fix.
+
+Next owner step: run documented `--archive-stopped-failed --apply && ./lab vm run`
+from updated checkout. Archiver verifies stopped ownership before archiving the
+entire disk/ISO/runtime/run evidence and recapturing source. Do not edit frozen
+profiles, destroy prior evidence, touch parent listeners or rerun if active.
+If it still waits, counts identify whether commentary or extra/unknown records
+remain; use the scoped SSH continuation above rather than restarting the workflow.
+Once SSH passes, inspect new cloud-init/harness milestones and actual console
+failures. Any substantial remaining provisioning/metrics work belongs to the
+implementation-model handoff; C14 still follows the established acceptance gates.
+Local validation: process Python9/9 and process Bats13/13 PASS; changed Python
+Ruff, SSH/runner ShellCheck and diff checks PASS. No VM operation performed here.
+
+### Owner-confirmed SSH success; provisioning egress failure; reusable log report
+
+Run19609672-f460-4ba6-8869-ab7683b6e10f verified guest SSH and entered
+cloud-init readiness. Serial log showed successful base package installation,
+then curl403 and terminal scripts_user failure around79s. This clears the earlier
+OS-identity blocker but not bootstrap acceptance. Next source download is the
+NodeSource signing key; owner confirmed checkout egress allowlist contains only
+pypi.org,github.com,npmjs.com,ubuntu.com,deb.debian.org, excluding NodeSource.
+NodeSource egress denial is the likely403 source, not a proven origin response.
+No policy bypass or listener takeover is authorized/implemented by diagnostics.
+
+Owner requested a reusable collating/redacting script instead of custom commands.
+Extended vm-start-diagnostics.py with --logs, using vm-log-report.py: selected
+latest-run host logs and fixed cloud-init status/output/log commands over existing
+isolated SSH. Exact registry identity, profile disk argv binding and loopback
+listener ownership gate guest collection; no host-key learning, arbitrary command
+input or file exports. Current source collector can inspect the running frozen
+profile without patching it. Stdout is bounded64KiB/deadline20s; cleanup signals
+only the collector's private client process group, never VM/run services. Host
+tails are private regular/nonlinked files, capped64KiB each and80 report lines.
+No raw log files are saved. Public/private key lines/blocks/fingerprints,
+credential-like lines, URLs and long identifiers are redacted; explicitly
+best-effort and owner review remains required before sharing.
+
+Use the one-command --logs invocation at the top of the recovery section in
+docs/vm-c14-handoff-plan.md, even while launch is active. Do not recover/restart
+the active VM to run diagnostics. Remaining implementation-model scope: reconcile
+required bootstrap destinations with explicit egress policy without weakening
+public/private boundaries; detect terminal cloud-init failure promptly; preserve
+active/failed disks and frozen run evidence before any fresh retry. Do not assume
+the current run stopped until inventory confirms it. Metrics remains separately
+blocked by a present unverified listener and must not touch parent service state.
+
+### Required package domains, cloud-init fail-fast, interrupted-state guard
+
+Owner requested implementation and reports killing the launcher; subsequent list
+still says provisioning. This is not stopped-process evidence. Added explicit
+checkout-policy entries deb.nodesource.com/download.docker.com (source key/APT
+URLs), registry.npmjs.org (npm and committed MCP lockfile artifacts), and
+files.pythonhosted.org (pip wheel CDN). Existing allowed domains retained; no
+blank allowlist, bypass, public/private-network relaxation or unrelated cloud auth
+domains. This is checkout policy, not an implicit exception for arbitrary projects.
+Ancestor policy can still independently deny; do not bypass it.
+
+Cloud-init readiness now captures JSON even on nonzero status, detects terminal
+error/disabled/degraded-done or done-with-errors, and exits immediately with a fixed
+stage diagnostic and original nonzero code (1 if command itself exited0). Running,
+unknown and malformed JSON do not trigger terminal classification. Marker is never
+read after terminal failure. Added an actual lifecycle/SSH fixture returning exit2
+and terminal JSON: only one SSH call, immediate exit2, no secret-error output.
+
+Archive-stopped-failed now accepts interrupted starting/provisioning metadata under
+the same all-stopped/run/identity/dead-owner/no-descendant checks. It does not signal
+or reclassify an active guest. If guarded archive refuses, collect inventory/logs;
+do not force kill/rewrite status to unblock it. Controlled interrupted-provisioning
+shutdown is the next implementation-model task ONLY if current processes remain
+live: reuse exact registry/SSH ownership, terminal-cloud-init confirmation and
+child guard; require controller lock free/dead; send graceful guest poweroff only,
+wait bounded for exact QEMU stopped, then stop owned sidecars, preserve disk/logs,
+and refuse unknown identity or timeout without escalation. No broad pkill/down.
+This has not been implemented or host-tested; do not substitute a custom force
+command. The owner can first try the documented guarded archive/fresh launch;
+it proceeds only if the interrupted launch truly left all processes stopped.
+Validation: guest16/16, proxy37/37, recovery15/15 and lifecycle Bats28/28 PASS;
+changed Python Ruff, guest/lifecycle ShellCheck and diff checks PASS. No owner VM
+stop/restart, live package download or provisioning success is claimed here.
+
+### Run4b967dd8 terminal failure and shutdown-wait defect
+
+Owner's next run verified SSH then failed terminally after about173s, exited2
+with cleanup-unverified. Follow-up inventory: profile unknown, exact QEMU and
+virtiofsd/loggers stopped with exit0, proxy and proxy_logger still running.
+Serial tail shows clean guest poweroff at188s, hiding the earlier bootstrap
+failure. Guest SSH log collection is correctly unavailable after poweroff.
+
+Found concrete cleanup defect: vm_lifecycle_wait_qemu_stopped called wait-role,
+which waits for role registration and immediately reports an already-registered
+running process. It did not wait for exit, so graceful poweroff was prematurely
+classified as timeout and sidecar cleanup was skipped. Corrected future source
+to poll exact identity until stopped, unknown, or bounded deadline; never signals
+QEMU or treats missing/unknown as stopped. Regression invokes the real waiter
+with a helper reporting running then stopped. Frozen failed profile is unchanged.
+Collector now adds redacted error_excerpt across the full bounded64KiB tail,
+so the final80 shutdown lines no longer hide earlier errors still in that window.
+It cannot recover errors outside that bound or rotated files; do not infer their
+absence. No retry or process operation executed on the owner's VM.
+
+Immediate owner action: rerun the same --logs collector and inspect error_excerpt.
+Current unknown profile with live proxy does not qualify for archival. After the
+actual bootstrap cause is known, next implementation model must provide a narrow
+explicit recovery for this known interrupted cleanup: verify exact stopped QEMU,
+no descendants, dead controller/free locks; stop only exact run-owned proxy
+supervisor through process.py identity checks; reverify every run stopped;
+preserve unknown metadata/evidence and require explicit stopped-unknown archival
+authorization rather than inventing an unknown->failed schema transition. Never
+touch parent metrics listener or broad process groups. No blind relaunch.
+Local checks: lifecycle Bats29/29 and log fixtures6/6 PASS; ShellCheck/Ruff PASS.
+
+### Silent post-npm failure reproduced; guarded unknown-proxy recovery
+
+Latest owner context shows npm added5packages immediately before scripts_user
+failed, without a diagnostic. Read-only local `opencode --version` prints
+`opencode v2.2.5`; the bootstrap regex required a non-alphanumeric immediately
+before the numeric version and therefore rejected the CLI's v prefix. Corrected
+known plain/v-prefixed/labelled formats while retaining exact saved-version
+matching; malformed/mismatched output gets a fixed explicit error, never raw
+version output. Updated in-place updater parsing for v prefix too. Fixture default
+now matches actual CLI output; mismatch/no-secret and stage failure tests added.
+Bootstrap prints fixed named stages across preflight/packages/Node/Python/Docker/
+OpenCode/version/adapter/private build/readiness and ERR trap reports only fixed
+stage plus exit status. No BASH_COMMAND/argv tracing. Actual guest success is still
+unverified; this fixes a concrete reproducer consistent with the host symptom.
+
+New explicit --archive-unknown-cleanup addresses current run4b967dd8 leftovers:
+unknown metadata only, stopped recorded QEMU matched to run registry, no possible
+descendants, all nonproxy roles stopped, only exact run-bound proxy/logger may
+remain live. Requires dead/absent reservation owner and free allocation/profile
+locks before signalling. Stops only run supervisors via process.py exact identity
+checks, rechecks stopped roles and live references, archives whole disk/ISO/keys/
+runtime/logs with unknown metadata unchanged, then releases dead reservation.
+Read-only mode does not signal. No QEMU/parent/metrics signals, unknown->failed
+schema changes, disk deletion or frozen-runtime edits. Synthetic real supervisor
+fixture verifies proxy stops and overlay/evidence preserved; live nonproxy refuses.
+
+Owner retry is now the top command in docs/vm-c14-handoff-plan.md. If it refuses,
+stop and report; do not fall back to force-kill or a less restrictive archive mode.
+If fresh bootstrap fails, use the existing --logs collector; named stages and
+stage/exit trap should avoid further blind failure-context iterations. Remaining
+substantial work belongs to implementation-model handoff under the existing
+package-1 -> package-2 -> integrated acceptance -> C14 plan, not new old-ticket gates.
+Validation: guest18/18, update15/15, recovery17/17 PASS; changed production Bash
+ShellCheck, changed Python Ruff and diff checks PASS. Local CLI version/help-only
+observation; no owner VM operation, provider call or provisioning success claimed.
+
+### Orphan supervisor lock inheritance and unchanged version policy
+
+Owner's unknown-cleanup attempt passed stopped-QEMU/proxy identity/dead-controller
+preflight, then nonblocking lifecycle flock refused BlockingIOError before any
+archive. Source analysis and real-process fixture reproduce long-lived run-logged
+supervisors retaining the controller's inherited allocation/profile descriptors.
+Child close_fds did not close the supervisor's own references; these outlived the
+controller and kept lifecycle locks held.
+
+New supervisor source verifies and closes only its inherited lifecycle FD copies,
+clears stale VM_HELD metadata, and never LOCK_UNs the controller's shared flock.
+Fixture proves controller remains locked while alive and both locks become
+acquirable after it closes, even while supervisor/child continue running.
+For the already-frozen orphan logger, unknown-cleanup now has a guarded fallback:
+same stopped-QEMU/dead-controller/run-binding checks, examine kernel flock owners/
+waiters plus verified proxy/supervisor FD holders, refuse any other live holder,
+then retire only exact orphan proxy supervisors and acquire normal locks before
+whole-profile archival. A live-controller-lock fixture still refuses. No lock
+stealing, broad kill, QEMU signal, metadata rewrite or parent listener operation.
+Unknown/missing or inaccessible relevant lock ownership fails closed. Unrelated
+applications' private FD tables are not inspected.
+
+Owner clarified that latest/in-VM upgrades are required, not a one-off pinned
+release. No OpenCode release was hard-coded: default latest resolves once per
+bootstrap transaction; explicit owner pins and in-VM updater remain supported.
+The version-format fix accepts CLI display labels/v prefix while validating the
+resolved transaction version. Warm starts do not update implicitly. Reuse the
+same guarded unknown-cleanup/retry command; successful owner provisioning remains
+unverified. Local checks: process Python10/10, recovery18/18, process Bats13/13 PASS.
+
+### Run5d202308 private MCP build failure — parent ownership correction
+
+Owner's guarded archive succeeded and preserved the prior profile at the printed
+private sibling archive. Fresh run5d202308-f537-44ba-8487-4e68d8fa9515 passed SSH,
+then failed terminally at about174s readiness elapsed. Updated collector identifies
+`stage=private-payload-build exit=1` and npm ci EUSAGE/unusable lockfile. Post-run
+profile failed, no runtime identity, all six recorded roles stopped with exit0;
+guest collection unavailable after clean poweroff. These exit0s are cleanup
+results, not successful provisioning. Metrics registry absent with a present
+unverified listener remains separate and untouched.
+
+Owner authorized planning then implementation, after a read-only diagnosis pause.
+PR_REIMPLEMENTATION and the current C14 handoff control this work; no further
+ticket calls or writes. Inspection found root's install -d creates the private
+share_root as0700, but only the stage subtree was chowned to mester. The parent
+therefore blocks the runuser npm process from reading its valid copied lockfile.
+Real npm, in a dependency-free disposable fixture with offline/no-script/no-audit
+options, reproduced the exact EUSAGE with an inaccessible parent (exit1) and
+succeeded with parent access restored (exit0). No registry or VM operation.
+
+Fix: nonrecursive chown of the one private parent to the selected guest UID/GID,
+before staging/npm, keeping0700. Existing runtime subtrees are not recursively
+reowned by this new operation. Latest-once/pins/in-VM updates, npm ci/lockfile,
+egress and host boundaries remain unchanged. New production-path ownership-order
+test audits chown and refuses the synthetic user switch unless that exact parent
+was assigned first; it fails before the fix and passes after. Existing fixture
+runuser never switched users, which had hidden this traversal defect.
+
+Initial focused validation: guest/update/recovery/log Python59/59 PASS; changed
+test Ruff, production bootstrap ShellCheck and Bash syntax PASS. Final milestone
+checks recorded below. No assistant VM start/stop, host acceptance, source-version
+pin, credential action, push/merge or C14 activation. Preserve all uncommitted work
+and vm-migration-plan.md. Next owner handoff uses guarded archive-stopped-failed
+then fresh launch, not the superseded archive-unknown-cleanup mode. Any refusal
+stops; any new provisioning failure requires collector evidence before retry.
+
+Final local milestone: `python3 -B -m unittest discover -s tests`365/365 PASS;
+`bats tests/`149/149 PASS; `git diff --check` PASS. These include the inherited
+uncommitted fixes and remain local fixture evidence, not owner VM acceptance.
+
+### Run71ff52d4 ready; native attach and browser-cleanup failures
+
+Owner archived the failed profile successfully at the printed private sibling
+archive, then fresh run71ff52d4-d3d5-4394-a43d-440b1929f07c passed SSH and
+provisioning, printing `Profile branch-dev-20261105 is ready`. This is owner
+bootstrap-readiness evidence, not TUI/usability/metrics or integrated acceptance.
+Native attach then failed `exec: opencode: not found`, and browser EXIT cleanup
+raised `15: unbound variable`. Source confirms cleanup reads argument15 while
+trap/callers pass14; that failure may leave session helpers and must not be
+reported as successful cleanup. Root bootstrap's version check does not establish
+guest-user executable visibility. Preserve ready profile and parent; no archive,
+restart, credential operation or frozen-runtime edit is justified.
+
+Extended the existing current-source read-only collector with fixed user/root
+command lookup and bounded standard-bin namei metadata, placed after cloud-init
+logs so last80 lines retain it. No OpenCode execution, config/auth read, unbounded
+filesystem search or VM signals; existing verified SSH and20s/64KiB bounds remain.
+Local log tests7/7, changed-file Ruff and git diff --check PASS. Next owner step is
+only the same --logs collector; diagnose visibility before selecting a source fix
+and a non-reprovisioning way to validate it. Current handoff supersedes older
+archive-and-retry instructions. Tickets remain untouched.
+
+### Confirmed global npm directory-mode defect; ready-VM repair handoff
+
+Owner's collector verifies run71ff52d4 remains ready/running and cloud-init finished
+with0failures; private MCP ci/build succeeded. Root resolves /usr/bin/opencode,
+mester does not. namei proves its exact symlink reaches root0755 opencode.exe
+through root0700 @opencode/cli/bin directories. Bootstrap-wide umask077 was
+inherited by the global npm install. Source now scopes022 only inside that install
+subprocess, retaining private077 afterward, and checks version through runuser
+mester with the actual agent PATH before readiness. Shared install code also
+serves update. No hard-coded OpenCode version, unlocked install or permission/
+egress boundary changes. Existing frozen runtime/guest install are not patched by
+these local edits.
+
+Browser cleanup source fixes the separate missing argument15: its14-argument
+callers carry bridge ports, and the session always uses mester@127.0.0.1; cleanup
+now uses that same fixed endpoint. Regression under nounset reproduces old failure
+and passes after fix. Global-install umask regression also went red before fix;
+guest-user execution denial now blocks readiness, even when root could execute.
+
+Added scripts/vm-agent-permissions.py as a bounded owner-operated correction for
+the diagnosed ready guest, default audit/explicit --apply. Uses existing profile,
+exact registry identity and QEMU-owned/pinned SSH transport checks; requires exact
+run ID, ready/running state, diagnosed canonical guest paths/root ownership/modes
+and symlink. Validates all first, then chmods only three public package directories
+to0755 and checks --version as mester. No recursive chmod, package/file-content,
+credential, frozen-runtime, metadata, VM or parent-service change. Six fixtures
+cover audit, exact/idempotent apply/private-file preservation, unsafe-mode and
+symlink refusals, nonready/unknown/stopped/wrong-run/foreign-listener no-SSH cases.
+No owner repair or host acceptance has yet occurred.
+
+Validation: full Python374/374 and Bats149/149 PASS; changed Python Ruff PASS;
+bootstrap ShellCheck and Bash syntax PASS; repair --help and git diff --check PASS.
+Full ShellCheck services.sh retains the same existing SC2016/SC2015/SC2034 findings,
+confirmed by checking its HEAD Git-object contents; no new finding from cleanup
+change. Next owner step is only the exact --apply handoff in the C14 plan. After
+successful version confirmation, attach existing VM with --no-browser-auth for
+usability, avoiding its frozen cleanup bug without replacing runtime. Prior auth
+helpers may remain: no cleanup PASS is claimed, and exact-identity inspection is
+still needed. Keep all profiles/archives, parent and metrics listener intact;
+ordinary lab remains Docker, package1 usability and later gates still open.
+
+### Ready-guest repair refusal — expose the failed predicate, do not relax it
+
+Owner --apply returned the generic diagnosed-shape refusal, exit2. This comes
+from pre-chmod validation, so no directory modes were changed. The exact
+predicate is unknown; namei did not capture all checked metadata (including
+executable link count). Replaced generic guest validation refusal with fixed
+check labels and numeric mode/UID/link counts, never arbitrary paths/file bodies.
+Existing conditions retained; explicit require checks also remain enforced with
+Python optimization. New real hardlink fixture reproduces the refusal and
+verifies fixed executable-links/links2 output with every directory unchanged;
+unsafe-mode and symlink fixtures verify distinct labels too. Seven repair tests,
+changed-file Ruff and git diff --check PASS. No VM/guest mutation performed here.
+Next owner action is the exact same helper WITHOUT --apply (audit-only), then
+return result and stop. Preserve ready VM; no blind apply/restart or weakened
+checks. Current C14 handoff updated; no ticket calls.
+
+### Ready-guest hardlink audit resolved
+
+Owner audit reports executable-links mode0755 uid0 links2. Single-link refusal
+was overconservative for this operation: it does not change binary contents or
+inode permissions, only three known public ancestor directories. Removed only
+the executable-link-count condition; all canonical path, exact symlink, regular
+file/root-owner/mode and directory checks remain. Revised real-hardlink fixture
+applies directory-only repair and verifies both links retain inode/mode/owner/
+link count/mtime/content; private file remains untouched in existing coverage.
+Seven repair tests, changed-file Ruff and git diff --check PASS. No owner apply
+or VM mutation performed by this session; next owner action is exact --apply
+then stop with correction/version output. Ready VM, overlay, frozen runtime,
+parent state and metrics listener preserved; prior helper cleanup still not
+claimed. Current handoff supersedes audit-only pause. Tickets untouched.
+
+### Public package correction applied; guest XDG-parent write refusal
+
+Owner --apply printed guest_opencode_directory_modes=corrected; the subsequent
+mester --version invocation reached OpenCode startup, then failed mkdir for
+/home/mester/.local/share/opencode/log (EACCES creating its opencode parent).
+The three public directory-mode changes succeeded and are not rolled back;
+guest version/TUI success remains unverified. Do not conflate new home-write
+failure with executable visibility or rebuild the ready VM.
+
+Expanded helper audit-only output with fixed home/.local/share/opencode/config/
+cache path metadata (type, mode, UID, links, or absent). No enumeration/file
+contents/auth inspection, mutation or recursive ownership operations. Eight
+repair tests, Ruff and git diff --check PASS, including synthetic unread secret
+and unchanged-parent-mode coverage. Next owner step: same exact helper/run ID
+without --apply; return result and stop. Diagnose actual ownership before fixing
+selected parents; preserve all runtime/credential data. No ticket calls or VM
+operations by the assistant. Current handoff updated.
+
+### Confirmed root-owned XDG parents — targeted owner correction
+
+Owner audit identifies home uid1000 mode0750; .local, .local/share and .config
+uid0 mode0755; cache uid1000 mode0700; .local/share/opencode absent. This is a
+parent ownership defect, not existing auth-store permissions or another package
+visibility failure. Bootstrap now validates all three XDG parents before the
+guest-user OpenCode version check, creates missing directories0700, assigns only
+the parents nonrecursively to selected guest UID/GID, and preserves existing
+safe directory modes/contents. Symlink/unexpected-type/foreign-owner/mode refuses;
+fixture mode keeps synthetic ownership handling without privileged operations.
+
+Added explicit --repair-home (requires --apply) to the existing exact-run helper.
+Validates account/home/three canonical parent directory owners and modes before
+any package chmod or parent chown, then changes only those parent owners to the
+guest mester account, leaving descendants and home/cache unchanged. Public
+package directory-mode correction is idempotent. No recursive chown, auth data
+read, reinstall, VM restart, parent process/service operation or frozen-runtime
+edit. Owner command in C14 handoff returns only correction status plus --version;
+stop on refusal or new error before attach. Current ready profile preserved.
+
+Focused guest/update/repair48/48 PASS; full Python380/380 and Bats149/149 PASS.
+Changed-file Ruff, bootstrap ShellCheck/Bash syntax and git diff --check PASS.
+Coverage includes safe parent preparation, unsafe symlink no readiness/no target
+writes, parent-mode preservation and unchanged synthetic private-data inode/stat/
+contents, plus validation before the first mutation. No owner correction or live
+version/TUI success claimed by these fixtures. Next: exact --apply --repair-home,
+return result and stop, then --no-browser-auth attach only after version success.
+All prior archives, ready VM, parent, metrics listener and mission file preserved;
+tickets untouched. Package1 usability and later acceptance/C14 still pending.
+
+### Owner-confirmed repaired guest executable; next native attach
+
+Owner ran exact run71ff52d4 helper --apply --repair-home successfully: both
+guest_home_parent_ownership=corrected and guest_opencode_directory_modes=corrected,
+then opencode v2.2.5 as mester. This is live guest executable evidence; no restart,
+reinstall or frozen-runtime patch. TUI/metrics/permission/model/workload/recursive
+acceptance are not established by --version.
+Next owner action is existing-profile `lab vm agent branch-dev-20261105` with
+explicit ask permissions and --no-browser-auth, under the same dedicated state
+root. Reuses frozen controller/profile and avoids its old browser-cleanup defect
+for the usability observation. Owner observes rendering/input/errors, no login,
+model selection or agent task yet. Metrics and potential prior auth-helper cleanup
+remain open. Current C14 handoff updated; no assistant VM operation or ticket call.
+
+### Owner reports native TUI opens; Escape works; feature gates remain open
+
+Owner attached and reports TUI opens and Escape handling works. No metrics or
+local models visible; no browser auth under the explicit --no-browser-auth
+usability attach; remote-model request retries with ERR_PROXY_TUNNEL403. Record
+only partial usability: no model completion, metrics, browser, actual permissions
+or integrated acceptance PASS. Cancel retries rather than generate paid traffic.
+Metrics forward was already unavailable/unverified and model provider remained
+none pending discovery/owner selection. Checkout allowlist currently has package
+domains, consistent with remote denial, but exact denied hostname/policy layer
+still unknown. No allow-all, proxy bypass or parent service takeover.
+
+Next owner action is existing standalone --discover-providers on the parent VM,
+read-only fixed-loopback model-list queries, then return safe IDs/status and
+select an exact available provider/model. No service startup, configuration or
+VM/campaign operation authorized by discovery itself. Updated current C14 handoff;
+all required feature/security/usability gates remain, browser capability not
+removed, prior helper cleanup and metrics verification still open. No source
+implementation change, ticket call or VM operation in this observation step.
+
+## Owner-authorized implementation checkpoint and CI repair — 2026-11-06
+
+Owner approved checkpointing existing work, fixing the reported GitHub Actions
+failure, then detailed planning only and a pause before further implementation.
+No push/merge/default cutover or live operational action is part of this phase.
+Preserve/exclude vm-migration-plan.md, all existing profiles/archives, credentials,
+the ready development VM, parent session and unverified metrics listener.
+
+Reproduced `shellcheck lab scripts/*.sh`: SC1091 at dispatcher's explicit source
+of lab-docker. CI now lists all three launchers: `shellcheck lab lab-docker lab-vm
+scripts/*.sh`. Exact expanded command PASS without disabling SC1091, changing
+severity or removing scripts. The workflow continues to run Node/Bats/hygiene/
+ticket-store jobs unchanged otherwise; no ticket-store operation was run here.
+
+Reviewed existing production and regression diffs plus new bounded recovery,
+redacted diagnostics and guest-only permission-repair helpers. This checkpoint
+captures earlier boot/ownership/seed/SSH/lock/readiness fixes and evidence, not
+the approved but not-yet-implemented inference architecture.
+
+Revalidated locally for this checkpoint:
+
+| Command/check | Observed result |
+|---|---|
+| python3 -B -m unittest discover -s tests |380/380 PASS|
+| bats tests/ |149/149 PASS|
+| shellcheck lab lab-docker lab-vm scripts/*.sh |PASS, full default severity|
+| ruff check scripts/*.py agent/metrics/gather.py bench/bench.py |PASS|
+| scripts Python py_compile with external temporary cache; VM/test Python AST |PASS|
+| npm run build in little-mester-mcp |PASS, existing local dependencies|
+| npm run check:package |PASS|
+| npm test -- --runInBand |3 suites/143 tests PASS, temporary ticket fixtures only|
+| git diff --check |PASS|
+| python3 -B scripts/check-docs-consistency.py |Same8 previously recorded README/DECISIONS drift/link failures; still required C14 closeout work, not a newly green docs gate|
+
+No npm ci/download, registry/model request, real ticket read/write, VM operation,
+provider/service mutation, credential action or active harness restart. The
+untracked mission file remains SHA256
+3d6ee2115423272b88a8efd8d4d33462318d5ae4c537841091e513ee5e2d1374 and is excluded
+from staging. SHA of this implementation checkpoint is recorded by the subsequent
+planning-only commit, which will define executable pre-C14 inference/performance
+steps and an explicit pause for the owner to choose the implementation model.

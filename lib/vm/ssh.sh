@@ -71,25 +71,40 @@ vm_ssh_listener_verified() {
 
 vm_ssh_trust_host_key() {
   local known_hosts="$1" port="$2" registry="$3" run_id="$4" role="$5"
+  VM_SSH_TRUST_STAGE='port-validation'
   vm_ssh_port_valid "$port" || return 2
+  VM_SSH_TRUST_STAGE=listener-ownership-before-scan
   vm_ssh_listener_verified "$registry" "$run_id" "$role" "$port" || {
     vm_ssh_error 'SSH host-key scan requires a verified VM-owned loopback listener.'
     return 2
   }
-  local scan_output scan_status
+  local scan_output scan_status trust_result
+  VM_SSH_TRUST_STAGE=keyscan-unavailable
   if scan_output="$("$VM_SSH_TIMEOUT_BIN" --foreground --signal=TERM --kill-after=1s \
     4s "$VM_SSH_KEYSCAN_BIN" -T 3 -t ed25519 -p "$port" 127.0.0.1 2>/dev/null)"; then
     scan_status=0
   else
     scan_status=$?
   fi
-  (( scan_status == 0 )) || return 1
+  if (( scan_status != 0 )); then
+    [[ "$scan_status" != 124 && "$scan_status" != 137 ]] || VM_SSH_TRUST_STAGE=keyscan-timeout
+    return 1
+  fi
+  VM_SSH_TRUST_STAGE=listener-ownership-after-scan
   vm_ssh_listener_verified "$registry" "$run_id" "$role" "$port" || {
     vm_ssh_error 'SSH listener identity changed during host-key scan.'
     return 2
   }
-  printf '%s\n' "$scan_output" | "$VM_SSH_PYTHON" "$VM_SSH_PROCESS_HELPER" trust-key \
-    --known-hosts "$known_hosts" --host 127.0.0.1 --port "$port" >/dev/null 2>&1
+  VM_SSH_TRUST_STAGE='host-key-validation-or-persistence'
+  if ! trust_result="$(printf '%s\n' "$scan_output" | "$VM_SSH_PYTHON" "$VM_SSH_PROCESS_HELPER" trust-key \
+    --known-hosts "$known_hosts" --host 127.0.0.1 --port "$port" 2>/dev/null)"; then
+    if [[ "$trust_result" =~ ^scan-lines=[0-9]{1,5},comments=[0-9]{1,5},records=[0-9]{1,5}$ ]]; then
+      VM_SSH_TRUST_STAGE="host-key-validation-or-persistence:$trust_result"
+    fi
+    return 2
+  fi
+  # shellcheck disable=SC2034 # Public diagnostic consumed by runner.sh.
+  VM_SSH_TRUST_STAGE=verified
 }
 
 vm_ssh_exec() {

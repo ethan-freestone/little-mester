@@ -71,6 +71,17 @@ class PathsTest(unittest.TestCase):
         self.assertEqual(data["auth_escrow_dir"], str(self.root / "secrets"))
         self.assertEqual(list(self.root.iterdir()), before)
 
+    def test_context_accepts_private_metrics_namespace_before_profile_creation(self):
+        metrics = self.root / "vm/metrics"
+        metrics.mkdir(parents=True, mode=0o700)
+        metrics.parent.chmod(0o700)
+        data = self.cli("context", "--profile", "test", "--repository", self.repo)
+        self.assertEqual(data["profile_name"], "test")
+        self.assertFalse((self.root / "vm/profiles/test").exists())
+        foreign = self.root / "vm/unrecognized"
+        foreign.mkdir(mode=0o700)
+        self.cli("context", "--profile", "test", "--repository", self.repo, ok=False)
+
     def test_bounded_log_writer_rotates_only_current_and_one_prior_segment(self):
         paths = load_module()
         log = self.root / "serial.log"
@@ -918,6 +929,36 @@ class PathsTest(unittest.TestCase):
         self.assertEqual(bad.returncode, 2)
         self.assertNotIn(b"SECRET_CANARY", bad.stderr)
         self.assertEqual(target.read_bytes(), before)
+
+    @unittest.skipUnless(shutil.which("genisoimage") and shutil.which("ssh-keygen"),
+                         "local ISO and key tools required; no VM/network operations")
+    def test_real_seed_preparation_reaches_key_and_iso_publication(self):
+        data = self.profile()
+        data["status"] = "starting"
+        self.cli("profile-write", "--profile", "test", data=data)
+        result = subprocess.run(
+            ["bash", "-c", '''
+set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
+source "$1/lib/vm/lifecycle.sh"
+source "$1/lib/vm/disk.sh"
+vm_disk_create_overlay() {
+  printf fixture-disk > "$1/vm/profiles/$2/disk.qcow2"
+  chmod 600 "$1/vm/profiles/$2/disk.qcow2"
+}
+vm_guest_payload_hash() { printf '%064d\\n' 0; }
+payload="$(vm_guest_payload_hash)"
+vm_lifecycle_prepare_profile_assets_locked "$2" test "$3" 0 0 docker opencode latest "$payload" 1000 1000
+''', "_", str(SCRIPT.parents[2]), str(self.root), str(self.workspace)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        profile = self.root / "vm/profiles/test"
+        for name in ("disk.qcow2", "seed.user-data", "control-key", "seed.iso"):
+            self.assertTrue((profile / name).is_file(), name)
+            self.assertEqual((profile / name).stat().st_mode & 0o777, 0o600)
+        self.assertFalse(list(profile.glob(".asset.*")))
+        self.assertFalse((profile / "runs").exists())
 
     def test_seed_atomic_write_failure_preserves_existing_file(self):
         module = load_module()
