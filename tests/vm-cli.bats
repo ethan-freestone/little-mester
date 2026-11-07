@@ -113,6 +113,22 @@ parse() {
   [[ "$output" != *'+ '* ]]
 }
 
+@test "metrics host port is a singleton config override" {
+  run bash -c '
+    source "$1/lib/vm/config.sh"
+    vm_cli_defaults
+    vm_cli_parse run "$2" --metrics-port 24680
+    printf "%s\n" "${VM_OPTIONS[metrics-port]}"
+  ' _ "$ROOT" "$BATS_TEST_TMPDIR/workspace"
+  [ "$status" -eq 0 ]
+  [ "$output" = "24680" ]
+
+  run bash -c 'source "$1/lib/vm/config.sh"; vm_cli_defaults; vm_cli_parse run "$2" --metrics-port 24680 --metrics-port 24681' \
+    _ "$ROOT" "$BATS_TEST_TMPDIR/workspace"
+  [ "$status" -eq 2 ]
+  [ ! -e "$MESTER_STATE_DIR" ]
+}
+
 @test "CLI debug explains private-state rejection without exposing file contents" {
   mkdir -m 700 "$MESTER_STATE_DIR"
   mkdir -m 700 "$MESTER_STATE_DIR/logs"

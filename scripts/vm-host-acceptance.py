@@ -27,6 +27,7 @@ import secrets
 import select
 import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -1335,7 +1336,7 @@ def _listener_owned_loopback(profile: dict[str, Any]) -> bool:
 
 
 def _guest_exec(state_root: Path, profile: str, command: str, *, timeout: int = 120,
-                campaign_profile: bool = True) -> subprocess.CompletedProcess:
+                campaign_profile: bool = True, allow_failure: bool = False) -> subprocess.CompletedProcess:
     timeout = _bounded_timeout(timeout)
     allowed_name = PROFILE_RE if campaign_profile else PROFILE_NAME_RE
     if (not isinstance(profile, str) or allowed_name.fullmatch(profile) is None
@@ -1374,8 +1375,14 @@ vm_ssh_noninteractive "$key" "$known_hosts" "$port" "$((deadline + 5))" mester@1
         )
     except subprocess.TimeoutExpired as error:
         raise TimeoutError("bounded guest command timed out") from error
-    if completed.returncode != 0:
+    if completed.returncode != 0 and not allow_failure:
         raise AcceptanceError("bounded guest command failed")
+    if allow_failure:
+        # Development probes consume only fixed, size-bounded JSON on stdout.
+        # Never forward guest stderr, which may contain arbitrary guest output.
+        return subprocess.CompletedProcess(
+            completed.args, completed.returncode, completed.stdout[:64 * 1024], b"",
+        )
     return completed
 
 
@@ -4267,6 +4274,497 @@ def execute_stage(source: Path, state_root: Path, run_id: str, suites: list[str]
     )
 
 
+DEV_STEPS = ("inspect", "boot", "auth", "work", "metrics", "nested")
+DEV_STATUSES = {"PASS", "FAIL", "NOT_RUN", "WAITING_OWNER", "BLOCKED_EXTERNAL"}
+DEV_MAX_OUTPUT = 64 * 1024
+DEV_PROXY_HOST = "auth.openai.com"
+
+
+def _dev_check(check_id: str, expected: str, observed: Any, status: str,
+               cause_exit_code: int | None = None, *, repair: str = "M0-exact-transport",
+               action: str = "Repair this exact check and rerun its evidence step.",
+               blocks: list[str] | None = None) -> dict[str, Any]:
+    if status not in DEV_STATUSES:
+        raise AcceptanceError("development evidence status is invalid")
+    check = {"id": check_id, "expected": expected, "observed": observed,
+             "status": status, "cause_exit_code": cause_exit_code}
+    if status != "PASS":
+        check.update({"repair_packet": repair, "next_action": action,
+                      "blocks_live_checks": list(blocks or [])})
+    return check
+
+
+def _dev_not_run(checks: list[dict[str, Any]], check_id: str, expected: str,
+                 repair: str, action: str, blocks: list[str]) -> None:
+    checks.append(_dev_check(check_id, expected, "not_attempted_due_to_prerequisite", "NOT_RUN",
+                             repair=repair, action=action, blocks=blocks))
+
+
+def _dev_guest_json(state_root: Path, profile: str, code: str) -> tuple[dict[str, Any] | None, int | None, str]:
+    try:
+        completed = _guest_exec(
+            state_root, profile, "python3 -c " + shlex.quote(code), timeout=20,
+            campaign_profile=False, allow_failure=True,
+        )
+    except TimeoutError:
+        return None, 124, "guest_command_timeout"
+    except (AcceptanceError, OSError, RuntimeError):
+        return None, None, "exact_guest_transport_unavailable"
+    if completed.returncode != 0:
+        return None, completed.returncode, "guest_command_failed"
+    if len(completed.stdout) > DEV_MAX_OUTPUT:
+        return None, completed.returncode, "guest_output_limit_exceeded"
+    try:
+        value = _decode_json_no_duplicates(completed.stdout)
+    except (AcceptanceError, UnicodeError, json.JSONDecodeError, ValueError):
+        return None, completed.returncode, "guest_probe_output_invalid"
+    return (value, completed.returncode, "guest_probe_completed") if isinstance(value, dict) else \
+        (None, completed.returncode, "guest_probe_output_invalid")
+
+
+DEV_GUEST_FACTS = r'''import json,os,pwd,re,shutil
+from pathlib import Path
+def available():
+ for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+  if line.startswith("MemAvailable:"): return int(line.split()[1])//1024
+ raise ValueError
+def virt():
+ text=Path("/proc/cpuinfo").read_text(encoding="ascii",errors="ignore")[:65536]
+ return any(re.search(r"\b(vmx|svm)\b",x) for x in text.splitlines() if x.startswith("flags"))
+mount=any(len(x:=line.split())>=3 and x[1]=="/workspace" and x[2]=="virtiofs" for line in Path("/proc/mounts").read_text().splitlines())
+try: user=pwd.getpwuid(os.geteuid()).pw_name
+except KeyError: user="unknown"
+tools={n:shutil.which(n) is not None for n in ("qemu-system-x86_64","qemu-img","virtiofsd","socat","bats","shellcheck","cloud-init")}
+print(json.dumps({"mester":user=="mester","opencode":shutil.which("opencode") is not None,
+ "workspace_writable":os.access("/workspace",os.W_OK|os.X_OK),"workspace_virtiofs":mount,
+ "kvm":os.access("/dev/kvm",os.R_OK|os.W_OK),"cpu_virtualization":virt(),
+ "memavailable_mib":available(),"tools":tools},sort_keys=True,separators=(",",":")))
+'''
+DEV_GUEST_MARKER = r'''import json,os,stat
+fd=os.open("/var/lib/lab-vm/guest-ready.json",os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK)
+try:
+ s=os.fstat(fd)
+ if not(stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 and stat.S_IMODE(s.st_mode)==0o644 and s.st_size<=16384): raise SystemExit(2)
+ raw=os.read(fd,16385)
+finally: os.close(fd)
+if len(raw)!=s.st_size: raise SystemExit(2)
+d=json.loads(raw)
+print(json.dumps({k:d.get(k) for k in ("status","payload_sha256","opencode_version","workspace_mount","depth","max_depth","recursion_tools")},sort_keys=True,separators=(",",":")))
+'''
+DEV_GUEST_PROXY = r'''import json,socket
+status=None
+try:
+ with socket.create_connection(("10.0.2.100",3128),timeout=5) as s:
+  s.settimeout(5); s.sendall(b"CONNECT auth.openai.com:443 HTTP/1.1\r\nHost: auth.openai.com:443\r\nConnection: close\r\n\r\n")
+  raw=bytearray()
+  while b"\r\n" not in raw and len(raw)<1024:
+   part=s.recv(min(256,1024-len(raw)))
+   if not part: break
+   raw.extend(part)
+ fields=bytes(raw).split(b"\r\n",1)[0].decode("ascii","strict").split()
+ if len(fields)>=2 and fields[0] in ("HTTP/1.0","HTTP/1.1") and fields[1].isdigit(): status=int(fields[1])
+except (OSError,UnicodeError,ValueError,TimeoutError): pass
+print(json.dumps({"connect_status":status},sort_keys=True,separators=(",",":")))
+'''
+DEV_GUEST_METRICS = r'''import json
+from urllib.request import build_opener,ProxyHandler,Request
+op=build_opener(ProxyHandler({})); out={"summary":False,"json":False,"cpu":False,"memory":False}
+try:
+ with op.open(Request("http://10.0.2.100:19532/summary",headers={"Accept":"text/plain"}),timeout=5) as r:
+  b=r.read(65537); out["summary"]=r.status==200 and r.headers.get_content_type()=="text/plain" and 0<len(b)<=65536
+except Exception: pass
+try:
+ with op.open(Request("http://10.0.2.100:19532/metrics",headers={"Accept":"application/json"}),timeout=5) as r:
+  b=r.read(65537); d=json.loads(b) if r.status==200 and len(b)<=65536 else {}
+  out["json"]=isinstance(d,dict) and isinstance(d.get("cpu"),dict) and isinstance(d.get("memory"),dict)
+  out["cpu"]="load_avg_1m" in d.get("cpu",{}); out["memory"]="total_gb" in d.get("memory",{})
+except Exception: pass
+print(json.dumps(out,sort_keys=True,separators=(",",":")))
+'''
+
+
+def _dev_proxy_details(state_root: Path, profile: str, data: dict[str, Any]) -> tuple[Path, bool, bool]:
+    run_dir = _profile_run_directory(state_root, profile, data)
+    process = _load_module("vm_dev_inspect_process", ROOT / "lib/vm/process.py")
+    registry = process.registry_read(run_dir / "processes.json", run_dir.name)
+    item = registry.get("processes", {}).get("proxy")
+    identity = item.get("identity") if isinstance(item, dict) else None
+    if not isinstance(identity, dict) or process.identity_state(identity) != "running":
+        raise AcceptanceError("exact profile proxy identity is unavailable")
+    argv = identity.get("argv")
+    runtime = state_root / "vm/profiles" / profile / "runtime"
+    if not isinstance(argv, list) or len(argv) < 2 or argv[1] != str(runtime / "lib/vm/proxy.py"):
+        raise AcceptanceError("proxy does not match the exact frozen profile runtime")
+
+    def value(option: str) -> str | None:
+        positions = [i for i, item in enumerate(argv[:-1]) if item == option]
+        return argv[positions[0] + 1] if len(positions) == 1 else None
+
+    if (value("--workspace") != data.get("workspace")
+            or value("--port-file") != str(run_dir / "proxy.port")
+            or value("--reload-marker") != str(run_dir / "proxy.ready")):
+        raise AcceptanceError("proxy arguments do not match the selected profile")
+    upstream = value("--upstream-proxy")
+    if upstream not in (None, "http://10.0.2.100:3128") or (data.get("depth") == 0 and upstream):
+        raise AcceptanceError("proxy parent does not match the fixed immediate-parent boundary")
+    workspace = Path(data["workspace"])
+    if workspace.resolve(strict=True) != workspace or not workspace.is_dir():
+        raise AcceptanceError("selected workspace is not canonical")
+    proxy = _load_module("vm_dev_inspect_proxy", runtime / "lib/vm/proxy.py")
+    enabled, domains = proxy.policy(workspace / ".mester-egress")
+    return runtime, bool(proxy.allowed(DEV_PROXY_HOST, enabled, domains)), upstream is not None
+
+
+def _dev_metrics_port(profile: dict[str, Any], state_root: Path, name: str) -> int | None:
+    if _profile_model_forward_identity(profile, state_root, name) is None:
+        return None
+    argv = profile["runtime_identity"]["argv"]
+    netdevs = [argv[i + 1] for i, item in enumerate(argv[:-1]) if item == "-netdev"]
+    if len(netdevs) != 1:
+        return None
+    pattern = re.compile(r"guestfwd=tcp:10\.0\.2\.100:19532-cmd:([A-Za-z0-9_./+-]+) - TCP:127\.0\.0\.1:([1-9][0-9]{0,4})")
+    matches = [pattern.fullmatch(x) for x in netdevs[0].split(",") if x.startswith("guestfwd=tcp:10.0.2.100:19532-")]
+    matches = [x for x in matches if x and Path(x.group(1)).name == "socat"]
+    if len(matches) != 1:
+        return None
+    port = int(matches[0].group(2))
+    return port if port <= 65535 else None
+
+
+def _dev_host_metrics(state_root: Path, runtime: Path, port: int) -> tuple[bool, dict[str, Any]]:
+    service = runtime / "lib/vm/metrics_service.py"
+    empty = {"summary": False, "json": False, "cpu": False, "memory": False}
+    if not service.is_file() or service.is_symlink():
+        return False, empty
+    try:
+        verified = subprocess.run([sys.executable, str(service), "verify", "--state-root", str(state_root),
+                                   "--port", str(port), "--quiet"], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  timeout=5, check=False, cwd=ROOT)
+    except (OSError, subprocess.TimeoutExpired):
+        return False, empty
+    if verified.returncode != 0:
+        return False, empty
+    result = {"summary": False, "json": False, "cpu": False, "memory": False}
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request("GET", "/summary", headers={"Accept": "text/plain", "Connection": "close"})
+        response = connection.getresponse(); body = response.read(DEV_MAX_OUTPUT + 1)
+        result["summary"] = response.status == 200 and response.headers.get_content_type() == "text/plain" and 0 < len(body) <= DEV_MAX_OUTPUT
+        connection.close(); connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        connection.request("GET", "/metrics", headers={"Accept": "application/json", "Connection": "close"})
+        response = connection.getresponse(); body = response.read(DEV_MAX_OUTPUT + 1)
+        data = _decode_json_no_duplicates(body) if response.status == 200 and len(body) <= DEV_MAX_OUTPUT else {}
+        if isinstance(data, dict):
+            result["json"] = isinstance(data.get("cpu"), dict) and isinstance(data.get("memory"), dict)
+            result["cpu"] = isinstance(data.get("cpu"), dict) and "load_avg_1m" in data["cpu"]
+            result["memory"] = isinstance(data.get("memory"), dict) and "total_gb" in data["memory"]
+    except (OSError, http.client.HTTPException, TimeoutError, AcceptanceError, UnicodeError, json.JSONDecodeError):
+        pass
+    finally:
+        connection.close()
+    return True, result
+
+
+def _dev_report_path(value: str, source: Path) -> Path:
+    path = Path(value)
+    if not path.is_absolute() or path.name in ("", ".", ".."):
+        raise AcceptanceError("development report must be an absolute fresh file path")
+    _private_directory(path.parent)
+    if (path.parent / path.name).resolve(strict=False) != path or path.is_relative_to(source):
+        raise AcceptanceError("development report must be outside the shared checkout")
+    if path.exists() or path.is_symlink():
+        raise AcceptanceError("development report will not overwrite existing evidence")
+    return path
+
+
+def run_dev_step(source: Path, state_root: Path, profile: str, run_id: str, step: str,
+                 *, dev_execute: bool = False, dev_report: str | None = None) -> dict[str, Any]:
+    if step not in DEV_STEPS or PROFILE_NAME_RE.fullmatch(profile) is None:
+        raise AcceptanceError("development step or exact profile name is invalid")
+    if step != "inspect":
+        packet = {"boot": "M1-boot", "auth": "M2a-auth-egress", "work": "M2b-agent-work",
+                  "metrics": "M3-metrics", "nested": "M4-nested"}[step]
+        check = _dev_check("step_available", "implemented development evidence step", "not_implemented",
+                           "NOT_RUN", repair=packet, action=f"Implement {step} in its frozen packet.")
+        report = {"step": step, "run_id": run_id, "location": "O", "source_head": None,
+                  "source_tree_sha256": None, "profile": profile, "runtime_payload_sha256": None,
+                  "guest_payload_sha256": None, "process_identity_summary": {"state": "NOT_RUN"},
+                  "checks": [check], "result": "BLOCKED_EXTERNAL", "reason_code": "step_not_implemented",
+                  "elapsed_ms": 0, "next_action": check["next_action"],
+                  "protected_assets_unchanged": {"measured_assets": [], "unmeasured": "UNKNOWN"}, "artifacts": []}
+        if dev_report:
+            destination = _dev_report_path(dev_report, source)
+            report["artifacts"] = [destination.name]
+            _atomic_json(destination, report)
+        return report
+    if dev_execute:
+        raise AcceptanceError("inspect is observe-only; --dev-execute is not valid for this step")
+
+    started = time.monotonic(); checks: list[dict[str, Any]] = []
+    source_head = source_tree = runtime_hash = guest_hash = None
+    profile_data: dict[str, Any] | None = None; initial_profile: dict[str, Any] | None = None
+    process_summary: dict[str, Any] = {"state": "UNKNOWN"}; transport = False
+    try:
+        source_info = _source_identity(source)
+        source_head, source_tree = source_info["source_head"], source_info["tree_sha256"]
+        checks.append(_dev_check("source_identity", "current source HEAD and tree digest",
+                                 {"head_present": bool(source_head), "tree_digest_present": bool(source_tree)}, "PASS"))
+    except (AcceptanceError, OSError, RuntimeError, ValueError, KeyError):
+        checks.append(_dev_check("source_identity", "current source HEAD and tree digest", "unavailable", "FAIL",
+                                 repair="M0-source-provenance", action="Repair source inventory before freezing an M1 candidate.",
+                                 blocks=["boot", "work", "nested"]))
+
+    root_ok = False
+    try:
+        if state_root == source or state_root in source.parents or source in state_root.parents:
+            raise AcceptanceError("source checkout and selected profile state root overlap")
+        _private_directory(state_root); root_ok = True
+        checks.append(_dev_check("exact_state_root", "recorded canonical owner-private root", "available_0700", "PASS"))
+    except (OSError, AcceptanceError, RuntimeError):
+        checks.append(_dev_check("exact_state_root", "recorded canonical owner-private root", "unavailable_or_not_private",
+                                 "BLOCKED_EXTERNAL", repair="M0-exact-transport",
+                                 action="Run this exact inspect command in the recorded O terminal; do not substitute another root.",
+                                 blocks=["boot", "auth", "work", "metrics", "nested"]))
+    if root_ok:
+        try:
+            profile_data = _profile_record(state_root, profile, campaign_profile=False)
+            initial_profile = dict(profile_data)
+            runtime_hash = profile_data.get("runtime_payload_sha256")
+            guest_hash = profile_data.get("guest_payload_sha256")
+            checks.append(_dev_check("exact_profile", "only selected profile metadata", {
+                "status": profile_data.get("status"), "depth": profile_data.get("depth"),
+                "max_depth": profile_data.get("max_depth"), "memory_gib": profile_data.get("memory_gib")}, "PASS"))
+            ready = profile_data.get("status") == "ready"
+            checks.append(_dev_check("profile_ready", "selected profile is ready", profile_data.get("status"),
+                                     "PASS" if ready else "FAIL", repair="M1-boot",
+                                     action="Repair the first failed boot stage; preserve the existing overlay.",
+                                     blocks=["auth", "work", "metrics", "nested"]))
+            depth, maximum = profile_data.get("depth"), profile_data.get("max_depth")
+            cap_ok = type(depth) is int and type(maximum) is int and depth <= maximum and maximum >= 2
+            checks.append(_dev_check("recursion_cap", "separate candidate can inherit max_depth 2", {
+                "depth": depth, "max_depth": maximum}, "PASS" if cap_ok else "FAIL",
+                repair="M1-boot", action="Preserve this profile; create a separate current-source cap-2 candidate.",
+                blocks=["nested"]))
+        except (AcceptanceError, OSError, RuntimeError, ValueError, KeyError):
+            checks.append(_dev_check("exact_profile", "only selected profile metadata", "unavailable", "BLOCKED_EXTERNAL",
+                                     repair="M0-exact-transport",
+                                     action="Run this exact inspect command in the recorded O terminal; do not select another profile.",
+                                     blocks=["boot", "auth", "work", "metrics", "nested"]))
+
+    # Read-only controller prerequisites; no profile is started, stopped or signalled.
+    try:
+        info = Path("/dev/kvm").stat(); kvm_ok = stat.S_ISCHR(info.st_mode) and os.access("/dev/kvm", os.R_OK | os.W_OK)
+    except OSError: kvm_ok = False
+    checks.append(_dev_check("controller_kvm", "controller exposes read/write KVM", kvm_ok,
+                             "PASS" if kvm_ok else "BLOCKED_EXTERNAL", repair="M1-boot",
+                             action="Use the authoritative launcher with nested KVM; do not use TCG.", blocks=["boot", "nested"]))
+    try:
+        cpu = Path("/proc/cpuinfo").read_text(encoding="ascii", errors="ignore")[:1024*1024]
+        cpu_ok = any(re.search(r"\b(?:vmx|svm)\b", x) for x in cpu.splitlines() if x.startswith("flags"))
+    except OSError: cpu_ok = False
+    checks.append(_dev_check("controller_cpu", "controller exposes VMX/SVM", cpu_ok,
+                             "PASS" if cpu_ok else "BLOCKED_EXTERNAL", repair="M1-boot",
+                             action="Expose virtualization at the authoritative outer launcher; never edit identity markers.",
+                             blocks=["boot", "nested"]))
+    tools = ("qemu-system-x86_64", "qemu-img", "virtiofsd", "socat", "bats", "shellcheck", "cloud-init")
+    missing = [name for name in tools if shutil.which(name) is None]
+    checks.append(_dev_check("controller_recursion_tools", "candidate boot/test tools are installed", {"missing": missing},
+                             "PASS" if not missing else "BLOCKED_EXTERNAL", repair="M1-boot",
+                             action="Repair only the listed missing tools through the supported environment.", blocks=["boot", "nested"]))
+    requested_gib = profile_data.get("memory_gib", 8) if profile_data else 8
+    if type(requested_gib) is not int or not 1 <= requested_gib <= 128: requested_gib = 8
+    try:
+        budget = _read_mem_budget(requested_gib*1024, DEFAULT_RESERVE_MIB); budget_ok = budget.get("passed") is True
+        budget_view = {k: budget.get(k) for k in ("memavailable_mib", "cgroup_remaining_mib", "projected_available_mib", "requested_mib", "reserve_mib")}
+    except (OSError, RuntimeError, ValueError, KeyError): budget_ok, budget_view = False, {"readable": False}
+    checks.append(_dev_check("controller_memory_headroom", "enough memory for candidate plus 512 MiB reserve", budget_view,
+                             "PASS" if budget_ok else "BLOCKED_EXTERNAL", repair="M1-boot",
+                             action="Report the exact deficit; do not stop or suspend an existing VM automatically.", blocks=["boot"]))
+
+    runtime_ok = False
+    if profile_data is not None:
+        try:
+            runtime_ok = _validate_profile_runtime(state_root, profile)
+        except (OSError, RuntimeError, AcceptanceError, ValueError):
+            runtime_ok = False
+        checks.append(_dev_check("frozen_runtime", "selected frozen runtime validates", {
+            "validated": runtime_ok, "runtime_payload_sha256_present": bool(runtime_hash),
+            "guest_payload_sha256_present": bool(guest_hash)}, "PASS" if runtime_ok else "FAIL",
+            repair="M1-boot", action="Repair frozen source/runtime identity; never modify the existing ready profile in place.",
+            blocks=["boot", "auth", "work", "metrics", "nested"]))
+        try:
+            identity = profile_data.get("runtime_identity")
+            process = _load_module("vm_dev_inspect_identity", ROOT / "lib/vm/process.py")
+            state = process.identity_state({k: identity[k] for k in ("pid", "start_ticks", "executable", "argv")})
+            process_summary = {"state": state, "pid": identity["pid"], "start_ticks": identity["start_ticks"],
+                               "executable": Path(identity["executable"]).name}
+            transport = (profile_data.get("status") == "ready" and runtime_ok and state == "running"
+                         and _listener_owned_loopback(profile_data))
+        except (OSError, RuntimeError, AcceptanceError, KeyError, TypeError, ValueError): transport = False
+        checks.append(_dev_check("exact_qemu_ssh_identity", "selected QEMU process and loopback SSH identity match",
+                                 process_summary, "PASS" if transport else "BLOCKED_EXTERNAL",
+                                 repair="M0-exact-transport", action="Repair exact profile/listener association; never signal an unverified PID.",
+                                 blocks=["auth", "work", "metrics", "nested"]))
+    else:
+        _dev_not_run(checks, "frozen_runtime", "selected frozen runtime validates", "M1-boot",
+                     "Inspect the exact selected profile before runtime validation.", ["boot", "auth", "work", "metrics", "nested"])
+        _dev_not_run(checks, "exact_qemu_ssh_identity", "selected QEMU and loopback SSH identity match", "M0-exact-transport",
+                     "Inspect the exact selected profile; do not discover a substitute.", ["auth", "work", "metrics", "nested"])
+
+    if transport:
+        facts, cause, detail = _dev_guest_json(state_root, profile, DEV_GUEST_FACTS)
+        if facts is None:
+            checks.append(_dev_check("guest_facts", "fixed guest command returns bounded facts", detail, "FAIL", cause,
+                                     repair="M1-boot", action="Repair mester PATH/guest execution or exact SSH transport; preserve the command rc.",
+                                     blocks=["auth", "work", "metrics", "nested"]))
+        else:
+            checks.append(_dev_check("guest_mester_opencode_path", "guest execution is mester with OpenCode on PATH",
+                                     {"mester": facts.get("mester"), "opencode": facts.get("opencode")},
+                                     "PASS" if facts.get("mester") and facts.get("opencode") else "FAIL",
+                                     repair="M1-boot", action="Repair only the diagnosed guest user/PATH bootstrap fault.", blocks=["auth", "work"]))
+            checks.append(_dev_check("guest_workspace", "writable virtiofs /workspace",
+                                     {"writable": facts.get("workspace_writable"), "virtiofs": facts.get("workspace_virtiofs")},
+                                     "PASS" if facts.get("workspace_writable") and facts.get("workspace_virtiofs") else "FAIL",
+                                     repair="M1-boot", action="Repair guest workspace ownership/mount in a fresh candidate.", blocks=["work", "nested"]))
+            checks.append(_dev_check("guest_kvm_cpu", "guest has KVM and VMX/SVM",
+                                     {"kvm": facts.get("kvm"), "cpu_virtualization": facts.get("cpu_virtualization")},
+                                     "PASS" if facts.get("kvm") and facts.get("cpu_virtualization") else "BLOCKED_EXTERNAL",
+                                     repair="M1-boot", action="Repair nested KVM/CPU exposure at its owning launcher.", blocks=["nested"]))
+            guest_tools = facts.get("tools") if isinstance(facts.get("tools"), dict) else {}
+            guest_missing = [name for name in tools if guest_tools.get(name) is not True]
+            checks.append(_dev_check("guest_recursion_tools", "guest recursion tools are available", {"missing": guest_missing},
+                                     "PASS" if not guest_missing else "FAIL", repair="M1-boot",
+                                     action="Repair only missing guest tools and freeze the fix into a new candidate.", blocks=["nested"]))
+            available = facts.get("memavailable_mib")
+            checks.append(_dev_check("guest_memory_headroom", "guest has at least 512 MiB available", available,
+                                     "PASS" if type(available) is int and available >= DEFAULT_RESERVE_MIB else "BLOCKED_EXTERNAL",
+                                     repair="M1-boot", action="Report exact memory headroom; do not resize or stop a VM automatically.", blocks=["nested"]))
+        marker, marker_rc, marker_reason = _dev_guest_json(state_root, profile, DEV_GUEST_MARKER)
+        marker_ok = bool(marker and marker.get("status") == "ready" and marker.get("payload_sha256") == guest_hash
+                         and marker.get("workspace_mount") == "virtiofs")
+        checks.append(_dev_check("guest_payload_identity", "guest marker matches source profile payload",
+                                 {"available": marker is not None, "payload_matches": bool(marker and marker.get("payload_sha256") == guest_hash),
+                                  "workspace_mount": marker.get("workspace_mount") if marker else marker_reason},
+                                 "PASS" if marker_ok else "FAIL", marker_rc if marker is None else None,
+                                 repair="M1-boot", action="Repair guest-ready identity in a fresh candidate; do not inspect auth stores.",
+                                 blocks=["work", "nested"]))
+        try:
+            runtime, policy_allows, upstream_present = _dev_proxy_details(state_root, profile, profile_data)
+            proxy, cause, detail = _dev_guest_json(state_root, profile, DEV_GUEST_PROXY)
+            code = proxy.get("connect_status") if proxy else None
+            if policy_allows and code == 200:
+                status, layer, action = "PASS", "selected_policy_and_connect_pass", ""
+            elif not policy_allows:
+                status, layer, action = "FAIL", "selected_workspace_egress_policy_denied", \
+                    "Repair the selected .mester-egress allow rule and exact-owned reload path (M2a)."
+            elif code == 403 and upstream_present:
+                status, layer = "FAIL", "immediate_parent_proxy_denied_after_child_policy_allow"
+                action = "Repair the immediate parent's mediated egress policy; the selected guest must not control an ancestor."
+            elif code == 403:
+                status, layer = "FAIL", "denied_beyond_selected_workspace_policy"
+                action = "Repair the exact mediated upstream/outer egress policy; the selected .mester-egress allows this public host."
+            else:
+                status, layer, action = "FAIL", "selected_proxy_transport_unavailable", \
+                    "Repair the exact proxy/QEMU path; do not retry a model completion as a network diagnostic."
+            checks.append(_dev_check("openai_auth_https_connect", "no-credential CONNECT to auth.openai.com returns 200",
+                                     {"selected_policy_allows": policy_allows, "connect_status": code,
+                                      "diagnosed_layer": layer, "probe": detail}, status, cause,
+                                     repair="M2a-auth-egress", action=action or "No egress repair required.", blocks=["auth", "work"] if status != "PASS" else []))
+        except (AcceptanceError, OSError, RuntimeError, ValueError, KeyError):
+            checks.append(_dev_check("openai_auth_https_connect", "no-credential CONNECT to auth.openai.com returns 200",
+                                     "exact_proxy_identity_or_policy_unavailable", "BLOCKED_EXTERNAL",
+                                     repair="M0-proxy-diagnosis", action="Verify exact proxy identity and policy without issuing a completion request.",
+                                     blocks=["auth", "work"]))
+    else:
+        for args in (
+            ("guest_facts", "fixed guest command returns bounded facts", "M0-exact-transport", "Repair selected transport before guest inspection.", ["auth", "work", "metrics", "nested"]),
+            ("guest_mester_opencode_path", "guest mester has OpenCode on PATH", "M1-boot", "Verify mester/PATH after transport repair.", ["auth", "work"]),
+            ("guest_workspace", "writable virtiofs /workspace", "M1-boot", "Verify workspace after transport repair.", ["work", "nested"]),
+            ("guest_kvm_cpu", "guest KVM and VMX/SVM", "M1-boot", "Verify nested capability after transport repair.", ["nested"]),
+            ("guest_recursion_tools", "guest recursion tools", "M1-boot", "Verify tools after transport repair.", ["nested"]),
+            ("guest_memory_headroom", "guest has 512 MiB headroom", "M1-boot", "Verify memory after transport repair.", ["nested"]),
+            ("guest_payload_identity", "guest marker matches selected payload", "M1-boot", "Verify guest identity after transport repair.", ["work", "nested"]),
+            ("openai_auth_https_connect", "no-credential CONNECT to auth.openai.com returns 200", "M2a-auth-egress", "Verify exact proxy after transport repair.", ["auth", "work"]),
+        ):
+            _dev_not_run(checks, *args)
+
+    # Metrics is deliberately independent from the auth HTTPS check.
+    try:
+        port = _dev_metrics_port(profile_data, state_root, profile) if profile_data and transport else None
+    except (AcceptanceError, OSError, RuntimeError, ValueError, KeyError, TypeError):
+        port = None
+    if profile_data is None or not transport:
+        _dev_not_run(checks, "metrics_forward", "exact profile guestfwd targets selected metrics host port",
+                     "M0-exact-transport", "Repair/verify exact profile identity before inspecting its guest forward.", ["metrics"])
+        _dev_not_run(checks, "metrics_host_http", "owned /summary and /metrics endpoints respond", "M3-metrics",
+                     "Verify host endpoints after exact profile transport is available.", ["metrics"])
+        _dev_not_run(checks, "metrics_guest_http", "guest /summary text and CPU/RAM JSON respond", "M3-metrics",
+                     "Verify the guest URL after exact profile transport is available.", ["metrics"])
+    elif port is None:
+        checks.append(_dev_check("metrics_forward", "exact profile guestfwd targets selected metrics host port",
+                                 "no_verified_metrics_forward", "FAIL", repair="M1-metrics-port",
+                                 action="Implement configurable managed host port selection before freezing a new candidate.",
+                                 blocks=["metrics"]))
+        _dev_not_run(checks, "metrics_host_http", "owned /summary and /metrics endpoints respond", "M3-metrics",
+                     "Verify host endpoints after M1 managed port selection.", ["metrics"])
+        _dev_not_run(checks, "metrics_guest_http", "guest /summary text and CPU/RAM JSON respond", "M3-metrics",
+                     "Verify the guest URL after an exact forward is present.", ["metrics"])
+    else:
+        runtime = state_root / "vm/profiles" / profile / "runtime"
+        try:
+            owned, details = _dev_host_metrics(state_root, runtime, port)
+            checks.append(_dev_check("metrics_host_service", "managed service owns selected host port",
+                                     {"owned": owned, "port": port}, "PASS" if owned else "FAIL",
+                                     repair="M3-metrics", action="Select a verified managed alternate; leave foreign listeners untouched.", blocks=["metrics"]))
+            host_ok = owned and details["summary"] and details["json"] and details["cpu"] and details["memory"]
+            checks.append(_dev_check("metrics_host_http", "owned /summary text and /metrics CPU/RAM JSON respond", details,
+                                     "PASS" if host_ok else "FAIL", repair="M3-metrics",
+                                     action="Repair the first failed owned host HTTP link; do not adopt a foreign service.", blocks=["metrics"]))
+            if owned:
+                guest, cause, reason = _dev_guest_json(state_root, profile, DEV_GUEST_METRICS)
+                guest_ok = bool(guest and guest.get("summary") and guest.get("json") and guest.get("cpu") and guest.get("memory"))
+                checks.append(_dev_check("metrics_guest_http", "guest /summary text and CPU/RAM JSON respond",
+                                         guest if guest else reason, "PASS" if guest_ok else "FAIL", cause,
+                                         repair="M3-metrics", action="Repair the matched QEMU forward or guest URL; retain the host HTTP result.", blocks=["metrics"]))
+            else:
+                _dev_not_run(checks, "metrics_guest_http", "guest /summary and CPU/RAM JSON respond", "M3-metrics",
+                             "Do not contact the guest forward until its host listener is verified as managed.", ["metrics"])
+        except (AcceptanceError, OSError, RuntimeError, ValueError, KeyError):
+            checks.append(_dev_check("metrics_host_service", "managed service owns selected host port", "verification_failed",
+                                     "FAIL", repair="M3-metrics", action="Repair the exact managed port/service; leave foreign listeners untouched.", blocks=["metrics"]))
+            _dev_not_run(checks, "metrics_guest_http", "guest /summary and CPU/RAM JSON respond", "M3-metrics",
+                         "Verify managed host service before guest HTTP probe.", ["metrics"])
+
+    protected = {"selected_profile_metadata": "UNKNOWN", "other_profiles": "NOT_MEASURED",
+                 "credentials": "NOT_INSPECTED", "old_vm_session": "NOT_MEASURED",
+                 "source_user_changes": "NOT_WRITTEN_BY_INSPECT"}
+    if initial_profile is not None:
+        try:
+            protected["selected_profile_metadata"] = "UNCHANGED_DURING_INSPECT" if \
+                _profile_record(state_root, profile, campaign_profile=False) == initial_profile else "CHANGED"
+        except (AcceptanceError, OSError, RuntimeError, ValueError):
+            protected["selected_profile_metadata"] = "UNKNOWN"
+    failures = [item for item in checks if item["status"] != "PASS"]
+    if any(item["status"] == "FAIL" for item in failures): result = "FAIL"
+    elif any(item["status"] == "BLOCKED_EXTERNAL" for item in failures): result = "BLOCKED_EXTERNAL"
+    elif failures: result = "FAIL"
+    else: result = "PASS"
+    first = failures[0] if failures else None
+    report = {"step": "inspect", "run_id": run_id, "location": "O", "source_head": source_head,
+              "source_tree_sha256": source_tree, "profile": profile, "runtime_payload_sha256": runtime_hash,
+              "guest_payload_sha256": guest_hash, "process_identity_summary": process_summary,
+              "checks": checks, "result": result, "reason_code": first["id"] if first else "inspect_checks_passed",
+              "elapsed_ms": max(0, int((time.monotonic()-started)*1000)),
+              "next_action": first.get("next_action") if first else "Continue to M1 candidate preparation after Sol review.",
+              "protected_assets_unchanged": protected, "artifacts": []}
+    if dev_report:
+        destination = _dev_report_path(dev_report, source)
+        report["artifacts"] = [destination.name]
+        _atomic_json(destination, report)
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", help="canonical checkout to snapshot and test")
@@ -4281,6 +4779,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--discover-providers", action="store_true",
                         help="read only the model selected by one exact ready profile and verified forward")
     parser.add_argument("--profile", help="exact ready profile name for --discover-providers")
+    parser.add_argument("--dev-step", choices=DEV_STEPS,
+                        help="run one independent development evidence probe (not a campaign stage)")
+    parser.add_argument("--dev-execute", action="store_true",
+                        help="consent to this step's documented synthetic guest action")
+    parser.add_argument("--dev-report", help="write a fresh private JSON report beneath an existing owner0700 parent")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--execute", dest="operation", action="store_const", const="execute",
                         help="disabled one-shot path; use the exact staged workflow")
@@ -4308,6 +4811,28 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.dev_step is not None:
+            if (not args.source or not args.state_root or not args.profile or not args.run_id
+                    or args.operation is not None or args.suite or args.stage or args.discover_providers
+                    or args.provider_config or args.apply_selected_updates or args.memory_gib is not None
+                    or args.approved_total_minutes is not None or args.retry_of or args.retry_reason
+                    or args.confirm_run_id or args.observation_gate or args.observation_result
+                    or args.observed_version or args.observation_check):
+                parser.error("--dev-step requires --source, --state-root, --profile and --run-id; campaign/discovery flags are mutually exclusive")
+            source = _canonical_directory(args.source)
+            raw_state_root = Path(args.state_root)
+            if not raw_state_root.is_absolute() or ".." in raw_state_root.parts:
+                parser.error("--state-root must be an absolute exact path without traversal")
+            if PROFILE_NAME_RE.fullmatch(args.profile) is None:
+                parser.error("--profile must be one exact valid profile name")
+            if RUN_ID_RE.fullmatch(args.run_id) is None:
+                parser.error("--run-id must be 32 lowercase hexadecimal characters")
+            report = run_dev_step(source, raw_state_root, args.profile, args.run_id, args.dev_step,
+                                  dev_execute=args.dev_execute, dev_report=args.dev_report)
+            print(json.dumps(report, sort_keys=True))
+            return 0 if report["result"] == "PASS" else 1 if report["result"] == "FAIL" else 2
+        if args.dev_execute or args.dev_report:
+            parser.error("--dev-execute and --dev-report require --dev-step")
         if args.discover_providers:
             if (args.source or args.provider_config or args.operation is not None or args.suite
                     or args.run_id or args.stage or args.retry_of or args.retry_reason

@@ -97,6 +97,42 @@ PY
   [ "$output" = "<>" ]
 }
 
+@test "selected nondefault host metrics port reaches managed ensure and QEMU forward" {
+  local runtime port netdev
+  runtime="$BATS_TEST_TMPDIR/vm-metrics-selected"
+  mkdir -p "$runtime/lib/vm" "$runtime/agent/metrics"
+  cat >"$runtime/lib/vm/metrics_service.py" <<'PY'
+import os,sys
+port=sys.argv[sys.argv.index("--port")+1]
+assert sys.argv[1] == "ensure-selected"
+open(os.environ["METRICS_TEST_PORT_LOG"],"w",encoding="ascii").write(port)
+print(port)
+PY
+  : >"$runtime/agent/metrics/gather.py"
+  export METRICS_TEST_PORT_LOG="$runtime/selected-port"
+  port="$(bash -c '
+    source "$1/lib/vm/lifecycle.sh"
+    vm_lifecycle_metrics_select_port /unused "$2" '\''{"metrics":"on","metrics_port":24680}'\'' 0 ""
+  ' _ "$ROOT" "$runtime" 2>/dev/null)"
+  [ "$port" = "24680" ]
+  [ "$(cat "$METRICS_TEST_PORT_LOG")" = "24680" ]
+
+  bash -c '
+    source "$1/lib/vm/runner.sh"
+    vm_runner_build_qemu_argv demo 2 /tmp/seed.iso /tmp/disk.qcow2 \
+      /tmp/lm-vfs-test.sock 40224 43130 none "" "$2"
+    for ((i=0;i<${#VM_QEMU_ARGV[@]};i++)); do
+      if [[ "${VM_QEMU_ARGV[$i]}" == -netdev ]]; then printf "%s\n" "${VM_QEMU_ARGV[$((i+1))]}"; fi
+    done
+  ' _ "$ROOT" "$port" >"$runtime/netdev"
+  netdev="$(cat "$runtime/netdev")"
+  [[ "$netdev" == *'guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:24680'* ]]
+
+  rm -f "$runtime/lib/vm/metrics_service.py" "$runtime/agent/metrics/gather.py" \
+    "$runtime/selected-port" "$runtime/netdev"
+  rmdir "$runtime/lib/vm" "$runtime/lib" "$runtime/agent/metrics" "$runtime/agent" "$runtime"
+}
+
 @test "VM metrics management remains separate from experimental run/up" {
   run bash "$ROOT/lab-vm" --help
   [ "$status" -eq 0 ]

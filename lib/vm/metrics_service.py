@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -44,6 +45,10 @@ STOP_TIMEOUT = 5.0
 
 class MetricsServiceError(Exception):
     """A metrics service state could not be safely established or verified."""
+
+
+class MetricsPortConflict(MetricsServiceError):
+    """A listener claimed a candidate host port before the managed bind."""
 
 
 def _require(condition: bool, message: str) -> None:
@@ -259,8 +264,13 @@ def ensure_service(
         if current["state"] in {"unknown", "starting"}:
             if current["state"] == "starting":
                 return _wait_ready(service, port, startup_timeout)
+            _data, registry_status = _registry_status(service)
+            if registry_status["state"] == "absent" and _listener_present(port):
+                raise MetricsPortConflict(
+                    "Metrics port is occupied by an unverified listener; it was not changed"
+                )
             raise MetricsServiceError(
-                "Metrics port is occupied by an unverified listener; it was not changed"
+                "Metrics service identity could not be verified; it was not changed"
             )
 
         registry = service / "processes.json"
@@ -271,7 +281,7 @@ def ensure_service(
         elif current["state"] != "absent":
             raise MetricsServiceError("Metrics service state is not safely restartable")
         if _listener_present(port):
-            raise MetricsServiceError(
+            raise MetricsPortConflict(
                 "Metrics port is occupied by an unverified listener; it was not changed"
             )
 
@@ -352,7 +362,7 @@ def _wait_ready(service: Path, port: int, timeout: float) -> dict:
                         "Metrics service process identity could not be verified"
                     )
                 if _listener_present(port) and not _listener_owned(identity, port):
-                    raise MetricsServiceError(
+                    raise MetricsPortConflict(
                         "Metrics port is occupied by an unverified listener; it was not changed"
                     )
                 # The verified child may still be binding or initializing HTTP.
@@ -362,6 +372,67 @@ def _wait_ready(service: Path, port: int, timeout: float) -> dict:
                 )
         time.sleep(0.05)
     raise MetricsServiceError("Metrics service did not become ready before the deadline")
+
+
+def _os_allocated_loopback_port(exclude: set[int]) -> int:
+    """Ask the kernel for one ephemeral loopback port; never scan a port range."""
+    for _ in range(8):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = int(listener.getsockname()[1])
+        if 1024 <= port <= 65535 and port not in exclude:
+            return port
+    raise MetricsServiceError("The OS did not allocate a distinct loopback metrics port")
+
+
+def ensure_selected_service(
+    state_root: str | Path,
+    collector: str | Path | None,
+    port: int | str = DEFAULT_PORT,
+    *,
+    default_port: int | str = DEFAULT_PORT,
+    allow_default_alternate: bool = False,
+) -> dict:
+    """Ensure the selected service, falling back only for a foreign default bind."""
+    requested = _port(port)
+    default = _port(default_port)
+    current = status_service(state_root, requested)
+    if current["state"] != "unknown":
+        return ensure_service(state_root, collector, requested)
+
+    if not _listener_present(requested):
+        raise MetricsServiceError("Metrics service identity could not be verified")
+    if not allow_default_alternate or requested != default:
+        raise MetricsServiceError(
+            "Metrics port is occupied by an unverified listener; it was not changed"
+        )
+
+    _PATHS.ensure_private_root(Path(state_root))
+    config = _PATHS.config_read(Path(state_root))
+    original_port = config["metrics_port"]
+    _require(
+        original_port == requested,
+        "Automatic metrics port selection requires the persisted default to match",
+    )
+    persisted_port = original_port
+    excluded = {requested}
+    for _attempt in range(3):
+        candidate = _os_allocated_loopback_port(excluded)
+        excluded.add(candidate)
+        _PATHS.config_set_metrics_port(Path(state_root), persisted_port, candidate)
+        persisted_port = candidate
+        try:
+            return ensure_service(state_root, collector, candidate)
+        except MetricsPortConflict:
+            continue
+        except (MetricsServiceError, _PATHS.PolicyError, _PROCESS.ProcessPolicyError, OSError, ValueError):
+            _PATHS.config_set_metrics_port(Path(state_root), persisted_port, original_port)
+            raise
+
+    _PATHS.config_set_metrics_port(Path(state_root), persisted_port, original_port)
+    raise MetricsServiceError(
+        "Three OS-allocated loopback metrics ports collided; the foreign listener was not changed"
+    )
 
 
 def stop_service(state_root: str | Path, port: int | str = DEFAULT_PORT) -> dict:
@@ -404,12 +475,15 @@ def _parse_args():
     commands = parser.add_subparsers(dest="command", required=True)
     spawn = commands.add_parser("_spawn", help=argparse.SUPPRESS)
     spawn.add_argument("--payload", required=True)
-    for name in ("ensure", "status", "verify", "stop"):
+    for name in ("ensure", "ensure-selected", "status", "verify", "stop"):
         command = commands.add_parser(name)
         command.add_argument("--state-root", required=True)
         command.add_argument("--port", default=DEFAULT_PORT, type=int)
-        if name == "ensure":
+        if name in {"ensure", "ensure-selected"}:
             command.add_argument("--collector")
+        if name == "ensure-selected":
+            command.add_argument("--default-port", default=DEFAULT_PORT, type=int)
+            command.add_argument("--allow-default-alternate", action="store_true")
         if name in {"status", "verify"}:
             command.add_argument("--quiet", action="store_true")
     return parser.parse_args()
@@ -423,6 +497,16 @@ def main() -> int:
             return 0
         if args.command == "ensure":
             result = ensure_service(args.state_root, args.collector, args.port)
+            print(result["port"])
+            return 0
+        if args.command == "ensure-selected":
+            result = ensure_selected_service(
+                args.state_root,
+                args.collector,
+                args.port,
+                default_port=args.default_port,
+                allow_default_alternate=args.allow_default_alternate,
+            )
             print(result["port"])
             return 0
         if args.command == "status":

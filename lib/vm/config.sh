@@ -93,8 +93,8 @@ vm_cli_parse() {
       --clean) VM_CLEAN=1 ;;
       --all) VM_SEEN[all]=1 ;;
       --name|--workspace|--memory|--max-depth|--permissions|--opencode-version|--agent|\
-      --host-profile|--workload-runtime|--model-provider|--model-port|--model-id|\
-      --metrics|--auth-forward|--auth-escrow-dir|--cwd)
+       --host-profile|--workload-runtime|--model-provider|--model-port|--model-id|\
+       --metrics|--metrics-port|--auth-forward|--auth-escrow-dir|--cwd)
         if (($# < 2)) || [[ -z "$2" ]]; then vm_error 'Option requires a value.'; return 2; fi
         key="${option#--}"; value="$2"
         [[ "$value" != --* ]] || { vm_error 'Option requires a value.'; return 2; }
@@ -281,6 +281,10 @@ for key,value in zip(args[::2],args[1::2]):
         c["model"][field]=value
     elif key == "auth-forward":
         c["auth_forward"]=value if value in ("off","auto") else value.split(",")
+    elif key == "metrics-port":
+        if not value.isascii() or not value.isdecimal() or len(value)>5:
+            raise SystemExit(2)
+        c["metrics_port"]=int(value)
     else:
         c[key.replace("-","_")]=value
 print(json.dumps(c))
@@ -293,7 +297,7 @@ print(json.dumps(c))
 vm_config_overrides() {
   local key
   VM_CONFIG_OVERRIDES=()
-  for key in host-profile workload-runtime opencode-version agent model-provider model-port model-id metrics auth-forward auth-escrow-dir; do
+for key in host-profile workload-runtime opencode-version agent model-provider model-port model-id metrics metrics-port auth-forward auth-escrow-dir; do
     if [[ -v "VM_SEEN[$key]" ]]; then VM_CONFIG_OVERRIDES+=("$key" "${VM_OPTIONS[$key]}"); fi
   done
 }

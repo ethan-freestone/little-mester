@@ -860,7 +860,7 @@ except Exception:
 
 vm_lifecycle_metrics_select_port() {
   local root="$1" runtime="$2" config="$3" depth="$4"
-  local enabled service collector port
+  local enabled service collector port requested
   if [[ "$depth" != 0 ]]; then
     # No ancestor-host metrics are forwarded into nested child profiles.
     printf '\n'
@@ -870,16 +870,29 @@ vm_lifecycle_metrics_select_port() {
   case "$enabled" in
     off) printf '\n'; return 0 ;;
     on)
+      requested="$(vm_lifecycle_json_field "$config" metrics_port 2>/dev/null || true)"
+      requested="${requested:-19532}"
+      if [[ ! "$requested" =~ ^[1-9][0-9]{3,4}$ ]] || (( 10#$requested < 1024 || 10#$requested > 65535 )); then
+        vm_lifecycle_error 'The selected host metrics port must be an integer from 1024 to 65535.'
+        return 2
+      fi
       service="$runtime/lib/vm/metrics_service.py"
       collector="$runtime/agent/metrics/gather.py"
       if [[ -f "$service" && ! -L "$service" && -f "$collector" && ! -L "$collector" ]]; then
-        port="$(PYTHONDONTWRITEBYTECODE=1 "$VM_LIFECYCLE_PYTHON" "$service" ensure --state-root "$root" \
-          --port 19532 --collector "$collector" 2>/dev/null)" || port=''
+        port="$(PYTHONDONTWRITEBYTECODE=1 "$VM_LIFECYCLE_PYTHON" "$service" ensure-selected \
+          --state-root "$root" --port "$requested" --default-port 19532 \
+          --allow-default-alternate --collector "$collector" 2>/dev/null)" || port=''
       else
         port=''
       fi
-      if [[ "$port" != 19532 ]]; then
-        printf 'WARNING: host metrics service is unavailable or unverified; VM startup will continue without the metrics forward.\n' >&2
+      if [[ "$port" != "$requested" ]]; then
+        if [[ "$port" =~ ^[1-9][0-9]{3,4}$ ]]; then
+          printf 'Selected OS-allocated managed host metrics port %s after the default port was occupied; it is recorded in state-root config.\n' "$port" >&2
+        else
+          printf 'WARNING: host metrics service on selected port %s is unavailable or unverified; VM startup will continue without the metrics forward.\n' "$requested" >&2
+        fi
+      fi
+      if [[ ! "$port" =~ ^[1-9][0-9]{3,4}$ ]] || (( 10#$port < 1024 || 10#$port > 65535 )); then
         printf '\n'
       else
         printf '%s\n' "$port"
@@ -959,6 +972,19 @@ vm_lifecycle_up() {
     vm_lifecycle_error 'Selected workspace does not contain a valid native guest payload.'
     return 2
   }
+  metrics_port="$(vm_lifecycle_metrics_select_port "$root" "$VM_LIFECYCLE_ROOT" \
+    "$config" "$depth")" || return 2
+  if [[ -n "$metrics_port" ]]; then
+    config="$(printf '%s' "$config" | "$VM_LIFECYCLE_PYTHON" -c '
+import json,sys
+data=json.load(sys.stdin)
+data["metrics_port"]=int(sys.argv[1])
+print(json.dumps(data,separators=(",",":")))
+' "$metrics_port")" || return 2
+    VM_CONFIG_JSON="$(printf '%s' "$config" | "$VM_LIFECYCLE_PYTHON" \
+      "$VM_LIFECYCLE_PATHS" validate-config --state-root "$root")" || return 2
+    config="$VM_CONFIG_JSON"
+  fi
   data="$("$VM_LIFECYCLE_PYTHON" - "$root" "$name" "$workspace" \
     "$VM_DISK_PIN_SHA256" "$memory" "$depth" "$max_depth" "$payload" <<'PY'
 import json,sys,uuid

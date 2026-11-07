@@ -3,31 +3,22 @@
 ## Control state
 
 > **Current single handoff:** [PR_REIMPLEMENTATION_HANDOFF.md](PR_REIMPLEMENTATION_HANDOFF.md).
-> The owner reset on 2026-11-06 supersedes older next steps throughout this ledger.
-> This session is planning only, no tests or implementation. Next resumed sequence
-> is Luna max implementation -> real evidence -> Sol medium diagnosis/fix, M0–M4.
-> First get OpenAI-backed implementation INSIDE the replacement VM; then metrics
-> and recursive VM work there. Historical tickets are not another authority.
+> Implementation resumed 2026-11-07. M0 inspect source/fixtures are implemented;
+> the exact-profile attempt from this shell was blocked by the inaccessible O state
+> root. M1 metrics-port and exact-owned proxy-reload source fixes now have focused
+> local evidence; new-candidate boot/runtime acceptance is still outstanding.
+> Continue M1–M4 per the frozen sequence; do not treat the M0 transport failure as
+> an implementation gate. Historical tickets are not authority.
 
-- Phase: **Planning-only reset; single migration/evidence handoff prepared. Existing INF-01 evidence retained; no local-inference gate before OpenAI development migration.**
+- Phase: **Implementation resumed; M0 source/fixtures complete, O runtime inspection blocked by shell location; M1 source fixes fixture-checked, new candidate boot still NOT_RUN. No auth/work acceptance claimed.**
 - Authority: user requested reading and kickoff of `vm-migration-plan.md`.
 - Architecture/execution approval: **granted 2026-11-03**, “Yes, please begin round 2”.
-- Current authorization: the owner approved the fixed four-package sequence in
-  [the local-first C14 handoff plan](docs/vm-c14-handoff-plan.md): (1) experimental
-  explicit development entry and first owner-started VM on this branch, (2) the
-  remaining bounded security/evidence implementation, (3) integrated acceptance
-  on a frozen candidate, and (4) C14 default/rollback and closeout. The owner starts
-  the VM; the assistant must not. The useful-evidence campaign is approved within
-  a 360-minute ceiling including cleanup and one diagnosed retry; do not request
-  campaign approval again. Pause for genuine owner observations or new effects.
-  Manual owner OpenAI authentication experimentation is allowed in the disposable
-  VM; no paid streams or credential export/import are included. No push, merge or
-  C14 activation is authorized.
-- The 2026-11-06 planning pause was superseded by the owner's later request to
-  resume local INF-01 implementation, followed by one owner-run read-only
-  exact-profile report recorded below. No provider endpoint request, VM lifecycle
-  or service operation, push, merge or default cutover is authorized by that resume.
-- Controlling next-session task source: `PR_REIMPLEMENTATION_HANDOFF.md`, M0–M4.
+- Current authorization: owner resumed the frozen M0–M4 implementation sequence;
+  owner-selected roles are Luna max implementation and Sol medium evidence/review.
+  Routine in-scope source fixes and fixtures continue without an aggregate gate.
+  The owner performs candidate launch and private interactive login. No assistant VM
+  launch, credential copying, push, merge or C14 activation is authorized.
+- Controlling task source: `PR_REIMPLEMENTATION_HANDOFF.md`, M0–M4.
   INF-00–12/F1–F8 retain shared-local-inference/release obligations but are not
   prerequisites to experimental OpenAI development migration or first child boot.
   Owner selected Luna max implementation and Sol medium planning/evidence review.
@@ -49,11 +40,10 @@
   ticket history through MCP, reconcile this branch's plan/tasks/progress, commit
   locally and stop; no C13 or host action in that session. This was superseded by
   the later request to finish C13 locally only.
-- Current scope: preserve ready run71ff52d4 and old parent; no live operations in
-  this planning reset. On resume, M1 specifies a separate recursion-capable
-  development candidate rather than modifying the valuable cap-0 profile. M2
-  moves implementation into that VM as soon as OpenAI login/coding work succeeds;
-  metrics/nesting continue there. Ordinary lab remains Docker pending C14. Shared
+- Current scope: preserve ready run71ff52d4 and old parent. M1 specifies a separate
+  recursion-capable development candidate rather than modifying the valuable cap-0
+  profile. M2 moves implementation into that VM as soon as OpenAI login/coding work
+  succeeds; metrics/nesting continue there. Ordinary lab remains Docker pending C14. Shared
   local-inference >=95% requirements are retained for that feature, not for M2.
 - Inspected source: PR #13 at
   `97af1d83a16fce68ddcc3390276c218a1b0cd518`.
@@ -2188,3 +2178,103 @@ Only planning/instruction documents edited during this clarification; source rea
 to ground the contract. No tests, linters, help commands, application code changes,
 VM/provider/auth actions or ticket MCP operations. Existing runtime acceptance
 remains unpassed; this entry documents how to repair it, not another closed gate.
+
+## M0/M1 source implementation checkpoint — 2026-11-07
+
+**Location:** implementation checkout `/workspace`, branch `feat/vm-approach-2`,
+HEAD `a33f6309e2ae6bd436f14d92da4dedfee0ba1472`. Changes remain uncommitted. The
+pre-existing user file `vm-migration-plan.md` remains unchanged (SHA-256
+`3d6ee2115423272b88a8efd8d4d33462318d5ae4c537841091e513ee5e2d1374`). No ticket
+reads/writes, VM launch, real host metrics-service action, provider call, auth
+operation, push, merge or C14 cutover occurred.
+
+### M0 inspect evidence
+
+- Implemented `--dev-step inspect` in `scripts/vm-host-acceptance.py` with exact
+  selected-profile transport, bounded guest probes, per-check failure continuation,
+  repair actions and private report support. Added fixture coverage in
+  `tests/test_vm_host_acceptance.py` for CLI conflicts, observe-only behavior,
+  transport/identity/guest failures, proxy denial and independent metrics checks.
+- Attempted the real inspect from this shell with source `/workspace`, root
+  `/home/ethan/.local/share/little-mester-branch-dev-vm-approach-2`, profile
+  `branch-dev-20261105`, run `20261107a3f39c5d9120b5a76d4ef018`. Report source HEAD
+  was `a33f6309e2ae6bd436f14d92da4dedfee0ba1472`, tree SHA-256
+  `c20971e13509b8b12a34d22a1f65e1576fd106a41de5eea948d87d8908087a8b`. The root
+  was inaccessible; report emitted to stdout, exit 2, with no guest or proxy probe.
+  Controller KVM/CPU and 8-GiB headroom were available; `virtiofsd` was not found on
+  this shell's PATH. No alternate root was guessed. This is BLOCKED_EXTERNAL runtime
+  evidence, not a passing inspect. No report file was retained.
+
+### M1 selected metrics port and exact-owned reload source fixes
+
+- Added validated config `metrics_port` (default 19532, integer 1024–65535) and a
+  compare-and-swap helper that changes only this field while preserving the other
+  configured data.
+- Managed metrics selection now leaves an unknown listener untouched. For an
+  occupied default, it asks the OS for a loopback ephemeral port, persists the
+  selected value, and retries only classified bind races, at most three times;
+  exhausting those retries restores the prior configured port. Explicit nondefault
+  collisions do not silently change the requested port. The guest-side forwarded
+  port remains 19532; selected host port flows through managed ensure/status and QEMU.
+- Exact-profile `egress-reload` validates the selected profile/QEMU/runtime, parses
+  policy before signalling, and signals only the registry-owned proxy. Invalid
+  policy or QEMU identity mismatch causes no signal.
+- Focused fixture evidence covers metrics config validation/CAS, foreign-listener
+  continuity, OS-allocated alternate service and `/summary`, three-collision limit
+  and config rollback, nondefault-port refusal, selected host-to-QEMU forwarding,
+  and proxy reload identity/policy failures. Runtime on a newly frozen candidate is
+  still NOT_RUN; M1 `boot` evidence and owner-started launch remain outstanding.
+
+### Validation at this checkpoint
+
+| Command/check | Result |
+|---|---|
+| `python3 -B -m unittest discover -s tests -p 'test_vm_*.py'` |412/412 PASS, fixtures only |
+| `bats --print-output-on-failure tests/` |151/151 PASS |
+| Focused paths/metrics/process/acceptance Python suites after final test edit |158/158 PASS |
+| `ruff check --ignore F841,BLE001` on changed VM Python modules/tests |PASS; ignored only the two pre-existing `metrics_service.py` findings recorded earlier |
+| Unignored Ruff on changed paths/metrics/process tests |Reports those same pre-existing `metrics_service.py` F841/BLE001 findings; no new finding |
+| ShellCheck `--severity=error`, Bash `-n`, Python AST, `git diff --check` |PASS |
+| `python3 scripts/check-docs-consistency.py` |8 existing README/DECISIONS drift/link failures, same set as earlier baseline; no new failure |
+
+The metrics service integration fixture started only a temporary loopback collector
+under private temporary state and stopped it during test cleanup. No real guest,
+owner metrics service, auth data, credentials, VM overlay or archive was modified.
+
+**Next bounded actions:** O is the current `feat/vm-approach` VM; N is the separate
+replacement candidate. Do not switch away from or stop O. The M0 source/fixtures
+and known M1 source batch are implemented; the owner performs one exact inspect in
+O, then starts one fresh cap-2 candidate from the committed source revision. The
+agent tool shell itself could not see the recorded private root; do not retry from
+another root or create another preflight. The inspect is read-only and is not a
+code or candidate-launch gate. Exact inspect command (fresh run ID; stdout report):
+
+```sh
+python3 /workspace/scripts/vm-host-acceptance.py --dev-step inspect \
+  --source /workspace \
+  --state-root /home/ethan/.local/share/little-mester-branch-dev-vm-approach-2 \
+  --profile branch-dev-20261105 --run-id ee5318f43bc944d3a0be1dc5300aa780
+```
+
+This is read-only inspect. It does not authorize launching or modifying a VM.
+
+### No-loop amendment — 2026-11-07
+
+The owner supplied Claude's proposed loop-breakers. The current handoff now records
+the fixed distinction between M2 migration and C14 completion, a committed-source
+fresh-candidate rule (excluding `vm-migration-plan.md`), one exact owner action when
+the O state root is inaccessible, evidence-first proxy repair, and local-model
+topology as an owner decision that does not block OpenAI boot/work. The proposal to
+ignore normative release requirements was not adopted: local-model acceptance and
+the documented C14 gates remain in scope. No new launch script is needed; the
+existing `lab vm` CLI already exposes the required depth, browser, metrics and model
+provider/port options. No checked-in `.mester-egress` manifest was found, so no
+OpenAI hosts were guessed or added.
+
+Focused validation rerun after the amendment: 79 acceptance Python tests, 16 metrics
+service tests, 51 paths tests, 12 process tests, and 42 VM CLI/metrics Bats tests
+passed; `git diff --check` passed. These are source/fixture checks only. No VM was
+launched, no provider was contacted, and no auth or live egress policy was changed.
+The local inference server location/provider/port are not established here; use
+provider `none` for the initial development candidate unless the owner selects a
+local endpoint before its separate inference acceptance.

@@ -16,6 +16,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
@@ -203,6 +204,7 @@ class HostServiceTests(unittest.TestCase):
             server.serve_forever()
         """), encoding="utf-8")
         self.port = self._free_port()
+        self.service_port = self.port
         self.started = False
 
     @staticmethod
@@ -214,7 +216,7 @@ class HostServiceTests(unittest.TestCase):
     def tearDown(self):
         if self.started:
             try:
-                service.stop_service(self.root, self.port)
+                service.stop_service(self.root, self.service_port)
             except service.MetricsServiceError:
                 pass
         self.temp.cleanup()
@@ -256,6 +258,64 @@ class HostServiceTests(unittest.TestCase):
                 service.ensure_service(self.root, self.collector, self.port)
             self.assertEqual(service.status_service(self.root, self.port)["state"], "unknown")
             self.assertTrue(service._listener_present(self.port))
+
+    def test_nondefault_occupied_port_does_not_silently_select_an_alternate(self):
+        with socket.socket() as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", self.port))
+            listener.listen(1)
+            with self.assertRaises(service.MetricsServiceError):
+                service.ensure_selected_service(
+                    self.root, self.collector, self.port,
+                    default_port=19532, allow_default_alternate=True,
+                )
+            self.assertFalse((self.root / "vm/metrics").exists())
+            self.assertTrue(service._listener_present(self.port))
+
+    def test_occupied_default_selects_and_records_os_allocated_managed_port(self):
+        config = self.root / "config.json"
+        config.write_text(json.dumps({"metrics_port": self.port}), encoding="utf-8")
+        config.chmod(0o600)
+        with socket.socket() as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", self.port))
+            listener.listen(1)
+            selected = service.ensure_selected_service(
+                self.root, self.collector, self.port,
+                default_port=self.port, allow_default_alternate=True,
+            )["port"]
+            self.started = True
+            self.service_port = selected
+            self.assertNotEqual(selected, self.port)
+            self.assertEqual(json.loads(config.read_text(encoding="utf-8"))["metrics_port"], selected)
+            self.assertTrue(service._listener_present(self.port))
+            self.assertEqual(service.status_service(self.root, selected)["state"], "running")
+            with urlopen(f"http://127.0.0.1:{selected}/summary", timeout=1) as response:
+                self.assertEqual(response.read(), b"fixture metrics ready")
+
+    def test_alternate_selection_retries_only_three_bind_collisions_and_restores_config(self):
+        config = self.root / "config.json"
+        config.write_text(json.dumps({"metrics_port": 19532, "agent": "aider"}), encoding="utf-8")
+        config.chmod(0o600)
+        with (
+            mock.patch.object(service, "status_service", return_value={"state": "unknown"}),
+            mock.patch.object(service, "_listener_present", return_value=True),
+            mock.patch.object(service, "_os_allocated_loopback_port", side_effect=(24001, 24002, 24003)) as allocate,
+            mock.patch.object(service, "ensure_service", side_effect=service.MetricsPortConflict("collision")) as ensure,
+        ):
+            self.assertRaises(
+                service.MetricsServiceError,
+                service.ensure_selected_service,
+                self.root,
+                self.collector,
+                19532,
+                default_port=19532,
+                allow_default_alternate=True,
+            )
+        self.assertEqual(allocate.call_count, 3)
+        self.assertEqual(ensure.call_count, 3)
+        self.assertEqual(json.loads(config.read_text(encoding="utf-8")),
+                         {"metrics_port": 19532, "agent": "aider"})
 
     def test_missing_transport_is_reported_without_creating_state(self):
         missing_root = Path(self.temp.name) / "not-created"

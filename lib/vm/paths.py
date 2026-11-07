@@ -416,7 +416,8 @@ def config_read(root):
 def config_validate(root, data):
     result = {"schema_version": 1, "host_profile": "linux-x86_64", "workload_runtime": "docker",
               "opencode_version": "latest", "agent": "opencode", "model": {"provider": "none"},
-              "metrics": "on", "auth_forward": "off", "auth_escrow_dir": str(root / "secrets")}
+              "metrics": "on", "metrics_port": 19532, "auth_forward": "off",
+              "auth_escrow_dir": str(root / "secrets")}
     require(isinstance(data, dict) and data.keys() <= result.keys())
     result.update(data)
     require(type(result["schema_version"]) is int and result["schema_version"] == 1)
@@ -425,6 +426,7 @@ def config_validate(root, data):
     require(result["agent"] in ("opencode", "aider"))
     opencode_version(result["opencode_version"], latest=True)
     require(result["metrics"] in ("on", "off"))
+    integer(result["metrics_port"], 1024, 65535)
     model = result["model"]
     require(isinstance(model, dict) and model.keys() <= {"provider", "port", "id"})
     require(model.get("provider") in ("none", "ollama", "llamacpp", "remote"))
@@ -452,6 +454,27 @@ def config_validate(root, data):
             parent = parent.parent
         private_entry(parent)
     return result
+
+
+def config_set_metrics_port(root, expected_port, selected_port):
+    """Compare-and-swap the selected metrics port without replacing other config."""
+    integer(expected_port, 1024, 65535)
+    integer(selected_port, 1024, 65535)
+    root = state_root(str(root), must_exist=True, scan=True)
+    path = root / "config.json"
+    with lock_file(root / ".allocation.lock"):
+        if path.exists() or path.is_symlink():
+            private_entry(path)
+            original = decode(path.read_bytes())
+        else:
+            original = {}
+        current = config_validate(root, original)
+        require(current["metrics_port"] == expected_port)
+        updated = dict(original)
+        updated["metrics_port"] = selected_port
+        config_validate(root, updated)
+        atomic_json(path, updated)
+    return config_read(root)
 
 
 def version(value, *, latest=False):
@@ -1419,12 +1442,15 @@ class Parser(argparse.ArgumentParser):
 def main():
     parser = Parser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
-    for command in ("config", "validate-config", "context", "validate-workspace",
+    for command in ("config", "validate-config", "config-set-metrics-port", "context", "validate-workspace",
                     "profile-read", "profile-list", "profile-write", "profile-create", "profile-transition", "profile-version-update", "runtime-install", "runtime-validate", "image-run",
                     "image-publish", "profile-run", "profile-delete", "overlay-publish", "asset-publish", "asset-replace", "seed-write",
                     "recursion-run-create", "recursion-run-delete"):
         sub = commands.add_parser(command)
         sub.add_argument("--state-root", required=True)
+        if command == "config-set-metrics-port":
+            sub.add_argument("--expected-port", required=True, type=int)
+            sub.add_argument("--port", required=True, type=int)
         if command in ("context", "profile-read", "profile-write", "profile-create", "profile-transition", "profile-version-update", "runtime-install", "runtime-validate",
                        "profile-run", "profile-delete", "overlay-publish", "asset-publish", "asset-replace", "seed-write"):
             sub.add_argument("--profile", required=True)
@@ -1466,6 +1492,8 @@ def main():
         result = config_read(root)
     elif args.command == "validate-config":
         result = config_validate(root, decode(sys.stdin.buffer.read(1024 * 1024 + 1)))
+    elif args.command == "config-set-metrics-port":
+        result = config_set_metrics_port(root, args.expected_port, args.port)
     elif args.command in ("context", "validate-workspace"):
         result = {"schema_version": 1, "state_root": str(root)}
         if args.command == "context":

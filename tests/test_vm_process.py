@@ -1,4 +1,5 @@
 import base64
+import contextlib
 import fcntl
 import importlib.util
 import os
@@ -11,6 +12,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 PROCESS_PATH = Path(__file__).parents[1] / "lib" / "vm" / "process.py"
@@ -20,6 +22,68 @@ SPEC.loader.exec_module(process)
 
 
 class ProcessTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def proxy_reload_fixture(self, *, invalid_policy=False, qemu_match=True):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile_dir = root / "vm/profiles/candidate"
+            run_dir = profile_dir / "runs/run-123"
+            workspace = root / "workspace"
+            run_dir.mkdir(parents=True, mode=0o700)
+            workspace.mkdir(mode=0o700)
+            runtime = profile_dir / "runtime"
+            runtime.mkdir(mode=0o700)
+            qemu = {"pid": 12345, "start_ticks": 21, "executable": "/usr/bin/qemu-system-x86_64",
+                    "argv": ["qemu-system-x86_64", "-enable-kvm"]}
+            profile_qemu = dict(qemu)
+            if not qemu_match:
+                profile_qemu["start_ticks"] += 1
+            proxy_identity = {"pid": 12346, "start_ticks": 22, "executable": "/usr/bin/python3",
+                              "argv": ["/usr/bin/python3", str(runtime / "lib/vm/proxy.py"),
+                                       "--workspace", str(workspace), "--port-file", str(run_dir / "proxy.port"),
+                                       "--reload-marker", str(run_dir / "proxy.ready")]}
+            profile = {"name": "candidate", "status": "ready", "depth": 0,
+                       "workspace": str(workspace), "runtime_payload_sha256": "a" * 64,
+                       "runtime_identity": profile_qemu}
+            registry = {"processes": {"qemu_0": {"identity": qemu},
+                                      "proxy": {"identity": proxy_identity}}}
+            paths = process._PATHS
+            proxy_module = SimpleNamespace(
+                policy=mock.Mock(side_effect=ValueError("invalid policy") if invalid_policy else None,
+                                 return_value=(True, set())),
+                allowed=mock.Mock(return_value=True),
+            )
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(paths, "state_root", return_value=root))
+                stack.enter_context(mock.patch.object(paths, "profile_read", return_value=profile))
+                stack.enter_context(mock.patch.object(paths, "runtime_validate", return_value={
+                    "runtime_payload_sha256": "a" * 64,
+                }))
+                stack.enter_context(mock.patch.object(paths, "profile_path", return_value=profile_dir))
+                stack.enter_context(mock.patch.object(paths, "private_entry"))
+                stack.enter_context(mock.patch.object(process, "registry_read", return_value=registry))
+                stack.enter_context(mock.patch.object(process, "identity_state", return_value="running"))
+                signal_proxy = stack.enter_context(mock.patch.object(process, "registry_signal", return_value="running"))
+                stack.enter_context(mock.patch.object(process, "_load_reload_proxy", return_value=proxy_module))
+                yield root, profile_dir, run_dir, signal_proxy
+
+    def test_proxy_reload_signals_only_exact_registered_proxy_after_policy_validation(self):
+        with self.proxy_reload_fixture() as (root, _profile_dir, run_dir, signal_proxy):
+            result = process.proxy_reload_profile(root, "candidate")
+        self.assertEqual(result["status"], "reload_signal_sent")
+        self.assertTrue(result["policy_allows_auth_host"])
+        signal_proxy.assert_called_once_with(run_dir / "processes.json", "run-123", "proxy", signal.SIGHUP, 0)
+
+    def test_proxy_reload_invalid_policy_and_qemu_mismatch_never_signal(self):
+        with self.proxy_reload_fixture(invalid_policy=True) as (root, _profile, _run, signal_proxy):
+            with self.assertRaises(process.ProcessPolicyError):
+                process.proxy_reload_profile(root, "candidate")
+            signal_proxy.assert_not_called()
+        with self.proxy_reload_fixture(qemu_match=False) as (root, _profile, _run, signal_proxy):
+            with self.assertRaises(process.ProcessPolicyError):
+                process.proxy_reload_profile(root, "candidate")
+            signal_proxy.assert_not_called()
+
     def test_supervisor_drops_inherited_locks_without_unlocking_controller(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

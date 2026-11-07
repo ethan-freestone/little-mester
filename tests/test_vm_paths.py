@@ -68,6 +68,7 @@ class PathsTest(unittest.TestCase):
         before = list(self.root.iterdir())
         data = self.cli("config")
         self.assertEqual(data["model"], {"provider": "none"})
+        self.assertEqual(data["metrics_port"], 19532)
         self.assertEqual(data["auth_escrow_dir"], str(self.root / "secrets"))
         self.assertEqual(list(self.root.iterdir()), before)
 
@@ -439,6 +440,31 @@ class PathsTest(unittest.TestCase):
         self.assertEqual(self.cli("config")["model"]["port"], 11434)
         config.chmod(0o644)
         self.cli("config", ok=False)
+
+    def test_metrics_host_port_is_optional_validated_and_nonsecret(self):
+        config = self.root / "config.json"
+        config.write_text('{"schema_version":1,"metrics_port":24680}')
+        config.chmod(0o600)
+        self.assertEqual(self.cli("config")["metrics_port"], 24680)
+        for value in (1023, 65536, True, "19532"):
+            config.write_text(json.dumps({"schema_version": 1, "metrics_port": value}))
+            config.chmod(0o600)
+            result = self.cli("config", ok=False)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_metrics_port_update_is_compare_and_swap_and_preserves_other_fields(self):
+        config = self.root / "config.json"
+        original = {"schema_version": 1, "agent": "aider", "auth_forward": "off",
+                    "metrics": "on", "metrics_port": 19532}
+        config.write_text(json.dumps(original), encoding="utf-8")
+        config.chmod(0o600)
+        updated = self.cli("config-set-metrics-port", "--expected-port", 19532, "--port", 24680)
+        self.assertEqual(updated["metrics_port"], 24680)
+        persisted = json.loads(config.read_text(encoding="utf-8"))
+        self.assertEqual(persisted, {**original, "metrics_port": 24680})
+        before = config.read_bytes()
+        self.cli("config-set-metrics-port", "--expected-port", 19532, "--port", 24681, ok=False)
+        self.assertEqual(config.read_bytes(), before)
 
     def test_private_ancestry_and_descendants(self):
         self.root.chmod(0o755)

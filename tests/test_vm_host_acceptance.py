@@ -1178,6 +1178,144 @@ class HostAcceptanceTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 2)
         preflight.assert_not_called()
 
+    @contextlib.contextmanager
+    def dev_inspect_fixture(self, *, listener=True, guest_facts_rc=0, proxy_status=200):
+        profile = {
+            "name": "branch-dev-fixture", "status": "ready", "depth": 0, "max_depth": 2,
+            "memory_gib": 4, "workspace": str(self.source),
+            "runtime_payload_sha256": "a" * 64, "guest_payload_sha256": "b" * 64,
+            "runtime_identity": {"pid": 12345, "start_ticks": 98765,
+                                 "executable": "/usr/bin/qemu-system-x86_64", "argv": ["qemu"]},
+        }
+        facts = {"mester": True, "opencode": True, "workspace_writable": True,
+                 "workspace_virtiofs": True, "kvm": True, "cpu_virtualization": True,
+                 "memavailable_mib": 2048,
+                 "tools": {name: True for name in ("qemu-system-x86_64", "qemu-img", "virtiofsd",
+                                                     "socat", "bats", "shellcheck", "cloud-init")}}
+        marker = {"status": "ready", "payload_sha256": "b" * 64,
+                  "workspace_mount": "virtiofs", "opencode_version": "2.2.5"}
+        metrics = {"summary": True, "json": True, "cpu": True, "memory": True}
+
+        def guest_json(_root, _profile, code):
+            if code == acceptance.DEV_GUEST_FACTS and guest_facts_rc:
+                return None, guest_facts_rc, "guest_command_failed"
+            if code == acceptance.DEV_GUEST_FACTS:
+                return facts, 0, "guest_probe_completed"
+            if code == acceptance.DEV_GUEST_MARKER:
+                return marker, 0, "guest_probe_completed"
+            if code == acceptance.DEV_GUEST_PROXY:
+                return {"connect_status": proxy_status}, 0, "guest_probe_completed"
+            if code == acceptance.DEV_GUEST_METRICS:
+                return metrics, 0, "guest_probe_completed"
+            raise AssertionError("unexpected guest command")
+
+        original_stat = Path.stat
+        original_read_text = Path.read_text
+
+        def fake_stat(path, *args, **kwargs):
+            if str(path) == "/dev/kvm":
+                return SimpleNamespace(st_mode=stat.S_IFCHR | 0o660)
+            return original_stat(path, *args, **kwargs)
+
+        def fake_read_text(path, *args, **kwargs):
+            if str(path) == "/proc/cpuinfo":
+                return "processor : 0\nflags : fpu vmx sse\n"
+            return original_read_text(path, *args, **kwargs)
+
+        def load_module(name, path):
+            if name == "vm_dev_inspect_identity":
+                return SimpleNamespace(identity_state=lambda _identity: "running")
+            raise AssertionError(f"unexpected module load: {name}")
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(acceptance, "_source_identity", return_value={
+                "source_head": "c" * 40, "tree_sha256": "d" * 64,
+            }))
+            stack.enter_context(mock.patch.object(acceptance, "_private_directory"))
+            stack.enter_context(mock.patch.object(acceptance, "_profile_record", return_value=profile))
+            stack.enter_context(mock.patch.object(acceptance, "_validate_profile_runtime", return_value=True))
+            stack.enter_context(mock.patch.object(acceptance, "_listener_owned_loopback", return_value=listener))
+            stack.enter_context(mock.patch.object(acceptance, "_dev_guest_json", side_effect=guest_json))
+            stack.enter_context(mock.patch.object(acceptance, "_dev_proxy_details",
+                                                  return_value=(self.base, True, False)))
+            stack.enter_context(mock.patch.object(acceptance, "_dev_metrics_port", return_value=43210))
+            stack.enter_context(mock.patch.object(acceptance, "_dev_host_metrics", return_value=(True, metrics)))
+            stack.enter_context(mock.patch.object(acceptance, "_load_module", side_effect=load_module))
+            stack.enter_context(mock.patch.object(acceptance, "_read_mem_budget", return_value={"passed": True,
+                                                                                               "memavailable_mib": 16384}))
+            stack.enter_context(mock.patch.object(acceptance.os, "access", return_value=True))
+            stack.enter_context(mock.patch.object(acceptance.shutil, "which", return_value="/mock/tool"))
+            stack.enter_context(mock.patch.object(Path, "stat", fake_stat))
+            stack.enter_context(mock.patch.object(Path, "read_text", fake_read_text))
+            yield profile
+
+    def test_dev_inspect_rejects_campaign_combination_before_any_probe(self):
+        with mock.patch.object(acceptance, "run_dev_step") as inspect, \
+                mock.patch.object(sys, "stderr", io.StringIO()), self.assertRaises(SystemExit) as error:
+            acceptance.main(["--dev-step", "inspect", "--source", str(self.source),
+                             "--state-root", str(self.state_root), "--profile", "branch-dev-fixture",
+                             "--run-id", RUN_ID, "--suite", "clean"])
+        self.assertEqual(error.exception.code, 2)
+        inspect.assert_not_called()
+
+    def test_dev_inspect_without_action_consent_is_read_only(self):
+        before = list(self.state_root.iterdir())
+        with self.dev_inspect_fixture():
+            report = acceptance.run_dev_step(self.source, self.state_root, "branch-dev-fixture", RUN_ID, "inspect")
+        self.assertEqual(report["result"], "PASS")
+        self.assertEqual(list(self.state_root.iterdir()), before)
+        self.assertEqual(report["protected_assets_unchanged"]["credentials"], "NOT_INSPECTED")
+        self.assertEqual(report["protected_assets_unchanged"]["selected_profile_metadata"], "UNCHANGED_DURING_INSPECT")
+
+    def test_dev_inspect_stale_listener_performs_no_ssh(self):
+        with self.dev_inspect_fixture(listener=False), mock.patch.object(acceptance, "_guest_exec") as ssh:
+            report = acceptance.run_dev_step(self.source, self.state_root, "branch-dev-fixture", RUN_ID, "inspect")
+        ssh.assert_not_called()
+        check = next(item for item in report["checks"] if item["id"] == "exact_qemu_ssh_identity")
+        self.assertEqual(check["status"], "BLOCKED_EXTERNAL")
+        self.assertEqual(check["repair_packet"], "M0-exact-transport")
+
+    def test_dev_inspect_emits_report_when_exact_ssh_listener_is_unavailable(self):
+        output = io.StringIO()
+        with self.dev_inspect_fixture(listener=False), contextlib.redirect_stdout(output):
+            status = acceptance.main(["--dev-step", "inspect", "--source", str(self.source),
+                                      "--state-root", str(self.state_root), "--profile", "branch-dev-fixture",
+                                      "--run-id", RUN_ID])
+        report = json.loads(output.getvalue())
+        self.assertEqual(status, 2)
+        self.assertEqual(report["step"], "inspect")
+        self.assertEqual(report["result"], "BLOCKED_EXTERNAL")
+        self.assertIn("checks", report)
+        self.assertEqual(report["process_identity_summary"]["state"], "running")
+
+    def test_dev_inspect_preserves_guest_command_rc_and_continues_independent_checks(self):
+        with self.dev_inspect_fixture(guest_facts_rc=37):
+            report = acceptance.run_dev_step(self.source, self.state_root, "branch-dev-fixture", RUN_ID, "inspect")
+        facts = next(item for item in report["checks"] if item["id"] == "guest_facts")
+        self.assertEqual(facts["cause_exit_code"], 37)
+        self.assertEqual(facts["repair_packet"], "M1-boot")
+        self.assertIn("openai_auth_https_connect", {item["id"] for item in report["checks"]})
+        self.assertIn("metrics_guest_http", {item["id"] for item in report["checks"]})
+
+    def test_dev_inspect_proxy_403_does_not_hide_metrics_and_names_repairs(self):
+        with self.dev_inspect_fixture(proxy_status=403):
+            report = acceptance.run_dev_step(self.source, self.state_root, "branch-dev-fixture", RUN_ID, "inspect")
+        by_id = {item["id"]: item for item in report["checks"]}
+        self.assertEqual(by_id["openai_auth_https_connect"]["observed"]["diagnosed_layer"],
+                         "denied_beyond_selected_workspace_policy")
+        self.assertEqual(by_id["openai_auth_https_connect"]["repair_packet"], "M2a-auth-egress")
+        self.assertEqual(by_id["metrics_host_http"]["status"], "PASS")
+        self.assertEqual(by_id["metrics_guest_http"]["status"], "PASS")
+
+    def test_dev_guest_nonzero_exit_is_retained_without_stderr(self):
+        completed = subprocess.CompletedProcess(["ssh"], 37, b"", b"private guest output")
+        with mock.patch.object(acceptance, "_guest_exec", return_value=completed) as ssh:
+            data, cause, reason = acceptance._dev_guest_json(self.state_root, "branch-dev-fixture", "fixed")
+        self.assertIsNone(data)
+        self.assertEqual(cause, 37)
+        self.assertEqual(reason, "guest_command_failed")
+        self.assertTrue(ssh.call_args.kwargs["allow_failure"])
+
     def test_dry_run_lists_explicit_update_effect_without_execution(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output), \

@@ -38,6 +38,49 @@ the entire historical handoff each iteration or call tickets to choose work.
 Use the gate/repair matrix, implement its repair, run evidence, and continue. Sol
 reviews a result and chooses a repair within this plan, not a new architecture.
 
+### No-loop execution contract — owner clarification, 2026-11-07
+
+- **Fixed finish lines:** M2 PASS means development has demonstrably moved into N;
+  it is not C14. C14 means the accepted VM workflow is the ordinary `lab`
+  default, the explicit Docker fallback works, and TASK-16's required evidence,
+  docs and CI closeout pass. Do not rename an intermediate milestone as completion
+  or invent a later phase after those criteria pass.
+- **Freeze once, preserve the valuable profiles:** before the owner starts the new
+  M1 candidate, review and commit the known source batch, run its focused tests,
+  and record the exact source revision. Exclude the owner file
+  `vm-migration-plan.md`. Create one fresh, uniquely named cap-2 candidate from
+  that revision; never use the existing cap-0 `branch-dev-20261105` as a test
+  target or change its persisted cap. Do not launch a candidate while a known
+  required source fix is still pending. A later fix to frozen runtime content is
+  tested in a new candidate; preserve the working N and its evidence.
+- **Use the existing interfaces:** verify `./lab vm --help` / `lab-vm --help` and
+  the actual candidate flags. Prefer one exact owner launch command over adding a
+  second launch/evidence script when the existing CLI and acceptance runner suffice.
+  Owner starts the VM; assistant does not. Browser auth is already `auto` by
+  default: for the supported OpenCode version it uses the existing bridge. Do not
+  pass `--no-browser-auth` for N; recursive child C remains credential/browser-free.
+- **One owner-only action at a time:** if this shell cannot reach the recorded O
+  state root, do not retry from another guessed root. Give the owner one exact
+  read-only command to run in O, keep implementing independent source work, and
+  use its result to select the next bounded repair. Every handoff names the
+  expected observation and what it changes; no repeated action without a changed
+  hypothesis.
+- **Repair observed egress, never guessed egress:** do not add the suggested
+  OpenAI hostname list pre-emptively. First identify the exact denied public
+  hostname and whether the denial belongs to N's selected workspace policy or an
+  ancestor proxy; add only the required rule at that owning layer, then verify a
+  public auth transport response and a private-destination denial. No allow-all
+  or private/host policy weakening.
+- **Local-model topology is an owner choice, not an M1/M2 blocker:** the serving
+  machine, provider and port are not established by the current checkout. Ask once
+  before configuring/running local inference. Until selected, the development
+  candidate may use provider `none`; do not guess that physical-host loopback is
+  reachable from O/N or start/change a model service. Local-model acceptance stays
+  in the bounded inference/release scope; it is not dropped.
+- **Keep reports finite:** distinguish source/fixture PASS from runtime PASS;
+  report the exact failed predicate and one repair. A failed check returns to its
+  repair, not to a global approval/planning phase. Continue independent M1–M4 work.
+
 ## 1. Facts and assets to carry to the next session
 
 | Item | Recorded fact / remaining uncertainty |
@@ -167,15 +210,15 @@ checks; do not rerun all successful VM/auth steps for a metrics-renderer edit.
 Do run the broad suite at a coherent checkpoint and before release. Preserve
 evidence validity by recording which source/runtime/probe each result actually used.
 
-## 3. Minimal evidence runner contract (implementation on resume, not now)
+## 3. Minimal evidence runner contract and implementation status
 
-**Planned extension, NOT IMPLEMENTED:** a development-evidence mode in the EXISTING
-`scripts/vm-host-acceptance.py`, not another driver file or campaign system. Reuse
-its exact-profile transport and reporting plus existing redaction, metrics and
-self-test helpers. No new dependency, daemon, validator framework or process manager.
-Build only the current packet's probe; do not implement every mode before boot.
+**Implemented through `inspect` only:** development evidence remains an additive
+mode in the EXISTING `scripts/vm-host-acceptance.py`, not another driver file or
+campaign system. The inspect path reuses exact-profile transport/reporting and
+existing redaction, metrics and self-test helpers. No new dependency or runner
+framework was added. Remaining step probes are implemented packet-by-packet.
 
-Freeze the following additive interface; it is **NOT IMPLEMENTED YET**:
+The additive interface is:
 
 ```text
 python3 scripts/vm-host-acceptance.py --dev-step STEP \
@@ -183,7 +226,8 @@ python3 scripts/vm-host-acceptance.py --dev-step STEP \
   [--dev-execute --confirm-run-id ID] [--dev-report ABSOLUTE_PRIVATE_FILE]
 ```
 
-STEP is exactly `inspect|boot|auth|work|metrics|nested`. This is mutually exclusive
+STEP is exactly `inspect|boot|auth|work|metrics|nested`; **only `inspect` is currently
+implemented**. This is mutually exclusive
 with campaign `--start/--resume/--execute/--cleanup/--suite/--stage`, discovery and
 observation flags. Do not route it through `execute_stage`, `_campaign_result`,
 campaign locks/attempt ledger or the old aggregate gate prerequisites. Preserve
@@ -206,12 +250,11 @@ permission to run any arbitrary guest command or to launch from the assistant.
   results and repair task, including on failure. A human UI check can remain
   pending while machine checks pass; do not synthesize a human PASS.
 
-Add a small `run_dev_step()` dispatcher and per-step functions in this script;
-do not introduce another runner module/process framework. M0 adds inspect only;
-later packets add their own step. Extend existing tests/test_vm_host_acceptance.py.
-An unimplemented step returns a fixed `step_not_implemented` repair target, not
-a successful placeholder. Luna verifies implemented flags/help on resume before
-giving an executable command to the owner. Do not run the proposed CLI now.
+The small `run_dev_step()` dispatcher and `inspect` implementation are in this
+script; do not introduce another runner module/process framework. Extend existing
+tests/test_vm_host_acceptance.py for each later packet. An unimplemented step returns
+a fixed `step_not_implemented` repair target, not a successful placeholder. Before
+giving an owner a command, verify that exact step's flags/help and implementation.
 
 Per-step report fields (fixed schema; identifiers, not secrets):
 `step`, `run_id`, `location` (O/N/C), `source_head`, `source_tree_sha256`,
@@ -276,11 +319,17 @@ PROGRESS. No VM mutation. Do not build the other modes as an M0 prerequisite.
 - **Failure -> fix:** transport failure repairs the specific transport path;
   private state mismatch diagnoses only the selected path. No old-root migration.
 
-M0 tests to add: CLI campaign/dev conflict; missing consent zero writes/launches;
-stale identity zero SSH; SSH unavailable report retained; guest command failure
-keeps cause rc; auth403 does not hide metrics checks; failure report explicitly
-names the next M1/M2/M3 repair. Do not run the full suite repeatedly while writing
-these fixtures. Focused test first, one coherent broad checkpoint afterward.
+M0 fixture coverage implemented: CLI campaign/dev conflict; missing consent zero
+writes/launches; stale identity zero SSH; SSH unavailable report retained; guest
+command failure keeps cause rc; proxy403 does not hide metrics checks; failure
+report names the next M1/M2/M3 repair. These are fixture results, not live inspect
+acceptance. Focused checks are complete; use one coherent broad checkpoint next.
+
+**M0 source/fixture checkpoint, 2026-11-07:** inspect mode and the failure-
+continuation fixtures are implemented. The real exact-profile attempt was made
+from this shell but could not access the recorded O state root; its report was
+emitted to stdout with exit 2, and no guest/proxy probe ran. This is an
+environment-location failure, not a passing inspect. See the current status table.
 
 ### M1 — launch one recursion-capable replacement development candidate
 
@@ -304,7 +353,7 @@ the cap-0 fact, Sol may select reuse only with recorded metadata evidence.
   latest-once/version policy; do not invent a version pin or silently reinstall O.
   Reuse the verified immutable base cache through supported lifecycle; do not
   redownload/rebuild a base merely because the new candidate has a new name.
-- Implement the already-specified exact-owned egress-reload dispatch (M2a detail)
+- Include the already-implemented exact-owned egress-reload dispatch (M2a detail)
   and metrics-port selection below BEFORE this initial candidate runtime freezes.
   Do not knowingly launch another candidate missing a source fix already in this
   plan, then discover its immutable runtime cannot use that fix. M2a exercises the
@@ -325,18 +374,18 @@ the cap-0 fact, Sol may select reuse only with recorded metadata evidence.
 - Include metrics forward/service using its existing ownership checks; if a foreign
   listener collides, use a fresh recorded managed port, never adopt/kill the foreign
   service. Do not make metrics success a prerequisite for boot/auth debugging.
-- **Known source fix to include before candidate freeze:**
-  `vm_lifecycle_metrics_select_port` currently asks for 19532 and discards any other
-  port. Add an optional validated host config field `metrics_port` (default19532,
-  integer1024..65535; no secret); pass it to existing metrics ensure/verify and
-  return the actual selected host port. Guest metrics port remains19532. This is
-  host-local selection, not inherited metrics in C. If default is occupied by an
-  unverified listener, the development plan may choose one OS-allocated loopback
-  port, record it in that candidate's config and use existing managed ensure;
-  never scan ports, adopt the listener or run broad cleanup. Limit bind-race retry
-  to three newly selected ports. Preserve unrelated config fields. No port picker
-  framework or automatic edits to legacy state. Tests: foreign19532 survives;
-  selected nondefault host port reaches QEMU argv/verification; C inherits none.
+- **Known source fix implemented before candidate freeze:**
+  `vm_lifecycle_metrics_select_port` now honors an optional validated host config
+  field `metrics_port` (default19532, integer1024..65535; no secret), passes the
+  selected host port to managed ensure/verification and QEMU, while guest metrics
+  remains19532. If the default is occupied by an unverified listener, source now
+  chooses one OS-allocated loopback port and compare-and-swap persists only
+  `metrics_port` in state-root config. It never scans ports, adopts the listener or
+  runs broad cleanup. Bind-race retry is limited to three newly selected ports,
+  with config restored if all three collide. Focused fixtures cover foreign-listener
+  continuity, bounded retry/rollback and the selected host port reaching QEMU.
+  No port-picker framework or legacy-state edit was added. This is source/fixture
+  evidence only; runtime candidate acceptance remains NOT_RUN.
 - Evidence runner `boot`: ready, mester execution, writable /workspace, actual
   identities, KVM/recursion prerequisite results and O/old-N continuity. On failure,
   automatically collect bounded failed-stage diagnostics in the same attempt.
@@ -367,15 +416,17 @@ faults, focused regressions, evidence driver. Use the candidate's trusted contro
   rule. On browser timeout/cleanup failure, fix bridge lifecycle. On unavailable
   OpenAI model selection, show safe supported choices in the guest rather than
   restarting provisioning. No raw callback URLs in evidence.
-- **Source work, not an auth questionnaire:** proxy.py reads the selected workspace's
-  `.mester-egress` and supports SIGHUP reload; launcher `egress-reload` currently
-  refuses. Implement that already-planned exact-profile command using registered
-  proxy identity, not `pgrep`/raw PID. Verify the proxy and profile ownership before
-  signalling; invalid policy must retain the previous policy. Merge required public
-  OpenAI destinations into the selected policy, preserving all unrelated rules and
-  private/host denial. If denial is O's ancestor proxy, give the owner ONE exact
-  policy/reload action at that layer; N must not control an ancestor. Do not add
-  blind auto-allow of hostnames copied from errors.
+- **Exact-owned source path implemented; diagnose live denial, not the command:**
+  proxy.py reads the selected workspace's `.mester-egress` and supports SIGHUP
+  reload. Launcher `egress-reload` now validates the selected ready profile, frozen
+  runtime, exact QEMU identity, registered proxy identity and candidate policy before
+  signalling; invalid policy or QEMU mismatch does not signal. Fixtures cover the
+  exact identity and invalid-policy cases. Runtime policy reload is NOT_RUN. If a
+  public OpenAI destination is denied, identify the exact policy layer/hostname and
+  add only the required scoped rule, preserving unrelated rules and private/host
+  denial. If denial is O's ancestor proxy, give the owner ONE exact policy/reload
+  action at that layer; N must not control an ancestor. Do not add blind auto-allow
+  of hostnames copied from errors.
 - Wire `auth` evidence to existing bridge result/cleanup marker and supported
   installed CLI's credential-presence enum, never DB contents. Regression fixtures:
   old cleanup14-argument case, cancelled browser, failed reverse tunnel, new login
@@ -524,17 +575,20 @@ do not implement/test just because this file contains future work.
 The next handoff is an update to this file's packet status plus a short PROGRESS
 entry, not another competing handoff document or copied historical command chain.
 
-### Status at delivery to Luna (all future work, no new execution claimed)
+### Current implementation/evidence checkpoint — 2026-11-07
 
 | Item | Implementation | Runtime acceptance |
 |---|---|---|
-| M0 development inspect/report mode | TODO | NOT_RUN; implement and attempt, don't treat absence as a gate |
-| M1 new candidate with current fixes/cap2/selected metrics port | Existing boot path reusable; port/config repair TODO | Existing cap0 VM ready; new candidate NOT_RUN |
-| M2 native auth/coding/migration | Existing bridge/config reusable; diagnosed repairs and probes TODO | Auth/work NOT_RUN or previously failed as recorded; implement repair anyway |
-| M3 metrics end-to-end | Existing service/forward/plugins reusable; repair failed link | NOT_RUN/unverified; does not block migration/child work |
-| M4 guest-local live adapter, child boot then fail/fix proof | Guest-local entry TODO; existing lifecycle/snapshot adapter reusable | NOT_RUN; implement it, don't wait for an E2E-SELF PASS first |
+| M0 development inspect/report mode | Implemented; focused fixtures pass | Attempted from this shell; BLOCKED_EXTERNAL because recorded O state root is inaccessible. Report emitted, exit 2; no guest/proxy probe ran. |
+| M1 new candidate with current fixes/cap2/selected metrics port | Port config/OS allocation and exact-owned egress reload source repairs implemented; focused fixtures pass | Existing cap0 N preserved; no new candidate boot yet. `virtiofsd` absent on this shell PATH; runtime launch remains owner/O evidence. |
+| M2a native auth/egress | Exact-profile proxy reload path implemented; invalid policy/QEMU identity does not signal | No live policy reload/auth attempt. |
+| M2b native agent coding/migration | TODO; implement and evidence next after M1 candidate/runtime path | Auth/work NOT_RUN; fixtures alone cannot pass. |
+| M3 metrics end-to-end | Existing service/forward/plugins reused; M1 selected-port source fix implemented | NOT_RUN on a guest; independent of auth/child implementation. |
+| M4 guest-local live adapter, child boot then fail/fix proof | Guest-local entry TODO; existing lifecycle/snapshot adapter reusable | NOT_RUN; implement without waiting for E2E-SELF PASS. |
 
-**Luna's first deliverable is code plus an attempted inspect report, not another
-plan.** Its next deliverable is the listed fix plus affected evidence. A report
-without an in-scope fix, concrete owner-only action or completed milestone is not
-a completed iteration.
+**Current M0 report attempt:** source HEAD `a33f6309e2ae6bd436f14d92da4dedfee0ba1472`,
+tree SHA-256 `c20971e13509b8b12a34d22a1f65e1576fd106a41de5eea948d87d8908087a8b`,
+profile `branch-dev-20261105`, run `20261107a3f39c5d9120b5a76d4ef018`. The recorded
+state root was inaccessible in this shell; no state root was guessed and no VM or
+proxy was touched. The next M0 action is one exact inspect run from O, while M1
+source implementation and its local evidence continue independently.

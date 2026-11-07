@@ -695,6 +695,77 @@ def proxy_ready(registry, run_id, port_file, marker_file):
     return port
 
 
+def _load_reload_proxy(path):
+    spec = importlib.util.spec_from_file_location("vm_process_reload_proxy", path)
+    require(spec is not None and spec.loader is not None)
+    proxy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(proxy)
+    return proxy
+
+
+def proxy_reload_profile(state_root, profile_name):
+    """Reload only the verified egress proxy owned by one ready profile."""
+    root = _PATHS.state_root(str(state_root), must_exist=True)
+    profile = _PATHS.profile_read(root, profile_name)
+    require(profile.get("status") == "ready")
+    runtime_info = _PATHS.runtime_validate(root, profile_name)
+    require(runtime_info.get("runtime_payload_sha256") == profile.get("runtime_payload_sha256"))
+    runtime = _PATHS.profile_path(root, profile_name) / "runtime"
+    _PATHS.private_entry(runtime)
+    workspace = Path(profile["workspace"])
+    require(workspace.is_absolute() and workspace.resolve(strict=True) == workspace and workspace.is_dir())
+    expected_qemu = {key: profile["runtime_identity"][key]
+                     for key in ("pid", "start_ticks", "executable", "argv")}
+    require(identity_state(expected_qemu) == "running")
+
+    runs = _PATHS.profile_path(root, profile_name) / "runs"
+    _PATHS.private_entry(runs)
+    matches = []
+    for run_dir in runs.iterdir():
+        _PATHS.private_entry(run_dir)
+        record = registry_read(run_dir / "processes.json", run_dir.name)
+        if any(role.startswith("qemu_") and item.get("identity") == expected_qemu
+               for role, item in record.get("processes", {}).items()):
+            matches.append((run_dir, record))
+    require(len(matches) == 1)
+    run_dir, record = matches[0]
+    registry = run_dir / "processes.json"
+    proxy_item = record.get("processes", {}).get("proxy")
+    proxy_identity = proxy_item.get("identity") if isinstance(proxy_item, dict) else None
+    require(isinstance(proxy_identity, dict) and identity_state(proxy_identity) == "running")
+    argv = proxy_identity.get("argv")
+    expected_script = str(runtime / "lib/vm/proxy.py")
+    require(isinstance(argv, list) and len(argv) >= 2 and argv[1] == expected_script)
+
+    def option_value(option):
+        positions = [index for index, value in enumerate(argv[:-1]) if value == option]
+        require(len(positions) == 1)
+        return argv[positions[0] + 1]
+
+    require(option_value("--workspace") == str(workspace))
+    require(option_value("--port-file") == str(run_dir / "proxy.port"))
+    require(option_value("--reload-marker") == str(run_dir / "proxy.ready"))
+    upstream = [value for index, value in enumerate(argv[:-1]) if value == "--upstream-proxy"]
+    require(len(upstream) <= 1)
+    if profile.get("depth", 0) == 0:
+        require(not upstream)
+    else:
+        require(upstream == ["http://10.0.2.100:3128"])
+
+    proxy = _load_reload_proxy(runtime / "lib/vm/proxy.py")
+    # Parse before signalling. An invalid/missing manifest never replaces the
+    # last-good in-memory policy; the proxy also preserves it on SIGHUP failure.
+    try:
+        enabled, domains = proxy.policy(workspace / ".mester-egress")
+    except (OSError, UnicodeError, ValueError) as error:
+        raise ProcessPolicyError("Selected egress policy is invalid; proxy was not signalled") from error
+    policy_allows_auth = proxy.allowed("auth.openai.com", enabled, domains)
+    outcome = registry_signal(registry, run_dir.name, "proxy", signal.SIGHUP, 0)
+    require(outcome == "running" and identity_state(proxy_identity) == "running")
+    return {"status": "reload_signal_sent", "profile": profile_name,
+            "policy_allows_auth_host": bool(policy_allows_auth), "proxy_identity": "verified"}
+
+
 def write_failure(path, run_id, stage, cause_exit_code, diagnostics):
     _validate_run_id(run_id)
     require(isinstance(stage, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", stage))
@@ -758,6 +829,9 @@ def _parse_args():
     proxy_ready_cmd.add_argument("--run-id", required=True)
     proxy_ready_cmd.add_argument("--port-file", required=True, type=Path)
     proxy_ready_cmd.add_argument("--marker-file", required=True, type=Path)
+    reload_proxy = commands.add_parser("proxy-reload")
+    reload_proxy.add_argument("--state-root", required=True)
+    reload_proxy.add_argument("--profile", required=True)
     key = commands.add_parser("trust-key")
     key.add_argument("--known-hosts", required=True, type=Path)
     key.add_argument("--host", default="127.0.0.1")
@@ -810,6 +884,10 @@ def main():
     if args.command == "proxy-ready":
         port = proxy_ready(args.registry, args.run_id, args.port_file, args.marker_file)
         sys.stdout.write(f"{port}\n")
+        return 0
+    if args.command == "proxy-reload":
+        result = proxy_reload_profile(args.state_root, args.profile)
+        sys.stdout.write(json.dumps(result, sort_keys=True) + "\n")
         return 0
     if args.command == "trust-key":
         scan = sys.stdin.buffer.read(65537)

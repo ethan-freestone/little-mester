@@ -68,7 +68,8 @@ Options (before or after command/path; -- stops launcher parsing):
   --opencode-version latest|SEMVER, --agent opencode|aider,
   --host-profile linux-x86_64, --workload-runtime docker|none,
   --model-provider none|ollama|llamacpp|remote, --model-port PORT, --model-id ID,
-  --metrics on|off, --auth-forward off|auto|PROVIDER[,PROVIDER], --auth-escrow-dir PATH
+  --metrics on|off, --metrics-port 1024..65535,
+  --auth-forward off|auto|PROVIDER[,PROVIDER], --auth-escrow-dir PATH
 
 --yes confirms launcher actions only, never requests agent auto mode. Suspend never
 force-kills QEMU; unknown children or process identities block shutdown.
@@ -210,21 +211,31 @@ else:
     vm_services_models "$VM_ACTION" "$VM_MODEL_PROVIDER_QUERY" "$VM_STATE_ROOT" "$VM_PROFILE"
     ;;
   metrics)
+    metrics_port="$(vm_lifecycle_json_field "$VM_CONFIG_JSON" metrics_port)" || exit 2
     case "$VM_ACTION" in
       up)
         port="$(python3 "$VM_REPO/lib/vm/metrics_service.py" ensure \
-          --state-root "$VM_STATE_ROOT" --port 19532 \
+          --state-root "$VM_STATE_ROOT" --port "$metrics_port" \
           --collector "$VM_REPO/agent/metrics/gather.py")" || exit $?
         printf 'Verified loopback metrics service listening on 127.0.0.1:%s.\n' "$port"
         ;;
       status)
-        python3 "$VM_REPO/lib/vm/metrics_service.py" status --state-root "$VM_STATE_ROOT" --port 19532
+        python3 "$VM_REPO/lib/vm/metrics_service.py" status --state-root "$VM_STATE_ROOT" --port "$metrics_port"
         ;;
       down)
-        python3 "$VM_REPO/lib/vm/metrics_service.py" stop --state-root "$VM_STATE_ROOT" --port 19532
+        python3 "$VM_REPO/lib/vm/metrics_service.py" stop --state-root "$VM_STATE_ROOT" --port "$metrics_port"
         ;;
       *) vm_error 'Unknown metrics action.'; exit 2 ;;
     esac
+    ;;
+  egress-reload)
+    runtime="$(vm_lifecycle_profile_runtime "$VM_STATE_ROOT" "$VM_PROFILE")" || exit $?
+    if [[ "$runtime" != "$VM_REPO" ]]; then
+      exec "$runtime/lab-vm" egress-reload --name "$VM_PROFILE"
+    fi
+    # shellcheck disable=SC1091 # The exact profile's frozen helper validates and signals its own proxy identity.
+    source "$runtime/lib/vm/services.sh"
+    vm_services_egress_reload "$VM_STATE_ROOT" "$VM_PROFILE"
     ;;
   context)
     system="$(vm_host_system)"; arch="$(vm_host_arch)"

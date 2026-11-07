@@ -6,6 +6,7 @@ VM_SERVICES_SOURCE_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basenam
 VM_SERVICES_ROOT="$(cd "$(dirname "$VM_SERVICES_SOURCE_FILE")/../.." && pwd)"
 VM_SERVICES_CURL_BIN="${VM_SERVICES_CURL_BIN:-curl}"
 VM_SERVICES_AGENT_TIMEOUT="${VM_SERVICES_AGENT_TIMEOUT:-1800}"
+VM_SERVICES_PYTHON="${VM_SERVICES_PYTHON:-python3}"
 
 vm_services_error() {
   printf 'REFUSED: %s\n' "$*" >&2
@@ -338,6 +339,16 @@ except Exception:
     return 2
   }
   VM_SERVICES_METRICS_FORWARD_PORT="$result"
+}
+
+vm_services_egress_reload() {
+  local root="${1:-}" name="${2:-}" helper
+  helper="$VM_SERVICES_ROOT/lib/vm/process.py"
+  [[ -f "$helper" && ! -L "$helper" ]] || {
+    vm_services_error 'The selected frozen process identity helper is unavailable.'
+    return 2
+  }
+  "$VM_SERVICES_PYTHON" "$helper" proxy-reload --state-root "$root" --profile "$name"
 }
 
 # Resolve a ready profile's provider selection against its host-owned QEMU
