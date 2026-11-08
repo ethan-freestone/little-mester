@@ -177,6 +177,58 @@ JSON
   [[ "$output" == *"cloud-init, workspace mount, or rootless bootstrap readiness failed"* ]]
 }
 
+@test "essential smoke stages propagate injected failures and never print completion markers" {
+  local stage
+  for stage in vm_host_prepare_disk vm_host_start_proxy vm_host_provisioning_ready vm_host_model_smoke vm_host_docker_smoke cleanup; do
+    run bash -c '
+      source "$1/lib/vm/host-launcher.sh"
+      source "$1/lib/vm/cloud-init.sh"
+      VM_HOST_SCRIPT_ROOT="$1"
+      vm_host_require_kvm() { :; }
+      vm_host_require_commands() { :; }
+      vm_host_account_home() { printf "%s\n" "$FAKE_HOME"; }
+      vm_host_validate_workspace() { printf "%s/workspace\n" "$FAKE_HOME"; }
+      vm_host_validate_credentials() { :; }
+      vm_host_check_workspace_filesystem() { :; }
+      vm_host_is_under() { return 1; }
+      vm_host_credential_model() { printf "openai/test-model\n"; }
+      vm_host_prepare_state_root() { mkdir -p "$1/state"; printf "%s/state\n" "$1"; }
+      vm_host_check_run_capacity() { :; }
+      vm_host_write_cloud_seed() { :; }
+      injected_failure() { [[ "$FAIL_STAGE" != "$1" ]] || { printf "INJECTED_FAILURE:%s\n" "$1" >&2; return 73; }; }
+      vm_host_prepare_disk() { injected_failure vm_host_prepare_disk; }
+      vm_host_start_proxy() { injected_failure vm_host_start_proxy || return $?; VM_HOST_PROXY_PORT=12345; }
+      vm_host_start_virtiofs() { :; }
+      vm_host_free_port() { printf "43210\n"; }
+      vm_host_start_qemu() { :; }
+      vm_host_wait_ssh() { :; }
+      vm_host_provisioning_ready() { injected_failure vm_host_provisioning_ready; }
+      vm_host_import_credentials() { :; }
+      vm_host_model_smoke() { injected_failure vm_host_model_smoke || return $?; printf "VM_RESPONSE_OK\n"; }
+      vm_host_docker_smoke() { injected_failure vm_host_docker_smoke || return $?; printf "DOCKER_CONTAINER_OK\n"; }
+      vm_host_cleanup() { injected_failure cleanup; }
+      id() { case "$1" in -u) printf "1234\n";; -g) printf "1234\n";; esac; }
+      ssh-keygen() { local file="${@: -1}"; printf "private-key\n" >"$file"; printf "ssh-ed25519 test-key\n" >"$file.pub"; }
+      FAKE_HOME="$2"
+      FAIL_STAGE="$3"
+      vm_host_smoke --workspace "$2/workspace" --credentials-file "$2/credentials"
+    ' _ "$TEST_ROOT" "$TEST_TMP" "$stage"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"INJECTED_FAILURE:$stage"* ]] || { printf 'stage=%s output=%s\n' "$stage" "$output" >&2; return 1; }
+    [[ "$output" != *"Smoke acceptance stages completed."* ]]
+  done
+  run bash -c '
+    source "$1/lib/vm/host-launcher.sh"
+    VM_HOST_RUN_DIR="$2/run"
+    mkdir -p "$VM_HOST_RUN_DIR"
+    VM_HOST_UNTRACKED_CHILD=1
+    trap vm_host_exit_cleanup EXIT
+    exit 0
+  ' _ "$TEST_ROOT" "$TEST_TMP"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cleanup incomplete"* ]]
+}
+
 @test "cloud seed stops before metadata and ISO creation when bootstrap fails" {
   vm_host_cloud_init() { return 73; }
 
@@ -332,6 +384,8 @@ JSON
   [ "$status" -eq 0 ]
   run grep -E '^[[:space:]]*_smoke\)' "$TEST_ROOT/lab-vm"
   [ "$status" -ne 0 ]
+  run grep -F '"$root/lib/vm/bounded-log.py"' "$TEST_ROOT/lab-vm"
+  [ "$status" -eq 0 ]
 }
 
 @test "cleanup deletes transient keys/seeds, bounds retained logs, and keeps diagnostics private" {

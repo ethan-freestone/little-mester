@@ -485,6 +485,9 @@ vm_host_exit_cleanup() {
   local original_status=$?
   trap - EXIT
   if vm_host_cleanup; then
+    if (( original_status == 0 )) && [[ "${VM_HOST_SMOKE_COMPLETE_PENDING:-0}" == 1 ]]; then
+      printf 'Smoke acceptance stages completed.\n' || exit 1
+    fi
     exit "$original_status"
   fi
   if (( original_status == 0 )); then
@@ -841,5 +844,5 @@ vm_host_smoke() {
     vm_host_error "smoke exceeded ${VM_HOST_TOTAL_TIMEOUT}s total budget"
     return 1
   fi
-  printf 'Smoke acceptance stages completed.\n' || return 1
+  VM_HOST_SMOKE_COMPLETE_PENDING=1
 }
