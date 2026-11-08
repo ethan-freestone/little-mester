@@ -60,6 +60,7 @@ def main(arguments):
 
     signal.signal(signal.SIGTERM, forward)
     signal.signal(signal.SIGINT, forward)
+    signal.signal(signal.SIGHUP, forward)
     written = 0
     truncated = False
     selector = selectors.DefaultSelector()
@@ -85,9 +86,11 @@ def main(arguments):
                 if len(chunk) > max(remaining, 0):
                     truncated = True
             if (termination_deadline[0] is not None
-                    and time.monotonic() >= termination_deadline[0]
-                    and child.poll() is None):
+                    and time.monotonic() >= termination_deadline[0]):
                 try:
+                    # The direct child may have exited while a forked child
+                    # still holds the log pipe. Escalate the owned process
+                    # group independently of the leader's exit status.
                     os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass

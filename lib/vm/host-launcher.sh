@@ -11,6 +11,7 @@ VM_HOST_DOWNLOAD_TIMEOUT=300
 VM_HOST_BOOT_TIMEOUT=300
 VM_HOST_PROVIDER_TIMEOUT=300
 VM_HOST_DOCKER_TIMEOUT=180
+VM_HOST_CONTROL_TIMEOUT=30
 VM_HOST_TOTAL_TIMEOUT=1200
 VM_HOST_LOG_LIMIT_BYTES=1048576
 VM_HOST_MAX_RETAINED_RUNS=8
@@ -25,10 +26,10 @@ vm_host_error() {
 }
 
 vm_host_resource_limits() {
-  printf '{"cpus":%s,"memory_mib":%s,"disk_gib":%s,"download_timeout_seconds":%s,"startup_timeout_seconds":%s,"provider_timeout_seconds":%s,"docker_timeout_seconds":%s,"total_timeout_seconds":%s}\n' \
+  printf '{"cpus":%s,"memory_mib":%s,"disk_gib":%s,"download_timeout_seconds":%s,"startup_timeout_seconds":%s,"provider_timeout_seconds":%s,"docker_timeout_seconds":%s,"ssh_control_timeout_seconds":%s,"total_timeout_seconds":%s}\n' \
     "$VM_HOST_CPU_COUNT" "$VM_HOST_MEMORY_MIB" "$VM_HOST_DISK_GIB" \
     "$VM_HOST_DOWNLOAD_TIMEOUT" "$VM_HOST_BOOT_TIMEOUT" "$VM_HOST_PROVIDER_TIMEOUT" \
-    "$VM_HOST_DOCKER_TIMEOUT" "$VM_HOST_TOTAL_TIMEOUT"
+    "$VM_HOST_DOCKER_TIMEOUT" "$VM_HOST_CONTROL_TIMEOUT" "$VM_HOST_TOTAL_TIMEOUT"
 }
 
 vm_host_qemu_network_args() {
@@ -436,8 +437,33 @@ vm_host_cleanup_one() {
 }
 
 vm_host_cleanup() {
-  [[ -n "${VM_HOST_RUN_DIR:-}" && -d "$VM_HOST_RUN_DIR" ]] || return 0
   local cleanup_failed="${VM_HOST_UNTRACKED_CHILD:-0}"
+  if [[ -z "${VM_HOST_RUN_DIR:-}" ]]; then
+    if (( cleanup_failed == 0 )) && [[ "${VM_HOST_SMOKE_COMPLETE_PENDING:-0}" != 1 ]]; then
+      return 0
+    fi
+    printf 'WARNING: cleanup incomplete; run state is unavailable, preserving possible resources\n' >&2
+    return 1
+  fi
+  if ! python3 -I - "$VM_HOST_RUN_DIR" <<'PY'
+import os, pathlib, stat, sys
+
+raw = sys.argv[1]
+try:
+    path = pathlib.Path(raw)
+    lexical = pathlib.Path(os.path.abspath(raw))
+    resolved = path.resolve(strict=True)
+    info = os.lstat(raw)
+except (OSError, RuntimeError):
+    raise SystemExit("REFUSED: private run-state directory cannot be verified")
+if (lexical != resolved or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid() or info.st_mode & 0o077):
+    raise SystemExit("REFUSED: private run-state directory cannot be verified")
+PY
+  then
+    printf 'WARNING: cleanup incomplete; private run state is missing, substituted, or not owner-private; preserving it\n' >&2
+    return 1
+  fi
   if (( cleanup_failed == 0 )); then
     vm_host_cleanup_one "$VM_HOST_RUN_DIR/qemu.identity" || cleanup_failed=1
   fi
@@ -497,12 +523,13 @@ vm_host_exit_cleanup() {
 }
 
 vm_host_ssh() {
-  local run_dir="$1" command="$2" limit="${3:-0}"
+  local run_dir="$1" command="$2" limit="${3:-$VM_HOST_CONTROL_TIMEOUT}"
   local -a ssh_command=(ssh -T -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes \
     -o UserKnownHostsFile="$run_dir/known_hosts" -o IdentitiesOnly=yes \
     -o LogLevel=ERROR -i "$run_dir/id_vm_control" -p "$(<"$run_dir/ssh_port")" \
     "mester@127.0.0.1" "$command")
-  if (( limit > 0 )); then timeout "$limit" "${ssh_command[@]}"; else "${ssh_command[@]}"; fi
+  [[ "$limit" =~ ^[1-9][0-9]*$ ]] || { vm_host_error 'SSH command deadline must be a positive integer'; return 2; }
+  timeout --signal=TERM --kill-after=5 "$limit" "${ssh_command[@]}"
 }
 
 vm_host_write_cloud_seed() {
@@ -672,7 +699,7 @@ vm_host_wait_ssh() {
       vm_host_error 'run-owned QEMU exited or its process identity became ambiguous before guest SSH readiness'
       return 1
     fi
-    if host_keys="$(timeout 3 ssh-keyscan -T 2 -t ed25519 -p "$ssh_port" -H 127.0.0.1 2>/dev/null)" && [[ "$host_keys" == *' ssh-ed25519 '* ]]; then
+    if host_keys="$(timeout --signal=TERM --kill-after=2 3 ssh-keyscan -T 2 -t ed25519 -p "$ssh_port" -H 127.0.0.1 2>/dev/null)" && [[ "$host_keys" == *' ssh-ed25519 '* ]]; then
       printf '%s\n' "$host_keys" >"$run_dir/known_hosts.tmp"
       chmod 0600 "$run_dir/known_hosts.tmp"
       mv -- "$run_dir/known_hosts.tmp" "$run_dir/known_hosts"
@@ -704,7 +731,7 @@ vm_host_import_credentials() {
   local run_dir="$1" credential_file="$2" timeout_seconds=60
   printf 'stage: importing owner credential into private guest OpenCode store\n'
   if ! vm_host_credential_key_to_stdout "$credential_file" | \
-    timeout "$timeout_seconds" ssh -tt -o BatchMode=yes -o ConnectTimeout=5 \
+    timeout --signal=TERM --kill-after=5 "$timeout_seconds" ssh -tt -o BatchMode=yes -o ConnectTimeout=5 \
       -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$run_dir/known_hosts" \
       -o IdentitiesOnly=yes -o LogLevel=ERROR -i "$run_dir/id_vm_control" \
       -p "$(<"$run_dir/ssh_port")" mester@127.0.0.1 \

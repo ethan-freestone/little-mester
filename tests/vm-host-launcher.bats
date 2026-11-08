@@ -76,6 +76,7 @@ JSON
   [[ "$output" == *'"memory_mib":4096'* ]]
   [[ "$output" == *'"disk_gib":24'* ]]
   [[ "$output" == *'"startup_timeout_seconds":300'* ]]
+  [[ "$output" == *'"ssh_control_timeout_seconds":30'* ]]
   [[ "$output" != *"nested"* ]]
 }
 
@@ -179,7 +180,7 @@ JSON
 
 @test "essential smoke stages propagate injected failures and never print completion markers" {
   local stage
-  for stage in vm_host_prepare_disk vm_host_start_proxy vm_host_provisioning_ready vm_host_model_smoke vm_host_docker_smoke cleanup; do
+  for stage in vm_host_write_cloud_seed vm_host_prepare_disk vm_host_start_proxy vm_host_start_virtiofs vm_host_start_qemu vm_host_wait_ssh vm_host_provisioning_ready vm_host_import_credentials vm_host_model_smoke vm_host_docker_smoke cleanup; do
     run bash -c '
       source "$1/lib/vm/host-launcher.sh"
       source "$1/lib/vm/cloud-init.sh"
@@ -194,16 +195,16 @@ JSON
       vm_host_credential_model() { printf "openai/test-model\n"; }
       vm_host_prepare_state_root() { mkdir -p "$1/state"; printf "%s/state\n" "$1"; }
       vm_host_check_run_capacity() { :; }
-      vm_host_write_cloud_seed() { :; }
+      vm_host_write_cloud_seed() { injected_failure vm_host_write_cloud_seed; }
       injected_failure() { [[ "$FAIL_STAGE" != "$1" ]] || { printf "INJECTED_FAILURE:%s\n" "$1" >&2; return 73; }; }
       vm_host_prepare_disk() { injected_failure vm_host_prepare_disk; }
       vm_host_start_proxy() { injected_failure vm_host_start_proxy || return $?; VM_HOST_PROXY_PORT=12345; }
-      vm_host_start_virtiofs() { :; }
+      vm_host_start_virtiofs() { injected_failure vm_host_start_virtiofs; }
       vm_host_free_port() { printf "43210\n"; }
-      vm_host_start_qemu() { :; }
-      vm_host_wait_ssh() { :; }
+      vm_host_start_qemu() { injected_failure vm_host_start_qemu; }
+      vm_host_wait_ssh() { injected_failure vm_host_wait_ssh; }
       vm_host_provisioning_ready() { injected_failure vm_host_provisioning_ready; }
-      vm_host_import_credentials() { :; }
+      vm_host_import_credentials() { injected_failure vm_host_import_credentials; }
       vm_host_model_smoke() { injected_failure vm_host_model_smoke || return $?; printf "VM_RESPONSE_OK\n"; }
       vm_host_docker_smoke() { injected_failure vm_host_docker_smoke || return $?; printf "DOCKER_CONTAINER_OK\n"; }
       vm_host_cleanup() { injected_failure cleanup; }
@@ -357,7 +358,11 @@ PY
 JSON
   chmod 0600 "$TEST_TMP/provider.json"
   timeout() {
-    [ "$1" = 60 ] || return 89
+    [ "$1" = --signal=TERM ] || return 89
+    shift
+    [ "$1" = --kill-after=5 ] || return 89
+    shift
+    [[ "$1" == 60 || "$1" == 30 ]] || return 89
     shift
     "$@"
   }
@@ -466,4 +471,93 @@ PY
   kill -0 "$pid"
   kill "$pid"
   wait "$pid" 2>/dev/null || true
+}
+
+@test "filesystem preflight rejects an ordinary workspace directory" {
+  mkdir "$TEST_TMP/unbounded-workspace"
+
+  run vm_host_check_workspace_filesystem "$TEST_TMP/unbounded-workspace"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"dedicated owner-provisioned bounded filesystem"* ]]
+}
+
+@test "cleanup is a no-op before state allocation when no resources exist" {
+  run bash -c 'source "$1/lib/vm/host-launcher.sh"; unset VM_HOST_RUN_DIR; VM_HOST_UNTRACKED_CHILD=0; VM_HOST_SMOKE_COMPLETE_PENDING=0; vm_host_cleanup' _ "$TEST_ROOT"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "EXIT trap rejects missing allocated run state before success" {
+  local missing="$TEST_TMP/missing-run-state"
+
+  run bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_RUN_DIR="$2"; VM_HOST_UNTRACKED_CHILD=1; VM_HOST_SMOKE_COMPLETE_PENDING=1; trap vm_host_exit_cleanup EXIT; exit 0' _ "$TEST_ROOT" "$missing"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cleanup incomplete"* ]]
+  [[ "$output" != *"Smoke acceptance stages completed."* ]]
+}
+
+@test "EXIT trap rejects nondirectory allocated run state before success" {
+  local run_state="$TEST_TMP/not-a-run-directory"
+  : >"$run_state"
+
+  run bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_RUN_DIR="$2"; VM_HOST_UNTRACKED_CHILD=0; VM_HOST_SMOKE_COMPLETE_PENDING=1; trap vm_host_exit_cleanup EXIT; exit 0' _ "$TEST_ROOT" "$run_state"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cleanup incomplete"* ]]
+  [[ "$output" != *"Smoke acceptance stages completed."* ]]
+}
+
+@test "EXIT trap rejects symlinked allocated run state without touching its target" {
+  local target="$TEST_TMP/run-target" link="$TEST_TMP/run-link"
+  mkdir -m 0700 "$target"
+  printf 'preserve this file\n' >"$target/disk.qcow2"
+  ln -s "$target" "$link"
+
+  run bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_RUN_DIR="$2"; VM_HOST_UNTRACKED_CHILD=0; VM_HOST_SMOKE_COMPLETE_PENDING=1; trap vm_host_exit_cleanup EXIT; exit 0' _ "$TEST_ROOT" "$link"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cleanup incomplete"* ]]
+  [[ "$output" != *"Smoke acceptance stages completed."* ]]
+  [ "$(<"$target/disk.qcow2")" = "preserve this file" ]
+}
+
+@test "EXIT trap preserves the original stage failure when allocated run state is missing" {
+  local missing="$TEST_TMP/missing-failed-run-state"
+
+  run bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_RUN_DIR="$2"; VM_HOST_UNTRACKED_CHILD=1; trap vm_host_exit_cleanup EXIT; exit 73' _ "$TEST_ROOT" "$missing"
+
+  [ "$status" -eq 73 ]
+  [[ "$output" == *"cleanup incomplete"* ]]
+  [[ "$output" != *"Smoke acceptance stages completed."* ]]
+}
+
+@test "vm_host_ssh has a real finite default deadline and reaps a timed-out child" {
+  local fake_bin="$TEST_TMP/fake-bin" run_dir="$TEST_TMP/ssh-run" pid_file="$TEST_TMP/ssh.pid"
+  local started elapsed pid
+  mkdir -p "$fake_bin" "$run_dir"
+  printf '43210\n' >"$run_dir/ssh_port"
+  cat >"$fake_bin/ssh" <<'SH'
+#!/bin/sh
+printf '%s\n' "$$" >"$VM_HOST_TEST_SSH_PID"
+exec /usr/bin/sleep 30
+SH
+  chmod 0700 "$fake_bin/ssh"
+  started=$SECONDS
+
+  run timeout --kill-after=1 5 bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_CONTROL_TIMEOUT=1; VM_HOST_TEST_SSH_PID="$3"; PATH="$4:/usr/bin:/bin"; export VM_HOST_TEST_SSH_PID PATH; vm_host_ssh "$2" "bounded test command"' _ "$TEST_ROOT" "$run_dir" "$pid_file" "$fake_bin"
+
+  elapsed=$((SECONDS - started))
+  [ "$status" -eq 124 ]
+  [ "$elapsed" -lt 4 ]
+  [ -s "$pid_file" ]
+  pid="$(<"$pid_file")"
+  [ ! -e "/proc/$pid" ]
+
+  run bash -c 'source "$1/lib/vm/host-launcher.sh"; timeout() { :; }; ssh() { printf "SSH_WAS_CALLED\n"; }; vm_host_ssh "$2" "invalid deadline" 0' _ "$TEST_ROOT" "$run_dir"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"deadline must be a positive integer"* ]]
+  [[ "$output" != *"SSH_WAS_CALLED"* ]]
 }
