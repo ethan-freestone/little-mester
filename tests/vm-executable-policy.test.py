@@ -32,7 +32,7 @@ class ExecutablePolicyTests(unittest.TestCase):
 
     def test_protected_temporary_executable_and_lexical_symlink_are_accepted(self):
         uid = os.getuid()
-        with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as temporary:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             root = pathlib.Path(temporary)
             bindir = root / "bin"
             bindir.mkdir(mode=0o755)
@@ -66,7 +66,7 @@ class ExecutablePolicyTests(unittest.TestCase):
 
     def test_safe_lexical_symlink_cannot_escape_to_unprotected_target_ancestry(self):
         uid = os.getuid()
-        with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as protected_root:
+        with tempfile.TemporaryDirectory(dir=ROOT) as protected_root:
             with tempfile.TemporaryDirectory(dir="/tmp") as unprotected_root:
                 target = pathlib.Path(unprotected_root) / "tool"
                 target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -84,7 +84,7 @@ class ExecutablePolicyTests(unittest.TestCase):
 
     def test_group_or_world_writable_temporary_executable_is_rejected(self):
         uid = os.getuid()
-        with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as temporary:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             root = pathlib.Path(temporary)
             executable = root / "writable-tool"
             executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
