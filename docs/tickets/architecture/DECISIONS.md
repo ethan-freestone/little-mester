@@ -583,7 +583,7 @@ checkout is not a trusted host execution source.
 
 **Identity and workspace authority:** The core derives authority from the actual host
 process/transport context, never caller-supplied role, identity, capability, workspace
-configuration, or guest state. The CLI and same-server MCP module are adapters to the same
+configuration, or guest state. The CLI and dedicated host MCP entrypoint are adapters to the same
 core. The canonical workspace is selected/authorized on the host; the MCP request cannot
 select arbitrary paths or executables. Resolve and validate one canonical path on the host
 before VM startup/export; reject unsafe symlinks, path substitution, and overlap with
@@ -596,17 +596,25 @@ host lifecycle control is exposed.
 system rootful Docker and verify the guest user daemon is rootless. Preserve QEMU
 `restrict=on`, mediated public HTTP(S), private/LAN denial and loopback-only control. Test
 VMs, snapshots, recursion, self-test grants, and capability-grant mechanisms are absent
-in this phase. This entry records the already-approved #49/#51 constraints; it does not
+in this phase. This entry records #49/#51's intended constraints; it does not
 authorize host installation or runtime operations in the implementation environment.
+
+**Verification and review status:** External review considers the architecture sound in
+principle. Security guarantees remain unverified until implementation and negative tests
+pass. Sol's earlier statements attributing human approval of §L to external reviewers
+were incorrect. The user's consolidated review authorizes these implementation
+corrections, not a claim of verified security. Only the user can authorize scope or
+security-policy changes. Sol alone maintains this decision log.
 
 **Stdio clarification (Sol review):** Phase 1 does not authenticate arbitrary agents
 per MCP request. The owner starts the trusted host installation with private stdio pipes
 connected only to the owner-controlled host client. That process/pipe boundary is the
-authority; it is not a role supplied in a tool argument. Do not register lifecycle tools
-in the ordinary guest/workspace ticket-server instance or expose/forward the host pipes
-to any agent. The same server implementation may register the host-only module in the
-trusted host deployment, using host-bound workspace context. A mode flag alone is not an
-authorization boundary: guest copies can set flags but must have no access to the host
+authority; it is not a role supplied in a tool argument. `mcp-server.ts` never imports,
+registers or dispatches lifecycle code. Only the separate host-installed
+`vm-host-server.ts` imports and registers lifecycle tools, using host-bound workspace
+context. Selection is which entrypoint is installed and spawned, never a runtime flag,
+environment variable or workspace configuration. Do not expose or forward the host
+process or its private pipes to any agent. Guest copies must have no access to the host
 core, host transport or VM resources. No remote listener, authentication service, bearer
 token scheme or guest lifecycle access is needed for this phase. If the actual deployment
 cannot enforce those process/pipe/resource boundaries, stop with concrete evidence.
