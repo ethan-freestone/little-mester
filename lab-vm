@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Protected-install host CLI. This entry point intentionally ignores all
+# authority-like environment variables and accepts no lifecycle subcommands
+# beyond the explicitly implemented smoke path.
+set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+entry="$(readlink -f -- "${BASH_SOURCE[0]}")"
+root="$(dirname -- "$entry")"
+if [[ ! -f "$root/lib/vm/host-launcher.sh" || -L "$root/lib/vm/host-launcher.sh" ]]; then
+  printf 'REFUSED: incomplete protected host installation\n' >&2
+  exit 1
+fi
+
+# A clean checkout is not a trust boundary. Require a root-owned installation
+# tree with no group/world write bits before loading any code from it.
+python3 -I - "$entry" "$root/lib/vm/host-launcher.sh" "$root/lib/vm/cloud-init.sh" "$root/lib/vm/proxy.py" "$root/lib/vm/bounded-log.py" <<'PY'
+import os, pathlib, stat, sys
+
+paths = [pathlib.Path(p).resolve(strict=True) for p in sys.argv[1:]]
+checked = set()
+for path in paths:
+    current = path
+    while current != current.parent:
+        if current in checked:
+            current = current.parent
+            continue
+        checked.add(current)
+        info = current.stat(follow_symlinks=False)
+        if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            print("REFUSED: host installation and every ancestor must be root-owned and not group/world writable", file=sys.stderr)
+            raise SystemExit(1)
+        if current == path and not stat.S_ISREG(info.st_mode):
+            print("REFUSED: protected host installation contains a non-regular dependency", file=sys.stderr)
+            raise SystemExit(1)
+        if current != path and not stat.S_ISDIR(info.st_mode):
+            print("REFUSED: host installation path contains a non-directory component", file=sys.stderr)
+            raise SystemExit(1)
+        current = current.parent
+PY
+
+command -v timeout >/dev/null 2>&1 || {
+  printf 'REFUSED: required host command missing: timeout\n' >&2
+  exit 1
+}
+
+export VM_HOST_SCRIPT_ROOT="$root"
+# VM_HOST_SCRIPT_ROOT is a path locator only; it is not authority. Verify it
+# cannot be replaced between the checks above and loading trusted code.
+source "$root/lib/vm/host-launcher.sh"
+source "$root/lib/vm/cloud-init.sh"
+
+command="${1:-}"
+[[ -n "$command" ]] || { printf 'Usage: lab-vm smoke --workspace PATH --credentials-file PATH\n' >&2; exit 2; }
+shift
+case "$command" in
+  smoke)
+    exec timeout --signal=TERM --kill-after=15 "$VM_HOST_TOTAL_TIMEOUT" \
+      bash -c 'export VM_HOST_SCRIPT_ROOT="$1"; source "$1/lib/vm/host-launcher.sh"; source "$1/lib/vm/cloud-init.sh"; vm_host_smoke "${@:2}"' \
+      _ "$root" "$@"
+    ;;
+  *) printf 'REFUSED: unsupported command: %s\n' "$command" >&2; exit 2 ;;
+esac

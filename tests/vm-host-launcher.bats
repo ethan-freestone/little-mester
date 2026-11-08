@@ -1,0 +1,415 @@
+#!/usr/bin/env bats
+
+setup() {
+  TEST_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
+  TEST_TMP="$(mktemp -d)"
+  VM_HOST_SCRIPT_ROOT="$TEST_ROOT"
+  source "$TEST_ROOT/lib/vm/host-launcher.sh"
+  source "$TEST_ROOT/lib/vm/cloud-init.sh"
+}
+
+teardown() {
+  rm -rf -- "$TEST_TMP"
+}
+
+@test "canonical workspace rejects a symlinked selected path" {
+  mkdir "$TEST_TMP/real-workspace"
+  ln -s "$TEST_TMP/real-workspace" "$TEST_TMP/workspace-link"
+
+  run vm_host_validate_workspace "$TEST_TMP/workspace-link" "$TEST_TMP/install" "$TEST_TMP/state"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"symlink"* ]]
+}
+
+@test "canonical workspace rejects overlap with host state or installed code" {
+  mkdir -p "$TEST_TMP/workspace/project" "$TEST_TMP/workspace/.state" "$TEST_TMP/install"
+
+  run vm_host_validate_workspace "$TEST_TMP/workspace" "$TEST_TMP/install" "$TEST_TMP/workspace/.state"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"overlap"* ]]
+}
+
+@test "private state directory is created without following a symlink" {
+  mkdir "$TEST_TMP/home" "$TEST_TMP/target"
+  chmod 0755 "$TEST_TMP/home"
+  ln -s "$TEST_TMP/target" "$TEST_TMP/home/.local"
+
+  run vm_host_prepare_state_root "$TEST_TMP/home"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"REFUSED"* || "$output" == *"Too many levels"* ]]
+  [ ! -e "$TEST_TMP/target/state" ]
+}
+
+@test "credential file requires private regular owner-owned OpenAI JSON" {
+  cat >"$TEST_TMP/provider.json" <<'JSON'
+{"provider":"openai","model":"openai/gpt-6.1-sol","api_key":"unit-test-not-a-secret"}
+JSON
+  chmod 0644 "$TEST_TMP/provider.json"
+
+  run vm_host_validate_credentials "$TEST_TMP/provider.json"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"mode 0600"* ]]
+  [[ "$output" != *"unit-test-not-a-secret"* ]]
+}
+
+@test "credential parser rejects unknown fields and never prints key material" {
+  cat >"$TEST_TMP/provider.json" <<'JSON'
+{"provider":"openai","model":"openai/gpt-6.1-sol","api_key":"unit-test-not-a-secret","workspace":"/etc"}
+JSON
+  chmod 0600 "$TEST_TMP/provider.json"
+
+  run vm_host_validate_credentials "$TEST_TMP/provider.json"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"unit-test-not-a-secret"* ]]
+}
+
+@test "resource envelope is bounded and does not select guest admin or nested KVM" {
+  run vm_host_resource_limits
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"cpus":2'* ]]
+  [[ "$output" == *'"memory_mib":4096'* ]]
+  [[ "$output" == *'"disk_gib":24'* ]]
+  [[ "$output" == *'"startup_timeout_seconds":300'* ]]
+  [[ "$output" != *"nested"* ]]
+}
+
+@test "workspace filesystem bound requires a mount root no larger than eight GiB" {
+  run vm_host_workspace_capacity_allowed yes 8589934592
+  [ "$status" -eq 0 ]
+
+  run vm_host_workspace_capacity_allowed yes 8589934593
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"exceeds the 8-GiB"* ]]
+
+  run vm_host_workspace_capacity_allowed no 1048576
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"dedicated owner-provisioned bounded filesystem"* ]]
+}
+
+@test "smoke refuses an unbounded workspace before allocating runtime state" {
+  local prepared="$TEST_TMP/state-was-prepared"
+  vm_host_require_kvm() { return 0; }
+  vm_host_require_commands() { return 0; }
+  vm_host_account_home() { printf '%s\n' "$TEST_TMP"; }
+  vm_host_validate_workspace() { printf '%s\n' "$TEST_TMP/workspace"; }
+  vm_host_validate_credentials() { return 0; }
+  vm_host_check_workspace_filesystem() { return 73; }
+  vm_host_is_under() { return 1; }
+  vm_host_credential_model() { printf 'openai/test-model\n'; }
+  vm_host_prepare_state_root() { touch "$prepared"; printf '%s/state\n' "$TEST_TMP"; }
+
+  run vm_host_smoke --workspace "$TEST_TMP/workspace" --credentials-file "$TEST_TMP/credentials.json"
+
+  [ "$status" -ne 0 ]
+  [ ! -e "$prepared" ]
+  [[ "$output" != *"VM_UP"* ]]
+}
+
+@test "guest cloud-init uses rootless Docker and direct OpenCode without lifecycle authority" {
+  run vm_host_cloud_init smoke-v3 1234 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test'
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"docker-ce-rootless-extras"* ]]
+  [[ "$output" == *"dockerd-rootless-setuptool.sh install"* ]]
+  [[ "$output" == *"systemctl disable --now docker.service docker.socket containerd.service"* ]]
+  [[ "$output" == *"systemctl --user enable --now docker"* ]]
+  [[ "$output" == *"opencode"* ]]
+  [[ "$output" == *"@opencode/cli@2.2.5"* ]]
+  [[ "$output" != *"/dev/kvm"* ]]
+  [[ "$output" != *"VM_CREATE"* ]]
+  [[ "$output" != *"recursion"* ]]
+}
+
+@test "network builder restricts QEMU and binds only loopback SSH control" {
+  run vm_host_qemu_network_args 43210 32123
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostfwd=tcp:127.0.0.1:43210-:22"* ]]
+  [[ "$output" == *"guestfwd=tcp:10.0.2.100:3128"* ]]
+  [[ "$output" == *"restrict=on"* ]]
+  [[ "$output" != *"hostfwd=tcp:0.0.0.0"* ]]
+  [[ "$output" != *"2375"* ]]
+}
+
+@test "lifecycle preflight requires host KVM before creating private state" {
+  run vm_host_require_kvm
+
+  if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"/dev/kvm"* ]]
+  else
+    [ "$status" -eq 0 ]
+  fi
+}
+
+@test "mutable checkout refuses before host execution under forged identity and workspace config" {
+  local marker="$TEST_TMP/host-core-was-run"
+  printf 'MESTER_VM_HOST_MODE=1\nMESTER_VM_CORE=touch %s\nMESTER_VM_ROLE=owner\n' "$marker" >"$TEST_TMP/.little-mester.conf"
+  chmod 0666 "$TEST_TMP/.little-mester.conf"
+
+  run env MESTER_VM_HOST_MODE=1 MESTER_VM_INSTALL_ROOT=/tmp/forged \
+    MESTER_VM_CORE="touch $marker" MESTER_VM_ROLE=owner \
+    "$TEST_ROOT/lab-vm" smoke --workspace "$TEST_TMP" --credentials-file "$TEST_TMP/credentials.json"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be root-owned"* ]]
+  [ ! -e "$marker" ]
+}
+
+@test "readiness fails closed when cloud-init SSH command fails" {
+  vm_host_ssh() {
+    case "$2" in
+      cloud-init*) return 73 ;;
+      *) printf '["name=rootless"]\n' ;;
+    esac
+  }
+
+  run vm_host_provisioning_ready "$TEST_TMP/no-vm-used"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"ROOTLESS_DOCKER_OK"* ]]
+  [[ "$output" == *"cloud-init, workspace mount, or rootless bootstrap readiness failed"* ]]
+}
+
+@test "cloud seed stops before metadata and ISO creation when bootstrap fails" {
+  vm_host_cloud_init() { return 73; }
+
+  run vm_host_write_cloud_seed "$TEST_TMP" smoke-v3 1234 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test'
+
+  [ "$status" -ne 0 ]
+  [ ! -e "$TEST_TMP/meta-data" ]
+  [ ! -e "$TEST_TMP/seed.iso" ]
+}
+
+@test "image download failure stops before conversion" {
+  local converted="$TEST_TMP/converted"
+  curl() { return 73; }
+  qemu-img() { touch "$converted"; }
+
+  run vm_host_prepare_disk "$TEST_TMP"
+
+  [ "$status" -ne 0 ]
+  [ ! -e "$converted" ]
+}
+
+@test "proxy startup fails closed when launch cannot produce an owned process" {
+  VM_HOST_SCRIPT_ROOT="$TEST_ROOT"
+  python3() { return 73; }
+  vm_host_record_process_identity() { return 78; }
+
+  run vm_host_start_proxy "$TEST_TMP"
+
+  [ "$status" -ne 0 ]
+  [ ! -s "$TEST_TMP/proxy.port" ]
+  [[ "$output" != *"PROXY_READY"* ]]
+}
+
+@test "virtiofs startup fails closed when launch cannot produce an owned process" {
+  virtiofsd() { return 73; }
+  vm_host_record_process_identity() { return 78; }
+
+  run vm_host_start_virtiofs "$TEST_TMP" "$TEST_TMP/workspace"
+
+  [ "$status" -ne 0 ]
+  [ ! -S "$TEST_TMP/virtiofs.sock" ]
+}
+
+@test "QEMU argv includes shareable memfd RAM required by vhost-user virtiofs" {
+  local argv_file="$TEST_TMP/qemu.argv"
+  VM_HOST_PROXY_PORT=32123
+  python3() { printf '%s\n' "$@" >"$argv_file"; }
+  readlink() {
+    printf '/usr/bin/python3\n'
+  }
+  vm_host_record_process_identity() { : >"$1"; }
+  vm_host_process_identity_status() { return 0; }
+
+  run vm_host_start_qemu "$TEST_TMP" smoke-v3 "$TEST_TMP/workspace" 43210
+
+  [ "$status" -eq 0 ]
+  grep -Fx -- '-object' "$argv_file"
+  grep -Fx -- 'memory-backend-memfd,id=mem,size=4096M,share=on' "$argv_file"
+  grep -Fx -- '-numa' "$argv_file"
+  grep -Fx -- 'node,memdev=mem' "$argv_file"
+  grep -Fx -- '-serial' "$argv_file"
+  grep -Fx -- 'stdio' "$argv_file"
+  grep -F -- 'restrict=on' "$argv_file"
+}
+
+@test "QEMU launch identity failure is nonzero and does not claim readiness" {
+  VM_HOST_PROXY_PORT=32123
+  python3() { return 73; }
+  readlink() {
+    printf '/usr/bin/python3\n'
+  }
+  vm_host_record_process_identity() { return 78; }
+
+  run vm_host_start_qemu "$TEST_TMP" smoke-v3 "$TEST_TMP/workspace" 43210
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"exact run-owned process identity"* ]]
+  [[ "$output" != *"VM_UP"* ]]
+}
+
+@test "cleanup leaves an unrelated reused PID alone when argv identity differs" {
+  local pid executable
+  sleep 60 &
+  pid="$!"
+  executable="$(readlink -f "$(command -v sleep)")"
+  vm_host_record_process_identity "$TEST_TMP/process.identity" "$pid" "$executable" 60
+  python3 - "$TEST_TMP/process.identity" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["argv"].append("not-the-recorded-process")
+p.write_text(json.dumps(d))
+PY
+  VM_HOST_RUN_DIR="$TEST_TMP"
+
+  run vm_host_cleanup_one "$TEST_TMP/process.identity"
+
+  [ "$status" -ne 0 ]
+  kill -0 "$pid"
+  kill "$pid"
+  wait "$pid" 2>/dev/null || true
+}
+
+@test "pidfd cleanup stops only the exact recorded child process" {
+  local pid executable
+  sleep 60 &
+  pid="$!"
+  executable="$(readlink -f "$(command -v sleep)")"
+  vm_host_record_process_identity "$TEST_TMP/process.identity" "$pid" "$executable" 60
+
+  run vm_host_cleanup_one "$TEST_TMP/process.identity"
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$TEST_TMP/process.identity" ]
+  run vm_host_process_identity_status "$TEST_TMP/process.identity"
+  [ "$status" -ne 0 ]
+  wait "$pid" 2>/dev/null || true
+}
+
+@test "credential delivery uses private control stdin and keeps fake key out of argv and logs" {
+  local key='sk-inert-test-only-000000000000000000000000000000'
+  mkdir "$TEST_TMP/run"
+  printf '43210\n' >"$TEST_TMP/run/ssh_port"
+  cat >"$TEST_TMP/provider.json" <<JSON
+{"provider":"openai","model":"openai/gpt-6.1-sol","api_key":"$key"}
+JSON
+  chmod 0600 "$TEST_TMP/provider.json"
+  timeout() {
+    [ "$1" = 60 ] || return 89
+    shift
+    "$@"
+  }
+  ssh() {
+    if [[ "$*" == *"opencode auth login openai --method key"* ]]; then
+      printf '%s\n' "$*" >"$TEST_TMP/ssh-argv"
+      cat >"$TEST_TMP/ssh-stdin"
+    fi
+    return 0
+  }
+
+  if vm_host_import_credentials "$TEST_TMP/run" "$TEST_TMP/provider.json" >"$TEST_TMP/import-output" 2>&1; then status=0; else status=$?; fi
+
+  [ "$status" -eq 0 ]
+  [ "$(<"$TEST_TMP/ssh-stdin")" = "$key" ]
+  [[ "$(<"$TEST_TMP/ssh-argv")" == *"-tt"* ]]
+  [[ "$(<"$TEST_TMP/ssh-argv")" != *"$key"* ]]
+  ! grep -Fq -- "$key" "$TEST_TMP/import-output"
+  [ "${VM_HOST_CREDENTIALS_IMPORTED:-0}" = 1 ]
+}
+
+@test "CLI exposes no unbounded internal smoke worker" {
+  run grep -F 'exec timeout --signal=TERM --kill-after=15' "$TEST_ROOT/lab-vm"
+  [ "$status" -eq 0 ]
+  run grep -E '^[[:space:]]*_smoke\)' "$TEST_ROOT/lab-vm"
+  [ "$status" -ne 0 ]
+}
+
+@test "cleanup deletes transient keys/seeds, bounds retained logs, and keeps diagnostics private" {
+  local run_dir="$TEST_TMP/private-run"
+  mkdir -m 0700 "$run_dir"
+  printf 'private key material\n' >"$run_dir/id_vm_control"
+  printf 'credential-free seed metadata\n' >"$run_dir/user-data"
+  printf 'temporary cloud image\n' >"$run_dir/disk.qcow2"
+  python3 - "$run_dir/qemu.log" "$VM_HOST_LOG_LIMIT_BYTES" <<'PY'
+import pathlib, sys
+pathlib.Path(sys.argv[1]).write_bytes(b"x" * (int(sys.argv[2]) + 73))
+PY
+  VM_HOST_RUN_DIR="$run_dir"
+  VM_HOST_UNTRACKED_CHILD=0
+
+  if vm_host_cleanup; then status=0; else status=$?; fi
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$run_dir/id_vm_control" ]
+  [ ! -e "$run_dir/user-data" ]
+  [ ! -e "$run_dir/disk.qcow2" ]
+  [ "$(stat -c %s "$run_dir/qemu.log")" -le "$VM_HOST_LOG_LIMIT_BYTES" ]
+  [ "$(stat -c %a "$run_dir/qemu.log")" = 600 ]
+}
+
+@test "cleanup reports an untracked child instead of returning success" {
+  local run_dir="$TEST_TMP/untracked-run"
+  mkdir -m 0700 "$run_dir"
+
+  run bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_RUN_DIR="$2"; VM_HOST_UNTRACKED_CHILD=1; vm_host_cleanup' _ "$TEST_ROOT" "$run_dir"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cleanup incomplete"* ]]
+  [ -d "$run_dir" ]
+}
+
+@test "EXIT trap changes a successful smoke status to failure when cleanup is ambiguous" {
+  local run_dir="$TEST_TMP/ambiguous-exit-run"
+  mkdir -m 0700 "$run_dir"
+
+  run bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_RUN_DIR="$2"; VM_HOST_UNTRACKED_CHILD=1; trap vm_host_exit_cleanup EXIT; exit 0' _ "$TEST_ROOT" "$run_dir"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cleanup incomplete"* ]]
+  [ -d "$run_dir" ]
+}
+
+@test "EXIT trap preserves the original stage failure when cleanup is ambiguous" {
+  local run_dir="$TEST_TMP/failed-stage-run"
+  mkdir -m 0700 "$run_dir"
+
+  run bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_RUN_DIR="$2"; VM_HOST_UNTRACKED_CHILD=1; trap vm_host_exit_cleanup EXIT; exit 73' _ "$TEST_ROOT" "$run_dir"
+
+  [ "$status" -eq 73 ]
+  [[ "$output" == *"cleanup incomplete"* ]]
+  [ -d "$run_dir" ]
+}
+
+@test "EXIT trap rejects ambiguous process ownership without killing that process" {
+  local run_dir="$TEST_TMP/ambiguous-process-run" pid executable
+  mkdir -m 0700 "$run_dir"
+  sleep 60 &
+  pid="$!"
+  executable="$(readlink -f "$(command -v sleep)")"
+  vm_host_record_process_identity "$run_dir/qemu.identity" "$pid" "$executable" 60
+  python3 - "$run_dir/qemu.identity" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+d = json.loads(p.read_text())
+d["argv"].append("forged-identity")
+p.write_text(json.dumps(d))
+PY
+
+  run bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_RUN_DIR="$2"; trap vm_host_exit_cleanup EXIT; exit 0' _ "$TEST_ROOT" "$run_dir"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cleanup incomplete"* ]]
+  kill -0 "$pid"
+  kill "$pid"
+  wait "$pid" 2>/dev/null || true
+}
