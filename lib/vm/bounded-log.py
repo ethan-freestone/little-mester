@@ -2,6 +2,7 @@
 """Run one child while retaining at most a fixed prefix of combined output."""
 
 import ctypes
+import json
 import os
 import pathlib
 import selectors
@@ -17,7 +18,7 @@ KILL_SETTLE_SECONDS = 2
 
 def main(arguments):
     if len(arguments) < 4:
-        print("usage: bounded-log.py LOG_PATH MAX_BYTES [--fail-on-overflow] [--stdin] -- COMMAND [ARG ...]", file=sys.stderr)
+        print("usage: bounded-log.py LOG_PATH MAX_BYTES [--fail-on-overflow] [--stdin] [--completion-file PATH] -- COMMAND [ARG ...]", file=sys.stderr)
         return 2
     log_name = arguments[0]
     try:
@@ -26,15 +27,25 @@ def main(arguments):
         print("invalid log size limit", file=sys.stderr)
         return 2
     options = set()
+    completion_path = None
     index = 2
     while index < len(arguments) and arguments[index].startswith("--") and arguments[index] != "--":
-        if arguments[index] not in ("--fail-on-overflow", "--stdin") or arguments[index] in options:
+        option = arguments[index]
+        if option == "--completion-file":
+            if (completion_path is not None or index + 1 >= len(arguments)
+                    or not arguments[index + 1] or arguments[index + 1] == "--"):
+                print("invalid bounded-log completion file", file=sys.stderr)
+                return 2
+            completion_path = arguments[index + 1]
+            index += 2
+            continue
+        if option not in ("--fail-on-overflow", "--stdin") or option in options:
             print("invalid bounded-log option", file=sys.stderr)
             return 2
-        options.add(arguments[index])
+        options.add(option)
         index += 1
     if index >= len(arguments) or arguments[index] != "--" or not arguments[index + 1:]:
-        print("usage: bounded-log.py LOG_PATH MAX_BYTES [--fail-on-overflow] [--stdin] -- COMMAND [ARG ...]", file=sys.stderr)
+        print("usage: bounded-log.py LOG_PATH MAX_BYTES [--fail-on-overflow] [--stdin] [--completion-file PATH] -- COMMAND [ARG ...]", file=sys.stderr)
         return 2
     fail_on_overflow = "--fail-on-overflow" in options
     pass_stdin = "--stdin" in options
@@ -135,6 +146,7 @@ def main(arguments):
     written = 0
     truncated = False
     cleanup_failed = False
+    group_clean = False
     selector = selectors.DefaultSelector()
 
     def group_members():
@@ -151,8 +163,10 @@ def main(arguments):
                     fields = pathlib.Path(entry.path, "stat").read_text().rsplit(")", 1)[1].split()
                     process_group = int(fields[2])
                     session = int(fields[3])
-                except (OSError, ValueError, IndexError):
+                except FileNotFoundError:
                     continue
+                except (OSError, ValueError, IndexError):
+                    return None
                 if process_group == child.pid and session == child.pid:
                     members.append(int(entry.name))
         return members
@@ -256,7 +270,11 @@ def main(arguments):
             os.killpg(child.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        settle_deadline = time.monotonic() + KILL_SETTLE_SECONDS
+        settle_deadline = (
+            kill_sent_at[0] + KILL_SETTLE_SECONDS
+            if kill_sent_at[0] is not None
+            else time.monotonic() + KILL_SETTLE_SECONDS
+        )
         while True:
             if child.poll() is None:
                 try:
@@ -266,6 +284,7 @@ def main(arguments):
             reap_adopted_children()
             members = group_members()
             if child.returncode is not None and members == []:
+                group_clean = True
                 break
             if time.monotonic() >= settle_deadline:
                 cleanup_failed = True
@@ -273,6 +292,29 @@ def main(arguments):
             time.sleep(0.05)
         os.close(group_identity)
         selector.close()
+    if completion_path is not None and not cleanup_failed and group_clean:
+        try:
+            fields = pathlib.Path(f"/proc/{os.getpid()}/stat").read_text().rsplit(")", 1)[1].split()
+            completion = {
+                "logger_pid": os.getpid(),
+                "logger_start_time": fields[19],
+                "child_pid": child.pid,
+                "process_group_clean": True,
+            }
+            descriptor = os.open(
+                completion_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(completion, stream, separators=(",", ":"))
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        except (OSError, IndexError, ValueError) as error:
+            cleanup_failed = True
+            print(f"could not write bounded-log cleanup proof: {error}", file=sys.stderr)
     if cleanup_failed:
         print("logged child process group did not finish cleanup within its bounded grace", file=sys.stderr)
         return 125
