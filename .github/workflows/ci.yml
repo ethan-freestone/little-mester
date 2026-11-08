@@ -46,8 +46,16 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - run: git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats && sudo /tmp/bats/install.sh /usr/local && rm -rf /tmp/bats
-      - run: bats tests/
+      - name: Install Bats and report its provenance
+        run: |
+          git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats
+          bats_core_commit="$(git -C /tmp/bats rev-parse HEAD)"
+          sudo /tmp/bats/install.sh /usr/local
+          rm -rf /tmp/bats
+          printf 'bats-core commit: %s\n' "$bats_core_commit"
+          bats --version
+      - name: Run Bats with failure output
+        run: bats --print-output-on-failure tests/
 
   # ── 3. Hygiene — ShellCheck, Python compile, ruff lint ───────────
   hygiene:
