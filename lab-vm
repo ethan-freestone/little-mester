@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+# VM replacement CLI. Only explicitly implemented lifecycle commands are dispatched.
+set -euo pipefail
+
+# All helper imports, including inline identity checks in frozen launchers, must
+# leave the manifest-validated private runtime unchanged.
+export PYTHONDONTWRITEBYTECODE=1
+
+# A native agent may itself have an explicitly selected parent metrics URL in
+# its environment. Never let that capability flow into a child launcher.
+unset METRICS_URL
+# Internal one-session SSH/browser values are never accepted from the caller.
+unset VM_SSH_CONTROL_PATH VM_BROWSER_BRIDGE_DIR VM_BROWSER_BRIDGE_TOKEN_FILE \
+  VM_BROWSER_BRIDGE_PORT VM_BROWSER_BRIDGE_SSH_CONTROL_PATH \
+  VM_BROWSER_BRIDGE_SSH_PORT VM_BROWSER_BRIDGE_SSH_KEY \
+  VM_BROWSER_BRIDGE_KNOWN_HOSTS VM_BROWSER_BRIDGE_SSH_LOG \
+  VM_BROWSER_BRIDGE_SSH_DEBUG VM_BROWSER_BRIDGE_SSH_BIN
+
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+  printf 'REFUSED: VM launcher requires Bash 4.4+ on the Linux x86_64 support profile.\n' >&2
+  exit 2
+fi
+
+VM_REPO="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=lib/state.sh
+# shellcheck disable=SC1091 # Repository root is resolved from this launcher at runtime.
+source "$VM_REPO/lib/state.sh"
+# shellcheck source=lib/vm/config.sh
+# shellcheck disable=SC1091 # Repository root is resolved from this launcher at runtime.
+source "$VM_REPO/lib/vm/config.sh"
+# shellcheck source=lib/vm/recursion.sh
+# shellcheck disable=SC1091 # Repository root is resolved from this launcher at runtime.
+source "$VM_REPO/lib/vm/recursion.sh"
+
+vm_usage() {
+  cat <<'HELP'
+Usage: ./lab-vm COMMAND|WORKSPACE [options] [-- agent arguments]
+
+Available now:
+  run [WORKSPACE] [--name NAME]      Start/resume a profile and attach its native agent
+  up [PROFILE] --workspace PATH     Start/resume a profile without attaching an agent
+  context [--json] [--name NAME]    Read-only config, private paths and capabilities
+  status [--json] [--name NAME]     Read-only exact-profile lifecycle and identity
+  list [--json]                     Read-only inventory of private VM profiles
+  agent [PROFILE] [-- <args>]       Attach to a ready profile's native guest agent
+  models status|diagnose [provider] [--name PROFILE] Read-only selected-provider check
+  metrics up|status|down        Manage the verified per-user loopback metrics service
+  suspend [--name NAME]             Graceful, descendant-safe guest shutdown
+  update [TARGET...] [--all]        Scan exact guest updates; confirm before apply
+  install-tools [PROFILE]            Update Python tools in the selected guest only
+  recursion-clean RUN              Confirmed cleanup of one stopped recursive run
+  setup                           Read-only host prerequisite discovery
+  setup --install-prereqs          Explicit default-no userland package installation
+  base                            Verify/download the pinned immutable base image
+                                  Never replaces an existing cache entry
+  --help                          Show this checkpoint's actual availability
+
+Not yet implemented (refuse with exit 2):
+  ssh, doctor,
+  resume, resize PROFILE GiB, down, stop, rebuild, egress-reload,
+  auth-forward [PROFILE] PORT
+
+Options (before or after command/path; -- stops launcher parsing):
+  --name NAME, --workspace PATH, --memory GiB, --recurse, --unsafe-recurse,
+  --max-depth 0..32, --browser-auth|--no-browser-auth, --permissions ask|auto,
+  --auto-accept, -y|--yes, -v|--verbose, -d|--debug, --json,
+  --poweroff-recursive, --discard-recursive, --clean, --all, --cwd RELATIVE_PATH,
+  --opencode-version latest|SEMVER, --agent opencode|aider,
+  --host-profile linux-x86_64, --workload-runtime docker|none,
+  --model-provider none|ollama|llamacpp|remote, --model-port PORT, --model-id ID,
+  --metrics on|off, --metrics-port 1024..65535,
+  --auth-forward off|auto|PROVIDER[,PROVIDER], --auth-escrow-dir PATH
+
+--yes confirms launcher actions only, never requests agent auto mode. Suspend never
+force-kills QEMU; unknown children or process identities block shutdown.
+agent requires an already-ready profile and never starts/resumes it. OpenCode's
+--permissions auto maps to its supported --auto; Aider remains in prompt mode.
+No VM startup or nested-KVM acceptance is claimed by a successful context/setup.
+Transition-stage routing: ./lab vm selects this explicit experimental CLI;
+./lab without "vm" still delegates to Docker until acceptance. The intended
+C14 released default is VM, with ./lab-docker retained as optional Docker use.
+The experimental run/up entry may start or resume a profile; use a dedicated
+--name for development work. Use --unsafe-recurse only to share this checkout as
+the writable guest workspace, and pair it with --max-depth 0 when child VMs are
+not wanted. These commands do not change ordinary ./lab routing.
+HELP
+}
+
+vm_cli_defaults
+vm_cli_parse "$@" || exit 2
+if (( VM_HELP )); then vm_usage; exit 0; fi
+command -v python3 >/dev/null 2>&1 || {
+  vm_error 'Python 3 is required for safe configuration validation; install it manually before setup.'
+  exit 2
+}
+vm_recursion_apply_guest_identity /etc/lab-vm-recursion || exit 2
+VM_STATE_ROOT="$(vm_state_root)"
+VM_PATHS_HELPER="$VM_REPO/lib/vm/paths.py"
+# shellcheck source=lib/vm/disk.sh
+# shellcheck disable=SC1091 # Repository root is resolved from this launcher at runtime.
+source "$VM_REPO/lib/vm/disk.sh"
+# shellcheck disable=SC1091
+source "$VM_REPO/lib/vm/lifecycle.sh"
+vm_config_overrides
+vm_config_load || exit 2
+vm_recursion_configure "$VM_COMMAND" || exit 2
+vm_recursion_validate_candidate_handoff || exit 2
+if (( VM_NESTED_LAUNCH )); then
+  vm_recursion_require_nested_kvm /dev/kvm /proc/cpuinfo || exit 2
+fi
+
+# Resolve/validate exact paths even for unavailable operations; never mkdir or repair.
+context_args=(context --state-root "$VM_STATE_ROOT" --profile "$VM_PROFILE" --repository "$VM_REPO")
+if [[ -n "$VM_WORKSPACE" ]]; then context_args+=(--workspace "$VM_WORKSPACE"); fi
+if (( VM_RECURSE )); then context_args+=(--recurse); fi
+if (( VM_UNSAFE_RECURSE )); then context_args+=(--unsafe-recurse); fi
+VM_CONTEXT_JSON="$(VM_POLICY_DEBUG="$VM_DEBUG" python3 "$VM_PATHS_HELPER" "${context_args[@]}")" || exit 2
+
+case "$VM_COMMAND" in
+  run|up)
+    vm_lifecycle_cli_run_up "$VM_COMMAND" "$VM_STATE_ROOT" "$VM_PROFILE" \
+      "$VM_WORKSPACE" "$VM_REPO"
+    ;;
+  setup) vm_setup ;;
+  base)
+    if [[ "$(vm_host_system)" != Linux || "$(vm_host_arch)" != x86_64 ]]; then
+      vm_error 'Pinned base preparation is supported only on Linux x86_64.'
+      exit 2
+    fi
+    vm_disk_create_base "$VM_STATE_ROOT"
+    ;;
+  status)
+    status_json="$(vm_lifecycle_status "$VM_STATE_ROOT" "$VM_PROFILE")" || exit $?
+    if (( VM_JSON )); then
+      printf '%s\n' "$status_json"
+    else
+      printf '%s\n' "$status_json" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print("VM profile status")
+print("Profile:",d["name"])
+print("Lifecycle:",d["status"])
+print("Runtime:",d["runtime_state"])
+print("Workspace:",d["workspace"])
+print("Memory:",str(d["memory_gib"])+" GiB")
+print("Depth:",d["depth"])
+'
+    fi
+    ;;
+  list)
+    list_json="$(vm_lifecycle_list "$VM_STATE_ROOT")" || exit $?
+    if (( VM_JSON )); then
+      printf '%s\n' "$list_json"
+    else
+      printf '%s\n' "$list_json" | python3 -c '
+import json,sys
+items=json.load(sys.stdin)
+if not items:
+    print("No VM profiles.")
+else:
+    print("NAME  STATUS  MEMORY  DEPTH")
+    for item in items:
+        print("{name}  {status}  {memory_gib} GiB  {depth}".format(**item))
+'
+    fi
+    ;;
+  suspend)
+    controller="$VM_STATE_ROOT/vm/profiles/$VM_PROFILE/runtime/lab-vm"
+    vm_lifecycle_suspend "$VM_STATE_ROOT" "$VM_PROFILE" "$VM_POWEROFF_RECURSIVE" \
+      "$VM_LIFECYCLE_DEFAULT_TIMEOUT" "$controller"
+    ;;
+  update)
+    update_all=0
+    [[ ! -v 'VM_SEEN[all]' ]] || update_all=1
+    vm_lifecycle_update "$VM_STATE_ROOT" "$VM_PROFILE" "$VM_YES" "$update_all" 0 \
+      "${VM_TARGETS[@]}"
+    ;;
+  install-tools)
+    vm_lifecycle_update "$VM_STATE_ROOT" "$VM_PROFILE" "$VM_YES" 0 1
+    ;;
+  recursion-clean)
+    recursion_confirmed=0
+    [[ ! -v 'VM_SEEN[yes]' ]] || recursion_confirmed=1
+    vm_recursion_clean_run "$VM_STATE_ROOT" "$VM_PROFILE" "$recursion_confirmed"
+    ;;
+  agent)
+    runtime="$(vm_lifecycle_profile_runtime "$VM_STATE_ROOT" "$VM_PROFILE")" || exit $?
+    if [[ "$runtime" != "$VM_REPO" ]]; then
+      forward=(agent "$VM_PROFILE" --permissions "$VM_PERMISSIONS")
+      if [[ -v 'VM_SEEN[cwd]' ]]; then forward+=(--cwd "$VM_CWD"); fi
+      if [[ -v 'VM_SEEN[browser]' ]]; then
+        if [[ "$VM_BROWSER_AUTH" == on ]]; then forward+=(--browser-auth); else forward+=(--no-browser-auth); fi
+      fi
+      if ((${#VM_AGENT_ARGS[@]})); then forward+=(-- "${VM_AGENT_ARGS[@]}"); fi
+      exec "$runtime/lab-vm" "${forward[@]}"
+    fi
+    # shellcheck disable=SC1091 # Agent dispatch uses the selected profile's frozen module.
+    source "$runtime/lib/vm/services.sh"
+    vm_services_agent "$VM_STATE_ROOT" "$VM_PROFILE" "$VM_PERMISSIONS" \
+      "$VM_CWD" "$VM_BROWSER_AUTH" "${VM_AGENT_ARGS[@]}"
+    ;;
+  models)
+    runtime="$(vm_lifecycle_profile_runtime "$VM_STATE_ROOT" "$VM_PROFILE")" || exit $?
+    if [[ "$runtime" != "$VM_REPO" ]]; then
+      forward=(models "$VM_ACTION" --name "$VM_PROFILE")
+      if [[ -n "$VM_MODEL_PROVIDER_QUERY" ]]; then forward+=("$VM_MODEL_PROVIDER_QUERY"); fi
+      exec "$runtime/lab-vm" "${forward[@]}"
+    fi
+    # shellcheck disable=SC1091 # Model doctor uses the selected profile's frozen module.
+    source "$runtime/lib/vm/services.sh"
+    vm_services_models "$VM_ACTION" "$VM_MODEL_PROVIDER_QUERY" "$VM_STATE_ROOT" "$VM_PROFILE"
+    ;;
+  metrics)
+    metrics_port="$(vm_lifecycle_json_field "$VM_CONFIG_JSON" metrics_port)" || exit 2
+    case "$VM_ACTION" in
+      up)
+        port="$(python3 "$VM_REPO/lib/vm/metrics_service.py" ensure \
+          --state-root "$VM_STATE_ROOT" --port "$metrics_port" \
+          --collector "$VM_REPO/agent/metrics/gather.py")" || exit $?
+        printf 'Verified loopback metrics service listening on 127.0.0.1:%s.\n' "$port"
+        ;;
+      status)
+        python3 "$VM_REPO/lib/vm/metrics_service.py" status --state-root "$VM_STATE_ROOT" --port "$metrics_port"
+        ;;
+      down)
+        python3 "$VM_REPO/lib/vm/metrics_service.py" stop --state-root "$VM_STATE_ROOT" --port "$metrics_port"
+        ;;
+      *) vm_error 'Unknown metrics action.'; exit 2 ;;
+    esac
+    ;;
+  egress-reload)
+    runtime="$(vm_lifecycle_profile_runtime "$VM_STATE_ROOT" "$VM_PROFILE")" || exit $?
+    if [[ "$runtime" != "$VM_REPO" ]]; then
+      exec "$runtime/lab-vm" egress-reload --name "$VM_PROFILE"
+    fi
+    # shellcheck disable=SC1091 # The exact profile's frozen helper validates and signals its own proxy identity.
+    source "$runtime/lib/vm/services.sh"
+    vm_services_egress_reload "$VM_STATE_ROOT" "$VM_PROFILE"
+    ;;
+  context)
+    system="$(vm_host_system)"; arch="$(vm_host_arch)"
+    kvm=false; if vm_host_kvm; then kvm=true; fi
+    virtiofsd_path="$(vm_virtiofsd || true)"
+    missing="$(vm_host_missing)"
+    # Never put arbitrary agent arguments, environment dumps or config file contents in logs.
+    printf '%s\n%s\n' "$VM_CONTEXT_JSON" "$VM_CONFIG_JSON" | python3 -c '
+import json,os,sys
+context=json.loads(sys.stdin.readline())
+config=json.loads(sys.stdin.readline())
+yes,permissions,verbose,debug,maximum,system,arch,kvm,vfs,missing,formatted,next_depth,nested,handoff=sys.argv[1:]
+context["effective_config"]=config
+context["launcher"]={"yes":yes=="1","permissions":permissions,"verbose":int(verbose),"debug":int(debug),"max_depth":int(maximum)}
+context["recursion"]={"current_depth":int(os.environ.get("LAB_VM_RECURSION_DEPTH","0")),"next_child_depth":int(next_depth),"max_depth":int(maximum),"nested_launch":nested=="1","candidate_handoff":handoff=="1"}
+context["host"]={"system":system,"architecture":arch,"supported":system=="Linux" and arch=="x86_64","kvm_usable":kvm=="true","virtiofsd":vfs or None,"missing_tools":missing.splitlines()}
+if formatted=="1":
+    print(json.dumps(context,sort_keys=True))
+else:
+    print("VM replacement context (no runtime acceptance implied)")
+    print("State root:",context["state_root"])
+    print("Exact profile:",context["profile_path"])
+    print("Host:",system,arch,"KVM usable:"+kvm)
+    print("Missing userland:",", ".join(missing.splitlines()) or "none")
+' "$VM_YES" "$VM_PERMISSIONS" "$VM_VERBOSE" "$VM_DEBUG" "$VM_MAX_DEPTH" \
+      "$system" "$arch" "$kvm" "$virtiofsd_path" "$missing" "$VM_JSON" \
+      "$VM_GUEST_RECURSION_DEPTH" "$VM_NESTED_LAUNCH" "${VM_RECURSION_CANDIDATE_HANDOFF:-0}"
+    ;;
+  *) vm_error 'VM operation not yet implemented at this checkpoint; no VM or service was changed.'; exit 2 ;;
+esac

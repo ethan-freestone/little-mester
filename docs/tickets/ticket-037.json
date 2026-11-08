@@ -6,9 +6,9 @@
   "type": "feature",
   "status": "resolved",
   "title": "Opencode TUI plugin: confirm before exit on Ctrl+C",
-  "objective": "Add an OpenCode v2 TUI plugin that intercepts Ctrl+C in the Little Mester opencode session and shows a confirmation dialog asking 'are you sure you want to close Little Mester?' before exiting, only closing on confirmed intent.",
+  "objective": "IGNORE ME AS AN EXECUTION PLAN FOR feat/vm-approach-2. Start with PR_REIMPLEMENTATION_HANDOFF.md; PR_REIMPLEMENTATION_PLAN.md / TASKS.md / PROGRESS.md control replacement work. Historical ticket details below are retained, not current gates or permission to resume legacy procedures. PR_IMPLEMENTATION is a conversational shorthand; actual files are named PR_REIMPLEMENTATION.\n\nORIGINAL OBJECTIVE (preserved):\nAdd an OpenCode v2 TUI plugin that intercepts Ctrl+C in the Little Mester opencode session and shows a confirmation dialog asking 'are you sure you want to close Little Mester?' before exiting, only closing on confirmed intent.",
   "created_at": "2026-10-26T19:13:23.833Z",
-  "updated_at": "2026-10-26T20:01:46.810Z",
+  "updated_at": "2026-11-06T22:26:14.157Z",
   "acceptance_criteria": [
     {
       "id": "A1",

@@ -70,6 +70,7 @@ interface Theme {
   gpu: string
   vram: string
   temp: string
+  warning: string
 }
 
 function resolveTheme(theme: any): Theme {
@@ -78,6 +79,7 @@ function resolveTheme(theme: any): Theme {
     gpu: "#34a853",
     vram: "#5b93d0",
     temp: "#ea4c73",
+    warning: "#e6a23c",
   }
 }
 
@@ -102,6 +104,7 @@ interface State {
   ramUsedGb: number
   ramTotalGb: number
   ramPct: number
+  metricsError: string
 }
 
 function initialState(): State {
@@ -122,6 +125,7 @@ function initialState(): State {
     ramUsedGb: 0,
     ramTotalGb: 0,
     ramPct: 0,
+    metricsError: "",
   }
 }
 
@@ -210,6 +214,9 @@ const SPARK_WIDTH = 16
 function MetricsView(props: { state: () => State; theme: Theme; onToggle: () => void }) {
   return (
     <box flexDirection="column" gap={0} onMouseUp={props.onToggle}>
+      <Show when={props.state().metricsError}>
+        <text fg={props.theme.warning}>{props.state().metricsError}</text>
+      </Show>
       <Show when={props.state().mode === "expanded"} fallback={<CompactView state={props.state} theme={props.theme} />}>
         <ExpandedView state={props.state} theme={props.theme} />
       </Show>
@@ -294,8 +301,15 @@ export default Plugin.define({
   async setup(context) {
     const [state, setState] = createSignal<State>(initialState())
     const theme = resolveTheme(context.theme)
+    const configuredEndpoint = process.env.METRICS_URL?.trim()
+    const metricsBases = configuredEndpoint !== undefined
+      ? (configuredEndpoint && configuredEndpoint.toLowerCase() !== "disabled"
+        ? [configuredEndpoint.replace(/\/+$/, "")]
+        : [])
+      : ["http://metrics:19532", "http://127.0.0.1:19532"]
     let pollingId: ReturnType<typeof setInterval> | null = null
     let isDisposed = false
+    let requestInFlight = false
 
     function toggle() {
       setState(prev => ({ ...prev, mode: prev.mode === "compact" ? "expanded" : "compact" }))
@@ -303,8 +317,14 @@ export default Plugin.define({
 
     /* Poll /history (first time) → seeds the data arrays. */
     function seedHistory() {
-      return fetch("http://metrics:19532/history?n=60")
-        .then(r => r.json())
+      if (!metricsBases.length) return Promise.resolve()
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 1500)
+      return fetch(`${metricsBases[0]}/history?n=60`, { signal: controller.signal })
+        .then(r => {
+          if (!r.ok) throw new Error("metrics history unavailable")
+          return r.json()
+        })
         .then((data: Array<{ gpu_util?: number; vram_pct?: number; gpu_temp?: number }>) => {
           if (isDisposed || !Array.isArray(data) || !data.length) return
           setState(prev => ({
@@ -318,60 +338,86 @@ export default Plugin.define({
           }))
         })
         .catch(() => {})
+        .finally(() => clearTimeout(timeout))
     }
 
     /* Poll /metrics → push latest data point. */
-    function pollMetrics() {
-      fetch("http://metrics:19532/metrics")
-        .then(r => r.json())
-        .then((d: MetricsPayload) => {
-          if (isDisposed) return
-          const g = d.gpu?.[0]
-          setState(prev => {
-            const history = [...prev.history]
-            const vramHistory = [...prev.vramHistory]
-            const tempVals = [...prev.tempVals]
+    async function pollMetrics() {
+      if (isDisposed || requestInFlight || !metricsBases.length) return
+      requestInFlight = true
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 1500)
+      try {
+        let d: MetricsPayload | undefined
+        for (const base of metricsBases) {
+          try {
+            const response = await fetch(`${base}/metrics`, { signal: controller.signal })
+            if (!response.ok) continue
+            d = await response.json() as MetricsPayload
+            break
+          } catch (error) {
+            if (controller.signal.aborted) throw error
+          }
+        }
+        if (!d) throw new Error("metrics sidecar unavailable")
+        if (isDisposed) return
+        const g = d.gpu?.[0]
+        setState(prev => {
+          const history = [...prev.history]
+          const vramHistory = [...prev.vramHistory]
+          const tempVals = [...prev.tempVals]
 
-            const util = g?.utilization_percent
-            if (util != null) history.push(util)
+          const util = g?.utilization_percent
+          if (util != null) history.push(util)
 
-            const usedMb = g?.memory_used_mb ?? prev.vramUsedMb
-            const totalMb = g?.memory_total_mb ?? prev.vramTotalMb
-            if (totalMb > 0) vramHistory.push(Math.round(100 * usedMb / totalMb))
+          const usedMb = g?.memory_used_mb ?? prev.vramUsedMb
+          const totalMb = g?.memory_total_mb ?? prev.vramTotalMb
+          if (totalMb > 0) vramHistory.push(Math.round(100 * usedMb / totalMb))
 
-            const temp = g?.temperature_c
-            if (temp != null && temp > 0) {
-              const rounded = Math.round(temp)
-              if (!tempVals.length || tempVals[tempVals.length - 1] !== rounded) tempVals.push(rounded)
-            }
+          const temp = g?.temperature_c
+          if (temp != null && temp > 0) {
+            const rounded = Math.round(temp)
+            if (!tempVals.length || tempVals[tempVals.length - 1] !== rounded) tempVals.push(rounded)
+          }
 
-            return {
-              ...prev,
-              gpuName: g?.name || prev.gpuName,
-              gpuUtil: util ?? prev.gpuUtil,
-              vramUsedMb: usedMb,
-              vramTotalMb: totalMb,
-              history: history.slice(-240),
-              vramHistory: vramHistory.slice(-240),
-              tempVals: tempVals.slice(-20),
-              cpuModel: d.cpu?.model?.trim() || prev.cpuModel,
-              cpuCores: d.cpu?.num_cpus ?? prev.cpuCores,
-              load1: d.cpu?.load_avg_1m ?? prev.load1,
-              load5: d.cpu?.load_avg_5m ?? prev.load5,
-              load15: d.cpu?.load_avg_15m ?? prev.load15,
-              ramUsedGb: d.memory?.used_gb ?? prev.ramUsedGb,
-              ramTotalGb: d.memory?.total_gb ?? prev.ramTotalGb,
-              ramPct: d.memory?.percent ?? prev.ramPct,
-            }
-          })
+          return {
+            ...prev,
+            gpuName: g?.name || prev.gpuName,
+            gpuUtil: util ?? prev.gpuUtil,
+            vramUsedMb: usedMb,
+            vramTotalMb: totalMb,
+            history: history.slice(-240),
+            vramHistory: vramHistory.slice(-240),
+            tempVals: tempVals.slice(-20),
+            cpuModel: d.cpu?.model?.trim() || prev.cpuModel,
+            cpuCores: d.cpu?.num_cpus ?? prev.cpuCores,
+            load1: d.cpu?.load_avg_1m ?? prev.load1,
+            load5: d.cpu?.load_avg_5m ?? prev.load5,
+            load15: d.cpu?.load_avg_15m ?? prev.load15,
+            ramUsedGb: d.memory?.used_gb ?? prev.ramUsedGb,
+            ramTotalGb: d.memory?.total_gb ?? prev.ramTotalGb,
+            ramPct: d.memory?.percent ?? prev.ramPct,
+            metricsError: "",
+          }
         })
-        .catch(() => {})
+      } catch {
+        if (!isDisposed) {
+          setState(prev => ({ ...prev, metricsError: "Metrics unavailable · retrying" }))
+        }
+      } finally {
+        clearTimeout(timeout)
+        requestInFlight = false
+      }
     }
 
     // Start polling (500ms cadence)
-    seedHistory()
-    pollMetrics()            // immediate first read
-    pollingId = setInterval(() => pollMetrics(), 500)
+    if (!metricsBases.length) {
+      setState(prev => ({ ...prev, metricsError: "Metrics disabled for this profile" }))
+    } else {
+      void seedHistory()
+      void pollMetrics()            // immediate first read
+      pollingId = setInterval(() => void pollMetrics(), 500)
+    }
 
     // Palette command provides a keyboard route to the same toggle.
     context.keymap.layer(() => ({

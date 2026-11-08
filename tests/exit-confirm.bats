@@ -69,6 +69,29 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "exit-confirm has distinct cancel and confirm callbacks" {
+  run python3 - "$PLUGIN" <<'PY'
+import sys
+
+src = open(sys.argv[1], encoding="utf-8").read()
+try:
+    cancel_start = src.index("const cancelExit = () => {")
+    confirm_start = src.index("const confirmExit = () => {")
+    layer_start = src.index('mode: "global"')
+except ValueError as exc:
+    raise SystemExit(f"missing exit callback: {exc}")
+cancel = src[cancel_start:confirm_start]
+confirm = src[confirm_start:layer_start]
+if 'context.keymap.dispatch("app.exit")' in cancel:
+    raise SystemExit("cancel callback must not dispatch app.exit")
+if 'context.keymap.dispatch("app.exit")' not in confirm:
+    raise SystemExit("confirm callback must dispatch app.exit")
+if "run: cancelExit" not in src or "run: confirmExit" not in src:
+    raise SystemExit("modal actions must use their distinct callbacks")
+PY
+  [ "$status" -eq 0 ]
+}
+
 @test "Dockerfile disables ctrl+c/ctrl+d exit and prompt.clear ctrl+c" {
   run grep -Fq '"keybinds":{"app.exit":"none","prompt.clear":"none"}' "$DOCKERFILE"
   [ "$status" -eq 0 ]
