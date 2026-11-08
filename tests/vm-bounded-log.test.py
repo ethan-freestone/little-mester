@@ -32,6 +32,33 @@ class BoundedLogTests(unittest.TestCase):
             )
             self.assertEqual(failed.returncode, 23)
 
+    def test_overflow_fails_and_terminates_the_logged_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = pathlib.Path(directory) / "bounded.log"
+            child_pid_file = pathlib.Path(directory) / "child.pid"
+            result = subprocess.run(
+                [PYTHON, "-I", str(LOGGER), str(log), "256", "--fail-on-overflow", "--", PYTHON, "-c",
+                 "import os,pathlib,sys,time; pathlib.Path(os.environ['CHILD_PID_FILE']).write_text(str(os.getpid())); sys.stdout.write('x'*100000); sys.stdout.flush(); time.sleep(30)"],
+                env={**os.environ, "CHILD_PID_FILE": str(child_pid_file)},
+                timeout=4,
+            )
+            self.assertEqual(result.returncode, 125)
+            self.assertLessEqual(log.stat().st_size, 256)
+            self.assertIn(b"[bounded-log: output truncated]", log.read_bytes())
+            child_pid = int(child_pid_file.read_text())
+            self.assertFalse(pathlib.Path(f"/proc/{child_pid}").exists(), "overflow child survived logger termination")
+
+    def test_discarded_stream_is_counted_and_never_written_to_a_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [PYTHON, "-I", str(LOGGER), "-", "256", "--fail-on-overflow", "--", PYTHON, "-c",
+                 "import sys; sys.stdout.write('x'*10000)"],
+                timeout=4,
+                cwd=directory,
+            )
+            self.assertEqual(result.returncode, 125)
+            self.assertEqual(list(pathlib.Path(directory).iterdir()), [])
+
     def test_termination_is_forwarded_and_logged_child_is_reaped(self):
         with tempfile.TemporaryDirectory() as directory:
             log = pathlib.Path(directory) / "bounded.log"
@@ -69,8 +96,9 @@ class BoundedLogTests(unittest.TestCase):
                 "pid=os.fork(); "
                 "pathlib.Path(os.environ['CHILD_PID_FILE']).write_text(str(os.getpid())) if pid else None; "
                 "signal.signal(signal.SIGTERM, signal.SIG_IGN) if pid == 0 else None; "
+                "os.close(1) if pid == 0 else None; os.close(2) if pid == 0 else None; "
                 "pathlib.Path(os.environ['DESCENDANT_PID_FILE']).write_text(str(os.getpid())) if pid == 0 else None; "
-                "print('CHILD_READY', flush=True); time.sleep(30)"
+                "print('CHILD_READY', flush=True) if pid else None; time.sleep(30)"
             )
             wrapper = subprocess.Popen(
                 [PYTHON, "-I", str(LOGGER), str(log), "256", "--", PYTHON, "-c", child_code],
@@ -92,17 +120,8 @@ class BoundedLogTests(unittest.TestCase):
                 self.assertIsNotNone(descendant_pid)
                 wrapper.send_signal(signal.SIGTERM)
                 self.assertEqual(wrapper.wait(timeout=12), 143)
-                state = None
-                for _ in range(100):
-                    try:
-                        fields = pathlib.Path(f"/proc/{descendant_pid}/stat").read_text().rsplit(")", 1)[1].split()
-                        state = fields[0]
-                    except FileNotFoundError:
-                        break
-                    if state == "Z":
-                        break
-                    time.sleep(0.02)
-                self.assertIn(state, (None, "Z"), "owned descendant survived wrapper termination")
+                self.assertFalse(pathlib.Path(f"/proc/{descendant_pid}").exists(),
+                                 "closed-stream TERM-ignoring descendant survived or was not reaped")
             finally:
                 if wrapper.poll() is None:
                     wrapper.kill()

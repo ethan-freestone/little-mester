@@ -14,6 +14,8 @@ VM_HOST_DOCKER_TIMEOUT=180
 VM_HOST_CONTROL_TIMEOUT=30
 VM_HOST_TOTAL_TIMEOUT=1200
 VM_HOST_LOG_LIMIT_BYTES=1048576
+VM_HOST_GUEST_OUTPUT_LIMIT_BYTES=65536
+VM_HOST_SSH_KEY_LIMIT_BYTES=16384
 VM_HOST_MAX_RETAINED_RUNS=8
 VM_HOST_WORKSPACE_MAX_BYTES=8589934592
 VM_HOST_IMAGE_URL='https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img'
@@ -272,7 +274,7 @@ vm_host_require_commands() {
     python3 -I - "$executable" <<'PY' || {
 import os, pathlib, stat, sys
 path = pathlib.Path(sys.argv[1]).resolve(strict=True)
-if not os.access(path, os.X_OK):
+if not stat.S_ISREG(path.stat(follow_symlinks=False).st_mode) or not os.access(path, os.X_OK):
     raise SystemExit(1)
 for item in (path, *path.parents):
     info = item.stat(follow_symlinks=False)
@@ -292,7 +294,7 @@ PY
   python3 -I - "$iso_tool" <<'PY' || {
 import os, pathlib, stat, sys
 path = pathlib.Path(sys.argv[1]).resolve(strict=True)
-if not os.access(path, os.X_OK):
+if not stat.S_ISREG(path.stat(follow_symlinks=False).st_mode) or not os.access(path, os.X_OK):
     raise SystemExit(1)
 for item in (path, *path.parents):
     info = item.stat(follow_symlinks=False)
@@ -477,9 +479,10 @@ PY
     rm -f -- "$VM_HOST_RUN_DIR/disk.qcow2" "$VM_HOST_RUN_DIR/ubuntu.img.part" \
       "$VM_HOST_RUN_DIR/seed.iso" "$VM_HOST_RUN_DIR/user-data" "$VM_HOST_RUN_DIR/meta-data" \
       "$VM_HOST_RUN_DIR/id_vm_control" "$VM_HOST_RUN_DIR/id_vm_control.pub" \
-      "$VM_HOST_RUN_DIR/known_hosts" "$VM_HOST_RUN_DIR/known_hosts.tmp" \
+      "$VM_HOST_RUN_DIR/known_hosts" "$VM_HOST_RUN_DIR/known_hosts.tmp" "$VM_HOST_RUN_DIR/known_hosts.valid" \
       "$VM_HOST_RUN_DIR/qemu.command" "$VM_HOST_RUN_DIR/proxy.port" "$VM_HOST_RUN_DIR/ssh_port" \
-      "$VM_HOST_RUN_DIR/model-response.raw" "$VM_HOST_RUN_DIR/docker-container.raw" || cleanup_failed=1
+      "$VM_HOST_RUN_DIR/model-response.raw" "$VM_HOST_RUN_DIR/docker-container.raw" \
+      "$VM_HOST_RUN_DIR/docker-inspect.raw" "$VM_HOST_RUN_DIR/docker-security.raw" || cleanup_failed=1
   fi
   if (( cleanup_failed == 0 )); then
     python3 -I - "$VM_HOST_RUN_DIR" "$VM_HOST_LOG_LIMIT_BYTES" <<'PY' || cleanup_failed=1
@@ -524,12 +527,36 @@ vm_host_exit_cleanup() {
 
 vm_host_ssh() {
   local run_dir="$1" command="$2" limit="${3:-$VM_HOST_CONTROL_TIMEOUT}"
-  local -a ssh_command=(ssh -T -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes \
-    -o UserKnownHostsFile="$run_dir/known_hosts" -o IdentitiesOnly=yes \
-    -o LogLevel=ERROR -i "$run_dir/id_vm_control" -p "$(<"$run_dir/ssh_port")" \
-    "mester@127.0.0.1" "$command")
+  vm_host_ssh_bounded "$run_dir" - "$command" "$limit" 0 0
+}
+
+vm_host_ssh_capture() {
+  local run_dir="$1" output="$2" command="$3" limit="${4:-$VM_HOST_CONTROL_TIMEOUT}"
+  vm_host_ssh_bounded "$run_dir" "$output" "$command" "$limit" 0 0
+}
+
+vm_host_ssh_bounded() {
+  local run_dir="$1" output="$2" command="$3" limit="$4"
+  local inherit_stdin="${5:-0}" force_tty="${6:-0}"
+  local bounded_logger="$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py"
+  local -a logger_options=(--fail-on-overflow)
+  local -a ssh_options=(-F /dev/null)
+  local ssh_port
   [[ "$limit" =~ ^[1-9][0-9]*$ ]] || { vm_host_error 'SSH command deadline must be a positive integer'; return 2; }
-  timeout --signal=TERM --kill-after=5 "$limit" "${ssh_command[@]}"
+  ssh_port="$(<"$run_dir/ssh_port")"
+  [[ "$ssh_port" =~ ^[0-9]{1,5}$ ]] || { vm_host_error 'SSH control port is invalid'; return 2; }
+  if (( inherit_stdin )); then logger_options+=(--stdin); fi
+  if (( force_tty )); then ssh_options+=(-tt); else ssh_options+=(-T); fi
+  ssh_options+=(
+    -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes
+    -o UserKnownHostsFile="$run_dir/known_hosts" -o GlobalKnownHostsFile=/dev/null
+    -o IdentitiesOnly=yes -o IdentityAgent=none -o ProxyCommand=none -o ProxyJump=none
+    -o CanonicalizeHostname=no -o ControlMaster=no -o ClearAllForwardings=yes
+    -o PermitLocalCommand=no -o LogLevel=ERROR
+    -i "$run_dir/id_vm_control" -p "$ssh_port" "mester@127.0.0.1" "$command"
+  )
+  python3 -I "$bounded_logger" "$output" "$VM_HOST_GUEST_OUTPUT_LIMIT_BYTES" \
+    "${logger_options[@]}" -- timeout --signal=TERM --kill-after=5 "$limit" ssh "${ssh_options[@]}"
 }
 
 vm_host_write_cloud_seed() {
@@ -554,7 +581,7 @@ vm_host_write_cloud_seed() {
 vm_host_prepare_disk() {
   local run_dir="$1" download="$1/ubuntu.img.part"
   printf 'stage: pinned Ubuntu base download\n'
-  if ! curl --fail --location --silent --show-error --max-time "$VM_HOST_DOWNLOAD_TIMEOUT" \
+  if ! curl -q --fail --location --silent --show-error --max-time "$VM_HOST_DOWNLOAD_TIMEOUT" \
     --retry 2 --output "$download" "$VM_HOST_IMAGE_URL"; then
     vm_host_error 'pinned Ubuntu image download failed'
     return 1
@@ -692,18 +719,23 @@ vm_host_start_qemu() {
 }
 
 vm_host_wait_ssh() {
-  local run_dir="$1" ssh_port="$2" end host_keys
+  local run_dir="$1" ssh_port="$2" end
   end=$((SECONDS + VM_HOST_BOOT_TIMEOUT))
   while (( SECONDS < end )); do
     if ! vm_host_process_identity_status "$run_dir/qemu.identity"; then
       vm_host_error 'run-owned QEMU exited or its process identity became ambiguous before guest SSH readiness'
       return 1
     fi
-    if host_keys="$(timeout --signal=TERM --kill-after=2 3 ssh-keyscan -T 2 -t ed25519 -p "$ssh_port" -H 127.0.0.1 2>/dev/null)" && [[ "$host_keys" == *' ssh-ed25519 '* ]]; then
-      printf '%s\n' "$host_keys" >"$run_dir/known_hosts.tmp"
-      chmod 0600 "$run_dir/known_hosts.tmp"
-      mv -- "$run_dir/known_hosts.tmp" "$run_dir/known_hosts"
-      return 0
+    if python3 -I "$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py" \
+      "$run_dir/known_hosts.tmp" "$VM_HOST_SSH_KEY_LIMIT_BYTES" --fail-on-overflow -- \
+      timeout --signal=TERM --kill-after=2 3 ssh-keyscan -T 2 -t ed25519 -p "$ssh_port" -H 127.0.0.1; then
+      if (umask 077; grep -E '^\|1\|[A-Za-z0-9+/=]+\|[A-Za-z0-9+/=]+[[:space:]]+ssh-ed25519[[:space:]]+[A-Za-z0-9+/=]+$' \
+        "$run_dir/known_hosts.tmp" >"$run_dir/known_hosts.valid") && [[ -s "$run_dir/known_hosts.valid" ]]; then
+        chmod 0600 "$run_dir/known_hosts.valid"
+        mv -- "$run_dir/known_hosts.valid" "$run_dir/known_hosts"
+        rm -f -- "$run_dir/known_hosts.tmp"
+        return 0
+      fi
     fi
     sleep 1 || return 1
   done
@@ -711,18 +743,21 @@ vm_host_wait_ssh() {
 }
 
 vm_host_provisioning_ready() {
-  local run_dir="$1"
+  local run_dir="$1" security_output="$1/docker-security.raw" security
   printf 'stage: waiting for cloud-init and rootless guest readiness\n'
   if ! vm_host_ssh "$run_dir" \
     'cloud-init status --wait --long && test -f /var/lib/mester-v3-provisioned && mountpoint -q /workspace && test ! -S /var/run/docker.sock' "$VM_HOST_BOOT_TIMEOUT"; then
     vm_host_error 'cloud-init, workspace mount, or rootless bootstrap readiness failed'
     return 1
   fi
-  local security
-  security="$(vm_host_ssh "$run_dir" 'env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/'"$(id -u)"' DOCKER_HOST=unix:///run/user/'"$(id -u)"'/docker.sock /usr/bin/docker info --format "{{json .SecurityOptions}}"')" || {
+  if ! vm_host_ssh_capture "$run_dir" "$security_output" \
+    'env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/'"$(id -u)"' DOCKER_HOST=unix:///run/user/'"$(id -u)"'/docker.sock /usr/bin/docker info --format "{{json .SecurityOptions}}"'; then
+    rm -f -- "$security_output"
     vm_host_error 'guest rootless Docker info failed'
     return 1
-  }
+  fi
+  security="$(<"$security_output")"
+  rm -f -- "$security_output"
   [[ "$security" == *rootless* ]] || { vm_host_error 'guest Docker did not report rootless; no rootful fallback'; return 1; }
   printf 'ROOTLESS_DOCKER_OK\n' || return 1
 }
@@ -731,12 +766,9 @@ vm_host_import_credentials() {
   local run_dir="$1" credential_file="$2" timeout_seconds=60
   printf 'stage: importing owner credential into private guest OpenCode store\n'
   if ! vm_host_credential_key_to_stdout "$credential_file" | \
-    timeout --signal=TERM --kill-after=5 "$timeout_seconds" ssh -tt -o BatchMode=yes -o ConnectTimeout=5 \
-      -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$run_dir/known_hosts" \
-      -o IdentitiesOnly=yes -o LogLevel=ERROR -i "$run_dir/id_vm_control" \
-      -p "$(<"$run_dir/ssh_port")" mester@127.0.0.1 \
+    vm_host_ssh_bounded "$run_dir" - \
       'env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin XDG_DATA_HOME=/home/mester/.local/share XDG_CONFIG_HOME=/home/mester/.config HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 opencode auth login openai --method key && chmod 0600 /home/mester/.local/share/opencode/opencode.db' \
-      >/dev/null 2>&1; then
+      "$timeout_seconds" 1 1; then
     vm_host_error 'private guest OpenCode credential import failed (credential content suppressed)'
     return 1
   fi
@@ -750,10 +782,9 @@ vm_host_import_credentials() {
 vm_host_model_smoke() {
   local run_dir="$1" model="$2" response="$1/model-response.raw" rc
   printf 'stage: requesting real OpenCode model response\n'
-  if vm_host_ssh "$run_dir" \
+  if vm_host_ssh_capture "$run_dir" "$response" \
     "env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin XDG_DATA_HOME=/home/mester/.local/share XDG_CONFIG_HOME=/home/mester/.config HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 opencode run --model '$model' 'Reply with exactly: VM_RESPONSE_OK'" \
-    "$VM_HOST_PROVIDER_TIMEOUT" \
-    >"$response" 2>&1; then
+    "$VM_HOST_PROVIDER_TIMEOUT"; then
     rc=0
   else
     rc=$?
@@ -768,12 +799,16 @@ vm_host_model_smoke() {
 }
 
 vm_host_docker_smoke() {
-  local run_dir="$1" output="$1/docker-container.raw" digest
+  local run_dir="$1" output="$1/docker-container.raw" inspect_output="$1/docker-inspect.raw" digest
   printf 'stage: executing rootless guest Docker container\n'
-  if ! digest="$(vm_host_ssh "$run_dir" "env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/$(id -u) DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock /usr/bin/docker image inspect --format '{{index .RepoDigests 0}}' '$VM_HOST_DOCKER_IMAGE' 2>/dev/null || true")"; then
+  if ! vm_host_ssh_capture "$run_dir" "$inspect_output" \
+    "env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/$(id -u) DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock /usr/bin/docker image inspect --format '{{index .RepoDigests 0}}' '$VM_HOST_DOCKER_IMAGE' 2>/dev/null || true"; then
+    rm -f -- "$inspect_output"
     vm_host_error 'could not inspect the rootless Docker image cache'
     return 1
   fi
+  digest="$(<"$inspect_output")"
+  rm -f -- "$inspect_output"
   if [[ -z "$digest" ]]; then
     vm_host_ssh "$run_dir" \
       "env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/$(id -u) DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 /usr/bin/docker pull '$VM_HOST_DOCKER_IMAGE'" \
@@ -781,14 +816,20 @@ vm_host_docker_smoke() {
       vm_host_error 'rootless Docker image pull failed; output suppressed'
       return 1
     }
-    digest="$(vm_host_ssh "$run_dir" "env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/$(id -u) DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock /usr/bin/docker image inspect --format '{{index .RepoDigests 0}}' '$VM_HOST_DOCKER_IMAGE'")" || return 1
+    if ! vm_host_ssh_capture "$run_dir" "$inspect_output" \
+      "env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/$(id -u) DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock /usr/bin/docker image inspect --format '{{index .RepoDigests 0}}' '$VM_HOST_DOCKER_IMAGE'"; then
+      rm -f -- "$inspect_output"
+      vm_host_error 'could not read the rootless Docker image digest'
+      return 1
+    fi
+    digest="$(<"$inspect_output")"
+    rm -f -- "$inspect_output"
   fi
   [[ "$digest" == *@sha256:* ]] || { vm_host_error 'Docker image has no immutable RepoDigest'; return 1; }
   printf 'Docker image identity: %s\n' "$digest"
-  if ! vm_host_ssh "$run_dir" \
+  if ! vm_host_ssh_capture "$run_dir" "$output" \
     "env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/$(id -u) DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock /usr/bin/docker run --rm '$digest' sh -c 'printf DOCKER_CONTAINER_OK'" \
-    "$VM_HOST_DOCKER_TIMEOUT" \
-    >"$output" 2>&1; then
+    "$VM_HOST_DOCKER_TIMEOUT"; then
     rm -f -- "$output"
     vm_host_error 'guest container execution failed; output suppressed'
     return 1

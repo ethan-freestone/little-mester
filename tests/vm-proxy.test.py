@@ -3,8 +3,8 @@ import socket
 import ipaddress
 import pathlib
 import threading
+import time
 import unittest
-from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
 
@@ -20,7 +20,7 @@ class DestinationPolicyTests(unittest.TestCase):
         self.assertFalse(proxy.allowed("example.org", False, set()))
 
     def test_http_and_connect_port_rules_are_enforced_by_the_handler(self):
-        server = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Proxy)
+        server = proxy.BoundedThreadingHTTPServer(("127.0.0.1", 0), proxy.Proxy)
         server.policy = proxy.PolicyStore(None)
         server.upstream_proxy = None
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -58,6 +58,59 @@ class DestinationPolicyTests(unittest.TestCase):
                 ))
                 connect.assert_called_with("example.org", 443)
         finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_slow_incomplete_headers_are_admitted_before_thread_creation(self):
+        class TrackingServer(proxy.BoundedThreadingHTTPServer):
+            def __init__(self, *args, **kwargs):
+                self.active_handlers = 0
+                self.peak_handlers = 0
+                self.counter_lock = threading.Lock()
+                super().__init__(*args, **kwargs)
+
+            def process_request_thread(self, request, client_address):
+                with self.counter_lock:
+                    self.active_handlers += 1
+                    self.peak_handlers = max(self.peak_handlers, self.active_handlers)
+                try:
+                    super().process_request_thread(request, client_address)
+                finally:
+                    with self.counter_lock:
+                        self.active_handlers -= 1
+
+        with patch.object(proxy.Proxy, "timeout", 2):
+            server = TrackingServer(("127.0.0.1", 0), proxy.Proxy, max_connections=3)
+        server.policy = proxy.PolicyStore(None)
+        server.upstream_proxy = None
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        clients = []
+        try:
+            for _ in range(3):
+                client = socket.create_connection(server.server_address, timeout=2)
+                client.settimeout(2)
+                client.sendall(b"GET / HTTP/1.1\r\nHost: incomplete.example\r\n")
+                clients.append(client)
+            deadline = time.monotonic() + 2
+            while server.active_handlers < 3 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(server.active_handlers, 3)
+            self.assertEqual(server.peak_handlers, 3)
+
+            overflow = socket.create_connection(server.server_address, timeout=2)
+            overflow.settimeout(2)
+            try:
+                response = overflow.recv(1024)
+                self.assertIn(b"503 Service Unavailable", response)
+                self.assertEqual(server.active_handlers, 3)
+                self.assertEqual(server.peak_handlers, 3)
+            finally:
+                overflow.close()
+        finally:
+            for client in clients:
+                client.close()
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)

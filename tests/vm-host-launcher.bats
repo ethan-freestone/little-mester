@@ -150,17 +150,40 @@ JSON
 }
 
 @test "mutable checkout refuses before host execution under forged identity and workspace config" {
-  local marker="$TEST_TMP/host-core-was-run"
+  local marker="$TEST_TMP/host-core-was-run" startup_file="$TEST_TMP/hostile-bash-env" fake_bin="$TEST_TMP/fake-bin"
   printf 'MESTER_VM_HOST_MODE=1\nMESTER_VM_CORE=touch %s\nMESTER_VM_ROLE=owner\n' "$marker" >"$TEST_TMP/.little-mester.conf"
   chmod 0666 "$TEST_TMP/.little-mester.conf"
+  printf 'touch %q\n' "$marker" >"$startup_file"
+  mkdir "$fake_bin"
+  cat >"$fake_bin/python3" <<SH
+#!/bin/sh
+touch "$marker"
+exit 0
+SH
+  chmod 0700 "$fake_bin/python3"
 
-  run env MESTER_VM_HOST_MODE=1 MESTER_VM_INSTALL_ROOT=/tmp/forged \
+  run env PATH="$fake_bin:/usr/bin:/bin" BASH_ENV="$startup_file" \
+    "BASH_FUNC_python3%%=() { touch $marker; }" \
+    MESTER_VM_HOST_MODE=1 MESTER_VM_INSTALL_ROOT=/tmp/forged \
     MESTER_VM_CORE="touch $marker" MESTER_VM_ROLE=owner \
     "$TEST_ROOT/lab-vm" smoke --workspace "$TEST_TMP" --credentials-file "$TEST_TMP/credentials.json"
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"must be root-owned"* ]]
   [ ! -e "$marker" ]
+}
+
+@test "intermediate installation symlink is refused before resolving its target" {
+  local fixture="$TEST_TMP/protected-shape" output
+  mkdir -p "$fixture"
+  cp "$TEST_ROOT/lab-vm" "$fixture/lab-vm"
+  ln -s "$TEST_ROOT/lib" "$fixture/lib"
+
+  run "$fixture/lab-vm" smoke --workspace "$TEST_TMP" --credentials-file "$TEST_TMP/credentials.json"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"symlinked path component"* ]]
+  [[ "$output" != *"must be root-owned"* ]]
 }
 
 @test "readiness fails closed when cloud-init SSH command fails" {
@@ -242,7 +265,7 @@ JSON
 
 @test "image download failure stops before conversion" {
   local converted="$TEST_TMP/converted"
-  curl() { return 73; }
+  curl() { [ "$1" = -q ] || return 89; return 73; }
   qemu-img() { touch "$converted"; }
 
   run vm_host_prepare_disk "$TEST_TMP"
@@ -351,45 +374,125 @@ PY
 
 @test "credential delivery uses private control stdin and keeps fake key out of argv and logs" {
   local key='sk-inert-test-only-000000000000000000000000000000'
-  mkdir "$TEST_TMP/run"
+  local fake_bin="$TEST_TMP/fake-bin"
+  mkdir -p "$TEST_TMP/run" "$fake_bin"
   printf '43210\n' >"$TEST_TMP/run/ssh_port"
   cat >"$TEST_TMP/provider.json" <<JSON
 {"provider":"openai","model":"openai/gpt-6.1-sol","api_key":"$key"}
 JSON
   chmod 0600 "$TEST_TMP/provider.json"
-  timeout() {
-    [ "$1" = --signal=TERM ] || return 89
-    shift
-    [ "$1" = --kill-after=5 ] || return 89
-    shift
-    [[ "$1" == 60 || "$1" == 30 ]] || return 89
-    shift
-    "$@"
-  }
-  ssh() {
-    if [[ "$*" == *"opencode auth login openai --method key"* ]]; then
-      printf '%s\n' "$*" >"$TEST_TMP/ssh-argv"
-      cat >"$TEST_TMP/ssh-stdin"
-    fi
-    return 0
-  }
+  cat >"$fake_bin/ssh" <<'SH'
+#!/bin/sh
+printf '%s\n' "$@" >"$VM_HOST_TEST_SSH_ARGV"
+cat >"$VM_HOST_TEST_SSH_STDIN"
+printf 'fake interactive prompt output\n'
+SH
+  chmod 0700 "$fake_bin/ssh"
+  PATH="$fake_bin:$PATH"
+  export PATH
+  VM_HOST_TEST_SSH_ARGV="$TEST_TMP/ssh-argv"
+  VM_HOST_TEST_SSH_STDIN="$TEST_TMP/ssh-stdin"
+  export VM_HOST_TEST_SSH_ARGV VM_HOST_TEST_SSH_STDIN
+  vm_host_ssh() { :; } # The post-import database permission check is isolated here.
 
   if vm_host_import_credentials "$TEST_TMP/run" "$TEST_TMP/provider.json" >"$TEST_TMP/import-output" 2>&1; then status=0; else status=$?; fi
 
   [ "$status" -eq 0 ]
   [ "$(<"$TEST_TMP/ssh-stdin")" = "$key" ]
-  [[ "$(<"$TEST_TMP/ssh-argv")" == *"-tt"* ]]
+  grep -Fx -- '-tt' "$TEST_TMP/ssh-argv"
+  grep -Fx -- '-F' "$TEST_TMP/ssh-argv"
+  grep -Fx -- '/dev/null' "$TEST_TMP/ssh-argv"
   [[ "$(<"$TEST_TMP/ssh-argv")" != *"$key"* ]]
   ! grep -Fq -- "$key" "$TEST_TMP/import-output"
+  ! grep -Fq -- 'fake interactive prompt output' "$TEST_TMP/import-output"
   [ "${VM_HOST_CREDENTIALS_IMPORTED:-0}" = 1 ]
 }
 
+@test "guest SSH capture disables ambient config and keeps outputs within the fixed cap" {
+  local fake_bin="$TEST_TMP/fake-bin" run_dir="$TEST_TMP/ssh-run" output_file="$TEST_TMP/guest.out"
+  mkdir -p "$fake_bin" "$run_dir"
+  printf '43210\n' >"$run_dir/ssh_port"
+  cat >"$fake_bin/ssh" <<'SH'
+#!/bin/sh
+printf '%s\n' "$@" >"$VM_HOST_TEST_SSH_ARGV"
+printf 'bounded response\n'
+SH
+  chmod 0700 "$fake_bin/ssh"
+  PATH="$fake_bin:$PATH"
+  VM_HOST_TEST_SSH_ARGV="$TEST_TMP/ssh-argv"
+  export PATH VM_HOST_TEST_SSH_ARGV
+
+  run vm_host_ssh_capture "$run_dir" "$output_file" 'test guest command'
+
+  [ "$status" -eq 0 ]
+  [ "$(<"$output_file")" = 'bounded response' ]
+  grep -Fx -- '-F' "$TEST_TMP/ssh-argv"
+  grep -Fx -- '/dev/null' "$TEST_TMP/ssh-argv"
+  grep -Fx -- 'ProxyCommand=none' "$TEST_TMP/ssh-argv"
+  grep -Fx -- 'ProxyJump=none' "$TEST_TMP/ssh-argv"
+  grep -Fx -- 'IdentityAgent=none' "$TEST_TMP/ssh-argv"
+  grep -Fx -- 'GlobalKnownHostsFile=/dev/null' "$TEST_TMP/ssh-argv"
+}
+
+@test "oversized guest SSH output fails while receiving and kills its producer" {
+  local fake_bin="$TEST_TMP/fake-bin" run_dir="$TEST_TMP/ssh-run"
+  local output_file="$TEST_TMP/oversized-guest.out" pid_file="$TEST_TMP/ssh.pid" pid
+  mkdir -p "$fake_bin" "$run_dir"
+  printf '43210\n' >"$run_dir/ssh_port"
+  cat >"$fake_bin/ssh" <<'PY'
+#!/usr/bin/python3
+import os, pathlib, sys, time
+pathlib.Path(os.environ['VM_HOST_TEST_SSH_PID']).write_text(str(os.getpid()))
+sys.stdout.write('x' * 200000)
+sys.stdout.flush()
+time.sleep(30)
+PY
+  chmod 0700 "$fake_bin/ssh"
+  PATH="$fake_bin:$PATH"
+  VM_HOST_TEST_SSH_PID="$pid_file"
+  export PATH VM_HOST_TEST_SSH_PID
+
+  run vm_host_ssh_capture "$run_dir" "$output_file" 'oversized guest command'
+
+  [ "$status" -eq 125 ]
+  [ "$(stat -c %s "$output_file")" -le "$VM_HOST_GUEST_OUTPUT_LIMIT_BYTES" ]
+  [ -s "$pid_file" ]
+  pid="$(<"$pid_file")"
+  [ ! -e "/proc/$pid" ]
+}
+
+@test "SSH host-key scan caps combined diagnostics and retains only a valid key line" {
+  local fake_bin="$TEST_TMP/fake-bin" run_dir="$TEST_TMP/ssh-run"
+  mkdir -p "$fake_bin" "$run_dir"
+  cat >"$fake_bin/ssh-keyscan" <<'SH'
+#!/bin/sh
+printf 'bounded diagnostic\n' >&2
+printf '|1|salt==|hash== ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA==\n'
+SH
+  chmod 0700 "$fake_bin/ssh-keyscan"
+  PATH="$fake_bin:$PATH"
+  export PATH
+  VM_HOST_BOOT_TIMEOUT=10
+  vm_host_process_identity_status() { return 0; }
+
+  run vm_host_wait_ssh "$run_dir" 43210
+
+  [ "$status" -eq 0 ]
+  [ "$(<"$run_dir/known_hosts")" = '|1|salt==|hash== ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA==' ]
+  ! grep -Fq 'bounded diagnostic' "$run_dir/known_hosts"
+  [ "$(stat -c %a "$run_dir/known_hosts")" = 600 ]
+}
+
 @test "CLI exposes no unbounded internal smoke worker" {
-  run grep -F 'exec timeout --signal=TERM --kill-after=15' "$TEST_ROOT/lab-vm"
+  run grep -F '/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C' "$TEST_ROOT/lab-vm"
+  [ "$status" -eq 0 ]
+  run grep -F '/usr/bin/timeout --signal=TERM --kill-after=15 1200' "$TEST_ROOT/lab-vm"
+  [ "$status" -eq 0 ]
+  run grep -F '#!/usr/bin/bash -p' "$TEST_ROOT/lab-vm"
   [ "$status" -eq 0 ]
   run grep -E '^[[:space:]]*_smoke\)' "$TEST_ROOT/lab-vm"
   [ "$status" -ne 0 ]
-  run grep -F '"$root/lib/vm/bounded-log.py"' "$TEST_ROOT/lab-vm"
+  run grep -F '"$bounded_logger" "$output" "$VM_HOST_GUEST_OUTPUT_LIMIT_BYTES"' "$TEST_ROOT/lib/vm/host-launcher.sh"
   [ "$status" -eq 0 ]
 }
 
@@ -546,7 +649,7 @@ SH
   chmod 0700 "$fake_bin/ssh"
   started=$SECONDS
 
-  run timeout --kill-after=1 5 bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_CONTROL_TIMEOUT=1; VM_HOST_TEST_SSH_PID="$3"; PATH="$4:/usr/bin:/bin"; export VM_HOST_TEST_SSH_PID PATH; vm_host_ssh "$2" "bounded test command"' _ "$TEST_ROOT" "$run_dir" "$pid_file" "$fake_bin"
+  run timeout --kill-after=1 5 bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_SCRIPT_ROOT="$1"; VM_HOST_CONTROL_TIMEOUT=1; VM_HOST_TEST_SSH_PID="$3"; PATH="$4:/usr/bin:/bin"; export VM_HOST_SCRIPT_ROOT VM_HOST_TEST_SSH_PID PATH; vm_host_ssh "$2" "bounded test command"' _ "$TEST_ROOT" "$run_dir" "$pid_file" "$fake_bin"
 
   elapsed=$((SECONDS - started))
   [ "$status" -eq 124 ]
@@ -555,7 +658,7 @@ SH
   pid="$(<"$pid_file")"
   [ ! -e "/proc/$pid" ]
 
-  run bash -c 'source "$1/lib/vm/host-launcher.sh"; timeout() { :; }; ssh() { printf "SSH_WAS_CALLED\n"; }; vm_host_ssh "$2" "invalid deadline" 0' _ "$TEST_ROOT" "$run_dir"
+  run bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_SCRIPT_ROOT="$1"; export VM_HOST_SCRIPT_ROOT; timeout() { :; }; ssh() { printf "SSH_WAS_CALLED\n"; }; vm_host_ssh "$2" "invalid deadline" 0' _ "$TEST_ROOT" "$run_dir"
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"deadline must be a positive integer"* ]]

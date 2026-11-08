@@ -293,7 +293,6 @@ def _http_status_code(headers):
 class Proxy(BaseHTTPRequestHandler):
     rbufsize = 0
     timeout = 30
-    slots = threading.BoundedSemaphore(64)
 
     def log_message(self, *_args):
         pass  # Never log URL paths, headers, tokens or request bodies.
@@ -307,9 +306,6 @@ class Proxy(BaseHTTPRequestHandler):
     do_HEAD = do_POST = do_PUT = do_DELETE = do_PATCH = do_GET
 
     def forward(self, tunnel):
-        if not self.slots.acquire(blocking=False):
-            self.send_error(503)
-            return
         upstream = None
         response_started = False
         parent_proxy = getattr(self.server, "upstream_proxy", None)
@@ -417,7 +413,45 @@ class Proxy(BaseHTTPRequestHandler):
         finally:
             if upstream:
                 upstream.close()
-            self.slots.release()
+
+
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Bound accepted handlers before ThreadingMixIn creates a thread."""
+
+    request_queue_size = 64
+
+    def __init__(self, *args, max_connections=64, **kwargs):
+        if max_connections < 1:
+            raise ValueError("max_connections must be positive")
+        self._connection_slots = threading.BoundedSemaphore(max_connections)
+        super().__init__(*args, **kwargs)
+
+    def handle_error(self, _request, _client_address):
+        pass  # Client disconnects must not emit headers or request data to logs.
+
+    def process_request(self, request, client_address):
+        if not self._connection_slots.acquire(blocking=False):
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Connection: close\r\nContent-Length: 0\r\n\r\n"
+                )
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
 
 
 if __name__ == "__main__":
@@ -427,7 +461,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error("--port must be between 0 and 65535")
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Proxy)
+    server = BoundedThreadingHTTPServer(("127.0.0.1", args.port), Proxy)
     server.policy = PolicyStore(None)
     server.upstream_proxy = None
     args.port_file.write_text(str(server.server_port))
