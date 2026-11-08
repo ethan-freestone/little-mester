@@ -33,8 +33,79 @@ CANDIDATE_SHA='<PENDING-final-integrated-commit-SHA>'
 [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
 [[ "$(git -C "$REPO" rev-parse "$CANDIDATE_SHA^{commit}")" == "$CANDIDATE_SHA" ]]
 INSTALL_ROOT="/opt/little-mester/v3/$CANDIDATE_SHA"
-test ! -e "$INSTALL_ROOT" && test ! -L "$INSTALL_ROOT"
-sudo install -d -o root -g root -m 0755 "$INSTALL_ROOT"
+sudo /usr/bin/python3 -I - "$CANDIDATE_SHA" <<'PY'
+import os, re, stat, sys
+
+def refuse(message):
+    raise SystemExit(f"REFUSED: {message}")
+
+def open_protected_dir(parent_fd, component, expected_uid, create_missing):
+    if component in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", component):
+        refuse("unsafe installation path component")
+    created = False
+    try:
+        info = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        if not create_missing:
+            refuse("required installation ancestor is missing")
+        os.mkdir(component, 0o755, dir_fd=parent_fd)
+        created = True
+        info = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != expected_uid
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or (not created and not info.st_mode & stat.S_IXOTH)):
+        refuse(f"installation ancestor is not protected/traversable: {component}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    child_fd = os.open(component, flags, dir_fd=parent_fd)
+    opened = os.fstat(child_fd)
+    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+        os.close(child_fd)
+        refuse(f"installation ancestor changed while opening: {component}")
+    if created:
+        os.fchmod(child_fd, 0o755)
+        opened = os.fstat(child_fd)
+    if (not stat.S_ISDIR(opened.st_mode) or opened.st_uid != expected_uid
+            or opened.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not opened.st_mode & stat.S_IXOTH):
+        os.close(child_fd)
+        refuse(f"installation ancestor failed protected-mode check: {component}")
+    return child_fd
+
+def create_install_root(parent_fd, sha, expected_uid=0):
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        refuse("candidate must be a full lowercase commit SHA")
+    try:
+        os.stat(sha, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        refuse("candidate install path already exists; refusing to overwrite")
+    return open_protected_dir(parent_fd, sha, expected_uid, create_missing=True)
+
+sha = sys.argv[1]
+if os.geteuid() != 0:
+    refuse("protected installation preparation requires the owner-authorized root command")
+root_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+root_info = os.fstat(root_fd)
+if (root_info.st_uid != 0 or root_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or not root_info.st_mode & stat.S_IXOTH):
+    os.close(root_fd)
+    refuse("filesystem root is not protected/traversable")
+parent_fd = root_fd
+try:
+    for component in ("opt", "little-mester", "v3"):
+        next_fd = open_protected_dir(parent_fd, component, 0, create_missing=True)
+        if parent_fd != root_fd:
+            os.close(parent_fd)
+        parent_fd = next_fd
+    install_fd = create_install_root(parent_fd, sha)
+    os.close(install_fd)
+finally:
+    if parent_fd != root_fd:
+        os.close(parent_fd)
+    os.close(root_fd)
+PY
 git -C "$REPO" archive --format=tar "$CANDIDATE_SHA" \
   lab-vm \
   lib/vm/host-launcher.sh \
@@ -42,7 +113,7 @@ git -C "$REPO" archive --format=tar "$CANDIDATE_SHA" \
   lib/vm/proxy.py \
   lib/vm/bounded-log.py \
   lib/vm/executable-policy.py \
-  | sudo tar --no-same-owner -xf - -C "$INSTALL_ROOT"
+  | sudo tar --no-same-owner --same-permissions --keep-old-files -xf - -C "$INSTALL_ROOT"
 test -x "$INSTALL_ROOT/lab-vm"
 for file in lib/vm/host-launcher.sh lib/vm/cloud-init.sh lib/vm/proxy.py lib/vm/bounded-log.py lib/vm/executable-policy.py; do
   test -f "$INSTALL_ROOT/$file"
@@ -52,7 +123,7 @@ namei -l "$INSTALL_ROOT/lab-vm" "$INSTALL_ROOT/lib/vm/host-launcher.sh" \
   "$INSTALL_ROOT/lib/vm/bounded-log.py" "$INSTALL_ROOT/lib/vm/executable-policy.py"
 ```
 
-Stop unless `namei` shows no symlink in any path and every file, directory, and ancestor is root-owned and not group/world writable. The launcher's own protected-install check repeats this invariant before loading code. No `cp` from the mutable checkout, symlinked install path, package install, or runtime-path override is allowed.
+The dirfd walk checks every existing lexical component before creating its child, refuses symlinks or user/group/world-writable ancestors, creates only missing root-owned/traversable directories, and refuses any pre-existing candidate install directory. Archive extraction is reached only afterward and `tar --keep-old-files` also refuses overwrites. If extraction fails, do not execute or retry into the partial tree; stop for owner review. Stop unless `namei` shows no symlink in any path and every file, directory, and ancestor is root-owned and not group/world writable. The launcher's own protected-install check repeats this invariant before loading code. No `cp` from the mutable checkout, symlinked install path, package install, or runtime-path override is allowed.
 
 Before allocating the workspace or starting QEMU, prove the owner-installed runtime commands resolve through the fixed system `PATH` and pass the installed executable policy. This is read-only; if any command is absent or refused, stop and have the owner provision it through the normal host process (never through this launcher).
 
@@ -84,7 +155,7 @@ findmnt --noheadings --output SOURCE,TARGET,FSTYPE,SIZE,OPTIONS --target "$WORKS
 stat -c '%u:%g:%a %n' "$WORKSPACE"
 ```
 
-Before the proof, confirm the `findmnt` row has this exact target, `tmpfs`, a 64-MiB size, and `nosuid,nodev,noexec,mode=700` plus the invoking UID/GID; `stat` must show the invoking UID/GID and mode `700`. Then run the bounded proof. It refuses unless the exact path is a canonical tmpfs mount root with those options, an empty owner-private directory, and `statvfs` capacity no greater than 64 MiB. It creates one exclusive no-follow file, writes at most 64 MiB, requires an observed `errno.ENOSPC`, and removes the probe in `finally`. Do not proceed if it refuses or fails to observe ENOSPC; do not retry on another path.
+Before the proof, confirm the `findmnt` row has this exact target, `tmpfs`, a 64-MiB size, and `nosuid,nodev,noexec,mode=700` plus the invoking UID/GID; `stat` must show the invoking UID/GID and mode `700`. Then run the bounded proof. It refuses unless the exact path is a canonical tmpfs mount root with those options, an empty owner-private directory, and `statvfs` capacity no greater than 64 MiB. It creates one exclusive no-follow file and offers at most 64 MiB of chunk writes plus exactly one 1-byte boundary write (64 MiB + 1 attempted bytes), requires an observed `errno.ENOSPC`, and removes the probe in `finally`. The unprivileged mocked regression below tests only the byte bound; it does not replace this real owner-only proof. Do not proceed if it refuses or fails to observe ENOSPC; do not retry on another path.
 
 ```bash
 /usr/bin/python3 -I - "$WORKSPACE" <<'PY'
@@ -131,31 +202,50 @@ def is_empty(path):
     with os.scandir(path) as entries:
         return next(entries, None) is None
 
+def write_until_enospc(fd, byte_limit, writer=None):
+    writer = os.write if writer is None else writer
+    attempted = written = 0
+    confirmed = False
+    while attempted < byte_limit:
+        requested = min(1024 * 1024, byte_limit - attempted)
+        attempted += requested
+        try:
+            amount = writer(fd, b"\0" * requested)
+        except OSError as error:
+            if error.errno != errno.ENOSPC:
+                raise
+            confirmed = True
+            break
+        if not 0 < amount <= requested:
+            fail("bounded write returned an invalid byte count")
+        written += amount
+    if not confirmed:
+        attempted += 1
+        try:
+            amount = writer(fd, b"\0")
+        except OSError as error:
+            if error.errno != errno.ENOSPC:
+                raise
+            confirmed = True
+        else:
+            if amount != 1:
+                fail("one-byte ENOSPC boundary write returned an invalid count")
+            written += amount
+    if not confirmed:
+        fail("64-MiB-plus-one-byte write cap reached without observing ENOSPC")
+    return written, attempted
+
 if not is_empty(root):
     fail("fresh workspace is not empty")
 
 probe = root / "enospc-proof.bin"
 fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-written = 0
-confirmed = False
 try:
-    while written < limit:
-        try:
-            amount = os.write(fd, b"\0" * min(1024 * 1024, limit - written))
-        except OSError as error:
-            if error.errno != errno.ENOSPC:
-                raise
-            confirmed = True
-            print(f"ENOSPC_CONFIRMED after {written} bytes on the verified 64-MiB tmpfs")
-            break
-        if amount <= 0:
-            fail("bounded write made no progress")
-        written += amount
+    written, attempted = write_until_enospc(fd, limit)
+    print(f"ENOSPC_CONFIRMED after {written} bytes; {attempted} bytes attempted at most")
 finally:
     os.close(fd)
     probe.unlink()
-if not confirmed:
-    fail("64-MiB write cap reached without observing ENOSPC")
 if not is_empty(root):
     fail("ENOSPC probe did not leave the fresh workspace empty")
 PY
@@ -163,7 +253,7 @@ PY
 
 #### Create the private credential and run the smoke
 
-Use the owner's current API key, never an old-VM token. This prompt does not echo the key; the key is neither a command argument nor environment value. The file is created exclusively at mode 0600 under the invoking user's verified mode-0700 `/run/user/<uid>`, outside the `/mnt` workspace, `/opt` install, repository, and `~/.local/state` runtime-state directory. The adjacent evidence log contains smoke output only, never credential contents.
+Use the owner's current API key, never an old-VM token. The model is read from an explicitly opened controlling `/dev/tty`; the key prompt requires `getpass` on that TTY, treats `GetPassWarning` as fatal, and never falls back to the heredoc/script stdin. Both prompts fail closed if a usable TTY is absent. The key is neither a command argument nor environment value. The file is created exclusively at mode 0600 under the invoking user's verified mode-0700 `/run/user/<uid>`, outside the `/mnt` workspace, `/opt` install, repository, and `~/.local/state` runtime-state directory. The adjacent evidence log contains smoke output only, never credential contents.
 
 ```bash
 PRIVATE_DIR="$(readlink -f -- "/run/user/$(id -u)")"
@@ -173,20 +263,42 @@ case "$REPO_ROOT/" in "$PRIVATE_DIR/"*) printf 'STOP: private credential directo
 case "$PRIVATE_DIR/" in "$REPO_ROOT/"*) printf 'STOP: private credential directory overlaps the repository\n' >&2; exit 1;; esac
 CREDENTIALS="$PRIVATE_DIR/v3-smoke-openai-$CANDIDATE_SHA.json"
 /usr/bin/python3 -I - "$CREDENTIALS" <<'PY'
-import getpass, json, os, pathlib, sys
+import getpass, json, os, pathlib, sys, warnings
 
+def read_owner_credentials(opener=open, password_reader=getpass.getpass, pass_warning=getpass.GetPassWarning):
+    try:
+        tty = opener("/dev/tty", "r+", encoding="utf-8")
+    except OSError as error:
+        raise SystemExit("REFUSED: an interactive controlling TTY is required") from error
+    try:
+        if not tty.isatty():
+            raise SystemExit("REFUSED: /dev/tty is not a usable terminal")
+        tty.write("OpenAI model ID (openai/<model-id>): ")
+        tty.flush()
+        model = tty.readline().rstrip("\r\n")
+        if not model:
+            raise SystemExit("REFUSED: model ID is required")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", pass_warning)
+            try:
+                key = password_reader("Current owner-supplied OpenAI API key (input hidden): ", stream=tty)
+            except pass_warning as error:
+                raise SystemExit("REFUSED: getpass could not guarantee hidden TTY input") from error
+        return model, key
+    finally:
+        tty.close()
+
+model, key = read_owner_credentials()
 path = pathlib.Path(sys.argv[1])
 if path.exists() or path.is_symlink():
     raise SystemExit("REFUSED: credential path already exists; choose a fresh private path")
-model = input("OpenAI model ID (openai/<model-id>): ").strip()
-key = getpass.getpass("Current owner-supplied OpenAI API key (input hidden): ")
 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+os.fchmod(fd, 0o600)
 with os.fdopen(fd, "w", encoding="utf-8") as stream:
     json.dump({"provider": "openai", "model": model, "api_key": key}, stream)
     stream.write("\n")
     stream.flush()
     os.fsync(stream.fileno())
-os.chmod(path, 0o600)
 PY
 stat -c '%u:%g:%a %n' "$CREDENTIALS"
 ```
@@ -197,13 +309,14 @@ The `stat` line must show the invoking owner and `600`; do not display or copy t
 EVIDENCE="$PRIVATE_DIR/v3-smoke-$CANDIDATE_SHA.log"
 umask 077
 set -o noclobber
-: > "$EVIDENCE"
-chmod 0600 "$EVIDENCE"
-if "$INSTALL_ROOT/lab-vm" smoke --workspace "$WORKSPACE" --credentials-file "$CREDENTIALS" >"$EVIDENCE" 2>&1; then
+exec {evidence_fd}> "$EVIDENCE"
+test "$(stat -c %a "$EVIDENCE")" = 600
+if "$INSTALL_ROOT/lab-vm" smoke --workspace "$WORKSPACE" --credentials-file "$CREDENTIALS" >&"$evidence_fd" 2>&1; then
   smoke_status=0
 else
   smoke_status=$?
 fi
+exec {evidence_fd}>&-
 printf 'smoke exit status: %s\n' "$smoke_status"
 cat "$EVIDENCE"
 test "$smoke_status" -eq 0
