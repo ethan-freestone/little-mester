@@ -267,26 +267,32 @@ import getpass, json, os, pathlib, sys, warnings
 
 def read_owner_credentials(opener=open, password_reader=getpass.getpass, pass_warning=getpass.GetPassWarning):
     try:
-        tty = opener("/dev/tty", "r+", encoding="utf-8")
+        tty_in = opener("/dev/tty", "r", encoding="utf-8")
     except OSError as error:
         raise SystemExit("REFUSED: an interactive controlling TTY is required") from error
     try:
-        if not tty.isatty():
+        tty_out = opener("/dev/tty", "w", encoding="utf-8")
+    except OSError as error:
+        tty_in.close()
+        raise SystemExit("REFUSED: an interactive controlling TTY is required") from error
+    try:
+        if not tty_in.isatty() or not tty_out.isatty():
             raise SystemExit("REFUSED: /dev/tty is not a usable terminal")
-        tty.write("OpenAI model ID (openai/<model-id>): ")
-        tty.flush()
-        model = tty.readline().rstrip("\r\n")
+        tty_out.write("OpenAI model ID (openai/<model-id>): ")
+        tty_out.flush()
+        model = tty_in.readline().rstrip("\r\n")
         if not model:
             raise SystemExit("REFUSED: model ID is required")
         with warnings.catch_warnings():
             warnings.simplefilter("error", pass_warning)
             try:
-                key = password_reader("Current owner-supplied OpenAI API key (input hidden): ", stream=tty)
+                key = password_reader("Current owner-supplied OpenAI API key (input hidden): ", stream=tty_out)
             except pass_warning as error:
                 raise SystemExit("REFUSED: getpass could not guarantee hidden TTY input") from error
         return model, key
     finally:
-        tty.close()
+        tty_in.close()
+        tty_out.close()
 
 model, key = read_owner_credentials()
 path = pathlib.Path(sys.argv[1])

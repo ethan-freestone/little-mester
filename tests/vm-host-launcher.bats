@@ -204,85 +204,129 @@ PY
   [[ "$output" == *'SMOKE_OUTPUT_CAPTURED'* ]]
 }
 
-@test "runbook credential prompt fails closed without TTY and uses only the opened TTY" {
-  run python3 - "$TEST_ROOT/docs/vm-v3-phase1-smoke.md" <<'PY'
-import ast, getpass, pathlib, warnings, sys
+@test "runbook credential prompt uses a real controlling PTY and refuses no-TTY fallback" {
+  run python3 - "$TEST_ROOT/docs/vm-v3-phase1-smoke.md" "$TEST_TMP/pty-credential.json" <<'PY'
+import ast, errno, getpass, json, os, pathlib, pty, select, signal, subprocess, sys, termios, time, warnings
 
 text = pathlib.Path(sys.argv[1]).read_text()
 marker = '/usr/bin/python3 -I - "$CREDENTIALS" <<\'PY\'\n'
 start = text.index(marker) + len(marker)
 end = text.index("\nPY\n", start)
-tree = ast.parse(text[start:end])
+credential_code = text[start:end]
+credential_path = pathlib.Path(sys.argv[2])
+dummy = "INERT-PTY-TEST-NOT-A-CREDENTIAL"
+
+# A new session has no controlling TTY; script stdin contains tempting test data
+# but the documented code must refuse before reading it or creating a file.
+no_tty_path = credential_path.with_name("no-tty-credential.json")
+result = subprocess.run(
+    [sys.executable, "-I", "-c", credential_code, str(no_tty_path)],
+    input=("openai/no-tty-model\n" + dummy + "\n").encode(),
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    timeout=3, check=False,
+)
+assert result.returncode != 0
+assert b"controlling TTY is required" in result.stdout + result.stderr
+assert dummy.encode() not in result.stdout + result.stderr
+assert not no_tty_path.exists()
+
+pid, master = pty.fork()
+if pid == 0:
+    os.execv(sys.executable, [sys.executable, "-I", "-c", credential_code, str(credential_path)])
+deadline = time.monotonic() + 8
+reaped = False
+output = bytearray()
+def read_until(needle):
+    while needle not in output:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("timed out waiting for TTY prompt")
+        ready, _, _ = select.select([master], [], [], remaining)
+        if not ready:
+            raise TimeoutError("timed out waiting for TTY prompt")
+        try:
+            chunk = os.read(master, 4096)
+        except OSError as error:
+            if error.errno == errno.EIO:
+                raise AssertionError("child closed the PTY before prompting") from error
+            raise
+        if not chunk:
+            raise AssertionError("child closed the PTY before prompting")
+        output.extend(chunk)
+
+try:
+    read_until(b"OpenAI model ID (openai/<model-id>): ")
+    os.write(master, b"openai/pty-test-model\n")
+    read_until(b"Current owner-supplied OpenAI API key (input hidden): ")
+    assert not (termios.tcgetattr(master)[3] & termios.ECHO), "getpass did not disable terminal echo"
+    os.write(master, dummy.encode() + b"\n")
+    status = None
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([master], [], [], min(0.05, deadline - time.monotonic()))
+        if ready:
+            try:
+                chunk = os.read(master, 4096)
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+                chunk = b""
+            output.extend(chunk)
+        waited, status = os.waitpid(pid, os.WNOHANG)
+        if waited == pid:
+            reaped = True
+            break
+    if not reaped:
+        raise TimeoutError("credential prompt child did not exit within the bound")
+    assert os.waitstatus_to_exitcode(status) == 0
+finally:
+    if not reaped:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        os.waitpid(pid, 0)
+    os.close(master)
+
+assert dummy.encode() not in output, "dummy key was echoed to the PTY"
+assert credential_path.stat().st_mode & 0o777 == 0o600
+credential = json.loads(credential_path.read_text())
+assert credential == {"provider": "openai", "model": "openai/pty-test-model", "api_key": dummy}
+
+# Keep the fail-closed warning path covered independently of the real getpass PTY.
+tree = ast.parse(credential_code)
 function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
                 and node.name == "read_owner_credentials")
 namespace = {"getpass": getpass, "warnings": warnings, "open": open}
-exec(compile(ast.Module(body=[function], type_ignores=[]), "<runbook-tty-function>", "exec"), namespace)
-read_credentials = namespace["read_owner_credentials"]
+exec(compile(ast.Module(body=[function], type_ignores=[]), "<runbook-warning-function>", "exec"), namespace)
 
-calls = []
-def missing_tty(*args, **kwargs):
-    raise OSError("no controlling TTY")
-def forbidden_password_reader(*args, **kwargs):
-    calls.append("stdin fallback attempted")
-    raise AssertionError("password reader must not run without a TTY")
-try:
-    read_credentials(opener=missing_tty, password_reader=forbidden_password_reader)
-except SystemExit as error:
-    assert "controlling TTY" in str(error)
-else:
-    raise AssertionError("missing TTY was accepted")
-assert not calls
-
-class FakeTTY:
-    def __init__(self, terminal=True):
-        self.terminal = terminal
-        self.closed = False
-        self.prompt = ""
-    def isatty(self): return self.terminal
-    def write(self, text): self.prompt += text
+class MockTTY:
+    def __init__(self): self.closed = False
+    def isatty(self): return True
+    def write(self, value): pass
     def flush(self): pass
-    def readline(self): return "openai/test-model\n"
+    def readline(self): return "openai/warning-test-model\n"
     def close(self): self.closed = True
 
-non_terminal = FakeTTY(terminal=False)
+tty_in, tty_out = MockTTY(), MockTTY()
+def open_mock_tty(path, mode, encoding):
+    assert path == "/dev/tty" and encoding == "utf-8"
+    return {"r": tty_in, "w": tty_out}[mode]
+def warning_password_reader(prompt, *, stream):
+    assert stream is tty_out
+    warnings.warn("mocked hidden-input failure", getpass.GetPassWarning)
+    return dummy
 try:
-    read_credentials(opener=lambda *args, **kwargs: non_terminal,
-                    password_reader=forbidden_password_reader)
-except SystemExit as error:
-    assert "not a usable terminal" in str(error)
-else:
-    raise AssertionError("non-TTY stream was accepted")
-assert non_terminal.closed and not calls
-
-tty = FakeTTY()
-def fake_open(path, mode, encoding):
-    assert (path, mode, encoding) == ("/dev/tty", "r+", "utf-8")
-    return tty
-def fake_password_reader(prompt, *, stream):
-    assert stream is tty
-    assert "input hidden" in prompt
-    return "unit-test-dummy-key-only"
-model, key = read_credentials(opener=fake_open, password_reader=fake_password_reader)
-assert model == "openai/test-model" and key == "unit-test-dummy-key-only"
-assert tty.closed and "OpenAI model ID" in tty.prompt
-
-warning_tty = FakeTTY()
-default_warning = getpass.GetPassWarning
-def warning_password_reader(*args, **kwargs):
-    raise default_warning("mocked getpass fallback")
-try:
-    read_credentials(opener=lambda *args, **kwargs: warning_tty,
-                     password_reader=warning_password_reader)
+    namespace["read_owner_credentials"](opener=open_mock_tty, password_reader=warning_password_reader)
 except SystemExit as error:
     assert "hidden TTY input" in str(error)
 else:
-    raise AssertionError("getpass warning/fallback was accepted")
-assert warning_tty.closed
-print("RUNBOOK_TTY_GUARD_MOCK_OK")
+    raise AssertionError("GetPassWarning was not fatal")
+assert tty_in.closed and tty_out.closed
+print("RUNBOOK_REAL_PTY_CREDENTIAL_PROMPT_OK")
 PY
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *'RUNBOOK_TTY_GUARD_MOCK_OK'* ]]
+  [[ "$output" == *'RUNBOOK_REAL_PTY_CREDENTIAL_PROMPT_OK'* ]]
 }
 
 @test "runbook ENOSPC boundary logic makes at most one extra byte attempt" {
