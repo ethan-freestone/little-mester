@@ -141,12 +141,14 @@ JSON
 }
 
 @test "guest cloud-init uses rootless Docker and direct OpenCode without lifecycle authority" {
+  unset HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
   run vm_host_cloud_init smoke-v3 1234 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test'
 
   [ "$status" -eq 0 ] || {
     printf 'cloud-init generation failed (status %s); captured output follows:\n%s\n' "$status" "$output" >&2
     return 1
   }
+  [[ "$output" == *"export http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128"* ]]
   [[ "$output" == *"docker-ce-rootless-extras"* ]]
   [[ "$output" == *"dockerd-rootless-setuptool.sh install"* ]]
   [[ "$output" == *"systemctl disable --now docker.service docker.socket containerd.service"* ]]
@@ -156,6 +158,15 @@ JSON
   [[ "$output" != *"/dev/kvm"* ]]
   [[ "$output" != *"VM_CREATE"* ]]
   [[ "$output" != *"recursion"* ]]
+
+  export HTTP_PROXY=http://hostile.invalid:9999 HTTPS_PROXY=http://hostile.invalid:9999
+  export http_proxy=http://hostile.invalid:9999 https_proxy=http://hostile.invalid:9999
+  export NO_PROXY=hostile.invalid no_proxy=hostile.invalid
+  run vm_host_cloud_init smoke-v3 1234 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test'
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"export http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128"* ]]
+  [[ "$output" != *"hostile.invalid"* ]]
 }
 
 @test "host command preflight rejects untrusted mv and cat before lifecycle stages" {

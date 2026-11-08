@@ -54,7 +54,7 @@ write_files:
       set -euo pipefail
       export DEBIAN_FRONTEND=noninteractive
       export HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128
-      export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY"
+      export http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128
       mkdir -p /workspace
       grep -q '^workspace /workspace virtiofs ' /etc/fstab || echo 'workspace /workspace virtiofs defaults 0 0' >> /etc/fstab
       mountpoint -q /workspace || mount -t virtiofs workspace /workspace
