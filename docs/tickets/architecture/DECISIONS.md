@@ -583,8 +583,10 @@ checkout is not a trusted host execution source.
 
 **Identity and workspace authority:** The core derives authority from the actual host
 process/transport context, never caller-supplied role, identity, capability, workspace
-configuration, or guest state. The CLI and dedicated host MCP entrypoint are adapters to the same
-core. The canonical workspace is selected/authorized on the host; the MCP request cannot
+configuration, or guest state. Phase 1 provides an owner-operated CLI and shared
+security/policy core. The host lifecycle MCP adapter is deferred until the Dev VM smoke
+succeeds; it will use that same core. The canonical workspace is selected/authorized on
+the host; a future MCP request cannot
 select arbitrary paths or executables. Resolve and validate one canonical path on the host
 before VM startup/export; reject unsafe symlinks, path substitution, and overlap with
 private host policy/state/credentials. Export exactly that workspace and nothing else.
@@ -606,8 +608,8 @@ were incorrect. The user's consolidated review authorizes these implementation
 corrections, not a claim of verified security. Only the user can authorize scope or
 security-policy changes. Sol alone maintains this decision log.
 
-**Stdio clarification (Sol review):** Phase 1 does not authenticate arbitrary agents
-per MCP request. The owner starts the trusted host installation with private stdio pipes
+**Future host MCP boundary (not implemented in Phase 1):** The owner will start the
+trusted host installation with private stdio pipes
 connected only to the owner-controlled host client. That process/pipe boundary is the
 authority; it is not a role supplied in a tool argument. `mcp-server.ts` never imports,
 registers or dispatches lifecycle code. Only the separate host-installed
@@ -616,7 +618,7 @@ context. Selection is which entrypoint is installed and spawned, never a runtime
 environment variable or workspace configuration. Do not expose or forward the host
 process or its private pipes to any agent. Guest copies must have no access to the host
 core, host transport or VM resources. No remote listener, authentication service, bearer
-token scheme or guest lifecycle access is needed for this phase. If the actual deployment
+token scheme or guest lifecycle access is needed for Phase 1. If the future deployment
 cannot enforce those process/pipe/resource boundaries, stop with concrete evidence.
 
 **Command discovery status:** Legacy source documents `./lab-vm run [workspace]` and
