@@ -282,7 +282,25 @@
       "file_path": "ticket-048.json",
       "status": "draft",
       "area": "engine"
+    },
+    {
+      "number": 49,
+      "file_path": "ticket-049.json",
+      "status": "draft",
+      "area": "vm-v3"
+    },
+    {
+      "number": 50,
+      "file_path": "ticket-050.json",
+      "status": "resolved",
+      "area": "vm-v3"
+    },
+    {
+      "number": 51,
+      "file_path": "ticket-051.json",
+      "status": "active",
+      "area": "vm-v3"
     }
   ],
-  "updated_at": "2026-11-06T23:17:17.903Z"
+  "updated_at": "2026-11-08T15:12:41.486Z"
 }

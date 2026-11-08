@@ -1,0 +1,73 @@
+{
+  "id": 49,
+  "file_path": "/workspace/docs/tickets/ticket-049.json",
+  "number": 49,
+  "area": "vm-v3",
+  "type": "feature",
+  "status": "draft",
+  "title": "Secure VM Foundation — v3",
+  "objective": "Sol orchestrates; Luna investigates and implements. Current phase ONLY: establish evidence, then smallest clean-checkout → Dev VM → Little Mester responds → Docker container executes milestone. User confirms /workspace is the fresh feat/vm-approach-3 checkout from main, permits local edits/commits here, and reserves pushes to the end user. Base SHA fc863532b18e21aabd8cb87f4266eed9afafd89c (HEAD and cached origin/main observed equal); live remote freshness cannot be independently checked because GitHub DNS failed. This clarification supersedes the earlier separate-worktree blocker; do not move branches or disturb the running VM. Preserve feat/vm-approach and feat/vm-approach-2 and all unrelated work. No implementation until investigation evidence is reviewed by Sol.",
+  "created_at": "2026-11-08T14:50:47.796Z",
+  "updated_at": "2026-11-08T14:52:07.296Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "LOCKED D1–D3: trusted Host Launcher alone creates/destroys VMs; each VM accesses exclusively its assigned workspace; host-side MCP and CLI are thin adapters over one core security/authorisation library.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "LOCKED D4–D6: ordinary agents cannot create VMs; host-granted Dev self-test capability disabled by default, one disposable Test VM maximum, Test VMs cannot recurse; host establishes caller identity/permissions, never agent parameters or guest-editable configuration; prefer host-created siblings, no nested virtualisation unless demonstrated necessary.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "LOCKED D7–D10: one working provider initially, no local-model optimisation; security controls outside agent-editable workspaces; first milestone proves clean checkout launches Dev VM, Little Mester responds and guest Docker runs a container; old branches remain untouched until explicit cleanup approval.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Target workflow retained without planning later implementation: isolated single-workspace Dev VM supports normal Docker work; explicitly authorised disposable Test VM tests a fresh snapshot of actual changes; bounded iterations; tested cohesive commits; only suggest Dev VM refresh onto verified branch, NEVER refresh automatically.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Immediate child investigation compares both branches by capability with paths and concrete evidence, no implementation or broad commit archaeology; Sol reviews evidence before defining one implementation ticket. No wholesale merges/blind cherry-picks; reuse proven cohesive portions, simplify without weakening security.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "Implementation ticket must specify objective, exact files, existing code to reuse, security constraints, ordered instructions, exact evidence-backed test commands and expected results, acceptance criteria and commit checkpoint. Unknown commands are discovered, not invented. Luna owns implementation; Sol reviews actual changes and acceptance evidence and decides completion.",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "Execution: only one active v3 implementation task; tickets only for current milestone; no sprawling plans/frameworks; document → test → code → commit; tests/evidence before cohesive commits; stop after two identical failures without new evidence; host actions NEEDS_HUMAN; source changes do not change running runtime; never agent-controlled privilege grants. No resets, discards, deletion, force pushes or automatic VM replacement. End user alone pushes, merges, approves scope/security/architecture expansion or deletes work.",
+      "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "External review contract: every user-facing progress report, completed task, milestone, blocker, change/approval request and PR boundary ends with a compact YAML handoff packet; persist the same packet in relevant ticket through MCP. ChatGPT/Claude are independent advisory reviewers, not authorities. Extract concrete feedback, check against requirements/evidence, apply justified in-scope changes; otherwise request user approval with CHANGE_REQUEST, without restarting planning. No expensive model solely for report rewriting.",
+      "status": "pending"
+    },
+    {
+      "id": "A9",
+      "text": "Mandatory handoff YAML structure (actual observed values only; redact secrets; concise verbatim evidence; full logs in existing artifacts; NOT_RUN for unexecuted commands):\nhandoff_version: 1\nsequence: <monotonically increasing integer>\nevent: <INITIALIZED | TASK_COMPLETE | PHASE_COMPLETE | BLOCKED | NEEDS_HUMAN | CHANGE_REQUEST | PR_OPENED>\nbranch: feat/vm-approach-3\nbase_sha: <actual SHA>\nhead_sha: <actual SHA>\nworking_tree: <clean | dirty>\nphase: <current phase>\nticket: <ticket reference>\nstatus: <DONE | IN_PROGRESS | BLOCKED | NEEDS_HUMAN>\nobjective: <bounded objective>\ncompleted: []\nchanges:\n  files: []\n  commits: []\nverification:\n  - command: <exact executed command or proposed NOT_RUN command>\n    result: <PASS | FAIL | NOT_RUN>\n    exit_code: <actual exit code or null if unexecuted>\n    evidence: <observed concise verbatim evidence>\nsecurity:\n  invariants_affected: []\n  negative_tests: []\n  concerns: []\ndeviations: []\nblockers: []\nnext:\n  action: <next bounded action>\n  owner: <Luna | Sol | Human>\n  ticket: <reference>\nneeds_human: null\nGenerate packets after initial setup, each ticket completion/blocker/human action/deviation/milestone/PR opening. Normal packet approximately 30–50 lines, new information plus current Git/task state; no invented success, tests or commit references.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Review investigation evidence before authorising implementation.",
+      "Discover and verify exact Phase 1 smoke commands; distinguish source inspection, mocks and actual host/VM evidence.",
+      "Validate ticket store after MCP writes."
+    ],
+    "created": [],
+    "cases": [
+      "Initial read-only inspection: git status --short returned no output; git rev-parse HEAD origin/main returned fc863532b18e21aabd8cb87f4266eed9afafd89c twice; git worktree list --porcelain showed /workspace on feat/vm-approach-3.",
+      "handoff_version: 1\nsequence: 2\nevent: INITIALIZED\nbranch: feat/vm-approach-3\nbase_sha: fc863532b18e21aabd8cb87f4266eed9afafd89c\nhead_sha: fc863532b18e21aabd8cb87f4266eed9afafd89c\nworking_tree: dirty\nphase: Phase 1 investigation\nticket: \"#49 / #50\"\nstatus: IN_PROGRESS\nobjective: Establish v3 and delegate evidence-only investigation.\ncompleted:\n  - Verified user-authorised fresh checkout at /workspace.\n  - Recorded locked decisions, workflow and full handoff specification in parent ticket.\n  - Delegated active investigation to Luna; no implementation authorised.\nchanges:\n  files: [docs/tickets/ticket-049.json, docs/tickets/ticket-050.json, docs/tickets/_index.json, docs/tickets/_audit.json]\n  commits: []\nverification:\n  - command: git status --short\n    result: PASS\n    exit_code: 0\n    evidence: Only the four listed ticket-store files changed.\n  - command: git rev-parse HEAD origin/main\n    result: PASS\n    exit_code: 0\n    evidence: Both returned fc863532b18e21aabd8cb87f4266eed9afafd89c.\n  - command: mester_tickets_validate\n    result: PASS\n    exit_code: null\n    evidence: '\"ok\": true; \"synced\": true; \"issues\": []; audit intact (131 entries).'\nsecurity:\n  invariants_affected: []\n  negative_tests: []\n  concerns: []\ndeviations:\n  - User authorised existing /workspace checkout instead of another worktree; pushes remain user-only.\nblockers: []\nnext:\n  action: Investigate both branches, persist evidence and propose smallest implementation ticket; await Sol review.\n  owner: Luna\n  ticket: \"#50\"\nneeds_human: null",
+      "Luna delegation active: openai/gpt-6-luna, session ses_e445b3083ffeAB0BXeJTSYE26k; spike #50 only; no implementation until Sol evidence review."
+    ]
+  },
+  "models_used": []
+}

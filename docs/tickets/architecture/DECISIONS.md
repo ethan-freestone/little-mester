@@ -570,3 +570,49 @@ diagram: `docs/vm-architecture.md`.
    `docs/DECISIONS.md`/this log and a ticket with acceptance criteria and test evidence.
    Hand-editing a boundary into `lab`, `compose.yaml` or the agent image is a validation
    failure.
+
+## L. v3 Phase 1 trusted host execution boundary (2026-11-08, #49/#51)
+
+**Decision:** Phase 1 lifecycle authority exists only in a host-installed launcher/core
+outside the one exported workspace. The owner explicitly installs that trusted copy on the
+host; implementation/agent code must not install or refresh it. The running guest and
+workspace have no host lifecycle endpoint, socket, capability, or privilege-grant path.
+Do not dispatch trusted VM work through `./lab`: the current `lab` sources the mutable
+workspace `.little-mester.conf` before dispatch (see `lab` config-loading block), so that
+checkout is not a trusted host execution source.
+
+**Identity and workspace authority:** The core derives authority from the actual host
+process/transport context, never caller-supplied role, identity, capability, workspace
+configuration, or guest state. The CLI and same-server MCP module are adapters to the same
+core. The canonical workspace is selected/authorized on the host; the MCP request cannot
+select arbitrary paths or executables. Resolve and validate one canonical path on the host
+before VM startup/export; reject unsafe symlinks, path substitution, and overlap with
+private host policy/state/credentials. Export exactly that workspace and nothing else.
+Host policy/runtime state and the installed executable remain outside the export. No host
+Docker socket, credentials, extra workspace, host command execution facility, or guest-to-
+host lifecycle control is exposed.
+
+**Phase scope:** Direct guest agent startup and rootless Docker follow v1. Disable/avoid
+system rootful Docker and verify the guest user daemon is rootless. Preserve QEMU
+`restrict=on`, mediated public HTTP(S), private/LAN denial and loopback-only control. Test
+VMs, snapshots, recursion, self-test grants, and capability-grant mechanisms are absent
+in this phase. This entry records the already-approved #49/#51 constraints; it does not
+authorize host installation or runtime operations in the implementation environment.
+
+**Stdio clarification (Sol review):** Phase 1 does not authenticate arbitrary agents
+per MCP request. The owner starts the trusted host installation with private stdio pipes
+connected only to the owner-controlled host client. That process/pipe boundary is the
+authority; it is not a role supplied in a tool argument. Do not register lifecycle tools
+in the ordinary guest/workspace ticket-server instance or expose/forward the host pipes
+to any agent. The same server implementation may register the host-only module in the
+trusted host deployment, using host-bound workspace context. A mode flag alone is not an
+authorization boundary: guest copies can set flags but must have no access to the host
+core, host transport or VM resources. No remote listener, authentication service, bearer
+token scheme or guest lifecycle access is needed for this phase. If the actual deployment
+cannot enforce those process/pipe/resource boundaries, stop with concrete evidence.
+
+**Command discovery status:** Legacy source documents `./lab-vm run [workspace]` and
+`./lab-vm agent` as v1 direct-guest invocations; historical host results do not establish
+the required v3 clean-checkout → real model response → successful guest container flow.
+The new trusted-install invocation and exact v3 smoke command are therefore proposals to
+validate after implementation, not verified commands. Host smoke remains owner-coordinated.
