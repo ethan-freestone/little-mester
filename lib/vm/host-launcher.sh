@@ -266,7 +266,7 @@ PY
 
 vm_host_require_commands() {
   local command
-  for command in qemu-system-x86_64 qemu-img virtiofsd curl ssh ssh-keygen ssh-keyscan socat python3 timeout sha256sum date mktemp mkdir chmod stat id grep rm sleep readlink; do
+  for command in qemu-system-x86_64 qemu-img virtiofsd curl cat mv ssh ssh-keygen ssh-keyscan socat python3 timeout sha256sum date mktemp mkdir chmod stat id grep rm sleep readlink; do
     local executable
     executable="$(command -v "$command" 2>/dev/null || true)"
     [[ -n "$executable" ]] || {

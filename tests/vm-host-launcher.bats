@@ -143,7 +143,10 @@ JSON
 @test "guest cloud-init uses rootless Docker and direct OpenCode without lifecycle authority" {
   run vm_host_cloud_init smoke-v3 1234 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test'
 
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || {
+    printf 'cloud-init generation failed (status %s); captured output follows:\n%s\n' "$status" "$output" >&2
+    return 1
+  }
   [[ "$output" == *"docker-ce-rootless-extras"* ]]
   [[ "$output" == *"dockerd-rootless-setuptool.sh install"* ]]
   [[ "$output" == *"systemctl disable --now docker.service docker.socket containerd.service"* ]]
@@ -153,6 +156,48 @@ JSON
   [[ "$output" != *"/dev/kvm"* ]]
   [[ "$output" != *"VM_CREATE"* ]]
   [[ "$output" != *"recursion"* ]]
+}
+
+@test "host command preflight rejects untrusted mv and cat before lifecycle stages" {
+  local unsafe_command fake_command marker
+  for unsafe_command in mv cat; do
+    fake_command="$TEST_TMP/untrusted-$unsafe_command"
+    marker="$TEST_TMP/$unsafe_command-was-invoked"
+    cat >"$fake_command" <<SH
+#!/bin/sh
+printf 'invoked\\n' >'$marker'
+exec /usr/bin/$unsafe_command "\$@"
+SH
+    chmod 0700 "$fake_command"
+
+    run bash -c '
+      root="$1" test_tmp="$2" unsafe_command="$3" fake_command="$4"
+      trusted_python="$(builtin command -v python3)"
+      source "$root/lib/vm/host-launcher.sh"
+      VM_HOST_SCRIPT_ROOT="$root"
+      vm_host_require_kvm() { :; }
+      vm_host_wait_ssh() { printf "KEY_PROMOTION_REACHED\\n" >&2; }
+      command() {
+        if [[ "${1:-}" == -v ]]; then
+          if [[ "${2:-}" == "$unsafe_command" ]]; then
+            printf "%s\\n" "$fake_command"
+          elif [[ "${2:-}" == python3 ]]; then
+            printf "%s\\n" "$trusted_python"
+          else
+            printf "/usr/bin/true\\n"
+          fi
+          return 0
+        fi
+        builtin command "$@"
+      }
+      vm_host_smoke --workspace "$test_tmp/workspace" --credentials-file "$test_tmp/credentials.json"
+    ' _ "$TEST_ROOT" "$TEST_TMP" "$unsafe_command" "$fake_command"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"host command is not from a protected root-owned path: $unsafe_command"* ]]
+    [[ "$output" != *"KEY_PROMOTION_REACHED"* ]]
+    [ ! -e "$marker" ]
+  done
 }
 
 @test "network builder restricts QEMU and binds only loopback SSH control" {
