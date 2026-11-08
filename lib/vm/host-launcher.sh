@@ -16,6 +16,8 @@ VM_HOST_TOTAL_TIMEOUT=1200
 VM_HOST_LOG_LIMIT_BYTES=1048576
 VM_HOST_GUEST_OUTPUT_LIMIT_BYTES=65536
 VM_HOST_SSH_KEY_LIMIT_BYTES=16384
+VM_HOST_PROCESS_STOP_GRACE_MS=11000
+VM_HOST_PROCESS_KILL_SETTLE_MS=2000
 VM_HOST_MAX_RETAINED_RUNS=8
 VM_HOST_WORKSPACE_MAX_BYTES=8589934592
 VM_HOST_IMAGE_URL='https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img'
@@ -271,16 +273,7 @@ vm_host_require_commands() {
       vm_host_error "required host command missing: $command (host installation is never performed automatically)"
       return 1
     }
-    python3 -I - "$executable" <<'PY' || {
-import os, pathlib, stat, sys
-path = pathlib.Path(sys.argv[1]).resolve(strict=True)
-if not stat.S_ISREG(path.stat(follow_symlinks=False).st_mode) or not os.access(path, os.X_OK):
-    raise SystemExit(1)
-for item in (path, *path.parents):
-    info = item.stat(follow_symlinks=False)
-    if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        raise SystemExit(1)
-PY
+    python3 -I "$VM_HOST_SCRIPT_ROOT/lib/vm/executable-policy.py" "$executable" >/dev/null || {
       vm_host_error "host command is not from a protected root-owned path: $command"
       return 1
     }
@@ -291,16 +284,7 @@ PY
     vm_host_error 'required host command missing: genisoimage or mkisofs (host installation is never performed automatically)'
     return 1
   }
-  python3 -I - "$iso_tool" <<'PY' || {
-import os, pathlib, stat, sys
-path = pathlib.Path(sys.argv[1]).resolve(strict=True)
-if not stat.S_ISREG(path.stat(follow_symlinks=False).st_mode) or not os.access(path, os.X_OK):
-    raise SystemExit(1)
-for item in (path, *path.parents):
-    info = item.stat(follow_symlinks=False)
-    if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        raise SystemExit(1)
-PY
+  python3 -I "$VM_HOST_SCRIPT_ROOT/lib/vm/executable-policy.py" "$iso_tool" >/dev/null || {
     vm_host_error 'ISO creation command is not from a protected root-owned path'
     return 1
   }
@@ -377,10 +361,18 @@ PY
 
 vm_host_stop_process_identity() {
   local identity_file="$1"
-  python3 -I - "$identity_file" <<'PY'
+  python3 -I - "$identity_file" "$VM_HOST_PROCESS_STOP_GRACE_MS" "$VM_HOST_PROCESS_KILL_SETTLE_MS" <<'PY'
 import json, os, pathlib, select, signal, sys
 
 identity_path = pathlib.Path(sys.argv[1])
+try:
+    term_grace_ms = int(sys.argv[2])
+    kill_settle_ms = int(sys.argv[3])
+    if (term_grace_ms <= 0 or kill_settle_ms <= 0
+            or term_grace_ms + kill_settle_ms > 15000):
+        raise ValueError()
+except ValueError:
+    raise SystemExit("REFUSED: invalid bounded process cleanup deadline")
 try:
     record = json.loads(identity_path.read_text(encoding="utf-8"))
     pid = record["pid"]
@@ -405,18 +397,30 @@ def matches():
             and record.get("exe") == exe and record.get("argv") == argv)
 
 try:
-    if not matches():
-        print("REFUSED: process identity changed; retaining run state", file=sys.stderr)
-        raise SystemExit(2)
-    signal.pidfd_send_signal(pidfd, signal.SIGTERM)
     poller = select.poll()
     poller.register(pidfd, select.POLLIN)
-    if not poller.poll(8000):
+    if poller.poll(0):
+        raise SystemExit(0)
+    if not matches():
+        if poller.poll(0):
+            raise SystemExit(0)
+        print("REFUSED: process identity changed; retaining run state", file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    if not poller.poll(term_grace_ms):
         if not matches():
+            if poller.poll(0):
+                raise SystemExit(0)
             print("REFUSED: process identity changed before escalation; retaining run state", file=sys.stderr)
             raise SystemExit(2)
-        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
-        if not poller.poll(2000):
+        try:
+            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if not poller.poll(kill_settle_ms):
             print("REFUSED: owned process did not exit; retaining run state", file=sys.stderr)
             raise SystemExit(1)
 finally:
@@ -424,9 +428,64 @@ finally:
 PY
 }
 
+vm_host_verify_logger_completion() {
+  local identity_file="$1" completion_file="$2"
+  python3 -I - "$identity_file" "$completion_file" "$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py" <<'PY'
+import json, os, pathlib, stat, sys
+
+identity_path, completion_path, expected_helper = map(pathlib.Path, sys.argv[1:])
+try:
+    record = json.loads(identity_path.read_text(encoding="utf-8"))
+    completion_info = os.lstat(completion_path)
+    if (not stat.S_ISREG(completion_info.st_mode) or completion_info.st_uid != os.getuid()
+            or completion_info.st_mode & 0o077):
+        raise ValueError()
+    proof = json.loads(completion_path.read_text(encoding="utf-8"))
+    argv = record["argv"]
+    separator = argv.index("--")
+    option = argv.index("--completion-file")
+    if (option >= separator or option + 1 >= separator
+            or pathlib.Path(argv[option + 1]) != completion_path
+            or expected_helper not in [pathlib.Path(arg) for arg in argv[:separator]]):
+        raise ValueError()
+    child_pid = proof["child_pid"]
+    if (proof.get("logger_pid") != record["pid"]
+            or str(proof.get("logger_start_time")) != str(record["start_time"])
+            or proof.get("process_group_clean") is not True
+            or not isinstance(child_pid, int) or child_pid <= 1):
+        raise ValueError()
+except (OSError, ValueError, KeyError, TypeError, IndexError, json.JSONDecodeError):
+    raise SystemExit("REFUSED: bounded logger cleanup proof is missing or invalid")
+
+try:
+    entries = os.scandir("/proc")
+except OSError as error:
+    raise SystemExit("REFUSED: could not verify bounded logger process-group cleanup") from error
+with entries:
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = pathlib.Path(entry.path, "stat").read_text().rsplit(")", 1)[1].split()
+            process_group, session = int(fields[2]), int(fields[3])
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, IndexError) as error:
+            raise SystemExit("REFUSED: could not verify bounded logger process-group cleanup") from error
+        if process_group == child_pid and session == child_pid:
+            raise SystemExit("REFUSED: bounded logger process group still has live members")
+PY
+}
+
 vm_host_cleanup_one() {
-  local identity_file="$1"
-  [[ -e "$identity_file" || -L "$identity_file" ]] || return 0
+  local identity_file="$1" completion_file="${2:-}"
+  if [[ ! -e "$identity_file" && ! -L "$identity_file" ]]; then
+    if [[ -n "$completion_file" && ( -e "$completion_file" || -L "$completion_file" ) ]]; then
+      printf 'WARNING: bounded logger proof has no matching identity; preserving run state %s\n' "$VM_HOST_RUN_DIR" >&2
+      return 1
+    fi
+    return 0
+  fi
   [[ -f "$identity_file" && ! -L "$identity_file" ]] || {
     printf 'WARNING: invalid process identity record; preserving run state %s\n' "$VM_HOST_RUN_DIR" >&2
     return 1
@@ -435,7 +494,17 @@ vm_host_cleanup_one() {
     printf 'WARNING: process ownership is ambiguous; preserving run state %s\n' "$VM_HOST_RUN_DIR" >&2
     return 1
   }
-  rm -f -- "$identity_file"
+  if [[ -n "$completion_file" ]]; then
+    vm_host_verify_logger_completion "$identity_file" "$completion_file" || {
+      printf 'WARNING: bounded logger completion is unverified; preserving run state %s\n' "$VM_HOST_RUN_DIR" >&2
+      return 1
+    }
+  fi
+  if [[ -n "$completion_file" ]]; then
+    rm -f -- "$identity_file" "$completion_file"
+  else
+    rm -f -- "$identity_file"
+  fi
 }
 
 vm_host_cleanup() {
@@ -467,13 +536,13 @@ PY
     return 1
   fi
   if (( cleanup_failed == 0 )); then
-    vm_host_cleanup_one "$VM_HOST_RUN_DIR/qemu.identity" || cleanup_failed=1
+    vm_host_cleanup_one "$VM_HOST_RUN_DIR/qemu.identity" "$VM_HOST_RUN_DIR/qemu.complete" || cleanup_failed=1
   fi
   if (( cleanup_failed == 0 )); then
-    vm_host_cleanup_one "$VM_HOST_RUN_DIR/virtiofsd.identity" || cleanup_failed=1
+    vm_host_cleanup_one "$VM_HOST_RUN_DIR/virtiofsd.identity" "$VM_HOST_RUN_DIR/virtiofsd.complete" || cleanup_failed=1
   fi
   if (( cleanup_failed == 0 )); then
-    vm_host_cleanup_one "$VM_HOST_RUN_DIR/proxy.identity" || cleanup_failed=1
+    vm_host_cleanup_one "$VM_HOST_RUN_DIR/proxy.identity" "$VM_HOST_RUN_DIR/proxy.complete" || cleanup_failed=1
   fi
   if (( cleanup_failed == 0 )); then
     rm -f -- "$VM_HOST_RUN_DIR/disk.qcow2" "$VM_HOST_RUN_DIR/ubuntu.img.part" \
@@ -603,11 +672,13 @@ vm_host_prepare_disk() {
 
 vm_host_start_proxy() {
   local run_dir="$1" proxy_script="$VM_HOST_SCRIPT_ROOT/lib/vm/proxy.py"
-  local bounded_logger="$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py" port_file="$1/proxy.port"
+  local bounded_logger="$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py"
+  local port_file="$1/proxy.port" completion_file="$1/proxy.complete"
   local pid python_exe status end
-  rm -f -- "$port_file"
+  rm -f -- "$port_file" "$completion_file"
   : >"$run_dir/proxy.log" || { vm_host_error 'could not create private proxy log'; return 1; }
-  (umask 077; python3 -I "$bounded_logger" "$run_dir/proxy.log" "$VM_HOST_LOG_LIMIT_BYTES" -- \
+  (umask 077; python3 -I "$bounded_logger" "$run_dir/proxy.log" "$VM_HOST_LOG_LIMIT_BYTES" \
+    --completion-file "$completion_file" -- \
     python3 -I "$proxy_script" --port-file "$port_file") </dev/null &
   pid="$!"
   VM_HOST_UNTRACKED_CHILD=1
@@ -640,10 +711,13 @@ vm_host_start_proxy() {
 }
 
 vm_host_start_virtiofs() {
-  local run_dir="$1" workspace="$2" socket="$1/virtiofs.sock" pid executable status end
+  local run_dir="$1" workspace="$2" socket="$1/virtiofs.sock"
+  local completion_file="$1/virtiofsd.complete" pid executable status end
   local bounded_logger="$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py"
   [[ ! -e "$socket" && ! -L "$socket" ]] || { vm_host_error 'refusing pre-existing virtiofs socket path'; return 1; }
-  (umask 077; python3 -I "$bounded_logger" "$run_dir/virtiofsd.log" "$VM_HOST_LOG_LIMIT_BYTES" -- \
+  rm -f -- "$completion_file"
+  (umask 077; python3 -I "$bounded_logger" "$run_dir/virtiofsd.log" "$VM_HOST_LOG_LIMIT_BYTES" \
+    --completion-file "$completion_file" -- \
     virtiofsd --shared-dir "$workspace" --socket-path "$socket" --rlimit-nofile=1048576) </dev/null &
   pid="$!"
   VM_HOST_UNTRACKED_CHILD=1
@@ -678,6 +752,7 @@ vm_host_free_port() {
 vm_host_start_qemu() {
   local run_dir="$1" vm_name="$2" workspace="$3" ssh_port="$4" netdev pid executable status end
   local bounded_logger="$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py"
+  local completion_file="$1/qemu.complete"
   netdev="$(vm_host_qemu_network_args "$ssh_port" "$VM_HOST_PROXY_PORT")" || return 1
   local -a qemu=(qemu-system-x86_64 -enable-kvm -name "$vm_name" -machine q35,accel=kvm
     -cpu host -smp "$VM_HOST_CPU_COUNT" -m "$VM_HOST_MEMORY_MIB"
@@ -694,7 +769,9 @@ vm_host_start_qemu() {
   chmod 0600 "$run_dir/qemu.command" || return 1
   : >"$run_dir/qemu.log" || return 1
   chmod 0600 "$run_dir/qemu.log" || return 1
-  python3 -I "$bounded_logger" "$run_dir/qemu.log" "$VM_HOST_LOG_LIMIT_BYTES" -- \
+  rm -f -- "$completion_file"
+  python3 -I "$bounded_logger" "$run_dir/qemu.log" "$VM_HOST_LOG_LIMIT_BYTES" \
+    --completion-file "$completion_file" -- \
     "${qemu[@]}" </dev/null &
   pid="$!"
   VM_HOST_UNTRACKED_CHILD=1

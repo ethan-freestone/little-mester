@@ -3,12 +3,40 @@
 setup() {
   TEST_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   TEST_TMP="$(mktemp -d)"
+  TEST_OWNED_PROCESS_GROUP_FILE=""
+  TEST_UNRELATED_PID_FILE=""
   VM_HOST_SCRIPT_ROOT="$TEST_ROOT"
   source "$TEST_ROOT/lib/vm/host-launcher.sh"
   source "$TEST_ROOT/lib/vm/cloud-init.sh"
 }
 
 teardown() {
+  if [[ -n "$TEST_OWNED_PROCESS_GROUP_FILE" && -s "$TEST_OWNED_PROCESS_GROUP_FILE" ]]; then
+    python3 - "$TEST_OWNED_PROCESS_GROUP_FILE" <<'PY' || true
+import os, pathlib, signal, sys
+try:
+    group = int(pathlib.Path(sys.argv[1]).read_text().strip())
+    with os.scandir("/proc") as entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                fields = pathlib.Path(entry.path, "stat").read_text().rsplit(")", 1)[1].split()
+                if int(fields[2]) == group and int(fields[3]) == group:
+                    os.killpg(group, signal.SIGKILL)
+                    break
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+except (OSError, ValueError):
+    pass
+PY
+  fi
+  if [[ -n "$TEST_UNRELATED_PID_FILE" && -s "$TEST_UNRELATED_PID_FILE" ]]; then
+    unrelated_pid="$(<"$TEST_UNRELATED_PID_FILE")"
+    if [[ "$unrelated_pid" =~ ^[1-9][0-9]*$ ]]; then
+      kill "$unrelated_pid" 2>/dev/null || true
+    fi
+  fi
   rm -rf -- "$TEST_TMP"
 }
 
@@ -574,6 +602,135 @@ PY
   kill -0 "$pid"
   kill "$pid"
   wait "$pid" 2>/dev/null || true
+}
+
+@test "EXIT cleanup waits for bounded logger group proof and preserves unrelated processes" {
+  local run_dir="$TEST_TMP/logger-supervisor-run" child_script="$TEST_TMP/fork-ignore-term.py"
+  local exit_script="$TEST_TMP/exit-with-logger.sh" descendant_file="$TEST_TMP/logger-descendant.pid"
+  local parent_file="$TEST_TMP/logger-parent.pid" unrelated_file="$TEST_TMP/unrelated.pid"
+  TEST_OWNED_PROCESS_GROUP_FILE="$parent_file"
+  TEST_UNRELATED_PID_FILE="$unrelated_file"
+  mkdir -m 0700 "$run_dir"
+  cat >"$child_script" <<'PY'
+import os, pathlib, signal, time
+child = os.fork()
+if child:
+    pathlib.Path(os.environ["TEST_PARENT_PID_FILE"]).write_text(str(os.getpid()))
+    print("SUPERVISED_READY", flush=True)
+    while True:
+        time.sleep(1)
+else:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.close(1)
+    os.close(2)
+    pathlib.Path(os.environ["TEST_DESCENDANT_PID_FILE"]).write_text(str(os.getpid()))
+    while True:
+        time.sleep(1)
+PY
+  cat >"$exit_script" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$1" run_dir="$2" child_script="$3" parent_file="$4" descendant_file="$5" unrelated_file="$6"
+source "$root/lib/vm/host-launcher.sh"
+VM_HOST_SCRIPT_ROOT="$root"
+VM_HOST_RUN_DIR="$run_dir"
+VM_HOST_UNTRACKED_CHILD=0
+VM_HOST_SMOKE_COMPLETE_PENDING=1
+export VM_HOST_SCRIPT_ROOT VM_HOST_RUN_DIR VM_HOST_UNTRACKED_CHILD VM_HOST_SMOKE_COMPLETE_PENDING
+trap vm_host_exit_cleanup EXIT
+sleep 60 </dev/null >/dev/null 2>&1 &
+printf '%s\n' "$!" >"$unrelated_file"
+export TEST_PARENT_PID_FILE="$parent_file" TEST_DESCENDANT_PID_FILE="$descendant_file"
+python3 -I "$root/lib/vm/bounded-log.py" "$run_dir/proxy.log" 1048576 \
+  --completion-file "$run_dir/proxy.complete" -- python3 -I "$child_script" </dev/null &
+logger_pid="$!"
+VM_HOST_UNTRACKED_CHILD=1
+vm_host_record_process_identity "$run_dir/proxy.identity" "$logger_pid" \
+  "$(readlink -f -- "$(command -v python3)")" "$root/lib/vm/bounded-log.py"
+VM_HOST_UNTRACKED_CHILD=0
+for ((attempt=0; attempt<150; attempt++)); do [[ -s "$descendant_file" ]] && break; sleep 0.02; done
+[[ -s "$parent_file" && -s "$descendant_file" ]]
+exit 0
+SH
+  chmod 0700 "$exit_script"
+
+  run timeout --signal=TERM --kill-after=15 25 bash "$exit_script" \
+    "$TEST_ROOT" "$run_dir" "$child_script" "$parent_file" "$descendant_file" "$unrelated_file"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Smoke acceptance stages completed."* ]]
+  [ ! -e "/proc/$(<"$descendant_file")" ]
+  [ ! -e "$run_dir/proxy.identity" ]
+  [ ! -e "$run_dir/proxy.complete" ]
+  kill -0 "$(<"$unrelated_file")"
+}
+
+@test "EXIT cleanup fails closed when supervisor escalation kills an unverified logger" {
+  local run_dir="$TEST_TMP/logger-unproved-run" start_script="$TEST_TMP/escalate-logger.sh"
+  local child_script="$TEST_TMP/unproved-fork.py" parent_file="$TEST_TMP/unproved-parent.pid"
+  local child_pid_file="$TEST_TMP/unproved-descendant.pid" group_file="$TEST_TMP/unproved-group.pid"
+  TEST_OWNED_PROCESS_GROUP_FILE="$group_file"
+  mkdir -m 0700 "$run_dir"
+  cat >"$child_script" <<'PY'
+import os, pathlib, signal, time
+child = os.fork()
+if child:
+    pathlib.Path(os.environ["TEST_PARENT_PID_FILE"]).write_text(str(os.getpid()))
+    print("READY", flush=True)
+    while True:
+        time.sleep(1)
+else:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.close(1)
+    os.close(2)
+    pathlib.Path(os.environ["TEST_CHILD_PID_FILE"]).write_text(str(os.getpid()))
+    while True:
+        time.sleep(1)
+PY
+  cat >"$start_script" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$1" run_dir="$2" child_script="$3" parent_file="$4" child_pid_file="$5" group_file="$6"
+source "$root/lib/vm/host-launcher.sh"
+VM_HOST_SCRIPT_ROOT="$root"
+VM_HOST_RUN_DIR="$run_dir"
+VM_HOST_UNTRACKED_CHILD=0
+VM_HOST_SMOKE_COMPLETE_PENDING=1
+VM_HOST_PROCESS_STOP_GRACE_MS=100
+VM_HOST_PROCESS_KILL_SETTLE_MS=200
+export VM_HOST_SCRIPT_ROOT VM_HOST_RUN_DIR VM_HOST_UNTRACKED_CHILD VM_HOST_SMOKE_COMPLETE_PENDING
+trap vm_host_exit_cleanup EXIT
+export TEST_PARENT_PID_FILE="$parent_file" TEST_CHILD_PID_FILE="$child_pid_file"
+python3 -I "$root/lib/vm/bounded-log.py" "$run_dir/proxy.log" 1048576 \
+  --completion-file "$run_dir/proxy.complete" -- python3 -I "$child_script" </dev/null &
+logger_pid="$!"
+VM_HOST_UNTRACKED_CHILD=1
+vm_host_record_process_identity "$run_dir/proxy.identity" "$logger_pid" \
+  "$(readlink -f -- "$(command -v python3)")" "$root/lib/vm/bounded-log.py"
+VM_HOST_UNTRACKED_CHILD=0
+for ((attempt=0; attempt<150; attempt++)); do [[ -s "$child_pid_file" ]] && break; sleep 0.02; done
+[[ -s "$parent_file" && -s "$child_pid_file" ]]
+printf '%s\n' "$(<"$parent_file")" >"$group_file"
+exit 0
+SH
+  chmod 0700 "$start_script"
+
+  run timeout --signal=TERM --kill-after=15 10 bash "$start_script" \
+    "$TEST_ROOT" "$run_dir" "$child_script" "$parent_file" "$child_pid_file" "$group_file"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"completion is unverified"* ]]
+  [[ "$output" != *"Smoke acceptance stages completed."* ]]
+  [ -d "$run_dir" ]
+  [ -e "/proc/$(<"$child_pid_file")" ]
+  [ ! -e "$run_dir/proxy.complete" ]
+}
+
+@test "logger and supervisor teardown grace periods fit inside the outer timeout grace" {
+  [ "$VM_HOST_PROCESS_STOP_GRACE_MS" -eq 11000 ]
+  [ "$VM_HOST_PROCESS_KILL_SETTLE_MS" -eq 2000 ]
+  [ $((VM_HOST_PROCESS_STOP_GRACE_MS + VM_HOST_PROCESS_KILL_SETTLE_MS)) -lt 15000 ]
+  [ "$VM_HOST_PROCESS_STOP_GRACE_MS" -ge 10000 ]
 }
 
 @test "filesystem preflight rejects an ordinary workspace directory" {

@@ -33,6 +33,7 @@ dependencies = [
     root / "lib/vm/cloud-init.sh",
     root / "lib/vm/proxy.py",
     root / "lib/vm/bounded-log.py",
+    root / "lib/vm/executable-policy.py",
 ]
 
 # Inspect the original lexical path before resolving anything. A symlink in
