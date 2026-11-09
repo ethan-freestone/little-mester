@@ -266,6 +266,37 @@ class OwnerAcceptanceTests(unittest.TestCase):
             self.assertFalse(runtime.exists())
             candidate.assert_not_called()
 
+    def test_initial_report_write_failure_is_controlled_and_stops_candidate_work(self):
+        errors = io.StringIO()
+        output = io.StringIO()
+        with mock.patch.object(acceptance, "new_report_dir", return_value=pathlib.Path("/trusted/attempt")), \
+                mock.patch.object(acceptance, "save_report", side_effect=OSError("disk unavailable")), \
+                mock.patch.object(acceptance, "candidate_commit") as candidate, \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            result = acceptance.main(["--preflight", "--sha", "a" * 40, "--repo", str(ROOT)])
+        self.assertEqual(result, 1)
+        self.assertIn("FAIL: runner initialization failed (OSError)", errors.getvalue())
+        self.assertNotIn("Traceback", errors.getvalue())
+        self.assertEqual(output.getvalue(), "")
+        candidate.assert_not_called()
+
+    def test_final_report_update_failure_does_not_print_pass(self):
+        errors = io.StringIO()
+        output = io.StringIO()
+        with mock.patch.object(acceptance, "new_report_dir", return_value=pathlib.Path("/trusted/attempt")), \
+                mock.patch.object(acceptance, "save_report"), \
+                mock.patch.object(acceptance, "candidate_commit"), \
+                mock.patch.object(acceptance, "install_path", return_value=pathlib.Path("/protected/install")), \
+                mock.patch.object(acceptance, "verify_install", return_value=pathlib.Path("/protected/install")), \
+                mock.patch.object(acceptance, "installed_preflight"), \
+                mock.patch.object(acceptance.os, "open", side_effect=OSError("update unavailable")), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            result = acceptance.main(["--preflight", "--sha", "a" * 40, "--repo", str(ROOT)])
+        self.assertEqual(result, 1)
+        self.assertIn("FAIL: report update failed", errors.getvalue())
+        self.assertIn("OVERALL: FAIL", output.getvalue())
+        self.assertNotIn("OVERALL: PASS", output.getvalue())
+
     def test_report_directory_allocation_refusal_is_a_gate_error(self):
         with tempfile.TemporaryDirectory() as temporary:
             parent = pathlib.Path(temporary)

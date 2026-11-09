@@ -816,6 +816,7 @@ def main(argv: list[str] | None = None) -> int:
             os.fsync(stream.fileno())
     except OSError:
         print(f"FAIL: report update failed; preserve evidence directory {report_dir}", file=sys.stderr)
+        data["status"] = "FAIL"
         result_code = 1
     print_report(data)
     return result_code
