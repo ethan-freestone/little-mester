@@ -48,6 +48,7 @@ INSTALL_FILES = {
     "lib/vm/bounded-log.py": 0o644,
     "lib/vm/executable-policy.py": 0o644,
     "lib/vm/browser-auth-session.py": 0o644,
+    "lib/vm/virtiofs-socket.py": 0o644,
 }
 INSTALL_DIRS = {"lib", "lib/vm"}
 
@@ -525,7 +526,7 @@ def list_runs(root: pathlib.Path) -> set[str]:
         return set()
 
 
-def inspect_cleanup(sha: str, run_id: str) -> dict:
+def inspect_cleanup(sha: str, run_id: str, install_root: pathlib.Path) -> dict:
     if not RUN_ID_RE.fullmatch(run_id):
         raise GateError("BLOCKED", "run identity format is invalid")
     root = state_root()
@@ -533,9 +534,11 @@ def inspect_cleanup(sha: str, run_id: str) -> dict:
     verify_user_directory_chain(run_dir)
     if not run_dir.is_relative_to(root):
         raise GateError("BLOCKED", "run directory escaped private state")
-    allowed = {"qemu.log", "virtiofsd.log", "proxy.log", "virtiofs.sock", "virtiofs.sock.pid"}
+    allowed = {"qemu.log", "virtiofsd.log", "proxy.log", "virtiofs.socket-path"}
     required_logs = {"qemu.log", "virtiofsd.log", "proxy.log"}
     entries = {entry.name for entry in run_dir.iterdir()}
+    if "qemu.log" not in entries:
+        raise GateError("BLOCKED", "QEMU never created its log; this was an early startup failure, not cleanup acceptance")
     if not required_logs.issubset(entries) or not entries.issubset(allowed):
         raise GateError("BLOCKED", "run contains missing expected logs or unexpected retained artifacts")
     for name in required_logs:
@@ -548,38 +551,37 @@ def inspect_cleanup(sha: str, run_id: str) -> dict:
     for name in ("disk.qcow2", "ubuntu.img.part", "id_vm_control", "id_vm_control.pub"):
         if (run_dir / name).exists() or (run_dir / name).is_symlink():
             raise GateError("BLOCKED", "run retains transient VM or key material; no cleanup attempted")
-    socket_path = run_dir / "virtiofs.sock"
-    pid_path = run_dir / "virtiofs.sock.pid"
-    residual = []
-    if socket_path.exists() or socket_path.is_symlink():
-        info = os.lstat(socket_path)
-        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
-            raise GateError("BLOCKED", "retained virtiofs socket path has unexpected identity")
-        residual.append("virtiofs.sock (retained, not removed)")
-    if pid_path.exists() or pid_path.is_symlink():
-        info = os.lstat(pid_path)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
-            raise GateError("BLOCKED", "retained virtiofs PID artifact has unexpected identity")
-        text = pid_path.read_text(encoding="ascii").strip()
-        if not text.isdigit() or int(text) <= 1:
-            raise GateError("BLOCKED", "retained virtiofs PID artifact is malformed")
-        residual.append("virtiofs.sock.pid (retained; contents are not process authority)")
-    if socket_listener_present(str(socket_path)):
-        raise GateError("BLOCKED", "a listener remains for the retained virtiofs socket path")
-    return {"status": "PASS", "run_id": run_id, "residual_artifacts": residual,
-            "note": "No identity/PID artifact was used to signal a process; historical run artifacts were not changed."}
-
-
-def socket_listener_present(path: str) -> bool:
+    metadata = run_dir / "virtiofs.socket-path"
     try:
-        with open("/proc/net/unix", encoding="ascii") as stream:
-            for line in stream.readlines()[1:]:
-                fields = line.rstrip("\n").split(None, 7)
-                if len(fields) == 8 and fields[7] == path:
-                    return True
+        info = os.lstat(metadata)
     except OSError as error:
-        raise GateError("BLOCKED", "cannot verify whether a retained socket has a live listener") from error
-    return False
+        raise GateError("BLOCKED", "short virtiofs socket-path evidence is missing") from error
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        raise GateError("BLOCKED", "short virtiofs socket-path evidence has unsafe metadata")
+    socket_state = inspect_virtiofs_artifacts(run_dir, install_root)
+    residual = ["virtiofs.socket-path (retained private allocation evidence)"]
+    if socket_state["socket_present"]:
+        residual.append("short virtiofs socket (retained in private runtime directory)")
+    if socket_state["pid_present"]:
+        residual.append("short virtiofs PID artifact (retained; contents are not process authority)")
+    return {"status": "PASS", "run_id": run_id, "residual_artifacts": residual,
+            "note": "No identity/PID artifact was used to signal a process; an expired volatile runtime directory is distinguished from a live listener."}
+
+
+def inspect_virtiofs_artifacts(run_dir: pathlib.Path, install_root: pathlib.Path) -> dict:
+    helper = install_root / "lib/vm/virtiofs-socket.py"
+    result = subprocess.run(
+        [sys.executable, "-I", str(helper), "stopped", str(run_dir)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=clean_env(), check=False,
+    )
+    if result.returncode:
+        raise GateError("BLOCKED", "short virtiofs socket/PID artifacts or listener state failed validation")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise GateError("BLOCKED", "short virtiofs artifact validator returned invalid evidence") from error
 
 
 def verify_user_directory_chain(path: pathlib.Path) -> None:
@@ -619,10 +621,12 @@ def verify_cleanup_report(sha: str, run_id: str) -> None:
         except (OSError, ValueError, json.JSONDecodeError):
             continue
         if (content.get("candidate_sha") == sha
-                and content.get("evidence", {}).get("vm_run_id") == run_id):
+                and content.get("evidence", {}).get("vm_run_id") == run_id
+                and content.get("gates", {}).get("run") == "PASS"
+                and content.get("gates", {}).get("cleanup") == "PASS"):
             matches.append(content)
     if len(matches) != 1:
-        raise GateError("BLOCKED", "no unique owner-runner report binds this SHA to that run id")
+        raise GateError("BLOCKED", "no unique successful smoke report binds this SHA to that run id; early startup failure is not cleanup acceptance")
 
 
 def report_template(sha: str, mode: str, report_dir: pathlib.Path) -> dict:
@@ -673,7 +677,7 @@ def run_smoke(root: pathlib.Path, workspace: str, model: str, state_before: set[
     if len(created) != 1:
         raise GateError("BLOCKED", "smoke succeeded but a unique new VM run directory was not observed")
     try:
-        cleanup = inspect_cleanup(data["candidate_sha"], next(iter(created)))
+        cleanup = inspect_cleanup(data["candidate_sha"], next(iter(created)), root)
     except GateError as error:
         data["gates"]["cleanup"] = error.status
         raise
@@ -729,7 +733,8 @@ def main(argv: list[str] | None = None) -> int:
             if not args.run_id:
                 raise GateError("BLOCKED", "--verify-cleanup requires --run-id")
             verify_cleanup_report(args.sha, args.run_id)
-            cleanup = inspect_cleanup(args.sha, args.run_id)
+            root = verify_install(repo, args.sha)
+            cleanup = inspect_cleanup(args.sha, args.run_id, root)
             data["gates"]["cleanup"] = cleanup["status"]
             data["evidence"]["cleanup"] = cleanup
         elif mode == "preflight":

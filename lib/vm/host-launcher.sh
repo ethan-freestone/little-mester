@@ -856,12 +856,22 @@ vm_host_start_proxy() {
 }
 
 vm_host_start_virtiofs() {
-  local run_dir="$1" workspace="$2" socket="$1/virtiofs.sock" pid_file="$1/virtiofs.sock.pid"
+  local run_dir="$1" workspace="$2" socket pid_file
   local completion_file="$1/virtiofsd.complete" pid executable status end
+  local socket_helper="$VM_HOST_SCRIPT_ROOT/lib/vm/virtiofs-socket.py"
   local bounded_logger="$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py"
   [[ -n "$VM_HOST_VIRTIOFSD_EXECUTABLE" ]] || { vm_host_error 'virtiofsd has not passed host preflight'; return 1; }
+  socket="$(python3 -I "$socket_helper" allocate "$run_dir")" || {
+    vm_host_error 'could not securely allocate a short per-run virtiofs socket path'
+    return 1
+  }
+  pid_file="$socket.pid"
   [[ ! -e "$socket" && ! -L "$socket" && ! -e "$pid_file" && ! -L "$pid_file" ]] || {
     vm_host_error 'refusing pre-existing virtiofs socket or PID path'
+    return 1
+  }
+  python3 -I "$socket_helper" create-log "$run_dir" virtiofsd.log || {
+    vm_host_error 'could not exclusively pre-create the private virtiofsd log'
     return 1
   }
   rm -f -- "$completion_file"
@@ -876,10 +886,10 @@ vm_host_start_virtiofs() {
     return 1
   }
   VM_HOST_UNTRACKED_CHILD=0
-  chmod 0600 "$run_dir/virtiofsd.identity" "$run_dir/virtiofsd.log" || return 1
+  chmod 0600 "$run_dir/virtiofsd.identity" || return 1
   end=$((SECONDS + 15))
   while (( SECONDS < end )); do
-    if [[ -S "$socket" ]]; then
+    if [[ -S "$socket" && -f "$pid_file" ]]; then
       vm_host_validate_virtiofs_artifacts "$run_dir" startup || return 1
       return 0
     fi
@@ -898,48 +908,13 @@ vm_host_start_virtiofs() {
 }
 
 vm_host_validate_virtiofs_artifacts() {
-  python3 -I - "$1" "${2:-startup}" <<'PY'
-import os, pathlib, stat, sys
-root = pathlib.Path(sys.argv[1])
-mode = sys.argv[2]
-socket_path = root / "virtiofs.sock"
-pid_path = root / "virtiofs.sock.pid"
-uid = os.getuid()
-try:
-    root_info = os.lstat(root)
-    if (not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != uid
-            or stat.S_IMODE(root_info.st_mode) != 0o700):
-        raise ValueError()
-    try:
-        socket_info = os.lstat(socket_path)
-    except FileNotFoundError:
-        socket_info = None
-    if socket_info is not None and (not stat.S_ISSOCK(socket_info.st_mode) or socket_info.st_uid != uid):
-        raise ValueError()
-    try:
-        pid_info = os.lstat(pid_path)
-    except FileNotFoundError:
-        pid_info = None
-    if pid_info is not None:
-        if (not stat.S_ISREG(pid_info.st_mode) or pid_info.st_uid != uid
-                or stat.S_IMODE(pid_info.st_mode) != 0o600):
-            raise ValueError()
-        pid = pid_path.read_text(encoding="ascii").strip()
-        if not pid.isdigit() or int(pid) <= 1:
-            raise ValueError()
-except (OSError, ValueError, UnicodeError):
-    raise SystemExit("REFUSED: run-owned virtiofs socket/PID artifacts failed identity checks")
-
-if mode == "stopped" and socket_info is not None:
-    try:
-        with open("/proc/net/unix", encoding="ascii") as stream:
-            if any((fields := line.rstrip("\n").split(None, 7)) and len(fields) == 8
-                   and fields[7] == str(socket_path)
-                   for line in stream.readlines()[1:]):
-                raise SystemExit("REFUSED: virtiofs socket still has a live listener")
-    except OSError as error:
-        raise SystemExit("REFUSED: could not verify virtiofs socket listener state") from error
-PY
+  local operation="${2:-startup}"
+  case "$operation" in
+    startup) operation=startup ;;
+    stopped) operation=stopped ;;
+    *) vm_host_error 'invalid virtiofs artifact validation mode'; return 2 ;;
+  esac
+  python3 -I "$VM_HOST_SCRIPT_ROOT/lib/vm/virtiofs-socket.py" "$operation" "$1"
 }
 
 vm_host_free_port() {
@@ -948,8 +923,13 @@ vm_host_free_port() {
 
 vm_host_start_qemu() {
   local run_dir="$1" vm_name="$2" workspace="$3" ssh_port="$4" netdev pid executable status end
+  local socket
   local bounded_logger="$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py"
   local completion_file="$1/qemu.complete"
+  socket="$(python3 -I "$VM_HOST_SCRIPT_ROOT/lib/vm/virtiofs-socket.py" path "$run_dir")" || {
+    vm_host_error 'could not verify the allocated short virtiofs socket path for QEMU'
+    return 1
+  }
   netdev="$(vm_host_qemu_network_args "$ssh_port" "$VM_HOST_PROXY_PORT")" || return 1
   local -a qemu=(qemu-system-x86_64 -enable-kvm -name "$vm_name" -machine q35,accel=kvm
     -cpu host -smp "$VM_HOST_CPU_COUNT" -m "$VM_HOST_MEMORY_MIB"
@@ -958,7 +938,7 @@ vm_host_start_qemu() {
     -drive "file=$run_dir/seed.iso,format=raw,if=none,id=cloud,readonly=on"
     -device virtio-scsi-pci,id=scsi0 -device scsi-cd,drive=cloud
     -drive "file=$run_dir/disk.qcow2,format=qcow2,if=virtio"
-    -chardev "socket,id=charfs,path=$run_dir/virtiofs.sock"
+    -chardev "socket,id=charfs,path=$socket"
     -device vhost-user-fs-pci,chardev=charfs,tag=workspace
     -display none -serial stdio -monitor none
     -netdev "$netdev" -device virtio-net-pci,netdev=net0 -no-reboot)

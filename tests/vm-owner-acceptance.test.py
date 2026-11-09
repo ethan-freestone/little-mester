@@ -644,22 +644,18 @@ class OwnerAcceptanceTests(unittest.TestCase):
             run_dir.mkdir(mode=0o700)
             for name in ("qemu.log", "virtiofsd.log", "proxy.log"):
                 (run_dir / name).touch(mode=0o600)
-            sock = run_dir / "virtiofs.sock"
-            import socket
-            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            listener.bind(str(sock))
-            listener.close()
+            (run_dir / "virtiofs.socket-path").write_text("/run/user/1000/lmv3-test/virtiofs.sock\n", encoding="utf-8")
+            os.chmod(run_dir / "virtiofs.socket-path", 0o600)
             child = subprocess.Popen(["/usr/bin/sleep", "30"])
-            pid_file = run_dir / "virtiofs.sock.pid"
-            pid_file.write_text(f"{child.pid}\n", encoding="ascii")
-            os.chmod(pid_file, 0o600)
             with mock.patch.object(acceptance, "state_root", return_value=pathlib.Path(temporary)), \
-                    mock.patch.object(acceptance, "verify_user_directory_chain"), \
-                    mock.patch.object(acceptance, "socket_listener_present", return_value=False):
-                result = acceptance.inspect_cleanup("e" * 40, run_id)
+                     mock.patch.object(acceptance, "verify_user_directory_chain"), \
+                     mock.patch.object(acceptance, "inspect_virtiofs_artifacts", return_value={
+                         "socket_present": True, "pid_present": True, "runtime_directory": "present"
+                     }):
+                result = acceptance.inspect_cleanup("e" * 40, run_id, pathlib.Path("/protected/install"))
             self.assertEqual(result["status"], "PASS")
-            self.assertTrue(sock.exists())
-            self.assertEqual(pid_file.read_text(encoding="ascii"), f"{child.pid}\n")
+            self.assertTrue((run_dir / "virtiofs.socket-path").exists())
+            self.assertTrue(any("PID artifact" in artifact for artifact in result["residual_artifacts"]))
             self.assertIsNone(child.poll())
             child.terminate()
             child.wait(timeout=5)
@@ -671,28 +667,55 @@ class OwnerAcceptanceTests(unittest.TestCase):
             run_dir.mkdir(mode=0o700)
             for name in ("qemu.log", "virtiofsd.log", "proxy.log"):
                 (run_dir / name).touch(mode=0o600)
-            sock = run_dir / "virtiofs.sock"
-            import socket
-            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            listener.bind(str(sock))
-            try:
-                with mock.patch.object(acceptance, "state_root", return_value=pathlib.Path(temporary)), \
-                        mock.patch.object(acceptance, "verify_user_directory_chain"), \
-                        mock.patch.object(acceptance, "socket_listener_present", return_value=True):
-                    with self.assertRaises(acceptance.GateError):
-                        acceptance.inspect_cleanup("f" * 40, run_id)
-                self.assertTrue(sock.exists())
-            finally:
-                listener.close()
+            (run_dir / "virtiofs.socket-path").touch(mode=0o600)
+            with mock.patch.object(acceptance, "state_root", return_value=pathlib.Path(temporary)), \
+                    mock.patch.object(acceptance, "verify_user_directory_chain"), \
+                    mock.patch.object(acceptance, "inspect_virtiofs_artifacts", side_effect=acceptance.GateError("BLOCKED", "listener remains")):
+                with self.assertRaises(acceptance.GateError):
+                    acceptance.inspect_cleanup("f" * 40, run_id, pathlib.Path("/protected/install"))
+
+    def test_early_startup_without_qemu_log_is_not_cleanup_acceptance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_id = "20261109T154005Z-" + "1" * 32
+            run_dir = pathlib.Path(temporary) / run_id
+            run_dir.mkdir(mode=0o700)
+            for name in ("virtiofsd.log", "proxy.log", "virtiofs.socket-path"):
+                (run_dir / name).touch(mode=0o600)
+            with mock.patch.object(acceptance, "state_root", return_value=pathlib.Path(temporary)), \
+                    mock.patch.object(acceptance, "verify_user_directory_chain"):
+                with self.assertRaisesRegex(acceptance.GateError, "early startup failure"):
+                    acceptance.inspect_cleanup("1" * 40, run_id, pathlib.Path("/protected/install"))
+
+    def test_cleanup_report_requires_completed_run_and_cleanup_gates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            report_dir = root / "report"
+            report_dir.mkdir(mode=0o700)
+            report = report_dir / "report.json"
+            data = acceptance.report_template("2" * 40, "run", report_dir)
+            data["evidence"]["vm_run_id"] = "20261109T154005Z-" + "2" * 32
+            data["gates"]["run"] = "BLOCKED"
+            data["gates"]["cleanup"] = "NOT_RUN"
+            report.write_text(json.dumps(data), encoding="utf-8")
+            os.chmod(report, 0o600)
+            with mock.patch.object(acceptance, "runtime_dir", return_value=root):
+                with self.assertRaisesRegex(acceptance.GateError, "early startup failure"):
+                    acceptance.verify_cleanup_report("2" * 40, data["evidence"]["vm_run_id"])
 
     def test_proc_unix_listener_path_preserves_repeated_spaces(self):
         import socket
+        helper_loader = importlib.machinery.SourceFileLoader(
+            "virtiofs_socket_helper", str(ROOT / "lib/vm/virtiofs-socket.py")
+        )
+        helper_spec = importlib.util.spec_from_loader(helper_loader.name, helper_loader)
+        helper = importlib.util.module_from_spec(helper_spec)
+        helper_loader.exec_module(helper)
         with tempfile.TemporaryDirectory(prefix="vm owner  ") as temporary:
             path = pathlib.Path(temporary) / "virtiofs  socket.sock"
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 listener.bind(str(path))
-                self.assertTrue(acceptance.socket_listener_present(str(path)))
+                self.assertTrue(helper._listener_present(str(path)))
             finally:
                 listener.close()
 
@@ -703,11 +726,12 @@ class OwnerAcceptanceTests(unittest.TestCase):
             run_dir.mkdir(mode=0o700)
             for name in ("qemu.log", "virtiofsd.log", "proxy.log"):
                 (run_dir / name).touch(mode=0o600)
+            (run_dir / "virtiofs.socket-path").touch(mode=0o600)
             (run_dir / "oauth-url.txt").write_text("unexpected", encoding="utf-8")
             with mock.patch.object(acceptance, "state_root", return_value=pathlib.Path(temporary)), \
                     mock.patch.object(acceptance, "verify_user_directory_chain"):
                 with self.assertRaises(acceptance.GateError):
-                    acceptance.inspect_cleanup("a" * 40, run_id)
+                    acceptance.inspect_cleanup("a" * 40, run_id, pathlib.Path("/protected/install"))
             self.assertTrue((run_dir / "oauth-url.txt").exists())
 
 

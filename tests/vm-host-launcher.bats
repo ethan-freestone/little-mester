@@ -400,7 +400,7 @@ PY
   run vm_host_start_virtiofs "$run_dir" "$TEST_TMP"
 
   [ "$status" -ne 0 ]
-  [[ "$output" == *'refusing pre-existing virtiofs socket or PID path'* ]]
+  [[ "$output" == *'could not securely allocate a short per-run virtiofs socket path'* ]]
   [ -e "$run_dir/virtiofs.sock" ]
   [ "$(<"$run_dir/virtiofs.sock.pid")" = "$pid" ]
   kill -0 "$pid"
@@ -936,6 +936,19 @@ PY
   [ "$(<"$TEST_POLICY_CALLS")" = "$executable" ]
   VM_HOST_TEST_VIRTIOFSD_INVOCATION="$invocation"
   export VM_HOST_TEST_VIRTIOFSD_INVOCATION
+  mkdir -m 0700 "$TEST_TMP/virtiofs-runtime"
+  python3() {
+    if [[ "${2:-}" == *virtiofs-socket.py ]]; then
+      case "${3:-}" in
+        allocate) printf '%s\n' "$TEST_TMP/virtiofs-runtime/virtiofs.sock" ;;
+        create-log) : >"$4/virtiofsd.log"; chmod 0600 "$4/virtiofsd.log" ;;
+        startup|stopped) return 0 ;;
+        *) return 1 ;;
+      esac
+    else
+      command python3 "$@"
+    fi
+  }
   vm_host_record_process_identity() {
     local log_path="${1%/virtiofsd.identity}/virtiofsd.log"
     : >"$1"
@@ -951,17 +964,18 @@ PY
 
   [ "$status" -eq 0 ] || { printf 'virtiofs start output: %s\n' "$output" >&2; return 1; }
   expected_invocation="$(printf '%s\n' "$executable" --shared-dir "$TEST_TMP/workspace" \
-    --socket-path "$run_dir/virtiofs.sock" --rlimit-nofile=1048576)"
+    --socket-path "$TEST_TMP/virtiofs-runtime/virtiofs.sock" --rlimit-nofile=1048576)"
   [ "$(<"$invocation")" = "$expected_invocation" ]
-  [ -S "$run_dir/virtiofs.sock" ]
-  [ -f "$run_dir/virtiofs.sock.pid" ]
-  [ "$(stat -c %a "$run_dir/virtiofs.sock.pid")" = 600 ]
+  [ -S "$TEST_TMP/virtiofs-runtime/virtiofs.sock" ]
+  [ -f "$TEST_TMP/virtiofs-runtime/virtiofs.sock.pid" ]
+  [ "$(stat -c %a "$TEST_TMP/virtiofs-runtime/virtiofs.sock.pid")" = 600 ]
 }
 
 @test "cleanup retains stopped run socket/PID artifacts and never signals PID-file contents" {
   local run_dir="$TEST_TMP/retained-virtiofs" pid
   mkdir -m 0700 "$run_dir"
-  python3 - "$run_dir/virtiofs.sock" <<'PY'
+  mkdir -m 0700 "$TEST_TMP/virtiofs-runtime"
+  python3 - "$TEST_TMP/virtiofs-runtime/virtiofs.sock" <<'PY'
 import socket, sys
 listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 listener.bind(sys.argv[1])
@@ -969,17 +983,165 @@ listener.close()
 PY
   sleep 30 &
   pid=$!
-  printf '%s\n' "$pid" >"$run_dir/virtiofs.sock.pid"
-  chmod 0600 "$run_dir/virtiofs.sock.pid"
+  printf '%s\n' "$pid" >"$TEST_TMP/virtiofs-runtime/virtiofs.sock.pid"
+  chmod 0600 "$TEST_TMP/virtiofs-runtime/virtiofs.sock.pid"
+  printf '%s\n' "$TEST_TMP/virtiofs-runtime/virtiofs.sock" >"$run_dir/virtiofs.socket-path"
+  chmod 0600 "$run_dir/virtiofs.socket-path"
+  vm_host_validate_virtiofs_artifacts() { return 0; }
   VM_HOST_RUN_DIR="$run_dir"
 
   vm_host_cleanup
 
-  [ -S "$run_dir/virtiofs.sock" ]
-  [ "$(<"$run_dir/virtiofs.sock.pid")" = "$pid" ]
+  [ -S "$TEST_TMP/virtiofs-runtime/virtiofs.sock" ]
+  [ "$(<"$TEST_TMP/virtiofs-runtime/virtiofs.sock.pid")" = "$pid" ]
   kill -0 "$pid"
   kill "$pid"
   wait "$pid" 2>/dev/null || true
+}
+
+@test "virtiofs socket uses a short path when the retained state root is longer than SUN_LEN" {
+  local long_state="$TEST_TMP/$(printf '%050d' 1)/$(printf '%050d' 2)/$(printf '%050d' 3)"
+  local run_dir="$long_state/20261109T195256Z-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  local fake_daemon="$TEST_TMP/virtiofsd-short-path" invocation="$TEST_TMP/socket-path"
+  local log_path="$run_dir/virtiofsd.log" identity_path="$run_dir/virtiofsd.identity"
+  mkdir -p "$run_dir" "$TEST_TMP/workspace"
+  chmod 0700 "$run_dir"
+  cat >"$fake_daemon" <<'PY'
+#!/usr/bin/python3
+import os, pathlib, signal, socket, sys, time
+path = sys.argv[sys.argv.index("--socket-path") + 1]
+pathlib.Path(os.environ["VM_HOST_TEST_INVOCATION"]).write_text(path, encoding="utf-8")
+if len(os.fsencode(path)) > 107:
+    print("Error creating listener: socket error: path must be shorter than SUN_LEN", flush=True)
+    raise SystemExit(1)
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(path)
+listener.listen(1)
+pathlib.Path(path + ".pid").write_text(str(os.getpid()) + "\n", encoding="ascii")
+listener.close()
+PY
+  chmod 0700 "$fake_daemon"
+  mkdir -m 0700 "$TEST_TMP/short-socket-dir"
+  export VM_HOST_TEST_INVOCATION="$invocation"
+  VM_HOST_VIRTIOFSD_EXECUTABLE="$fake_daemon"
+  python3() {
+    if [[ "${2:-}" == *virtiofs-socket.py ]]; then
+      case "${3:-}" in
+        allocate) printf '%s\n' "$TEST_TMP/short-socket-dir/virtiofs.sock" ;;
+        create-log) : >"$4/virtiofsd.log"; chmod 0600 "$4/virtiofsd.log" ;;
+        startup|stopped) return 0 ;;
+        *) return 1 ;;
+      esac
+    else
+      command python3 "$@"
+    fi
+  }
+  vm_host_record_process_identity() {
+    # Isolate the path behavior from the separate asynchronous log-open race.
+    local log="${1%/virtiofsd.identity}/virtiofsd.log"
+    for _ in {1..100}; do
+      [[ -e "$log" ]] && break
+      sleep 0.01
+    done
+    [ -f "$log" ] || return 1
+    printf '{"test_identity":true}\n' >"$1"
+  }
+  vm_host_process_identity_status() {
+    for _ in {1..100}; do
+      [[ -s "$invocation" ]] && break
+      sleep 0.01
+    done
+    [[ -s "$invocation" && -S "$(<"$invocation")" ]]
+  }
+  VM_HOST_RUN_DIR="$run_dir"
+
+  if vm_host_start_virtiofs "$run_dir" "$TEST_TMP/workspace"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  for _ in {1..200}; do
+    [[ -e "$run_dir/virtiofsd.complete" ]] && break
+    sleep 0.01
+  done
+  [ -e "$run_dir/virtiofsd.complete" ]
+  [ "$status" -eq 0 ]
+  local socket_path="$(<"$invocation")"
+  [ "$(python3 -c 'import os,sys; print(len(os.fsencode(sys.argv[1])))' "$socket_path")" -le 107 ]
+  [[ "$socket_path" != "$run_dir"/* ]]
+  [[ "$socket_path" == *"/virtiofs.sock" ]]
+  vm_host_validate_virtiofs_artifacts "$run_dir" stopped
+}
+
+@test "virtiofs log exists privately before a delayed bounded logger starts" {
+  local run_dir="$TEST_TMP/delayed-logger-run" fake_root="$TEST_TMP/slow-logger-root"
+  local fake_daemon="$TEST_TMP/virtiofsd-immediate-failure" real_logger="$TEST_ROOT/lib/vm/bounded-log.py"
+  local identity_path="$run_dir/virtiofsd.identity" complete_path="$run_dir/virtiofsd.complete"
+  mkdir -m 0700 "$run_dir" "$fake_root"
+  mkdir -p "$fake_root/lib/vm"
+  cat >"$fake_root/lib/vm/bounded-log.py" <<'PY'
+import os, runpy, sys, time
+time.sleep(0.5)
+real = os.environ["VM_HOST_TEST_REAL_LOGGER"]
+sys.argv = [real, *sys.argv[1:]]
+runpy.run_path(real, run_name="__main__")
+PY
+  cat >"$fake_daemon" <<'SH'
+#!/usr/bin/bash
+printf 'intentional virtiofsd startup failure\n' >&2
+exit 23
+SH
+  chmod 0700 "$fake_daemon"
+  export VM_HOST_TEST_REAL_LOGGER="$real_logger"
+  VM_HOST_SCRIPT_ROOT="$fake_root"
+  VM_HOST_VIRTIOFSD_EXECUTABLE="$fake_daemon"
+  python3() {
+    if [[ "${2:-}" == *virtiofs-socket.py ]]; then
+      case "${3:-}" in
+        allocate) printf '%s\n' "$TEST_TMP/delayed-socket/virtiofs.sock" ;;
+        create-log) : >"$4/virtiofsd.log"; chmod 0600 "$4/virtiofsd.log" ;;
+        *) return 0 ;;
+      esac
+    else
+      command python3 "$@"
+    fi
+  }
+  vm_host_record_process_identity() {
+    local log="${1%/virtiofsd.identity}/virtiofsd.log"
+    if [[ -f "$log" ]] && [[ "$(stat -c %a "$log")" == 600 ]]; then
+      printf 'yes\n' >"$TEST_TMP/log-precreated"
+    else
+      printf 'no\n' >"$TEST_TMP/log-precreated"
+    fi
+    printf '{"test_identity":true}\n' >"$1"
+  }
+  vm_host_process_identity_status() {
+    for _ in {1..200}; do
+      [[ -e "$complete_path" ]] && return 1
+      sleep 0.01
+    done
+    return 2
+  }
+  VM_HOST_RUN_DIR="$run_dir"
+
+  if vm_host_start_virtiofs "$run_dir" "$TEST_TMP/workspace"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  [ "$status" -ne 0 ]
+  for _ in {1..200}; do
+    [[ -e "$complete_path" ]] && break
+    sleep 0.01
+  done
+  [ -e "$complete_path" ]
+  [ "$(<"$TEST_TMP/log-precreated")" = yes ]
+  [ -f "$run_dir/virtiofsd.log" ]
+  [ "$(stat -c %a "$run_dir/virtiofsd.log")" = 600 ]
+  grep -Fq 'intentional virtiofsd startup failure' "$run_dir/virtiofsd.log"
+  [ ! -e "$run_dir/virtiofs.sock" ]
 }
 
 @test "stopped virtiofs validation preserves repeated spaces while checking listener paths" {
@@ -994,10 +1156,16 @@ PY
   local listener_pid=$!
   sleep 0.1
 
-  run vm_host_validate_virtiofs_artifacts "$run_dir" stopped
+  run python3 -I - "$run_dir/virtiofs.sock" "$TEST_ROOT/lib/vm/virtiofs-socket.py" <<'PY'
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location("socket_helper", sys.argv[2])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module._listener_present(sys.argv[1]))
+PY
 
-  [ "$status" -ne 0 ]
-  [[ "$output" == *'virtiofs socket still has a live listener'* ]]
+  [ "$status" -eq 0 ]
+  [ "$output" = True ]
   kill "$listener_pid"
   wait "$listener_pid" 2>/dev/null || true
 }
@@ -1147,6 +1315,34 @@ SH
   [ ! -e "$converted" ]
 }
 
+@test "new smoke disk preparation cannot resize the legacy default VM disk" {
+  local run_dir="$TEST_TMP/fresh-run" legacy="$TEST_TMP/home/.local/share/little-mester/vm/default/disk.qcow2"
+  mkdir -m 0700 "$run_dir"
+  mkdir -p "$(dirname "$legacy")"
+  printf 'legacy disk sentinel\n' >"$legacy"
+  local invocations="$TEST_TMP/qemu-img.calls"
+  curl() {
+    while (($#)); do
+      if [[ "$1" == --output ]]; then printf 'new candidate image\n' >"$2"; return 0; fi
+      shift
+    done
+    return 89
+  }
+  sha256sum() { return 0; }
+  qemu-img() {
+    printf '%s\n' "$*" >>"$invocations"
+    if [[ "$1" == convert ]]; then printf 'fresh run disk\n' >"${@: -1}"; fi
+  }
+
+  run vm_host_prepare_disk "$run_dir"
+
+  [ "$status" -eq 0 ]
+  [ "$(<"$run_dir/disk.qcow2")" = 'fresh run disk' ]
+  [ "$(<"$legacy")" = 'legacy disk sentinel' ]
+  grep -F -- "$run_dir/disk.qcow2" "$invocations"
+  [[ "$(<"$invocations")" != *"$legacy"* ]]
+}
+
 @test "proxy startup fails closed when launch cannot produce an owned process" {
   VM_HOST_SCRIPT_ROOT="$TEST_ROOT"
   python3() { return 73; }
@@ -1175,7 +1371,13 @@ SH
 @test "QEMU argv includes shareable memfd RAM required by vhost-user virtiofs" {
   local argv_file="$TEST_TMP/qemu.argv"
   VM_HOST_PROXY_PORT=32123
-  python3() { printf '%s\n' "$@" >"$argv_file"; }
+  python3() {
+    if [[ "${2:-}" == *virtiofs-socket.py && "${3:-}" == path ]]; then
+      printf '%s\n' "$TEST_TMP/virtiofs.sock"
+    else
+      printf '%s\n' "$@" >"$argv_file"
+    fi
+  }
   readlink() {
     printf '/usr/bin/python3\n'
   }
@@ -1191,12 +1393,19 @@ SH
   grep -Fx -- 'node,memdev=mem' "$argv_file"
   grep -Fx -- '-serial' "$argv_file"
   grep -Fx -- 'stdio' "$argv_file"
+  grep -Fx -- "socket,id=charfs,path=$TEST_TMP/virtiofs.sock" "$argv_file"
   grep -F -- 'restrict=on' "$argv_file"
 }
 
 @test "QEMU launch identity failure is nonzero and does not claim readiness" {
   VM_HOST_PROXY_PORT=32123
-  python3() { return 73; }
+  python3() {
+    if [[ "${2:-}" == *virtiofs-socket.py && "${3:-}" == path ]]; then
+      printf '%s\n' "$TEST_TMP/virtiofs.sock"
+    else
+      return 73
+    fi
+  }
   readlink() {
     printf '/usr/bin/python3\n'
   }
@@ -1348,6 +1557,7 @@ pathlib.Path(sys.argv[1]).write_bytes(b"x" * (int(sys.argv[2]) + 73))
 PY
   VM_HOST_RUN_DIR="$run_dir"
   VM_HOST_UNTRACKED_CHILD=0
+  vm_host_validate_virtiofs_artifacts() { return 0; }
 
   if vm_host_cleanup; then status=0; else status=$?; fi
 
@@ -1363,7 +1573,7 @@ PY
   local run_dir="$TEST_TMP/untracked-run"
   mkdir -m 0700 "$run_dir"
 
-  run bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_RUN_DIR="$2"; VM_HOST_UNTRACKED_CHILD=1; vm_host_cleanup' _ "$TEST_ROOT" "$run_dir"
+  run bash -c 'source "$1/lib/vm/host-launcher.sh"; vm_host_validate_virtiofs_artifacts() { return 0; }; VM_HOST_RUN_DIR="$2"; VM_HOST_UNTRACKED_CHILD=1; vm_host_cleanup' _ "$TEST_ROOT" "$run_dir"
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"cleanup incomplete"* ]]
@@ -1440,7 +1650,7 @@ PY
   local run_dir="$TEST_TMP/ambiguous-exit-run"
   mkdir -m 0700 "$run_dir"
 
-  run bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_RUN_DIR="$2"; VM_HOST_UNTRACKED_CHILD=1; trap vm_host_exit_cleanup EXIT; exit 0' _ "$TEST_ROOT" "$run_dir"
+  run bash -c 'source "$1/lib/vm/host-launcher.sh"; vm_host_validate_virtiofs_artifacts() { return 0; }; VM_HOST_RUN_DIR="$2"; VM_HOST_UNTRACKED_CHILD=1; trap vm_host_exit_cleanup EXIT; exit 0' _ "$TEST_ROOT" "$run_dir"
 
   [ "$status" -eq 1 ]
   [[ "$output" == *"cleanup incomplete"* ]]
@@ -1451,7 +1661,7 @@ PY
   local run_dir="$TEST_TMP/failed-stage-run"
   mkdir -m 0700 "$run_dir"
 
-  run bash -c 'source "$1/lib/vm/host-launcher.sh"; VM_HOST_RUN_DIR="$2"; VM_HOST_UNTRACKED_CHILD=1; trap vm_host_exit_cleanup EXIT; exit 73' _ "$TEST_ROOT" "$run_dir"
+  run bash -c 'source "$1/lib/vm/host-launcher.sh"; vm_host_validate_virtiofs_artifacts() { return 0; }; VM_HOST_RUN_DIR="$2"; VM_HOST_UNTRACKED_CHILD=1; trap vm_host_exit_cleanup EXIT; exit 73' _ "$TEST_ROOT" "$run_dir"
 
   [ "$status" -eq 73 ]
   [[ "$output" == *"cleanup incomplete"* ]]
@@ -1510,6 +1720,7 @@ PY
 set -euo pipefail
 root="$1" run_dir="$2" child_script="$3" parent_file="$4" descendant_file="$5" unrelated_file="$6"
 source "$root/lib/vm/host-launcher.sh"
+vm_host_validate_virtiofs_artifacts() { return 0; }
 VM_HOST_SCRIPT_ROOT="$root"
 VM_HOST_RUN_DIR="$run_dir"
 VM_HOST_UNTRACKED_CHILD=0
