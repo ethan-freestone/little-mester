@@ -34,6 +34,7 @@ dependencies = [
     root / "lib/vm/proxy.py",
     root / "lib/vm/bounded-log.py",
     root / "lib/vm/executable-policy.py",
+    root / "lib/vm/browser-auth-session.py",
 ]
 
 # Inspect the original lexical path before resolving anything. A symlink in
@@ -87,7 +88,7 @@ PY
 export VM_HOST_SCRIPT_ROOT="$root"
 command="${1:-}"
 [[ -n "$command" ]] || {
-  printf 'Usage: lab-vm smoke --workspace PATH --credentials-file PATH\n' >&2
+  printf 'Usage: lab-vm smoke --workspace PATH --model openai/<model-id>\n' >&2
   exit 2
 }
 shift

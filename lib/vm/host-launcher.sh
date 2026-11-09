@@ -20,6 +20,7 @@ VM_HOST_PROCESS_STOP_GRACE_MS=11000
 VM_HOST_PROCESS_KILL_SETTLE_MS=2000
 VM_HOST_MAX_RETAINED_RUNS=8
 VM_HOST_WORKSPACE_MAX_BYTES=8589934592
+VM_HOST_BROWSER_AUTH_TIMEOUT=600
 VM_HOST_IMAGE_URL='https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img'
 VM_HOST_IMAGE_SHA256='04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94'
 VM_HOST_DOCKER_IMAGE='busybox:1.36.1'
@@ -51,18 +52,18 @@ vm_host_require_kvm() {
 }
 
 vm_host_validate_workspace() {
-  local selected="${1:-}" install_root="${2:-}" state_root="${3:-}" credential_file="${4:-}"
+  local selected="${1:-}" install_root="${2:-}" state_root="${3:-}"
   [[ -n "$selected" && -n "$install_root" && -n "$state_root" ]] || {
     vm_host_error 'workspace and trusted install/state roots are required'
     return 1
   }
-  python3 -I - "$selected" "$install_root" "$state_root" "$credential_file" <<'PY'
+  python3 -I - "$selected" "$install_root" "$state_root" <<'PY'
 import os
 import pathlib
 import pwd
 import sys
 
-raw, install_raw, state_raw, credentials_raw = sys.argv[1:]
+raw, install_raw, state_raw = sys.argv[1:]
 uid = os.getuid()
 def fail(message):
     print(f"REFUSED: {message}", file=sys.stderr)
@@ -103,77 +104,16 @@ state = canon(state_raw)
 for label, protected in (("trusted installation", install), ("private runtime state", state)):
     if resolved == protected or resolved in protected.parents or protected in resolved.parents:
         fail(f"workspace overlaps {label}")
-if credentials_raw:
-    credentials = canon(credentials_raw)
-    if resolved == credentials or resolved in credentials.parents or credentials in resolved.parents:
-        fail("workspace overlaps the private provider credential file")
 print(resolved)
 PY
 }
 
-vm_host_validate_credentials() {
-  local file="${1:-}" workspace="${2:-}" install_root="${3:-}" state_root="${4:-}"
-  [[ -n "$file" ]] || { vm_host_error 'a private provider credential file is required'; return 1; }
-  python3 -I - "$file" "$workspace" "$install_root" "$state_root" <<'PY'
-import json
-import os
-import pathlib
-import re
-import stat
-import sys
-
-raw, workspace_raw, install_raw, state_raw = sys.argv[1:]
-def fail(message):
-    print(f"REFUSED: {message}", file=sys.stderr)
-    raise SystemExit(1)
-path = pathlib.Path(raw)
-try:
-    if not path.is_absolute():
-        path = pathlib.Path.cwd() / path
-    lexical = pathlib.Path(os.path.abspath(path))
-    resolved = path.resolve(strict=True)
-    info = resolved.stat(follow_symlinks=False)
-except (OSError, RuntimeError):
-    fail("credential file must be an existing regular file")
-if lexical != resolved or not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-    fail("credential file must be a canonical regular file, not a symlink")
-if info.st_uid != os.getuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
-    fail("credential file must be invoking-user-owned, single-link, and mode 0600")
-try:
-    text = resolved.read_text(encoding="utf-8")
-    data = json.loads(text)
-except (OSError, UnicodeError, json.JSONDecodeError):
-    fail("credential file must contain valid UTF-8 JSON")
-if not isinstance(data, dict) or set(data) != {"provider", "model", "api_key"}:
-    fail("credential JSON must contain exactly provider, model, and api_key")
-if data.get("provider") != "openai":
-    fail("only the owner-selected OpenAI provider is supported in this smoke")
-model = data.get("model")
-key = data.get("api_key")
-if not isinstance(model, str) or not re.fullmatch(r"openai/[A-Za-z0-9._-]{1,100}", model):
-    fail("model must be an OpenAI model ID of the form openai/<model>")
-if not isinstance(key, str) or not 20 <= len(key) <= 4096 or any(ord(c) < 0x21 or ord(c) > 0x7e for c in key):
-    fail("api_key must be a non-empty printable ASCII credential")
-for raw_protected in (workspace_raw, install_raw, state_raw):
-    protected = pathlib.Path(os.path.abspath(raw_protected))
-    if resolved == protected or resolved in protected.parents or protected in resolved.parents:
-        fail("credential file overlaps workspace, installation, or runtime state")
-PY
-}
-
-vm_host_credential_model() {
-  python3 -I - "$1" <<'PY'
-import json, sys
-print(json.load(open(sys.argv[1], encoding="utf-8"))["model"])
-PY
-}
-
-vm_host_credential_key_to_stdout() {
-  # Intended only as a pipe into forced-TTY SSH; never capture or log this value.
-  python3 -I - "$1" <<'PY'
-import json, sys
-sys.stdout.write(json.load(open(sys.argv[1], encoding="utf-8"))["api_key"] + "\n")
-PY
+vm_host_validate_model() {
+  local model="${1:-}"
+  [[ "$model" =~ ^openai/[A-Za-z0-9._-]{1,100}(#[A-Za-z0-9._-]{1,32})?$ ]] || {
+    vm_host_error 'model must be an OpenAI model ID of the form openai/<model>'
+    return 1
+  }
 }
 
 vm_host_account_home() {
@@ -507,6 +447,115 @@ vm_host_cleanup_one() {
   fi
 }
 
+vm_host_verify_browser_auth_proof() {
+  local proof_file="$1"
+  python3 -I - "$proof_file" <<'PY'
+import json, os, pathlib, stat, sys
+path = pathlib.Path(sys.argv[1])
+try:
+    info = os.lstat(path)
+    proof = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, ValueError, json.JSONDecodeError):
+    raise SystemExit("REFUSED: browser-auth cleanup proof is missing or invalid")
+if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or set(proof) != {"version", "ssh_stopped", "control_socket_absent", "listener_verified_closed", "cleanup_complete"}
+        or proof.get("version") != 1
+        or proof.get("ssh_stopped") is not True
+        or proof.get("control_socket_absent") is not True
+        or proof.get("listener_verified_closed") is not True
+        or proof.get("cleanup_complete") is not True):
+    raise SystemExit("REFUSED: browser-auth callback or SSH cleanup is unverified")
+PY
+}
+
+vm_host_auth_listener_closed() {
+  local port_file="$1"
+  python3 -I - "$port_file" <<'PY'
+import os, pathlib, stat, struct, socket, sys
+path = pathlib.Path(sys.argv[1])
+try:
+    info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        raise ValueError()
+    raw = path.read_text(encoding="ascii").strip()
+    if not raw.isdigit():
+        raise ValueError()
+    port = int(raw)
+    if not 1024 <= port <= 65535:
+        raise ValueError()
+except (OSError, ValueError, UnicodeError):
+    raise SystemExit("REFUSED: callback listener identity is invalid")
+try:
+    expected_loopback = struct.unpack("=I", socket.inet_aton("127.0.0.1"))[0]
+    def ipv6_accepts_ipv4(local_address):
+        address = b"".join(bytes.fromhex(local_address[index:index + 8])[::-1]
+                           for index in range(0, 32, 8))
+        if address == b"\0" * 16:
+            return True
+        return (address[:12] == b"\0" * 10 + b"\xff\xff"
+                and address[12:] in {b"\0" * 4, socket.inet_aton("127.0.0.1")})
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        rows = pathlib.Path(table).read_text(encoding="ascii").splitlines()[1:]
+        for row in rows:
+            fields = row.split()
+            if len(fields) < 4 or fields[3] != "0A":
+                continue
+            local_address, local_port = fields[1].split(":", 1)
+            if int(local_port, 16) != port:
+                continue
+            if table.endswith("tcp") and int(local_address, 16) in {0, expected_loopback}:
+                raise SystemExit("REFUSED: owned callback listener is still present or ambiguous")
+            if table.endswith("tcp6") and ipv6_accepts_ipv4(local_address):
+                raise SystemExit("REFUSED: owned callback listener is still present or ambiguous")
+except (OSError, UnicodeError, ValueError, IndexError) as error:
+    raise SystemExit("REFUSED: callback listener absence could not be verified") from error
+PY
+}
+
+vm_host_cleanup_browser_auth() {
+  local run_dir="$1" auth_identity="$1/auth-session.identity"
+  local auth_completion="$1/auth-session.complete" auth_proof="$1/auth-session.proof"
+  local ssh_identity="$1/auth-ssh.identity" callback_port_file="$1/auth-callback.port"
+  local guest_dir="" cleanup_failed=0
+  if [[ -e "$auth_identity" || -L "$auth_identity" || -e "$auth_completion" || -L "$auth_completion" ]]; then
+    vm_host_cleanup_one "$auth_identity" "$auth_completion" || cleanup_failed=1
+    if [[ -e "$auth_proof" || -L "$auth_proof" ]]; then
+      vm_host_verify_browser_auth_proof "$auth_proof" || cleanup_failed=1
+    else
+      printf 'WARNING: browser-auth session proof is absent; preserving run state %s\n' "$run_dir" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if [[ -e "$ssh_identity" || -L "$ssh_identity" ]]; then
+    vm_host_cleanup_one "$ssh_identity" || cleanup_failed=1
+  fi
+  if [[ -e "$callback_port_file" || -L "$callback_port_file" ]]; then
+    if ! vm_host_auth_listener_closed "$callback_port_file"; then
+      cleanup_failed=1
+    fi
+    if (( cleanup_failed == 0 )); then rm -f -- "$callback_port_file" || cleanup_failed=1; fi
+  fi
+  if [[ "${VM_HOST_AUTH_STARTED:-0}" == 1 && -e "$run_dir/qemu.identity" ]]; then
+    local run_id="${run_dir##*/}"
+    if [[ "$run_id" =~ ^[A-Za-z0-9-]{1,80}$ ]]; then
+      guest_dir="/tmp/mester-v3-auth-$run_id"
+      if ! vm_host_ssh "$run_dir" \
+        "if [ -L '$guest_dir' ]; then exit 1; fi; if [ -e '$guest_dir' ]; then rm -rf -- '$guest_dir'; fi; test ! -e '$guest_dir' && test ! -L '$guest_dir'"; then
+        printf 'WARNING: temporary guest browser helper cleanup was not verified\n' >&2
+        cleanup_failed=1
+      fi
+    else
+      cleanup_failed=1
+    fi
+  fi
+  if (( cleanup_failed != 0 )); then
+    printf 'WARNING: browser-auth cleanup incomplete; preserving run state %s\n' "$run_dir" >&2
+    return 1
+  fi
+  rm -f -- "$auth_proof" "$1/auth-session.log" "$1/auth-ssh.log" "$1/auth-control.sock" || return 1
+}
+
 vm_host_cleanup() {
   local cleanup_failed="${VM_HOST_UNTRACKED_CHILD:-0}"
   if [[ -z "${VM_HOST_RUN_DIR:-}" ]]; then
@@ -536,6 +585,9 @@ PY
     return 1
   fi
   if (( cleanup_failed == 0 )); then
+    vm_host_cleanup_browser_auth "$VM_HOST_RUN_DIR" || cleanup_failed=1
+  fi
+  if (( cleanup_failed == 0 )); then
     vm_host_cleanup_one "$VM_HOST_RUN_DIR/qemu.identity" "$VM_HOST_RUN_DIR/qemu.complete" || cleanup_failed=1
   fi
   if (( cleanup_failed == 0 )); then
@@ -551,14 +603,17 @@ PY
       "$VM_HOST_RUN_DIR/known_hosts" "$VM_HOST_RUN_DIR/known_hosts.tmp" "$VM_HOST_RUN_DIR/known_hosts.valid" \
       "$VM_HOST_RUN_DIR/qemu.command" "$VM_HOST_RUN_DIR/proxy.port" "$VM_HOST_RUN_DIR/ssh_port" \
       "$VM_HOST_RUN_DIR/model-response.raw" "$VM_HOST_RUN_DIR/docker-container.raw" \
-      "$VM_HOST_RUN_DIR/docker-inspect.raw" "$VM_HOST_RUN_DIR/docker-security.raw" || cleanup_failed=1
+      "$VM_HOST_RUN_DIR/docker-inspect.raw" "$VM_HOST_RUN_DIR/docker-security.raw" \
+      "$VM_HOST_RUN_DIR/auth-ssh.identity" "$VM_HOST_RUN_DIR/auth-callback.port" \
+      "$VM_HOST_RUN_DIR/auth-session.proof" "$VM_HOST_RUN_DIR/auth-session.log" \
+      "$VM_HOST_RUN_DIR/auth-ssh.log" "$VM_HOST_RUN_DIR/auth-control.sock" || cleanup_failed=1
   fi
   if (( cleanup_failed == 0 )); then
     python3 -I - "$VM_HOST_RUN_DIR" "$VM_HOST_LOG_LIMIT_BYTES" <<'PY' || cleanup_failed=1
 import os, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 limit = int(sys.argv[2])
-for name in ("qemu.log", "virtiofsd.log", "proxy.log"):
+for name in ("qemu.log", "virtiofsd.log", "proxy.log", "auth-session.log", "auth-ssh.log"):
     path = root / name
     if not path.is_file() or path.is_symlink():
         continue
@@ -839,21 +894,101 @@ vm_host_provisioning_ready() {
   printf 'ROOTLESS_DOCKER_OK\n' || return 1
 }
 
-vm_host_import_credentials() {
-  local run_dir="$1" credential_file="$2" timeout_seconds=60
-  printf 'stage: importing owner credential into private guest OpenCode store\n'
-  if ! vm_host_credential_key_to_stdout "$credential_file" | \
-    vm_host_ssh_bounded "$run_dir" - \
-      'env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin XDG_DATA_HOME=/home/mester/.local/share XDG_CONFIG_HOME=/home/mester/.config HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 opencode auth login openai --method key && chmod 0600 /home/mester/.local/share/opencode/opencode.db' \
-      "$timeout_seconds" 1 1; then
-    vm_host_error 'private guest OpenCode credential import failed (credential content suppressed)'
+vm_host_auth_guest_cleanup() {
+  local run_dir="$1" run_id="${1##*/}" guest_dir
+  [[ "$run_id" =~ ^[A-Za-z0-9-]{1,80}$ ]] || { vm_host_error 'temporary guest browser path is invalid'; return 1; }
+  guest_dir="/tmp/mester-v3-auth-$run_id"
+  vm_host_ssh "$run_dir" \
+    "if [ -L '$guest_dir' ]; then exit 1; fi; if [ -e '$guest_dir' ]; then rm -rf -- '$guest_dir'; fi; test ! -e '$guest_dir' && test ! -L '$guest_dir'"
+}
+
+vm_host_browser_auth_session() {
+  local run_dir="$1" timeout_seconds="$2" bounded_logger="$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py"
+  local auth_script="$VM_HOST_SCRIPT_ROOT/lib/vm/browser-auth-session.py" ssh_exe python_exe ssh_port run_id guest_dir
+  local pid status identity_file="$1/auth-session.identity" completion_file="$1/auth-session.complete"
+  local proof_file="$1/auth-session.proof" control_socket="$1/auth-control.sock"
+  local callback_port_file="$1/auth-callback.port" ssh_identity="$1/auth-ssh.identity"
+  [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || { vm_host_error 'browser-auth deadline must be a positive integer'; return 2; }
+  ssh_port="$(<"$run_dir/ssh_port")"
+  [[ "$ssh_port" =~ ^[0-9]{1,5}$ ]] || { vm_host_error 'SSH control port is invalid'; return 1; }
+  run_id="${run_dir##*/}"
+  [[ "$run_id" =~ ^[A-Za-z0-9-]{1,80}$ ]] || { vm_host_error 'temporary guest browser path is invalid'; return 1; }
+  guest_dir="/tmp/mester-v3-auth-$run_id"
+  ssh_exe="$(command -v ssh)" || { vm_host_error 'SSH executable is unavailable'; return 1; }
+  python_exe="$(readlink -f -- "$(command -v python3)")" || return 1
+  rm -f -- "$identity_file" "$completion_file" "$proof_file" "$control_socket" "$callback_port_file" "$ssh_identity"
+  : >"$run_dir/auth-session.log" || return 1
+  chmod 0600 "$run_dir/auth-session.log" || return 1
+  printf 'stage: owner ChatGPT browser login (maximum %ss)\n' "$timeout_seconds"
+  printf 'In the guest TUI use /connect → OpenAI → Sign in with ChatGPT; copy-link (c), paste in your host browser, then type /exit after sign-in. Do not click/open the link.\n'
+  (
+    exec 0<>/dev/tty
+    exec python3 -I "$bounded_logger" "$run_dir/auth-session.log" "$VM_HOST_GUEST_OUTPUT_LIMIT_BYTES" \
+      --fail-on-overflow --stdin --completion-file "$completion_file" -- \
+      python3 -I "$auth_script" \
+        --ssh "$ssh_exe" --ssh-port "$ssh_port" \
+        --identity-file "$run_dir/id_vm_control" --known-hosts "$run_dir/known_hosts" \
+        --control-socket "$control_socket" --ssh-identity "$ssh_identity" \
+        --callback-port-file "$callback_port_file" --proof-file "$proof_file" \
+        --run-dir "$run_dir" --guest-auth-dir "$guest_dir" \
+        --timeout-seconds "$timeout_seconds" --output-limit "$VM_HOST_GUEST_OUTPUT_LIMIT_BYTES"
+  ) &
+  pid="$!"
+  VM_HOST_UNTRACKED_CHILD=1
+  vm_host_record_process_identity "$identity_file" "$pid" "$python_exe" "$bounded_logger" || {
+    vm_host_error 'could not bind browser-auth session to an exact bounded process identity'
+    return 1
+  }
+  VM_HOST_UNTRACKED_CHILD=0
+  if wait "$pid"; then status=0; else status=$?; fi
+  if ! vm_host_verify_logger_completion "$identity_file" "$completion_file"; then
+    vm_host_error 'browser-auth output or process cleanup proof is invalid'
     return 1
   fi
-  if ! vm_host_ssh "$run_dir" 'test -d /home/mester/.local/share/opencode && test "$(stat -c %a /home/mester/.local/share/opencode)" = 700 && test -f /home/mester/.local/share/opencode/opencode.db && test ! -L /home/mester/.local/share/opencode/opencode.db && test "$(stat -c %a /home/mester/.local/share/opencode/opencode.db)" = 600'; then
-    vm_host_error 'guest OpenCode credential database is not private mode 0600'
+  if ! vm_host_verify_browser_auth_proof "$proof_file"; then
+    vm_host_error 'browser-auth SSH/callback cleanup was not verified'
     return 1
   fi
-  VM_HOST_CREDENTIALS_IMPORTED=1
+  if (( status != 0 )); then
+    vm_host_error 'owner browser authentication was cancelled, timed out, or failed; details are shown only in the live TUI'
+    return 1
+  fi
+}
+
+vm_host_browser_auth_smoke() {
+  local run_dir="$1" model="$2" timeout_seconds="$3" run_id guest_dir
+  vm_host_validate_model "$model" || return 1
+  run_id="${run_dir##*/}"
+  [[ "$run_id" =~ ^[A-Za-z0-9-]{1,80}$ ]] || { vm_host_error 'temporary guest browser path is invalid'; return 1; }
+  guest_dir="/tmp/mester-v3-auth-$run_id"
+  VM_HOST_AUTH_STARTED=1
+  if ! vm_host_ssh "$run_dir" \
+    "test ! -e '$guest_dir' && test ! -L '$guest_dir' && umask 077 && mkdir -m 700 -- '$guest_dir'"; then
+    vm_host_error 'could not create a fresh private guest browser-path directory'
+    return 1
+  fi
+  if ! vm_host_ssh "$run_dir" \
+    "test -x /usr/bin/node && test ! -e '$guest_dir/node' && ln -s -- /usr/bin/node '$guest_dir/node' && test -L '$guest_dir/node' && test ! -e '$guest_dir/xdg-open' && test ! -e '$guest_dir/gio'"; then
+    vm_host_error 'could not prepare the temporary guest Node path without a browser opener'
+    return 1
+  fi
+  vm_host_browser_auth_session "$run_dir" "$timeout_seconds" || return 1
+  if ! vm_host_auth_listener_closed "$run_dir/auth-callback.port"; then
+    vm_host_error 'temporary host callback listener was not closed before model acceptance'
+    return 1
+  fi
+  rm -f -- "$run_dir/auth-callback.port" || return 1
+  if ! vm_host_ssh "$run_dir" \
+    'test -d /home/mester/.local/share/opencode && test ! -L /home/mester/.local/share/opencode && test "$(stat -c %u:%g:%a /home/mester/.local/share/opencode)" = "$(id -u):$(id -g):700" && test -f /home/mester/.local/share/opencode/opencode.db && test ! -L /home/mester/.local/share/opencode/opencode.db && chmod 0600 /home/mester/.local/share/opencode/opencode.db && test "$(stat -c %u:%g:%a /home/mester/.local/share/opencode/opencode.db)" = "$(id -u):$(id -g):600"'; then
+    vm_host_error 'guest OpenCode auth database is not private mode 0600'
+    return 1
+  fi
+  if ! vm_host_auth_guest_cleanup "$run_dir"; then
+    vm_host_error 'temporary guest browser-path cleanup was not verified'
+    return 1
+  fi
+  VM_HOST_AUTH_STARTED=0
+  printf 'BROWSER_AUTH_UI_OK\n'
 }
 
 vm_host_model_smoke() {
@@ -921,26 +1056,26 @@ vm_host_docker_smoke() {
 }
 
 vm_host_smoke() {
-  local selected_workspace="" credential_file="" arg
+  local selected_workspace="" model="" arg
   while (($#)); do
     arg="$1"; shift
     case "$arg" in
       --workspace) (($#)) || { vm_host_error '--workspace requires a value'; return 2; }; [[ -z "$selected_workspace" ]] || { vm_host_error '--workspace may appear only once'; return 2; }; selected_workspace="$1"; shift ;;
-      --credentials-file) (($#)) || { vm_host_error '--credentials-file requires a value'; return 2; }; [[ -z "$credential_file" ]] || { vm_host_error '--credentials-file may appear only once'; return 2; }; credential_file="$1"; shift ;;
+      --model) (($#)) || { vm_host_error '--model requires a value'; return 2; }; [[ -z "$model" ]] || { vm_host_error '--model may appear only once'; return 2; }; model="$1"; shift ;;
       *) vm_host_error "unsupported smoke argument: $arg"; return 2 ;;
     esac
   done
-  [[ -n "$selected_workspace" && -n "$credential_file" ]] || {
-    vm_host_error 'usage: lab-vm smoke --workspace <fresh-workspace> --credentials-file <private-provider-json>'
+  [[ -n "$selected_workspace" && -n "$model" ]] || {
+    vm_host_error 'usage: lab-vm smoke --workspace <fresh-workspace> --model openai/<model-id>'
     return 2
   }
+  vm_host_validate_model "$model" || return 2
   vm_host_require_kvm || return 1
   vm_host_require_commands || return 1
   local home state_root workspace
   home="$(vm_host_account_home)" || { vm_host_error 'could not resolve invoking account home'; return 1; }
   state_root="$home/.local/state/little-mester/v3-smoke"
-  workspace="$(vm_host_validate_workspace "$selected_workspace" "$VM_HOST_SCRIPT_ROOT" "$state_root" "$credential_file")" || return 1
-  vm_host_validate_credentials "$credential_file" "$workspace" "$VM_HOST_SCRIPT_ROOT" "$state_root" || return 1
+  workspace="$(vm_host_validate_workspace "$selected_workspace" "$VM_HOST_SCRIPT_ROOT" "$state_root")" || return 1
   vm_host_check_workspace_filesystem "$workspace" || return 1
   if vm_host_is_under "$VM_HOST_SCRIPT_ROOT" "$workspace"; then
     vm_host_error 'candidate launcher and transitive source must remain outside the exported workspace'
@@ -949,8 +1084,8 @@ vm_host_smoke() {
     local under_status=$?
     (( under_status == 1 )) || return 1
   fi
-  local model start_time run_id vm_name ssh_port uid gid pubkey
-  model="$(vm_host_credential_model "$credential_file")" || return 1
+  local start_time run_id vm_name ssh_port uid gid pubkey remaining auth_wait
+  VM_HOST_AUTH_STARTED=0
   start_time=$SECONDS
   state_root="$(vm_host_prepare_state_root "$home")" || return 1
   vm_host_check_run_capacity "$state_root" || return 1
@@ -982,7 +1117,11 @@ vm_host_smoke() {
   vm_host_wait_ssh "$VM_HOST_RUN_DIR" "$ssh_port" || return 1
   vm_host_provisioning_ready "$VM_HOST_RUN_DIR" || return 1
   printf 'VM_UP\n' || return 1
-  vm_host_import_credentials "$VM_HOST_RUN_DIR" "$credential_file" || return 1
+  remaining=$((VM_HOST_TOTAL_TIMEOUT - (SECONDS - start_time)))
+  (( remaining > 0 )) || { vm_host_error 'smoke deadline expired before browser authentication'; return 1; }
+  auth_wait="$VM_HOST_BROWSER_AUTH_TIMEOUT"
+  (( auth_wait <= remaining )) || auth_wait="$remaining"
+  vm_host_browser_auth_smoke "$VM_HOST_RUN_DIR" "$model" "$auth_wait" || return 1
   vm_host_model_smoke "$VM_HOST_RUN_DIR" "$model" || return 1
   vm_host_docker_smoke "$VM_HOST_RUN_DIR" || return 1
   if (( SECONDS - start_time > VM_HOST_TOTAL_TIMEOUT )); then

@@ -71,29 +71,45 @@ PY
   [ ! -e "$TEST_TMP/target/state" ]
 }
 
-@test "credential file requires private regular owner-owned OpenAI JSON" {
-  cat >"$TEST_TMP/provider.json" <<'JSON'
-{"provider":"openai","model":"openai/gpt-6.1-sol","api_key":"unit-test-not-a-secret"}
-JSON
-  chmod 0644 "$TEST_TMP/provider.json"
+@test "browser-auth model selector accepts only bounded OpenAI model identifiers" {
+  run vm_host_validate_model 'openai/gpt-6-luna#max'
+  [ "$status" -eq 0 ]
 
-  run vm_host_validate_credentials "$TEST_TMP/provider.json"
-
+  run vm_host_validate_model 'openai/gpt-6-luna#max;touch /tmp/not-allowed'
   [ "$status" -ne 0 ]
-  [[ "$output" == *"mode 0600"* ]]
-  [[ "$output" != *"unit-test-not-a-secret"* ]]
+  [[ "$output" != *"not-allowed"* ]]
 }
 
-@test "credential parser rejects unknown fields and never prints key material" {
-  cat >"$TEST_TMP/provider.json" <<'JSON'
-{"provider":"openai","model":"openai/gpt-6.1-sol","api_key":"unit-test-not-a-secret","workspace":"/etc"}
-JSON
-  chmod 0600 "$TEST_TMP/provider.json"
+@test "host callback cleanup rejects IPv4-mapped IPv6 listeners and verifies closure" {
+  local port_file="$TEST_TMP/listener-port" pid
+  python3 - "$port_file" <<'PY' &
+import os, socket, sys, time
+listener = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+listener.bind(("::ffff:127.0.0.1", 0))
+listener.listen(1)
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w") as stream:
+    stream.write(str(listener.getsockname()[1]) + "\n")
+    stream.flush()
+while True:
+    time.sleep(1)
+PY
+  pid="$!"
+  for _ in {1..100}; do
+    [[ -s "$port_file" ]] && break
+    sleep 0.01
+  done
+  [ -s "$port_file" ]
+  chmod 0600 "$port_file"
 
-  run vm_host_validate_credentials "$TEST_TMP/provider.json"
-
+  run vm_host_auth_listener_closed "$port_file"
   [ "$status" -ne 0 ]
-  [[ "$output" != *"unit-test-not-a-secret"* ]]
+
+  kill "$pid"
+  wait "$pid" 2>/dev/null || true
+  run vm_host_auth_listener_closed "$port_file"
+  [ "$status" -eq 0 ]
 }
 
 @test "resource envelope is bounded and does not select guest admin or nested KVM" {
@@ -127,13 +143,11 @@ JSON
   vm_host_require_commands() { return 0; }
   vm_host_account_home() { printf '%s\n' "$TEST_TMP"; }
   vm_host_validate_workspace() { printf '%s\n' "$TEST_TMP/workspace"; }
-  vm_host_validate_credentials() { return 0; }
   vm_host_check_workspace_filesystem() { return 73; }
   vm_host_is_under() { return 1; }
-  vm_host_credential_model() { printf 'openai/test-model\n'; }
   vm_host_prepare_state_root() { touch "$prepared"; printf '%s/state\n' "$TEST_TMP"; }
 
-  run vm_host_smoke --workspace "$TEST_TMP/workspace" --credentials-file "$TEST_TMP/credentials.json"
+  run vm_host_smoke --workspace "$TEST_TMP/workspace" --model openai/test-model
 
   [ "$status" -ne 0 ]
   [ ! -e "$prepared" ]
@@ -186,7 +200,7 @@ text = pathlib.Path(sys.argv[1]).read_text()
 start = text.index('EVIDENCE="$PRIVATE_DIR/v3-smoke-$CANDIDATE_SHA.log"\n')
 end = text.index("\n```", start)
 block = text[start:end]
-original = 'if "$INSTALL_ROOT/lab-vm" smoke --workspace "$WORKSPACE" --credentials-file "$CREDENTIALS" >&"$evidence_fd" 2>&1; then'
+original = 'if "$INSTALL_ROOT/lab-vm" smoke --workspace "$WORKSPACE" --model "$MODEL" >&"$evidence_fd" 2>&1; then'
 replacement = 'if "$FAKE_COMMAND" "$FAKE_MARKER" >&"$evidence_fd" 2>&1; then'
 assert original in block
 block = block.replace(original, replacement, 1)
@@ -196,7 +210,7 @@ PY
 )"
 
   run env PRIVATE_DIR="$TEST_TMP" CANDIDATE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-    FAKE_COMMAND="$fake_command" FAKE_MARKER="$marker" bash -c "$procedure"
+    MODEL=openai/test-model FAKE_COMMAND="$fake_command" FAKE_MARKER="$marker" bash -c "$procedure"
 
   [ "$status" -eq 0 ]
   [ "$(<"$marker")" = 'FAKE_COMMAND_RAN' ]
@@ -204,129 +218,24 @@ PY
   [[ "$output" == *'SMOKE_OUTPUT_CAPTURED'* ]]
 }
 
-@test "runbook credential prompt uses a real controlling PTY and refuses no-TTY fallback" {
-  run python3 - "$TEST_ROOT/docs/vm-v3-phase1-smoke.md" "$TEST_TMP/pty-credential.json" <<'PY'
-import ast, errno, getpass, json, os, pathlib, pty, select, signal, subprocess, sys, termios, time, warnings
+@test "ChatGPT browser-auth regressions cover OAuth validation and live-only URL handling" {
+  run python3 -I "$TEST_ROOT/tests/vm-browser-auth.test.py"
 
-text = pathlib.Path(sys.argv[1]).read_text()
-marker = '/usr/bin/python3 -I - "$CREDENTIALS" <<\'PY\'\n'
-start = text.index(marker) + len(marker)
-end = text.index("\nPY\n", start)
-credential_code = text[start:end]
-credential_path = pathlib.Path(sys.argv[2])
-dummy = "INERT-PTY-TEST-NOT-A-CREDENTIAL"
+  [ "$status" -eq 0 ] || {
+    printf 'browser-auth regression failed (status %s); output follows:\n%s\n' "$status" "$output" >&2
+    return 1
+  }
+  [[ "$output" == *'BROWSER_AUTH_TESTS_OK'* ]]
+}
 
-# A new session has no controlling TTY; script stdin contains tempting test data
-# but the documented code must refuse before reading it or creating a file.
-no_tty_path = credential_path.with_name("no-tty-credential.json")
-result = subprocess.run(
-    [sys.executable, "-I", "-c", credential_code, str(no_tty_path)],
-    input=("openai/no-tty-model\n" + dummy + "\n").encode(),
-    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
-    timeout=3, check=False,
-)
-assert result.returncode != 0
-assert b"controlling TTY is required" in result.stdout + result.stderr
-assert dummy.encode() not in result.stdout + result.stderr
-assert not no_tty_path.exists()
-
-pid, master = pty.fork()
-if pid == 0:
-    os.execv(sys.executable, [sys.executable, "-I", "-c", credential_code, str(credential_path)])
-deadline = time.monotonic() + 8
-reaped = False
-output = bytearray()
-def read_until(needle):
-    while needle not in output:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("timed out waiting for TTY prompt")
-        ready, _, _ = select.select([master], [], [], remaining)
-        if not ready:
-            raise TimeoutError("timed out waiting for TTY prompt")
-        try:
-            chunk = os.read(master, 4096)
-        except OSError as error:
-            if error.errno == errno.EIO:
-                raise AssertionError("child closed the PTY before prompting") from error
-            raise
-        if not chunk:
-            raise AssertionError("child closed the PTY before prompting")
-        output.extend(chunk)
-
-try:
-    read_until(b"OpenAI model ID (openai/<model-id>): ")
-    os.write(master, b"openai/pty-test-model\n")
-    read_until(b"Current owner-supplied OpenAI API key (input hidden): ")
-    assert not (termios.tcgetattr(master)[3] & termios.ECHO), "getpass did not disable terminal echo"
-    os.write(master, dummy.encode() + b"\n")
-    status = None
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([master], [], [], min(0.05, deadline - time.monotonic()))
-        if ready:
-            try:
-                chunk = os.read(master, 4096)
-            except OSError as error:
-                if error.errno != errno.EIO:
-                    raise
-                chunk = b""
-            output.extend(chunk)
-        waited, status = os.waitpid(pid, os.WNOHANG)
-        if waited == pid:
-            reaped = True
-            break
-    if not reaped:
-        raise TimeoutError("credential prompt child did not exit within the bound")
-    assert os.waitstatus_to_exitcode(status) == 0
-finally:
-    if not reaped:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        os.waitpid(pid, 0)
-    os.close(master)
-
-assert dummy.encode() not in output, "dummy key was echoed to the PTY"
-assert credential_path.stat().st_mode & 0o777 == 0o600
-credential = json.loads(credential_path.read_text())
-assert credential == {"provider": "openai", "model": "openai/pty-test-model", "api_key": dummy}
-
-# Keep the fail-closed warning path covered independently of the real getpass PTY.
-tree = ast.parse(credential_code)
-function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
-                and node.name == "read_owner_credentials")
-namespace = {"getpass": getpass, "warnings": warnings, "open": open}
-exec(compile(ast.Module(body=[function], type_ignores=[]), "<runbook-warning-function>", "exec"), namespace)
-
-class MockTTY:
-    def __init__(self): self.closed = False
-    def isatty(self): return True
-    def write(self, value): pass
-    def flush(self): pass
-    def readline(self): return "openai/warning-test-model\n"
-    def close(self): self.closed = True
-
-tty_in, tty_out = MockTTY(), MockTTY()
-def open_mock_tty(path, mode, encoding):
-    assert path == "/dev/tty" and encoding == "utf-8"
-    return {"r": tty_in, "w": tty_out}[mode]
-def warning_password_reader(prompt, *, stream):
-    assert stream is tty_out
-    warnings.warn("mocked hidden-input failure", getpass.GetPassWarning)
-    return dummy
-try:
-    namespace["read_owner_credentials"](opener=open_mock_tty, password_reader=warning_password_reader)
-except SystemExit as error:
-    assert "hidden TTY input" in str(error)
-else:
-    raise AssertionError("GetPassWarning was not fatal")
-assert tty_in.closed and tty_out.closed
-print("RUNBOOK_REAL_PTY_CREDENTIAL_PROMPT_OK")
-PY
-
-  [ "$status" -eq 0 ]
-  [[ "$output" == *'RUNBOOK_REAL_PTY_CREDENTIAL_PROMPT_OK'* ]]
+@test "Phase 1 runbook requires ChatGPT browser login, not an API key" {
+  local doc="$TEST_ROOT/docs/vm-v3-phase1-smoke.md"
+  grep -Fq 'Sign in with ChatGPT' "$doc"
+  grep -Fq 'No API key or API credits are used' "$doc"
+  grep -Fq "MODEL='openai/gpt-6-luna#max'" "$doc"
+  grep -Fq 'opencode auth logout openai' "$doc"
+  ! grep -Fq -- '--credentials-file' "$doc"
+  ! grep -Fq 'api_key' "$doc"
 }
 
 @test "runbook ENOSPC boundary logic makes at most one extra byte attempt" {
@@ -472,7 +381,7 @@ SH
         fi
         builtin command "$@"
       }
-      vm_host_smoke --workspace "$test_tmp/workspace" --credentials-file "$test_tmp/credentials.json"
+      vm_host_smoke --workspace "$test_tmp/workspace" --model openai/test-model
     ' _ "$TEST_ROOT" "$TEST_TMP" "$unsafe_command" "$fake_command"
 
     [ "$status" -ne 0 ]
@@ -521,7 +430,7 @@ SH
     "BASH_FUNC_python3%%=() { touch $marker; }" \
     MESTER_VM_HOST_MODE=1 MESTER_VM_INSTALL_ROOT=/tmp/forged \
     MESTER_VM_CORE="touch $marker" MESTER_VM_ROLE=owner \
-    "$TEST_ROOT/lab-vm" smoke --workspace "$TEST_TMP" --credentials-file "$TEST_TMP/credentials.json"
+    "$TEST_ROOT/lab-vm" smoke --workspace "$TEST_TMP" --model openai/test-model
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"must be root-owned"* ]]
@@ -534,7 +443,7 @@ SH
   cp "$TEST_ROOT/lab-vm" "$fixture/lab-vm"
   ln -s "$TEST_ROOT/lib" "$fixture/lib"
 
-  run "$fixture/lab-vm" smoke --workspace "$TEST_TMP" --credentials-file "$TEST_TMP/credentials.json"
+  run "$fixture/lab-vm" smoke --workspace "$TEST_TMP" --model openai/test-model
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"symlinked path component"* ]]
@@ -558,7 +467,7 @@ SH
 
 @test "essential smoke stages propagate injected failures and never print completion markers" {
   local stage
-  for stage in vm_host_write_cloud_seed vm_host_prepare_disk vm_host_start_proxy vm_host_start_virtiofs vm_host_start_qemu vm_host_wait_ssh vm_host_provisioning_ready vm_host_import_credentials vm_host_model_smoke vm_host_docker_smoke cleanup; do
+  for stage in vm_host_write_cloud_seed vm_host_prepare_disk vm_host_start_proxy vm_host_start_virtiofs vm_host_start_qemu vm_host_wait_ssh vm_host_provisioning_ready vm_host_browser_auth_smoke vm_host_model_smoke vm_host_docker_smoke cleanup; do
     run bash -c '
       source "$1/lib/vm/host-launcher.sh"
       source "$1/lib/vm/cloud-init.sh"
@@ -567,10 +476,8 @@ SH
       vm_host_require_commands() { :; }
       vm_host_account_home() { printf "%s\n" "$FAKE_HOME"; }
       vm_host_validate_workspace() { printf "%s/workspace\n" "$FAKE_HOME"; }
-      vm_host_validate_credentials() { :; }
       vm_host_check_workspace_filesystem() { :; }
       vm_host_is_under() { return 1; }
-      vm_host_credential_model() { printf "openai/test-model\n"; }
       vm_host_prepare_state_root() { mkdir -p "$1/state"; printf "%s/state\n" "$1"; }
       vm_host_check_run_capacity() { :; }
       vm_host_write_cloud_seed() { injected_failure vm_host_write_cloud_seed; }
@@ -582,7 +489,7 @@ SH
       vm_host_start_qemu() { injected_failure vm_host_start_qemu; }
       vm_host_wait_ssh() { injected_failure vm_host_wait_ssh; }
       vm_host_provisioning_ready() { injected_failure vm_host_provisioning_ready; }
-      vm_host_import_credentials() { injected_failure vm_host_import_credentials; }
+      vm_host_browser_auth_smoke() { injected_failure vm_host_browser_auth_smoke; }
       vm_host_model_smoke() { injected_failure vm_host_model_smoke || return $?; printf "VM_RESPONSE_OK\n"; }
       vm_host_docker_smoke() { injected_failure vm_host_docker_smoke || return $?; printf "DOCKER_CONTAINER_OK\n"; }
       vm_host_cleanup() { injected_failure cleanup; }
@@ -590,7 +497,7 @@ SH
       ssh-keygen() { local file="${@: -1}"; printf "private-key\n" >"$file"; printf "ssh-ed25519 test-key\n" >"$file.pub"; }
       FAKE_HOME="$2"
       FAIL_STAGE="$3"
-      vm_host_smoke --workspace "$2/workspace" --credentials-file "$2/credentials"
+      vm_host_smoke --workspace "$2/workspace" --model openai/test-model
     ' _ "$TEST_ROOT" "$TEST_TMP" "$stage"
     [ "$status" -ne 0 ]
     [[ "$output" == *"INJECTED_FAILURE:$stage"* ]] || { printf 'stage=%s output=%s\n' "$stage" "$output" >&2; return 1; }
@@ -725,42 +632,6 @@ PY
   run vm_host_process_identity_status "$TEST_TMP/process.identity"
   [ "$status" -ne 0 ]
   wait "$pid" 2>/dev/null || true
-}
-
-@test "credential delivery uses private control stdin and keeps fake key out of argv and logs" {
-  local key='sk-inert-test-only-000000000000000000000000000000'
-  local fake_bin="$TEST_TMP/fake-bin"
-  mkdir -p "$TEST_TMP/run" "$fake_bin"
-  printf '43210\n' >"$TEST_TMP/run/ssh_port"
-  cat >"$TEST_TMP/provider.json" <<JSON
-{"provider":"openai","model":"openai/gpt-6.1-sol","api_key":"$key"}
-JSON
-  chmod 0600 "$TEST_TMP/provider.json"
-  cat >"$fake_bin/ssh" <<'SH'
-#!/bin/sh
-printf '%s\n' "$@" >"$VM_HOST_TEST_SSH_ARGV"
-cat >"$VM_HOST_TEST_SSH_STDIN"
-printf 'fake interactive prompt output\n'
-SH
-  chmod 0700 "$fake_bin/ssh"
-  PATH="$fake_bin:$PATH"
-  export PATH
-  VM_HOST_TEST_SSH_ARGV="$TEST_TMP/ssh-argv"
-  VM_HOST_TEST_SSH_STDIN="$TEST_TMP/ssh-stdin"
-  export VM_HOST_TEST_SSH_ARGV VM_HOST_TEST_SSH_STDIN
-  vm_host_ssh() { :; } # The post-import database permission check is isolated here.
-
-  if vm_host_import_credentials "$TEST_TMP/run" "$TEST_TMP/provider.json" >"$TEST_TMP/import-output" 2>&1; then status=0; else status=$?; fi
-
-  [ "$status" -eq 0 ]
-  [ "$(<"$TEST_TMP/ssh-stdin")" = "$key" ]
-  grep -Fx -- '-tt' "$TEST_TMP/ssh-argv"
-  grep -Fx -- '-F' "$TEST_TMP/ssh-argv"
-  grep -Fx -- '/dev/null' "$TEST_TMP/ssh-argv"
-  [[ "$(<"$TEST_TMP/ssh-argv")" != *"$key"* ]]
-  ! grep -Fq -- "$key" "$TEST_TMP/import-output"
-  ! grep -Fq -- 'fake interactive prompt output' "$TEST_TMP/import-output"
-  [ "${VM_HOST_CREDENTIALS_IMPORTED:-0}" = 1 ]
 }
 
 @test "guest SSH capture disables ambient config and keeps outputs within the fixed cap" {
