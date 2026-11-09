@@ -65,21 +65,69 @@ for path in dependencies:
         elif not stat.S_ISDIR(info.st_mode):
             refuse("protected host installation path contains a non-directory component")
 
-# These fixed bootstrap executables are reached before normal dependency
-# validation. Verify their lexical and resolved paths are system protected.
-for raw_tool in ("/usr/bin/env", "/usr/bin/bash", "/usr/bin/python3", "/usr/bin/timeout"):
-    lexical = pathlib.Path(raw_tool)
+def validate_bootstrap_executable(raw_tool):
+    """Check every lexical and symlink-target component before bootstrap use."""
+    path = pathlib.Path(raw_tool)
+    if not path.is_absolute():
+        refuse("required protected bootstrap executable path must be absolute")
+
+    components = list(path.parts[1:])
+    current = pathlib.Path("/")
     try:
-        resolved = lexical.resolve(strict=True)
-        executable_info = os.stat(resolved, follow_symlinks=False)
-        if not stat.S_ISREG(executable_info.st_mode) or not os.access(resolved, os.X_OK):
-            refuse("required protected bootstrap executable is not executable")
-        for path in (lexical, *lexical.parents, resolved, *resolved.parents):
-            info = os.lstat(path)
-            if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        root_info = os.lstat(current)
+        if (root_info.st_uid != 0
+                or root_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or not stat.S_ISDIR(root_info.st_mode)):
+            refuse("bootstrap executable and every ancestor must be root-owned and not group/world writable")
+
+        symlink_count = 0
+        while components:
+            component = components.pop(0)
+            if component in ("", "."):
+                continue
+            if component == "..":
+                current = current.parent
+                continue
+
+            candidate = current / component
+            info = os.lstat(candidate)
+            if stat.S_ISLNK(info.st_mode):
+                if info.st_uid != 0:
+                    refuse("bootstrap executable symlink must be root-owned")
+                symlink_count += 1
+                if symlink_count > 40:
+                    refuse("bootstrap executable symlink chain is too deep")
+                target = pathlib.Path(os.readlink(candidate))
+                if target.is_absolute():
+                    current = pathlib.Path("/")
+                    components = list(target.parts[1:]) + components
+                else:
+                    components = list(target.parts) + components
+                continue
+
+            if not components:
+                if (info.st_uid != 0
+                        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                        or not stat.S_ISREG(info.st_mode)
+                        or not os.access(candidate, os.X_OK)):
+                    refuse("required protected bootstrap executable is not executable")
+                return
+
+            if (info.st_uid != 0
+                    or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                    or not stat.S_ISDIR(info.st_mode)):
                 refuse("bootstrap executable and every ancestor must be root-owned and not group/world writable")
+            current = candidate
     except OSError:
         refuse("required protected bootstrap executable is unavailable")
+
+    refuse("required protected bootstrap executable is unavailable")
+
+
+# These fixed bootstrap executables are reached before normal dependency
+# validation. Keep their paths and order fixed; do not discover them via PATH.
+for raw_tool in ("/usr/bin/env", "/usr/bin/bash", "/usr/bin/python3", "/usr/bin/timeout"):
+    validate_bootstrap_executable(raw_tool)
 
 print(root)
 PY
