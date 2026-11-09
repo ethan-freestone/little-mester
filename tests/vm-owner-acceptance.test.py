@@ -279,6 +279,17 @@ class OwnerAcceptanceTests(unittest.TestCase):
             finally:
                 listener.close()
 
+    def test_proc_unix_listener_path_preserves_repeated_spaces(self):
+        import socket
+        with tempfile.TemporaryDirectory(prefix="vm owner  ") as temporary:
+            path = pathlib.Path(temporary) / "virtiofs  socket.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                listener.bind(str(path))
+                self.assertTrue(acceptance.socket_listener_present(str(path)))
+            finally:
+                listener.close()
+
     def test_cleanup_verification_blocks_unexpected_retained_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             run_id = "20261109T154005Z-" + "f" * 32

@@ -969,6 +969,26 @@ PY
   wait "$pid" 2>/dev/null || true
 }
 
+@test "stopped virtiofs validation preserves repeated spaces while checking listener paths" {
+  local run_dir="$TEST_TMP/run with  repeated spaces"
+  mkdir -m 0700 "$run_dir"
+  python3 - "$run_dir/virtiofs.sock" <<'PY' &
+import socket, sys, time
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(sys.argv[1])
+time.sleep(30)
+PY
+  local listener_pid=$!
+  sleep 0.1
+
+  run vm_host_validate_virtiofs_artifacts "$run_dir" stopped
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'virtiofs socket still has a live listener'* ]]
+  kill "$listener_pid"
+  wait "$listener_pid" 2>/dev/null || true
+}
+
 @test "network builder restricts QEMU and binds only loopback SSH control" {
   run vm_host_qemu_network_args 43210 32123
 

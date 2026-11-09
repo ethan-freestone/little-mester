@@ -503,8 +503,8 @@ def socket_listener_present(path: str) -> bool:
     try:
         with open("/proc/net/unix", encoding="ascii") as stream:
             for line in stream.readlines()[1:]:
-                fields = line.split()
-                if len(fields) >= 8 and " ".join(fields[7:]) == path:
+                fields = line.rstrip("\n").split(None, 7)
+                if len(fields) == 8 and fields[7] == path:
                     return True
     except OSError as error:
         raise GateError("BLOCKED", "cannot verify whether a retained socket has a live listener") from error
