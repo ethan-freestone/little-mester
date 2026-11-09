@@ -5,12 +5,26 @@ setup() {
   TEST_TMP="$(mktemp -d)"
   TEST_OWNED_PROCESS_GROUP_FILE=""
   TEST_UNRELATED_PID_FILE=""
+  TEST_CLEANUP_RUN_DIRS=()
   VM_HOST_SCRIPT_ROOT="$TEST_ROOT"
   source "$TEST_ROOT/lib/vm/host-launcher.sh"
   source "$TEST_ROOT/lib/vm/cloud-init.sh"
 }
 
 teardown() {
+  local run_dir emergency_dir resource
+  for run_dir in "${TEST_CLEANUP_RUN_DIRS[@]}"; do
+    [[ -d "$run_dir" ]] || continue
+    VM_HOST_RUN_DIR="$run_dir"
+    emergency_dir="$run_dir.emergency"
+    # These are independent synthetic bounded-log sleepers. Retry only their
+    # saved exact identities, so cleanup still works if the code under test
+    # removed a production identity before stopping its process.
+    for resource in qemu virtiofsd proxy; do
+      vm_host_cleanup_one "$emergency_dir/$resource.identity" "$run_dir/$resource.complete" \
+        >/dev/null 2>&1 || true
+    done
+  done
   if [[ -n "$TEST_OWNED_PROCESS_GROUP_FILE" && -s "$TEST_OWNED_PROCESS_GROUP_FILE" ]]; then
     python3 - "$TEST_OWNED_PROCESS_GROUP_FILE" <<'PY' || true
 import os, pathlib, signal, sys
@@ -35,6 +49,7 @@ PY
     unrelated_pid="$(<"$TEST_UNRELATED_PID_FILE")"
     if [[ "$unrelated_pid" =~ ^[1-9][0-9]*$ ]]; then
       kill "$unrelated_pid" 2>/dev/null || true
+      wait "$unrelated_pid" 2>/dev/null || true
     fi
   fi
   rm -rf -- "$TEST_TMP"
@@ -45,7 +60,10 @@ write_cleanup_cascade_driver() {
   cat >"$path" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 root="$1" run_dir="$2" scenario="$3" port_source="$4" attempt_log="$5" pid_file="$6"
+emergency_dir="$run_dir.emergency"
+mkdir -m 0700 "$emergency_dir"
 source "$root/lib/vm/host-launcher.sh"
 VM_HOST_SCRIPT_ROOT="$root"
 VM_HOST_RUN_DIR="$run_dir"
@@ -91,6 +109,7 @@ for resource in qemu virtiofsd proxy; do
   printf '%s %s\n' "$resource" "$resource_pid" >>"$pid_file"
   vm_host_record_process_identity "$run_dir/$resource.identity" "$resource_pid" \
     "$python_exe" "$root/lib/vm/bounded-log.py"
+  cp -- "$run_dir/$resource.identity" "$emergency_dir/$resource.identity"
 done
 
 trap vm_host_exit_cleanup EXIT
@@ -838,8 +857,9 @@ PY
   local run_dir="$TEST_TMP/occupied-auth-cleanup" driver="$TEST_TMP/cleanup-cascade.sh"
   local listener_port="$TEST_TMP/occupied-port" listener_pid_file="$TEST_TMP/occupied-listener.pid"
   local attempt_log="$TEST_TMP/occupied-attempts" pids_file="$TEST_TMP/occupied-resource-pids"
-  local listener_pid run_status run_output listener_closed=1 kind pid
+  local listener_pid run_status run_output
   mkdir -m 0700 "$run_dir"
+  TEST_CLEANUP_RUN_DIRS+=("$run_dir")
   python3 - "$listener_port" <<'PY' &
 import os, socket, sys, time
 listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -867,21 +887,9 @@ PY
     "$TEST_ROOT" "$run_dir" occupied "$listener_port" "$attempt_log" "$pids_file"
   run_status="$status"
   run_output="$output"
-  if ! vm_host_auth_listener_closed "$run_dir/auth-callback.port" >/dev/null 2>&1; then
-    listener_closed=0
-  fi
-  kill "$listener_pid"
-  wait "$listener_pid" 2>/dev/null || true
-  TEST_UNRELATED_PID_FILE=""
-  VM_HOST_RUN_DIR="$run_dir"
-  for kind in qemu virtiofsd proxy; do
-    if [[ -f "$run_dir/$kind.identity" && ! -L "$run_dir/$kind.identity" ]]; then
-      vm_host_cleanup_one "$run_dir/$kind.identity" "$run_dir/$kind.complete" >/dev/null 2>&1 || true
-    fi
-  done
-
   assert_cleanup_cascade_result "$run_dir" "$attempt_log" "$pids_file" "$run_status" "$run_output"
-  [ "$listener_closed" -eq 0 ]
+  [ -e "/proc/$listener_pid" ]
+  ! vm_host_auth_listener_closed "$run_dir/auth-callback.port"
   [ -e "$run_dir/auth-callback.port" ]
 }
 
@@ -894,19 +902,13 @@ PY
     attempt_log="$TEST_TMP/$scenario-attempts"
     pids_file="$TEST_TMP/$scenario-resource-pids"
     mkdir -m 0700 "$run_dir"
+    TEST_CLEANUP_RUN_DIRS+=("$run_dir")
     : >"$attempt_log"
 
     run timeout --signal=TERM --kill-after=3 15 bash "$driver" \
       "$TEST_ROOT" "$run_dir" "$scenario" - "$attempt_log" "$pids_file"
     run_status="$status"
     run_output="$output"
-    VM_HOST_RUN_DIR="$run_dir"
-    for kind in qemu virtiofsd proxy; do
-      if [[ -f "$run_dir/$kind.identity" && ! -L "$run_dir/$kind.identity" ]]; then
-        vm_host_cleanup_one "$run_dir/$kind.identity" "$run_dir/$kind.complete" >/dev/null 2>&1 || true
-      fi
-    done
-
     assert_cleanup_cascade_result "$run_dir" "$attempt_log" "$pids_file" "$run_status" "$run_output"
     [ -e "$run_dir/auth-session.complete" ]
     if [[ "$scenario" == missing-proof ]]; then
