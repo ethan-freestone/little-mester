@@ -639,6 +639,7 @@ files = {
     "lib/vm/bounded-log.py": 0o666,
     "lib/vm/executable-policy.py": 0o666,
     "lib/vm/browser-auth-session.py": 0o666,
+    "lib/vm/virtiofs-socket.py": 0o666,
 }
 with tarfile.open(archive, "w") as bundle:
     for directory in directories:
