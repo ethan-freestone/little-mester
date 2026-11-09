@@ -112,6 +112,14 @@ def install_path(sha: str) -> pathlib.Path:
     return INSTALL_PARENT / sha
 
 
+def installer_manifest() -> str:
+    return json.dumps({"files": INSTALL_FILES, "directories": sorted(INSTALL_DIRS)}, sort_keys=True)
+
+
+def archive_arguments(repo: pathlib.Path, sha: str, git_executable: str = GIT) -> list[str]:
+    return [git_executable, "-C", str(repo), "archive", "--format=tar", sha, *INSTALL_FILES]
+
+
 def check_directory_chain(path: pathlib.Path, final_uid: int, final_mode: int) -> None:
     """Require a lexical, symlink-free protected directory chain."""
     if not path.is_absolute():
@@ -166,7 +174,7 @@ def verify_install(repo: pathlib.Path, sha: str) -> pathlib.Path:
     return root
 
 
-INSTALL_WORKER = r'''import os, pathlib, re, stat, sys, tarfile
+INSTALL_WORKER = r'''import json, os, pathlib, re, stat, sys, tarfile
 
 sha = sys.argv[1]
 if not re.fullmatch(r"[0-9a-f]{40}", sha) or os.geteuid() != 0:
@@ -207,16 +215,15 @@ try:
     target = os.open(sha, flags, dir_fd=fd)
     os.fchmod(target, 0o755)
     os.fchown(target, 0, 0)
-    expected = {
-        "lab-vm": 0o755,
-        "lib/vm/host-launcher.sh": 0o644,
-        "lib/vm/cloud-init.sh": 0o644,
-        "lib/vm/proxy.py": 0o644,
-        "lib/vm/bounded-log.py": 0o644,
-        "lib/vm/executable-policy.py": 0o644,
-        "lib/vm/browser-auth-session.py": 0o644,
-    }
-    directories = {"lib", "lib/vm"}
+manifest = json.loads(sys.argv[2])
+expected = manifest["files"]
+directories = set(manifest["directories"])
+required_directories = set()
+for name in expected:
+    required_directories.update(str(parent) for parent in pathlib.PurePosixPath(name).parents
+                                if str(parent) != ".")
+if directories != required_directories:
+    raise SystemExit("REFUSED: installer directory manifest does not match runtime files")
     observed = set()
     total = 0
     archive = tarfile.open(fileobj=sys.stdin.buffer, mode="r|")
@@ -288,7 +295,7 @@ def install_candidate(repo: pathlib.Path, sha: str) -> pathlib.Path:
     if authorization.returncode:
         raise GateError("BLOCKED", "privileged installation authorization was not granted")
     archive = subprocess.Popen(
-        [protected_executable(repo, GIT), "-C", str(repo), "archive", "--format=tar", sha],
+        archive_arguments(repo, sha, protected_executable(repo, GIT)),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=None,
@@ -297,7 +304,7 @@ def install_candidate(repo: pathlib.Path, sha: str) -> pathlib.Path:
     assert archive.stdout is not None
     try:
         worker = subprocess.run(
-            [sudo, "-n", PYTHON, "-I", "-c", INSTALL_WORKER, sha],
+            [sudo, "-n", PYTHON, "-I", "-c", INSTALL_WORKER, sha, installer_manifest()],
             stdin=archive.stdout,
             env=clean_env(),
             check=False,

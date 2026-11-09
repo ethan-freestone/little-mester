@@ -7,6 +7,7 @@ import os
 import pathlib
 import stat
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -57,6 +58,26 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 with self.assertRaises(acceptance.GateError):
                     acceptance.install_candidate(ROOT, sha)
             self.assertEqual(marker.read_text(encoding="utf-8"), "historical")
+
+    def test_install_archive_contains_exactly_the_worker_allowlisted_runtime(self):
+        head = subprocess.run(
+            [acceptance.GIT, "-C", str(ROOT), "rev-parse", "HEAD"],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=acceptance.clean_env(),
+        ).stdout.decode("ascii").strip()
+        result = subprocess.run(
+            acceptance.archive_arguments(ROOT, head), check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={**acceptance.clean_env(), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"},
+        )
+        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
+            names = {member.name.rstrip("/") for member in archive.getmembers()}
+        manifest = json.loads(acceptance.installer_manifest())
+        expected = set(manifest["files"]) | set(manifest["directories"])
+        self.assertEqual(names, expected)
+        self.assertEqual(set(acceptance.archive_arguments(ROOT, head)[6:]), set(manifest["files"]))
+        self.assertNotIn(".github", names)
+        self.assertIn('json.loads(sys.argv[2])', acceptance.INSTALL_WORKER)
 
     def test_default_operation_is_read_only_preflight_and_reports_blocked_install(self):
         with tempfile.TemporaryDirectory() as temporary:
