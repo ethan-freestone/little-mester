@@ -418,7 +418,7 @@ PY
   # if specified, that list must be non-empty. Top-level groups must be group
   # names (or a name-to-members mapping), not {name, gid} records.
   [[ "$user_data" == *$'users:\n  - name: mester\n    uid: 1234\n    primary_group: mester\n    shell: /bin/bash\n    lock_passwd: true\n    ssh_authorized_keys:\n      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test\n'* ]]
-  [[ "$user_data" != *$'groups:\n'* ]]
+  [[ "$user_data" == *$'groups:\n  - mester\n'* ]]
   [[ "$user_data" != *$'    groups: []\n'* ]]
   [[ "$user_data" == *$'ssh_pwauth: false\n'* ]]
   [[ "$user_data" == *$'disable_root: true\n'* ]]
@@ -429,6 +429,19 @@ PY
   [ "$status" -eq 2 ]
   run vm_host_cloud_init smoke-v3 1234 'not-an-ssh-key'
   [ "$status" -eq 2 ]
+}
+
+@test "cloud-init creates the primary group before a user with primary_group" {
+  run vm_host_cloud_init smoke-v3 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 fixture'
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'groups:\n  - mester\nusers:\n'* ]]
+  [[ "$output" == *'name: mester'* ]]
+  [[ "$output" == *'uid: 1234'* ]]
+  [[ "$output" == *'primary_group: mester'* ]]
+  [[ "$output" == *'lock_passwd: true'* ]]
+  [[ "$output" == *$'ssh_pwauth: false\n'* ]]
+  [[ "$output" == *$'disable_root: true\n'* ]]
 }
 
 @test "runbook evidence command writes through its exclusive open descriptor" {

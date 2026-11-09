@@ -15,6 +15,8 @@ vm_host_cloud_init() {
 hostname: ${name}
 ssh_pwauth: false
 disable_root: true
+groups:
+  - mester
 users:
   - name: mester
     uid: ${uid}
