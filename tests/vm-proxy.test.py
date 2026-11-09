@@ -62,6 +62,101 @@ class DestinationPolicyTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_redirect_followup_to_private_target_is_denied_before_socket_creation(self):
+        server = proxy.BoundedThreadingHTTPServer(("127.0.0.1", 0), proxy.Proxy)
+        server.policy = proxy.PolicyStore(None)
+        server.upstream_proxy = None
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        real_connect_public = proxy.connect_public
+        fixture_peers = []
+        fixture_connections = []
+
+        def mocked_connect_public(host, port, blocked_networks=None):
+            if (host, port) == ("public.example", 80):
+                fixture_connections.append((host, port))
+                upstream, peer = socket.socketpair()
+                fixture_peers.append(peer)
+                peer.sendall(
+                    b"HTTP/1.1 302 Found\r\n"
+                    b"Location: http://127.0.0.1/private\r\n"
+                    b"Content-Length: 0\r\n"
+                    b"Connection: close\r\n\r\n"
+                )
+                peer.shutdown(socket.SHUT_WR)
+                return upstream
+
+            # connect_public is also the address-policy gate. A private
+            # literal must be rejected there before it creates a socket.
+            return real_connect_public(host, port, frozenset())
+
+        def exchange(client, raw):
+            client.sendall(raw)
+            response = bytearray()
+            while True:
+                chunk = client.recv(4096)
+                if not chunk:
+                    return bytes(response)
+                response.extend(chunk)
+
+        clients = []
+        try:
+            with patch.object(proxy, "connect_public", side_effect=mocked_connect_public) as connect:
+                first = socket.create_connection(server.server_address, timeout=2)
+                first.settimeout(2)
+                clients.append(first)
+                redirect = exchange(
+                    first,
+                    b"GET http://public.example/start HTTP/1.1\r\n"
+                    b"Host: public.example\r\nConnection: close\r\n\r\n",
+                )
+                self.assertIn(b"HTTP/1.1 302 Found", redirect)
+                self.assertIn(b"Location: http://127.0.0.1/private", redirect)
+                self.assertEqual(fixture_connections, [("public.example", 80)])
+
+                # Model the client's explicit redirect follow-up. Pre-connect
+                # the local test client before guarding socket construction so
+                # any later socket creation can only come from the proxy.
+                second = socket.create_connection(server.server_address, timeout=2)
+                second.settimeout(2)
+                clients.append(second)
+                socket_constructor = proxy.socket.socket
+                destination_socket_creations = []
+
+                def reject_new_socket(*args, **kwargs):
+                    # socketserver wraps accepted local clients using fileno;
+                    # only reject new sockets that could initiate a dial.
+                    if kwargs.get("fileno") is None:
+                        destination_socket_creations.append((args, kwargs))
+                        raise AssertionError("private redirect attempted socket creation")
+                    return socket_constructor(*args, **kwargs)
+
+                with patch.object(
+                    proxy.socket,
+                    "socket",
+                    side_effect=reject_new_socket,
+                ):
+                    denied = exchange(
+                        second,
+                        b"GET http://127.0.0.1/private HTTP/1.1\r\n"
+                        b"Host: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                    )
+                self.assertIn(b"403 Forbidden", denied)
+                self.assertEqual(
+                    [call.args[:2] for call in connect.call_args_list],
+                    [("public.example", 80), ("127.0.0.1", 80)],
+                )
+                self.assertEqual(fixture_connections, [("public.example", 80)])
+                self.assertEqual(destination_socket_creations, [])
+        finally:
+            for client in clients:
+                client.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+            for peer in fixture_peers:
+                peer.close()
+
     def test_slow_incomplete_headers_are_admitted_before_thread_creation(self):
         class TrackingServer(proxy.BoundedThreadingHTTPServer):
             def __init__(self, *args, **kwargs):
