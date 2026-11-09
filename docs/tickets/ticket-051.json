@@ -8,7 +8,7 @@
   "title": "Phase 1 — clean checkout to isolated Dev VM, Little Mester response and rootless Docker smoke",
   "objective": "FINAL Phase1 scope, child of #49: trusted protected host launcher and shared security/policy core, minimal owner CLI, exactly one workspace, fresh DevVM bootstrap, real LittleMester response, rootlessDocker actual container, restricted egress/finite resources/focused tests and successful owner smoke. Host lifecycle MCP adapter deferred until smoke succeeds; D3 future target unchanged. No guest lifecycle/recursion/self-test implementation. Luna sole implementation writer; Sol decisions/verification. Preserve deferred/uncommitted work. No new planning/tickets/docs-only checkpoint; next appropriate implementation commit includes minimal §L timing correction after tests/review. End user pushes. Standing workflow reference only: #49 tests.cases entry \"ORCHESTRATION POLICY v1\"; canonical handoffs remain #49, child uses sequence references.",
   "created_at": "2026-11-08T15:02:09.519Z",
-  "updated_at": "2026-11-09T22:10:12.774Z",
+  "updated_at": "2026-11-09T23:00:31.698Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -149,7 +149,8 @@
       "Independent Sol Medium review of exact committed SHA 13e1886dfb0f72f292e89063d4f1379ca7dc4184: ACCEPT, no security finding; suggestion only that fixture shims do not prove owner-host/root-only acceptance.",
       "tests/vm-virtiofs-socket.test.py: short-path allocation, collisions/unsafe ancestry, log creation, listener-after-unlink/expiry, PID evidence non-authority",
       "tests/vm-host-launcher.bats: workspace/runtime overlap, protected helper, logger ordering, pre-allocation cleanup, old disk isolation",
-      "tests/vm-owner-acceptance.test.py: successful-run cleanup report binding and early-startup failure distinction"
+      "tests/vm-owner-acceptance.test.py: successful-run cleanup report binding and early-startup failure distinction",
+      "tests/vm-guest-user-dirs.test.py: exact cloud-init helper embedding; isolated filesystem permissions and non-root home/systemd-user probes; unsafe symlink and writable-parent refusals; one-node ownership repair leaving file ownership unchanged; exclusive no-follow Docker proxy config creation; root-runner-portable unchanged-owner assertion."
     ],
     "cases": [
       "INITIAL TEST STATUS: no implementation tests or host smoke have run. Sol source-checked package scripts and startup/rootless/rollback evidence; no exact working end-to-end smoke exists in inspected legacy evidence. Discovery is required before any verified-command claim.",
@@ -295,7 +296,11 @@
       "Implementation/review checkpoint recorded in canonical parent #49 handoff sequence 40; reviewed source b74ad8c0f63f53bad518b0abe6be2e4b2cefc135, current bookkeeping HEAD 17b018f522bd3514442cd5bdbfc47968da5b6b34.",
       "Clean detached exact-source verification: Bats 71/71; all eight VM Python suites pass; shell syntax, warning-as-error Python compilation, and diff checks pass. Independent Sol Medium disposition PASS.",
       "Owner-pushed CI, protected install, storage proof, VM boot, browser auth, model response, rootless container, and full cleanup remain NOT_RUN/BLOCKED; no Phase 1 PASS.",
-      "Sequence-40 correction is recorded append-only in canonical parent #49: its clean-tree claim referred to the detached source-verification checkout; ticket bookkeeping remained pending in /workspace and is committed separately. Runtime acceptance remains blocked/not run."
+      "Sequence-40 correction is recorded append-only in canonical parent #49: its clean-tree claim referred to the detached source-verification checkout; ticket bookkeeping remained pending in /workspace and is committed separately. Runtime acceptance remains blocked/not run.",
+      "Rootless configuration fix committed as 499c774673be32a6409767155438c051218308b6; follow-up race-hardening and fixture portability fix committed as 7cbc6777511673a163552ce8393dd33226aaa194. No recursive chown; unexpected home ownership fails closed; helper inventory/runbook includes the protected guest helper.",
+      "Independent Sol Medium review of exact final source SHA 7cbc6777511673a163552ce8393dd33226aaa194: PASS, no blocking finding. Review confirmed corrected root-mode assertion by source; reviewer UID 1000 could not execute root-only cases, which were skipped in local verification.",
+      "Exact-source test results: full Bats 97/97; all VM Python test scripts passed (owner archive suite 32/32 and guest directory suite 6 passed/2 root-only skipped); shell syntax, Python warning-as-error compilation, and diff checks passed. No VM/host operation occurred.",
+      "Phase 1 owner acceptance remains BLOCKED/NOT_RUN pending owner execution on the corrected candidate; no Docker daemon/container, browser auth, real model response, or successful cloud-init runtime is claimed."
     ]
   },
   "models_used": []
