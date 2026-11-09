@@ -373,6 +373,7 @@ PY
   [[ "$output" == *"mester-v3-user-dirs.py prepare"* ]]
   [[ "$output" == *"mester-v3-user-dirs.py verify-write"* ]]
   [[ "$output" == *"systemctl --user show-environment"* ]]
+  [[ "$output" == *"timeout --signal=TERM --kill-after=1s 2s runuser"* ]]
   [[ "$output" != *"install -d -o mester -g mester -m 0700 /home/mester/.config/systemd/user/docker.service.d"* ]]
   [[ "$output" == *"systemctl disable --now docker.service docker.socket containerd.service"* ]]
   [[ "$output" == *"systemctl --user enable --now docker"* ]]

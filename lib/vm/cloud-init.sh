@@ -96,7 +96,7 @@ write_files:
         if [[ -d /run/user/${uid} && ! -L /run/user/${uid} && -S /run/user/${uid}/bus && ! -L /run/user/${uid}/bus ]] \
           && [[ "\$(stat -c '%u:%a' /run/user/${uid} 2>/dev/null)" == '${uid}:700' ]] \
           && [[ "\$(stat -c '%u' /run/user/${uid}/bus 2>/dev/null)" == '${uid}' ]] \
-          && runuser -u mester -- env HOME=/home/mester XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user show-environment >/dev/null 2>&1; then
+          && timeout --signal=TERM --kill-after=1s 2s runuser -u mester -- env HOME=/home/mester XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user show-environment >/dev/null 2>&1; then
           user_bus_ready=1
           break
         fi
@@ -106,20 +106,6 @@ write_files:
         echo 'guest user systemd bus did not become ready with the expected private runtime directory' >&2
         exit 1
       fi
-      cat > /home/mester/.config/systemd/user/docker.service.d/80-mester-proxy.conf <<'PROXY'
-      [Service]
-      Environment=HTTP_PROXY=http://10.0.2.100:3128
-      Environment=HTTPS_PROXY=http://10.0.2.100:3128
-      Environment=NO_PROXY=localhost,127.0.0.1,10.0.2.100
-      Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS=--cidr=10.0.3.0/24
-      PROXY
-      chown mester:mester /home/mester/.config/systemd/user/docker.service.d/80-mester-proxy.conf
-      chmod 0600 /home/mester/.config/systemd/user/docker.service.d/80-mester-proxy.conf
-      cat > /home/mester/.config/docker/daemon.json <<'DOCKER_PROXY'
-      {"proxies":{"http-proxy":"http://10.0.2.100:3128","https-proxy":"http://10.0.2.100:3128","no-proxy":"localhost,127.0.0.1,10.0.2.100"}}
-      DOCKER_PROXY
-      chown mester:mester /home/mester/.config/docker/daemon.json
-      chmod 0600 /home/mester/.config/docker/daemon.json
       runuser -u mester -- env HOME=/home/mester python3 -I /usr/local/sbin/mester-v3-user-dirs.py verify-write
       runuser -u mester -- env HOME=/home/mester XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user daemon-reload
       runuser -u mester -- env HOME=/home/mester XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus dockerd-rootless-setuptool.sh install

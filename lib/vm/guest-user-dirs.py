@@ -22,6 +22,18 @@ USER_DIRS = (
     (".local", "share"),
     (".local", "share", "opencode"),
 )
+PROXY_UNIT_CONFIG = (
+    b"[Service]\n"
+    b"Environment=HTTP_PROXY=http://10.0.2.100:3128\n"
+    b"Environment=HTTPS_PROXY=http://10.0.2.100:3128\n"
+    b"Environment=NO_PROXY=localhost,127.0.0.1,10.0.2.100\n"
+    b"Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS=--cidr=10.0.3.0/24\n"
+)
+DOCKER_DAEMON_CONFIG = (
+    b'{"proxies":{"http-proxy":"http://10.0.2.100:3128",'
+    b'"https-proxy":"http://10.0.2.100:3128",'
+    b'"no-proxy":"localhost,127.0.0.1,10.0.2.100"}}\n'
+)
 
 
 class Refusal(Exception):
@@ -130,6 +142,75 @@ def prepare_config_dirs(home_fd: int, uid: int, gid: int) -> None:
             os.close(parent_fd)
 
 
+def _open_directory_chain(home_fd: int, components: tuple[str, ...]) -> int:
+    parent_fd = os.dup(home_fd)
+    try:
+        for component in components:
+            child_fd = os.open(component, DIR_FLAGS, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = child_fd
+        result_fd = parent_fd
+        parent_fd = -1
+        return result_fd
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
+def _create_private_config_file(
+    directory_fd: int, name: str, contents: bytes, uid: int, gid: int
+) -> None:
+    directory_info = os.fstat(directory_fd)
+    if (directory_info.st_uid, directory_info.st_gid) != (uid, gid):
+        raise Refusal(f"configuration directory for {name} is not owned by guest user mester")
+    if stat.S_IMODE(directory_info.st_mode) != 0o700:
+        raise Refusal(f"configuration directory for {name} is not private mode 0700")
+    try:
+        descriptor = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+            dir_fd=directory_fd,
+        )
+    except FileExistsError as error:
+        raise Refusal(f"refusing to replace existing guest configuration file {name}") from error
+    except OSError as error:
+        raise Refusal(f"could not safely create guest configuration file {name}") from error
+    try:
+        os.fchown(descriptor, uid, gid)
+        os.fchmod(descriptor, 0o600)
+        remaining = memoryview(contents)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("short write creating guest configuration")
+            remaining = remaining[written:]
+    except BaseException:
+        os.close(descriptor)
+        os.unlink(name, dir_fd=directory_fd)
+        raise
+    else:
+        os.close(descriptor)
+
+
+def prepare_rootless_config(home_fd: int, uid: int, gid: int) -> None:
+    prepare_config_dirs(home_fd, uid, gid)
+    unit_dir_fd = _open_directory_chain(home_fd, (".config", "systemd", "user", "docker.service.d"))
+    try:
+        _create_private_config_file(
+            unit_dir_fd, "80-mester-proxy.conf", PROXY_UNIT_CONFIG, uid, gid
+        )
+    finally:
+        os.close(unit_dir_fd)
+    docker_dir_fd = _open_directory_chain(home_fd, (".config", "docker"))
+    try:
+        _create_private_config_file(
+            docker_dir_fd, "daemon.json", DOCKER_DAEMON_CONFIG, uid, gid
+        )
+    finally:
+        os.close(docker_dir_fd)
+
+
 def _write_probe(directory_fd: int, uid: int, label: str) -> None:
     for _ in range(8):
         name = f".mester-write-check-{secrets.token_hex(8)}"
@@ -167,7 +248,7 @@ def provision(uid: int) -> None:
         raise Refusal("guest mester account UID/home does not match cloud-init input")
     home_fd = open_guest_home(uid, account.pw_gid)
     try:
-        prepare_config_dirs(home_fd, uid, account.pw_gid)
+        prepare_rootless_config(home_fd, uid, account.pw_gid)
     finally:
         os.close(home_fd)
 

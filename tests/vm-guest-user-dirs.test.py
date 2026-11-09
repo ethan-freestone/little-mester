@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import importlib.util
+import json
 import os
 import pathlib
 import pwd
@@ -73,6 +74,7 @@ class GuestUserDirectoryTests(unittest.TestCase):
         self.assertIn("mester-v3-user-dirs.py verify-write", generated)
         self.assertIn("user systemd bus did not become ready", generated)
         self.assertIn("systemctl --user show-environment", generated)
+        self.assertIn("timeout --signal=TERM --kill-after=1s 2s runuser", generated)
         self.assertIn("groups:\n  - mester\nusers:", generated)
         self.assertIn("dockerd-rootless-setuptool.sh install", generated)
         self.assertNotIn("systemctl enable --now docker.service", generated)
@@ -123,6 +125,39 @@ class GuestUserDirectoryTests(unittest.TestCase):
         self.assertEqual(os.WEXITSTATUS(status), 0)
         self.assertEqual(list(self.home.glob(".mester-write-check-*")), [])
         self.assertEqual(list((self.home / ".config/systemd/user").glob(".mester-write-check-*")), [])
+
+    def test_proxy_configs_are_created_privately_without_following_existing_symlink(self):
+        guest_dirs.prepare_rootless_config(self.home_fd, self.account.pw_uid, self.account.pw_gid)
+        unit_file = self.home / ".config/systemd/user/docker.service.d/80-mester-proxy.conf"
+        daemon_file = self.home / ".config/docker/daemon.json"
+        for path, contents in (
+            (unit_file, guest_dirs.PROXY_UNIT_CONFIG),
+            (daemon_file, guest_dirs.DOCKER_DAEMON_CONFIG),
+        ):
+            info = path.stat()
+            self.assertTrue(path.is_file())
+            self.assertEqual((info.st_uid, info.st_gid), (self.account.pw_uid, self.account.pw_gid))
+            self.assertEqual(info.st_mode & 0o777, 0o600)
+            self.assertEqual(path.read_bytes(), contents)
+        self.assertIn(b"Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS=--cidr=10.0.3.0/24", unit_file.read_bytes())
+        self.assertEqual(json.loads(daemon_file.read_text(encoding="utf-8"))["proxies"]["http-proxy"], "http://10.0.2.100:3128")
+
+        separate = self.root / "separate-home"
+        separate.mkdir(mode=0o700)
+        os.chown(separate, self.account.pw_uid, self.account.pw_gid)
+        separate_fd = os.open(separate, guest_dirs.DIR_FLAGS)
+        try:
+            guest_dirs.prepare_config_dirs(separate_fd, self.account.pw_uid, self.account.pw_gid)
+            external = self.root / "external-config"
+            external.write_text("preserve", encoding="utf-8")
+            target = separate / ".config/systemd/user/docker.service.d/80-mester-proxy.conf"
+            target.symlink_to(external)
+            with self.assertRaisesRegex(guest_dirs.Refusal, "refusing to replace"):
+                guest_dirs.prepare_rootless_config(separate_fd, self.account.pw_uid, self.account.pw_gid)
+            self.assertTrue(target.is_symlink())
+            self.assertEqual(external.read_text(encoding="utf-8"), "preserve")
+        finally:
+            os.close(separate_fd)
 
     def test_existing_root_owned_intermediate_dirs_are_fixed_without_recursive_chown(self):
         if os.geteuid() != 0 or self.account.pw_uid == 0:
@@ -179,13 +214,16 @@ class GuestUserDirectoryTests(unittest.TestCase):
     def test_group_world_writable_existing_config_parent_is_refused_unchanged(self):
         config = self.home / ".config"
         config.mkdir(mode=0o777)
+        if os.geteuid() == 0:
+            os.chown(config, self.account.pw_uid, self.account.pw_gid)
         config.chmod(0o777)
+        original = config.stat()
 
         with self.assertRaisesRegex(guest_dirs.Refusal, "group/world-writable"):
             guest_dirs.prepare_config_dirs(self.home_fd, self.account.pw_uid, self.account.pw_gid)
 
         self.assertEqual(config.stat().st_mode & 0o777, 0o777)
-        self.assertEqual((config.stat().st_uid, config.stat().st_gid), (self.account.pw_uid, self.account.pw_gid))
+        self.assertEqual((config.stat().st_uid, config.stat().st_gid), (original.st_uid, original.st_gid))
 
     def test_wrong_home_owner_fails_without_chowning_home(self):
         if os.geteuid() != 0 or self.account.pw_uid == 0:
