@@ -254,11 +254,11 @@ class VirtiofsSocketTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as temporary:
             fixture = RuntimeFixture(temporary)
             run_dir = fixture.run_dir(self.identity(11))
-            patches = fixture.ownership_patches()
-            with patches[0], patches[1], patches[2]:
+            self.assertEqual(
+                virtiofs_socket.main(["create-log", str(run_dir), "virtiofsd.log"]), 0
+            )
+            with self.assertRaisesRegex(virtiofs_socket.Refusal, "pre-existing"):
                 virtiofs_socket.create_log(run_dir, "virtiofsd.log")
-                with self.assertRaisesRegex(virtiofs_socket.Refusal, "pre-existing"):
-                    virtiofs_socket.create_log(run_dir, "virtiofsd.log")
             log_path = run_dir / "virtiofsd.log"
             self.assertTrue(stat.S_ISREG(os.lstat(log_path).st_mode))
             self.assertEqual(stat.S_IMODE(os.lstat(log_path).st_mode), 0o600)
@@ -274,6 +274,42 @@ class VirtiofsSocketTests(unittest.TestCase):
                 with self.assertRaises(virtiofs_socket.Refusal):
                     virtiofs_socket.create_log(run_dir, "virtiofsd.log")
             self.assertEqual(target.read_text(encoding="utf-8"), "must remain untouched")
+
+    def test_unlinked_live_listener_is_not_misreported_as_stopped_or_expired(self):
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as temporary:
+            fixture = RuntimeFixture(temporary)
+            run_dir = fixture.run_dir(self.identity(13))
+            socket_path = self.allocate_with_fixture(fixture, run_dir)
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                listener.bind(str(socket_path))
+                listener.listen(1)
+                pid_path = pathlib.Path(str(socket_path) + ".pid")
+                pid_path.write_text("4242\n", encoding="ascii")
+                os.chmod(pid_path, 0o600)
+                socket_path.unlink()
+                patches = fixture.ownership_patches()
+                with patches[0], patches[1], patches[2]:
+                    with self.assertRaisesRegex(virtiofs_socket.Refusal, "live listener"):
+                        virtiofs_socket.inspect(
+                            run_dir, fixture.runtime_root, fixture.uid, fixture.system_uid, startup=False
+                        )
+                pid_path.unlink()
+                socket_path.parent.rmdir()
+                patches = fixture.ownership_patches()
+                with patches[0], patches[1], patches[2]:
+                    with self.assertRaisesRegex(virtiofs_socket.Refusal, "live listener"):
+                        virtiofs_socket.inspect(
+                            run_dir, fixture.runtime_root, fixture.uid, fixture.system_uid, startup=False
+                        )
+            finally:
+                listener.close()
+            patches = fixture.ownership_patches()
+            with patches[0], patches[1], patches[2]:
+                result = virtiofs_socket.inspect(
+                    run_dir, fixture.runtime_root, fixture.uid, fixture.system_uid, startup=False
+                )
+            self.assertEqual(result["runtime_directory"], "expired")
 
 
 if __name__ == "__main__":

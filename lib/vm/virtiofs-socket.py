@@ -223,6 +223,8 @@ def inspect(run_dir: pathlib.Path, runtime_root: pathlib.Path, uid: int, system_
         except FileNotFoundError:
             if startup:
                 raise Refusal("allocated short virtiofs socket directory disappeared")
+            if _listener_present(str(socket_path)):
+                raise Refusal("virtiofs socket still has a live listener")
             return {"socket_path": str(socket_path), "runtime_directory": "expired",
                     "socket_present": False, "pid_present": False}
         _check_directory(directory_info, uid, mode=0o700)
@@ -262,7 +264,7 @@ def inspect(run_dir: pathlib.Path, runtime_root: pathlib.Path, uid: int, system_
 
     if startup and (socket_info is None or pid_info is None):
         raise Refusal("virtiofsd did not create its short socket and private PID artifact")
-    if not startup and socket_info is not None and _listener_present(str(socket_path)):
+    if not startup and _listener_present(str(socket_path)):
         raise Refusal("virtiofs socket still has a live listener")
     return {"socket_path": str(socket_path), "runtime_directory": "present",
             "socket_present": socket_info is not None, "pid_present": pid_info is not None}
@@ -308,7 +310,8 @@ def main(argv: list[str]) -> int:
     if len(argv) not in (2, 3) or argv[0] not in {"allocate", "path", "startup", "stopped", "create-log"}:
         print("usage: virtiofs-socket.py {allocate|path|startup|stopped|create-log} RUN_DIR [LOG_NAME]", file=sys.stderr)
         return 2
-    operation, raw_run_dir = argv
+    operation = argv[0]
+    raw_run_dir = argv[1]
     run_dir = pathlib.Path(raw_run_dir)
     uid = os.getuid()
     runtime_root = pathlib.Path(f"/run/user/{uid}")

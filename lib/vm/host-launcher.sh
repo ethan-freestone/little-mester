@@ -21,6 +21,7 @@ VM_HOST_PROCESS_KILL_SETTLE_MS=2000
 VM_HOST_MAX_RETAINED_RUNS=8
 VM_HOST_WORKSPACE_MAX_BYTES=8589934592
 VM_HOST_BROWSER_AUTH_TIMEOUT=600
+VM_HOST_VIRTIOFS_ALLOCATED=0
 VM_HOST_IMAGE_URL='https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img'
 VM_HOST_IMAGE_SHA256='04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94'
 VM_HOST_DOCKER_IMAGE='busybox:1.36.1'
@@ -679,7 +680,8 @@ PY
     vm_host_cleanup_one "$VM_HOST_RUN_DIR/virtiofsd.identity" "$VM_HOST_RUN_DIR/virtiofsd.complete" || cleanup_failed=1
     vm_host_cleanup_one "$VM_HOST_RUN_DIR/proxy.identity" "$VM_HOST_RUN_DIR/proxy.complete" || cleanup_failed=1
   fi
-  if (( qemu_cleanup_failed == 0 )) && ! vm_host_validate_virtiofs_artifacts "$VM_HOST_RUN_DIR" stopped; then
+  if (( qemu_cleanup_failed == 0 )) && [[ "${VM_HOST_VIRTIOFS_ALLOCATED:-0}" == 1 ]] \
+    && ! vm_host_validate_virtiofs_artifacts "$VM_HOST_RUN_DIR" stopped; then
     printf 'WARNING: virtiofs socket/PID state is ambiguous; preserving run state %s\n' "$VM_HOST_RUN_DIR" >&2
     cleanup_failed=1
   fi
@@ -865,6 +867,7 @@ vm_host_start_virtiofs() {
     vm_host_error 'could not securely allocate a short per-run virtiofs socket path'
     return 1
   }
+  VM_HOST_VIRTIOFS_ALLOCATED=1
   pid_file="$socket.pid"
   [[ ! -e "$socket" && ! -L "$socket" && ! -e "$pid_file" && ! -L "$pid_file" ]] || {
     vm_host_error 'refusing pre-existing virtiofs socket or PID path'

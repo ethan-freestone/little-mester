@@ -999,6 +999,23 @@ PY
   wait "$pid" 2>/dev/null || true
 }
 
+@test "cleanup safely retires transient state after failure before virtiofs allocation" {
+  local run_dir="$TEST_TMP/early-startup-failure"
+  mkdir -m 0700 "$run_dir"
+  printf 'partial image download\n' >"$run_dir/ubuntu.img.part"
+  printf 'temporary converted disk\n' >"$run_dir/disk.qcow2"
+  VM_HOST_RUN_DIR="$run_dir"
+  VM_HOST_UNTRACKED_CHILD=0
+  VM_HOST_VIRTIOFS_ALLOCATED=0
+
+  vm_host_cleanup
+
+  [ ! -e "$run_dir/ubuntu.img.part" ]
+  [ ! -e "$run_dir/disk.qcow2" ]
+  [ ! -e "$run_dir/virtiofs.socket-path" ]
+  [ ! -e "$TEST_TMP/early-startup-failure/virtiofsd.sock" ]
+}
+
 @test "virtiofs socket uses a short path when the retained state root is longer than SUN_LEN" {
   local long_state="$TEST_TMP/$(printf '%050d' 1)/$(printf '%050d' 2)/$(printf '%050d' 3)"
   local run_dir="$long_state/20261109T195256Z-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
