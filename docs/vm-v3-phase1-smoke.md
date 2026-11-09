@@ -5,6 +5,37 @@
 **Status:** NOT_RUN. Do not execute the owner procedure below until the final integrated candidate has clean tests, independent security review, passing owner-pushed GitHub Actions checks, and explicit owner authorization. This agent is UID 1000 with `CapEff=0`; no privileged install, hard-filesystem proof, owner browser login, or VM acceptance is claimed. This source tree is not an executable trust boundary.
 
 - **Reviewed source SHA:** `PENDING — use the final integrated candidate SHA in the owner evidence after review; do not use baseline 60f3bd59ab3ca51756b1aee523b172cae61bb7d2 as the implementation SHA.`
+- **Reusable owner runner:** `tools/vm-owner-acceptance` is the maintained, OS-independent entry point. Run it from the exact candidate checkout with a full commit SHA containing that same runner version; it refuses a SHA/runner mismatch. It uses the fixed system executable policy and protected `lab-vm` for dependency/workspace preflight, and the protected launcher for VM/browser-auth/process lifecycle. It never installs packages or automatically removes historical state. Reports are private JSON under `/run/user/<uid>/little-mester-vm-acceptance/<fresh-id>/report.json`; they contain statuses, paths, exit codes and redacted notes, never OAuth URLs or credentials. The separate detailed blocks below document the underlying controls and owner procedure; use the runner commands below instead of copying their implementation blocks.
+
+```bash
+REPO="$PWD"
+SHA='<full-reviewed-candidate-commit-sha>'
+WORKSPACE='/mnt/little-mester-v3-smoke-1000'
+
+# Read-only host/KVM/dependency and optional existing-workspace preflight.
+tools/vm-owner-acceptance --preflight --sha "$SHA" --repo "$REPO" --workspace "$WORKSPACE"
+
+# Explicitly authorize creation of a new, immutable protected installation.
+# Prompts for sudo on the controlling terminal; refuses to overwrite any target.
+tools/vm-owner-acceptance --install --sha "$SHA" --repo "$REPO"
+
+# Explicitly authorize the bounded 64-MiB ENOSPC proof on the pre-existing
+# owner-provisioned tmpfs. The runner removes only the inode it created.
+tools/vm-owner-acceptance --storage-proof --sha "$SHA" --repo "$REPO" --workspace "$WORKSPACE"
+
+# Explicitly authorize the real interactive smoke. Keep the controlling TTY
+# attached for native OpenCode browser authentication.
+tools/vm-owner-acceptance --run --sha "$SHA" --repo "$REPO" --workspace "$WORKSPACE" --model openai/<model-id>
+
+# Read-only verification for the fresh run ID reported by --run.
+tools/vm-owner-acceptance --verify-cleanup --sha "$SHA" --repo "$REPO" --run-id '<reported-run-id>'
+
+# Optional combined mutating path: protected install, preflight, bounded proof,
+# then interactive VM smoke. Use only with owner authorization for every stage.
+tools/vm-owner-acceptance --all --sha "$SHA" --repo "$REPO" --workspace "$WORKSPACE" --model openai/<model-id>
+```
+
+Every invocation creates a new evidence directory. `--verify-cleanup` is read-only with respect to VM state and never signals processes or unlinks socket/PID files; it checks that any retained socket has no listener. Preserve failed run directories for owner review. The run-scoped virtiofs socket and PID file are intentionally retained as private post-mortem artifacts; PID-file contents are never process authority. A later attempt gets an exclusive collision-resistant run directory and refuses any pre-existing socket/PID path within its own directory.
 - **Protected installation:** owner installs that reviewed source under a root-owned, non-group/world-writable directory outside the exported workspace, for example `/opt/little-mester/v3/<reviewed-sha>/`. `lab-vm`, `lib/vm/host-launcher.sh`, `lib/vm/cloud-init.sh`, `lib/vm/proxy.py`, `lib/vm/bounded-log.py`, `lib/vm/executable-policy.py`, and `lib/vm/browser-auth-session.py`, plus every lexical path component and ancestor directory, must be root-owned and not group/world writable; symlinks anywhere in those installation paths are refused. The launcher uses the validated lexical paths only after this check. Keep the source SHA and installed path in the evidence. Do not run from a mutable checkout or install/refresh host packages through the launcher.
 - **Protected host dependencies:** use owner-installed root-owned system executables on the fixed system `PATH` for ordinary runtime commands: `qemu-system-x86_64`, `qemu-img`, `curl`, `cat`, `mv`, `ssh`, `ssh-keygen`, `ssh-keyscan`, `socat`, `python3`, `timeout`, `sha256sum`, `date`, `mktemp`, `mkdir`, `chmod`, `stat`, `id`, `grep`, `rm`, `sleep`, `readlink`, and either `genisoimage` or `mkisofs`. `virtiofsd` need not be on `PATH`: selection checks its `command -v` result there first, then `/usr/lib/virtiofsd`, `/usr/libexec/virtiofsd`, and `/usr/lib/qemu/virtiofsd` in that order; only a candidate accepted by the installed executable policy is usable. `cat` renders the cloud-init seed and `mv` promotes the validated SSH host key; both are checked by the executable policy before lifecycle work. KVM must be available at `/dev/kvm`; no TCG fallback.
 - **Workspace storage prerequisite:** the selected workspace must be the root of a dedicated, owner-provisioned filesystem whose reported capacity is at most 8 GiB. A normal directory, bind mount exposing a larger filesystem, or user quota on a larger filesystem is not accepted. The launcher neither provisions storage nor changes host mounts. Its mount-root/`statvfs` check is only preflight; the hard write limit during the run is enforced by the owner-provisioned filesystem itself. Before acceptance, use a separate small disposable filesystem to demonstrate that writes fail with `ENOSPC` at its configured limit. Never run a capacity-filling probe on a shared host filesystem. Keep this proof separate from the 1-MiB diagnostic-log cap, which bounds helper logs but does not cap workspace writes.

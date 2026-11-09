@@ -158,6 +158,25 @@ print(home / ".local/state/little-mester/v3-smoke")
 PY
 }
 
+vm_host_create_run_dir() {
+  local state_root="$1" stamp run_dir run_id attempt suffix
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)" || return 1
+  [[ "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || return 1
+  for attempt in {1..8}; do
+    suffix="$(python3 -I -c 'import secrets; print(secrets.token_hex(16))')" || return 1
+    [[ "$suffix" =~ ^[0-9a-f]{32}$ ]] || return 1
+    run_id="$stamp-$suffix"
+    run_dir="$state_root/$run_id"
+    if (umask 077; mkdir -- "$run_dir") 2>/dev/null; then
+      chmod 0700 "$run_dir" || return 1
+      printf '%s\n' "$run_dir"
+      return 0
+    fi
+    [[ -e "$run_dir" || -L "$run_dir" ]] || return 1
+  done
+  return 1
+}
+
 vm_host_check_run_capacity() {
   python3 -I - "$1" "$VM_HOST_MAX_RETAINED_RUNS" <<'PY'
 import os, pathlib, stat, sys
@@ -261,6 +280,29 @@ vm_host_require_commands() {
     return 1
   }
   vm_host_resolve_virtiofsd || return 1
+}
+
+vm_host_preflight() {
+  local selected_workspace="" arg home state_root workspace
+  while (($#)); do
+    arg="$1"; shift
+    case "$arg" in
+      --workspace)
+        (($#)) || { vm_host_error '--workspace requires a value'; return 2; }
+        [[ -z "$selected_workspace" ]] || { vm_host_error '--workspace may appear only once'; return 2; }
+        selected_workspace="$1"; shift ;;
+      *) vm_host_error "unsupported preflight argument: $arg"; return 2 ;;
+    esac
+  done
+  vm_host_require_kvm || return 1
+  vm_host_require_commands || return 1
+  if [[ -n "$selected_workspace" ]]; then
+    home="$(vm_host_account_home)" || { vm_host_error 'could not resolve invoking account home'; return 1; }
+    state_root="$home/.local/state/little-mester/v3-smoke"
+    workspace="$(vm_host_validate_workspace "$selected_workspace" "$VM_HOST_SCRIPT_ROOT" "$state_root")" || return 1
+    vm_host_check_workspace_filesystem "$workspace" || return 1
+  fi
+  printf 'HOST_PREFLIGHT_PASS\n'
 }
 
 vm_host_is_under() {
@@ -637,7 +679,14 @@ PY
     vm_host_cleanup_one "$VM_HOST_RUN_DIR/virtiofsd.identity" "$VM_HOST_RUN_DIR/virtiofsd.complete" || cleanup_failed=1
     vm_host_cleanup_one "$VM_HOST_RUN_DIR/proxy.identity" "$VM_HOST_RUN_DIR/proxy.complete" || cleanup_failed=1
   fi
+  if (( qemu_cleanup_failed == 0 )) && ! vm_host_validate_virtiofs_artifacts "$VM_HOST_RUN_DIR" stopped; then
+    printf 'WARNING: virtiofs socket/PID state is ambiguous; preserving run state %s\n' "$VM_HOST_RUN_DIR" >&2
+    cleanup_failed=1
+  fi
   if (( cleanup_failed == 0 )); then
+    # Retain the run-scoped virtiofs socket pathname and its PID file as
+    # post-mortem artifacts. The atomic fresh run directory is never reused;
+    # the PID file is validated as data only and is never process authority.
     rm -f -- "$VM_HOST_RUN_DIR/disk.qcow2" "$VM_HOST_RUN_DIR/ubuntu.img.part" \
       "$VM_HOST_RUN_DIR/seed.iso" "$VM_HOST_RUN_DIR/user-data" "$VM_HOST_RUN_DIR/meta-data" \
       "$VM_HOST_RUN_DIR/id_vm_control" "$VM_HOST_RUN_DIR/id_vm_control.pub" \
@@ -807,11 +856,14 @@ vm_host_start_proxy() {
 }
 
 vm_host_start_virtiofs() {
-  local run_dir="$1" workspace="$2" socket="$1/virtiofs.sock"
+  local run_dir="$1" workspace="$2" socket="$1/virtiofs.sock" pid_file="$1/virtiofs.sock.pid"
   local completion_file="$1/virtiofsd.complete" pid executable status end
   local bounded_logger="$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py"
   [[ -n "$VM_HOST_VIRTIOFSD_EXECUTABLE" ]] || { vm_host_error 'virtiofsd has not passed host preflight'; return 1; }
-  [[ ! -e "$socket" && ! -L "$socket" ]] || { vm_host_error 'refusing pre-existing virtiofs socket path'; return 1; }
+  [[ ! -e "$socket" && ! -L "$socket" && ! -e "$pid_file" && ! -L "$pid_file" ]] || {
+    vm_host_error 'refusing pre-existing virtiofs socket or PID path'
+    return 1
+  }
   rm -f -- "$completion_file"
   (umask 077; python3 -I "$bounded_logger" "$run_dir/virtiofsd.log" "$VM_HOST_LOG_LIMIT_BYTES" \
     --completion-file "$completion_file" -- \
@@ -827,7 +879,10 @@ vm_host_start_virtiofs() {
   chmod 0600 "$run_dir/virtiofsd.identity" "$run_dir/virtiofsd.log" || return 1
   end=$((SECONDS + 15))
   while (( SECONDS < end )); do
-    [[ -S "$socket" ]] && return 0
+    if [[ -S "$socket" ]]; then
+      vm_host_validate_virtiofs_artifacts "$run_dir" startup || return 1
+      return 0
+    fi
     if vm_host_process_identity_status "$run_dir/virtiofsd.identity"; then
       :
     else
@@ -840,6 +895,50 @@ vm_host_start_virtiofs() {
   done
   vm_host_error 'virtiofsd did not create its run-owned workspace socket'
   return 1
+}
+
+vm_host_validate_virtiofs_artifacts() {
+  python3 -I - "$1" "${2:-startup}" <<'PY'
+import os, pathlib, stat, sys
+root = pathlib.Path(sys.argv[1])
+mode = sys.argv[2]
+socket_path = root / "virtiofs.sock"
+pid_path = root / "virtiofs.sock.pid"
+uid = os.getuid()
+try:
+    root_info = os.lstat(root)
+    if (not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != uid
+            or stat.S_IMODE(root_info.st_mode) != 0o700):
+        raise ValueError()
+    try:
+        socket_info = os.lstat(socket_path)
+    except FileNotFoundError:
+        socket_info = None
+    if socket_info is not None and (not stat.S_ISSOCK(socket_info.st_mode) or socket_info.st_uid != uid):
+        raise ValueError()
+    try:
+        pid_info = os.lstat(pid_path)
+    except FileNotFoundError:
+        pid_info = None
+    if pid_info is not None:
+        if (not stat.S_ISREG(pid_info.st_mode) or pid_info.st_uid != uid
+                or stat.S_IMODE(pid_info.st_mode) != 0o600):
+            raise ValueError()
+        pid = pid_path.read_text(encoding="ascii").strip()
+        if not pid.isdigit() or int(pid) <= 1:
+            raise ValueError()
+except (OSError, ValueError, UnicodeError):
+    raise SystemExit("REFUSED: run-owned virtiofs socket/PID artifacts failed identity checks")
+
+if mode == "stopped" and socket_info is not None:
+    try:
+        with open("/proc/net/unix", encoding="ascii") as stream:
+            if any((fields := line.split()) and fields[-1] == str(socket_path)
+                   for line in stream.readlines()[1:]):
+                raise SystemExit("REFUSED: virtiofs socket still has a live listener")
+    except OSError as error:
+        raise SystemExit("REFUSED: could not verify virtiofs socket listener state") from error
+PY
 }
 
 vm_host_free_port() {
@@ -1131,10 +1230,8 @@ vm_host_smoke() {
   start_time=$SECONDS
   state_root="$(vm_host_prepare_state_root "$home")" || return 1
   vm_host_check_run_capacity "$state_root" || return 1
-  run_id="$(date -u +%Y%m%dT%H%M%SZ)-$(mktemp -u XXXXXXXX)" || { vm_host_error 'could not allocate run identifier'; return 1; }
-  VM_HOST_RUN_DIR="$state_root/$run_id"
-  (umask 077; mkdir -- "$VM_HOST_RUN_DIR") || return 1
-  chmod 0700 "$VM_HOST_RUN_DIR" || return 1
+  VM_HOST_RUN_DIR="$(vm_host_create_run_dir "$state_root")" || { vm_host_error 'could not allocate a fresh private run directory'; return 1; }
+  run_id="${VM_HOST_RUN_DIR##*/}"
   trap 'vm_host_exit_cleanup' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM

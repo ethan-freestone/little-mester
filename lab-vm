@@ -136,11 +136,24 @@ PY
 export VM_HOST_SCRIPT_ROOT="$root"
 command="${1:-}"
 [[ -n "$command" ]] || {
-  printf 'Usage: lab-vm smoke --workspace PATH --model openai/<model-id>\n' >&2
+  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id>\n' >&2
   exit 2
 }
 shift
 case "$command" in
+  preflight)
+    exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C \
+      VM_HOST_SCRIPT_ROOT="$root" \
+      /usr/bin/bash -p -c '
+        set -euo pipefail
+        VM_HOST_SCRIPT_ROOT=$1
+        export VM_HOST_SCRIPT_ROOT
+        shift
+        source "$VM_HOST_SCRIPT_ROOT/lib/vm/host-launcher.sh"
+        source "$VM_HOST_SCRIPT_ROOT/lib/vm/cloud-init.sh"
+        vm_host_preflight "$@"
+      ' _ "$root" "$@"
+    ;;
   smoke)
     exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C \
       /usr/bin/timeout --signal=TERM --kill-after=15 1200 \

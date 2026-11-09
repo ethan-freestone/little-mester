@@ -1,0 +1,732 @@
+#!/usr/bin/env python3
+"""Owner-controlled, distro-independent orchestration for the VM v3 gates.
+
+The installed lab-vm remains the authority for executable provenance,
+workspace policy, lifecycle, native browser authentication, and process cleanup.
+This entry point only pins a candidate, sequences those existing gates, and
+stores a small secret-free report. It never performs automatic cleanup.
+"""
+
+from __future__ import annotations
+
+import argparse
+import errno
+import json
+import os
+import pathlib
+import pwd
+import re
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import uuid
+
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+ENTRY = pathlib.Path(__file__).resolve()
+FIXED_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+PYTHON = "/usr/bin/python3"
+GIT = "/usr/bin/git"
+SUDO = "/usr/bin/sudo"
+INSTALL_PARENT = pathlib.Path("/opt/little-mester/v3")
+RUNTIME_ROOT = pathlib.Path(f"/run/user/{os.getuid()}/little-mester-vm-acceptance")
+RUN_ROOT_NAME = "v3-smoke"
+WORKSPACE_PROOF_BYTES = 64 * 1024 * 1024
+WORKSPACE_MAX_BYTES = WORKSPACE_PROOF_BYTES
+MAX_ARCHIVE_FILE = 4 * 1024 * 1024
+MAX_ARCHIVE_TOTAL = 16 * 1024 * 1024
+RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-(?:[A-Za-z0-9]{8}|[0-9a-f]{32})$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+INSTALL_FILES = {
+    "lab-vm": 0o755,
+    "lib/vm/host-launcher.sh": 0o644,
+    "lib/vm/cloud-init.sh": 0o644,
+    "lib/vm/proxy.py": 0o644,
+    "lib/vm/bounded-log.py": 0o644,
+    "lib/vm/executable-policy.py": 0o644,
+    "lib/vm/browser-auth-session.py": 0o644,
+}
+INSTALL_DIRS = {"lib", "lib/vm"}
+
+
+class GateError(Exception):
+    def __init__(self, status: str, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def clean_env() -> dict[str, str]:
+    return {"PATH": FIXED_PATH, "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C"}
+
+
+def protected_executable(repo: pathlib.Path, path: str) -> str:
+    candidate = pathlib.Path(path)
+    if not candidate.is_absolute():
+        raise GateError("BLOCKED", "required fixed executable path is not absolute")
+    policy = repo / "lib/vm/executable-policy.py"
+    result = subprocess.run(
+        [PYTHON, "-I", str(policy), str(candidate)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=clean_env(),
+        check=False,
+    )
+    if result.returncode:
+        raise GateError("BLOCKED", "required executable failed protected-path policy")
+    return str(candidate)
+
+
+def git(repo: pathlib.Path, *args: str, capture: bool = True) -> subprocess.CompletedProcess:
+    executable = protected_executable(repo, GIT)
+    return subprocess.run(
+        [executable, "-C", str(repo), *args],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+        env={**clean_env(), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"},
+        check=False,
+    )
+
+
+def candidate_commit(repo: pathlib.Path, sha: str) -> None:
+    if not SHA_RE.fullmatch(sha):
+        raise GateError("BLOCKED", "candidate must be a full lowercase 40-character commit SHA")
+    resolved = git(repo, "rev-parse", "--verify", f"{sha}^{{commit}}")
+    if resolved.returncode or resolved.stdout.decode("ascii", "replace").strip() != sha:
+        raise GateError("BLOCKED", "candidate SHA is not an available exact commit")
+    runner_blob = git(repo, "show", f"{sha}:tools/vm-owner-acceptance")
+    try:
+        current = ENTRY.read_bytes()
+    except OSError as error:
+        raise GateError("BLOCKED", "runner source cannot be read safely") from error
+    if runner_blob.returncode or runner_blob.stdout != current:
+        raise GateError("BLOCKED", "running acceptance runner does not match the pinned candidate")
+
+
+def install_path(sha: str) -> pathlib.Path:
+    return INSTALL_PARENT / sha
+
+
+def check_directory_chain(path: pathlib.Path, final_uid: int, final_mode: int) -> None:
+    """Require a lexical, symlink-free protected directory chain."""
+    if not path.is_absolute():
+        raise GateError("BLOCKED", "protected path is not absolute")
+    current = pathlib.Path("/")
+    for index, component in enumerate(path.parts[1:]):
+        current = current / component
+        try:
+            info = os.lstat(current)
+        except OSError as error:
+            raise GateError("BLOCKED", "protected directory path is missing or inaccessible") from error
+        last = index == len(path.parts[1:]) - 1
+        expected_uid = final_uid if last else 0
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != expected_uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or not info.st_mode & stat.S_IXOTH):
+            raise GateError("BLOCKED", "protected directory ownership, type, or mode check failed")
+        if last and stat.S_IMODE(info.st_mode) != final_mode:
+            raise GateError("BLOCKED", "protected directory mode differs from the normalized mode")
+
+
+def verify_install(repo: pathlib.Path, sha: str) -> pathlib.Path:
+    root = install_path(sha)
+    check_directory_chain(root, 0, 0o755)
+    expected = set(INSTALL_FILES) | INSTALL_DIRS
+    observed: set[str] = set()
+    for directory, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        parent = pathlib.Path(directory)
+        for name in list(dirs):
+            path = parent / name
+            info = os.lstat(path)
+            relative = path.relative_to(root).as_posix()
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                raise GateError("BLOCKED", "installation contains a symlink or non-directory")
+            if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o755:
+                raise GateError("BLOCKED", "installation directory ownership or mode differs")
+            observed.add(relative)
+        for name in files:
+            path = parent / name
+            info = os.lstat(path)
+            relative = path.relative_to(root).as_posix()
+            if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                raise GateError("BLOCKED", "installation contains a symlink or non-regular file")
+            if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != INSTALL_FILES.get(relative):
+                raise GateError("BLOCKED", "installation file ownership or mode differs")
+            source = git(repo, "show", f"{sha}:{relative}")
+            if source.returncode or path.read_bytes() != source.stdout:
+                raise GateError("BLOCKED", "installed bytes do not match the pinned commit")
+            observed.add(relative)
+    if observed != expected:
+        raise GateError("BLOCKED", "installation file set differs from the pinned runtime inventory")
+    return root
+
+
+INSTALL_WORKER = r'''import os, pathlib, re, stat, sys, tarfile
+
+sha = sys.argv[1]
+if not re.fullmatch(r"[0-9a-f]{40}", sha) or os.geteuid() != 0:
+    raise SystemExit("REFUSED: invalid pinned install request")
+parts = ("opt", "little-mester", "v3")
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+fd = os.open("/", flags)
+try:
+    root = os.fstat(fd)
+    if root.st_uid != 0 or root.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SystemExit("REFUSED: filesystem root is not protected")
+    for component in parts:
+        created = False
+        try:
+            info = os.stat(component, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            os.mkdir(component, 0o755, dir_fd=fd)
+            created = True
+            info = os.stat(component, dir_fd=fd, follow_symlinks=False)
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or (not created and not info.st_mode & stat.S_IXOTH)):
+            raise SystemExit("REFUSED: installation ancestry is not root-owned and protected")
+        child = os.open(component, flags, dir_fd=fd)
+        if created:
+            os.fchown(child, 0, 0)
+            os.fchmod(child, 0o755)
+        opened = os.fstat(child)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            os.close(child)
+            raise SystemExit("REFUSED: installation ancestry changed while opening")
+        os.close(fd)
+        fd = child
+    try:
+        os.mkdir(sha, 0o755, dir_fd=fd)
+    except FileExistsError:
+        raise SystemExit("REFUSED: candidate installation already exists; refusing overwrite")
+    target = os.open(sha, flags, dir_fd=fd)
+    os.fchmod(target, 0o755)
+    os.fchown(target, 0, 0)
+    expected = {
+        "lab-vm": 0o755,
+        "lib/vm/host-launcher.sh": 0o644,
+        "lib/vm/cloud-init.sh": 0o644,
+        "lib/vm/proxy.py": 0o644,
+        "lib/vm/bounded-log.py": 0o644,
+        "lib/vm/executable-policy.py": 0o644,
+        "lib/vm/browser-auth-session.py": 0o644,
+    }
+    directories = {"lib", "lib/vm"}
+    observed = set()
+    total = 0
+    archive = tarfile.open(fileobj=sys.stdin.buffer, mode="r|")
+    for item in archive:
+        name = item.name.removeprefix("./").rstrip("/")
+        if name in directories:
+            if not item.isdir():
+                raise SystemExit("REFUSED: archive directory entry has an unsafe type")
+            observed.add(name)
+            continue
+        if name not in expected or not item.isreg() or item.size > 4 * 1024 * 1024:
+            raise SystemExit("REFUSED: archive has an unexpected path, link, type, or size")
+        total += item.size
+        if total > 16 * 1024 * 1024 or name in observed:
+            raise SystemExit("REFUSED: archive exceeds bounds or duplicates a member")
+        parent_fd = os.dup(target)
+        parent_parts = pathlib.PurePosixPath(name).parts[:-1]
+        for component in parent_parts:
+            try:
+                os.mkdir(component, 0o755, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            next_fd = os.open(component, flags, dir_fd=parent_fd)
+            os.fchown(next_fd, 0, 0)
+            os.fchmod(next_fd, 0o755)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        output = os.open(pathlib.PurePosixPath(name).name,
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o600, dir_fd=parent_fd)
+        source = archive.extractfile(item)
+        if source is None:
+            raise SystemExit("REFUSED: archive member could not be read")
+        with source, os.fdopen(output, "wb") as stream:
+            remaining = item.size
+            while remaining:
+                chunk = source.read(min(65536, remaining))
+                if not chunk:
+                    raise SystemExit("REFUSED: archive member was truncated")
+                stream.write(chunk)
+                remaining -= len(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.fchown(stream.fileno(), 0, 0)
+            os.fchmod(stream.fileno(), expected[name])
+        os.close(parent_fd)
+        observed.add(name)
+    if observed != set(expected) | directories:
+        raise SystemExit("REFUSED: archive does not contain the exact runtime inventory")
+    os.fsync(target)
+    os.close(target)
+    print("PINNED_INSTALL_CREATED")
+finally:
+    os.close(fd)
+'''
+
+
+def install_candidate(repo: pathlib.Path, sha: str) -> pathlib.Path:
+    target = install_path(sha)
+    if target.exists() or target.is_symlink():
+        raise GateError("BLOCKED", "candidate installation path already exists; preserving it")
+    sudo = protected_executable(repo, SUDO)
+    # Let sudo authenticate on the controlling terminal before its stdin is
+    # occupied by the immutable archive stream. The privileged worker itself
+    # runs non-interactively after this explicit authorization step.
+    authorization = subprocess.run(
+        [sudo, "-v"], stdin=None, stdout=None, stderr=None, env=clean_env(), check=False
+    )
+    if authorization.returncode:
+        raise GateError("BLOCKED", "privileged installation authorization was not granted")
+    archive = subprocess.Popen(
+        [protected_executable(repo, GIT), "-C", str(repo), "archive", "--format=tar", sha],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=None,
+        env={**clean_env(), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"},
+    )
+    assert archive.stdout is not None
+    try:
+        worker = subprocess.run(
+            [sudo, "-n", PYTHON, "-I", "-c", INSTALL_WORKER, sha],
+            stdin=archive.stdout,
+            env=clean_env(),
+            check=False,
+        )
+    except KeyboardInterrupt:
+        archive.terminate()
+        archive.wait()
+        raise
+    finally:
+        archive.stdout.close()
+    archive_status = archive.wait()
+    if worker.returncode or archive_status:
+        raise GateError("FAIL", "protected installation failed; any partial target is preserved")
+    return verify_install(repo, sha)
+
+
+def runtime_dir() -> pathlib.Path:
+    expected = pathlib.Path(f"/run/user/{os.getuid()}")
+    check_directory_chain(expected, os.getuid(), 0o700)
+    target = expected / "little-mester-vm-acceptance"
+    try:
+        os.mkdir(target, 0o700)
+    except FileExistsError:
+        pass
+    check_directory_chain(target, os.getuid(), 0o700)
+    return target
+
+
+def new_report_dir(parent: pathlib.Path | None = None) -> pathlib.Path:
+    parent = parent or runtime_dir()
+    for _ in range(20):
+        identity = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex
+        path = parent / identity
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            continue
+        info = os.lstat(path)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise GateError("BLOCKED", "new evidence directory failed private ownership check")
+        return path
+    raise GateError("FAIL", "could not allocate a fresh evidence directory")
+
+
+def save_report(report_dir: pathlib.Path, data: dict) -> None:
+    path = report_dir / "report.json"
+    payload = (json.dumps(data, sort_keys=True, indent=2) + "\n").encode()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def mount_facts(path: pathlib.Path) -> tuple[str, set[str], set[str]]:
+    resolved = path.resolve(strict=True)
+    match = None
+    with open("/proc/self/mountinfo", "r", encoding="ascii") as stream:
+        for line in stream:
+            left, separator, right = line.rstrip("\n").partition(" - ")
+            if not separator:
+                continue
+            fields = left.split()
+            tail = right.split()
+            if len(fields) >= 6 and len(tail) >= 3 and fields[4].replace("\\040", " ") == str(resolved):
+                match = (tail[0], set(fields[5].split(",")), set(tail[2].split(",")))
+                break
+    if match is None:
+        raise GateError("BLOCKED", "workspace is not a mount root")
+    return match
+
+
+def verify_workspace_mount(path_text: str, exact_tmpfs: bool) -> pathlib.Path:
+    path = pathlib.Path(path_text)
+    if not path.is_absolute():
+        raise GateError("BLOCKED", "workspace path must be absolute")
+    try:
+        resolved = path.resolve(strict=True)
+        info = os.lstat(path)
+        usage = os.statvfs(resolved)
+    except OSError as error:
+        raise GateError("BLOCKED", "workspace path or filesystem cannot be verified") from error
+    if resolved != path or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise GateError("BLOCKED", "workspace must be a canonical owner-owned directory")
+    fs_type, mount_options, super_options = mount_facts(resolved)
+    total = usage.f_blocks * usage.f_frsize
+    if exact_tmpfs:
+        options = mount_options | super_options
+        required = {"nosuid", "nodev", "noexec", "mode=700", f"uid={os.getuid()}"}
+        if (fs_type != "tmpfs" or total != WORKSPACE_PROOF_BYTES
+                or not required.issubset(options) or stat.S_IMODE(info.st_mode) != 0o700
+                or info.st_gid != os.getgid()):
+            raise GateError("BLOCKED", "storage proof requires the pre-existing confined 64-MiB tmpfs")
+    elif total > 8 * 1024 * 1024 * 1024:
+        raise GateError("BLOCKED", "workspace filesystem exceeds the 8-GiB smoke bound")
+    return resolved
+
+
+def storage_proof(workspace_text: str) -> None:
+    workspace = verify_workspace_mount(workspace_text, exact_tmpfs=True)
+    if list(workspace.iterdir()):
+        raise GateError("BLOCKED", "workspace must be empty before the bounded ENOSPC proof")
+    proof = workspace / (".vm-owner-acceptance-" + uuid.uuid4().hex)
+    fd = os.open(proof, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    identity = os.fstat(fd)
+    written = 0
+    try:
+        with os.fdopen(fd, "wb", buffering=0) as stream:
+            block = b"\0" * min(1024 * 1024, WORKSPACE_PROOF_BYTES)
+            while written < WORKSPACE_PROOF_BYTES + 1:
+                amount = min(len(block), WORKSPACE_PROOF_BYTES + 1 - written)
+                try:
+                    count = stream.write(block[:amount])
+                except OSError as error:
+                    if error.errno == errno.ENOSPC and written == WORKSPACE_PROOF_BYTES:
+                        print("ENOSPC_CONFIRMED after 67108864 bytes; 67108865 bytes attempted at most")
+                        return
+                    raise GateError("FAIL", "bounded storage proof failed before the expected ENOSPC boundary") from error
+                if count != amount:
+                    raise GateError("FAIL", "bounded storage proof encountered a short write")
+                written += count
+        raise GateError("FAIL", "workspace accepted a write beyond the 64-MiB capacity")
+    finally:
+        try:
+            current = os.lstat(proof)
+            if ((current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino)
+                    and current.st_uid == os.getuid() and stat.S_ISREG(current.st_mode)):
+                os.unlink(proof)
+        except FileNotFoundError:
+            pass
+
+
+def state_root() -> pathlib.Path:
+    home = pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=True)
+    path = home / ".local/state/little-mester" / RUN_ROOT_NAME
+    return path
+
+
+def installed_preflight(root: pathlib.Path, workspace: str | None) -> None:
+    command = [str(root / "lab-vm"), "preflight"]
+    if workspace:
+        command.extend(["--workspace", workspace])
+    status = subprocess.run(command, stdin=subprocess.DEVNULL, env=clean_env(), check=False).returncode
+    if status:
+        raise GateError("BLOCKED", "protected installed preflight failed")
+
+
+def list_runs(root: pathlib.Path) -> set[str]:
+    try:
+        return {entry.name for entry in root.iterdir() if entry.is_dir() and not entry.is_symlink()}
+    except FileNotFoundError:
+        return set()
+
+
+def inspect_cleanup(sha: str, run_id: str) -> dict:
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise GateError("BLOCKED", "run identity format is invalid")
+    root = state_root()
+    run_dir = root / run_id
+    verify_user_directory_chain(run_dir)
+    if not run_dir.is_relative_to(root):
+        raise GateError("BLOCKED", "run directory escaped private state")
+    if list(run_dir.glob("*.identity")) or list(run_dir.glob("*.complete")):
+        raise GateError("BLOCKED", "run retains process identity or incomplete logger proof; no cleanup attempted")
+    for name in ("disk.qcow2", "ubuntu.img.part", "id_vm_control", "id_vm_control.pub"):
+        if (run_dir / name).exists() or (run_dir / name).is_symlink():
+            raise GateError("BLOCKED", "run retains transient VM or key material; no cleanup attempted")
+    socket_path = run_dir / "virtiofs.sock"
+    pid_path = run_dir / "virtiofs.sock.pid"
+    residual = []
+    if socket_path.exists() or socket_path.is_symlink():
+        info = os.lstat(socket_path)
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+            raise GateError("BLOCKED", "retained virtiofs socket path has unexpected identity")
+        residual.append("virtiofs.sock (retained, not removed)")
+    if pid_path.exists() or pid_path.is_symlink():
+        info = os.lstat(pid_path)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            raise GateError("BLOCKED", "retained virtiofs PID artifact has unexpected identity")
+        text = pid_path.read_text(encoding="ascii").strip()
+        if not text.isdigit() or int(text) <= 1:
+            raise GateError("BLOCKED", "retained virtiofs PID artifact is malformed")
+        residual.append("virtiofs.sock.pid (retained; contents are not process authority)")
+    if socket_listener_present(str(socket_path)):
+        raise GateError("BLOCKED", "a listener remains for the retained virtiofs socket path")
+    return {"status": "PASS", "run_id": run_id, "residual_artifacts": residual,
+            "note": "No identity/PID artifact was used to signal a process; historical run artifacts were not changed."}
+
+
+def socket_listener_present(path: str) -> bool:
+    try:
+        with open("/proc/net/unix", encoding="ascii") as stream:
+            for line in stream.readlines()[1:]:
+                fields = line.split()
+                if len(fields) >= 8 and fields[-1] == path:
+                    return True
+    except OSError as error:
+        raise GateError("BLOCKED", "cannot verify whether a retained socket has a live listener") from error
+    return False
+
+
+def verify_user_directory_chain(path: pathlib.Path) -> None:
+    if not path.is_absolute():
+        raise GateError("BLOCKED", "private run path is not absolute")
+    home = pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=True)
+    if path != home and home not in path.parents:
+        raise GateError("BLOCKED", "VM run path is outside the invoking user's home")
+    current = pathlib.Path("/")
+    for index, component in enumerate(path.parts[1:]):
+        current /= component
+        try:
+            info = os.lstat(current)
+        except OSError as error:
+            raise GateError("BLOCKED", "private run path is missing or inaccessible") from error
+        final = index == len(path.parts[1:]) - 1
+        expected_uid = os.getuid() if current == home or home in current.parents else 0
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != expected_uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or (final and stat.S_IMODE(info.st_mode) != 0o700)):
+            raise GateError("BLOCKED", "private run path ownership or mode check failed")
+
+
+def verify_cleanup_report(sha: str, run_id: str) -> None:
+    parent = runtime_dir()
+    matches = []
+    for entry in parent.iterdir():
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        report = entry / "report.json"
+        try:
+            info = os.lstat(report)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600):
+                continue
+            content = json.loads(report.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if (content.get("candidate_sha") == sha
+                and content.get("evidence", {}).get("vm_run_id") == run_id):
+            matches.append(content)
+    if len(matches) != 1:
+        raise GateError("BLOCKED", "no unique owner-runner report binds this SHA to that run id")
+
+
+def report_template(sha: str, mode: str, report_dir: pathlib.Path) -> dict:
+    return {
+        "version": 1,
+        "candidate_sha": sha,
+        "mode": mode,
+        "attempt_id": report_dir.name,
+        "status": "IN_PROGRESS",
+        "gates": {name: "NOT_RUN" for name in ("candidate", "preflight", "install", "storage_proof", "run", "cleanup")},
+        "evidence": {"report": str(report_dir / "report.json")},
+        "notes": [],
+    }
+
+
+def print_report(data: dict) -> None:
+    print(f"Candidate: {data['candidate_sha']}")
+    print(f"Report: {data['evidence']['report']}")
+    for name, status in data["gates"].items():
+        print(f"{name}: {status}")
+    print(f"OVERALL: {data['status']}")
+
+
+def run_smoke(root: pathlib.Path, workspace: str, model: str, state_before: set[str], data: dict) -> None:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise GateError("BLOCKED", "native browser authentication requires the controlling terminal")
+    resolved = verify_workspace_mount(workspace, exact_tmpfs=False)
+    if list(resolved.iterdir()):
+        raise GateError("BLOCKED", "selected smoke workspace must be empty before launch")
+    result = subprocess.run(
+        [str(root / "lab-vm"), "smoke", "--workspace", str(resolved), "--model", model],
+        stdin=None,
+        stdout=None,
+        stderr=None,
+        env=clean_env(),
+        check=False,
+    )
+    created = list_runs(state_root()) - state_before
+    if len(created) == 1:
+        run_id = next(iter(created))
+        data["evidence"]["vm_run_id"] = run_id
+        data["evidence"]["vm_run_directory"] = str(state_root() / run_id)
+    elif created:
+        data["notes"].append("ambiguous new VM run directories; none were modified")
+    data["gates"]["run"] = "PASS" if result.returncode == 0 else "BLOCKED"
+    data["evidence"]["smoke_exit_code"] = result.returncode
+    if result.returncode:
+        raise GateError("BLOCKED", "protected smoke returned nonzero; inspect its retained private run logs")
+    if len(created) != 1:
+        raise GateError("BLOCKED", "smoke succeeded but a unique new VM run directory was not observed")
+    try:
+        cleanup = inspect_cleanup(data["candidate_sha"], next(iter(created)))
+    except GateError as error:
+        data["gates"]["cleanup"] = error.status
+        raise
+    data["gates"]["cleanup"] = cleanup["status"]
+    data["evidence"]["cleanup"] = cleanup
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=__doc__)
+    modes = p.add_mutually_exclusive_group()
+    for name in ("preflight", "install", "storage-proof", "run", "verify-cleanup", "all"):
+        modes.add_argument(f"--{name}", action="store_true", dest=name.replace("-", "_"))
+    p.add_argument("--sha", required=True, type=full_sha, help="full lowercase 40-character candidate commit SHA")
+    p.add_argument("--repo", default=str(ROOT), help="repository containing the exact candidate commit")
+    p.add_argument("--workspace", help="existing owner-provisioned bounded filesystem root")
+    p.add_argument("--model", help="OpenAI model identifier for the interactive smoke")
+    p.add_argument("--run-id", help="exact fresh VM run id for read-only cleanup verification")
+    return p
+
+
+def full_sha(value: str) -> str:
+    if not SHA_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError("expected a full lowercase 40-character commit SHA")
+    return value
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    modes = [name for name in ("preflight", "install", "storage_proof", "run", "verify_cleanup", "all") if getattr(args, name)]
+    mode = modes[0] if modes else "preflight"
+    repo = pathlib.Path(args.repo).resolve(strict=True)
+    report_dir = new_report_dir()
+    data = report_template(args.sha, mode, report_dir)
+    save_report(report_dir, data)
+    result_code = 0
+    current_gate = "candidate"
+    try:
+        candidate_commit(repo, args.sha)
+        data["gates"]["candidate"] = "PASS"
+        if mode == "verify_cleanup":
+            current_gate = "cleanup"
+            if not args.run_id:
+                raise GateError("BLOCKED", "--verify-cleanup requires --run-id")
+            verify_cleanup_report(args.sha, args.run_id)
+            cleanup = inspect_cleanup(args.sha, args.run_id)
+            data["gates"]["cleanup"] = cleanup["status"]
+            data["evidence"]["cleanup"] = cleanup
+        elif mode == "preflight":
+            current_gate = "preflight"
+            root = install_path(args.sha)
+            if root.exists():
+                root = verify_install(repo, args.sha)
+                installed_preflight(root, args.workspace)
+                data["gates"]["preflight"] = "PASS"
+            else:
+                data["gates"]["preflight"] = "BLOCKED"
+                data["notes"].append("protected install absent; read-only preflight did not install or execute the mutable candidate")
+                raise GateError("BLOCKED", "candidate is verified in Git but not yet installed")
+        elif mode in ("install", "all"):
+            current_gate = "install"
+            root = install_candidate(repo, args.sha)
+            data["gates"]["install"] = "PASS"
+            current_gate = "preflight"
+            installed_preflight(root, args.workspace)
+            data["gates"]["preflight"] = "PASS"
+            if mode == "install":
+                data["status"] = "PASS"
+            else:
+                current_gate = "storage_proof"
+                if not args.workspace or not args.model:
+                    raise GateError("BLOCKED", "--all requires --workspace and --model")
+                verify_workspace_mount(args.workspace, exact_tmpfs=True)
+                storage_proof(args.workspace)
+                data["gates"]["storage_proof"] = "PASS"
+                before = list_runs(state_root())
+                current_gate = "run"
+                run_smoke(root, args.workspace, args.model, before, data)
+                data["status"] = "PASS"
+        elif mode == "storage_proof":
+            current_gate = "preflight"
+            root = verify_install(repo, args.sha)
+            if not args.workspace:
+                raise GateError("BLOCKED", "--storage-proof requires --workspace")
+            installed_preflight(root, args.workspace)
+            data["gates"]["preflight"] = "PASS"
+            current_gate = "storage_proof"
+            storage_proof(args.workspace)
+            data["gates"]["storage_proof"] = "PASS"
+            data["status"] = "PASS"
+        elif mode == "run":
+            current_gate = "preflight"
+            root = verify_install(repo, args.sha)
+            if not args.workspace or not args.model:
+                raise GateError("BLOCKED", "--run requires --workspace and --model")
+            installed_preflight(root, args.workspace)
+            data["gates"]["preflight"] = "PASS"
+            before = list_runs(state_root())
+            current_gate = "run"
+            run_smoke(root, args.workspace, args.model, before, data)
+            data["status"] = "PASS"
+        else:
+            raise GateError("FAIL", "unsupported operation")
+    except KeyboardInterrupt:
+        data["status"] = "BLOCKED"
+        if data["gates"].get(current_gate) == "NOT_RUN":
+            data["gates"][current_gate] = "BLOCKED"
+        data["notes"].append("interrupted; no automatic cleanup or historical deletion was attempted")
+        result_code = 3
+    except GateError as error:
+        data["status"] = error.status
+        if data["gates"].get(current_gate) == "NOT_RUN":
+            data["gates"][current_gate] = error.status
+        data["notes"].append(error.message)
+        result_code = 3 if error.status == "BLOCKED" else 1
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        data["status"] = "FAIL"
+        if data["gates"].get(current_gate) == "NOT_RUN":
+            data["gates"][current_gate] = "FAIL"
+        data["notes"].append(f"operation failed ({type(error).__name__}); details omitted")
+        result_code = 1
+    finally:
+        try:
+            save_report_update = report_dir / "report.json"
+            payload = (json.dumps(data, sort_keys=True, indent=2) + "\n").encode()
+            fd = os.open(save_report_update, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError:
+            print(f"FAIL: report update failed; preserve evidence directory {report_dir}", file=sys.stderr)
+            return 1
+    print_report(data)
+    return result_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -356,6 +356,58 @@ PY
   [[ "$output" != *"hostile.invalid"* ]]
 }
 
+@test "fresh run directories use exclusive identities and preserve stale socket/PID evidence" {
+  local state_root="$TEST_TMP/private-state" old_dir first unrelated_pid token_counter="$TEST_TMP/token-counter" calls
+  mkdir -m 0700 "$state_root"
+  old_dir="$state_root/20261109T154005Z-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  mkdir -m 0700 "$old_dir"
+  printf 'preserve historical marker\n' >"$old_dir/postmortem.txt"
+  sleep 30 &
+  unrelated_pid=$!
+  printf '%s\n' "$unrelated_pid" >"$old_dir/virtiofs.sock.pid"
+  chmod 0600 "$old_dir/virtiofs.sock.pid"
+
+  printf '0\n' >"$token_counter"
+  date() { printf '20261109T154005Z\n'; }
+  python3() {
+    read -r calls <"$token_counter"
+    calls=$((calls + 1))
+    printf '%s\n' "$calls" >"$token_counter"
+    if (( calls == 1 )); then printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'; else printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'; fi
+  }
+  first="$(vm_host_create_run_dir "$state_root")"
+
+  [ "$first" = "$state_root/20261109T154005Z-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ]
+  [ "$(stat -c %a "$first")" = 700 ]
+  [ "$(<"$old_dir/postmortem.txt")" = 'preserve historical marker' ]
+  [ "$(<"$old_dir/virtiofs.sock.pid")" = "$unrelated_pid" ]
+  kill -0 "$unrelated_pid"
+
+  kill "$unrelated_pid"
+  wait "$unrelated_pid" 2>/dev/null || true
+}
+
+@test "virtiofs startup refuses stale socket or PID paths without trusting their PID" {
+  local run_dir="$TEST_TMP/stale-virtiofs" pid
+  mkdir -m 0700 "$run_dir"
+  sleep 30 &
+  pid=$!
+  printf '%s\n' "$pid" >"$run_dir/virtiofs.sock.pid"
+  chmod 0600 "$run_dir/virtiofs.sock.pid"
+  : >"$run_dir/virtiofs.sock"
+  VM_HOST_VIRTIOFSD_EXECUTABLE=/usr/bin/true
+
+  run vm_host_start_virtiofs "$run_dir" "$TEST_TMP"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'refusing pre-existing virtiofs socket or PID path'* ]]
+  [ -e "$run_dir/virtiofs.sock" ]
+  [ "$(<"$run_dir/virtiofs.sock.pid")" = "$pid" ]
+  kill -0 "$pid"
+  kill "$pid"
+  wait "$pid" 2>/dev/null || true
+}
+
 @test "generated cloud-init uses cloud-init 26.1 users-groups schema for the host UID" {
   local user_data
   user_data="$(vm_host_cloud_init smoke-v3 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test')"
@@ -855,6 +907,9 @@ socket_path = sys.argv[sys.argv.index("--socket-path") + 1]
 listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 listener.bind(socket_path)
 listener.close()
+with open(socket_path + ".pid", "w", encoding="ascii") as stream:
+    stream.write(str(os.getpid()) + "\n")
+os.chmod(socket_path + ".pid", 0o600)
 PY
   chmod 0755 "$executable"
   VM_HOST_TRUSTED_PATH="$TEST_POLICY_TMP/empty-path"
@@ -886,6 +941,32 @@ PY
     --socket-path "$run_dir/virtiofs.sock" --rlimit-nofile=1048576)"
   [ "$(<"$invocation")" = "$expected_invocation" ]
   [ -S "$run_dir/virtiofs.sock" ]
+  [ -f "$run_dir/virtiofs.sock.pid" ]
+  [ "$(stat -c %a "$run_dir/virtiofs.sock.pid")" = 600 ]
+}
+
+@test "cleanup retains stopped run socket/PID artifacts and never signals PID-file contents" {
+  local run_dir="$TEST_TMP/retained-virtiofs" pid
+  mkdir -m 0700 "$run_dir"
+  python3 - "$run_dir/virtiofs.sock" <<'PY'
+import socket, sys
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(sys.argv[1])
+listener.close()
+PY
+  sleep 30 &
+  pid=$!
+  printf '%s\n' "$pid" >"$run_dir/virtiofs.sock.pid"
+  chmod 0600 "$run_dir/virtiofs.sock.pid"
+  VM_HOST_RUN_DIR="$run_dir"
+
+  vm_host_cleanup
+
+  [ -S "$run_dir/virtiofs.sock" ]
+  [ "$(<"$run_dir/virtiofs.sock.pid")" = "$pid" ]
+  kill -0 "$pid"
+  kill "$pid"
+  wait "$pid" 2>/dev/null || true
 }
 
 @test "network builder restricts QEMU and binds only loopback SSH control" {
