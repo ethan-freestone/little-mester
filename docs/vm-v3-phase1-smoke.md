@@ -224,16 +224,17 @@ The dirfd walk checks every existing lexical component before creating its child
 
 #### Repair the already-extracted candidate, only after read-only verification
 
-For an installation created by the earlier procedure, do not rerun the create/extract block: it correctly refuses an existing target. The owner may retain and repair that tree in place only if all checks below pass. They verify the exact SHA path, protected ancestors, exact seven-file tree, root ownership, no symlinks/special/extra entries, and byte-for-byte contents against the pinned commit before changing permissions. If any check fails, stop and preserve the tree for review; do not use a recursive chmod or overwrite it.
+For an installation created by the earlier procedure, do not rerun the create/extract block: it correctly refuses an existing target. The owner may retain and repair that tree in place only if all checks below pass **and** the owner has placed the host in a trusted maintenance window: no untrusted process may have write access through GID 0 or be concurrently modifying this tree. The owner must establish this from the host's user/group and process-management context; if uncertain, stop rather than chmod. The checks verify the exact SHA path, protected ancestors, exact seven-file tree, root ownership, no symlinks/special/extra entries, and byte-for-byte contents against the pinned commit before changing permissions. If any check fails, stop and preserve the tree for review; do not use a recursive chmod or overwrite it.
 
 ```bash
 set -euo pipefail
+export LC_ALL=C
 REPO='/path/to/owner/repository-clone'
 CANDIDATE_SHA='ce88ae5b4fe706f90244ebc60562354c5ba36da4'
 INSTALL_ROOT="/opt/little-mester/v3/$CANDIDATE_SHA"
 [[ "$INSTALL_ROOT" == /opt/little-mester/v3/ce88ae5b4fe706f90244ebc60562354c5ba36da4 ]]
 [[ "$(git -C "$REPO" rev-parse "$CANDIDATE_SHA^{commit}")" == "$CANDIDATE_SHA" ]]
-for path in /opt /opt/little-mester /opt/little-mester/v3 "$INSTALL_ROOT"; do
+for path in / /opt /opt/little-mester /opt/little-mester/v3 "$INSTALL_ROOT"; do
   test ! -L "$path"
   test "$(sudo stat -c '%F:%u:%g' "$path")" = 'directory:0:0'
   sudo /usr/bin/python3 -I -c 'import os,stat,sys; m=os.stat(sys.argv[1],follow_symlinks=False).st_mode; sys.exit(bool(m & (stat.S_IWGRP|stat.S_IWOTH)))' "$path"
@@ -270,7 +271,7 @@ namei -l "$INSTALL_ROOT/lab-vm" "$INSTALL_ROOT/lib/vm/host-launcher.sh" \
   "$INSTALL_ROOT/lib/vm/browser-auth-session.py"
 ```
 
-This one-time recovery applies only to the exact recorded tree. If path, ownership, contents, layout, or symlink checks differ from the reported evidence, stop before `chmod`. After successful verification and normalization, resume the normal read-only dependency/KVM preflight; no KVM or VM action is part of this correction.
+This one-time recovery applies only to the exact recorded tree during the stated trusted maintenance window. If path, ownership, contents, layout, or symlink checks differ from the reported evidence, or writer quiescence cannot be established, stop before `chmod`. After successful verification and normalization, resume the normal read-only dependency/KVM preflight; no KVM or VM action is part of this correction.
 
 Before allocating the workspace or starting QEMU, prove the owner-installed runtime commands resolve through the fixed system `PATH` and pass the installed executable policy. This is read-only; if any command is absent or refused, stop and have the owner provision it through the normal host process (never through this launcher).
 

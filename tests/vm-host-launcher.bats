@@ -452,7 +452,7 @@ PY
 
 @test "runbook normalizes permissions after real archive extraction" {
   run python3 - "$TEST_ROOT/docs/vm-v3-phase1-smoke.md" "$TEST_TMP" <<'PY'
-import io, os, pathlib, stat, subprocess, sys, tarfile
+import io, os, pathlib, shlex, stat, subprocess, sys, tarfile
 
 text = pathlib.Path(sys.argv[1]).read_text()
 marker = 'sudo /usr/bin/python3 -I - "$INSTALL_ROOT" 0 0 <<\'PY\'\n'
@@ -485,12 +485,17 @@ with tarfile.open(archive, "w") as bundle:
         entry.mode = mode
         bundle.addfile(entry, io.BytesIO(payload))
 
-extract = (
-    "import os,sys; os.umask(0o077); "
-    "os.execv('/usr/bin/tar', ['/usr/bin/tar','--no-same-owner',"
-    "'--no-same-permissions','--keep-old-files','-xf',sys.argv[1],'-C',sys.argv[2]])"
+extract_line = next(
+    line.strip().split("|", 1)[1].strip()
+    for line in text.splitlines()
+    if line.lstrip().startswith("| sudo /usr/bin/python3")
 )
-subprocess.run([sys.executable, "-I", "-c", extract, str(archive), str(root)], check=True)
+extract_command = shlex.split(extract_line)
+assert extract_command[0] == "sudo"
+extract_command = extract_command[1:]
+assert extract_command[-1] == "$INSTALL_ROOT"
+extract_command[-1] = str(root)
+subprocess.run(extract_command, input=archive.read_bytes(), check=True)
 
 expected_paths = [root, root / "lib", root / "lib/vm"] + [root / name for name in files]
 for path in expected_paths:
