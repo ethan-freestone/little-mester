@@ -6,6 +6,7 @@ setup() {
   TEST_OWNED_PROCESS_GROUP_FILE=""
   TEST_UNRELATED_PID_FILE=""
   TEST_CLEANUP_RUN_DIRS=()
+  TEST_POLICY_TMP=""
   VM_HOST_SCRIPT_ROOT="$TEST_ROOT"
   source "$TEST_ROOT/lib/vm/host-launcher.sh"
   source "$TEST_ROOT/lib/vm/cloud-init.sh"
@@ -52,7 +53,86 @@ PY
       wait "$unrelated_pid" 2>/dev/null || true
     fi
   fi
+  if [[ -n "$TEST_POLICY_TMP" && -d "$TEST_POLICY_TMP" ]]; then
+    rm -rf -- "$TEST_POLICY_TMP"
+  fi
   rm -rf -- "$TEST_TMP"
+}
+
+setup_virtiofsd_policy_test() {
+  local policy_home
+  policy_home="$(python3 -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+  TEST_POLICY_TMP="$(mktemp -d "$policy_home/.vm-host-launcher-test.XXXXXXXX")"
+  TEST_POLICY_CALLS="$TEST_TMP/virtiofsd-policy-calls"
+  TEST_POLICY_FORCE_OWNER_PATH=""
+  TEST_REAL_PYTHON="$(builtin command -v python3)"
+  : >"$TEST_POLICY_CALLS"
+  unset -f virtiofsd 2>/dev/null || true
+}
+
+install_virtiofsd_policy_test_shim() {
+  python3() {
+    if [[ "${1:-}" == -I && "${2:-}" == "$VM_HOST_SCRIPT_ROOT/lib/vm/executable-policy.py" ]]; then
+      printf '%s\n' "${3:-}" >>"$TEST_POLICY_CALLS"
+      "$TEST_REAL_PYTHON" -I - "$VM_HOST_SCRIPT_ROOT/lib/vm/executable-policy.py" \
+        "${3:-}" "$TEST_POLICY_FORCE_OWNER_PATH" <<'PY'
+import importlib.util
+import os
+import pathlib
+import sys
+
+policy_path, candidate, synthetic_owner_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("executable_policy_test", policy_path)
+policy = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(policy)
+owners = {0, os.getuid()}
+original_lstat = policy.os.lstat
+if synthetic_owner_path:
+    def lstat_with_untrusted_owner(raw_path, *args, **kwargs):
+        info = original_lstat(raw_path, *args, **kwargs)
+        if pathlib.Path(os.fsdecode(os.fspath(raw_path))) == pathlib.Path(synthetic_owner_path):
+            values = list(info)
+            values[4] = os.getuid() + 1
+            return os.stat_result(values)
+        return info
+    policy.os.lstat = lstat_with_untrusted_owner
+try:
+    policy.validate_executable(
+        candidate,
+        directory_owners=owners,
+        executable_owners=owners,
+        symlink_owners=owners,
+    )
+except (OSError, ValueError) as error:
+    print(f"REFUSED: {error}", file=sys.stderr)
+    raise SystemExit(1)
+finally:
+    policy.os.lstat = original_lstat
+PY
+    else
+      "$TEST_REAL_PYTHON" "$@"
+    fi
+  }
+}
+
+write_virtiofsd_test_executable() {
+  local path="$1" directory="${1%/*}"
+  mkdir -p "$directory"
+  while [[ "$directory" == "$TEST_POLICY_TMP/"* ]]; do
+    chmod 0755 "$directory"
+    directory="${directory%/*}"
+  done
+  printf '#!/bin/sh\nexit 0\n' >"$path"
+  chmod 0755 "$path"
+}
+
+assert_virtiofsd_refused() {
+  local output_file="$1"
+  if vm_host_resolve_virtiofsd >"$output_file" 2>&1; then
+    printf 'virtiofsd discovery unexpectedly accepted a candidate\n' >&2
+    return 1
+  fi
+  [ -z "$VM_HOST_VIRTIOFSD_EXECUTABLE" ]
 }
 
 write_cleanup_cascade_driver() {
@@ -570,6 +650,221 @@ SH
   done
 }
 
+@test "virtiofsd discovery prefers the trusted PATH executable and validates its exact path" {
+  setup_virtiofsd_policy_test
+  install_virtiofsd_policy_test_shim
+  local path_dir="$TEST_POLICY_TMP/path-bin" fallback_dir="$TEST_POLICY_TMP/usr/lib"
+  local path_executable="$path_dir/virtiofsd" fallback_executable="$fallback_dir/virtiofsd"
+  write_virtiofsd_test_executable "$path_executable"
+  write_virtiofsd_test_executable "$fallback_executable"
+  VM_HOST_TRUSTED_PATH="$path_dir"
+  VM_HOST_VIRTIOFSD_PATHS=("$fallback_executable")
+
+  vm_host_resolve_virtiofsd >"$TEST_TMP/virtiofsd-resolve.out" 2>&1 || {
+    cat "$TEST_TMP/virtiofsd-resolve.out" >&2
+    return 1
+  }
+
+  [ "$VM_HOST_VIRTIOFSD_EXECUTABLE" = "$path_executable" ]
+  [ "$(<"$TEST_POLICY_CALLS")" = "$path_executable" ]
+}
+
+@test "virtiofsd discovery skips an unsafe trusted PATH candidate for an acceptable fallback" {
+  setup_virtiofsd_policy_test
+  install_virtiofsd_policy_test_shim
+  local unsafe_dir="$TEST_TMP/unsafe-bin" unsafe_candidate="$TEST_TMP/unsafe-bin/virtiofsd"
+  local safe_candidate="$TEST_POLICY_TMP/usr/lib/virtiofsd" expected_calls
+  write_virtiofsd_test_executable "$unsafe_candidate"
+  write_virtiofsd_test_executable "$safe_candidate"
+  VM_HOST_TRUSTED_PATH="$unsafe_dir"
+  VM_HOST_VIRTIOFSD_PATHS=("$safe_candidate")
+
+  vm_host_resolve_virtiofsd >"$TEST_TMP/virtiofsd-resolve.out" 2>&1 || {
+    cat "$TEST_TMP/virtiofsd-resolve.out" >&2
+    return 1
+  }
+
+  expected_calls="$(printf '%s\n%s' "$unsafe_candidate" "$safe_candidate")"
+  [ "$VM_HOST_VIRTIOFSD_EXECUTABLE" = "$safe_candidate" ]
+  [ "$(<"$TEST_POLICY_CALLS")" = "$expected_calls" ]
+}
+
+@test "virtiofsd discovery supports the evidenced Arch, exec, and QEMU package paths" {
+  setup_virtiofsd_policy_test
+  install_virtiofsd_policy_test_shim
+  [ "${VM_HOST_VIRTIOFSD_PATHS[*]}" = '/usr/lib/virtiofsd /usr/libexec/virtiofsd /usr/lib/qemu/virtiofsd' ]
+  VM_HOST_TRUSTED_PATH="$TEST_POLICY_TMP/empty-path"
+  mkdir -p "$VM_HOST_TRUSTED_PATH"
+
+  local relative fixture candidate
+  for relative in usr/lib/virtiofsd usr/libexec/virtiofsd usr/lib/qemu/virtiofsd; do
+    fixture="$TEST_POLICY_TMP/fixture-${relative//\//-}"
+    candidate="$fixture/$relative"
+    write_virtiofsd_test_executable "$candidate"
+    VM_HOST_VIRTIOFSD_PATHS=(
+      "$fixture/usr/lib/virtiofsd"
+      "$fixture/usr/libexec/virtiofsd"
+      "$fixture/usr/lib/qemu/virtiofsd"
+    )
+    : >"$TEST_POLICY_CALLS"
+
+    vm_host_resolve_virtiofsd >"$TEST_TMP/virtiofsd-resolve.out" 2>&1 || {
+      cat "$TEST_TMP/virtiofsd-resolve.out" >&2
+      return 1
+    }
+
+    [ "$VM_HOST_VIRTIOFSD_EXECUTABLE" = "$candidate" ]
+    [ "$(<"$TEST_POLICY_CALLS")" = "$candidate" ]
+  done
+}
+
+@test "virtiofsd discovery refuses missing and invalid candidate files" {
+  setup_virtiofsd_policy_test
+  install_virtiofsd_policy_test_shim
+  VM_HOST_TRUSTED_PATH="$TEST_POLICY_TMP/empty-path"
+  mkdir -p "$VM_HOST_TRUSTED_PATH"
+  VM_HOST_VIRTIOFSD_PATHS=("$TEST_POLICY_TMP/missing/virtiofsd")
+
+  assert_virtiofsd_refused "$TEST_TMP/virtiofsd-refusal.out"
+  [[ "$(<"$TEST_TMP/virtiofsd-refusal.out")" == *'required host command missing: virtiofsd'* ]]
+  [ ! -s "$TEST_POLICY_CALLS" ]
+
+  local invalid="$TEST_POLICY_TMP/invalid/virtiofsd"
+  write_virtiofsd_test_executable "$invalid"
+  chmod 0644 "$invalid"
+  VM_HOST_VIRTIOFSD_PATHS=("$invalid")
+  assert_virtiofsd_refused "$TEST_TMP/virtiofsd-refusal.out"
+  [[ "$(<"$TEST_TMP/virtiofsd-refusal.out")" == *'virtiofsd executable is not from a protected root-owned path'* ]]
+  [ "$(<"$TEST_POLICY_CALLS")" = "$invalid" ]
+}
+
+@test "virtiofsd discovery propagates unsafe ownership, writable ancestry, and symlink refusal" {
+  setup_virtiofsd_policy_test
+  install_virtiofsd_policy_test_shim
+  VM_HOST_TRUSTED_PATH="$TEST_POLICY_TMP/empty-path"
+  mkdir -p "$VM_HOST_TRUSTED_PATH"
+
+  local owner_dir="$TEST_POLICY_TMP/unsafe-owner" owner_candidate="$TEST_POLICY_TMP/unsafe-owner/bin/virtiofsd"
+  write_virtiofsd_test_executable "$owner_candidate"
+  VM_HOST_VIRTIOFSD_PATHS=("$owner_candidate")
+  TEST_POLICY_FORCE_OWNER_PATH="$owner_dir"
+  assert_virtiofsd_refused "$TEST_TMP/virtiofsd-refusal.out"
+  [[ "$(<"$TEST_TMP/virtiofsd-refusal.out")" == *'virtiofsd executable is not from a protected root-owned path'* ]]
+  [ "$(<"$TEST_POLICY_CALLS")" = "$owner_candidate" ]
+
+  local writable_dir="$TEST_POLICY_TMP/unsafe-writable" writable_candidate="$TEST_POLICY_TMP/unsafe-writable/bin/virtiofsd"
+  write_virtiofsd_test_executable "$writable_candidate"
+  chmod 0777 "$writable_dir"
+  TEST_POLICY_FORCE_OWNER_PATH=''
+  VM_HOST_VIRTIOFSD_PATHS=("$writable_candidate")
+  : >"$TEST_POLICY_CALLS"
+  assert_virtiofsd_refused "$TEST_TMP/virtiofsd-refusal.out"
+  [ "$(<"$TEST_POLICY_CALLS")" = "$writable_candidate" ]
+
+  local safe_dir="$TEST_POLICY_TMP/safe-alias/bin" unsafe_target="$TEST_POLICY_TMP/unsafe-target/bin/virtiofsd"
+  local symlink_candidate="$safe_dir/virtiofsd"
+  write_virtiofsd_test_executable "$unsafe_target"
+  chmod 0777 "${unsafe_target%/bin/virtiofsd}"
+  mkdir -p "$safe_dir"
+  chmod 0755 "$TEST_POLICY_TMP/safe-alias" "$safe_dir"
+  ln -s "$unsafe_target" "$symlink_candidate"
+  VM_HOST_VIRTIOFSD_PATHS=("$symlink_candidate")
+  : >"$TEST_POLICY_CALLS"
+  assert_virtiofsd_refused "$TEST_TMP/virtiofsd-refusal.out"
+  [ "$(<"$TEST_POLICY_CALLS")" = "$symlink_candidate" ]
+}
+
+@test "unsafe virtiofsd preflight fails before allocating state or starting lifecycle stages" {
+  setup_virtiofsd_policy_test
+  install_virtiofsd_policy_test_shim
+  local fake_bin="$TEST_TMP/untrusted-bin" state_marker="$TEST_TMP/state-preparation" stage_marker="$TEST_TMP/lifecycle-stage"
+  mkdir -p "$fake_bin"
+  write_virtiofsd_test_executable "$fake_bin/virtiofsd"
+  VM_HOST_TRUSTED_PATH="$fake_bin"
+  VM_HOST_VIRTIOFSD_PATHS=("$TEST_POLICY_TMP/missing/virtiofsd")
+  VM_HOST_SCRIPT_ROOT="$TEST_ROOT"
+  command() {
+    if [[ "${1:-}" == -v ]]; then
+      if [[ "${2:-}" == python3 ]]; then
+        printf '/usr/bin/python3\n'
+      else
+        printf '/usr/bin/true\n'
+      fi
+      return 0
+    fi
+    builtin command "$@"
+  }
+  vm_host_require_kvm() { :; }
+  vm_host_prepare_state_root() { touch "$state_marker"; printf '%s/state\n' "$TEST_TMP"; }
+  vm_host_prepare_disk() { touch "$stage_marker"; }
+
+  if vm_host_smoke --workspace "$TEST_TMP/workspace" --model openai/test-model \
+    >"$TEST_TMP/virtiofsd-preflight.out" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+
+  [ "$status" -ne 0 ]
+  [[ "$(<"$TEST_TMP/virtiofsd-preflight.out")" == *'virtiofsd executable is not from a protected root-owned path'* ]]
+  [ ! -e "$state_marker" ]
+  [ ! -e "$stage_marker" ]
+}
+
+@test "virtiofs startup executes the exact absolute path selected and validated during preflight" {
+  setup_virtiofsd_policy_test
+  install_virtiofsd_policy_test_shim
+  local run_dir="$TEST_TMP/virtiofs-run" executable
+  local invocation="$TEST_TMP/virtiofsd-invocation" expected_invocation
+  executable="$TEST_POLICY_TMP/selected-virtiofsd"
+  mkdir -m 0700 "$run_dir"
+  cat >"$executable" <<'PY'
+#!/usr/bin/python3
+import os
+import pathlib
+import socket
+import sys
+
+pathlib.Path(os.environ["VM_HOST_TEST_VIRTIOFSD_INVOCATION"]).write_text(
+    "\n".join([sys.argv[0], *sys.argv[1:]]) + "\n", encoding="utf-8"
+)
+socket_path = sys.argv[sys.argv.index("--socket-path") + 1]
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(socket_path)
+listener.close()
+PY
+  chmod 0755 "$executable"
+  VM_HOST_TRUSTED_PATH="$TEST_POLICY_TMP/empty-path"
+  mkdir -p "$VM_HOST_TRUSTED_PATH"
+  VM_HOST_VIRTIOFSD_PATHS=("$executable")
+  vm_host_resolve_virtiofsd >"$TEST_TMP/virtiofsd-resolve.out" 2>&1 || {
+    cat "$TEST_TMP/virtiofsd-resolve.out" >&2
+    return 1
+  }
+  [ "$VM_HOST_VIRTIOFSD_EXECUTABLE" = "$executable" ]
+  [ "$(<"$TEST_POLICY_CALLS")" = "$executable" ]
+  VM_HOST_TEST_VIRTIOFSD_INVOCATION="$invocation"
+  export VM_HOST_TEST_VIRTIOFSD_INVOCATION
+  vm_host_record_process_identity() {
+    local log_path="${1%/virtiofsd.identity}/virtiofsd.log"
+    : >"$1"
+    for _ in {1..100}; do
+      [[ -e "$log_path" ]] && return 0
+      sleep 0.01
+    done
+    return 1
+  }
+  vm_host_process_identity_status() { return 0; }
+
+  run vm_host_start_virtiofs "$run_dir" "$TEST_TMP/workspace"
+
+  [ "$status" -eq 0 ] || { printf 'virtiofs start output: %s\n' "$output" >&2; return 1; }
+  expected_invocation="$(printf '%s\n' "$executable" --shared-dir "$TEST_TMP/workspace" \
+    --socket-path "$run_dir/virtiofs.sock" --rlimit-nofile=1048576)"
+  [ "$(<"$invocation")" = "$expected_invocation" ]
+  [ -S "$run_dir/virtiofs.sock" ]
+}
+
 @test "network builder restricts QEMU and binds only loopback SSH control" {
   run vm_host_qemu_network_args 43210 32123
 
@@ -728,7 +1023,10 @@ SH
 }
 
 @test "virtiofs startup fails closed when launch cannot produce an owned process" {
-  virtiofsd() { return 73; }
+  local fake_virtiofsd="$TEST_TMP/virtiofsd"
+  printf '#!/bin/sh\nexit 73\n' >"$fake_virtiofsd"
+  chmod 0755 "$fake_virtiofsd"
+  VM_HOST_VIRTIOFSD_EXECUTABLE="$fake_virtiofsd"
   vm_host_record_process_identity() { return 78; }
 
   run vm_host_start_virtiofs "$TEST_TMP" "$TEST_TMP/workspace"

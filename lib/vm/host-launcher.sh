@@ -24,6 +24,9 @@ VM_HOST_BROWSER_AUTH_TIMEOUT=600
 VM_HOST_IMAGE_URL='https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img'
 VM_HOST_IMAGE_SHA256='04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94'
 VM_HOST_DOCKER_IMAGE='busybox:1.36.1'
+VM_HOST_TRUSTED_PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+VM_HOST_VIRTIOFSD_PATHS=(/usr/lib/virtiofsd /usr/libexec/virtiofsd /usr/lib/qemu/virtiofsd)
+VM_HOST_VIRTIOFSD_EXECUTABLE=''
 
 vm_host_error() {
   printf 'REFUSED: %s\n' "$1" >&2
@@ -204,9 +207,38 @@ PY
   vm_host_workspace_capacity_allowed "$mount_root" "$total_bytes"
 }
 
+vm_host_resolve_virtiofsd() {
+  local path_executable candidate found_candidate=0
+  local -a candidates=()
+  VM_HOST_VIRTIOFSD_EXECUTABLE=''
+
+  path_executable="$(PATH="$VM_HOST_TRUSTED_PATH" builtin command -v virtiofsd 2>/dev/null || true)"
+  if [[ -n "$path_executable" ]]; then
+    candidates+=("$path_executable")
+  fi
+  candidates+=("${VM_HOST_VIRTIOFSD_PATHS[@]}")
+
+  for candidate in "${candidates[@]}"; do
+    [[ -e "$candidate" || -L "$candidate" ]] || continue
+    found_candidate=1
+    [[ "$candidate" == /* ]] || continue
+    if python3 -I "$VM_HOST_SCRIPT_ROOT/lib/vm/executable-policy.py" "$candidate" >/dev/null 2>&1; then
+      VM_HOST_VIRTIOFSD_EXECUTABLE="$candidate"
+      return 0
+    fi
+  done
+
+  if (( found_candidate )); then
+    vm_host_error 'virtiofsd executable is not from a protected root-owned path'
+  else
+    vm_host_error 'required host command missing: virtiofsd (host installation is never performed automatically)'
+  fi
+  return 1
+}
+
 vm_host_require_commands() {
   local command
-  for command in qemu-system-x86_64 qemu-img virtiofsd curl cat mv ssh ssh-keygen ssh-keyscan socat python3 timeout sha256sum date mktemp mkdir chmod stat id grep rm sleep readlink; do
+  for command in qemu-system-x86_64 qemu-img curl cat mv ssh ssh-keygen ssh-keyscan socat python3 timeout sha256sum date mktemp mkdir chmod stat id grep rm sleep readlink; do
     local executable
     executable="$(command -v "$command" 2>/dev/null || true)"
     [[ -n "$executable" ]] || {
@@ -228,6 +260,7 @@ vm_host_require_commands() {
     vm_host_error 'ISO creation command is not from a protected root-owned path'
     return 1
   }
+  vm_host_resolve_virtiofsd || return 1
 }
 
 vm_host_is_under() {
@@ -777,11 +810,12 @@ vm_host_start_virtiofs() {
   local run_dir="$1" workspace="$2" socket="$1/virtiofs.sock"
   local completion_file="$1/virtiofsd.complete" pid executable status end
   local bounded_logger="$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py"
+  [[ -n "$VM_HOST_VIRTIOFSD_EXECUTABLE" ]] || { vm_host_error 'virtiofsd has not passed host preflight'; return 1; }
   [[ ! -e "$socket" && ! -L "$socket" ]] || { vm_host_error 'refusing pre-existing virtiofs socket path'; return 1; }
   rm -f -- "$completion_file"
   (umask 077; python3 -I "$bounded_logger" "$run_dir/virtiofsd.log" "$VM_HOST_LOG_LIMIT_BYTES" \
     --completion-file "$completion_file" -- \
-    virtiofsd --shared-dir "$workspace" --socket-path "$socket" --rlimit-nofile=1048576) </dev/null &
+    "$VM_HOST_VIRTIOFSD_EXECUTABLE" --shared-dir "$workspace" --socket-path "$socket" --rlimit-nofile=1048576) </dev/null &
   pid="$!"
   VM_HOST_UNTRACKED_CHILD=1
   executable="$(readlink -f -- "$(command -v python3)")" || return 1
