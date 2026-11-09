@@ -40,6 +40,80 @@ PY
   rm -rf -- "$TEST_TMP"
 }
 
+write_cleanup_cascade_driver() {
+  local path="$1"
+  cat >"$path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$1" run_dir="$2" scenario="$3" port_source="$4" attempt_log="$5" pid_file="$6"
+source "$root/lib/vm/host-launcher.sh"
+VM_HOST_SCRIPT_ROOT="$root"
+VM_HOST_RUN_DIR="$run_dir"
+VM_HOST_UNTRACKED_CHILD=0
+VM_HOST_AUTH_STARTED=0
+VM_HOST_SMOKE_COMPLETE_PENDING=1
+export VM_HOST_SCRIPT_ROOT VM_HOST_RUN_DIR VM_HOST_UNTRACKED_CHILD VM_HOST_AUTH_STARTED VM_HOST_SMOKE_COMPLETE_PENDING
+
+cleanup_one_definition="$(declare -f vm_host_cleanup_one)"
+cleanup_one_definition="${cleanup_one_definition/vm_host_cleanup_one /vm_host_cleanup_one_exact }"
+eval "$cleanup_one_definition"
+vm_host_cleanup_one() {
+  case "${1##*/}" in
+    qemu.identity|virtiofsd.identity|proxy.identity) printf '%s\n' "${1##*/}" >>"$attempt_log" ;;
+  esac
+  vm_host_cleanup_one_exact "$@"
+}
+
+printf 'synthetic disk state\n' >"$run_dir/disk.qcow2"
+printf 'synthetic auth state\n' >"$run_dir/user-data"
+case "$scenario" in
+  occupied)
+    cat -- "$port_source" >"$run_dir/auth-callback.port"
+    chmod 0600 "$run_dir/auth-callback.port"
+    ;;
+  missing-proof)
+    : >"$run_dir/auth-session.complete"
+    chmod 0600 "$run_dir/auth-session.complete"
+    ;;
+  invalid-proof)
+    : >"$run_dir/auth-session.complete"
+    printf 'not-json\n' >"$run_dir/auth-session.proof"
+    chmod 0600 "$run_dir/auth-session.complete" "$run_dir/auth-session.proof"
+    ;;
+  *) exit 2 ;;
+esac
+
+python_exe="$(readlink -f -- "$(command -v python3)")"
+for resource in qemu virtiofsd proxy; do
+  python3 -I "$root/lib/vm/bounded-log.py" "$run_dir/$resource.log" 4096 \
+    --completion-file "$run_dir/$resource.complete" -- /usr/bin/sleep 60 </dev/null &
+  resource_pid="$!"
+  printf '%s %s\n' "$resource" "$resource_pid" >>"$pid_file"
+  vm_host_record_process_identity "$run_dir/$resource.identity" "$resource_pid" \
+    "$python_exe" "$root/lib/vm/bounded-log.py"
+done
+
+trap vm_host_exit_cleanup EXIT
+exit 0
+SH
+  chmod 0700 "$path"
+}
+
+assert_cleanup_cascade_result() {
+  local run_dir="$1" attempt_log="$2" pid_file="$3" result_status="$4" result_output="$5" kind pid
+  [ "$result_status" -eq 1 ]
+  [[ "$result_output" != *"Smoke acceptance stages completed."* ]]
+  [ "$(<"$attempt_log")" = $'qemu.identity\nvirtiofsd.identity\nproxy.identity' ]
+  [ -d "$run_dir" ]
+  [ "$(<"$run_dir/disk.qcow2")" = 'synthetic disk state' ]
+  [ "$(<"$run_dir/user-data")" = 'synthetic auth state' ]
+  while read -r kind pid; do
+    [ ! -e "/proc/$pid" ] || { printf 'resource process remained: %s %s\n' "$kind" "$pid" >&2; return 1; }
+    [ ! -e "$run_dir/$kind.identity" ]
+    [ ! -e "$run_dir/$kind.complete" ]
+  done <"$pid_file"
+}
+
 @test "canonical workspace rejects a symlinked selected path" {
   mkdir "$TEST_TMP/real-workspace"
   ln -s "$TEST_TMP/real-workspace" "$TEST_TMP/workspace-link"
@@ -234,6 +308,10 @@ PY
   grep -Fq 'No API key or API credits are used' "$doc"
   grep -Fq "MODEL='openai/gpt-6-luna#max'" "$doc"
   grep -Fq 'opencode auth logout openai' "$doc"
+  grep -Fq 'not from other processes running as `mester`, guest root' "$doc"
+  grep -Fq 'does not establish remote session revocation or secure erasure' "$doc"
+  grep -Fq 'may invalidate the working old-VM session' "$doc"
+  grep -Fq 'Persistence across VM restart remains out of scope and is a separate concern' "$doc"
   ! grep -Fq -- '--credentials-file' "$doc"
   ! grep -Fq 'api_key' "$doc"
 }
@@ -754,6 +832,89 @@ PY
   [ "$status" -ne 0 ]
   [[ "$output" == *"cleanup incomplete"* ]]
   [ -d "$run_dir" ]
+}
+
+@test "EXIT cleanup cascades after an occupied callback port and retains run artifacts" {
+  local run_dir="$TEST_TMP/occupied-auth-cleanup" driver="$TEST_TMP/cleanup-cascade.sh"
+  local listener_port="$TEST_TMP/occupied-port" listener_pid_file="$TEST_TMP/occupied-listener.pid"
+  local attempt_log="$TEST_TMP/occupied-attempts" pids_file="$TEST_TMP/occupied-resource-pids"
+  local listener_pid run_status run_output listener_closed=1 kind pid
+  mkdir -m 0700 "$run_dir"
+  python3 - "$listener_port" <<'PY' &
+import os, socket, sys, time
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.bind(("127.0.0.1", 0))
+listener.listen(1)
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w") as stream:
+    stream.write(str(listener.getsockname()[1]) + "\n")
+    stream.flush()
+while True:
+    time.sleep(1)
+PY
+  listener_pid="$!"
+  printf '%s\n' "$listener_pid" >"$listener_pid_file"
+  TEST_UNRELATED_PID_FILE="$listener_pid_file"
+  for _ in {1..100}; do
+    [[ -s "$listener_port" ]] && break
+    sleep 0.01
+  done
+  [ -s "$listener_port" ]
+  write_cleanup_cascade_driver "$driver"
+  : >"$attempt_log"
+
+  run timeout --signal=TERM --kill-after=3 15 bash "$driver" \
+    "$TEST_ROOT" "$run_dir" occupied "$listener_port" "$attempt_log" "$pids_file"
+  run_status="$status"
+  run_output="$output"
+  if ! vm_host_auth_listener_closed "$run_dir/auth-callback.port" >/dev/null 2>&1; then
+    listener_closed=0
+  fi
+  kill "$listener_pid"
+  wait "$listener_pid" 2>/dev/null || true
+  TEST_UNRELATED_PID_FILE=""
+  VM_HOST_RUN_DIR="$run_dir"
+  for kind in qemu virtiofsd proxy; do
+    if [[ -f "$run_dir/$kind.identity" && ! -L "$run_dir/$kind.identity" ]]; then
+      vm_host_cleanup_one "$run_dir/$kind.identity" "$run_dir/$kind.complete" >/dev/null 2>&1 || true
+    fi
+  done
+
+  assert_cleanup_cascade_result "$run_dir" "$attempt_log" "$pids_file" "$run_status" "$run_output"
+  [ "$listener_closed" -eq 0 ]
+  [ -e "$run_dir/auth-callback.port" ]
+}
+
+@test "EXIT cleanup cascades after missing or invalid browser-auth proof and retains artifacts" {
+  local scenario run_dir driver="$TEST_TMP/cleanup-cascade.sh" attempt_log pids_file
+  local run_status run_output kind
+  write_cleanup_cascade_driver "$driver"
+  for scenario in missing-proof invalid-proof; do
+    run_dir="$TEST_TMP/$scenario-cleanup"
+    attempt_log="$TEST_TMP/$scenario-attempts"
+    pids_file="$TEST_TMP/$scenario-resource-pids"
+    mkdir -m 0700 "$run_dir"
+    : >"$attempt_log"
+
+    run timeout --signal=TERM --kill-after=3 15 bash "$driver" \
+      "$TEST_ROOT" "$run_dir" "$scenario" - "$attempt_log" "$pids_file"
+    run_status="$status"
+    run_output="$output"
+    VM_HOST_RUN_DIR="$run_dir"
+    for kind in qemu virtiofsd proxy; do
+      if [[ -f "$run_dir/$kind.identity" && ! -L "$run_dir/$kind.identity" ]]; then
+        vm_host_cleanup_one "$run_dir/$kind.identity" "$run_dir/$kind.complete" >/dev/null 2>&1 || true
+      fi
+    done
+
+    assert_cleanup_cascade_result "$run_dir" "$attempt_log" "$pids_file" "$run_status" "$run_output"
+    [ -e "$run_dir/auth-session.complete" ]
+    if [[ "$scenario" == missing-proof ]]; then
+      [ ! -e "$run_dir/auth-session.proof" ]
+    else
+      [ "$(<"$run_dir/auth-session.proof")" = 'not-json' ]
+    fi
+  done
 }
 
 @test "EXIT trap changes a successful smoke status to failure when cleanup is ambiguous" {

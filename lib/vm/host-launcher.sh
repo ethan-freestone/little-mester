@@ -558,6 +558,7 @@ vm_host_cleanup_browser_auth() {
 
 vm_host_cleanup() {
   local cleanup_failed="${VM_HOST_UNTRACKED_CHILD:-0}"
+  local auth_cleanup_failed=0 qemu_cleanup_failed=0
   if [[ -z "${VM_HOST_RUN_DIR:-}" ]]; then
     if (( cleanup_failed == 0 )) && [[ "${VM_HOST_SMOKE_COMPLETE_PENDING:-0}" != 1 ]]; then
       return 0
@@ -584,16 +585,23 @@ PY
     printf 'WARNING: cleanup incomplete; private run state is missing, substituted, or not owner-private; preserving it\n' >&2
     return 1
   fi
-  if (( cleanup_failed == 0 )); then
-    vm_host_cleanup_browser_auth "$VM_HOST_RUN_DIR" || cleanup_failed=1
+  if (( cleanup_failed == 0 )) && ! vm_host_cleanup_browser_auth "$VM_HOST_RUN_DIR"; then
+    cleanup_failed=1
+    auth_cleanup_failed=1
   fi
-  if (( cleanup_failed == 0 )); then
-    vm_host_cleanup_one "$VM_HOST_RUN_DIR/qemu.identity" "$VM_HOST_RUN_DIR/qemu.complete" || cleanup_failed=1
+  # Auth cleanup failure remains fatal, but it must not strand separately
+  # recorded VM helpers. Stop QEMU first; only stop its dependencies if that
+  # exact bounded cleanup (including logger proof) succeeded. Once QEMU is
+  # gone, a virtiofsd cleanup failure does not prevent stopping the independent
+  # proxy process. Any uncertainty retains the run state and suppresses success.
+  if (( cleanup_failed == 0 || auth_cleanup_failed == 1 )); then
+    if ! vm_host_cleanup_one "$VM_HOST_RUN_DIR/qemu.identity" "$VM_HOST_RUN_DIR/qemu.complete"; then
+      cleanup_failed=1
+      qemu_cleanup_failed=1
+    fi
   fi
-  if (( cleanup_failed == 0 )); then
+  if (( qemu_cleanup_failed == 0 && (cleanup_failed == 0 || auth_cleanup_failed == 1) )); then
     vm_host_cleanup_one "$VM_HOST_RUN_DIR/virtiofsd.identity" "$VM_HOST_RUN_DIR/virtiofsd.complete" || cleanup_failed=1
-  fi
-  if (( cleanup_failed == 0 )); then
     vm_host_cleanup_one "$VM_HOST_RUN_DIR/proxy.identity" "$VM_HOST_RUN_DIR/proxy.complete" || cleanup_failed=1
   fi
   if (( cleanup_failed == 0 )); then
