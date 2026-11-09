@@ -1015,7 +1015,7 @@ SH
 @test "cloud seed stops before metadata and ISO creation when bootstrap fails" {
   vm_host_cloud_init() { return 73; }
 
-  run vm_host_write_cloud_seed "$TEST_TMP" smoke-v3 1234 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test'
+  run vm_host_write_cloud_seed "$TEST_TMP" smoke-v3 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test'
 
   [ "$status" -ne 0 ]
   [ ! -e "$TEST_TMP/meta-data" ]
