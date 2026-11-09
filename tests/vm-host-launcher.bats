@@ -370,6 +370,10 @@ PY
   [[ "$output" == *"export http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128"* ]]
   [[ "$output" == *"docker-ce-rootless-extras"* ]]
   [[ "$output" == *"dockerd-rootless-setuptool.sh install"* ]]
+  [[ "$output" == *"mester-v3-user-dirs.py prepare"* ]]
+  [[ "$output" == *"mester-v3-user-dirs.py verify-write"* ]]
+  [[ "$output" == *"systemctl --user show-environment"* ]]
+  [[ "$output" != *"install -d -o mester -g mester -m 0700 /home/mester/.config/systemd/user/docker.service.d"* ]]
   [[ "$output" == *"systemctl disable --now docker.service docker.socket containerd.service"* ]]
   [[ "$output" == *"systemctl --user enable --now docker"* ]]
   [[ "$output" == *"opencode"* ]]
@@ -672,6 +676,7 @@ files = {
     "lib/vm/executable-policy.py": 0o666,
     "lib/vm/browser-auth-session.py": 0o666,
     "lib/vm/virtiofs-socket.py": 0o666,
+    "lib/vm/guest-user-dirs.py": 0o666,
 }
 with tarfile.open(archive, "w") as bundle:
     for directory in directories:
@@ -1283,7 +1288,7 @@ SH
   local fixture="$TEST_TMP/protected-helper-shape"
   mkdir -p "$fixture/lib/vm"
   cp "$TEST_ROOT/lab-vm" "$fixture/lab-vm"
-  for name in host-launcher.sh cloud-init.sh proxy.py bounded-log.py executable-policy.py browser-auth-session.py; do
+  for name in host-launcher.sh cloud-init.sh proxy.py bounded-log.py executable-policy.py browser-auth-session.py guest-user-dirs.py; do
     cp "$TEST_ROOT/lib/vm/$name" "$fixture/lib/vm/$name"
   done
   ln -s "$TEST_ROOT/lib/vm/virtiofs-socket.py" "$fixture/lib/vm/virtiofs-socket.py"

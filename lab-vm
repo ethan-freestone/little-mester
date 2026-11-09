@@ -36,6 +36,7 @@ dependencies = [
     root / "lib/vm/executable-policy.py",
     root / "lib/vm/browser-auth-session.py",
     root / "lib/vm/virtiofs-socket.py",
+    root / "lib/vm/guest-user-dirs.py",
 ]
 
 # Inspect the original lexical path before resolving anything. A symlink in

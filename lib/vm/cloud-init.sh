@@ -5,10 +5,27 @@
 vm_host_cloud_init() {
   local name="${1:?VM name required}" uid="${2:?host uid required}"
   local ssh_key="${3:?SSH key required}"
+  local guest_dirs_helper="${VM_HOST_SCRIPT_ROOT:?}/lib/vm/guest-user-dirs.py"
+  local guest_dirs_payload
   [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,31}$ ]] || return 2
   [[ "$uid" =~ ^[1-9][0-9]{0,8}$ ]] || return 2
   [[ "$ssh_key" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+([[:space:]].*)?$ ]] || return 2
   [[ "$ssh_key" != *$'\n'* && "$ssh_key" != *$'\r'* ]] || return 2
+  guest_dirs_payload="$(python3 -I - "$guest_dirs_helper" <<'PY'
+import base64
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+info = os.lstat(path)
+if not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.getuid()) or info.st_mode & 0o022:
+    raise SystemExit("guest rootless directory helper is not a protected regular file")
+with open(path, "rb") as stream:
+    print(base64.b64encode(stream.read()).decode("ascii"))
+PY
+  )" || return 1
+  [[ "$guest_dirs_payload" =~ ^[A-Za-z0-9+/]+=*$ ]] || return 1
 
   cat <<USERDATA
 #cloud-config
@@ -73,7 +90,22 @@ write_files:
       usermod --add-subgids 100000-165535 mester
       loginctl enable-linger mester
       systemctl start user@${uid}.service
-      install -d -o mester -g mester -m 0700 /home/mester/.config/systemd/user/docker.service.d /home/mester/.config/docker
+      python3 -I /usr/local/sbin/mester-v3-user-dirs.py prepare ${uid}
+      user_bus_ready=0
+      for attempt in {1..30}; do
+        if [[ -d /run/user/${uid} && ! -L /run/user/${uid} && -S /run/user/${uid}/bus && ! -L /run/user/${uid}/bus ]] \
+          && [[ "\$(stat -c '%u:%a' /run/user/${uid} 2>/dev/null)" == '${uid}:700' ]] \
+          && [[ "\$(stat -c '%u' /run/user/${uid}/bus 2>/dev/null)" == '${uid}' ]] \
+          && runuser -u mester -- env HOME=/home/mester XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user show-environment >/dev/null 2>&1; then
+          user_bus_ready=1
+          break
+        fi
+        sleep 1
+      done
+      if [[ "\$user_bus_ready" != 1 ]]; then
+        echo 'guest user systemd bus did not become ready with the expected private runtime directory' >&2
+        exit 1
+      fi
       cat > /home/mester/.config/systemd/user/docker.service.d/80-mester-proxy.conf <<'PROXY'
       [Service]
       Environment=HTTP_PROXY=http://10.0.2.100:3128
@@ -88,15 +120,20 @@ write_files:
       DOCKER_PROXY
       chown mester:mester /home/mester/.config/docker/daemon.json
       chmod 0600 /home/mester/.config/docker/daemon.json
+      runuser -u mester -- env HOME=/home/mester python3 -I /usr/local/sbin/mester-v3-user-dirs.py verify-write
       runuser -u mester -- env HOME=/home/mester XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user daemon-reload
       runuser -u mester -- env HOME=/home/mester XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus dockerd-rootless-setuptool.sh install
       runuser -u mester -- env HOME=/home/mester XDG_RUNTIME_DIR=/run/user/${uid} DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus systemctl --user enable --now docker
       npm install --global @opencode/cli@2.2.5
       command -v opencode
-      install -d -o mester -g mester -m 0700 /home/mester/.local/share/opencode
       chown root:root /usr/local/bin/opencode
       chmod 0755 /usr/local/bin/opencode
       touch /var/lib/mester-v3-provisioned
+  - path: /usr/local/sbin/mester-v3-user-dirs.py
+    owner: root:root
+    permissions: '0644'
+    encoding: b64
+    content: ${guest_dirs_payload}
 runcmd:
   - [bash, /usr/local/sbin/mester-v3-provision]
 USERDATA

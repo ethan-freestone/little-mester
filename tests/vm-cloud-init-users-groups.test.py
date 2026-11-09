@@ -41,6 +41,7 @@ def installed_package_version() -> str | None:
 def generated_config():
     command = (
         f'source "{ROOT / "lib/vm/cloud-init.sh"}"; '
+        f'VM_HOST_SCRIPT_ROOT="{ROOT}"; '
         f'vm_host_cloud_init smoke-v3 1234 "{FIXTURE_KEY}"'
     )
     output = subprocess.run(
