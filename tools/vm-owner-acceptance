@@ -215,15 +215,15 @@ try:
     target = os.open(sha, flags, dir_fd=fd)
     os.fchmod(target, 0o755)
     os.fchown(target, 0, 0)
-manifest = json.loads(sys.argv[2])
-expected = manifest["files"]
-directories = set(manifest["directories"])
-required_directories = set()
-for name in expected:
-    required_directories.update(str(parent) for parent in pathlib.PurePosixPath(name).parents
-                                if str(parent) != ".")
-if directories != required_directories:
-    raise SystemExit("REFUSED: installer directory manifest does not match runtime files")
+    manifest = json.loads(sys.argv[2])
+    expected = manifest["files"]
+    directories = set(manifest["directories"])
+    required_directories = set()
+    for name in expected:
+        required_directories.update(str(parent) for parent in pathlib.PurePosixPath(name).parents
+                                    if str(parent) != ".")
+    if directories != required_directories:
+        raise SystemExit("REFUSED: installer directory manifest does not match runtime files")
     observed = set()
     total = 0
     archive = tarfile.open(fileobj=sys.stdin.buffer, mode="r|")

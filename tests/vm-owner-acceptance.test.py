@@ -7,6 +7,7 @@ import os
 import pathlib
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -78,6 +79,31 @@ class OwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(set(acceptance.archive_arguments(ROOT, head)[6:]), set(manifest["files"]))
         self.assertNotIn(".github", names)
         self.assertIn('json.loads(sys.argv[2])', acceptance.INSTALL_WORKER)
+        worker = acceptance.INSTALL_WORKER
+        substitutions = (
+            ('or os.geteuid() != 0', 'or False'),
+            ('parts = ("opt", "little-mester", "v3")\nflags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC\nfd = os.open("/", flags)',
+             'parts = ()\nflags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC\nfd = os.open(sys.argv[3], flags)'),
+            ('if root.st_uid != 0 or root.st_mode & (stat.S_IWGRP | stat.S_IWOTH):', 'if False:'),
+            ('os.fchown(target, 0, 0)', 'pass'),
+            ('os.fchown(next_fd, 0, 0)', 'pass'),
+            ('os.fchown(stream.fileno(), 0, 0)', 'pass'),
+        )
+        for original, replacement in substitutions:
+            self.assertIn(original, worker)
+            worker = worker.replace(original, replacement, 1)
+        with tempfile.TemporaryDirectory() as temporary:
+            installed = subprocess.run(
+                [sys.executable, "-I", "-c", worker, head, acceptance.installer_manifest(), temporary],
+                input=result.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr.decode("utf-8", "replace"))
+            self.assertEqual(installed.stdout, b"PINNED_INSTALL_CREATED\n")
+            target = pathlib.Path(temporary) / head
+            observed = {path.relative_to(target).as_posix() for path in target.rglob("*")}
+            self.assertEqual(observed, expected)
+            for name, mode in manifest["files"].items():
+                self.assertEqual(stat.S_IMODE(os.lstat(target / name).st_mode), mode)
 
     def test_default_operation_is_read_only_preflight_and_reports_blocked_install(self):
         with tempfile.TemporaryDirectory() as temporary:
