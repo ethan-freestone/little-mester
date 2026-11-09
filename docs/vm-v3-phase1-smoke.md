@@ -116,7 +116,100 @@ git -C "$REPO" archive --format=tar "$CANDIDATE_SHA" \
   lib/vm/bounded-log.py \
   lib/vm/executable-policy.py \
   lib/vm/browser-auth-session.py \
-  | sudo tar --no-same-owner --same-permissions --keep-old-files -xf - -C "$INSTALL_ROOT"
+  | sudo /usr/bin/python3 -I -c 'import os,sys; os.umask(0o077); os.execv("/usr/bin/tar", ["/usr/bin/tar", "--no-same-owner", "--no-same-permissions", "--keep-old-files", "-xf", "-", "-C", sys.argv[1]])' "$INSTALL_ROOT"
+sudo /usr/bin/python3 -I - "$INSTALL_ROOT" 0 0 <<'PY'
+import os, stat, sys
+
+root = sys.argv[1]
+expected_uid, expected_gid = map(int, sys.argv[2:4])
+directory_children = {
+    ".": {"lab-vm", "lib"},
+    "lib": {"vm"},
+    "lib/vm": {
+        "host-launcher.sh", "cloud-init.sh", "proxy.py", "bounded-log.py",
+        "executable-policy.py", "browser-auth-session.py",
+    },
+}
+file_modes = {
+    "lab-vm": 0o755,
+    "lib/vm/host-launcher.sh": 0o644,
+    "lib/vm/cloud-init.sh": 0o644,
+    "lib/vm/proxy.py": 0o644,
+    "lib/vm/bounded-log.py": 0o644,
+    "lib/vm/executable-policy.py": 0o644,
+    "lib/vm/browser-auth-session.py": 0o644,
+}
+dir_modes = {".": 0o755, "lib": 0o755, "lib/vm": 0o755}
+dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+def refuse(message):
+    raise SystemExit(f"REFUSED: extracted install tree {message}")
+
+def open_dir(parent_fd, name, display):
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode):
+        refuse(f"contains a non-directory at {display}")
+    fd = os.open(name, dir_flags, dir_fd=parent_fd)
+    after = os.fstat(fd)
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        os.close(fd)
+        refuse(f"changed while opening {display}")
+    return fd
+
+def validate_tree(fd, relative):
+    expected = directory_children[relative]
+    if set(os.listdir(fd)) != expected:
+        refuse(f"has unexpected or missing entries at {relative}")
+    for name in sorted(expected):
+        child = name if relative == "." else f"{relative}/{name}"
+        if child in directory_children and child != ".":
+            child_fd = open_dir(fd, name, child)
+            try:
+                validate_tree(child_fd, child)
+            finally:
+                os.close(child_fd)
+        else:
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode):
+                refuse(f"contains a non-regular file at {child}")
+
+root_fd = os.open(root, dir_flags)
+try:
+    validate_tree(root_fd, ".")
+
+    def normalize_dir(fd, relative):
+        for name in sorted(directory_children[relative]):
+            child = name if relative == "." else f"{relative}/{name}"
+            if child in directory_children and child != ".":
+                child_fd = open_dir(fd, name, child)
+                try:
+                    normalize_dir(child_fd, child)
+                finally:
+                    os.close(child_fd)
+            else:
+                file_fd = os.open(name, file_flags, dir_fd=fd)
+                try:
+                    os.fchown(file_fd, expected_uid, expected_gid)
+                    os.fchmod(file_fd, file_modes[child])
+                    result = os.fstat(file_fd)
+                    if (not stat.S_ISREG(result.st_mode) or result.st_uid != expected_uid
+                            or result.st_gid != expected_gid
+                            or stat.S_IMODE(result.st_mode) != file_modes[child]):
+                        refuse(f"failed ownership/mode verification at {child}")
+                finally:
+                    os.close(file_fd)
+        os.fchown(fd, expected_uid, expected_gid)
+        os.fchmod(fd, dir_modes[relative])
+        result = os.fstat(fd)
+        if (result.st_uid != expected_uid or result.st_gid != expected_gid
+                or stat.S_IMODE(result.st_mode) != dir_modes[relative]):
+            refuse(f"failed directory ownership/mode verification at {relative}")
+
+    normalize_dir(root_fd, ".")
+finally:
+    os.close(root_fd)
+PY
 test -x "$INSTALL_ROOT/lab-vm"
 for file in lib/vm/host-launcher.sh lib/vm/cloud-init.sh lib/vm/proxy.py lib/vm/bounded-log.py lib/vm/executable-policy.py lib/vm/browser-auth-session.py; do
   test -f "$INSTALL_ROOT/$file"
@@ -127,7 +220,57 @@ namei -l "$INSTALL_ROOT/lab-vm" "$INSTALL_ROOT/lib/vm/host-launcher.sh" \
   "$INSTALL_ROOT/lib/vm/browser-auth-session.py"
 ```
 
-The dirfd walk checks every existing lexical component before creating its child, refuses symlinks or user/group/world-writable ancestors, creates only missing root-owned/traversable directories, and refuses any pre-existing candidate install directory. Archive extraction is reached only afterward and `tar --keep-old-files` also refuses overwrites. If extraction fails, do not execute or retry into the partial tree; stop for owner review. Stop unless `namei` shows no symlink in any path and every file, directory, and ancestor is root-owned and not group/world writable. The launcher's own protected-install check repeats this invariant before loading code. No `cp` from the mutable checkout, symlinked install path, package install, or runtime-path override is allowed.
+The dirfd walk checks every existing lexical component before creating its child, refuses symlinks or user/group/world-writable ancestors, creates only missing root-owned/traversable directories, and refuses any pre-existing candidate install directory. Extraction runs with root umask 077 and `--no-same-permissions`, so archive modes and the caller's umask cannot create group/world-writable entries, even transiently. The following dirfd-anchored normalizer requires exactly the seven expected regular files and three directories, rejects symlinks/special/extra entries, explicitly sets root ownership and exact 0755/0644 modes, and verifies each result. `tar --keep-old-files` also refuses overwrites. If extraction or normalization fails, do not execute or retry into the partial tree; stop for owner review. Stop unless `namei` shows no symlink in any path and every file, directory, and ancestor is root-owned and not group/world writable. The launcher's own protected-install check repeats this invariant before loading code. No `cp` from the mutable checkout, symlinked install path, package install, or runtime-path override is allowed.
+
+#### Repair the already-extracted candidate, only after read-only verification
+
+For an installation created by the earlier procedure, do not rerun the create/extract block: it correctly refuses an existing target. The owner may retain and repair that tree in place only if all checks below pass. They verify the exact SHA path, protected ancestors, exact seven-file tree, root ownership, no symlinks/special/extra entries, and byte-for-byte contents against the pinned commit before changing permissions. If any check fails, stop and preserve the tree for review; do not use a recursive chmod or overwrite it.
+
+```bash
+set -euo pipefail
+REPO='/path/to/owner/repository-clone'
+CANDIDATE_SHA='ce88ae5b4fe706f90244ebc60562354c5ba36da4'
+INSTALL_ROOT="/opt/little-mester/v3/$CANDIDATE_SHA"
+[[ "$INSTALL_ROOT" == /opt/little-mester/v3/ce88ae5b4fe706f90244ebc60562354c5ba36da4 ]]
+[[ "$(git -C "$REPO" rev-parse "$CANDIDATE_SHA^{commit}")" == "$CANDIDATE_SHA" ]]
+for path in /opt /opt/little-mester /opt/little-mester/v3 "$INSTALL_ROOT"; do
+  test ! -L "$path"
+  test "$(sudo stat -c '%F:%u:%g' "$path")" = 'directory:0:0'
+  sudo /usr/bin/python3 -I -c 'import os,stat,sys; m=os.stat(sys.argv[1],follow_symlinks=False).st_mode; sys.exit(bool(m & (stat.S_IWGRP|stat.S_IWOTH)))' "$path"
+done
+expected="$(printf '%s\n' 'lab-vm f' 'lib d' 'lib/vm d' \
+  'lib/vm/host-launcher.sh f' 'lib/vm/cloud-init.sh f' 'lib/vm/proxy.py f' \
+  'lib/vm/bounded-log.py f' 'lib/vm/executable-policy.py f' \
+  'lib/vm/browser-auth-session.py f' | LC_ALL=C sort)"
+actual="$(sudo find "$INSTALL_ROOT" -xdev -mindepth 1 -printf '%P %y\n' | LC_ALL=C sort)"
+test "$actual" = "$expected"
+test -z "$(sudo find "$INSTALL_ROOT" -xdev \( ! -uid 0 -o ! -gid 0 \) -print -quit)"
+for file in lab-vm lib/vm/host-launcher.sh lib/vm/cloud-init.sh lib/vm/proxy.py \
+            lib/vm/bounded-log.py lib/vm/executable-policy.py lib/vm/browser-auth-session.py; do
+  git -C "$REPO" show "$CANDIDATE_SHA:$file" | cmp - "$INSTALL_ROOT/$file"
+done
+
+# Exact paths only; do not recurse or change contents/ownership.
+sudo chmod 0755 "$INSTALL_ROOT" "$INSTALL_ROOT/lib" "$INSTALL_ROOT/lib/vm" "$INSTALL_ROOT/lab-vm"
+sudo chmod 0644 "$INSTALL_ROOT/lib/vm/host-launcher.sh" "$INSTALL_ROOT/lib/vm/cloud-init.sh" \
+  "$INSTALL_ROOT/lib/vm/proxy.py" "$INSTALL_ROOT/lib/vm/bounded-log.py" \
+  "$INSTALL_ROOT/lib/vm/executable-policy.py" "$INSTALL_ROOT/lib/vm/browser-auth-session.py"
+
+for path in "$INSTALL_ROOT" "$INSTALL_ROOT/lib" "$INSTALL_ROOT/lib/vm" "$INSTALL_ROOT/lab-vm"; do
+  test "$(sudo stat -c '%u:%g:%a' "$path")" = '0:0:755'
+done
+for path in "$INSTALL_ROOT/lib/vm/host-launcher.sh" "$INSTALL_ROOT/lib/vm/cloud-init.sh" \
+            "$INSTALL_ROOT/lib/vm/proxy.py" "$INSTALL_ROOT/lib/vm/bounded-log.py" \
+            "$INSTALL_ROOT/lib/vm/executable-policy.py" "$INSTALL_ROOT/lib/vm/browser-auth-session.py"; do
+  test "$(sudo stat -c '%u:%g:%a' "$path")" = '0:0:644'
+done
+namei -l "$INSTALL_ROOT/lab-vm" "$INSTALL_ROOT/lib/vm/host-launcher.sh" \
+  "$INSTALL_ROOT/lib/vm/cloud-init.sh" "$INSTALL_ROOT/lib/vm/proxy.py" \
+  "$INSTALL_ROOT/lib/vm/bounded-log.py" "$INSTALL_ROOT/lib/vm/executable-policy.py" \
+  "$INSTALL_ROOT/lib/vm/browser-auth-session.py"
+```
+
+This one-time recovery applies only to the exact recorded tree. If path, ownership, contents, layout, or symlink checks differ from the reported evidence, stop before `chmod`. After successful verification and normalization, resume the normal read-only dependency/KVM preflight; no KVM or VM action is part of this correction.
 
 Before allocating the workspace or starting QEMU, prove the owner-installed runtime commands resolve through the fixed system `PATH` and pass the installed executable policy. This is read-only; if any command is absent or refused, stop and have the owner provision it through the normal host process (never through this launcher).
 

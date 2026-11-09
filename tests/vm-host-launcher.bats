@@ -436,14 +436,91 @@ finally:
     os.close(fd)
 assert sentinel.read_text() == "preserve"
 archive_start = text.index("git -C \"$REPO\" archive --format=tar \"$CANDIDATE_SHA\"", start)
-tar_extract = text.index("| sudo tar --no-same-owner --same-permissions --keep-old-files", archive_start)
+tar_extract = text.index("| sudo /usr/bin/python3", archive_start)
 assert start < archive_start < tar_extract
+assert "os.umask(0o077)" in text[tar_extract:]
+assert '"--no-same-permissions"' in text[tar_extract:]
+assert "os.fchown" in text[tar_extract:]
+assert "os.fchmod" in text[tar_extract:]
 assert "sudo install -d" not in text[start:tar_extract]
 print("RUNBOOK_INSTALL_GUARD_MOCK_OK")
 PY
 
   [ "$status" -eq 0 ]
   [[ "$output" == *'RUNBOOK_INSTALL_GUARD_MOCK_OK'* ]]
+}
+
+@test "runbook normalizes permissions after real archive extraction" {
+  run python3 - "$TEST_ROOT/docs/vm-v3-phase1-smoke.md" "$TEST_TMP" <<'PY'
+import io, os, pathlib, stat, subprocess, sys, tarfile
+
+text = pathlib.Path(sys.argv[1]).read_text()
+marker = 'sudo /usr/bin/python3 -I - "$INSTALL_ROOT" 0 0 <<\'PY\'\n'
+start = text.index(marker) + len(marker)
+end = text.index("\nPY\n", start)
+normalizer = text[start:end]
+root = pathlib.Path(sys.argv[2]) / "archive-install"
+root.mkdir(mode=0o700)
+archive = pathlib.Path(sys.argv[2]) / "permissive-install.tar"
+directories = ["lib", "lib/vm"]
+files = {
+    "lab-vm": 0o777,
+    "lib/vm/host-launcher.sh": 0o666,
+    "lib/vm/cloud-init.sh": 0o666,
+    "lib/vm/proxy.py": 0o666,
+    "lib/vm/bounded-log.py": 0o666,
+    "lib/vm/executable-policy.py": 0o666,
+    "lib/vm/browser-auth-session.py": 0o666,
+}
+with tarfile.open(archive, "w") as bundle:
+    for directory in directories:
+        entry = tarfile.TarInfo(directory)
+        entry.type = tarfile.DIRTYPE
+        entry.mode = 0o777
+        bundle.addfile(entry)
+    for name, mode in files.items():
+        payload = ("fixture:" + name + "\n").encode()
+        entry = tarfile.TarInfo(name)
+        entry.size = len(payload)
+        entry.mode = mode
+        bundle.addfile(entry, io.BytesIO(payload))
+
+extract = (
+    "import os,sys; os.umask(0o077); "
+    "os.execv('/usr/bin/tar', ['/usr/bin/tar','--no-same-owner',"
+    "'--no-same-permissions','--keep-old-files','-xf',sys.argv[1],'-C',sys.argv[2]])"
+)
+subprocess.run([sys.executable, "-I", "-c", extract, str(archive), str(root)], check=True)
+
+expected_paths = [root, root / "lib", root / "lib/vm"] + [root / name for name in files]
+for path in expected_paths:
+    mode = stat.S_IMODE(path.lstat().st_mode)
+    assert mode & (stat.S_IWGRP | stat.S_IWOTH) == 0, (path, oct(mode))
+
+subprocess.run([
+    sys.executable, "-I", "-c", normalizer, str(root), str(os.getuid()), str(os.getgid())
+], check=True)
+
+expected_modes = {
+    root: 0o755,
+    root / "lib": 0o755,
+    root / "lib/vm": 0o755,
+    root / "lab-vm": 0o755,
+    **{root / name: 0o644 for name in files if name != "lab-vm"},
+}
+for path, expected_mode in expected_modes.items():
+    info = path.lstat()
+    assert stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)
+    assert (info.st_uid, info.st_gid) == (os.getuid(), os.getgid()), path
+    assert stat.S_IMODE(info.st_mode) == expected_mode, (path, oct(stat.S_IMODE(info.st_mode)))
+assert sorted(p.relative_to(root).as_posix() for p in root.rglob("*")) == sorted(
+    ["lib", "lib/vm", *files]
+)
+print("RUNBOOK_ARCHIVE_PERMISSION_NORMALIZATION_OK")
+PY
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'RUNBOOK_ARCHIVE_PERMISSION_NORMALIZATION_OK'* ]]
 }
 
 @test "host command preflight rejects untrusted mv and cat before lifecycle stages" {
