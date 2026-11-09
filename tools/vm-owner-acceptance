@@ -60,7 +60,13 @@ class GateError(Exception):
 
 
 def clean_env() -> dict[str, str]:
-    return {"PATH": FIXED_PATH, "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C"}
+    return {
+        "PATH": FIXED_PATH,
+        "HOME": "/nonexistent",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    }
 
 
 def protected_executable(repo: pathlib.Path, path: str) -> str:

@@ -48,6 +48,57 @@ class OwnerAcceptanceTests(unittest.TestCase):
             acceptance.candidate_commit(ROOT, sha)
             self.assertEqual(git.call_count, 2)
 
+    def test_candidate_commit_ignores_repository_replace_refs(self):
+        with tempfile.TemporaryDirectory(prefix="owner-acceptance-replace-ref-") as temporary:
+            repo = pathlib.Path(temporary)
+            env = {**os.environ, **acceptance.clean_env()}
+
+            def git(*args):
+                return subprocess.run(
+                    [acceptance.GIT, "-C", str(repo), *args], env=env,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, check=True,
+                ).stdout.decode("ascii").strip()
+
+            git("init", "-q")
+            git("config", "user.name", "Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            for name in acceptance.INSTALL_FILES:
+                path = repo / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(ENTRY.read_bytes() if name == "tools/vm-owner-acceptance" else f"pinned:{name}\n".encode())
+            runner_path = repo / "tools/vm-owner-acceptance"
+            runner_path.parent.mkdir(parents=True, exist_ok=True)
+            runner_path.write_bytes(ENTRY.read_bytes())
+            git("add", "--all")
+            git("commit", "-qm", "pinned candidate")
+            pinned_sha = git("rev-parse", "HEAD")
+            pinned_launcher = (repo / "lab-vm").read_bytes()
+
+            (repo / "tools/vm-owner-acceptance").write_bytes(b"untrusted runner bytes\n")
+            (repo / "lab-vm").write_bytes(b"untrusted launcher bytes\n")
+            git("commit", "-qam", "replacement tree")
+            replacement_sha = git("rev-parse", "HEAD")
+            git("replace", pinned_sha, replacement_sha)
+
+            # Model an entrypoint loaded from the replacement tree. A replace
+            # ref must not make its bytes appear to belong to the pinned SHA.
+            with mock.patch.object(acceptance, "protected_executable", side_effect=lambda _repo, path: path), \
+                    mock.patch.object(acceptance, "ENTRY", repo / "tools/vm-owner-acceptance"):
+                with self.assertRaises(acceptance.GateError):
+                    acceptance.candidate_commit(repo, pinned_sha)
+
+            archive = subprocess.run(
+                acceptance.archive_arguments(repo, pinned_sha), env={
+                    **acceptance.clean_env(),
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                }, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, check=True,
+            ).stdout
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as pinned_archive:
+                self.assertEqual(pinned_archive.extractfile("lab-vm").read(), pinned_launcher)
+
     def test_existing_installation_is_never_overwritten(self):
         sha = "a" * 40
         with tempfile.TemporaryDirectory() as temporary:
