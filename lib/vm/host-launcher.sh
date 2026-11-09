@@ -933,7 +933,8 @@ except (OSError, ValueError, UnicodeError):
 if mode == "stopped" and socket_info is not None:
     try:
         with open("/proc/net/unix", encoding="ascii") as stream:
-            if any((fields := line.split()) and fields[-1] == str(socket_path)
+            if any((fields := line.split()) and len(fields) >= 8
+                   and " ".join(fields[7:]) == str(socket_path)
                    for line in stream.readlines()[1:]):
                 raise SystemExit("REFUSED: virtiofs socket still has a live listener")
     except OSError as error:

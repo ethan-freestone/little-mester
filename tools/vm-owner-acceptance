@@ -400,34 +400,36 @@ def storage_proof(workspace_text: str) -> None:
     workspace = verify_workspace_mount(workspace_text, exact_tmpfs=True)
     if list(workspace.iterdir()):
         raise GateError("BLOCKED", "workspace must be empty before the bounded ENOSPC proof")
-    proof = workspace / (".vm-owner-acceptance-" + uuid.uuid4().hex)
-    fd = os.open(proof, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    identity = os.fstat(fd)
+    fd = open_anonymous_probe(workspace)
     written = 0
+    with os.fdopen(fd, "wb", buffering=0) as stream:
+        block = b"\0" * min(1024 * 1024, WORKSPACE_PROOF_BYTES)
+        while written < WORKSPACE_PROOF_BYTES + 1:
+            amount = min(len(block), WORKSPACE_PROOF_BYTES + 1 - written)
+            try:
+                count = stream.write(block[:amount])
+            except OSError as error:
+                if error.errno == errno.ENOSPC and written == WORKSPACE_PROOF_BYTES:
+                    print("ENOSPC_CONFIRMED after 67108864 bytes; 67108865 bytes attempted at most")
+                    return
+                raise GateError("FAIL", "bounded storage proof failed before the expected ENOSPC boundary") from error
+            if count != amount:
+                raise GateError("FAIL", "bounded storage proof encountered a short write")
+            written += count
+    raise GateError("FAIL", "workspace accepted a write beyond the 64-MiB capacity")
+
+
+def open_anonymous_probe(workspace: pathlib.Path) -> int:
+    """Open an unnamed file so interruption cannot unlink a replacement path."""
+    if not hasattr(os, "O_TMPFILE"):
+        raise GateError("BLOCKED", "platform does not support anonymous temporary files for the storage proof")
+    directory_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
-        with os.fdopen(fd, "wb", buffering=0) as stream:
-            block = b"\0" * min(1024 * 1024, WORKSPACE_PROOF_BYTES)
-            while written < WORKSPACE_PROOF_BYTES + 1:
-                amount = min(len(block), WORKSPACE_PROOF_BYTES + 1 - written)
-                try:
-                    count = stream.write(block[:amount])
-                except OSError as error:
-                    if error.errno == errno.ENOSPC and written == WORKSPACE_PROOF_BYTES:
-                        print("ENOSPC_CONFIRMED after 67108864 bytes; 67108865 bytes attempted at most")
-                        return
-                    raise GateError("FAIL", "bounded storage proof failed before the expected ENOSPC boundary") from error
-                if count != amount:
-                    raise GateError("FAIL", "bounded storage proof encountered a short write")
-                written += count
-        raise GateError("FAIL", "workspace accepted a write beyond the 64-MiB capacity")
+        return os.open(".", os.O_TMPFILE | os.O_RDWR | os.O_CLOEXEC, 0o600, dir_fd=directory_fd)
+    except OSError as error:
+        raise GateError("BLOCKED", "workspace does not support a safe anonymous temporary proof file") from error
     finally:
-        try:
-            current = os.lstat(proof)
-            if ((current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino)
-                    and current.st_uid == os.getuid() and stat.S_ISREG(current.st_mode)):
-                os.unlink(proof)
-        except FileNotFoundError:
-            pass
+        os.close(directory_fd)
 
 
 def state_root() -> pathlib.Path:
@@ -460,6 +462,16 @@ def inspect_cleanup(sha: str, run_id: str) -> dict:
     verify_user_directory_chain(run_dir)
     if not run_dir.is_relative_to(root):
         raise GateError("BLOCKED", "run directory escaped private state")
+    allowed = {"qemu.log", "virtiofsd.log", "proxy.log", "virtiofs.sock", "virtiofs.sock.pid"}
+    required_logs = {"qemu.log", "virtiofsd.log", "proxy.log"}
+    entries = {entry.name for entry in run_dir.iterdir()}
+    if not required_logs.issubset(entries) or not entries.issubset(allowed):
+        raise GateError("BLOCKED", "run contains missing expected logs or unexpected retained artifacts")
+    for name in required_logs:
+        info = os.lstat(run_dir / name)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 1024 * 1024):
+            raise GateError("BLOCKED", "retained helper log failed type, ownership, mode, or size checks")
     if list(run_dir.glob("*.identity")) or list(run_dir.glob("*.complete")):
         raise GateError("BLOCKED", "run retains process identity or incomplete logger proof; no cleanup attempted")
     for name in ("disk.qcow2", "ubuntu.img.part", "id_vm_control", "id_vm_control.pub"):
@@ -492,7 +504,7 @@ def socket_listener_present(path: str) -> bool:
         with open("/proc/net/unix", encoding="ascii") as stream:
             for line in stream.readlines()[1:]:
                 fields = line.split()
-                if len(fields) >= 8 and fields[-1] == path:
+                if len(fields) >= 8 and " ".join(fields[7:]) == path:
                     return True
     except OSError as error:
         raise GateError("BLOCKED", "cannot verify whether a retained socket has a live listener") from error
@@ -581,7 +593,6 @@ def run_smoke(root: pathlib.Path, workspace: str, model: str, state_before: set[
     if len(created) == 1:
         run_id = next(iter(created))
         data["evidence"]["vm_run_id"] = run_id
-        data["evidence"]["vm_run_directory"] = str(state_root() / run_id)
     elif created:
         data["notes"].append("ambiguous new VM run directories; none were modified")
     data["gates"]["run"] = "PASS" if result.returncode == 0 else "BLOCKED"

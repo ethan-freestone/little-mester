@@ -127,6 +127,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
                     return count
 
             writers = []
+            anonymous_files = []
 
             def fdopen(*args, **kwargs):
                 writer = FullFilesystem(real_fdopen(*args, **kwargs))
@@ -136,6 +137,10 @@ class OwnerAcceptanceTests(unittest.TestCase):
             usage = SimpleNamespace(f_blocks=8, f_frsize=1)
             with (
                 mock.patch.object(acceptance, "WORKSPACE_PROOF_BYTES", 8),
+                mock.patch.object(acceptance, "open_anonymous_probe", side_effect=lambda directory: (
+                    anonymous_files.append(tempfile.TemporaryFile(dir=directory))
+                    or os.dup(anonymous_files[-1].fileno())
+                )),
                 mock.patch.object(acceptance, "mount_facts", return_value=(
                     "tmpfs", {"nosuid", "nodev", "noexec"},
                     {"mode=700", f"uid={os.getuid()}", f"gid={os.getgid()}", "size=8k"},
@@ -150,6 +155,8 @@ class OwnerAcceptanceTests(unittest.TestCase):
             self.assertEqual(writers[0].written, 8)
             self.assertEqual(writers[0].attempts, [8, 1])
             self.assertEqual(list(workspace.iterdir()), [])
+            for anonymous in anonymous_files:
+                anonymous.close()
 
     def test_storage_proof_refuses_non_tmpfs_and_never_fills_it(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -229,6 +236,8 @@ class OwnerAcceptanceTests(unittest.TestCase):
             run_id = "20261109T154005Z-" + "d" * 32
             run_dir = pathlib.Path(temporary) / run_id
             run_dir.mkdir(mode=0o700)
+            for name in ("qemu.log", "virtiofsd.log", "proxy.log"):
+                (run_dir / name).touch(mode=0o600)
             sock = run_dir / "virtiofs.sock"
             import socket
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -254,6 +263,8 @@ class OwnerAcceptanceTests(unittest.TestCase):
             run_id = "20261109T154005Z-" + "e" * 32
             run_dir = pathlib.Path(temporary) / run_id
             run_dir.mkdir(mode=0o700)
+            for name in ("qemu.log", "virtiofsd.log", "proxy.log"):
+                (run_dir / name).touch(mode=0o600)
             sock = run_dir / "virtiofs.sock"
             import socket
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -267,6 +278,20 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 self.assertTrue(sock.exists())
             finally:
                 listener.close()
+
+    def test_cleanup_verification_blocks_unexpected_retained_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_id = "20261109T154005Z-" + "f" * 32
+            run_dir = pathlib.Path(temporary) / run_id
+            run_dir.mkdir(mode=0o700)
+            for name in ("qemu.log", "virtiofsd.log", "proxy.log"):
+                (run_dir / name).touch(mode=0o600)
+            (run_dir / "oauth-url.txt").write_text("unexpected", encoding="utf-8")
+            with mock.patch.object(acceptance, "state_root", return_value=pathlib.Path(temporary)), \
+                    mock.patch.object(acceptance, "verify_user_directory_chain"):
+                with self.assertRaises(acceptance.GateError):
+                    acceptance.inspect_cleanup("a" * 40, run_id)
+            self.assertTrue((run_dir / "oauth-url.txt").exists())
 
 
 if __name__ == "__main__":
