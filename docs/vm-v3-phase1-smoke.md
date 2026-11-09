@@ -4,7 +4,7 @@
 
 **Status:** NOT_RUN. Do not execute the owner procedure below until the final integrated candidate has clean tests, independent security review, passing owner-pushed GitHub Actions checks, and explicit owner authorization. This agent is UID 1000 with `CapEff=0`; no privileged install, hard-filesystem proof, owner browser login, or VM acceptance is claimed. This source tree is not an executable trust boundary.
 
-- **Reviewed source SHA:** `PENDING — use the final integrated candidate SHA in the owner evidence after review; do not use baseline 60f3bd59ab3ca51756b1aee523b172cae61bb7d2 as the implementation SHA.`
+- **Reviewed source SHA:** `b74ad8c0f63f53bad518b0abe6be2e4b2cefc135` (independent Sol Medium review: PASS). Later documentation and bookkeeping commits do not alter this source SHA. Do not use baseline `60f3bd59ab3ca51756b1aee523b172cae61bb7d2` as the implementation SHA.
 - **Reusable owner runner:** `tools/vm-owner-acceptance` is the maintained, OS-independent entry point. Run it from the exact candidate checkout with a full commit SHA containing that same runner version; it refuses a SHA/runner mismatch. It uses the fixed system executable policy and protected `lab-vm` for dependency/workspace preflight, and the protected launcher for VM/browser-auth/process lifecycle. It never installs packages or automatically removes historical state. Reports are private JSON under `/run/user/<uid>/little-mester-vm-acceptance/<fresh-id>/report.json`; they contain statuses, paths, exit codes and redacted notes, never OAuth URLs or credentials. The separate detailed blocks below document the underlying controls and owner procedure; use the runner commands below instead of copying their implementation blocks.
 
 ```bash
