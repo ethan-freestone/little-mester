@@ -6,7 +6,7 @@
 
 - **Reviewed source SHA:** `PENDING — use the final integrated candidate SHA in the owner evidence after review; do not use baseline 60f3bd59ab3ca51756b1aee523b172cae61bb7d2 as the implementation SHA.`
 - **Protected installation:** owner installs that reviewed source under a root-owned, non-group/world-writable directory outside the exported workspace, for example `/opt/little-mester/v3/<reviewed-sha>/`. `lab-vm`, `lib/vm/host-launcher.sh`, `lib/vm/cloud-init.sh`, `lib/vm/proxy.py`, `lib/vm/bounded-log.py`, `lib/vm/executable-policy.py`, and `lib/vm/browser-auth-session.py`, plus every lexical path component and ancestor directory, must be root-owned and not group/world writable; symlinks anywhere in those installation paths are refused. The launcher uses the validated lexical paths only after this check. Keep the source SHA and installed path in the evidence. Do not run from a mutable checkout or install/refresh host packages through the launcher.
-- **Protected host dependencies:** use owner-installed root-owned system executables on the fixed system `PATH`: `qemu-system-x86_64`, `qemu-img`, `virtiofsd`, `curl`, `cat`, `mv`, `ssh`, `ssh-keygen`, `ssh-keyscan`, `socat`, `python3`, `timeout`, `sha256sum`, `date`, `mktemp`, `mkdir`, `chmod`, `stat`, `id`, `grep`, `rm`, `sleep`, `readlink`, and either `genisoimage` or `mkisofs`. `cat` renders the cloud-init seed and `mv` promotes the validated SSH host key; both are checked by the executable policy before lifecycle work. KVM must be available at `/dev/kvm`; no TCG fallback.
+- **Protected host dependencies:** use owner-installed root-owned system executables on the fixed system `PATH` for ordinary runtime commands: `qemu-system-x86_64`, `qemu-img`, `curl`, `cat`, `mv`, `ssh`, `ssh-keygen`, `ssh-keyscan`, `socat`, `python3`, `timeout`, `sha256sum`, `date`, `mktemp`, `mkdir`, `chmod`, `stat`, `id`, `grep`, `rm`, `sleep`, `readlink`, and either `genisoimage` or `mkisofs`. `virtiofsd` need not be on `PATH`: selection checks its `command -v` result there first, then `/usr/lib/virtiofsd`, `/usr/libexec/virtiofsd`, and `/usr/lib/qemu/virtiofsd` in that order; only a candidate accepted by the installed executable policy is usable. `cat` renders the cloud-init seed and `mv` promotes the validated SSH host key; both are checked by the executable policy before lifecycle work. KVM must be available at `/dev/kvm`; no TCG fallback.
 - **Workspace storage prerequisite:** the selected workspace must be the root of a dedicated, owner-provisioned filesystem whose reported capacity is at most 8 GiB. A normal directory, bind mount exposing a larger filesystem, or user quota on a larger filesystem is not accepted. The launcher neither provisions storage nor changes host mounts. Its mount-root/`statvfs` check is only preflight; the hard write limit during the run is enforced by the owner-provisioned filesystem itself. Before acceptance, use a separate small disposable filesystem to demonstrate that writes fail with `ENOSPC` at its configured limit. Never run a capacity-filling probe on a shared host filesystem. Keep this proof separate from the 1-MiB diagnostic-log cap, which bounds helper logs but does not cap workspace writes.
 - **Resource and deadline bounds:** QEMU is limited to 2 vCPUs, 4096 MiB RAM and a 24-GiB virtual guest disk. The pinned image download has a 300-second per-attempt cap (two retries); guest boot/readiness and model response each have a 300-second cap; Docker pull/container execution each have a 180-second cap; other SSH control commands default to 30 seconds. Browser authentication is bounded by 600 seconds and the remaining whole-smoke budget (1200 seconds total), followed by a 15-second forced-termination grace. QEMU, virtiofsd and proxy helper logs are capped while receiving at 1 MiB each and retained in at most eight private run directories. Guest SSH output is separately capped at 64 KiB per command (host-key scan output at 16 KiB); overflow terminates the owned process group and fails the stage. The bounded logger pins the process-group identity, gives TERM-ignoring descendants an 8-second grace before KILL, reaps adopted descendants, and allows a 2-second post-KILL settle even if the direct child exits and descendants close both output streams. The supervisor waits up to 11 seconds after TERM and allows at most 2 seconds after its own KILL escalation; it requires a logger completion proof and verifies the logger's session is empty before reporting cleanup success. The 13-second worst-case supervisor budget stays within the outer 15-second forced-termination grace. Redirecting to a normal file then truncating after exit would permit unbounded disk growth during the run. All these helper/guest-output bounds are distinct from the externally enforced workspace filesystem limit.
 - **Inputs and authentication:** select one fresh, disposable workspace on that bounded filesystem, outside the installed tree and private runtime state. Select the model with `--model openai/<model-id>`; it is not a credential. The owner signs in once through native OpenCode TUI `/connect → OpenAI → Sign in with ChatGPT`. No API key or API credits are used. OpenCode v2.2.5 renders the authorization URL as a live TUI hyperlink. Use the TUI's `c` / **copy link** action to copy it to the host terminal clipboard, then paste it into the host browser; do not click the link or invoke the TUI's open-link action. The guest auth process runs with a restricted `PATH` that contains no browser opener. The host validates the native TUI URL against the pinned OAuth shape, including state/nonce, S256 PKCE and exactly one `http://127.0.0.1:<port>/auth/callback`; it holds the URL until a temporary host listener on literal `127.0.0.1:<same-port>` is established by exactly one `ssh -L` over the existing authenticated VM connection. SSH disables agent forwarding, remote/dynamic forwarding, SSH configuration, proxy commands and proxy jumps. The URL is shown only in the live terminal and kept transiently in process memory; it is not written to logs, evidence, argv, environment or persistent files by this launcher. OpenCode stores tokens in its guest SQLite database under `/home/mester/.local/share/opencode` (directory mode 0700, database mode 0600). That database is on the disposable per-run disk, which is destroyed after verified cleanup; persistence across VM restart is out of scope. Never copy auth state from the old VM. For manual logout before teardown, inspect `opencode auth list`, then use the supported `opencode auth logout openai <account-label>` command. Do not edit the SQLite database or automate logout.
@@ -273,11 +273,11 @@ namei -l "$INSTALL_ROOT/lab-vm" "$INSTALL_ROOT/lib/vm/host-launcher.sh" \
 
 This one-time recovery applies only to the exact recorded tree during the stated trusted maintenance window. If path, ownership, contents, layout, or symlink checks differ from the reported evidence, or writer quiescence cannot be established, stop before `chmod`. After successful verification and normalization, resume the normal read-only dependency/KVM preflight; no KVM or VM action is part of this correction.
 
-Before allocating the workspace or starting QEMU, prove the owner-installed runtime commands resolve through the fixed system `PATH` and pass the installed executable policy. This is read-only; if any command is absent or refused, stop and have the owner provision it through the normal host process (never through this launcher).
+Before allocating the workspace or starting QEMU, prove ordinary owner-installed runtime commands resolve through the fixed system `PATH` and pass the installed executable policy; for `virtiofsd`, check the `command -v` result on that `PATH` first, then `/usr/lib/virtiofsd`, `/usr/libexec/virtiofsd`, and `/usr/lib/qemu/virtiofsd` in that order, accepting only candidates that pass the installed executable policy. This is read-only; if any command is absent or refused, stop and have the owner provision it through the normal host process (never through this launcher).
 
 ```bash
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
-for command in qemu-system-x86_64 qemu-img virtiofsd curl cat mv ssh ssh-keygen ssh-keyscan socat python3 timeout sha256sum date mktemp mkdir chmod stat id grep rm sleep readlink; do
+for command in qemu-system-x86_64 qemu-img curl cat mv ssh ssh-keygen ssh-keyscan socat python3 timeout sha256sum date mktemp mkdir chmod stat id grep rm sleep readlink; do
   executable="$(command -v "$command")"
   /usr/bin/python3 -I "$INSTALL_ROOT/lib/vm/executable-policy.py" "$executable"
   printf '%s\t%s\n' "$command" "$executable"
@@ -285,6 +285,25 @@ done
 iso_tool="$(command -v genisoimage || command -v mkisofs)"
 /usr/bin/python3 -I "$INSTALL_ROOT/lib/vm/executable-policy.py" "$iso_tool"
 printf 'ISO tool\t%s\n' "$iso_tool"
+virtiofsd_path="$(command -v virtiofsd 2>/dev/null || true)"
+virtiofsd_candidates=()
+if [[ -n "$virtiofsd_path" ]]; then
+  virtiofsd_candidates+=("$virtiofsd_path")
+fi
+virtiofsd_candidates+=(/usr/lib/virtiofsd /usr/libexec/virtiofsd /usr/lib/qemu/virtiofsd)
+virtiofsd_executable=''
+for candidate in "${virtiofsd_candidates[@]}"; do
+  [[ -e "$candidate" || -L "$candidate" ]] || continue
+  if /usr/bin/python3 -I "$INSTALL_ROOT/lib/vm/executable-policy.py" "$candidate" >/dev/null 2>&1; then
+    virtiofsd_executable="$candidate"
+    break
+  fi
+done
+if [[ -z "$virtiofsd_executable" ]]; then
+  printf 'STOP: no virtiofsd candidate passed the installed executable policy\n' >&2
+  exit 1
+fi
+printf 'virtiofsd\t%s\n' "$virtiofsd_executable"
 test -c /dev/kvm && test -r /dev/kvm && test -w /dev/kvm
 ```
 
