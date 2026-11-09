@@ -24,6 +24,279 @@ loader.exec_module(acceptance)
 
 
 class OwnerAcceptanceTests(unittest.TestCase):
+    @staticmethod
+    def runtime_fixture(temporary, *, system_mode=0o755, system_uid=0):
+        root = pathlib.Path(temporary)
+        system_parent = root / "run" / "user"
+        system_parent.mkdir(parents=True, mode=0o755)
+        user_root = system_parent / str(os.getuid())
+        user_root.mkdir(mode=0o700)
+        os.chmod(user_root, 0o700)
+        for directory in (root, root / "run", system_parent):
+            os.chmod(directory, system_mode)
+        runtime = user_root / "little-mester-vm-acceptance"
+
+        real_lstat = os.lstat
+
+        def fixture_lstat(path):
+            path = pathlib.Path(path)
+            info = real_lstat(path)
+            if path == user_root or user_root in path.parents:
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=info.st_uid)
+            return SimpleNamespace(
+                st_mode=(info.st_mode & ~0o222) | stat.S_IXOTH,
+                st_uid=system_uid,
+            )
+
+        return system_parent, user_root, runtime, fixture_lstat
+
+    def test_directory_chain_accepts_owner_private_final_without_other_execute(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, user_root, _, fixture_lstat = self.runtime_fixture(temporary)
+            with mock.patch.object(acceptance.os, "lstat", side_effect=fixture_lstat):
+                acceptance.check_directory_chain(user_root, os.getuid(), 0o700)
+
+    def test_previous_nested_validation_rejects_owner_owned_parent_as_root_ancestor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            _, user_root, runtime, fixture_lstat = self.runtime_fixture(temporary)
+            runtime.mkdir(mode=0o700)
+            with mock.patch.object(acceptance.os, "lstat", side_effect=fixture_lstat):
+                with self.assertRaisesRegex(acceptance.GateError, "ownership, type, or mode"):
+                    acceptance.check_directory_chain(runtime, os.getuid(), 0o700)
+
+    def test_protected_install_chain_accepts_root_owned_0755_final_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            final = root / "opt" / "little-mester" / "v3" / ("a" * 40)
+            final.mkdir(parents=True, mode=0o755)
+            for path in (root, root / "opt", root / "opt/little-mester", root / "opt/little-mester/v3", final):
+                os.chmod(path, 0o755)
+            real_lstat = os.lstat
+
+            def root_lstat(path):
+                info = real_lstat(path)
+                mode = info.st_mode if pathlib.Path(path) == final else (info.st_mode & ~0o222) | stat.S_IXOTH
+                return SimpleNamespace(
+                    st_mode=mode,
+                    st_uid=0,
+                )
+
+            with mock.patch.object(acceptance.os, "lstat", side_effect=root_lstat):
+                acceptance.check_directory_chain(final, 0, 0o755)
+
+    def test_protected_install_chain_rejects_unsafe_ancestry_and_final_mode(self):
+        for reason in ("symlink", "non-directory", "group-writable", "world-writable", "wrong-owner", "no-traverse", "final-mode"):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                final = root / "opt" / "little-mester" / "v3" / ("b" * 40)
+                final.mkdir(parents=True, mode=0o755)
+                paths = (root, root / "opt", root / "opt/little-mester", root / "opt/little-mester/v3", final)
+                for path in paths:
+                    os.chmod(path, 0o755)
+                bad = paths[2]
+                real_lstat = os.lstat
+
+                def unsafe_lstat(path):
+                    path = pathlib.Path(path)
+                    info = real_lstat(path)
+                    mode = info.st_mode
+                    uid = 0
+                    if reason == "symlink" and path == bad:
+                        mode = stat.S_IFLNK | 0o777
+                    elif reason == "non-directory" and path == bad:
+                        mode = stat.S_IFREG | 0o644
+                    elif reason == "group-writable" and path == bad:
+                        mode |= stat.S_IWGRP
+                    elif reason == "world-writable" and path == bad:
+                        mode |= stat.S_IWOTH
+                    elif reason == "wrong-owner" and path == bad:
+                        uid = os.getuid() + 1
+                    elif reason == "no-traverse" and path == bad:
+                        mode &= ~stat.S_IXOTH
+                    elif reason == "final-mode" and path == final:
+                        mode = (mode & ~stat.S_IMODE(mode)) | stat.S_IFDIR | 0o750
+                    return SimpleNamespace(st_mode=mode, st_uid=uid)
+
+                with mock.patch.object(acceptance.os, "lstat", side_effect=unsafe_lstat):
+                    with self.assertRaises(acceptance.GateError):
+                        acceptance.check_directory_chain(final, 0, 0o755)
+
+    def test_runtime_validator_accepts_protected_prefix_and_private_descendants(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            system_parent, user_root, runtime, fixture_lstat = self.runtime_fixture(temporary)
+            runtime.mkdir(mode=0o700)
+            report_parent = runtime / "attempt-parent"
+            report_parent.mkdir(mode=0o700)
+            report_dir = report_parent / "attempt"
+            report_dir.mkdir(mode=0o700)
+            with mock.patch.object(acceptance, "RUNTIME_ROOT", runtime), \
+                    mock.patch.object(acceptance.os, "lstat", side_effect=fixture_lstat):
+                acceptance.check_private_runtime_chain(user_root, system_parent)
+                acceptance.check_private_runtime_chain(runtime, system_parent)
+                acceptance.check_private_runtime_chain(report_parent, system_parent)
+                acceptance.check_private_runtime_chain(report_dir, system_parent)
+
+    def test_runtime_validator_rejects_symlink_and_non_directory_system_components(self):
+        for make_unsafe in ("symlink", "non-directory"):
+            with self.subTest(make_unsafe=make_unsafe), tempfile.TemporaryDirectory() as temporary:
+                system_parent, user_root, runtime, fixture_lstat = self.runtime_fixture(temporary)
+                displaced = system_parent.with_name("user-original")
+                system_parent.rename(displaced)
+                if make_unsafe == "symlink":
+                    system_parent.symlink_to(displaced)
+                else:
+                    system_parent.write_text("not a directory", encoding="ascii")
+                with mock.patch.object(acceptance.os, "lstat", side_effect=fixture_lstat):
+                    with self.assertRaises(acceptance.GateError):
+                        acceptance.check_private_runtime_chain(user_root, system_parent)
+
+    def test_runtime_validator_rejects_unsafe_system_ownership_and_permissions(self):
+        for reason in ("group-writable", "world-writable", "wrong-owner", "no-traverse"):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as temporary:
+                system_parent, user_root, runtime, fixture_lstat = self.runtime_fixture(temporary)
+
+                def unsafe_lstat(path):
+                    info = fixture_lstat(path)
+                    path = pathlib.Path(path)
+                    if path == system_parent:
+                        mode = info.st_mode
+                        uid = info.st_uid
+                        if reason == "group-writable":
+                            mode |= stat.S_IWGRP
+                        elif reason == "world-writable":
+                            mode |= stat.S_IWOTH
+                        elif reason == "wrong-owner":
+                            uid = os.getuid()
+                        else:
+                            mode &= ~stat.S_IXOTH
+                        return SimpleNamespace(st_mode=mode, st_uid=uid)
+                    return info
+
+                with mock.patch.object(acceptance.os, "lstat", side_effect=unsafe_lstat):
+                    with self.assertRaises(acceptance.GateError):
+                        acceptance.check_private_runtime_chain(user_root, system_parent)
+
+    def test_runtime_validator_rejects_private_owner_mode_traversal_and_transition(self):
+        for reason in (
+            "wrong-owner", "group-writable", "world-writable", "wrong-mode", "no-traverse",
+            "transition", "symlink", "child-group-writable", "child-world-writable",
+            "child-wrong-mode", "child-no-traverse",
+        ):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as temporary:
+                system_parent, user_root, runtime, fixture_lstat = self.runtime_fixture(temporary)
+                runtime.mkdir(mode=0o700)
+                child = runtime / "child"
+                child.mkdir(mode=0o700)
+                if reason == "group-writable":
+                    os.chmod(runtime, 0o720)
+                elif reason == "world-writable":
+                    os.chmod(runtime, 0o702)
+                elif reason == "wrong-mode":
+                    os.chmod(runtime, 0o750)
+                elif reason == "no-traverse":
+                    os.chmod(runtime, 0o600)
+                elif reason == "symlink":
+                    child.rmdir()
+                    child.symlink_to(user_root)
+                elif reason == "child-group-writable":
+                    os.chmod(child, 0o720)
+                elif reason == "child-world-writable":
+                    os.chmod(child, 0o702)
+                elif reason == "child-wrong-mode":
+                    os.chmod(child, 0o750)
+                elif reason == "child-no-traverse":
+                    os.chmod(child, 0o600)
+
+                def unsafe_lstat(path):
+                    info = fixture_lstat(path)
+                    path = pathlib.Path(path)
+                    if reason == "wrong-owner" and path == user_root:
+                        return SimpleNamespace(st_mode=info.st_mode, st_uid=os.getuid() + 1)
+                    if reason == "transition" and path == child:
+                        return SimpleNamespace(st_mode=info.st_mode, st_uid=os.getuid() + 1)
+                    return info
+
+                with mock.patch.object(acceptance.os, "lstat", side_effect=unsafe_lstat):
+                    with self.assertRaises(acceptance.GateError):
+                        acceptance.check_private_runtime_chain(child, system_parent)
+
+    def test_report_creation_and_preflight_use_validated_private_runtime_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            system_parent, _, runtime, fixture_lstat = self.runtime_fixture(temporary)
+            install = pathlib.Path(temporary) / "protected-install"
+            install.mkdir(mode=0o755)
+            with mock.patch.object(acceptance, "RUNTIME_ROOT", runtime), \
+                    mock.patch.object(acceptance.os, "lstat", side_effect=fixture_lstat), \
+                    mock.patch.object(acceptance, "candidate_commit"), \
+                    mock.patch.object(acceptance, "install_path", return_value=install), \
+                    mock.patch.object(acceptance, "verify_install", return_value=install), \
+                    mock.patch.object(acceptance, "installed_preflight"), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                result = acceptance.main(["--preflight", "--sha", "a" * 40, "--repo", str(ROOT)])
+            self.assertEqual(result, 0)
+            attempts = list(runtime.iterdir())
+            self.assertEqual(len(attempts), 1)
+            report = attempts[0] / "report.json"
+            self.assertEqual(stat.S_IMODE(os.lstat(report).st_mode), 0o600)
+            payload = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "PASS")
+            self.assertEqual(payload["gates"]["preflight"], "PASS")
+
+    def test_early_runtime_gate_error_is_reported_without_traceback_or_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            system_parent, _, runtime, fixture_lstat = self.runtime_fixture(temporary)
+            errors = io.StringIO()
+            output = io.StringIO()
+
+            def unsafe_system_lstat(path):
+                info = fixture_lstat(path)
+                if pathlib.Path(path) == system_parent:
+                    return SimpleNamespace(st_mode=info.st_mode | stat.S_IWGRP, st_uid=info.st_uid)
+                return info
+
+            with mock.patch.object(acceptance, "RUNTIME_ROOT", runtime), \
+                mock.patch.object(acceptance.os, "lstat", side_effect=unsafe_system_lstat), \
+                mock.patch.object(acceptance, "candidate_commit") as candidate, \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                result = acceptance.main(["--preflight", "--sha", "a" * 40, "--repo", str(ROOT)])
+            self.assertEqual(result, 3)
+            self.assertIn("BLOCKED: protected system directory", errors.getvalue())
+            self.assertNotIn("Traceback", errors.getvalue())
+            self.assertEqual(output.getvalue(), "")
+            self.assertFalse(runtime.exists())
+            candidate.assert_not_called()
+
+    def test_report_directory_allocation_refusal_is_a_gate_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = pathlib.Path(temporary)
+            os.chmod(parent, 0o700)
+            with mock.patch.object(acceptance.os, "mkdir", side_effect=PermissionError("denied")):
+                with self.assertRaisesRegex(acceptance.GateError, "trusted report directory"):
+                    acceptance.new_report_dir(parent)
+
+    def test_unsafe_report_parent_is_refused_by_production_private_directory_check(self):
+        for reason in ("symlink", "wrong-mode", "wrong-owner"):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                parent = root / "reports"
+                if reason == "symlink":
+                    parent.symlink_to(root)
+                else:
+                    parent.mkdir(mode=0o700)
+                    if reason == "wrong-mode":
+                        os.chmod(parent, 0o750)
+                real_lstat = os.lstat
+
+                def wrong_owner_lstat(path):
+                    info = real_lstat(path)
+                    if pathlib.Path(path) == parent and reason == "wrong-owner":
+                        return SimpleNamespace(st_mode=info.st_mode, st_uid=os.getuid() + 1)
+                    return info
+
+                with mock.patch.object(acceptance.os, "lstat", side_effect=wrong_owner_lstat):
+                    with self.assertRaises(acceptance.GateError):
+                        acceptance.new_report_dir(parent)
+
     def test_cli_requires_full_sha_and_rejects_multiple_operations(self):
         with self.assertRaises(SystemExit):
             acceptance.parser().parse_args(["--install", "--sha", "abc"])

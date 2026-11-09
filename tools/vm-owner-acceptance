@@ -127,7 +127,7 @@ def archive_arguments(repo: pathlib.Path, sha: str, git_executable: str = GIT) -
 
 
 def check_directory_chain(path: pathlib.Path, final_uid: int, final_mode: int) -> None:
-    """Require a lexical, symlink-free protected directory chain."""
+    """Require a lexical, symlink-free root-protected installation chain."""
     if not path.is_absolute():
         raise GateError("BLOCKED", "protected path is not absolute")
     current = pathlib.Path("/")
@@ -139,12 +139,65 @@ def check_directory_chain(path: pathlib.Path, final_uid: int, final_mode: int) -
             raise GateError("BLOCKED", "protected directory path is missing or inaccessible") from error
         last = index == len(path.parts[1:]) - 1
         expected_uid = final_uid if last else 0
+        search_bit = stat.S_IXUSR if info.st_uid == os.getuid() else stat.S_IXOTH
         if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
                 or info.st_uid != expected_uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-                or not info.st_mode & stat.S_IXOTH):
+                or not info.st_mode & search_bit):
             raise GateError("BLOCKED", "protected directory ownership, type, or mode check failed")
         if last and stat.S_IMODE(info.st_mode) != final_mode:
             raise GateError("BLOCKED", "protected directory mode differs from the normalized mode")
+
+
+def check_protected_directory_prefix(path: pathlib.Path) -> None:
+    """Validate root-owned system ancestors that an invoking user must traverse."""
+    if not path.is_absolute():
+        raise GateError("BLOCKED", "protected system directory is not absolute")
+    current = pathlib.Path("/")
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            info = os.lstat(current)
+        except OSError as error:
+            raise GateError("BLOCKED", "protected system directory is missing or inaccessible") from error
+        search_bit = stat.S_IXUSR if info.st_uid == os.getuid() else stat.S_IXOTH
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or not info.st_mode & search_bit):
+            raise GateError("BLOCKED", "protected system directory ownership, type, mode, or traversal check failed")
+
+
+def check_private_directory(path: pathlib.Path, uid: int, mode: int = 0o700) -> None:
+    """Validate one owner-controlled private directory without world-execute assumptions."""
+    try:
+        info = os.lstat(path)
+    except OSError as error:
+        raise GateError("BLOCKED", "private runtime directory is missing or inaccessible") from error
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != uid or stat.S_IMODE(info.st_mode) != mode
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not info.st_mode & stat.S_IXUSR):
+        raise GateError("BLOCKED", "private runtime directory ownership, type, mode, or owner traversal check failed")
+
+
+def check_private_runtime_chain(
+    path: pathlib.Path,
+    system_parent: pathlib.Path | None = None,
+    uid: int | None = None,
+) -> None:
+    """Validate root-owned /run/user ancestry followed by the private UID subtree."""
+    uid = os.getuid() if uid is None else uid
+    system_parent = system_parent or RUNTIME_ROOT.parent.parent
+    if not path.is_absolute() or not system_parent.is_absolute():
+        raise GateError("BLOCKED", "private runtime path is not absolute")
+    user_root = system_parent / str(uid)
+    if path != user_root and user_root not in path.parents:
+        raise GateError("BLOCKED", "private runtime path is outside the invoking user's runtime directory")
+    check_protected_directory_prefix(system_parent)
+    current = user_root
+    check_private_directory(current, uid)
+    for component in path.relative_to(user_root).parts:
+        current /= component
+        check_private_directory(current, uid)
 
 
 def verify_install(repo: pathlib.Path, sha: str) -> pathlib.Path:
@@ -328,19 +381,24 @@ def install_candidate(repo: pathlib.Path, sha: str) -> pathlib.Path:
 
 
 def runtime_dir() -> pathlib.Path:
-    expected = pathlib.Path(f"/run/user/{os.getuid()}")
-    check_directory_chain(expected, os.getuid(), 0o700)
-    target = expected / "little-mester-vm-acceptance"
+    uid = os.getuid()
+    system_parent = RUNTIME_ROOT.parent.parent
+    user_root = system_parent / str(uid)
+    check_private_runtime_chain(user_root, system_parent, uid)
+    target = RUNTIME_ROOT
     try:
         os.mkdir(target, 0o700)
     except FileExistsError:
         pass
-    check_directory_chain(target, os.getuid(), 0o700)
+    except OSError as error:
+        raise GateError("BLOCKED", "trusted private runtime directory could not be created") from error
+    check_private_runtime_chain(target, system_parent, uid)
     return target
 
 
 def new_report_dir(parent: pathlib.Path | None = None) -> pathlib.Path:
-    parent = parent or runtime_dir()
+    parent = runtime_dir() if parent is None else parent
+    check_private_directory(parent, os.getuid())
     for _ in range(20):
         identity = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex
         path = parent / identity
@@ -348,9 +406,9 @@ def new_report_dir(parent: pathlib.Path | None = None) -> pathlib.Path:
             os.mkdir(path, 0o700)
         except FileExistsError:
             continue
-        info = os.lstat(path)
-        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
-            raise GateError("BLOCKED", "new evidence directory failed private ownership check")
+        except OSError as error:
+            raise GateError("BLOCKED", "trusted report directory could not be created") from error
+        check_private_directory(path, os.getuid())
         return path
     raise GateError("FAIL", "could not allocate a fresh evidence directory")
 
@@ -646,10 +704,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     modes = [name for name in ("preflight", "install", "storage_proof", "run", "verify_cleanup", "all") if getattr(args, name)]
     mode = modes[0] if modes else "preflight"
-    repo = pathlib.Path(args.repo).resolve(strict=True)
-    report_dir = new_report_dir()
-    data = report_template(args.sha, mode, report_dir)
-    save_report(report_dir, data)
+    try:
+        repo = pathlib.Path(args.repo).resolve(strict=True)
+        report_dir = new_report_dir()
+        data = report_template(args.sha, mode, report_dir)
+        save_report(report_dir, data)
+    except KeyboardInterrupt:
+        print("BLOCKED: interrupted during runner initialization; no report directory was trusted", file=sys.stderr)
+        return 3
+    except GateError as error:
+        print(f"{error.status}: {error.message}", file=sys.stderr)
+        return 3 if error.status == "BLOCKED" else 1
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        print(f"FAIL: runner initialization failed ({type(error).__name__}); details omitted", file=sys.stderr)
+        return 1
+
     result_code = 0
     current_gate = "candidate"
     try:
@@ -670,6 +739,7 @@ def main(argv: list[str] | None = None) -> int:
                 root = verify_install(repo, args.sha)
                 installed_preflight(root, args.workspace)
                 data["gates"]["preflight"] = "PASS"
+                data["status"] = "PASS"
             else:
                 data["gates"]["preflight"] = "BLOCKED"
                 data["notes"].append("protected install absent; read-only preflight did not install or execute the mutable candidate")
@@ -736,18 +806,17 @@ def main(argv: list[str] | None = None) -> int:
             data["gates"][current_gate] = "FAIL"
         data["notes"].append(f"operation failed ({type(error).__name__}); details omitted")
         result_code = 1
-    finally:
-        try:
-            save_report_update = report_dir / "report.json"
-            payload = (json.dumps(data, sort_keys=True, indent=2) + "\n").encode()
-            fd = os.open(save_report_update, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-        except OSError:
-            print(f"FAIL: report update failed; preserve evidence directory {report_dir}", file=sys.stderr)
-            return 1
+    try:
+        save_report_update = report_dir / "report.json"
+        payload = (json.dumps(data, sort_keys=True, indent=2) + "\n").encode()
+        fd = os.open(save_report_update, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError:
+        print(f"FAIL: report update failed; preserve evidence directory {report_dir}", file=sys.stderr)
+        result_code = 1
     print_report(data)
     return result_code
 
