@@ -702,6 +702,34 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 with self.assertRaisesRegex(acceptance.GateError, "early startup failure"):
                     acceptance.verify_cleanup_report("2" * 40, data["evidence"]["vm_run_id"])
 
+    def test_successful_verify_cleanup_reports_overall_pass(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            report_dir = root / "report"
+            run_id = "20261109T154005Z-" + "3" * 32
+
+            def allocate_report_dir():
+                report_dir.mkdir(mode=0o700)
+                return report_dir
+
+            with (
+                mock.patch.object(acceptance, "new_report_dir", side_effect=allocate_report_dir),
+                mock.patch.object(acceptance, "candidate_commit"),
+                mock.patch.object(acceptance, "verify_cleanup_report"),
+                mock.patch.object(acceptance, "verify_install", return_value=root / "install"),
+                mock.patch.object(acceptance, "inspect_cleanup", return_value={"status": "PASS"}),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                result = acceptance.main([
+                    "--verify-cleanup", "--sha", "3" * 40,
+                    "--repo", str(ROOT), "--run-id", run_id,
+                ])
+            self.assertEqual(result, 0)
+            self.assertIn("OVERALL: PASS", output.getvalue())
+            final_report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(final_report["status"], "PASS")
+            self.assertEqual(final_report["gates"]["cleanup"], "PASS")
+
     def test_proc_unix_listener_path_preserves_repeated_spaces(self):
         import socket
         helper_loader = importlib.machinery.SourceFileLoader(

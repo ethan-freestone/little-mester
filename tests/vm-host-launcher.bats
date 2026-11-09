@@ -1246,6 +1246,22 @@ SH
   [[ "$output" != *"must be root-owned"* ]]
 }
 
+@test "mutable virtiofs socket helper is rejected by launcher installation validation" {
+  local fixture="$TEST_TMP/protected-helper-shape"
+  mkdir -p "$fixture/lib/vm"
+  cp "$TEST_ROOT/lab-vm" "$fixture/lab-vm"
+  for name in host-launcher.sh cloud-init.sh proxy.py bounded-log.py executable-policy.py browser-auth-session.py; do
+    cp "$TEST_ROOT/lib/vm/$name" "$fixture/lib/vm/$name"
+  done
+  ln -s "$TEST_ROOT/lib/vm/virtiofs-socket.py" "$fixture/lib/vm/virtiofs-socket.py"
+
+  run "$fixture/lab-vm" smoke --workspace "$TEST_TMP" --model openai/test-model
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"symlinked path component"* ]]
+  [[ "$output" != *"must be root-owned"* ]]
+}
+
 @test "readiness fails closed when cloud-init SSH command fails" {
   vm_host_ssh() {
     case "$2" in

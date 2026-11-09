@@ -35,6 +35,7 @@ dependencies = [
     root / "lib/vm/bounded-log.py",
     root / "lib/vm/executable-policy.py",
     root / "lib/vm/browser-auth-session.py",
+    root / "lib/vm/virtiofs-socket.py",
 ]
 
 # Inspect the original lexical path before resolving anything. A symlink in

@@ -737,6 +737,7 @@ def main(argv: list[str] | None = None) -> int:
             cleanup = inspect_cleanup(args.sha, args.run_id, root)
             data["gates"]["cleanup"] = cleanup["status"]
             data["evidence"]["cleanup"] = cleanup
+            data["status"] = "PASS"
         elif mode == "preflight":
             current_gate = "preflight"
             root = install_path(args.sha)
