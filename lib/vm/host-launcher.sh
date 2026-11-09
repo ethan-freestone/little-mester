@@ -56,18 +56,18 @@ vm_host_require_kvm() {
 }
 
 vm_host_validate_workspace() {
-  local selected="${1:-}" install_root="${2:-}" state_root="${3:-}"
+  local selected="${1:-}" install_root="${2:-}" state_root="${3:-}" runtime_root="${4:-}"
   [[ -n "$selected" && -n "$install_root" && -n "$state_root" ]] || {
     vm_host_error 'workspace and trusted install/state roots are required'
     return 1
   }
-  python3 -I - "$selected" "$install_root" "$state_root" <<'PY'
+  python3 -I - "$selected" "$install_root" "$state_root" "$runtime_root" <<'PY'
 import os
 import pathlib
 import pwd
 import sys
 
-raw, install_raw, state_raw = sys.argv[1:]
+raw, install_raw, state_raw, runtime_raw = sys.argv[1:]
 uid = os.getuid()
 def fail(message):
     print(f"REFUSED: {message}", file=sys.stderr)
@@ -105,7 +105,12 @@ def canon(raw_path):
 
 install = canon(install_raw)
 state = canon(state_raw)
-for label, protected in (("trusted installation", install), ("private runtime state", state)):
+runtime = canon(runtime_raw) if runtime_raw else pathlib.Path(f"/run/user/{uid}")
+for label, protected in (
+    ("trusted installation", install),
+    ("private runtime state", state),
+    ("private short-socket runtime root", runtime),
+):
     if resolved == protected or resolved in protected.parents or protected in resolved.parents:
         fail(f"workspace overlaps {label}")
 print(resolved)

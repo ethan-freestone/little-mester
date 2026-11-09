@@ -232,6 +232,38 @@ assert_cleanup_cascade_result() {
   [[ "$output" == *"overlap"* ]]
 }
 
+@test "workspace inside private socket runtime root is rejected before export" {
+  local runtime_root="$TEST_TMP/private-runtime"
+  mkdir -p "$runtime_root/workspace" "$TEST_TMP/install"
+
+  run vm_host_validate_workspace "$runtime_root/workspace" "$TEST_TMP/install" \
+    "$TEST_TMP/private-state" "$runtime_root"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"overlaps private short-socket runtime root"* ]]
+}
+
+@test "smoke rejects an export overlapping socket runtime before workspace checks or launch" {
+  local runtime_root="$TEST_TMP/private-runtime" home="$TEST_TMP/home" marker="$TEST_TMP/lifecycle-reached"
+  mkdir -p "$runtime_root/workspace" "$TEST_TMP/install" "$home"
+  export VM_HOST_TEST_RUNTIME_ROOT="$runtime_root" VM_HOST_TEST_HOME="$home" VM_HOST_TEST_MARKER="$marker"
+  eval "$(declare -f vm_host_validate_workspace | sed 's/vm_host_validate_workspace/vm_host_validate_workspace_real/')"
+  vm_host_validate_workspace() {
+    vm_host_validate_workspace_real "$1" "$2" "$3" "$VM_HOST_TEST_RUNTIME_ROOT"
+  }
+  vm_host_require_kvm() { :; }
+  vm_host_require_commands() { :; }
+  vm_host_account_home() { printf '%s\n' "$VM_HOST_TEST_HOME"; }
+  vm_host_check_workspace_filesystem() { : >"$VM_HOST_TEST_MARKER"; }
+  VM_HOST_SCRIPT_ROOT="$TEST_TMP/install"
+
+  run vm_host_smoke --workspace "$runtime_root/workspace" --model openai/test-model
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"overlaps private short-socket runtime root"* ]]
+  [ ! -e "$marker" ]
+}
+
 @test "private state directory is created without following a symlink" {
   mkdir "$TEST_TMP/home" "$TEST_TMP/target"
   chmod 0755 "$TEST_TMP/home"
