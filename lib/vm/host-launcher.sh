@@ -725,8 +725,8 @@ vm_host_ssh_bounded() {
 }
 
 vm_host_write_cloud_seed() {
-  local run_dir="$1" vm_name="$2" uid="$3" gid="$4" pubkey="$5" iso_tool
-  if ! vm_host_cloud_init "$vm_name" "$uid" "$gid" "$pubkey" >"$run_dir/user-data"; then
+  local run_dir="$1" vm_name="$2" uid="$3" pubkey="$4" iso_tool
+  if ! vm_host_cloud_init "$vm_name" "$uid" "$pubkey" >"$run_dir/user-data"; then
     vm_host_error 'cloud-init seed generation failed'
     return 1
   fi
@@ -1126,7 +1126,7 @@ vm_host_smoke() {
     local under_status=$?
     (( under_status == 1 )) || return 1
   fi
-  local start_time run_id vm_name ssh_port uid gid pubkey remaining auth_wait
+  local start_time run_id vm_name ssh_port uid pubkey remaining auth_wait
   VM_HOST_AUTH_STARTED=0
   start_time=$SECONDS
   state_root="$(vm_host_prepare_state_root "$home")" || return 1
@@ -1141,7 +1141,6 @@ vm_host_smoke() {
   trap 'exit 129' HUP
   printf 'Run state: %s\n' "$VM_HOST_RUN_DIR" || return 1
   uid="$(id -u)" || { vm_host_error 'could not resolve invoking UID'; return 1; }
-  gid="$(id -g)" || { vm_host_error 'could not resolve invoking GID'; return 1; }
   vm_name="v3-smoke-${run_id//[^A-Za-z0-9-]/}"
   vm_name="${vm_name:0:31}"
   ssh-keygen -q -t ed25519 -N '' -C "little-mester-v3-$run_id" -f "$VM_HOST_RUN_DIR/id_vm_control" || {
@@ -1150,7 +1149,7 @@ vm_host_smoke() {
   }
   chmod 0600 "$VM_HOST_RUN_DIR/id_vm_control" || return 1
   pubkey="$(<"$VM_HOST_RUN_DIR/id_vm_control.pub")" || { vm_host_error 'could not read run-owned SSH public key'; return 1; }
-  vm_host_write_cloud_seed "$VM_HOST_RUN_DIR" "$vm_name" "$uid" "$gid" "$pubkey" || return 1
+  vm_host_write_cloud_seed "$VM_HOST_RUN_DIR" "$vm_name" "$uid" "$pubkey" || return 1
   vm_host_prepare_disk "$VM_HOST_RUN_DIR" || return 1
   vm_host_start_proxy "$VM_HOST_RUN_DIR" || return 1
   vm_host_start_virtiofs "$VM_HOST_RUN_DIR" "$workspace" || return 1

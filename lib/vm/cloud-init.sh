@@ -4,9 +4,9 @@
 
 vm_host_cloud_init() {
   local name="${1:?VM name required}" uid="${2:?host uid required}"
-  local gid="${3:?host gid required}" ssh_key="${4:?SSH key required}"
+  local ssh_key="${3:?SSH key required}"
   [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,31}$ ]] || return 2
-  [[ "$uid" =~ ^[1-9][0-9]{0,8}$ && "$gid" =~ ^[1-9][0-9]{0,8}$ ]] || return 2
+  [[ "$uid" =~ ^[1-9][0-9]{0,8}$ ]] || return 2
   [[ "$ssh_key" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+([[:space:]].*)?$ ]] || return 2
   [[ "$ssh_key" != *$'\n'* && "$ssh_key" != *$'\r'* ]] || return 2
 
@@ -15,14 +15,10 @@ vm_host_cloud_init() {
 hostname: ${name}
 ssh_pwauth: false
 disable_root: true
-groups:
-  - name: mester
-    gid: ${gid}
 users:
   - name: mester
     uid: ${uid}
     primary_group: mester
-    groups: []
     shell: /bin/bash
     lock_passwd: true
     ssh_authorized_keys:

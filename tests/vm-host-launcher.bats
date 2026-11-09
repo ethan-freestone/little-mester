@@ -329,7 +329,7 @@ PY
 
 @test "guest cloud-init uses rootless Docker and direct OpenCode without lifecycle authority" {
   unset HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
-  run vm_host_cloud_init smoke-v3 1234 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test'
+  run vm_host_cloud_init smoke-v3 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test'
 
   [ "$status" -eq 0 ] || {
     printf 'cloud-init generation failed (status %s); captured output follows:\n%s\n' "$status" "$output" >&2
@@ -349,11 +349,34 @@ PY
   export HTTP_PROXY=http://hostile.invalid:9999 HTTPS_PROXY=http://hostile.invalid:9999
   export http_proxy=http://hostile.invalid:9999 https_proxy=http://hostile.invalid:9999
   export NO_PROXY=hostile.invalid no_proxy=hostile.invalid
-  run vm_host_cloud_init smoke-v3 1234 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test'
+  run vm_host_cloud_init smoke-v3 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test'
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"export http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128"* ]]
   [[ "$output" != *"hostile.invalid"* ]]
+}
+
+@test "generated cloud-init uses cloud-init 26.1 users-groups schema for the host UID" {
+  local user_data
+  user_data="$(vm_host_cloud_init smoke-v3 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test')"
+
+  # cloud-init 26.1's users-groups schema accepts users[].uid as an integer,
+  # primary_group as a string, and ssh_authorized_keys as a non-empty string
+  # list. An omitted users[].groups uses the default empty supplementary set;
+  # if specified, that list must be non-empty. Top-level groups must be group
+  # names (or a name-to-members mapping), not {name, gid} records.
+  [[ "$user_data" == *$'users:\n  - name: mester\n    uid: 1234\n    primary_group: mester\n    shell: /bin/bash\n    lock_passwd: true\n    ssh_authorized_keys:\n      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test\n'* ]]
+  [[ "$user_data" != *$'groups:\n'* ]]
+  [[ "$user_data" != *$'    groups: []\n'* ]]
+  [[ "$user_data" == *$'ssh_pwauth: false\n'* ]]
+  [[ "$user_data" == *$'disable_root: true\n'* ]]
+
+  run vm_host_cloud_init 'bad/name' 1234 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test'
+  [ "$status" -eq 2 ]
+  run vm_host_cloud_init smoke-v3 0 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test'
+  [ "$status" -eq 2 ]
+  run vm_host_cloud_init smoke-v3 1234 'not-an-ssh-key'
+  [ "$status" -eq 2 ]
 }
 
 @test "runbook evidence command writes through its exclusive open descriptor" {
