@@ -1,0 +1,49 @@
+{
+  "id": 55,
+  "file_path": "/workspace/docs/tickets/ticket-055.json",
+  "number": 55,
+  "area": "vm-v3",
+  "type": "improvement",
+  "status": "draft",
+  "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
+  "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port.",
+  "created_at": "2026-11-10T21:46:28.225Z",
+  "updated_at": "2026-11-10T21:46:51.737Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Timebox source/runtime compatibility investigation against pinned OpenCode 2.2.5 before porting; record verified behavior and stop for owner/Sol decision if compatibility or security boundaries are unclear.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Use supported native keybindings when they provide the approved behavior; verify Ctrl+C opens confirmation, Escape/N/Ctrl+C cancel, Y/Q confirm, and Ctrl+D behavior on the pinned binary without losing workspace data.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Any plugins/config are version-pinned, baked into the protected guest and inaccessible for workspace replacement; hostile project config/plugin discovery cannot override protected settings or load an unapproved plugin.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Verify update, telemetry, remote model-list, and sharing behavior under the existing egress policy; keep autoupdate/sharing disabled as configured and do not broaden the allowlist without owner approval.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Document target-terminal clipboard-write mitigation, verify it with a harmless clipboard canary, and state residual terminal-control risks; do not treat SSH EscapeChar=none as a clipboard defense.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Timeboxed OpenCode 2.2.5 TUI/plugin/keybinding/config-precedence probe in an isolated disposable environment.",
+      "PTy key-sequence matrix and harmless OSC-52 clipboard canary on each owner-approved terminal profile.",
+      "Hostile project config/plugin sentinel and egress/update/model-list checks without real credentials."
+    ],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}

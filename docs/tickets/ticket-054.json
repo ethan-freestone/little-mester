@@ -1,0 +1,49 @@
+{
+  "id": 54,
+  "file_path": "/workspace/docs/tickets/ticket-054.json",
+  "number": 54,
+  "area": "vm-v3",
+  "type": "feature",
+  "status": "draft",
+  "title": "P1-02 — Secure foreground interactive v3 VM session",
+  "objective": "P1-02 foreground session. Successor to #49/#51; depends on P1-01 ticket #53 evidence/supersession and P1-03 ticket #55's timeboxed 2.2.5 compatibility findings before protected TUI integration. Proposed trust-boundary changes require explicit owner approval before implementation.",
+  "created_at": "2026-11-10T21:46:28.200Z",
+  "updated_at": "2026-11-10T21:46:51.729Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Session runs only from the protected installed launcher, exports exactly one owner-selected bounded workspace, uses a foreground PTY with terminal restoration, disables SSH escape commands with EscapeChar=none, and enforces an owner-approved finite session deadline.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Session uses per-run ephemeral guest/auth state and verified teardown; no credential or guest state persists after successful destruction.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "SIGINT and SIGHUP trigger bounded cleanup and nonzero failure when cleanup is uncertain; SIGKILL is treated as possible orphaning, never as successful cleanup.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Provide an owner-only recovery procedure for interrupted sessions that verifies run identity, exact executable/start-time/argv identity and listener state; only identity-bound owned processes may be terminated, never PID-file contents. Ambiguous evidence preserves state and fails closed.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Tests cover PTY input/output/resize/terminal restoration, deadlines, signal cases, sequential cleanup budget, orphan recovery, unrelated-process preservation, no credential persistence, and no broad host access.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Owner approval for foreground lifecycle/recovery trust boundary and finite deadline.",
+      "PTY and resize tests; SIGINT/SIGHUP cleanup; SIGKILL orphan recovery with exact-identity fixtures and host canary.",
+      "Full protected smoke on final SHA after any launcher/provisioning change."
+    ],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}

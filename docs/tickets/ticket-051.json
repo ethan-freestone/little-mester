@@ -8,7 +8,7 @@
   "title": "Phase 1 — clean checkout to isolated Dev VM, Little Mester response and rootless Docker smoke",
   "objective": "FINAL Phase1 scope, child of #49: trusted protected host launcher and shared security/policy core, minimal owner CLI, exactly one workspace, fresh DevVM bootstrap, real LittleMester response, rootlessDocker actual container, restricted egress/finite resources/focused tests and successful owner smoke. Host lifecycle MCP adapter deferred until smoke succeeds; D3 future target unchanged. No guest lifecycle/recursion/self-test implementation. Luna sole implementation writer; Sol decisions/verification. Preserve deferred/uncommitted work. No new planning/tickets/docs-only checkpoint; next appropriate implementation commit includes minimal §L timing correction after tests/review. End user pushes. Standing workflow reference only: #49 tests.cases entry \"ORCHESTRATION POLICY v1\"; canonical handoffs remain #49, child uses sequence references.",
   "created_at": "2026-11-08T15:02:09.519Z",
-  "updated_at": "2026-11-10T21:23:13.463Z",
+  "updated_at": "2026-11-10T21:47:59.513Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -358,7 +358,9 @@
       "Read-only source findings for owner plan: v3 lab-vm has preflight and one-shot smoke only; no persistent interactive Dev VM launcher/resume, metrics integration, or TUI model-picker workflow. Existing ./lab command runs a distinct Compose agent workflow and sources mutable .little-mester.conf. Legacy metrics sidecar/plugin and scripts/verify-metrics.sh apply only to Compose stack, not v3.",
       "Pre-merge owner test plan: do not reuse disposable smoke guest or legacy VM. First run existing local negative suites without VM: bats tests/vm-host-launcher.bats; python3 -I tests/vm-proxy.test.py; python3 -I tests/vm-executable-policy.test.py; python3 -I tests/vm-virtiofs-socket.test.py. For later interactive tests, require an owner-selected isolated bounded workspace and owner-authorized interactive Dev VM workflow; use harmless canaries and synthetic network fixtures only, no host/LAN probes or credentials. Metrics/model-picker/TUI criteria are blocked until supported in v3.",
       "#49 canonical owner handoff sequence 49. #51 A5 and A6 recorded passing based on owner attestation; final security/cleanup/interactive gates remain pending.",
-      "Canonical current handoff is #49 sequence 50; it supersedes malformed sequence 49 (ticket key indentation). It records owner-reported smoke PASS and current interactive-workflow limits."
+      "Canonical current handoff is #49 sequence 50; it supersedes malformed sequence 49 (ticket key indentation). It records owner-reported smoke PASS and current interactive-workflow limits.",
+      "Owner additionally reports independent cleanup verification OVERALL PASS and owner CI PASS on candidate a43e9aaa746af22dbd0ab106b5d12fc33b7fb982; protected smoke report path /run/user/1000/little-mester-vm-acceptance/20261110T210726Z-68d15063699145a6b7a5e7e0430f6203/report.json, guest run 20261110T210728Z-7c68b08d15544d1bc4ec1f27486d9803; report not inspected.",
+      "Outstanding interactive/TUI/metrics/final review work is proposed in draft successor tickets #53–#57; no remaining #51 criteria are reclassified beyond previously recorded A5/A6 passing."
     ]
   },
   "models_used": []

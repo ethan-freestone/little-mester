@@ -1,0 +1,49 @@
+{
+  "id": 53,
+  "file_path": "/workspace/docs/tickets/ticket-053.json",
+  "number": 53,
+  "area": "vm-v3",
+  "type": "doc",
+  "status": "draft",
+  "title": "P1-01 — Phase 1 evidence and supersession",
+  "objective": "P1-01 evidence and supersession. Preserve historical #49/#51 records and accepted runner evidence; this is the parent evidence checkpoint for P1-02 #54, P1-03 #55, and P1-04 #56. Do not mark unfinished #49/#51 criteria as passed or rewrite their histories.",
+  "created_at": "2026-11-10T21:46:28.191Z",
+  "updated_at": "2026-11-10T21:47:59.517Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Preserve and reference owner-reported accepted candidate a43e9aaa746af22dbd0ab106b5d12fc33b7fb982, original runner report/run ID, independent cleanup PASS, and CI PASS with evidence provenance clearly labeled; do not inspect or rewrite historical reports.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Keep #49/#51 history and historical tests.cases intact; document which remaining work is superseded by the P1-01..P1-05 tickets, retaining honest incomplete criterion states and accepted A5/A6 evidence.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Commit a discoverable repository document defining the standing combined Sol implementation/security review packet, exact-SHA coverage, targeted evidence rounds, and PASS/PASS WITH CONCERNS/BLOCKED outcomes.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Use ticket comments for new handoffs; preserve old tests.cases as historical records and do not append new handoffs there.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Verify owner-supplied acceptance references and handoff comments are read back; validate ticket store before/after."
+    ],
+    "created": [],
+    "cases": [
+      "Owner-reported smoke and independent cleanup verification OVERALL PASS on a43e9aaa746af22dbd0ab106b5d12fc33b7fb982; smoke report /run/user/1000/little-mester-vm-acceptance/20261110T210726Z-68d15063699145a6b7a5e7e0430f6203/report.json; guest run 20261110T210728Z-7c68b08d15544d1bc4ec1f27486d9803; owner CI PASS. Report and CI run not independently inspected.",
+      "Read-only source findings: lab-vm supports preflight/smoke only; smoke is one-shot and tears down; current browser-auth SSH uses -T/DEVNULL and is not interactive; exact process identity/pidfd and bounded cleanup helpers are reusable; SIGKILL has no trap and may leave orphans.",
+      "Read-only OpenCode findings: v3 cloud-init pins CLI 2.2.5, but historical plugin/TUI evidence is 2.1.2/2.1.4 and static tests do not prove 2.2.5; regular agent Dockerfile install is unpinned; project-config/plugin precedence and telemetry/update/model-list network behavior remain unverified.",
+      "Read-only metrics findings: legacy collector has import-time hardware probing/background thread; formatter/TUI presentation may be reused; legacy HTTP sidecar/network topology is not suitable for v3. Existing SSH bounded wrapper has no stdin payload bound. A push design needs a new bounded sender/receiver, schema validation and atomic private tmpfs replacement, all before Sol/owner approval.",
+      "Ticket tooling: MCP create/update schemas do not expose comments or structured parent/dependency links. CLI ticket-engine update --comment appends timestamped comments; comments live in tracked ticket JSON. CLI exception is used only for handoff comments. Dependencies in current draft objectives are textual references, not structured engine relationship fields.",
+      "Proposal: #53–#57 are draft Phase 1 successors; #58 is separate deferred post-Phase-1 MCP comment API backlog. No source/docs implementation, VM action, credential access or runtime mutation performed in this checkpoint."
+    ]
+  },
+  "models_used": []
+}

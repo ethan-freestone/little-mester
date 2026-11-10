@@ -1,0 +1,55 @@
+{
+  "id": 57,
+  "file_path": "/workspace/docs/tickets/ticket-057.json",
+  "number": 57,
+  "area": "vm-v3",
+  "type": "feature",
+  "status": "draft",
+  "title": "P1-05 — Final Phase 1 acceptance and merge readiness",
+  "objective": "P1-05 final acceptance/merge readiness. Successor to #49/#51; depends on completion of P1-01 #53, P1-02 #54, P1-03 #55, and P1-04 #56. No merge absent explicit owner approval.",
+  "created_at": "2026-11-10T21:46:28.245Z",
+  "updated_at": "2026-11-10T21:46:51.758Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Record final integrated source SHA, ticket-evidence SHA and repository HEAD distinctly; preserve candidate a43e9aaa746af22dbd0ab106b5d12fc33b7fb982 smoke/cleanup/CI as historical evidence only.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "All relevant automated tests and owner CI pass on the final integrated SHA; every changed VM runtime/provisioning SHA receives a new owner-run protected full smoke.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Owner demonstrates interactive TUI/model selection, exit-confirm behavior, accurate host metrics, and approved terminal configuration on a distinct interactive Dev VM and private bounded workspace.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Controlled negative tests cover forbidden filesystem, host-loopback/LAN, terminal control, credential persistence and abnormal termination without probing real private services or sensitive data.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Independent cleanup verification is designed for the interactive-session binding, proves identity-bound QEMU/proxy/virtiofsd teardown, and does not rely on PID-file contents.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "Sol combined review covers exact final source SHA; Claude performs final adversarial assessment; owner explicitly approves merge. No tool performs an automated merge.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Final integrated SHA automated suite and owner CI.",
+      "Fresh protected full smoke after runtime/provisioning changes.",
+      "Owner hands-on acceptance and independent cleanup evidence.",
+      "Sol combined review, Claude adversarial assessment, and explicit owner merge approval."
+    ],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}
