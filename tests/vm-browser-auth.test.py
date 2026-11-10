@@ -184,6 +184,7 @@ class AuthorizationValidationTests(unittest.TestCase):
         session.callback_port = 1455
         session.deadline = None
         session.signal_received = None
+        session.auth_process_completed = False
         session._loopback_forward_ready = lambda port: events.append(("ready", port)) or True
         with mock.patch.dict("sys.modules", {
             "dbus": fake_dbus,
@@ -235,78 +236,139 @@ class AuthorizationValidationTests(unittest.TestCase):
         self.assertEqual(error.exception.status, 128 + signal.SIGTERM)
         self.assertFalse(any(url.encode("ascii") in chunk for chunk in output))
 
-    def test_portal_wait_cancellation_closes_pending_request(self):
-        closed = []
-        callbacks = []
+    def test_cancellation_during_readiness_probe_prevents_manual_url_disclosure(self):
+        session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
+        session.tty_fd = 1
+        session.callback_port = 1455
+        session.deadline = time.monotonic() + 30
+        session.signal_received = None
+        session.auth_process_completed = False
+        output = []
+
+        def cancelled_probe(_port):
+            session.signal_received = signal.SIGTERM
+            return True
+
+        session._loopback_forward_ready = cancelled_probe
+        session._open_portal = lambda *_args: (session._assert_auth_live(session.deadline), False)[1]
+        session._write_tty = output.append
+        url = authorization_url()
+        with self.assertRaises(auth.AuthSessionError) as error:
+            session._portal_or_manual(url, session.deadline)
+        self.assertEqual(error.exception.status, 128 + signal.SIGTERM)
+        self.assertFalse(any(url.encode("ascii") in chunk for chunk in output))
+
+    def test_successful_guest_completion_during_readiness_probe_is_not_misclassified(self):
         session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
         session.callback_port = 1455
         session.deadline = time.monotonic() + 30
         session.signal_received = None
-        session._loopback_forward_ready = lambda _port: True
+        session.auth_process_completed = False
 
-        class Receiver:
-            def remove(self):
-                pass
+        class Process:
+            returncode = 0
 
-        class Bus:
-            def get_unique_name(self):
-                return ":1.7"
+            def __init__(self):
+                self.polls = 0
 
-            def get_object(self, _name, _path):
-                return object()
+            def poll(self):
+                self.polls += 1
+                return None if self.polls == 1 else 0
 
-            def add_signal_receiver(self, _callback, **_kwargs):
-                return Receiver()
+        session.ssh_process = Process()
+        session._loopback_forward_ready = lambda _port: False
+        session._assert_auth_live(session.deadline)
+        self.assertTrue(session.auth_process_completed)
 
-        bus = Bus()
+    def test_portal_wait_cancellation_closes_pending_request(self):
+        for mode in ("cancel", "timeout", "mismatch", "open-error"):
+            with self.subTest(mode=mode):
+                closed = []
+                callbacks = []
+                session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
+                session.callback_port = 1455
+                session.deadline = time.monotonic() + 30
+                session.signal_received = None
+                session.auth_process_completed = False
+                session._loopback_forward_ready = lambda _port: True
 
-        class Portal:
-            def OpenURI(self, _parent, _url, options, timeout):
-                self.token = options["handle_token"]
-                return f"/org/freedesktop/portal/desktop/request/1_7/{self.token}"
+                class Receiver:
+                    def remove(self):
+                        pass
 
-        portal = Portal()
+                class Bus:
+                    def get_unique_name(self):
+                        return ":1.7"
 
-        class Request:
-            def Close(self, timeout):
-                closed.append(timeout)
+                    def get_object(self, _name, path):
+                        closed.append(path)
+                        return object()
 
-        def interface(_obj, name):
-            return portal if name == "org.freedesktop.portal.OpenURI" else Request()
+                    def add_signal_receiver(self, _callback, **_kwargs):
+                        return Receiver()
 
-        class Loop:
-            def run(self):
-                session.signal_received = signal.SIGTERM
-                callbacks[0]()
+                bus = Bus()
 
-            def quit(self):
-                pass
+                class Portal:
+                    def OpenURI(self, _parent, _url, options, timeout):
+                        path = f"/org/freedesktop/portal/desktop/request/1_7/{options['handle_token']}"
+                        if mode == "open-error":
+                            raise RuntimeError("synthetic portal submission error")
+                        if mode == "mismatch":
+                            return path + "_unexpected"
+                        return path
 
-        glib = types.SimpleNamespace(
-            MainLoop=Loop,
-            timeout_add=lambda _ms, callback: callbacks.append(callback) or len(callbacks),
-            source_remove=lambda _source: None,
-        )
-        fake_dbus = types.ModuleType("dbus")
-        fake_dbus.SessionBus = lambda: bus
-        fake_dbus.Interface = interface
-        mainloop = types.ModuleType("dbus.mainloop")
-        glib_dbus = types.ModuleType("dbus.mainloop.glib")
-        glib_dbus.DBusGMainLoop = lambda **_kwargs: None
-        gi = types.ModuleType("gi")
-        repository = types.ModuleType("gi.repository")
-        repository.GLib = glib
-        with mock.patch.dict("sys.modules", {
-            "dbus": fake_dbus,
-            "dbus.mainloop": mainloop,
-            "dbus.mainloop.glib": glib_dbus,
-            "gi": gi,
-            "gi.repository": repository,
-        }):
-            with self.assertRaises(auth.AuthSessionError) as error:
-                session._open_portal(authorization_url(), session.deadline)
-        self.assertEqual(error.exception.status, 128 + signal.SIGTERM)
-        self.assertEqual(closed, [2])
+                portal = Portal()
+
+                class Request:
+                    def Close(self, timeout):
+                        closed.append(timeout)
+
+                def interface(_obj, name):
+                    return portal if name == "org.freedesktop.portal.OpenURI" else Request()
+
+                class Loop:
+                    def run(self):
+                        if mode == "cancel":
+                            session.signal_received = signal.SIGTERM
+                            callbacks[0]()
+                        else:
+                            callbacks[1]()
+
+                    def quit(self):
+                        pass
+
+                glib = types.SimpleNamespace(
+                    MainLoop=Loop,
+                    timeout_add=lambda _ms, callback: callbacks.append(callback) or len(callbacks),
+                    source_remove=lambda _source: None,
+                )
+                fake_dbus = types.ModuleType("dbus")
+                fake_dbus.SessionBus = lambda: bus
+                fake_dbus.Interface = interface
+                mainloop = types.ModuleType("dbus.mainloop")
+                glib_dbus = types.ModuleType("dbus.mainloop.glib")
+                glib_dbus.DBusGMainLoop = lambda **_kwargs: None
+                gi = types.ModuleType("gi")
+                repository = types.ModuleType("gi.repository")
+                repository.GLib = glib
+                with mock.patch.dict("sys.modules", {
+                    "dbus": fake_dbus,
+                    "dbus.mainloop": mainloop,
+                    "dbus.mainloop.glib": glib_dbus,
+                    "gi": gi,
+                    "gi.repository": repository,
+                }):
+                    if mode == "cancel" or mode == "mismatch":
+                        with self.assertRaises(auth.AuthSessionError) as error:
+                            session._open_portal(authorization_url(), session.deadline)
+                        self.assertEqual(
+                            error.exception.status,
+                            128 + signal.SIGTERM if mode == "cancel" else 77,
+                        )
+                    else:
+                        self.assertFalse(session._open_portal(authorization_url(), session.deadline))
+                self.assertIn(2, closed, "every unresolved portal request must be explicitly closed")
 
     def test_listener_absence_detects_ipv4_mapped_ipv6_callback_sockets(self):
         listener = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)

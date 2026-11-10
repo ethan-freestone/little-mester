@@ -399,6 +399,7 @@ class BrowserAuthSession:
         self.listener_verified_closed = True
         self.ipv6_guard: socket.socket | None = None
         self.deadline: float | None = None
+        self.auth_process_completed = False
         self.output_bytes = 0
         self.signal_received: int | None = None
         self.status = 1
@@ -605,7 +606,7 @@ class BrowserAuthSession:
         except (OSError, ValueError, KeyError, IndexError):
             return False
 
-    def _assert_auth_live(self, deadline: float | None = None) -> None:
+    def _check_auth_abort(self, deadline: float | None = None) -> bool:
         if self.signal_received is not None:
             raise AuthSessionError(
                 "interactive browser authentication was cancelled", 128 + self.signal_received
@@ -615,21 +616,26 @@ class BrowserAuthSession:
             raise AuthSessionError("browser authentication exceeded its fixed wait period", 124)
         ssh_process = getattr(self, "ssh_process", None)
         if ssh_process is not None and ssh_process.poll() is not None:
-            # A completed guest auth process may have received the callback
-            # while the desktop portal was still waiting for its own response.
-            exit_status = ssh_process.returncode
-            if exit_status is not None and exit_status < 0:
-                exit_status = 128 - exit_status
-            raise AuthSessionError(
-                "guest browser authentication process completed during portal handling",
-                exit_status if exit_status is not None else 1,
-            )
-        if self.callback_port is None or not self._loopback_forward_ready(self.callback_port):
+            self.auth_process_completed = True
+            return True
+        return False
+
+    def _assert_auth_live(self, deadline: float | None = None) -> None:
+        if self._check_auth_abort(deadline):
+            return
+        ready = self.callback_port is not None and self._loopback_forward_ready(self.callback_port)
+        # The readiness probe can block while signals or process completion
+        # arrive; recheck after it and immediately before portal/fallback use.
+        if self._check_auth_abort(deadline):
+            return
+        if not ready:
             raise AuthSessionError("browser opening refused because the callback forward is no longer verified", 77)
 
     def _open_portal(self, url: str, deadline: float | None = None) -> bool:
         """Ask the invoking owner's desktop portal to open one validated URL."""
         self._assert_auth_live(deadline)
+        if self.auth_process_completed:
+            return False
         try:
             import dbus
             from dbus.mainloop.glib import DBusGMainLoop
@@ -658,8 +664,9 @@ class BrowserAuthSession:
                 dbus_interface="org.freedesktop.portal.Request",
                 path=expected_path,
             )
-            request_path = None
-            abort = {"error": None, "timed_out": False}
+            request_path = expected_path
+            open_attempted = False
+            abort = {"error": None}
 
             def monitor_session():
                 try:
@@ -671,12 +678,11 @@ class BrowserAuthSession:
                 return True
 
             def portal_timeout():
-                abort["timed_out"] = True
                 loop.quit()
                 return False
 
             def close_pending_request():
-                if request_path is None or response["code"] is not None:
+                if not open_attempted or response["code"] is not None:
                     return
                 try:
                     request = bus.get_object("org.freedesktop.portal.Desktop", request_path)
@@ -685,11 +691,25 @@ class BrowserAuthSession:
                     raise AuthSessionError("pending desktop portal request could not be closed", 77) from error
 
             try:
-                request_path = interface.OpenURI("", url, {"handle_token": token}, timeout=5)
-                if str(request_path) != expected_path:
+                self._assert_auth_live(deadline)
+                if self.auth_process_completed:
                     return False
+                open_attempted = True
+                call_timeout = 5
+                auth_deadline = deadline if deadline is not None else self.deadline
+                if auth_deadline is not None:
+                    remaining = auth_deadline - time.monotonic()
+                    if remaining <= 0:
+                        self._assert_auth_live(deadline)
+                    call_timeout = min(call_timeout, max(0.001, remaining))
+                returned_path = interface.OpenURI("", url, {"handle_token": token}, timeout=call_timeout)
+                request_path = str(returned_path)
+                self._assert_auth_live(deadline)
+                if self.auth_process_completed:
+                    return False
+                if request_path != expected_path:
+                    raise AuthSessionError("desktop portal returned an unexpected request handle", 77)
                 if response["code"] is None:
-                    auth_deadline = deadline if deadline is not None else self.deadline
                     timeout_ms = 15000
                     if auth_deadline is not None:
                         timeout_ms = min(timeout_ms, max(1, int((auth_deadline - time.monotonic()) * 1000)))
@@ -701,13 +721,14 @@ class BrowserAuthSession:
                         GLib.source_remove(session_source)
                         GLib.source_remove(timeout_source)
                 if abort["error"] is not None:
-                    close_pending_request()
                     raise abort["error"]
                 if response["code"] is None:
-                    close_pending_request()
                     return False
             finally:
-                receiver.remove()
+                try:
+                    receiver.remove()
+                finally:
+                    close_pending_request()
             return response["code"] == 0
         except AuthSessionError:
             raise
@@ -715,14 +736,21 @@ class BrowserAuthSession:
             return False
 
     def _portal_or_manual(self, url: str, deadline: float | None = None) -> None:
-        if self._open_portal(url, deadline):
+        opened = self._open_portal(url, deadline)
+        if getattr(self, "auth_process_completed", False):
+            return
+        if opened:
             self._assert_auth_live(deadline)
+            if getattr(self, "auth_process_completed", False):
+                return
             self._write_tty(
                 b"Owner browser opened through the desktop portal. Complete ChatGPT consent; this stage continues automatically.\r\n"
             )
             return
         if self.tty_fd is not None:
             self._assert_auth_live(deadline)
+            if getattr(self, "auth_process_completed", False):
+                return
             fallback = (
                 "\r\nDesktop browser portal unavailable or declined; manual fallback: open this validated URL in the host browser:\r\n"
                 + url + "\r\n\r\n"
