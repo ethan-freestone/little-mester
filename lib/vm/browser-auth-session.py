@@ -639,6 +639,9 @@ class BrowserAuthSession:
                 if self._check_auth_abort(deadline):
                     return
                 time.sleep(0.01)
+            # Completion or cancellation may arrive during the last sleep.
+            if self._check_auth_abort(deadline):
+                return
             raise AuthSessionError("browser opening refused because the callback forward is no longer verified", 77)
 
     def _open_portal(self, url: str, deadline: float | None = None) -> bool:
@@ -713,6 +716,15 @@ class BrowserAuthSession:
                 self._assert_auth_live(deadline)
                 if self.auth_process_completed:
                     return False
+                open_args = (
+                    "",
+                    url,
+                    dbus.Dictionary({"handle_token": dbus.String(token, variant_level=1)}, signature="sv"),
+                )
+                if self._check_auth_abort(deadline):
+                    return False
+                if self.auth_process_completed:
+                    return False
                 auth_deadline = deadline if deadline is not None else self.deadline
                 call_timeout = 5.0
                 if auth_deadline is not None:
@@ -722,10 +734,9 @@ class BrowserAuthSession:
                     if remaining <= 0:
                         raise AuthSessionError("browser authentication deadline is too close for portal submission", 124)
                     call_timeout = min(call_timeout, remaining)
-                if self._check_auth_abort(deadline):
-                    return False
-                if self.auth_process_completed:
-                    return False
+                # No readiness, bus lookup, or argument construction follows
+                # this deadline calculation; submit immediately with the
+                # remaining-budget timeout.
                 open_attempted = True
                 returned_path = bus.call_blocking(
                     "org.freedesktop.portal.Desktop",
@@ -733,11 +744,7 @@ class BrowserAuthSession:
                     "org.freedesktop.portal.OpenURI",
                     "OpenURI",
                     "ssa{sv}",
-                    (
-                        "",
-                        url,
-                        dbus.Dictionary({"handle_token": dbus.String(token, variant_level=1)}, signature="sv"),
-                    ),
+                    open_args,
                     timeout=call_timeout,
                 )
                 request_path = str(returned_path)

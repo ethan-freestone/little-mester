@@ -187,7 +187,7 @@ class AuthorizationValidationTests(unittest.TestCase):
         session.portal_cleanup_failed = False
         clock = [0.0]
         readiness_calls = [0]
-        probe_times = [9.7, 9.8, 9.8, 9.999, 9.999]
+        probe_times = [9.7, 9.8, 9.9, 9.999, 9.999]
 
         def ready_near_deadline(port):
             readiness_calls[0] += 1
@@ -196,6 +196,18 @@ class AuthorizationValidationTests(unittest.TestCase):
             return True
 
         session._loopback_forward_ready = ready_near_deadline
+        original_abort_check = session._check_auth_abort
+        abort_checks = [0]
+
+        def delayed_abort_check(deadline):
+            abort_checks[0] += 1
+            if abort_checks[0] == 5:
+                clock[0] = 9.85  # Delay after readiness, before timeout calculation.
+            elif abort_checks[0] == 12:
+                clock[0] = 9.9995  # Too little budget remains to submit safely.
+            return original_abort_check(deadline)
+
+        session._check_auth_abort = delayed_abort_check
         with (
             mock.patch.dict("sys.modules", {
                 "dbus": fake_dbus,
@@ -223,7 +235,7 @@ class AuthorizationValidationTests(unittest.TestCase):
         ))
         self.assertEqual(opened[6][1], url)
         self.assertGreater(opened[7], 0)
-        self.assertLessEqual(opened[7], 0.15)
+        self.assertLessEqual(opened[7], 0.100001)
         self.assertEqual(sum(event[0] == "call" and event[4] == "OpenURI" for event in events), 1)
         self.assertEqual(events[-1], "removed")
 
@@ -350,6 +362,29 @@ class AuthorizationValidationTests(unittest.TestCase):
         session.ssh_process = Process()
         session._loopback_forward_ready = lambda _port: False
         session._assert_auth_live(session.deadline)
+        self.assertTrue(session.auth_process_completed)
+
+    def test_successful_guest_completion_during_final_settle_sleep_is_not_lost(self):
+        session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
+        session.callback_port = 1455
+        session.deadline = 10.0
+        session.signal_received = None
+        session.auth_process_completed = False
+        clock = [0.0]
+
+        class Process:
+            returncode = 0
+
+            def poll(self):
+                return 0 if clock[0] >= 0.095 else None
+
+        session.ssh_process = Process()
+        session._loopback_forward_ready = lambda _port: False
+        with (
+            mock.patch.object(auth.time, "monotonic", side_effect=lambda: clock[0]),
+            mock.patch.object(auth.time, "sleep", side_effect=lambda duration: clock.__setitem__(0, clock[0] + duration)),
+        ):
+            session._assert_auth_live(session.deadline)
         self.assertTrue(session.auth_process_completed)
 
     def test_portal_wait_cancellation_closes_pending_request(self):
