@@ -8,7 +8,7 @@
   "title": "Phase 1 — clean checkout to isolated Dev VM, Little Mester response and rootless Docker smoke",
   "objective": "FINAL Phase1 scope, child of #49: trusted protected host launcher and shared security/policy core, minimal owner CLI, exactly one workspace, fresh DevVM bootstrap, real LittleMester response, rootlessDocker actual container, restricted egress/finite resources/focused tests and successful owner smoke. Host lifecycle MCP adapter deferred until smoke succeeds; D3 future target unchanged. No guest lifecycle/recursion/self-test implementation. Luna sole implementation writer; Sol decisions/verification. Preserve deferred/uncommitted work. No new planning/tickets/docs-only checkpoint; next appropriate implementation commit includes minimal §L timing correction after tests/review. End user pushes. Standing workflow reference only: #49 tests.cases entry \"ORCHESTRATION POLICY v1\"; canonical handoffs remain #49, child uses sequence references.",
   "created_at": "2026-11-08T15:02:09.519Z",
-  "updated_at": "2026-11-10T17:46:26.140Z",
+  "updated_at": "2026-11-10T20:09:27.586Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -161,7 +161,10 @@
       "tests/vm-owner-acceptance.test.py: owner --debug parsing and propagation to lab-vm smoke.",
       "tests/vm-browser-auth.test.py::test_exact_pinned_clack_info_line_without_pty: source-faithful synthetic Clack no-PTY line fed bytewise through AuthorizationOutputScanner and validate_authorization_url.",
       "tests/vm-browser-auth.test.py::test_incomplete_endpoint_is_distinct_from_extracted_invalid_url and test_wrong_scheme_for_auth_host_is_classified_as_invalid_url: secret-free rejection categories.",
-      "docs/vm-v3-phase1-smoke.md: current reviewed source SHA, expanded terminal diagnostic categories, synthetic-vs-genuine reproduction boundary, and serialize-run warning."
+      "docs/vm-v3-phase1-smoke.md: current reviewed source SHA, expanded terminal diagnostic categories, synthetic-vs-genuine reproduction boundary, and serialize-run warning.",
+      "tests/vm-host-launcher.bats: deterministic mocked launcher regression constructs the original 115-byte run_dir/auth-control.sock and verifies a short runtime auth-path is passed to the helper.",
+      "tests/vm-browser-auth.test.py: preserves byte-based <100 ControlPath boundaries in both SSH argument builders and rejects unsafe/non-private per-run control directories.",
+      "tests/vm-virtiofs-socket.test.py: verifies auth ControlPath shares the existing private per-run runtime directory and refuses a pre-existing auth socket artifact."
     ],
     "cases": [
       "INITIAL TEST STATUS: no implementation tests or host smoke have run. Sol source-checked package scripts and startup/rootless/rollback evidence; no exact working end-to-end smoke exists in inspected legacy evidence. Discovery is required before any verified-command claim.",
@@ -338,7 +341,10 @@
       "Static capacity/lifecycle: host launcher permits at most 8 retained run entries, fails closed on unexpected entries or retained disk/download artifacts, but has no cross-run lock; owner attempts must be serialized. Current occupancy and prior run process/listener/cleanup state remain unknown because retained-run contents/live state were not inspected. Do not mark owner acceptance criteria passing.",
       "Pinned OpenCode v2.2.5 source establishes token exchange at `https://auth.openai.com/oauth/token` and Codex base URL `https://chatgpt.com/backend-api/codex`; both use HTTPS port 443 allowed by existing public-only proxy policy. No proxy allowance change is needed.",
       "Canonical handoff packet for this acceptance-readiness task is recorded in parent ticket #49 tests.cases as sequence 43; #51 acceptance criteria remain pending.",
-      "Canonical acceptance-readiness handoff #49 sequence 44 records NO-GO today and the exact owner prerequisites; #51 acceptance criteria remain pending. No live retained-run/auth/VM state was inspected."
+      "Canonical acceptance-readiness handoff #49 sequence 44 records NO-GO today and the exact owner prerequisites; #51 acceptance criteria remain pending. No live retained-run/auth/VM state was inspected.",
+      "Implementation 5cea973a7d41674a6b8142b626a12713215ae5d2: Bats tests/vm-host-launcher.bats PASS 77/77; all nine tests/vm-*.test.py suites PASS (browser-auth 35/35; virtiofs-socket 11/11); warning-as-error Python compilation, bash syntax, and git diff --check PASS. Sol Medium independently reviewed the exact implementation SHA: PASS, no blocking issue or regression. No VM/owner smoke run; retained capacity remains 8/8, acceptance pending.",
+      "Canonical handoff #49 sequence 45 records this implementation milestone; its head_sha transcription is corrected in the immediately following #49 ledger case to d6704e405b1be2ba9d664be340ea6995bf2dd280. Acceptance criteria remain pending; owner smoke NOT_RUN.",
+      "Project-wide persistent Sol Medium workflow is defined in parent #49 tests.cases (review exact committed SHA with combined implementation-quality/security packet; scoped evidence requests; same-context continuation; Luna owns fixes/disposition; verdict and ranked findings recorded). Current combined review of 5cea973a7d41674a6b8142b626a12713215ae5d2: PASS; one low optional suggestion is a composed helper-chain regression, not a release blocker. Supplied test evidence was not independently rerun by Sol. Owner acceptance remains pending."
     ]
   },
   "models_used": []
