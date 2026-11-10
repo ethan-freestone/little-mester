@@ -8,7 +8,7 @@
   "title": "Phase 1 — clean checkout to isolated Dev VM, Little Mester response and rootless Docker smoke",
   "objective": "FINAL Phase1 scope, child of #49: trusted protected host launcher and shared security/policy core, minimal owner CLI, exactly one workspace, fresh DevVM bootstrap, real LittleMester response, rootlessDocker actual container, restricted egress/finite resources/focused tests and successful owner smoke. Host lifecycle MCP adapter deferred until smoke succeeds; D3 future target unchanged. No guest lifecycle/recursion/self-test implementation. Luna sole implementation writer; Sol decisions/verification. Preserve deferred/uncommitted work. No new planning/tickets/docs-only checkpoint; next appropriate implementation commit includes minimal §L timing correction after tests/review. End user pushes. Standing workflow reference only: #49 tests.cases entry \"ORCHESTRATION POLICY v1\"; canonical handoffs remain #49, child uses sequence references.",
   "created_at": "2026-11-08T15:02:09.519Z",
-  "updated_at": "2026-11-10T12:11:34.771Z",
+  "updated_at": "2026-11-10T13:35:27.286Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -151,7 +151,9 @@
       "tests/vm-host-launcher.bats: workspace/runtime overlap, protected helper, logger ordering, pre-allocation cleanup, old disk isolation",
       "tests/vm-owner-acceptance.test.py: successful-run cleanup report binding and early-startup failure distinction",
       "tests/vm-guest-user-dirs.test.py: exact cloud-init helper embedding; isolated filesystem permissions and non-root home/systemd-user probes; unsafe symlink and writable-parent refusals; one-node ownership repair leaving file ownership unchanged; exclusive no-follow Docker proxy config creation; root-runner-portable unchanged-owner assertion.",
-      "tests/vm-host-launcher.bats: provisioning timeout diagnostic, readiness failure classification, 300s SSH deadline, 600s provision bound, 3600s outer cap and OAuth reserve regressions."
+      "tests/vm-host-launcher.bats: provisioning timeout diagnostic, readiness failure classification, 300s SSH deadline, 600s provision bound, 3600s outer cap and OAuth reserve regressions.",
+      "tests/vm-host-launcher.bats: resource-envelope arithmetic covers full configured maxima (8160s) under the 8400s whole-smoke cap; provisioning timeout reports 5400s; outer timeout is synchronized.",
+      "tests/vm-host-launcher.bats: confirms 5400s provisioning and 8400s whole-smoke caps, 8160s configured stage-max arithmetic, timeout-124 diagnostic, and synchronized outer timeout."
     ],
     "cases": [
       "INITIAL TEST STATUS: no implementation tests or host smoke have run. Sol source-checked package scripts and startup/rootless/rollback evidence; no exact working end-to-end smoke exists in inspected legacy evidence. Discovery is required before any verified-command claim.",
@@ -308,7 +310,17 @@
       "Runbook update committed separately as 87c89c2 (docs(vm): update phase one smoke timeout guidance); it now documents separate 300s SSH/600s provisioning deadlines, synchronized 3600s smoke caps, OAuth budget reserve and noninteractive browser OAuth instead of stale TUI instructions.",
       "#49 canonical handoff sequence 20 records the reviewed source SHA, separate runbook commit, local test evidence, ticket validation and outstanding owner push/CI/smoke gate.",
       "#49 canonical handoff sequence 21 identifies final clean candidate de215043f5b07a5d48f78a04e515358798825297; remaining gates are owner push, CI, and protected acceptance only.",
-      "#49 canonical handoff sequence 41 corrects the sequence regression, identifies #49 tests.cases as historical authority (prior max 40), and records deferred workflow ticket #52. Final candidate SHA: 1923f19ff06bf3a3feaab078383be1d2b8159da5; only owner push/CI/protected acceptance remain."
+      "#49 canonical handoff sequence 41 corrects the sequence regression, identifies #49 tests.cases as historical authority (prior max 40), and records deferred workflow ticket #52. Final candidate SHA: 1923f19ff06bf3a3feaab078383be1d2b8159da5; only owner push/CI/protected acceptance remain.",
+      "Owner-provided evidence for timeout policy: one normal first-boot run was still downloading apt package 87 at ~308s when the 300s readiness deadline terminated it; another was downloading package 249 at ~595s when the 600s deadline terminated it. Neither retained log demonstrates a stall; preserve full cloud-init package set and path.",
+      "Timeout policy implementation in progress: SSH readiness remains 300s, cloud-init readiness 5400s, inner/outer whole-smoke hard cap 8400s. Configured simultaneous maxima sum to 8160s (900 download + 300 boot + 5400 provisioning + 600 OAuth + 300 provider + 360 Docker + 300 bounded controls), leaving 240s inside the cap plus existing 15s kill grace. 7200s cannot fit those maxima coherently.",
+      "No inactivity monitor added: cloud-init/guest output can be silent during legitimate package installation and is not a trustworthy progress source. A genuinely stuck wait is bounded by the 5400s deadline; diagnostic output remains bounded and failures retain run evidence.",
+      "Local verification on timeout-policy working tree: bats --print-output-on-failure tests/ PASS 101/101; all tests/vm-*.test.py scripts passed sequentially with 2 skips in the root-dependent suite; bash -n, error-severity ShellCheck and git diff --check PASS. No host/VM operations.",
+      "Owner-supplied first-boot evidence: apt download reached package 87 near guest uptime 308s during the 300s attempt and package 249 near 595s during the 600s attempt. Neither log demonstrates a stall; no package-set/cache/cloud-init shortcut was introduced.",
+      "Policy correction committed: SSH readiness remains 300s, cloud-init readiness is 5400s, and inner/outer whole-smoke caps are 8400s. Configured maxima total 8160s (900 download + 300 boot + 5400 provisioning + 600 browser auth + 300 provider + 360 Docker + 300 bounded controls), leaving 240s plus the existing 15s termination grace. A 7200s total would not fit these maxima coherently.",
+      "No inactivity detector: guest output can be silent during normal package installation and is not used as trusted progress. Incomplete provisioning fails at the 5400s hard deadline; existing bounded process/log/cleanup controls remain.",
+      "Source commit 845f00e9af8855e87fcdaf5b77440ef255c229b1 received independent Sol Medium PASS against e342034b3bfef874ba592ac904aea0b8e24512a6. Review confirmed no cloud-init/package changes and no blocker in limits, arithmetic or cleanup.",
+      "Verification: bats --print-output-on-failure tests/ PASS 101/101; all tests/vm-*.test.py scripts passed sequentially (2 root-dependent skips); bash -n, shellcheck --severity=error and git diff --check PASS. Runbook commit 751e2d4 documents the policy. No host/VM operations.",
+      "#49 canonical handoff sequence 42 records the production-equivalent 5400s provisioning/8400s total policy, Sol PASS, tests and outstanding owner acceptance."
     ]
   },
   "models_used": []
