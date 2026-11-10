@@ -8,7 +8,7 @@
   "title": "Phase 1 — clean checkout to isolated Dev VM, Little Mester response and rootless Docker smoke",
   "objective": "FINAL Phase1 scope, child of #49: trusted protected host launcher and shared security/policy core, minimal owner CLI, exactly one workspace, fresh DevVM bootstrap, real LittleMester response, rootlessDocker actual container, restricted egress/finite resources/focused tests and successful owner smoke. Host lifecycle MCP adapter deferred until smoke succeeds; D3 future target unchanged. No guest lifecycle/recursion/self-test implementation. Luna sole implementation writer; Sol decisions/verification. Preserve deferred/uncommitted work. No new planning/tickets/docs-only checkpoint; next appropriate implementation commit includes minimal §L timing correction after tests/review. End user pushes. Standing workflow reference only: #49 tests.cases entry \"ORCHESTRATION POLICY v1\"; canonical handoffs remain #49, child uses sequence references.",
   "created_at": "2026-11-08T15:02:09.519Z",
-  "updated_at": "2026-11-10T11:58:00.813Z",
+  "updated_at": "2026-11-10T12:11:34.771Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -307,7 +307,8 @@
       "Reviewed source SHA 8ee5e856e10a94fc5bfe724174eb316cfe08c418 passed independent Sol Medium review against f5f96bf68d00ff0079a140d76fcb805d8192fd3c. New-candidate push/CI and fresh protected owner acceptance remain NOT_RUN/NEEDS_HUMAN.",
       "Runbook update committed separately as 87c89c2 (docs(vm): update phase one smoke timeout guidance); it now documents separate 300s SSH/600s provisioning deadlines, synchronized 3600s smoke caps, OAuth budget reserve and noninteractive browser OAuth instead of stale TUI instructions.",
       "#49 canonical handoff sequence 20 records the reviewed source SHA, separate runbook commit, local test evidence, ticket validation and outstanding owner push/CI/smoke gate.",
-      "#49 canonical handoff sequence 21 identifies final clean candidate de215043f5b07a5d48f78a04e515358798825297; remaining gates are owner push, CI, and protected acceptance only."
+      "#49 canonical handoff sequence 21 identifies final clean candidate de215043f5b07a5d48f78a04e515358798825297; remaining gates are owner push, CI, and protected acceptance only.",
+      "#49 canonical handoff sequence 41 corrects the sequence regression, identifies #49 tests.cases as historical authority (prior max 40), and records deferred workflow ticket #52. Final candidate SHA: 1923f19ff06bf3a3feaab078383be1d2b8159da5; only owner push/CI/protected acceptance remain."
     ]
   },
   "models_used": []

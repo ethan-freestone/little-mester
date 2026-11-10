@@ -300,7 +300,13 @@
       "file_path": "ticket-051.json",
       "status": "active",
       "area": "vm-v3"
+    },
+    {
+      "number": 52,
+      "file_path": "ticket-052.json",
+      "status": "draft",
+      "area": "workflow"
     }
   ],
-  "updated_at": "2026-11-10T11:58:00.814Z"
+  "updated_at": "2026-11-10T12:11:34.772Z"
 }
