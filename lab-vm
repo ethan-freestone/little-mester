@@ -183,7 +183,7 @@ case "$command" in
     ;;
   smoke)
     exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C "${desktop_env[@]}" \
-      /usr/bin/timeout --signal=TERM --kill-after=15 1200 \
+      /usr/bin/timeout --signal=TERM --kill-after=15 3600 \
       /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C "${desktop_env[@]}" \
       VM_HOST_SCRIPT_ROOT="$root" \
       /usr/bin/bash -p -c '

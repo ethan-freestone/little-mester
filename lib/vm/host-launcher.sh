@@ -9,10 +9,11 @@ VM_HOST_MEMORY_MIB=4096
 VM_HOST_DISK_GIB=24
 VM_HOST_DOWNLOAD_TIMEOUT=300
 VM_HOST_BOOT_TIMEOUT=300
+VM_HOST_PROVISION_TIMEOUT=600
 VM_HOST_PROVIDER_TIMEOUT=300
 VM_HOST_DOCKER_TIMEOUT=180
 VM_HOST_CONTROL_TIMEOUT=30
-VM_HOST_TOTAL_TIMEOUT=1200
+VM_HOST_TOTAL_TIMEOUT=3600
 VM_HOST_LOG_LIMIT_BYTES=1048576
 VM_HOST_GUEST_OUTPUT_LIMIT_BYTES=65536
 VM_HOST_SSH_KEY_LIMIT_BYTES=16384
@@ -35,10 +36,11 @@ vm_host_error() {
 }
 
 vm_host_resource_limits() {
-  printf '{"cpus":%s,"memory_mib":%s,"disk_gib":%s,"download_timeout_seconds":%s,"startup_timeout_seconds":%s,"provider_timeout_seconds":%s,"docker_timeout_seconds":%s,"ssh_control_timeout_seconds":%s,"total_timeout_seconds":%s}\n' \
+  printf '{"cpus":%s,"memory_mib":%s,"disk_gib":%s,"download_timeout_seconds":%s,"startup_timeout_seconds":%s,"provisioning_timeout_seconds":%s,"provider_timeout_seconds":%s,"docker_timeout_seconds":%s,"ssh_control_timeout_seconds":%s,"total_timeout_seconds":%s}\n' \
     "$VM_HOST_CPU_COUNT" "$VM_HOST_MEMORY_MIB" "$VM_HOST_DISK_GIB" \
-    "$VM_HOST_DOWNLOAD_TIMEOUT" "$VM_HOST_BOOT_TIMEOUT" "$VM_HOST_PROVIDER_TIMEOUT" \
-    "$VM_HOST_DOCKER_TIMEOUT" "$VM_HOST_CONTROL_TIMEOUT" "$VM_HOST_TOTAL_TIMEOUT"
+    "$VM_HOST_DOWNLOAD_TIMEOUT" "$VM_HOST_BOOT_TIMEOUT" "$VM_HOST_PROVISION_TIMEOUT" \
+    "$VM_HOST_PROVIDER_TIMEOUT" "$VM_HOST_DOCKER_TIMEOUT" "$VM_HOST_CONTROL_TIMEOUT" \
+    "$VM_HOST_TOTAL_TIMEOUT"
 }
 
 vm_host_qemu_network_args() {
@@ -1005,23 +1007,62 @@ vm_host_wait_ssh() {
 }
 
 vm_host_provisioning_ready() {
-  local run_dir="$1" security_output="$1/docker-security.raw" security
+  local run_dir="$1" security_output="$1/docker-security.raw" security status
   printf 'stage: waiting for cloud-init and rootless guest readiness\n'
-  if ! vm_host_ssh "$run_dir" \
-    'cloud-init status --wait --long && test -f /var/lib/mester-v3-provisioned && mountpoint -q /workspace && test ! -S /var/run/docker.sock' "$VM_HOST_BOOT_TIMEOUT"; then
-    vm_host_error 'cloud-init, workspace mount, or rootless bootstrap readiness failed'
+  if vm_host_ssh "$run_dir" 'cloud-init status --wait --long >/dev/null 2>&1' "$VM_HOST_PROVISION_TIMEOUT"; then
+    :
+  else
+    status=$?
+    case "$status" in
+      124)
+        vm_host_error "cloud-init provisioning timed out after ${VM_HOST_PROVISION_TIMEOUT}s; guest may still be provisioning"
+        ;;
+      255)
+        vm_host_error 'SSH transport failed while waiting for cloud-init provisioning'
+        ;;
+      *)
+        vm_host_error "cloud-init reported failure (exit ${status}); guest output suppressed"
+        ;;
+    esac
     return 1
   fi
-  if ! vm_host_ssh_capture "$run_dir" "$security_output" \
+  if ! vm_host_ssh "$run_dir" 'test -f /var/lib/mester-v3-provisioned'; then
+    vm_host_error 'guest provisioning completion marker is missing'
+    return 1
+  fi
+  if ! vm_host_ssh "$run_dir" 'mountpoint -q /workspace'; then
+    vm_host_error 'guest workspace mount is missing'
+    return 1
+  fi
+  if ! vm_host_ssh "$run_dir" 'test ! -S /var/run/docker.sock'; then
+    vm_host_error 'rootful Docker socket is present; refusing rootful fallback'
+    return 1
+  fi
+  if vm_host_ssh_capture "$run_dir" "$security_output" \
     'env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin XDG_RUNTIME_DIR=/run/user/'"$(id -u)"' DOCKER_HOST=unix:///run/user/'"$(id -u)"'/docker.sock /usr/bin/docker info --format "{{json .SecurityOptions}}"'; then
+    :
+  else
+    status=$?
     rm -f -- "$security_output"
-    vm_host_error 'guest rootless Docker info failed'
+    vm_host_error "guest rootless Docker readiness failed (exit ${status}); output suppressed"
     return 1
   fi
   security="$(<"$security_output")"
   rm -f -- "$security_output"
   [[ "$security" == *rootless* ]] || { vm_host_error 'guest Docker did not report rootless; no rootful fallback'; return 1; }
   printf 'ROOTLESS_DOCKER_OK\n' || return 1
+}
+
+vm_host_browser_auth_budget() {
+  local remaining="$1" reserve=$((VM_HOST_PROVIDER_TIMEOUT + 2 * VM_HOST_DOCKER_TIMEOUT + 3 * VM_HOST_CONTROL_TIMEOUT))
+  [[ "$remaining" =~ ^[0-9]+$ ]] || { vm_host_error 'whole-smoke remaining budget is invalid'; return 1; }
+  (( remaining > reserve )) || {
+    vm_host_error 'insufficient smoke budget remains for browser authentication, provider, and container stages'
+    return 1
+  }
+  local available=$((remaining - reserve))
+  (( available <= VM_HOST_BROWSER_AUTH_TIMEOUT )) || available="$VM_HOST_BROWSER_AUTH_TIMEOUT"
+  printf '%s\n' "$available"
 }
 
 vm_host_auth_guest_cleanup() {
@@ -1250,9 +1291,7 @@ vm_host_smoke() {
   vm_host_provisioning_ready "$VM_HOST_RUN_DIR" || return 1
   printf 'VM_UP\n' || return 1
   remaining=$((VM_HOST_TOTAL_TIMEOUT - (SECONDS - start_time)))
-  (( remaining > 0 )) || { vm_host_error 'smoke deadline expired before browser authentication'; return 1; }
-  auth_wait="$VM_HOST_BROWSER_AUTH_TIMEOUT"
-  (( auth_wait <= remaining )) || auth_wait="$remaining"
+  auth_wait="$(vm_host_browser_auth_budget "$remaining")" || return 1
   vm_host_browser_auth_smoke "$VM_HOST_RUN_DIR" "$model" "$auth_wait" || return 1
   vm_host_model_smoke "$VM_HOST_RUN_DIR" "$model" || return 1
   vm_host_docker_smoke "$VM_HOST_RUN_DIR" || return 1

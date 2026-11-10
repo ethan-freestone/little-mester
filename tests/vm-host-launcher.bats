@@ -325,8 +325,27 @@ PY
   [[ "$output" == *'"memory_mib":4096'* ]]
   [[ "$output" == *'"disk_gib":24'* ]]
   [[ "$output" == *'"startup_timeout_seconds":300'* ]]
+  [[ "$output" == *'"provisioning_timeout_seconds":600'* ]]
   [[ "$output" == *'"ssh_control_timeout_seconds":30'* ]]
+  [[ "$output" == *'"total_timeout_seconds":3600'* ]]
+  # Worst-case configured stages: three 300s download attempts, SSH boot,
+  # provisioning, browser auth, provider, Docker pull/container and controls.
+  (( 3 * 300 + 300 + 600 + 600 + 300 + 2 * 180 + 3 * 30 <= 3600 ))
   [[ "$output" != *"nested"* ]]
+}
+
+@test "browser auth allowance is bounded and reserves provider and container deadlines" {
+  run vm_host_browser_auth_budget 1800
+  [ "$status" -eq 0 ]
+  [ "$output" = 600 ]
+
+  run vm_host_browser_auth_budget 1300
+  [ "$status" -eq 0 ]
+  [ "$output" = 550 ]
+
+  run vm_host_browser_auth_budget 750
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"insufficient smoke budget remains"* ]]
 }
 
 @test "workspace filesystem bound requires a mount root no larger than eight GiB" {
@@ -529,6 +548,9 @@ PY
 @test "Phase 1 runbook requires ChatGPT browser login, not an API key" {
   local doc="$TEST_ROOT/docs/vm-v3-phase1-smoke.md"
   grep -Fq 'opencode auth login openai --method chatgpt-browser' "$doc"
+  grep -Fq 'it is not a guest TUI `/connect` flow' "$doc"
+  grep -Fq '600-second cap' "$doc"
+  grep -Fq '3600-second whole-run cap' "$doc"
   grep -Fq 'No API key or API credits are used' "$doc"
   grep -Fq 'http://localhost:1455/auth/callback' "$doc"
   grep -Fq 'http://localhost:1457/auth/callback' "$doc"
@@ -539,6 +561,8 @@ PY
   grep -Fq 'does not establish remote session revocation or secure erasure' "$doc"
   grep -Fq 'may invalidate the working old-VM session' "$doc"
   grep -Fq 'Persistence across VM restart remains out of scope and is a separate concern' "$doc"
+  ! grep -Fq "When OpenCode displays the authorization URL" "$doc"
+  ! grep -Fq 'type `/exit` in the TUI' "$doc"
   ! grep -Fq -- '--credentials-file' "$doc"
   ! grep -Fq 'api_key' "$doc"
 }
@@ -1311,19 +1335,77 @@ SH
   [[ "$output" != *"must be root-owned"* ]]
 }
 
-@test "readiness fails closed when cloud-init SSH command fails" {
+@test "provisioning gets its separate deadline and timeout is reported distinctly" {
   vm_host_ssh() {
-    case "$2" in
-      cloud-init*) return 73 ;;
-      *) printf '["name=rootless"]\n' ;;
-    esac
+    [ "$3" -eq 600 ] || return 74
+    return 124
   }
 
   run vm_host_provisioning_ready "$TEST_TMP/no-vm-used"
 
   [ "$status" -ne 0 ]
+  [[ "$output" == *"cloud-init provisioning timed out after 600s"* ]]
+  [[ "$output" != *"workspace mount is missing"* ]]
   [[ "$output" != *"ROOTLESS_DOCKER_OK"* ]]
-  [[ "$output" == *"cloud-init, workspace mount, or rootless bootstrap readiness failed"* ]]
+}
+
+@test "readiness reports cloud-init, workspace, rootful socket, and rootless failures separately" {
+  local failure_mode
+  for failure_mode in cloud-init workspace-marker workspace-mount rootful-socket rootless-command rootless-mode; do
+    export VM_TEST_FAILURE_MODE="$failure_mode"
+    vm_host_ssh() {
+      case "$2" in
+        'cloud-init status --wait --long >/dev/null 2>&1')
+          [ "$VM_TEST_FAILURE_MODE" != cloud-init ] || return 73
+          ;;
+        'test -f /var/lib/mester-v3-provisioned')
+          [ "$VM_TEST_FAILURE_MODE" != workspace-marker ] || return 1
+          ;;
+        'mountpoint -q /workspace')
+          [ "$VM_TEST_FAILURE_MODE" != workspace-mount ] || return 1
+          ;;
+        'test ! -S /var/run/docker.sock')
+          [ "$VM_TEST_FAILURE_MODE" != rootful-socket ] || return 1
+          ;;
+      esac
+      return 0
+    }
+    vm_host_ssh_capture() {
+      [ "$VM_TEST_FAILURE_MODE" != rootless-command ] || return 73
+      if [ "$VM_TEST_FAILURE_MODE" = rootless-mode ]; then
+        printf '[]\n' >"$2"
+      else
+        printf '["name=rootless"]\n' >"$2"
+      fi
+    }
+
+    run vm_host_provisioning_ready "$TEST_TMP"
+    [ "$status" -ne 0 ]
+    case "$failure_mode" in
+      cloud-init) [[ "$output" == *"cloud-init reported failure (exit 73)"* ]] ;;
+      workspace-marker) [[ "$output" == *"guest provisioning completion marker is missing"* ]] ;;
+      workspace-mount) [[ "$output" == *"guest workspace mount is missing"* ]] ;;
+      rootful-socket) [[ "$output" == *"rootful Docker socket is present"* ]] ;;
+      rootless-command) [[ "$output" == *"guest rootless Docker readiness failed (exit 73)"* ]] ;;
+      rootless-mode) [[ "$output" == *"guest Docker did not report rootless"* ]] ;;
+    esac
+    [[ "$output" != *"ROOTLESS_DOCKER_OK"* ]]
+  done
+  unset VM_TEST_FAILURE_MODE
+}
+
+@test "guest SSH readiness keeps its shorter boot deadline" {
+  vm_host_process_identity_status() { return 0; }
+  python3() {
+    [ "$VM_HOST_BOOT_TIMEOUT" -eq 300 ]
+    return 1
+  }
+  sleep() { SECONDS=300; }
+  SECONDS=0
+  run vm_host_wait_ssh "$TEST_TMP/no-vm-used" 12345
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"guest SSH did not become ready within 300s"* ]]
 }
 
 @test "essential smoke stages propagate injected failures and never print completion markers" {
@@ -1617,7 +1699,7 @@ SH
 @test "CLI exposes no unbounded internal smoke worker" {
   run grep -F '/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C' "$TEST_ROOT/lab-vm"
   [ "$status" -eq 0 ]
-  run grep -F '/usr/bin/timeout --signal=TERM --kill-after=15 1200' "$TEST_ROOT/lab-vm"
+  run grep -F '/usr/bin/timeout --signal=TERM --kill-after=15 3600' "$TEST_ROOT/lab-vm"
   [ "$status" -eq 0 ]
   run grep -F '#!/usr/bin/bash -p' "$TEST_ROOT/lab-vm"
   [ "$status" -eq 0 ]
