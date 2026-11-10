@@ -1054,7 +1054,7 @@ vm_host_provisioning_ready() {
 }
 
 vm_host_browser_auth_budget() {
-  local remaining="$1" reserve=$((VM_HOST_PROVIDER_TIMEOUT + 2 * VM_HOST_DOCKER_TIMEOUT + 3 * VM_HOST_CONTROL_TIMEOUT))
+  local remaining="$1" reserve=$((VM_HOST_PROVIDER_TIMEOUT + 2 * VM_HOST_DOCKER_TIMEOUT + 6 * VM_HOST_CONTROL_TIMEOUT))
   [[ "$remaining" =~ ^[0-9]+$ ]] || { vm_host_error 'whole-smoke remaining budget is invalid'; return 1; }
   (( remaining > reserve )) || {
     vm_host_error 'insufficient smoke budget remains for browser authentication, provider, and container stages'

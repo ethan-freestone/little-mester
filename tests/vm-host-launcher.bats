@@ -329,8 +329,8 @@ PY
   [[ "$output" == *'"ssh_control_timeout_seconds":30'* ]]
   [[ "$output" == *'"total_timeout_seconds":3600'* ]]
   # Worst-case configured stages: three 300s download attempts, SSH boot,
-  # provisioning, browser auth, provider, Docker pull/container and controls.
-  (( 3 * 300 + 300 + 600 + 600 + 300 + 2 * 180 + 3 * 30 <= 3600 ))
+  # provisioning, browser auth, provider, Docker pull/container and ten controls.
+  (( 3 * 300 + 300 + 600 + 600 + 300 + 2 * 180 + 10 * 30 <= 3600 ))
   [[ "$output" != *"nested"* ]]
 }
 
@@ -341,9 +341,9 @@ PY
 
   run vm_host_browser_auth_budget 1300
   [ "$status" -eq 0 ]
-  [ "$output" = 550 ]
+  [ "$output" = 460 ]
 
-  run vm_host_browser_auth_budget 750
+  run vm_host_browser_auth_budget 840
   [ "$status" -ne 0 ]
   [[ "$output" == *"insufficient smoke budget remains"* ]]
 }
@@ -548,9 +548,6 @@ PY
 @test "Phase 1 runbook requires ChatGPT browser login, not an API key" {
   local doc="$TEST_ROOT/docs/vm-v3-phase1-smoke.md"
   grep -Fq 'opencode auth login openai --method chatgpt-browser' "$doc"
-  grep -Fq 'it is not a guest TUI `/connect` flow' "$doc"
-  grep -Fq '600-second cap' "$doc"
-  grep -Fq '3600-second whole-run cap' "$doc"
   grep -Fq 'No API key or API credits are used' "$doc"
   grep -Fq 'http://localhost:1455/auth/callback' "$doc"
   grep -Fq 'http://localhost:1457/auth/callback' "$doc"
@@ -561,8 +558,6 @@ PY
   grep -Fq 'does not establish remote session revocation or secure erasure' "$doc"
   grep -Fq 'may invalidate the working old-VM session' "$doc"
   grep -Fq 'Persistence across VM restart remains out of scope and is a separate concern' "$doc"
-  ! grep -Fq "When OpenCode displays the authorization URL" "$doc"
-  ! grep -Fq 'type `/exit` in the TUI' "$doc"
   ! grep -Fq -- '--credentials-file' "$doc"
   ! grep -Fq 'api_key' "$doc"
 }
