@@ -142,8 +142,11 @@ class AuthorizationValidationTests(unittest.TestCase):
             def get_unique_name(self):
                 return ":1.99"
 
-            def get_object(self, _name, _path):
-                return object()
+            def call_blocking(self, destination, path, interface, method, signature, args, timeout):
+                events.append(("call", destination, path, interface, method, signature, args, timeout))
+                if method == "OpenURI":
+                    return f"/org/freedesktop/portal/desktop/request/1_99/{args[2]['handle_token']}"
+                return None
 
             def add_signal_receiver(self, callback, **kwargs):
                 events.append(("subscribe", kwargs["path"]))
@@ -151,11 +154,6 @@ class AuthorizationValidationTests(unittest.TestCase):
                 return Receiver()
 
         bus = Bus()
-
-        class Interface:
-            def OpenURI(self, _parent, actual_url, options, timeout):
-                events.append(("open", actual_url, dict(options), timeout))
-                return f"/org/freedesktop/portal/desktop/request/1_99/{options['handle_token']}"
 
         class Loop:
             def __init__(self):
@@ -169,7 +167,8 @@ class AuthorizationValidationTests(unittest.TestCase):
 
         fake_dbus = types.ModuleType("dbus")
         fake_dbus.SessionBus = lambda: bus
-        fake_dbus.Interface = lambda _obj, _name: Interface()
+        fake_dbus.String = lambda value, **_kwargs: value
+        fake_dbus.Dictionary = lambda value, **_kwargs: value
         mainloop = types.ModuleType("dbus.mainloop")
         glib_dbus = types.ModuleType("dbus.mainloop.glib")
         glib_dbus.DBusGMainLoop = lambda **_kwargs: None
@@ -197,9 +196,16 @@ class AuthorizationValidationTests(unittest.TestCase):
         self.assertEqual(events[0], ("ready", 1455))
         self.assertEqual(events[1][0], "subscribe")
         self.assertEqual(events[1][1].rsplit("/", 1)[0], "/org/freedesktop/portal/desktop/request/1_99")
-        opened = next(event for event in events if isinstance(event, tuple) and event[0] == "open")
-        self.assertEqual(opened[1], url)
-        self.assertEqual(opened[3], 5)
+        opened = next(event for event in events if isinstance(event, tuple) and event[0] == "call")
+        self.assertEqual(opened[1:6], (
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.OpenURI",
+            "OpenURI",
+            "ssa{sv}",
+        ))
+        self.assertEqual(opened[6][1], url)
+        self.assertEqual(opened[7], 5)
         self.assertEqual(events[-1], "removed")
 
     def test_portal_absence_without_tty_fails_closed_without_printing_url(self):
@@ -281,7 +287,7 @@ class AuthorizationValidationTests(unittest.TestCase):
         self.assertTrue(session.auth_process_completed)
 
     def test_portal_wait_cancellation_closes_pending_request(self):
-        for mode in ("cancel", "timeout", "mismatch", "open-error"):
+        for mode in ("cancel", "timeout", "mismatch", "open-error", "completion"):
             with self.subTest(mode=mode):
                 closed = []
                 callbacks = []
@@ -300,37 +306,28 @@ class AuthorizationValidationTests(unittest.TestCase):
                     def get_unique_name(self):
                         return ":1.7"
 
-                    def get_object(self, _name, path):
-                        closed.append(path)
-                        return object()
+                    def call_blocking(self, _destination, path, _interface, method, signature, args, timeout):
+                        if method == "OpenURI":
+                            token = args[2]["handle_token"]
+                            expected = f"/org/freedesktop/portal/desktop/request/1_7/{token}"
+                            if mode == "open-error":
+                                raise RuntimeError("synthetic portal submission error")
+                            return expected + "_unexpected" if mode == "mismatch" else expected
+                        closed.append((path, timeout))
+                        return None
 
                     def add_signal_receiver(self, _callback, **_kwargs):
                         return Receiver()
 
                 bus = Bus()
 
-                class Portal:
-                    def OpenURI(self, _parent, _url, options, timeout):
-                        path = f"/org/freedesktop/portal/desktop/request/1_7/{options['handle_token']}"
-                        if mode == "open-error":
-                            raise RuntimeError("synthetic portal submission error")
-                        if mode == "mismatch":
-                            return path + "_unexpected"
-                        return path
-
-                portal = Portal()
-
-                class Request:
-                    def Close(self, timeout):
-                        closed.append(timeout)
-
-                def interface(_obj, name):
-                    return portal if name == "org.freedesktop.portal.OpenURI" else Request()
-
                 class Loop:
                     def run(self):
                         if mode == "cancel":
                             session.signal_received = signal.SIGTERM
+                            callbacks[0]()
+                        elif mode == "completion":
+                            session.ssh_process = SimpleNamespace(returncode=0, poll=lambda: 0)
                             callbacks[0]()
                         else:
                             callbacks[1]()
@@ -345,7 +342,8 @@ class AuthorizationValidationTests(unittest.TestCase):
                 )
                 fake_dbus = types.ModuleType("dbus")
                 fake_dbus.SessionBus = lambda: bus
-                fake_dbus.Interface = interface
+                fake_dbus.String = lambda value, **_kwargs: value
+                fake_dbus.Dictionary = lambda value, **_kwargs: value
                 mainloop = types.ModuleType("dbus.mainloop")
                 glib_dbus = types.ModuleType("dbus.mainloop.glib")
                 glib_dbus.DBusGMainLoop = lambda **_kwargs: None
@@ -368,7 +366,12 @@ class AuthorizationValidationTests(unittest.TestCase):
                         )
                     else:
                         self.assertFalse(session._open_portal(authorization_url(), session.deadline))
-                self.assertIn(2, closed, "every unresolved portal request must be explicitly closed")
+                if mode == "completion":
+                    self.assertTrue(session.auth_process_completed)
+                self.assertTrue(
+                    any(item[1] == 2 for item in closed),
+                    "every unresolved portal request must be explicitly closed with a bounded call",
+                )
 
     def test_listener_absence_detects_ipv4_mapped_ipv6_callback_sockets(self):
         listener = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
@@ -689,6 +692,11 @@ class BrowserAuthProcessTests(unittest.TestCase):
         test_env["AUTH_TEST_CALLBACK_PORT"] = str(callback_port)
         test_env["AUTH_TEST_TARGET_PORT"] = str(target.server_address[1])
         test_env["AUTH_TEST_CAPTURE"] = str(process_capture)
+        # Synthetic sessions must never invoke the real owner's desktop portal.
+        test_env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/nonexistent/auth-test-bus"
+        test_env.pop("XDG_RUNTIME_DIR", None)
+        test_env.pop("DISPLAY", None)
+        test_env.pop("WAYLAND_DISPLAY", None)
         process = None
         if use_pty:
             pid, master = pty.fork()

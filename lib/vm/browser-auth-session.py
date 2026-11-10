@@ -643,8 +643,6 @@ class BrowserAuthSession:
 
             DBusGMainLoop(set_as_default=True)
             bus = dbus.SessionBus()
-            portal = bus.get_object("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop")
-            interface = dbus.Interface(portal, "org.freedesktop.portal.OpenURI")
             token = "mester_auth_" + uuid.uuid4().hex
             response = {"code": None}
             loop = GLib.MainLoop()
@@ -675,6 +673,10 @@ class BrowserAuthSession:
                     abort["error"] = error
                     loop.quit()
                     return False
+                if getattr(self, "auth_process_completed", False):
+                    abort["completed"] = True
+                    loop.quit()
+                    return False
                 return True
 
             def portal_timeout():
@@ -685,8 +687,15 @@ class BrowserAuthSession:
                 if not open_attempted or response["code"] is not None:
                     return
                 try:
-                    request = bus.get_object("org.freedesktop.portal.Desktop", request_path)
-                    dbus.Interface(request, "org.freedesktop.portal.Request").Close(timeout=2)
+                    bus.call_blocking(
+                        "org.freedesktop.portal.Desktop",
+                        request_path,
+                        "org.freedesktop.portal.Request",
+                        "Close",
+                        "",
+                        (),
+                        timeout=2,
+                    )
                 except Exception as error:
                     raise AuthSessionError("pending desktop portal request could not be closed", 77) from error
 
@@ -702,7 +711,22 @@ class BrowserAuthSession:
                     if remaining <= 0:
                         self._assert_auth_live(deadline)
                     call_timeout = min(call_timeout, max(0.001, remaining))
-                returned_path = interface.OpenURI("", url, {"handle_token": token}, timeout=call_timeout)
+                self._assert_auth_live(deadline)
+                if self.auth_process_completed:
+                    return False
+                returned_path = bus.call_blocking(
+                    "org.freedesktop.portal.Desktop",
+                    "/org/freedesktop/portal/desktop",
+                    "org.freedesktop.portal.OpenURI",
+                    "OpenURI",
+                    "ssa{sv}",
+                    (
+                        "",
+                        url,
+                        dbus.Dictionary({"handle_token": dbus.String(token, variant_level=1)}, signature="sv"),
+                    ),
+                    timeout=call_timeout,
+                )
                 request_path = str(returned_path)
                 self._assert_auth_live(deadline)
                 if self.auth_process_completed:
@@ -722,6 +746,8 @@ class BrowserAuthSession:
                         GLib.source_remove(timeout_source)
                 if abort["error"] is not None:
                     raise abort["error"]
+                if abort.get("completed"):
+                    return False
                 if response["code"] is None:
                     return False
             finally:
