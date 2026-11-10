@@ -600,7 +600,7 @@ PY
 vm_host_cleanup_browser_auth() {
   local run_dir="$1" auth_identity="$1/auth-session.identity"
   local auth_completion="$1/auth-session.complete" auth_proof="$1/auth-session.proof"
-  local ssh_identity="$1/auth-ssh.identity" callback_port_file="$1/auth-callback.port"
+  local ssh_identity="$1/auth-ssh.identity" callback_port_file="$1/auth-callback.port" control_socket=""
   local guest_dir="" cleanup_failed=0
   if [[ -e "$auth_identity" || -L "$auth_identity" || -e "$auth_completion" || -L "$auth_completion" ]]; then
     vm_host_cleanup_one "$auth_identity" "$auth_completion" || cleanup_failed=1
@@ -637,7 +637,17 @@ vm_host_cleanup_browser_auth() {
     printf 'WARNING: browser-auth cleanup incomplete; preserving run state %s\n' "$run_dir" >&2
     return 1
   fi
-  rm -f -- "$auth_proof" "$1/auth-session.log" "$1/auth-ssh.log" "$1/auth-control.sock" || return 1
+  if [[ "${VM_HOST_VIRTIOFS_ALLOCATED:-0}" == 1 ]]; then
+    control_socket="$(python3 -I "$VM_HOST_SCRIPT_ROOT/lib/vm/virtiofs-socket.py" auth-path "$run_dir")" || {
+      printf 'WARNING: browser-auth control socket path could not be verified; preserving run state %s\n' "$run_dir" >&2
+      return 1
+    }
+    if [[ -e "$control_socket" || -L "$control_socket" ]]; then
+      printf 'WARNING: browser-auth control socket remains or was substituted; preserving run state %s\n' "$run_dir" >&2
+      return 1
+    fi
+  fi
+  rm -f -- "$auth_proof" "$1/auth-session.log" "$1/auth-ssh.log" || return 1
 }
 
 vm_host_cleanup() {
@@ -706,7 +716,7 @@ PY
       "$VM_HOST_RUN_DIR/docker-inspect.raw" "$VM_HOST_RUN_DIR/docker-security.raw" \
       "$VM_HOST_RUN_DIR/auth-ssh.identity" "$VM_HOST_RUN_DIR/auth-callback.port" \
       "$VM_HOST_RUN_DIR/auth-session.proof" "$VM_HOST_RUN_DIR/auth-session.log" \
-      "$VM_HOST_RUN_DIR/auth-ssh.log" "$VM_HOST_RUN_DIR/auth-control.sock" || cleanup_failed=1
+      "$VM_HOST_RUN_DIR/auth-ssh.log" || cleanup_failed=1
   fi
   if (( cleanup_failed == 0 )); then
     python3 -I - "$VM_HOST_RUN_DIR" "$VM_HOST_LOG_LIMIT_BYTES" <<'PY' || cleanup_failed=1
@@ -866,7 +876,7 @@ vm_host_start_proxy() {
 }
 
 vm_host_start_virtiofs() {
-  local run_dir="$1" workspace="$2" socket pid_file
+  local run_dir="$1" workspace="$2" socket auth_socket pid_file
   local completion_file="$1/virtiofsd.complete" pid executable status end
   local socket_helper="$VM_HOST_SCRIPT_ROOT/lib/vm/virtiofs-socket.py"
   local bounded_logger="$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py"
@@ -876,6 +886,14 @@ vm_host_start_virtiofs() {
     return 1
   }
   VM_HOST_VIRTIOFS_ALLOCATED=1
+  auth_socket="$(python3 -I "$socket_helper" auth-path "$run_dir")" || {
+    vm_host_error 'private browser-auth SSH control socket path is unavailable or too long'
+    return 1
+  }
+  [[ ! -e "$auth_socket" && ! -L "$auth_socket" ]] || {
+    vm_host_error 'refusing a pre-existing browser-auth SSH control socket'
+    return 1
+  }
   pid_file="$socket.pid"
   [[ ! -e "$socket" && ! -L "$socket" && ! -e "$pid_file" && ! -L "$pid_file" ]] || {
     vm_host_error 'refusing pre-existing virtiofs socket or PID path'
@@ -1082,7 +1100,7 @@ vm_host_browser_auth_session() {
   local run_dir="$1" timeout_seconds="$2" bounded_logger="$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py"
   local auth_script="$VM_HOST_SCRIPT_ROOT/lib/vm/browser-auth-session.py" ssh_exe python_exe ssh_port run_id guest_dir
   local pid status identity_file="$1/auth-session.identity" completion_file="$1/auth-session.complete"
-  local proof_file="$1/auth-session.proof" control_socket="$1/auth-control.sock"
+  local proof_file="$1/auth-session.proof" control_socket=""
   local callback_port_file="$1/auth-callback.port" ssh_identity="$1/auth-ssh.identity"
   [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || { vm_host_error 'browser-auth deadline must be a positive integer'; return 2; }
   ssh_port="$(<"$run_dir/ssh_port")"
@@ -1090,9 +1108,17 @@ vm_host_browser_auth_session() {
   run_id="${run_dir##*/}"
   [[ "$run_id" =~ ^[A-Za-z0-9-]{1,80}$ ]] || { vm_host_error 'temporary guest browser path is invalid'; return 1; }
   guest_dir="/tmp/mester-v3-auth-$run_id"
+  control_socket="$(python3 -I "$VM_HOST_SCRIPT_ROOT/lib/vm/virtiofs-socket.py" auth-path "$run_dir")" || {
+    vm_host_error 'could not verify the private short browser-auth SSH control path'
+    return 1
+  }
+  [[ ! -e "$control_socket" && ! -L "$control_socket" ]] || {
+    vm_host_error 'refusing a pre-existing browser-auth SSH control socket'
+    return 1
+  }
   ssh_exe="$(command -v ssh)" || { vm_host_error 'SSH executable is unavailable'; return 1; }
   python_exe="$(readlink -f -- "$(command -v python3)")" || return 1
-  rm -f -- "$identity_file" "$completion_file" "$proof_file" "$control_socket" "$callback_port_file" "$ssh_identity"
+  rm -f -- "$identity_file" "$completion_file" "$proof_file" "$callback_port_file" "$ssh_identity"
   printf 'stage: owner ChatGPT browser login (maximum %ss)\n' "$timeout_seconds"
   (
     logger_stdin=()

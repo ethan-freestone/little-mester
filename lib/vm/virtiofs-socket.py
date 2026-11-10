@@ -14,8 +14,10 @@ import sys
 RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{32}$")
 SOCKET_DIR_PREFIX = "lmv3-"
 SOCKET_NAME = "virtiofs.sock"
+AUTH_CONTROL_SOCKET_NAME = "auth-control.sock"
 SOCKET_PATH_FILE = "virtiofs.socket-path"
 MAX_SUN_PATH_BYTES = 107
+MAX_AUTH_CONTROL_PATH_BYTES = 99
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
@@ -108,6 +110,17 @@ def _expected_socket_path(run_dir: pathlib.Path, runtime_root: pathlib.Path, uid
     return path
 
 
+def _expected_auth_control_path(run_dir: pathlib.Path, runtime_root: pathlib.Path, uid: int) -> pathlib.Path:
+    run_id = _run_id(run_dir)
+    path = runtime_root / f"{SOCKET_DIR_PREFIX}{run_id}" / AUTH_CONTROL_SOCKET_NAME
+    byte_length = len(os.fsencode(path))
+    if byte_length > MAX_AUTH_CONTROL_PATH_BYTES:
+        raise Refusal(
+            f"SSH control socket path is {byte_length} bytes; must be shorter than 100"
+        )
+    return path
+
+
 def allocate(run_dir: pathlib.Path, runtime_root: pathlib.Path, uid: int, system_uid: int = 0) -> pathlib.Path:
     """Exclusively allocate a per-run directory under the protected UID runtime root."""
     run_fd = _open_run_dir(run_dir, uid)
@@ -136,12 +149,12 @@ def allocate(run_dir: pathlib.Path, runtime_root: pathlib.Path, uid: int, system
         try:
             info = os.fstat(socket_dir_fd)
             _check_directory(info, uid, mode=0o700)
-            for name in (SOCKET_NAME, SOCKET_NAME + ".pid"):
+            for name in (SOCKET_NAME, SOCKET_NAME + ".pid", AUTH_CONTROL_SOCKET_NAME):
                 try:
                     os.stat(name, dir_fd=socket_dir_fd, follow_symlinks=False)
                 except FileNotFoundError:
                     continue
-                raise Refusal("refusing pre-existing virtiofs socket or PID path")
+                raise Refusal("refusing a pre-existing per-run runtime socket or PID artifact")
         finally:
             os.close(socket_dir_fd)
 
@@ -307,8 +320,8 @@ def create_log(run_dir: pathlib.Path, name: str) -> None:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) not in (2, 3) or argv[0] not in {"allocate", "path", "startup", "stopped", "create-log"}:
-        print("usage: virtiofs-socket.py {allocate|path|startup|stopped|create-log} RUN_DIR [LOG_NAME]", file=sys.stderr)
+    if len(argv) not in (2, 3) or argv[0] not in {"allocate", "path", "auth-path", "startup", "stopped", "create-log"}:
+        print("usage: virtiofs-socket.py {allocate|path|auth-path|startup|stopped|create-log} RUN_DIR [LOG_NAME]", file=sys.stderr)
         return 2
     operation = argv[0]
     raw_run_dir = argv[1]
@@ -326,6 +339,11 @@ def main(argv: list[str]) -> int:
             print(allocate(run_dir, runtime_root, uid))
         elif operation == "path":
             print(read_path(run_dir, runtime_root, uid))
+        elif operation == "auth-path":
+            # Revalidate the existing exclusive allocation before deriving the
+            # second socket path in its private per-run runtime directory.
+            read_path(run_dir, runtime_root, uid)
+            print(_expected_auth_control_path(run_dir, runtime_root, uid))
         else:
             print(json.dumps(inspect(run_dir, runtime_root, uid, 0, startup=operation == "startup"),
                              sort_keys=True))

@@ -71,6 +71,71 @@ class AuthorizationValidationTests(unittest.TestCase):
         self.assertIn("ProxyCommand=none", command)
         self.assertIn("ProxyJump=none", command)
 
+    def test_control_socket_guard_keeps_exact_100_byte_boundary(self):
+        def control_path(length):
+            return "/" + ("s" * (length - 1))
+
+        accepted = auth.control_socket_arguments(
+            "/usr/bin/ssh", control_path(auth.CONTROL_SOCKET_LIMIT - 1),
+            "forward", 1455, 43210, "/tmp/private/id", "/tmp/private/known_hosts",
+        )
+        self.assertIn(control_path(auth.CONTROL_SOCKET_LIMIT - 1), accepted)
+        with self.assertRaisesRegex(auth.AuthSessionError, "control socket path is invalid"):
+            auth.control_socket_arguments(
+                "/usr/bin/ssh", control_path(auth.CONTROL_SOCKET_LIMIT),
+                "forward", 1455, 43210, "/tmp/private/id", "/tmp/private/known_hosts",
+            )
+        def session_for(length):
+            return auth.BrowserAuthSession(SimpleNamespace(
+                control_socket=control_path(length), ssh="/usr/bin/ssh", ssh_port=43210,
+                known_hosts="/tmp/private/known_hosts", identity_file="/tmp/private/id",
+                ssh_identity="/tmp/private/auth-id", callback_port_file="/tmp/private/port",
+                proof_file="/tmp/private/proof", run_dir="/tmp/private",
+                guest_auth_dir="/tmp/mester-v3-auth-boundary",
+            ))
+
+        self.assertIn(control_path(99), session_for(99)._ssh_command())
+        with self.assertRaisesRegex(auth.AuthSessionError, "control socket path is too long"):
+            session_for(100)._ssh_command()
+
+    def test_helper_accepts_only_a_private_per_run_control_socket_directory(self):
+        with tempfile.TemporaryDirectory(prefix="a-", dir="/tmp") as temporary:
+            root = pathlib.Path(temporary)
+            run_id = "20261110T161954Z-" + "b" * 32
+            run_dir = root / run_id
+            run_dir.mkdir(mode=0o700)
+            control_dir = root / f"lmv3-{run_id}"
+            control_dir.mkdir(mode=0o700)
+            control_dir.chmod(0o700)
+
+            def arguments():
+                paths = {name: str(run_dir / name) for name in (
+                    "identity_file", "known_hosts", "ssh_identity",
+                    "callback_port_file", "proof_file",
+                )}
+                values = [
+                    "--ssh", "/usr/bin/ssh", "--ssh-port", "43210",
+                    "--identity-file", paths["identity_file"], "--known-hosts", paths["known_hosts"],
+                    "--control-socket", str(control_dir / "auth-control.sock"),
+                    "--ssh-identity", paths["ssh_identity"], "--callback-port-file", paths["callback_port_file"],
+                    "--proof-file", paths["proof_file"], "--run-dir", str(run_dir),
+                    "--guest-auth-dir", "/tmp/mester-v3-auth-test", "--timeout-seconds", "30",
+                    "--output-limit", "65536",
+                ]
+                return auth._arguments(values)
+
+            self.assertEqual(arguments().control_socket, str(control_dir / "auth-control.sock"))
+            control_dir.chmod(0o755)
+            with self.assertRaises(SystemExit):
+                arguments()
+            control_dir.chmod(0o700)
+            target = root / "private-target"
+            target.mkdir(mode=0o700)
+            control_dir.rmdir()
+            control_dir.symlink_to(target, target_is_directory=True)
+            with self.assertRaises(SystemExit):
+                arguments()
+
     def test_rejects_unexpected_endpoint_redirect_and_query_shape(self):
         valid = authorization_url()
         rejected = [
@@ -812,10 +877,13 @@ raise SystemExit(0)
 
 class BrowserAuthProcessTests(unittest.TestCase):
     def _run_session(self, mode, *, occupied=False, timeout_seconds=5, use_pty=True):
-        temporary = tempfile.TemporaryDirectory(prefix="mester-auth-session-")
+        temporary = tempfile.TemporaryDirectory(prefix="a-", dir="/tmp")
         root = pathlib.Path(temporary.name)
-        run_dir = root / "run"
+        run_dir = root / ("20261110T161954Z-" + "a" * 32)
         run_dir.mkdir(mode=0o700)
+        control_dir = root / f"lmv3-{run_dir.name}"
+        control_dir.mkdir(mode=0o700)
+        control_dir.chmod(0o700)
         identity = run_dir / "identity"
         known_hosts = run_dir / "known_hosts"
         identity.write_text("synthetic test identity\n")
@@ -855,7 +923,7 @@ class BrowserAuthProcessTests(unittest.TestCase):
             "/usr/bin/python3", "-I", str(SESSION_PATH),
             "--ssh", str(fake_ssh), "--ssh-port", "43210",
             "--identity-file", str(identity), "--known-hosts", str(known_hosts),
-            "--control-socket", str(run_dir / "auth-control.sock"),
+            "--control-socket", str(control_dir / "auth-control.sock"),
             "--ssh-identity", str(run_dir / "auth-ssh.identity"),
             "--callback-port-file", str(run_dir / "auth-callback.port"),
             "--proof-file", str(proof), "--run-dir", str(run_dir),
@@ -980,7 +1048,7 @@ class BrowserAuthProcessTests(unittest.TestCase):
         proof_data = __import__("json").loads(proof.read_text())
         self.assertEqual(proof_data["ssh_stopped"], True)
         self.assertEqual(proof_data["control_socket_absent"], True)
-        self.assertFalse((run_dir / "auth-control.sock").exists())
+        self.assertFalse((control_dir / "auth-control.sock").exists())
         self.assertFalse((run_dir / "auth-ssh.identity").exists())
         if occupied:
             self.assertFalse(proof_data["cleanup_complete"])

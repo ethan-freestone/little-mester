@@ -547,6 +547,66 @@ PY
   [[ "$output" == *'BROWSER_AUTH_TESTS_OK'* ]]
 }
 
+@test "browser auth replaces the exact 115-byte run-dir socket path with the private short runtime path" {
+  local run_id="20261110T161954Z-$(printf '%032x' 987654321)"
+  local run_dir runtime_dir control_socket fake_bin="$TEST_TMP/fake-python-bin"
+  local capture="$TEST_TMP/browser-auth-control-path" fake_python="$TEST_TMP/fake-python3"
+  run_dir="$(python3 - "$TEST_TMP" "$run_id" <<'PY'
+import os, sys
+prefix, run_id = sys.argv[1:]
+target = 115 - len(os.fsencode("/auth-control.sock"))
+padding = target - len(os.fsencode(prefix)) - 2 - len(os.fsencode(run_id))
+if padding < 1:
+    raise SystemExit("test temp directory is unexpectedly long")
+print(f"{prefix}/{'x' * padding}/{run_id}")
+PY
+)"
+  runtime_dir="/tmp/lmv3-$run_id"
+  control_socket="$runtime_dir/auth-control.sock"
+  [ "$(python3 -c 'import os,sys; print(len(os.fsencode(sys.argv[1])))' "$run_dir/auth-control.sock")" -eq 115 ]
+  mkdir -m 0700 -p "$run_dir" "$runtime_dir" "$fake_bin"
+  printf '43210\n' >"$run_dir/ssh_port"
+  cat >"$fake_python" <<'PY'
+#!/usr/bin/python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+if len(args) >= 3 and args[1].endswith("virtiofs-socket.py") and args[2] == "auth-path":
+    print(os.environ["VM_HOST_TEST_AUTH_SOCKET"])
+    raise SystemExit(0)
+if len(args) >= 2 and args[1].endswith("bounded-log.py"):
+    child = args[args.index("--") + 1:]
+    socket_path = child[child.index("--control-socket") + 1]
+    pathlib.Path(os.environ["VM_HOST_TEST_AUTH_CAPTURE"]).write_text(socket_path)
+    proof = pathlib.Path(child[child.index("--proof-file") + 1])
+    proof.write_text(json.dumps({
+        "version": 1, "ssh_stopped": True, "control_socket_absent": True,
+        "listener_verified_closed": True, "cleanup_complete": True,
+    }))
+    completion = pathlib.Path(args[args.index("--completion-file") + 1])
+    completion.write_text("{}")
+    raise SystemExit(0)
+raise SystemExit(91)
+PY
+  chmod 0700 "$fake_python"
+  ln -s "$fake_python" "$fake_bin/python3"
+  export VM_HOST_TEST_AUTH_SOCKET="$control_socket" VM_HOST_TEST_AUTH_CAPTURE="$capture"
+
+  run env PATH="$fake_bin:$PATH" bash -c '
+    source "$1/lib/vm/host-launcher.sh"
+    VM_HOST_SCRIPT_ROOT="$1"
+    vm_host_record_process_identity() { printf "test identity\n" >"$1"; }
+    vm_host_verify_logger_completion() { [[ -s "$2" ]]; }
+    vm_host_verify_browser_auth_proof() { [[ -s "$1" ]]; }
+    vm_host_browser_auth_session "$2" 60
+  ' _ "$TEST_ROOT" "$run_dir"
+
+  [ "$status" -eq 0 ]
+  [ "$(<"$capture")" = "$control_socket" ]
+  [ "$(python3 -c 'import os,sys; print(len(os.fsencode(sys.argv[1])))' "$(<"$capture")")" -lt 100 ]
+  [[ "$(<"$capture")" != "$run_dir"/* ]]
+  [ ! -e "$control_socket" ]
+}
+
 @test "Phase 1 runbook requires ChatGPT browser login, not an API key" {
   local doc="$TEST_ROOT/docs/vm-v3-phase1-smoke.md"
   grep -Fq 'opencode auth login openai --method chatgpt-browser' "$doc"
@@ -1011,6 +1071,7 @@ PY
     if [[ "${2:-}" == *virtiofs-socket.py ]]; then
       case "${3:-}" in
         allocate) printf '%s\n' "$TEST_TMP/virtiofs-runtime/virtiofs.sock" ;;
+        auth-path) printf '%s\n' "$TEST_TMP/virtiofs-runtime/auth-control.sock" ;;
         create-log) : >"$4/virtiofsd.log"; chmod 0600 "$4/virtiofsd.log" ;;
         startup|stopped) return 0 ;;
         *) return 1 ;;
@@ -1115,6 +1176,7 @@ PY
     if [[ "${2:-}" == *virtiofs-socket.py ]]; then
       case "${3:-}" in
         allocate) printf '%s\n' "$TEST_TMP/short-socket-dir/virtiofs.sock" ;;
+        auth-path) printf '%s\n' "$TEST_TMP/short-socket-dir/auth-control.sock" ;;
         create-log) : >"$4/virtiofsd.log"; chmod 0600 "$4/virtiofsd.log" ;;
         startup|stopped) return 0 ;;
         *) return 1 ;;
@@ -1187,6 +1249,7 @@ SH
     if [[ "${2:-}" == *virtiofs-socket.py ]]; then
       case "${3:-}" in
         allocate) printf '%s\n' "$TEST_TMP/delayed-socket/virtiofs.sock" ;;
+        auth-path) printf '%s\n' "$TEST_TMP/delayed-socket/auth-control.sock" ;;
         create-log) : >"$4/virtiofsd.log"; chmod 0600 "$4/virtiofsd.log" ;;
         *) return 0 ;;
       esac

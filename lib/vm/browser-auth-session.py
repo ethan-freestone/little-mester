@@ -266,7 +266,7 @@ def control_socket_arguments(
         raise AuthSessionError("callback port is outside the approved range")
     if not isinstance(ssh_port, int) or not 1024 <= ssh_port <= 65535:
         raise AuthSessionError("SSH control port is invalid")
-    if not os.path.isabs(control_path) or len(control_path) >= CONTROL_SOCKET_LIMIT:
+    if not os.path.isabs(control_path) or len(os.fsencode(control_path)) >= CONTROL_SOCKET_LIMIT:
         raise AuthSessionError("SSH control socket path is invalid")
     # The pinned provider uses server.listen(port, "localhost") in the guest.
     # The host-side listener remains explicitly IPv4-loopback-only.
@@ -483,7 +483,7 @@ class BrowserAuthSession:
         )
 
     def _ssh_command(self) -> list[str]:
-        if len(str(self.socket_path)) >= CONTROL_SOCKET_LIMIT:
+        if len(os.fsencode(self.socket_path)) >= CONTROL_SOCKET_LIMIT:
             raise AuthSessionError("SSH control socket path is too long")
         if self.socket_path.exists() or self.socket_path.is_symlink():
             raise AuthSessionError("SSH control socket path already exists")
@@ -1058,10 +1058,26 @@ def _arguments(argv):
     run_dir = pathlib.Path(args.run_dir)
     if not run_dir.is_dir() or run_dir.is_symlink() or run_dir.stat().st_uid != os.getuid():
         parser.error("private run directory is invalid")
-    for name in ("identity_file", "known_hosts", "control_socket", "ssh_identity", "callback_port_file", "proof_file"):
+    for name in ("identity_file", "known_hosts", "ssh_identity", "callback_port_file", "proof_file"):
         value = pathlib.Path(getattr(args, name))
         if not value.is_absolute() or value.parent != run_dir:
             parser.error("auth state path is outside the private run directory")
+    control_socket = pathlib.Path(args.control_socket)
+    runtime_socket_dir = control_socket.parent
+    try:
+        runtime_info = os.lstat(runtime_socket_dir)
+        runtime_resolved = runtime_socket_dir.resolve(strict=True)
+    except (OSError, RuntimeError):
+        parser.error("private SSH control socket directory is missing or unsafe")
+    if (not control_socket.is_absolute()
+            or len(os.fsencode(control_socket)) >= CONTROL_SOCKET_LIMIT
+            or control_socket.name != "auth-control.sock"
+            or runtime_socket_dir.name != f"lmv3-{run_dir.name}"
+            or runtime_resolved != runtime_socket_dir
+            or not stat.S_ISDIR(runtime_info.st_mode)
+            or runtime_info.st_uid != os.getuid()
+            or stat.S_IMODE(runtime_info.st_mode) != 0o700):
+        parser.error("private SSH control socket path is invalid")
     return args
 
 

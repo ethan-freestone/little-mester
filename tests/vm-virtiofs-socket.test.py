@@ -117,6 +117,37 @@ class VirtiofsSocketTests(unittest.TestCase):
             self.assertEqual(metadata.read_text(encoding="utf-8"), str(path) + "\n")
             self.assertEqual(stat.S_IMODE(os.lstat(metadata).st_mode), 0o600)
 
+    def test_auth_control_socket_uses_the_same_private_per_run_directory(self):
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as temporary:
+            fixture = RuntimeFixture(temporary)
+            run_dir = fixture.run_dir(self.identity(20))
+            runtime_root = pathlib.Path(f"/run/user/{fixture.uid}")
+            virtiofs_path = virtiofs_socket._expected_socket_path(
+                run_dir, runtime_root, fixture.uid
+            )
+            auth_path = virtiofs_socket._expected_auth_control_path(
+                run_dir, runtime_root, fixture.uid
+            )
+            self.assertEqual(auth_path.parent, virtiofs_path.parent)
+            self.assertEqual(auth_path.name, "auth-control.sock")
+            self.assertLess(len(os.fsencode(auth_path)), 100)
+            self.assertFalse(auth_path.exists())
+
+    def test_allocator_refuses_a_preexisting_auth_control_socket_artifact(self):
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as temporary:
+            fixture = RuntimeFixture(temporary)
+            run_dir = fixture.run_dir(self.identity(21))
+            socket_dir = fixture.runtime_root / f"lmv3-{run_dir.name}"
+            socket_dir.mkdir(mode=0o700)
+            (socket_dir / "auth-control.sock").touch(mode=0o600)
+            patches = fixture.ownership_patches()
+            with patches[0], patches[1], patches[2]:
+                with self.assertRaisesRegex(virtiofs_socket.Refusal, "pre-existing short virtiofs socket directory"):
+                    virtiofs_socket.allocate(
+                        run_dir, fixture.runtime_root, fixture.uid, fixture.system_uid
+                    )
+            self.assertTrue((socket_dir / "auth-control.sock").exists())
+
     def test_explicit_overlong_socket_candidate_fails_before_allocation(self):
         with tempfile.TemporaryDirectory(dir=pathlib.Path.home()) as temporary:
             fixture = RuntimeFixture(temporary)
