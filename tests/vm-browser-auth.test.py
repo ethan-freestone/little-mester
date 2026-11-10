@@ -103,6 +103,20 @@ class AuthorizationValidationTests(unittest.TestCase):
                 with self.assertRaises(auth.AuthSessionError):
                     auth.validate_authorization_url(candidate)
 
+    def test_safe_auth_failure_reason_codes(self):
+        self.assertEqual(auth.classify_missing_authorization(0, 0), 71)
+        self.assertEqual(auth.classify_missing_authorization(0, 18), 72)
+        self.assertEqual(auth.classify_missing_authorization(1, 18), 78)
+        with self.assertRaises(auth.AuthSessionError) as invalid:
+            auth.validate_authorization_url("https://auth.openai.com/not-the-approved-endpoint")
+        self.assertEqual(invalid.exception.status, 73)
+        callback = authorization_url().replace(
+            "localhost%3A1455", "localhost%3A1456"
+        )
+        with self.assertRaises(auth.AuthSessionError) as unsupported:
+            auth.validate_authorization_url(callback)
+        self.assertEqual(unsupported.exception.status, 74)
+
     def test_requires_exact_pinned_open_code_scope_and_auth_path_hides_openers(self):
         valid = authorization_url()
         with self.assertRaises(auth.AuthSessionError):
@@ -581,6 +595,19 @@ class AuthorizationValidationTests(unittest.TestCase):
         second = authorization_url(1457, state="T" * 43)
         with self.assertRaises(auth.AuthSessionError):
             scanner.feed(b"\x1b]8;;" + second.encode("ascii") + b"\x1b\\")
+
+    def test_pinned_clack_log_info_format_with_ansi_and_hyperlink_chunking(self):
+        url = authorization_url()
+        # Clack log.info adds a decorated label; terminals may render its URL as OSC 8.
+        line = (b"\x1b[36m\xe2\x84\xb9\x1b[0m  Authorization URL: \x1b]8;;"
+                + url.encode("ascii") + b"\x1b\\" + url.encode("ascii")
+                + b"\x1b]8;;\x1b\\\r\n")
+        scanner = auth.AuthorizationOutputScanner()
+        for index in range(0, len(line), 7):
+            _visible, port, _held = scanner.feed(line[index:index + 7])
+            if port is not None:
+                self.assertEqual(port, 1455)
+        self.assertEqual(scanner.auth_url, url)
 
 
 class FakeTargetHandler(BaseRequestHandler):

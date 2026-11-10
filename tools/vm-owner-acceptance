@@ -668,12 +668,16 @@ def print_report(data: dict) -> None:
     print(f"OVERALL: {data['status']}")
 
 
-def run_smoke(root: pathlib.Path, workspace: str, model: str, state_before: set[str], data: dict) -> None:
+def run_smoke(root: pathlib.Path, workspace: str, model: str, state_before: set[str], data: dict,
+              debug: bool = False) -> None:
     resolved = verify_workspace_mount(workspace, exact_tmpfs=False)
     if list(resolved.iterdir()):
         raise GateError("BLOCKED", "selected smoke workspace must be empty before launch")
+    command = [str(root / "lab-vm"), "smoke", "--workspace", str(resolved), "--model", model]
+    if debug:
+        command.insert(2, "--debug")
     result = subprocess.run(
-        [str(root / "lab-vm"), "smoke", "--workspace", str(resolved), "--model", model],
+        command,
         stdin=None,
         stdout=None,
         stderr=None,
@@ -711,6 +715,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--workspace", help="existing owner-provisioned bounded filesystem root")
     p.add_argument("--model", help="OpenAI model identifier for the interactive smoke")
     p.add_argument("--run-id", help="exact fresh VM run id for read-only cleanup verification")
+    p.add_argument("--debug", action="store_true", help="stream bounded, sanitized guest provisioning progress during --run/--all")
     return p
 
 
@@ -724,6 +729,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     modes = [name for name in ("preflight", "install", "storage_proof", "run", "verify_cleanup", "all") if getattr(args, name)]
     mode = modes[0] if modes else "preflight"
+    if args.debug and mode not in ("run", "all"):
+        parser().error("--debug is supported only with --run or --all")
     try:
         repo = pathlib.Path(args.repo).resolve(strict=True)
         report_dir = new_report_dir()
@@ -784,7 +791,7 @@ def main(argv: list[str] | None = None) -> int:
                 data["gates"]["storage_proof"] = "PASS"
                 before = list_runs(state_root())
                 current_gate = "run"
-                run_smoke(root, args.workspace, args.model, before, data)
+                run_smoke(root, args.workspace, args.model, before, data, debug=args.debug)
                 data["status"] = "PASS"
         elif mode == "storage_proof":
             current_gate = "preflight"
@@ -806,7 +813,7 @@ def main(argv: list[str] | None = None) -> int:
             data["gates"]["preflight"] = "PASS"
             before = list_runs(state_root())
             current_gate = "run"
-            run_smoke(root, args.workspace, args.model, before, data)
+            run_smoke(root, args.workspace, args.model, before, data, debug=args.debug)
             data["status"] = "PASS"
         else:
             raise GateError("FAIL", "unsupported operation")

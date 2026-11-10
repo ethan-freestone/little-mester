@@ -2071,3 +2071,16 @@ SH
   [[ "$output" == *"deadline must be a positive integer"* ]]
   [[ "$output" != *"SSH_WAS_CALLED"* ]]
 }
+
+@test "smoke debug flag is set before lifecycle preflight and fails before VM work" {
+  local observed="$TEST_TMP/debug-flag"
+  vm_host_validate_model() { :; }
+  vm_host_require_kvm() {
+    printf '%s\n' "$VM_HOST_DEBUG" >"$observed"
+    return 1
+  }
+  run vm_host_smoke --debug --workspace "$TEST_TMP/workspace" --model openai/test-model
+  [ "$status" -ne 0 ]
+  [ "$(<"$observed")" = 1 ]
+  [ ! -e "$TEST_TMP/state" ]
+}

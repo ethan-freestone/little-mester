@@ -337,6 +337,8 @@ class OwnerAcceptanceTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             acceptance.parser().parse_args(["--install", "--run", "--sha", "a" * 40])
         parsed = acceptance.parser().parse_args(["--sha", "a" * 40])
+        debug = acceptance.parser().parse_args(["--run", "--sha", "a" * 40, "--debug"])
+        self.assertTrue(debug.debug)
         self.assertFalse(any(getattr(parsed, name) for name in (
             "preflight", "install", "storage_proof", "run", "verify_cleanup", "all"
         )))
@@ -595,9 +597,9 @@ class OwnerAcceptanceTests(unittest.TestCase):
             mock.patch.object(acceptance, "inspect_cleanup", return_value={"status": "PASS"}),
             mock.patch.object(acceptance.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run,
         ):
-            acceptance.run_smoke(root, "/workspace", "openai/model", set(), data)
+            acceptance.run_smoke(root, "/workspace", "openai/model", set(), data, debug=True)
         args, kwargs = run.call_args
-        self.assertEqual(args[0], [str(root / "lab-vm"), "smoke", "--workspace", "/workspace", "--model", "openai/model"])
+        self.assertEqual(args[0], [str(root / "lab-vm"), "smoke", "--debug", "--workspace", "/workspace", "--model", "openai/model"])
         self.assertIsNone(kwargs["stdin"])
         self.assertIsNone(kwargs["stdout"])
         self.assertIsNone(kwargs["stderr"])

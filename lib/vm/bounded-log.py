@@ -5,6 +5,7 @@ import ctypes
 import json
 import os
 import pathlib
+import re
 import selectors
 import signal
 import subprocess
@@ -14,6 +15,67 @@ import time
 PR_SET_CHILD_SUBREAPER = 36
 TERMINATION_GRACE_SECONDS = 8
 KILL_SETTLE_SECONDS = 2
+
+
+class ProvisioningDebug:
+    """Emit only fixed progress labels, never guest-provided text."""
+
+    MAX_BYTES = 8192
+
+    def __init__(self, stop_path):
+        self.stop_path = pathlib.Path(stop_path)
+        self.pending = bytearray()
+        self.written = 0
+        self.enabled = True
+
+    def feed(self, data):
+        if not self.enabled:
+            return
+        if self.stop_path.exists():
+            self.enabled = False
+            self.pending.clear()
+            return
+        self.pending.extend(data)
+        if len(self.pending) > 2048 and b"\n" not in self.pending:
+            self.pending.clear()
+            return
+        while b"\n" in self.pending:
+            line, _, remainder = self.pending.partition(b"\n")
+            self.pending[:] = remainder
+            label = self.label(line)
+            if label is None or self.written >= self.MAX_BYTES:
+                continue
+            message = (label + "\n").encode("ascii")
+            if self.written + len(message) > self.MAX_BYTES:
+                self.enabled = False
+                self.pending.clear()
+                return
+            try:
+                os.write(sys.stdout.fileno(), message)
+            except (BrokenPipeError, OSError):
+                self.enabled = False
+                self.pending.clear()
+                return
+            self.written += len(message)
+
+    @staticmethod
+    def label(raw):
+        # Strip terminal controls before classification; only fixed labels leave.
+        text = re.sub(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))", "", raw.decode("utf-8", "ignore"))
+        lowered = text.lower()
+        if "cloud-init" in lowered and "running" in lowered:
+            return "Guest provisioning: cloud-init running"
+        if "cloud-init" in lowered and "finished" in lowered:
+            return "Guest provisioning: cloud-init finished"
+        if "cloud-init" in lowered and "error" in lowered:
+            return "Guest provisioning: cloud-init reported an error"
+        if lowered.lstrip().startswith(("get:", "fetching ", "downloaded ")):
+            return "Guest provisioning: package download in progress"
+        if lowered.lstrip().startswith(("setting up ", "unpacking ")):
+            return "Guest provisioning: package setup in progress"
+        if "rootless" in lowered and ("docker" in lowered or "containerd" in lowered):
+            return "Guest provisioning: rootless container runtime setup"
+        return None
 
 
 def main(arguments):
@@ -28,6 +90,7 @@ def main(arguments):
         return 2
     options = set()
     completion_path = None
+    debug_stop_path = None
     index = 2
     while index < len(arguments) and arguments[index].startswith("--") and arguments[index] != "--":
         option = arguments[index]
@@ -37,6 +100,13 @@ def main(arguments):
                 print("invalid bounded-log completion file", file=sys.stderr)
                 return 2
             completion_path = arguments[index + 1]
+            index += 2
+            continue
+        if option == "--debug-provisioning-until":
+            if debug_stop_path is not None or index + 1 >= len(arguments) or not arguments[index + 1]:
+                print("invalid provisioning debug stop file", file=sys.stderr)
+                return 2
+            debug_stop_path = arguments[index + 1]
             index += 2
             continue
         if option not in ("--fail-on-overflow", "--stdin") or option in options:
@@ -49,6 +119,7 @@ def main(arguments):
         return 2
     fail_on_overflow = "--fail-on-overflow" in options
     pass_stdin = "--stdin" in options
+    debug = ProvisioningDebug(debug_stop_path) if debug_stop_path is not None else None
     discard_output = log_name == "-"
     if limit < 128:
         print("invalid log size limit or empty command", file=sys.stderr)
@@ -232,6 +303,8 @@ def main(arguments):
                 if not chunk:
                     selector.unregister(key.fd)
                     continue
+                if debug is not None:
+                    debug.feed(chunk)
                 remaining = content_limit - written
                 if remaining > 0:
                     portion = chunk[:remaining]

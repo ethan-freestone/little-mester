@@ -29,6 +29,7 @@ VM_HOST_DOCKER_IMAGE='busybox:1.36.1'
 VM_HOST_TRUSTED_PATH='/usr/sbin:/usr/bin:/sbin:/bin'
 VM_HOST_VIRTIOFSD_PATHS=(/usr/lib/virtiofsd /usr/libexec/virtiofsd /usr/lib/qemu/virtiofsd)
 VM_HOST_VIRTIOFSD_EXECUTABLE=''
+VM_HOST_DEBUG=0
 
 vm_host_error() {
   printf 'REFUSED: %s\n' "$1" >&2
@@ -936,6 +937,10 @@ vm_host_start_qemu() {
   local socket
   local bounded_logger="$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py"
   local completion_file="$1/qemu.complete"
+  local -a debug_option=()
+  if (( VM_HOST_DEBUG )); then
+    debug_option=(--debug-provisioning-until "$run_dir/qemu.debug-stop")
+  fi
   socket="$(python3 -I "$VM_HOST_SCRIPT_ROOT/lib/vm/virtiofs-socket.py" path "$run_dir")" || {
     vm_host_error 'could not verify the allocated short virtiofs socket path for QEMU'
     return 1
@@ -958,7 +963,7 @@ vm_host_start_qemu() {
   chmod 0600 "$run_dir/qemu.log" || return 1
   rm -f -- "$completion_file"
   python3 -I "$bounded_logger" "$run_dir/qemu.log" "$VM_HOST_LOG_LIMIT_BYTES" \
-    --completion-file "$completion_file" -- \
+    --completion-file "$completion_file" "${debug_option[@]}" -- \
     "${qemu[@]}" </dev/null &
   pid="$!"
   VM_HOST_UNTRACKED_CHILD=1
@@ -1122,9 +1127,14 @@ vm_host_browser_auth_session() {
     case "$status" in
       124) vm_host_error 'ChatGPT browser authentication exceeded its bounded deadline' ;;
       130) vm_host_error 'ChatGPT browser authentication was cancelled by the owner' ;;
-      75) vm_host_error 'pinned OpenCode ChatGPT authorization was missing or outside the exact approved protocol' ;;
+      71) vm_host_error 'AUTH_URL_MISSING: guest produced no authorization output' ;;
+      72) vm_host_error 'AUTH_OUTPUT_UNEXPECTED: guest output did not contain an authorization URL' ;;
+      73) vm_host_error 'AUTH_URL_INVALID: authorization endpoint or query did not match the pinned protocol' ;;
+      74) vm_host_error 'AUTH_CALLBACK_UNSUPPORTED: callback did not match the pinned localhost ports' ;;
+      75) vm_host_error 'pinned OpenCode ChatGPT authorization was outside the exact approved protocol' ;;
       76) vm_host_error 'desktop portal was unavailable and no usable manual browser fallback existed' ;;
       77) vm_host_error 'callback forwarding or localhost verification failed safely' ;;
+      78) vm_host_error 'AUTH_PROCESS_EXIT: guest authentication process exited before producing an approved URL' ;;
       *) vm_host_error 'ChatGPT browser authentication failed; OAuth details were intentionally suppressed' ;;
     esac
     return 1
@@ -1134,6 +1144,10 @@ vm_host_browser_auth_session() {
 vm_host_browser_auth_smoke() {
   local run_dir="$1" model="$2" timeout_seconds="$3" run_id guest_dir
   vm_host_validate_model "$model" || return 1
+  if (( VM_HOST_DEBUG )); then
+    : >"$run_dir/qemu.debug-stop" || { vm_host_error 'could not stop guest provisioning debug output before authentication'; return 1; }
+    chmod 0600 "$run_dir/qemu.debug-stop" || return 1
+  fi
   run_id="${run_dir##*/}"
   [[ "$run_id" =~ ^[A-Za-z0-9-]{1,80}$ ]] || { vm_host_error 'temporary guest browser path is invalid'; return 1; }
   guest_dir="/tmp/mester-v3-auth-$run_id"
@@ -1232,12 +1246,13 @@ vm_host_docker_smoke() {
 }
 
 vm_host_smoke() {
-  local selected_workspace="" model="" arg
+  local selected_workspace="" model="" arg debug=0
   while (($#)); do
     arg="$1"; shift
     case "$arg" in
       --workspace) (($#)) || { vm_host_error '--workspace requires a value'; return 2; }; [[ -z "$selected_workspace" ]] || { vm_host_error '--workspace may appear only once'; return 2; }; selected_workspace="$1"; shift ;;
       --model) (($#)) || { vm_host_error '--model requires a value'; return 2; }; [[ -z "$model" ]] || { vm_host_error '--model may appear only once'; return 2; }; model="$1"; shift ;;
+      --debug) (( debug == 0 )) || { vm_host_error '--debug may appear only once'; return 2; }; debug=1 ;;
       *) vm_host_error "unsupported smoke argument: $arg"; return 2 ;;
     esac
   done
@@ -1246,6 +1261,7 @@ vm_host_smoke() {
     return 2
   }
   vm_host_validate_model "$model" || return 2
+  VM_HOST_DEBUG="$debug"
   vm_host_require_kvm || return 1
   vm_host_require_commands || return 1
   local home state_root workspace

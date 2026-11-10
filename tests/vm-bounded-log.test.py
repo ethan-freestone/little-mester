@@ -15,6 +15,50 @@ PYTHON = sys.executable
 
 
 class BoundedLogTests(unittest.TestCase):
+    def test_provisioning_debug_never_exceeds_its_fixed_output_cap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            log = root / "bounded.log"
+            stop = root / "debug.stop"
+            child = (
+                "import sys; "
+                "sys.stdout.write(('Cloud-init running\\n') * 8); "
+                "sys.stdout.write(('Cloud-init finished\\n') * 197); "
+                "sys.stdout.write('Cloud-init running\\n'); sys.stdout.flush()"
+            )
+            result = subprocess.run(
+                [PYTHON, "-I", str(LOGGER), str(log), "65536", "--debug-provisioning-until", str(stop),
+                 "--", PYTHON, "-c", child],
+                capture_output=True, timeout=4,
+            )
+            self.assertEqual(result.returncode, 0)
+            running = b"Guest provisioning: cloud-init running\n"
+            finished = b"Guest provisioning: cloud-init finished\n"
+            self.assertEqual(len(result.stdout), 8192)
+            self.assertEqual(result.stdout.count(running), 8)
+            self.assertEqual(result.stdout.count(finished), 197)
+
+    def test_provisioning_debug_emits_only_fixed_labels_and_stops_at_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            log = root / "bounded.log"
+            stop = root / "debug.stop"
+            child = (
+                "import pathlib,sys,time; "
+                "print('\\x1b[31mCloud-init v. 24 running modules:config\\x1b[0m'); sys.stdout.flush(); time.sleep(.3); "
+                f"pathlib.Path({str(stop)!r}).touch(); "
+                "print('Setting up secret-package-token=DO_NOT_SHOW'); sys.stdout.flush(); time.sleep(.2)"
+            )
+            result = subprocess.run(
+                [PYTHON, "-I", str(LOGGER), str(log), "4096", "--debug-provisioning-until", str(stop),
+                 "--", PYTHON, "-c", child],
+                capture_output=True, text=True, timeout=4,
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "Guest provisioning: cloud-init running\n")
+            self.assertNotIn("DO_NOT_SHOW", result.stdout)
+            self.assertIn(b"DO_NOT_SHOW", log.read_bytes())
+
     def test_stdin_option_preserves_the_owner_terminal_input_for_the_child(self):
         with tempfile.TemporaryDirectory() as directory:
             log = pathlib.Path(directory) / "bounded.log"

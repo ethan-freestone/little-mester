@@ -57,6 +57,13 @@ class AuthSessionError(Exception):
         self.status = status
 
 
+def classify_missing_authorization(returncode: int | None, output_bytes: int) -> int:
+    """Return a safe reason code without retaining or exposing guest output."""
+    if returncode not in (None, 0):
+        return 78  # AUTH_PROCESS_EXIT
+    return 71 if output_bytes == 0 else 72  # AUTH_URL_MISSING / AUTH_OUTPUT_UNEXPECTED
+
+
 def _single_value_query(raw_query: str) -> dict[str, str]:
     try:
         fields = parse_qsl(
@@ -68,11 +75,11 @@ def _single_value_query(raw_query: str) -> dict[str, str]:
             errors="strict",
         )
     except (UnicodeDecodeError, ValueError) as error:
-        raise AuthSessionError("authorization URL query is malformed") from error
+        raise AuthSessionError("authorization URL query is malformed", 73) from error
     result = {}
     for key, value in fields:
         if key in result:
-            raise AuthSessionError("authorization URL has duplicate query fields")
+            raise AuthSessionError("authorization URL has duplicate query fields", 73)
         result[key] = value
     return result
 
@@ -80,13 +87,13 @@ def _single_value_query(raw_query: str) -> dict[str, str]:
 def validate_authorization_url(raw_url: str) -> int:
     """Validate pinned OpenCode 2.2.5 OAuth shape and return its callback port."""
     if not isinstance(raw_url, str) or not raw_url or len(raw_url) > MAX_AUTH_URL_LENGTH:
-        raise AuthSessionError("authorization URL length is invalid")
+        raise AuthSessionError("authorization URL structure is invalid", 73)
     try:
         raw_url.encode("ascii")
         parsed = urlsplit(raw_url)
         parsed_port = parsed.port
     except (UnicodeEncodeError, ValueError) as error:
-        raise AuthSessionError("authorization URL syntax is invalid") from error
+        raise AuthSessionError("authorization URL structure is invalid", 73) from error
     if (
         parsed.scheme != "https"
         or parsed.netloc != "auth.openai.com"
@@ -99,45 +106,45 @@ def validate_authorization_url(raw_url: str) -> int:
         or parsed.fragment
         or any(ord(character) <= 0x20 or ord(character) >= 0x7F for character in raw_url)
     ):
-        raise AuthSessionError("authorization URL endpoint is not approved")
+        raise AuthSessionError("authorization URL endpoint is not approved", 73)
 
     query = _single_value_query(parsed.query)
     keys = set(query)
     if keys.intersection(SECRET_QUERY_KEYS):
-        raise AuthSessionError("authorization URL contains callback credentials")
+        raise AuthSessionError("authorization URL contains callback credentials", 73)
     if not REQUIRED_QUERY_KEYS.issubset(keys) or keys - REQUIRED_QUERY_KEYS - OPTIONAL_QUERY_KEYS:
-        raise AuthSessionError("authorization URL query shape is not approved")
+        raise AuthSessionError("authorization URL query shape is not approved", 73)
     if query.get("response_type") != "code":
-        raise AuthSessionError("authorization response type is not approved")
+        raise AuthSessionError("authorization response type is not approved", 73)
     if (query.get("scope") != "openid profile email offline_access"
             or query.get("id_token_add_organizations") != "true"
             or query.get("codex_cli_simplified_flow") != "true"
             or query.get("originator") != "opencode"):
-        raise AuthSessionError("authorization parameters do not match pinned OpenCode 2.2.5")
+        raise AuthSessionError("authorization parameters do not match pinned OpenCode 2.2.5", 73)
     if query.get("client_id") != PINNED_CLIENT_ID or not CLIENT_ID.fullmatch(query.get("client_id", "")):
-        raise AuthSessionError("authorization client identifier is invalid")
+        raise AuthSessionError("authorization client identifier is invalid", 73)
     if (
         not BASE64URL_43.fullmatch(query.get("state", ""))
         or query.get("code_challenge_method") != "S256"
         or not BASE64URL_43.fullmatch(query.get("code_challenge", ""))
     ):
-        raise AuthSessionError("OAuth state or PKCE shape is invalid")
+        raise AuthSessionError("OAuth state or PKCE shape is invalid", 73)
 
     redirect_values = [value for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key == "redirect_uri"]
     if len(redirect_values) != 1:
-        raise AuthSessionError("authorization callback URI must appear exactly once")
+        raise AuthSessionError("authorization callback URI must appear exactly once", 74)
     redirect_raw = redirect_values[0]
     try:
         redirect = urlsplit(redirect_raw)
         port = redirect.port
     except ValueError as error:
-        raise AuthSessionError("authorization callback URI is invalid") from error
+        raise AuthSessionError("authorization callback URI is invalid", 74) from error
     expected_redirects = {
         "http://localhost:1455/auth/callback": 1455,
         "http://localhost:1457/auth/callback": 1457,
     }
     if redirect_raw not in expected_redirects:
-        raise AuthSessionError("authorization callback URI is not an exact pinned localhost URI")
+        raise AuthSessionError("authorization callback URI is unsupported", 74)
     if (
         redirect.hostname != "localhost"
         or redirect.username is not None
@@ -147,7 +154,7 @@ def validate_authorization_url(raw_url: str) -> int:
         or redirect.fragment
         or port != expected_redirects[redirect_raw]
     ):
-        raise AuthSessionError("authorization callback URI is not an exact guest loopback URI")
+        raise AuthSessionError("authorization callback URI is unsupported", 74)
     return expected_redirects[redirect_raw]
 
 
@@ -159,9 +166,15 @@ class AuthorizationOutputScanner:
         self.auth_url: str | None = None
         self.callback_port: int | None = None
         self.fingerprint: bytes | None = None
+        self.saw_auth_endpoint = False
+        self.endpoint_tail = b""
 
     def feed(self, data: bytes) -> tuple[bytes, int | None, bytes]:
         self.pending.extend(data)
+        endpoint_window = self.endpoint_tail + data
+        if b"https://auth.openai.com" in endpoint_window:
+            self.saw_auth_endpoint = True
+        self.endpoint_tail = endpoint_window[-len(b"https://auth.openai.com") + 1 :]
         visible = bytearray()
         held = bytearray()
         first_port = None
@@ -192,12 +205,12 @@ class AuthorizationOutputScanner:
                 url_end += 1
             if url_end == len(self.pending):
                 if url_end > MAX_AUTH_URL_LENGTH:
-                    raise AuthSessionError("authorization URL exceeded its fixed bound")
+                    raise AuthSessionError("authorization URL exceeded its fixed bound", 73)
                 return bytes(visible), first_port, bytes(held)
             if url_end > MAX_AUTH_URL_LENGTH:
-                raise AuthSessionError("authorization URL exceeded its fixed bound")
+                raise AuthSessionError("authorization URL exceeded its fixed bound", 73)
             if self.pending[url_end] not in b"\x1b\r\n\t ":
-                raise AuthSessionError("authorization URL has an invalid trailing character")
+                raise AuthSessionError("authorization URL structure is invalid", 73)
             raw = bytes(self.pending[url_start:url_end])
             # Keep the first non-URL byte (usually OSC 8's ESC or a terminal
             # newline) with the held stream so the TUI hyperlink remains intact.
@@ -209,7 +222,7 @@ class AuthorizationOutputScanner:
             try:
                 url = raw.decode("ascii")
             except UnicodeDecodeError as error:
-                raise AuthSessionError("authorization URL is not ASCII") from error
+                raise AuthSessionError("authorization URL structure is invalid", 73) from error
             port = validate_authorization_url(url)
             fingerprint = hashlib.sha256(raw).digest()
             if self.auth_url is not None:
@@ -865,9 +878,16 @@ class BrowserAuthSession:
                         raise AuthSessionError("browser opening refused because SSH ownership is unverified", 77)
                     self._portal_or_manual(self.scanner.auth_url, deadline)
         if self.scanner.auth_url is None:
-            self.status = self.status or 1
-            self.failure = "OpenCode did not request the approved ChatGPT browser flow"
-            self.status = 75
+            if self.ssh_process is not None and self.ssh_process.returncode not in (None, 0):
+                self.status = 78
+            elif self.scanner.saw_auth_endpoint:
+                self.status = 73
+            else:
+                self.status = classify_missing_authorization(
+                    self.ssh_process.returncode if self.ssh_process is not None else None,
+                    self.output_bytes,
+                )
+            self.failure = "authorization diagnostics: no approved URL observed"
 
     def _control(self, operation: str, port: int) -> bool:
         command = control_socket_arguments(
