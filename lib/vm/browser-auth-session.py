@@ -397,6 +397,7 @@ class BrowserAuthSession:
         self.forward_installed = False
         self.listener_was_available = False
         self.listener_verified_closed = True
+        self.ipv6_guard: socket.socket | None = None
         self.output_bytes = 0
         self.signal_received: int | None = None
         self.status = 1
@@ -524,6 +525,10 @@ class BrowserAuthSession:
     def _install_forward(self, port: int) -> None:
         if self.forward_attempted:
             raise AuthSessionError("only one callback forward is permitted")
+        # Reserve the browser's other localhost family before the IPv4 SSH
+        # forward is installed. This non-listening guard forces fast IPv6
+        # refusal so clients can retry the approved IPv4 callback path.
+        self._reserve_ipv6_localhost(port)
         if not listener_absent(port):
             self.callback_port = port
             self.listener_verified_closed = False
@@ -563,6 +568,26 @@ class BrowserAuthSession:
         except (OSError, ValueError):
             return False
 
+    def _reserve_ipv6_localhost(self, port: int) -> None:
+        try:
+            addresses = socket.getaddrinfo("localhost", port, type=socket.SOCK_STREAM)
+        except OSError as error:
+            raise AuthSessionError("localhost resolution could not be verified", 77) from error
+        if not any(
+            family == socket.AF_INET6
+            and ipaddress.ip_address(address[0].split("%", 1)[0]) == ipaddress.IPv6Address("::1")
+            for family, _kind, _protocol, _canonical, address in addresses
+        ):
+            return
+        guard = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        try:
+            guard.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            guard.bind(("::1", port))
+        except OSError as error:
+            guard.close()
+            raise AuthSessionError("IPv6 localhost callback collision could not be excluded", 77) from error
+        self.ipv6_guard = guard
+
     def _owned_ssh_process(self) -> bool:
         process = self.ssh_process
         if process is None or process.poll() is not None:
@@ -600,7 +625,10 @@ class BrowserAuthSession:
                 response["code"] = int(code)
                 loop.quit()
 
-            sender = bus.get_unique_name().replace(":", "_").replace(".", "_")
+            unique_name = bus.get_unique_name()
+            if not unique_name.startswith(":"):
+                return False
+            sender = unique_name[1:].replace(".", "_")
             expected_path = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
             receiver = bus.add_signal_receiver(
                 on_response,
@@ -609,11 +637,15 @@ class BrowserAuthSession:
                 path=expected_path,
             )
             try:
-                request_path = interface.Open("", url, {"handle_token": token}, timeout=5)
+                request_path = interface.OpenURI("", url, {"handle_token": token}, timeout=5)
                 if str(request_path) != expected_path:
                     return False
-                GLib.timeout_add(15000, lambda: (loop.quit(), False)[1])
-                loop.run()
+                if response["code"] is None:
+                    timeout_source = GLib.timeout_add(15000, lambda: (loop.quit(), False)[1])
+                    try:
+                        loop.run()
+                    finally:
+                        GLib.source_remove(timeout_source)
             finally:
                 receiver.remove()
             return response["code"] == 0
@@ -765,6 +797,12 @@ class BrowserAuthSession:
                 clean = False
         if self.socket_path.exists() or self.socket_path.is_symlink():
             clean = False
+        if self.ipv6_guard is not None:
+            try:
+                self.ipv6_guard.close()
+                self.ipv6_guard = None
+            except OSError:
+                clean = False
         if self.identity_path.exists() and (self.ssh_process is None or self.ssh_process.poll() is not None):
             try:
                 self.identity_path.unlink()

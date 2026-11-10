@@ -1049,8 +1049,10 @@ vm_host_browser_auth_session() {
   rm -f -- "$identity_file" "$completion_file" "$proof_file" "$control_socket" "$callback_port_file" "$ssh_identity"
   printf 'stage: owner ChatGPT browser login (maximum %ss)\n' "$timeout_seconds"
   (
+    logger_stdin=()
+    if { exec 0<>/dev/tty; } 2>/dev/null; then logger_stdin+=(--stdin); fi
     exec python3 -I "$bounded_logger" - "$VM_HOST_GUEST_OUTPUT_LIMIT_BYTES" \
-      --fail-on-overflow --completion-file "$completion_file" -- \
+      --fail-on-overflow "${logger_stdin[@]}" --completion-file "$completion_file" -- \
       python3 -I "$auth_script" \
         --ssh "$ssh_exe" --ssh-port "$ssh_port" \
         --identity-file "$run_dir/id_vm_control" --known-hosts "$run_dir/known_hosts" \

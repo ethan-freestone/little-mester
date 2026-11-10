@@ -24,6 +24,17 @@ exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
+# The outer entrypoint already verified this exact per-UID runtime directory
+# and bus socket before preserving them through env -i. Rebuild the allowlist
+# array in this worker shell; Bash arrays do not cross the worker boundary.
+desktop_env=()
+desktop_runtime="/run/user/$UID"
+if [[ "${XDG_RUNTIME_DIR-}" == "$desktop_runtime" \
+   && "${DBUS_SESSION_BUS_ADDRESS-}" == "unix:path=$desktop_runtime/bus" \
+   && -d "$desktop_runtime" && ! -L "$desktop_runtime" \
+   && -S "$desktop_runtime/bus" && ! -L "$desktop_runtime/bus" ]]; then
+  desktop_env+=("XDG_RUNTIME_DIR=$desktop_runtime" "DBUS_SESSION_BUS_ADDRESS=unix:path=$desktop_runtime/bus")
+fi
 script_path=$1
 shift
 

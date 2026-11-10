@@ -152,9 +152,9 @@ class AuthorizationValidationTests(unittest.TestCase):
         bus = Bus()
 
         class Interface:
-            def Open(self, _parent, actual_url, options, timeout):
+            def OpenURI(self, _parent, actual_url, options, timeout):
                 events.append(("open", actual_url, dict(options), timeout))
-                return f"/org/freedesktop/portal/desktop/request/_1_99/{options['handle_token']}"
+                return f"/org/freedesktop/portal/desktop/request/1_99/{options['handle_token']}"
 
         class Loop:
             def __init__(self):
@@ -177,6 +177,7 @@ class AuthorizationValidationTests(unittest.TestCase):
         repository.GLib = types.SimpleNamespace(
             MainLoop=Loop,
             timeout_add=lambda _seconds, _callback: 1,
+            source_remove=lambda _source: None,
         )
         session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
         session.callback_port = 1455
@@ -191,6 +192,7 @@ class AuthorizationValidationTests(unittest.TestCase):
             self.assertTrue(session._open_portal(url))
         self.assertEqual(events[0], ("ready", 1455))
         self.assertEqual(events[1][0], "subscribe")
+        self.assertEqual(events[1][1].rsplit("/", 1)[0], "/org/freedesktop/portal/desktop/request/1_99")
         opened = next(event for event in events if isinstance(event, tuple) and event[0] == "open")
         self.assertEqual(opened[1], url)
         self.assertEqual(opened[3], 5)
@@ -224,6 +226,35 @@ class AuthorizationValidationTests(unittest.TestCase):
             self.assertFalse(auth.listener_absent(listener.getsockname()[1]))
         finally:
             listener.close()
+
+    def test_ipv6_localhost_guard_prevents_late_callback_listener_bind(self):
+        probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        try:
+            probe.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            probe.bind(("::1", 0))
+            port = probe.getsockname()[1]
+        finally:
+            probe.close()
+        session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
+        session.ipv6_guard = None
+        with mock.patch.object(
+            auth.socket,
+            "getaddrinfo",
+            return_value=[(socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("::1", port, 0, 0))],
+        ):
+            session._reserve_ipv6_localhost(port)
+        try:
+            self.assertIsNotNone(session.ipv6_guard)
+            attacker = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            try:
+                attacker.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                with self.assertRaises(OSError):
+                    attacker.bind(("::1", port))
+            finally:
+                attacker.close()
+        finally:
+            if session.ipv6_guard is not None:
+                session.ipv6_guard.close()
 
     def test_native_tui_url_scanner_holds_url_until_forward_and_refuses_races(self):
         first = authorization_url(1455)
