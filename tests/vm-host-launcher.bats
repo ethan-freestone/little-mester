@@ -543,6 +543,13 @@ PY
   ! grep -Fq 'api_key' "$doc"
 }
 
+@test "browser auth preserves the validated desktop bus and optional owner TTY through wrappers" {
+  grep -Fq 'desktop_runtime="/run/user/$UID"' "$TEST_ROOT/lab-vm"
+  grep -Fq 'desktop_env+=("XDG_RUNTIME_DIR=$desktop_runtime" "DBUS_SESSION_BUS_ADDRESS=unix:path=$desktop_runtime/bus")' "$TEST_ROOT/lab-vm"
+  grep -Fq 'logger_stdin+=(--stdin)' "$TEST_ROOT/lib/vm/host-launcher.sh"
+  grep -Fq '"${logger_stdin[@]}"' "$TEST_ROOT/lib/vm/host-launcher.sh"
+}
+
 @test "runbook ENOSPC boundary logic makes at most one extra byte attempt" {
   run python3 - "$TEST_ROOT/docs/vm-v3-phase1-smoke.md" <<'PY'
 import ast, errno, os, pathlib, sys

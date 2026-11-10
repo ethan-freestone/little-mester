@@ -15,6 +15,19 @@ PYTHON = sys.executable
 
 
 class BoundedLogTests(unittest.TestCase):
+    def test_stdin_option_preserves_the_owner_terminal_input_for_the_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = pathlib.Path(directory) / "bounded.log"
+            result = subprocess.run(
+                [PYTHON, "-I", str(LOGGER), str(log), "256", "--stdin", "--", PYTHON, "-c",
+                 "import sys; print(sys.stdin.read())"],
+                input="OWNER_TTY_INPUT",
+                text=True,
+                timeout=4,
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertIn(b"OWNER_TTY_INPUT", log.read_bytes())
+
     def test_stream_is_capped_and_child_exit_code_is_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
             log = pathlib.Path(directory) / "bounded.log"

@@ -9,6 +9,7 @@ import pty
 import pwd
 import select
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -181,6 +182,8 @@ class AuthorizationValidationTests(unittest.TestCase):
         )
         session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
         session.callback_port = 1455
+        session.deadline = None
+        session.signal_received = None
         session._loopback_forward_ready = lambda port: events.append(("ready", port)) or True
         with mock.patch.dict("sys.modules", {
             "dbus": fake_dbus,
@@ -202,10 +205,108 @@ class AuthorizationValidationTests(unittest.TestCase):
         session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
         session.tty_fd = None
         session.status = 0
-        session._open_portal = lambda _url: False
+        session.callback_port = 1455
+        session.signal_received = None
+        session.deadline = None
+        session._loopback_forward_ready = lambda _port: True
+        session._open_portal = lambda *_args: False
         with self.assertRaises(auth.AuthSessionError) as error:
             session._portal_or_manual(authorization_url())
         self.assertEqual(error.exception.status, 76)
+
+    def test_portal_failure_after_cancellation_never_discloses_manual_url(self):
+        session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
+        session.tty_fd = 1
+        session.callback_port = 1455
+        session.deadline = time.monotonic() + 30
+        session.signal_received = None
+        session._loopback_forward_ready = lambda _port: True
+        output = []
+
+        def cancel_during_portal(_url, _deadline):
+            session.signal_received = signal.SIGTERM
+            return False
+
+        session._open_portal = cancel_during_portal
+        session._write_tty = output.append
+        url = authorization_url()
+        with self.assertRaises(auth.AuthSessionError) as error:
+            session._portal_or_manual(url, session.deadline)
+        self.assertEqual(error.exception.status, 128 + signal.SIGTERM)
+        self.assertFalse(any(url.encode("ascii") in chunk for chunk in output))
+
+    def test_portal_wait_cancellation_closes_pending_request(self):
+        closed = []
+        callbacks = []
+        session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
+        session.callback_port = 1455
+        session.deadline = time.monotonic() + 30
+        session.signal_received = None
+        session._loopback_forward_ready = lambda _port: True
+
+        class Receiver:
+            def remove(self):
+                pass
+
+        class Bus:
+            def get_unique_name(self):
+                return ":1.7"
+
+            def get_object(self, _name, _path):
+                return object()
+
+            def add_signal_receiver(self, _callback, **_kwargs):
+                return Receiver()
+
+        bus = Bus()
+
+        class Portal:
+            def OpenURI(self, _parent, _url, options, timeout):
+                self.token = options["handle_token"]
+                return f"/org/freedesktop/portal/desktop/request/1_7/{self.token}"
+
+        portal = Portal()
+
+        class Request:
+            def Close(self, timeout):
+                closed.append(timeout)
+
+        def interface(_obj, name):
+            return portal if name == "org.freedesktop.portal.OpenURI" else Request()
+
+        class Loop:
+            def run(self):
+                session.signal_received = signal.SIGTERM
+                callbacks[0]()
+
+            def quit(self):
+                pass
+
+        glib = types.SimpleNamespace(
+            MainLoop=Loop,
+            timeout_add=lambda _ms, callback: callbacks.append(callback) or len(callbacks),
+            source_remove=lambda _source: None,
+        )
+        fake_dbus = types.ModuleType("dbus")
+        fake_dbus.SessionBus = lambda: bus
+        fake_dbus.Interface = interface
+        mainloop = types.ModuleType("dbus.mainloop")
+        glib_dbus = types.ModuleType("dbus.mainloop.glib")
+        glib_dbus.DBusGMainLoop = lambda **_kwargs: None
+        gi = types.ModuleType("gi")
+        repository = types.ModuleType("gi.repository")
+        repository.GLib = glib
+        with mock.patch.dict("sys.modules", {
+            "dbus": fake_dbus,
+            "dbus.mainloop": mainloop,
+            "dbus.mainloop.glib": glib_dbus,
+            "gi": gi,
+            "gi.repository": repository,
+        }):
+            with self.assertRaises(auth.AuthSessionError) as error:
+                session._open_portal(authorization_url(), session.deadline)
+        self.assertEqual(error.exception.status, 128 + signal.SIGTERM)
+        self.assertEqual(closed, [2])
 
     def test_listener_absence_detects_ipv4_mapped_ipv6_callback_sockets(self):
         listener = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
@@ -255,6 +356,34 @@ class AuthorizationValidationTests(unittest.TestCase):
         finally:
             if session.ipv6_guard is not None:
                 session.ipv6_guard.close()
+
+    def test_ipv6_reservation_collision_never_claims_listener_cleanup_proof(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
+            session.forward_attempted = False
+            session.forward_installed = False
+            session.callback_port = None
+            session.listener_verified_closed = True
+            session.listener_was_available = False
+            session.ipv6_guard = None
+            session.args = SimpleNamespace()
+            session.socket_path = root / "control.sock"
+            session.identity_path = root / "ssh.identity"
+            session.ssh_process = None
+            session.proof_path = root / "proof.json"
+            session._reserve_ipv6_localhost = lambda _port: (_ for _ in ()).throw(
+                auth.AuthSessionError("IPv6 localhost callback collision could not be excluded", 77)
+            )
+            with self.assertRaises(auth.AuthSessionError):
+                session._install_forward(1455)
+            self.assertEqual(session.callback_port, 1455)
+            self.assertFalse(session.listener_verified_closed)
+            self.assertFalse(session._cleanup())
+            session._write_proof(False)
+            proof = __import__("json").loads(session.proof_path.read_text())
+            self.assertFalse(proof["listener_verified_closed"])
+            self.assertFalse(proof["cleanup_complete"])
 
     def test_native_tui_url_scanner_holds_url_until_forward_and_refuses_races(self):
         first = authorization_url(1455)
@@ -325,10 +454,10 @@ class RelayHandler(socketserver.BaseRequestHandler):
     def handle(self):
         with socket.create_connection(("127.0.0.1", target_port), timeout=2) as target:
             data = self.request.recv(4096)
-            if data:
-                callback_seen.set()
             target.sendall(data)
             self.request.sendall(target.recv(4096))
+            if data:
+                callback_seen.set()
 
 class Forward(socketserver.ThreadingTCPServer):
     allow_reuse_address = False
@@ -626,7 +755,7 @@ class BrowserAuthProcessTests(unittest.TestCase):
 
     def test_synthetic_oauth_waits_for_forward_and_reaches_fake_callback_target(self):
         status, terminal, _evidence = self._run_session("success")
-        self.assertEqual(status, 0)
+        self.assertEqual(status, 0, terminal.decode("utf-8", "replace"))
         self.assertIn(b"Verified localhost callback forward is ready", terminal)
 
     def test_non_tty_portal_failure_is_sanitized_and_cleans_owned_forward(self):
