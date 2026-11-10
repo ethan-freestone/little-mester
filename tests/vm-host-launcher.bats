@@ -2144,6 +2144,35 @@ SH
   [[ "$output" != *"SSH_WAS_CALLED"* ]]
 }
 
+@test "interactive SSH is an unbounded PTY session with fixed non-forwarding policy" {
+  local fake_bin="$TEST_TMP/fake-bin" run_dir="$TEST_TMP/interactive-run" args="$TEST_TMP/ssh-args"
+  mkdir -p "$fake_bin" "$run_dir"
+  chmod 0700 "$run_dir"
+  printf '43210\n' >"$run_dir/ssh_port"
+  : >"$run_dir/id_vm_control"
+  : >"$run_dir/known_hosts"
+  chmod 0600 "$run_dir/ssh_port" "$run_dir/id_vm_control" "$run_dir/known_hosts"
+  cat >"$fake_bin/ssh" <<'SH'
+#!/bin/sh
+printf '%s\n' "$@" >"$VM_HOST_TEST_SSH_ARGS"
+SH
+  chmod 0700 "$fake_bin/ssh"
+
+  run env PATH="$fake_bin:/usr/bin:/bin" VM_HOST_TEST_SSH_ARGS="$args" \
+    bash -c 'source "$1/lib/vm/host-launcher.sh"; vm_host_ssh_interactive "$2"' \
+    _ "$TEST_ROOT" "$run_dir"
+
+  [ "$status" -eq 0 ]
+  grep -Fxq -- '-tt' "$args"
+  grep -Fxq -- 'EscapeChar=none' "$args"
+  grep -Fxq -- 'ForwardAgent=no' "$args"
+  grep -Fxq -- 'ForwardX11=no' "$args"
+  grep -Fxq -- 'ClearAllForwardings=yes' "$args"
+  grep -Fxq -- '43210' "$args"
+  grep -Fxq -- 'mester@127.0.0.1' "$args"
+  ! grep -Eq '(^|[[:space:]])(timeout|ControlMaster=yes|LocalForward|RemoteForward)([[:space:]]|$)' "$args"
+}
+
 @test "smoke debug flag is set before lifecycle preflight and fails before VM work" {
   local observed="$TEST_TMP/debug-flag"
   vm_host_validate_model() { :; }

@@ -770,6 +770,58 @@ vm_host_ssh_capture() {
   vm_host_ssh_bounded "$run_dir" "$output" "$command" "$limit" 0 0
 }
 
+# Interactive owner SSH is deliberately separate from the bounded control
+# channel above: it has no wall-clock deadline and does not own the VM
+# lifecycle. Disconnecting this client must never stop the parent session.
+vm_host_ssh_interactive() {
+  local run_dir="$1" ssh_port
+  if ! python3 -I - "$run_dir" <<'PY'
+import os, pathlib, stat, sys
+raw = pathlib.Path(sys.argv[1])
+try:
+    info = os.lstat(raw)
+    resolved = raw.resolve(strict=True)
+except (OSError, RuntimeError):
+    raise SystemExit(1)
+if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+        or info.st_mode & 0o077 or raw.absolute() != resolved):
+    raise SystemExit(1)
+for name in ("id_vm_control", "known_hosts", "ssh_port"):
+    try:
+        item = os.lstat(raw / name)
+    except OSError:
+        raise SystemExit(1)
+    if (not stat.S_ISREG(item.st_mode) or item.st_uid != os.getuid()
+            or stat.S_IMODE(item.st_mode) != 0o600):
+        raise SystemExit(1)
+PY
+  then
+    vm_host_error 'interactive SSH run state is unavailable, substituted, or not private'
+    return 2
+  fi
+  ssh_port="$(<"$run_dir/ssh_port")" || {
+    vm_host_error 'interactive SSH port is unavailable'
+    return 2
+  }
+  [[ "$ssh_port" =~ ^[0-9]{1,5}$ ]] && (( ssh_port >= 1024 && ssh_port <= 65535 )) || {
+    vm_host_error 'interactive SSH port is invalid'
+    return 2
+  }
+  [[ -f "$run_dir/id_vm_control" && ! -L "$run_dir/id_vm_control" \
+    && -f "$run_dir/known_hosts" && ! -L "$run_dir/known_hosts" ]] || {
+    vm_host_error 'interactive SSH identity or host-key file is unavailable'
+    return 2
+  }
+  exec ssh -F /dev/null -tt \
+    -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile="$run_dir/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+    -o IdentitiesOnly=yes -o IdentityAgent=none -o ProxyCommand=none -o ProxyJump=none \
+    -o CanonicalizeHostname=no -o ControlMaster=no -o ControlPath=none \
+    -o ClearAllForwardings=yes -o ForwardAgent=no -o ForwardX11=no \
+    -o PermitLocalCommand=no -o EscapeChar=none -o LogLevel=ERROR \
+    -i "$run_dir/id_vm_control" -p "$ssh_port" "mester@127.0.0.1"
+}
+
 vm_host_ssh_bounded() {
   local run_dir="$1" output="$2" command="$3" limit="$4"
   local inherit_stdin="${5:-0}" force_tty="${6:-0}"
