@@ -1047,14 +1047,10 @@ vm_host_browser_auth_session() {
   ssh_exe="$(command -v ssh)" || { vm_host_error 'SSH executable is unavailable'; return 1; }
   python_exe="$(readlink -f -- "$(command -v python3)")" || return 1
   rm -f -- "$identity_file" "$completion_file" "$proof_file" "$control_socket" "$callback_port_file" "$ssh_identity"
-  : >"$run_dir/auth-session.log" || return 1
-  chmod 0600 "$run_dir/auth-session.log" || return 1
   printf 'stage: owner ChatGPT browser login (maximum %ss)\n' "$timeout_seconds"
-  printf 'In the guest TUI use /connect → OpenAI → Sign in with ChatGPT; copy-link (c), paste in your host browser, then type /exit after sign-in. Do not click/open the link.\n'
   (
-    exec 0<>/dev/tty
-    exec python3 -I "$bounded_logger" "$run_dir/auth-session.log" "$VM_HOST_GUEST_OUTPUT_LIMIT_BYTES" \
-      --fail-on-overflow --stdin --completion-file "$completion_file" -- \
+    exec python3 -I "$bounded_logger" - "$VM_HOST_GUEST_OUTPUT_LIMIT_BYTES" \
+      --fail-on-overflow --completion-file "$completion_file" -- \
       python3 -I "$auth_script" \
         --ssh "$ssh_exe" --ssh-port "$ssh_port" \
         --identity-file "$run_dir/id_vm_control" --known-hosts "$run_dir/known_hosts" \
@@ -1080,7 +1076,14 @@ vm_host_browser_auth_session() {
     return 1
   fi
   if (( status != 0 )); then
-    vm_host_error 'owner browser authentication was cancelled, timed out, or failed; details are shown only in the live TUI'
+    case "$status" in
+      124) vm_host_error 'ChatGPT browser authentication exceeded its bounded deadline' ;;
+      130) vm_host_error 'ChatGPT browser authentication was cancelled by the owner' ;;
+      75) vm_host_error 'pinned OpenCode ChatGPT authorization was missing or outside the exact approved protocol' ;;
+      76) vm_host_error 'desktop portal was unavailable and no usable manual browser fallback existed' ;;
+      77) vm_host_error 'callback forwarding or localhost verification failed safely' ;;
+      *) vm_host_error 'ChatGPT browser authentication failed; OAuth details were intentionally suppressed' ;;
+    esac
     return 1
   fi
 }
@@ -1118,7 +1121,7 @@ vm_host_browser_auth_smoke() {
     return 1
   fi
   VM_HOST_AUTH_STARTED=0
-  printf 'BROWSER_AUTH_UI_OK\n'
+  printf 'BROWSER_AUTH_OK\n'
 }
 
 vm_host_model_smoke() {

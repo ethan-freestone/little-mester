@@ -528,8 +528,11 @@ PY
 
 @test "Phase 1 runbook requires ChatGPT browser login, not an API key" {
   local doc="$TEST_ROOT/docs/vm-v3-phase1-smoke.md"
-  grep -Fq 'Sign in with ChatGPT' "$doc"
+  grep -Fq 'opencode auth login openai --method chatgpt-browser' "$doc"
   grep -Fq 'No API key or API credits are used' "$doc"
+  grep -Fq 'http://localhost:1455/auth/callback' "$doc"
+  grep -Fq 'http://localhost:1457/auth/callback' "$doc"
+  grep -Fq 'org.freedesktop.portal.OpenURI' "$doc"
   grep -Fq "MODEL='openai/gpt-6-luna#max'" "$doc"
   grep -Fq 'opencode auth logout openai' "$doc"
   grep -Fq 'not from other processes running as `mester`, guest root' "$doc"

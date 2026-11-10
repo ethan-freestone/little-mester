@@ -14,7 +14,6 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ENTRY = ROOT / "tools/vm-owner-acceptance"
 loader = importlib.machinery.SourceFileLoader("vm_owner_acceptance", str(ENTRY))
@@ -577,7 +576,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
                     acceptance.storage_proof(str(workspace))
             self.assertEqual(list(workspace.iterdir()), [])
 
-    def test_smoke_requires_tty_then_inherits_terminal_without_capturing_oauth_output(self):
+    def test_smoke_runs_without_tty_and_inherits_standard_streams(self):
         class NotTTY(io.StringIO):
             def isatty(self):
                 return False
@@ -585,20 +584,10 @@ class OwnerAcceptanceTests(unittest.TestCase):
         sha = "b" * 40
         root = pathlib.Path("/protected/install")
         data = acceptance.report_template(sha, "run", pathlib.Path("/private/report"))
-        with mock.patch.object(acceptance.sys, "stdin", NotTTY()), \
-                mock.patch.object(acceptance.subprocess, "run") as run:
-            with self.assertRaises(acceptance.GateError):
-                acceptance.run_smoke(root, "/workspace", "openai/model", set(), data)
-            run.assert_not_called()
-
-        class TTY(io.StringIO):
-            def isatty(self):
-                return True
-
         state = pathlib.Path("/private/state")
         with (
-            mock.patch.object(acceptance.sys, "stdin", TTY()),
-            mock.patch.object(acceptance.sys, "stdout", TTY()),
+            mock.patch.object(acceptance.sys, "stdin", NotTTY()),
+            mock.patch.object(acceptance.sys, "stdout", NotTTY()),
             mock.patch.object(acceptance, "verify_workspace_mount", return_value=pathlib.Path("/workspace")),
             mock.patch.object(acceptance.pathlib.Path, "iterdir", return_value=iter(())),
             mock.patch.object(acceptance, "state_root", return_value=state),
@@ -614,6 +603,29 @@ class OwnerAcceptanceTests(unittest.TestCase):
         self.assertIsNone(kwargs["stderr"])
         self.assertEqual(data["gates"]["run"], "PASS")
         self.assertEqual(data["gates"]["cleanup"], "PASS")
+
+    def test_clean_env_preserves_only_validated_owner_session_bus(self):
+        uid = 12345
+        runtime = pathlib.Path(f"/run/user/{uid}")
+        bus = runtime / "bus"
+
+        def fake_stat(path, *args, **kwargs):
+            if path == runtime:
+                return SimpleNamespace(st_uid=uid, st_mode=stat.S_IFDIR | 0o700)
+            if path == bus:
+                return SimpleNamespace(st_uid=uid, st_mode=stat.S_IFSOCK | 0o600)
+            raise FileNotFoundError
+
+        with mock.patch.object(acceptance.os, "getuid", return_value=uid), \
+                mock.patch.object(pathlib.Path, "stat", fake_stat):
+            env = acceptance.clean_env(desktop_session=True)
+            ordinary_env = acceptance.clean_env()
+        self.assertEqual(env["XDG_RUNTIME_DIR"], str(runtime))
+        self.assertEqual(env["DBUS_SESSION_BUS_ADDRESS"], f"unix:path={bus}")
+        self.assertNotIn("XDG_RUNTIME_DIR", ordinary_env)
+        self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", ordinary_env)
+        self.assertNotIn("DISPLAY", env)
+        self.assertNotIn("WAYLAND_DISPLAY", env)
 
     def test_nonzero_smoke_is_blocked_and_never_claims_cleanup(self):
         class TTY(io.StringIO):

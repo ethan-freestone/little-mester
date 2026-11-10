@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import pathlib
@@ -21,11 +22,10 @@ import time
 import uuid
 from urllib.parse import parse_qsl, urlsplit
 
-
 MAX_AUTH_URL_LENGTH = 8192
 MAX_AUTH_OUTPUT_BYTES = 65536
 MAX_FIELDS = 32
-AUTHORIZATION_URL_PREFIX = b"https://auth.openai.com/api/accounts/authorize?"
+AUTHORIZATION_URL_PREFIX = b"https://auth.openai.com/oauth/authorize?"
 URL_CHARACTERS = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:/?&=._~%+-")
 SSH_STOP_GRACE_SECONDS = 3
 FORWARD_COMMAND_TIMEOUT_SECONDS = 5
@@ -33,23 +33,28 @@ CONTROL_SOCKET_LIMIT = 100
 SECRET_QUERY_KEYS = {"code", "access_token", "refresh_token", "id_token", "code_verifier"}
 REQUIRED_QUERY_KEYS = {
     "client_id",
-    "ext_agent_host_id",
     "response_type",
     "redirect_uri",
     "scope",
-    "resource",
     "state",
-    "nonce",
     "code_challenge_method",
     "code_challenge",
+    "id_token_add_organizations",
+    "codex_cli_simplified_flow",
+    "originator",
 }
-OPTIONAL_QUERY_KEYS = {"agent_name_hint"}
+OPTIONAL_QUERY_KEYS = set()
 BASE64URL_43 = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 CLIENT_ID = re.compile(r"[A-Za-z0-9._-]{1,256}\Z")
+PINNED_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 
 class AuthSessionError(Exception):
     """A deliberately sanitized browser-auth failure."""
+
+    def __init__(self, message: str, status: int = 75):
+        super().__init__(message)
+        self.status = status
 
 
 def _single_value_query(raw_query: str) -> dict[str, str]:
@@ -89,7 +94,7 @@ def validate_authorization_url(raw_url: str) -> int:
         or parsed_port is not None
         or parsed.username is not None
         or parsed.password is not None
-        or parsed.path != "/api/accounts/authorize"
+        or parsed.path != "/oauth/authorize"
         or not parsed.query
         or parsed.fragment
         or any(ord(character) <= 0x20 or ord(character) >= 0x7F for character in raw_url)
@@ -104,27 +109,15 @@ def validate_authorization_url(raw_url: str) -> int:
         raise AuthSessionError("authorization URL query shape is not approved")
     if query.get("response_type") != "code":
         raise AuthSessionError("authorization response type is not approved")
-    if query.get("resource") != "https://api.openai.com/v1":
-        raise AuthSessionError("authorization resource is not approved")
-    if query.get("agent_name_hint", "OpenCode") != "OpenCode":
-        raise AuthSessionError("authorization client hint is not approved")
-    if not CLIENT_ID.fullmatch(query.get("client_id", "")):
+    if (query.get("scope") != "openid profile email offline_access"
+            or query.get("id_token_add_organizations") != "true"
+            or query.get("codex_cli_simplified_flow") != "true"
+            or query.get("originator") != "opencode"):
+        raise AuthSessionError("authorization parameters do not match pinned OpenCode 2.2.5")
+    if query.get("client_id") != PINNED_CLIENT_ID or not CLIENT_ID.fullmatch(query.get("client_id", "")):
         raise AuthSessionError("authorization client identifier is invalid")
-    host_id = query.get("ext_agent_host_id", "")
-    if not host_id.startswith("urn:uuid:"):
-        raise AuthSessionError("authorization host identifier is invalid")
-    try:
-        host_uuid = uuid.UUID(host_id.removeprefix("urn:uuid:"))
-    except (ValueError, AttributeError) as error:
-        raise AuthSessionError("authorization host identifier is invalid") from error
-    if str(host_uuid) != host_id.removeprefix("urn:uuid:"):
-        raise AuthSessionError("authorization host identifier is not canonical")
-
-    if query.get("scope") != "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct":
-        raise AuthSessionError("authorization scope is not approved")
     if (
         not BASE64URL_43.fullmatch(query.get("state", ""))
-        or not BASE64URL_43.fullmatch(query.get("nonce", ""))
         or query.get("code_challenge_method") != "S256"
         or not BASE64URL_43.fullmatch(query.get("code_challenge", ""))
     ):
@@ -139,25 +132,27 @@ def validate_authorization_url(raw_url: str) -> int:
         port = redirect.port
     except ValueError as error:
         raise AuthSessionError("authorization callback URI is invalid") from error
-    if port is None or redirect.scheme != "http" or redirect.netloc != f"127.0.0.1:{port}":
-        raise AuthSessionError("authorization callback URI is not loopback-only")
+    expected_redirects = {
+        "http://localhost:1455/auth/callback": 1455,
+        "http://localhost:1457/auth/callback": 1457,
+    }
+    if redirect_raw not in expected_redirects:
+        raise AuthSessionError("authorization callback URI is not an exact pinned localhost URI")
     if (
-        redirect.hostname != "127.0.0.1"
+        redirect.hostname != "localhost"
         or redirect.username is not None
         or redirect.password is not None
         or redirect.path != "/auth/callback"
         or redirect.query
         or redirect.fragment
-        or port is None
-        or not 1024 <= port <= 65535
-        or redirect_raw != f"http://127.0.0.1:{port}/auth/callback"
+        or port != expected_redirects[redirect_raw]
     ):
         raise AuthSessionError("authorization callback URI is not an exact guest loopback URI")
-    return port
+    return expected_redirects[redirect_raw]
 
 
 class AuthorizationOutputScanner:
-    """Find the native TUI hyperlink, holding it until its exact forward is live."""
+    """Find one pinned CLI authorization URL and keep it out of retained output."""
 
     def __init__(self):
         self.pending = bytearray()
@@ -248,7 +243,9 @@ def control_socket_arguments(
         raise AuthSessionError("SSH control port is invalid")
     if not os.path.isabs(control_path) or len(control_path) >= CONTROL_SOCKET_LIMIT:
         raise AuthSessionError("SSH control socket path is invalid")
-    forward = f"127.0.0.1:{callback_port}:127.0.0.1:{callback_port}"
+    # The pinned provider uses server.listen(port, "localhost") in the guest.
+    # The host-side listener remains explicitly IPv4-loopback-only.
+    forward = f"127.0.0.1:{callback_port}:localhost:{callback_port}"
     return [
         ssh,
         "-F",
@@ -358,6 +355,8 @@ def listener_absent(port: int) -> bool:
             )
             if address == b"\0" * 16:
                 return True
+            if address == b"\0" * 15 + b"\1":
+                return True
             return address[:12] == b"\0" * 10 + b"\xff\xff" and address[12:] in {
                 b"\0" * 4,
                 socket.inet_aton("127.0.0.1"),
@@ -411,13 +410,19 @@ class BrowserAuthSession:
     def _signal(self, signum, _frame):
         self.signal_received = signum
 
-    def _tty(self):
+    def _optional_tty(self):
         try:
             self.tty_fd = os.dup(0)
-        except OSError as error:
-            raise AuthSessionError("interactive controlling TTY is required") from error
-        if not os.isatty(self.tty_fd):
-            raise AuthSessionError("interactive controlling TTY is required")
+        except OSError:
+            self.tty_fd = None
+        if self.tty_fd is not None and not os.isatty(self.tty_fd):
+            os.close(self.tty_fd)
+            self.tty_fd = None
+        if self.tty_fd is None:
+            try:
+                self.tty_fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+            except OSError:
+                self.tty_fd = None
 
     def _remote_command(self) -> str:
         directory = self.args.guest_auth_dir
@@ -445,7 +450,7 @@ class BrowserAuthSession:
             "HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 "
             "http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128 "
             "NO_PROXY=localhost,127.0.0.1,10.0.2.100 no_proxy=localhost,127.0.0.1,10.0.2.100 "
-            "/usr/local/bin/opencode"
+            "/usr/local/bin/opencode auth login openai --method chatgpt-browser"
         )
 
     def _ssh_command(self) -> list[str]:
@@ -460,7 +465,7 @@ class BrowserAuthSession:
             "-M",
             "-S",
             str(self.socket_path),
-            "-tt",
+            "-T",
             "-o",
             "ControlMaster=yes",
             "-o",
@@ -505,7 +510,7 @@ class BrowserAuthSession:
 
     def _write_tty(self, data: bytes) -> None:
         if self.tty_fd is None:
-            raise AuthSessionError("interactive terminal is unavailable")
+            return
         view = memoryview(data)
         while view:
             try:
@@ -522,7 +527,7 @@ class BrowserAuthSession:
         if not listener_absent(port):
             self.callback_port = port
             self.listener_verified_closed = False
-            raise AuthSessionError("the exact host-loopback callback port is already occupied")
+            raise AuthSessionError("the exact host-loopback callback port is already occupied", 77)
         self.listener_was_available = True
         self.forward_attempted = True
         self.callback_port = port
@@ -536,21 +541,108 @@ class BrowserAuthSession:
             self.args.known_hosts,
         )
         if not run_control_command(command):
-            raise AuthSessionError("exact loopback callback forward could not be created")
+            raise AuthSessionError("exact loopback callback forward could not be created", 77)
         self.forward_installed = True
         self.listener_verified_closed = False
+        if not self._loopback_forward_ready(port):
+            raise AuthSessionError("verified localhost callback forward did not become ready", 77)
         _write_port(self.port_path, port)
-        self._write_tty(
-            b"\r\nTemporary loopback callback is ready. Use copy-link and paste the URL in your host browser.\r\n"
-        )
+        self._write_tty(b"\r\nVerified localhost callback forward is ready; opening the owner browser.\r\n")
+
+    def _loopback_forward_ready(self, port: int) -> bool:
+        try:
+            addresses = socket.getaddrinfo("localhost", port, type=socket.SOCK_STREAM)
+            if not addresses or any(
+                not ipaddress.ip_address(item[4][0].split("%", 1)[0]).is_loopback
+                for item in addresses
+            ):
+                return False
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                pass
+            return not listener_absent(port) and self._owned_ssh_process()
+        except (OSError, ValueError):
+            return False
+
+    def _owned_ssh_process(self) -> bool:
+        process = self.ssh_process
+        if process is None or process.poll() is not None:
+            return False
+        try:
+            proc = pathlib.Path(f"/proc/{process.pid}")
+            fields = (proc / "stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()
+            identity = json.loads(self.identity_path.read_text(encoding="utf-8"))
+            return (
+                int(identity["pid"]) == process.pid
+                and identity["start_time"] == fields[19]
+                and identity["exe"] == os.path.realpath(proc / "exe")
+            )
+        except (OSError, ValueError, KeyError, IndexError):
+            return False
+
+    def _open_portal(self, url: str) -> bool:
+        """Ask the invoking owner's desktop portal to open one validated URL."""
+        if not self._loopback_forward_ready(self.callback_port):
+            raise AuthSessionError("browser opening refused because the callback forward is not verified", 77)
+        try:
+            import dbus
+            from dbus.mainloop.glib import DBusGMainLoop
+            from gi.repository import GLib
+
+            DBusGMainLoop(set_as_default=True)
+            bus = dbus.SessionBus()
+            portal = bus.get_object("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop")
+            interface = dbus.Interface(portal, "org.freedesktop.portal.OpenURI")
+            token = "mester_auth_" + uuid.uuid4().hex
+            response = {"code": None}
+            loop = GLib.MainLoop()
+
+            def on_response(code, _results):
+                response["code"] = int(code)
+                loop.quit()
+
+            sender = bus.get_unique_name().replace(":", "_").replace(".", "_")
+            expected_path = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
+            receiver = bus.add_signal_receiver(
+                on_response,
+                signal_name="Response",
+                dbus_interface="org.freedesktop.portal.Request",
+                path=expected_path,
+            )
+            try:
+                request_path = interface.Open("", url, {"handle_token": token}, timeout=5)
+                if str(request_path) != expected_path:
+                    return False
+                GLib.timeout_add(15000, lambda: (loop.quit(), False)[1])
+                loop.run()
+            finally:
+                receiver.remove()
+            return response["code"] == 0
+        except Exception:
+            return False
+
+    def _portal_or_manual(self, url: str) -> None:
+        if self._open_portal(url):
+            self._write_tty(
+                b"Owner browser opened through the desktop portal. Complete ChatGPT consent; this stage continues automatically.\r\n"
+            )
+            return
+        if self.tty_fd is not None:
+            fallback = (
+                "\r\nDesktop browser portal unavailable or declined; manual fallback: open this validated URL in the host browser:\r\n"
+                + url + "\r\n\r\n"
+            )
+            self._write_tty(fallback.encode("ascii"))
+        else:
+            self.status = 76
+            raise AuthSessionError(
+                "desktop browser portal unavailable and no interactive manual fallback is available", 76
+            )
 
     def _start_ssh(self) -> None:
-        if self.tty_fd is None:
-            raise AuthSessionError("interactive terminal is unavailable")
         command = self._ssh_command()
         self.ssh_process = subprocess.Popen(
             command,
-            stdin=self.tty_fd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             close_fds=True,
@@ -592,17 +684,16 @@ class BrowserAuthSession:
                     self.status = 125
                     self.failure = "interactive guest output exceeded its fixed byte limit"
                     return
-                visible, port, held = self.scanner.feed(chunk)
-                if visible:
-                    # No complete URL is present in this portion.
-                    self._write_tty(visible)
+                _visible, port, _held = self.scanner.feed(chunk)
                 if port is not None:
                     self._install_forward(port)
-                    if held:
-                        self._write_tty(held)
+                    if not self._owned_ssh_process():
+                        raise AuthSessionError("browser opening refused because SSH ownership is unverified", 77)
+                    self._portal_or_manual(self.scanner.auth_url)
         if self.scanner.auth_url is None:
             self.status = self.status or 1
             self.failure = "OpenCode did not request the approved ChatGPT browser flow"
+            self.status = 75
 
     def _control(self, operation: str, port: int) -> bool:
         command = control_socket_arguments(
@@ -697,17 +788,13 @@ class BrowserAuthSession:
             old_handlers[signum] = signal.signal(signum, self._signal)
         clean = False
         try:
-            self._tty()
-            self._write_tty(
-                b"OpenCode browser authentication: use /connect -> OpenAI -> Sign in with ChatGPT.\r\n"
-                b"After the forward-ready notice, use the TUI copy-link action (c) and paste into your host browser.\r\n"
-                b"Do not click or open the link. After sign-in completes, type /exit to finish this stage.\r\n"
-            )
+            self._optional_tty()
+            self._write_tty(b"Starting pinned OpenCode 2.2.5 ChatGPT browser authorization.\r\n")
             self._start_ssh()
             self._run_ui()
         except AuthSessionError as error:
             self.failure = str(error)
-            self.status = 1
+            self.status = error.status
         except (OSError, ValueError, subprocess.SubprocessError):
             self.failure = "browser authentication failed safely"
             self.status = 1
@@ -729,7 +816,7 @@ class BrowserAuthSession:
         if self.failure:
             print(self.failure, file=sys.stderr)
         elif self.status == 0:
-            print("BROWSER_AUTH_UI_COMPLETE")
+            print("BROWSER_AUTH_COMPLETE")
         return int(self.status or 0)
 
 

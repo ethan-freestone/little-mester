@@ -14,11 +14,12 @@ import subprocess
 import tempfile
 import threading
 import time
+import types
 import unittest
 import urllib.parse
-from types import SimpleNamespace
 from socketserver import BaseRequestHandler, ThreadingTCPServer
-
+from types import SimpleNamespace
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).parent.parent
 SESSION_PATH = ROOT / "lib/vm/browser-auth-session.py"
@@ -27,21 +28,22 @@ auth = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(auth)
 
 
-def authorization_url(port=43210, *, state="S" * 43, nonce="N" * 43, challenge="C" * 43):
+def authorization_url(port=1455, *, state="S" * 43, nonce="N" * 43, challenge="C" * 43):
+    if port not in (1455, 1457):
+        raise ValueError("pinned OpenCode callback ports only")
     query = {
-        "client_id": "dynamic_agent_client",
-        "agent_name_hint": "OpenCode",
-        "ext_agent_host_id": "urn:uuid:12345678-1234-1234-1234-123456789abc",
+        "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
         "response_type": "code",
-        "redirect_uri": f"http://127.0.0.1:{port}/auth/callback",
-        "scope": "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct",
-        "resource": "https://api.openai.com/v1",
+        "redirect_uri": f"http://localhost:{port}/auth/callback",
+        "scope": "openid profile email offline_access",
         "state": state,
-        "nonce": nonce,
         "code_challenge_method": "S256",
         "code_challenge": challenge,
+        "id_token_add_organizations": "true",
+        "codex_cli_simplified_flow": "true",
+        "originator": "opencode",
     }
-    return "https://auth.openai.com/api/accounts/authorize?" + urllib.parse.urlencode(query)
+    return "https://auth.openai.com/oauth/authorize?" + urllib.parse.urlencode(query)
 
 
 def free_port():
@@ -51,15 +53,15 @@ def free_port():
 
 
 class AuthorizationValidationTests(unittest.TestCase):
-    def test_pinned_open_code_authorize_shape_and_dynamic_callback_port(self):
-        value = authorization_url(54321)
-        self.assertEqual(auth.validate_authorization_url(value), 54321)
+    def test_pinned_open_code_authorize_shape_and_literal_callback_forward(self):
+        value = authorization_url(1455)
+        self.assertEqual(auth.validate_authorization_url(value), 1455)
         command = auth.control_socket_arguments(
-            "/usr/bin/ssh", "/tmp/private/auth.sock", "forward", 54321, 43210,
+            "/usr/bin/ssh", "/tmp/private/auth.sock", "forward", 1455, 43210,
             "/tmp/private/id", "/tmp/private/known_hosts",
         )
         self.assertEqual(command.count("-L"), 1)
-        self.assertEqual(command[command.index("-L") + 1], "127.0.0.1:54321:127.0.0.1:54321")
+        self.assertEqual(command[command.index("-L") + 1], "127.0.0.1:1455:localhost:1455")
         self.assertNotIn("-R", command)
         self.assertNotIn("-D", command)
         self.assertIn("/dev/null", command)
@@ -73,20 +75,19 @@ class AuthorizationValidationTests(unittest.TestCase):
         rejected = [
             valid.replace("https://auth.openai.com/", "http://auth.openai.com/", 1),
             valid.replace("auth.openai.com", "auth.openai.com.evil.invalid", 1),
-            valid.replace("/api/accounts/authorize", "/api/other", 1),
-            valid.replace("redirect_uri=http%3A%2F%2F127.0.0.1%3A43210%2Fauth%2Fcallback",
-                          "redirect_uri=http%3A%2F%2F127.0.0.1%3A43210%2Fauth%2Fcallback%3Fextra%3D1"),
-            valid + "&redirect_uri=http%3A%2F%2F127.0.0.1%3A43210%2Fauth%2Fcallback",
+            valid.replace("/oauth/authorize", "/api/other", 1),
+            valid.replace("http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback",
+                          "http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback%3Fextra%3D1"),
+            valid + "&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback",
             valid + "#fragment",
             valid.replace("state=" + "S" * 43, "state=forged"),
-            valid.replace("nonce=" + "N" * 43, "nonce=forged"),
             valid.replace("code_challenge_method=S256", "code_challenge_method=plain"),
             valid.replace("code_challenge=" + "C" * 43, "code_challenge=short"),
             valid + "&code_verifier=synthetic-canary",
-            valid.replace("http%3A%2F%2F127.0.0.1%3A43210", "http%3A%2F%2Flocalhost%3A43210"),
-            valid.replace("43210", "1023"),
-            valid.replace("43210", "65536"),
-            valid.replace("43210", "043210"),
+            valid.replace("localhost%3A1455", "127.0.0.1%3A1455"),
+            valid.replace("localhost%3A1455", "localhost%3A1456"),
+            valid.replace("localhost%3A1455", "localhost%3A1023"),
+            valid.replace("localhost%3A1455", "evil.invalid%3A1455"),
         ]
         for candidate in rejected:
             with self.subTest(candidate=candidate[:96]):
@@ -95,7 +96,8 @@ class AuthorizationValidationTests(unittest.TestCase):
 
     def test_rejects_duplicate_oauth_state_and_callback_secret_fields(self):
         valid = authorization_url()
-        for candidate in (valid + "&state=" + "T" * 43, valid + "&code=synthetic-code-canary"):
+        for candidate in (valid + "&state=" + "T" * 43, valid + "&code=synthetic-code-canary",
+                          valid + "&unexpected=extra"):
             with self.subTest(candidate=candidate[-60:]):
                 with self.assertRaises(auth.AuthSessionError):
                     auth.validate_authorization_url(candidate)
@@ -104,15 +106,104 @@ class AuthorizationValidationTests(unittest.TestCase):
         valid = authorization_url()
         with self.assertRaises(auth.AuthSessionError):
             auth.validate_authorization_url(valid.replace(
-                "scope=openid+profile+email+offline_access+resource.invoke+chatgpt.tokens.use.direct",
-                "scope=openid+profile+email+offline_access+resource.invoke+chatgpt.tokens.use.direct+admin",
+                "scope=openid+profile+email+offline_access",
+                "scope=openid+profile+email+offline_access+admin",
             ))
         session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
         session.args = SimpleNamespace(guest_auth_dir="/tmp/mester-v3-auth-unit")
         remote = session._remote_command()
         self.assertIn("PATH=/tmp/mester-v3-auth-unit:/usr/local/bin", remote)
         self.assertIn("for opener in xdg-open gio sensible-browser firefox chromium chromium-browser", remote)
+        self.assertIn("opencode auth login openai --method chatgpt-browser", remote)
         self.assertNotIn("auth.openai.com", remote)
+
+    def test_auth_mode_does_not_require_a_pty(self):
+        check = subprocess.run(
+            ["/usr/bin/python3", "-I", "-c",
+             f"import importlib.util; s=importlib.util.spec_from_file_location('a',{str(SESSION_PATH)!r}); "
+             "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+             "x=m.BrowserAuthSession.__new__(m.BrowserAuthSession); x.tty_fd=None; x._optional_tty(); "
+             "assert x.tty_fd is None"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True, timeout=5, check=False,
+        )
+        self.assertEqual(check.returncode, 0, check.stderr.decode("utf-8", "replace"))
+
+    def test_portal_request_is_after_forward_verification_and_receives_one_validated_url(self):
+        url = authorization_url()
+        events = []
+
+        class Receiver:
+            def remove(self):
+                events.append("removed")
+
+        class Bus:
+            def get_unique_name(self):
+                return ":1.99"
+
+            def get_object(self, _name, _path):
+                return object()
+
+            def add_signal_receiver(self, callback, **kwargs):
+                events.append(("subscribe", kwargs["path"]))
+                self.callback = callback
+                return Receiver()
+
+        bus = Bus()
+
+        class Interface:
+            def Open(self, _parent, actual_url, options, timeout):
+                events.append(("open", actual_url, dict(options), timeout))
+                return f"/org/freedesktop/portal/desktop/request/_1_99/{options['handle_token']}"
+
+        class Loop:
+            def __init__(self):
+                self.callback = None
+
+            def run(self):
+                bus.callback(0, {})
+
+            def quit(self):
+                pass
+
+        fake_dbus = types.ModuleType("dbus")
+        fake_dbus.SessionBus = lambda: bus
+        fake_dbus.Interface = lambda _obj, _name: Interface()
+        mainloop = types.ModuleType("dbus.mainloop")
+        glib_dbus = types.ModuleType("dbus.mainloop.glib")
+        glib_dbus.DBusGMainLoop = lambda **_kwargs: None
+        gi = types.ModuleType("gi")
+        repository = types.ModuleType("gi.repository")
+        repository.GLib = types.SimpleNamespace(
+            MainLoop=Loop,
+            timeout_add=lambda _seconds, _callback: 1,
+        )
+        session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
+        session.callback_port = 1455
+        session._loopback_forward_ready = lambda port: events.append(("ready", port)) or True
+        with mock.patch.dict("sys.modules", {
+            "dbus": fake_dbus,
+            "dbus.mainloop": mainloop,
+            "dbus.mainloop.glib": glib_dbus,
+            "gi": gi,
+            "gi.repository": repository,
+        }):
+            self.assertTrue(session._open_portal(url))
+        self.assertEqual(events[0], ("ready", 1455))
+        self.assertEqual(events[1][0], "subscribe")
+        opened = next(event for event in events if isinstance(event, tuple) and event[0] == "open")
+        self.assertEqual(opened[1], url)
+        self.assertEqual(opened[3], 5)
+        self.assertEqual(events[-1], "removed")
+
+    def test_portal_absence_without_tty_fails_closed_without_printing_url(self):
+        session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
+        session.tty_fd = None
+        session.status = 0
+        session._open_portal = lambda _url: False
+        with self.assertRaises(auth.AuthSessionError) as error:
+            session._portal_or_manual(authorization_url())
+        self.assertEqual(error.exception.status, 76)
 
     def test_listener_absence_detects_ipv4_mapped_ipv6_callback_sockets(self):
         listener = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
@@ -124,8 +215,18 @@ class AuthorizationValidationTests(unittest.TestCase):
         finally:
             listener.close()
 
+    def test_listener_absence_detects_native_ipv6_localhost_collisions(self):
+        listener = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        try:
+            listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            listener.bind(("::1", 0))
+            listener.listen(1)
+            self.assertFalse(auth.listener_absent(listener.getsockname()[1]))
+        finally:
+            listener.close()
+
     def test_native_tui_url_scanner_holds_url_until_forward_and_refuses_races(self):
-        first = authorization_url(43210)
+        first = authorization_url(1455)
         encoded = b"\x1b]8;;" + first.encode("ascii") + b"\x1b\\"
         scanner = auth.AuthorizationOutputScanner()
         prefix = b"TUI-prefix:" + b"x" * 64
@@ -135,14 +236,14 @@ class AuthorizationValidationTests(unittest.TestCase):
         self.assertIsNone(port)
         self.assertEqual(held, b"")
         visible, port, held = scanner.feed(encoded[19:] + b"URL-visible-copy")
-        self.assertEqual(port, 43210)
+        self.assertEqual(port, 1455)
         self.assertNotIn(first.encode("ascii"), visible)
         self.assertIn(first.encode("ascii"), held)
         visible, port, held = scanner.feed(encoded)
         self.assertIsNone(port)  # An identical TUI redraw is harmless.
         self.assertIn(first.encode("ascii"), visible)
         self.assertEqual(held, b"")
-        second = authorization_url(43211, state="T" * 43)
+        second = authorization_url(1457, state="T" * 43)
         with self.assertRaises(auth.AuthSessionError):
             scanner.feed(b"\x1b]8;;" + second.encode("ascii") + b"\x1b\\")
 
@@ -186,12 +287,15 @@ callback_port = int(os.environ["AUTH_TEST_CALLBACK_PORT"])
 target_port = int(os.environ["AUTH_TEST_TARGET_PORT"])
 control_path = after("-S")
 stop = threading.Event()
+callback_seen = threading.Event()
 forwards = {}
 
 class RelayHandler(socketserver.BaseRequestHandler):
     def handle(self):
         with socket.create_connection(("127.0.0.1", target_port), timeout=2) as target:
             data = self.request.recv(4096)
+            if data:
+                callback_seen.set()
             target.sendall(data)
             self.request.sendall(target.recv(4096))
 
@@ -261,43 +365,49 @@ if not os.path.exists(control_path):
     raise SystemExit(125)
 
 query = {
-    "client_id": "dynamic_agent_client",
-    "agent_name_hint": "OpenCode",
-    "ext_agent_host_id": "urn:uuid:12345678-1234-1234-1234-123456789abc",
+    "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
     "response_type": "code",
-    "redirect_uri": f"http://127.0.0.1:{callback_port}/auth/callback",
-    "scope": "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct",
-    "resource": "https://api.openai.com/v1",
+    "redirect_uri": f"http://localhost:{callback_port}/auth/callback",
+    "scope": "openid profile email offline_access",
     "state": "Q" * 43,
-    "nonce": "N" * 43,
     "code_challenge_method": "S256",
     "code_challenge": "C" * 43,
+    "id_token_add_organizations": "true",
+    "codex_cli_simplified_flow": "true",
+    "originator": "opencode",
 }
-url = "https://auth.openai.com/api/accounts/authorize?" + urllib.parse.urlencode(query)
+url = "https://auth.openai.com/oauth/authorize?" + urllib.parse.urlencode(query)
 if mode == "invalid":
     url = url.replace("auth.openai.com", "auth.openai.com.evil.invalid", 1)
 payload = b"\x1b]8;;" + url.encode("ascii") + b"\x1b\\"
 if mode == "race":
     raced = dict(query)
-    raced["redirect_uri"] = f"http://127.0.0.1:{callback_port + 1}/auth/callback"
+    raced["redirect_uri"] = f"http://localhost:1457/auth/callback"
     raced["state"] = "R" * 43
-    second = "https://auth.openai.com/api/accounts/authorize?" + urllib.parse.urlencode(raced)
+    second = "https://auth.openai.com/oauth/authorize?" + urllib.parse.urlencode(raced)
     payload += b"\x1b]8;;" + second.encode("ascii") + b"\x1b\\"
 os.write(1, payload)
 if mode == "invalid":
     time.sleep(10)
+elif mode == "cancel":
+    while callback_port not in forwards:
+        time.sleep(0.01)
+    time.sleep(0.5)
+    raise SystemExit(130)
+elif mode == "failure":
+    while callback_port not in forwards:
+        time.sleep(0.01)
+    time.sleep(0.5)
+    raise SystemExit(23)
 else:
-    answer = sys.stdin.readline()
-    if mode == "cancel":
-        raise SystemExit(130)
-    if mode == "failure":
-        raise SystemExit(23)
+    while not stop.is_set() and not (mode == "success" and callback_seen.is_set()):
+        time.sleep(0.02)
 raise SystemExit(0)
 '''
 
 
 class BrowserAuthProcessTests(unittest.TestCase):
-    def _run_session(self, mode, *, occupied=False, timeout_seconds=5):
+    def _run_session(self, mode, *, occupied=False, timeout_seconds=5, use_pty=True):
         temporary = tempfile.TemporaryDirectory(prefix="mester-auth-session-")
         root = pathlib.Path(temporary.name)
         run_dir = root / "run"
@@ -315,12 +425,27 @@ class BrowserAuthProcessTests(unittest.TestCase):
         target.daemon_threads = True
         target_thread = threading.Thread(target=target.serve_forever, daemon=True)
         target_thread.start()
-        callback_port = free_port()
+        callback_port = None
         occupied_socket = None
-        if occupied:
-            occupied_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            occupied_socket.bind(("127.0.0.1", callback_port))
-            occupied_socket.listen(1)
+        for candidate in (1455, 1457):
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                probe.bind(("127.0.0.1", candidate))
+                if occupied:
+                    probe.listen(1)
+                    occupied_socket = probe
+                else:
+                    probe.close()
+                callback_port = candidate
+                break
+            except OSError:
+                probe.close()
+        if callback_port is None:
+            target.shutdown()
+            target.server_close()
+            target_thread.join(timeout=2)
+            temporary.cleanup()
+            self.skipTest("both pinned localhost callback ports are occupied")
         proof = run_dir / "auth-session.proof"
         command = [
             "/usr/bin/python3", "-I", str(SESSION_PATH),
@@ -335,16 +460,29 @@ class BrowserAuthProcessTests(unittest.TestCase):
         ]
         evidence = root / "evidence.log"
         process_capture = root / "ssh-argv-env.capture"
-        pid, master = pty.fork()
-        if pid == 0:
-            os.environ["AUTH_TEST_MODE"] = mode
-            os.environ["AUTH_TEST_CALLBACK_PORT"] = str(callback_port)
-            os.environ["AUTH_TEST_TARGET_PORT"] = str(target.server_address[1])
-            os.environ["AUTH_TEST_CAPTURE"] = str(process_capture)
-            evidence_fd = os.open(evidence, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            os.dup2(evidence_fd, 1)
-            os.dup2(evidence_fd, 2)
-            os.execv(command[0], command)
+        evidence.touch(mode=0o600)
+        evidence.chmod(0o600)
+        test_env = os.environ.copy()
+        test_env["AUTH_TEST_MODE"] = mode
+        test_env["AUTH_TEST_CALLBACK_PORT"] = str(callback_port)
+        test_env["AUTH_TEST_TARGET_PORT"] = str(target.server_address[1])
+        test_env["AUTH_TEST_CAPTURE"] = str(process_capture)
+        process = None
+        if use_pty:
+            pid, master = pty.fork()
+            if pid == 0:
+                os.environ.update(test_env)
+                evidence_fd = os.open(evidence, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                os.dup2(evidence_fd, 1)
+                os.dup2(evidence_fd, 2)
+                os.execv(command[0], command)
+        else:
+            process = subprocess.Popen(
+                command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=test_env, start_new_session=True, close_fds=True,
+            )
+            pid = process.pid
+            master = process.stdout.fileno()
         own_argv = b""
         own_environment = b""
         for _ in range(100):
@@ -363,7 +501,7 @@ class BrowserAuthProcessTests(unittest.TestCase):
         reaped = False
         sent_input = False
         deadline = time.monotonic() + max(8, timeout_seconds + 5)
-        ready_marker = b"Temporary loopback callback is ready."
+        ready_marker = b"Verified localhost callback forward is ready"
         expected_url = authorization_url(callback_port, state="Q" * 43).encode("ascii")
         try:
             while time.monotonic() < deadline:
@@ -377,36 +515,52 @@ class BrowserAuthProcessTests(unittest.TestCase):
                         else:
                             raise
                     terminal.extend(chunk)
-                waited, raw_status = os.waitpid(pid, os.WNOHANG)
+                if process is not None:
+                    status = process.poll()
+                    waited = pid if status is not None else 0
+                else:
+                    waited, raw_status = os.waitpid(pid, os.WNOHANG)
+                    if waited == pid:
+                        status = os.waitstatus_to_exitcode(raw_status)
                 if waited == pid:
-                    status = os.waitstatus_to_exitcode(raw_status)
                     reaped = True
                     break
-                if mode == "success" and ready_marker in terminal and expected_url in terminal and not sent_input:
-                    self.assertGreater(terminal.find(expected_url), terminal.find(ready_marker))
+                if use_pty and mode == "success" and ready_marker in terminal and not sent_input:
                     with socket.create_connection(("127.0.0.1", callback_port), timeout=2) as client:
                         client.sendall(b"SYNTHETIC_CALLBACK_CANARY")
                         self.assertEqual(client.recv(1024), b"LOCAL_FAKE_TARGET_OK:SYNTHETIC_CALLBACK_CANARY")
                     os.write(master, b"exit\n")
                     sent_input = True
-                elif mode in {"cancel", "failure"} and ready_marker in terminal and not sent_input:
+                elif use_pty and mode in {"cancel", "failure"} and ready_marker in terminal and not sent_input:
                     os.write(master, b"continue\n")
                     sent_input = True
             if occupied:
                 with socket.create_connection(("127.0.0.1", callback_port), timeout=1):
                     pass
             if not reaped:
-                waited, raw_status = os.waitpid(pid, os.WNOHANG)
+                if process is not None:
+                    status = process.poll()
+                    waited = pid if status is not None else 0
+                else:
+                    waited, raw_status = os.waitpid(pid, os.WNOHANG)
+                    if waited == pid:
+                        status = os.waitstatus_to_exitcode(raw_status)
                 if waited == pid:
-                    status = os.waitstatus_to_exitcode(raw_status)
                     reaped = True
             if not reaped:
-                os.kill(pid, 9)
-                _, raw_status = os.waitpid(pid, 0)
-                status = os.waitstatus_to_exitcode(raw_status)
+                if process is not None:
+                    process.kill()
+                    status = process.wait(timeout=2)
+                else:
+                    os.kill(pid, 9)
+                    _, raw_status = os.waitpid(pid, 0)
+                    status = os.waitstatus_to_exitcode(raw_status)
                 self.fail("browser-auth process exceeded its outer test deadline")
         finally:
-            os.close(master)
+            if process is not None:
+                process.stdout.close()
+            else:
+                os.close(master)
             if occupied_socket is not None:
                 occupied_socket.close()
             target.shutdown()
@@ -424,6 +578,9 @@ class BrowserAuthProcessTests(unittest.TestCase):
         else:
             self.assertTrue(proof_data["listener_verified_closed"])
             self.assertTrue(proof_data["cleanup_complete"])
+            closed_deadline = time.monotonic() + 2
+            while not auth.listener_absent(callback_port) and time.monotonic() < closed_deadline:
+                time.sleep(0.01)
             self.assertTrue(auth.listener_absent(callback_port))
         evidence_bytes = evidence.read_bytes()
         exposure_bytes = process_capture.read_bytes() if process_capture.exists() else b""
@@ -433,16 +590,19 @@ class BrowserAuthProcessTests(unittest.TestCase):
         self.assertTrue(own_argv and own_environment, "must inspect live browser-auth process argv and environment")
         self.assertNotIn(expected_url, own_argv + own_environment + exposure_bytes)
         self.assertNotIn(b"state=", own_argv + own_environment + exposure_bytes)
-        self.assertNotIn(b"nonce=", own_argv + own_environment + exposure_bytes)
-        if mode != "timeout" and not occupied and mode not in {"invalid", "race"}:
-            self.assertIn(expected_url, terminal)
         temporary.cleanup()
         return status, bytes(terminal), evidence_bytes
 
-    def test_success_shows_url_only_after_forward_and_reaches_fake_callback_target(self):
+    def test_synthetic_oauth_waits_for_forward_and_reaches_fake_callback_target(self):
         status, terminal, _evidence = self._run_session("success")
         self.assertEqual(status, 0)
-        self.assertIn(b"Temporary loopback callback is ready.", terminal)
+        self.assertIn(b"Verified localhost callback forward is ready", terminal)
+
+    def test_non_tty_portal_failure_is_sanitized_and_cleans_owned_forward(self):
+        status, terminal, _evidence = self._run_session("success", use_pty=False)
+        self.assertEqual(status, 76)
+        self.assertNotIn(b"https://auth.openai.com/", terminal)
+        self.assertNotIn(b"state=", terminal)
 
     def test_cancel_provider_failure_and_timeout_are_nonzero_and_clean(self):
         cancel_status, _, _ = self._run_session("cancel")
@@ -627,7 +787,7 @@ LogLevel QUIET
 
     def test_real_ssh_forward_reaches_local_fake_target_and_cancel_closes_listener(self):
         callback_port = free_port()
-        self.assertEqual(auth.validate_authorization_url(authorization_url(callback_port)), callback_port)
+        self.assertEqual(auth.validate_authorization_url(authorization_url(1455)), 1455)
         forward = self._command("forward", callback_port, self.target_port)
         self.assertTrue(auth.run_control_command(forward))
         with socket.create_connection(("127.0.0.1", callback_port), timeout=2) as client:

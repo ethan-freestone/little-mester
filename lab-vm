@@ -5,7 +5,21 @@ set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
-exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C \
+desktop_env=()
+desktop_uid="$(/usr/bin/id -u)"
+desktop_runtime="/run/user/$desktop_uid"
+if [[ "${XDG_RUNTIME_DIR-}" == "$desktop_runtime" \
+   && "${DBUS_SESSION_BUS_ADDRESS-}" == "unix:path=$desktop_runtime/bus" \
+   && -d "$desktop_runtime" && ! -L "$desktop_runtime" \
+   && -S "$desktop_runtime/bus" && ! -L "$desktop_runtime/bus" ]]; then
+  runtime_owner_mode="$(/usr/bin/stat -c '%u:%a' -- "$desktop_runtime" 2>/dev/null || true)"
+  bus_owner="$(/usr/bin/stat -c '%u' -- "$desktop_runtime/bus" 2>/dev/null || true)"
+  if [[ "$runtime_owner_mode" == "$desktop_uid:700" && "$bus_owner" == "$desktop_uid" ]]; then
+    desktop_env+=("XDG_RUNTIME_DIR=$desktop_runtime" "DBUS_SESSION_BUS_ADDRESS=unix:path=$desktop_runtime/bus")
+  fi
+fi
+
+exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C "${desktop_env[@]}" \
   /usr/bin/bash -p -s -- "${BASH_SOURCE[0]}" "$@" <<'WORKER'
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -157,9 +171,9 @@ case "$command" in
       ' _ "$root" "$@"
     ;;
   smoke)
-    exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C \
+    exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C "${desktop_env[@]}" \
       /usr/bin/timeout --signal=TERM --kill-after=15 1200 \
-      /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C \
+      /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C "${desktop_env[@]}" \
       VM_HOST_SCRIPT_ROOT="$root" \
       /usr/bin/bash -p -c '
         set -euo pipefail
