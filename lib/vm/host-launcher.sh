@@ -1131,11 +1131,13 @@ vm_host_browser_auth_session() {
       72) vm_host_error 'AUTH_OUTPUT_UNEXPECTED: guest output did not contain an authorization URL' ;;
       73) vm_host_error 'AUTH_URL_INVALID: authorization endpoint or query did not match the pinned protocol' ;;
       74) vm_host_error 'AUTH_CALLBACK_UNSUPPORTED: callback did not match the pinned localhost ports' ;;
-      75) vm_host_error 'pinned OpenCode ChatGPT authorization was outside the exact approved protocol' ;;
+      75) vm_host_error 'AUTH_SESSION_FAILURE: browser-auth session could not safely start or continue' ;;
       76) vm_host_error 'desktop portal was unavailable and no usable manual browser fallback existed' ;;
       77) vm_host_error 'callback forwarding or localhost verification failed safely' ;;
-      78) vm_host_error 'AUTH_PROCESS_EXIT: guest authentication process exited before producing an approved URL' ;;
-      *) vm_host_error 'ChatGPT browser authentication failed; OAuth details were intentionally suppressed' ;;
+      78) vm_host_error 'AUTH_PROCESS_EXIT: guest authentication process exited nonzero' ;;
+      79) vm_host_error 'AUTH_URL_CHANGED: a second or changed authorization attempt was refused' ;;
+      80) vm_host_error 'AUTH_URL_INCOMPLETE: authorization endpoint text was seen, but no complete URL was extracted' ;;
+      *) vm_host_error 'AUTH_PROCESS_EXIT: browser-auth process/session failed; OAuth details were intentionally suppressed' ;;
     esac
     return 1
   fi

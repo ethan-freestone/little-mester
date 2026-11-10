@@ -33,15 +33,15 @@ def authorization_url(port=1455, *, state="S" * 43, nonce="N" * 43, challenge="C
     if port not in (1455, 1457):
         raise ValueError("pinned OpenCode callback ports only")
     query = {
-        "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
         "response_type": "code",
+        "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
         "redirect_uri": f"http://localhost:{port}/auth/callback",
         "scope": "openid profile email offline_access",
-        "state": state,
-        "code_challenge_method": "S256",
         "code_challenge": challenge,
+        "code_challenge_method": "S256",
         "id_token_add_organizations": "true",
         "codex_cli_simplified_flow": "true",
+        "state": state,
         "originator": "opencode",
     }
     return "https://auth.openai.com/oauth/authorize?" + urllib.parse.urlencode(query)
@@ -107,6 +107,8 @@ class AuthorizationValidationTests(unittest.TestCase):
         self.assertEqual(auth.classify_missing_authorization(0, 0), 71)
         self.assertEqual(auth.classify_missing_authorization(0, 18), 72)
         self.assertEqual(auth.classify_missing_authorization(1, 18), 78)
+        self.assertEqual(auth.classify_missing_authorization(0, 30, True, False), 73)
+        self.assertEqual(auth.classify_missing_authorization(0, 30, True, True), 80)
         with self.assertRaises(auth.AuthSessionError) as invalid:
             auth.validate_authorization_url("https://auth.openai.com/not-the-approved-endpoint")
         self.assertEqual(invalid.exception.status, 73)
@@ -116,6 +118,25 @@ class AuthorizationValidationTests(unittest.TestCase):
         with self.assertRaises(auth.AuthSessionError) as unsupported:
             auth.validate_authorization_url(callback)
         self.assertEqual(unsupported.exception.status, 74)
+
+    def test_incomplete_endpoint_is_distinct_from_extracted_invalid_url(self):
+        scanner = auth.AuthorizationOutputScanner()
+        scanner.feed(b"\xe2\x97\x8f  https://auth.openai.com/oauth/authorize?")
+        self.assertTrue(scanner.saw_auth_host)
+        self.assertTrue(scanner.saw_authorization_prefix)
+        self.assertIsNone(scanner.auth_url)
+        self.assertEqual(auth.classify_missing_authorization(
+            0, 45, scanner.saw_auth_host, scanner.saw_authorization_prefix
+        ), 80)
+
+    def test_wrong_scheme_for_auth_host_is_classified_as_invalid_url(self):
+        scanner = auth.AuthorizationOutputScanner()
+        scanner.feed(b"http://auth.openai.com/oauth/authorize?synthetic")
+        self.assertTrue(scanner.saw_auth_host)
+        self.assertFalse(scanner.saw_authorization_prefix)
+        self.assertEqual(auth.classify_missing_authorization(
+            0, 55, scanner.saw_auth_host, scanner.saw_authorization_prefix
+        ), 73)
 
     def test_requires_exact_pinned_open_code_scope_and_auth_path_hides_openers(self):
         valid = authorization_url()
@@ -593,8 +614,9 @@ class AuthorizationValidationTests(unittest.TestCase):
         self.assertIn(first.encode("ascii"), visible)
         self.assertEqual(held, b"")
         second = authorization_url(1457, state="T" * 43)
-        with self.assertRaises(auth.AuthSessionError):
+        with self.assertRaises(auth.AuthSessionError) as changed:
             scanner.feed(b"\x1b]8;;" + second.encode("ascii") + b"\x1b\\")
+        self.assertEqual(changed.exception.status, 79)
 
     def test_pinned_clack_log_info_format_with_ansi_and_hyperlink_chunking(self):
         url = authorization_url()
@@ -608,6 +630,21 @@ class AuthorizationValidationTests(unittest.TestCase):
             if port is not None:
                 self.assertEqual(port, 1455)
         self.assertEqual(scanner.auth_url, url)
+
+    def test_exact_pinned_clack_info_line_without_pty(self):
+        url = authorization_url()
+        # @clack/prompts 1.0.0-alpha.1 log.info writes `${symbol}  ${message}\n`;
+        # under SSH -T stdout is not a TTY, so picocolors does not wrap the URL.
+        output = b"\xe2\x97\x8f  " + url.encode("ascii") + b"\n"
+        scanner = auth.AuthorizationOutputScanner()
+        port = None
+        for byte in output:
+            _visible, found, _held = scanner.feed(bytes([byte]))
+            if found is not None:
+                port = found
+        self.assertEqual(port, 1455)
+        self.assertEqual(scanner.auth_url, url)
+        self.assertEqual(auth.validate_authorization_url(scanner.auth_url), 1455)
 
 
 class FakeTargetHandler(BaseRequestHandler):
@@ -761,6 +798,11 @@ elif mode == "failure":
         time.sleep(0.01)
     time.sleep(0.5)
     raise SystemExit(23)
+elif mode == "failure75":
+    while callback_port not in forwards:
+        time.sleep(0.01)
+    time.sleep(0.5)
+    raise SystemExit(75)
 else:
     while not stop.is_set() and not (mode == "success" and callback_seen.is_set()):
         time.sleep(0.02)
@@ -974,9 +1016,11 @@ class BrowserAuthProcessTests(unittest.TestCase):
     def test_cancel_provider_failure_and_timeout_are_nonzero_and_clean(self):
         cancel_status, _, _ = self._run_session("cancel")
         failure_status, _, _ = self._run_session("failure")
+        status75_process, _, _ = self._run_session("failure75")
         timeout_status, _, _ = self._run_session("timeout", timeout_seconds=1)
         self.assertEqual(cancel_status, 130)
-        self.assertEqual(failure_status, 23)
+        self.assertEqual(failure_status, 78)
+        self.assertEqual(status75_process, 78)
         self.assertEqual(timeout_status, 124)
 
     def test_invalid_url_and_callback_race_fail_closed_with_cleanup(self):

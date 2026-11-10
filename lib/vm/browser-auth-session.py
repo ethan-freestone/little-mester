@@ -57,10 +57,19 @@ class AuthSessionError(Exception):
         self.status = status
 
 
-def classify_missing_authorization(returncode: int | None, output_bytes: int) -> int:
+def classify_missing_authorization(
+    returncode: int | None,
+    output_bytes: int,
+    saw_auth_host: bool = False,
+    saw_authorization_prefix: bool = False,
+) -> int:
     """Return a safe reason code without retaining or exposing guest output."""
     if returncode not in (None, 0):
         return 78  # AUTH_PROCESS_EXIT
+    if saw_auth_host and not saw_authorization_prefix:
+        return 73  # AUTH_URL_INVALID: auth host appeared outside the exact URL prefix
+    if saw_authorization_prefix:
+        return 80  # AUTH_URL_INCOMPLETE: expected URL prefix, but no complete URL extracted
     return 71 if output_bytes == 0 else 72  # AUTH_URL_MISSING / AUTH_OUTPUT_UNEXPECTED
 
 
@@ -166,15 +175,18 @@ class AuthorizationOutputScanner:
         self.auth_url: str | None = None
         self.callback_port: int | None = None
         self.fingerprint: bytes | None = None
-        self.saw_auth_endpoint = False
-        self.endpoint_tail = b""
+        self.saw_auth_host = False
+        self.saw_authorization_prefix = False
+        self.detection_tail = b""
 
     def feed(self, data: bytes) -> tuple[bytes, int | None, bytes]:
         self.pending.extend(data)
-        endpoint_window = self.endpoint_tail + data
-        if b"https://auth.openai.com" in endpoint_window:
-            self.saw_auth_endpoint = True
-        self.endpoint_tail = endpoint_window[-len(b"https://auth.openai.com") + 1 :]
+        detection_window = self.detection_tail + data
+        if b"auth.openai.com" in detection_window:
+            self.saw_auth_host = True
+        if AUTHORIZATION_URL_PREFIX in detection_window:
+            self.saw_authorization_prefix = True
+        self.detection_tail = detection_window[-len(AUTHORIZATION_URL_PREFIX) + 1 :]
         visible = bytearray()
         held = bytearray()
         first_port = None
@@ -227,7 +239,7 @@ class AuthorizationOutputScanner:
             fingerprint = hashlib.sha256(raw).digest()
             if self.auth_url is not None:
                 if fingerprint != self.fingerprint:
-                    raise AuthSessionError("a second or changed authorization attempt was refused")
+                    raise AuthSessionError("a second or changed authorization attempt was refused", 79)
                 destination = held if first_port is not None else visible
                 destination.extend(raw_with_delimiter)
                 continue
@@ -878,16 +890,20 @@ class BrowserAuthSession:
                         raise AuthSessionError("browser opening refused because SSH ownership is unverified", 77)
                     self._portal_or_manual(self.scanner.auth_url, deadline)
         if self.scanner.auth_url is None:
-            if self.ssh_process is not None and self.ssh_process.returncode not in (None, 0):
-                self.status = 78
-            elif self.scanner.saw_auth_endpoint:
-                self.status = 73
-            else:
-                self.status = classify_missing_authorization(
-                    self.ssh_process.returncode if self.ssh_process is not None else None,
-                    self.output_bytes,
-                )
+            self.status = classify_missing_authorization(
+                self.ssh_process.returncode if self.ssh_process is not None else None,
+                self.output_bytes,
+                self.scanner.saw_auth_host,
+                self.scanner.saw_authorization_prefix,
+            )
             self.failure = "authorization diagnostics: no approved URL observed"
+        elif (
+            self.ssh_process is not None
+            and self.ssh_process.returncode not in (None, 0, 130)
+            and self.status == self.ssh_process.returncode
+        ):
+            self.status = 78
+            self.failure = "authorization diagnostics: guest authentication process exited before completion"
 
     def _control(self, operation: str, port: int) -> bool:
         command = control_socket_arguments(
