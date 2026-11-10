@@ -181,18 +181,31 @@ class AuthorizationValidationTests(unittest.TestCase):
         )
         session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
         session.callback_port = 1455
-        session.deadline = None
+        session.deadline = 10.0
         session.signal_received = None
         session.auth_process_completed = False
-        session._loopback_forward_ready = lambda port: events.append(("ready", port)) or True
-        with mock.patch.dict("sys.modules", {
-            "dbus": fake_dbus,
-            "dbus.mainloop": mainloop,
-            "dbus.mainloop.glib": glib_dbus,
-            "gi": gi,
-            "gi.repository": repository,
-        }):
-            self.assertTrue(session._open_portal(url))
+        session.portal_cleanup_failed = False
+        clock = [0.0]
+        readiness_calls = [0]
+
+        def ready_near_deadline(port):
+            readiness_calls[0] += 1
+            clock[0] = 9.7 if readiness_calls[0] == 1 else 9.8
+            events.append(("ready", port))
+            return True
+
+        session._loopback_forward_ready = ready_near_deadline
+        with (
+            mock.patch.dict("sys.modules", {
+                "dbus": fake_dbus,
+                "dbus.mainloop": mainloop,
+                "dbus.mainloop.glib": glib_dbus,
+                "gi": gi,
+                "gi.repository": repository,
+            }),
+            mock.patch.object(auth.time, "monotonic", side_effect=lambda: clock[0]),
+        ):
+            self.assertTrue(session._open_portal(url, session.deadline))
         self.assertEqual(events[0], ("ready", 1455))
         self.assertEqual(events[1][0], "subscribe")
         self.assertEqual(events[1][1].rsplit("/", 1)[0], "/org/freedesktop/portal/desktop/request/1_99")
@@ -205,7 +218,8 @@ class AuthorizationValidationTests(unittest.TestCase):
             "ssa{sv}",
         ))
         self.assertEqual(opened[6][1], url)
-        self.assertEqual(opened[7], 5)
+        self.assertGreater(opened[7], 0)
+        self.assertLessEqual(opened[7], 0.2)
         self.assertEqual(events[-1], "removed")
 
     def test_portal_absence_without_tty_fails_closed_without_printing_url(self):
@@ -287,15 +301,20 @@ class AuthorizationValidationTests(unittest.TestCase):
         self.assertTrue(session.auth_process_completed)
 
     def test_portal_wait_cancellation_closes_pending_request(self):
-        for mode in ("cancel", "timeout", "mismatch", "open-error", "completion"):
+        for mode in (
+            "cancel", "timeout", "mismatch", "open-error", "completion",
+            "cancel-close-error", "completion-close-error",
+        ):
             with self.subTest(mode=mode):
                 closed = []
+                handles = []
                 callbacks = []
                 session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
                 session.callback_port = 1455
                 session.deadline = time.monotonic() + 30
                 session.signal_received = None
                 session.auth_process_completed = False
+                session.portal_cleanup_failed = False
                 session._loopback_forward_ready = lambda _port: True
 
                 class Receiver:
@@ -311,9 +330,14 @@ class AuthorizationValidationTests(unittest.TestCase):
                             token = args[2]["handle_token"]
                             expected = f"/org/freedesktop/portal/desktop/request/1_7/{token}"
                             if mode == "open-error":
+                                handles.append(expected)
                                 raise RuntimeError("synthetic portal submission error")
-                            return expected + "_unexpected" if mode == "mismatch" else expected
+                            actual = expected + "_unexpected" if mode == "mismatch" else expected
+                            handles.append(actual)
+                            return actual
                         closed.append((path, timeout))
+                        if mode.endswith("close-error"):
+                            raise RuntimeError("synthetic pending request close error")
                         return None
 
                     def add_signal_receiver(self, _callback, **_kwargs):
@@ -323,10 +347,10 @@ class AuthorizationValidationTests(unittest.TestCase):
 
                 class Loop:
                     def run(self):
-                        if mode == "cancel":
+                        if mode.startswith("cancel"):
                             session.signal_received = signal.SIGTERM
                             callbacks[0]()
-                        elif mode == "completion":
+                        elif mode.startswith("completion"):
                             session.ssh_process = SimpleNamespace(returncode=0, poll=lambda: 0)
                             callbacks[0]()
                         else:
@@ -357,21 +381,19 @@ class AuthorizationValidationTests(unittest.TestCase):
                     "gi": gi,
                     "gi.repository": repository,
                 }):
-                    if mode == "cancel" or mode == "mismatch":
+                    if mode.startswith("cancel") or mode == "mismatch":
                         with self.assertRaises(auth.AuthSessionError) as error:
                             session._open_portal(authorization_url(), session.deadline)
                         self.assertEqual(
                             error.exception.status,
-                            128 + signal.SIGTERM if mode == "cancel" else 77,
+                            128 + signal.SIGTERM if mode.startswith("cancel") else 77,
                         )
                     else:
                         self.assertFalse(session._open_portal(authorization_url(), session.deadline))
-                if mode == "completion":
+                if mode.startswith("completion"):
                     self.assertTrue(session.auth_process_completed)
-                self.assertTrue(
-                    any(item[1] == 2 for item in closed),
-                    "every unresolved portal request must be explicitly closed with a bounded call",
-                )
+                self.assertEqual(closed, [(handles[0], 2)])
+                self.assertEqual(session.portal_cleanup_failed, mode.endswith("close-error"))
 
     def test_listener_absence_detects_ipv4_mapped_ipv6_callback_sockets(self):
         listener = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
@@ -432,6 +454,7 @@ class AuthorizationValidationTests(unittest.TestCase):
             session.listener_verified_closed = True
             session.listener_was_available = False
             session.ipv6_guard = None
+            session.portal_cleanup_failed = False
             session.args = SimpleNamespace()
             session.socket_path = root / "control.sock"
             session.identity_path = root / "ssh.identity"

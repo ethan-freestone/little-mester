@@ -400,6 +400,7 @@ class BrowserAuthSession:
         self.ipv6_guard: socket.socket | None = None
         self.deadline: float | None = None
         self.auth_process_completed = False
+        self.portal_cleanup_failed = False
         self.output_bytes = 0
         self.signal_received: int | None = None
         self.status = 1
@@ -696,24 +697,34 @@ class BrowserAuthSession:
                         (),
                         timeout=2,
                     )
-                except Exception as error:
-                    raise AuthSessionError("pending desktop portal request could not be closed", 77) from error
+                except Exception:
+                    self.portal_cleanup_failed = True
 
             try:
                 self._assert_auth_live(deadline)
                 if self.auth_process_completed:
                     return False
-                open_attempted = True
                 call_timeout = 5
                 auth_deadline = deadline if deadline is not None else self.deadline
                 if auth_deadline is not None:
                     remaining = auth_deadline - time.monotonic()
                     if remaining <= 0:
-                        self._assert_auth_live(deadline)
+                        self._check_auth_abort(deadline)
                     call_timeout = min(call_timeout, max(0.001, remaining))
-                self._assert_auth_live(deadline)
+                if self._check_auth_abort(deadline):
+                    return False
                 if self.auth_process_completed:
                     return False
+                if auth_deadline is not None:
+                    remaining = auth_deadline - time.monotonic()
+                    if remaining <= 0:
+                        self._check_auth_abort(deadline)
+                    call_timeout = min(5, max(0.001, remaining))
+                if self._check_auth_abort(deadline):
+                    return False
+                if self.auth_process_completed:
+                    return False
+                open_attempted = True
                 returned_path = bus.call_blocking(
                     "org.freedesktop.portal.Desktop",
                     "/org/freedesktop/portal/desktop",
@@ -765,6 +776,8 @@ class BrowserAuthSession:
         opened = self._open_portal(url, deadline)
         if getattr(self, "auth_process_completed", False):
             return
+        if getattr(self, "portal_cleanup_failed", False):
+            raise AuthSessionError("pending desktop portal request could not be closed", 77)
         if opened:
             self._assert_auth_live(deadline)
             if getattr(self, "auth_process_completed", False):
@@ -885,7 +898,7 @@ class BrowserAuthSession:
         return True
 
     def _cleanup(self) -> bool:
-        clean = True
+        clean = not self.portal_cleanup_failed
         if self.forward_attempted and self.callback_port is not None and self.ssh_process is not None:
             if self.ssh_process.poll() is None:
                 # A cancel failure is tolerated only if the master is then stopped
