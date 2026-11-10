@@ -325,12 +325,14 @@ PY
   [[ "$output" == *'"memory_mib":4096'* ]]
   [[ "$output" == *'"disk_gib":24'* ]]
   [[ "$output" == *'"startup_timeout_seconds":300'* ]]
-  [[ "$output" == *'"provisioning_timeout_seconds":600'* ]]
+  [[ "$output" == *'"provisioning_timeout_seconds":5400'* ]]
   [[ "$output" == *'"ssh_control_timeout_seconds":30'* ]]
-  [[ "$output" == *'"total_timeout_seconds":3600'* ]]
-  # Worst-case configured stages: three 300s download attempts, SSH boot,
-  # provisioning, browser auth, provider, Docker pull/container and ten controls.
-  (( 3 * 300 + 300 + 600 + 600 + 300 + 2 * 180 + 10 * 30 <= 3600 ))
+  [[ "$output" == *'"total_timeout_seconds":8400'* ]]
+  # Full maxima require 8160s: 3x300s image attempts, 300s SSH boot,
+  # 5400s provisioning, 600s OAuth, 300s provider, 2x180s Docker and ten
+  # 30s controls. The 8400s cap leaves 240s in addition to outer kill grace.
+  (( 3 * 300 + 300 + 5400 + 600 + 300 + 2 * 180 + 10 * 30 == 8160 ))
+  (( 8160 <= 8400 ))
   [[ "$output" != *"nested"* ]]
 }
 
@@ -1332,14 +1334,14 @@ SH
 
 @test "provisioning gets its separate deadline and timeout is reported distinctly" {
   vm_host_ssh() {
-    [ "$3" -eq 600 ] || return 74
+    [ "$3" -eq 5400 ] || return 74
     return 124
   }
 
   run vm_host_provisioning_ready "$TEST_TMP/no-vm-used"
 
   [ "$status" -ne 0 ]
-  [[ "$output" == *"cloud-init provisioning timed out after 600s"* ]]
+  [[ "$output" == *"cloud-init provisioning timed out after 5400s"* ]]
   [[ "$output" != *"workspace mount is missing"* ]]
   [[ "$output" != *"ROOTLESS_DOCKER_OK"* ]]
 }
@@ -1694,7 +1696,7 @@ SH
 @test "CLI exposes no unbounded internal smoke worker" {
   run grep -F '/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C' "$TEST_ROOT/lab-vm"
   [ "$status" -eq 0 ]
-  run grep -F '/usr/bin/timeout --signal=TERM --kill-after=15 3600' "$TEST_ROOT/lab-vm"
+  run grep -F '/usr/bin/timeout --signal=TERM --kill-after=15 8400' "$TEST_ROOT/lab-vm"
   [ "$status" -eq 0 ]
   run grep -F '#!/usr/bin/bash -p' "$TEST_ROOT/lab-vm"
   [ "$status" -eq 0 ]
