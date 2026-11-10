@@ -8,7 +8,7 @@
   "title": "Phase 1 — clean checkout to isolated Dev VM, Little Mester response and rootless Docker smoke",
   "objective": "FINAL Phase1 scope, child of #49: trusted protected host launcher and shared security/policy core, minimal owner CLI, exactly one workspace, fresh DevVM bootstrap, real LittleMester response, rootlessDocker actual container, restricted egress/finite resources/focused tests and successful owner smoke. Host lifecycle MCP adapter deferred until smoke succeeds; D3 future target unchanged. No guest lifecycle/recursion/self-test implementation. Luna sole implementation writer; Sol decisions/verification. Preserve deferred/uncommitted work. No new planning/tickets/docs-only checkpoint; next appropriate implementation commit includes minimal §L timing correction after tests/review. End user pushes. Standing workflow reference only: #49 tests.cases entry \"ORCHESTRATION POLICY v1\"; canonical handoffs remain #49, child uses sequence references.",
   "created_at": "2026-11-08T15:02:09.519Z",
-  "updated_at": "2026-11-10T14:56:31.091Z",
+  "updated_at": "2026-11-10T17:40:17.600Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -129,7 +129,8 @@
       "FOUR ownerprocedure findings at495 blockedhostexecution; Maxonebatchfix: noclobber+precreatedevidencelogthen>reopenpreventssmoke→retainexclusiveFD; PythonheredocconsumedstdintheninputmodelEOF→explicit/dev/tty+hiddenkeyrequireTTYfailclosed;64MiBproofloopneverwritebeyondcapacity→EXACT64MiB+1byteattemptbounded; sudo install/extractbeforelexicalancestorchecks→validateexistingancestorsBEFOREprivilegedwrites, securelyprovisionmissingcomponents, recheckall, noexistingtreeoverwrite. No genericframework/hostexecution, addfocusedunprivilegedbehaviorregressionsifpractical.",
       "Owner supersedes API-key-only acceptance: Phase1 requires native browser ChatGPT OAuth via Plus; no API key/credits/device code. Use pinned v2.2.5 supported guest TUI /connect, manual browser okay. Do not copy auth, touch old VM, or implement persistent auth.",
       "Implement only existing boundary: validated in-memory auth URL, temporary per-session loopback host browser bridge and exact dynamic callback SSH forward to guest loopback; no persistent/LAN listener, new QEMU forward, arbitrary host tools, egress widening. Bounded login waiting and interactive URL visibility without diagnostic leakage; cancellation/timeouts fail and cleanup.",
-      "Focused tests: timeout/cancel/unexpected URL/auth output/code/token leak, callback private/redirect/DNS rejection, login failure propagation, incomplete cleanup; real PTY if interactive. No secrets or real auth in tests. Owner browser/VM remains NOT_RUN."
+      "Focused tests: timeout/cancel/unexpected URL/auth output/code/token leak, callback private/redirect/DNS rejection, login failure propagation, incomplete cleanup; real PTY if interactive. No secrets or real auth in tests. Owner browser/VM remains NOT_RUN.",
+      "Genuine pinned OpenCode 2.2.5 browser-auth output under production-equivalent SSH -T/no-PTY, streamed through the real scanner/validator in a disposable network-isolated environment; synthetic source-faithful fixtures are not genuine executable evidence."
     ],
     "created": [
       "tests/vm-host-launcher.bats:10 existing cases; Sol reran exit0.",
@@ -157,7 +158,10 @@
       "tests/vm-browser-auth.test.py: pinned OpenCode v2.2.5 Clack log.info URL presentation with ANSI/OSC-8 hyperlink chunking; strict URL/callback negatives and sanitized auth reason-code classification.",
       "tests/vm-bounded-log.test.py: fixed-label-only debug sanitization, stop-marker cutoff, and exact 8192-byte cap plus suppressed extra label.",
       "tests/vm-host-launcher.bats: --debug is propagated into VM smoke state before lifecycle preflight; refusal occurs before VM work.",
-      "tests/vm-owner-acceptance.test.py: owner --debug parsing and propagation to lab-vm smoke."
+      "tests/vm-owner-acceptance.test.py: owner --debug parsing and propagation to lab-vm smoke.",
+      "tests/vm-browser-auth.test.py::test_exact_pinned_clack_info_line_without_pty: source-faithful synthetic Clack no-PTY line fed bytewise through AuthorizationOutputScanner and validate_authorization_url.",
+      "tests/vm-browser-auth.test.py::test_incomplete_endpoint_is_distinct_from_extracted_invalid_url and test_wrong_scheme_for_auth_host_is_classified_as_invalid_url: secret-free rejection categories.",
+      "docs/vm-v3-phase1-smoke.md: current reviewed source SHA, expanded terminal diagnostic categories, synthetic-vs-genuine reproduction boundary, and serialize-run warning."
     ],
     "cases": [
       "INITIAL TEST STATUS: no implementation tests or host smoke have run. Sol source-checked package scripts and startup/rootless/rollback evidence; no exact working end-to-end smoke exists in inspected legacy evidence. Discovery is required before any verified-command claim.",
@@ -327,7 +331,13 @@
       "#49 canonical handoff sequence 42 records the production-equivalent 5400s provisioning/8400s total policy, Sol PASS, tests and outstanding owner acceptance.",
       "Source checkpoint a824c57beeb31d9f2da10f3e64aedc036f142a5b reviewed by Sol Medium on that exact SHA; one low cap-boundary observation was corrected and the amended SHA was confirmed with an exact 8192-byte regression. No remaining review finding in final narrow follow-up.",
       "At a824c57: bats tests/vm-host-launcher.bats PASS 76/76; python3 -I tests/vm-browser-auth.test.py PASS 30; tests/vm-bounded-log.test.py PASS 10; tests/vm-owner-acceptance.test.py PASS 33; bash -n, Python compile and git diff --check PASS.",
-      "No host, VM, or retained run inspection was performed. Actual cause of the supplied run's authorization rejection remains unconfirmed; new safe reason codes distinguish missing URL, unexpected output, invalid endpoint/query, unsupported callback, forwarding failure and auth-process exit without logging raw OAuth data."
+      "No host, VM, or retained run inspection was performed. Actual cause of the supplied run's authorization rejection remains unconfirmed; new safe reason codes distinguish missing URL, unexpected output, invalid endpoint/query, unsupported callback, forwarding failure and auth-process exit without logging raw OAuth data.",
+      "OAuth diagnostic candidate a99967f5996a4c2d79da127e52f56cfeeb37a2c3: focused browser-auth suite passed 33/33; all 9 tests/vm-*.test.py suites passed sequentially; tests/vm-host-launcher.bats passed 76/76. Syntax/compile/diff checks passed in the source task. Owner VM/browser OAuth/model/container/cleanup acceptance was NOT_RUN.",
+      "Pinned executable feasibility check: installed `opencode --version` returned `opencode v2.2.5`; exact login command was not executed. No `bwrap` is installed; `unshare --net true` and `unshare --user --map-root-user --net true` both failed with EPERM, so this environment cannot guarantee network-isolated execution. The no-PTY fixture remains synthetic/source-based; actual OAuth cause remains unconfirmed.",
+      "Static owner diagnostic path: host-launcher maps statuses 73/74/75/78/79/80 to fixed stderr categories; owner runner inherits stderr. Category visibility depends on auth logger and cleanup proofs succeeding; report.json stores generic failure status/note, not category. No real run state was inspected.",
+      "Static capacity/lifecycle: host launcher permits at most 8 retained run entries, fails closed on unexpected entries or retained disk/download artifacts, but has no cross-run lock; owner attempts must be serialized. Current occupancy and prior run process/listener/cleanup state remain unknown because retained-run contents/live state were not inspected. Do not mark owner acceptance criteria passing.",
+      "Pinned OpenCode v2.2.5 source establishes token exchange at `https://auth.openai.com/oauth/token` and Codex base URL `https://chatgpt.com/backend-api/codex`; both use HTTPS port 443 allowed by existing public-only proxy policy. No proxy allowance change is needed.",
+      "Canonical handoff packet for this acceptance-readiness task is recorded in parent ticket #49 tests.cases as sequence 43; #51 acceptance criteria remain pending."
     ]
   },
   "models_used": []
