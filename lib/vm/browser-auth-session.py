@@ -630,6 +630,15 @@ class BrowserAuthSession:
         if self._check_auth_abort(deadline):
             return
         if not ready:
+            # The SSH master may close its callback socket just before the
+            # child process is reaped after successful callback delivery.
+            # Allow that already-started completion to surface before calling
+            # it a lost forward; a still-live process remains a hard failure.
+            settle_deadline = time.monotonic() + 0.1
+            while time.monotonic() < settle_deadline:
+                if self._check_auth_abort(deadline):
+                    return
+                time.sleep(0.01)
             raise AuthSessionError("browser opening refused because the callback forward is no longer verified", 77)
 
     def _open_portal(self, url: str, deadline: float | None = None) -> bool:
@@ -704,22 +713,15 @@ class BrowserAuthSession:
                 self._assert_auth_live(deadline)
                 if self.auth_process_completed:
                     return False
-                call_timeout = 5
                 auth_deadline = deadline if deadline is not None else self.deadline
+                call_timeout = 5.0
                 if auth_deadline is not None:
-                    remaining = auth_deadline - time.monotonic()
+                    # Reserve scheduling/marshalling headroom so the D-Bus
+                    # timeout cannot extend beyond the caller's deadline.
+                    remaining = auth_deadline - time.monotonic() - 0.05
                     if remaining <= 0:
-                        self._check_auth_abort(deadline)
-                    call_timeout = min(call_timeout, max(0.001, remaining))
-                if self._check_auth_abort(deadline):
-                    return False
-                if self.auth_process_completed:
-                    return False
-                if auth_deadline is not None:
-                    remaining = auth_deadline - time.monotonic()
-                    if remaining <= 0:
-                        self._check_auth_abort(deadline)
-                    call_timeout = min(5, max(0.001, remaining))
+                        raise AuthSessionError("browser authentication deadline is too close for portal submission", 124)
+                    call_timeout = min(call_timeout, remaining)
                 if self._check_auth_abort(deadline):
                     return False
                 if self.auth_process_completed:
@@ -774,6 +776,7 @@ class BrowserAuthSession:
 
     def _portal_or_manual(self, url: str, deadline: float | None = None) -> None:
         opened = self._open_portal(url, deadline)
+        self._check_auth_abort(deadline)
         if getattr(self, "auth_process_completed", False):
             return
         if getattr(self, "portal_cleanup_failed", False):

@@ -187,10 +187,11 @@ class AuthorizationValidationTests(unittest.TestCase):
         session.portal_cleanup_failed = False
         clock = [0.0]
         readiness_calls = [0]
+        probe_times = [9.7, 9.8, 9.8, 9.999, 9.999]
 
         def ready_near_deadline(port):
             readiness_calls[0] += 1
-            clock[0] = 9.7 if readiness_calls[0] == 1 else 9.8
+            clock[0] = probe_times[min(readiness_calls[0] - 1, len(probe_times) - 1)]
             events.append(("ready", port))
             return True
 
@@ -206,6 +207,9 @@ class AuthorizationValidationTests(unittest.TestCase):
             mock.patch.object(auth.time, "monotonic", side_effect=lambda: clock[0]),
         ):
             self.assertTrue(session._open_portal(url, session.deadline))
+            with self.assertRaises(auth.AuthSessionError) as error:
+                session._open_portal(url, session.deadline)
+            self.assertEqual(error.exception.status, 124)
         self.assertEqual(events[0], ("ready", 1455))
         self.assertEqual(events[1][0], "subscribe")
         self.assertEqual(events[1][1].rsplit("/", 1)[0], "/org/freedesktop/portal/desktop/request/1_99")
@@ -219,7 +223,8 @@ class AuthorizationValidationTests(unittest.TestCase):
         ))
         self.assertEqual(opened[6][1], url)
         self.assertGreater(opened[7], 0)
-        self.assertLessEqual(opened[7], 0.2)
+        self.assertLessEqual(opened[7], 0.15)
+        self.assertEqual(sum(event[0] == "call" and event[4] == "OpenURI" for event in events), 1)
         self.assertEqual(events[-1], "removed")
 
     def test_portal_absence_without_tty_fails_closed_without_printing_url(self):
@@ -254,6 +259,53 @@ class AuthorizationValidationTests(unittest.TestCase):
         with self.assertRaises(auth.AuthSessionError) as error:
             session._portal_or_manual(url, session.deadline)
         self.assertEqual(error.exception.status, 128 + signal.SIGTERM)
+        self.assertFalse(any(url.encode("ascii") in chunk for chunk in output))
+
+    def test_close_failure_does_not_replace_cancellation_status_or_disclose_url(self):
+        session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
+        session.tty_fd = 1
+        session.callback_port = 1455
+        session.deadline = time.monotonic() + 30
+        session.signal_received = None
+        session.auth_process_completed = False
+        session.portal_cleanup_failed = False
+        session._loopback_forward_ready = lambda _port: True
+        output = []
+
+        def cancel_with_close_failure(_url, _deadline):
+            session.signal_received = signal.SIGTERM
+            session.portal_cleanup_failed = True
+            return False
+
+        session._open_portal = cancel_with_close_failure
+        session._write_tty = output.append
+        url = authorization_url()
+        with self.assertRaises(auth.AuthSessionError) as error:
+            session._portal_or_manual(url, session.deadline)
+        self.assertEqual(error.exception.status, 128 + signal.SIGTERM)
+        self.assertFalse(any(url.encode("ascii") in chunk for chunk in output))
+
+    def test_unclosed_portal_request_blocks_manual_fallback(self):
+        session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
+        session.tty_fd = 1
+        session.callback_port = 1455
+        session.deadline = time.monotonic() + 30
+        session.signal_received = None
+        session.auth_process_completed = False
+        session.portal_cleanup_failed = False
+        session._loopback_forward_ready = lambda _port: True
+        output = []
+
+        def failed_close(_url, _deadline):
+            session.portal_cleanup_failed = True
+            return False
+
+        session._open_portal = failed_close
+        session._write_tty = output.append
+        url = authorization_url()
+        with self.assertRaises(auth.AuthSessionError) as error:
+            session._portal_or_manual(url, session.deadline)
+        self.assertEqual(error.exception.status, 77)
         self.assertFalse(any(url.encode("ascii") in chunk for chunk in output))
 
     def test_cancellation_during_readiness_probe_prevents_manual_url_disclosure(self):
