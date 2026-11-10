@@ -1102,8 +1102,8 @@ PY
   [ "$(stat -c %a "$TEST_TMP/virtiofs-runtime/virtiofs.sock.pid")" = 600 ]
 }
 
-@test "cleanup retains stopped run socket/PID artifacts and never signals PID-file contents" {
-  local run_dir="$TEST_TMP/retained-virtiofs" pid
+@test "cleanup validates stopped virtiofs artifacts, retains evidence, and never signals PID-file contents" {
+  local run_dir="$TEST_TMP/retained-virtiofs" pid validation_mode=""
   mkdir -m 0700 "$run_dir"
   mkdir -m 0700 "$TEST_TMP/virtiofs-runtime"
   python3 - "$TEST_TMP/virtiofs-runtime/virtiofs.sock" <<'PY'
@@ -1118,11 +1118,14 @@ PY
   chmod 0600 "$TEST_TMP/virtiofs-runtime/virtiofs.sock.pid"
   printf '%s\n' "$TEST_TMP/virtiofs-runtime/virtiofs.sock" >"$run_dir/virtiofs.socket-path"
   chmod 0600 "$run_dir/virtiofs.socket-path"
-  vm_host_validate_virtiofs_artifacts() { return 0; }
+  VM_HOST_VIRTIOFS_ALLOCATED=1
+  vm_host_cleanup_browser_auth() { return 0; }
+  vm_host_validate_virtiofs_artifacts() { validation_mode="$2"; [[ "$1" == "$run_dir" && "$2" == stopped ]]; }
   VM_HOST_RUN_DIR="$run_dir"
 
   vm_host_cleanup
 
+  [ "$validation_mode" = stopped ]
   [ -S "$TEST_TMP/virtiofs-runtime/virtiofs.sock" ]
   [ "$(<"$TEST_TMP/virtiofs-runtime/virtiofs.sock.pid")" = "$pid" ]
   kill -0 "$pid"
@@ -1923,6 +1926,8 @@ PY
   TEST_OWNED_PROCESS_GROUP_FILE="$parent_file"
   TEST_UNRELATED_PID_FILE="$unrelated_file"
   mkdir -m 0700 "$run_dir"
+  : >"$run_dir/qemu.debug-stop"
+  chmod 0600 "$run_dir/qemu.debug-stop"
   cat >"$child_script" <<'PY'
 import os, pathlib, signal, time
 child = os.fork()
@@ -1972,6 +1977,7 @@ SH
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"Smoke acceptance stages completed."* ]]
+  [ ! -e "$run_dir/qemu.debug-stop" ]
   [ ! -e "/proc/$(<"$descendant_file")" ]
   [ ! -e "$run_dir/proxy.identity" ]
   [ ! -e "$run_dir/proxy.complete" ]
@@ -1984,6 +1990,8 @@ SH
   local child_pid_file="$TEST_TMP/unproved-descendant.pid" group_file="$TEST_TMP/unproved-group.pid"
   TEST_OWNED_PROCESS_GROUP_FILE="$group_file"
   mkdir -m 0700 "$run_dir"
+  : >"$run_dir/qemu.debug-stop"
+  chmod 0600 "$run_dir/qemu.debug-stop"
   cat >"$child_script" <<'PY'
 import os, pathlib, signal, time
 child = os.fork()
@@ -2035,6 +2043,7 @@ SH
   [[ "$output" == *"completion is unverified"* ]]
   [[ "$output" != *"Smoke acceptance stages completed."* ]]
   [ -d "$run_dir" ]
+  [ -e "$run_dir/qemu.debug-stop" ]
   [ -e "/proc/$(<"$child_pid_file")" ]
   [ ! -e "$run_dir/proxy.complete" ]
 }

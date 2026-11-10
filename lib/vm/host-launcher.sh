@@ -711,7 +711,8 @@ PY
       "$VM_HOST_RUN_DIR/seed.iso" "$VM_HOST_RUN_DIR/user-data" "$VM_HOST_RUN_DIR/meta-data" \
       "$VM_HOST_RUN_DIR/id_vm_control" "$VM_HOST_RUN_DIR/id_vm_control.pub" \
       "$VM_HOST_RUN_DIR/known_hosts" "$VM_HOST_RUN_DIR/known_hosts.tmp" "$VM_HOST_RUN_DIR/known_hosts.valid" \
-      "$VM_HOST_RUN_DIR/qemu.command" "$VM_HOST_RUN_DIR/proxy.port" "$VM_HOST_RUN_DIR/ssh_port" \
+      "$VM_HOST_RUN_DIR/qemu.command" "$VM_HOST_RUN_DIR/qemu.debug-stop" \
+      "$VM_HOST_RUN_DIR/proxy.port" "$VM_HOST_RUN_DIR/ssh_port" \
       "$VM_HOST_RUN_DIR/model-response.raw" "$VM_HOST_RUN_DIR/docker-container.raw" \
       "$VM_HOST_RUN_DIR/docker-inspect.raw" "$VM_HOST_RUN_DIR/docker-security.raw" \
       "$VM_HOST_RUN_DIR/auth-ssh.identity" "$VM_HOST_RUN_DIR/auth-callback.port" \

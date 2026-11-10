@@ -674,6 +674,19 @@ class OwnerAcceptanceTests(unittest.TestCase):
             child.terminate()
             child.wait(timeout=5)
 
+    def test_qemu_debug_stop_is_not_an_allowed_retained_acceptance_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run_id = "20261109T154005Z-" + "f" * 32
+            run_dir = pathlib.Path(temporary) / run_id
+            run_dir.mkdir(mode=0o700)
+            for name in ("qemu.log", "virtiofsd.log", "proxy.log", "virtiofs.socket-path"):
+                (run_dir / name).touch(mode=0o600)
+            (run_dir / "qemu.debug-stop").touch(mode=0o600)
+            with mock.patch.object(acceptance, "state_root", return_value=pathlib.Path(temporary)), \
+                    mock.patch.object(acceptance, "verify_user_directory_chain"):
+                with self.assertRaisesRegex(acceptance.GateError, "unexpected retained artifacts"):
+                    acceptance.inspect_cleanup("a" * 40, run_id, pathlib.Path("/protected/install"))
+
     def test_live_socket_listener_blocks_readonly_cleanup_verification(self):
         with tempfile.TemporaryDirectory() as temporary:
             run_id = "20261109T154005Z-" + "e" * 32

@@ -259,6 +259,9 @@ class VirtiofsSocketTests(unittest.TestCase):
                         run_dir, fixture.runtime_root, fixture.uid, fixture.system_uid, startup=False
                     )
                 self.assertTrue(stopped["socket_present"])
+                self.assertTrue(stopped["pid_present"])
+                self.assertEqual(stopped["runtime_directory"], "present")
+                self.assertFalse(virtiofs_socket._listener_present(str(socket_path)))
                 self.assertIsNone(child.poll(), "PID artifact is evidence, never a signal target")
             finally:
                 listener.close()
