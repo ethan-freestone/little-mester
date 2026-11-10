@@ -8,7 +8,7 @@
   "title": "Phase 1 — clean checkout to isolated Dev VM, Little Mester response and rootless Docker smoke",
   "objective": "FINAL Phase1 scope, child of #49: trusted protected host launcher and shared security/policy core, minimal owner CLI, exactly one workspace, fresh DevVM bootstrap, real LittleMester response, rootlessDocker actual container, restricted egress/finite resources/focused tests and successful owner smoke. Host lifecycle MCP adapter deferred until smoke succeeds; D3 future target unchanged. No guest lifecycle/recursion/self-test implementation. Luna sole implementation writer; Sol decisions/verification. Preserve deferred/uncommitted work. No new planning/tickets/docs-only checkpoint; next appropriate implementation commit includes minimal §L timing correction after tests/review. End user pushes. Standing workflow reference only: #49 tests.cases entry \"ORCHESTRATION POLICY v1\"; canonical handoffs remain #49, child uses sequence references.",
   "created_at": "2026-11-08T15:02:09.519Z",
-  "updated_at": "2026-11-10T20:10:47.578Z",
+  "updated_at": "2026-11-10T20:57:15.136Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -164,7 +164,10 @@
       "docs/vm-v3-phase1-smoke.md: current reviewed source SHA, expanded terminal diagnostic categories, synthetic-vs-genuine reproduction boundary, and serialize-run warning.",
       "tests/vm-host-launcher.bats: deterministic mocked launcher regression constructs the original 115-byte run_dir/auth-control.sock and verifies a short runtime auth-path is passed to the helper.",
       "tests/vm-browser-auth.test.py: preserves byte-based <100 ControlPath boundaries in both SSH argument builders and rejects unsafe/non-private per-run control directories.",
-      "tests/vm-virtiofs-socket.test.py: verifies auth ControlPath shares the existing private per-run runtime directory and refuses a pre-existing auth socket artifact."
+      "tests/vm-virtiofs-socket.test.py: verifies auth ControlPath shares the existing private per-run runtime directory and refuses a pre-existing auth socket artifact.",
+      "tests/vm-host-launcher.bats: successful cleanup removes qemu.debug-stop after owned-process/logger/stopped-artifact proofs; unverified cleanup retains it.",
+      "tests/vm-virtiofs-socket.test.py: stopped no-listener state retains validated socket/PID artifacts; PID contents are not signal authority.",
+      "tests/vm-owner-acceptance.test.py: qemu.debug-stop remains rejected by unchanged retained-artifact allowlist."
     ],
     "cases": [
       "INITIAL TEST STATUS: no implementation tests or host smoke have run. Sol source-checked package scripts and startup/rootless/rollback evidence; no exact working end-to-end smoke exists in inspected legacy evidence. Discovery is required before any verified-command claim.",
@@ -345,7 +348,10 @@
       "Implementation 5cea973a7d41674a6b8142b626a12713215ae5d2: Bats tests/vm-host-launcher.bats PASS 77/77; all nine tests/vm-*.test.py suites PASS (browser-auth 35/35; virtiofs-socket 11/11); warning-as-error Python compilation, bash syntax, and git diff --check PASS. Sol Medium independently reviewed the exact implementation SHA: PASS, no blocking issue or regression. No VM/owner smoke run; retained capacity remains 8/8, acceptance pending.",
       "Canonical handoff #49 sequence 45 records this implementation milestone; its head_sha transcription is corrected in the immediately following #49 ledger case to d6704e405b1be2ba9d664be340ea6995bf2dd280. Acceptance criteria remain pending; owner smoke NOT_RUN.",
       "Project-wide persistent Sol Medium workflow is defined in parent #49 tests.cases (review exact committed SHA with combined implementation-quality/security packet; scoped evidence requests; same-context continuation; Luna owns fixes/disposition; verdict and ranked findings recorded). Current combined review of 5cea973a7d41674a6b8142b626a12713215ae5d2: PASS; one low optional suggestion is a composed helper-chain regression, not a release blocker. Supplied test evidence was not independently rerun by Sol. Owner acceptance remains pending.",
-      "Parent #49 sequence 46 persists the project-wide Sol Medium combined implementation-quality/security review and scoped evidence-request workflow; it applies beyond the Phase 1 package. #51 remains active with all acceptance criteria pending."
+      "Parent #49 sequence 46 persists the project-wide Sol Medium combined implementation-quality/security review and scoped evidence-request workflow; it applies beyond the Phase 1 package. #51 remains active with all acceptance criteria pending.",
+      "Cleanup blocker correction at 71afdedadefbf0a023012a4fd5ce4b45dfba2327; Bats 77/77, virtiofs 11/11, owner-acceptance 34/34, Python compilation, shell syntax, and diff checks pass.",
+      "Sol Medium combined implementation-quality/security review of exact SHA 71afdedadefbf0a023012a4fd5ce4b45dfba2327: PASS, no findings. Owner final cleanup acceptance remains pending; canonical handoff #49 sequence 47.",
+      "Canonical cleanup-fix handoff is #49 sequence 48; it supersedes malformed sequence 47 and records exact head SHA dc41a093b907743a73822f14180f78aa791504c0. Final owner cleanup acceptance remains pending."
     ]
   },
   "models_used": []
