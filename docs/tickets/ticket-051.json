@@ -8,7 +8,7 @@
   "title": "Phase 1 — clean checkout to isolated Dev VM, Little Mester response and rootless Docker smoke",
   "objective": "FINAL Phase1 scope, child of #49: trusted protected host launcher and shared security/policy core, minimal owner CLI, exactly one workspace, fresh DevVM bootstrap, real LittleMester response, rootlessDocker actual container, restricted egress/finite resources/focused tests and successful owner smoke. Host lifecycle MCP adapter deferred until smoke succeeds; D3 future target unchanged. No guest lifecycle/recursion/self-test implementation. Luna sole implementation writer; Sol decisions/verification. Preserve deferred/uncommitted work. No new planning/tickets/docs-only checkpoint; next appropriate implementation commit includes minimal §L timing correction after tests/review. End user pushes. Standing workflow reference only: #49 tests.cases entry \"ORCHESTRATION POLICY v1\"; canonical handoffs remain #49, child uses sequence references.",
   "created_at": "2026-11-08T15:02:09.519Z",
-  "updated_at": "2026-11-10T17:40:17.600Z",
+  "updated_at": "2026-11-10T17:46:26.140Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -337,7 +337,8 @@
       "Static owner diagnostic path: host-launcher maps statuses 73/74/75/78/79/80 to fixed stderr categories; owner runner inherits stderr. Category visibility depends on auth logger and cleanup proofs succeeding; report.json stores generic failure status/note, not category. No real run state was inspected.",
       "Static capacity/lifecycle: host launcher permits at most 8 retained run entries, fails closed on unexpected entries or retained disk/download artifacts, but has no cross-run lock; owner attempts must be serialized. Current occupancy and prior run process/listener/cleanup state remain unknown because retained-run contents/live state were not inspected. Do not mark owner acceptance criteria passing.",
       "Pinned OpenCode v2.2.5 source establishes token exchange at `https://auth.openai.com/oauth/token` and Codex base URL `https://chatgpt.com/backend-api/codex`; both use HTTPS port 443 allowed by existing public-only proxy policy. No proxy allowance change is needed.",
-      "Canonical handoff packet for this acceptance-readiness task is recorded in parent ticket #49 tests.cases as sequence 43; #51 acceptance criteria remain pending."
+      "Canonical handoff packet for this acceptance-readiness task is recorded in parent ticket #49 tests.cases as sequence 43; #51 acceptance criteria remain pending.",
+      "Canonical acceptance-readiness handoff #49 sequence 44 records NO-GO today and the exact owner prerequisites; #51 acceptance criteria remain pending. No live retained-run/auth/VM state was inspected."
     ]
   },
   "models_used": []
