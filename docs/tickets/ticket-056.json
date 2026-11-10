@@ -5,39 +5,44 @@
   "area": "vm-v3",
   "type": "feature",
   "status": "draft",
-  "title": "P1-04 — Minimal host metrics parity over identity-bound SSH",
-  "objective": "P1-04 minimal host metrics parity. Successor to #49/#51; depends on P1-01 ticket #53 evidence context. Design-only assessment may proceed before P1-02 #54; implementation is blocked on Sol review and explicit owner approval, and final acceptance is #57.",
+  "title": "P1-04 — Host metrics 500-ms parity over identity-bound SSH",
+  "objective": "Deliver historical host CPU/RAM/GPU/VRAM/temperature metrics at a 500-ms target using a Sol-reviewed, owner-approved bounded host-push channel; no guest-initiated host API or copied Compose sidecar topology.",
   "created_at": "2026-11-10T21:46:28.237Z",
-  "updated_at": "2026-11-10T21:46:51.750Z",
+  "updated_at": "2026-11-10T23:24:27.192Z",
   "acceptance_criteria": [
     {
       "id": "A1",
-      "text": "Before implementation, submit an exact-SHA design packet for Sol combined security/implementation assessment and obtain explicit owner approval of any new host-to-guest data path.",
+      "text": "Before implementing any new host-to-guest metrics transport, submit the exact proposed design for Sol's combined security/implementation assessment and obtain explicit owner approval of the bounded push interface.",
       "status": "pending"
     },
     {
       "id": "A2",
-      "text": "Define a versioned fixed-schema snapshot with bounded numeric values/strings/arrays, UTC sample and receipt timestamps, monotonic freshness marker, explicit unavailable values, and stale threshold; propose 2-second cadence, 1-second collector/push deadline, 16-KiB maximum payload, and 6-second stale threshold for owner approval.",
+      "text": "Host hardware snapshot target cadence is 500 ms, matching the established implementation. Collector and transport do not overlap, block the TUI, accumulate queues, or launch an unbounded number of processes. Measure collection/push time; on deadline/overrun skip or mark unavailable rather than fabricate or queue samples.",
       "status": "pending"
     },
     {
       "id": "A3",
-      "text": "Use only the existing run-scoped identity-bound, host-key-verified SSH capability to push to a fixed guest receiver; no data interpolation into commands, guest-originated host request, listener, new egress, direct /proc-/sys-/device mount, or PID authority.",
+      "text": "Use the per-parent host-key-verified SSH route to push a fixed versioned schema to a fixed guest receiver, with a separate per-run metrics key enforced server-side to permit only the receiver (no PTY, forwarding, startup hooks, or arbitrary commands). If retaining the broader owner key is proposed, stop for explicit owner acceptance of that residual authority. No guest-initiated host request, new listener/port, proxy permission, direct host filesystem/device mount, Docker socket, arbitrary command interface, or PID-file authority.",
       "status": "pending"
     },
     {
       "id": "A4",
-      "text": "Receiver validates size/schema/ranges and atomically replaces one private tmpfs snapshot with symlink/special-file protections; UI distinguishes fresh, stale, and unavailable data.",
+      "text": "Bound snapshot size (16 KiB proposed starting maximum), exact schema keys, values, arrays, strings, collector execution and transport deadlines. Include opaque run ID, strictly increasing per-run sequence, UTC diagnostic sample timestamp, defined sampling duration, and explicit unavailable/error states. Receiver uses guest-monotonic receipt time for freshness; reject wrong-run, duplicate/decreasing sequence, and stale/replayed frames. Set a measured fixed stale threshold (Sol recommends 1.5 seconds); do not compare host and guest monotonic clocks.",
       "status": "pending"
     },
     {
       "id": "A5",
-      "text": "Expose a host-OS-portable collector interface with optional platform/vendor collectors; every executable collector passes existing provenance policy. Current Linux/KVM support is not misrepresented as cross-platform support.",
+      "text": "Guest receiver verifies a dedicated tmpfs-backed private directory, validates type/range/size and run/sequence, and atomically replaces a fixed snapshot using directory-relative no-follow/exclusive file operations. Read-only metrics tool/TUI updates at the 500-ms target without blocking OpenCode; stale/unavailable is explicit and valid subsequent samples recover automatically.",
       "status": "pending"
     },
     {
       "id": "A6",
-      "text": "Reuse historical gather/formatter/TUI logic selectively; do not import the Compose HTTP server or its network topology.",
+      "text": "Reuse safe portions of the historical 500-ms collectors, formatter, and TUI presentation; do not import their Compose HTTP server/network topology or import-time sampler side effects. Keep a portable collector interface; Linux/KVM is the supported Phase 1 runtime, vendor collectors are optional/provenance-checked, and missing hardware is reported unavailable.",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "Tests establish 500-ms cadence and non-overlap under normal load, collector deadline/overrun behavior, schema/size/provenance validation, unavailable/stale/recovery rendering, atomic replacement, symlink refusal, SSH timeout/overflow, no added network listener/egress, and no host data outside the fixed metrics schema.",
       "status": "pending"
     }
   ],
@@ -45,10 +50,22 @@
     "needed": [
       "Sol design review and owner authorization before code.",
       "Schema bounds, unavailable/stale data, timestamps, atomic replacement, symlink refusal, timeout, overflow, provenance and no-listener/no-new-egress negatives.",
-      "Owner hands-on metrics accuracy and stale/unavailable display on the protected interactive guest."
+      "Owner hands-on metrics accuracy and stale/unavailable display on the protected interactive guest.",
+      "Sol combined review of exact metrics design packet; owner approval before transport implementation.",
+      "Measure collector and SSH push latency/resource overhead against 500-ms cadence; guarantee no overlap/unbounded queue.",
+      "Schema, payload bounds, timestamps/freshness, unavailable/stale/recovery, atomic replace, provenance, symlink, timeout/overflow, and no-listener/no-egress negatives.",
+      "Owner hands-on 500-ms cadence/accuracy and stale/unavailable checks on final protected interactive VM.",
+      "Sol combined design assessment completed; resolve blocking conditions and obtain owner approval of identity scope, deadlines/schema/staleness, optional GPU policy and tmpfs ownership before transport implementation.",
+      "Measure collector and SSH delivery/ACK budget below 500 ms; one outstanding frame, absolute monotonic schedule, no overlap/catch-up/replay/queue, bounded retries, exact-process cleanup.",
+      "Schema bounds, wrong-run/sequence/replay, freshness, timestamps, optional-field unavailable/error, provenance and restart semantics.",
+      "Atomic tmpfs replacement, symlink/path substitution, unsafe permissions/non-tmpfs, interrupted writes and concurrent receiver negatives.",
+      "Stalled/hung collection or helper, excess output, blocked write/ACK, SSH disconnect/auth/host-key failure, and bounded recovery/no process leak.",
+      "Owner hands-on cadence/accuracy and stale/unavailable display on final protected interactive guest."
     ],
     "created": [],
-    "cases": []
+    "cases": [
+      "Design-only Sol assessment: PASS WITH CONCERNS. Owner approved a separate per-run receiver-restricted metrics SSH key, absolute 500-ms schedule, one-frame ACK/backpressure, fixed 1.5-s stale threshold and private tmpfs-only snapshots. GPU unavailable is permitted only where hardware lacks support/during implementation; supported NVIDIA GPU utilisation and VRAM remain Phase 1 acceptance requirements. This is not implementation review or acceptance; no metrics transport exists yet."
+    ]
   },
   "models_used": []
 }

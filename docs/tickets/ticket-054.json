@@ -5,34 +5,44 @@
   "area": "vm-v3",
   "type": "feature",
   "status": "draft",
-  "title": "P1-02 — Secure foreground interactive v3 VM session",
-  "objective": "P1-02 foreground session. Successor to #49/#51; depends on P1-01 ticket #53 evidence/supersession and P1-03 ticket #55's timeboxed 2.2.5 compatibility findings before protected TUI integration. Proposed trust-boundary changes require explicit owner approval before implementation.",
+  "title": "P1-02 — Owner-controlled persistent parent VM and SSH",
+  "objective": "Implement one owner-operated protected parent Dev VM that persists across SSH/OpenCode disconnects and has no default lifetime cap, with explicit stop and identity-bound recovery. Owner-approved trust-boundary scope; no child VM or multi-VM orchestration.",
   "created_at": "2026-11-10T21:46:28.200Z",
-  "updated_at": "2026-11-10T21:46:51.729Z",
+  "updated_at": "2026-11-10T23:23:43.811Z",
   "acceptance_criteria": [
     {
       "id": "A1",
-      "text": "Session runs only from the protected installed launcher, exports exactly one owner-selected bounded workspace, uses a foreground PTY with terminal restoration, disables SSH escape commands with EscapeChar=none, and enforces an owner-approved finite session deadline.",
+      "text": "Run a single owner-controlled parent Dev VM through the protected project script with lifecycle start, status, SSH, and deliberate stop operations. No general multi-VM orchestration. The parent remains running when SSH disconnects or OpenCode exits and supports reconnect without restart.",
       "status": "pending"
     },
     {
       "id": "A2",
-      "text": "Session uses per-run ephemeral guest/auth state and verified teardown; no credential or guest state persists after successful destruction.",
+      "text": "No default parent-VM or OpenCode session wall-clock cap, idle shutdown, or forced session termination. An optional owner-configured maximum lifetime is disabled by default for the parent; policy can represent future mandatory child-VM limits without implementing child orchestration.",
       "status": "pending"
     },
     {
       "id": "A3",
-      "text": "SIGINT and SIGHUP trigger bounded cleanup and nonzero failure when cleanup is uncertain; SIGKILL is treated as possible orphaning, never as successful cleanup.",
+      "text": "Owner host-to-guest SSH uses the existing protected per-VM identity, verified host key, private state, fixed trusted executable/configuration policy, interactive PTY, EscapeChar=none, and terminal restoration. Disable agent/X11 forwarding and arbitrary tunnels/forwarding changes. Disconnect/reconnect must not restart the parent. Remote owner access is documented via an approved authenticated host SSH/VPN hop, never public guest SSH or router forwarding.",
       "status": "pending"
     },
     {
       "id": "A4",
-      "text": "Provide an owner-only recovery procedure for interrupted sessions that verifies run identity, exact executable/start-time/argv identity and listener state; only identity-bound owned processes may be terminated, never PID-file contents. Ambiguous evidence preserves state and fails closed.",
+      "text": "Guest ChatGPT authentication persists only in the private live parent guest so owner reconnect does not require reauthentication; deliberate teardown destroys the guest/auth state and the next VM requires fresh authentication. No host-side credential persistence, shared-workspace token exposure, or preservation across destroyed instances.",
       "status": "pending"
     },
     {
       "id": "A5",
-      "text": "Tests cover PTY input/output/resize/terminal restoration, deadlines, signal cases, sequential cleanup budget, orphan recovery, unrelated-process preservation, no credential persistence, and no broad host access.",
+      "text": "Explicit owner stop and ordinary SIGINT/SIGHUP/launcher failure produce bounded identity-bound teardown and independently verifiable stopped state. A minimal owner-only recovery/verification path handles SIGKILL or launcher loss using validated run identity, executable/start-time/argv, pidfd where available, listener and artifact checks; never trust PID-file contents, kill ambiguous/unrelated processes, or reuse smoke-report-bound --verify-cleanup for arbitrary sessions.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "Preserve the explicitly selected private bounded workspace and current hard isolation. Investigate the minimum safe writable development workspace; do not silently expand the existing 64-MiB noexec smoke export or expose broader host filesystem. Any size/backing-store authority increase requires explicit owner approval.",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "Final owner tests prove script start/status/SSH/stop, SSH disconnect/reconnect, OpenCode exit without VM stop, unlimited default running lifetime, deliberate teardown, ephemeral auth destruction, SIGINT/SIGHUP cleanup, controlled SIGKILL recovery, stale/mismatched identity refusal, no unrelated process termination, PTY restoration, no host Docker socket, and bounded workspace isolation. No VM action is run without owner authorization.",
       "status": "pending"
     }
   ],
@@ -40,9 +50,17 @@
     "needed": [
       "Owner approval for foreground lifecycle/recovery trust boundary and finite deadline.",
       "PTY and resize tests; SIGINT/SIGHUP cleanup; SIGKILL orphan recovery with exact-identity fixtures and host canary.",
-      "Full protected smoke on final SHA after any launcher/provisioning change."
+      "Full protected smoke on final SHA after any launcher/provisioning change.",
+      "Protected script lifecycle start/status/ssh/stop; PTY reconnect and OpenCode exit independence.",
+      "No default expiry/idle shutdown; optional max-lifetime policy disabled for parent.",
+      "Identity-bound SIGINT/SIGHUP/stop cleanup and owner-only SIGKILL recovery/verification; no PID-file authority.",
+      "Per-VM authenticated SSH from owner host and approved remote host-hop, no unapproved forwarding.",
+      "Workspace-size/backing review and explicit owner approval before any export expansion.",
+      "No runtime testing until owner authorizes the specific host action."
     ],
-    "created": [],
+    "created": [
+      "tests/vm-host-launcher.bats: interactive SSH mock verifies an unbounded PTY invocation, private run-state validation, EscapeChar=none, disabled forwarding, strict per-run host-key/identity policy, and no session timeout; 78 host-launcher tests pass. Mock only; no guest/runtime evidence. Acceptance criteria remain pending."
+    ],
     "cases": []
   },
   "models_used": []
