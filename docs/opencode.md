@@ -206,9 +206,11 @@ sequence is therefore **Ctrl+C, then Q** (Q presses the dialog's confirm action)
   the other slash aliases still exist as deliberate, typed commands.
 - `agent/opencode/tui.json` is deleted: dead v1 config that would have bound exit to a single `q`.
 
-**Verification.** Static checks: `tests/tui-jsx.bats`, `tests/exit-confirm.bats` (26 tests total in
-`bats tests/`, one unrelated skip). Live check: `scripts/verify-exit-confirm.py` drives a private
-standalone TUI through a pty and asserts Ctrl+D is inert, `yq` types with the dialog closed, Ctrl+C
-opens the dialog, Esc/N/Ctrl+C cancel without exiting, and q exits. It passed on OpenCode 2.1.4 in
-the agent container; the run is recorded on ticket #37. The image must be rebuilt/restarted for the
-baked `/etc/opencode` copy to replace any stale running copy.
+**Verification.** Static checks: `tests/tui-jsx.bats`, `tests/exit-confirm.bats`. The live check
+`scripts/verify-exit-confirm.py` drives a private standalone TUI through a pty using a temporary
+HOME and disposable workspace, and asserts Ctrl+D is inert, `yq` types with the dialog closed,
+Ctrl+C opens the dialog, Esc/N/Ctrl+C cancel without exiting, and uppercase Y and Q confirm exit.
+The updated sequence passed against OpenCode 2.2.5 in the agent container on 2026-11-11. This
+establishes local pinned-binary behavior only; target-terminal clipboard canary and protected-guest
+configuration/provenance checks remain separate acceptance work. The image must be rebuilt/restarted
+for the baked `/etc/opencode` copy to replace any stale running copy.

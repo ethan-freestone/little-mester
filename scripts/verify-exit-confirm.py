@@ -43,9 +43,13 @@ CLI_CONFIG = {
 
 class Driver:
     def __init__(self, home):
-        env = dict(os.environ)
-        for key in ("OPENCODE_SESSION_ID", "OPENCODE", "OPENCODE_TERMINAL", "OPENCODE_CLI_CONFIG_CONTENT"):
-            env.pop(key, None)
+        workspace = os.path.join(home, "workspace")
+        server_config = os.path.join(home, "opencode.json")
+        with open(server_config, "w", encoding="utf-8") as stream:
+            json.dump({"$schema": "https://opencode.ai/config.json",
+                       "autoupdate": False, "share": "disabled"}, stream)
+        os.chmod(server_config, 0o600)
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         env.update(
             {
                 "HOME": home,
@@ -55,13 +59,14 @@ class Driver:
                 "XDG_CACHE_HOME": os.path.join(home, ".cache"),
                 "TERM": "xterm-256color",
                 "COLORTERM": "truecolor",
+                "OPENCODE_CONFIG": server_config,
                 "OPENCODE_CLI_CONFIG_CONTENT": json.dumps(CLI_CONFIG),
             }
         )
         self.child = pexpect.spawn(
             "opencode",
-            ["--standalone", ROOT],
-            cwd=ROOT,
+            ["--standalone", workspace],
+            cwd=workspace,
             env=env,
             encoding="utf-8",
             codec_errors="replace",
@@ -114,6 +119,8 @@ def check(label, condition):
 
 def main():
     home = tempfile.mkdtemp(prefix="opencode-exit-confirm-")
+    workspace = os.path.join(home, "workspace")
+    os.mkdir(workspace, 0o700)
     driver = None
     failures = []
     try:
@@ -147,9 +154,16 @@ def main():
 
         driver.buffer = ""
         driver.ctrl("c")
-        driver.send("q")
+        driver.send("Y")
         time.sleep(1.5)
-        failures.append(not check("q confirms and exits", not driver.alive()))
+        failures.append(not check("Y confirms and exits", not driver.alive()))
+        driver.close()
+
+        driver = Driver(home)
+        driver.ctrl("c")
+        driver.send("Q")
+        time.sleep(1.5)
+        failures.append(not check("Q confirms and exits", not driver.alive()))
     finally:
         if driver:
             driver.close()
