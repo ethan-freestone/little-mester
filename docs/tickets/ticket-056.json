@@ -8,7 +8,7 @@
   "title": "P1-04 — Host metrics 500-ms parity over identity-bound SSH",
   "objective": "Deliver historical host CPU/RAM/GPU/VRAM/temperature metrics at a 500-ms target using a Sol-reviewed, owner-approved bounded host-push channel; no guest-initiated host API or copied Compose sidecar topology. Execution follows the persistent Phase 1 operating workflow at docs/workflows/phase1-continuous-execution.md; read it before resuming.",
   "created_at": "2026-11-10T21:46:28.237Z",
-  "updated_at": "2026-11-11T16:52:31.248Z",
+  "updated_at": "2026-11-11T17:05:32.310Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -63,7 +63,9 @@
       "Owner hands-on cadence/accuracy and stale/unavailable display on final protected interactive guest."
     ],
     "created": [
-      "MOCK/PURE: commits 01bca0f/ac07a0b add lib/vm/parent-metrics.py fixed v1 contract and compact UTF-8 encoder: exact keys, <=16KiB, opaque per-run hex ID, increasing positive sequence field, UTC-ms diagnostic timestamp, bounded duration, strict CPU/RAM/GPU/temperature values, allowlisted explicit unavailable/error states. Tests 9/9 cover malformed fields, bounds, huge integers, control/bidi text, memory rounding consistency, absent hardware, maximum current payload (>12KiB but <=16KiB), encoding cap and timestamps. No hardware collector, cadence/scheduler, SSH, receiver, VM, or owner acceptance yet; criteria remain pending."
+      "MOCK/PURE: commits 01bca0f/ac07a0b add lib/vm/parent-metrics.py fixed v1 contract and compact UTF-8 encoder: exact keys, <=16KiB, opaque per-run hex ID, increasing positive sequence field, UTC-ms diagnostic timestamp, bounded duration, strict CPU/RAM/GPU/temperature values, allowlisted explicit unavailable/error states. Tests 9/9 cover malformed fields, bounds, huge integers, control/bidi text, memory rounding consistency, absent hardware, maximum current payload (>12KiB but <=16KiB), encoding cap and timestamps. No hardware collector, cadence/scheduler, SSH, receiver, VM, or owner acceptance yet; criteria remain pending.",
+      "SCHEDULER (MOCK): commits 43ad7be/14d78bf add fixed synchronous absolute 500-ms slot scheduler; uses monotonic nanoseconds, passes slot/deadline to one callback, serializes collection+delivery, skips expired slots without catch-up/queue. Fake-clock tests verify 100-ms cadence spacing, 800-ms overrun skips, exact-on-time and nonzero-origin exact-later slot preservation, stop handling, one callback in flight and invalid clock. Metrics contract suite 14/14. This does not yet enforce callback deadlines or implement collector, SSH ACK, receiver freshness, VM wiring, or hardware measurement.",
+      "Sol Medium scheduler review of 43ad7be found exact-deadline slot arithmetic issues. Follow-up 14d78bf uses integer monotonic-nanosecond cadence, preserves exact later slots even at nonzero origins, and checks stop before skipped-slot accounting. Focused delta review confirmed boundary behavior; metrics tests 14/14 passed. No collector, transport, receiver, hardware measurement, or acceptance claim."
     ],
     "cases": [
       "Design-only Sol assessment: PASS WITH CONCERNS. Owner approved a separate per-run receiver-restricted metrics SSH key, absolute 500-ms schedule, one-frame ACK/backpressure, fixed 1.5-s stale threshold and private tmpfs-only snapshots. GPU unavailable is permitted only where hardware lacks support/during implementation; supported NVIDIA GPU utilisation and VRAM remain Phase 1 acceptance requirements. This is not implementation review or acceptance; no metrics transport exists yet."
