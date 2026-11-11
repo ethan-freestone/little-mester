@@ -410,6 +410,48 @@ class ParentMetricsContractTests(unittest.TestCase):
             parent_metrics_collect.parse_gpu_csv("GPU,50,101,2048,512,1536\n")
         with self.assertRaises(parent_metrics_collect.CollectorError):
             parent_metrics_collect.parse_temperatures([("chip\x1b", "core", 40)])
+        with self.assertRaises(parent_metrics_collect.CollectorError):
+            parent_metrics_collect.parse_gpu_csv("G" * 8193)
+        with self.assertRaises(parent_metrics_collect.CollectorError):
+            parent_metrics_collect.parse_temperatures([(object(), "core", 40)])
+
+    def test_category_discards_data_when_adapter_finishes_at_deadline(self):
+        reads = iter((0, 100))
+        result = parent_metrics_collect._category(
+            lambda _deadline: "value", lambda value: value, deadline_ns=100,
+            clock=lambda: next(reads), unavailable_code="unsupported")
+        self.assertEqual(result, parent_metrics.category("unavailable", None, "timeout"))
+
+    def test_category_discards_data_when_parsing_crosses_deadline(self):
+        reads = iter((0, 1, 100))
+
+        def parse(_value):
+            return "parsed"
+
+        result = parent_metrics_collect._category(
+            lambda _deadline: "value", parse, deadline_ns=100,
+            clock=lambda: next(reads), unavailable_code="unsupported")
+        self.assertEqual(result, parent_metrics.category("unavailable", None, "timeout"))
+
+    def test_category_deadline_takes_precedence_over_late_errors_and_missing_adapters(self):
+        reads = iter((0, 1, 100))
+
+        def parse_error(_value):
+            raise parent_metrics_collect.CollectorError("malformed")
+
+        result = parent_metrics_collect._category(
+            lambda _deadline: "value", parse_error, deadline_ns=100,
+            clock=lambda: next(reads), unavailable_code="unsupported")
+        self.assertEqual(result, parent_metrics.category("unavailable", None, "timeout"))
+        reads = iter((0, 100))
+        result = parent_metrics_collect._category(
+            lambda _deadline: (_ for _ in ()).throw(PermissionError()), lambda value: value,
+            deadline_ns=100, clock=lambda: next(reads), unavailable_code="unsupported")
+        self.assertEqual(result, parent_metrics.category("unavailable", None, "timeout"))
+        result = parent_metrics_collect._category(
+            None, lambda value: value, deadline_ns=100, clock=lambda: 100,
+            unavailable_code="no_device")
+        self.assertEqual(result, parent_metrics.category("unavailable", None, "timeout"))
 
 
 if __name__ == "__main__":

@@ -28,6 +28,9 @@ class CollectorError(ValueError):
 
 
 def parse_cpu(cpuinfo: str, loadavg: str, online_cpus: int) -> dict:
+    if (not isinstance(cpuinfo, str) or len(cpuinfo.encode("utf-8", errors="replace")) > 65536
+            or not isinstance(loadavg, str) or len(loadavg) > 256):
+        raise CollectorError("malformed")
     model = "unknown"
     for line in cpuinfo.splitlines():
         if line.lower().startswith(("model name", "hardware")) and ":" in line:
@@ -50,6 +53,8 @@ def parse_cpu(cpuinfo: str, loadavg: str, online_cpus: int) -> dict:
 
 
 def parse_memory(meminfo: str) -> dict:
+    if not isinstance(meminfo, str) or len(meminfo) > 65536:
+        raise CollectorError("malformed")
     values = {}
     try:
         for line in meminfo.splitlines():
@@ -79,6 +84,8 @@ def parse_memory(meminfo: str) -> dict:
 
 def parse_gpu_csv(output: str) -> list[dict]:
     """Parse the fixed nvidia-smi query columns; no command is run here."""
+    if not isinstance(output, str) or len(output.encode("utf-8", errors="replace")) > 8192:
+        raise CollectorError("malformed")
     rows = list(csv.reader(output.splitlines(), skipinitialspace=True))
     if not rows or len(rows) > 8:
         raise CollectorError("no_device" if not rows else "malformed")
@@ -101,10 +108,17 @@ def parse_gpu_csv(output: str) -> list[dict]:
 
 def parse_temperatures(entries) -> list[dict]:
     """Normalize injected (chip, sensor, Celsius) entries from sysfs adapters."""
+    if not isinstance(entries, (list, tuple)):
+        raise CollectorError("malformed")
     if len(entries) > 64:
         raise CollectorError("malformed")
     result = []
-    for chip, sensor, raw_celsius in entries:
+    for entry in entries:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+            raise CollectorError("malformed")
+        chip, sensor, raw_celsius = entry
+        if not isinstance(chip, str) or not isinstance(sensor, str):
+            raise CollectorError("malformed")
         try:
             temperature = round(float(raw_celsius), 1)
         except (TypeError, ValueError, OverflowError) as error:
@@ -117,25 +131,36 @@ def parse_temperatures(entries) -> list[dict]:
 
 
 def _category(adapter, parser, *, deadline_ns: int, clock, unavailable_code: str):
+    def timed_out():
+        return clock() >= deadline_ns
+
+    if timed_out():
+        return contract.category("unavailable", None, "timeout")
     if adapter is None:
         return contract.category("unavailable", None, unavailable_code)
-    if clock() >= deadline_ns:
-        return contract.category("unavailable", None, "timeout")
     try:
         raw = adapter(deadline_ns)
-        if clock() > deadline_ns:
+        if timed_out():
             return contract.category("unavailable", None, "timeout")
-        return contract.category("ok", parser(raw))
+        parsed = parser(raw)
+        if timed_out():
+            return contract.category("unavailable", None, "timeout")
+        return contract.category("ok", parsed)
     except TimeoutError:
         return contract.category("unavailable", None, "timeout")
     except PermissionError:
-        return contract.category("unavailable", None, "permission_denied")
+        return contract.category("unavailable", None,
+                                 "timeout" if timed_out() else "permission_denied")
     except CollectorError as error:
-        return contract.category("unavailable", None, str(error))
+        return contract.category("unavailable", None,
+                                 "timeout" if timed_out() else str(error))
     except OSError:
-        return contract.category("unavailable", None, "unsupported")
+        return contract.category("unavailable", None,
+                                 "timeout" if timed_out() else "unsupported")
     except Exception:
         # Do not serialize exception text or host paths into the fixed frame.
+        if timed_out():
+            return contract.category("unavailable", None, "timeout")
         return contract.category("error", None, "collector_failed")
 
 
