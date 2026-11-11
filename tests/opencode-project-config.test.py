@@ -4,6 +4,7 @@
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -119,12 +120,18 @@ class ProjectConfigIsolationTests(unittest.TestCase):
                                   cwd=str(self.workspace), env=env, encoding="utf-8",
                                   codec_errors="replace", dimensions=(30, 100), timeout=10)
             deadline = time.monotonic() + 8
+            output = []
             try:
                 while time.monotonic() < deadline and child.isalive() and not marker.exists():
                     try:
-                        child.read_nonblocking(size=65536, timeout=0.2)
+                        output.append(child.read_nonblocking(size=65536, timeout=0.2))
                     except (pexpect.TIMEOUT, pexpect.EOF):
                         pass
+                if disabled:
+                    self.assertTrue(child.isalive(), "guarded TUI exited before plugin observation")
+                    plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", "".join(output))
+                    self.assertIn("Ask anything", plain,
+                                  "guarded TUI did not reach its interactive prompt")
                 self.assertEqual(marker.exists(), expected,
                                  "project plugin discovery did not match the guard setting")
             finally:
