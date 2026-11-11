@@ -6,12 +6,14 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 import unicodedata
 from datetime import UTC, datetime
 
 
 MAX_PAYLOAD_BYTES = 16 * 1024
 MAX_SEQUENCE = 2**63 - 1
+CADENCE_SECONDS = 0.5
 ERROR_CODES = frozenset({"collector_failed", "malformed", "no_device", "no_sensors",
                          "permission_denied", "timeout", "unsupported"})
 TOP_KEYS = {"version", "run_id", "sequence", "sampled_at", "sampling_duration_ms",
@@ -155,3 +157,43 @@ def utc_sample_time(now: datetime | None = None) -> str:
     if instant.tzinfo is None or instant.utcoffset() is None:
         raise Refused("metrics sample timestamp must be timezone-aware")
     return instant.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.") + f"{instant.astimezone(UTC).microsecond // 1000:03d}Z"
+
+
+def run_absolute_schedule(callback, stop_requested, *, clock=time.monotonic,
+                           wait=time.sleep) -> int:
+    """Run one synchronous callback per absolute 500-ms slot, skipping missed slots.
+
+    The callback receives its scheduled monotonic instant and an absolute deadline
+    one cadence later. It owns the collect/deliver deadline check. Because callback
+    execution is synchronous, at most one frame can be in flight and no queue forms.
+    Return the number of skipped slots when stop_requested becomes true.
+    """
+    if not callable(callback) or not callable(stop_requested) or not callable(clock) or not callable(wait):
+        raise TypeError("metrics schedule requires callback, stop predicate, clock and wait functions")
+
+    def monotonic_now():
+        value = clock()
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise Refused("metrics scheduler clock returned an invalid value")
+        return value
+
+    slot = monotonic_now()
+    skipped = 0
+    while not stop_requested():
+        current = monotonic_now()
+        if current < slot:
+            wait(slot - current)
+            current = monotonic_now()
+            if current < slot:
+                raise Refused("metrics scheduler clock moved backwards")
+        if stop_requested():
+            break
+        callback(slot, slot + CADENCE_SECONDS)
+        current = monotonic_now()
+        next_slot = slot + CADENCE_SECONDS
+        if current >= next_slot:
+            missed = int((current - next_slot) // CADENCE_SECONDS) + 1
+            skipped += missed
+            next_slot += missed * CADENCE_SECONDS
+        slot = next_slot
+    return skipped

@@ -181,6 +181,69 @@ class ParentMetricsContractTests(unittest.TestCase):
         with self.assertRaises(parent_metrics.Refused):
             parent_metrics.utc_sample_time(datetime.datetime(2026, 11, 11))
 
+    def test_absolute_schedule_uses_500ms_slots_and_runs_callbacks_serially(self):
+        class Clock:
+            now = 10.0
+            sleeps = []
+
+            def monotonic(self):
+                return self.now
+
+            def wait(self, duration):
+                self.sleeps.append(duration)
+                self.now += duration
+
+        clock = Clock()
+        frames = []
+        active = 0
+        maximum_active = 0
+
+        def callback(slot, deadline):
+            nonlocal active, maximum_active
+            active += 1
+            maximum_active = max(maximum_active, active)
+            frames.append((clock.now, slot, deadline))
+            clock.now += 0.1
+            active -= 1
+
+        skipped = parent_metrics.run_absolute_schedule(
+            callback, lambda: len(frames) == 3, clock=clock.monotonic, wait=clock.wait)
+        self.assertEqual(skipped, 0)
+        self.assertEqual([frame[0] for frame in frames], [10.0, 10.5, 11.0])
+        self.assertEqual([frame[2] - frame[1] for frame in frames], [0.5] * 3)
+        self.assertEqual(maximum_active, 1)
+        self.assertEqual(len(clock.sleeps), 2)
+        for duration in clock.sleeps:
+            self.assertAlmostEqual(duration, 0.4)
+
+    def test_absolute_schedule_skips_missed_slots_without_catchup(self):
+        class Clock:
+            now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+            def wait(self, duration):
+                self.now += duration
+
+        clock = Clock()
+        frames = []
+
+        def slow_callback(slot, deadline):
+            frames.append((clock.now, slot, deadline))
+            clock.now += 0.8
+
+        skipped = parent_metrics.run_absolute_schedule(
+            slow_callback, lambda: len(frames) == 3,
+            clock=clock.monotonic, wait=clock.wait)
+        self.assertEqual([frame[0] for frame in frames], [0.0, 1.0, 2.0])
+        self.assertEqual(skipped, 3)
+
+    def test_absolute_schedule_rejects_invalid_clock(self):
+        with self.assertRaises(parent_metrics.Refused):
+            parent_metrics.run_absolute_schedule(lambda *_: None, lambda: False,
+                                                 clock=lambda: float("nan"), wait=lambda _: None)
+
 
 if __name__ == "__main__":
     unittest.main()
