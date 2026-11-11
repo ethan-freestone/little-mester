@@ -7,7 +7,13 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
+
+try:
+    import pexpect
+except ImportError:  # pragma: no cover - environment guard
+    pexpect = None
 
 
 class ProjectConfigIsolationTests(unittest.TestCase):
@@ -47,6 +53,16 @@ class ProjectConfigIsolationTests(unittest.TestCase):
             "$schema": "https://opencode.ai/config.json",
             "share": "manual",
         }), encoding="utf-8")
+        self.plugin_dir = local_config / "plugins/sentinel"
+        self.plugin_dir.mkdir(parents=True, mode=0o700)
+        self.plugin_marker = self.root / "plugin-loaded"
+        plugin_source = (
+            'import { writeFileSync } from "node:fs"\n'
+            'import { Plugin } from "@opencode/plugin"\n'
+            f'export default Plugin.define({{ id: "phase1.config-probe", '
+            f'async setup() {{ writeFileSync({json.dumps(str(self.plugin_marker))}, "loaded") }} }})\n'
+        )
+        (self.plugin_dir / "index.ts").write_text(plugin_source, encoding="utf-8")
         self.env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": str(self.home),
@@ -86,6 +102,36 @@ class ProjectConfigIsolationTests(unittest.TestCase):
         protected = documents[str(self.home / "protected.json")]
         self.assertEqual(protected.get("update"), "disable")
         self.assertEqual(protected.get("share"), "disabled")
+
+    @unittest.skipIf(pexpect is None, "pexpect is required for project plugin discovery probe")
+    def test_disable_project_config_prevents_project_plugin_discovery(self):
+        for disabled, expected in ((False, True), (True, False)):
+            marker = self.root / ("guarded" if disabled else "unguarded")
+            source = (self.plugin_dir / "index.ts").read_text(encoding="utf-8")
+            self.plugin_marker.unlink(missing_ok=True)
+            (self.plugin_dir / "index.ts").write_text(
+                source.replace(json.dumps(str(self.plugin_marker)), json.dumps(str(marker))),
+                encoding="utf-8")
+            env = dict(self.env)
+            if disabled:
+                env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+            child = pexpect.spawn(self.binary, ["--standalone", "--print-logs", str(self.workspace)],
+                                  cwd=str(self.workspace), env=env, encoding="utf-8",
+                                  codec_errors="replace", dimensions=(30, 100), timeout=10)
+            deadline = time.monotonic() + 8
+            try:
+                while time.monotonic() < deadline and child.isalive() and not marker.exists():
+                    try:
+                        child.read_nonblocking(size=65536, timeout=0.2)
+                    except (pexpect.TIMEOUT, pexpect.EOF):
+                        pass
+                self.assertEqual(marker.exists(), expected,
+                                 "project plugin discovery did not match the guard setting")
+            finally:
+                if child.isalive():
+                    child.close(force=True)
+                else:
+                    child.close()
 
 
 if __name__ == "__main__":

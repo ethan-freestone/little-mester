@@ -223,9 +223,12 @@ conflicting `opencode.json` and `.opencode/opencode.json` values. Without a guar
 project files appear in `opencode debug config --standalone`. With
 `OPENCODE_DISABLE_PROJECT_CONFIG=1`, both disappear from the discovered configuration
 sources and the protected config still reports updates disabled and sharing disabled. The
-probe does not execute project plugins and therefore does **not** yet prove plugin discovery
-is disabled. This confirms project-config discovery behavior and reported protected values;
-it does not independently establish the final effective runtime config.
+probe also installs a test-authored benign project plugin whose only effect is writing a
+sentinel file inside the disposable test root. The marker is created without the guard and
+not created with `OPENCODE_DISABLE_PROJECT_CONFIG=1`, proving that this pinned binary also
+suppresses project plugin discovery in this isolated probe. This confirms discovery behavior
+and reported protected values; it does not independently establish the final effective
+runtime config or the protected guest's launch enforcement.
 
 For the protected parent guest, #54/#55 must provision immutable root-owned config/plugin
 assets separately from the writable workspace and set the project-config guard in the
