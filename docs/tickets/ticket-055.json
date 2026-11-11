@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Execution follows the persistent Phase 1 operating workflow at docs/workflows/phase1-continuous-execution.md; read it before resuming.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-11T16:01:15.792Z",
+  "updated_at": "2026-11-11T16:20:45.661Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -42,7 +42,9 @@
       "PTy key-sequence matrix and harmless OSC-52 clipboard canary on each owner-approved terminal profile.",
       "Hostile project config/plugin sentinel and egress/update/model-list checks without real credentials."
     ],
-    "created": [],
+    "created": [
+      "Local pinned-binary PTY verification: scripts/verify-exit-confirm.py now rejects any opencode version other than 2.2.5 and uses a temporary HOME, empty workspace, private minimal server config, and sanitized environment; no inherited auth/session/config. On 2.2.5, all 10 checks pass: Ctrl+D inert, yq types while closed, Ctrl+C opens, Esc/N/Ctrl+C cancel, uppercase Y and Q confirm. `bats tests/exit-confirm.bats`: 6/6. No guest/owner-terminal clipboard canary, hostile project config test, guest provenance, egress test, or owner acceptance; criteria remain pending. Source checkpoint 01197bd plus verifier version-enforcement follow-up 3a30f2c."
+    ],
     "cases": []
   },
   "models_used": [],
@@ -51,6 +53,11 @@
       "timestamp": "2026-11-11T15:40:08.791Z",
       "author": "cli",
       "body": "Workflow reminder for #54–#57: record durable discussion, review findings, and owner decisions as append-only comments with the ticket-engine CLI (--comment), not as prose in tests.created. Keep test ledgers limited to concise test evidence and actionable test gaps."
+    },
+    {
+      "timestamp": "2026-11-11T16:20:45.661Z",
+      "author": "cli",
+      "body": "Sol Medium independent review of 01197bd plus 3a30f2c: PASS WITH MINOR CONCERNS, both actionable concerns resolved. The verifier enforces exact OpenCode 2.2.5, isolates HOME/workspace/server config, and drops inherited OpenCode auth/session/config env; rerun passed 10/10 PTY checks and Bats 6/6. No owner terminal, guest, egress, clipboard, or credential acceptance is inferred. No remaining material simplify/security finding."
     }
   ]
 }
