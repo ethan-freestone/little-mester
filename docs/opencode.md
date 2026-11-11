@@ -214,3 +214,21 @@ The updated sequence passed against OpenCode 2.2.5 in the agent container on 202
 establishes local pinned-binary behavior only; target-terminal clipboard canary and protected-guest
 configuration/provenance checks remain separate acceptance work. The image must be rebuilt/restarted
 for the baked `/etc/opencode` copy to replace any stale running copy.
+
+### J.11 OpenCode 2.2.5 project-config isolation probe (#55)
+
+The disposable `tests/opencode-project-config.test.py` probe uses the exact OpenCode 2.2.5
+binary, temporary HOME/config/XDG directories and a separate writable project containing
+conflicting `opencode.json` and `.opencode/opencode.json` values. Without a guard, both
+project files appear in `opencode debug config --standalone`. With
+`OPENCODE_DISABLE_PROJECT_CONFIG=1`, both disappear from the discovered configuration
+sources and the protected config still reports updates disabled and sharing disabled. The
+probe does not execute project plugins and therefore does **not** yet prove plugin discovery
+is disabled. The project cannot override effective protected config by ordinary discovery
+only when this variable is present.
+
+For the protected parent guest, #54/#55 must provision immutable root-owned config/plugin
+assets separately from the writable workspace and set the project-config guard in the
+protected OpenCode launch environment. This local probe does not show that the v3 guest
+currently has such config/assets, that the launch environment is non-overridable, or that
+project plugins are not loaded; those remain acceptance requirements.
