@@ -12,6 +12,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location("parent_metrics", ROOT / "lib/vm/parent-metrics.py")
 parent_metrics = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(parent_metrics)
+COLLECT_SPEC = importlib.util.spec_from_file_location(
+    "parent_metrics_collect", ROOT / "lib/vm/parent-metrics-collect.py")
+parent_metrics_collect = importlib.util.module_from_spec(COLLECT_SPEC)
+COLLECT_SPEC.loader.exec_module(parent_metrics_collect)
 
 
 def valid_snapshot():
@@ -289,6 +293,123 @@ class ParentMetricsContractTests(unittest.TestCase):
         with self.assertRaises(parent_metrics.Refused):
             parent_metrics.run_absolute_schedule(lambda *_: None, lambda: False,
                                                  clock=lambda: float("nan"), wait=lambda _: None)
+
+    def test_historical_host_parsers_accept_injected_cpu_ram_gpu_and_thermal_fixtures(self):
+        cpu = parent_metrics_collect.parse_cpu(
+            "processor: 0\nmodel name: Example CPU\n", "1.25 0.80 0.40 1/20 123\n", 8)
+        self.assertEqual(cpu, {"model": "Example CPU", "load_avg_1m": 1.25,
+                               "load_avg_5m": 0.8, "load_avg_15m": 0.4, "num_cpus": 8})
+        memory = parent_metrics_collect.parse_memory(
+            "MemTotal: 67108864 kB\nMemAvailable: 25165824 kB\n")
+        self.assertEqual(memory, {"total_gb": 64.0, "used_gb": 40.0,
+                                  "available_gb": 24.0, "percent": 62.5})
+        gpu = parent_metrics_collect.parse_gpu_csv(
+            '"Example, GPU",55,60,8192,4096,4096\n')[0]
+        self.assertEqual(gpu["name"], "Example, GPU")
+        self.assertEqual(gpu["memory_free_mb"], 4096)
+        temps = parent_metrics_collect.parse_temperatures([("chip", "temp1", 42.26)])
+        self.assertEqual(temps, [{"chip": "chip", "sensor": "temp1", "temperature_c": 42.3}])
+
+    def test_collector_assembles_a_valid_snapshot_from_injected_adapters(self):
+        class Clock:
+            now = 1_000_000_000
+
+            def read(self):
+                return self.now
+
+        clock = Clock()
+        adapters = {
+            "cpu": lambda _deadline: ("model name: Test CPU", "1 0.5 0.25", 4),
+            "memory": lambda _deadline: "MemTotal: 1048576 kB\nMemAvailable: 524288 kB\n",
+            "gpus": lambda _deadline: "GPU,50,20,2048,512,1536\n",
+            "temperatures": lambda _deadline: [("chip", "core", 45.0)],
+        }
+        result = parent_metrics_collect.collect_snapshot(
+            run_id="0123456789abcdef0123456789abcdef", sequence=7,
+            adapters=adapters, clock=clock.read,
+            wall_clock=lambda: datetime.datetime(2026, 11, 11, tzinfo=datetime.timezone.utc))
+        parent_metrics.validate_snapshot(result)
+        self.assertEqual(result["sequence"], 7)
+        self.assertEqual(result["sampling_duration_ms"], 0)
+
+    def test_collector_marks_late_adapter_timeout_and_does_not_run_later_adapters(self):
+        class Clock:
+            now = 0
+
+            def read(self):
+                return self.now
+
+        clock = Clock()
+        called = []
+
+        def slow_cpu(deadline):
+            called.append("cpu")
+            clock.now = deadline + 1
+            return "model name: Late CPU", "1 1 1", 2
+
+        def should_not_run(name, value):
+            def adapter(_deadline):
+                called.append(name)
+                return value
+            return adapter
+
+        adapters = {
+            "cpu": slow_cpu,
+            "memory": should_not_run("memory", "MemTotal: 1024 kB\nMemAvailable: 512 kB\n"),
+            "gpus": should_not_run("gpus", "GPU,50,20,2048,512,1536\n"),
+            "temperatures": should_not_run("temperatures", [("chip", "core", 45)]),
+        }
+        result = parent_metrics_collect.collect_snapshot(
+            run_id="0123456789abcdef0123456789abcdef", sequence=1,
+            adapters=adapters, budget_seconds=0.1, clock=clock.read,
+            wall_clock=lambda: datetime.datetime(2026, 11, 11, tzinfo=datetime.timezone.utc))
+        self.assertEqual(called, ["cpu"])
+        self.assertEqual(result["cpu"], parent_metrics.category("unavailable", None, "timeout"))
+        self.assertTrue(all(result[name]["status"] == "unavailable"
+                            and result[name]["error"] == "timeout"
+                            for name in ("memory", "gpus", "temperatures")))
+        self.assertEqual(result["sampling_duration_ms"], 100)
+
+    def test_collector_maps_missing_optional_hardware_and_bad_sources_explicitly(self):
+        adapters = {"cpu": None, "memory": None, "gpus": None, "temperatures": None}
+        result = parent_metrics_collect.collect_snapshot(
+            run_id="0123456789abcdef0123456789abcdef", sequence=1,
+            adapters=adapters, clock=lambda: 2_000_000_000,
+            wall_clock=lambda: datetime.datetime(2026, 11, 11, tzinfo=datetime.timezone.utc))
+        self.assertEqual(result["gpus"], parent_metrics.category("unavailable", None, "no_device"))
+        self.assertEqual(result["temperatures"],
+                         parent_metrics.category("unavailable", None, "no_sensors"))
+        adapters["memory"] = lambda _deadline: "broken"
+        result = parent_metrics_collect.collect_snapshot(
+            run_id="0123456789abcdef0123456789abcdef", sequence=2,
+            adapters=adapters, clock=lambda: 2_000_000_000,
+            wall_clock=lambda: datetime.datetime(2026, 11, 11, tzinfo=datetime.timezone.utc))
+        self.assertEqual(result["memory"], parent_metrics.category("unavailable", None, "malformed"))
+
+    def test_collector_refuses_sampling_duration_outside_fixed_schema(self):
+        class Clock:
+            calls = 0
+
+            def read(self):
+                self.calls += 1
+                return 0 if self.calls == 1 else 6_000_000_000
+
+        with self.assertRaisesRegex(ValueError, "duration exceeded"):
+            parent_metrics_collect.collect_snapshot(
+                run_id="0123456789abcdef0123456789abcdef", sequence=1,
+                adapters={"cpu": None, "memory": None, "gpus": None, "temperatures": None},
+                clock=Clock().read,
+                wall_clock=lambda: datetime.datetime(2026, 11, 11, tzinfo=datetime.timezone.utc))
+
+    def test_historical_parsers_reject_malformed_or_out_of_contract_values(self):
+        with self.assertRaises(parent_metrics_collect.CollectorError):
+            parent_metrics_collect.parse_cpu("", "not-loadavg", 4)
+        with self.assertRaises(parent_metrics_collect.CollectorError):
+            parent_metrics_collect.parse_memory("MemTotal: 100 kB\nMemAvailable: 101 kB\n")
+        with self.assertRaises(parent_metrics_collect.CollectorError):
+            parent_metrics_collect.parse_gpu_csv("GPU,50,101,2048,512,1536\n")
+        with self.assertRaises(parent_metrics_collect.CollectorError):
+            parent_metrics_collect.parse_temperatures([("chip\x1b", "core", 40)])
 
 
 if __name__ == "__main__":
