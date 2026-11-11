@@ -430,7 +430,7 @@ def stop_starting_supervisor(*, home: str | os.PathLike | None = None,
         identity = run["supervisor"]
         try:
             pidfd = os.pidfd_open(identity["pid"], 0)
-        except (OSError, ProcessLookupError) as error:
+        except (OSError, ProcessLookupError, AttributeError) as error:
             raise Refused("could not bind a pidfd to the verified supervisor") from error
         try:
             current = observe_process(identity["pid"])

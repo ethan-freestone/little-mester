@@ -6,9 +6,9 @@
   "type": "feature",
   "status": "draft",
   "title": "P1-05 — Final Phase 1 acceptance and merge readiness",
-  "objective": "P1-05 final acceptance/merge readiness. Successor to #49/#51; depends on completion of P1-01 #53, P1-02 #54, P1-03 #55, and P1-04 #56. No merge absent explicit owner approval. Execution follows the persistent Phase 1 operating workflow at docs/workflows/phase1-continuous-execution.md; read it before resuming.",
+  "objective": "P1-05 final acceptance/merge readiness. Successor to #49/#51; depends on completion of P1-01 #53, P1-02 #54, P1-03 #55, and P1-04 #56. No merge absent explicit owner approval. Operating policy: docs/workflows/phase1-continuous-execution.md, including the owner-approved M1→M2→M3 integration priority and review/commit efficiency correction. No acceptance criterion changes.",
   "created_at": "2026-11-10T21:46:28.245Z",
-  "updated_at": "2026-11-11T16:01:15.850Z",
+  "updated_at": "2026-11-11T18:11:18.858Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -57,6 +57,16 @@
       "timestamp": "2026-11-11T15:40:20.617Z",
       "author": "cli",
       "body": "Workflow reminder for #54–#57: record durable discussion, review findings, and owner decisions as append-only comments with the ticket-engine CLI (--comment), not as prose in tests.created. Keep test ledgers limited to concise test evidence and actionable test gaps."
+    },
+    {
+      "timestamp": "2026-11-11T18:10:57.350Z",
+      "author": "cli",
+      "body": "Owner-approved trajectory correction is persisted in docs/workflows/phase1-continuous-execution.md and ticket objectives #54–#57 through MCP: M1 persistent up/status/ssh/stop/re-up first, then M2 real OpenCode, then M3 metrics; preserve approved security gates. Scratch-only qemu-img/QEMU FD/fdset/single-writer procedure and bounded NVIDIA timing probe are prepared in docs/parent-runtime-gates.md. Both remain NOT_RUN pending owner approval; no merge or acceptance inferred."
+    },
+    {
+      "timestamp": "2026-11-11T18:11:18.857Z",
+      "author": "cli",
+      "body": "Sol Medium prepared-gate review returned FIX: the second QEMU originally reused the first open-file description, so the writer-lock result was not trustworthy. The gate now opens the scratch disk independently for writer two, verifies the same device/inode with a distinct FD, and requires the specific Failed to get \"write\" lock diagnostic. Focused Sol delta PASS. The procedure/script remain PREPARED and NOT_RUN; no qemu-img, QEMU or NVIDIA probe was executed."
     }
   ]
 }

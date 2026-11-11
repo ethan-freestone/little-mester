@@ -154,6 +154,20 @@ class SupervisorHandoffTests(unittest.TestCase):
         finally:
             self.cleanup_test_supervisor(proc)
 
+    def test_parent_stop_refuses_when_pidfd_api_is_unavailable(self):
+        proc, _run_id = self.spawn_supervisor()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            with mock.patch.object(parent_state.os, "pidfd_open", side_effect=AttributeError):
+                with self.assertRaisesRegex(parent_state.Refused, "pidfd"):
+                    parent_state.stop_starting_supervisor(home=self.home)
+            self.assertIsNone(proc.poll())
+            self.assertTrue((self.state_dir / "disk.qcow2").exists())
+        finally:
+            self.cleanup_test_supervisor(proc)
+
     def test_sigkill_supervisor_releases_kernel_lock_but_reports_ambiguous_without_recovery(self):
         proc, _run_id = self.spawn_supervisor()
         try:

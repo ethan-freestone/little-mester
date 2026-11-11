@@ -46,7 +46,8 @@ Progress toward these three demonstrations in order:
    still deletes its ephemeral disk. `recover` initially remains a dry-run report. Keep real
    parent launch disabled until the owner validates qemu-img inherited-output-FD compatibility,
    QEMU fdset opening, single-writer locking, and explicit image-format handling on scratch
-   artifacts. Default workspace is guest-disk-backed, with no implicit virtiofs export.
+   artifacts using the prepared [owner-only runtime gate](../parent-runtime-gates.md).
+   Default workspace is guest-disk-backed, with no implicit virtiofs export.
    Confirm whether virtiofsd serves any other parent-launch requirement before omitting it.
 2. **M2 real OpenCode:** after M1 integration, provision pinned 2.2.5 and protected assets,
    support SSH/TUI and tmux reattachment, and prove configuration, credentials and session

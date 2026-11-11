@@ -6,9 +6,9 @@
   "type": "feature",
   "status": "draft",
   "title": "P1-04 — Host metrics 500-ms parity over identity-bound SSH",
-  "objective": "Deliver historical host CPU/RAM/GPU/VRAM/temperature metrics at a 500-ms target using a Sol-reviewed, owner-approved bounded host-push channel; no guest-initiated host API or copied Compose sidecar topology. Execution follows the persistent Phase 1 operating workflow at docs/workflows/phase1-continuous-execution.md; read it before resuming.",
+  "objective": "Deliver historical host CPU/RAM/GPU/VRAM/temperature metrics at a 500-ms target using a Sol-reviewed, owner-approved bounded push channel; no guest-initiated host API or copied Compose sidecar topology. Operating policy: docs/workflows/phase1-continuous-execution.md; this is M3 after M1/M2. Reuse the current schema/collector; request owner NVIDIA collection/timing evidence before choosing the GPU sampling method. Supported NVIDIA utilization and VRAM remain required; no criteria are relaxed.",
   "created_at": "2026-11-10T21:46:28.237Z",
-  "updated_at": "2026-11-11T17:18:10.471Z",
+  "updated_at": "2026-11-11T17:53:28.820Z",
   "acceptance_criteria": [
     {
       "id": "A1",
