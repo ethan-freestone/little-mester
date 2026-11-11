@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -116,6 +117,50 @@ class SupervisorHandoffTests(unittest.TestCase):
             with parent_state.lifecycle_lock(home=self.home):
                 pass
         finally:
+            self.cleanup_test_supervisor(proc)
+
+    def test_parent_stop_cli_helper_requests_only_verified_starting_supervisor(self):
+        proc, run_id = self.spawn_supervisor()
+        reaper = threading.Thread(target=proc.wait)
+        reaper.start()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            result = parent_state.stop_starting_supervisor(home=self.home)
+            self.assertEqual(result["status"], "STOPPED")
+            self.assertEqual(result["run_id"], run_id)
+            self.assertTrue(result["disk_retained"])
+            reaper.join(timeout=3)
+            self.assertFalse(reaper.is_alive())
+            self.assertEqual(proc.returncode, 0)
+            self.assertTrue((self.state_dir / "disk.qcow2").exists())
+            self.assertEqual(parent_state.read_status(home=self.home)["status"], "STOPPED")
+        finally:
+            self.cleanup_test_supervisor(proc)
+
+    def test_parent_stop_refuses_unverified_control_socket_peer(self):
+        proc, _run_id = self.spawn_supervisor()
+        rogue = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        rogue_path = self.state_dir / "supervisor.sock"
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            rogue_path.unlink()
+            rogue.bind(str(rogue_path))
+            os.chmod(rogue_path, 0o600)
+            rogue.listen(1)
+            with self.assertRaisesRegex(parent_state.Refused, "peer does not match"):
+                parent_state.stop_starting_supervisor(home=self.home)
+            self.assertIsNone(proc.poll())
+            self.assertTrue((self.state_dir / "disk.qcow2").exists())
+        finally:
+            rogue.close()
+            try:
+                rogue_path.unlink()
+            except FileNotFoundError:
+                pass
             self.cleanup_test_supervisor(proc)
 
     def test_missing_commit_does_not_record_supervisor_and_releases_lock(self):

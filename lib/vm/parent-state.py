@@ -16,6 +16,9 @@ import signal
 import stat
 import sys
 import re
+import socket
+import struct
+import time
 from contextlib import contextmanager
 
 
@@ -408,6 +411,60 @@ def recovery_preview(*, home: str | os.PathLike | None = None) -> dict:
         os.close(directory_fd)
 
 
+def stop_starting_supervisor(*, home: str | os.PathLike | None = None,
+                             timeout_seconds: float = 15.0) -> dict:
+    """Request graceful stop only for a verified STARTING supervisor with no child."""
+    if (type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 60):
+        raise Refused("supervisor stop timeout must be between 0 and 60 seconds")
+    status = read_status(home=home)
+    if status["status"] != "STARTING":
+        raise Refused("safe supervisor-only stop is available only before any child is launched")
+    directory_fd = _open_directory_chain(create=False, home_override=home)
+    if directory_fd is None:
+        raise Refused("parent state disappeared before stop request")
+    try:
+        run = _read_json(directory_fd, "active-run.json")
+        if (run.get("run_id") != status.get("run_id") or run.get("phase") != "STARTING"
+                or not isinstance(run.get("supervisor"), dict)
+                or run["supervisor"].get("pid") != status.get("supervisor_pid")):
+            raise Refused("parent run changed before stop request")
+        identity = run["supervisor"]
+        home_path = pathlib.Path(home if home is not None else pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=True)
+        socket_path = home_path.joinpath(*STATE_COMPONENTS, "supervisor.sock")
+        try:
+            info = os.stat("supervisor.sock", dir_fd=directory_fd, follow_symlinks=False)
+        except OSError as error:
+            raise Refused("parent supervisor control socket is unavailable") from error
+        if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise Refused("parent supervisor control socket has unsafe identity")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            try:
+                client.connect(str(socket_path))
+                credentials = client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+                peer_pid, peer_uid, _peer_gid = struct.unpack("3i", credentials)
+                if peer_uid != os.getuid() or peer_pid != identity.get("pid"):
+                    raise Refused("control socket peer does not match the recorded supervisor identity")
+                client.sendall(b"STOP\n")
+                if client.recv(32) != b"STOPPING\n":
+                    raise Refused("supervisor did not acknowledge graceful stop")
+            except (OSError, struct.error) as error:
+                raise Refused("could not verify or contact the parent supervisor") from error
+    finally:
+        os.close(directory_fd)
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        result = read_status(home=home)
+        if result["status"] == "STOPPED":
+            return {"status": "STOPPED", "parent_id": PARENT_ID,
+                    "run_id": status["run_id"], "disk_retained": True}
+        if result["status"] == "AMBIGUOUS":
+            raise Refused("supervisor stop left ambiguous identity evidence; no signal escalation performed")
+        time.sleep(0.05)
+    raise Refused("supervisor did not stop before the bounded wait expired; no signal escalation performed")
+
+
 def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: str | os.PathLike | None = None) -> dict:
     validate_parent(parent)
     if (not isinstance(run, dict) or type(run.get("schema")) is not int or run["schema"] != SCHEMA
@@ -496,7 +553,8 @@ def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: s
             current_boot_id=current_boot_id)
         if qemu_state != "MATCH":
             return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
-    return {"status": run["phase"], "parent_id": PARENT_ID, "run_id": run["run_id"], "disk": disk}
+    return {"status": run["phase"], "parent_id": PARENT_ID, "run_id": run["run_id"],
+            "supervisor_pid": identity["pid"], "disk": disk}
 
 
 def _recorded_process_status(identity: object, *, expected_basename: str,
@@ -776,7 +834,7 @@ def stop_exec_transition(identity: dict, *, term_grace_ms: int = 5000, settle_ms
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("status", "recover"))
+    parser.add_argument("command", choices=("status", "recover", "stop"))
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--dry-run", action="store_true",
                         help="preview recovery; recovery is always non-mutating in this version")
@@ -784,7 +842,12 @@ def main() -> int:
     if args.command != "recover" and args.dry_run:
         parser.error("--dry-run is only valid with recover")
     try:
-        result = recovery_preview() if args.command == "recover" else read_status()
+        if args.command == "recover":
+            result = recovery_preview()
+        elif args.command == "stop":
+            result = stop_starting_supervisor()
+        else:
+            result = read_status()
     except Refused as error:
         print(f"REFUSED: {error}", file=sys.stderr)
         return 2
@@ -794,6 +857,9 @@ def main() -> int:
         if args.command == "recover":
             print(f"Recovery preview: {result['status']} (dry-run; action=none)")
             print(result.get("reason", ""))
+            return 0
+        if args.command == "stop":
+            print(f"Parent supervisor stopped: run_id={result['run_id']}; persistent disk retained")
             return 0
         print(f"Parent: {result['status']}")
         if result["status"] in ("RUNNING", "STARTING", "STOPPED", "UNPROVISIONED"):
