@@ -5,7 +5,6 @@ import importlib.util
 import json
 import os
 import pathlib
-import socket
 import stat
 import subprocess
 import sys
@@ -89,8 +88,9 @@ class SupervisorHandoffTests(unittest.TestCase):
 
     def test_handoff_records_exact_supervisor_and_retains_lock_until_owner_stop(self):
         proc, run_id = self.spawn_supervisor()
+        reaper = threading.Thread(target=proc.wait)
+        reaper.start()
         try:
-            socket_path = self.state_dir / "supervisor.sock"
             deadline = time.monotonic() + 3
             status = parent_state.read_status(home=self.home)
             while time.monotonic() < deadline and status["status"] == "AMBIGUOUS" and proc.poll() is None:
@@ -101,17 +101,12 @@ class SupervisorHandoffTests(unittest.TestCase):
             with self.assertRaises(parent_state.Refused):
                 with parent_state.lifecycle_lock(home=self.home):
                     self.fail("supervisor did not retain exclusive lifecycle lock")
-
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                client.connect(str(socket_path))
-                client.sendall(b"STATUS\n")
-                self.assertEqual(client.recv(32), b"STARTING\n")
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                client.connect(str(socket_path))
-                client.sendall(b"STOP\n")
-                self.assertEqual(client.recv(32), b"STOPPING\n")
-            self.assertEqual(proc.wait(timeout=3), 0)
-            self.assertFalse(socket_path.exists())
+            self.assertFalse((self.state_dir / "supervisor.sock").exists())
+            result = parent_state.stop_starting_supervisor(home=self.home)
+            self.assertTrue(result["disk_retained"])
+            reaper.join(timeout=3)
+            self.assertFalse(reaper.is_alive())
+            self.assertEqual(proc.returncode, 0)
             self.assertEqual(parent_state.read_status(home=self.home)["status"], "STOPPED")
             self.assertTrue((self.state_dir / "disk.qcow2").exists())
             with parent_state.lifecycle_lock(home=self.home):
@@ -139,28 +134,43 @@ class SupervisorHandoffTests(unittest.TestCase):
         finally:
             self.cleanup_test_supervisor(proc)
 
-    def test_parent_stop_refuses_unverified_control_socket_peer(self):
+    def test_parent_stop_refuses_unverified_supervisor_identity_without_signal(self):
         proc, _run_id = self.spawn_supervisor()
-        rogue = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        rogue_path = self.state_dir / "supervisor.sock"
         try:
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
                 time.sleep(0.01)
-            rogue_path.unlink()
-            rogue.bind(str(rogue_path))
-            os.chmod(rogue_path, 0o600)
-            rogue.listen(1)
-            with self.assertRaisesRegex(parent_state.Refused, "peer does not match"):
+            fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+            try:
+                run = parent_state._read_json(fd, "active-run.json")
+                run["supervisor"]["start_time"] = str(int(run["supervisor"]["start_time"]) + 1)
+                parent_state._atomic_json(fd, "active-run.json", run)
+            finally:
+                os.close(fd)
+            with self.assertRaises(parent_state.Refused):
                 parent_state.stop_starting_supervisor(home=self.home)
             self.assertIsNone(proc.poll())
             self.assertTrue((self.state_dir / "disk.qcow2").exists())
         finally:
-            rogue.close()
-            try:
-                rogue_path.unlink()
-            except FileNotFoundError:
+            self.cleanup_test_supervisor(proc)
+
+    def test_sigkill_supervisor_releases_kernel_lock_but_reports_ambiguous_without_recovery(self):
+        proc, _run_id = self.spawn_supervisor()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            self.assertEqual(parent_state.read_status(home=self.home)["status"], "STARTING")
+            proc.kill()
+            self.assertNotEqual(proc.wait(timeout=3), 0)
+            self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+            preview = parent_state.recovery_preview(home=self.home)
+            self.assertEqual(preview["status"], "AMBIGUOUS")
+            self.assertEqual(preview["action"], "none")
+            self.assertTrue((self.state_dir / "disk.qcow2").exists())
+            with parent_state.lifecycle_lock(home=self.home):
                 pass
+        finally:
             self.cleanup_test_supervisor(proc)
 
     def test_missing_commit_does_not_record_supervisor_and_releases_lock(self):
@@ -364,59 +374,16 @@ class SupervisorHandoffTests(unittest.TestCase):
             finally:
                 self.cleanup_gated_child("qemu", captured.get("identity"))
 
-    def test_idle_control_client_does_not_block_termination(self):
-        proc, _run_id = self.spawn_supervisor()
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            socket_path = self.state_dir / "supervisor.sock"
-            deadline = time.monotonic() + 3
-            while time.monotonic() < deadline and not socket_path.exists() and proc.poll() is None:
-                time.sleep(0.01)
-            client.connect(str(socket_path))
-            time.sleep(0.05)
-            proc.terminate()
-            self.assertEqual(proc.wait(timeout=3), 0)
-            self.assertEqual(parent_state.read_status(home=self.home)["status"], "STOPPED")
-        finally:
-            client.close()
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=3)
-
-    def test_preexisting_control_path_is_preserved_on_startup_refusal(self):
-        socket_path = self.state_dir / "supervisor.sock"
-        socket_path.write_text("owner evidence\n")
-        os.chmod(socket_path, 0o600)
-        proc, _run_id = self.spawn_supervisor()
-        try:
-            self.assertEqual(proc.wait(timeout=3), 2)
-            self.assertEqual(socket_path.read_text(), "owner evidence\n")
-            with parent_state.lifecycle_lock(home=self.home):
-                pass
-        finally:
-            self.cleanup_test_supervisor(proc)
-
     def test_post_bind_record_failure_removes_only_new_socket(self):
         active_run = self.state_dir / "active-run.json"
         active_run.mkdir(mode=0o700)
         proc, _run_id = self.spawn_supervisor()
         try:
             self.assertEqual(proc.wait(timeout=3), 2)
-            self.assertFalse((self.state_dir / "supervisor.sock").exists())
             self.assertTrue(active_run.is_dir())
             self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
         finally:
             self.cleanup_test_supervisor(proc)
-
-    def test_socket_chmod_failure_cleans_only_newly_bound_socket(self):
-        directory_fd = parent_state._open_directory_chain(create=False, home_override=self.home)
-        try:
-            with mock.patch.object(parent_supervisor.os, "chmod", side_effect=OSError("injected chmod failure")):
-                with self.assertRaises(OSError):
-                    parent_supervisor._listen(parent_state, directory_fd, str(self.home))
-        finally:
-            os.close(directory_fd)
-        self.assertFalse((self.state_dir / "supervisor.sock").exists())
 
     def test_commit_eof_barrier_is_bounded_when_writer_stays_open(self):
         read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
@@ -429,37 +396,7 @@ class SupervisorHandoffTests(unittest.TestCase):
             os.close(read_fd)
             os.close(write_fd)
 
-    def test_shutdown_record_failure_still_removes_owned_socket_and_closes_lock(self):
-        proc, _run_id = self.spawn_supervisor()
-        try:
-            socket_path = self.state_dir / "supervisor.sock"
-            deadline = time.monotonic() + 3
-            status = parent_state.read_status(home=self.home)
-            while time.monotonic() < deadline and status["status"] == "AMBIGUOUS" and proc.poll() is None:
-                time.sleep(0.01)
-                status = parent_state.read_status(home=self.home)
-            self.assertEqual(status["status"], "STARTING")
-            active_run = self.state_dir / "active-run.json"
-            active_run.unlink()
-            active_run.mkdir(mode=0o700)
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                client.connect(str(socket_path))
-                client.sendall(b"STOP\n")
-                self.assertEqual(client.recv(32), b"STOPPING\n")
-            self.assertNotEqual(proc.wait(timeout=3), 0)
-            self.assertFalse(socket_path.exists())
-            with parent_state.lifecycle_lock(home=self.home):
-                pass
-        finally:
-            self.cleanup_test_supervisor(proc)
-
-    def test_atomic_stop_record_failure_still_runs_socket_and_lock_finalizers(self):
-        socket_path = self.state_dir / "supervisor.sock"
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        listener.bind(str(socket_path))
-        os.chmod(socket_path, 0o600)
-        info = os.lstat(socket_path)
-        socket_identity = (info.st_dev, info.st_ino)
+    def test_atomic_stop_record_failure_still_closes_supervisor_lock(self):
         directory_fd = parent_state._open_directory_chain(create=False, home_override=self.home)
         try:
             parent_state._atomic_json(directory_fd, "active-run.json",
@@ -471,40 +408,9 @@ class SupervisorHandoffTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     parent_supervisor._finalize(
                         parent_state, SimpleNamespace(run_id="test-run", lock_fd=lock_fd),
-                        str(self.home), listener, socket_identity)
-            self.assertFalse(socket_path.exists())
+                        str(self.home))
             with self.assertRaises(OSError):
                 os.fstat(lock_fd)
-
-    def test_cleanup_preserves_replacement_socket_path(self):
-        proc, _run_id = self.spawn_supervisor()
-        replacement = None
-        try:
-            socket_path = self.state_dir / "supervisor.sock"
-            deadline = time.monotonic() + 3
-            status = parent_state.read_status(home=self.home)
-            while time.monotonic() < deadline and status["status"] == "AMBIGUOUS" and proc.poll() is None:
-                time.sleep(0.01)
-                status = parent_state.read_status(home=self.home)
-            self.assertEqual(status["status"], "STARTING")
-            original_info = os.lstat(socket_path)
-            socket_path.unlink()
-            replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            replacement.bind(str(socket_path))
-            os.chmod(socket_path, 0o600)
-            replacement_info = os.lstat(socket_path)
-            self.assertNotEqual((replacement_info.st_dev, replacement_info.st_ino),
-                                (original_info.st_dev, original_info.st_ino))
-            # The old listener has no pathname now; request shutdown by signal.
-            proc.terminate()
-            self.assertEqual(proc.wait(timeout=3), 0)
-            self.assertTrue(socket_path.exists())
-            self.assertTrue(stat.S_ISSOCK(os.lstat(socket_path).st_mode))
-        finally:
-            self.cleanup_test_supervisor(proc)
-            if replacement is not None:
-                replacement.close()
-            socket_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

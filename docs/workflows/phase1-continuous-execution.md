@@ -1,8 +1,9 @@
 # Phase 1 continuous execution workflow
 
 **Scope:** tickets #53–#57 and their approved Phase 1 work. This is the operating
-workflow for those tickets; it does not change their functional objectives, acceptance
-criteria, architecture, or owner authority.
+workflow for those tickets; it preserves approved functional objectives, security
+architecture, acceptance criteria and owner authority. The owner-approved trajectory
+correction below prioritizes working integration and review efficiency, not weaker controls.
 
 ## Roles and execution loop
 
@@ -27,18 +28,43 @@ ticket fields and criteria. Keep test ledgers factual and concise; record review
 as ticket comments. Preserve pending criteria until their stated evidence exists.
 
 At a security-sensitive boundary, review the exact source SHA. A material change after
-review receives an appropriately scoped delta review. Meaningful Sol reviews report code
-growth by production/tests/docs, reuse versus duplication, specific simplification targets,
-complexity verdict, and security impact. Do not reduce security checks or tests solely to
-reduce line count.
+review receives an appropriately scoped delta review. Sol reviews assess whether code is
+necessary and reachable, not only locally correct: report the acceptance behavior or verified
+risk advanced, CLI/smoke/milestone reachability, duplication/complexity, security impact, code
+growth by production/tests/docs, and one verdict: PASS, FIX, SIMPLIFY, DEFER, or BLOCKED.
+SIMPLIFY requires actual justified consolidation while preserving trust-boundary checks; do
+not answer it with more defensive scaffolding. Review integrated boundaries rather than every
+small commit. Keep independent combined quality/security review for changed trust boundaries
+and the final holistic review on #57.
 
 ## Phase 1 progression and stopping conditions
 
-Progress in dependency order: #53 evidence/supersession, #54 persistent parent lifecycle,
-#55 pinned OpenCode 2.2.5 TUI/session behavior, #56 approved host-push metrics, then #57
-integrated acceptance/merge readiness. Continue safe independent implementation when an
-owner-only runtime gate blocks one operation; do not infer runtime success from local
-tests, mocks, argv inspection, or source review.
+Progress toward these three demonstrations in order:
+
+1. **M1 persistent parent:** protected `up` → validated `status` → interactive/reconnectable
+   `ssh` → identity-bound `stop` → `up` reuses the same disk and workspace; ordinary smoke
+   still deletes its ephemeral disk. `recover` initially remains a dry-run report. Keep real
+   parent launch disabled until the owner validates qemu-img inherited-output-FD compatibility,
+   QEMU fdset opening, single-writer locking, and explicit image-format handling on scratch
+   artifacts. Default workspace is guest-disk-backed, with no implicit virtiofs export.
+   Confirm whether virtiofsd serves any other parent-launch requirement before omitting it.
+2. **M2 real OpenCode:** after M1 integration, provision pinned 2.2.5 and protected assets,
+   support SSH/TUI and tmux reattachment, and prove configuration, credentials and session
+   history survive ordinary stop/up. Provisioning must not erase credentials. Reuse existing
+   compatibility probes; do not repeat settled investigations without contradictory live
+   guest evidence. New egress requires owner approval.
+3. **M3 live metrics:** integrate the approved schema/collector through restricted per-boot
+   SSH push/ACK, receiver, tmpfs snapshot and 1.5-second freshness behavior. Request an
+   owner-operated NVIDIA collection/timing probe before selecting the GPU method; supported
+   NVIDIA utilization and VRAM remain required. Sampler failure must not stop the VM. Reuse
+   existing collectors/schema; add no compatibility layer without demonstrated need.
+
+Before more lifecycle helpers, connect existing provisioning, process identity, supervisor,
+gate, SSH and smoke cleanup primitives to supported subcommands. At M1 identify every
+remaining unreachable product function and wire it into the immediate path, explicitly defer
+it, or remove it if unjustified. Prefer real unprivileged process/lock/signal/identity tests
+for lifecycle behavior; mocks do not establish VM behavior. Never run a real VM, SSH listener,
+or owner-host QEMU/qemu-img gate without explicit owner authority.
 
 Stop only for a genuine owner decision/authorization, an unresolved security or architecture
 boundary outside the approved scope, an unresolvable blocking review finding, required
@@ -56,13 +82,18 @@ launch is enabled before its required owner-host QEMU fdset and single-writer va
 
 ## Reviews, commits, and ticket closure
 
-- Keep Git provenance accurate: implementation, consolidation, and ticket-evidence commits
-  should be scoped and describe incomplete work honestly. Inspect the full diff and working
+- Keep Git provenance accurate: implementation and milestone evidence commits should be
+  scoped and describe incomplete work honestly. Avoid review-only commits and repeated prose;
+  consolidate ticket evidence at meaningful milestones. Inspect the full diff and working
   tree before each commit; leave clean worktrees at handoff boundaries where possible.
 - Commit meaningful tested checkpoints; do not wait for a whole ticket to finish.
-- Record tests, source SHAs, and review results on the relevant ticket. Do not mark an
-  acceptance criterion passing without its required evidence. Validate the ticket store
-  after ticket operations.
+- Record concise tests, source SHAs, Sol verdicts and acceptance progress on the relevant
+  ticket. Test ledgers contain actual tests and actionable test gaps; discussion belongs in
+  append-only comments. Do not mark an end-to-end criterion passing without its demonstration.
+  Split a criterion once through MCP only if it truly bundles independently verifiable
+  behaviors; never split merely to manufacture progress. Validate the ticket store after
+  ticket operations. Normal mutations use MCP; the temporary CLI exception is only for
+  appending handoff comments.
 - When a ticket is complete, reconcile every criterion with evidence, record legitimate
   deferrals in the appropriate existing successor/backlog ticket, resolve/supersede
   obsolete requirements, and transition the ticket through MCP. Then continue to the next

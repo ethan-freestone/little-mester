@@ -16,8 +16,6 @@ import signal
 import stat
 import sys
 import re
-import socket
-import struct
 import time
 from contextlib import contextmanager
 
@@ -411,21 +409,9 @@ def recovery_preview(*, home: str | os.PathLike | None = None) -> dict:
         os.close(directory_fd)
 
 
-def _recv_control_line(connection, *, maximum: int = 32) -> bytes:
-    response = bytearray()
-    while len(response) < maximum:
-        chunk = connection.recv(maximum - len(response))
-        if not chunk:
-            break
-        response.extend(chunk)
-        if b"\n" in chunk:
-            break
-    return bytes(response)
-
-
 def stop_starting_supervisor(*, home: str | os.PathLike | None = None,
                              timeout_seconds: float = 15.0) -> dict:
-    """Request graceful stop only for a verified STARTING supervisor with no child."""
+    """Request cooperative stop through a pidfd for a verified childless supervisor."""
     if (type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 60):
         raise Refused("supervisor stop timeout must be between 0 and 60 seconds")
     status = read_status(home=home)
@@ -434,6 +420,7 @@ def stop_starting_supervisor(*, home: str | os.PathLike | None = None,
     directory_fd = _open_directory_chain(create=False, home_override=home)
     if directory_fd is None:
         raise Refused("parent state disappeared before stop request")
+    pidfd = -1
     try:
         run = _read_json(directory_fd, "active-run.json")
         if (run.get("run_id") != status.get("run_id") or run.get("phase") != "STARTING"
@@ -441,29 +428,27 @@ def stop_starting_supervisor(*, home: str | os.PathLike | None = None,
                 or run["supervisor"].get("pid") != status.get("supervisor_pid")):
             raise Refused("parent run changed before stop request")
         identity = run["supervisor"]
-        home_path = pathlib.Path(home if home is not None else pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=True)
-        socket_path = home_path.joinpath(*STATE_COMPONENTS, "supervisor.sock")
         try:
-            info = os.stat("supervisor.sock", dir_fd=directory_fd, follow_symlinks=False)
-        except OSError as error:
-            raise Refused("parent supervisor control socket is unavailable") from error
-        if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid()
-                or stat.S_IMODE(info.st_mode) != 0o600):
-            raise Refused("parent supervisor control socket has unsafe identity")
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(2.0)
-            try:
-                client.connect(str(socket_path))
-                credentials = client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-                peer_pid, peer_uid, _peer_gid = struct.unpack("3i", credentials)
-                if peer_uid != os.getuid() or peer_pid != identity.get("pid"):
-                    raise Refused("control socket peer does not match the recorded supervisor identity")
-                client.sendall(b"STOP\n")
-                if _recv_control_line(client) != b"STOPPING\n":
-                    raise Refused("supervisor did not acknowledge graceful stop")
-            except (OSError, struct.error) as error:
-                raise Refused("could not verify or contact the parent supervisor") from error
+            pidfd = os.pidfd_open(identity["pid"], 0)
+        except (OSError, ProcessLookupError) as error:
+            raise Refused("could not bind a pidfd to the verified supervisor") from error
+        try:
+            current = observe_process(identity["pid"])
+        except Refused as error:
+            raise Refused("supervisor identity changed before stop request") from error
+        if any(current.get(key) != identity.get(key)
+               for key in ("schema", "pid", "uid", "host_boot_id", "start_time", "exe", "argv")):
+            raise Refused("supervisor identity changed before stop request")
+        if _recorded_process_status(identity, expected_basename=pathlib.Path(identity["exe"]).name,
+                                    current_boot_id=identity["host_boot_id"]) != "MATCH":
+            raise Refused("supervisor identity failed final pre-signal verification")
+        try:
+            signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+        except (OSError, ProcessLookupError, AttributeError) as error:
+            raise Refused("could not send the cooperative stop request through the supervisor pidfd") from error
     finally:
+        if pidfd >= 0:
+            os.close(pidfd)
         os.close(directory_fd)
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
