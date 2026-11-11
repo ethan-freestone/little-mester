@@ -116,9 +116,7 @@ class SupervisorHandoffTests(unittest.TestCase):
             with parent_state.lifecycle_lock(home=self.home):
                 pass
         finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=3)
+            self.cleanup_test_supervisor(proc)
 
     def test_missing_commit_does_not_record_supervisor_and_releases_lock(self):
         proc, _run_id = self.spawn_supervisor(send_commit=False)

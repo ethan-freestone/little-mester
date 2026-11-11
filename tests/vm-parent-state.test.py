@@ -185,14 +185,7 @@ class ParentStateTests(unittest.TestCase):
         child = subprocess.Popen([sys.executable, "-I", str(supervisor_path),
                                   "--parent-id", "default", "--run-id", run_id])
         try:
-            proc = pathlib.Path(f"/proc/{child.pid}")
-            fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
-            uid_fields = next(line.split() for line in (proc / "status").read_text().splitlines()
-                              if line.startswith("Uid:"))
-            identity = {"schema": 1, "pid": child.pid, "uid": int(uid_fields[1]),
-                        "host_boot_id": pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
-                        "start_time": fields[19], "exe": os.path.realpath(proc / "exe"),
-                        "argv": [os.fsdecode(arg) for arg in (proc / "cmdline").read_bytes().split(b"\0") if arg]}
+            identity = parent_state.observe_process(child.pid)
             identity["argv"] = [sys.executable, "-I", str(ROOT / "lib/vm/parent-supervisor.py"),
                                 "--parent-id", "default", "--run-id", run_id,
                                 "--lock-fd", "3", "--control-fd", "4"]

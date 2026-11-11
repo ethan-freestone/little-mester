@@ -81,6 +81,50 @@ class ParentGateTests(unittest.TestCase):
                 time.sleep(0.01)
         raise AssertionError(f"gate never reached its exact protected argv: {last_error}")
 
+    def test_live_builder_and_persisted_validator_share_exact_gate_argv_checks(self):
+        self.current_token = "0123456789abcdef0123456789abcdef"
+        proc, write_fd = self.start_gate(self.current_token)
+        try:
+            observed = parent_state.observe_process(proc.pid)
+            observed["argv"][3] = "--unexpected"
+            with self.assertRaises(parent_state.Refused):
+                parent_state.create_exec_transition(
+                    observed, self.target_argv[0], self.target_argv,
+                    release_token=self.current_token, target_path=self.target_name,
+                    identity_path=self.identity_name, fd_contracts=self.fd_contracts)
+            observed = parent_state.observe_process(proc.pid)
+            observed["argv"][12] = observed["argv"][4]
+            with self.assertRaises(parent_state.Refused):
+                parent_state.create_exec_transition(
+                    observed, self.target_argv[0], self.target_argv,
+                    release_token=self.current_token, target_path=self.target_name,
+                    identity_path=self.identity_name, fd_contracts=self.fd_contracts)
+            observed = parent_state.observe_process(proc.pid)
+            observed["argv"][4] = "²"
+            with self.assertRaises(parent_state.Refused):
+                parent_state.create_exec_transition(
+                    observed, self.target_argv[0], self.target_argv,
+                    release_token=self.current_token, target_path=self.target_name,
+                    identity_path=self.identity_name, fd_contracts=self.fd_contracts)
+
+            valid = self.identity_for_gate(proc)
+            invalid = json.loads(json.dumps(valid))
+            invalid["gate"]["argv"][3] = "--unexpected"
+            with self.assertRaises(parent_state.Refused):
+                parent_state._validate_exec_transition(invalid)
+            invalid = json.loads(json.dumps(valid))
+            invalid["gate"]["argv"][12] = invalid["gate"]["argv"][4]
+            with self.assertRaises(parent_state.Refused):
+                parent_state._validate_exec_transition(invalid)
+            invalid = json.loads(json.dumps(valid))
+            invalid["gate"]["argv"][4] = "²"
+            with self.assertRaises(parent_state.Refused):
+                parent_state._validate_exec_transition(invalid)
+        finally:
+            os.close(write_fd)
+            self.assertEqual(proc.wait(timeout=3), 0)
+        self.assertFalse(self.marker.exists())
+
     def test_eof_before_durable_authorization_exits_without_workload(self):
         token = "0123456789abcdef0123456789abcdef"
         self.current_token = token
