@@ -10,6 +10,8 @@ import os
 import pathlib
 import pwd
 import secrets
+import select
+import signal
 import stat
 import sys
 import re
@@ -311,7 +313,7 @@ def status_for_run(parent: dict, run: dict, disk: dict | None = None) -> dict:
         return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
     if (set(identity) != {"schema", "pid", "uid", "host_boot_id", "start_time", "exe", "argv"}
             or type(identity.get("schema")) is not int or identity["schema"] != 1
-            or type(identity.get("pid")) is not int or identity["pid"] <= 1
+            or type(identity.get("pid")) is not int or not 1 < identity["pid"] <= 2**31 - 1
             or type(identity.get("uid")) is not int or identity["uid"] != os.getuid()
             or not isinstance(identity.get("host_boot_id"), str)
             or not isinstance(identity.get("start_time"), str)
@@ -363,6 +365,214 @@ def status_for_run(parent: dict, run: dict, disk: dict | None = None) -> dict:
     except (OSError, ValueError, KeyError, TypeError, IndexError, StopIteration):
         return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
     return {"status": "RUNNING", "parent_id": PARENT_ID, "run_id": run["run_id"], "disk": disk}
+
+
+def observe_process(pid: int) -> dict:
+    """Capture exact live-process identity for a gated child before release."""
+    if type(pid) is not int or not 1 < pid <= 2**31 - 1:
+        raise Refused("invalid child PID")
+    proc = pathlib.Path(f"/proc/{pid}")
+    try:
+        executable = os.path.realpath(proc / "exe")
+        raw_argv = (proc / "cmdline").read_bytes().split(b"\0")
+        if raw_argv and raw_argv[-1] == b"":
+            raw_argv.pop()  # Drop only procfs's final terminator; preserve empty arguments.
+        argv = [os.fsdecode(arg) for arg in raw_argv]
+        fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+        uid_fields = next((line.split() for line in (proc / "status").read_text().splitlines()
+                           if line.startswith("Uid:")), [])
+        boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        if len(fields) <= 19 or len(uid_fields) < 2:
+            raise ValueError("incomplete process identity")
+        uid = int(uid_fields[1])
+    except (OSError, ValueError, IndexError, StopIteration) as error:
+        raise Refused("could not capture complete child identity") from error
+    return {"schema": 1, "pid": pid, "uid": uid, "host_boot_id": boot_id,
+            "start_time": fields[19], "exe": executable, "argv": argv}
+
+
+def create_exec_transition(gate_identity: dict, target_exe: str, target_argv: list[str], *,
+                           release_token: str, target_path: str, identity_path: str) -> dict:
+    """Build exact gate and permitted same-PID direct-exec state for atomic commit."""
+    if (not isinstance(gate_identity, dict) or set(gate_identity) !=
+            {"schema", "pid", "uid", "host_boot_id", "start_time", "exe", "argv"}
+            or type(gate_identity.get("schema")) is not int or gate_identity["schema"] != 1
+            or type(gate_identity.get("pid")) is not int or not 1 < gate_identity["pid"] <= 2**31 - 1
+            or type(gate_identity.get("uid")) is not int or gate_identity["uid"] != os.getuid()
+            or not isinstance(gate_identity.get("host_boot_id"), str)
+            or not isinstance(gate_identity.get("start_time"), str)
+            or not gate_identity["start_time"].isdigit()
+            or not isinstance(gate_identity.get("exe"), str) or not gate_identity["exe"].startswith("/")
+            or not isinstance(gate_identity.get("argv"), list)
+            or not gate_identity["argv"] or not all(isinstance(arg, str) for arg in gate_identity["argv"])
+            or not isinstance(target_exe, str) or not target_exe.startswith("/")
+            or not isinstance(target_argv, list) or not target_argv
+            or not all(isinstance(arg, str) for arg in target_argv)
+            or os.path.realpath(target_argv[0]) != os.path.realpath(target_exe)
+            or not isinstance(release_token, str) or not re.fullmatch(r"[0-9a-f]{32}", release_token)
+            or not isinstance(target_path, str) or not isinstance(identity_path, str)
+            or not re.fullmatch(r"child-[a-z0-9-]+\.target\.json", target_path)
+            or not re.fullmatch(r"child-[a-z0-9-]+\.identity\.json", identity_path)):
+        raise Refused("invalid gated child transition identity")
+    gate_argv = gate_identity["argv"]
+    expected_gate = pathlib.Path(__file__).with_name("parent-gate.py").resolve()
+    if (len(gate_argv) != 13 or not gate_argv[0].startswith("/")
+            or os.path.realpath(gate_argv[0]) != gate_identity["exe"] or gate_argv[1] != "-I"
+            or pathlib.Path(gate_argv[2]) != expected_gate
+            or gate_argv[3] != "--release-fd" or not gate_argv[4].isdigit()
+            or gate_argv[5] != "--token" or gate_argv[6] != release_token
+            or gate_argv[7] != "--target" or gate_argv[8] != target_path
+            or gate_argv[9] != "--identity" or gate_argv[10] != identity_path
+            or gate_argv[11] != "--state-dir-fd" or not gate_argv[12].isdigit()):
+        raise Refused("spawned child is not the protected parent gate invocation")
+    return {"schema": 2, "pid": gate_identity["pid"], "uid": gate_identity["uid"],
+            "host_boot_id": gate_identity["host_boot_id"], "start_time": gate_identity["start_time"],
+            "release_token": release_token, "target_path": target_path, "identity_path": identity_path,
+            "gate": {"exe": gate_identity["exe"], "argv": gate_identity["argv"]},
+            "target": {"exe": os.path.realpath(target_exe), "argv": target_argv}}
+
+
+def persist_exec_transition(dir_fd: int, name: str, identity: dict, *, lock_fd: int) -> None:
+    """Durably authorize a validated gate transition before releasing its pipe."""
+    _validate_exec_transition(identity)
+    _verify_lock_for_dir(dir_fd, lock_fd)
+    if exec_transition_status(identity) != "GATE":
+        raise Refused("parent gate identity is no longer exact before durable commit")
+    if not re.fullmatch(r"child-[a-z0-9-]+\.identity\.json", name):
+        raise Refused("invalid child identity filename")
+    if name != identity["identity_path"]:
+        raise Refused("child identity record path does not match gate authorization")
+    _atomic_json(dir_fd, name, identity)
+
+
+def _verify_lock_for_dir(dir_fd: int, lock_fd: int) -> None:
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_info = os.fstat(lock_fd)
+        path_info = os.stat("lifecycle.lock", dir_fd=dir_fd, follow_symlinks=False)
+    except OSError as error:
+        raise Refused("parent lifecycle lock is unavailable") from error
+    if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid()
+            or stat.S_IMODE(lock_info.st_mode) != 0o600 or not stat.S_ISREG(path_info.st_mode)
+            or path_info.st_uid != os.getuid() or stat.S_IMODE(path_info.st_mode) != 0o600
+            or lock_info.st_dev != path_info.st_dev or lock_info.st_ino != path_info.st_ino):
+        raise Refused("parent lifecycle lock does not match the state directory")
+
+
+def _validate_exec_transition(identity: dict) -> None:
+    if (not isinstance(identity, dict) or set(identity) !=
+            {"schema", "pid", "uid", "host_boot_id", "start_time", "release_token",
+             "target_path", "identity_path", "gate", "target"}
+            or type(identity.get("schema")) is not int or identity["schema"] != 2
+            or type(identity.get("pid")) is not int or not 1 < identity["pid"] <= 2**31 - 1
+            or type(identity.get("uid")) is not int or identity["uid"] != os.getuid()
+            or not isinstance(identity.get("host_boot_id"), str)
+            or not isinstance(identity.get("start_time"), str) or not identity["start_time"].isdigit()
+            or not isinstance(identity.get("release_token"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", identity["release_token"])
+            or not isinstance(identity.get("target_path"), str)
+            or not re.fullmatch(r"child-[a-z0-9-]+\.target\.json", identity["target_path"])
+            or not isinstance(identity.get("identity_path"), str)
+            or not re.fullmatch(r"child-[a-z0-9-]+\.identity\.json", identity["identity_path"])):
+        raise Refused("invalid gated transition schema")
+    gate, target = identity.get("gate"), identity.get("target")
+    if (not isinstance(gate, dict) or set(gate) != {"exe", "argv"}
+            or not isinstance(gate.get("exe"), str) or not gate["exe"].startswith("/")
+            or not isinstance(gate.get("argv"), list) or not gate["argv"]
+            or not all(isinstance(arg, str) for arg in gate["argv"])):
+        raise Refused("invalid gated transition gate identity")
+    expected_gate = pathlib.Path(__file__).with_name("parent-gate.py").resolve()
+    argv = gate["argv"]
+    if (len(argv) != 13 or not argv[0].startswith("/")
+            or os.path.realpath(argv[0]) != gate["exe"] or argv[1] != "-I"
+            or pathlib.Path(argv[2]) != expected_gate or argv[3] != "--release-fd"
+            or not argv[4].isdigit() or argv[5] != "--token" or argv[6] != identity["release_token"]
+            or argv[7] != "--target" or argv[8] != identity["target_path"]
+            or argv[9] != "--identity" or argv[10] != identity["identity_path"]
+            or argv[11] != "--state-dir-fd" or not argv[12].isdigit()):
+        raise Refused("gate identity does not describe the protected invocation")
+    if (not isinstance(target, dict) or set(target) != {"exe", "argv"}
+            or not isinstance(target.get("exe"), str) or not target["exe"].startswith("/")
+            or not isinstance(target.get("argv"), list) or not target["argv"]
+            or not all(isinstance(arg, str) for arg in target["argv"])
+            or not target["argv"][0].startswith("/")
+            or os.path.realpath(target["argv"][0]) != target["exe"]):
+        raise Refused("invalid gated transition target identity")
+
+
+def exec_transition_status(identity: dict) -> str:
+    """Return GATE, TARGET, STOPPED, or AMBIGUOUS without signalling."""
+    try:
+        _validate_exec_transition(identity)
+    except (Refused, TypeError, ValueError):
+        return "AMBIGUOUS"
+    try:
+        current_boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return "AMBIGUOUS"
+    if identity["host_boot_id"] != current_boot_id:
+        return "AMBIGUOUS"
+    pid = identity["pid"]
+    proc = pathlib.Path(f"/proc/{pid}")
+    try:
+        current = observe_process(pid)
+    except Refused:
+        try:
+            proc.stat()
+        except FileNotFoundError:
+            return "STOPPED"
+        except OSError:
+            return "AMBIGUOUS"
+        return "AMBIGUOUS"
+    if (current["uid"] != identity["uid"] or current["host_boot_id"] != identity["host_boot_id"]
+            or current["start_time"] != identity["start_time"]):
+        return "AMBIGUOUS"
+    for phase in ("gate", "target"):
+        candidate = identity.get(phase)
+        if (isinstance(candidate, dict) and set(candidate) == {"exe", "argv"}
+                and isinstance(candidate.get("exe"), str) and isinstance(candidate.get("argv"), list)
+                and all(isinstance(arg, str) for arg in candidate["argv"])
+                and current["exe"] == candidate["exe"] and current["argv"] == candidate["argv"]):
+            return phase.upper()
+    return "AMBIGUOUS"
+
+
+def stop_exec_transition(identity: dict, *, term_grace_ms: int = 5000, settle_ms: int = 2000) -> str:
+    """Identity-bound bounded stop; callers must separately require owner authorization."""
+    if (type(term_grace_ms) is not int or type(settle_ms) is not int
+            or term_grace_ms <= 0 or settle_ms <= 0 or term_grace_ms + settle_ms > 15000):
+        raise Refused("invalid bounded child stop deadline")
+    try:
+        _validate_exec_transition(identity)
+    except (Refused, TypeError, ValueError):
+        return "AMBIGUOUS"
+    try:
+        pidfd = os.pidfd_open(identity["pid"], 0)
+    except ProcessLookupError:
+        return "STOPPED"
+    except (OSError, KeyError, TypeError):
+        return "AMBIGUOUS"
+    try:
+        poller = select.poll()
+        poller.register(pidfd, select.POLLIN)
+        if poller.poll(0):
+            return "STOPPED"
+        phase = exec_transition_status(identity)
+        if phase not in ("GATE", "TARGET"):
+            return phase
+        signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+        if poller.poll(term_grace_ms):
+            return "STOPPED"
+        if exec_transition_status(identity) not in ("GATE", "TARGET"):
+            return "AMBIGUOUS"
+        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+        if poller.poll(settle_ms):
+            return "STOPPED"
+        return "AMBIGUOUS"
+    except (OSError, ProcessLookupError):
+        return "AMBIGUOUS"
+    finally:
+        os.close(pidfd)
 
 
 def main() -> int:
