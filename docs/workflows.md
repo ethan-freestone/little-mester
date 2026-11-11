@@ -1,5 +1,8 @@
 # Workflows — how to work through this repo
 
+For the persistent operating procedure for Phase 1 tickets #53–#57, see
+[`workflows/phase1-continuous-execution.md`](workflows/phase1-continuous-execution.md).
+
 ## Core discipline: doc → test → code → commit
 
 Every change follows four stages. No stage is skipped or reordered.
