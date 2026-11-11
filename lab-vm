@@ -62,6 +62,7 @@ dependencies = [
     root / "lib/vm/browser-auth-session.py",
     root / "lib/vm/virtiofs-socket.py",
     root / "lib/vm/guest-user-dirs.py",
+    root / "lib/vm/parent-state.py",
 ]
 
 # Inspect the original lexical path before resolving anything. A symlink in
@@ -163,7 +164,7 @@ PY
 export VM_HOST_SCRIPT_ROOT="$root"
 command="${1:-}"
 [[ -n "$command" ]] || {
-  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id>\n' >&2
+  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent status [--json]\n' >&2
   exit 2
 }
 shift
@@ -195,6 +196,18 @@ case "$command" in
         source "$VM_HOST_SCRIPT_ROOT/lib/vm/cloud-init.sh"
         vm_host_smoke "$@"
       ' _ "$root" "$@"
+    ;;
+  parent)
+    subcommand="${1:-}"
+    [[ -n "$subcommand" ]] || { printf 'REFUSED: parent requires status\n' >&2; exit 2; }
+    shift
+    case "$subcommand" in
+      status)
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          /usr/bin/python3 -I "$root/lib/vm/parent-state.py" status "$@"
+        ;;
+      *) printf 'REFUSED: unsupported parent command: %s\n' "$subcommand" >&2; exit 2 ;;
+    esac
     ;;
   *) printf 'REFUSED: unsupported command: %s\n' "$command" >&2; exit 2 ;;
 esac

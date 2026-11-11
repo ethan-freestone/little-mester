@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Unprivileged REAL_PROCESS tests for persistent-parent state primitives."""
+
+import importlib.util
+import json
+import os
+import pathlib
+import pwd
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+MODULE = ROOT / "lib/vm/parent-state.py"
+SPEC = importlib.util.spec_from_file_location("parent_state", MODULE)
+parent_state = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(parent_state)
+
+
+class ParentStateTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = pathlib.Path(self.temp.name) / "home"
+        self.home.mkdir(mode=0o700)
+        os.chmod(self.home, 0o700)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def parent_dir(self):
+        return self.home / ".local/state/little-mester/parent-v3/default"
+
+    def test_read_only_status_does_not_create_state(self):
+        self.assertEqual(parent_state.read_status(home=self.home),
+                         {"status": "NOT_CREATED", "parent_id": "default"})
+        self.assertFalse((self.home / ".local").exists())
+
+    def test_initialize_writes_private_atomic_parent_record_and_is_idempotent(self):
+        record = parent_state.initialize(64, home=self.home)
+        directory = self.parent_dir()
+        self.assertEqual(record["disk"]["format"], "qcow2")
+        self.assertEqual(record["disk"]["virtual_capacity_gib"], 64)
+        self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE((directory / "parent.json").stat().st_mode), 0o600)
+        self.assertEqual(list(directory.glob("*.tmp")), [])
+        self.assertEqual(parent_state.initialize(64, home=self.home), record)
+        with self.assertRaises(parent_state.Refused):
+            parent_state.initialize(32, home=self.home)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "UNPROVISIONED")
+
+    def test_status_refuses_unsafe_directory_without_repairing_it(self):
+        parent_state.initialize(home=self.home)
+        directory = self.parent_dir()
+        os.chmod(directory, 0o755)
+        with self.assertRaises(parent_state.Refused):
+            parent_state.read_status(home=self.home)
+        self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o755)
+
+    def test_symlink_in_parent_state_path_is_refused_without_touching_target(self):
+        target = pathlib.Path(self.temp.name) / "target"
+        target.mkdir()
+        (self.home / ".local").symlink_to(target, target_is_directory=True)
+        with self.assertRaises(parent_state.Refused):
+            parent_state.initialize(home=self.home)
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_parent_record_symlink_and_malformed_json_are_refused(self):
+        parent_state.initialize(home=self.home)
+        record_path = self.parent_dir() / "parent.json"
+        target = pathlib.Path(self.temp.name) / "outside.json"
+        target.write_text("{}\n")
+        record_path.unlink()
+        record_path.symlink_to(target)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+        record_path.unlink()
+        record_path.write_text("{not-json\n")
+        os.chmod(record_path, 0o600)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+
+    def test_parent_record_rejects_unknown_schema_fields(self):
+        record = parent_state.initialize(home=self.home)
+        record["unexpected"] = "not part of schema"
+        with parent_state.lifecycle_lock(home=self.home):
+            fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+            try:
+                parent_state._atomic_json(fd, "parent.json", record)
+            finally:
+                os.close(fd)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+        with self.assertRaises(parent_state.Refused):
+            parent_state.initialize(home=self.home)
+
+    def test_fifo_state_files_do_not_block_status(self):
+        parent_state.initialize(home=self.home)
+        directory = self.parent_dir()
+        record_path = directory / "parent.json"
+        record_path.unlink()
+        os.mkfifo(record_path, 0o600)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+        record_path.unlink()
+        record_path.write_text("{not-json\n")
+        os.chmod(record_path, 0o600)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+
+    def test_metadata_or_disk_inconsistency_is_ambiguous(self):
+        parent_state.initialize(home=self.home)
+        directory = self.parent_dir()
+        run = {"schema": 1, "parent_id": "default", "run_id": "0123456789abcdef",
+               "supervisor": {}}
+        with parent_state.lifecycle_lock(home=self.home):
+            fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+            try:
+                parent_state._atomic_json(fd, "active-run.json", run)
+            finally:
+                os.close(fd)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+        (directory / "active-run.json").unlink()
+        (directory / "disk.qcow2").write_bytes(b"unexpected")
+        os.chmod(directory / "disk.qcow2", 0o600)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+
+    def test_run_without_parent_metadata_is_ambiguous(self):
+        with parent_state.lifecycle_lock(home=self.home):
+            fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+            try:
+                parent_state._atomic_json(fd, "active-run.json", {"schema": 1})
+            finally:
+                os.close(fd)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+
+    def test_lifecycle_lock_is_exclusive_and_not_inherited_by_exec_child(self):
+        parent_state.initialize(home=self.home)
+        with parent_state.lifecycle_lock(home=self.home) as lock_fd:
+            self.assertFalse(os.get_inheritable(lock_fd))
+            with self.assertRaises(parent_state.Refused):
+                with parent_state.lifecycle_lock(home=self.home):
+                    self.fail("second lifecycle lock unexpectedly acquired")
+            directory = self.parent_dir()
+            os.chmod(directory, 0o755)
+            with self.assertRaises(parent_state.Refused):
+                parent_state.initialize(home=self.home)
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o755)
+            os.chmod(directory, 0o700)
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.5)"],
+                                     close_fds=False)
+        try:
+            # The exec'd child is still alive, but must not retain the lock.
+            self.assertIsNone(child.poll())
+            with parent_state.lifecycle_lock(home=self.home):
+                pass
+        finally:
+            child.wait(timeout=3)
+
+    def test_running_status_requires_exact_process_identity(self):
+        parent = parent_state.initialize(home=self.home)
+        run = {"run_id": "test-run", "supervisor": {"pid": os.getpid(), "schema": 1,
+                "uid": os.getuid(), "host_boot_id": "mismatch", "start_time": "0",
+                "exe": sys.executable, "argv": [sys.executable]}}
+        self.assertEqual(parent_state.status_for_run(parent, run)["status"], "AMBIGUOUS")
+
+    def test_status_accepts_only_a_live_recorded_supervisor_and_verified_disk(self):
+        parent = parent_state.initialize(home=self.home)
+        directory = self.parent_dir()
+        supervisor_path = pathlib.Path(self.temp.name) / "lib/vm/parent-supervisor.py"
+        supervisor_path.parent.mkdir(parents=True)
+        supervisor_path.write_text("import time\ntime.sleep(5)\n")
+        os.chmod(supervisor_path, 0o600)
+        disk_path = directory / "disk.qcow2"
+        with disk_path.open("wb") as disk_file:
+            disk_file.truncate(1024 * 1024)
+        os.chmod(disk_path, 0o600)
+        disk_info = disk_path.stat()
+        parent["disk"].update({"provisioned": True, "device": disk_info.st_dev,
+                               "inode": disk_info.st_ino})
+        run_id = "0123456789abcdef0123456789abcdef"
+        child = subprocess.Popen([sys.executable, "-I", str(supervisor_path),
+                                  "--parent-id", "default", "--run-id", run_id])
+        try:
+            proc = pathlib.Path(f"/proc/{child.pid}")
+            fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+            uid_fields = next(line.split() for line in (proc / "status").read_text().splitlines()
+                              if line.startswith("Uid:"))
+            identity = {"schema": 1, "pid": child.pid, "uid": int(uid_fields[1]),
+                        "host_boot_id": pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+                        "start_time": fields[19], "exe": os.path.realpath(proc / "exe"),
+                        "argv": [os.fsdecode(arg) for arg in (proc / "cmdline").read_bytes().split(b"\0") if arg]}
+            with parent_state.lifecycle_lock(home=self.home) as lock_fd:
+                fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+                try:
+                    parent_state._verify_lock_fd(lock_fd, home=self.home)
+                    parent_state._atomic_json(fd, "parent.json", parent)
+                    parent_state._atomic_json(fd, "active-run.json", {"schema": 1, "parent_id": "default",
+                                               "run_id": run_id, "supervisor": identity})
+                finally:
+                    os.close(fd)
+            result = parent_state.read_status(home=self.home)
+            self.assertEqual(result["status"], "RUNNING")
+            self.assertEqual(result["run_id"], run_id)
+            self.assertGreaterEqual(result["disk"]["host_allocated_bytes"], 0)
+        finally:
+            child.terminate()
+            child.wait(timeout=3)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "STOPPED")
+        os.unlink(disk_path)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+
+
+if __name__ == "__main__":
+    unittest.main()
