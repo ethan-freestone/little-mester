@@ -52,11 +52,12 @@ def validate_qcow2_info(data: object, expected_size: int | None = None) -> int:
     return data["virtual-size"]
 
 
-def _info(qemu_img: str, path: str, *, directory_fd: int) -> dict:
+def _info(qemu_img: str, path: str, *, directory_fd: int, file_fd: int | None = None) -> dict:
+    pass_fds = (directory_fd,) if file_fd is None else (directory_fd, file_fd)
     result = subprocess.run([qemu_img, "info", "--output=json", "-f", "qcow2", path],
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL, check=False, timeout=30, close_fds=True,
-                            pass_fds=(directory_fd,))
+                            pass_fds=pass_fds)
     if result.returncode != 0:
         raise Refused("qemu-img could not inspect the explicitly qcow2 image")
     try:
@@ -155,39 +156,46 @@ def create_initial_disk(*, state, capacity_gib: int, qemu_img: str, curl: str,
         os.unlink("base-image.part", dir_fd=directory_fd)
         os.fsync(directory_fd)
 
-        part_path = f"/proc/self/fd/{directory_fd}/disk.qcow2.part"
+        part_fd = os.open("disk.qcow2.part", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                          0o600, dir_fd=directory_fd)
+        os.fchmod(part_fd, 0o600)
+        part_path = f"/proc/self/fd/{part_fd}"
         base_path = f"/proc/self/fd/{directory_fd}/base-image.qcow2"
-        convert = subprocess.run([qemu_img, "convert", "-f", "qcow2", "-O", "qcow2",
-                                  base_path, part_path], stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 check=False, timeout=600, close_fds=True,
-                                 pass_fds=(directory_fd,))
-        if convert.returncode != 0:
-            raise Refused("flattening the pinned base image failed; partial evidence retained")
-        part_fd = os.open("disk.qcow2.part", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
         try:
-            os.fchmod(part_fd, 0o600)
+            convert = subprocess.run([qemu_img, "convert", "-f", "qcow2", "-O", "qcow2",
+                                      base_path, part_path], stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                     check=False, timeout=600, close_fds=True,
+                                     pass_fds=(directory_fd, part_fd))
+            if convert.returncode != 0:
+                raise Refused("flattening the pinned base image failed; partial evidence retained")
             os.fsync(part_fd)
+            resize = subprocess.run([qemu_img, "resize", "-f", "qcow2", part_path, f"{capacity_gib}G"],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, check=False, timeout=60,
+                                    close_fds=True, pass_fds=(directory_fd, part_fd))
+            if resize.returncode != 0:
+                raise Refused("initial virtual-capacity sizing failed; partial evidence retained")
+            disk_info_json = _info(qemu_img, part_path, directory_fd=directory_fd, file_fd=part_fd)
+            validate_qcow2_info(disk_info_json, capacity_bytes)
+            part_info = os.fstat(part_fd)
+            path_info = _private_regular_at(directory_fd, "disk.qcow2.part")
+            if (part_info.st_dev, part_info.st_ino) != (path_info.st_dev, path_info.st_ino):
+                raise Refused("qemu-img output path no longer names its exclusively created disk inode")
+            os.link("disk.qcow2.part", "disk.qcow2", src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd, follow_symlinks=False)
+            published = os.stat("disk.qcow2", dir_fd=directory_fd, follow_symlinks=False)
+            if (published.st_dev, published.st_ino) != (part_info.st_dev, part_info.st_ino):
+                raise Refused("published parent disk does not match the exclusively created qemu-img output")
+            os.unlink("disk.qcow2.part", dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            parent["disk"].update({"provisioned": True, "device": part_info.st_dev, "inode": part_info.st_ino})
+            state._atomic_json(directory_fd, "parent.json", parent)
+            os.unlink("base-image.qcow2", dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            return parent
         finally:
             os.close(part_fd)
-        resize = subprocess.run([qemu_img, "resize", "-f", "qcow2", part_path, f"{capacity_gib}G"],
-                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, check=False, timeout=60,
-                                close_fds=True, pass_fds=(directory_fd,))
-        if resize.returncode != 0:
-            raise Refused("initial virtual-capacity sizing failed; partial evidence retained")
-        disk_info_json = _info(qemu_img, part_path, directory_fd=directory_fd)
-        validate_qcow2_info(disk_info_json, capacity_bytes)
-        part_info = _private_regular_at(directory_fd, "disk.qcow2.part")
-        os.link("disk.qcow2.part", "disk.qcow2", src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd, follow_symlinks=False)
-        os.unlink("disk.qcow2.part", dir_fd=directory_fd)
-        os.fsync(directory_fd)
-        parent["disk"].update({"provisioned": True, "device": part_info.st_dev, "inode": part_info.st_ino})
-        state._atomic_json(directory_fd, "parent.json", parent)
-        os.unlink("base-image.qcow2", dir_fd=directory_fd)
-        os.fsync(directory_fd)
-        return parent
     finally:
         os.close(directory_fd)
 

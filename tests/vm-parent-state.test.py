@@ -93,6 +93,12 @@ class ParentStateTests(unittest.TestCase):
         with self.assertRaises(parent_state.Refused):
             parent_state.initialize(home=self.home)
 
+    def test_parent_record_rejects_null_seed_identity_extension(self):
+        record = parent_state.initialize(home=self.home)
+        record["ssh_identity"] = None
+        with self.assertRaises(parent_state.Refused):
+            parent_state.validate_parent(record)
+
     def test_fifo_state_files_do_not_block_status(self):
         parent_state.initialize(home=self.home)
         directory = self.parent_dir()

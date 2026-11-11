@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import pathlib
@@ -106,13 +107,14 @@ def _unique_object(pairs):
     return result
 
 
-def _atomic_json(fd: int, name: str, value: dict) -> None:
+def _atomic_bytes(fd: int, name: str, payload: bytes) -> None:
+    if not isinstance(payload, bytes):
+        raise TypeError("private atomic payload must be bytes")
     temporary = f".{name}.{secrets.token_hex(16)}.tmp"
     file_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
                       0o600, dir_fd=fd)
     try:
         os.fchmod(file_fd, 0o600)
-        payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
         view = memoryview(payload)
         while view:
             written = os.write(file_fd, view)
@@ -131,6 +133,11 @@ def _atomic_json(fd: int, name: str, value: dict) -> None:
             os.unlink(temporary, dir_fd=fd)
         except FileNotFoundError:
             pass
+
+
+def _atomic_json(fd: int, name: str, value: dict) -> None:
+    payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    _atomic_bytes(fd, name, payload)
 
 
 def initialize(capacity_gib: int = 64, *, home: str | os.PathLike | None = None,
@@ -175,7 +182,19 @@ def initialize(capacity_gib: int = 64, *, home: str | os.PathLike | None = None,
 
 def validate_parent(value: dict) -> None:
     disk = value.get("disk")
-    if (set(value) != {"schema", "parent_id", "owner_uid", "disk", "workspace"}
+    expected_fields = {"schema", "parent_id", "owner_uid", "disk", "workspace"}
+    if "ssh_identity" in value:
+        expected_fields.add("ssh_identity")
+    ssh_identity = value.get("ssh_identity")
+    if "ssh_identity" in value and (not isinstance(ssh_identity, dict)
+            or set(ssh_identity) != {"seed_sha256", "control_private_sha256", "control_public_sha256",
+                                    "host_private_sha256", "host_public_sha256"}
+            or any(not isinstance(ssh_identity.get(name), str)
+                   or not re.fullmatch(r"[0-9a-f]{64}", ssh_identity[name])
+                   for name in ("seed_sha256", "control_private_sha256", "control_public_sha256",
+                                "host_private_sha256", "host_public_sha256"))):
+        raise Refused("parent SSH identity metadata is invalid")
+    if (set(value) != expected_fields
             or type(value.get("schema")) is not int or value.get("schema") != SCHEMA
             or value.get("parent_id") != PARENT_ID
             or type(value.get("owner_uid")) is not int or value["owner_uid"] != os.getuid()
@@ -249,9 +268,10 @@ def lifecycle_lock(*, nonblocking: bool = True, home: str | os.PathLike | None =
 
 def _disk_status(fd: int, parent: dict) -> dict:
     disk = parent["disk"]
-    creation_artifacts = {"base-image.part", "base-image.qcow2", "disk.qcow2.part"}
+    creation_artifacts = {"base-image.part", "base-image.qcow2", "disk.qcow2.part", "seed.iso.part"}
     if creation_artifacts.intersection(os.listdir(fd)):
         raise Refused("incomplete or leftover parent disk creation evidence is present")
+    _validate_seed_identity(fd, parent)
     try:
         disk_fd = os.open(disk["path"], os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), dir_fd=fd)
     except FileNotFoundError:
@@ -272,6 +292,47 @@ def _disk_status(fd: int, parent: dict) -> dict:
         os.close(disk_fd)
 
 
+def _hash_private_file(fd: int, name: str) -> str:
+    try:
+        file_fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=fd)
+    except OSError as error:
+        raise Refused(f"persistent parent identity file is unavailable: {name}") from error
+    try:
+        info = os.fstat(file_fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            raise Refused(f"persistent parent identity file is unsafe: {name}")
+        digest = hashlib.sha256()
+        while chunk := os.read(file_fd, 1024 * 1024):
+            digest.update(chunk)
+        return digest.hexdigest()
+    finally:
+        os.close(file_fd)
+
+
+def _validate_seed_identity(fd: int, parent: dict) -> None:
+    identity = parent.get("ssh_identity")
+    seed_files = {"id_vm_control", "id_vm_control.pub", "ssh_host_ed25519_key",
+                  "ssh_host_ed25519_key.pub", "user-data", "meta-data", "seed.iso.part"}
+    try:
+        seed_info = os.stat("seed.iso", dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        if identity is not None:
+            raise Refused("persistent parent cloud-init seed is missing")
+        if seed_files.intersection(os.listdir(fd)):
+            raise Refused("incomplete persistent parent SSH seed evidence is present")
+        return
+    if identity is None:
+        raise Refused("persistent parent cloud-init seed has no recorded identity")
+    if (not stat.S_ISREG(seed_info.st_mode) or seed_info.st_uid != os.getuid()
+            or stat.S_IMODE(seed_info.st_mode) != 0o600 or seed_info.st_nlink != 1):
+        raise Refused("persistent parent cloud-init seed is unsafe")
+    for filename, key in (("seed.iso", "seed_sha256"), ("id_vm_control", "control_private_sha256"),
+                          ("id_vm_control.pub", "control_public_sha256"),
+                          ("ssh_host_ed25519_key", "host_private_sha256"),
+                          ("ssh_host_ed25519_key.pub", "host_public_sha256")):
+        if _hash_private_file(fd, filename) != identity[key]:
+            raise Refused(f"persistent parent identity does not match {filename}")
 def read_status(*, home: str | os.PathLike | None = None) -> dict:
     fd = _open_directory_chain(create=False, home_override=home)
     if fd is None:
