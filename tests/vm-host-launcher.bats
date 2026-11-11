@@ -6,6 +6,7 @@ setup() {
   TEST_OWNED_PROCESS_GROUP_FILE=""
   TEST_UNRELATED_PID_FILE=""
   TEST_CLEANUP_RUN_DIRS=()
+  TEST_PROCESS_IDENTITY_FILES=()
   TEST_POLICY_TMP=""
   VM_HOST_SCRIPT_ROOT="$TEST_ROOT"
   source "$TEST_ROOT/lib/vm/host-launcher.sh"
@@ -13,7 +14,10 @@ setup() {
 }
 
 teardown() {
-  local run_dir emergency_dir resource
+  local run_dir emergency_dir resource identity_file
+  for identity_file in "${TEST_PROCESS_IDENTITY_FILES[@]}"; do
+    vm_host_cleanup_one "$identity_file" >/dev/null 2>&1 || true
+  done
   for run_dir in "${TEST_CLEANUP_RUN_DIRS[@]}"; do
     [[ -d "$run_dir" ]] || continue
     VM_HOST_RUN_DIR="$run_dir"
@@ -1682,6 +1686,53 @@ PY
   run vm_host_process_identity_status "$TEST_TMP/process.identity"
   [ "$status" -ne 0 ]
   wait "$pid" 2>/dev/null || true
+}
+
+@test "process identity binds host boot ID and process UID before signalling" {
+  local pid executable identity="$TEST_TMP/process.identity" cleanup_identity="$TEST_TMP/process.cleanup.identity"
+  sleep 60 &
+  pid="$!"
+  executable="$(readlink -f "$(command -v sleep)")"
+  vm_host_record_process_identity "$identity" "$pid" "$executable" 60
+  cp -- "$identity" "$cleanup_identity"
+  TEST_PROCESS_IDENTITY_FILES+=("$cleanup_identity")
+
+  python3 - "$identity" <<'PY'
+import json, os, pathlib, sys
+record = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert record["schema"] == 1
+assert record["uid"] == os.getuid()
+assert record["host_boot_id"] == pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+PY
+  run vm_host_process_identity_status "$identity"
+  [ "$status" -eq 0 ]
+
+  python3 - "$identity" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+record = json.loads(path.read_text())
+record["uid"] += 1
+path.write_text(json.dumps(record))
+PY
+  run vm_host_process_identity_status "$identity"
+  [ "$status" -eq 2 ]
+  run vm_host_cleanup_one "$identity"
+  [ "$status" -ne 0 ]
+  kill -0 "$pid"
+
+  python3 - "$identity" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+record = json.loads(path.read_text())
+record["uid"] = int(pathlib.Path("/proc", str(record["pid"]), "status").read_text().split("Uid:", 1)[1].split()[0])
+record["host_boot_id"] = "00000000-0000-0000-0000-000000000000"
+path.write_text(json.dumps(record))
+PY
+  run vm_host_process_identity_status "$identity"
+  [ "$status" -eq 2 ]
+  run vm_host_cleanup_one "$identity"
+  [ "$status" -ne 0 ]
+  kill -0 "$pid"
 }
 
 @test "guest SSH capture disables ambient config and keeps outputs within the fixed cap" {

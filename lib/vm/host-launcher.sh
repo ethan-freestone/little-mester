@@ -345,12 +345,19 @@ try:
     argv = [os.fsdecode(arg) for arg in (proc / "cmdline").read_bytes().split(b"\0") if arg]
     stat_fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
     start_time = stat_fields[19]  # Linux /proc stat field 22 (starttime).
-except (OSError, ValueError, IndexError):
+    uid_fields = next((line.split() for line in (proc / "status").read_text().splitlines()
+                       if line.startswith("Uid:")), [])
+    if len(uid_fields) < 2:
+        raise ValueError("missing Uid field")
+    process_uid = int(uid_fields[1])
+    host_boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+except (OSError, ValueError, IndexError, StopIteration):
     raise SystemExit("REFUSED: could not capture child process identity")
 expected_exe = os.path.realpath(expected_exe)
 if actual_exe != expected_exe or expected_arg not in argv:
     raise SystemExit("REFUSED: spawned process executable/argv did not match the requested run")
-record = {"pid": pid, "start_time": start_time, "exe": actual_exe, "argv": argv}
+record = {"schema": 1, "pid": pid, "uid": process_uid, "host_boot_id": host_boot_id,
+          "start_time": start_time, "exe": actual_exe, "argv": argv}
 fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(fd, "w", encoding="utf-8") as stream:
     json.dump(record, stream, separators=(",", ":"))
@@ -364,6 +371,13 @@ vm_host_process_identity_status() {
 import json, os, pathlib, sys
 try:
     record = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, ValueError, TypeError, json.JSONDecodeError):
+    raise SystemExit(2)  # Missing or malformed identity is ambiguous.
+try:
+    host_boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+except OSError:
+    raise SystemExit(2)  # Without the current boot ID, identity is ambiguous.
+try:
     pid = record["pid"]
     if not isinstance(pid, int) or pid <= 1:
         raise ValueError()
@@ -371,11 +385,25 @@ try:
     actual_exe = os.path.realpath(proc / "exe")
     argv = [os.fsdecode(arg) for arg in (proc / "cmdline").read_bytes().split(b"\0") if arg]
     stat_fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+    uid_fields = next((line.split() for line in (proc / "status").read_text().splitlines()
+                       if line.startswith("Uid:")), [])
+    if len(uid_fields) < 2:
+        raise ValueError("missing Uid field")
+    process_uid = int(uid_fields[1])
+    start_time = stat_fields[19]
 except FileNotFoundError:
-    raise SystemExit(1)  # Process is gone; no signal may be sent.
-except (OSError, ValueError, KeyError, TypeError, IndexError, json.JSONDecodeError):
+    try:
+        proc.stat()
+    except FileNotFoundError:
+        raise SystemExit(1)  # Process is gone; no signal may be sent.
+    except OSError:
+        raise SystemExit(2)
+    raise SystemExit(2)  # A proc entry exists but identity data is missing.
+except (OSError, ValueError, KeyError, TypeError, IndexError, StopIteration):
     raise SystemExit(2)  # Malformed or unreadable identity is ambiguous.
-if (str(record.get("start_time")) != stat_fields[19]
+if (type(record.get("schema")) is not int or record.get("schema") != 1
+        or type(record.get("uid")) is not int or record.get("host_boot_id") != host_boot_id
+        or record.get("uid") != process_uid or str(record.get("start_time")) != start_time
         or record.get("exe") != actual_exe
         or record.get("argv") != argv):
     raise SystemExit(2)
@@ -415,9 +443,18 @@ def matches():
         exe = os.path.realpath(proc / "exe")
         argv = [os.fsdecode(arg) for arg in (proc / "cmdline").read_bytes().split(b"\0") if arg]
         fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
-    except (OSError, IndexError):
+        uid_fields = next((line.split() for line in (proc / "status").read_text().splitlines()
+                           if line.startswith("Uid:")), [])
+        if len(uid_fields) < 2:
+            return False
+        process_uid = int(uid_fields[1])
+        host_boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        start_time = fields[19]
+    except (OSError, ValueError, IndexError, StopIteration):
         return False
-    return (str(record.get("start_time")) == fields[19]
+    return (type(record.get("schema")) is int and record.get("schema") == 1
+            and type(record.get("uid")) is int and record.get("host_boot_id") == host_boot_id
+            and record.get("uid") == process_uid and str(record.get("start_time")) == start_time
             and record.get("exe") == exe and record.get("argv") == argv)
 
 try:

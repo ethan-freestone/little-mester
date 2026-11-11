@@ -5,44 +5,44 @@
   "area": "vm-v3",
   "type": "feature",
   "status": "draft",
-  "title": "P1-02 — Owner-controlled persistent parent VM and SSH",
-  "objective": "Implement one owner-operated protected parent Dev VM that persists across SSH/OpenCode disconnects and has no default lifetime cap, with explicit stop and identity-bound recovery. Architecture skeleton (Claude review pending): stable parent identity owns persistent private guest data; per-boot run identity owns volatile QEMU/proxy/virtiofs/logger and transport artifacts; reuse v3 launch/identity/ordered-cleanup machinery with explicit ephemeral-smoke versus persistent-parent artifact policy. #55 supplies the protected pinned-2.2.5 OpenCode/session seam; #56 supplies a separate restricted per-run metrics-key and 500-ms push hook in the same boot lifecycle. No child orchestration.",
+  "title": "P1-02 — Persistent owner parent VM, supervisor and SSH",
+  "objective": "Implement one owner-operated protected persistent parent VM with no default lifetime cap. Approved R1–R10 architecture contract (owner amendments): R1 stable parent_id plus fresh per-boot run_id/host boot ID; R2 one independently verified terminal-independent supervisor and exclusive non-inherited lifecycle lock before children; R3 reuse v3 launch/readiness/exact-identity/ordered-cleanup machinery with explicit smoke-ephemeral versus parent-persistent policy; R4 dry-run recovery and explicit exact-identity signalling only, fail closed on ambiguous spawn/record races; R5 persistent private guest disk/home/config/auth/history/workspace, single writer, explicit image format and path validation; R6 stop and provisioning failure never delete/reset parent state; R7 default bounded guest-disk development workspace, optional explicitly selected validated virtiofs exports; R8 protected pinned OpenCode 2.2.5/session assets (#55); R9 separate per-boot receiver-restricted metrics key and 500-ms push hook in the same supervisor/cleanup (#56); R10 preserve smoke cleanup and add no host authority/child orchestration. Claude architecture review passed with concerns; implementation reviews remain pending. Owner clarification: future capacity increases must be supported through an explicit owner-authorized offline expansion preserving guest data; resize implementation is out of Phase 1 scope.",
   "created_at": "2026-11-10T21:46:28.200Z",
-  "updated_at": "2026-11-11T09:38:41.374Z",
+  "updated_at": "2026-11-11T11:19:55.093Z",
   "acceptance_criteria": [
     {
       "id": "A1",
-      "text": "Run a single owner-controlled parent Dev VM through the protected project script with lifecycle start, status, SSH, and deliberate stop operations. No general multi-VM orchestration. The parent remains running when SSH disconnects or OpenCode exits and supports reconnect without restart.",
+      "text": "Provide protected project-script up/status/ssh/stop/recover operations for one parent. up is idempotent only after independently verifying matching RUNNING identity; returns success only after bounded readiness. SSH disconnect/OpenCode exit do not stop the VM. Parent uses one terminal-independent supervisor; shared smoke launch/identity/readiness/cleanup primitives are reused, not duplicated.",
       "status": "pending"
     },
     {
       "id": "A2",
-      "text": "No default parent-VM or OpenCode session wall-clock cap, idle shutdown, or forced session termination. An optional owner-configured maximum lifetime is disabled by default for the parent; policy can represent future mandatory child-VM limits without implementing child orchestration.",
+      "text": "Parent VM and OpenCode have no default wall-clock cap, idle shutdown, logger byte cap or elapsed-time policy that can terminate a healthy parent. Any optional owner-configured maximum lifetime is disabled by default. Keep smoke timeout and cleanup behavior unchanged.",
       "status": "pending"
     },
     {
       "id": "A3",
-      "text": "Owner host-to-guest SSH uses the existing protected per-VM identity, verified host key, private state, fixed trusted executable/configuration policy, interactive PTY, EscapeChar=none, and terminal restoration. Disable agent/X11 forwarding and arbitrary tunnels/forwarding changes. Disconnect/reconnect must not restart the parent. Remote owner access is documented via an approved authenticated host SSH/VPN hop, never public guest SSH or router forwarding.",
+      "text": "Stable parent control SSH identity and guest host identity are private and verified for the parent lifetime; each boot has fresh volatile run identity. Owner SSH supports plain shell and reattachable PTY/TUI using the fixed non-forwarding host policy (EscapeChar=none). Remote owner access uses an existing authenticated host SSH/VPN hop; never expose guest SSH publicly or add routes/listeners.",
       "status": "pending"
     },
     {
       "id": "A4",
-      "text": "Parent stop/up preserves the same protected private persistent guest disk, authorized workspace selection/data, OpenCode configuration, provider auth state, and session history. Auth remains available after reboot until provider expiry/revocation, explicit logout, or owner-authorized reset. A genuinely new parent gets fresh state. Ordinary stop/recovery never deletes parent disk or auth; destructive reset is separate and explicit. Credentials remain guest-private and are never exported to host workspace, logs, metrics or another VM; no unreviewed host escrow/backup system.",
+      "text": "Ordinary stop/up preserves the same protected private guest disk, home, OpenCode configuration, ChatGPT auth, session/conversation history, project files and workspace selection/data. Auth persists across restart until provider expiry/revocation, owner logout/reset, or genuinely new parent. Stop/recovery and provisioning failure never delete or reset persistent state. No host workspace/log/metrics/child-VM credential exposure or unreviewed escrow/backup system.",
       "status": "pending"
     },
     {
       "id": "A5",
-      "text": "Explicit owner stop and ordinary SIGINT/SIGHUP/launcher failure produce bounded identity-bound teardown and independently verifiable stopped state. A minimal owner-only recovery/verification path handles SIGKILL or launcher loss using validated run identity, executable/start-time/argv, pidfd where available, listener and artifact checks; never trust PID-file contents, kill ambiguous/unrelated processes, or reuse smoke-report-bound --verify-cleanup for arbitrary sessions.",
-      "status": "pending"
+      "text": "One independently verifiable supervisor acquires an exclusive private lifecycle lock and records its exact identity and host boot ID before launching children; children cannot inherit lock ownership. stop uses bounded graceful shutdown and existing validated ordered cleanup. recover is dry-run by default, refuses while a live supervisor owns the lock, and only signals independently validated exact identities after explicit owner action. Never PID-only signal, auto-kill a live unresponsive supervisor, infer authority from intent/run tokens, or guess at SIGKILL spawn-before-record or ambiguous orphans; retain evidence and request owner intervention.",
+      "status": "in-progress"
     },
     {
       "id": "A6",
-      "text": "Preserve the explicitly selected private bounded workspace and current hard isolation. Investigate the minimum safe writable development workspace; do not silently expand the existing 64-MiB noexec smoke export or expose broader host filesystem. Any size/backing-store authority increase requires explicit owner approval.",
+      "text": "Default workspace is guest-disk-backed and persistent on a sparse qcow2 parent disk with configurable creation-time virtual capacity (64 GiB default, not a host-space reservation); distinguish inspectable virtual capacity from actual host allocation and handle host exhaustion safely. Keep disk identity/format/path validated and one-writer enforced. No automatic resize, online resize, shrinking or general disk-management system. Preserve architecture for a future explicit owner-authorized offline expansion, with no resize while running; verify identity, explicit image format and no active writer first. Document a safe offline expansion procedure, including guest partition/filesystem growth, only after the actual guest disk layout is established. Workspace uses normal project read/write/execute semantics, not smoke's 64-MiB noexec bound. No implicit host exports; optional virtiofs requires explicit owner selection and existing canonical-path/ownership/symlink/access validation. Never export broad host dirs, credentials, legacy VM or Docker capabilities; treat guest files as untrusted on host and never auto-source/execute guest hooks/scripts.",
       "status": "pending"
     },
     {
       "id": "A7",
-      "text": "Final owner tests prove script start/status/SSH/stop/reconnect, OpenCode exit/reconnect and session continuation, unlimited default lifetime, stop/up persistence of disk/workspace/config/auth/session history, auth expiry/logout/reset semantics, fresh new-parent state, explicit destructive-reset behavior, SIGINT/SIGHUP cleanup, controlled SIGKILL recovery, stale/mismatched identity refusal, no unrelated process termination, PTY restoration, no host Docker socket, and bounded workspace isolation. No VM action is run without owner authorization.",
+      "text": "Final owner acceptance proves start/status/SSH/stop/reconnect, same-disk/auth/config/history/workspace stop/up persistence, PTY/TUI continuation while live and saved history reopening after reboot, no default timeout, dry-run and controlled explicit recovery, SIGKILL/partial-startup/identity/lock/PID-reuse/boot-ID cases, one-writer/format/path protections, persistent disk retained and smoke disk still deleted, logger limits not terminating healthy parents, and isolation/no host Docker/unapproved access. Runtime checks require owner authorization.",
       "status": "pending"
     }
   ],
@@ -58,10 +58,21 @@
       "Workspace-size/backing review and explicit owner approval before any export expansion.",
       "No runtime testing until owner authorizes the specific host action.",
       "Owner-authorized real-process and owner-VM checks for stop/up preserving the same parent disk, workspace, OpenCode config, auth and session history; verify fresh state only for new parent or explicit owner reset.",
-      "Test unlimited-by-default parent lifetime and absence of idle shutdown; supersedes the earlier finite-foreground-deadline planning item. Do not add an optional cap without separately approved policy."
+      "Test unlimited-by-default parent lifetime and absence of idle shutdown; supersedes the earlier finite-foreground-deadline planning item. Do not add an optional cap without separately approved policy.",
+      "Real-process tests for exclusive private lifecycle locks, no lock inheritance by children, ownership/mode/symlink/path races, host boot ID mismatch, PID reuse, executable/argv mismatch, and ambiguous status.",
+      "Exercise SIGKILL between child spawn and identity record; unrecorded children must not be signalled by PID/run token and ambiguous evidence must be retained.",
+      "Exercise supervisor SIGKILL with live QEMU/helpers, dry-run recovery, lock conflict with live/unresponsive supervisor, and explicit recovery only for independently validated dead-supervisor children.",
+      "Verify explicit image format, single active writer, stable disk identity and guest-disk workspace bound; stop retains parent disk while smoke cleanup still deletes its ephemeral disk.",
+      "Verify healthy long-running parent is not terminated by smoke timeout, logger byte cap, or elapsed-time policy; smoke timeout/cap regressions remain unchanged.",
+      "Owner-authorized VM test: default guest-disk workspace persists; explicit virtiofs selection is bounded and validated; no implicit host export or host execution of guest files.",
+      "Owner-authorized VM test: stop/up preserves auth/config/history without browser login when valid, and OpenCode history can be reopened after reboot.",
+      "Verify explicit image format, single active writer, stable disk identity, sparse allocation and 64-GiB configurable creation-time capacity; host usage remains observable, exhaustion fails safely, and no automatic expansion occurs. Stop retains parent disk while smoke cleanup still deletes its ephemeral disk.",
+      "Verify explicit image format, single active writer, stable disk identity, sparse allocation, virtual-vs-actual capacity reporting, and safe host-exhaustion behavior. Confirm future offline expansion compatibility and documented layout-specific procedure before owner acceptance; no automatic/online resize, shrink or general disk-management implementation."
     ],
     "created": [
-      "tests/vm-host-launcher.bats: interactive SSH mock verifies an unbounded PTY invocation, private run-state validation, EscapeChar=none, disabled forwarding, strict per-run host-key/identity policy, and no session timeout; 78 host-launcher tests pass. Mock only; no guest/runtime evidence. Acceptance criteria remain pending."
+      "tests/vm-host-launcher.bats: interactive SSH mock verifies an unbounded PTY invocation, private run-state validation, EscapeChar=none, disabled forwarding, strict per-run host-key/identity policy, and no session timeout; 78 host-launcher tests pass. Mock only; no guest/runtime evidence. Acceptance criteria remain pending.",
+      "REAL_PROCESS: tests/vm-host-launcher.bats::process identity binds host boot ID and process UID before signalling. Shared v3 process-identity records now carry schema, UID and host boot ID; verification/cleanup refuse boot-ID or UID mismatch before signalling. Validation only; no parent state store, supervisor or lifecycle CLI yet.",
+      "REAL_PROCESS: tests/vm-host-launcher.bats::process identity binds host boot ID and process UID before signalling. Real sleep process identity record carries schema, UID and host boot ID; status and cleanup refuse boot-ID/UID mismatches and the process remains alive (no signal). Validation only; no parent state store, supervisor or lifecycle CLI yet."
     ],
     "cases": []
   },
