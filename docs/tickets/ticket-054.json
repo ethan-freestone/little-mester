@@ -8,7 +8,7 @@
   "title": "P1-02 — Persistent owner parent VM, supervisor and SSH",
   "objective": "Implement one owner-operated protected persistent parent VM with no default lifetime cap. Approved R1–R10 architecture contract (owner amendments): R1 stable parent_id plus fresh per-boot run_id/host boot ID; R2 one independently verified terminal-independent supervisor and exclusive non-inherited lifecycle lock before children; R3 reuse v3 launch/readiness/exact-identity/ordered-cleanup machinery with explicit smoke-ephemeral versus parent-persistent policy; R4 dry-run recovery and explicit exact-identity signalling only, fail closed on ambiguous spawn/record races; R5 persistent private guest disk/home/config/auth/history/workspace, single writer, explicit image format and path validation; R6 stop and provisioning failure never delete/reset parent state; R7 default bounded guest-disk development workspace, optional explicitly selected validated virtiofs exports; R8 protected pinned OpenCode 2.2.5/session assets (#55); R9 separate per-boot receiver-restricted metrics key and 500-ms push hook in the same supervisor/cleanup (#56); R10 preserve smoke cleanup and add no host authority/child orchestration. Claude architecture review passed with concerns; implementation reviews remain pending. Owner clarification: future capacity increases must be supported through an explicit owner-authorized offline expansion preserving guest data; resize implementation is out of Phase 1 scope.",
   "created_at": "2026-11-10T21:46:28.200Z",
-  "updated_at": "2026-11-11T15:40:02.182Z",
+  "updated_at": "2026-11-11T15:48:56.947Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -101,6 +101,16 @@
       "timestamp": "2026-11-11T15:40:02.181Z",
       "author": "cli",
       "body": "Workflow reminder: add durable discussion, review findings, and owner decisions as append-only ticket comments with the ticket-engine CLI (--comment), not as prose crammed into tests.created. Keep tests.created/tests.needed for concise test evidence and actionable test gaps. Apply this workflow on #54–#57. Current Sol consolidation follow-up should target shared exact gate-argv/FD validation in parent-state.py; preserve distinct builder/consumer checks and all failure-path tests. qemu-img output-fd compatibility remains NOT_RUN pending owner-host validation."
+    },
+    {
+      "timestamp": "2026-11-11T15:48:47.246Z",
+      "author": "cli",
+      "body": "Focused consolidation checkpoint c006869 (): Sol Medium combined review verdict JUSTIFIED, no blocking findings. Replaced the duplicate exact gate argv/FD-contract predicate in create_exec_transition and _validate_exec_transition with one helper; retained caller-specific diagnostics and separate schema/target validation; added release/state FD alias and bounded ASCII FD parsing; reused observe_process in the malformed-handoff fixture and the existing supervisor cleanup helper. Tests: state 13/13, gate 8/8, supervisor 16/16; diff check clean. Review measured +5 net production and +35 net tests; no further reduction justified for this scope. qemu-img compatibility, QEMU fdset and single-writer behavior remain NOT_RUN / pending owner-host validation. No acceptance criteria marked passing."
+    },
+    {
+      "timestamp": "2026-11-11T15:48:56.947Z",
+      "author": "cli",
+      "body": "Correction to the immediately preceding consolidation note: commit title is Consolidate parent gate identity validation (commit c006869). The empty parentheses in that prior comment resulted from shell interpretation of backticks; this comment supplies the accurate title. Review verdict and evidence are unchanged."
     }
   ]
 }
