@@ -224,8 +224,8 @@ project files appear in `opencode debug config --standalone`. With
 `OPENCODE_DISABLE_PROJECT_CONFIG=1`, both disappear from the discovered configuration
 sources and the protected config still reports updates disabled and sharing disabled. The
 probe does not execute project plugins and therefore does **not** yet prove plugin discovery
-is disabled. The project cannot override effective protected config by ordinary discovery
-only when this variable is present.
+is disabled. This confirms project-config discovery behavior and reported protected values;
+it does not independently establish the final effective runtime config.
 
 For the protected parent guest, #54/#55 must provision immutable root-owned config/plugin
 assets separately from the writable workspace and set the project-config guard in the
