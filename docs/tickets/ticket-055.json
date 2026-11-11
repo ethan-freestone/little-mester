@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Execution follows the persistent Phase 1 operating workflow at docs/workflows/phase1-continuous-execution.md; read it before resuming.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-11T16:20:45.661Z",
+  "updated_at": "2026-11-11T16:41:37.234Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -43,7 +43,9 @@
       "Hostile project config/plugin sentinel and egress/update/model-list checks without real credentials."
     ],
     "created": [
-      "Local pinned-binary PTY verification: scripts/verify-exit-confirm.py now rejects any opencode version other than 2.2.5 and uses a temporary HOME, empty workspace, private minimal server config, and sanitized environment; no inherited auth/session/config. On 2.2.5, all 10 checks pass: Ctrl+D inert, yq types while closed, Ctrl+C opens, Esc/N/Ctrl+C cancel, uppercase Y and Q confirm. `bats tests/exit-confirm.bats`: 6/6. No guest/owner-terminal clipboard canary, hostile project config test, guest provenance, egress test, or owner acceptance; criteria remain pending. Source checkpoint 01197bd plus verifier version-enforcement follow-up 3a30f2c."
+      "Local pinned-binary PTY verification: scripts/verify-exit-confirm.py now rejects any opencode version other than 2.2.5 and uses a temporary HOME, empty workspace, private minimal server config, and sanitized environment; no inherited auth/session/config. On 2.2.5, all 10 checks pass: Ctrl+D inert, yq types while closed, Ctrl+C opens, Esc/N/Ctrl+C cancel, uppercase Y and Q confirm. `bats tests/exit-confirm.bats`: 6/6. No guest/owner-terminal clipboard canary, hostile project config test, guest provenance, egress test, or owner acceptance; criteria remain pending. Source checkpoint 01197bd plus verifier version-enforcement follow-up 3a30f2c.",
+      "CONFIG-PRECEDENCE (local pinned v2.2.5 only): commit 2a9be6e adds tests/opencode-project-config.test.py. In isolated temporary HOME/workspace, debug config discovers both direct and .opencode configs without guard; both are absent with OPENCODE_DISABLE_PROJECT_CONFIG=1, while protected config source reports updates disabled/share disabled. 2/2 tests pass. Does not prove effective config, project-plugin suppression/load, guest launch enforcement, or owner acceptance; A3 remains pending. Docs explicitly bound claim (94e32b0).",
+      "Project config/plugin probe current result (commits 2a9be6e/82fc434/79f4aac): tests/opencode-project-config.test.py 3/3 on v2.2.5. Confirms direct and .opencode config sources are absent under OPENCODE_DISABLE_PROJECT_CONFIG=1; a benign test-authored project plugin creates its private marker without the flag and not with the flag. Guarded negative also requires live TUI to reach Ask anything; no false pass on startup failure. No guest enforcement/effective-config/owner acceptance claim."
     ],
     "cases": []
   },
@@ -58,6 +60,16 @@
       "timestamp": "2026-11-11T16:20:45.661Z",
       "author": "cli",
       "body": "Sol Medium independent review of 01197bd plus 3a30f2c: PASS WITH MINOR CONCERNS, both actionable concerns resolved. The verifier enforces exact OpenCode 2.2.5, isolates HOME/workspace/server config, and drops inherited OpenCode auth/session/config env; rerun passed 10/10 PTY checks and Bats 6/6. No owner terminal, guest, egress, clipboard, or credential acceptance is inferred. No remaining material simplify/security finding."
+    },
+    {
+      "timestamp": "2026-11-11T16:36:08.568Z",
+      "author": "cli",
+      "body": "Sol Medium review of config-precedence probe commit 2a9be6e: PASS WITH MINOR DOCUMENTATION CONCERN. Isolated pinned-binary control-vs-guard tests are valid (2/2); project config sources appear normally and are omitted when OPENCODE_DISABLE_PROJECT_CONFIG=1. Review correctly noted this does not prove final effective config, plugin loading, or guest enforcement. Docs claim was narrowed in 94e32b0; A3 remains pending, and no A3 security acceptance is claimed."
+    },
+    {
+      "timestamp": "2026-11-11T16:41:37.234Z",
+      "author": "cli",
+      "body": "Sol Medium security review of 82fc434: PASS with minor test-quality caveat. The benign sentinel is confined to temporary state and the positive/negative control is appropriate; review noted absence alone could pass if TUI failed to start. Commit 79f4aac resolves this by requiring the guarded TUI to remain alive and reach Ask anything before checking no marker. Focused Sol delta confirmed the caveat closed. 3/3 config/plugin tests pass; protected guest launch enforcement remains pending."
     }
   ]
 }
