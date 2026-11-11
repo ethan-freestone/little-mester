@@ -3,6 +3,7 @@
 
 import json
 import importlib.util
+import fcntl
 import os
 import pathlib
 import stat
@@ -15,9 +16,9 @@ def refuse(message: str) -> int:
 
 
 def main() -> int:
-    if (len(sys.argv) != 11 or sys.argv[1] != "--release-fd" or sys.argv[3] != "--token"
+    if (len(sys.argv) != 13 or sys.argv[1] != "--release-fd" or sys.argv[3] != "--token"
             or sys.argv[5] != "--target" or sys.argv[7] != "--identity"
-            or sys.argv[9] != "--state-dir-fd"):
+            or sys.argv[9] != "--state-dir-fd" or sys.argv[11] != "--disk-fd"):
         return refuse("invalid parent gate arguments")
     try:
         release_fd = int(sys.argv[2])
@@ -30,8 +31,9 @@ def main() -> int:
     identity_name = sys.argv[8]
     try:
         state_dir_fd = int(sys.argv[10])
+        disk_fd = int(sys.argv[12])
     except ValueError:
-        return refuse("invalid parent state directory descriptor")
+        return refuse("invalid parent or disk descriptor")
     if (not target_name.startswith("child-") or not target_name.endswith(".target.json")
             or not identity_name.startswith("child-") or not identity_name.endswith(".identity.json")):
         return refuse("invalid private gate filenames")
@@ -74,9 +76,10 @@ def main() -> int:
                 or identity["identity_path"] != identity_name
                 or identity["gate"] != {"exe": current["exe"], "argv": current["argv"]}):
             return refuse("durable child identity does not authorize this gate")
-        if (set(target) != {"executable", "argv"}
+        if (set(target) != {"executable", "argv", "fd_contracts"}
                 or target.get("executable") != identity["target"]["exe"]
-                or target.get("argv") != identity["target"]["argv"]):
+                or target.get("argv") != identity["target"]["argv"]
+                or target.get("fd_contracts") != identity["target"]["fd_contracts"]):
             return refuse("durable child identity does not authorize this target")
         executable = target["executable"]
         argv = target["argv"]
@@ -84,8 +87,26 @@ def main() -> int:
             return refuse("parent gate target executable is not canonical")
         policy = _load_module("executable_policy", pathlib.Path(__file__).with_name("executable-policy.py"))
         policy.validate_executable(executable)
+        fd_contracts = target["fd_contracts"]
+        if bool(fd_contracts) != (disk_fd >= 0) or (disk_fd >= 0 and disk_fd in (release_fd, state_dir_fd)):
+            return refuse("inherited disk descriptor does not match the authorized contract")
+        if fd_contracts:
+            contract = fd_contracts[0]
+            disk_info = os.fstat(disk_fd)
+            disk_flags = fcntl.fcntl(disk_fd, fcntl.F_GETFL)
+            if (not stat.S_ISREG(disk_info.st_mode) or disk_info.st_uid != os.getuid()
+                    or stat.S_IMODE(disk_info.st_mode) != 0o600 or disk_info.st_nlink != 1
+                    or disk_info.st_dev != contract["device"] or disk_info.st_ino != contract["inode"]
+                    or disk_flags & os.O_ACCMODE != os.O_RDWR):
+                return refuse("inherited parent disk descriptor failed identity/access validation")
         os.close(state_dir_fd)
-        _close_other_fds({0, 1, 2})
+        if fd_contracts:
+            os.dup2(disk_fd, 3, inheritable=True)
+            if disk_fd != 3:
+                os.close(disk_fd)
+            _close_other_fds({0, 1, 2, 3})
+        else:
+            _close_other_fds({0, 1, 2})
         os.execve(executable, argv, {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/nonexistent",
                                      "LANG": "C", "LC_ALL": "C"})
     except (OSError, RuntimeError, UnicodeError, ValueError, TypeError, json.JSONDecodeError) as error:

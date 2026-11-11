@@ -392,8 +392,11 @@ def observe_process(pid: int) -> dict:
 
 
 def create_exec_transition(gate_identity: dict, target_exe: str, target_argv: list[str], *,
-                           release_token: str, target_path: str, identity_path: str) -> dict:
+                           release_token: str, target_path: str, identity_path: str,
+                           fd_contracts: list[dict] | None = None) -> dict:
     """Build exact gate and permitted same-PID direct-exec state for atomic commit."""
+    if fd_contracts is None:
+        fd_contracts = []
     if (not isinstance(gate_identity, dict) or set(gate_identity) !=
             {"schema", "pid", "uid", "host_boot_id", "start_time", "exe", "argv"}
             or type(gate_identity.get("schema")) is not int or gate_identity["schema"] != 1
@@ -412,24 +415,45 @@ def create_exec_transition(gate_identity: dict, target_exe: str, target_argv: li
             or not isinstance(release_token, str) or not re.fullmatch(r"[0-9a-f]{32}", release_token)
             or not isinstance(target_path, str) or not isinstance(identity_path, str)
             or not re.fullmatch(r"child-[a-z0-9-]+\.target\.json", target_path)
-            or not re.fullmatch(r"child-[a-z0-9-]+\.identity\.json", identity_path)):
+            or not re.fullmatch(r"child-[a-z0-9-]+\.identity\.json", identity_path)
+            or not isinstance(fd_contracts, list)):
         raise Refused("invalid gated child transition identity")
     gate_argv = gate_identity["argv"]
     expected_gate = pathlib.Path(__file__).with_name("parent-gate.py").resolve()
-    if (len(gate_argv) != 13 or not gate_argv[0].startswith("/")
+    if (len(gate_argv) != 15 or not gate_argv[0].startswith("/")
             or os.path.realpath(gate_argv[0]) != gate_identity["exe"] or gate_argv[1] != "-I"
             or pathlib.Path(gate_argv[2]) != expected_gate
             or gate_argv[3] != "--release-fd" or not gate_argv[4].isdigit()
             or gate_argv[5] != "--token" or gate_argv[6] != release_token
             or gate_argv[7] != "--target" or gate_argv[8] != target_path
             or gate_argv[9] != "--identity" or gate_argv[10] != identity_path
-            or gate_argv[11] != "--state-dir-fd" or not gate_argv[12].isdigit()):
+            or gate_argv[11] != "--state-dir-fd" or not gate_argv[12].isdigit()
+            or gate_argv[13] != "--disk-fd" or not (gate_argv[14] == "-1" or gate_argv[14].isdigit())):
         raise Refused("spawned child is not the protected parent gate invocation")
+    _validate_fd_contracts(fd_contracts)
+    disk_arg = gate_argv[14]
+    if bool(fd_contracts) != (disk_arg != "-1") or (fd_contracts and int(disk_arg) in (int(gate_argv[4]), int(gate_argv[12]))):
+        raise Refused("gate descriptor arguments do not match the FD contract")
     return {"schema": 2, "pid": gate_identity["pid"], "uid": gate_identity["uid"],
             "host_boot_id": gate_identity["host_boot_id"], "start_time": gate_identity["start_time"],
             "release_token": release_token, "target_path": target_path, "identity_path": identity_path,
             "gate": {"exe": gate_identity["exe"], "argv": gate_identity["argv"]},
-            "target": {"exe": os.path.realpath(target_exe), "argv": target_argv}}
+            "target": {"exe": os.path.realpath(target_exe), "argv": target_argv,
+                       "fd_contracts": fd_contracts}}
+
+
+def _validate_fd_contracts(contracts: list[dict]) -> None:
+    if not isinstance(contracts, list) or len(contracts) > 1:
+        raise Refused("unsupported inherited descriptor contract")
+    for contract in contracts:
+        if (not isinstance(contract, dict) or set(contract) !=
+                {"fd", "purpose", "device", "inode", "access", "fdset"}
+                or contract.get("fd") != 3 or contract.get("purpose") != "parent-disk"
+                or type(contract.get("device")) is not int or contract["device"] < 0
+                or type(contract.get("inode")) is not int or contract["inode"] <= 0
+                or contract.get("access") != "read-write"
+                or type(contract.get("fdset")) is not int or contract["fdset"] != 1):
+            raise Refused("invalid parent disk descriptor contract")
 
 
 def persist_exec_transition(dir_fd: int, name: str, identity: dict, *, lock_fd: int) -> None:
@@ -483,21 +507,26 @@ def _validate_exec_transition(identity: dict) -> None:
         raise Refused("invalid gated transition gate identity")
     expected_gate = pathlib.Path(__file__).with_name("parent-gate.py").resolve()
     argv = gate["argv"]
-    if (len(argv) != 13 or not argv[0].startswith("/")
+    if (len(argv) != 15 or not argv[0].startswith("/")
             or os.path.realpath(argv[0]) != gate["exe"] or argv[1] != "-I"
             or pathlib.Path(argv[2]) != expected_gate or argv[3] != "--release-fd"
             or not argv[4].isdigit() or argv[5] != "--token" or argv[6] != identity["release_token"]
             or argv[7] != "--target" or argv[8] != identity["target_path"]
             or argv[9] != "--identity" or argv[10] != identity["identity_path"]
-            or argv[11] != "--state-dir-fd" or not argv[12].isdigit()):
+            or argv[11] != "--state-dir-fd" or not argv[12].isdigit()
+            or argv[13] != "--disk-fd" or not (argv[14] == "-1" or argv[14].isdigit())):
         raise Refused("gate identity does not describe the protected invocation")
-    if (not isinstance(target, dict) or set(target) != {"exe", "argv"}
+    if (not isinstance(target, dict) or set(target) != {"exe", "argv", "fd_contracts"}
             or not isinstance(target.get("exe"), str) or not target["exe"].startswith("/")
             or not isinstance(target.get("argv"), list) or not target["argv"]
             or not all(isinstance(arg, str) for arg in target["argv"])
             or not target["argv"][0].startswith("/")
             or os.path.realpath(target["argv"][0]) != target["exe"]):
         raise Refused("invalid gated transition target identity")
+    _validate_fd_contracts(target["fd_contracts"])
+    disk_arg = argv[14]
+    if bool(target["fd_contracts"]) != (disk_arg != "-1") or (target["fd_contracts"] and int(disk_arg) in (int(argv[4]), int(argv[12]))):
+        raise Refused("gate descriptor arguments do not match the FD contract")
 
 
 def exec_transition_status(identity: dict) -> str:
@@ -529,7 +558,8 @@ def exec_transition_status(identity: dict) -> str:
         return "AMBIGUOUS"
     for phase in ("gate", "target"):
         candidate = identity.get(phase)
-        if (isinstance(candidate, dict) and set(candidate) == {"exe", "argv"}
+        expected_keys = {"exe", "argv"} if phase == "gate" else {"exe", "argv", "fd_contracts"}
+        if (isinstance(candidate, dict) and set(candidate) == expected_keys
                 and isinstance(candidate.get("exe"), str) and isinstance(candidate.get("argv"), list)
                 and all(isinstance(arg, str) for arg in candidate["argv"])
                 and current["exe"] == candidate["exe"] and current["argv"] == candidate["argv"]):
