@@ -6,9 +6,9 @@
   "type": "feature",
   "status": "draft",
   "title": "P1-02 — Owner-controlled persistent parent VM and SSH",
-  "objective": "Implement one owner-operated protected parent Dev VM that persists across SSH/OpenCode disconnects and has no default lifetime cap, with explicit stop and identity-bound recovery. Owner-approved trust-boundary scope; no child VM or multi-VM orchestration.",
+  "objective": "Implement one owner-operated protected parent Dev VM that persists across SSH/OpenCode disconnects and has no default lifetime cap, with explicit stop and identity-bound recovery. Architecture skeleton (Claude review pending): stable parent identity owns persistent private guest data; per-boot run identity owns volatile QEMU/proxy/virtiofs/logger and transport artifacts; reuse v3 launch/identity/ordered-cleanup machinery with explicit ephemeral-smoke versus persistent-parent artifact policy. #55 supplies the protected pinned-2.2.5 OpenCode/session seam; #56 supplies a separate restricted per-run metrics-key and 500-ms push hook in the same boot lifecycle. No child orchestration.",
   "created_at": "2026-11-10T21:46:28.200Z",
-  "updated_at": "2026-11-10T23:23:43.811Z",
+  "updated_at": "2026-11-11T09:35:09.372Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -27,7 +27,7 @@
     },
     {
       "id": "A4",
-      "text": "Guest ChatGPT authentication persists only in the private live parent guest so owner reconnect does not require reauthentication; deliberate teardown destroys the guest/auth state and the next VM requires fresh authentication. No host-side credential persistence, shared-workspace token exposure, or preservation across destroyed instances.",
+      "text": "Parent stop/up preserves the same protected private persistent guest disk, authorized workspace selection/data, OpenCode configuration, provider auth state, and session history. Auth remains available after reboot until provider expiry/revocation, explicit logout, or owner-authorized reset. A genuinely new parent gets fresh state. Ordinary stop/recovery never deletes parent disk or auth; destructive reset is separate and explicit. Credentials remain guest-private and are never exported to host workspace, logs, metrics or another VM; no unreviewed host escrow/backup system.",
       "status": "pending"
     },
     {
@@ -42,7 +42,7 @@
     },
     {
       "id": "A7",
-      "text": "Final owner tests prove script start/status/SSH/stop, SSH disconnect/reconnect, OpenCode exit without VM stop, unlimited default running lifetime, deliberate teardown, ephemeral auth destruction, SIGINT/SIGHUP cleanup, controlled SIGKILL recovery, stale/mismatched identity refusal, no unrelated process termination, PTY restoration, no host Docker socket, and bounded workspace isolation. No VM action is run without owner authorization.",
+      "text": "Final owner tests prove script start/status/SSH/stop/reconnect, OpenCode exit/reconnect and session continuation, unlimited default lifetime, stop/up persistence of disk/workspace/config/auth/session history, auth expiry/logout/reset semantics, fresh new-parent state, explicit destructive-reset behavior, SIGINT/SIGHUP cleanup, controlled SIGKILL recovery, stale/mismatched identity refusal, no unrelated process termination, PTY restoration, no host Docker socket, and bounded workspace isolation. No VM action is run without owner authorization.",
       "status": "pending"
     }
   ],
@@ -56,7 +56,8 @@
       "Identity-bound SIGINT/SIGHUP/stop cleanup and owner-only SIGKILL recovery/verification; no PID-file authority.",
       "Per-VM authenticated SSH from owner host and approved remote host-hop, no unapproved forwarding.",
       "Workspace-size/backing review and explicit owner approval before any export expansion.",
-      "No runtime testing until owner authorizes the specific host action."
+      "No runtime testing until owner authorizes the specific host action.",
+      "Owner-authorized real-process and owner-VM checks for stop/up preserving the same parent disk, workspace, OpenCode config, auth and session history; verify fresh state only for new parent or explicit owner reset."
     ],
     "created": [
       "tests/vm-host-launcher.bats: interactive SSH mock verifies an unbounded PTY invocation, private run-state validation, EscapeChar=none, disabled forwarding, strict per-run host-key/identity policy, and no session timeout; 78 host-launcher tests pass. Mock only; no guest/runtime evidence. Acceptance criteria remain pending."
