@@ -6,9 +6,9 @@
   "type": "improvement",
   "status": "draft",
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
-  "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; this is M2 after integrated M1, with existing pinned-binary probes reused rather than repeated absent contradictory guest evidence.",
+  "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-11T17:53:28.810Z",
+  "updated_at": "2026-11-11T22:08:15.971Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -45,9 +45,14 @@
     "created": [
       "Local pinned-binary PTY verification: scripts/verify-exit-confirm.py now rejects any opencode version other than 2.2.5 and uses a temporary HOME, empty workspace, private minimal server config, and sanitized environment; no inherited auth/session/config. On 2.2.5, all 10 checks pass: Ctrl+D inert, yq types while closed, Ctrl+C opens, Esc/N/Ctrl+C cancel, uppercase Y and Q confirm. `bats tests/exit-confirm.bats`: 6/6. No guest/owner-terminal clipboard canary, hostile project config test, guest provenance, egress test, or owner acceptance; criteria remain pending. Source checkpoint 01197bd plus verifier version-enforcement follow-up 3a30f2c.",
       "CONFIG-PRECEDENCE (local pinned v2.2.5 only): commit 2a9be6e adds tests/opencode-project-config.test.py. In isolated temporary HOME/workspace, debug config discovers both direct and .opencode configs without guard; both are absent with OPENCODE_DISABLE_PROJECT_CONFIG=1, while protected config source reports updates disabled/share disabled. 2/2 tests pass. Does not prove effective config, project-plugin suppression/load, guest launch enforcement, or owner acceptance; A3 remains pending. Docs explicitly bound claim (94e32b0).",
-      "Project config/plugin probe current result (commits 2a9be6e/82fc434/79f4aac): tests/opencode-project-config.test.py 3/3 on v2.2.5. Confirms direct and .opencode config sources are absent under OPENCODE_DISABLE_PROJECT_CONFIG=1; a benign test-authored project plugin creates its private marker without the flag and not with the flag. Guarded negative also requires live TUI to reach Ask anything; no false pass on startup failure. No guest enforcement/effective-config/owner acceptance claim."
+      "Project config/plugin probe current result (commits 2a9be6e/82fc434/79f4aac): tests/opencode-project-config.test.py 3/3 on v2.2.5. Confirms direct and .opencode config sources are absent under OPENCODE_DISABLE_PROJECT_CONFIG=1; a benign test-authored project plugin creates its private marker without the flag and not with the flag. Guarded negative also requires live TUI to reach Ask anything; no false pass on startup failure. No guest enforcement/effective-config/owner acceptance claim.",
+      "MOCK seed-provisioning regression: first-boot parent cloud-init embeds exact root-owned exit-confirm plugin bytes and protected server/CLI config; pins OpenCode 2.2.5, disables project config, routes global plugin discovery to /etc, and installs a tmux attach launcher/runner. Generated scripts pass /bin/sh -n in `tests/vm-parent-supervisor.test.py` (16/16); `bats tests/exit-confirm.bats tests/tui-jsx.bats` 11/11. No guest boot, target-terminal canary, or guest TUI behavior demonstrated."
     ],
-    "cases": []
+    "cases": [
+      "MOCK seed assets: exact plugin bytes, root ownership/modes, protected config (autoupdate/share disabled, exit keybinds disabled), project-config guard, root XDG global plugin location, pinned install command and tmux scripts asserted; generated shell syntax valid. tests/vm-parent-supervisor.test.py (16/16). No VM/guest acceptance.",
+      "STATIC/BATS: exit-confirm and TUI JSX suites 11/11. Owner terminal OSC 52 clipboard canary remains NOT_RUN; docs/opencode.md J.12 records terminal-specific mitigation and safe non-secret canary.",
+      "MOCK seed provisioning: protected root-owned OpenCode 2.2.5 config/plugin assets, project-config disable, XDG global discovery under /etc, pinned installation and tmux launcher/runner. `lab-vm parent tui` attaches by fixed SSH remote command through the same pinned, non-forwarding, sealed-memfd path. `tests/vm-parent-supervisor.test.py` 18/18 and Bats exit/TUI 11/11. No guest boot/live TUI/clipboard canary."
+    ]
   },
   "models_used": [],
   "comments": [

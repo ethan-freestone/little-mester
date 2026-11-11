@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import hashlib
 import importlib.util
@@ -14,7 +15,9 @@ import re
 import secrets
 import select
 import signal
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import time
@@ -138,6 +141,35 @@ def _prepare_parent_seed(state, lock_fd: int, home: str | None = None) -> bytes:
                 raise state.Refused("persistent cloud-init seed is unsafe")
             state._validate_seed_identity(directory_fd, parent)
         else:
+            plugin_root = pathlib.Path(__file__).resolve().parents[2] / "agent/opencode/plugins/little-mester-exit-confirm"
+            plugin_files = []
+            for name, destination in (("package.json", "/etc/opencode/plugins/little-mester-exit-confirm/package.json"),
+                                      ("tui.tsx", "/etc/opencode/plugins/little-mester-exit-confirm/tui.tsx")):
+                source = plugin_root / name
+                info = os.lstat(source)
+                if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o022:
+                    raise state.Refused(f"protected OpenCode plugin asset is unsafe: {name}")
+                payload = source.read_bytes()
+                plugin_files.append({"path": destination, "owner": "root:root", "permissions": "0644",
+                                     "encoding": "b64",
+                                     "content": base64.b64encode(payload).decode("ascii")})
+            protected_config = json.dumps({"autoupdate": False, "share": "disabled",
+                                           "permission": {"edit": "ask", "bash": "ask"}},
+                                          separators=(",", ":"))
+            cli_config = json.dumps({
+                "plugins": ["/etc/opencode/plugins/little-mester-exit-confirm"],
+                "keybinds": {"app.exit": "none", "prompt.clear": "none"},
+            }, separators=(",", ":"))
+            cli_config_export = f"export OPENCODE_CLI_CONFIG_CONTENT='{cli_config}'\n"
+            opencode_runner = (
+                "#!/bin/sh\n"
+                "set -eu\n"
+                "export XDG_CONFIG_HOME=/etc\n"
+                "export OPENCODE_CONFIG=/etc/opencode/opencode.json\n"
+                + cli_config_export +
+                "export OPENCODE_DISABLE_PROJECT_CONFIG=1\n"
+                "exec /usr/local/bin/opencode\n")
+            opencode_launcher = "#!/bin/sh\nset -eu\nexec tmux new-session -A -s little-mester-opencode /usr/local/libexec/lm-opencode\n"
             user_data = {
                 "hostname": "little-mester-parent",
                 "ssh_pwauth": False,
@@ -154,8 +186,19 @@ def _prepare_parent_seed(state, lock_fd: int, home: str | None = None) -> bytes:
                      "permissions": "0644", "content": "HostKeyAlgorithms ssh-ed25519\n"},
                     {"path": "/etc/profile.d/little-mester-parent.sh", "owner": "root:root",
                      "permissions": "0644", "content": "export HTTP_PROXY=http://10.0.2.100:3128\nexport HTTPS_PROXY=http://10.0.2.100:3128\nexport http_proxy=http://10.0.2.100:3128\nexport https_proxy=http://10.0.2.100:3128\n"},
+                    {"path": "/etc/opencode/opencode.json", "owner": "root:root",
+                     "permissions": "0644", "content": protected_config},
+                    {"path": "/etc/profile.d/little-mester-opencode.sh", "owner": "root:root",
+                     "permissions": "0644", "content": "export OPENCODE_CONFIG=/etc/opencode/opencode.json\n" +
+                     cli_config_export + "export OPENCODE_DISABLE_PROJECT_CONFIG=1\n"},
+                    {"path": "/usr/local/bin/lm-opencode", "owner": "root:root",
+                     "permissions": "0755", "content": opencode_launcher},
+                    {"path": "/usr/local/libexec/lm-opencode", "owner": "root:root",
+                     "permissions": "0755", "content": opencode_runner},
+                    *plugin_files,
                 ],
-                "runcmd": [["bash", "-lc", "install -d -o mester -g mester -m 0750 /home/mester/workspace && systemctl restart ssh"]],
+                "packages": ["tmux", "nodejs", "npm"],
+                "runcmd": [["bash", "-lc", "install -d -o mester -g mester -m 0750 /home/mester/workspace && npm install --global @opencode/cli@2.2.5 && test \"$(opencode --version)\" = 'opencode v2.2.5' && chown root:root /usr/local/bin/opencode && chmod 0755 /usr/local/bin/opencode && systemctl restart ssh"]],
             }
             userdata = b"#cloud-config\n" + json.dumps(user_data, separators=(",", ":")).encode("utf-8") + b"\n"
             metadata = b"instance-id: little-mester-parent-default\nlocal-hostname: little-mester-parent\n"
@@ -412,14 +455,147 @@ def _stop_gated_target(state, role: str, transition: dict, *, term_grace_ms: int
     return "STOPPED"
 
 
-def _finalize(state, args, home) -> None:
+def _qmp_powerdown(state, qmp_path: str, qemu_identity: dict, *, timeout_seconds: float = 5.0) -> None:
+    """Request guest ACPI shutdown through a private socket bound to exact QEMU identity."""
+    if (not isinstance(qmp_path, str) or not qmp_path.startswith("/")
+            or len(os.fsencode(qmp_path)) > 100
+            or not isinstance(qemu_identity, dict) or not 0 < timeout_seconds <= 10):
+        raise state.Refused("invalid QMP shutdown arguments")
+    try:
+        info = os.lstat(qmp_path)
+    except OSError as error:
+        raise state.Refused("private QMP socket is unavailable") from error
+    if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        raise state.Refused("private QMP socket has unsafe owner, type, or mode")
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    deadline = time.monotonic() + timeout_seconds
+
+    def set_remaining_timeout() -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise state.Refused("QMP exchange exceeded its bounded deadline")
+        client.settimeout(remaining)
+
+    try:
+        set_remaining_timeout()
+        client.connect(qmp_path)
+        credentials = client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        peer_pid, peer_uid, _peer_gid = struct.unpack("3i", credentials)
+        if peer_pid != qemu_identity.get("pid") or peer_uid != qemu_identity.get("uid"):
+            raise state.Refused("QMP peer does not match the recorded QEMU identity")
+        if state._recorded_process_status(qemu_identity, expected_basename="qemu-system-x86_64",
+                                         current_boot_id=qemu_identity.get("host_boot_id", "")) != "MATCH":
+            raise state.Refused("QMP peer failed exact QEMU process identity verification")
+
+        buffer = bytearray()
+
+        def receive_line() -> dict:
+            while b"\n" not in buffer:
+                if len(buffer) >= 65536:
+                    raise state.Refused("QMP response exceeded its bounded deadline or size")
+                set_remaining_timeout()
+                chunk = client.recv(min(4096, 65536 - len(buffer)))
+                if not chunk:
+                    raise state.Refused("QMP peer closed before completing its response")
+                buffer.extend(chunk)
+            line, _, remaining = buffer.partition(b"\n")
+            buffer[:] = remaining
+            try:
+                response = json.loads(line)
+            except (UnicodeError, json.JSONDecodeError) as error:
+                raise state.Refused("QMP peer returned malformed JSON") from error
+            if not isinstance(response, dict):
+                raise state.Refused("QMP peer returned an invalid message")
+            return response
+
+        if not isinstance(receive_line().get("QMP"), dict):
+            raise state.Refused("QMP peer did not send the protocol greeting")
+        for command in ("qmp_capabilities", "system_powerdown"):
+            set_remaining_timeout()
+            client.sendall((json.dumps({"execute": command}, separators=(",", ":")) + "\r\n").encode())
+            while True:
+                response = receive_line()
+                if "event" in response:
+                    continue
+                if "error" in response or not isinstance(response.get("return"), dict):
+                    raise state.Refused(f"QMP rejected {command}")
+                break
+    except (OSError, TimeoutError) as error:
+        raise state.Refused("could not complete bounded identity-verified QMP shutdown") from error
+    finally:
+        client.close()
+
+
+def _shutdown_running_qemu(state, args, home) -> None:
+    owned = _CHILD_PROCESSES.get("qemu")
+    if owned is None or owned[1] is None:
+        raise state.Refused("RUNNING QEMU has no supervisor-owned durable transition")
+    proc, transition = owned
+    if state.exec_transition_status(transition) != "TARGET":
+        raise state.Refused("RUNNING QEMU transition is not the exact live target")
+    directory = pathlib.Path(home if home is not None else state.pwd.getpwuid(os.getuid()).pw_dir)
+    qmp_path = str(directory.joinpath(*state.STATE_COMPONENTS, "qmp.sock"))
+    fd = state._open_directory_chain(create=False, home_override=home)
+    if fd is None:
+        raise state.Refused("parent state disappeared before QMP shutdown")
+    try:
+        run = state._read_json(fd, "active-run.json")
+        if (run.get("run_id") != args.run_id or run.get("phase") != "RUNNING"
+                or run.get("supervisor", {}).get("pid") != os.getpid()
+                or not isinstance(run.get("qemu"), dict)):
+            raise state.Refused("parent RUNNING record changed before QMP shutdown")
+        qemu_identity = run["qemu"]
+    finally:
+        os.close(fd)
+    _qmp_powerdown(state, qmp_path, qemu_identity)
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        proc.poll()  # Reap the owned process before evaluating its procfs identity.
+        phase = state.exec_transition_status(transition)
+        if phase == "STOPPED":
+            proc.wait()
+            _CHILD_PROCESSES.pop("qemu", None)
+            for role in ("metrics", "proxy"):
+                helper = _CHILD_PROCESSES.get(role)
+                if helper is None:
+                    continue
+                if helper[1] is None:
+                    raise state.Refused(f"supervised {role} child has no durable identity transition")
+                if _stop_gated_target(state, role, helper[1]) != "STOPPED":
+                    raise state.Refused(f"supervised {role} child did not stop with verified identity")
+            if _CHILD_PROCESSES:
+                raise state.Refused("supervisor still owns children after ordered shutdown")
+            return
+        if phase != "TARGET":
+            raise state.Refused(f"QEMU identity became {phase} during graceful shutdown")
+        time.sleep(0.05)
+    raise state.Refused("guest/QEMU did not stop before the graceful shutdown deadline")
+
+
+def _stop_starting_children(state) -> None:
+    """Roll back only recorded startup children, in bounded identity-bound order."""
+    for role in ("metrics", "proxy", "qemu"):
+        owned = _CHILD_PROCESSES.get(role)
+        if owned is None:
+            continue
+        if owned[1] is None:
+            raise state.Refused(f"STARTING {role} child has no durable identity transition")
+        if _stop_gated_target(state, role, owned[1]) != "STOPPED":
+            raise state.Refused(f"STARTING {role} child did not stop with verified identity")
+    if _CHILD_PROCESSES:
+        raise state.Refused("supervisor owns an unrecognized child during startup rollback")
+
+
+def _finalize(state, args, home, *, mark_stopped: bool = True) -> None:
     try:
         directory_fd = state._open_directory_chain(create=False, home_override=home)
         if directory_fd is not None:
             try:
                 try:
                     run = state._read_json(directory_fd, "active-run.json")
-                    if run.get("run_id") == args.run_id and run.get("supervisor", {}).get("pid") == os.getpid():
+                    if (mark_stopped and run.get("run_id") == args.run_id
+                            and run.get("supervisor", {}).get("pid") == os.getpid()):
                         run["phase"] = "STOPPING"
                         state._atomic_json(directory_fd, "active-run.json", run)
                 except FileNotFoundError:
@@ -432,6 +608,7 @@ def _finalize(state, args, home) -> None:
 
 def run(args) -> int:
     state = _load_state()
+    os.umask(0o077)
     home = str(pathlib.Path(args.state_home).resolve(strict=True)) if args.state_home else None
     if args.parent_id != state.PARENT_ID or len(args.run_id) != 32 or any(ch not in "0123456789abcdef" for ch in args.run_id):
         print("REFUSED: invalid parent or run identity", file=sys.stderr)
@@ -472,12 +649,31 @@ def run(args) -> int:
         print(f"REFUSED: supervisor startup failed: {error}", file=sys.stderr)
         return 2
 
+    stop_error = None
     try:
         while not stop_requested:
             time.sleep(0.25)
+        current = state.read_status(home=home)
+        if current["status"] == "STARTING":
+            if _CHILD_PROCESSES:
+                try:
+                    _stop_starting_children(state)
+                except (OSError, ValueError, state.Refused) as error:
+                    stop_error = error
+                    print(f"REFUSED: startup child rollback failed: {error}", file=sys.stderr)
+        elif current["status"] == "RUNNING":
+            try:
+                _shutdown_running_qemu(state, args, home)
+            except (OSError, ValueError, state.Refused) as error:
+                stop_error = error
+                print(f"REFUSED: graceful parent QEMU shutdown failed: {error}", file=sys.stderr)
+        else:
+            stop_error = state.Refused(
+                f"supervisor stop refused because parent state is {current['status']}")
+            print(f"REFUSED: {stop_error}; preserving ambiguous lifecycle evidence", file=sys.stderr)
     finally:
-        _finalize(state, args, home)
-    return 0
+        _finalize(state, args, home, mark_stopped=stop_error is None)
+    return 2 if stop_error is not None else 0
 
 
 def main() -> int:

@@ -39,6 +39,22 @@ and the final holistic review on #57.
 
 ## Phase 1 progression and stopping conditions
 
+**Continuous-execution correction (owner-approved 2026-11-11):** M1→M2→M3 is a
+priority order, not a prohibition on independent later-milestone work. When an owner-only
+runtime gate blocks an assumption, name the exact dependent operations and pause only those.
+Continue useful authorized implementation elsewhere in #54–#56; do not stop at a gate,
+review, commit, or ticket update. Do not invent a new architecture to route around a gate.
+For M1, unverified qemu-img inherited-FD/QEMU fdset/locking behavior blocks only enabling or
+claiming real parent disk launch and owner VM acceptance; it does not block offline lifecycle,
+status/readiness, shutdown, SSH, guest config, or tests that preserve the launch-disabled gate.
+For #55, reuse settled 2.2.5 probes and continue protected configuration/tmux wiring and
+offline tests without claiming live guest behavior. For #56, continue the already approved
+schema, scheduler, collector, restricted receiver/ACK, stale snapshot and display work with
+bounded offline tests; hardware timing/accuracy remains pending the owner NVIDIA probe.
+Return to the owner only after independent safe work is exhausted, an actual owner decision is
+needed, or a batched host acceptance action is ready. Every handoff must say what the gate
+blocks, what independent work was completed or remains, and the exact action that unlocks it.
+
 Progress toward these three demonstrations in order:
 
 1. **M1 persistent parent:** protected `up` → validated `status` → interactive/reconnectable

@@ -409,21 +409,21 @@ def recovery_preview(*, home: str | os.PathLike | None = None) -> dict:
         os.close(directory_fd)
 
 
-def stop_starting_supervisor(*, home: str | os.PathLike | None = None,
-                             timeout_seconds: float = 15.0) -> dict:
-    """Request cooperative stop through a pidfd for a verified childless supervisor."""
+def request_supervisor_stop(*, home: str | os.PathLike | None = None,
+                            timeout_seconds: float = 15.0) -> dict:
+    """Request cooperative stop through a pidfd for a verified supervisor."""
     if (type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 60):
         raise Refused("supervisor stop timeout must be between 0 and 60 seconds")
     status = read_status(home=home)
-    if status["status"] != "STARTING":
-        raise Refused("safe supervisor-only stop is available only before any child is launched")
+    if status["status"] not in ("STARTING", "RUNNING"):
+        raise Refused("parent stop requires a verified STARTING or RUNNING supervisor")
     directory_fd = _open_directory_chain(create=False, home_override=home)
     if directory_fd is None:
         raise Refused("parent state disappeared before stop request")
     pidfd = -1
     try:
         run = _read_json(directory_fd, "active-run.json")
-        if (run.get("run_id") != status.get("run_id") or run.get("phase") != "STARTING"
+        if (run.get("run_id") != status.get("run_id") or run.get("phase") != status.get("status")
                 or not isinstance(run.get("supervisor"), dict)
                 or run["supervisor"].get("pid") != status.get("supervisor_pid")):
             raise Refused("parent run changed before stop request")
@@ -455,11 +455,129 @@ def stop_starting_supervisor(*, home: str | os.PathLike | None = None,
         result = read_status(home=home)
         if result["status"] == "STOPPED":
             return {"status": "STOPPED", "parent_id": PARENT_ID,
-                    "run_id": status["run_id"], "disk_retained": True}
+                    "run_id": status.get("run_id"), "disk_retained": True}
         if result["status"] == "AMBIGUOUS":
             raise Refused("supervisor stop left ambiguous identity evidence; no signal escalation performed")
         time.sleep(0.05)
     raise Refused("supervisor did not stop before the bounded wait expired; no signal escalation performed")
+
+
+def parent_ssh_plan(*, home: str | os.PathLike | None = None,
+                    attach_opencode: bool = False) -> tuple[list[str], list[int]]:
+    """Build pinned SSH argv and retain validated identity/key descriptors for exec."""
+    if type(attach_opencode) is not bool:
+        raise Refused("parent SSH mode is invalid")
+    status = read_status(home=home)
+    if status["status"] != "RUNNING":
+        raise Refused("parent SSH requires a verified RUNNING parent")
+    directory_fd = _open_directory_chain(create=False, home_override=home)
+    if directory_fd is None:
+        raise Refused("parent state disappeared before SSH setup")
+    retained_fds = []
+    try:
+        parent = _read_json(directory_fd, "parent.json")
+        validate_parent(parent)
+        _validate_seed_identity(directory_fd, parent)
+
+        def open_private(name: str, maximum: int = 65536) -> tuple[int, bytes]:
+            fd = -1
+            try:
+                fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory_fd)
+            except OSError as error:
+                raise Refused(f"persistent SSH file is unavailable: {name}") from error
+            try:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                    raise Refused(f"persistent SSH file is unsafe: {name}")
+                value = bytearray()
+                while len(value) <= maximum:
+                    chunk = os.read(fd, min(4096, maximum + 1 - len(value)))
+                    if not chunk:
+                        break
+                    value.extend(chunk)
+                if len(value) > maximum:
+                    raise Refused(f"persistent SSH file exceeds its size bound: {name}")
+                retained_fds.append(fd)
+                return fd, bytes(value)
+            except BaseException:
+                if fd >= 0:
+                    os.close(fd)
+                raise
+
+        def release(fd: int) -> None:
+            os.close(fd)
+            retained_fds.remove(fd)
+
+        port_fd, port_bytes = open_private("ssh_port", 8)
+        release(port_fd)
+        port_text = port_bytes.decode("ascii").strip()
+        if not re.fullmatch(r"[0-9]{1,5}", port_text) or not 1024 <= int(port_text) <= 65535:
+            raise Refused("persistent parent SSH port is invalid")
+        known_hosts_file_fd, known_hosts = open_private("known_hosts")
+        key_file_fd, private_key = open_private("id_vm_control")
+        host_public_fd, host_public_bytes = open_private("ssh_host_ed25519_key.pub", 4096)
+        identity = parent.get("ssh_identity")
+        if (not isinstance(identity, dict)
+                or hashlib.sha256(private_key).hexdigest() != identity.get("control_private_sha256")
+                or hashlib.sha256(host_public_bytes).hexdigest() != identity.get("host_public_sha256")):
+            raise Refused("persistent SSH identity changed during descriptor validation")
+        public_key = host_public_bytes.decode("ascii").strip().split()
+        if (len(public_key) < 2 or public_key[0] != "ssh-ed25519"
+                or known_hosts != f"[127.0.0.1]:{port_text} {public_key[0]} {public_key[1]}\n".encode()):
+            raise Refused("persistent parent SSH host-key pin does not match its seed identity")
+        release(host_public_fd)
+
+        def sealed_copy(name: str, content: bytes) -> int:
+            if not hasattr(os, "memfd_create") or not hasattr(fcntl, "F_ADD_SEALS"):
+                raise Refused("sealed in-memory SSH identity descriptors are unavailable")
+            flags = getattr(os, "MFD_CLOEXEC", 1) | getattr(os, "MFD_ALLOW_SEALING", 2)
+            try:
+                fd = os.memfd_create(name, flags)
+            except OSError as error:
+                raise Refused("could not create a sealed in-memory SSH identity file") from error
+            try:
+                os.fchmod(fd, 0o600)
+                view = memoryview(content)
+                while view:
+                    written = os.write(fd, view)
+                    if written <= 0:
+                        raise Refused("could not copy validated SSH identity into sealed memory")
+                    view = view[written:]
+                seals = (getattr(fcntl, "F_SEAL_SEAL", 1) | getattr(fcntl, "F_SEAL_SHRINK", 2)
+                         | getattr(fcntl, "F_SEAL_GROW", 4) | getattr(fcntl, "F_SEAL_WRITE", 8))
+                fcntl.fcntl(fd, fcntl.F_ADD_SEALS, seals)
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.set_inheritable(fd, False)
+                retained_fds.append(fd)
+                return fd
+            except BaseException:
+                os.close(fd)
+                raise
+
+        key_fd = sealed_copy("little-mester-parent-ssh-key", private_key)
+        known_hosts_fd = sealed_copy("little-mester-parent-known-hosts", known_hosts)
+        release(known_hosts_file_fd)
+        release(key_file_fd)
+        argv = ["/usr/bin/ssh", "-F", "/dev/null", "-tt", "-a", "-x",
+                "-p", port_text, "-i", f"/proc/self/fd/{key_fd}",
+                "-o", f"UserKnownHostsFile=/proc/self/fd/{known_hosts_fd}",
+                "-o", "GlobalKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=yes",
+                "-o", "HostKeyAlgorithms=ssh-ed25519", "-o", "PubkeyAcceptedAlgorithms=ssh-ed25519",
+                "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "PasswordAuthentication=no",
+                "-o", "PreferredAuthentications=publickey", "-o", "ClearAllForwardings=yes",
+                "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "PermitLocalCommand=no",
+                "-o", "ProxyCommand=none", "-o", "ProxyJump=none", "-o", "EscapeChar=none",
+                "mester@127.0.0.1"]
+        if attach_opencode:
+            argv.append("exec /usr/local/bin/lm-opencode")
+        return argv, retained_fds
+    except BaseException:
+        for fd in retained_fds:
+            os.close(fd)
+        raise
+    finally:
+        os.close(directory_fd)
 
 
 def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: str | os.PathLike | None = None) -> dict:
@@ -831,18 +949,32 @@ def stop_exec_transition(identity: dict, *, term_grace_ms: int = 5000, settle_ms
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("status", "recover", "stop"))
+    parser.add_argument("command", choices=("status", "recover", "stop", "ssh", "tui"))
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--dry-run", action="store_true",
                         help="preview recovery; recovery is always non-mutating in this version")
     args = parser.parse_args()
     if args.command != "recover" and args.dry_run:
         parser.error("--dry-run is only valid with recover")
+    if args.command in ("ssh", "tui") and args.json:
+        parser.error("--json is not valid with ssh/tui")
     try:
+        if args.command in ("ssh", "tui"):
+            argv, descriptors = parent_ssh_plan(attach_opencode=args.command == "tui")
+            try:
+                for fd in descriptors:
+                    os.set_inheritable(fd, True)
+                os.execv(argv[0], argv)
+            finally:
+                for fd in descriptors:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
         if args.command == "recover":
             result = recovery_preview()
         elif args.command == "stop":
-            result = stop_starting_supervisor()
+            result = request_supervisor_stop()
         else:
             result = read_status()
     except Refused as error:

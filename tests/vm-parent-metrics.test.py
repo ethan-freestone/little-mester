@@ -46,6 +46,41 @@ def valid_snapshot():
 
 
 class ParentMetricsContractTests(unittest.TestCase):
+    def test_one_snapshot_exchange_requires_exact_bounded_matching_ack(self):
+        snapshot = valid_snapshot()
+        seen = []
+
+        def exchange(frame):
+            seen.append(frame)
+            return parent_metrics.encode_ack_frame(snapshot["run_id"], snapshot["sequence"])
+
+        frame = parent_metrics.exchange_snapshot(snapshot, exchange)
+        self.assertEqual(frame, parent_metrics.encode_snapshot(snapshot))
+        self.assertEqual(seen, [frame])
+
+    def test_ack_codec_rejects_wrong_identity_duplicate_or_extra_frames_and_overflow(self):
+        snapshot = valid_snapshot()
+        run_id, sequence = snapshot["run_id"], snapshot["sequence"]
+        valid = parent_metrics.encode_ack_frame(run_id, sequence)
+        parent_metrics.validate_ack_frame(valid, run_id=run_id, sequence=sequence)
+        for frame in (
+            parent_metrics.encode_ack_frame("f" * 32, sequence),
+            parent_metrics.encode_ack_frame(run_id, sequence + 1),
+            valid[:-1] + b"\n{}\n",
+            valid[:-1] + b' ,"ack":"accepted"}\n',
+            b'{"version":1,"run_id":"' + run_id.encode() +
+            b'","sequence":1,"sequence":1,"ack":"accepted"}\n',
+            b"x" * (parent_metrics.MAX_ACK_BYTES + 1),
+            b"",
+            b"{}",
+        ):
+            with self.subTest(frame=frame[:80]), self.assertRaises(parent_metrics.Refused):
+                parent_metrics.validate_ack_frame(frame, run_id=run_id, sequence=sequence)
+
+    def test_exchange_failure_is_not_converted_to_acknowledged_success(self):
+        with self.assertRaises(TimeoutError):
+            parent_metrics.exchange_snapshot(valid_snapshot(), lambda _frame: (_ for _ in ()).throw(TimeoutError()))
+
     def test_valid_fixed_snapshot_encodes_compact_utf8(self):
         payload = parent_metrics.encode_snapshot(valid_snapshot())
         self.assertLessEqual(len(payload), parent_metrics.MAX_PAYLOAD_BYTES)

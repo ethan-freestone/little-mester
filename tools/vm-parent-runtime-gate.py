@@ -47,23 +47,18 @@ def run(label: str, argv: list[str], *, pass_fds: tuple[int, ...] = (), timeout:
 def qemu_argv(executable: str, disk_fd: int) -> list[str]:
     return [executable, "-machine", "q35,accel=tcg", "-nodefaults", "-display", "none",
             "-S", "-monitor", "none", "-serial", "none", "-no-reboot",
-            "-add-fd", f"fd=3,set=1,opaque=parent-disk",
+            "-add-fd", f"fd={disk_fd},set=1,opaque=parent-disk",
             "-blockdev", "driver=file,node-name=parent-file,filename=/dev/fdset/1,locking=on,auto-read-only=off",
             "-blockdev", "driver=qcow2,node-name=parent-qcow2,file=parent-file,auto-read-only=off",
             "-device", "virtio-blk-pci,drive=parent-qcow2"]
 
 
 def start_qemu(executable: str, disk_fd: int, log_path: pathlib.Path) -> subprocess.Popen:
-    # fd 3 is the exact descriptor passed to QEMU's -add-fd option.
-    def remap_fd3():
-        if disk_fd != 3:
-            os.dup2(disk_fd, 3)
-
     log = log_path.open("xb")
     try:
         return subprocess.Popen(qemu_argv(executable, disk_fd), stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=subprocess.STDOUT, close_fds=True,
-                                pass_fds=(disk_fd,), preexec_fn=remap_fd3,
+                                pass_fds=(disk_fd,),
                                 start_new_session=True)
     finally:
         log.close()

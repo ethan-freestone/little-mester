@@ -67,6 +67,8 @@ dependencies = [
     root / "lib/vm/parent-supervisor.py",
     root / "lib/vm/parent-qemu.py",
     root / "lib/vm/parent-provision.py",
+    root / "agent/opencode/plugins/little-mester-exit-confirm/package.json",
+    root / "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
 ]
 
 # Inspect the original lexical path before resolving anything. A symlink in
@@ -168,7 +170,7 @@ PY
 export VM_HOST_SCRIPT_ROOT="$root"
 command="${1:-}"
 [[ -n "$command" ]] || {
-  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent status [--json] | parent stop | parent recover [--dry-run] [--json]\n' >&2
+  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent status [--json] | parent ssh | parent tui | parent stop | parent recover [--dry-run] [--json]\n' >&2
   exit 2
 }
 shift
@@ -217,6 +219,14 @@ case "$command" in
       stop)
         exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
           /usr/bin/python3 -I "$root/lib/vm/parent-state.py" stop "$@"
+        ;;
+      ssh)
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          /usr/bin/python3 -I "$root/lib/vm/parent-state.py" ssh "$@"
+        ;;
+      tui)
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          /usr/bin/python3 -I "$root/lib/vm/parent-state.py" tui "$@"
         ;;
       *) printf 'REFUSED: unsupported parent command: %s\n' "$subcommand" >&2; exit 2 ;;
     esac

@@ -19,7 +19,8 @@ checks qemu-img conversion into a pre-created inherited output FD, then inspects
 scratch image using explicit `-f qcow2`, expected virtual size, and no backing/external
 data file. It starts a paused `-S`, TCG-only QEMU with `-nodefaults`, no network device,
 no monitor/display/serial, and the same fdset/blockdev/`locking=on` pattern as the
-parent builder. A second paused QEMU attempts to open the same scratch disk; the gate
+parent builder (the gate names each inherited descriptor by its actual FD number so
+subprocess-internal descriptors cannot collide with FD 3). A second paused QEMU attempts to open the same scratch disk; the gate
 passes that check only when the second process exits nonzero with a lock diagnostic.
 Output and diagnostics are printed. No image or VM state outside the fresh scratch
 directory is opened or changed; it never uses KVM, the legacy VM, the actual parent
@@ -65,3 +66,9 @@ owner reports qemu-img inherited-FD compatibility, explicit qcow2 inspection, QE
 fdset opening and single-writer refusal from this scratch procedure. The NVIDIA probe
 is evidence for the later M3 GPU sampling choice. Keep parent launch disabled until
 those gates pass and the integrated source is separately reviewed.
+
+`lab-vm parent stop` waits at most 15 seconds by default. A timeout does not cancel the
+supervisor's graceful shutdown: a verified RUNNING QEMU may still be in its bounded QMP
+shutdown wait (up to 60 seconds). After a stop timeout or refusal, check `lab-vm parent
+status` before retrying; no signal escalation is performed, and an ambiguous result
+requires owner review rather than disk cleanup.

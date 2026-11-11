@@ -11,7 +11,8 @@ def _port(value: int, name: str) -> None:
         raise ValueError(f"{name} must be an unprivileged TCP port")
 
 
-def build_qemu_argv(*, executable: str, seed_iso: str, ssh_port: int, proxy_port: int) -> list[str]:
+def build_qemu_argv(*, executable: str, seed_iso: str, ssh_port: int, proxy_port: int,
+                    qmp_socket: str) -> list[str]:
     """Return direct QEMU argv; parent disk is fd 3, never a mutable path."""
     if (not isinstance(executable, str) or not executable.startswith("/")
             or os.path.realpath(executable) != executable):
@@ -19,6 +20,10 @@ def build_qemu_argv(*, executable: str, seed_iso: str, ssh_port: int, proxy_port
     if (not isinstance(seed_iso, str) or not seed_iso.startswith("/")
             or "\0" in seed_iso or "\n" in seed_iso or "," in seed_iso):
         raise ValueError("cloud-init seed path is not safe for QEMU option encoding")
+    if (not isinstance(qmp_socket, str) or not qmp_socket.startswith("/")
+            or any(character in qmp_socket for character in "\0\n,\r")
+            or len(os.fsencode(qmp_socket)) > 100):
+        raise ValueError("private QMP socket path is not safe for Unix-socket option encoding")
     _port(ssh_port, "SSH port")
     _port(proxy_port, "proxy port")
     netdev = (f"user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22,"
@@ -43,6 +48,7 @@ def build_qemu_argv(*, executable: str, seed_iso: str, ssh_port: int, proxy_port
         "-display", "none",
         "-serial", "null",
         "-monitor", "none",
+        "-qmp", f"unix:{qmp_socket},server=on,wait=off",
         "-no-reboot",
     ]
 

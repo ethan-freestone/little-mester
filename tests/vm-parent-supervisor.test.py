@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """REAL_PROCESS tests for terminal-independent supervisor lock handoff."""
 
+import base64
+import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -102,7 +105,7 @@ class SupervisorHandoffTests(unittest.TestCase):
                 with parent_state.lifecycle_lock(home=self.home):
                     self.fail("supervisor did not retain exclusive lifecycle lock")
             self.assertFalse((self.state_dir / "supervisor.sock").exists())
-            result = parent_state.stop_starting_supervisor(home=self.home)
+            result = parent_state.request_supervisor_stop(home=self.home)
             self.assertTrue(result["disk_retained"])
             reaper.join(timeout=3)
             self.assertFalse(reaper.is_alive())
@@ -122,7 +125,7 @@ class SupervisorHandoffTests(unittest.TestCase):
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
                 time.sleep(0.01)
-            result = parent_state.stop_starting_supervisor(home=self.home)
+            result = parent_state.request_supervisor_stop(home=self.home)
             self.assertEqual(result["status"], "STOPPED")
             self.assertEqual(result["run_id"], run_id)
             self.assertTrue(result["disk_retained"])
@@ -148,7 +151,7 @@ class SupervisorHandoffTests(unittest.TestCase):
             finally:
                 os.close(fd)
             with self.assertRaises(parent_state.Refused):
-                parent_state.stop_starting_supervisor(home=self.home)
+                parent_state.request_supervisor_stop(home=self.home)
             self.assertIsNone(proc.poll())
             self.assertTrue((self.state_dir / "disk.qcow2").exists())
         finally:
@@ -162,7 +165,7 @@ class SupervisorHandoffTests(unittest.TestCase):
                 time.sleep(0.01)
             with mock.patch.object(parent_state.os, "pidfd_open", side_effect=AttributeError):
                 with self.assertRaisesRegex(parent_state.Refused, "pidfd"):
-                    parent_state.stop_starting_supervisor(home=self.home)
+                    parent_state.request_supervisor_stop(home=self.home)
             self.assertIsNone(proc.poll())
             self.assertTrue((self.state_dir / "disk.qcow2").exists())
         finally:
@@ -184,6 +187,33 @@ class SupervisorHandoffTests(unittest.TestCase):
             self.assertTrue((self.state_dir / "disk.qcow2").exists())
             with parent_state.lifecycle_lock(home=self.home):
                 pass
+        finally:
+            self.cleanup_test_supervisor(proc)
+
+    def test_supervisor_signal_does_not_mark_ambiguous_running_record_stopped(self):
+        proc, _run_id = self.spawn_supervisor()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+            try:
+                run = parent_state._read_json(fd, "active-run.json")
+                run.update({"phase": "RUNNING", "qemu": {"untrusted": "record"}})
+                parent_state._atomic_json(fd, "active-run.json", run)
+            finally:
+                os.close(fd)
+            self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+            proc.terminate()
+            self.assertEqual(proc.wait(timeout=3), 2)
+            result = parent_state.read_status(home=self.home)
+            self.assertEqual(result["status"], "AMBIGUOUS")
+            fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+            try:
+                self.assertEqual(parent_state._read_json(fd, "active-run.json")["phase"], "RUNNING")
+            finally:
+                os.close(fd)
+            self.assertTrue((self.state_dir / "disk.qcow2").exists())
         finally:
             self.cleanup_test_supervisor(proc)
 
@@ -247,6 +277,7 @@ class SupervisorHandoffTests(unittest.TestCase):
     def test_parent_seed_persists_control_and_host_identity_without_host_exports(self):
         calls = []
         public_by_private = {}
+        real_run = subprocess.run
 
         def fake_run(argv, **kwargs):
             calls.append(argv)
@@ -284,6 +315,37 @@ class SupervisorHandoffTests(unittest.TestCase):
                 sshd_config = next(item for item in config["write_files"]
                                    if item["path"].endswith("99-little-mester-parent.conf"))
                 self.assertEqual(sshd_config["content"].count("\n"), 1)
+                protected = {item["path"]: item for item in config["write_files"]}
+                opencode_config = json.loads(protected["/etc/opencode/opencode.json"]["content"])
+                self.assertFalse(opencode_config["autoupdate"])
+                self.assertEqual(opencode_config["share"], "disabled")
+                self.assertEqual(protected["/etc/opencode/opencode.json"]["owner"], "root:root")
+                plugin_path = "/etc/opencode/plugins/little-mester-exit-confirm/tui.tsx"
+                self.assertEqual(protected[plugin_path]["owner"], "root:root")
+                self.assertEqual(protected[plugin_path]["permissions"], "0644")
+                expected_plugin = (ROOT / "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx").read_bytes()
+                self.assertEqual(base64.b64decode(protected[plugin_path]["content"], validate=True), expected_plugin)
+                profile = protected["/etc/profile.d/little-mester-opencode.sh"]["content"]
+                launcher = protected["/usr/local/bin/lm-opencode"]["content"]
+                runner = protected["/usr/local/libexec/lm-opencode"]["content"]
+                self.assertIn("OPENCODE_DISABLE_PROJECT_CONFIG=1", profile)
+                self.assertIn("little-mester-exit-confirm", profile)
+                self.assertIn("tmux new-session -A -s little-mester-opencode", launcher)
+                self.assertIn("XDG_CONFIG_HOME=/etc", runner)
+                self.assertIn("OPENCODE_CONFIG=/etc/opencode/opencode.json", runner)
+                self.assertIn("OPENCODE_DISABLE_PROJECT_CONFIG=1", runner)
+                self.assertIn("exec /usr/local/bin/opencode", runner)
+                cli_export = next(line for line in profile.splitlines()
+                                  if line.startswith("export OPENCODE_CLI_CONFIG_CONTENT="))
+                cli_content = json.loads(cli_export.split("=", 1)[1].strip("'"))
+                self.assertEqual(cli_content["keybinds"], {"app.exit": "none", "prompt.clear": "none"})
+                self.assertIn("test \"$(opencode --version)\" = 'opencode v2.2.5'",
+                              config["runcmd"][0][-1])
+                for script in (launcher, runner):
+                    self.assertEqual(real_run(["/bin/sh", "-n"], input=script.encode(),
+                                              check=False).returncode, 0)
+                self.assertEqual(config["packages"], ["tmux", "nodejs", "npm"])
+                self.assertIn("@opencode/cli@2.2.5", config["runcmd"][0][-1])
                 port = 22345
                 directory_fd = parent_state._open_directory_chain(create=False, home_override=self.home)
                 try:
@@ -344,6 +406,93 @@ class SupervisorHandoffTests(unittest.TestCase):
                     os.close(directory_fd)
                 (self.state_dir / "seed.iso").write_bytes(seed)
 
+    def test_parent_ssh_requires_running_identity_and_builds_pinned_nonforwarding_tty(self):
+        files = {
+            "id_vm_control": b"control-private",
+            "id_vm_control.pub": b"ssh-ed25519 " + b"A" * 40 + b" control\n",
+            "ssh_host_ed25519_key": b"host-private",
+            "ssh_host_ed25519_key.pub": b"ssh-ed25519 " + b"B" * 40 + b" host\n",
+            "user-data": b"#cloud-config\n{}\n", "meta-data": b"instance-id: test\n",
+            "seed.iso": b"seed-fixture",
+        }
+        for name, data in files.items():
+            (self.state_dir / name).write_bytes(data)
+            os.chmod(self.state_dir / name, 0o600)
+        fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+        try:
+            parent = parent_state._read_json(fd, "parent.json")
+        finally:
+            os.close(fd)
+        parent["ssh_identity"] = {
+            "seed_sha256": hashlib.sha256(files["seed.iso"]).hexdigest(),
+            "control_private_sha256": hashlib.sha256(files["id_vm_control"]).hexdigest(),
+            "control_public_sha256": hashlib.sha256(files["id_vm_control.pub"]).hexdigest(),
+            "host_private_sha256": hashlib.sha256(files["ssh_host_ed25519_key"]).hexdigest(),
+            "host_public_sha256": hashlib.sha256(files["ssh_host_ed25519_key.pub"]).hexdigest(),
+        }
+        fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+        try:
+            parent_state._atomic_json(fd, "parent.json", parent)
+            parent_supervisor._write_ssh_connection(parent_state, fd, 23456, files["ssh_host_ed25519_key.pub"])
+        finally:
+            os.close(fd)
+
+        proc, _run_id = self.spawn_supervisor()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+            try:
+                run = parent_state._read_json(fd, "active-run.json")
+                run.update({"phase": "RUNNING", "qemu": {
+                    "schema": 1, "pid": os.getpid(), "uid": os.getuid(),
+                    "host_boot_id": pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+                    "start_time": "1", "exe": "/usr/bin/qemu-system-x86_64",
+                    "argv": ["/usr/bin/qemu-system-x86_64"],
+                }})
+                parent_state._atomic_json(fd, "active-run.json", run)
+            finally:
+                os.close(fd)
+            with mock.patch.object(parent_state, "_recorded_process_status", return_value="MATCH"):
+                argv, descriptors = parent_state.parent_ssh_plan(home=self.home)
+            try:
+                self.assertEqual(argv[argv.index("-p") + 1], "23456")
+                self.assertEqual(argv[argv.index("-tt")], "-tt")
+                self.assertIn("EscapeChar=none", argv)
+                self.assertIn("StrictHostKeyChecking=yes", argv)
+                self.assertIn("ClearAllForwardings=yes", argv)
+                self.assertIn("ForwardAgent=no", argv)
+                self.assertEqual(argv[-1], "mester@127.0.0.1")
+                with mock.patch.object(parent_state, "_recorded_process_status", return_value="MATCH"):
+                    tui_argv, tui_descriptors = parent_state.parent_ssh_plan(
+                        home=self.home, attach_opencode=True)
+                self.assertEqual(tui_argv[-2:], ["mester@127.0.0.1",
+                                                 "exec /usr/local/bin/lm-opencode"])
+                self.assertEqual(len(tui_descriptors), len(descriptors))
+                for descriptor in tui_descriptors:
+                    os.close(descriptor)
+                key_arg = argv[argv.index("-i") + 1]
+                known_hosts_arg = next(item.split("=", 1)[1] for item in argv
+                                        if item.startswith("UserKnownHostsFile="))
+                self.assertTrue(key_arg.startswith("/proc/self/fd/"))
+                self.assertTrue(known_hosts_arg.startswith("/proc/self/fd/"))
+                self.assertIn(int(key_arg.rsplit("/", 1)[1]), descriptors)
+                self.assertIn(int(known_hosts_arg.rsplit("/", 1)[1]), descriptors)
+                self.assertNotEqual(key_arg, known_hosts_arg)
+                required_seals = (fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK |
+                                  fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE)
+                for descriptor in descriptors:
+                    self.assertEqual(fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) & required_seals,
+                                     required_seals)
+                with self.assertRaises(OSError):
+                    os.write(int(key_arg.rsplit("/", 1)[1]), b"substitution")
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+        finally:
+            self.cleanup_test_supervisor(proc)
+
     def test_partial_seed_iso_is_refused_and_reported_ambiguous(self):
         part = self.state_dir / "seed.iso.part"
         part.write_bytes(b"partial evidence")
@@ -387,6 +536,23 @@ class SupervisorHandoffTests(unittest.TestCase):
                 self.assertFalse(marker.exists())
             finally:
                 self.cleanup_gated_child("qemu", captured.get("identity"))
+
+    def test_starting_child_rollback_uses_durable_identity_and_retains_disk(self):
+        executable = os.path.realpath(sys.executable)
+        transition = None
+        with parent_state.lifecycle_lock(home=self.home) as lock_fd:
+            try:
+                transition = parent_supervisor._spawn_gated_target(
+                    parent_state, lock_fd=lock_fd, role="qemu", executable=executable,
+                    argv=[executable, "-c", "import time; time.sleep(30)"], home=str(self.home))
+                self.assertEqual(parent_state.exec_transition_status(transition), "TARGET")
+                parent_supervisor._stop_starting_children(parent_state)
+                self.assertEqual(parent_state.exec_transition_status(transition), "STOPPED")
+                self.assertNotIn("qemu", parent_supervisor._CHILD_PROCESSES)
+                self.assertTrue((self.state_dir / "disk.qcow2").exists())
+            finally:
+                if transition is not None:
+                    self.cleanup_gated_child("qemu", transition)
 
     def test_post_bind_record_failure_removes_only_new_socket(self):
         active_run = self.state_dir / "active-run.json"

@@ -235,3 +235,25 @@ assets separately from the writable workspace and set the project-config guard i
 protected OpenCode launch environment. This local probe does not show that the v3 guest
 currently has such config/assets, that the launch environment is non-overridable, or that
 project plugins are not loaded; those remain acceptance requirements.
+
+### J.12 Remote terminal clipboard-write mitigation (#55)
+
+Treat guest/OpenCode output as untrusted terminal control data. In the **owner's selected
+terminal profile**, disable OSC 52 / remote clipboard writes (or the terminal's equivalent
+remote-clipboard integration) before using the parent TUI. `EscapeChar=none` only disables
+OpenSSH's own escape commands; it is not an OSC 52 defense. Until the owner records the
+terminal name/version and passes a harmless clipboard canary, assume clipboard writes may
+reach the host clipboard and do not leave sensitive clipboard contents available while
+attached. Do not claim this mitigation is active based only on an SSH setting.
+
+Owner canary (run only in the selected terminal; this attempts to set clipboard contents to
+the non-secret text `LM-CLIPBOARD-CANARY`):
+
+```sh
+printf '\033]52;c;TE0tQ0xJUEJPQVJELUNBTkFSWQ==\a'
+```
+
+After the terminal-specific OSC 52 block is enabled, verify the clipboard did **not** change
+to the canary text. Record the terminal profile and observed result on #55. This repository
+does not know which terminal/profile the owner uses, so its protection and residual behavior
+remain unverified until that check is returned.

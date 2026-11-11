@@ -17,7 +17,7 @@ class ParentQemuArgvTests(unittest.TestCase):
     def test_disk_is_fdset_backed_with_explicit_qcow2_and_writer_locking(self):
         argv = parent_qemu.build_qemu_argv(
             executable="/usr/bin/qemu-system-x86_64", seed_iso="/private/parent/seed.iso",
-            ssh_port=22222, proxy_port=23456)
+            ssh_port=22222, proxy_port=23456, qmp_socket="/private/parent/qmp.sock")
         self.assertEqual(argv[argv.index("-add-fd") + 1], "fd=3,set=1,opaque=parent-disk")
         file_node = argv[argv.index("-blockdev") + 1]
         self.assertIn("driver=file", file_node)
@@ -40,13 +40,15 @@ class ParentQemuArgvTests(unittest.TestCase):
     def test_guest_egress_and_ssh_are_loopback_forwarded_with_qemu_restrict(self):
         argv = parent_qemu.build_qemu_argv(
             executable="/usr/bin/qemu-system-x86_64", seed_iso="/private/parent/seed.iso",
-            ssh_port=22222, proxy_port=23456)
+            ssh_port=22222, proxy_port=23456, qmp_socket="/private/parent/qmp.sock")
         netdev = argv[argv.index("-netdev") + 1]
         self.assertIn("hostfwd=tcp:127.0.0.1:22222-:22", netdev)
         self.assertIn("guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:23456", netdev)
         self.assertIn("restrict=on", netdev)
         self.assertNotIn("virtiofs", " ".join(argv))
         self.assertEqual(argv[argv.index("-display") + 1], "none")
+        self.assertEqual(argv[argv.index("-qmp") + 1],
+                         "unix:/private/parent/qmp.sock,server=on,wait=off")
 
     def test_qemu_builder_is_a_protected_launcher_dependency(self):
         lab = (ROOT / "lab-vm").read_text()
@@ -56,13 +58,17 @@ class ParentQemuArgvTests(unittest.TestCase):
     def test_refuses_untrusted_executable_paths_seed_option_injection_and_invalid_ports(self):
         with self.assertRaises(ValueError):
             parent_qemu.build_qemu_argv(executable="qemu-system-x86_64", seed_iso="/seed.iso",
-                                        ssh_port=22222, proxy_port=23456)
+                                        ssh_port=22222, proxy_port=23456, qmp_socket="/qmp.sock")
         with self.assertRaises(ValueError):
             parent_qemu.build_qemu_argv(executable="/usr/bin/qemu-system-x86_64",
-                                        seed_iso="/seed.iso,format=qcow2", ssh_port=22222, proxy_port=23456)
+                                        seed_iso="/seed.iso,format=qcow2", ssh_port=22222, proxy_port=23456,
+                                        qmp_socket="/qmp.sock")
         with self.assertRaises(ValueError):
             parent_qemu.build_qemu_argv(executable="/usr/bin/qemu-system-x86_64", seed_iso="/seed.iso",
-                                        ssh_port=22, proxy_port=23456)
+                                        ssh_port=22, proxy_port=23456, qmp_socket="/qmp.sock")
+        with self.assertRaises(ValueError):
+            parent_qemu.build_qemu_argv(executable="/usr/bin/qemu-system-x86_64", seed_iso="/seed.iso",
+                                        ssh_port=22222, proxy_port=23456, qmp_socket="/tmp/qmp.sock,server=on")
 
 
 if __name__ == "__main__":

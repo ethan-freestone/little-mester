@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 
 MAX_PAYLOAD_BYTES = 16 * 1024
+MAX_ACK_BYTES = 256
 MAX_SEQUENCE = 2**63 - 1
 CADENCE_SECONDS = 0.5
 CADENCE_NANOSECONDS = 500_000_000
@@ -145,6 +146,57 @@ def encode_snapshot(snapshot: object) -> bytes:
     if len(payload) > MAX_PAYLOAD_BYTES:
         raise Refused("metrics snapshot exceeds the 16-KiB payload limit")
     return payload
+
+
+def encode_ack_frame(run_id: str, sequence: int) -> bytes:
+    """Encode the single bounded ACK for one accepted snapshot frame."""
+    if (not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id)
+            or type(sequence) is not int or not 1 <= sequence <= MAX_SEQUENCE):
+        raise Refused("metrics acknowledgement identity is invalid")
+    return json.dumps({"version": 1, "run_id": run_id, "sequence": sequence, "ack": "accepted"},
+                      separators=(",", ":")).encode("ascii") + b"\n"
+
+
+def validate_ack_frame(frame: object, *, run_id: str, sequence: int) -> None:
+    """Accept exactly one newline-terminated ACK matching the outstanding frame."""
+    if (not isinstance(frame, bytes) or not 1 <= len(frame) <= MAX_ACK_BYTES
+            or not frame.endswith(b"\n") or frame.count(b"\n") != 1):
+        raise Refused("metrics acknowledgement is missing, oversized, or not exactly one frame")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise Refused("metrics acknowledgement contains duplicate fields")
+            result[key] = value
+        return result
+
+    try:
+        acknowledgement = json.loads(frame[:-1], object_pairs_hook=unique_object)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise Refused("metrics acknowledgement is malformed") from error
+    if (not isinstance(acknowledgement, dict)
+            or set(acknowledgement) != {"version", "run_id", "sequence", "ack"}
+            or type(acknowledgement.get("version")) is not int or acknowledgement["version"] != 1
+            or acknowledgement.get("run_id") != run_id
+            or type(acknowledgement.get("sequence")) is not int
+            or acknowledgement["sequence"] != sequence
+            or acknowledgement.get("ack") != "accepted"):
+        raise Refused("metrics acknowledgement does not match the outstanding frame")
+
+
+def exchange_snapshot(snapshot: object, exchange) -> bytes:
+    """Synchronously deliver one validated snapshot and require its matching ACK.
+
+    `exchange` is the bounded transport adapter: it receives one complete frame and
+    returns one complete ACK. The synchronous contract prevents overlap or queuing.
+    """
+    if not callable(exchange):
+        raise TypeError("metrics transport exchange must be callable")
+    frame = encode_snapshot(snapshot)
+    acknowledgement = exchange(frame)
+    validate_ack_frame(acknowledgement, run_id=snapshot["run_id"], sequence=snapshot["sequence"])
+    return frame
 
 
 def category(status: str, value=None, error: str | None = None) -> dict:
