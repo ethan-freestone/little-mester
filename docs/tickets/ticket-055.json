@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-10T21:46:51.737Z",
+  "updated_at": "2026-11-11T15:40:08.792Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -45,5 +45,12 @@
     "created": [],
     "cases": []
   },
-  "models_used": []
+  "models_used": [],
+  "comments": [
+    {
+      "timestamp": "2026-11-11T15:40:08.791Z",
+      "author": "cli",
+      "body": "Workflow reminder for #54–#57: record durable discussion, review findings, and owner decisions as append-only comments with the ticket-engine CLI (--comment), not as prose in tests.created. Keep test ledgers limited to concise test evidence and actionable test gaps."
+    }
+  ]
 }
