@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 MAX_PAYLOAD_BYTES = 16 * 1024
 MAX_SEQUENCE = 2**63 - 1
 CADENCE_SECONDS = 0.5
+CADENCE_NANOSECONDS = 500_000_000
 ERROR_CODES = frozenset({"collector_failed", "malformed", "no_device", "no_sensors",
                          "permission_denied", "timeout", "unsupported"})
 TOP_KEYS = {"version", "run_id", "sequence", "sampled_at", "sampling_duration_ms",
@@ -159,13 +160,14 @@ def utc_sample_time(now: datetime | None = None) -> str:
     return instant.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.") + f"{instant.astimezone(UTC).microsecond // 1000:03d}Z"
 
 
-def run_absolute_schedule(callback, stop_requested, *, clock=time.monotonic,
+def run_absolute_schedule(callback, stop_requested, *, clock=time.monotonic_ns,
                            wait=time.sleep) -> int:
     """Run one synchronous callback per absolute 500-ms slot, skipping missed slots.
 
-    The callback receives its scheduled monotonic instant and an absolute deadline
-    one cadence later. It owns the collect/deliver deadline check. Because callback
-    execution is synchronous, at most one frame can be in flight and no queue forms.
+    `clock` must return monotonic nanoseconds. The callback receives its scheduled
+    monotonic instant and absolute deadline in seconds. It owns the collect/deliver
+    deadline check. Because callback execution is synchronous, at most one frame can
+    be in flight and no queue forms.
     Return the number of skipped slots when stop_requested becomes true.
     """
     if not callable(callback) or not callable(stop_requested) or not callable(clock) or not callable(wait):
@@ -173,7 +175,7 @@ def run_absolute_schedule(callback, stop_requested, *, clock=time.monotonic,
 
     def monotonic_now():
         value = clock()
-        if type(value) not in (int, float) or not math.isfinite(value):
+        if type(value) is not int or value < 0:
             raise Refused("metrics scheduler clock returned an invalid value")
         return value
 
@@ -182,18 +184,22 @@ def run_absolute_schedule(callback, stop_requested, *, clock=time.monotonic,
     while not stop_requested():
         current = monotonic_now()
         if current < slot:
-            wait(slot - current)
+            wait((slot - current) / 1_000_000_000)
             current = monotonic_now()
             if current < slot:
                 raise Refused("metrics scheduler clock moved backwards")
         if stop_requested():
             break
-        callback(slot, slot + CADENCE_SECONDS)
+        callback(slot / 1_000_000_000,
+                 (slot + CADENCE_NANOSECONDS) / 1_000_000_000)
+        if stop_requested():
+            break
         current = monotonic_now()
-        next_slot = slot + CADENCE_SECONDS
-        if current >= next_slot:
-            missed = int((current - next_slot) // CADENCE_SECONDS) + 1
+        next_slot = slot + CADENCE_NANOSECONDS
+        if current > next_slot:
+            lateness = current - next_slot
+            missed = (lateness + CADENCE_NANOSECONDS - 1) // CADENCE_NANOSECONDS
             skipped += missed
-            next_slot += missed * CADENCE_SECONDS
+            next_slot += missed * CADENCE_NANOSECONDS
         slot = next_slot
     return skipped

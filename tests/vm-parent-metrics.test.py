@@ -187,7 +187,7 @@ class ParentMetricsContractTests(unittest.TestCase):
             sleeps = []
 
             def monotonic(self):
-                return self.now
+                return round(self.now * 1_000_000_000)
 
             def wait(self, duration):
                 self.sleeps.append(duration)
@@ -221,7 +221,7 @@ class ParentMetricsContractTests(unittest.TestCase):
             now = 0.0
 
             def monotonic(self):
-                return self.now
+                return round(self.now * 1_000_000_000)
 
             def wait(self, duration):
                 self.now += duration
@@ -237,7 +237,53 @@ class ParentMetricsContractTests(unittest.TestCase):
             slow_callback, lambda: len(frames) == 3,
             clock=clock.monotonic, wait=clock.wait)
         self.assertEqual([frame[0] for frame in frames], [0.0, 1.0, 2.0])
-        self.assertEqual(skipped, 3)
+        self.assertEqual(skipped, 2)
+
+    def test_absolute_schedule_runs_slot_when_callback_finishes_exactly_on_deadline(self):
+        class Clock:
+            now = 0.0
+
+            def monotonic(self):
+                return round(self.now * 1_000_000_000)
+
+            def wait(self, duration):
+                self.now += duration
+
+        clock = Clock()
+        starts = []
+
+        def callback(slot, deadline):
+            starts.append((clock.now, slot, deadline))
+            clock.now = deadline
+
+        skipped = parent_metrics.run_absolute_schedule(
+            callback, lambda: len(starts) == 3,
+            clock=clock.monotonic, wait=clock.wait)
+        self.assertEqual([frame[0] for frame in starts], [0.0, 0.5, 1.0])
+        self.assertEqual(skipped, 0)
+
+    def test_absolute_schedule_skips_intermediate_slots_but_runs_exact_current_slot(self):
+        class Clock:
+            now = 0.1
+
+            def monotonic(self):
+                return round(self.now * 1_000_000_000)
+
+            def wait(self, duration):
+                self.now += duration
+
+        clock = Clock()
+        starts = []
+
+        def callback(slot, deadline):
+            starts.append(clock.now)
+            clock.now += 1.0
+
+        skipped = parent_metrics.run_absolute_schedule(
+            callback, lambda: len(starts) == 2,
+            clock=clock.monotonic, wait=clock.wait)
+        self.assertEqual(starts, [0.1, 1.1])
+        self.assertEqual(skipped, 1)
 
     def test_absolute_schedule_rejects_invalid_clock(self):
         with self.assertRaises(parent_metrics.Refused):
