@@ -411,6 +411,18 @@ def recovery_preview(*, home: str | os.PathLike | None = None) -> dict:
         os.close(directory_fd)
 
 
+def _recv_control_line(connection, *, maximum: int = 32) -> bytes:
+    response = bytearray()
+    while len(response) < maximum:
+        chunk = connection.recv(maximum - len(response))
+        if not chunk:
+            break
+        response.extend(chunk)
+        if b"\n" in chunk:
+            break
+    return bytes(response)
+
+
 def stop_starting_supervisor(*, home: str | os.PathLike | None = None,
                              timeout_seconds: float = 15.0) -> dict:
     """Request graceful stop only for a verified STARTING supervisor with no child."""
@@ -447,7 +459,7 @@ def stop_starting_supervisor(*, home: str | os.PathLike | None = None,
                 if peer_uid != os.getuid() or peer_pid != identity.get("pid"):
                     raise Refused("control socket peer does not match the recorded supervisor identity")
                 client.sendall(b"STOP\n")
-                if client.recv(32) != b"STOPPING\n":
+                if _recv_control_line(client) != b"STOPPING\n":
                     raise Refused("supervisor did not acknowledge graceful stop")
             except (OSError, struct.error) as error:
                 raise Refused("could not verify or contact the parent supervisor") from error

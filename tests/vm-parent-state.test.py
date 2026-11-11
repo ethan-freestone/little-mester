@@ -70,6 +70,16 @@ class ParentStateTests(unittest.TestCase):
         self.assertEqual(preview["action"], "none")
         self.assertEqual(sorted(item.name for item in self.parent_dir().iterdir()), before)
 
+    def test_control_line_reader_accepts_fragmented_acknowledgement(self):
+        class FragmentedSocket:
+            def __init__(self):
+                self.parts = [b"STOP", b"PING", b"\n"]
+
+            def recv(self, _limit):
+                return self.parts.pop(0) if self.parts else b""
+
+        self.assertEqual(parent_state._recv_control_line(FragmentedSocket()), b"STOPPING\n")
+
     def test_initialize_writes_private_atomic_parent_record_and_is_idempotent(self):
         record = parent_state.initialize(64, home=self.home)
         directory = self.parent_dir()
