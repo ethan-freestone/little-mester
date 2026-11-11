@@ -4,7 +4,9 @@
 import copy
 import datetime
 import importlib.util
+import os
 import pathlib
+import tempfile
 import unittest
 
 
@@ -400,6 +402,45 @@ class ParentMetricsContractTests(unittest.TestCase):
                 adapters={"cpu": None, "memory": None, "gpus": None, "temperatures": None},
                 clock=Clock().read,
                 wall_clock=lambda: datetime.datetime(2026, 11, 11, tzinfo=datetime.timezone.utc))
+
+    def test_linux_proc_adapters_are_lazy_and_read_only_fixed_bounded_fixture_files(self):
+        with tempfile.TemporaryDirectory(prefix="parent-proc-fixture-") as temporary:
+            root = pathlib.Path(temporary)
+            (root / "cpuinfo").write_text("model name: Fixture CPU\n", encoding="utf-8")
+            (root / "loadavg").write_text("0.5 0.25 0.1 1/1 2\n", encoding="utf-8")
+            (root / "meminfo").write_text(
+                "MemTotal: 2097152 kB\nMemAvailable: 1048576 kB\n", encoding="utf-8")
+            reads = []
+
+            def read_text(path, maximum):
+                reads.append((pathlib.Path(path).name, maximum))
+                return parent_metrics_collect.read_bounded_file(path, maximum)
+
+            adapters = parent_metrics_collect.linux_proc_adapters(
+                proc_root=root, cpu_count=lambda: 4, read_text=read_text,
+                clock=lambda: 0)
+            self.assertEqual(reads, [])
+            cpu = parent_metrics_collect.parse_cpu(*adapters["cpu"](100))
+            memory = parent_metrics_collect.parse_memory(adapters["memory"](100))
+            self.assertEqual(cpu["num_cpus"], 4)
+            self.assertEqual(memory["total_gb"], 2.0)
+            self.assertEqual({name for name, _limit in reads}, {"cpuinfo", "loadavg", "meminfo"})
+            self.assertIsNone(adapters["gpus"])
+            self.assertIsNone(adapters["temperatures"])
+
+    def test_bounded_file_reader_rejects_symlink_nonregular_and_oversize(self):
+        with tempfile.TemporaryDirectory(prefix="parent-proc-fixture-") as temporary:
+            root = pathlib.Path(temporary)
+            target = root / "target"
+            target.write_text("private", encoding="utf-8")
+            link = root / "link"
+            link.symlink_to(target)
+            with self.assertRaises(parent_metrics_collect.CollectorError):
+                parent_metrics_collect.read_bounded_file(link, 64)
+            with self.assertRaises(parent_metrics_collect.CollectorError):
+                parent_metrics_collect.read_bounded_file(root, 64)
+            with self.assertRaises(parent_metrics_collect.CollectorError):
+                parent_metrics_collect.read_bounded_file(target, 3)
 
     def test_historical_parsers_reject_malformed_or_out_of_contract_values(self):
         with self.assertRaises(parent_metrics_collect.CollectorError):

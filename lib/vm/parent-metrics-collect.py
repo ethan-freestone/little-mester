@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import csv
+import errno
+import os
 import importlib.util
 import math
 import pathlib
+import stat
 import time
 
 
@@ -25,6 +28,71 @@ contract = _load_contract()
 
 class CollectorError(ValueError):
     """A source could not be parsed into the fixed metrics contract."""
+
+
+def read_bounded_file(path: str | os.PathLike, maximum_bytes: int) -> str:
+    """Read a bounded regular file without following a final-component symlink."""
+    if type(maximum_bytes) is not int or not 1 <= maximum_bytes <= 65536:
+        raise CollectorError("malformed")
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except PermissionError:
+        raise
+    except OSError as error:
+        code = "malformed" if error.errno == errno.ELOOP else "unsupported"
+        raise CollectorError(code) from error
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise CollectorError("malformed")
+        chunks = bytearray()
+        while len(chunks) <= maximum_bytes:
+            chunk = os.read(fd, min(4096, maximum_bytes + 1 - len(chunks)))
+            if not chunk:
+                break
+            chunks.extend(chunk)
+        if len(chunks) > maximum_bytes:
+            raise CollectorError("malformed")
+        try:
+            return chunks.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as error:
+            raise CollectorError("malformed") from error
+    finally:
+        os.close(fd)
+
+
+def linux_proc_adapters(*, proc_root: str | os.PathLike = "/proc",
+                        cpu_count=os.cpu_count, read_text=read_bounded_file,
+                        clock=time.monotonic_ns, gpu_adapter=None,
+                        temperatures_adapter=None) -> dict:
+    """Build lazy Linux adapters for proc metrics plus optional injected devices.
+
+    Calling this function performs no reads or device probes. CPU/RAM access is
+    limited to three fixed proc files; GPU and thermal access stay explicit optional
+    adapters so no vendor library or sysfs tree is probed implicitly.
+    """
+    root = pathlib.Path(proc_root)
+    if not root.is_absolute() or "\n" in str(root) or "\0" in str(root):
+        raise CollectorError("malformed")
+
+    def cpu(deadline_ns):
+        if clock() >= deadline_ns:
+            raise TimeoutError
+        cpuinfo = read_text(root / "cpuinfo", 65536)
+        loadavg = read_text(root / "loadavg", 256)
+        count = cpu_count()
+        if type(count) is not int or count < 1:
+            raise CollectorError("malformed")
+        return cpuinfo, loadavg, count
+
+    def memory(deadline_ns):
+        if clock() >= deadline_ns:
+            raise TimeoutError
+        return read_text(root / "meminfo", 65536)
+
+    return {"cpu": cpu, "memory": memory, "gpus": gpu_adapter,
+            "temperatures": temperatures_adapter}
 
 
 def parse_cpu(cpuinfo: str, loadavg: str, online_cpus: int) -> dict:
