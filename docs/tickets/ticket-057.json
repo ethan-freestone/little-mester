@@ -6,9 +6,9 @@
   "type": "feature",
   "status": "draft",
   "title": "P1-05 — Final Phase 1 acceptance and merge readiness",
-  "objective": "P1-05 final acceptance/merge readiness. Successor to #49/#51; depends on completion of P1-01 #53, P1-02 #54, P1-03 #55, and P1-04 #56. No merge absent explicit owner approval.",
+  "objective": "P1-05 final acceptance/merge readiness. Successor to #49/#51; depends on completion of P1-01 #53, P1-02 #54, P1-03 #55, and P1-04 #56. No merge absent explicit owner approval. Execution follows the persistent Phase 1 operating workflow at docs/workflows/phase1-continuous-execution.md; read it before resuming.",
   "created_at": "2026-11-10T21:46:28.245Z",
-  "updated_at": "2026-11-11T15:40:20.618Z",
+  "updated_at": "2026-11-11T16:01:15.850Z",
   "acceptance_criteria": [
     {
       "id": "A1",

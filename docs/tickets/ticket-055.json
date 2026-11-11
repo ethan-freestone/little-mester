@@ -6,9 +6,9 @@
   "type": "improvement",
   "status": "draft",
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
-  "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port.",
+  "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Execution follows the persistent Phase 1 operating workflow at docs/workflows/phase1-continuous-execution.md; read it before resuming.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-11T15:40:08.792Z",
+  "updated_at": "2026-11-11T16:01:15.792Z",
   "acceptance_criteria": [
     {
       "id": "A1",

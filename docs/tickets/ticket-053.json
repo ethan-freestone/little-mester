@@ -6,9 +6,9 @@
   "type": "doc",
   "status": "draft",
   "title": "P1-01 — Phase 1 evidence and supersession",
-  "objective": "P1-01 evidence and supersession. Preserve historical #49/#51 records and accepted runner evidence; this is the parent evidence checkpoint for P1-02 #54, P1-03 #55, and P1-04 #56. Do not mark unfinished #49/#51 criteria as passed or rewrite their histories.",
+  "objective": "P1-01 evidence and supersession. Preserve historical #49/#51 records and accepted runner evidence; this is the parent evidence checkpoint for P1-02 #54, P1-03 #55, and P1-04 #56. Do not mark unfinished #49/#51 criteria as passed or rewrite their histories. Execution follows the persistent Phase 1 operating workflow at docs/workflows/phase1-continuous-execution.md; read it before resuming.",
   "created_at": "2026-11-10T21:46:28.191Z",
-  "updated_at": "2026-11-11T09:37:11.533Z",
+  "updated_at": "2026-11-11T16:01:15.751Z",
   "acceptance_criteria": [
     {
       "id": "A1",
