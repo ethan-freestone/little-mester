@@ -442,6 +442,31 @@ class ParentMetricsContractTests(unittest.TestCase):
             with self.assertRaises(parent_metrics_collect.CollectorError):
                 parent_metrics_collect.read_bounded_file(target, 3)
 
+    def test_linux_proc_adapter_stops_between_reads_after_deadline(self):
+        class Clock:
+            now = 0
+
+            def read(self):
+                return self.now
+
+        clock = Clock()
+        reads = []
+
+        def read_text(path, _maximum):
+            name = pathlib.Path(path).name
+            reads.append(name)
+            if name == "cpuinfo":
+                clock.now = 100
+                return "model name: Fixture CPU"
+            return "0 0 0"
+
+        adapters = parent_metrics_collect.linux_proc_adapters(
+            proc_root="/proc-fixture", cpu_count=lambda: 4,
+            read_text=read_text, clock=clock.read)
+        with self.assertRaises(TimeoutError):
+            adapters["cpu"](100)
+        self.assertEqual(reads, ["cpuinfo"])
+
     def test_historical_parsers_reject_malformed_or_out_of_contract_values(self):
         with self.assertRaises(parent_metrics_collect.CollectorError):
             parent_metrics_collect.parse_cpu("", "not-loadavg", 4)

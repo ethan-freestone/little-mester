@@ -76,20 +76,27 @@ def linux_proc_adapters(*, proc_root: str | os.PathLike = "/proc",
     if not root.is_absolute() or "\n" in str(root) or "\0" in str(root):
         raise CollectorError("malformed")
 
-    def cpu(deadline_ns):
+    def check_deadline(deadline_ns):
         if clock() >= deadline_ns:
             raise TimeoutError
+
+    def cpu(deadline_ns):
+        check_deadline(deadline_ns)
         cpuinfo = read_text(root / "cpuinfo", 65536)
+        check_deadline(deadline_ns)
         loadavg = read_text(root / "loadavg", 256)
+        check_deadline(deadline_ns)
         count = cpu_count()
+        check_deadline(deadline_ns)
         if type(count) is not int or count < 1:
             raise CollectorError("malformed")
         return cpuinfo, loadavg, count
 
     def memory(deadline_ns):
-        if clock() >= deadline_ns:
-            raise TimeoutError
-        return read_text(root / "meminfo", 65536)
+        check_deadline(deadline_ns)
+        content = read_text(root / "meminfo", 65536)
+        check_deadline(deadline_ns)
+        return content
 
     return {"cpu": cpu, "memory": memory, "gpus": gpu_adapter,
             "temperatures": temperatures_adapter}
