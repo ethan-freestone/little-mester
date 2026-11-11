@@ -38,6 +38,38 @@ class ParentStateTests(unittest.TestCase):
                          {"status": "NOT_CREATED", "parent_id": "default"})
         self.assertFalse((self.home / ".local").exists())
 
+    def test_recovery_preview_is_non_mutating_and_does_not_create_state(self):
+        preview = parent_state.recovery_preview(home=self.home)
+        self.assertEqual(preview["status"], "NOT_CREATED")
+        self.assertEqual(preview["action"], "none")
+        self.assertTrue(preview["dry_run"])
+        self.assertFalse((self.home / ".local").exists())
+
+    def test_recovery_preview_refuses_while_supervisor_owns_lifecycle_lock(self):
+        parent_state.initialize(home=self.home)
+        with parent_state.lifecycle_lock(home=self.home):
+            with self.assertRaisesRegex(parent_state.Refused, "owns the parent lock"):
+                parent_state.recovery_preview(home=self.home)
+
+    def test_recovery_preview_refuses_symlinked_lock_without_following_it(self):
+        parent_state.initialize(home=self.home)
+        lock = self.parent_dir() / "lifecycle.lock"
+        lock.unlink()
+        target = pathlib.Path(self.temp.name) / "outside-lock"
+        target.write_bytes(b"untouched")
+        lock.symlink_to(target)
+        with self.assertRaisesRegex(parent_state.Refused, "unsafe or unreadable"):
+            parent_state.recovery_preview(home=self.home)
+        self.assertEqual(target.read_bytes(), b"untouched")
+
+    def test_recovery_preview_reports_unprovisioned_state_without_mutation(self):
+        parent_state.initialize(home=self.home)
+        before = sorted(item.name for item in self.parent_dir().iterdir())
+        preview = parent_state.recovery_preview(home=self.home)
+        self.assertEqual(preview["status"], "UNPROVISIONED")
+        self.assertEqual(preview["action"], "none")
+        self.assertEqual(sorted(item.name for item in self.parent_dir().iterdir()), before)
+
     def test_initialize_writes_private_atomic_parent_record_and_is_idempotent(self):
         record = parent_state.initialize(64, home=self.home)
         directory = self.parent_dir()

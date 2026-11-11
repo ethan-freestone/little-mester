@@ -365,6 +365,49 @@ def read_status(*, home: str | os.PathLike | None = None) -> dict:
         os.close(fd)
 
 
+def recovery_preview(*, home: str | os.PathLike | None = None) -> dict:
+    """Report recovery evidence without creating state, repairing files, or signalling."""
+    directory_fd = _open_directory_chain(create=False, home_override=home)
+    if directory_fd is None:
+        return {"dry_run": True, "action": "none", "status": "NOT_CREATED",
+                "parent_id": PARENT_ID}
+    lock_fd = -1
+    try:
+        try:
+            lock_fd = os.open("lifecycle.lock", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                              dir_fd=directory_fd)
+        except FileNotFoundError:
+            status = read_status(home=home)
+            return {"dry_run": True, "action": "none", "status": status["status"],
+                    "parent_id": PARENT_ID, "reason": "no lifecycle lock file exists"}
+        except OSError as error:
+            raise Refused("parent lifecycle lock is unsafe or unreadable") from error
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise Refused("live supervisor or lifecycle operation owns the parent lock") from error
+        except OSError as error:
+            raise Refused("could not verify ownership of the parent lifecycle lock") from error
+        try:
+            _verify_lock_fd(lock_fd, home=home)
+        except (OSError, Refused) as error:
+            raise Refused("parent lifecycle lock changed or has unsafe identity") from error
+        status = read_status(home=home)
+        result = {"dry_run": True, "action": "none", "status": status["status"],
+                  "parent_id": PARENT_ID}
+        if "run_id" in status:
+            result["run_id"] = status["run_id"]
+        if status["status"] == "AMBIGUOUS":
+            result["reason"] = "state is ambiguous; no identity was signalled or changed"
+        else:
+            result["reason"] = "no recovery action was requested or performed"
+        return result
+    finally:
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        os.close(directory_fd)
+
+
 def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: str | os.PathLike | None = None) -> dict:
     validate_parent(parent)
     if (not isinstance(run, dict) or type(run.get("schema")) is not int or run["schema"] != SCHEMA
@@ -733,17 +776,25 @@ def stop_exec_transition(identity: dict, *, term_grace_ms: int = 5000, settle_ms
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("status",))
+    parser.add_argument("command", choices=("status", "recover"))
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="preview recovery; recovery is always non-mutating in this version")
     args = parser.parse_args()
+    if args.command != "recover" and args.dry_run:
+        parser.error("--dry-run is only valid with recover")
     try:
-        result = read_status()
+        result = recovery_preview() if args.command == "recover" else read_status()
     except Refused as error:
         print(f"REFUSED: {error}", file=sys.stderr)
         return 2
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:
+        if args.command == "recover":
+            print(f"Recovery preview: {result['status']} (dry-run; action=none)")
+            print(result.get("reason", ""))
+            return 0
         print(f"Parent: {result['status']}")
         if result["status"] in ("RUNNING", "STARTING", "STOPPED", "UNPROVISIONED"):
             disk = result["disk"]
