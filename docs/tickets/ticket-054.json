@@ -8,7 +8,7 @@
   "title": "P1-02 — Owner-controlled persistent parent VM and SSH",
   "objective": "Implement one owner-operated protected parent Dev VM that persists across SSH/OpenCode disconnects and has no default lifetime cap, with explicit stop and identity-bound recovery. Architecture skeleton (Claude review pending): stable parent identity owns persistent private guest data; per-boot run identity owns volatile QEMU/proxy/virtiofs/logger and transport artifacts; reuse v3 launch/identity/ordered-cleanup machinery with explicit ephemeral-smoke versus persistent-parent artifact policy. #55 supplies the protected pinned-2.2.5 OpenCode/session seam; #56 supplies a separate restricted per-run metrics-key and 500-ms push hook in the same boot lifecycle. No child orchestration.",
   "created_at": "2026-11-10T21:46:28.200Z",
-  "updated_at": "2026-11-11T09:35:09.372Z",
+  "updated_at": "2026-11-11T09:38:41.374Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -57,7 +57,8 @@
       "Per-VM authenticated SSH from owner host and approved remote host-hop, no unapproved forwarding.",
       "Workspace-size/backing review and explicit owner approval before any export expansion.",
       "No runtime testing until owner authorizes the specific host action.",
-      "Owner-authorized real-process and owner-VM checks for stop/up preserving the same parent disk, workspace, OpenCode config, auth and session history; verify fresh state only for new parent or explicit owner reset."
+      "Owner-authorized real-process and owner-VM checks for stop/up preserving the same parent disk, workspace, OpenCode config, auth and session history; verify fresh state only for new parent or explicit owner reset.",
+      "Test unlimited-by-default parent lifetime and absence of idle shutdown; supersedes the earlier finite-foreground-deadline planning item. Do not add an optional cap without separately approved policy."
     ],
     "created": [
       "tests/vm-host-launcher.bats: interactive SSH mock verifies an unbounded PTY invocation, private run-state validation, EscapeChar=none, disabled forwarding, strict per-run host-key/identity policy, and no session timeout; 78 host-launcher tests pass. Mock only; no guest/runtime evidence. Acceptance criteria remain pending."
