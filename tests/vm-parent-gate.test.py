@@ -65,11 +65,21 @@ class ParentGateTests(unittest.TestCase):
         return proc, write_fd
 
     def identity_for_gate(self, proc):
-        gate = parent_state.observe_process(proc.pid)
-        return parent_state.create_exec_transition(
-            gate, self.target_argv[0], self.target_argv, release_token=self.current_token,
-            target_path=self.target_name, identity_path=self.identity_name,
-            fd_contracts=self.fd_contracts)
+        deadline = time.monotonic() + 3
+        last_error = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"gate exited before exact identity capture: {proc.returncode}")
+            try:
+                gate = parent_state.observe_process(proc.pid)
+                return parent_state.create_exec_transition(
+                    gate, self.target_argv[0], self.target_argv, release_token=self.current_token,
+                    target_path=self.target_name, identity_path=self.identity_name,
+                    fd_contracts=self.fd_contracts)
+            except parent_state.Refused as error:
+                last_error = error
+                time.sleep(0.01)
+        raise AssertionError(f"gate never reached its exact protected argv: {last_error}")
 
     def test_eof_before_durable_authorization_exits_without_workload(self):
         token = "0123456789abcdef0123456789abcdef"

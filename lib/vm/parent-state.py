@@ -210,7 +210,8 @@ def _verify_lock_fd(lock_fd: int, *, home: str | os.PathLike | None = None) -> N
         if (not stat.S_ISREG(info.st_mode) or info.st_dev != path_info.st_dev
                 or info.st_ino != path_info.st_ino or info.st_uid != os.getuid()
                 or not stat.S_ISREG(path_info.st_mode) or path_info.st_uid != os.getuid()
-                or stat.S_IMODE(info.st_mode) != 0o600):
+                or stat.S_IMODE(info.st_mode) != 0o600 or stat.S_IMODE(path_info.st_mode) != 0o600
+                or info.st_nlink != 1 or path_info.st_nlink != 1):
             raise Refused("lifecycle transaction does not hold the private lock file")
     finally:
         os.close(fd)
@@ -295,18 +296,22 @@ def read_status(*, home: str | os.PathLike | None = None) -> dict:
             return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
         except Refused:
             return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
-        return status_for_run(parent, run, disk)
+        return status_for_run(parent, run, disk, home=home)
     finally:
         os.close(fd)
 
 
-def status_for_run(parent: dict, run: dict, disk: dict | None = None) -> dict:
+def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: str | os.PathLike | None = None) -> dict:
     validate_parent(parent)
     if (not isinstance(run, dict) or type(run.get("schema")) is not int or run["schema"] != SCHEMA
             or run.get("parent_id") != PARENT_ID
             or not isinstance(run.get("run_id"), str)
             or not re.fullmatch(r"[0-9a-f]{32}", run["run_id"])
-            or set(run) != {"schema", "parent_id", "run_id", "supervisor"}):
+            or run.get("phase") not in ("STARTING", "RUNNING", "STOPPING")
+            or (run.get("phase") == "RUNNING"
+                and set(run) != {"schema", "parent_id", "run_id", "phase", "supervisor", "qemu"})
+            or (run.get("phase") != "RUNNING"
+                and set(run) != {"schema", "parent_id", "run_id", "phase", "supervisor"})):
         return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
     identity = run.get("supervisor") if isinstance(run, dict) else None
     if not isinstance(identity, dict):
@@ -321,12 +326,18 @@ def status_for_run(parent: dict, run: dict, disk: dict | None = None) -> dict:
             or not isinstance(identity.get("exe"), str) or not identity["exe"].startswith("/")
             or not isinstance(identity.get("argv"), list)
             or not identity["argv"] or not all(isinstance(item, str) for item in identity["argv"])
-            or len(identity["argv"]) != 7
+            or len(identity["argv"]) not in (11, 13)
             or not identity["argv"][0].startswith("/")
             or os.path.realpath(identity["argv"][0]) != identity["exe"]
             or identity["argv"][1] != "-I"
-            or not identity["argv"][2].endswith("/lib/vm/parent-supervisor.py")
-            or identity["argv"][3:] != ["--parent-id", PARENT_ID, "--run-id", run["run_id"]]
+            or identity["argv"][2] != str(pathlib.Path(__file__).with_name("parent-supervisor.py").resolve())
+            or identity["argv"][3:7] != ["--parent-id", PARENT_ID, "--run-id", run["run_id"]]
+            or identity["argv"][7] != "--lock-fd" or not identity["argv"][8].isdigit()
+            or identity["argv"][9] != "--handoff-fd" or not identity["argv"][10].isdigit()
+            or (len(identity["argv"]) == 13 and
+                (identity["argv"][11] != "--state-home" or home is None
+                 or identity["argv"][12] != str(pathlib.Path(home).resolve())))
+            or (len(identity["argv"]) == 11 and home is not None)
             or not parent["disk"]["provisioned"] or disk is None):
         return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
     try:
@@ -358,13 +369,59 @@ def status_for_run(parent: dict, run: dict, disk: dict | None = None) -> dict:
         except FileNotFoundError:
             if disk is None or not parent["disk"]["provisioned"]:
                 return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
-            return {"status": "STOPPED", "parent_id": PARENT_ID, "disk": disk}
+            if run["phase"] == "STOPPING":
+                return {"status": "STOPPED", "parent_id": PARENT_ID, "disk": disk}
+            if run["phase"] == "RUNNING":
+                qemu_state = _recorded_process_status(
+                    run.get("qemu"), expected_basename="qemu-system-x86_64",
+                    current_boot_id=current_boot_id)
+                if qemu_state == "GONE":
+                    return {"status": "STOPPED", "parent_id": PARENT_ID, "disk": disk}
+            return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
         except OSError:
             return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
         return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
     except (OSError, ValueError, KeyError, TypeError, IndexError, StopIteration):
         return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
-    return {"status": "RUNNING", "parent_id": PARENT_ID, "run_id": run["run_id"], "disk": disk}
+    if run["phase"] == "RUNNING":
+        qemu_state = _recorded_process_status(
+            run.get("qemu"), expected_basename="qemu-system-x86_64",
+            current_boot_id=current_boot_id)
+        if qemu_state != "MATCH":
+            return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
+    return {"status": run["phase"], "parent_id": PARENT_ID, "run_id": run["run_id"], "disk": disk}
+
+
+def _recorded_process_status(identity: object, *, expected_basename: str,
+                             current_boot_id: str) -> str:
+    if (not isinstance(identity, dict)
+            or set(identity) != {"schema", "pid", "uid", "host_boot_id", "start_time", "exe", "argv"}
+            or type(identity.get("schema")) is not int or identity["schema"] != 1
+            or type(identity.get("pid")) is not int or not 1 < identity["pid"] <= 2**31 - 1
+            or type(identity.get("uid")) is not int or identity["uid"] != os.getuid()
+            or identity.get("host_boot_id") != current_boot_id
+            or not isinstance(identity.get("start_time"), str) or not identity["start_time"].isdigit()
+            or not isinstance(identity.get("exe"), str)
+            or pathlib.Path(identity["exe"]).name != expected_basename
+            or not isinstance(identity.get("argv"), list) or not identity["argv"]
+            or not all(isinstance(arg, str) for arg in identity["argv"])):
+        return "AMBIGUOUS"
+    try:
+        current = observe_process(identity["pid"])
+    except Refused:
+        proc = pathlib.Path(f"/proc/{identity['pid']}")
+        try:
+            proc.stat()
+        except FileNotFoundError:
+            return "GONE"
+        except OSError:
+            return "AMBIGUOUS"
+        return "AMBIGUOUS"
+    if (current["uid"] != identity["uid"] or current["host_boot_id"] != identity["host_boot_id"]
+            or current["start_time"] != identity["start_time"] or current["exe"] != identity["exe"]
+            or current["argv"] != identity["argv"]):
+        return "AMBIGUOUS"
+    return "MATCH"
 
 
 def observe_process(pid: int) -> dict:
@@ -619,16 +676,16 @@ def main() -> int:
         print(json.dumps(result, sort_keys=True))
     else:
         print(f"Parent: {result['status']}")
-        if result["status"] in ("RUNNING", "STOPPED", "UNPROVISIONED"):
+        if result["status"] in ("RUNNING", "STARTING", "STOPPED", "UNPROVISIONED"):
             disk = result["disk"]
             print(f"Disk: {disk['path']} format={disk['format']} virtual_capacity_gib={disk['virtual_capacity_gib']}")
             if disk["host_allocated_bytes"] is None:
                 print("Host allocation: disk not provisioned")
             else:
                 print(f"Host allocation: {disk['host_allocated_bytes']} bytes; file length: {disk['file_bytes']} bytes")
-        if result["status"] == "RUNNING":
+        if result["status"] in ("RUNNING", "STARTING"):
             print(f"Run: {result['run_id']}")
-    return 0 if result["status"] in ("NOT_CREATED", "UNPROVISIONED", "STOPPED", "RUNNING") else 2
+    return 0 if result["status"] in ("NOT_CREATED", "UNPROVISIONED", "STOPPED", "STARTING", "RUNNING") else 2
 
 
 if __name__ == "__main__":

@@ -161,7 +161,7 @@ class ParentStateTests(unittest.TestCase):
                 "exe": sys.executable, "argv": [sys.executable]}}
         self.assertEqual(parent_state.status_for_run(parent, run)["status"], "AMBIGUOUS")
 
-    def test_status_accepts_only_a_live_recorded_supervisor_and_verified_disk(self):
+    def test_status_rejects_supervisor_with_malformed_handoff_arguments(self):
         parent = parent_state.initialize(home=self.home)
         directory = self.parent_dir()
         supervisor_path = pathlib.Path(self.temp.name) / "lib/vm/parent-supervisor.py"
@@ -187,23 +187,24 @@ class ParentStateTests(unittest.TestCase):
                         "host_boot_id": pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
                         "start_time": fields[19], "exe": os.path.realpath(proc / "exe"),
                         "argv": [os.fsdecode(arg) for arg in (proc / "cmdline").read_bytes().split(b"\0") if arg]}
+            identity["argv"] = [sys.executable, "-I", str(ROOT / "lib/vm/parent-supervisor.py"),
+                                "--parent-id", "default", "--run-id", run_id,
+                                "--lock-fd", "3", "--control-fd", "4"]
             with parent_state.lifecycle_lock(home=self.home) as lock_fd:
                 fd = parent_state._open_directory_chain(create=False, home_override=self.home)
                 try:
                     parent_state._verify_lock_fd(lock_fd, home=self.home)
                     parent_state._atomic_json(fd, "parent.json", parent)
                     parent_state._atomic_json(fd, "active-run.json", {"schema": 1, "parent_id": "default",
-                                               "run_id": run_id, "supervisor": identity})
+                                               "run_id": run_id, "phase": "STARTING", "supervisor": identity})
                 finally:
                     os.close(fd)
             result = parent_state.read_status(home=self.home)
-            self.assertEqual(result["status"], "RUNNING")
-            self.assertEqual(result["run_id"], run_id)
-            self.assertGreaterEqual(result["disk"]["host_allocated_bytes"], 0)
+            self.assertEqual(result["status"], "AMBIGUOUS")
         finally:
             child.terminate()
             child.wait(timeout=3)
-        self.assertEqual(parent_state.read_status(home=self.home)["status"], "STOPPED")
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
         os.unlink(disk_path)
         self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
 

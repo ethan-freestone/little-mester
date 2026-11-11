@@ -64,6 +64,7 @@ dependencies = [
     root / "lib/vm/guest-user-dirs.py",
     root / "lib/vm/parent-state.py",
     root / "lib/vm/parent-gate.py",
+    root / "lib/vm/parent-supervisor.py",
 ]
 
 # Inspect the original lexical path before resolving anything. A symlink in
