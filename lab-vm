@@ -66,6 +66,7 @@ dependencies = [
     root / "lib/vm/parent-gate.py",
     root / "lib/vm/parent-supervisor.py",
     root / "lib/vm/parent-qemu.py",
+    root / "lib/vm/parent-provision.py",
 ]
 
 # Inspect the original lexical path before resolving anything. A symlink in

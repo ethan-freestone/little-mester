@@ -249,6 +249,9 @@ def lifecycle_lock(*, nonblocking: bool = True, home: str | os.PathLike | None =
 
 def _disk_status(fd: int, parent: dict) -> dict:
     disk = parent["disk"]
+    creation_artifacts = {"base-image.part", "base-image.qcow2", "disk.qcow2.part"}
+    if creation_artifacts.intersection(os.listdir(fd)):
+        raise Refused("incomplete or leftover parent disk creation evidence is present")
     try:
         disk_fd = os.open(disk["path"], os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), dir_fd=fd)
     except FileNotFoundError:
