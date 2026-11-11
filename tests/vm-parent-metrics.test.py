@@ -95,6 +95,12 @@ class ParentMetricsContractTests(unittest.TestCase):
              "load_avg_15m": 0, "num_cpus": 1},
             {"model": "cpu", "load_avg_1m": 0, "load_avg_5m": 0,
              "load_avg_15m": 0, "num_cpus": True},
+            {"model": "cpu", "load_avg_1m": 10**10000, "load_avg_5m": 0,
+             "load_avg_15m": 0, "num_cpus": 1},
+            {"model": "cpu\x1b[31m", "load_avg_1m": 0, "load_avg_5m": 0,
+             "load_avg_15m": 0, "num_cpus": 1},
+            {"model": "cpu\u202e", "load_avg_1m": 0, "load_avg_5m": 0,
+             "load_avg_15m": 0, "num_cpus": 1},
         ]
         for value in bad_cpu:
             snapshot = valid_snapshot()
@@ -105,6 +111,8 @@ class ParentMetricsContractTests(unittest.TestCase):
             {"total_gb": 64, "used_gb": 65, "available_gb": 1, "percent": 50},
             {"total_gb": 64, "used_gb": 1, "available_gb": 65, "percent": 1},
             {"total_gb": 64, "used_gb": 1, "available_gb": 1, "percent": 101},
+            {"total_gb": 64, "used_gb": 30, "available_gb": 24, "percent": 46.9},
+            {"total_gb": 0, "used_gb": 0, "available_gb": 0, "percent": 0},
         ):
             snapshot = valid_snapshot()
             snapshot["memory"] = parent_metrics.category("ok", value)
@@ -141,7 +149,22 @@ class ParentMetricsContractTests(unittest.TestCase):
         with self.assertRaises(parent_metrics.Refused):
             parent_metrics.validate_snapshot(snapshot)
 
-    def test_payload_size_cap_is_enforced(self):
+    def test_worst_case_current_field_bounds_remain_below_payload_cap(self):
+        snapshot = valid_snapshot()
+        snapshot["cpu"]["value"]["model"] = "c" * 128
+        snapshot["gpus"]["value"] = [{
+            "index": index, "name": "g" * 128, "temperature_c": 50,
+            "utilization_percent": 50, "memory_total_mb": 8192,
+            "memory_used_mb": 4096, "memory_free_mb": 4096,
+        } for index in range(8)]
+        snapshot["temperatures"]["value"] = [{
+            "chip": "c" * 64, "sensor": "s" * 64, "temperature_c": 50,
+        } for _ in range(64)]
+        payload = parent_metrics.encode_snapshot(snapshot)
+        self.assertGreater(len(payload), 12 * 1024)
+        self.assertLessEqual(len(payload), parent_metrics.MAX_PAYLOAD_BYTES)
+
+    def test_payload_size_cap_rejects_oversized_encoding(self):
         snapshot = valid_snapshot()
         original_limit = parent_metrics.MAX_PAYLOAD_BYTES
         try:

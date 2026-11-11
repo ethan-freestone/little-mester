@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import unicodedata
 from datetime import UTC, datetime
 
 
@@ -23,15 +24,16 @@ class Refused(ValueError):
 
 
 def _number(value, *, minimum: float, maximum: float, integer: bool = False) -> bool:
-    if type(value) is bool or not isinstance(value, (int, float)):
-        return False
-    if integer and type(value) is not int:
+    if type(value) is int:
+        return minimum <= value <= maximum
+    if type(value) is not float or integer:
         return False
     return math.isfinite(value) and minimum <= value <= maximum
 
 
 def _text(value, maximum_bytes: int) -> bool:
-    if not isinstance(value, str) or "\0" in value:
+    if (not isinstance(value, str)
+            or any(unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} for char in value)):
         return False
     try:
         return len(value.encode("utf-8", errors="strict")) <= maximum_bytes
@@ -67,7 +69,13 @@ def _memory(value) -> bool:
                        for name in ("total_gb", "used_gb", "available_gb"))
             or not _number(value["percent"], minimum=0, maximum=100)):
         return False
-    return value["used_gb"] <= value["total_gb"] and value["available_gb"] <= value["total_gb"]
+    total, used, available = (value["total_gb"], value["used_gb"], value["available_gb"])
+    # Legacy values are independently rounded to 0.1 GB; allow their maximum
+    # combined rounding error, but reject materially contradictory snapshots.
+    # `percent` is computed from the source's unrounded kB values in the legacy
+    # collector, so it is range-checked but intentionally not recomputed here.
+    return (total > 0 and used <= total and available <= total
+            and abs((used + available) - total) <= 0.16)
 
 
 def _gpus(value) -> bool:
