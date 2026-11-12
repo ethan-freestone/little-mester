@@ -10,35 +10,51 @@ evidence only. NVIDIA timing remains separately pending.
   approximately 9 seconds (`run_id=1e65b748de8d76ca27daa92eac1b7cbe`). The owner reports
   that it remains RUNNING across multiple SSH connections and SSH authentication succeeds.
 - **M1a remains pending:** after the Ubuntu shell prompt appears, typed commands are echoed
-  but produce no visible execution/output (including `pwd` and `echo hello`). Diagnose the
-  interactive SSH I/O path before continuing lifecycle/persistence acceptance. No agent-side
-  VM interaction or acceptance is implied by this report.
+  but produce no visible execution/output. The owner reproduced this across multiple SSH
+  connections: both Enter and Ctrl+J after `echo $((19+23))` produce no `42` or subsequent
+  prompt. This does not support a simple CR-to-NL-only explanation. Diagnose the interactive
+  SSH I/O path before continuing lifecycle/persistence acceptance. No agent-side VM
+  interaction or acceptance is implied by this report.
 - Offline production-path probe: the pinned `parent_ssh_plan()` and
   `_run_interactive_ssh()` successfully execute a harmless shell arithmetic command over a
   real local `sshd` and controlling PTY (repeated three times). This verifies host-side PTY
   allocation, inherited terminal descriptors, and shell input/output in the fixture; it
-  does not reproduce the owner guest or identify its runtime cause. No SSH policy change is
-  justified by this evidence. The next distinction requires owner-approved guest-side
-  observation of shell execution and terminal state.
+  does not reproduce the owner guest or identify its runtime cause. In particular, the
+  regression proves shell execution from the separate `42` output but does not establish
+  whether the owner's typed-text echo is local or guest PTY echo. No SSH policy change is
+  justified by this evidence.
 
-### Next owner diagnostic: capture one harmless PTY round-trip
+### Next owner diagnostic: separate local echo from remote PTY echo
+
+Production `parent ssh` inherits fd 0/1/2 into OpenSSH and requests `-tt` with an interactive
+shell; the Python runner does not itself read, transform, or echo input. The local-sshd test
+attaches those streams to a PTY and writes input through its master. Those facts narrow the
+host path but cannot establish whether the owner guest receives the newline or where the
+visible echo originates.
 
 Using the **same protected installed candidate that started the still-running parent**, open
-a fresh local terminal and record one SSH session to a mode-0600 file. This reconnects only;
-do not run `up`, `stop`, or `recover` for this check.
+a fresh local terminal and reconnect only. This toggles only the local terminal's echo flag
+for the duration of the SSH process; it does not change guest termios, write files, or run
+`up`, `stop`, or `recover`. Save and restore the original local terminal state even on
+interrupt:
 
 ```bash
-umask 077
-LOG="$HOME/.local/state/little-mester/parent-ssh-pty.typescript"
-install -d -m 0700 "$HOME/.local/state/little-mester"
-script --quiet --flush --command "$INSTALL_ROOT/lab-vm parent ssh" "$LOG"
+saved_stty=$(stty -g </dev/tty)
+restore_stty() { stty "$saved_stty" </dev/tty; }
+trap restore_stty EXIT HUP INT TERM
+stty -echo </dev/tty
+"$INSTALL_ROOT/lab-vm" parent ssh
+restore_stty
+trap - EXIT HUP INT TERM
 ```
 
-At the guest prompt, type `echo $((19+23))` and press Enter, then type `exit`. A shell that
-executes the command should display a separate `42` output line (the echoed command itself
-does not contain `42`). Report whether that line appeared. If not, report the terminal
-emulator and local `TERM`, plus a sanitized excerpt showing the echoed line and any following
-output; do not share credentials or unredacted private logs. Keep the transcript private.
+At the Ubuntu prompt, type `printf 'GUEST-SHELL-EXECUTED-731\\n'` and press Enter. Report
+whether the typed characters were visible, whether the `GUEST-SHELL-EXECUTED-731` output
+appeared, and whether a new prompt appeared. With local echo disabled, visible typed
+characters are evidence of echo returned through SSH (normally the guest PTY); the unique
+output marker proves shell execution. Remote PTY echo may itself be disabled, so absence of
+visible characters alone cannot prove input was not delivered. Do not share credentials or
+unredacted logs. This diagnostic does not establish M1a acceptance.
 
 ## 1. Install the reviewed candidate
 
