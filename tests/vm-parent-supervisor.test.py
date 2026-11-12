@@ -8,7 +8,9 @@ import importlib.util
 import json
 import os
 import pathlib
+import pwd
 import signal
+import shutil
 import socket
 import stat
 import subprocess
@@ -101,6 +103,97 @@ class SupervisorHandoffTests(unittest.TestCase):
         self.assertEqual(parent_supervisor._ssh_failure_label(
             b"guest-provided text", 255, timed_out=False,
             forward_connected=False), "SSH_TRANSPORT_OR_HANDSHAKE_FAILED")
+
+    def test_parent_pinned_known_hosts_accepts_exact_server_key_and_rejects_substitute(self):
+        ssh = shutil.which("ssh")
+        sshd = shutil.which("sshd")
+        keygen = shutil.which("ssh-keygen")
+        if not all((ssh, sshd, keygen)):
+            self.skipTest("local OpenSSH tools unavailable")
+        root = pathlib.Path(self.temp.name) / "parent-ssh-pin-integration"
+        root.mkdir(mode=0o700)
+        client_key, host_key, substitute_key = (root / "client", root / "host", root / "substitute")
+        for key in (client_key, host_key, substitute_key):
+            subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-f", str(key)],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        authorized_keys = root / "authorized_keys"
+        authorized_keys.write_text(client_key.with_suffix(".pub").read_text())
+        authorized_keys.chmod(0o600)
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        listener.close()
+        config = root / "sshd_config"
+        config.write_text(
+            f"Port {port}\nListenAddress 127.0.0.1\nHostKey {host_key}\n"
+            f"PidFile {root / 'sshd.pid'}\nAuthorizedKeysFile {authorized_keys}\n"
+            f"StrictModes no\nUsePAM no\nPasswordAuthentication no\n"
+            f"KbdInteractiveAuthentication no\nPubkeyAuthentication yes\n"
+            f"PermitRootLogin {'yes' if os.getuid() == 0 else 'no'}\n"
+            f"AllowUsers {pwd.getpwuid(os.getuid()).pw_name}\nUseDNS no\nLogLevel QUIET\n")
+        config.chmod(0o600)
+        checked = subprocess.run([sshd, "-t", "-f", str(config)],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 timeout=5, check=False)
+        if checked.returncode:
+            self.skipTest("local sshd cannot validate isolated test configuration")
+        server = subprocess.Popen([sshd, "-D", "-e", "-f", str(config)],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, close_fds=True,
+                                  start_new_session=True)
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if server.poll() is not None:
+                    self.skipTest("isolated test sshd exited during startup")
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                        break
+                except OSError:
+                    time.sleep(0.02)
+            else:
+                self.skipTest("isolated test sshd did not become ready")
+
+            directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                parent_supervisor._write_ssh_connection(
+                    parent_state, directory_fd, port, host_key.with_suffix(".pub").read_bytes())
+            finally:
+                os.close(directory_fd)
+            known_hosts = root / "known_hosts"
+
+            def connect():
+                return subprocess.run(
+                    [ssh, "-F", "/dev/null", "-T", "-p", str(port), "-i", str(client_key),
+                     "-o", f"UserKnownHostsFile={known_hosts}", "-o", "GlobalKnownHostsFile=/dev/null",
+                     "-o", "StrictHostKeyChecking=yes", "-o", "HostKeyAlgorithms=ssh-ed25519",
+                     "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+                     "-o", "BatchMode=yes", "-o", "ConnectTimeout=2",
+                     f"{pwd.getpwuid(os.getuid()).pw_name}@127.0.0.1", "true"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    close_fds=True, timeout=5, check=False)
+
+            accepted = connect()
+            self.assertEqual(accepted.returncode, 0, accepted.stderr.decode("utf-8", "replace"))
+
+            directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                parent_supervisor._write_ssh_connection(
+                    parent_state, directory_fd, port,
+                    substitute_key.with_suffix(".pub").read_bytes())
+            finally:
+                os.close(directory_fd)
+            rejected = connect()
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn(b"Host key verification failed", rejected.stderr)
+        finally:
+            if server.poll() is None:
+                server.terminate()
+                try:
+                    server.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait(timeout=2)
 
     def test_bounded_ssh_probe_caps_stderr_and_reaps_timeout_child(self):
         argv = [sys.executable, "-c", "import sys; sys.stderr.write('x' * 10000); sys.exit(255)"]

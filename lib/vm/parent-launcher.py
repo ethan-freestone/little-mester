@@ -132,6 +132,11 @@ def up(capacity_gib: int = 64, *, home: str | None = None,
             if last_status["status"] in ("STARTING", "RUNNING") and last_status.get("run_id") != run_id:
                 raise Refused("a different parent run appeared during supervisor handoff")
             if proc.poll() is not None:
+                # poll() reaps the launcher-owned supervisor. Refresh the
+                # durable status afterward so an exit between read_status()
+                # and poll() does not leave the caller with a stale
+                # AMBIGUOUS zombie-race projection.
+                last_status = state.read_status(home=home)
                 raise Refused(f"parent supervisor/startup failed; status is {last_status['status']}")
             time.sleep(0.1)
         raise Refused("parent startup/readiness exceeded its bounded deadline")

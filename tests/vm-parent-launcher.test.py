@@ -191,6 +191,58 @@ class ParentLauncherTests(unittest.TestCase):
         self.assertEqual(State.stop_requests, 0)
         self.assertEqual(events, [("readiness-completed", 1.2)])
 
+    def test_launcher_refreshes_status_after_reaping_failed_supervisor(self):
+        statuses = iter((
+            {"status": "NOT_CREATED"},
+            {"status": "NOT_CREATED"},
+            {"status": "AMBIGUOUS"},  # stale zombie projection before poll()
+            {"status": "STOPPED"},    # durable status after poll() reaps supervisor
+            {"status": "STOPPED"},    # failure handler's fresh eligibility check
+        ))
+
+        class State:
+            PARENT_ID = "default"
+            Refused = parent_state.Refused
+
+            @staticmethod
+            @contextlib.contextmanager
+            def lifecycle_lock(*, home=None):
+                yield 42
+
+            @staticmethod
+            def read_status(*, home=None):
+                return next(statuses)
+
+            @staticmethod
+            def initialize(*_args, **_kwargs):
+                return {"disk": {"provisioned": False}}
+
+        class Provision:
+            Refused = RuntimeError
+
+            @staticmethod
+            def create_initial_disk(**_kwargs):
+                return {"disk": {"provisioned": True}}
+
+        class Supervisor:
+            @staticmethod
+            def _protected_tool(name, _candidates):
+                return f"/mock/{name}"
+
+            @staticmethod
+            def _prepare_parent_seed(*_args):
+                return None
+
+        fake_proc = SimpleNamespace(poll=lambda: 17)
+        with (mock.patch.object(parent_launcher, "_load", side_effect=[State, Provision, Supervisor]),
+              mock.patch.object(parent_launcher, "_free_loopback_port", return_value=23456),
+              mock.patch.object(parent_launcher.secrets, "token_hex",
+                                return_value="0123456789abcdef0123456789abcdef"),
+              mock.patch.object(parent_launcher, "_spawn_supervisor", return_value=fake_proc)):
+            with self.assertRaisesRegex(parent_launcher.Refused,
+                                        "parent supervisor/startup failed; status is STOPPED"):
+                parent_launcher.up(64, startup_timeout_seconds=1)
+
     def test_supervisor_spawn_commits_handoff_under_the_existing_lifecycle_lock(self):
         import os
         import tempfile
