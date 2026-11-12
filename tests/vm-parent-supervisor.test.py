@@ -864,6 +864,7 @@ class SupervisorHandoffTests(unittest.TestCase):
                                                   os.open("/dev/null", os.O_RDONLY)])
 
         fake_state = SimpleNamespace(
+            Refused=parent_state.Refused,
             PARENT_READY_COMMAND=parent_state.PARENT_READY_COMMAND,
             exec_transition_status=lambda _transition: "TARGET",
             parent_ssh_plan=ssh_plan,
@@ -888,6 +889,47 @@ class SupervisorHandoffTests(unittest.TestCase):
         self.assertEqual(argv[-1], fake_state.PARENT_READY_COMMAND)
         self.assertEqual(len(descriptors), 2)
         self.assertTrue(all(fd >= 3 for fd in descriptors))
+
+    def test_guest_readiness_reaps_exited_qemu_before_transition_classification(self):
+        child = subprocess.Popen([sys.executable, "-c", "raise SystemExit(17)"])
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            # Wait until the kernel has exited the child without calling
+            # Popen.poll()/wait(), leaving it as a zombie for the first probe.
+            try:
+                fields = pathlib.Path(f"/proc/{child.pid}/stat").read_text().rsplit(")", 1)[1].split()
+            except FileNotFoundError:
+                break
+            if fields[0] == "Z":
+                break
+            time.sleep(0.01)
+        self.assertIsNone(child.returncode)
+        observations = []
+
+        def transition_status(_transition):
+            reaped = child.returncode is not None
+            observations.append(reaped)
+            return "STOPPED" if reaped else "AMBIGUOUS"
+
+        fake_state = SimpleNamespace(
+            Refused=parent_state.Refused,
+            PARENT_READY_COMMAND=parent_state.PARENT_READY_COMMAND,
+            read_status=lambda **_kwargs: {"run_id": "0123456789abcdef0123456789abcdef"},
+            exec_transition_status=transition_status,
+        )
+        parent_supervisor._CHILD_PROCESSES["qemu"] = (child, None)
+        try:
+            with (mock.patch.object(parent_supervisor, "_protected_tool", return_value="/usr/bin/ssh"),
+                  mock.patch.object(parent_supervisor, "_read_private_port", return_value=23456)):
+                with self.assertRaisesRegex(parent_state.Refused,
+                                            r"QEMU_PROCESS_EXITED_BEFORE_READINESS exit=17"):
+                    parent_supervisor._wait_for_guest_readiness(
+                        fake_state, None, {"target_path": "child-qemu.target.json"},
+                        stop_requested=lambda: False, timeout_seconds=1)
+            self.assertEqual(observations, [True])
+            self.assertEqual(child.returncode, 17)
+        finally:
+            parent_supervisor._CHILD_PROCESSES.pop("qemu", None)
 
     def test_post_bind_record_failure_removes_only_new_socket(self):
         active_run = self.state_dir / "active-run.json"

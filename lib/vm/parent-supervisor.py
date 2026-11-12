@@ -568,12 +568,16 @@ def _wait_for_guest_readiness(state, home: str | None, qemu_transition: dict,
         if stop_requested():
             raise state.Refused(f"READINESS_CANCELLED_BY_SUPERVISOR_STOP last={last_failure} attempts={attempts}; "
                                 f"private diagnostics={log_name}")
+        # poll() reaps the launcher-owned child before procfs transition
+        # classification; otherwise an exited child may still look ambiguous
+        # while it remains a zombie.
+        owned = _CHILD_PROCESSES.get("qemu")
+        exit_code = owned[0].poll() if owned is not None else None
         phase = state.exec_transition_status(qemu_transition)
         if phase != "TARGET":
             if phase == "STOPPED":
-                owned = _CHILD_PROCESSES.get("qemu")
-                exit_code = owned[0].poll() if owned is not None else "unknown"
-                raise state.Refused(f"QEMU_PROCESS_EXITED_BEFORE_READINESS exit={exit_code}; "
+                reported_exit = exit_code if owned is not None else "unknown"
+                raise state.Refused(f"QEMU_PROCESS_EXITED_BEFORE_READINESS exit={reported_exit}; "
                                     f"private diagnostics={log_name}")
             raise state.Refused("QEMU_IDENTITY_AMBIGUOUS_BEFORE_READINESS")
         capture = _CHILD_LOG_CAPTURES.get("qemu")
