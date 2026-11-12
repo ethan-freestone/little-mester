@@ -71,11 +71,22 @@ for proc in glob.glob('/proc/[0-9]*'):
         continue
     if owner not in (0, os.getuid()):
         continue
-    for fd in glob.glob(proc + '/fd/*'):
+    try:
+        descriptors = list(os.scandir(proc + '/fd'))
+    except (FileNotFoundError, ProcessLookupError):
+        continue
+    except PermissionError:
+        unreadable.append(pid)
+        continue
+    for descriptor in descriptors:
+        fd = descriptor.path
         try:
             opened = os.stat(fd)
             if (opened.st_dev, opened.st_ino) == (disk.st_dev, disk.st_ino):
-                exe = os.path.basename(os.readlink(proc + '/exe'))
+                try:
+                    exe = os.path.basename(os.readlink(proc + '/exe'))
+                except (FileNotFoundError, PermissionError, ProcessLookupError):
+                    exe = 'unavailable'
                 print(f'open disk writer candidate: pid={pid} exe={exe}')
         except (FileNotFoundError, ProcessLookupError):
             pass
@@ -88,15 +99,32 @@ PY
 fi
 ```
 
-Stop for inspection if a writer is reported or `qmp.sock`/`proxy.port` already exists;
-never remove these during preflight. Check a prior SSH-port listener with:
+Stop for inspection if a writer is reported. Refuse stale QMP/proxy artifacts without
+removing them:
 
 ```sh
 STATE_DIR="$HOME/.local/state/little-mester/parent-v3/default"
+for artifact in qmp.sock proxy.port; do
+  if [[ -e "$STATE_DIR/$artifact" || -L "$STATE_DIR/$artifact" ]]; then
+    echo "REFUSED: inspect existing parent artifact $STATE_DIR/$artifact" >&2
+    exit 2
+  fi
+done
+```
+
+Check a prior SSH-port listener with:
+
+```sh
 if [[ -e "$STATE_DIR/ssh_port" || -L "$STATE_DIR/ssh_port" ]]; then
-  [[ -f "$STATE_DIR/ssh_port" && ! -L "$STATE_DIR/ssh_port" ]]
+  if [[ ! -f "$STATE_DIR/ssh_port" || -L "$STATE_DIR/ssh_port" ]]; then
+    echo "REFUSED: ssh_port is not a regular non-symlink file" >&2
+    exit 2
+  fi
   PORT="$(cat "$STATE_DIR/ssh_port")"
-  [[ "$PORT" =~ ^[0-9]{1,5}$ ]] && (( PORT >= 1024 && PORT <= 65535 ))
+  if [[ ! "$PORT" =~ ^[0-9]{1,5}$ ]] || (( PORT < 1024 || PORT > 65535 )); then
+    echo "REFUSED: ssh_port is not a valid unprivileged TCP port" >&2
+    exit 2
+  fi
   command -v ss >/dev/null
   LISTENERS="$(ss -H -ltn)"
   if awk -v p="$PORT" '$4 ~ (":" p "$") { print; found=1 } END { exit !found }' <<<"$LISTENERS"; then
