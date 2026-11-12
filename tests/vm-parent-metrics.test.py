@@ -4,6 +4,7 @@
 import copy
 import datetime
 import importlib.util
+import json
 import os
 import pathlib
 import tempfile
@@ -46,6 +47,49 @@ def valid_snapshot():
 
 
 class ParentMetricsContractTests(unittest.TestCase):
+    def test_exchange_schedule_connects_sampling_ack_and_continues_after_transport_failure(self):
+        class Clock:
+            now = 5_000_000_000
+
+            def read(self):
+                return self.now
+
+            def wait(self, seconds):
+                self.now += round(seconds * 1_000_000_000)
+
+        clock = Clock()
+        run_id = "0123456789abcdef0123456789abcdef"
+        samples, deliveries, failures = [], [], []
+
+        def collect(**kwargs):
+            samples.append(kwargs)
+            snapshot = valid_snapshot()
+            snapshot.update(run_id=kwargs["run_id"], sequence=kwargs["sequence"])
+            return snapshot
+
+        def exchange(frame, deadline_ns):
+            deliveries.append((frame, deadline_ns))
+            if len(deliveries) == 2:
+                raise TimeoutError("injected transport timeout")
+            snapshot = json.loads(frame)
+            return parent_metrics.encode_ack_frame(snapshot["run_id"], snapshot["sequence"])
+
+        result = parent_metrics.run_exchange_schedule(
+            run_id=run_id, collect=collect, exchange=exchange,
+            stop_requested=lambda: len(samples) == 3,
+            on_failure=lambda sequence, error: failures.append((sequence, type(error))),
+            clock=clock.read, wait=clock.wait)
+        self.assertEqual([sample["sequence"] for sample in samples], [1, 2, 3])
+        self.assertEqual(len(deliveries), 3)
+        self.assertEqual(failures, [(2, TimeoutError)])
+        self.assertEqual(result, {"attempts": 3, "failures": 1,
+                                  "skipped_slots": 0, "next_sequence": 4})
+
+    def test_exchange_schedule_refuses_bad_run_id_and_adapter_contract(self):
+        with self.assertRaises(TypeError):
+            parent_metrics.run_exchange_schedule(
+                run_id="invalid", collect=lambda **_: None, exchange=lambda *_: b"", stop_requested=lambda: True)
+
     def test_one_snapshot_exchange_requires_exact_bounded_matching_ack(self):
         snapshot = valid_snapshot()
         seen = []

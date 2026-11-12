@@ -255,3 +255,45 @@ def run_absolute_schedule(callback, stop_requested, *, clock=time.monotonic_ns,
             next_slot += missed * CADENCE_NANOSECONDS
         slot = next_slot
     return skipped
+
+
+def run_exchange_schedule(*, run_id: str, collect, exchange, stop_requested,
+                          on_failure=None, clock=time.monotonic_ns, wait=time.sleep) -> dict:
+    """Connect absolute cadence to one collect→frame→ACK exchange per slot.
+
+    The injected transport receives the absolute monotonic deadline and must bound
+    connect, write, and ACK-read time by it. Failures are counted and reported to the
+    optional callback; they do not terminate the sampler or queue stale frames.
+    """
+    if (not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id)
+            or not callable(collect) or not callable(exchange) or not callable(stop_requested)
+            or on_failure is not None and not callable(on_failure)):
+        raise TypeError("metrics exchange schedule requires a run ID and callable adapters")
+    sequence = 1
+    attempts = failures = 0
+
+    def cycle(scheduled_seconds: float, deadline_seconds: float) -> None:
+        nonlocal sequence, attempts, failures
+        attempts += 1
+        deadline_ns = int(deadline_seconds * 1_000_000_000)
+        try:
+            if sequence > MAX_SEQUENCE:
+                raise Refused("metrics sequence space is exhausted for this run")
+            if clock() >= deadline_ns:
+                raise Refused("metrics collection deadline expired before sampling")
+            snapshot = collect(run_id=run_id, sequence=sequence,
+                              scheduled_ns=int(scheduled_seconds * 1_000_000_000),
+                              deadline_ns=deadline_ns)
+            if clock() >= deadline_ns:
+                raise Refused("metrics collection deadline expired before transport")
+            exchange_snapshot(snapshot, lambda frame: exchange(frame, deadline_ns))
+        except (Refused, OSError, TimeoutError) as error:
+            failures += 1
+            if on_failure is not None:
+                on_failure(sequence, error)
+        finally:
+            sequence += 1
+
+    skipped = run_absolute_schedule(cycle, stop_requested, clock=clock, wait=wait)
+    return {"attempts": attempts, "failures": failures, "skipped_slots": skipped,
+            "next_sequence": sequence}

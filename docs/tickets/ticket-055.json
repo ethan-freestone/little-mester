@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-11T22:08:15.971Z",
+  "updated_at": "2026-11-12T00:21:32.445Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -51,7 +51,8 @@
     "cases": [
       "MOCK seed assets: exact plugin bytes, root ownership/modes, protected config (autoupdate/share disabled, exit keybinds disabled), project-config guard, root XDG global plugin location, pinned install command and tmux scripts asserted; generated shell syntax valid. tests/vm-parent-supervisor.test.py (16/16). No VM/guest acceptance.",
       "STATIC/BATS: exit-confirm and TUI JSX suites 11/11. Owner terminal OSC 52 clipboard canary remains NOT_RUN; docs/opencode.md J.12 records terminal-specific mitigation and safe non-secret canary.",
-      "MOCK seed provisioning: protected root-owned OpenCode 2.2.5 config/plugin assets, project-config disable, XDG global discovery under /etc, pinned installation and tmux launcher/runner. `lab-vm parent tui` attaches by fixed SSH remote command through the same pinned, non-forwarding, sealed-memfd path. `tests/vm-parent-supervisor.test.py` 18/18 and Bats exit/TUI 11/11. No guest boot/live TUI/clipboard canary."
+      "MOCK seed provisioning: protected root-owned OpenCode 2.2.5 config/plugin assets, project-config disable, XDG global discovery under /etc, pinned installation and tmux launcher/runner. `lab-vm parent tui` attaches by fixed SSH remote command through the same pinned, non-forwarding, sealed-memfd path. `tests/vm-parent-supervisor.test.py` 18/18 and Bats exit/TUI 11/11. No guest boot/live TUI/clipboard canary.",
+      "Delta integration: `lab-vm parent tui` executes only the fixed remote `/usr/local/bin/lm-opencode` command via the existing RUNNING-only pinned SSH/sealed-memfd path. Parent startup readiness now checks cloud-init, tmux launcher availability, and exact OpenCode v2.2.5 version. Offline only; no guest boot or terminal canary."
     ]
   },
   "models_used": [],
@@ -75,6 +76,11 @@
       "timestamp": "2026-11-11T16:41:37.234Z",
       "author": "cli",
       "body": "Sol Medium security review of 82fc434: PASS with minor test-quality caveat. The benign sentinel is confined to temporary state and the positive/negative control is appropriate; review noted absence alone could pass if TUI failed to start. Commit 79f4aac resolves this by requiring the guarded TUI to remain alive and reach Ask anything before checking no marker. Focused Sol delta confirmed the caveat closed. 3/3 config/plugin tests pass; protected guest launch enforcement remains pending."
+    },
+    {
+      "timestamp": "2026-11-12T00:21:32.445Z",
+      "author": "cli",
+      "body": "Luna implementation chunk M2 (depends on #54 M1a working parent, not metrics): wire only missing protected pinned OpenCode/TUI/model-selection and approved authentication entry paths on the SAME parent. Reuse settled 2.2.5/plugin findings and protected cloud-init assets; reuse reviewed browser-auth-session machinery where applicable, without broadening ordinary owner SSH forwarding or egress. Prove live tmux disconnect/reattach and exit-confirm key matrix; separately prove auth/config/history/workspace survive stop/up (tmux process itself does not survive reboot). Run hostile project config/plugin sentinel and update/telemetry/model-list/sharing checks; owner performs approved-terminal mitigation+harmless OSC52 canary and authentication. Preserve credentials, no escrow/new host bridge topology. Commit coherent missing wiring, then owner M2 evidence. M1a must not wait on these refinements. Existing A1-A5 remain authoritative; no new deferral. Planning inspection only; no tests run."
     }
   ]
 }

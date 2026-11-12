@@ -1,75 +1,169 @@
-# Owner-run persistent-parent lifecycle acceptance
+# Owner-run persistent-parent M1a acceptance
 
-**Owner action only.** The agent must not run this procedure. It starts a real VM and
-may download the pinned guest image. The scratch QEMU/qemu-img compatibility gate has
-owner-reported PASS ×2 for source revision `37f5fb622135831a5195615e175086c8053b0992`;
-this procedure is the next, separate acceptance step and does not imply the VM has
-already been accepted. The NVIDIA probe remains unrelated and pending.
+**Owner action only.** This procedure installs trusted code and starts a real VM. The
+agent must not run it. The owner-reported QEMU/qemu-img scratch PASS ×2 is compatibility
+evidence only. NVIDIA timing remains separately pending.
 
-## Before starting
+## 1. Install the reviewed candidate
 
-- Use the candidate checkout containing the integrated `parent up` path and review its
-  change list locally. Do not proceed if this is not the intended source.
-- Do not start if `lab-vm parent status --json` reports `STARTING`, `RUNNING`, or
-  `AMBIGUOUS`. For an existing RUNNING parent, use its normal `ssh`/`tui` commands; do
-  not start a second writer.
-- Choose the initial virtual capacity deliberately. This procedure does not resize an
-  existing disk; reusing a parent with a different requested capacity is refused.
+Use the existing protected deployment mechanism documented in
+[`docs/vm-v3-phase1-smoke.md`](vm-v3-phase1-smoke.md#owner-only-execution-procedure):
+`tools/vm-owner-acceptance --install`. Do not execute `lab-vm` from a mutable checkout,
+use `sudo lab-vm`, manually copy files, or add a development-mode bypass.
 
-## Bounded first run and persistence check
+From a clean owner clone containing the final reviewed commit:
 
 ```sh
-lab-vm parent up --capacity-gib 64
-lab-vm parent status --json
-lab-vm parent ssh
+set -euo pipefail
+REPO="$HOME/Development/little-mester-m1a"
+CANDIDATE_SHA='<final-reviewed-40-character-SHA>'
+cd "$REPO"
+test "$(git -C "$REPO" rev-parse "$CANDIDATE_SHA^{commit}")" = "$CANDIDATE_SHA"
+test -z "$(git -C "$REPO" status --porcelain)"
+tools/vm-owner-acceptance --install --sha "$CANDIDATE_SHA" --repo "$REPO"
+INSTALL_ROOT="/opt/little-mester/v3/$CANDIDATE_SHA"
+namei -l "$INSTALL_ROOT/lab-vm" \
+  "$INSTALL_ROOT/lib/vm/parent-launcher.py" \
+  "$INSTALL_ROOT/lib/vm/parent-supervisor.py" \
+  "$INSTALL_ROOT/agent/opencode/plugins/little-mester-exit-confirm/tui.tsx"
+"$INSTALL_ROOT/lab-vm" preflight
 ```
 
-After SSH is ready, create a non-sensitive guest-disk canary and inspect it:
+The existing installer streams an exact allowlisted Git archive to its protected worker,
+installs under a new SHA-specific `/opt/little-mester/v3/` path, rejects symlinks and
+unexpected entries, enforces root-owned non-writable ancestry and file modes, verifies
+every installed byte against the pinned Git commit, then runs installed read-only
+preflight. Its inventory includes the parent modules and protected plugin assets. It
+does not run smoke or start a VM. It writes a private acceptance report outside the
+checkout and changes neither the development checkout, legacy VM, nor parent VM data.
+
+`--install` refuses to overwrite an existing SHA path. If it already exists, use
+`tools/vm-owner-acceptance --preflight --sha "$CANDIDATE_SHA" --repo "$REPO"` and
+proceed only on PASS. Preserve a partial or failed installation for owner inspection;
+never chmod, overwrite, delete, or create a parallel launcher. A different reviewed SHA
+uses a new path and leaves prior installations untouched. The persistent parent data is
+separate user-owned state at `~/.local/state/little-mester/parent-v3/default`.
+
+## 2. Preflight and competing-writer checks
 
 ```sh
-mkdir -p /home/mester/workspace
-printf 'parent-persistence-canary\n' > /home/mester/workspace/.phase1-parent-canary
-cat /home/mester/workspace/.phase1-parent-canary
+"$INSTALL_ROOT/lab-vm" parent status --json
 ```
 
-Exit the SSH shell, then use `lab-vm parent tui` to confirm that the protected OpenCode
-launcher reaches the persistent tmux session. Before attaching, follow the owner-terminal
-OSC 52 mitigation and harmless canary in [docs/opencode.md §J.12](opencode.md#j12-remote-terminal-clipboard-write-mitigation-55).
-The first boot must complete cloud-init,
-install the pinned OpenCode 2.2.5 CLI, and report RUNNING only after pinned-host-key SSH
-readiness and `/usr/local/bin/lm-opencode` availability. Startup readiness is capped at
-900 seconds after bounded image/seed provisioning steps; the `up` operation refuses on
-failure and performs identity-bound child rollback without deleting the disk.
+An existing provisioned parent must report validated **STOPPED**. Fresh state may report
+**NOT_CREATED** or **UNPROVISIONED**. Stop on **STARTING**, **RUNNING**, or **AMBIGUOUS**.
+Do not change existing state.
 
-Stop and repeat the same initial capacity:
+If the disk exists, this read-only device/inode scan must print no open-writer candidate:
 
 ```sh
-lab-vm parent stop
-lab-vm parent status --json
-lab-vm parent up --capacity-gib 64
-lab-vm parent status --json
-lab-vm parent ssh
-cat /home/mester/workspace/.phase1-parent-canary
+DISK="$HOME/.local/state/little-mester/parent-v3/default/disk.qcow2"
+if [[ -e "$DISK" ]]; then
+  python3 - "$DISK" <<'PY'
+import glob, os, sys
+disk = os.stat(sys.argv[1])
+for proc in glob.glob('/proc/[0-9]*'):
+    pid = proc.rsplit('/', 1)[-1]
+    for fd in glob.glob(proc + '/fd/*'):
+        try:
+            opened = os.stat(fd)
+            if (opened.st_dev, opened.st_ino) == (disk.st_dev, disk.st_ino):
+                exe = os.path.basename(os.readlink(proc + '/exe'))
+                print(f'open disk writer candidate: pid={pid} exe={exe}')
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            pass
+PY
+fi
 ```
 
-Expected: stop reaches STOPPED, the second up reaches RUNNING, and the canary remains
-unchanged. Also verify the guest's OpenCode local history/config remains present after
-re-up by opening the TUI; do not perform browser authentication or add credentials during
-this acceptance. A tmux process is scoped to one guest boot; reattachment is tested by
-disconnecting/reconnecting with `parent tui`, while cross-stop persistence applies to
-the guest disk data, not a live tmux process.
+Stop for inspection if a writer is reported or `qmp.sock`/`proxy.port` already exists;
+never remove these during preflight. If `ssh_port` exists, ensure it is a regular
+non-symlink file and `ss -H -ltn` shows no listener on that port. Stop if listener status
+cannot be checked. Use capacity 64 for a fresh parent; for an existing STOPPED disk use
+its current `disk.virtual_capacity_gib` (up does not resize).
 
-## Refusal, timeout, and evidence
+## 3. Up, SSH disconnect/reconnect, duplicate-up
 
-- The first `up` can spend bounded time downloading/verifying the pinned base image,
-  converting/sizing the disk, creating the seed, and waiting up to 900 seconds for guest
-  readiness. Do not start another `up` concurrently.
-- `parent stop` waits 15 seconds by default. A timeout does not cancel graceful QMP
-  shutdown (which can continue up to 60 seconds); inspect status before retrying.
-- If any command returns REFUSED, status is AMBIGUOUS, QEMU identity changes, or rollback
-  cannot verify a child is stopped, stop the acceptance. Preserve the disk and all state;
-  do not manually kill QEMU, delete files, or repeat `up` until the owner has inspected
-  the exact evidence.
-- Record the exact source revision, host QEMU/qemu-img versions, command output, both
-  status JSON results, stop/re-up result, canary equality, and observed OpenCode history
-  persistence. A successful first boot alone is not lifecycle acceptance.
+```sh
+CAPACITY=64
+"$INSTALL_ROOT/lab-vm" parent up --capacity-gib "$CAPACITY"
+"$INSTALL_ROOT/lab-vm" parent status --json
+"$INSTALL_ROOT/lab-vm" parent ssh
+```
+
+Expect RUNNING with a validated run ID. In the guest shell:
+
+```sh
+cd /home/mester/workspace
+printf 'm1a-persistence-canary\n' > .phase1-parent-canary
+cat .phase1-parent-canary
+exit
+```
+
+Confirm the same run remains RUNNING after disconnect, then reconnect and read the canary:
+
+```sh
+"$INSTALL_ROOT/lab-vm" parent status --json
+"$INSTALL_ROOT/lab-vm" parent ssh
+cd /home/mester/workspace
+cat .phase1-parent-canary
+exit
+```
+
+While RUNNING, invoke up again with the same capacity and inspect status:
+
+```sh
+"$INSTALL_ROOT/lab-vm" parent up --capacity-gib "$CAPACITY"
+"$INSTALL_ROOT/lab-vm" parent status --json
+```
+
+Expect the same run ID and disk identity; no second writer. Stop if another run appears
+or identity differs.
+
+## 4. Stop, re-up, verify persistence, stop again
+
+```sh
+"$INSTALL_ROOT/lab-vm" parent stop
+"$INSTALL_ROOT/lab-vm" parent status --json
+"$INSTALL_ROOT/lab-vm" parent up --capacity-gib "$CAPACITY"
+"$INSTALL_ROOT/lab-vm" parent status --json
+"$INSTALL_ROOT/lab-vm" parent ssh
+cd /home/mester/workspace
+cat .phase1-parent-canary
+exit
+"$INSTALL_ROOT/lab-vm" parent stop
+"$INSTALL_ROOT/lab-vm" parent status --json
+```
+
+Expect STOPPED after each stop, then RUNNING after re-up with the same disk device/inode,
+a fresh run ID, and unchanged canary. This M1a test is plain SSH; TUI/auth/history are M2.
+
+Provisioning stages have individual bounds (download up to 310 seconds, image conversion
+up to 600 seconds, readiness up to 900 seconds); there is no VM lifetime/idle timeout.
+Stop on refusal, AMBIGUOUS status, unexpected listener/writer, identity mismatch, or
+unverified cleanup. Preserve all state; do not manually signal QEMU, delete files or
+repeat up. Stop waits 15 seconds by default; graceful QMP shutdown may continue up to 60
+seconds. On timeout, inspect status before retrying.
+
+Return candidate SHA/branch, clean-tree and install/preflight results, host QEMU versions,
+status JSONs, disk/run identity comparisons, disconnect/reconnect, duplicate-up, canary,
+stop/re-up results and any refusal output. M1a is not full M1 lifecycle acceptance.
+
+## Separate bounded NVIDIA timing probe
+
+This read-only probe does not start a VM. Return its output and all ten timings; it informs
+M3 collector choice only.
+
+```sh
+set -eu
+command -v nvidia-smi
+timeout --signal=TERM --kill-after=1 5 \
+  nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu,memory.total,memory.used,memory.free \
+  --format=csv,noheader,nounits
+for n in 1 2 3 4 5 6 7 8 9 10; do
+  /usr/bin/time -f 'sample_wall_seconds=%e' timeout --signal=TERM --kill-after=1 5 \
+    nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu,memory.total,memory.used,memory.free \
+    --format=csv,noheader,nounits >/dev/null
+done
+timeout --signal=TERM --kill-after=1 5 nvidia-smi --version
+```

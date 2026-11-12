@@ -42,6 +42,8 @@ RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-(?:[A-Za-z0-9]{8}|[0-9a-f]{32})$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 INSTALL_FILES = {
     "lab-vm": 0o755,
+    "agent/opencode/plugins/little-mester-exit-confirm/package.json": 0o644,
+    "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx": 0o644,
     "lib/vm/host-launcher.sh": 0o644,
     "lib/vm/cloud-init.sh": 0o644,
     "lib/vm/proxy.py": 0o644,
@@ -50,8 +52,17 @@ INSTALL_FILES = {
     "lib/vm/browser-auth-session.py": 0o644,
     "lib/vm/virtiofs-socket.py": 0o644,
     "lib/vm/guest-user-dirs.py": 0o644,
+    "lib/vm/parent-state.py": 0o644,
+    "lib/vm/parent-launcher.py": 0o644,
+    "lib/vm/parent-gate.py": 0o644,
+    "lib/vm/parent-supervisor.py": 0o644,
+    "lib/vm/parent-qemu.py": 0o644,
+    "lib/vm/parent-provision.py": 0o644,
 }
-INSTALL_DIRS = {"lib", "lib/vm"}
+INSTALL_DIRS = {
+    "agent", "agent/opencode", "agent/opencode/plugins",
+    "agent/opencode/plugins/little-mester-exit-confirm", "lib", "lib/vm",
+}
 
 
 class GateError(Exception):

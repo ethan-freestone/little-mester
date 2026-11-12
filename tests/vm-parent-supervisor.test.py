@@ -138,6 +138,34 @@ class SupervisorHandoffTests(unittest.TestCase):
         finally:
             self.cleanup_test_supervisor(proc)
 
+    def test_parent_stop_waits_out_one_transient_ambiguous_procfs_exit_observation(self):
+        proc, _run_id = self.spawn_supervisor()
+        reaper = threading.Thread(target=proc.wait)
+        reaper.start()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            actual_read_status = parent_state.read_status
+            calls = 0
+
+            def transient_status(*, home=None):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    return {"status": "AMBIGUOUS", "parent_id": "default"}
+                return actual_read_status(home=home)
+
+            with mock.patch.object(parent_state, "read_status", side_effect=transient_status):
+                result = parent_state.request_supervisor_stop(home=self.home)
+            self.assertEqual(result["status"], "STOPPED")
+            self.assertGreaterEqual(calls, 3)
+            self.assertTrue((self.state_dir / "disk.qcow2").exists())
+            reaper.join(timeout=3)
+            self.assertFalse(reaper.is_alive())
+        finally:
+            self.cleanup_test_supervisor(proc)
+
     def test_parent_stop_refuses_unverified_supervisor_identity_without_signal(self):
         proc, _run_id = self.spawn_supervisor()
         try:

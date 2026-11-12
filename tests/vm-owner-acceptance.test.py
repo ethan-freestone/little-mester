@@ -436,6 +436,13 @@ class OwnerAcceptanceTests(unittest.TestCase):
         manifest = json.loads(acceptance.installer_manifest())
         expected = set(manifest["files"]) | set(manifest["directories"])
         self.assertEqual(names, expected)
+        self.assertTrue({
+            "lib/vm/parent-state.py", "lib/vm/parent-launcher.py",
+            "lib/vm/parent-gate.py", "lib/vm/parent-supervisor.py",
+            "lib/vm/parent-qemu.py", "lib/vm/parent-provision.py",
+            "agent/opencode/plugins/little-mester-exit-confirm/package.json",
+            "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
+        }.issubset(manifest["files"]))
         self.assertEqual(set(acceptance.archive_arguments(ROOT, head)[6:]), set(manifest["files"]))
         self.assertNotIn(".github", names)
         self.assertIn('json.loads(sys.argv[2])', acceptance.INSTALL_WORKER)

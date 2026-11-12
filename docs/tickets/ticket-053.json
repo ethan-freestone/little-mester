@@ -8,7 +8,7 @@
   "title": "P1-01 — Phase 1 evidence and supersession",
   "objective": "P1-01 evidence and supersession. Preserve historical #49/#51 records and accepted runner evidence; this is the parent evidence checkpoint for P1-02 #54, P1-03 #55, and P1-04 #56. Do not mark unfinished #49/#51 criteria as passed or rewrite their histories. Execution follows the persistent Phase 1 operating workflow at docs/workflows/phase1-continuous-execution.md; read it before resuming.",
   "created_at": "2026-11-10T21:46:28.191Z",
-  "updated_at": "2026-11-11T16:01:15.751Z",
+  "updated_at": "2026-11-12T00:21:29.510Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -76,6 +76,11 @@
       "timestamp": "2026-11-11T09:37:11.532Z",
       "author": "cli",
       "body": "handoff_version: 1\nsequence: 56\nevent: NEEDS_HUMAN\nbranch: feat/vm-approach-3\nbase_sha: b5974d3f0c019ec441529da85c7abb00ed6371c0\nsource_sha: c863ab46f90283128d6f720c83204959335dae6c\nticket_evidence_sha: b5974d3f0c019ec441529da85c7abb00ed6371c0\nhead_sha: b5974d3f0c019ec441529da85c7abb00ed6371c0\nworking_tree: clean before appending this correction\nphase: Phase 1 skeleton-first architecture checkpoint\nticket: \"#54 architecture; interfaces #55 and #56\"\nstatus: NEEDS_HUMAN\nobjective: Correct sequence 55's abbreviated SHA fields; sequence 56 is authoritative for exact checkpoint revisions.\ncompleted:\n  - Starting checkpoint: 5a713b7e33fdf3d9b5d8f3489df10007172549da.\n  - Owner-SSH source SHA: c863ab46f90283128d6f720c83204959335dae6c; ticket skeleton evidence commit and pre-comment HEAD: b5974d3f0c019ec441529da85c7abb00ed6371c0.\n  - The architecture remains pending Claude adversarial review; no implementation began and all #54 acceptance criteria remain pending.\n  - Sequence 55 is retained as historical context; its short SHA labels are superseded by the exact values above.\nnext:\n  action: Obtain Claude adversarial review of the paste-ready skeleton before implementation.\n  owner: Human"
+    },
+    {
+      "timestamp": "2026-11-12T00:21:29.509Z",
+      "author": "cli",
+      "body": "Sol bounded implementation plan (source inspection only; no tests run). Preserve historical accepted smoke SHA/report/cleanup/CI provenance; do not rerun settled compatibility investigation or rewrite #49/#51. Luna High: reconcile A1-A4 against existing evidence and the existing review packet document, making only missing evidence/document fixes. This is an evidence-closeout chunk, not a prerequisite to invent more runtime infrastructure. Overall execution order is #54 M1a fixes + owner demonstration, #54 M1b recovery, #55 M2, #56 M3, #57 M4. No new tickets/framework/planning documents or weakened criteria."
     }
   ]
 }

@@ -43,7 +43,7 @@ tools/vm-owner-acceptance --all --sha "$SHA" --repo "$REPO" --workspace "$WORKSP
 Every invocation creates a new evidence directory. Serialize owner attempts: the retained-run capacity check and exclusive run-directory creation are not protected by a cross-run lock. `--verify-cleanup` is read-only with respect to VM state and never signals processes or unlinks socket/PID files; it checks `/proc/net/unix` for a listener even if the socket path or per-run short socket directory has disappeared. Cleanup verification is accepted only for a uniquely reported successful run; an early startup failure remains BLOCKED/NOT_RUN, not cleanup PASS. Preserve failed run directories for owner review. The retained `virtiofs.socket-path` file binds the run to its private per-run socket directory under `/run/user/<uid>/lmv3-<run-id>/`; the virtiofs socket and `.pid` evidence are in that volatile directory when present. Browser-auth uses the distinct `auth-control.sock` in that same 0700 directory, after verifying it is absent; cleanup proof must verify its removal before virtiofs stopped-artifact inspection. PID-file contents are never process authority. A later attempt gets an exclusive collision-resistant run directory and short-path allocation and refuses pre-existing socket/PID paths.
 
 `--debug` is valid only with `--run` or `--all`. It does not alter provisioning or gate outcomes. It streams only fixed, allowlisted progress labels from the existing bounded QEMU serial capture (maximum 8 KiB), never guest-provided line content. The stream is stopped before browser authentication starts; OAuth/session output remains suppressed. Default runs do not stream guest progress. Auth refusal diagnostics use fixed safe categories: `AUTH_URL_MISSING`, `AUTH_OUTPUT_UNEXPECTED`, `AUTH_URL_INVALID`, `AUTH_CALLBACK_UNSUPPORTED`, `AUTH_SESSION_FAILURE`, `AUTH_PROCESS_EXIT`, `AUTH_URL_CHANGED`, `AUTH_URL_INCOMPLETE`, callback-forward failure, and bounded-deadline/cancellation failures. When the auth logger and cleanup proofs pass, categories are synthesized by the host launcher and visible on the owner's terminal; if a proof fails, a generic proof refusal takes precedence. Helper output and raw OAuth values remain suppressed. Categories identify where the next attempt stopped; they do not establish the cause of a prior run. The no-PTY Clack conformance fixture is synthetic and source-based; genuine executable output has not been captured. The pinned authorization endpoint, query/PKCE checks, exact localhost callback allowlist, and SSH forward restrictions remain unchanged.
-- **Protected installation:** owner installs that reviewed source under a root-owned, non-group/world-writable directory outside the exported workspace, for example `/opt/little-mester/v3/<reviewed-sha>/`. `lab-vm`, `lib/vm/host-launcher.sh`, `lib/vm/cloud-init.sh`, `lib/vm/proxy.py`, `lib/vm/bounded-log.py`, `lib/vm/executable-policy.py`, `lib/vm/browser-auth-session.py`, `lib/vm/virtiofs-socket.py`, and `lib/vm/guest-user-dirs.py`, plus every lexical path component and ancestor directory, must be root-owned and not group/world writable; symlinks anywhere in those installation paths are refused. The launcher uses the validated lexical paths only after this check. Keep the source SHA and installed path in the evidence. Do not run from a mutable checkout or install/refresh host packages through the launcher.
+- **Protected installation:** owner installs that reviewed source under a root-owned, non-group/world-writable directory outside the exported workspace, for example `/opt/little-mester/v3/<reviewed-sha>/`, using the existing `tools/vm-owner-acceptance --install --sha ... --repo ...` path. Its exact archive inventory now includes the smoke runtime plus the parent runtime modules and protected exit-confirm plugin assets required by the installed `lab-vm`; installation verifies every installed byte against the pinned commit. `lab-vm` and every runtime dependency, plugin asset, lexical path component and ancestor directory must be root-owned and not group/world writable; symlinks anywhere in those installation paths are refused. The launcher uses validated lexical paths only after this check. Keep the source SHA and installed path in evidence. Do not run from a mutable checkout or install/refresh host packages through the launcher.
 - **Protected host dependencies:** use owner-installed root-owned system executables on the fixed system `PATH` for ordinary runtime commands: `qemu-system-x86_64`, `qemu-img`, `curl`, `cat`, `mv`, `ssh`, `ssh-keygen`, `ssh-keyscan`, `socat`, `python3`, `timeout`, `sha256sum`, `date`, `mktemp`, `mkdir`, `chmod`, `stat`, `id`, `grep`, `rm`, `sleep`, `readlink`, and either `genisoimage` or `mkisofs`. `virtiofsd` need not be on `PATH`: selection checks its `command -v` result there first, then `/usr/lib/virtiofsd`, `/usr/libexec/virtiofsd`, and `/usr/lib/qemu/virtiofsd` in that order; only a candidate accepted by the installed executable policy is usable. `cat` renders the cloud-init seed and `mv` promotes the validated SSH host key; both are checked by the executable policy before lifecycle work. KVM must be available at `/dev/kvm`; no TCG fallback.
 - **Workspace storage prerequisite:** the selected workspace must be the root of a dedicated, owner-provisioned filesystem whose reported capacity is at most 8 GiB. A normal directory, bind mount exposing a larger filesystem, or user quota on a larger filesystem is not accepted. It must not overlap `/run/user/<uid>` (the protected private short-socket runtime root), the home-state directory, or the installed tree; this prevents exporting the socket/PID evidence to the guest. The launcher neither provisions storage nor changes host mounts. Its mount-root/`statvfs` check is only preflight; the hard write limit during the run is enforced by the owner-provisioned filesystem itself. Before acceptance, use a separate small disposable filesystem to demonstrate that writes fail with `ENOSPC` at its configured limit. Never run a capacity-filling probe on a shared host filesystem. Keep this proof separate from the 1-MiB diagnostic-log cap, which bounds helper logs but does not cap workspace writes.
 - **Resource and deadline bounds:** QEMU is limited to 2 vCPUs, 4096 MiB RAM and a 24-GiB virtual guest disk. Pinned image download is capped at 300 seconds per attempt with two retries (at most 900 seconds); guest SSH/key readiness retains its separate 300-second cap. Full first-boot cloud-init provisioning and its completion checks retain the production package set and have a separate 5400-second (90-minute) hard cap. Timeout status 124 is reported as provisioning timeout; SSH transport failure, cloud-init failure, missing completion marker/workspace mount, rootful socket, and rootless-Docker readiness failures retain distinct sanitized diagnostics. The hard whole-smoke cap is 8400 seconds (140 minutes), with the existing 15-second forced-termination grace. A 7200-second cap would not fit all configured maxima: 900 seconds for image-download attempts + 300 SSH boot + 5400 provisioning + 600 browser auth + 300 provider + 360 Docker + 300 bounded controls = 8160 seconds. The 8400-second cap leaves 240 seconds for lifecycle/cleanup overhead while preserving those stages. Browser auth remains capped at 600 seconds and is reduced when necessary to reserve the provider's 300 seconds, Docker pull/container's 180 seconds each, and six bounded SSH controls for auth setup/verification and Docker inspection. Both the inner stage accounting and outer `timeout` enforce finite bounds. There is no inactivity detector: guest console/package output may be silent during valid installation and is not treated as a trusted progress signal; provisioning that remains incomplete fails at the hard deadline, with failed-run evidence retained. QEMU, virtiofsd and proxy helper logs are capped while receiving at 1 MiB each and retained in at most eight private run directories. Guest SSH output is separately capped at 64 KiB per command (host-key scan output at 16 KiB); overflow terminates the owned process group and fails the stage. The bounded logger pins the process-group identity, gives TERM-ignoring descendants an 8-second grace before KILL, reaps adopted descendants, and allows a 2-second post-KILL settle even if the direct child exits and descendants close both output streams. The supervisor waits up to 11 seconds after TERM and allows at most 2 seconds after its own KILL escalation; it requires a logger completion proof and verifies the logger's session is empty before reporting cleanup success. The 13-second worst-case supervisor budget stays within the outer 15-second forced-termination grace. Redirecting to a normal file then truncating after exit would permit unbounded disk growth during the run. All these helper/guest-output bounds are distinct from the externally enforced workspace filesystem limit.
@@ -151,6 +151,8 @@ finally:
 PY
 git -C "$REPO" archive --format=tar "$CANDIDATE_SHA" \
   lab-vm \
+  agent/opencode/plugins/little-mester-exit-confirm/package.json \
+  agent/opencode/plugins/little-mester-exit-confirm/tui.tsx \
   lib/vm/host-launcher.sh \
   lib/vm/cloud-init.sh \
   lib/vm/proxy.py \
@@ -159,6 +161,12 @@ git -C "$REPO" archive --format=tar "$CANDIDATE_SHA" \
   lib/vm/browser-auth-session.py \
   lib/vm/virtiofs-socket.py \
   lib/vm/guest-user-dirs.py \
+  lib/vm/parent-state.py \
+  lib/vm/parent-launcher.py \
+  lib/vm/parent-gate.py \
+  lib/vm/parent-supervisor.py \
+  lib/vm/parent-qemu.py \
+  lib/vm/parent-provision.py \
   | sudo /usr/bin/python3 -I -c 'import os,sys; os.umask(0o077); os.execv("/usr/bin/tar", ["/usr/bin/tar", "--no-same-owner", "--no-same-permissions", "--keep-old-files", "-xf", "-", "-C", sys.argv[1]])' "$INSTALL_ROOT"
 sudo /usr/bin/python3 -I - "$INSTALL_ROOT" 0 0 <<'PY'
 import os, stat, sys
@@ -166,15 +174,23 @@ import os, stat, sys
 root = sys.argv[1]
 expected_uid, expected_gid = map(int, sys.argv[2:4])
 directory_children = {
-    ".": {"lab-vm", "lib"},
+    ".": {"lab-vm", "lib", "agent"},
+    "agent": {"opencode"},
+    "agent/opencode": {"plugins"},
+    "agent/opencode/plugins": {"little-mester-exit-confirm"},
+    "agent/opencode/plugins/little-mester-exit-confirm": {"package.json", "tui.tsx"},
     "lib": {"vm"},
     "lib/vm": {
         "host-launcher.sh", "cloud-init.sh", "proxy.py", "bounded-log.py",
         "executable-policy.py", "browser-auth-session.py", "virtiofs-socket.py", "guest-user-dirs.py",
+        "parent-state.py", "parent-launcher.py", "parent-gate.py", "parent-supervisor.py",
+        "parent-qemu.py", "parent-provision.py",
     },
 }
 file_modes = {
     "lab-vm": 0o755,
+    "agent/opencode/plugins/little-mester-exit-confirm/package.json": 0o644,
+    "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx": 0o644,
     "lib/vm/host-launcher.sh": 0o644,
     "lib/vm/cloud-init.sh": 0o644,
     "lib/vm/proxy.py": 0o644,
@@ -183,8 +199,16 @@ file_modes = {
     "lib/vm/browser-auth-session.py": 0o644,
     "lib/vm/virtiofs-socket.py": 0o644,
     "lib/vm/guest-user-dirs.py": 0o644,
+    "lib/vm/parent-state.py": 0o644,
+    "lib/vm/parent-launcher.py": 0o644,
+    "lib/vm/parent-gate.py": 0o644,
+    "lib/vm/parent-supervisor.py": 0o644,
+    "lib/vm/parent-qemu.py": 0o644,
+    "lib/vm/parent-provision.py": 0o644,
 }
-dir_modes = {".": 0o755, "lib": 0o755, "lib/vm": 0o755}
+dir_modes = {".": 0o755, "lib": 0o755, "lib/vm": 0o755, "agent": 0o755,
+             "agent/opencode": 0o755, "agent/opencode/plugins": 0o755,
+             "agent/opencode/plugins/little-mester-exit-confirm": 0o755}
 dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 
@@ -256,21 +280,28 @@ finally:
     os.close(root_fd)
 PY
 test -x "$INSTALL_ROOT/lab-vm"
-for file in lib/vm/host-launcher.sh lib/vm/cloud-init.sh lib/vm/proxy.py lib/vm/bounded-log.py lib/vm/executable-policy.py lib/vm/browser-auth-session.py lib/vm/virtiofs-socket.py lib/vm/guest-user-dirs.py; do
+for file in lib/vm/host-launcher.sh lib/vm/cloud-init.sh lib/vm/proxy.py lib/vm/bounded-log.py lib/vm/executable-policy.py lib/vm/browser-auth-session.py lib/vm/virtiofs-socket.py lib/vm/guest-user-dirs.py lib/vm/parent-state.py lib/vm/parent-launcher.py lib/vm/parent-gate.py lib/vm/parent-supervisor.py lib/vm/parent-qemu.py lib/vm/parent-provision.py agent/opencode/plugins/little-mester-exit-confirm/package.json agent/opencode/plugins/little-mester-exit-confirm/tui.tsx; do
   test -f "$INSTALL_ROOT/$file"
 done
 namei -l "$INSTALL_ROOT/lab-vm" "$INSTALL_ROOT/lib/vm/host-launcher.sh" \
   "$INSTALL_ROOT/lib/vm/cloud-init.sh" "$INSTALL_ROOT/lib/vm/proxy.py" \
   "$INSTALL_ROOT/lib/vm/bounded-log.py" "$INSTALL_ROOT/lib/vm/executable-policy.py" \
   "$INSTALL_ROOT/lib/vm/browser-auth-session.py" "$INSTALL_ROOT/lib/vm/virtiofs-socket.py" \
-  "$INSTALL_ROOT/lib/vm/guest-user-dirs.py"
+  "$INSTALL_ROOT/lib/vm/guest-user-dirs.py" "$INSTALL_ROOT/lib/vm/parent-state.py" \
+  "$INSTALL_ROOT/lib/vm/parent-launcher.py" "$INSTALL_ROOT/lib/vm/parent-gate.py" \
+  "$INSTALL_ROOT/lib/vm/parent-supervisor.py" "$INSTALL_ROOT/lib/vm/parent-qemu.py" \
+  "$INSTALL_ROOT/lib/vm/parent-provision.py" \
+  "$INSTALL_ROOT/agent/opencode/plugins/little-mester-exit-confirm/package.json" \
+  "$INSTALL_ROOT/agent/opencode/plugins/little-mester-exit-confirm/tui.tsx"
 ```
 
-The dirfd walk checks every existing lexical component before creating its child, refuses symlinks or user/group/world-writable ancestors, creates only missing root-owned/traversable directories, and refuses any pre-existing candidate install directory. Extraction runs with root umask 077 and `--no-same-permissions`, so archive modes and the caller's umask cannot create group/world-writable entries, even transiently. The following dirfd-anchored normalizer requires exactly the nine expected regular files and three directories, rejects symlinks/special/extra entries, explicitly sets root ownership and exact 0755/0644 modes, and verifies each result. `tar --keep-old-files` also refuses overwrites. If extraction or normalization fails, do not execute or retry into the partial tree; stop for owner review. Stop unless `namei` shows no symlink in any path and every file, directory, and ancestor is root-owned and not group/world writable. The launcher's own protected-install check repeats this invariant before loading code. No `cp` from the mutable checkout, symlinked install path, package install, or runtime-path override is allowed.
+The dirfd walk checks every existing lexical component before creating its child, refuses symlinks or user/group/world-writable ancestors, creates only missing root-owned/traversable directories, and refuses any pre-existing candidate install directory. Extraction runs with root umask 077 and `--no-same-permissions`, so archive modes and the caller's umask cannot create group/world-writable entries, even transiently. The following dirfd-anchored normalizer requires exactly the allowlisted 17 regular files and directory tree, rejects symlinks/special/extra entries, explicitly sets root ownership and exact 0755/0644 modes, and verifies each result. `tar --keep-old-files` also refuses overwrites. If extraction or normalization fails, do not execute or retry into the partial tree; stop for owner review. Stop unless `namei` shows no symlink in any path and every file, directory, and ancestor is root-owned and not group/world writable. The launcher's own protected-install check repeats this invariant before loading code. No `cp` from the mutable checkout, symlinked install path, package install, or runtime-path override is allowed.
+
+The supported wrapper is `tools/vm-owner-acceptance --install --sha "$CANDIDATE_SHA" --repo "$REPO"`. It archives only the committed allowlisted files, asks for owner-authorized `sudo` installation into the SHA-specific new path, verifies the exact tree/ownership/modes/bytes against Git, and runs the installed read-only preflight. It does not run smoke or start a VM. `--install` refuses an existing target; use `--preflight --sha ... --repo ...` to verify an existing exact-SHA installation. Never overwrite, repair in place, or remove a partial/untrusted tree under this procedure. Choose a new exact-SHA path after review if an earlier install is incomplete; preserve the prior path for owner inspection.
 
 #### Repair the already-extracted candidate, only after read-only verification
 
-**Historical recovery only — do not use this block for the current short-socket candidate.** The following commands are tied to old candidate `ce88ae5b4fe706f90244ebc60562354c5ba36da4` and its seven-file layout, which predates `virtiofs-socket.py`. A new correction candidate must use the normal SHA-specific `--install` flow above and its current nine-file inventory; do not repair or reuse the historical tree for the new candidate. For the old tree only, do not rerun its create/extract block: it correctly refuses an existing target. The owner may retain and repair that tree in place only if all checks below pass **and** the owner has placed the host in a trusted maintenance window: no untrusted process may have write access through GID 0 or be concurrently modifying this tree. The owner must establish this from the host's user/group and process-management context; if uncertain, stop rather than chmod. The checks verify that historical exact SHA path, protected ancestors, exact seven-file tree, root ownership, no symlinks/special/extra entries, and byte-for-byte contents against that historical commit before changing permissions. If any check fails, stop and preserve the tree for review; do not use a recursive chmod or overwrite it.
+**Historical recovery only — do not use this block for the current short-socket candidate.** The following commands are tied to old candidate `ce88ae5b4fe706f90244ebc60562354c5ba36da4` and its seven-file layout, which predates `virtiofs-socket.py`. A new correction candidate must use the normal SHA-specific `--install` flow above and its current 17-file inventory; do not repair or reuse the historical tree for the new candidate. For the old tree only, do not rerun its create/extract block: it correctly refuses an existing target. The owner may retain and repair that tree in place only if all checks below pass **and** the owner has placed the host in a trusted maintenance window: no untrusted process may have write access through GID 0 or be concurrently modifying this tree. The owner must establish this from the host's user/group and process-management context; if uncertain, stop rather than chmod. The checks verify that historical exact SHA path, protected ancestors, exact seven-file tree, root ownership, no symlinks/special/extra entries, and byte-for-byte contents against that historical commit before changing permissions. If any check fails, stop and preserve the tree for review; do not use a recursive chmod or overwrite it.
 
 ```bash
 set -euo pipefail

@@ -456,14 +456,19 @@ def request_supervisor_stop(*, home: str | os.PathLike | None = None,
             os.close(pidfd)
         os.close(directory_fd)
     deadline = time.monotonic() + timeout_seconds
+    ambiguous_seen = False
     while time.monotonic() < deadline:
         result = read_status(home=home)
         if result["status"] == "STOPPED":
             return {"status": "STOPPED", "parent_id": PARENT_ID,
                     "run_id": status.get("run_id"), "disk_retained": True}
         if result["status"] == "AMBIGUOUS":
-            raise Refused("supervisor stop left ambiguous identity evidence; no signal escalation performed")
+            # Procfs can briefly expose a zombie/reap race after the pidfd signal.
+            # Continue observation only; never send another signal or infer success.
+            ambiguous_seen = True
         time.sleep(0.05)
+    if ambiguous_seen:
+        raise Refused("supervisor stop left ambiguous identity evidence; no signal escalation performed")
     raise Refused("supervisor did not stop before the bounded wait expired; no signal escalation performed")
 
 
