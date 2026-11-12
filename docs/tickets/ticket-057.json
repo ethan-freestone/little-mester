@@ -8,7 +8,7 @@
   "title": "P1-05 — Final Phase 1 acceptance and merge readiness",
   "objective": "P1-05 final acceptance/merge readiness. Successor to #49/#51; depends on completion of P1-01 #53, P1-02 #54, P1-03 #55, and P1-04 #56. No merge absent explicit owner approval. Operating policy: docs/workflows/phase1-continuous-execution.md, including the owner-approved M1→M2→M3 priority and continuous-execution correction: a runtime gate blocks only dependent operations; continue independent authorized work. Handoffs identify the exact blocked assumption, independent work completed/remaining, and action to unlock it. No acceptance criterion changes.",
   "created_at": "2026-11-10T21:46:28.245Z",
-  "updated_at": "2026-11-12T08:36:58.310Z",
+  "updated_at": "2026-11-12T22:14:45.196Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -81,6 +81,11 @@
       "timestamp": "2026-11-12T00:21:35.345Z",
       "author": "cli",
       "body": "Phase 1 convergence plan for Luna High: dependency order #54 M1a minimum fixes->verified committed owner-test candidate->owner real lifecycle demonstration; #54 M1b explicit recovery/failure drill; #55 M2 protected TUI/auth/history; #56 M3 approved restricted-key live metrics; then M4 exact-SHA final acceptance. Reuse existing tickets and acceptance documents, no new plan/workflow system. Final chunk: pin source SHA separately from ticket-evidence SHA/HEAD, full relevant regression+CI and owner protected full smoke for changed runtime/provisioning SHA (A2), bounded negative isolation checks and independent interactive-session teardown verification (A4/A5), final holistic Sol review, reconcile all #53-#56 criteria/evidence, close completed tickets truthfully, owner merge decision only. Historical smoke and scratch compatibility PASS are not integrated acceptance. A6 still names Claude adversarial review while owner currently prohibits requesting/conducting external Claude review: leave criterion pending and obtain owner reconciliation/authorization before final merge readiness, not before M1a; do not silently waive it or initiate review. Every source change must enable required demonstration, fix observed defect, or remove justified duplication. Freeze M1a candidate refactoring while awaiting runtime evidence. No tests run or source changes made by this planning pass."
+    },
+    {
+      "timestamp": "2026-11-12T22:14:45.196Z",
+      "author": "cli",
+      "body": "Sol Medium Phase 1 readiness review (2026-11-12): progressing, not merge-ready. Exact source SHA ddf0e7bcc3424d124c9007808acf3e08139ab9d2 GitHub Actions run 43314731249 completed success; all five jobs passed. M1a now has owner-reported SSH/arithmetic and same-running-guest reconnect-canary evidence, but duplicate-up/stop/same-disk restart remain pending. M1b is implemented offline; live recovery remains pending (active lock refusal alone is not recovery). M2 is implemented but lacks integrated guest TUI/auth/model/persistence/terminal acceptance; source review found env -i dropped TERM, now being fixed narrowly. M3 codecs/scheduler/collector/ACK are offline only; restricted transport design has Sol FIX conditions and no implementation is authorized; owner NVIDIA timing/accuracy pending. M4 remains blocked on integrated acceptance, cleanup, final exact-SHA reviews, and explicit owner merge approval. No Phase 1.5 work is a blocker. Do not merge or operate the owner VM without explicit approval."
     }
   ]
 }

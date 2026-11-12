@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-12T00:21:32.445Z",
+  "updated_at": "2026-11-12T22:16:12.009Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -40,13 +40,15 @@
     "needed": [
       "Timeboxed OpenCode 2.2.5 TUI/plugin/keybinding/config-precedence probe in an isolated disposable environment.",
       "PTy key-sequence matrix and harmless OSC-52 clipboard canary on each owner-approved terminal profile.",
-      "Hostile project config/plugin sentinel and egress/update/model-list checks without real credentials."
+      "Hostile project config/plugin sentinel and egress/update/model-list checks without real credentials.",
+      "Owner verifies the propagated host TERM exists in guest terminfo and clear works; live OpenCode TUI key/resize and M2 terminal acceptance remain required."
     ],
     "created": [
       "Local pinned-binary PTY verification: scripts/verify-exit-confirm.py now rejects any opencode version other than 2.2.5 and uses a temporary HOME, empty workspace, private minimal server config, and sanitized environment; no inherited auth/session/config. On 2.2.5, all 10 checks pass: Ctrl+D inert, yq types while closed, Ctrl+C opens, Esc/N/Ctrl+C cancel, uppercase Y and Q confirm. `bats tests/exit-confirm.bats`: 6/6. No guest/owner-terminal clipboard canary, hostile project config test, guest provenance, egress test, or owner acceptance; criteria remain pending. Source checkpoint 01197bd plus verifier version-enforcement follow-up 3a30f2c.",
       "CONFIG-PRECEDENCE (local pinned v2.2.5 only): commit 2a9be6e adds tests/opencode-project-config.test.py. In isolated temporary HOME/workspace, debug config discovers both direct and .opencode configs without guard; both are absent with OPENCODE_DISABLE_PROJECT_CONFIG=1, while protected config source reports updates disabled/share disabled. 2/2 tests pass. Does not prove effective config, project-plugin suppression/load, guest launch enforcement, or owner acceptance; A3 remains pending. Docs explicitly bound claim (94e32b0).",
       "Project config/plugin probe current result (commits 2a9be6e/82fc434/79f4aac): tests/opencode-project-config.test.py 3/3 on v2.2.5. Confirms direct and .opencode config sources are absent under OPENCODE_DISABLE_PROJECT_CONFIG=1; a benign test-authored project plugin creates its private marker without the flag and not with the flag. Guarded negative also requires live TUI to reach Ask anything; no false pass on startup failure. No guest enforcement/effective-config/owner acceptance claim.",
-      "MOCK seed-provisioning regression: first-boot parent cloud-init embeds exact root-owned exit-confirm plugin bytes and protected server/CLI config; pins OpenCode 2.2.5, disables project config, routes global plugin discovery to /etc, and installs a tmux attach launcher/runner. Generated scripts pass /bin/sh -n in `tests/vm-parent-supervisor.test.py` (16/16); `bats tests/exit-confirm.bats tests/tui-jsx.bats` 11/11. No guest boot, target-terminal canary, or guest TUI behavior demonstrated."
+      "MOCK seed-provisioning regression: first-boot parent cloud-init embeds exact root-owned exit-confirm plugin bytes and protected server/CLI config; pins OpenCode 2.2.5, disables project config, routes global plugin discovery to /etc, and installs a tmux attach launcher/runner. Generated scripts pass /bin/sh -n in `tests/vm-parent-supervisor.test.py` (16/16); `bats tests/exit-confirm.bats tests/tui-jsx.bats` 11/11. No guest boot, target-terminal canary, or guest TUI behavior demonstrated.",
+      "tests/vm-parent-supervisor.test.py::test_lab_vm_worker_uses_separate_script_fd_and_preserves_terminal_stdin verifies validated TERM propagation and refuses TERM=dumb"
     ],
     "cases": [
       "MOCK seed assets: exact plugin bytes, root ownership/modes, protected config (autoupdate/share disabled, exit keybinds disabled), project-config guard, root XDG global plugin location, pinned install command and tmux scripts asserted; generated shell syntax valid. tests/vm-parent-supervisor.test.py (16/16). No VM/guest acceptance.",
@@ -81,6 +83,16 @@
       "timestamp": "2026-11-12T00:21:32.445Z",
       "author": "cli",
       "body": "Luna implementation chunk M2 (depends on #54 M1a working parent, not metrics): wire only missing protected pinned OpenCode/TUI/model-selection and approved authentication entry paths on the SAME parent. Reuse settled 2.2.5/plugin findings and protected cloud-init assets; reuse reviewed browser-auth-session machinery where applicable, without broadening ordinary owner SSH forwarding or egress. Prove live tmux disconnect/reattach and exit-confirm key matrix; separately prove auth/config/history/workspace survive stop/up (tmux process itself does not survive reboot). Run hostile project config/plugin sentinel and update/telemetry/model-list/sharing checks; owner performs approved-terminal mitigation+harmless OSC52 canary and authentication. Preserve credentials, no escrow/new host bridge topology. Commit coherent missing wiring, then owner M2 evidence. M1a must not wait on these refinements. Existing A1-A5 remain authoritative; no new deferral. Planning inspection only; no tests run."
+    },
+    {
+      "timestamp": "2026-11-12T22:14:43.755Z",
+      "author": "cli",
+      "body": "Luna TERM investigation: lab-vm used env -i for every command and dropped TERM before protected parent ssh/tui. The interactive path requests a PTY and retains strict SSH policy but does not explicitly override TERM; with TERM absent, Bash supplies TERM=dumb, which has no clear capability. Narrow source fix in progress: pass only a validated host TERM whose local terminfo has clear, only to interactive ssh/tui; refuse if unavailable. Regression covers xterm-256color propagation and dumb refusal. Owner guest-side infocmp/clear and live M2 TUI verification remain required; no terminal type is hard-coded and no SSH policy is weakened."
+    },
+    {
+      "timestamp": "2026-11-12T22:16:12.008Z",
+      "author": "cli",
+      "body": "Luna TERM fix committed as 67ef66744a59e848f23f101a784b83741afbb5d3. lab-vm preserves TERM only when its value passes a bounded character check and local infocmp reports a clear capability; it passes that value only to parent ssh/tui. Missing/unsupported terminal capabilities cause a clear refusal; no TERM is hard-coded and SSH policy is unchanged. Protected launcher PTY test verifies xterm-256color reaches the worker and TERM=dumb is refused. Parent Python suites, Bats 105/105, ShellCheck, Python compilation, Ruff and diff checks pass locally. Guest-side terminfo/clear and live OpenCode TUI acceptance remain pending; the running owner installation has not been modified."
     }
   ]
 }
