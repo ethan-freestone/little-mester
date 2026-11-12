@@ -73,6 +73,16 @@ class ProcessScanTests(unittest.TestCase):
     def test_gate_process_and_pid_one_are_visible_without_static_tree_requirement(self):
         gate._check_proc_visibility()
 
+    def test_privileged_pid_one_check_uses_only_system_lsof(self):
+        completed = subprocess.CompletedProcess(
+            ["sudo", "lsof"], 0, stdout="p1\ncsystemd\n", stderr="")
+        with mock.patch.object(gate.subprocess, "run", return_value=completed) as run:
+            gate._check_pid_one_with_lsof()
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:2], ["/usr/bin/sudo", "/usr/bin/lsof"])
+        self.assertIn("-p", argv)
+        self.assertNotIn(str(ROOT), " ".join(argv))
+
     def test_privileged_scan_executes_only_protected_system_utilities(self):
         with tempfile.NamedTemporaryFile() as held:
             info = os.fstat(held.fileno())

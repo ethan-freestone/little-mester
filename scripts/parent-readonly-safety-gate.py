@@ -28,6 +28,31 @@ def _check_proc_visibility() -> None:
         raise GateRefused("/proc process listing is empty/incomplete (PID 1 or gate PID missing)")
 
 
+def _system_executable(name: str) -> pathlib.Path:
+    path = pathlib.Path("/usr/bin") / name
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise GateRefused(f"trusted /usr/bin/{name} is unavailable") from error
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+            or not os.access(path, os.X_OK) or stat.S_IMODE(info.st_mode) & 0o022):
+        raise GateRefused(f"/usr/bin/{name} is not a protected root-owned executable")
+    return path
+
+
+def _check_pid_one_with_lsof() -> None:
+    sudo, lsof = _system_executable("sudo"), _system_executable("lsof")
+    try:
+        result = subprocess.run([str(sudo), str(lsof), "-Fpc", "-p", "1"],
+                                stdin=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise GateRefused("could not verify PID 1 through trusted lsof") from error
+    if (result.returncode != 0 or result.stderr.strip()
+            or "p1" not in result.stdout.splitlines()):
+        raise GateRefused("trusted lsof could not reliably observe PID 1")
+
+
 def _parse_lsof(stdout: str, stderr: str, returncode: int,
                 device: int, inode: int) -> list[int]:
     """Parse lsof machine fields; any warning or inconsistent identity refuses."""
@@ -162,18 +187,7 @@ def _check_listener(state_dir: pathlib.Path) -> None:
 
 def _scan_with_lsof(target: pathlib.Path, device: int, inode: int) -> list[int]:
     """Use the root-owned system lsof binary; never execute checkout code as root."""
-    def system_executable(name: str) -> pathlib.Path:
-        path = pathlib.Path("/usr/bin") / name
-        try:
-            info = path.lstat()
-        except OSError as error:
-            raise GateRefused(f"trusted /usr/bin/{name} is unavailable") from error
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
-                or not os.access(path, os.X_OK) or stat.S_IMODE(info.st_mode) & 0o022):
-            raise GateRefused(f"/usr/bin/{name} is not a protected root-owned executable")
-        return path
-
-    sudo, lsof = system_executable("sudo"), system_executable("lsof")
+    sudo, lsof = _system_executable("sudo"), _system_executable("lsof")
     command = [str(sudo), str(lsof), "-FpcfDi", "--", str(target)]
     try:
         result = subprocess.run(command, stdin=None, stdout=subprocess.PIPE,
@@ -210,6 +224,7 @@ def run_gate(install_root: pathlib.Path, state_dir: pathlib.Path) -> None:
     _check_listener(state_dir)
 
     _check_proc_visibility()
+    _check_pid_one_with_lsof()
     print("Positive control: confirming privileged lsof detects this gate's held test FD")
     with tempfile.NamedTemporaryFile() as held:
         held_info = os.fstat(held.fileno())
