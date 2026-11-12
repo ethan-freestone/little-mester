@@ -8,7 +8,7 @@
   "title": "P1-05 — Final Phase 1 acceptance and merge readiness",
   "objective": "P1-05 final acceptance/merge readiness. Successor to #49/#51; depends on completion of P1-01 #53, P1-02 #54, P1-03 #55, and P1-04 #56. No merge absent explicit owner approval. Operating policy: docs/workflows/phase1-continuous-execution.md, including the owner-approved M1→M2→M3 priority and continuous-execution correction: a runtime gate blocks only dependent operations; continue independent authorized work. Handoffs identify the exact blocked assumption, independent work completed/remaining, and action to unlock it. No acceptance criterion changes.",
   "created_at": "2026-11-10T21:46:28.245Z",
-  "updated_at": "2026-11-12T08:34:45.679Z",
+  "updated_at": "2026-11-12T08:36:58.310Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -56,7 +56,8 @@
       "Owner QEMU/qemu-img gate PASS ×2 is recorded for probe source revision 37f5fb622135831a5195615e175086c8053b0992. Only inherited-FD conversion, explicit qcow2 inspection, fdset opening and independent-writer lock refusal are satisfied. Parent lifecycle acceptance, protected guest, OpenCode/history persistence, OSC52 terminal canary, NVIDIA timing, CI, final reviews and merge approval remain pending. Owner procedure: docs/parent-lifecycle-acceptance.md. No VM was launched by agent.",
       "M1a candidate `9992eb9896d3475ae43a4017231be637bd565cad` received independent Sol Medium review verdict READY FOR OWNER M1a after blocker fixes. Full real parent lifecycle and final holistic review/CI/owner merge requirements remain pending. No VM was launched by implementer.",
       "Final M1a deployment/runtime candidate `cd734a38dc4d98e00ea9ffe06a8871701733945c` received fresh Sol Medium exact-source review verdict READY FOR OWNER M1a. Existing SHA-pinned trusted installation is extended and documented. Owner install + M1a test pending; no VM/SSH/privileged host action performed by implementer. Full Phase 1 acceptance/CI/final reviews/merge remain pending.",
-      "Final reviewed owner-handoff candidate SHA `820947aef297aeef199f1b983199a1867cd1e781`; focused Sol Medium exact-SHA verdict READY FOR OWNER M1a. Runtime candidate `cd734a38dc4d98e00ea9ffe06a8871701733945c` remains the unchanged runtime implementation; later commits only corrected the documented owner preflight. Owner protected installation/M1a lifecycle test pending. No VM/SSH/privileged action by implementer; broader Phase 1 CI, acceptance, reviews, and merge remain pending."
+      "Final reviewed owner-handoff candidate SHA `820947aef297aeef199f1b983199a1867cd1e781`; focused Sol Medium exact-SHA verdict READY FOR OWNER M1a. Runtime candidate `cd734a38dc4d98e00ea9ffe06a8871701733945c` remains the unchanged runtime implementation; later commits only corrected the documented owner preflight. Owner protected installation/M1a lifecycle test pending. No VM/SSH/privileged action by implementer; broader Phase 1 CI, acceptance, reviews, and merge remain pending.",
+      "Reviewed handoff commit `903dc8bf62b561293132582c9a7ff1cc9b5caacc` identifies pinned protected-install source `820947aef297aeef199f1b983199a1867cd1e781`; focused Sol Medium review confirms READY FOR OWNER M1a. Owner installation and real lifecycle acceptance pending. No VM/SSH/privileged action by implementer; full Phase 1 acceptance/CI/reviews/merge pending."
     ]
   },
   "models_used": [],
