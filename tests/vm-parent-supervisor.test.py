@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import signal
 import socket
 import stat
 import subprocess
@@ -135,6 +136,55 @@ class SupervisorHandoffTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0)
             self.assertTrue((self.state_dir / "disk.qcow2").exists())
             self.assertEqual(parent_state.read_status(home=self.home)["status"], "STOPPED")
+        finally:
+            self.cleanup_test_supervisor(proc)
+
+    def test_owner_up_stop_reaps_its_supervisor_before_accepting_procfs_stop_state(self):
+        proc, _run_id = self.spawn_supervisor()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            result = parent_state.request_supervisor_stop(
+                home=self.home, timeout_seconds=3, reap_supervisor=proc.poll)
+            self.assertEqual(result["status"], "STOPPED")
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(parent_state.read_status(home=self.home)["status"], "STOPPED")
+            self.assertTrue((self.state_dir / "disk.qcow2").exists())
+        finally:
+            self.cleanup_test_supervisor(proc)
+
+    def test_owner_up_stop_reaps_preexisting_supervisor_zombie_before_status_validation(self):
+        proc, _run_id = self.spawn_supervisor()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if parent_state.read_status(home=self.home)["status"] == "STARTING":
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("supervisor did not publish STARTING")
+
+            proc.send_signal(signal.SIGTERM)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                try:
+                    fields = pathlib.Path(f"/proc/{proc.pid}/stat").read_text().rsplit(")", 1)[1].split()
+                except FileNotFoundError:
+                    self.fail("supervisor was reaped before the zombie race was observed")
+                if fields[0] == "Z":
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("supervisor did not reach the expected unreaped-child state")
+
+            self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+            result = parent_state.request_supervisor_stop(
+                home=self.home, timeout_seconds=3, reap_supervisor=proc.poll)
+            self.assertEqual(result["status"], "STOPPED")
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(parent_state.read_status(home=self.home)["status"], "STOPPED")
+            self.assertTrue((self.state_dir / "disk.qcow2").exists())
         finally:
             self.cleanup_test_supervisor(proc)
 

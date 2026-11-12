@@ -16,6 +16,7 @@ import time
 
 PARENT_LAUNCH_ENABLED = True
 STARTUP_TIMEOUT_SECONDS = 900
+SUPERVISOR_COMPLETION_GRACE_SECONDS = 60
 
 
 class Refused(RuntimeError):
@@ -116,7 +117,12 @@ def up(capacity_gib: int = 64, *, home: str | None = None,
             subprocess.SubprocessError, RuntimeError) as error:
         raise Refused(f"parent provisioning refused: {error}") from error
 
-    deadline = time.monotonic() + startup_timeout_seconds
+    # The supervisor's guest-readiness deadline starts after proxy/QEMU startup.
+    # Give it a bounded completion window beyond the launcher deadline so the
+    # outer waiter cannot preempt readiness and misreport its own timeout as
+    # "guest SSH readiness was not established".
+    deadline = (time.monotonic() + startup_timeout_seconds
+                + SUPERVISOR_COMPLETION_GRACE_SECONDS)
     last_status = {"status": "AMBIGUOUS"}
     try:
         while time.monotonic() < deadline:
@@ -133,7 +139,8 @@ def up(capacity_gib: int = 64, *, home: str | None = None,
         status = state.read_status(home=home)
         if status["status"] in ("STARTING", "RUNNING") and status.get("run_id") == run_id:
             try:
-                state.request_supervisor_stop(home=home, timeout_seconds=60)
+                state.request_supervisor_stop(home=home, timeout_seconds=60,
+                                              reap_supervisor=proc.poll)
             except state.Refused as error:
                 raise Refused(f"startup failed and bounded rollback is ambiguous: {error}") from error
         raise

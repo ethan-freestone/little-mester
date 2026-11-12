@@ -121,6 +121,76 @@ class ParentLauncherTests(unittest.TestCase):
         self.assertEqual(spawn.call_args.args[1], 42)
         self.assertEqual(spawn.call_args.args[3], 23456)
 
+    def test_launcher_deadline_grace_does_not_preempt_supervisor_readiness_completion(self):
+        clock = [0.0]
+        events = []
+
+        class State:
+            PARENT_ID = "default"
+            Refused = parent_state.Refused
+            stop_requests = 0
+            reads = 0
+
+            @staticmethod
+            @contextlib.contextmanager
+            def lifecycle_lock(*, home=None):
+                yield 42
+
+            @classmethod
+            def read_status(cls, *, home=None):
+                cls.reads += 1
+                if cls.reads <= 2:
+                    return {"status": "NOT_CREATED"}
+                if clock[0] >= 1.1:
+                    events.append(("readiness-completed", clock[0]))
+                    return {"status": "RUNNING", "parent_id": "default",
+                            "run_id": "0123456789abcdef0123456789abcdef",
+                            "disk": {"virtual_capacity_gib": 64}}
+                return {"status": "STARTING", "run_id": "0123456789abcdef0123456789abcdef"}
+
+            @classmethod
+            def request_supervisor_stop(cls, **_kwargs):
+                cls.stop_requests += 1
+                raise AssertionError("outer timeout must not preempt readiness")
+
+            @staticmethod
+            def initialize(*_args, **_kwargs):
+                return {"disk": {"provisioned": False}}
+
+        class Provision:
+            Refused = RuntimeError
+
+            @staticmethod
+            def create_initial_disk(**_kwargs):
+                return {"disk": {"provisioned": True}}
+
+        class Supervisor:
+            @staticmethod
+            def _protected_tool(name, _candidates):
+                return f"/mock/{name}"
+
+            @staticmethod
+            def _prepare_parent_seed(*_args):
+                return None
+
+        fake_proc = SimpleNamespace(poll=lambda: None)
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with (mock.patch.object(parent_launcher, "_load", side_effect=[State, Provision, Supervisor]),
+              mock.patch.object(parent_launcher, "_free_loopback_port", return_value=23456),
+              mock.patch.object(parent_launcher.secrets, "token_hex",
+                                return_value="0123456789abcdef0123456789abcdef"),
+              mock.patch.object(parent_launcher, "_spawn_supervisor", return_value=fake_proc),
+              mock.patch.object(parent_launcher.time, "monotonic", side_effect=lambda: clock[0]),
+              mock.patch.object(parent_launcher.time, "sleep", side_effect=sleep)):
+            status = parent_launcher.up(64, home="/tmp/test-home", startup_timeout_seconds=1)
+
+        self.assertEqual(status["status"], "RUNNING")
+        self.assertEqual(State.stop_requests, 0)
+        self.assertEqual(events, [("readiness-completed", 1.2)])
+
     def test_supervisor_spawn_commits_handoff_under_the_existing_lifecycle_lock(self):
         import os
         import tempfile

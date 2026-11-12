@@ -415,11 +415,25 @@ def recovery_preview(*, home: str | os.PathLike | None = None) -> dict:
 
 
 def request_supervisor_stop(*, home: str | os.PathLike | None = None,
-                            timeout_seconds: float = 15.0) -> dict:
+                            timeout_seconds: float = 15.0,
+                            reap_supervisor=None) -> dict:
     """Request cooperative stop through a pidfd for a verified supervisor."""
     if (type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 60):
         raise Refused("supervisor stop timeout must be between 0 and 60 seconds")
+    if reap_supervisor is not None and not callable(reap_supervisor):
+        raise Refused("supervisor reaper must be a callable process poll")
+    if reap_supervisor is not None:
+        # The launcher owns this child. Reap an already-exited supervisor
+        # before read_status() mistakes its zombie procfs entry for an
+        # identity mismatch.
+        reap_supervisor()
     status = read_status(home=home)
+    if status["status"] == "AMBIGUOUS" and reap_supervisor is not None:
+        # The child can exit between poll() and the procfs identity read.
+        reap_supervisor()
+        status = read_status(home=home)
+    if status["status"] == "STOPPED":
+        return {"status": "STOPPED", "parent_id": PARENT_ID, "disk_retained": True}
     if status["status"] not in ("STARTING", "RUNNING"):
         raise Refused("parent stop requires a verified STARTING or RUNNING supervisor")
     directory_fd = _open_directory_chain(create=False, home_override=home)
@@ -458,7 +472,14 @@ def request_supervisor_stop(*, home: str | os.PathLike | None = None,
     deadline = time.monotonic() + timeout_seconds
     ambiguous_seen = False
     while time.monotonic() < deadline:
+        if reap_supervisor is not None:
+            reap_supervisor()
         result = read_status(home=home)
+        if result["status"] == "AMBIGUOUS" and reap_supervisor is not None:
+            # Close the exit race between poll() and the procfs read: if the
+            # supervisor exited in that interval, poll again and re-evaluate.
+            reap_supervisor()
+            result = read_status(home=home)
         if result["status"] == "STOPPED":
             return {"status": "STOPPED", "parent_id": PARENT_ID,
                     "run_id": status.get("run_id"), "disk_retained": True}
