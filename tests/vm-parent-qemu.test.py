@@ -47,6 +47,7 @@ class ParentQemuArgvTests(unittest.TestCase):
         self.assertIn("restrict=on", netdev)
         self.assertNotIn("virtiofs", " ".join(argv))
         self.assertEqual(argv[argv.index("-display") + 1], "none")
+        self.assertEqual(argv[argv.index("-serial") + 1], "stdio")
         self.assertEqual(argv[argv.index("-qmp") + 1],
                          "unix:/private/parent/qmp.sock,server=on,wait=off")
 

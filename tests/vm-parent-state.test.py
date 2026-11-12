@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -208,6 +209,91 @@ class ParentStateTests(unittest.TestCase):
             ["--ssh-port", "23456"], self.home))
         self.assertFalse(parent_state._valid_supervisor_options(
             ["--state-home", str(self.home), "--ssh-port", "0"], self.home))
+
+    def test_previous_candidate_runtime_script_requires_protected_sha_install_chain(self):
+        from types import SimpleNamespace
+
+        install_root = pathlib.Path(self.temp.name) / "protected" / "v3"
+        sha_root = install_root / ("a" * 40)
+        script = sha_root / "lib/vm/parent-supervisor.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("# trusted fixture\n")
+        os.chmod(script, 0o644)
+        real_lstat = os.lstat
+
+        def root_owned_lstat(path, *, override=None):
+            candidate = pathlib.Path(path)
+            if override and candidate == override.get("missing"):
+                raise FileNotFoundError(candidate)
+            if override and candidate == override.get("symlink"):
+                return SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=0)
+            if override and candidate == override.get("writable"):
+                return SimpleNamespace(st_mode=stat.S_IFDIR | 0o775, st_uid=0)
+            info = real_lstat(candidate)
+            if candidate == script:
+                mode = override.get("file_mode", info.st_mode) if override else info.st_mode
+                uid = override.get("file_uid", 0) if override else 0
+                return SimpleNamespace(st_mode=mode, st_uid=uid)
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+
+        def check(override=None, candidate=script, filename="parent-supervisor.py", raw=None):
+            with (mock.patch.object(parent_state, "TRUSTED_INSTALL_ROOT", install_root),
+                  mock.patch.object(parent_state.os, "lstat",
+                                    side_effect=lambda path: root_owned_lstat(path, override=override))):
+                return parent_state._trusted_parent_runtime_script(
+                    str(candidate) if raw is None else raw, filename)
+
+        self.assertTrue(check())
+        self.assertFalse(check({"file_mode": stat.S_IFREG | 0o664}))
+        self.assertFalse(check({"file_uid": os.getuid() + 1}))
+        self.assertFalse(check({"writable": sha_root}))
+        self.assertFalse(check({"symlink": sha_root / "lib"}))
+        self.assertFalse(check({"missing": script}))
+        self.assertFalse(check(candidate=install_root / "not-a-sha" / "lib/vm/parent-supervisor.py"))
+        self.assertFalse(check(candidate=script, filename="parent-gate.py"))
+        self.assertFalse(check(raw=str(script).replace("/lib/vm/", "/lib//vm/")))
+        self.assertFalse(check(raw=str(script).replace("/lib/vm/", "/lib/./vm/")))
+        self.assertFalse(check(raw=str(script) + "/"))
+
+    def test_stopping_tombstone_from_previous_trusted_candidate_projects_stopped(self):
+        parent = parent_state.initialize(home=self.home)
+        directory = self.parent_dir()
+        disk = directory / "disk.qcow2"
+        disk.write_bytes(b"persistent-parent-disk")
+        os.chmod(disk, 0o600)
+        info = disk.stat()
+        parent["disk"].update({"provisioned": True, "device": info.st_dev, "inode": info.st_ino})
+        run_id = "0123456789abcdef0123456789abcdef"
+        old_script = "/opt/little-mester/v3/" + "a" * 40 + "/lib/vm/parent-supervisor.py"
+        argv = [os.path.realpath(sys.executable), "-I", old_script, "--parent-id", "default",
+                "--run-id", run_id, "--lock-fd", "3", "--handoff-fd", "5",
+                "--ssh-port", "55719"]
+        identity = {"schema": 1, "pid": 2**31 - 1, "uid": os.getuid(),
+                    "host_boot_id": pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+                    "start_time": "1", "exe": os.path.realpath(sys.executable), "argv": argv}
+        run = {"schema": 1, "parent_id": "default", "run_id": run_id,
+               "phase": "STOPPING", "supervisor": identity}
+        with mock.patch.object(parent_state, "_trusted_parent_runtime_script", return_value=True):
+            result = parent_state.status_for_run(parent, run, parent["disk"])
+        self.assertEqual(result["status"], "STOPPED")
+
+    def test_gated_transition_accepts_previous_candidate_only_through_trusted_path_check(self):
+        token = "1" * 32
+        old_gate = "/opt/little-mester/v3/" + "b" * 40 + "/lib/vm/parent-gate.py"
+        argv = [os.path.realpath(sys.executable), "-I", old_gate,
+                "--release-fd", "4", "--token", token,
+                "--target", "child-proxy.target.json", "--identity", "child-proxy.identity.json",
+                "--state-dir-fd", "5", "--disk-fd", "-1"]
+        with mock.patch.object(parent_state, "_trusted_parent_runtime_script",
+                               side_effect=lambda path, filename: path == old_gate and filename == "parent-gate.py"):
+            parent_state._validate_gate_invocation(
+                argv, os.path.realpath(sys.executable), token,
+                "child-proxy.target.json", "child-proxy.identity.json", [], "invalid fixture")
+            argv[2] = "/tmp/untrusted-parent-gate.py"
+            with self.assertRaises(parent_state.Refused):
+                parent_state._validate_gate_invocation(
+                    argv, os.path.realpath(sys.executable), token,
+                    "child-proxy.target.json", "child-proxy.identity.json", [], "invalid fixture")
 
     def test_status_rejects_supervisor_with_malformed_handoff_arguments(self):
         parent = parent_state.initialize(home=self.home)

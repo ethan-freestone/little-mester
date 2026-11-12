@@ -74,6 +74,83 @@ class SupervisorHandoffTests(unittest.TestCase):
                 proc.kill()
                 proc.wait(timeout=3)
 
+    def test_bounded_qemu_output_capture_is_private_and_caps_guest_serial(self):
+        log_path = pathlib.Path(self.temp.name) / "qemu-test.log"
+        log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
+        capture = parent_supervisor._BoundedOutputCapture(read_fd, log_fd, limit=256)
+        capture.start()
+        os.write(write_fd, b"guest-controlled-serial\n" * 1000)
+        os.close(write_fd)
+        self.assertTrue(capture.finish())
+        data = log_path.read_bytes()
+        self.assertLessEqual(len(data), 256)
+        self.assertTrue(data.endswith(parent_supervisor._BoundedOutputCapture._MARKER))
+        self.assertEqual(stat.S_IMODE(log_path.stat().st_mode), 0o600)
+
+    def test_bounded_ssh_probe_classifies_only_fixed_labels(self):
+        self.assertEqual(parent_supervisor._ssh_failure_label(
+            b"Host key verification failed.\n", 255, timed_out=False,
+            forward_connected=True), "SSH_HOST_KEY_REJECTED")
+        self.assertEqual(parent_supervisor._ssh_failure_label(
+            b"Permission denied (publickey).\n", 255, timed_out=False,
+            forward_connected=True), "SSH_AUTH_REJECTED")
+        self.assertEqual(parent_supervisor._ssh_failure_label(
+            b"Connection refused\n", 255, timed_out=False,
+            forward_connected=True), "GUEST_SSH_SERVICE_UNAVAILABLE")
+        self.assertEqual(parent_supervisor._ssh_failure_label(
+            b"guest-provided text", 255, timed_out=False,
+            forward_connected=False), "SSH_TRANSPORT_OR_HANDSHAKE_FAILED")
+
+    def test_bounded_ssh_probe_caps_stderr_and_reaps_timeout_child(self):
+        argv = [sys.executable, "-c", "import sys; sys.stderr.write('x' * 10000); sys.exit(255)"]
+        returncode, stderr, timed_out = parent_supervisor._run_bounded_ssh_attempt(
+            argv, [], timeout_seconds=2, output_limit=128)
+        self.assertEqual(returncode, 255)
+        self.assertEqual(len(stderr), 128)
+        self.assertFalse(timed_out)
+
+        slow = [sys.executable, "-c", "import time; time.sleep(5)"]
+        returncode, stderr, timed_out = parent_supervisor._run_bounded_ssh_attempt(
+            slow, [], timeout_seconds=0.05, output_limit=128)
+        self.assertEqual(returncode, -9)
+        self.assertEqual(stderr, b"")
+        self.assertTrue(timed_out)
+
+    def test_bounded_ssh_probe_deadline_covers_closed_stderr_and_inherited_writer(self):
+        closed = [sys.executable, "-c", "import os,time; os.close(2); time.sleep(0.2)"]
+        started = time.monotonic()
+        cpu_started = time.process_time()
+        _returncode, _stderr, timed_out = parent_supervisor._run_bounded_ssh_attempt(
+            closed, [], timeout_seconds=1, output_limit=128)
+        self.assertFalse(timed_out)
+        self.assertGreaterEqual(time.monotonic() - started, 0.15)
+        self.assertLess(time.process_time() - cpu_started, 0.1)
+
+        inherited = [sys.executable, "-c",
+                     "import os,time; pid=os.fork(); os._exit(0) if pid else None; time.sleep(0.3)"]
+        started = time.monotonic()
+        _returncode, _stderr, timed_out = parent_supervisor._run_bounded_ssh_attempt(
+            inherited, [], timeout_seconds=0.05, output_limit=128)
+        self.assertTrue(timed_out)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_completed_qemu_log_capture_error_does_not_block_verified_stop(self):
+        read_fd, write_fd = os.pipe2(os.O_CLOEXEC)
+        capture = parent_supervisor._BoundedOutputCapture(read_fd, os.open("/dev/full", os.O_WRONLY))
+        capture.start()
+        os.write(write_fd, b"bounded private log test\n")
+        os.close(write_fd)
+        self.assertTrue(capture.finish())
+        self.assertIsNotNone(capture.error)
+        parent_supervisor._CHILD_LOG_CAPTURES["fixture"] = capture
+        try:
+            with mock.patch("builtins.print"):
+                self.assertTrue(parent_supervisor._finish_child_log_capture("fixture"))
+            self.assertNotIn("fixture", parent_supervisor._CHILD_LOG_CAPTURES)
+        finally:
+            parent_supervisor._CHILD_LOG_CAPTURES.pop("fixture", None)
+
     def spawn_supervisor(self, *, send_commit=True):
         run_id = "0123456789abcdef0123456789abcdef"
         handoff_read, handoff_write = os.pipe2(os.O_CLOEXEC)
@@ -790,25 +867,27 @@ class SupervisorHandoffTests(unittest.TestCase):
             PARENT_READY_COMMAND=parent_state.PARENT_READY_COMMAND,
             exec_transition_status=lambda _transition: "TARGET",
             parent_ssh_plan=ssh_plan,
+            read_status=lambda **_kwargs: {"status": "STARTING",
+                                           "run_id": "0123456789abcdef0123456789abcdef"},
         )
 
-        def fake_run(argv, **kwargs):
-            calls.append((argv, kwargs))
-            return SimpleNamespace(returncode=0)
+        def fake_run(argv, descriptors, **kwargs):
+            calls.append((argv, descriptors, kwargs))
+            return 0, b"", False
 
         with (mock.patch.object(parent_supervisor, "_protected_tool", return_value="/usr/bin/ssh"),
-              mock.patch.object(parent_supervisor.subprocess, "run", side_effect=fake_run)):
+              mock.patch.object(parent_supervisor, "_read_private_port", return_value=23456),
+              mock.patch.object(parent_supervisor, "_loopback_forward_accepts", return_value=True),
+              mock.patch.object(parent_supervisor, "_run_bounded_ssh_attempt", side_effect=fake_run)):
             ready = parent_supervisor._wait_for_guest_readiness(
                 fake_state, None, {"target_path": "child-qemu.target.json"},
                 stop_requested=lambda: False, timeout_seconds=1)
         self.assertTrue(ready)
         self.assertEqual(len(calls), 1)
-        argv, kwargs = calls[0]
+        argv, descriptors, kwargs = calls[0]
         self.assertEqual(argv[-1], fake_state.PARENT_READY_COMMAND)
-        self.assertEqual(len(kwargs["pass_fds"]), 2)
-        self.assertTrue(all(fd >= 3 for fd in kwargs["pass_fds"]))
-        self.assertTrue(kwargs["close_fds"])
-        self.assertEqual(kwargs["timeout"], 8)
+        self.assertEqual(len(descriptors), 2)
+        self.assertTrue(all(fd >= 3 for fd in descriptors))
 
     def test_post_bind_record_failure_removes_only_new_socket(self):
         active_run = self.state_dir / "active-run.json"

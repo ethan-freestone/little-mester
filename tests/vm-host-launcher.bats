@@ -762,9 +762,14 @@ normalizer = text[start:end]
 root = pathlib.Path(sys.argv[2]) / "archive-install"
 root.mkdir(mode=0o700)
 archive = pathlib.Path(sys.argv[2]) / "permissive-install.tar"
-directories = ["lib", "lib/vm"]
+directories = [
+    "agent", "agent/opencode", "agent/opencode/plugins",
+    "agent/opencode/plugins/little-mester-exit-confirm", "lib", "lib/vm",
+]
 files = {
     "lab-vm": 0o777,
+    "agent/opencode/plugins/little-mester-exit-confirm/package.json": 0o666,
+    "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx": 0o666,
     "lib/vm/host-launcher.sh": 0o666,
     "lib/vm/cloud-init.sh": 0o666,
     "lib/vm/proxy.py": 0o666,
@@ -773,6 +778,12 @@ files = {
     "lib/vm/browser-auth-session.py": 0o666,
     "lib/vm/virtiofs-socket.py": 0o666,
     "lib/vm/guest-user-dirs.py": 0o666,
+    "lib/vm/parent-state.py": 0o666,
+    "lib/vm/parent-launcher.py": 0o666,
+    "lib/vm/parent-gate.py": 0o666,
+    "lib/vm/parent-supervisor.py": 0o666,
+    "lib/vm/parent-qemu.py": 0o666,
+    "lib/vm/parent-provision.py": 0o666,
 }
 with tarfile.open(archive, "w") as bundle:
     for directory in directories:
@@ -799,7 +810,7 @@ assert extract_command[-1] == "$INSTALL_ROOT"
 extract_command[-1] = str(root)
 subprocess.run(extract_command, input=archive.read_bytes(), check=True)
 
-expected_paths = [root, root / "lib", root / "lib/vm"] + [root / name for name in files]
+expected_paths = [root, *[root / name for name in directories]] + [root / name for name in files]
 for path in expected_paths:
     mode = stat.S_IMODE(path.lstat().st_mode)
     assert mode & (stat.S_IWGRP | stat.S_IWOTH) == 0, (path, oct(mode))
@@ -810,9 +821,8 @@ subprocess.run([
 
 expected_modes = {
     root: 0o755,
-    root / "lib": 0o755,
-    root / "lib/vm": 0o755,
     root / "lab-vm": 0o755,
+    **{root / name: 0o755 for name in directories},
     **{root / name: 0o644 for name in files if name != "lab-vm"},
 }
 for path, expected_mode in expected_modes.items():
@@ -821,7 +831,7 @@ for path, expected_mode in expected_modes.items():
     assert (info.st_uid, info.st_gid) == (os.getuid(), os.getgid()), path
     assert stat.S_IMODE(info.st_mode) == expected_mode, (path, oct(stat.S_IMODE(info.st_mode)))
 assert sorted(p.relative_to(root).as_posix() for p in root.rglob("*")) == sorted(
-    ["lib", "lib/vm", *files]
+    [*directories, *files]
 )
 print("RUNBOOK_ARCHIVE_PERMISSION_NORMALIZATION_OK")
 PY

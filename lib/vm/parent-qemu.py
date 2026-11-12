@@ -46,7 +46,7 @@ def build_qemu_argv(*, executable: str, seed_iso: str, ssh_port: int, proxy_port
         "-netdev", netdev,
         "-device", "virtio-net-pci,netdev=net0",
         "-display", "none",
-        "-serial", "null",
+        "-serial", "stdio",
         "-monitor", "none",
         "-qmp", f"unix:{qmp_socket},server=on,wait=off",
         "-no-reboot",

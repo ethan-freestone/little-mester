@@ -23,10 +23,12 @@ from contextlib import contextmanager
 PARENT_ID = "default"
 STATE_COMPONENTS = (".local", "state", "little-mester", "parent-v3", PARENT_ID)
 SCHEMA = 1
+TRUSTED_INSTALL_ROOT = pathlib.Path("/opt/little-mester/v3")
 PARENT_READY_COMMAND = (
-    "cloud-init status --long >/dev/null 2>&1 && test -x /usr/bin/tmux && "
-    "test -x /usr/local/bin/lm-opencode && "
-    "/usr/local/bin/opencode --version | grep -Fx 'opencode v2.2.5' >/dev/null"
+    "cloud-init status --long >/dev/null 2>&1 || exit 41; "
+    "test -x /usr/bin/tmux || exit 42; "
+    "test -x /usr/local/bin/lm-opencode || exit 43; "
+    "/usr/local/bin/opencode --version 2>/dev/null | grep -Fx 'opencode v2.2.5' >/dev/null || exit 44"
 )
 DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
@@ -640,6 +642,40 @@ def _valid_supervisor_options(options: list[str], home: str | os.PathLike | None
     return True
 
 
+def _trusted_parent_runtime_script(path: str, filename: str) -> bool:
+    """Accept current checkout code or a protected SHA-pinned installed runtime."""
+    current = pathlib.Path(__file__).with_name(filename).resolve()
+    candidate = pathlib.Path(path)
+    if candidate == current:
+        return True
+    try:
+        relative = candidate.relative_to(TRUSTED_INSTALL_ROOT)
+    except ValueError:
+        return False
+    if (not isinstance(path, str) or not candidate.is_absolute()
+            or path != os.path.abspath(path) or path != str(candidate)
+            or len(relative.parts) != 4
+            or not re.fullmatch(r"[0-9a-f]{40}", relative.parts[0])
+            or relative.parts[1:] != ("lib", "vm", filename)):
+        return False
+    current_path = pathlib.Path("/")
+    parts = candidate.parts[1:]
+    for index, component in enumerate(parts):
+        current_path /= component
+        try:
+            info = os.lstat(current_path)
+        except OSError:
+            return False
+        if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return False
+        if index == len(parts) - 1:
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o644:
+                return False
+        elif not stat.S_ISDIR(info.st_mode):
+            return False
+    return True
+
+
 def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: str | os.PathLike | None = None) -> dict:
     validate_parent(parent)
     if (not isinstance(run, dict) or type(run.get("schema")) is not int or run["schema"] != SCHEMA
@@ -669,7 +705,7 @@ def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: s
             or not identity["argv"][0].startswith("/")
             or os.path.realpath(identity["argv"][0]) != identity["exe"]
             or identity["argv"][1] != "-I"
-            or identity["argv"][2] != str(pathlib.Path(__file__).with_name("parent-supervisor.py").resolve())
+            or not _trusted_parent_runtime_script(identity["argv"][2], "parent-supervisor.py")
             or identity["argv"][3:7] != ["--parent-id", PARENT_ID, "--run-id", run["run_id"]]
             or identity["argv"][7] != "--lock-fd" or not identity["argv"][8].isdigit()
             or identity["argv"][9] != "--handoff-fd" or not identity["argv"][10].isdigit()
@@ -846,7 +882,9 @@ def _validate_gate_invocation(argv: list[str], executable: str, release_token: s
             or not all(isinstance(arg, str) for arg in argv)
             or not isinstance(executable, str) or not executable.startswith("/")
             or not argv[0].startswith("/") or os.path.realpath(argv[0]) != executable
-            or argv[1] != "-I" or pathlib.Path(argv[2]) != expected_gate
+            or argv[1] != "-I"
+            or (pathlib.Path(argv[2]) != expected_gate
+                and not _trusted_parent_runtime_script(argv[2], "parent-gate.py"))
             or argv[3] != "--release-fd" or not re.fullmatch(r"[0-9]{1,10}", argv[4])
             or int(argv[4]) > 2**31 - 1
             or argv[5] != "--token" or argv[6] != release_token

@@ -20,9 +20,70 @@ import stat
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 _CHILD_PROCESSES: dict[str, tuple[subprocess.Popen, dict | None]] = {}
+_CHILD_LOG_CAPTURES: dict[str, "_BoundedOutputCapture"] = {}
+QEMU_LOG_LIMIT_BYTES = 1024 * 1024
+
+
+class _BoundedOutputCapture:
+    """Drain one owned child's output to a private, fixed-size log."""
+
+    _MARKER = b"\n[bounded-log: output truncated]\n"
+
+    def __init__(self, read_fd: int, log_fd: int, limit: int = QEMU_LOG_LIMIT_BYTES):
+        self.read_fd = read_fd
+        self.log_fd = log_fd
+        self.limit = limit
+        self.error: OSError | None = None
+        self.thread = threading.Thread(target=self._run, name="parent-qemu-log", daemon=True)
+
+    @staticmethod
+    def _write_all(fd: int, payload: bytes) -> None:
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("bounded QEMU log write made no progress")
+            view = view[written:]
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def _run(self) -> None:
+        stored = 0
+        truncated = False
+        try:
+            content_limit = self.limit - len(self._MARKER)
+            while True:
+                chunk = os.read(self.read_fd, 65536)
+                if not chunk:
+                    break
+                remaining = content_limit - stored
+                if remaining > 0:
+                    portion = chunk[:remaining]
+                    self._write_all(self.log_fd, portion)
+                    stored += len(portion)
+                    truncated = len(chunk) > remaining
+                else:
+                    truncated = True
+            if truncated:
+                self._write_all(self.log_fd, self._MARKER)
+            os.fsync(self.log_fd)
+        except OSError as error:
+            self.error = error
+        finally:
+            for descriptor in (self.read_fd, self.log_fd):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+    def finish(self, timeout_seconds: float = 3.0) -> bool:
+        self.thread.join(timeout_seconds)
+        return not self.thread.is_alive()
 
 
 def _load_state():
@@ -392,34 +453,153 @@ def _wait_for_proxy(state, home: str | None, transition: dict, port_name: str,
     raise state.Refused("parent egress proxy did not become ready before its deadline")
 
 
+def _run_bounded_ssh_attempt(argv: list[str], descriptors: list[int],
+                             *, timeout_seconds: float = 8.0,
+                             output_limit: int = 8192) -> tuple[int, bytes, bool]:
+    """Run one owned SSH probe while retaining only a small diagnostic prefix."""
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, close_fds=True,
+                            pass_fds=tuple(descriptors))
+    assert proc.stderr is not None
+    fd = proc.stderr.fileno()
+    os.set_blocking(fd, False)
+    poller = select.poll()
+    poller.register(fd, select.POLLIN | select.POLLHUP | select.POLLERR)
+    output = bytearray()
+    eof = False
+    timed_out = False
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while not (eof and proc.poll() is not None):
+            if time.monotonic() >= deadline:
+                timed_out = True
+                if proc.poll() is None:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        pass
+                break
+            wait_ms = max(1, min(50, int((deadline - time.monotonic()) * 1000)))
+            for _fd, _events in poller.poll(wait_ms):
+                try:
+                    chunk = os.read(fd, 4096)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    eof = True
+                    poller.unregister(fd)
+                    break
+                remaining = output_limit - len(output)
+                if remaining > 0:
+                    output.extend(chunk[:remaining])
+        try:
+            return proc.wait(timeout=max(0.01, deadline - time.monotonic())), bytes(output), timed_out
+        except subprocess.TimeoutExpired:
+            return proc.poll() if proc.poll() is not None else -signal.SIGKILL, bytes(output), True
+    finally:
+        proc.stderr.close()
+        if proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+
+
+def _ssh_failure_label(stderr: bytes, returncode: int, *, timed_out: bool,
+                       forward_connected: bool) -> str:
+    """Map untrusted SSH diagnostics to a small fixed label set; never log raw text."""
+    text = stderr.decode("utf-8", "ignore").lower()
+    if "host key verification failed" in text or "remote host identification has changed" in text:
+        return "SSH_HOST_KEY_REJECTED"
+    if "permission denied" in text and "publickey" in text:
+        return "SSH_AUTH_REJECTED"
+    if timed_out:
+        return "SSH_CLIENT_ATTEMPT_TIMED_OUT"
+    if "connection refused" in text:
+        return "GUEST_SSH_SERVICE_UNAVAILABLE" if forward_connected else "SSH_FORWARD_NOT_LISTENING"
+    if "connection timed out" in text or "operation timed out" in text:
+        return "GUEST_SSH_SERVICE_UNRESPONSIVE" if forward_connected else "SSH_FORWARD_UNRESPONSIVE"
+    if returncode == 255:
+        return "SSH_TRANSPORT_OR_HANDSHAKE_FAILED"
+    return {
+        41: "CLOUD_INIT_STATUS_FAILED",
+        42: "GUEST_TMUX_MISSING",
+        43: "GUEST_LAUNCHER_MISSING",
+        44: "GUEST_OPENCODE_VERSION_MISMATCH",
+    }.get(returncode, "GUEST_READINESS_COMMAND_FAILED")
+
+
+def _loopback_forward_accepts(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _finish_child_log_capture(role: str) -> bool:
+    capture = _CHILD_LOG_CAPTURES.get(role)
+    if capture is None:
+        return True
+    if not capture.finish():
+        return False
+    _CHILD_LOG_CAPTURES.pop(role, None)
+    if capture.error is not None:
+        print(f"REFUSED: bounded {role} diagnostic log is incomplete", file=sys.stderr)
+    return True
+
+
 def _wait_for_guest_readiness(state, home: str | None, qemu_transition: dict,
                               *, stop_requested, timeout_seconds: float = 900.0) -> bool:
     """Poll bounded, host-key-pinned SSH readiness while verifying exact QEMU identity."""
     ssh = _protected_tool("ssh", ("/usr/bin/ssh",))
     deadline = time.monotonic() + timeout_seconds
     command = state.PARENT_READY_COMMAND
+    status = state.read_status(home=home)
+    if not isinstance(status.get("run_id"), str) or not re.fullmatch(r"[0-9a-f]{32}", status["run_id"]):
+        raise state.Refused("parent readiness run identity is unavailable")
+    log_name = f"qemu-{status['run_id']}.log"
+    port = _read_private_port(state, home, "ssh_port")
+    last_failure = "SSH_FORWARD_NOT_LISTENING"
+    attempts = 0
     while time.monotonic() < deadline:
         if stop_requested():
-            return False
-        if state.exec_transition_status(qemu_transition) != "TARGET":
-            raise state.Refused("QEMU identity changed before guest SSH readiness")
+            raise state.Refused(f"READINESS_CANCELLED_BY_SUPERVISOR_STOP last={last_failure} attempts={attempts}; "
+                                f"private diagnostics={log_name}")
+        phase = state.exec_transition_status(qemu_transition)
+        if phase != "TARGET":
+            if phase == "STOPPED":
+                owned = _CHILD_PROCESSES.get("qemu")
+                exit_code = owned[0].poll() if owned is not None else "unknown"
+                raise state.Refused(f"QEMU_PROCESS_EXITED_BEFORE_READINESS exit={exit_code}; "
+                                    f"private diagnostics={log_name}")
+            raise state.Refused("QEMU_IDENTITY_AMBIGUOUS_BEFORE_READINESS")
+        capture = _CHILD_LOG_CAPTURES.get("qemu")
+        if capture is not None and capture.error is not None:
+            raise state.Refused("BOUNDED_QEMU_DIAGNOSTIC_CAPTURE_FAILED")
+        if not _loopback_forward_accepts(port):
+            last_failure = "SSH_FORWARD_NOT_LISTENING"
+            time.sleep(1)
+            continue
         argv, descriptors = state.parent_ssh_plan(home=home, allow_starting=True,
                                                    remote_command=command, tty=False)
+        attempts += 1
         try:
-            result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL, close_fds=True,
-                                    pass_fds=tuple(descriptors), timeout=8, check=False)
-        except subprocess.TimeoutExpired:
-            result = None
+            returncode, stderr, timed_out = _run_bounded_ssh_attempt(argv, descriptors)
         finally:
             for descriptor in descriptors:
                 os.close(descriptor)
-        if result is not None and result.returncode == 0:
+        if returncode == 0:
             if state.exec_transition_status(qemu_transition) != "TARGET":
-                raise state.Refused("QEMU identity changed during guest SSH readiness")
+                raise state.Refused("QEMU_IDENTITY_CHANGED_DURING_READINESS")
             return True
+        last_failure = _ssh_failure_label(stderr, returncode, timed_out=timed_out,
+                                          forward_connected=True)
         time.sleep(1)
-    return False
+    raise state.Refused(f"GUEST_READINESS_DEADLINE_EXPIRED last={last_failure} attempts={attempts}; "
+                        f"private diagnostics={log_name}")
 
 
 def _start_parent_children(state, args, home: str | None, *, stop_requested) -> None:
@@ -474,7 +654,8 @@ def _start_parent_children(state, args, home: str | None, *, stop_requested) -> 
             proxy_port=proxy_port, qmp_socket=qmp_path)
         qemu_transition = _spawn_gated_target(
             state, lock_fd=args.lock_fd, role="qemu", executable=qemu,
-            argv=qemu_argv, home=home, disk_fd=disk_fd)
+            argv=qemu_argv, home=home, disk_fd=disk_fd,
+            bounded_log_name=f"qemu-{args.run_id}.log")
     finally:
         os.close(disk_fd)
 
@@ -487,13 +668,15 @@ def _start_parent_children(state, args, home: str | None, *, stop_requested) -> 
 
 def _spawn_gated_target(state, *, lock_fd: int, role: str, executable: str,
                         argv: list[str], home: str | None = None,
-                        disk_fd: int = -1) -> dict:
+                        disk_fd: int = -1, bounded_log_name: str | None = None) -> dict:
     """Borrow descriptors; spawn only after durably recording the gate transition."""
     if (not isinstance(role, str) or not re.fullmatch(r"[a-z0-9-]{1,48}", role)
             or not isinstance(executable, str) or not executable.startswith("/")
             or os.path.realpath(executable) != executable
             or not isinstance(argv, list) or not argv or argv[0] != executable
             or not all(isinstance(item, str) for item in argv)
+            or bounded_log_name is not None and
+               (role != "qemu" or not re.fullmatch(r"qemu-[0-9a-f]{32}\.log", bounded_log_name))
             or type(lock_fd) is not int or lock_fd < 3
             or type(disk_fd) is not int or disk_fd != -1 and disk_fd < 3
             or disk_fd >= 0 and disk_fd == lock_fd):
@@ -504,8 +687,10 @@ def _spawn_gated_target(state, *, lock_fd: int, role: str, executable: str,
     if directory_fd is None:
         raise state.Refused("parent state is absent")
     reader = writer = -1
+    output_read_fd = output_write_fd = log_fd = -1
     proc = None
     transition = None
+    log_capture = None
     durable = False
     completed = False
     target_name = f"child-{role}.target.json"
@@ -543,9 +728,27 @@ def _spawn_gated_target(state, *, lock_fd: int, role: str, executable: str,
                      "--target", target_name, "--identity", identity_name,
                      "--state-dir-fd", state_fd_arg, "--disk-fd", disk_fd_arg]
         pass_fds = tuple(dict.fromkeys(fd for fd in (reader, directory_fd, disk_fd) if fd >= 0))
-        proc = subprocess.Popen(gate_argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, close_fds=True, pass_fds=pass_fds,
+        child_stdout = child_stderr = subprocess.DEVNULL
+        if bounded_log_name is not None:
+            log_fd = os.open(bounded_log_name,
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                             0o600, dir_fd=directory_fd)
+            log_info = os.fstat(log_fd)
+            if (not stat.S_ISREG(log_info.st_mode) or log_info.st_uid != os.getuid()
+                    or stat.S_IMODE(log_info.st_mode) != 0o600 or log_info.st_nlink != 1):
+                raise state.Refused("bounded QEMU log file is unsafe")
+            output_read_fd, output_write_fd = os.pipe2(os.O_CLOEXEC)
+            log_capture = _BoundedOutputCapture(output_read_fd, log_fd)
+            child_stdout = child_stderr = output_write_fd
+        proc = subprocess.Popen(gate_argv, stdin=subprocess.DEVNULL, stdout=child_stdout,
+                                stderr=child_stderr, close_fds=True, pass_fds=pass_fds,
                                 start_new_session=True)
+        if output_write_fd >= 0:
+            os.close(output_write_fd)
+            output_write_fd = -1
+            log_capture.start()
+            _CHILD_LOG_CAPTURES[role] = log_capture
+            output_read_fd = log_fd = -1
         _CHILD_PROCESSES[role] = (proc, None)
         os.close(reader)
         reader = -1
@@ -584,7 +787,7 @@ def _spawn_gated_target(state, *, lock_fd: int, role: str, executable: str,
             time.sleep(0.01)
         raise state.Refused("gated child did not reach its exact target identity")
     finally:
-        for fd in (reader, writer):
+        for fd in (reader, writer, output_read_fd, output_write_fd, log_fd):
             if fd >= 0:
                 os.close(fd)
         os.close(directory_fd)
@@ -603,8 +806,19 @@ def _spawn_gated_target(state, *, lock_fd: int, role: str, executable: str,
                     proc.wait(timeout=8)
                 except subprocess.TimeoutExpired:
                     cleanup_ok = False
-            if cleanup_ok and _CHILD_PROCESSES.get(role, (None, None))[0] is proc:
+            capture_finished = log_capture is None
+            if cleanup_ok and log_capture is not None:
+                capture_finished = log_capture.finish()
+                if capture_finished:
+                    _CHILD_LOG_CAPTURES.pop(role, None)
+                    if log_capture.error is not None:
+                        print("REFUSED: bounded QEMU diagnostic log is incomplete", file=sys.stderr)
+            if cleanup_ok and capture_finished and _CHILD_PROCESSES.get(role, (None, None))[0] is proc:
                 _CHILD_PROCESSES.pop(role, None)
+        elif log_capture is not None and role in _CHILD_LOG_CAPTURES:
+            # On successful gated startup the log remains live for QEMU's
+            # lifetime and is finalized only after its exact process exits.
+            pass
 
 
 def _stop_gated_target(state, role: str, transition: dict, *, term_grace_ms: int = 5000,
@@ -626,6 +840,8 @@ def _stop_gated_target(state, role: str, transition: dict, *, term_grace_ms: int
         try:
             proc.wait(timeout=(term_grace_ms + settle_ms) / 1000 + 1)
         except subprocess.TimeoutExpired:
+            return "AMBIGUOUS"
+        if not _finish_child_log_capture(role):
             return "AMBIGUOUS"
         if _CHILD_PROCESSES.get(role, (None, None))[0] is proc:
             _CHILD_PROCESSES.pop(role, None)
@@ -734,6 +950,8 @@ def _shutdown_running_qemu(state, args, home) -> None:
         phase = state.exec_transition_status(transition)
         if phase == "STOPPED":
             proc.wait()
+            if not _finish_child_log_capture("qemu"):
+                raise state.Refused("QEMU diagnostic output stream did not close after exact process exit")
             _CHILD_PROCESSES.pop("qemu", None)
             for role in ("metrics", "proxy"):
                 helper = _CHILD_PROCESSES.get(role)
@@ -846,6 +1064,27 @@ def _finalize(state, args, home, *, mark_stopped: bool = True) -> None:
         os.close(args.lock_fd)
 
 
+def _announce_private_qemu_log(state, run_id: str, home: str | None) -> None:
+    name = f"qemu-{run_id}.log"
+    try:
+        directory_fd = state._open_directory_chain(create=False, home_override=home)
+    except (OSError, state.Refused):
+        return
+    if directory_fd is None:
+        return
+    try:
+        try:
+            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError:
+            return
+        if (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                and stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1):
+            print(f"parent bounded QEMU/serial diagnostics retained privately as {name}",
+                  file=sys.stderr)
+    finally:
+        os.close(directory_fd)
+
+
 def run(args) -> int:
     state = _load_state()
     os.umask(0o077)
@@ -897,6 +1136,7 @@ def run(args) -> int:
             startup_error = error
             print(f"REFUSED: parent startup/readiness failed: {error}", file=sys.stderr)
         if startup_error is not None:
+            _announce_private_qemu_log(state, args.run_id, home)
             try:
                 _stop_starting_children(state, home)
             except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, state.Refused) as cleanup_error:
