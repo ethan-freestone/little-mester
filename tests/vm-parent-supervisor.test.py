@@ -28,6 +28,8 @@ from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+PROTECTED_FIXTURE_ROOT = pathlib.Path(
+    os.environ.get("LM_PROTECTED_FIXTURE_ROOT", "/usr/local"))
 SPEC = importlib.util.spec_from_file_location("parent_state", ROOT / "lib/vm/parent-state.py")
 parent_state = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(parent_state)
@@ -507,8 +509,27 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
 
     def test_lab_vm_worker_uses_separate_script_fd_and_preserves_terminal_stdin(self):
         sudo = shutil.which("sudo")
+        ci = os.environ.get("GITHUB_ACTIONS") == "true"
+
+        def unavailable(message):
+            if ci:
+                self.fail(f"CI protected launcher fixture prerequisite unavailable: {message}")
+            self.skipTest(f"local protected launcher fixture prerequisite unavailable: {message}")
+
         if not sudo or subprocess.run([sudo, "-n", "true"], check=False).returncode:
-            self.skipTest("root-owned fixture installation requires non-interactive sudo")
+            unavailable("non-interactive sudo is required")
+        if (not PROTECTED_FIXTURE_ROOT.is_absolute()
+                or str(PROTECTED_FIXTURE_ROOT) != os.path.normpath(str(PROTECTED_FIXTURE_ROOT))):
+            self.fail("protected fixture root must be an absolute normalized path")
+        for path in reversed((PROTECTED_FIXTURE_ROOT, *PROTECTED_FIXTURE_ROOT.parents)):
+            try:
+                info = path.lstat()
+            except OSError as error:
+                unavailable(f"protected ancestor is unavailable: {path} ({error})")
+            if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                    or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                    or not info.st_mode & stat.S_IXOTH):
+                unavailable(f"ancestor is not a traversable protected root directory: {path}")
 
         with tempfile.TemporaryDirectory() as source_temp:
             source_root = pathlib.Path(source_temp)
@@ -546,11 +567,16 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                     destination.write_text("fixture dependency\n")
                     destination.chmod(0o644)
 
-            install_result = subprocess.run(
-                [sudo, "-n", "/usr/bin/mktemp", "-d", "/opt/lm-vm-ssh-pty.XXXXXX"],
-                check=True, capture_output=True, text=True, timeout=5)
+            template = str(PROTECTED_FIXTURE_ROOT / "lm-vm-ssh-pty.XXXXXX")
+            try:
+                install_result = subprocess.run(
+                    [sudo, "-n", "/usr/bin/mktemp", "-d", template],
+                    check=True, capture_output=True, text=True, timeout=5)
+            except (OSError, subprocess.SubprocessError) as error:
+                self.fail(f"could not create protected launcher fixture under {PROTECTED_FIXTURE_ROOT}: {error}")
             install_root = pathlib.Path(install_result.stdout.strip())
             try:
+                self.assertEqual(install_root.parent, PROTECTED_FIXTURE_ROOT)
                 subprocess.run([sudo, "-n", "/usr/bin/chmod", "0755", str(install_root)],
                                check=True, timeout=5)
                 archive = io.BytesIO()
@@ -573,6 +599,12 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                     self.assertEqual(info.st_uid, 0, f"fixture path is not root-owned: {path}")
                     self.assertFalse(info.st_mode & (stat.S_IWGRP | stat.S_IWOTH),
                                      f"fixture path is group/world writable: {path}")
+                    if path in install_root.parents or path.is_dir():
+                        self.assertTrue(stat.S_ISDIR(info.st_mode), f"fixture directory type is invalid: {path}")
+                        self.assertTrue(info.st_mode & stat.S_IXOTH,
+                                        f"fixture directory is not traversable: {path}")
+                    else:
+                        self.assertTrue(stat.S_ISREG(info.st_mode), f"fixture file type is invalid: {path}")
 
                 master_fd, slave_fd = pty.openpty()
                 child = subprocess.Popen(
@@ -608,8 +640,12 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                             child.wait(timeout=2)
                     os.close(master_fd)
             finally:
-                subprocess.run([sudo, "-n", "/usr/bin/rm", "-rf", "--", str(install_root)],
-                               check=True, timeout=5)
+                if (install_root.parent == PROTECTED_FIXTURE_ROOT
+                        and install_root.name.startswith("lm-vm-ssh-pty.")):
+                    subprocess.run([sudo, "-n", "/usr/bin/rm", "-rf", "--", str(install_root)],
+                                   check=True, timeout=5)
+                else:
+                    self.fail(f"refusing to clean unexpected protected fixture path: {install_root}")
 
     def test_bounded_ssh_probe_caps_stderr_and_reaps_timeout_child(self):
         argv = [sys.executable, "-c", "import sys; sys.stderr.write('x' * 10000); sys.exit(255)"]

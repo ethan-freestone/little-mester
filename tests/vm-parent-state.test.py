@@ -261,9 +261,8 @@ class ParentStateTests(unittest.TestCase):
             return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
 
         def check(override=None, candidate=script, filename="parent-supervisor.py", raw=None):
-            with (mock.patch.object(parent_state, "TRUSTED_INSTALL_ROOT", install_root),
-                  mock.patch.object(parent_state.os, "lstat",
-                                    side_effect=lambda path: root_owned_lstat(path, override=override))):
+            with mock.patch.object(parent_state.os, "lstat",
+                                   side_effect=lambda path: root_owned_lstat(path, override=override)):
                 return parent_state._trusted_parent_runtime_script(
                     str(candidate) if raw is None else raw, filename)
 
@@ -278,6 +277,34 @@ class ParentStateTests(unittest.TestCase):
         self.assertFalse(check(raw=str(script).replace("/lib/vm/", "/lib//vm/")))
         self.assertFalse(check(raw=str(script).replace("/lib/vm/", "/lib/./vm/")))
         self.assertFalse(check(raw=str(script) + "/"))
+
+    def test_installed_runtime_root_derives_from_its_own_prefix(self):
+        for prefix in (pathlib.Path("/opt/little-mester"),
+                       pathlib.Path("/usr/local/share/little-mester")):
+            source = prefix / "v3" / ("c" * 40) / "lib/vm/parent-state.py"
+            self.assertEqual(parent_state._installed_runtime_root(source), prefix / "v3")
+        self.assertIsNone(parent_state._installed_runtime_root(
+            ROOT / "lib/vm/parent-state.py"))
+
+    def test_previous_sha_is_trusted_from_any_protected_configured_prefix(self):
+        from types import SimpleNamespace
+
+        prefix_root = pathlib.Path("/srv/little-mester/v3")
+        sha_root = prefix_root / ("d" * 40)
+        source = sha_root / "lib/vm/parent-supervisor.py"
+
+        def protected_lstat(path):
+            candidate = pathlib.Path(path)
+            if candidate.name == "parent-supervisor.py":
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0)
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+
+        with mock.patch.object(parent_state.os, "lstat", side_effect=protected_lstat):
+            self.assertTrue(parent_state._trusted_parent_runtime_script(
+                str(source), "parent-supervisor.py"))
+            other_prefix = pathlib.Path("/opt/little-mester/v3") / ("e" * 40) / "lib/vm/parent-supervisor.py"
+            self.assertTrue(parent_state._trusted_parent_runtime_script(
+                str(other_prefix), "parent-supervisor.py"))
 
     def test_stopping_tombstone_from_previous_trusted_candidate_projects_stopped(self):
         parent = parent_state.initialize(home=self.home)

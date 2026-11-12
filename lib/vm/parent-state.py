@@ -24,7 +24,23 @@ from contextlib import contextmanager
 PARENT_ID = "default"
 STATE_COMPONENTS = (".local", "state", "little-mester", "parent-v3", PARENT_ID)
 SCHEMA = 1
-TRUSTED_INSTALL_ROOT = pathlib.Path("/opt/little-mester/v3")
+
+
+def _installed_runtime_root(source: str | os.PathLike | None = None,
+                            filename: str = "parent-state.py") -> pathlib.Path | None:
+    """Derive the v3 prefix from a runtime's own immutable installation path."""
+    path = pathlib.Path(__file__ if source is None else source)
+    if source is None:
+        path = path.resolve()
+    if (path.name != filename or path.parent.name != "vm"
+            or path.parent.parent.name != "lib" or not path.is_absolute()):
+        return None
+    install = path.parents[2]
+    if not re.fullmatch(r"[0-9a-f]{40}", install.name) or install.parent.name != "v3":
+        return None
+    return install.parent
+
+
 PARENT_READY_COMMAND = (
     "cloud-init status --long >/dev/null 2>&1 || exit 41; "
     "test -x /usr/bin/tmux || exit 42; "
@@ -935,8 +951,11 @@ def _trusted_parent_runtime_script(path: str, filename: str) -> bool:
     candidate = pathlib.Path(path)
     if candidate == current:
         return True
+    trusted_root = _installed_runtime_root(candidate, filename)
+    if trusted_root is None:
+        return False
     try:
-        relative = candidate.relative_to(TRUSTED_INSTALL_ROOT)
+        relative = candidate.relative_to(trusted_root)
     except ValueError:
         return False
     if (not isinstance(path, str) or not candidate.is_absolute()

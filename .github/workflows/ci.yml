@@ -68,6 +68,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y openssh-server
       - name: Run parent suites
         run: |
+          python3 tests/vm-owner-acceptance.test.py
           for test in tests/vm-parent-*.test.py; do
             python3 "$test"
           done

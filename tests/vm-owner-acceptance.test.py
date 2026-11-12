@@ -1,3 +1,4 @@
+import argparse
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -60,7 +61,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
             _, user_root, runtime, fixture_lstat = self.runtime_fixture(temporary)
             runtime.mkdir(mode=0o700)
             with mock.patch.object(acceptance.os, "lstat", side_effect=fixture_lstat):
-                with self.assertRaisesRegex(acceptance.GateError, "ownership, type, or mode"):
+                with self.assertRaisesRegex(acceptance.GateError, "owner does not match"):
                     acceptance.check_directory_chain(runtime, os.getuid(), 0o700)
 
     def test_protected_install_chain_accepts_root_owned_0755_final_directory(self):
@@ -93,12 +94,10 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 for path in paths:
                     os.chmod(path, 0o755)
                 bad = paths[2]
-                real_lstat = os.lstat
 
                 def unsafe_lstat(path):
                     path = pathlib.Path(path)
-                    info = real_lstat(path)
-                    mode = info.st_mode
+                    mode = stat.S_IFDIR | 0o755
                     uid = 0
                     if reason == "symlink" and path == bad:
                         mode = stat.S_IFLNK | 0o777
@@ -113,12 +112,51 @@ class OwnerAcceptanceTests(unittest.TestCase):
                     elif reason == "no-traverse" and path == bad:
                         mode &= ~stat.S_IXOTH
                     elif reason == "final-mode" and path == final:
-                        mode = (mode & ~stat.S_IMODE(mode)) | stat.S_IFDIR | 0o750
+                        mode = stat.S_IFDIR | 0o751
                     return SimpleNamespace(st_mode=mode, st_uid=uid)
 
                 with mock.patch.object(acceptance.os, "lstat", side_effect=unsafe_lstat):
-                    with self.assertRaises(acceptance.GateError):
+                    expected = {
+                        "symlink": "contains a symlink",
+                        "non-directory": "not a directory",
+                        "group-writable": "group-writable",
+                        "world-writable": "world-writable",
+                        "wrong-owner": "owner does not match",
+                        "no-traverse": "not traversable",
+                        "final-mode": "normalized mode",
+                    }[reason]
+                    with self.assertRaisesRegex(acceptance.GateError, expected):
                         acceptance.check_directory_chain(final, 0, 0o755)
+
+    def test_install_prefix_defaults_and_accepts_only_normalized_absolute_paths(self):
+        sha = "a" * 40
+        self.assertEqual(acceptance.install_path(sha), acceptance.INSTALL_PARENT / sha)
+        self.assertEqual(acceptance.install_path(sha, pathlib.Path("/usr/local/little-mester")),
+                         pathlib.Path("/usr/local/little-mester/v3") / sha)
+        self.assertEqual(acceptance.install_prefix("/srv/little-mester"),
+                         pathlib.Path("/srv/little-mester"))
+        for invalid in ("relative/prefix", "/", "/usr/local/../tmp", "/usr/local/./tmp"):
+            with self.subTest(prefix=invalid), self.assertRaises(argparse.ArgumentTypeError):
+                acceptance.install_prefix(invalid)
+
+    def test_cli_install_uses_requested_prefix(self):
+        sha = "a" * 40
+        prefix = pathlib.Path("/srv/little-mester")
+        with tempfile.TemporaryDirectory() as temporary:
+            report_dir = pathlib.Path(temporary) / "attempt"
+            report_dir.mkdir(mode=0o700)
+            with (
+                mock.patch.object(acceptance, "new_report_dir", return_value=report_dir),
+                mock.patch.object(acceptance, "candidate_commit"),
+                mock.patch.object(acceptance, "install_candidate",
+                                  return_value=prefix / "v3" / sha) as install,
+                mock.patch.object(acceptance, "installed_preflight"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                result = acceptance.main([
+                    "--install", "--sha", sha, "--prefix", str(prefix), "--repo", str(ROOT)])
+            self.assertEqual(result, 0)
+            install.assert_called_once_with(ROOT, sha, prefix)
 
     def test_runtime_validator_accepts_protected_prefix_and_private_descendants(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -449,9 +487,10 @@ class OwnerAcceptanceTests(unittest.TestCase):
         worker = acceptance.INSTALL_WORKER
         substitutions = (
             ('or os.geteuid() != 0', 'or False'),
-            ('parts = ("opt", "little-mester", "v3")\nflags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC\nfd = os.open("/", flags)',
-             'parts = ()\nflags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC\nfd = os.open(sys.argv[3], flags)'),
+            ('fd = os.open("/", flags)', 'fd = os.open(sys.argv[4], flags)'),
             ('if root.st_uid != 0 or root.st_mode & (stat.S_IWGRP | stat.S_IWOTH):', 'if False:'),
+            ('or info.st_uid != 0', 'or False'),
+            ('os.fchown(child, 0, 0)', 'pass'),
             ('os.fchown(target, 0, 0)', 'pass'),
             ('os.fchown(next_fd, 0, 0)', 'pass'),
             ('os.fchown(stream.fileno(), 0, 0)', 'pass'),
@@ -460,17 +499,21 @@ class OwnerAcceptanceTests(unittest.TestCase):
             self.assertIn(original, worker)
             worker = worker.replace(original, replacement, 1)
         with tempfile.TemporaryDirectory() as temporary:
-            installed = subprocess.run(
-                [sys.executable, "-I", "-c", worker, head, acceptance.installer_manifest(), temporary],
-                input=result.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-            )
-            self.assertEqual(installed.returncode, 0, installed.stderr.decode("utf-8", "replace"))
-            self.assertEqual(installed.stdout, b"PINNED_INSTALL_CREATED\n")
-            target = pathlib.Path(temporary) / head
-            observed = {path.relative_to(target).as_posix() for path in target.rglob("*")}
-            self.assertEqual(observed, expected)
-            for name, mode in manifest["files"].items():
-                self.assertEqual(stat.S_IMODE(os.lstat(target / name).st_mode), mode)
+            for prefix in ("/prefix-one", "/prefix-two"):
+                with self.subTest(prefix=prefix):
+                    installed = subprocess.run(
+                        [sys.executable, "-I", "-c", worker, head,
+                         acceptance.installer_manifest(), prefix, temporary],
+                        input=result.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                    )
+                    self.assertEqual(installed.returncode, 0,
+                                     installed.stderr.decode("utf-8", "replace"))
+                    self.assertEqual(installed.stdout, b"PINNED_INSTALL_CREATED\n")
+                    target = pathlib.Path(temporary) / prefix.lstrip("/") / "v3" / head
+                    observed = {path.relative_to(target).as_posix() for path in target.rglob("*")}
+                    self.assertEqual(observed, expected)
+                    for name, mode in manifest["files"].items():
+                        self.assertEqual(stat.S_IMODE(os.lstat(target / name).st_mode), mode)
 
     def test_default_operation_is_read_only_preflight_and_reports_blocked_install(self):
         with tempfile.TemporaryDirectory() as temporary:

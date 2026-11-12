@@ -144,8 +144,20 @@ def candidate_commit(repo: pathlib.Path, sha: str) -> None:
         raise GateError("BLOCKED", "running acceptance runner does not match the pinned candidate")
 
 
-def install_path(sha: str) -> pathlib.Path:
-    return INSTALL_PARENT / sha
+def install_path(sha: str, prefix: pathlib.Path | None = None) -> pathlib.Path:
+    return install_parent(prefix) / sha
+
+
+def install_parent(prefix: pathlib.Path | None = None) -> pathlib.Path:
+    return INSTALL_PARENT if prefix is None else prefix / "v3"
+
+
+def install_prefix(value: str) -> pathlib.Path:
+    path = pathlib.PurePosixPath(value)
+    if (not path.is_absolute() or str(path) != value or path == pathlib.PurePosixPath("/")
+            or ".." in path.parts):
+        raise argparse.ArgumentTypeError("prefix must be an absolute normalized non-root path")
+    return pathlib.Path(value)
 
 
 def installer_manifest() -> str:
@@ -170,10 +182,18 @@ def check_directory_chain(path: pathlib.Path, final_uid: int, final_mode: int) -
         last = index == len(path.parts[1:]) - 1
         expected_uid = final_uid if last else 0
         search_bit = stat.S_IXUSR if info.st_uid == os.getuid() else stat.S_IXOTH
-        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-                or info.st_uid != expected_uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-                or not info.st_mode & search_bit):
-            raise GateError("BLOCKED", "protected directory ownership, type, or mode check failed")
+        if stat.S_ISLNK(info.st_mode):
+            raise GateError("BLOCKED", "protected directory path contains a symlink")
+        if not stat.S_ISDIR(info.st_mode):
+            raise GateError("BLOCKED", "protected path component is not a directory")
+        if info.st_uid != expected_uid:
+            raise GateError("BLOCKED", "protected directory owner does not match the required UID")
+        if info.st_mode & stat.S_IWGRP:
+            raise GateError("BLOCKED", "protected directory is group-writable")
+        if info.st_mode & stat.S_IWOTH:
+            raise GateError("BLOCKED", "protected directory is world-writable")
+        if not info.st_mode & search_bit:
+            raise GateError("BLOCKED", "protected directory is not traversable")
         if last and stat.S_IMODE(info.st_mode) != final_mode:
             raise GateError("BLOCKED", "protected directory mode differs from the normalized mode")
 
@@ -230,8 +250,9 @@ def check_private_runtime_chain(
         check_private_directory(current, uid)
 
 
-def verify_install(repo: pathlib.Path, sha: str) -> pathlib.Path:
-    root = install_path(sha)
+def verify_install(repo: pathlib.Path, sha: str,
+                   prefix: pathlib.Path | None = None) -> pathlib.Path:
+    root = install_path(sha, prefix)
     check_directory_chain(root, 0, 0o755)
     expected = set(INSTALL_FILES) | INSTALL_DIRS
     observed: set[str] = set()
@@ -266,9 +287,13 @@ def verify_install(repo: pathlib.Path, sha: str) -> pathlib.Path:
 INSTALL_WORKER = r'''import json, os, pathlib, re, stat, sys, tarfile
 
 sha = sys.argv[1]
-if not re.fullmatch(r"[0-9a-f]{40}", sha) or os.geteuid() != 0:
+prefix_text = sys.argv[3]
+prefix = pathlib.PurePosixPath(prefix_text)
+if (not re.fullmatch(r"[0-9a-f]{40}", sha) or os.geteuid() != 0
+        or not prefix.is_absolute() or str(prefix) != prefix_text
+        or prefix == pathlib.PurePosixPath("/") or ".." in prefix.parts):
     raise SystemExit("REFUSED: invalid pinned install request")
-parts = ("opt", "little-mester", "v3")
+parts = prefix.parts[1:] + ("v3",)
 flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 fd = os.open("/", flags)
 try:
@@ -370,8 +395,9 @@ finally:
 '''
 
 
-def install_candidate(repo: pathlib.Path, sha: str) -> pathlib.Path:
-    target = install_path(sha)
+def install_candidate(repo: pathlib.Path, sha: str,
+                      prefix: pathlib.Path | None = None) -> pathlib.Path:
+    target = install_path(sha, prefix)
     if target.exists() or target.is_symlink():
         raise GateError("BLOCKED", "candidate installation path already exists; preserving it")
     sudo = protected_executable(repo, SUDO)
@@ -393,7 +419,8 @@ def install_candidate(repo: pathlib.Path, sha: str) -> pathlib.Path:
     assert archive.stdout is not None
     try:
         worker = subprocess.run(
-            [sudo, "-n", PYTHON, "-I", "-c", INSTALL_WORKER, sha, installer_manifest()],
+            [sudo, "-n", PYTHON, "-I", "-c", INSTALL_WORKER, sha,
+             installer_manifest(), str(prefix if prefix is not None else INSTALL_PARENT.parent)],
             stdin=archive.stdout,
             env=clean_env(),
             check=False,
@@ -407,7 +434,7 @@ def install_candidate(repo: pathlib.Path, sha: str) -> pathlib.Path:
     archive_status = archive.wait()
     if worker.returncode or archive_status:
         raise GateError("FAIL", "protected installation failed; any partial target is preserved")
-    return verify_install(repo, sha)
+    return verify_install(repo, sha, prefix)
 
 
 def runtime_dir() -> pathlib.Path:
@@ -722,6 +749,8 @@ def parser() -> argparse.ArgumentParser:
     for name in ("preflight", "install", "storage-proof", "run", "verify-cleanup", "all"):
         modes.add_argument(f"--{name}", action="store_true", dest=name.replace("-", "_"))
     p.add_argument("--sha", required=True, type=full_sha, help="full lowercase 40-character candidate commit SHA")
+    p.add_argument("--prefix", type=install_prefix,
+                   help="protected root-owned install prefix (default: /opt/little-mester)")
     p.add_argument("--repo", default=str(ROOT), help="repository containing the exact candidate commit")
     p.add_argument("--workspace", help="existing owner-provisioned bounded filesystem root")
     p.add_argument("--model", help="OpenAI model identifier for the interactive smoke")
@@ -767,16 +796,16 @@ def main(argv: list[str] | None = None) -> int:
             if not args.run_id:
                 raise GateError("BLOCKED", "--verify-cleanup requires --run-id")
             verify_cleanup_report(args.sha, args.run_id)
-            root = verify_install(repo, args.sha)
+            root = verify_install(repo, args.sha, args.prefix)
             cleanup = inspect_cleanup(args.sha, args.run_id, root)
             data["gates"]["cleanup"] = cleanup["status"]
             data["evidence"]["cleanup"] = cleanup
             data["status"] = "PASS"
         elif mode == "preflight":
             current_gate = "preflight"
-            root = install_path(args.sha)
+            root = install_path(args.sha, args.prefix)
             if root.exists():
-                root = verify_install(repo, args.sha)
+                root = verify_install(repo, args.sha, args.prefix)
                 installed_preflight(root, args.workspace)
                 data["gates"]["preflight"] = "PASS"
                 data["status"] = "PASS"
@@ -786,7 +815,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise GateError("BLOCKED", "candidate is verified in Git but not yet installed")
         elif mode in ("install", "all"):
             current_gate = "install"
-            root = install_candidate(repo, args.sha)
+            root = install_candidate(repo, args.sha, args.prefix)
             data["gates"]["install"] = "PASS"
             current_gate = "preflight"
             installed_preflight(root, args.workspace)
@@ -806,7 +835,7 @@ def main(argv: list[str] | None = None) -> int:
                 data["status"] = "PASS"
         elif mode == "storage_proof":
             current_gate = "preflight"
-            root = verify_install(repo, args.sha)
+            root = verify_install(repo, args.sha, args.prefix)
             if not args.workspace:
                 raise GateError("BLOCKED", "--storage-proof requires --workspace")
             installed_preflight(root, args.workspace)
@@ -817,7 +846,7 @@ def main(argv: list[str] | None = None) -> int:
             data["status"] = "PASS"
         elif mode == "run":
             current_gate = "preflight"
-            root = verify_install(repo, args.sha)
+            root = verify_install(repo, args.sha, args.prefix)
             if not args.workspace or not args.model:
                 raise GateError("BLOCKED", "--run requires --workspace and --model")
             installed_preflight(root, args.workspace)
