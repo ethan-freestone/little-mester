@@ -912,6 +912,64 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
         finally:
             self.cleanup_test_supervisor(proc)
 
+    def test_parent_stop_does_not_accept_gone_qemu_with_live_proxy_as_completed(self):
+        supervisor, run_id = self.spawn_supervisor()
+        children = []
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            directory_fd = parent_state._open_directory_chain(
+                create=False, home_override=self.home)
+            try:
+                qemu, qemu_transition = self.spawn_recovery_target(directory_fd, "qemu")
+                proxy, _proxy_transition = self.spawn_recovery_target(directory_fd, "proxy")
+                children.extend((qemu, proxy))
+                run = parent_state._read_json(directory_fd, "active-run.json")
+                run["phase"] = "RUNNING"
+                run["qemu"] = {
+                    **{key: qemu_transition[key] for key in (
+                        "pid", "uid", "host_boot_id", "start_time")},
+                    "schema": 1,
+                    "exe": qemu_transition["target"]["exe"],
+                    "argv": qemu_transition["target"]["argv"],
+                }
+                parent_state._atomic_json(directory_fd, "active-run.json", run)
+                (self.state_dir / "proxy.port").write_text("12345\n")
+                (self.state_dir / "proxy.port").chmod(0o600)
+                self.assertEqual(parent_state.stop_exec_transition(qemu_transition), "STOPPED")
+                qemu.wait(timeout=2)
+            finally:
+                os.close(directory_fd)
+
+            supervisor.kill()
+            supervisor.wait(timeout=3)
+            recorded_status = parent_state._recorded_process_status
+
+            def qemu_is_gone(identity, *, expected_basename, current_boot_id):
+                if expected_basename == "qemu-system-x86_64":
+                    return "GONE"
+                return recorded_status(identity, expected_basename=expected_basename,
+                                       current_boot_id=current_boot_id)
+
+            with mock.patch.object(parent_state, "_recorded_process_status",
+                                   side_effect=qemu_is_gone):
+                self.assertEqual(parent_state.read_status(home=self.home)["status"], "STOPPED")
+                with self.assertRaisesRegex(parent_state.Refused, "without publishing verified STOPPING"):
+                    parent_state.request_supervisor_stop(home=self.home)
+                preview = parent_state.recovery_preview(home=self.home)
+                self.assertEqual(preview["action"], "recover")
+                self.assertEqual(preview["children"]["proxy"], "TARGET")
+                self.assertEqual(preview["run_id"], run_id)
+            self.assertIsNone(proxy.poll(), "stop acceptance must not signal the orphan proxy")
+            self.assertTrue((self.state_dir / "proxy.port").exists())
+        finally:
+            self.cleanup_test_supervisor(supervisor)
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=3)
+
     def test_parent_stop_refuses_when_pidfd_api_is_unavailable(self):
         proc, _run_id = self.spawn_supervisor()
         try:
@@ -1375,6 +1433,97 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 if child.poll() is None:
                     child.kill()
                     child.wait(timeout=3)
+
+    def test_stopping_recovery_stops_exact_live_helper_with_or_without_artifacts(self):
+        supervisor, _run_id = self.spawn_supervisor()
+        children = []
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            directory_fd = parent_state._open_directory_chain(
+                create=False, home_override=self.home)
+            try:
+                qemu, qemu_transition = self.spawn_recovery_target(directory_fd, "qemu")
+                proxy, _proxy_transition = self.spawn_recovery_target(directory_fd, "proxy")
+                children.extend((qemu, proxy))
+                self.assertEqual(parent_state.stop_exec_transition(qemu_transition), "STOPPED")
+                qemu.wait(timeout=2)
+                run = parent_state._read_json(directory_fd, "active-run.json")
+                run["phase"] = "STOPPING"
+                run.pop("qemu", None)
+                parent_state._atomic_json(directory_fd, "active-run.json", run)
+                (self.state_dir / "proxy.port").write_text("12345\n")
+                (self.state_dir / "proxy.port").chmod(0o600)
+            finally:
+                os.close(directory_fd)
+
+            supervisor.kill()
+            supervisor.wait(timeout=3)
+            with self.assertRaisesRegex(parent_state.Refused, "verified STOPPING cleanup"):
+                parent_state.request_supervisor_stop(home=self.home)
+            self.assertIsNone(proxy.poll(), "idempotent stop must not signal a residual helper")
+            preview = parent_state.recovery_preview(home=self.home)
+            self.assertEqual(preview["action"], "recover")
+            self.assertEqual(preview["status"], "RECOVERABLE")
+            self.assertEqual(preview["children"], {"qemu": "STOPPED", "proxy": "TARGET"})
+            recovered = parent_state.recover_parent(home=self.home, execute=True)
+            self.assertEqual(recovered["status"], "STOPPED")
+            self.assertTrue(recovered["disk_retained"])
+            self.assertEqual(proxy.wait(timeout=3), -signal.SIGTERM)
+            self.assertFalse((self.state_dir / "proxy.port").exists())
+            disk_after = (self.state_dir / "disk.qcow2").stat()
+            self.assertEqual((disk_after.st_dev, disk_after.st_ino),
+                             (self.parent["disk"]["device"], self.parent["disk"]["inode"]))
+
+            directory_fd = parent_state._open_directory_chain(
+                create=False, home_override=self.home)
+            try:
+                proxy_without_artifact, _ = self.spawn_recovery_target(directory_fd, "proxy")
+                children.append(proxy_without_artifact)
+            finally:
+                os.close(directory_fd)
+            preview_without_artifact = parent_state.recovery_preview(home=self.home)
+            self.assertEqual(preview_without_artifact["action"], "recover")
+            self.assertEqual(preview_without_artifact["artifacts"], [])
+            resumed = parent_state.recover_parent(home=self.home, execute=True)
+            self.assertEqual(resumed["status"], "STOPPED")
+            self.assertEqual(proxy_without_artifact.wait(timeout=3), -signal.SIGTERM)
+        finally:
+            self.cleanup_test_supervisor(supervisor)
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=3)
+
+    def test_stopping_recovery_refuses_unpaired_child_target_evidence(self):
+        supervisor, _run_id = self.spawn_supervisor()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            directory_fd = parent_state._open_directory_chain(
+                create=False, home_override=self.home)
+            try:
+                run = parent_state._read_json(directory_fd, "active-run.json")
+                run["phase"] = "STOPPING"
+                parent_state._atomic_json(directory_fd, "active-run.json", run)
+                parent_state._atomic_json(directory_fd, "child-proxy.target.json",
+                                          {"executable": "/usr/bin/python3", "argv": ["/usr/bin/python3"],
+                                           "fd_contracts": []})
+            finally:
+                os.close(directory_fd)
+            supervisor.kill()
+            supervisor.wait(timeout=3)
+
+            preview = parent_state.recovery_preview(home=self.home)
+            self.assertEqual(preview["action"], "none")
+            self.assertEqual(preview["status"], "AMBIGUOUS")
+            with self.assertRaisesRegex(parent_state.Refused, "unpaired proxy target"):
+                parent_state.recover_parent(home=self.home, execute=True)
+            self.assertTrue((self.state_dir / "child-proxy.target.json").exists())
+        finally:
+            self.cleanup_test_supervisor(supervisor)
 
     def test_recovery_revalidates_lock_after_child_stop_before_state_mutation(self):
         supervisor, _run_id = self.spawn_supervisor()

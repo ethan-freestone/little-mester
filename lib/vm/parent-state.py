@@ -429,6 +429,12 @@ def recovery_preview(*, home: str | os.PathLike | None = None) -> dict:
                     "parent_id": PARENT_ID,
                     "reason": "no recovery action is required or safely available"}
         if plan["run"]["phase"] == "STOPPING":
+            children_stopped = all(value == "STOPPED" for value in plan["child_states"].values())
+            if not children_stopped:
+                return {"dry_run": True, "action": "recover", "status": "RECOVERABLE",
+                        "parent_id": PARENT_ID, "run_id": plan["run"]["run_id"],
+                        "children": plan["child_states"], "artifacts": plan["pending_artifacts"],
+                        "reason": "exact recorded child identities remain live; execution requires --execute"}
             if plan["pending_artifacts"]:
                 return {"dry_run": True, "action": "cleanup", "status": "STOPPED",
                         "parent_id": PARENT_ID, "run_id": plan["run"]["run_id"],
@@ -496,6 +502,13 @@ def _validated_recovery_plan(directory_fd: int, *, home: str | os.PathLike | Non
         except FileNotFoundError:
             if role in required_roles:
                 raise Refused(f"recovery lacks the durable {role} child identity")
+            if run["phase"] == "STOPPING":
+                try:
+                    _read_json(directory_fd, target_name)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise Refused(f"STOPPING recovery has an unpaired {role} target record")
             continue
         _validate_exec_transition(transition)
         if (transition["identity_path"] != identity_name
@@ -509,10 +522,15 @@ def _validated_recovery_plan(directory_fd: int, *, home: str | os.PathLike | Non
         child_state = exec_transition_status(transition)
         if child_state not in ("GATE", "TARGET", "STOPPED"):
             raise Refused(f"recovery {role} process identity is ambiguous")
-        if run["phase"] == "STOPPING" and child_state != "STOPPED":
-            raise Refused(f"STOPPING record still has a live {role} child")
         transitions[role] = transition
         child_states[role] = child_state
+
+    if (run["phase"] == "STOPPING"
+            and any(child_state != "STOPPED" for child_state in child_states.values())
+            and (child_states.get("qemu") != "STOPPED"
+                 or any(role not in ("metrics", "proxy") and child_state != "STOPPED"
+                        for role, child_state in child_states.items()))):
+        raise Refused("STOPPING recovery requires verified-stopped QEMU and exact helper identities")
 
     if run["phase"] in ("STARTING", "RUNNING") and not transitions:
         # No records cannot prove that no process was spawned before a SIGKILL.
@@ -567,7 +585,8 @@ def recover_parent(*, home: str | os.PathLike | None = None, execute: bool = Fal
                     "parent_id": PARENT_ID}
         run = plan["run"]
         transitions = plan["transitions"]
-        if run["phase"] == "STOPPING" and not plan["pending_artifacts"]:
+        children_stopped = all(value == "STOPPED" for value in plan["child_states"].values())
+        if run["phase"] == "STOPPING" and children_stopped and not plan["pending_artifacts"]:
             return {"dry_run": False, "action": "none", "status": "STOPPED",
                     "parent_id": PARENT_ID, "run_id": run["run_id"], "disk_retained": True}
         for role in ("qemu", "metrics", "proxy"):
@@ -643,6 +662,7 @@ def request_supervisor_stop(*, home: str | os.PathLike | None = None,
         reap_supervisor()
         status = read_status(home=home)
     if status["status"] == "STOPPED":
+        _require_completed_stop(home=home, expected_run_id=status.get("run_id"))
         return {"status": "STOPPED", "parent_id": PARENT_ID, "disk_retained": True}
     if status["status"] not in ("STARTING", "RUNNING"):
         raise Refused("parent stop requires a verified STARTING or RUNNING supervisor")
@@ -691,6 +711,7 @@ def request_supervisor_stop(*, home: str | os.PathLike | None = None,
             reap_supervisor()
             result = read_status(home=home)
         if result["status"] == "STOPPED":
+            _require_completed_stop(home=home, expected_run_id=status.get("run_id"))
             return {"status": "STOPPED", "parent_id": PARENT_ID,
                     "run_id": status.get("run_id"), "disk_retained": True}
         if result["status"] == "AMBIGUOUS":
@@ -701,6 +722,30 @@ def request_supervisor_stop(*, home: str | os.PathLike | None = None,
     if ambiguous_seen:
         raise Refused("supervisor stop left ambiguous identity evidence; no signal escalation performed")
     raise Refused("supervisor did not stop before the bounded wait expired; no signal escalation performed")
+
+
+def _require_completed_stop(*, home: str | os.PathLike | None,
+                            expected_run_id: str | None = None) -> None:
+    """Accept stop only after the same run publishes its verified STOPPING tombstone."""
+    try:
+        with lifecycle_lock(home=home):
+            directory_fd = _open_directory_chain(create=False, home_override=home)
+            if directory_fd is None:
+                raise Refused("parent state disappeared while verifying completed stop")
+            try:
+                status = read_status(home=home)
+                plan = _validated_recovery_plan(directory_fd, home=home)
+            finally:
+                os.close(directory_fd)
+    except (OSError, Refused) as error:
+        raise Refused("could not verify completed parent stop under the lifecycle lock") from error
+    if (status.get("status") != "STOPPED" or plan is None
+            or plan["run"].get("phase") != "STOPPING"
+            or not isinstance(plan["run"].get("run_id"), str)
+            or expected_run_id is not None and plan["run"].get("run_id") != expected_run_id
+            or any(child_state != "STOPPED" for child_state in plan["child_states"].values())
+            or plan["pending_artifacts"]):
+        raise Refused("supervisor exited without publishing verified STOPPING cleanup; preserve lifecycle evidence")
 
 
 def parent_ssh_plan(*, home: str | os.PathLike | None = None,
@@ -1048,13 +1093,15 @@ def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: s
             if disk is None or not parent["disk"]["provisioned"]:
                 return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
             if run["phase"] == "STOPPING":
-                return {"status": "STOPPED", "parent_id": PARENT_ID, "disk": disk}
+                return {"status": "STOPPED", "parent_id": PARENT_ID,
+                        "run_id": run["run_id"], "disk": disk}
             if run["phase"] == "RUNNING":
                 qemu_state = _recorded_process_status(
                     run.get("qemu"), expected_basename="qemu-system-x86_64",
                     current_boot_id=current_boot_id)
                 if qemu_state == "GONE":
-                    return {"status": "STOPPED", "parent_id": PARENT_ID, "disk": disk}
+                    return {"status": "STOPPED", "parent_id": PARENT_ID,
+                            "run_id": run["run_id"], "disk": disk}
             return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
         except OSError:
             return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
