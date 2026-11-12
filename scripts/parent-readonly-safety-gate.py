@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import pathlib
@@ -19,53 +18,54 @@ class GateRefused(RuntimeError):
     pass
 
 
-def scan_open_inode(proc_root: str, device: int, inode: int, *, scanner_pid: int | None = None,
-                    minimum_processes: int = 3) -> list[int]:
-    """Enumerate every visible process and find descriptors for one exact inode.
-
-    Processes that exit during enumeration are benign races. Any live process
-    whose FD table or an FD target cannot be inspected makes the scan fail.
-    """
-    scanner_pid = os.getpid() if scanner_pid is None else scanner_pid
+def _check_proc_visibility() -> None:
+    """Require a plausible /proc process listing, without requiring it to freeze."""
     try:
-        entries = list(os.scandir(proc_root))
+        pids = {entry.name for entry in os.scandir("/proc") if entry.name.isdigit()}
     except OSError as error:
-        raise GateRefused(f"cannot enumerate process tree: {error}") from error
-    pids = {entry.name for entry in entries if entry.name.isdigit()}
-    if len(pids) < minimum_processes or "1" not in pids or str(scanner_pid) not in pids:
-        raise GateRefused("process scan is empty/incomplete (PID 1 or scanner PID missing)")
+        raise GateRefused(f"cannot enumerate /proc: {error}") from error
+    if len(pids) < 3 or "1" not in pids or str(os.getpid()) not in pids:
+        raise GateRefused("/proc process listing is empty/incomplete (PID 1 or gate PID missing)")
 
-    holders: set[int] = set()
-    for pid_text in sorted(pids, key=int):
-        pid = int(pid_text)
-        fd_dir = os.path.join(proc_root, pid_text, "fd")
-        try:
-            descriptors = list(os.scandir(fd_dir))
-        except (FileNotFoundError, ProcessLookupError):
-            # The process exited after enumeration.
-            if os.path.exists(os.path.join(proc_root, pid_text)):
-                raise GateRefused(f"cannot inspect live process {pid} FD table")
-            continue
-        except OSError as error:
-            raise GateRefused(f"cannot inspect process {pid} FD table: {error}") from error
-        for descriptor in descriptors:
+
+def _parse_lsof(stdout: str, stderr: str, returncode: int,
+                device: int, inode: int) -> list[int]:
+    """Parse lsof machine fields; any warning or inconsistent identity refuses."""
+    if returncode != 0 or stderr.strip():
+        raise GateRefused("lsof reported an incomplete or failed descriptor scan")
+    pid = None
+    record = {}
+    holders = set()
+
+    def consume() -> None:
+        if record:
+            if record.get("D") is None or record.get("i") is None:
+                raise GateRefused("lsof omitted device/inode from a matching descriptor")
             try:
-                info = os.stat(descriptor.path)
-            except (FileNotFoundError, ProcessLookupError):
-                # An individual descriptor can close while a process remains.
-                continue
-            except OSError as error:
-                raise GateRefused(f"cannot inspect process {pid} descriptor: {error}") from error
-            if (info.st_dev, info.st_ino) == (device, inode):
-                holders.add(pid)
-    try:
-        final_pids = {entry.name for entry in os.scandir(proc_root) if entry.name.isdigit()}
-    except OSError as error:
-        raise GateRefused(f"cannot verify process enumeration completion: {error}") from error
-    if not {"1", str(scanner_pid)} <= final_pids:
-        raise GateRefused("process scan became incomplete before its final check")
-    if final_pids - pids:
-        raise GateRefused("process tree changed during FD scan; repeat the complete scan")
+                found_device = int(record["D"], 0)
+            except ValueError:
+                found_device = int(record["D"], 10)
+            if found_device != device or record["i"] != str(inode):
+                raise GateRefused("lsof descriptor identity differs from target device/inode")
+            holders.add(pid)
+
+    for line in stdout.splitlines():
+        if not line:
+            continue
+        field, value = line[0], line[1:]
+        if field == "p":
+            consume()
+            if not value.isdigit():
+                raise GateRefused("lsof returned an invalid process record")
+            pid, record = int(value), {}
+        elif field == "f":
+            consume()
+            record = {"f": value}
+        elif field in ("D", "i") and record:
+            record[field] = value
+    consume()
+    if not holders:
+        raise GateRefused("lsof returned no matching open descriptor")
     return sorted(holders)
 
 
@@ -160,23 +160,27 @@ def _check_listener(state_dir: pathlib.Path) -> None:
             raise GateRefused(f"listener remains on recorded SSH port {port}")
 
 
-def _scan_as_root(script: pathlib.Path, device: int, inode: int) -> list[int]:
-    command = ["sudo", sys.executable, str(script), "--scan", str(device), str(inode)]
+def _scan_with_lsof(target: pathlib.Path, device: int, inode: int) -> list[int]:
+    """Use the root-owned system lsof binary; never execute checkout code as root."""
+    def system_executable(name: str) -> pathlib.Path:
+        path = pathlib.Path("/usr/bin") / name
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise GateRefused(f"trusted /usr/bin/{name} is unavailable") from error
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                or not os.access(path, os.X_OK) or stat.S_IMODE(info.st_mode) & 0o022):
+            raise GateRefused(f"/usr/bin/{name} is not a protected root-owned executable")
+        return path
+
+    sudo, lsof = system_executable("sudo"), system_executable("lsof")
+    command = [str(sudo), str(lsof), "-FpcfDi", "--", str(target)]
     try:
         result = subprocess.run(command, stdin=None, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, timeout=60, check=False)
     except (OSError, subprocess.SubprocessError) as error:
-        raise GateRefused("privileged read-only process scan could not run") from error
-    if result.returncode:
-        detail = result.stderr.strip() or result.stdout.strip() or "process scan refused"
-        raise GateRefused(detail)
-    try:
-        holders = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        raise GateRefused("process scan returned invalid data") from error
-    if not isinstance(holders, list) or any(type(pid) is not int for pid in holders):
-        raise GateRefused("process scan returned invalid holder list")
-    return holders
+        raise GateRefused("privileged lsof scan could not run") from error
+    return _parse_lsof(result.stdout, result.stderr, result.returncode, device, inode)
 
 
 def run_gate(install_root: pathlib.Path, state_dir: pathlib.Path) -> None:
@@ -184,7 +188,7 @@ def run_gate(install_root: pathlib.Path, state_dir: pathlib.Path) -> None:
     state_module_path = install_root / "lib/vm/parent-state.py"
     disk = state_dir / "disk.qcow2"
     if os.geteuid() == 0:
-        raise GateRefused("run this gate as the state owner; it invokes sudo only for FD scans")
+        raise GateRefused("run this gate as the state owner; sudo invokes only system lsof")
     if not lab_vm.is_file() or not os.access(lab_vm, os.X_OK) or not state_module_path.is_file():
         raise GateRefused("trusted installed candidate files are unavailable")
 
@@ -205,21 +209,34 @@ def run_gate(install_root: pathlib.Path, state_dir: pathlib.Path) -> None:
             raise GateRefused(f"stale parent artifact exists: {name}")
     _check_listener(state_dir)
 
-    print("Positive control: confirming process scan detects this gate's held test FD")
-    with tempfile.TemporaryFile() as held:
+    _check_proc_visibility()
+    print("Positive control: confirming privileged lsof detects this gate's held test FD")
+    with tempfile.NamedTemporaryFile() as held:
         held_info = os.fstat(held.fileno())
-        holders = _scan_as_root(pathlib.Path(__file__).resolve(), held_info.st_dev, held_info.st_ino)
+        target = pathlib.Path(f"/proc/{os.getpid()}/fd/{held.fileno()}")
+        holders = _scan_with_lsof(target, held_info.st_dev, held_info.st_ino)
         if os.getpid() not in holders:
             raise GateRefused("positive control failed to find the deliberately held test FD")
 
     print("Running two complete exact device/inode scans (all visible UIDs)")
-    for number in (1, 2):
-        current = _validate_status(lab_vm, disk, identity)
-        holders = _scan_as_root(pathlib.Path(__file__).resolve(), *identity)
-        if holders:
-            raise GateRefused(f"disk inode has open FD holder PID(s): {holders}")
-        _validate_status(lab_vm, disk, current)
-        print(f"holder scan {number}/2: PASS; no open FD for device={identity[0]} inode={identity[1]}")
+    disk_fd = os.open(disk, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        disk_info = os.fstat(disk_fd)
+        if (disk_info.st_dev, disk_info.st_ino) != identity:
+            raise GateRefused("opened disk FD differs from validated device/inode")
+        target = pathlib.Path(f"/proc/{os.getpid()}/fd/{disk_fd}")
+        for number in (1, 2):
+            _validate_status(lab_vm, disk, identity)
+            holders = _scan_with_lsof(target, *identity)
+            external = [pid for pid in holders if pid != os.getpid()]
+            if external:
+                raise GateRefused(f"disk inode has open FD holder PID(s): {external}")
+            _validate_status(lab_vm, disk, identity)
+            print(f"holder scan {number}/2: PASS; no external FD for device={identity[0]} inode={identity[1]}")
+        if (os.fstat(disk_fd).st_dev, os.fstat(disk_fd).st_ino) != identity:
+            raise GateRefused("held disk FD identity changed")
+    finally:
+        os.close(disk_fd)
     _validate_status(lab_vm, disk, identity)
     print(f"Validated disk identity unchanged: device={identity[0]} inode={identity[1]}")
 
@@ -231,16 +248,7 @@ def main() -> int:
                         if os.environ.get("INSTALL_ROOT") else None)
     parser.add_argument("--state-dir", type=pathlib.Path, default=pathlib.Path.home() /
                         ".local/state/little-mester/parent-v3/default")
-    parser.add_argument("--scan", nargs=2, metavar=("DEVICE", "INODE"), help=argparse.SUPPRESS)
     args = parser.parse_args()
-    if args.scan:
-        try:
-            holders = scan_open_inode("/proc", int(args.scan[0]), int(args.scan[1]))
-            print(json.dumps(holders))
-            return 0
-        except (GateRefused, ValueError) as error:
-            print(f"REFUSED: {error}", file=sys.stderr)
-            return 2
     try:
         if args.install_root is None:
             raise GateRefused("pass --install-root for the trusted installed candidate")

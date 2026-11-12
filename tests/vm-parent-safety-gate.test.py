@@ -6,6 +6,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -23,72 +24,68 @@ DIAG_SPEC.loader.exec_module(diagnostic)
 
 
 class ProcessScanTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = pathlib.Path(self.temp.name)
-        self.proc = self.root / "proc"
-        self.proc.mkdir()
-        self._process(1)
-        self._process(2)
-        self._process(3)
-
-    def tearDown(self):
-        self.temp.cleanup()
-
-    def _process(self, pid):
-        (self.proc / str(pid) / "fd").mkdir(parents=True)
-
-    def test_process_fixture_with_no_holders_passes(self):
-        holders = gate.scan_open_inode(str(self.proc), 123, 456, scanner_pid=2)
-        self.assertEqual(holders, [])
-
-    def test_empty_process_tree_is_refused(self):
-        empty = self.root / "empty"
-        empty.mkdir()
-        with self.assertRaisesRegex(gate.GateRefused, "empty/incomplete"):
-            gate.scan_open_inode(str(empty), 123, 456, scanner_pid=2)
-
-    def test_scan_missing_pid_one_or_scanner_pid_is_refused(self):
-        (self.proc / "1").rename(self.proc / "10")
-        with self.assertRaisesRegex(gate.GateRefused, "PID 1 or scanner PID"):
-            gate.scan_open_inode(str(self.proc), 123, 456, scanner_pid=2)
-
-    def test_inaccessible_live_fd_table_is_refused_even_if_holder_seen(self):
-        real_scandir = os.scandir
-
-        def scandir(path):
-            if os.fspath(path) == str(self.proc / "2" / "fd"):
-                raise PermissionError("fixture inaccessible FD table")
-            return real_scandir(path)
-
+    def test_process_fixture_reports_all_matching_pids(self):
         with tempfile.NamedTemporaryFile() as held:
             info = os.fstat(held.fileno())
-            (self.proc / "1" / "fd" / "9").symlink_to(held.name)
-            with mock.patch.object(gate.os, "scandir", side_effect=scandir):
-                with self.assertRaisesRegex(gate.GateRefused, "cannot inspect process 2 FD table"):
-                    gate.scan_open_inode(str(self.proc), info.st_dev, info.st_ino, scanner_pid=2)
+            fixture = (f"p1\ncinit\nf3\nD{info.st_dev:#x}\ni{info.st_ino}\n"
+                       f"p42\ncrunner\nf8\nD{info.st_dev:#x}\ni{info.st_ino}\n")
+            self.assertEqual(gate._parse_lsof(fixture, "", 0, info.st_dev, info.st_ino), [1, 42])
 
-    def test_real_locally_held_temporary_file_is_detected(self):
+    def test_empty_or_incomplete_process_fixture_is_refused(self):
+        with self.assertRaisesRegex(gate.GateRefused, "no matching open descriptor"):
+            gate._parse_lsof("", "", 0, 1, 2)
+        # An lsof warning about an unreadable live FD table is a hard failure,
+        # even if its partial stdout contains the exact target holder.
+        fixture = "p42\ncrunner\nf8\nD0xfd01\ni77\n"
+        with self.assertRaisesRegex(gate.GateRefused, "incomplete or failed"):
+            gate._parse_lsof(fixture, "lsof: WARNING: cannot inspect PID 43", 0,
+                             64769, 77)
+        with self.assertRaisesRegex(gate.GateRefused, "incomplete or failed"):
+            gate._parse_lsof(fixture, "", 1, 64769, 77)
+
+    def test_missing_device_inode_fields_are_refused(self):
+        with self.assertRaisesRegex(gate.GateRefused, "omitted device/inode"):
+            gate._parse_lsof("p42\ncworker\nf8\n", "", 0, 1, 2)
+
+    def test_real_local_temp_fd_and_ordinary_process_churn(self):
+        lsof = pathlib.Path("/usr/bin/lsof")
+        self.assertTrue(lsof.is_file())
         with tempfile.NamedTemporaryFile() as held:
             info = os.fstat(held.fileno())
-            # The fixture's PID 1 holds a proc-style descriptor symlink to a
-            # real temporary file that remains open throughout the scan.
-            live_fd = pathlib.Path(f"/proc/{os.getpid()}/fd/{held.fileno()}")
-            (self.proc / "1" / "fd" / "17").symlink_to(live_fd)
-            self.assertEqual(
-                gate.scan_open_inode(str(self.proc), info.st_dev, info.st_ino, scanner_pid=2),
-                [1],
-            )
+            target = f"/proc/{os.getpid()}/fd/{held.fileno()}"
+            churn = subprocess.Popen(
+                [sys.executable, "-c",
+                 "import subprocess; print('ready', flush=True); "
+                 "[subprocess.run(['/bin/true'], check=True) for _ in range(120)]"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            try:
+                self.assertEqual(churn.stdout.readline().strip(), b"ready")
+                result = subprocess.run([str(lsof), "-FpcfDi", "--", target],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        text=True, timeout=10, check=False)
+                self.assertEqual(
+                    gate._parse_lsof(result.stdout, result.stderr, result.returncode,
+                                     info.st_dev, info.st_ino), [os.getpid()])
+            finally:
+                churn.wait(timeout=10)
+                churn.stdout.close()
 
-    def test_incomplete_scan_cannot_hide_a_matching_open_descriptor(self):
+    def test_gate_process_and_pid_one_are_visible_without_static_tree_requirement(self):
+        gate._check_proc_visibility()
+
+    def test_privileged_scan_executes_only_protected_system_utilities(self):
         with tempfile.NamedTemporaryFile() as held:
             info = os.fstat(held.fileno())
-            (self.proc / "1" / "fd" / "17").symlink_to(held.name)
-            # Removing the scanner PID makes the entire result invalid rather
-            # than allowing a holder result from a partial process enumeration.
-            (self.proc / "2").rename(self.proc / "4")
-            with self.assertRaisesRegex(gate.GateRefused, "empty/incomplete"):
-                gate.scan_open_inode(str(self.proc), info.st_dev, info.st_ino, scanner_pid=2)
+            stdout = f"p{os.getpid()}\nctest\nf3\nD{info.st_dev:#x}\ni{info.st_ino}\n"
+            completed = subprocess.CompletedProcess(
+                ["sudo", "lsof"], 0, stdout=stdout, stderr="")
+            target = pathlib.Path(f"/proc/{os.getpid()}/fd/{held.fileno()}")
+            with mock.patch.object(gate.subprocess, "run", return_value=completed) as run:
+                self.assertEqual(
+                    gate._scan_with_lsof(target, info.st_dev, info.st_ino), [os.getpid()])
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[:2], ["/usr/bin/sudo", "/usr/bin/lsof"])
+            self.assertNotIn(str(ROOT), " ".join(argv))
 
 
 class OpenSSHHostLookupTests(unittest.TestCase):
