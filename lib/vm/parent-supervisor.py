@@ -166,6 +166,8 @@ def _prepare_parent_seed(state, lock_fd: int, home: str | None = None) -> bytes:
                 "set -eu\n"
                 "export XDG_CONFIG_HOME=/etc\n"
                 "export OPENCODE_CONFIG=/etc/opencode/opencode.json\n"
+                "export HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128\n"
+                "export http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128\n"
                 + cli_config_export +
                 "export OPENCODE_DISABLE_PROJECT_CONFIG=1\n"
                 "exec /usr/local/bin/opencode\n")
@@ -185,7 +187,9 @@ def _prepare_parent_seed(state, lock_fd: int, home: str | None = None) -> bytes:
                     {"path": "/etc/ssh/sshd_config.d/99-little-mester-parent.conf", "owner": "root:root",
                      "permissions": "0644", "content": "HostKeyAlgorithms ssh-ed25519\n"},
                     {"path": "/etc/profile.d/little-mester-parent.sh", "owner": "root:root",
-                     "permissions": "0644", "content": "export HTTP_PROXY=http://10.0.2.100:3128\nexport HTTPS_PROXY=http://10.0.2.100:3128\nexport http_proxy=http://10.0.2.100:3128\nexport https_proxy=http://10.0.2.100:3128\n"},
+                      "permissions": "0644", "content": "export HTTP_PROXY=http://10.0.2.100:3128\nexport HTTPS_PROXY=http://10.0.2.100:3128\nexport http_proxy=http://10.0.2.100:3128\nexport https_proxy=http://10.0.2.100:3128\n"},
+                    {"path": "/etc/apt/apt.conf.d/90little-mester-parent-proxy", "owner": "root:root",
+                     "permissions": "0644", "content": 'Acquire::http::Proxy "http://10.0.2.100:3128";\nAcquire::https::Proxy "http://10.0.2.100:3128";\n'},
                     {"path": "/etc/opencode/opencode.json", "owner": "root:root",
                      "permissions": "0644", "content": protected_config},
                     {"path": "/etc/profile.d/little-mester-opencode.sh", "owner": "root:root",
@@ -474,12 +478,11 @@ def _start_parent_children(state, args, home: str | None, *, stop_requested) -> 
     finally:
         os.close(disk_fd)
 
-    if not _wait_for_guest_readiness(state, home, qemu_transition,
-                                     stop_requested=stop_requested):
-        raise state.Refused("guest OpenCode bootstrap did not become SSH-ready")
     _commit_running_after_readiness(state, run_id=args.run_id, home=home,
                                     lock_fd=args.lock_fd, qemu_transition=qemu_transition,
-                                    readiness=lambda: True)
+                                    readiness=lambda: _wait_for_guest_readiness(
+                                        state, home, qemu_transition,
+                                        stop_requested=stop_requested))
 
 
 def _spawn_gated_target(state, *, lock_fd: int, role: str, executable: str,
@@ -639,8 +642,9 @@ def _qmp_powerdown(state, qmp_path: str, qemu_identity: dict, *, timeout_seconds
         info = os.lstat(qmp_path)
     except OSError as error:
         raise state.Refused("private QMP socket is unavailable") from error
+    socket_mode = stat.S_IMODE(info.st_mode)
     if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid()
-            or stat.S_IMODE(info.st_mode) != 0o600):
+            or socket_mode & 0o600 != 0o600 or socket_mode & 0o077):
         raise state.Refused("private QMP socket has unsafe owner, type, or mode")
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     deadline = time.monotonic() + timeout_seconds
@@ -786,8 +790,9 @@ def _remove_qmp_socket(state, qemu_transition: dict | None,
             info = os.stat("qmp.sock", dir_fd=directory_fd, follow_symlinks=False)
         except FileNotFoundError:
             return
+        socket_mode = stat.S_IMODE(info.st_mode)
         if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid()
-                or stat.S_IMODE(info.st_mode) & 0o077 or info.st_nlink != 1):
+                or socket_mode & 0o600 != 0o600 or socket_mode & 0o077 or info.st_nlink != 1):
             raise state.Refused("preserving unsafe or unowned QMP socket evidence")
         os.unlink("qmp.sock", dir_fd=directory_fd)
         os.fsync(directory_fd)
@@ -888,13 +893,13 @@ def run(args) -> int:
         startup_error = None
         try:
             _start_parent_children(state, args, home, stop_requested=lambda: stop_requested)
-        except (OSError, ValueError, subprocess.SubprocessError, state.Refused) as error:
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, state.Refused) as error:
             startup_error = error
             print(f"REFUSED: parent startup/readiness failed: {error}", file=sys.stderr)
         if startup_error is not None:
             try:
                 _stop_starting_children(state, home)
-            except (OSError, ValueError, subprocess.SubprocessError, state.Refused) as cleanup_error:
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, state.Refused) as cleanup_error:
                 print(f"REFUSED: parent startup cleanup is ambiguous: {cleanup_error}", file=sys.stderr)
                 _finalize(state, args, home, mark_stopped=False)
                 return 2

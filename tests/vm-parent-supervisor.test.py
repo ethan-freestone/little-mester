@@ -317,6 +317,9 @@ class SupervisorHandoffTests(unittest.TestCase):
                                    if item["path"].endswith("99-little-mester-parent.conf"))
                 self.assertEqual(sshd_config["content"].count("\n"), 1)
                 protected = {item["path"]: item for item in config["write_files"]}
+                apt_proxy = protected["/etc/apt/apt.conf.d/90little-mester-parent-proxy"]["content"]
+                self.assertIn('Acquire::http::Proxy "http://10.0.2.100:3128";', apt_proxy)
+                self.assertIn('Acquire::https::Proxy "http://10.0.2.100:3128";', apt_proxy)
                 opencode_config = json.loads(protected["/etc/opencode/opencode.json"]["content"])
                 self.assertFalse(opencode_config["autoupdate"])
                 self.assertEqual(opencode_config["share"], "disabled")
@@ -334,6 +337,8 @@ class SupervisorHandoffTests(unittest.TestCase):
                 self.assertIn("tmux new-session -A -s little-mester-opencode", launcher)
                 self.assertIn("XDG_CONFIG_HOME=/etc", runner)
                 self.assertIn("OPENCODE_CONFIG=/etc/opencode/opencode.json", runner)
+                self.assertIn("HTTP_PROXY=http://10.0.2.100:3128", runner)
+                self.assertIn("HTTPS_PROXY=http://10.0.2.100:3128", runner)
                 self.assertIn("OPENCODE_DISABLE_PROJECT_CONFIG=1", runner)
                 self.assertIn("exec /usr/local/bin/opencode", runner)
                 cli_export = next(line for line in profile.splitlines()

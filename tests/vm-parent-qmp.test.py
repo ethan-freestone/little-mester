@@ -4,6 +4,7 @@
 import importlib.util
 import os
 import pathlib
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,6 @@ SERVER = r'''import json, os, socket, sys
 path = sys.argv[1]
 server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 server.bind(path)
-os.chmod(path, 0o600)
 server.listen(1)
 connection, _ = server.accept()
 with connection:
@@ -51,13 +51,16 @@ class QmpShutdownTests(unittest.TestCase):
         self.socket_path = str(pathlib.Path(self.temp.name) / "qmp.sock")
         self.peer = subprocess.Popen([sys.executable, "-I", "-c", SERVER, self.socket_path],
                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL)
+                                     stderr=subprocess.DEVNULL, preexec_fn=lambda: os.umask(0o077))
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline and not pathlib.Path(self.socket_path).exists():
             if self.peer.poll() is not None:
                 self.fail("fake QMP peer exited before binding")
             time.sleep(0.01)
         self.assertTrue(pathlib.Path(self.socket_path).exists())
+        mode = stat.S_IMODE(pathlib.Path(self.socket_path).stat().st_mode)
+        self.assertEqual(mode & 0o077, 0)
+        self.assertEqual(mode & 0o600, 0o600)
         self.identity = {"pid": self.peer.pid, "uid": os.getuid(),
                          "host_boot_id": pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()}
 
@@ -90,7 +93,7 @@ class QmpShutdownTests(unittest.TestCase):
         pathlib.Path(self.socket_path).unlink(missing_ok=True)
         self.peer = subprocess.Popen([sys.executable, "-I", "-c", SLOW_SERVER, self.socket_path],
                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL)
+                                     stderr=subprocess.DEVNULL, preexec_fn=lambda: os.umask(0o077))
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline and not pathlib.Path(self.socket_path).exists():
             time.sleep(0.01)
