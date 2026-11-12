@@ -4,6 +4,16 @@
 agent must not run it. The owner-reported QEMU/qemu-img scratch PASS ×2 is compatibility
 evidence only. NVIDIA timing remains separately pending.
 
+## Owner evidence log
+
+- Candidate `24d307089c3931687ea3c07bcc6fa51a303e3be1` started the persistent parent in
+  approximately 9 seconds (`run_id=1e65b748de8d76ca27daa92eac1b7cbe`). The owner reports
+  that it remains RUNNING across multiple SSH connections and SSH authentication succeeds.
+- **M1a remains pending:** after the Ubuntu shell prompt appears, typed commands are echoed
+  but produce no visible execution/output (including `pwd` and `echo hello`). Diagnose the
+  interactive SSH I/O path before continuing lifecycle/persistence acceptance. No agent-side
+  VM interaction or acceptance is implied by this report.
+
 ## 1. Install the reviewed candidate
 
 Use the existing protected deployment mechanism documented in
