@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-12T22:16:12.009Z",
+  "updated_at": "2026-11-12T22:18:25.235Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -93,6 +93,11 @@
       "timestamp": "2026-11-12T22:16:12.008Z",
       "author": "cli",
       "body": "Luna TERM fix committed as 67ef66744a59e848f23f101a784b83741afbb5d3. lab-vm preserves TERM only when its value passes a bounded character check and local infocmp reports a clear capability; it passes that value only to parent ssh/tui. Missing/unsupported terminal capabilities cause a clear refusal; no TERM is hard-coded and SSH policy is unchanged. Protected launcher PTY test verifies xterm-256color reaches the worker and TERM=dumb is refused. Parent Python suites, Bats 105/105, ShellCheck, Python compilation, Ruff and diff checks pass locally. Guest-side terminfo/clear and live OpenCode TUI acceptance remain pending; the running owner installation has not been modified."
+    },
+    {
+      "timestamp": "2026-11-12T22:18:25.235Z",
+      "author": "cli",
+      "body": "TERM allowlisting was tightened in follow-up commit 9b108be637b6486cfe9089adbb582c6f453c01ab: validated TERM and the validation marker enter the clean worker environment only for `parent ssh` and `parent tui`; noninteractive commands retain the original sanitized environment. The protected PTY regression still passes after this refinement."
     }
   ]
 }
