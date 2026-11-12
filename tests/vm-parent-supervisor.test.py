@@ -376,7 +376,8 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
             try:
                 os.write(master_fd, b"echo $((19+23))\n")
                 deadline = time.monotonic() + 8
-                while time.monotonic() < deadline and b"\r42\r\n" not in shell_output:
+                while (time.monotonic() < deadline
+                       and b"42" not in shell_output.splitlines()):
                     ready, _, _ = select.select([master_fd], [], [], 0.1)
                     if ready:
                         try:
@@ -388,7 +389,7 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                         shell_output.extend(chunk)
                     if shell_proc.poll() is not None:
                         break
-                self.assertIn(b"\r42\r\n", shell_output,
+                self.assertIn(b"42", shell_output.splitlines(),
                               f"interactive shell did not execute input; PTY output={bytes(shell_output)!r}")
                 os.write(master_fd, b"exit\n")
                 self.assertEqual(shell_proc.wait(timeout=5), 0,
@@ -560,6 +561,18 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                     [sudo, "-n", "/usr/bin/tar", "--no-same-owner", "--no-same-permissions",
                      "-xf", "-", "-C", str(install_root)],
                     input=archive.getvalue(), check=True, timeout=5)
+                subprocess.run([sudo, "-n", "/usr/bin/chown", "-R", "0:0", str(install_root)],
+                               check=True, timeout=5)
+                protected_paths = list(install_root.parents) + [install_root]
+                for directory, child_dirs, child_files in os.walk(install_root):
+                    protected_paths.extend(pathlib.Path(directory) / name
+                                           for name in child_dirs + child_files)
+                for path in protected_paths:
+                    info = path.lstat()
+                    self.assertFalse(stat.S_ISLNK(info.st_mode), f"fixture path is a symlink: {path}")
+                    self.assertEqual(info.st_uid, 0, f"fixture path is not root-owned: {path}")
+                    self.assertFalse(info.st_mode & (stat.S_IWGRP | stat.S_IWOTH),
+                                     f"fixture path is group/world writable: {path}")
 
                 master_fd, slave_fd = pty.openpty()
                 child = subprocess.Popen(
@@ -570,7 +583,8 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 try:
                     os.write(master_fd, b"echo $((19+23))\n")
                     deadline = time.monotonic() + 8
-                    while time.monotonic() < deadline and b"42\r\n" not in output:
+                    while (time.monotonic() < deadline
+                           and b"42" not in output.splitlines()):
                         ready, _, _ = select.select([master_fd], [], [], 0.1)
                         if ready:
                             try:
@@ -581,7 +595,7 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                             break
                     self.assertIn(b"LAUNCHER-FDS:1,1,1:closed\r\n", output,
                                   f"launcher descriptors were not preserved/closed correctly: {bytes(output)!r}")
-                    self.assertIn(b"42\r\n", output,
+                    self.assertIn(b"42", output.splitlines(),
                                   f"interactive output did not reach the PTY: {bytes(output)!r}")
                     self.assertEqual(child.wait(timeout=3), 0)
                 finally:
