@@ -1,8 +1,11 @@
 # Owner-only persistent-parent runtime gates
 
-**NOT RUN.** This procedure is prepared for owner execution only. Do not run it until
-the owner explicitly approves this exact scratch-only QEMU/qemu-img test. It does not
-enable the parent launcher or certify a VM.
+**Owner-reported PASS ×2 for probe revision `37f5fb622135831a5195615e175086c8053b0992`.**
+The owner ran the corrected scratch-only QEMU/qemu-img gate twice on the owner host with
+QEMU/qemu-img 11.1.3; both reported PASS and removed their scratch artifacts. This clears
+only inherited output-FD conversion, explicit qcow2 inspection, QEMU fdset opening, and
+independent-writer lock refusal for that host/tool version. It does not enable the parent
+launcher or certify a VM. Do not rerun the owner-only gate autonomously.
 
 ## Scratch QEMU/qemu-img gate
 
@@ -34,7 +37,7 @@ failure it reports NOT_PASS/REFUSED, does not reinterpret the result, and preser
 the scratch path for owner inspection. A PASS establishes only these local binary and
 scratch-filesystem behaviors; it is not full parent/guest acceptance.
 
-## NVIDIA collector/timing probe
+## NVIDIA collector/timing probe — PENDING OWNER RESULT
 
 Run only on the owner's actual host, with owner approval, after the scratch gate (or
 as a separately approved read-only hardware probe). This reads NVIDIA telemetry and
@@ -60,15 +63,15 @@ not authorize changing the collection mechanism or adding egress.
 
 ## Combined return
 
-Return both procedure outputs together. Do not repeat parent provisioning or use the
-actual persistent-parent disk. The four parent launch gates remain pending until the
-owner reports qemu-img inherited-FD compatibility, explicit qcow2 inspection, QEMU
-fdset opening and single-writer refusal from this scratch procedure. The NVIDIA probe
-is evidence for the later M3 GPU sampling choice. Keep parent launch disabled until
-those gates pass and the integrated source is separately reviewed.
+The owner has now supplied the QEMU gate output twice. Do not repeat parent provisioning
+or use the actual persistent-parent disk. The four scratch compatibility checks listed
+above are satisfied for the tested owner host/tool version only. The NVIDIA probe remains
+pending and informs the later M3 GPU sampling choice. The integrated owner-invoked
+`lab-vm parent up` path is now present, but the scratch result is not guest or lifecycle acceptance; use
+the separate [owner-run lifecycle procedure](parent-lifecycle-acceptance.md) for that.
 
 `lab-vm parent stop` waits at most 15 seconds by default. A timeout does not cancel the
 supervisor's graceful shutdown: a verified RUNNING QEMU may still be in its bounded QMP
-shutdown wait (up to 60 seconds). After a stop timeout or refusal, check `lab-vm parent
-status` before retrying; no signal escalation is performed, and an ambiguous result
+shutdown wait (up to 60 seconds). After a stop timeout or refusal, check
+`lab-vm parent status` before retrying; no signal escalation is performed, and an ambiguous result
 requires owner review rather than disk cleanup.

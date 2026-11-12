@@ -308,6 +308,180 @@ def _record_supervisor(state, directory_fd: int, parent_id: str, run_id: str, pr
     state._atomic_json(directory_fd, "active-run.json", record)
 
 
+def _commit_running_after_readiness(state, *, run_id: str, home: str | None,
+                                   lock_fd: int, qemu_transition: dict, readiness) -> dict:
+    """Publish RUNNING only after readiness and two exact QEMU transition checks."""
+    if (not callable(readiness)
+            or not isinstance(qemu_transition, dict)
+            or qemu_transition.get("target_path") != "child-qemu.target.json"
+            or qemu_transition.get("identity_path") != "child-qemu.identity.json"):
+        raise state.Refused("invalid parent readiness transition")
+    if state.exec_transition_status(qemu_transition) != "TARGET":
+        raise state.Refused("QEMU is not the exact durable target before readiness")
+    if readiness() is not True:
+        raise state.Refused("guest SSH readiness was not established")
+    if state.exec_transition_status(qemu_transition) != "TARGET":
+        raise state.Refused("QEMU identity changed during guest readiness")
+    qemu = state.observe_process(qemu_transition["pid"])
+    target = qemu_transition["target"]
+    if qemu["exe"] != target["exe"] or qemu["argv"] != target["argv"]:
+        raise state.Refused("observed QEMU process differs from the durable launch target")
+    directory_fd = state._open_directory_chain(create=False, home_override=home)
+    if directory_fd is None:
+        raise state.Refused("parent state disappeared before RUNNING publication")
+    try:
+        state._verify_lock_for_dir(directory_fd, lock_fd)
+        run = state._read_json(directory_fd, "active-run.json")
+        if (run.get("run_id") != run_id or run.get("phase") != "STARTING"
+                or run.get("supervisor", {}).get("pid") != os.getpid()):
+            raise state.Refused("parent STARTING record changed before readiness commit")
+        run["phase"] = "RUNNING"
+        run["qemu"] = qemu
+        state._atomic_json(directory_fd, "active-run.json", run)
+        return qemu
+    finally:
+        os.close(directory_fd)
+
+
+def _read_private_port(state, home: str | None, name: str) -> int:
+    directory_fd = state._open_directory_chain(create=False, home_override=home)
+    if directory_fd is None:
+        raise state.Refused("parent state disappeared while reading proxy readiness")
+    try:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory_fd)
+        except OSError as error:
+            raise state.Refused("parent proxy readiness port file is unavailable") from error
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                    or info.st_size > 8):
+                raise state.Refused("parent proxy readiness port file is unsafe")
+            raw = os.read(fd, 9)
+            if len(raw) > 8:
+                raise state.Refused("parent proxy readiness port exceeds its size bound")
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory_fd)
+    try:
+        port = int(raw.decode("ascii").strip())
+    except (ValueError, UnicodeError) as error:
+        raise state.Refused("parent proxy returned a malformed port") from error
+    if not 1024 <= port <= 65535:
+        raise state.Refused("parent proxy returned an invalid port")
+    return port
+
+
+def _wait_for_proxy(state, home: str | None, transition: dict, port_name: str,
+                    *, timeout_seconds: float = 10.0) -> int:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        phase = state.exec_transition_status(transition)
+        if phase != "TARGET":
+            raise state.Refused(f"parent proxy identity became {phase} before readiness")
+        try:
+            return _read_private_port(state, home, port_name)
+        except state.Refused:
+            time.sleep(0.05)
+    raise state.Refused("parent egress proxy did not become ready before its deadline")
+
+
+def _wait_for_guest_readiness(state, home: str | None, qemu_transition: dict,
+                              *, stop_requested, timeout_seconds: float = 900.0) -> bool:
+    """Poll bounded, host-key-pinned SSH readiness while verifying exact QEMU identity."""
+    ssh = _protected_tool("ssh", ("/usr/bin/ssh",))
+    deadline = time.monotonic() + timeout_seconds
+    command = state.PARENT_READY_COMMAND
+    while time.monotonic() < deadline:
+        if stop_requested():
+            return False
+        if state.exec_transition_status(qemu_transition) != "TARGET":
+            raise state.Refused("QEMU identity changed before guest SSH readiness")
+        argv, descriptors = state.parent_ssh_plan(home=home, allow_starting=True,
+                                                   remote_command=command, tty=False)
+        try:
+            result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, close_fds=True,
+                                    pass_fds=tuple(descriptors), timeout=8, check=False)
+        except subprocess.TimeoutExpired:
+            result = None
+        finally:
+            for descriptor in descriptors:
+                os.close(descriptor)
+        if result is not None and result.returncode == 0:
+            if state.exec_transition_status(qemu_transition) != "TARGET":
+                raise state.Refused("QEMU identity changed during guest SSH readiness")
+            return True
+        time.sleep(1)
+    return False
+
+
+def _start_parent_children(state, args, home: str | None, *, stop_requested) -> None:
+    """Start the configured proxy and persistent QEMU, then publish verified readiness."""
+    if not isinstance(args.ssh_port, int) or not 1024 <= args.ssh_port <= 65535:
+        raise state.Refused("parent SSH forwarding port is invalid")
+    directory_fd = state._open_directory_chain(create=False, home_override=home)
+    if directory_fd is None:
+        raise state.Refused("parent state is absent")
+    try:
+        parent = state._read_json(directory_fd, "parent.json")
+        state.validate_parent(parent)
+        if not parent["disk"]["provisioned"]:
+            raise state.Refused("parent disk is not provisioned")
+        if parent.get("ssh_identity") is None:
+            raise state.Refused("persistent parent seed and SSH identity are absent")
+        state._validate_seed_identity(directory_fd, parent)
+        names = set(os.listdir(directory_fd))
+        if "proxy.port" in names:
+            raise state.Refused("preserving stale parent proxy port evidence")
+        if "qmp.sock" in names:
+            raise state.Refused("preserving stale parent QMP socket evidence")
+        proxy_port_path = str(pathlib.Path(home if home is not None else state.pwd.getpwuid(os.getuid()).pw_dir)
+                              .joinpath(*state.STATE_COMPONENTS, "proxy.port"))
+        qmp_path = str(pathlib.Path(home if home is not None else state.pwd.getpwuid(os.getuid()).pw_dir)
+                       .joinpath(*state.STATE_COMPONENTS, "qmp.sock"))
+        seed_path = str(pathlib.Path(home if home is not None else state.pwd.getpwuid(os.getuid()).pw_dir)
+                        .joinpath(*state.STATE_COMPONENTS, "seed.iso"))
+        host_key_fd = os.open("ssh_host_ed25519_key.pub", os.O_RDONLY | os.O_NOFOLLOW,
+                              dir_fd=directory_fd)
+        try:
+            host_key = os.read(host_key_fd, 4096)
+        finally:
+            os.close(host_key_fd)
+        _write_ssh_connection(state, directory_fd, args.ssh_port, host_key)
+        disk_fd = os.open("disk.qcow2", os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+                          dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
+
+    try:
+        python = _protected_tool("python3", (sys.executable, "/usr/bin/python3"))
+        proxy_script = str(pathlib.Path(__file__).with_name("proxy.py").resolve())
+        proxy_transition = _spawn_gated_target(
+            state, lock_fd=args.lock_fd, role="proxy", executable=python,
+            argv=[python, "-I", proxy_script, "--port-file", proxy_port_path], home=home)
+        proxy_port = _wait_for_proxy(state, home, proxy_transition, "proxy.port")
+        qemu = _protected_tool("qemu-system-x86_64", ("/usr/bin/qemu-system-x86_64",))
+        qemu_module = _load_protected_module("parent-qemu")
+        qemu_argv = qemu_module.build_qemu_argv(
+            executable=qemu, seed_iso=seed_path, ssh_port=args.ssh_port,
+            proxy_port=proxy_port, qmp_socket=qmp_path)
+        qemu_transition = _spawn_gated_target(
+            state, lock_fd=args.lock_fd, role="qemu", executable=qemu,
+            argv=qemu_argv, home=home, disk_fd=disk_fd)
+    finally:
+        os.close(disk_fd)
+
+    if not _wait_for_guest_readiness(state, home, qemu_transition,
+                                     stop_requested=stop_requested):
+        raise state.Refused("guest OpenCode bootstrap did not become SSH-ready")
+    _commit_running_after_readiness(state, run_id=args.run_id, home=home,
+                                    lock_fd=args.lock_fd, qemu_transition=qemu_transition,
+                                    readiness=lambda: True)
+
+
 def _spawn_gated_target(state, *, lock_fd: int, role: str, executable: str,
                         argv: list[str], home: str | None = None,
                         disk_fd: int = -1) -> dict:
@@ -550,6 +724,7 @@ def _shutdown_running_qemu(state, args, home) -> None:
         os.close(fd)
     _qmp_powerdown(state, qmp_path, qemu_identity)
     deadline = time.monotonic() + 60
+    had_proxy = "proxy" in _CHILD_PROCESSES
     while time.monotonic() < deadline:
         proc.poll()  # Reap the owned process before evaluating its procfs identity.
         phase = state.exec_transition_status(transition)
@@ -566,6 +741,9 @@ def _shutdown_running_qemu(state, args, home) -> None:
                     raise state.Refused(f"supervised {role} child did not stop with verified identity")
             if _CHILD_PROCESSES:
                 raise state.Refused("supervisor still owns children after ordered shutdown")
+            _remove_qmp_socket(state, transition, home)
+            if had_proxy:
+                _remove_proxy_port_file(state, home)
             return
         if phase != "TARGET":
             raise state.Refused(f"QEMU identity became {phase} during graceful shutdown")
@@ -573,9 +751,12 @@ def _shutdown_running_qemu(state, args, home) -> None:
     raise state.Refused("guest/QEMU did not stop before the graceful shutdown deadline")
 
 
-def _stop_starting_children(state) -> None:
+def _stop_starting_children(state, home: str | None = None) -> None:
     """Roll back only recorded startup children, in bounded identity-bound order."""
-    for role in ("metrics", "proxy", "qemu"):
+    had_proxy = "proxy" in _CHILD_PROCESSES
+    had_qemu = "qemu" in _CHILD_PROCESSES
+    qemu_transition = _CHILD_PROCESSES.get("qemu", (None, None))[1]
+    for role in ("qemu", "metrics", "proxy"):
         owned = _CHILD_PROCESSES.get(role)
         if owned is None:
             continue
@@ -585,6 +766,51 @@ def _stop_starting_children(state) -> None:
             raise state.Refused(f"STARTING {role} child did not stop with verified identity")
     if _CHILD_PROCESSES:
         raise state.Refused("supervisor owns an unrecognized child during startup rollback")
+    if had_qemu:
+        _remove_qmp_socket(state, qemu_transition, home)
+    if had_proxy:
+        _remove_proxy_port_file(state, home)
+
+
+def _remove_qmp_socket(state, qemu_transition: dict | None,
+                       home: str | None = None) -> None:
+    """Remove only a private QMP socket after the exact owned QEMU has exited."""
+    if (not isinstance(qemu_transition, dict)
+            or state.exec_transition_status(qemu_transition) != "STOPPED"):
+        raise state.Refused("preserving QMP socket until exact owned QEMU exit is verified")
+    directory_fd = state._open_directory_chain(create=False, home_override=home)
+    if directory_fd is None:
+        raise state.Refused("parent state disappeared before QMP socket cleanup")
+    try:
+        try:
+            info = os.stat("qmp.sock", dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) & 0o077 or info.st_nlink != 1):
+            raise state.Refused("preserving unsafe or unowned QMP socket evidence")
+        os.unlink("qmp.sock", dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _remove_proxy_port_file(state, home: str | None = None) -> None:
+    directory_fd = state._open_directory_chain(create=False, home_override=home)
+    if directory_fd is None:
+        raise state.Refused("parent state disappeared before proxy readiness cleanup")
+    try:
+        try:
+            info = os.stat("proxy.port", dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            raise state.Refused("preserving unsafe proxy readiness evidence")
+        os.unlink("proxy.port", dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _finalize(state, args, home, *, mark_stopped: bool = True) -> None:
@@ -596,7 +822,16 @@ def _finalize(state, args, home, *, mark_stopped: bool = True) -> None:
                     run = state._read_json(directory_fd, "active-run.json")
                     if (mark_stopped and run.get("run_id") == args.run_id
                             and run.get("supervisor", {}).get("pid") == os.getpid()):
+                        if _CHILD_PROCESSES:
+                            raise state.Refused("cannot publish STOPPING while supervised children remain")
+                        if run.get("phase") == "RUNNING":
+                            boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+                            if state._recorded_process_status(
+                                    run.get("qemu"), expected_basename="qemu-system-x86_64",
+                                    current_boot_id=boot_id) != "GONE":
+                                raise state.Refused("cannot publish STOPPING before exact QEMU exit")
                         run["phase"] = "STOPPING"
+                        run.pop("qemu", None)
                         state._atomic_json(directory_fd, "active-run.json", run)
                 except FileNotFoundError:
                     pass
@@ -649,6 +884,23 @@ def run(args) -> int:
         print(f"REFUSED: supervisor startup failed: {error}", file=sys.stderr)
         return 2
 
+    if args.ssh_port:
+        startup_error = None
+        try:
+            _start_parent_children(state, args, home, stop_requested=lambda: stop_requested)
+        except (OSError, ValueError, subprocess.SubprocessError, state.Refused) as error:
+            startup_error = error
+            print(f"REFUSED: parent startup/readiness failed: {error}", file=sys.stderr)
+        if startup_error is not None:
+            try:
+                _stop_starting_children(state, home)
+            except (OSError, ValueError, subprocess.SubprocessError, state.Refused) as cleanup_error:
+                print(f"REFUSED: parent startup cleanup is ambiguous: {cleanup_error}", file=sys.stderr)
+                _finalize(state, args, home, mark_stopped=False)
+                return 2
+            _finalize(state, args, home)
+            return 2
+
     stop_error = None
     try:
         while not stop_requested:
@@ -657,7 +909,7 @@ def run(args) -> int:
         if current["status"] == "STARTING":
             if _CHILD_PROCESSES:
                 try:
-                    _stop_starting_children(state)
+                    _stop_starting_children(state, home)
                 except (OSError, ValueError, state.Refused) as error:
                     stop_error = error
                     print(f"REFUSED: startup child rollback failed: {error}", file=sys.stderr)
@@ -683,6 +935,7 @@ def main() -> int:
     parser.add_argument("--lock-fd", type=int, required=True)
     parser.add_argument("--handoff-fd", type=int, required=True)
     parser.add_argument("--state-home")
+    parser.add_argument("--ssh-port", type=int, default=0)
     return run(parser.parse_args())
 
 

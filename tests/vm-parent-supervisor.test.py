@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import socket
 import stat
 import subprocess
 import sys
@@ -546,13 +547,185 @@ class SupervisorHandoffTests(unittest.TestCase):
                     parent_state, lock_fd=lock_fd, role="qemu", executable=executable,
                     argv=[executable, "-c", "import time; time.sleep(30)"], home=str(self.home))
                 self.assertEqual(parent_state.exec_transition_status(transition), "TARGET")
-                parent_supervisor._stop_starting_children(parent_state)
+                parent_supervisor._stop_starting_children(parent_state, str(self.home))
                 self.assertEqual(parent_state.exec_transition_status(transition), "STOPPED")
                 self.assertNotIn("qemu", parent_supervisor._CHILD_PROCESSES)
                 self.assertTrue((self.state_dir / "disk.qcow2").exists())
             finally:
                 if transition is not None:
                     self.cleanup_gated_child("qemu", transition)
+
+    def test_running_is_committed_only_after_readiness_and_exact_qemu_identity(self):
+        executable = os.path.realpath(sys.executable)
+        run_id = "0123456789abcdef0123456789abcdef"
+        transition = None
+        with parent_state.lifecycle_lock(home=self.home) as lock_fd:
+            fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+            try:
+                parent_supervisor._record_supervisor(
+                    parent_state, fd, "default", run_id, parent_state.observe_process(os.getpid()))
+            finally:
+                os.close(fd)
+            try:
+                transition = parent_supervisor._spawn_gated_target(
+                    parent_state, lock_fd=lock_fd, role="qemu", executable=executable,
+                    argv=[executable, "-c", "import time; time.sleep(30)"], home=str(self.home))
+                with self.assertRaisesRegex(parent_state.Refused, "SSH readiness"):
+                    parent_supervisor._commit_running_after_readiness(
+                        parent_state, run_id=run_id, home=str(self.home), lock_fd=lock_fd,
+                        qemu_transition=transition, readiness=lambda: False)
+                fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+                try:
+                    self.assertEqual(parent_state._read_json(fd, "active-run.json")["phase"], "STARTING")
+                finally:
+                    os.close(fd)
+                qemu = parent_supervisor._commit_running_after_readiness(
+                    parent_state, run_id=run_id, home=str(self.home), lock_fd=lock_fd,
+                    qemu_transition=transition, readiness=lambda: True)
+                self.assertEqual(qemu["pid"], parent_supervisor._CHILD_PROCESSES["qemu"][0].pid)
+                fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+                try:
+                    record = parent_state._read_json(fd, "active-run.json")
+                finally:
+                    os.close(fd)
+                self.assertEqual(record["phase"], "RUNNING")
+                self.assertEqual(record["qemu"], qemu)
+            finally:
+                if transition is not None:
+                    parent_supervisor._stop_gated_target(parent_state, "qemu", transition)
+
+    def test_start_parent_children_reaches_local_ssh_metadata_writer(self):
+        from types import SimpleNamespace
+
+        (self.state_dir / "ssh_host_ed25519_key.pub").write_text(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey parent\n")
+        (self.state_dir / "disk.qcow2").write_bytes(b"disk")
+        directory_fd = os.open(self.state_dir, os.O_RDONLY | os.O_DIRECTORY)
+        parent = {"disk": {"provisioned": True}, "ssh_identity": {"seed": "present"}}
+        fake_state = SimpleNamespace(
+            Refused=parent_state.Refused,
+            _open_directory_chain=lambda **_kwargs: os.dup(directory_fd),
+            _read_json=lambda _fd, _name: parent,
+            validate_parent=lambda _record: None,
+            _validate_seed_identity=lambda *_args: None,
+            PARENT_ID="default",
+            STATE_COMPONENTS=parent_state.STATE_COMPONENTS,
+            pwd=parent_state.pwd,
+        )
+        transitions = iter(({"target_path": "proxy"}, {"target_path": "qemu"}))
+        args = SimpleNamespace(ssh_port=23456, lock_fd=99, run_id="0123456789abcdef0123456789abcdef")
+        try:
+            with (mock.patch.object(parent_supervisor, "_protected_tool", side_effect=lambda name, _paths: f"/usr/bin/{name}"),
+                  mock.patch.object(parent_supervisor, "_load_protected_module",
+                                    return_value=SimpleNamespace(build_qemu_argv=lambda **_kwargs: ["/usr/bin/qemu"])),
+                  mock.patch.object(parent_supervisor, "_write_ssh_connection") as write_ssh,
+                  mock.patch.object(parent_supervisor, "_spawn_gated_target", side_effect=lambda *_a, **_kw: next(transitions)),
+                  mock.patch.object(parent_supervisor, "_wait_for_proxy", return_value=34567),
+                  mock.patch.object(parent_supervisor, "_wait_for_guest_readiness", return_value=True),
+                  mock.patch.object(parent_supervisor, "_commit_running_after_readiness") as commit):
+                parent_supervisor._start_parent_children(fake_state, args, str(self.home),
+                                                         stop_requested=lambda: False)
+            write_ssh.assert_called_once()
+            self.assertEqual(write_ssh.call_args.args[2], 23456)
+            commit.assert_called_once()
+        finally:
+            os.close(directory_fd)
+
+    def test_finalize_writes_valid_stopping_then_stopped_record_and_keeps_disk(self):
+        proc, run_id = self.spawn_supervisor()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+            try:
+                run = parent_state._read_json(fd, "active-run.json")
+                run["phase"] = "RUNNING"
+                run["qemu"] = {"schema": 1, "pid": 999999, "uid": os.getuid(),
+                               "host_boot_id": "test", "start_time": "1",
+                               "exe": "/usr/bin/qemu-system-x86_64", "argv": ["qemu"]}
+                parent_state._atomic_json(fd, "active-run.json", run)
+            finally:
+                os.close(fd)
+            lock_fd = os.open(self.state_dir / "lifecycle.lock", os.O_RDWR)
+            with (mock.patch.object(parent_supervisor.os, "getpid", return_value=proc.pid),
+                  mock.patch.object(parent_state, "_recorded_process_status", return_value="GONE")):
+                parent_supervisor._finalize(
+                    parent_state, SimpleNamespace(run_id=run_id, lock_fd=lock_fd), str(self.home))
+            status = parent_state.read_status(home=self.home)
+            self.assertEqual(status["status"], "STOPPING")
+            fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+            try:
+                run = parent_state._read_json(fd, "active-run.json")
+            finally:
+                os.close(fd)
+            self.assertEqual(run["phase"], "STOPPING")
+            self.assertNotIn("qemu", run)
+            proc.terminate()
+            self.assertEqual(proc.wait(timeout=3), 2)
+            self.assertEqual(parent_state.read_status(home=self.home)["status"], "STOPPED")
+            self.assertTrue((self.state_dir / "disk.qcow2").exists())
+            with parent_state.lifecycle_lock(home=self.home):
+                pass
+        finally:
+            self.cleanup_test_supervisor(proc)
+
+    def test_qmp_socket_is_removed_only_after_exact_qemu_stop_and_only_if_owned_socket(self):
+        qmp_path = self.state_dir / "qmp.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            listener.bind(str(qmp_path))
+            os.chmod(qmp_path, 0o600)
+            fake_state = SimpleNamespace(
+                Refused=parent_state.Refused,
+                _open_directory_chain=lambda **_kwargs: parent_state._open_directory_chain(
+                    create=False, home_override=self.home),
+                exec_transition_status=lambda _transition: "TARGET",
+            )
+            with self.assertRaisesRegex(parent_state.Refused, "QMP socket"):
+                parent_supervisor._remove_qmp_socket(fake_state, {"pid": os.getpid()}, str(self.home))
+            self.assertTrue(qmp_path.exists())
+            fake_state.exec_transition_status = lambda _transition: "STOPPED"
+            parent_supervisor._remove_qmp_socket(fake_state, {"pid": os.getpid()}, str(self.home))
+            self.assertFalse(qmp_path.exists())
+            qmp_path.write_text("not a socket")
+            with self.assertRaisesRegex(parent_state.Refused, "unowned QMP socket"):
+                parent_supervisor._remove_qmp_socket(fake_state, {"pid": os.getpid()}, str(self.home))
+            self.assertTrue(qmp_path.exists())
+        finally:
+            listener.close()
+
+    def test_guest_readiness_uses_fixed_pinned_ssh_command_and_checks_qemu(self):
+        calls = []
+
+        def ssh_plan(**kwargs):
+            return (["/usr/bin/ssh", "-F", "/dev/null", "-T", "mester@127.0.0.1",
+                     kwargs["remote_command"]], [os.open("/dev/null", os.O_RDONLY),
+                                                  os.open("/dev/null", os.O_RDONLY)])
+
+        fake_state = SimpleNamespace(
+            PARENT_READY_COMMAND=parent_state.PARENT_READY_COMMAND,
+            exec_transition_status=lambda _transition: "TARGET",
+            parent_ssh_plan=ssh_plan,
+        )
+
+        def fake_run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return SimpleNamespace(returncode=0)
+
+        with (mock.patch.object(parent_supervisor, "_protected_tool", return_value="/usr/bin/ssh"),
+              mock.patch.object(parent_supervisor.subprocess, "run", side_effect=fake_run)):
+            ready = parent_supervisor._wait_for_guest_readiness(
+                fake_state, None, {"target_path": "child-qemu.target.json"},
+                stop_requested=lambda: False, timeout_seconds=1)
+        self.assertTrue(ready)
+        self.assertEqual(len(calls), 1)
+        argv, kwargs = calls[0]
+        self.assertEqual(argv[-1], fake_state.PARENT_READY_COMMAND)
+        self.assertEqual(len(kwargs["pass_fds"]), 2)
+        self.assertTrue(all(fd >= 3 for fd in kwargs["pass_fds"]))
+        self.assertTrue(kwargs["close_fds"])
+        self.assertEqual(kwargs["timeout"], 8)
 
     def test_post_bind_record_failure_removes_only_new_socket(self):
         active_run = self.state_dir / "active-run.json"

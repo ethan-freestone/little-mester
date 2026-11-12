@@ -122,6 +122,7 @@ class ParentStateTests(unittest.TestCase):
             finally:
                 os.close(fd)
         self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+
         with self.assertRaises(parent_state.Refused):
             parent_state.initialize(home=self.home)
 
@@ -198,6 +199,15 @@ class ParentStateTests(unittest.TestCase):
                 "uid": os.getuid(), "host_boot_id": "mismatch", "start_time": "0",
                 "exe": sys.executable, "argv": [sys.executable]}}
         self.assertEqual(parent_state.status_for_run(parent, run)["status"], "AMBIGUOUS")
+
+    def test_supervisor_identity_accepts_exact_up_ssh_port_arguments(self):
+        self.assertTrue(parent_state._valid_supervisor_options(["--ssh-port", "23456"], None))
+        self.assertTrue(parent_state._valid_supervisor_options(
+            ["--state-home", str(self.home), "--ssh-port", "23456"], self.home))
+        self.assertFalse(parent_state._valid_supervisor_options(
+            ["--ssh-port", "23456"], self.home))
+        self.assertFalse(parent_state._valid_supervisor_options(
+            ["--state-home", str(self.home), "--ssh-port", "0"], self.home))
 
     def test_status_rejects_supervisor_with_malformed_handoff_arguments(self):
         parent = parent_state.initialize(home=self.home)

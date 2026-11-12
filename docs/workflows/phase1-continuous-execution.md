@@ -59,10 +59,12 @@ Progress toward these three demonstrations in order:
 
 1. **M1 persistent parent:** protected `up` → validated `status` → interactive/reconnectable
    `ssh` → identity-bound `stop` → `up` reuses the same disk and workspace; ordinary smoke
-   still deletes its ephemeral disk. `recover` initially remains a dry-run report. Keep real
-   parent launch disabled until the owner validates qemu-img inherited-output-FD compatibility,
-   QEMU fdset opening, single-writer locking, and explicit image-format handling on scratch
-   artifacts using the prepared [owner-only runtime gate](../parent-runtime-gates.md).
+    still deletes its ephemeral disk. `recover` initially remains a dry-run report. The owner
+    reported all four qemu-img/QEMU scratch compatibility checks PASS ×2 for source `37f5fb6`;
+    see the [runtime-gate record](../parent-runtime-gates.md). This unblocks implementing the
+    launch path, not lifecycle acceptance: only the separate owner-run
+    [parent acceptance procedure](../parent-lifecycle-acceptance.md) can establish the first
+    real up/status/ssh/stop/re-up demonstration.
    Default workspace is guest-disk-backed, with no implicit virtiofs export.
    Confirm whether virtiofsd serves any other parent-launch requirement before omitting it.
 2. **M2 real OpenCode:** after M1 integration, provision pinned 2.2.5 and protected assets,

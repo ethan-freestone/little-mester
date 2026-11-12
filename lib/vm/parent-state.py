@@ -23,6 +23,11 @@ from contextlib import contextmanager
 PARENT_ID = "default"
 STATE_COMPONENTS = (".local", "state", "little-mester", "parent-v3", PARENT_ID)
 SCHEMA = 1
+PARENT_READY_COMMAND = (
+    "cloud-init status --long >/dev/null 2>&1 && test -x /usr/bin/tmux && "
+    "test -x /usr/local/bin/lm-opencode && "
+    "/usr/local/bin/opencode --version | grep -Fx 'opencode v2.2.5' >/dev/null"
+)
 DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
@@ -463,12 +468,21 @@ def request_supervisor_stop(*, home: str | os.PathLike | None = None,
 
 
 def parent_ssh_plan(*, home: str | os.PathLike | None = None,
-                    attach_opencode: bool = False) -> tuple[list[str], list[int]]:
+                    attach_opencode: bool = False, allow_starting: bool = False,
+                    remote_command: str | None = None, tty: bool = True) -> tuple[list[str], list[int]]:
     """Build pinned SSH argv and retain validated identity/key descriptors for exec."""
-    if type(attach_opencode) is not bool:
+    if (type(attach_opencode) is not bool or type(allow_starting) is not bool
+            or type(tty) is not bool
+            or (remote_command is not None and
+                (not isinstance(remote_command, str) or not remote_command
+                 or "\0" in remote_command or "\n" in remote_command or "\r" in remote_command))
+            or attach_opencode and (allow_starting or remote_command is not None or not tty)
+            or allow_starting and (remote_command != PARENT_READY_COMMAND or tty or attach_opencode)
+            or not allow_starting and remote_command not in (None, "exec /usr/local/bin/lm-opencode")):
         raise Refused("parent SSH mode is invalid")
     status = read_status(home=home)
-    if status["status"] != "RUNNING":
+    allowed = ("RUNNING", "STARTING") if allow_starting else ("RUNNING",)
+    if status["status"] not in allowed:
         raise Refused("parent SSH requires a verified RUNNING parent")
     directory_fd = _open_directory_chain(create=False, home_override=home)
     if directory_fd is None:
@@ -559,7 +573,7 @@ def parent_ssh_plan(*, home: str | os.PathLike | None = None,
         known_hosts_fd = sealed_copy("little-mester-parent-known-hosts", known_hosts)
         release(known_hosts_file_fd)
         release(key_file_fd)
-        argv = ["/usr/bin/ssh", "-F", "/dev/null", "-tt", "-a", "-x",
+        argv = ["/usr/bin/ssh", "-F", "/dev/null", "-tt" if tty else "-T", "-a", "-x",
                 "-p", port_text, "-i", f"/proc/self/fd/{key_fd}",
                 "-o", f"UserKnownHostsFile=/proc/self/fd/{known_hosts_fd}",
                 "-o", "GlobalKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=yes",
@@ -569,7 +583,9 @@ def parent_ssh_plan(*, home: str | os.PathLike | None = None,
                 "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "PermitLocalCommand=no",
                 "-o", "ProxyCommand=none", "-o", "ProxyJump=none", "-o", "EscapeChar=none",
                 "mester@127.0.0.1"]
-        if attach_opencode:
+        if remote_command is not None:
+            argv.append(remote_command)
+        elif attach_opencode:
             argv.append("exec /usr/local/bin/lm-opencode")
         return argv, retained_fds
     except BaseException:
@@ -578,6 +594,24 @@ def parent_ssh_plan(*, home: str | os.PathLike | None = None,
         raise
     finally:
         os.close(directory_fd)
+
+
+def _valid_supervisor_options(options: list[str], home: str | os.PathLike | None) -> bool:
+    if home is not None:
+        expected = ["--state-home", str(pathlib.Path(home).resolve())]
+        if options[:2] != expected:
+            return False
+        options = options[2:]
+    elif options and options[0] == "--state-home":
+        return False
+    if not options:
+        return True
+    if options:
+        if (len(options) != 2 or options[0] != "--ssh-port"
+                or not re.fullmatch(r"[0-9]{1,5}", options[1])
+                or not 1024 <= int(options[1]) <= 65535):
+            return False
+    return True
 
 
 def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: str | os.PathLike | None = None) -> dict:
@@ -605,7 +639,7 @@ def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: s
             or not isinstance(identity.get("exe"), str) or not identity["exe"].startswith("/")
             or not isinstance(identity.get("argv"), list)
             or not identity["argv"] or not all(isinstance(item, str) for item in identity["argv"])
-            or len(identity["argv"]) not in (11, 13)
+            or len(identity["argv"]) not in (11, 13, 15)
             or not identity["argv"][0].startswith("/")
             or os.path.realpath(identity["argv"][0]) != identity["exe"]
             or identity["argv"][1] != "-I"
@@ -613,10 +647,7 @@ def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: s
             or identity["argv"][3:7] != ["--parent-id", PARENT_ID, "--run-id", run["run_id"]]
             or identity["argv"][7] != "--lock-fd" or not identity["argv"][8].isdigit()
             or identity["argv"][9] != "--handoff-fd" or not identity["argv"][10].isdigit()
-            or (len(identity["argv"]) == 13 and
-                (identity["argv"][11] != "--state-home" or home is None
-                 or identity["argv"][12] != str(pathlib.Path(home).resolve())))
-            or (len(identity["argv"]) == 11 and home is not None)
+            or not _valid_supervisor_options(identity["argv"][11:], home)
             or not parent["disk"]["provisioned"] or disk is None):
         return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
     try:
