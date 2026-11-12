@@ -121,8 +121,13 @@ if [[ -e "$STATE_DIR/ssh_port" || -L "$STATE_DIR/ssh_port" ]]; then
     exit 2
   fi
   PORT="$(cat "$STATE_DIR/ssh_port")"
-  if [[ ! "$PORT" =~ ^[0-9]{1,5}$ ]] || (( PORT < 1024 || PORT > 65535 )); then
-    echo "REFUSED: ssh_port is not a valid unprivileged TCP port" >&2
+  if [[ ! "$PORT" =~ ^[0-9]{1,5}$ ]]; then
+    echo "REFUSED: ssh_port is not a decimal TCP port" >&2
+    exit 2
+  fi
+  PORT=$((10#$PORT))
+  if (( PORT < 1024 || PORT > 65535 )); then
+    echo "REFUSED: ssh_port is outside the valid unprivileged TCP port range" >&2
     exit 2
   fi
   command -v ss >/dev/null
