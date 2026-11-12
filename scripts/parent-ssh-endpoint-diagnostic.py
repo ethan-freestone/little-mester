@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import re
+import socket
 import stat
 import subprocess
 import sys
@@ -93,6 +94,17 @@ def _presented_key(port: int) -> list[bytes]:
     except (OSError, subprocess.SubprocessError):
         return []
     return _key_lines(result.stdout)
+
+
+def _wait_for_listener(port: int, seconds: int) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return True
+        except OSError:
+            time.sleep(0.25)
+    return False
 
 
 def _known_hosts_key(known_hosts: pathlib.Path, port: int) -> tuple[str, str | None]:
@@ -184,7 +196,8 @@ def diagnose(install_root: pathlib.Path, state_dir: pathlib.Path,
     expected = _fingerprint(b"", public_file=host_public)
     if expected is None:
         raise DiagnosticRefused("expected public host-key fingerprint could not be read")
-    presented = _presented_key(port)
+    reachable = _wait_for_listener(port, min(wait_seconds, 60))
+    presented = _presented_key(port) if reachable else []
     endpoint_fps = {_fingerprint(line) for line in presented}
     endpoint_fps.discard(None)
     if len(endpoint_fps) == 1:
@@ -201,7 +214,8 @@ def diagnose(install_root: pathlib.Path, state_dir: pathlib.Path,
     status = _run_status(lab_vm)
     if status.get("run_id") != run_id or _port(state_dir) != port:
         raise DiagnosticRefused("parent run or SSH port changed during diagnostic")
-    return {"RUN_STATE_STABLE": "YES", "ENDPOINT_KEY_VS_EXPECTED": endpoint_match,
+    return {"RUN_STATE_STABLE": "YES", "ENDPOINT_REACHABLE": "YES" if reachable else "NO",
+            "ENDPOINT_KEY_VS_EXPECTED": endpoint_match,
             "KNOWN_HOST_LOOKUP": lookup, "PIN_VS_EXPECTED": pin_match,
             "STRICT_HOSTKEY": strict, "STRICT_REASON": reason,
             "STRICT_ENDPOINT_KEY_VS_EXPECTED": strict_endpoint_match}
