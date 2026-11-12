@@ -16,7 +16,7 @@ From a clean owner clone containing the final reviewed commit:
 ```sh
 set -euo pipefail
 REPO="$HOME/Development/little-mester-m1a"
-CANDIDATE_SHA='<final-reviewed-40-character-SHA>'
+CANDIDATE_SHA='820947aef297aeef199f1b983199a1867cd1e781'
 cd "$REPO"
 test "$(git -C "$REPO" rev-parse "$CANDIDATE_SHA^{commit}")" = "$CANDIDATE_SHA"
 test -z "$(git -C "$REPO" status --porcelain)"
