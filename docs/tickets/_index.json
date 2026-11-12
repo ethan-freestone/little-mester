@@ -348,7 +348,13 @@
       "file_path": "ticket-059.json",
       "status": "draft",
       "area": "ticketing engine"
+    },
+    {
+      "number": 60,
+      "file_path": "ticket-060.json",
+      "status": "draft",
+      "area": "documentation"
     }
   ],
-  "updated_at": "2026-11-12T19:00:05.556Z"
+  "updated_at": "2026-11-12T19:21:03.256Z"
 }

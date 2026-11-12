@@ -1,0 +1,43 @@
+{
+  "id": 60,
+  "file_path": "/workspace/docs/tickets/ticket-060.json",
+  "number": 60,
+  "area": "documentation",
+  "type": "doc",
+  "status": "draft",
+  "title": "Phase 1.5 — Consolidate repository documentation",
+  "objective": "After Phase 1 acceptance and merge, audit and consolidate repository Markdown to reduce duplication, obsolete material, and process narration while preserving durable architecture decisions, operational instructions, security rationale, and required history. This work is explicitly deferred until after Phase 1 merge and is not a blocker for Phase 1 acceptance or merge.",
+  "created_at": "2026-11-12T19:21:03.255Z",
+  "updated_at": "2026-11-12T19:21:03.255Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Audit existing Markdown for duplication, obsolescence, and unnecessary process narration; inventory useful operational instructions, durable architecture decisions, security rationale, lifecycle history, acceptance evidence, and references before changing or removing files.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Consolidate useful operational instructions around the scripts they explain; retain concise, durable architecture decisions and security rationale; move appropriate lifecycle history, acceptance evidence, and work commentary into ticket fields/comments where supported.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Remove redundant Markdown only after preserving necessary information, fix all affected references/links, and update documentation index/navigation so the resulting set is smaller and useful.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Preserve required security, audit, and provenance records; validate documentation links/navigation and confirm the cleanup does not alter ticket audit history or block Phase 1 acceptance/merge.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Markdown/reference inventory and link validation before and after consolidation.",
+      "Review of retained security, audit, provenance, and ticket-history records before removing redundant documentation."
+    ],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}
