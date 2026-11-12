@@ -1,15 +1,19 @@
 import * as fs from 'fs';
+import * as crypto from 'crypto';
+import * as os from 'os';
 import * as path from 'path';
-import { spawnSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import { createTicketEngine } from '../src/engine';
 
 describe('TicketEngine', () => {
     let tmpDir: string;
     let indexPath: string;
     let engine: ReturnType<typeof createTicketEngine>;
+    let privateTmpDir: string | undefined;
 
     beforeEach(() => {
         tmpDir = fs.mkdtempSync('/tmp/ticket-engine-test-');
+        privateTmpDir = undefined;
         indexPath = path.join(tmpDir, '_index.json');
         engine = createTicketEngine({ ticketDir: tmpDir, indexPath });
     });
@@ -18,6 +22,9 @@ describe('TicketEngine', () => {
         // Clean up temp directory
         if (fs.existsSync(tmpDir)) {
             fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+        if (privateTmpDir && fs.existsSync(privateTmpDir)) {
+            fs.rmSync(privateTmpDir, { recursive: true, force: true });
         }
     });
 
@@ -228,6 +235,155 @@ describe('TicketEngine', () => {
             engine.create({ acceptance_criteria: ['Criterion met'], area: 'a', title: 'T1' }); // draft
             const list = engine.list(undefined, 'draft');
             expect(list.length).toBe(1);
+        });
+    });
+
+    describe('one-time ticket 54 privacy reconciliation', () => {
+        function fixtureWithSensitiveCase() {
+            const repoRoot = path.join(tmpDir, 'fixture-repo');
+            const ticketDir = path.join(repoRoot, 'docs', 'tickets');
+            fs.mkdirSync(repoRoot, { recursive: true });
+            execFileSync('git', ['init', '--quiet', repoRoot]);
+            fs.mkdirSync(ticketDir, { recursive: true });
+            const fixtureEngine = createTicketEngine({
+                ticketDir,
+                indexPath: path.join(ticketDir, '_index.json'),
+            });
+            for (let number = 1; number <= 54; number++) {
+                fixtureEngine.create({
+                    area: 'test', title: `Ticket ${number}`,
+                    acceptance_criteria: ['Criterion remains unchanged'],
+                });
+            }
+            const fingerprint = `SHA256:${'A'.repeat(43)}`;
+            const original = `OWNER-REPORTED HOST-KEY FINGERPRINT CHECK (2026-11-12; post-failure state): `
+                + `ssh-keygen reports expected persistent \`ssh_host_ed25519_key.pub\` fingerprint ${fingerprint}; `
+                + 'pinned known_hosts key for `[127.0.0.1]:46617` matches. '
+                + '`guestfish` unavailable; guest-disk key unknown.';
+            const before = fixtureEngine.update(54, { tests: { cases: [original] } })!;
+            privateTmpDir = fs.mkdtempSync(path.join(os.homedir(), '.ticket-engine-test-private-'));
+            fs.chmodSync(privateTmpDir, 0o700);
+            const archiveDir = path.join(privateTmpDir, 'private-ticket-evidence');
+            fs.mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
+            fs.chmodSync(archiveDir, 0o700);
+            const archive = path.join(archiveDir, 'ticket-054-host-key-observation.json');
+            const authorizedCaseSha256 = crypto.createHash('sha256').update(original).digest('hex');
+            return { fixtureEngine, original, before, privateTmpDir, archive, authorizedCaseSha256 };
+        }
+
+        it('archives exact case privately, sanitizes the case, and appends without rewriting audit history', () => {
+            const { fixtureEngine, original, before, archive, authorizedCaseSha256 } = fixtureWithSensitiveCase();
+            const criteriaBefore = before.acceptance_criteria;
+            const auditBefore = fixtureEngine.getAuditLog();
+            const after = fixtureEngine.reconcileTicket054FingerprintCase(archive, authorizedCaseSha256);
+            expect(fixtureEngine.reconcileTicket054FingerprintCase(archive, authorizedCaseSha256)).toEqual(after);
+            expect(after.status).toBe('draft');
+            expect(after.acceptance_criteria).toEqual(criteriaBefore);
+            const sanitizedCases = after.tests!.cases;
+            expect(sanitizedCases).toHaveLength(1);
+            expect(sanitizedCases[0]).toContain('comparison: MATCH');
+            expect(sanitizedCases[0]).toContain('UNKNOWN');
+            expect(sanitizedCases[0]).not.toContain('SHA256:');
+            expect(JSON.parse(fs.readFileSync(archive, 'utf-8')).evidence).toBe(original);
+            expect(fs.statSync(archive).mode & 0o777).toBe(0o600);
+            expect(fixtureEngine.getAuditLog().slice(0, auditBefore.length)).toEqual(auditBefore);
+            expect(fixtureEngine.getAuditLog()).toHaveLength(auditBefore.length + 1);
+            const auditAfter = fixtureEngine.getAuditLog();
+            expect(auditAfter[auditAfter.length - 1]).toMatchObject({
+                operation: 'privacy-redaction', ticket_number: 54,
+            });
+            expect(fixtureEngine.validate().enforcement.audit.valid).toBe(true);
+            expect(fixtureEngine.getAuditLog()).toHaveLength(auditBefore.length + 1);
+        });
+
+        it('resumes after audit replacement failure without rewriting prior entries', () => {
+            const { fixtureEngine, original, archive, authorizedCaseSha256 } = fixtureWithSensitiveCase();
+            const before = fixtureEngine.getAuditLog();
+            const sanitized = 'OWNER-REPORTED HOST-KEY CHECK (2026-11-12; post-failure state): '
+                + 'expected persistent host-key vs pinned known_hosts comparison: MATCH. '
+                + 'Guest-disk active public host-key fingerprint: UNKNOWN (guestfish unavailable). '
+                + 'No guest mismatch/root-cause inference or M1a acceptance; exact private evidence '
+                + 'is retained outside the repository.';
+            fs.writeFileSync(archive, JSON.stringify({ ticket_number: 54, evidence: original }, null, 2) + '\n',
+                { mode: 0o600 });
+            fs.chmodSync(archive, 0o600);
+            const ticketPath = path.join(tmpDir, 'fixture-repo', 'docs', 'tickets', 'ticket-054.json');
+            const ticket = JSON.parse(fs.readFileSync(ticketPath, 'utf-8'));
+            ticket.tests.cases = [sanitized];
+            fs.writeFileSync(ticketPath, JSON.stringify(ticket, null, 2));
+            expect(fixtureEngine.getAuditLog()).toEqual(before);
+            fixtureEngine.reconcileTicket054FingerprintCase(archive, authorizedCaseSha256);
+            expect(fixtureEngine.getAuditLog()).toHaveLength(before.length + 1);
+            expect(fixtureEngine.getAuditLog().slice(-1)[0]).toMatchObject({
+                operation: 'privacy-redaction', ticket_number: 54,
+            });
+            expect(fixtureEngine.validate().enforcement.audit.valid).toBe(true);
+        });
+
+        it('refuses symlinked archive ancestry without changing the ticket', () => {
+            const { fixtureEngine, privateTmpDir: privateDir, archive, authorizedCaseSha256 } = fixtureWithSensitiveCase();
+            const link = path.join(privateDir, 'repo-link');
+            fs.symlinkSync(path.join(tmpDir, 'fixture-repo'), link, 'dir');
+            const unsafeArchive = path.join(link, 'private.json');
+            expect(() => fixtureEngine.reconcileTicket054FingerprintCase(unsafeArchive, authorizedCaseSha256))
+                .toThrow('private evidence archive path contains a symlink');
+            expect(fixtureEngine.list().find(ticket => ticket.number === 54)!.tests!.cases[0])
+                .toContain('SHA256:');
+            expect(fs.existsSync(archive)).toBe(false);
+        });
+
+        it('does not replace different existing evidence at the private archive path', () => {
+            const { fixtureEngine, archive, authorizedCaseSha256 } = fixtureWithSensitiveCase();
+            const competitorEvidence = 'owner-private evidence from a concurrent archive operation';
+            fs.writeFileSync(archive, competitorEvidence, { mode: 0o600, flag: 'wx' });
+            expect(() => fixtureEngine.reconcileTicket054FingerprintCase(archive, authorizedCaseSha256))
+                .toThrow('existing private evidence archive is unsafe or does not match');
+            expect(fs.readFileSync(archive, 'utf-8')).toBe(competitorEvidence);
+            expect(fixtureEngine.list().find(ticket => ticket.number === 54)!.tests!.cases[0])
+                .toContain('SHA256:');
+        });
+
+        it('recovers a dead writer temporary hard link without changing the archived evidence', () => {
+            const { fixtureEngine, original, archive, authorizedCaseSha256 } = fixtureWithSensitiveCase();
+            fs.writeFileSync(archive,
+                JSON.stringify({ ticket_number: 54, evidence: original }, null, 2) + '\n',
+                { mode: 0o600, flag: 'wx' });
+            const orphanLink = path.join(path.dirname(archive),
+                '.ticket-054-evidence.99999999.deadbeef.tmp');
+            fs.linkSync(archive, orphanLink);
+            expect(fs.statSync(archive).nlink).toBe(2);
+
+            fixtureEngine.reconcileTicket054FingerprintCase(archive, authorizedCaseSha256);
+
+            expect(fs.existsSync(orphanLink)).toBe(false);
+            expect(fs.statSync(archive).nlink).toBe(1);
+            expect(JSON.parse(fs.readFileSync(archive, 'utf-8')).evidence).toBe(original);
+            expect(fixtureEngine.validate().enforcement.audit.valid).toBe(true);
+        });
+
+        it('does not clean an orphan alias before retry authorization succeeds', () => {
+            const { fixtureEngine, original, archive, authorizedCaseSha256 } = fixtureWithSensitiveCase();
+            const sanitized = 'OWNER-REPORTED HOST-KEY CHECK (2026-11-12; post-failure state): '
+                + 'expected persistent host-key vs pinned known_hosts comparison: MATCH. '
+                + 'Guest-disk active public host-key fingerprint: UNKNOWN (guestfish unavailable). '
+                + 'No guest mismatch/root-cause inference or M1a acceptance; exact private evidence '
+                + 'is retained outside the repository.';
+            const wrongEvidence = original.replace('matches.', 'differs.');
+            fs.writeFileSync(archive,
+                JSON.stringify({ ticket_number: 54, evidence: wrongEvidence }, null, 2) + '\n',
+                { mode: 0o600, flag: 'wx' });
+            const orphanLink = path.join(path.dirname(archive),
+                '.ticket-054-evidence.99999999.deadbeef.tmp');
+            fs.linkSync(archive, orphanLink);
+            const ticketPath = path.join(tmpDir, 'fixture-repo', 'docs', 'tickets', 'ticket-054.json');
+            const ticket = JSON.parse(fs.readFileSync(ticketPath, 'utf-8'));
+            ticket.tests.cases = [sanitized];
+            fs.writeFileSync(ticketPath, JSON.stringify(ticket, null, 2));
+
+            expect(() => fixtureEngine.reconcileTicket054FingerprintCase(archive, authorizedCaseSha256))
+                .toThrow('the exact ticket-054 fingerprint observation was not found');
+            expect(fs.existsSync(orphanLink)).toBe(true);
+            expect(fs.statSync(archive).nlink).toBe(2);
         });
     });
 

@@ -38,6 +38,7 @@ describe('host-only VM MCP boundary', () => {
                 'mester_tickets_create', 'mester_tickets_list', 'mester_tickets_get',
                 'mester_tickets_update', 'mester_tickets_archive', 'mester_tickets_search',
                 'mester_tickets_board', 'mester_tickets_validate',
+                'mester_tickets_reconcile_054_fingerprint_case',
             ]));
             expect(names.some(name => name.startsWith('mester_vm_'))).toBe(false);
 

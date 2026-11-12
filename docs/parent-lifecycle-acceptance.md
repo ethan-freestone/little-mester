@@ -21,6 +21,25 @@ evidence only. NVIDIA timing remains separately pending.
   justified by this evidence. The next distinction requires owner-approved guest-side
   observation of shell execution and terminal state.
 
+### Next owner diagnostic: capture one harmless PTY round-trip
+
+Using the **same protected installed candidate that started the still-running parent**, open
+a fresh local terminal and record one SSH session to a mode-0600 file. This reconnects only;
+do not run `up`, `stop`, or `recover` for this check.
+
+```bash
+umask 077
+LOG="$HOME/.local/state/little-mester/parent-ssh-pty.typescript"
+install -d -m 0700 "$HOME/.local/state/little-mester"
+script --quiet --flush --command "$INSTALL_ROOT/lab-vm parent ssh" "$LOG"
+```
+
+At the guest prompt, type `echo $((19+23))` and press Enter, then type `exit`. A shell that
+executes the command should display a separate `42` output line (the echoed command itself
+does not contain `42`). Report whether that line appeared. If not, report the terminal
+emulator and local `TERM`, plus a sanitized excerpt showing the echoed line and any following
+output; do not share credentials or unredacted private logs. Keep the transcript private.
+
 ## 1. Install the reviewed candidate
 
 Use the existing protected deployment mechanism documented in

@@ -349,7 +349,10 @@ stale lock (an error worth raising). A **missing** lock is normal.
 }
 ```
 
-- `operation` is `create`, `update`, `archive`, or `baseline`.
+- `operation` is `create`, `update`, `archive`, `baseline`, or the one-time
+  `privacy-redaction` event for the owner-authorized ticket-054 correction. That event
+  records only its timestamp, operation, ticket number and integrity hash; the sensitive
+  original is preserved separately in owner-only storage outside the repository.
 - `hash = sha256(canonical_json({timestamp, operation, ticket_number}))`, where
   `canonical_json` is `JSON.stringify(value)` with no extra whitespace and keys in the
   order shown above.
