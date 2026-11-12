@@ -2,6 +2,8 @@
 """Unprivileged REAL_PROCESS tests for persistent-parent state primitives."""
 
 import importlib.util
+import contextlib
+import io
 import json
 import os
 import pathlib
@@ -44,6 +46,8 @@ class ParentStateTests(unittest.TestCase):
         self.assertEqual(preview["status"], "NOT_CREATED")
         self.assertEqual(preview["action"], "none")
         self.assertTrue(preview["dry_run"])
+        default = parent_state.recover_parent(home=self.home)
+        self.assertEqual(default, preview)
         self.assertFalse((self.home / ".local").exists())
 
     def test_recovery_preview_refuses_while_supervisor_owns_lifecycle_lock(self):
@@ -51,6 +55,26 @@ class ParentStateTests(unittest.TestCase):
         with parent_state.lifecycle_lock(home=self.home):
             with self.assertRaisesRegex(parent_state.Refused, "owns the parent lock"):
                 parent_state.recovery_preview(home=self.home)
+
+    def test_recovery_execute_refuses_while_supervisor_owns_lifecycle_lock(self):
+        parent_state.initialize(home=self.home)
+        with parent_state.lifecycle_lock(home=self.home):
+            with self.assertRaisesRegex(parent_state.Refused, "exclusive lifecycle lock"):
+                parent_state.recover_parent(home=self.home, execute=True)
+
+    def test_recoverable_preview_exit_code_matches_text_and_json(self):
+        recoverable = {"dry_run": True, "action": "recover", "status": "RECOVERABLE",
+                       "parent_id": "default", "run_id": "0" * 32,
+                       "children": {"qemu": "TARGET", "proxy": "TARGET"}}
+        with mock.patch.object(parent_state, "recover_parent", return_value=recoverable):
+            with mock.patch.object(sys, "argv", [str(MODULE), "recover"]), contextlib.redirect_stdout(io.StringIO()):
+                text_status = parent_state.main()
+            with mock.patch.object(sys, "argv", [str(MODULE), "recover", "--json"]), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                json_status = parent_state.main()
+        self.assertEqual(text_status, 0)
+        self.assertEqual(json_status, 0)
+        self.assertEqual(json.loads(output.getvalue())["status"], "RECOVERABLE")
 
     def test_recovery_preview_refuses_symlinked_lock_without_following_it(self):
         parent_state.initialize(home=self.home)

@@ -401,20 +401,211 @@ def recovery_preview(*, home: str | os.PathLike | None = None) -> dict:
             _verify_lock_fd(lock_fd, home=home)
         except (OSError, Refused) as error:
             raise Refused("parent lifecycle lock changed or has unsafe identity") from error
-        status = read_status(home=home)
-        result = {"dry_run": True, "action": "none", "status": status["status"],
-                  "parent_id": PARENT_ID}
-        if "run_id" in status:
-            result["run_id"] = status["run_id"]
-        if status["status"] == "AMBIGUOUS":
-            result["reason"] = "state is ambiguous; no identity was signalled or changed"
-        else:
-            result["reason"] = "no recovery action was requested or performed"
-        return result
+        try:
+            plan = _validated_recovery_plan(directory_fd, home=home)
+        except (Refused, OSError):
+            return {"dry_run": True, "action": "none", "status": "AMBIGUOUS",
+                    "parent_id": PARENT_ID,
+                    "reason": "state is ambiguous; no identity was signalled or changed"}
+        if plan is None:
+            status = read_status(home=home)
+            return {"dry_run": True, "action": "none", "status": status["status"],
+                    "parent_id": PARENT_ID,
+                    "reason": "no recovery action is required or safely available"}
+        if plan["run"]["phase"] == "STOPPING":
+            if plan["pending_artifacts"]:
+                return {"dry_run": True, "action": "cleanup", "status": "STOPPED",
+                        "parent_id": PARENT_ID, "run_id": plan["run"]["run_id"],
+                        "artifacts": plan["pending_artifacts"],
+                        "reason": "children are stopped; verified recovery artifacts remain to clean"}
+            return {"dry_run": True, "action": "none", "status": "STOPPED",
+                    "parent_id": PARENT_ID, "run_id": plan["run"]["run_id"],
+                    "reason": "parent is already verified STOPPED; no recovery action is required"}
+        return {"dry_run": True, "action": "recover", "status": "RECOVERABLE",
+                "parent_id": PARENT_ID, "run_id": plan["run"]["run_id"],
+                "children": plan["child_states"],
+                "artifacts": plan["pending_artifacts"],
+                "reason": "dead supervisor and complete exact child identities verified; execution requires --execute"}
     finally:
         if lock_fd >= 0:
             os.close(lock_fd)
         os.close(directory_fd)
+
+
+def _validated_recovery_plan(directory_fd: int, *, home: str | os.PathLike | None) -> dict | None:
+    """Validate complete orphan evidence. Never infer an absent child identity."""
+    try:
+        parent = _read_json(directory_fd, "parent.json")
+        validate_parent(parent)
+        disk = _disk_status(directory_fd, parent)
+        run = _read_json(directory_fd, "active-run.json")
+    except FileNotFoundError:
+        return None
+    if (run.get("schema") != SCHEMA or run.get("parent_id") != PARENT_ID
+            or not isinstance(run.get("run_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", run["run_id"])
+            or run.get("phase") not in ("STARTING", "RUNNING", "STOPPING")):
+        raise Refused("parent recovery run record is malformed")
+
+    # Reuse the complete supervisor schema/trusted-argv validation in status_for_run,
+    # then independently require that exact supervisor identity to be gone.
+    stopping_shape = dict(run)
+    stopping_shape["phase"] = "STOPPING"
+    stopping_shape.pop("qemu", None)
+    validated_status = status_for_run(parent, stopping_shape, disk, home=home)
+    if validated_status["status"] not in ("STOPPED", "STOPPING"):
+        raise Refused("supervisor identity or run schema is ambiguous")
+    supervisor = run.get("supervisor")
+    try:
+        boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError as error:
+        raise Refused("host boot identity is unavailable for recovery") from error
+    supervisor_state = _recorded_process_status(
+        supervisor, expected_basename=pathlib.Path(supervisor["exe"]).name,
+        current_boot_id=boot_id)
+    if supervisor_state != "GONE":
+        raise Refused("recovery requires the exact recorded supervisor to be stopped")
+    if not parent["disk"]["provisioned"] or disk is None:
+        return None
+
+    child_states = {}
+    transitions = {}
+    roles = ("qemu", "metrics", "proxy")
+    required_roles = {"qemu", "proxy"} if run["phase"] in ("STARTING", "RUNNING") else set()
+    for role in roles:
+        identity_name = f"child-{role}.identity.json"
+        target_name = f"child-{role}.target.json"
+        try:
+            transition = _read_json(directory_fd, identity_name)
+        except FileNotFoundError:
+            if role in required_roles:
+                raise Refused(f"recovery lacks the durable {role} child identity")
+            continue
+        _validate_exec_transition(transition)
+        if (transition["identity_path"] != identity_name
+                or transition["target_path"] != target_name):
+            raise Refused(f"recovery {role} transition names an unexpected state file")
+        target_record = _read_json(directory_fd, target_name)
+        if (target_record != {"executable": transition["target"]["exe"],
+                              "argv": transition["target"]["argv"],
+                              "fd_contracts": transition["target"]["fd_contracts"]}):
+            raise Refused(f"recovery {role} target does not match its durable identity")
+        child_state = exec_transition_status(transition)
+        if child_state not in ("GATE", "TARGET", "STOPPED"):
+            raise Refused(f"recovery {role} process identity is ambiguous")
+        if run["phase"] == "STOPPING" and child_state != "STOPPED":
+            raise Refused(f"STOPPING record still has a live {role} child")
+        transitions[role] = transition
+        child_states[role] = child_state
+
+    if run["phase"] in ("STARTING", "RUNNING") and not transitions:
+        # No records cannot prove that no process was spawned before a SIGKILL.
+        raise Refused("recovery cannot infer child absence from a partial startup record")
+    if run["phase"] == "RUNNING":
+        qemu = run.get("qemu")
+        transition = transitions.get("qemu")
+        if (not isinstance(qemu, dict) or transition is None
+                or any(qemu.get(key) != transition.get(key) for key in
+                       ("pid", "uid", "host_boot_id", "start_time"))
+                or qemu.get("exe") != transition["target"]["exe"]
+                or qemu.get("argv") != transition["target"]["argv"]
+                or _recorded_process_status(qemu, expected_basename="qemu-system-x86_64",
+                                            current_boot_id=boot_id) not in ("MATCH", "GONE")):
+            raise Refused("RUNNING QEMU identity does not match its durable child transition")
+    pending_artifacts = []
+    for name, kind in (("supervisor.sock", "socket"), ("qmp.sock", "socket"),
+                       ("proxy.port", "file")):
+        try:
+            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        _validate_recovery_artifact(directory_fd, name, kind)
+        pending_artifacts.append(name)
+    return {"run": run, "transitions": transitions, "child_states": child_states,
+            "pending_artifacts": pending_artifacts, "boot_id": boot_id}
+
+
+def recover_parent(*, home: str | os.PathLike | None = None, execute: bool = False) -> dict:
+    """Explicitly stop only fully recorded orphan children; default remains preview-only."""
+    if type(execute) is not bool:
+        raise Refused("recovery execution flag is invalid")
+    if not execute:
+        return recovery_preview(home=home)
+    directory_fd = _open_directory_chain(create=False, home_override=home)
+    if directory_fd is None:
+        return {"dry_run": False, "action": "none", "status": "NOT_CREATED",
+                "parent_id": PARENT_ID}
+    lock_fd = -1
+    try:
+        try:
+            lock_fd = os.open("lifecycle.lock", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                              dir_fd=directory_fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _verify_lock_fd(lock_fd, home=home)
+        except (OSError, Refused) as error:
+            raise Refused("recovery could not acquire the verified exclusive lifecycle lock") from error
+        plan = _validated_recovery_plan(directory_fd, home=home)
+        if plan is None:
+            status = read_status(home=home)
+            return {"dry_run": False, "action": "none", "status": status["status"],
+                    "parent_id": PARENT_ID}
+        run = plan["run"]
+        transitions = plan["transitions"]
+        if run["phase"] == "STOPPING" and not plan["pending_artifacts"]:
+            return {"dry_run": False, "action": "none", "status": "STOPPED",
+                    "parent_id": PARENT_ID, "run_id": run["run_id"], "disk_retained": True}
+        for role in ("qemu", "metrics", "proxy"):
+            transition = transitions.get(role)
+            if transition is None or plan["child_states"][role] == "STOPPED":
+                continue
+            _verify_lock_fd(lock_fd, home=home)
+            if stop_exec_transition(
+                    transition, authorize_signal=lambda: _verify_lock_fd(lock_fd, home=home)) != "STOPPED":
+                raise Refused(f"recovery could not stop the exact {role} child")
+
+        # Publish STOPPING only after every recorded child is independently stopped.
+        _verify_lock_fd(lock_fd, home=home)
+        run["phase"] = "STOPPING"
+        run.pop("qemu", None)
+        _atomic_json(directory_fd, "active-run.json", run)
+        for name, kind in (("supervisor.sock", "socket"), ("qmp.sock", "socket"),
+                           ("proxy.port", "file")):
+            _verify_lock_fd(lock_fd, home=home)
+            _recovery_remove_artifact(directory_fd, name, kind)
+        os.fsync(directory_fd)
+        status = read_status(home=home)
+        if status["status"] != "STOPPED":
+            raise Refused("recovery cleanup completed but final status is not verified STOPPED")
+        return {"dry_run": False, "action": "stopped", "status": "STOPPED",
+                "parent_id": PARENT_ID, "run_id": run["run_id"], "disk_retained": True}
+    finally:
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        os.close(directory_fd)
+
+
+def _recovery_remove_artifact(directory_fd: int, name: str, kind: str) -> None:
+    _validate_recovery_artifact(directory_fd, name, kind)
+    try:
+        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    os.unlink(name, dir_fd=directory_fd)
+
+
+def _validate_recovery_artifact(directory_fd: int, name: str, kind: str) -> None:
+    try:
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if (info.st_uid != os.getuid() or info.st_nlink != 1
+            or (kind == "socket" and
+                (not stat.S_ISSOCK(info.st_mode)
+                 or stat.S_IMODE(info.st_mode) & 0o600 != 0o600
+                 or stat.S_IMODE(info.st_mode) & 0o077))
+            or (kind == "file" and
+                (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600))):
+        raise Refused(f"recovery preserved unsafe {name} evidence")
 
 
 def request_supervisor_stop(*, home: str | os.PathLike | None = None,
@@ -1100,7 +1291,8 @@ def exec_transition_status(identity: dict) -> str:
     return "AMBIGUOUS"
 
 
-def stop_exec_transition(identity: dict, *, term_grace_ms: int = 5000, settle_ms: int = 2000) -> str:
+def stop_exec_transition(identity: dict, *, term_grace_ms: int = 5000, settle_ms: int = 2000,
+                         authorize_signal=None) -> str:
     """Identity-bound bounded stop; callers must separately require owner authorization."""
     if (type(term_grace_ms) is not int or type(settle_ms) is not int
             or term_grace_ms <= 0 or settle_ms <= 0 or term_grace_ms + settle_ms > 15000):
@@ -1123,11 +1315,15 @@ def stop_exec_transition(identity: dict, *, term_grace_ms: int = 5000, settle_ms
         phase = exec_transition_status(identity)
         if phase not in ("GATE", "TARGET"):
             return phase
+        if authorize_signal is not None:
+            authorize_signal()
         signal.pidfd_send_signal(pidfd, signal.SIGTERM)
         if poller.poll(term_grace_ms):
             return "STOPPED"
         if exec_transition_status(identity) not in ("GATE", "TARGET"):
             return "AMBIGUOUS"
+        if authorize_signal is not None:
+            authorize_signal()
         signal.pidfd_send_signal(pidfd, signal.SIGKILL)
         if poller.poll(settle_ms):
             return "STOPPED"
@@ -1142,11 +1338,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("status", "recover", "stop", "ssh", "tui"))
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="preview recovery; recovery is always non-mutating in this version")
+    recovery_mode = parser.add_mutually_exclusive_group()
+    recovery_mode.add_argument("--dry-run", action="store_true", help="preview recovery (the default)")
+    recovery_mode.add_argument("--execute", action="store_true",
+                               help="explicitly recover fully verified orphan children")
     args = parser.parse_args()
-    if args.command != "recover" and args.dry_run:
-        parser.error("--dry-run is only valid with recover")
+    if args.command != "recover" and (args.dry_run or args.execute):
+        parser.error("--dry-run/--execute is only valid with recover")
     if args.command in ("ssh", "tui") and args.json:
         parser.error("--json is not valid with ssh/tui")
     try:
@@ -1163,7 +1361,7 @@ def main() -> int:
                     except OSError:
                         pass
         if args.command == "recover":
-            result = recovery_preview()
+            result = recover_parent(execute=args.execute)
         elif args.command == "stop":
             result = request_supervisor_stop()
         else:
@@ -1175,9 +1373,13 @@ def main() -> int:
         print(json.dumps(result, sort_keys=True))
     else:
         if args.command == "recover":
-            print(f"Recovery preview: {result['status']} (dry-run; action=none)")
+            if result.get("dry_run"):
+                print(f"Recovery preview: {result['status']} (dry-run; action={result['action']})")
+            else:
+                print(f"Recovery: {result['status']} (action={result['action']}; disk retained)")
             print(result.get("reason", ""))
-            return 0
+            return 0 if result["status"] in (
+                "NOT_CREATED", "UNPROVISIONED", "STOPPED", "RECOVERABLE") else 2
         if args.command == "stop":
             print(f"Parent supervisor stopped: run_id={result['run_id']}; persistent disk retained")
             return 0
@@ -1191,7 +1393,8 @@ def main() -> int:
                 print(f"Host allocation: {disk['host_allocated_bytes']} bytes; file length: {disk['file_bytes']} bytes")
         if result["status"] in ("RUNNING", "STARTING"):
             print(f"Run: {result['run_id']}")
-    return 0 if result["status"] in ("NOT_CREATED", "UNPROVISIONED", "STOPPED", "STARTING", "RUNNING") else 2
+    return 0 if result["status"] in (
+        "NOT_CREATED", "UNPROVISIONED", "STOPPED", "STARTING", "RUNNING", "RECOVERABLE") else 2
 
 
 if __name__ == "__main__":

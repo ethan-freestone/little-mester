@@ -513,6 +513,49 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
         os.close(handoff_read)
         return proc, run_id
 
+    def spawn_recovery_target(self, directory_fd, role):
+        target = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, close_fds=True)
+        try:
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    target_identity = parent_state.observe_process(target.pid)
+                    if (target_identity["exe"] == os.path.realpath(sys.executable)
+                            and target_identity["argv"] == [sys.executable, "-c", "import time; time.sleep(30)"]):
+                        break
+                except parent_state.Refused:
+                    pass
+                if time.monotonic() >= deadline:
+                    raise AssertionError("recovery target identity did not stabilize")
+                time.sleep(0.01)
+        except BaseException:
+            if target.poll() is None:
+                target.kill()
+                target.wait(timeout=3)
+            raise
+        target_name = f"child-{role}.target.json"
+        identity_name = f"child-{role}.identity.json"
+        token = {"qemu": "1", "proxy": "2", "metrics": "3"}[role] * 32
+        gate_argv = [os.path.realpath(sys.executable), "-I",
+                     str((ROOT / "lib/vm/parent-gate.py").resolve()),
+                     "--release-fd", "10", "--token", token,
+                     "--target", target_name, "--identity", identity_name,
+                     "--state-dir-fd", "20", "--disk-fd", "-1"]
+        gate_identity = {**target_identity, "exe": os.path.realpath(sys.executable),
+                         "argv": gate_argv}
+        transition = parent_state.create_exec_transition(
+            gate_identity, target_identity["exe"], target_identity["argv"],
+            release_token=token, target_path=target_name,
+            identity_path=identity_name)
+        parent_state._atomic_json(directory_fd, target_name,
+                                  {"executable": target_identity["exe"],
+                                   "argv": target_identity["argv"],
+                                   "fd_contracts": []})
+        parent_state._atomic_json(directory_fd, identity_name, transition)
+        return target, transition
+
     def test_handoff_records_exact_supervisor_and_retains_lock_until_owner_stop(self):
         proc, run_id = self.spawn_supervisor()
         reaper = threading.Thread(target=proc.wait)
@@ -999,6 +1042,208 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                     os.close(descriptor)
         finally:
             self.cleanup_test_supervisor(proc)
+
+    def test_explicit_recovery_stops_only_fully_recorded_orphans_and_retains_disk(self):
+        supervisor, run_id = self.spawn_supervisor()
+        children = []
+        disk_before = (self.state_dir / "disk.qcow2").stat()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            self.assertEqual(parent_state.read_status(home=self.home)["status"], "STARTING")
+
+            directory_fd = parent_state._open_directory_chain(
+                create=False, home_override=self.home)
+            try:
+                for role in ("qemu", "proxy"):
+                    target, transition = self.spawn_recovery_target(directory_fd, role)
+                    children.append(target)
+                    self.assertEqual(parent_state.exec_transition_status(transition), "TARGET")
+            finally:
+                os.close(directory_fd)
+
+            supervisor.kill()
+            supervisor.wait(timeout=3)
+            self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+            preview = parent_state.recovery_preview(home=self.home)
+            self.assertEqual(preview["action"], "recover")
+            self.assertEqual(preview["status"], "RECOVERABLE")
+            self.assertTrue(preview["dry_run"])
+            self.assertTrue(all(child.poll() is None for child in children))
+
+            recovered = parent_state.recover_parent(home=self.home, execute=True)
+            self.assertEqual(recovered["status"], "STOPPED")
+            self.assertTrue(recovered["disk_retained"])
+            self.assertEqual(parent_state.read_status(home=self.home)["status"], "STOPPED")
+            disk_after = (self.state_dir / "disk.qcow2").stat()
+            self.assertEqual((disk_after.st_dev, disk_after.st_ino),
+                             (disk_before.st_dev, disk_before.st_ino))
+            self.assertTrue(all(child.wait(timeout=2) == -signal.SIGTERM for child in children))
+            self.assertFalse((self.state_dir / "supervisor.sock").exists())
+            for role in ("qemu", "proxy"):
+                self.assertTrue((self.state_dir / f"child-{role}.identity.json").exists())
+                self.assertTrue((self.state_dir / f"child-{role}.target.json").exists())
+        finally:
+            self.cleanup_test_supervisor(supervisor)
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=3)
+
+    def test_partial_startup_recovery_refuses_missing_child_identity_without_signalling(self):
+        supervisor, _run_id = self.spawn_supervisor()
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, close_fds=True)
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            supervisor.kill()
+            supervisor.wait(timeout=3)
+            with self.assertRaisesRegex(parent_state.Refused, "durable qemu child identity"):
+                parent_state.recover_parent(home=self.home, execute=True)
+            self.assertIsNone(child.poll())
+        finally:
+            self.cleanup_test_supervisor(supervisor)
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=3)
+
+    def test_recovery_cleanup_resumes_after_interruption_and_preview_reports_artifacts(self):
+        supervisor, _run_id = self.spawn_supervisor()
+        children = []
+        qmp = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            directory_fd = parent_state._open_directory_chain(
+                create=False, home_override=self.home)
+            try:
+                for role in ("qemu", "proxy"):
+                    child, _transition = self.spawn_recovery_target(directory_fd, role)
+                    children.append(child)
+            finally:
+                os.close(directory_fd)
+            qmp.bind(str(self.state_dir / "qmp.sock"))
+            os.chmod(self.state_dir / "qmp.sock", 0o600)
+            (self.state_dir / "proxy.port").write_text("12345\n")
+            (self.state_dir / "proxy.port").chmod(0o600)
+            supervisor.kill()
+            supervisor.wait(timeout=3)
+
+            remove_artifact = parent_state._recovery_remove_artifact
+
+            def interrupt_before_proxy_port(directory_fd, name, kind):
+                if name == "proxy.port":
+                    raise parent_state.Refused("injected interruption before proxy cleanup")
+                return remove_artifact(directory_fd, name, kind)
+
+            with mock.patch.object(parent_state, "_recovery_remove_artifact",
+                                   side_effect=interrupt_before_proxy_port):
+                with self.assertRaisesRegex(parent_state.Refused, "injected interruption"):
+                    parent_state.recover_parent(home=self.home, execute=True)
+            for child in children:
+                child.wait(timeout=2)
+            qmp.close()
+
+            preview = parent_state.recovery_preview(home=self.home)
+            self.assertEqual(preview["status"], "STOPPED")
+            self.assertEqual(preview["action"], "cleanup")
+            self.assertEqual(preview["artifacts"], ["proxy.port"])
+            resumed = parent_state.recover_parent(home=self.home, execute=True)
+            self.assertEqual(resumed["status"], "STOPPED")
+            self.assertFalse((self.state_dir / "proxy.port").exists())
+            self.assertEqual(parent_state.recovery_preview(home=self.home)["action"], "none")
+        finally:
+            qmp.close()
+            self.cleanup_test_supervisor(supervisor)
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=3)
+
+    def test_recovery_revalidates_lock_after_child_stop_before_state_mutation(self):
+        supervisor, _run_id = self.spawn_supervisor()
+        children = []
+        original_lock = self.state_dir / "lifecycle.lock"
+        displaced_lock = self.state_dir / "lifecycle.lock.displaced"
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            directory_fd = parent_state._open_directory_chain(
+                create=False, home_override=self.home)
+            try:
+                for role in ("qemu", "proxy"):
+                    child, _transition = self.spawn_recovery_target(directory_fd, role)
+                    children.append(child)
+            finally:
+                os.close(directory_fd)
+            supervisor.kill()
+            supervisor.wait(timeout=3)
+
+            def replace_lock(_transition, **_kwargs):
+                os.replace(original_lock, displaced_lock)
+                replacement = os.open(original_lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                os.close(replacement)
+                return "STOPPED"
+
+            with mock.patch.object(parent_state, "stop_exec_transition", side_effect=replace_lock):
+                with self.assertRaisesRegex(parent_state.Refused, "lifecycle transaction"):
+                    parent_state.recover_parent(home=self.home, execute=True)
+            directory_fd = parent_state._open_directory_chain(
+                create=False, home_override=self.home)
+            try:
+                self.assertEqual(parent_state._read_json(directory_fd, "active-run.json")["phase"],
+                                 "STARTING")
+            finally:
+                os.close(directory_fd)
+            self.assertTrue(all(child.poll() is None for child in children))
+            self.assertTrue(displaced_lock.exists())
+        finally:
+            self.cleanup_test_supervisor(supervisor)
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=3)
+
+    def test_recovery_refuses_unsafe_cleanup_artifact_before_signalling_children(self):
+        supervisor, _run_id = self.spawn_supervisor()
+        children = []
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            directory_fd = parent_state._open_directory_chain(
+                create=False, home_override=self.home)
+            try:
+                for role in ("qemu", "proxy"):
+                    child, _transition = self.spawn_recovery_target(directory_fd, role)
+                    children.append(child)
+            finally:
+                os.close(directory_fd)
+            unsafe = self.state_dir / "qmp.sock"
+            unsafe.write_text("not a socket")
+            unsafe.chmod(0o600)
+            supervisor.kill()
+            supervisor.wait(timeout=3)
+
+            preview = parent_state.recovery_preview(home=self.home)
+            self.assertEqual(preview["action"], "none")
+            self.assertEqual(preview["status"], "AMBIGUOUS")
+            with self.assertRaisesRegex(parent_state.Refused, "unsafe qmp.sock"):
+                parent_state.recover_parent(home=self.home, execute=True)
+            self.assertTrue(all(child.poll() is None for child in children))
+            self.assertEqual(unsafe.read_text(), "not a socket")
+        finally:
+            self.cleanup_test_supervisor(supervisor)
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=3)
 
     def test_partial_seed_iso_is_refused_and_reported_ambiguous(self):
         part = self.state_dir / "seed.iso.part"

@@ -171,7 +171,7 @@ PY
 export VM_HOST_SCRIPT_ROOT="$root"
 command="${1:-}"
 [[ -n "$command" ]] || {
-  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent up [--capacity-gib N] | parent status [--json] | parent ssh | parent tui | parent stop | parent recover [--dry-run] [--json]\n' >&2
+  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent up [--capacity-gib N] | parent status [--json] | parent ssh | parent tui | parent stop | parent recover [--dry-run|--execute] [--json]\n' >&2
   exit 2
 }
 shift
