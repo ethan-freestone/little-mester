@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Focused tests for the read-only parent safety-gate process scanner."""
 
+import contextlib
 import importlib.util
+import io
+import json
 import os
 import pathlib
 import shutil
@@ -96,6 +99,70 @@ class ProcessScanTests(unittest.TestCase):
             argv = run.call_args.args[0]
             self.assertEqual(argv[:2], ["/usr/bin/sudo", "/usr/bin/lsof"])
             self.assertNotIn(str(ROOT), " ".join(argv))
+
+
+class SafetyGateCliIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp.name)
+        self.install = self.root / "install"
+        (self.install / "lib/vm").mkdir(parents=True)
+        self.state = self.root / "state"
+        self.state.mkdir()
+        self.disk = self.state / "disk.qcow2"
+        self.disk.write_bytes(b"isolated fixture disk")
+        disk_info = os.stat(self.disk)
+        self.lab_vm = self.install / "lab-vm"
+        self.lab_vm.write_text(
+            "#!" + sys.executable + "\nimport json,sys\n"
+            f"disk={{'format':'qcow2','device':{disk_info.st_dev},'inode':{disk_info.st_ino}}}\n"
+            "if sys.argv[1:] == ['parent','status','--json']:\n"
+            " print(json.dumps({'status':'STOPPED','disk':disk}))\n"
+            "elif sys.argv[1:] == ['parent','recover','--dry-run','--json']:\n"
+            " print(json.dumps({'dry_run':True,'action':'none','status':'STOPPED'}))\n"
+            "else: raise SystemExit(2)\n")
+        self.lab_vm.chmod(0o700)
+        (self.install / "lib/vm/parent-state.py").write_text(
+            "def exec_transition_status(identity):\n"
+            "    return 'STOPPED' if identity.get('identity_path') in "
+            "('child-proxy.identity.json','child-qemu.identity.json') else 'AMBIGUOUS'\n")
+        for name in ("child-proxy.identity.json", "child-qemu.identity.json"):
+            (self.state / name).write_text(json.dumps({"identity_path": name}))
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _invoke(self):
+        output, errors = io.StringIO(), io.StringIO()
+        with (mock.patch.object(sys, "argv", ["parent-readonly-safety-gate.py",
+                                               "--install-root", str(self.install),
+                                               "--state-dir", str(self.state)]),
+              mock.patch.object(gate.os, "geteuid", return_value=1000),
+              mock.patch.object(gate, "_check_proc_visibility"),
+              mock.patch.object(gate, "_check_pid_one_with_lsof"),
+              mock.patch.object(gate, "_scan_with_lsof", return_value=[os.getpid()]),
+              contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors)):
+            code = gate.main()
+        return code, output.getvalue(), errors.getvalue()
+
+    def test_actual_cli_loads_installed_module_and_validates_both_children(self):
+        real_load = gate._load_state_module
+        real_check = gate._check_children
+        with (mock.patch.object(gate, "_load_state_module", wraps=real_load) as load,
+              mock.patch.object(gate, "_check_children", wraps=real_check) as check):
+            code, output, errors = self._invoke()
+        self.assertEqual(code, 0, errors)
+        self.assertIn("SAFETY GATE: PASS", output)
+        self.assertEqual(load.call_count, 1)
+        self.assertEqual(check.call_count, 1)
+
+    def test_actual_cli_converts_unexpected_failure_to_refused_nonzero(self):
+        with mock.patch.object(gate, "_check_children", side_effect=NameError("fixture")):
+            code, output, errors = self._invoke()
+        self.assertEqual(code, 2)
+        self.assertNotIn("SAFETY GATE: PASS", output)
+        self.assertIn("REFUSED: unexpected gate failure (NameError)", errors)
+        self.assertIn("SAFETY GATE: FAIL", errors)
 
 
 class OpenSSHHostLookupTests(unittest.TestCase):

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import pathlib
@@ -270,6 +271,10 @@ def main() -> int:
         run_gate(args.install_root.resolve(), args.state_dir.resolve())
     except (GateRefused, OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"REFUSED: {error}", file=sys.stderr)
+        print("SAFETY GATE: FAIL — no disk attachment authorized", file=sys.stderr)
+        return 2
+    except Exception as error:
+        print(f"REFUSED: unexpected gate failure ({type(error).__name__})", file=sys.stderr)
         print("SAFETY GATE: FAIL — no disk attachment authorized", file=sys.stderr)
         return 2
     print("SAFETY GATE: PASS — this is not authorization to attach the disk")
