@@ -5,6 +5,7 @@ import base64
 import fcntl
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -17,6 +18,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -501,6 +503,99 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 except subprocess.TimeoutExpired:
                     server.kill()
                     server.wait(timeout=2)
+
+    def test_lab_vm_worker_uses_separate_script_fd_and_preserves_terminal_stdin(self):
+        sudo = shutil.which("sudo")
+        if not sudo or subprocess.run([sudo, "-n", "true"], check=False).returncode:
+            self.skipTest("root-owned fixture installation requires non-interactive sudo")
+
+        with tempfile.TemporaryDirectory() as source_temp:
+            source_root = pathlib.Path(source_temp)
+            fixture_files = [
+                "lab-vm",
+                "lib/vm/host-launcher.sh", "lib/vm/cloud-init.sh", "lib/vm/proxy.py",
+                "lib/vm/bounded-log.py", "lib/vm/executable-policy.py",
+                "lib/vm/browser-auth-session.py", "lib/vm/virtiofs-socket.py",
+                "lib/vm/guest-user-dirs.py", "lib/vm/parent-state.py",
+                "lib/vm/parent-launcher.py", "lib/vm/parent-gate.py",
+                "lib/vm/parent-supervisor.py", "lib/vm/parent-qemu.py",
+                "lib/vm/parent-provision.py",
+                "agent/opencode/plugins/little-mester-exit-confirm/package.json",
+                "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
+            ]
+            for relative in fixture_files:
+                destination = source_root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if relative == "lab-vm":
+                    shutil.copyfile(ROOT / relative, destination)
+                    destination.chmod(0o755)
+                elif relative == "lib/vm/parent-state.py":
+                    destination.write_text(
+                        "import os, subprocess, sys\n"
+                        "fds = ','.join('1' if os.isatty(fd) else '0' for fd in (0, 1, 2))\n"
+                        "try: os.fstat(3); script_fd = 'open'\n"
+                        "except OSError: script_fd = 'closed'\n"
+                        "print(f'LAUNCHER-FDS:{fds}:{script_fd}', flush=True)\n"
+                        "child = subprocess.Popen([sys.executable, '-c', "
+                        "\"import sys; line=sys.stdin.readline(); "
+                        "print('42' if line.strip() == 'echo $((19+23))' else 'BAD-INPUT', flush=True)\"])\n"
+                        "raise SystemExit(child.wait())\n")
+                    destination.chmod(0o644)
+                else:
+                    destination.write_text("fixture dependency\n")
+                    destination.chmod(0o644)
+
+            install_result = subprocess.run(
+                [sudo, "-n", "/usr/bin/mktemp", "-d", "/opt/lm-vm-ssh-pty.XXXXXX"],
+                check=True, capture_output=True, text=True, timeout=5)
+            install_root = pathlib.Path(install_result.stdout.strip())
+            try:
+                subprocess.run([sudo, "-n", "/usr/bin/chmod", "0755", str(install_root)],
+                               check=True, timeout=5)
+                archive = io.BytesIO()
+                with tarfile.open(fileobj=archive, mode="w") as bundle:
+                    for relative in fixture_files:
+                        bundle.add(source_root / relative, arcname=relative)
+                subprocess.run(
+                    [sudo, "-n", "/usr/bin/tar", "--no-same-owner", "--no-same-permissions",
+                     "-xf", "-", "-C", str(install_root)],
+                    input=archive.getvalue(), check=True, timeout=5)
+
+                master_fd, slave_fd = pty.openpty()
+                child = subprocess.Popen(
+                    [str(install_root / "lab-vm"), "parent", "ssh"],
+                    stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, close_fds=True)
+                os.close(slave_fd)
+                output = bytearray()
+                try:
+                    os.write(master_fd, b"echo $((19+23))\n")
+                    deadline = time.monotonic() + 8
+                    while time.monotonic() < deadline and b"42\r\n" not in output:
+                        ready, _, _ = select.select([master_fd], [], [], 0.1)
+                        if ready:
+                            try:
+                                output.extend(os.read(master_fd, 4096))
+                            except OSError:
+                                break
+                        if child.poll() is not None:
+                            break
+                    self.assertIn(b"LAUNCHER-FDS:1,1,1:closed\r\n", output,
+                                  f"launcher descriptors were not preserved/closed correctly: {bytes(output)!r}")
+                    self.assertIn(b"42\r\n", output,
+                                  f"interactive output did not reach the PTY: {bytes(output)!r}")
+                    self.assertEqual(child.wait(timeout=3), 0)
+                finally:
+                    if child.poll() is None:
+                        child.terminate()
+                        try:
+                            child.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            child.kill()
+                            child.wait(timeout=2)
+                    os.close(master_fd)
+            finally:
+                subprocess.run([sudo, "-n", "/usr/bin/rm", "-rf", "--", str(install_root)],
+                               check=True, timeout=5)
 
     def test_bounded_ssh_probe_caps_stderr_and_reaps_timeout_child(self):
         argv = [sys.executable, "-c", "import sys; sys.stderr.write('x' * 10000); sys.exit(255)"]

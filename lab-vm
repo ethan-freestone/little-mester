@@ -20,7 +20,8 @@ if [[ "${XDG_RUNTIME_DIR-}" == "$desktop_runtime" \
 fi
 
 exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C "${desktop_env[@]}" \
-  /usr/bin/bash -p -s -- "${BASH_SOURCE[0]}" "$@" <<'WORKER'
+  /usr/bin/bash -p /dev/fd/3 "${BASH_SOURCE[0]}" "$@" 3<<'WORKER'
+exec 3<&-
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
