@@ -14,6 +14,7 @@ import secrets
 import select
 import signal
 import stat
+import subprocess
 import sys
 import re
 import time
@@ -498,7 +499,7 @@ def request_supervisor_stop(*, home: str | os.PathLike | None = None,
 def parent_ssh_plan(*, home: str | os.PathLike | None = None,
                     attach_opencode: bool = False, allow_starting: bool = False,
                     remote_command: str | None = None, tty: bool = True) -> tuple[list[str], list[int]]:
-    """Build pinned SSH argv and retain validated identity/key descriptors for exec."""
+    """Build pinned SSH argv and retain validated identity/key descriptors for its caller."""
     if (type(attach_opencode) is not bool or type(allow_starting) is not bool
             or type(tty) is not bool
             or (remote_command is not None and
@@ -601,9 +602,13 @@ def parent_ssh_plan(*, home: str | os.PathLike | None = None,
         known_hosts_fd = sealed_copy("little-mester-parent-known-hosts", known_hosts)
         release(known_hosts_file_fd)
         release(key_file_fd)
+        # OpenSSH closes its own descriptors above stderr during startup, so its
+        # /proc/self/fd paths are unusable. Point at this still-live caller's
+        # sealed memfds; callers must keep these descriptors open until ssh exits.
+        caller_fd_root = f"/proc/{os.getpid()}/fd"
         argv = ["/usr/bin/ssh", "-F", "/dev/null", "-tt" if tty else "-T", "-a", "-x",
-                "-p", port_text, "-i", f"/proc/self/fd/{key_fd}",
-                "-o", f"UserKnownHostsFile=/proc/self/fd/{known_hosts_fd}",
+                "-p", port_text, "-i", f"{caller_fd_root}/{key_fd}",
+                "-o", f"UserKnownHostsFile={caller_fd_root}/{known_hosts_fd}",
                 "-o", "GlobalKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=yes",
                 "-o", "HostKeyAlgorithms=ssh-ed25519", "-o", "PubkeyAcceptedAlgorithms=ssh-ed25519",
                 "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "PasswordAuthentication=no",
@@ -622,6 +627,97 @@ def parent_ssh_plan(*, home: str | os.PathLike | None = None,
         raise
     finally:
         os.close(directory_fd)
+
+
+def _run_interactive_ssh(argv: list[str]) -> int:
+    """Run SSH while retaining sealed key memfds and forwarding termination safely."""
+    if not isinstance(argv, list) or not argv or argv[0] != "/usr/bin/ssh":
+        raise Refused("interactive SSH command is invalid")
+    managed_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    child = None
+    pidfd = -1
+    prior_handlers = {}
+    received_signal: int | None = None
+    forwarding_failed = False
+
+    def forward(signum, _frame):
+        nonlocal received_signal, forwarding_failed
+        if received_signal is None:
+            received_signal = signum
+        if pidfd >= 0:
+            try:
+                signal.pidfd_send_signal(pidfd, signum)
+            except ProcessLookupError:
+                # SSH may have exited concurrently; wait() below determines outcome.
+                pass
+            except (AttributeError, OSError):
+                # Do not wait forever if the kernel refuses pidfd signalling. This
+                # is our direct child; the bounded wait loop will terminate/reap it.
+                forwarding_failed = True
+
+    try:
+        if not hasattr(signal, "pidfd_send_signal") or not hasattr(os, "pidfd_open"):
+            raise Refused("identity-safe SSH signal forwarding is unavailable")
+        for signum in managed_signals:
+            prior_handlers[signum] = signal.signal(signum, forward)
+        child = subprocess.Popen(argv)
+        try:
+            pidfd = os.pidfd_open(child.pid, 0)
+        except OSError as error:
+            # The child is still unreaped, so its PID cannot have been reused.
+            child.kill()
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                raise Refused("SSH did not exit after pidfd setup failed") from error
+            raise Refused("could not bind an identity-safe signal handle to SSH") from error
+        if received_signal is not None:
+            forward(received_signal, None)
+        while True:
+            try:
+                return_code = child.wait(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                if forwarding_failed:
+                    child.kill()
+                    try:
+                        return_code = child.wait(timeout=3)
+                    except subprocess.TimeoutExpired as error:
+                        raise Refused("SSH did not exit after failed identity-safe signal forwarding") from error
+                    break
+        if forwarding_failed:
+            raise Refused("identity-safe SSH signal forwarding failed; SSH was terminated")
+        return 128 + received_signal if received_signal is not None else return_code
+    finally:
+        cleanup_failed = False
+        if child is not None and child.poll() is None:
+            try:
+                if pidfd >= 0:
+                    signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+                else:
+                    child.terminate()
+            except (AttributeError, OSError, ProcessLookupError):
+                try:
+                    child.kill()
+                except OSError:
+                    pass
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    if pidfd >= 0:
+                        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                    else:
+                        child.kill()
+                    child.wait(timeout=3)
+                except (AttributeError, OSError, ProcessLookupError, subprocess.TimeoutExpired):
+                    cleanup_failed = True
+        for signum, handler in prior_handlers.items():
+            signal.signal(signum, handler)
+        if pidfd >= 0:
+            os.close(pidfd)
+        if cleanup_failed:
+            raise Refused("SSH cleanup remained incomplete after bounded termination attempts")
 
 
 def _valid_supervisor_options(options: list[str], home: str | os.PathLike | None) -> bool:
@@ -1057,9 +1153,9 @@ def main() -> int:
         if args.command in ("ssh", "tui"):
             argv, descriptors = parent_ssh_plan(attach_opencode=args.command == "tui")
             try:
-                for fd in descriptors:
-                    os.set_inheritable(fd, True)
-                os.execv(argv[0], argv)
+                # Keep the sealed memfds open in this process while OpenSSH reads
+                # their /proc/<caller>/fd paths. OpenSSH closes inherited FDs.
+                return _run_interactive_ssh(argv)
             finally:
                 for fd in descriptors:
                     try:

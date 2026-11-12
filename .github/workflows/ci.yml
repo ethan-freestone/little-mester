@@ -57,7 +57,22 @@ jobs:
       - name: Run Bats with failure output
         run: bats --print-output-on-failure tests/
 
-  # ── 3. Hygiene — ShellCheck, Python compile, ruff lint ───────────
+  # ── 3. Persistent-parent Python integration/unit suites ─────────
+  parent-python:
+    name: Persistent parent (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install local OpenSSH server for production-path pin regression
+        run: sudo apt-get update -qq && sudo apt-get install -y openssh-server
+      - name: Run parent suites
+        run: |
+          for test in tests/vm-parent-*.test.py; do
+            python3 "$test"
+          done
+
+  # ── 4. Hygiene — ShellCheck, Python compile, ruff lint ───────────
   hygiene:
     name: Hygiene (shellcheck, py_compile, ruff)
     runs-on: ubuntu-latest
@@ -74,7 +89,7 @@ jobs:
       - name: Install ruff and lint Python
         run: pip install --target=/tmp/.ruff ruff && /tmp/.ruff/bin/ruff check scripts/*.py agent/metrics/gather.py bench/bench.py
 
-  # ── 4. Ticket store ──────────────────────────────────────────────
+  # ── 5. Ticket store ──────────────────────────────────────────────
   ticket-store:
     name: Ticket store validation
     runs-on: ubuntu-latest

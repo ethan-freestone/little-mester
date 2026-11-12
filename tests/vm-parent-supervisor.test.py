@@ -195,6 +195,258 @@ class SupervisorHandoffTests(unittest.TestCase):
                     server.kill()
                     server.wait(timeout=2)
 
+    def test_production_ssh_plan_works_with_openssh_descriptor_closing(self):
+        sshd = shutil.which("sshd")
+        keygen = shutil.which("ssh-keygen")
+        if not sshd or not keygen:
+            self.skipTest("local OpenSSH tools unavailable")
+        root = pathlib.Path(self.temp.name) / "production-ssh-fd"
+        root.mkdir(mode=0o700)
+        control_key, host_key, substitute_key = (root / "control", root / "host", root / "substitute")
+        for key in (control_key, host_key, substitute_key):
+            subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-f", str(key)],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+
+        # Populate the same protected parent files validated by parent_ssh_plan().
+        assets = {
+            "id_vm_control": control_key.read_bytes(),
+            "id_vm_control.pub": control_key.with_suffix(".pub").read_bytes(),
+            "ssh_host_ed25519_key": host_key.read_bytes(),
+            "ssh_host_ed25519_key.pub": host_key.with_suffix(".pub").read_bytes(),
+            "user-data": b"#cloud-config\n{}\n",
+            "meta-data": b"instance-id: production-ssh-test\n",
+            "seed.iso": b"production-ssh-test-seed",
+        }
+        for name, data in assets.items():
+            path = self.state_dir / name
+            path.write_bytes(data)
+            path.chmod(0o600)
+        fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+        try:
+            parent = parent_state._read_json(fd, "parent.json")
+            parent["ssh_identity"] = {
+                "seed_sha256": hashlib.sha256(assets["seed.iso"]).hexdigest(),
+                "control_private_sha256": hashlib.sha256(assets["id_vm_control"]).hexdigest(),
+                "control_public_sha256": hashlib.sha256(assets["id_vm_control.pub"]).hexdigest(),
+                "host_private_sha256": hashlib.sha256(assets["ssh_host_ed25519_key"]).hexdigest(),
+                "host_public_sha256": hashlib.sha256(assets["ssh_host_ed25519_key.pub"]).hexdigest(),
+            }
+            parent_state._atomic_json(fd, "parent.json", parent)
+        finally:
+            os.close(fd)
+
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        listener.close()
+        authorized_keys = root / "authorized_keys"
+        authorized_keys.write_bytes(assets["id_vm_control.pub"])
+        authorized_keys.chmod(0o600)
+        config = root / "sshd_config"
+        config.write_text(
+            f"Port {port}\nListenAddress 127.0.0.1\nHostKey {host_key}\n"
+            f"PidFile {root / 'sshd.pid'}\nAuthorizedKeysFile {authorized_keys}\n"
+            "StrictModes no\nUsePAM no\nPasswordAuthentication no\n"
+            "KbdInteractiveAuthentication no\nPubkeyAuthentication yes\n"
+            f"PermitRootLogin {'yes' if os.getuid() == 0 else 'no'}\n"
+            f"AllowUsers {pwd.getpwuid(os.getuid()).pw_name}\nUseDNS no\nLogLevel QUIET\n")
+        config.chmod(0o600)
+        if subprocess.run([sshd, "-t", "-f", str(config)], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL, timeout=5, check=False).returncode:
+            self.skipTest("local sshd cannot validate isolated test configuration")
+        server = subprocess.Popen([sshd, "-D", "-e", "-f", str(config)],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+        supervisor = None
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and server.poll() is None:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                        break
+                except OSError:
+                    time.sleep(0.02)
+            else:
+                self.skipTest("isolated test sshd did not become ready")
+            fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+            try:
+                parent_supervisor._write_ssh_connection(
+                    parent_state, fd, port, assets["ssh_host_ed25519_key.pub"])
+            finally:
+                os.close(fd)
+            supervisor, _run_id = self.spawn_supervisor()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+            try:
+                run = parent_state._read_json(fd, "active-run.json")
+                run.update({"phase": "RUNNING", "qemu": {
+                    "schema": 1, "pid": os.getpid(), "uid": os.getuid(),
+                    "host_boot_id": pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+                    "start_time": "1", "exe": "/usr/bin/qemu-system-x86_64",
+                    "argv": ["/usr/bin/qemu-system-x86_64"],
+                }})
+                parent_state._atomic_json(fd, "active-run.json", run)
+            finally:
+                os.close(fd)
+
+            with mock.patch.object(parent_state, "_recorded_process_status", return_value="MATCH"):
+                argv, descriptors = parent_state.parent_ssh_plan(
+                    home=self.home, allow_starting=True,
+                    remote_command=parent_state.PARENT_READY_COMMAND, tty=False)
+            try:
+                # The local sshd account is the test runner; production remains mester.
+                argv[argv.index("mester@127.0.0.1")] = (
+                    f"{pwd.getpwuid(os.getuid()).pw_name}@127.0.0.1")
+                # Use the production argv and retained descriptor lifetime, not normal paths.
+                result = parent_supervisor._run_bounded_ssh_attempt(argv, descriptors, timeout_seconds=5)
+                # 43 is the fixture's expected guest-side missing-launcher check;
+                # reaching it proves the pinned SSH handshake and authentication passed.
+                self.assertEqual(result[0], 43, result[1].decode("utf-8", "replace"))
+                self.assertFalse(result[2])
+
+                # Keep the trusted parent pin unchanged and substitute the endpoint key.
+                server.terminate()
+                server.wait(timeout=2)
+                config.write_text(config.read_text().replace(f"HostKey {host_key}\n",
+                                                              f"HostKey {substitute_key}\n"))
+                server = subprocess.Popen([sshd, "-D", "-e", "-f", str(config)],
+                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL, close_fds=True,
+                                          start_new_session=True)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and server.poll() is None:
+                    try:
+                        with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                            break
+                    except OSError:
+                        time.sleep(0.02)
+                else:
+                    self.fail("substituted test sshd did not become ready")
+                rejected = parent_supervisor._run_bounded_ssh_attempt(argv, descriptors, timeout_seconds=5)
+                self.assertEqual(rejected[0], 255)
+                self.assertIn(b"Host key verification failed", rejected[1])
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+
+            server.terminate()
+            server.wait(timeout=2)
+            config.write_text(config.read_text().replace(f"HostKey {substitute_key}\n",
+                                                          f"HostKey {host_key}\n"))
+            server = subprocess.Popen([sshd, "-D", "-e", "-f", str(config)],
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL, close_fds=True,
+                                      start_new_session=True)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and server.poll() is None:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                        break
+                except OSError:
+                    time.sleep(0.02)
+            else:
+                self.fail("restored test sshd did not become ready")
+            with mock.patch.object(parent_state, "_recorded_process_status", return_value="MATCH"):
+                interactive, interactive_fds = parent_state.parent_ssh_plan(
+                    home=self.home, attach_opencode=True)
+            try:
+                interactive[interactive.index("mester@127.0.0.1")] = (
+                    f"{pwd.getpwuid(os.getuid()).pw_name}@127.0.0.1")
+                result = parent_state._run_interactive_ssh(interactive)
+                self.assertNotEqual(result, 255)
+            finally:
+                for descriptor in interactive_fds:
+                    os.close(descriptor)
+
+            # Exercise the production interactive runner's signal forwarding with a
+            # long-lived real OpenSSH child, then verify it was reaped before return.
+            known_hosts = root / "signal-known-hosts"
+            host_fields = assets["ssh_host_ed25519_key.pub"].decode().split()
+            known_hosts.write_text(f"[127.0.0.1]:{port} {host_fields[0]} {host_fields[1]}\n")
+            known_hosts.chmod(0o600)
+            signal_argv = ["/usr/bin/ssh", "-F", "/dev/null", "-N", "-T", "-p", str(port),
+                           "-i", str(control_key), "-o", f"UserKnownHostsFile={known_hosts}",
+                           "-o", "GlobalKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=yes",
+                           "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+                           "-o", "PasswordAuthentication=no", "-o", "LogLevel=QUIET",
+                           f"{pwd.getpwuid(os.getuid()).pw_name}@127.0.0.1"]
+            ssh_pid_file = root / "interactive-ssh.pid"
+            runner = r"""
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location('parent_state', sys.argv[1])
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+original = module.subprocess.Popen
+def tracked(*args, **kwargs):
+    child = original(*args, **kwargs)
+    pathlib.Path(sys.argv[3]).write_text(str(child.pid))
+    return child
+module.subprocess.Popen = tracked
+raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
+"""
+            runner_proc = subprocess.Popen(
+                [sys.executable, "-I", "-c", runner, str(ROOT / "lib/vm/parent-state.py"),
+                 json.dumps(signal_argv), str(ssh_pid_file)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                close_fds=True)
+            try:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not ssh_pid_file.exists() and runner_proc.poll() is None:
+                    time.sleep(0.01)
+                self.assertTrue(ssh_pid_file.exists(), "interactive SSH child did not start")
+                ssh_pid = int(ssh_pid_file.read_text())
+                runner_proc.send_signal(signal.SIGTERM)
+                self.assertEqual(runner_proc.wait(timeout=5), 128 + signal.SIGTERM)
+            finally:
+                if runner_proc.poll() is None:
+                    runner_proc.terminate()
+                    try:
+                        runner_proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        runner_proc.kill()
+                        runner_proc.wait(timeout=2)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(ssh_pid, 0)
+
+            server.terminate()
+            server.wait(timeout=2)
+            config.write_text(config.read_text().replace(f"HostKey {host_key}\n",
+                                                          f"HostKey {substitute_key}\n"))
+            server = subprocess.Popen([sshd, "-D", "-e", "-f", str(config)],
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL, close_fds=True,
+                                      start_new_session=True)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and server.poll() is None:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                        break
+                except OSError:
+                    time.sleep(0.02)
+            else:
+                self.fail("substituted interactive test sshd did not become ready")
+            with mock.patch.object(parent_state, "_recorded_process_status", return_value="MATCH"):
+                untrusted_interactive, untrusted_fds = parent_state.parent_ssh_plan(
+                    home=self.home, attach_opencode=True)
+            try:
+                untrusted_interactive[untrusted_interactive.index("mester@127.0.0.1")] = (
+                    f"{pwd.getpwuid(os.getuid()).pw_name}@127.0.0.1")
+                self.assertEqual(parent_state._run_interactive_ssh(untrusted_interactive), 255)
+            finally:
+                for descriptor in untrusted_fds:
+                    os.close(descriptor)
+        finally:
+            if supervisor is not None:
+                self.cleanup_test_supervisor(supervisor)
+            if server.poll() is None:
+                server.terminate()
+                try:
+                    server.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait(timeout=2)
+
     def test_bounded_ssh_probe_caps_stderr_and_reaps_timeout_child(self):
         argv = [sys.executable, "-c", "import sys; sys.stderr.write('x' * 10000); sys.exit(255)"]
         returncode, stderr, timed_out = parent_supervisor._run_bounded_ssh_attempt(
@@ -729,8 +981,9 @@ class SupervisorHandoffTests(unittest.TestCase):
                 key_arg = argv[argv.index("-i") + 1]
                 known_hosts_arg = next(item.split("=", 1)[1] for item in argv
                                         if item.startswith("UserKnownHostsFile="))
-                self.assertTrue(key_arg.startswith("/proc/self/fd/"))
-                self.assertTrue(known_hosts_arg.startswith("/proc/self/fd/"))
+                expected_fd_root = f"/proc/{os.getpid()}/fd/"
+                self.assertTrue(key_arg.startswith(expected_fd_root))
+                self.assertTrue(known_hosts_arg.startswith(expected_fd_root))
                 self.assertIn(int(key_arg.rsplit("/", 1)[1]), descriptors)
                 self.assertIn(int(known_hosts_arg.rsplit("/", 1)[1]), descriptors)
                 self.assertNotEqual(key_arg, known_hosts_arg)
