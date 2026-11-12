@@ -16,6 +16,10 @@ SPEC = importlib.util.spec_from_file_location(
     "parent_readonly_safety_gate", ROOT / "scripts/parent-readonly-safety-gate.py")
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
+DIAG_SPEC = importlib.util.spec_from_file_location(
+    "parent_ssh_endpoint_diagnostic", ROOT / "scripts/parent-ssh-endpoint-diagnostic.py")
+diagnostic = importlib.util.module_from_spec(DIAG_SPEC)
+DIAG_SPEC.loader.exec_module(diagnostic)
 
 
 class ProcessScanTests(unittest.TestCase):
@@ -119,6 +123,30 @@ class OpenSSHHostLookupTests(unittest.TestCase):
             self.assertEqual(values.get("hostname"), "127.0.0.1")
             self.assertEqual(values.get("port"), "46617")
             self.assertNotIn("hostkeyalias", values)
+
+    def test_diagnostic_fingerprints_only_keys_and_sanitizes_rejection(self):
+        keygen = shutil.which("ssh-keygen")
+        if not keygen:
+            self.skipTest("ssh-keygen unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            private = pathlib.Path(directory) / "host"
+            subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-f", str(private)],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=10)
+            public_line = private.with_suffix(".pub").read_bytes()
+            expected = diagnostic._fingerprint(b"", public_file=private.with_suffix(".pub"))
+            self.assertEqual(diagnostic._fingerprint(public_line), expected)
+            self.assertEqual(
+                diagnostic._rejection_label(
+                    b"WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! secret-looking text"),
+                "CHANGED_KEY",
+            )
+            self.assertEqual(
+                diagnostic._server_fingerprint(
+                    b"debug1: Server host key: ssh-ed25519 SHA256:"
+                    b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+                "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            )
 
 
 if __name__ == "__main__":
