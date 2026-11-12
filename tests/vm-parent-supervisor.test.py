@@ -555,9 +555,10 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                     destination.write_text(
                         "import os, subprocess, sys\n"
                         "fds = ','.join('1' if os.isatty(fd) else '0' for fd in (0, 1, 2))\n"
+                        "term = os.environ.get('TERM', '<unset>')\n"
                         "try: os.fstat(3); script_fd = 'open'\n"
                         "except OSError: script_fd = 'closed'\n"
-                        "print(f'LAUNCHER-FDS:{fds}:{script_fd}', flush=True)\n"
+                        "print(f'LAUNCHER-FDS:{fds}:{script_fd}:TERM={term}', flush=True)\n"
                         "child = subprocess.Popen([sys.executable, '-c', "
                         "\"import sys; line=sys.stdin.readline(); "
                         "print('42' if line.strip() == 'echo $((19+23))' else 'BAD-INPUT', flush=True)\"])\n"
@@ -609,7 +610,8 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 master_fd, slave_fd = pty.openpty()
                 child = subprocess.Popen(
                     [str(install_root / "lab-vm"), "parent", "ssh"],
-                    stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, close_fds=True)
+                    stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, close_fds=True,
+                    env={**os.environ, "TERM": "xterm-256color"})
                 os.close(slave_fd)
                 output = bytearray()
                 try:
@@ -625,7 +627,7 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                                 break
                         if child.poll() is not None:
                             break
-                    self.assertIn(b"LAUNCHER-FDS:1,1,1:closed\r\n", output,
+                    self.assertIn(b"LAUNCHER-FDS:1,1,1:closed:TERM=xterm-256color\r\n", output,
                                   f"launcher descriptors were not preserved/closed correctly: {bytes(output)!r}")
                     self.assertIn(b"42", output.splitlines(),
                                   f"interactive output did not reach the PTY: {bytes(output)!r}")
@@ -639,6 +641,15 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                             child.kill()
                             child.wait(timeout=2)
                     os.close(master_fd)
+
+                refused = subprocess.run(
+                    [str(install_root / "lab-vm"), "parent", "ssh"],
+                    env={**os.environ, "TERM": "dumb"},
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, timeout=5, check=False)
+                self.assertEqual(refused.returncode, 2, refused.stdout)
+                self.assertIn("requires a host-supported TERM with clear capability", refused.stdout)
+                self.assertNotIn("LAUNCHER-FDS", refused.stdout)
             finally:
                 if (install_root.parent == PROTECTED_FIXTURE_ROOT
                         and install_root.name.startswith("lm-vm-ssh-pty.")):

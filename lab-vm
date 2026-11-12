@@ -6,6 +6,7 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 desktop_env=()
+terminal_env=()
 desktop_uid="$(/usr/bin/id -u)"
 desktop_runtime="/run/user/$desktop_uid"
 if [[ "${XDG_RUNTIME_DIR-}" == "$desktop_runtime" \
@@ -19,7 +20,14 @@ if [[ "${XDG_RUNTIME_DIR-}" == "$desktop_runtime" \
   fi
 fi
 
-exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C "${desktop_env[@]}" \
+if [[ "${TERM-}" =~ ^[A-Za-z0-9_.+-]{1,64}$ ]] \
+   && /usr/bin/infocmp -1 "$TERM" 2>/dev/null \
+     | /usr/bin/grep -Eq '^[[:space:]]*clear='; then
+  terminal_env+=("TERM=$TERM" "LM_VM_TERM_VALIDATED=1")
+fi
+
+exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C \
+  "${terminal_env[@]}" "${desktop_env[@]}" \
   /usr/bin/bash -p /dev/fd/3 "${BASH_SOURCE[0]}" "$@" 3<<'WORKER'
 exec 3<&-
 set -euo pipefail
@@ -227,11 +235,21 @@ case "$command" in
           /usr/bin/python3 -I "$root/lib/vm/parent-state.py" stop "$@"
         ;;
       ssh)
-        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+        [[ "${LM_VM_TERM_VALIDATED-}" == 1
+           && "${TERM-}" =~ ^[A-Za-z0-9_.+-]{1,64}$ ]] || {
+          printf 'REFUSED: interactive parent SSH requires a host-supported TERM with clear capability\n' >&2
+          exit 2
+        }
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C "TERM=$TERM" \
           /usr/bin/python3 -I "$root/lib/vm/parent-state.py" ssh "$@"
         ;;
       tui)
-        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+        [[ "${LM_VM_TERM_VALIDATED-}" == 1
+           && "${TERM-}" =~ ^[A-Za-z0-9_.+-]{1,64}$ ]] || {
+          printf 'REFUSED: interactive parent TUI requires a host-supported TERM with clear capability\n' >&2
+          exit 2
+        }
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C "TERM=$TERM" \
           /usr/bin/python3 -I "$root/lib/vm/parent-state.py" tui "$@"
         ;;
       *) printf 'REFUSED: unsupported parent command: %s\n' "$subcommand" >&2; exit 2 ;;
