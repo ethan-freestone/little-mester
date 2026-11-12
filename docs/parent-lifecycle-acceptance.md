@@ -62,25 +62,52 @@ if [[ -e "$DISK" ]]; then
   python3 - "$DISK" <<'PY'
 import glob, os, sys
 disk = os.stat(sys.argv[1])
+unreadable = []
 for proc in glob.glob('/proc/[0-9]*'):
     pid = proc.rsplit('/', 1)[-1]
+    try:
+        owner = os.stat(proc).st_uid
+    except (FileNotFoundError, ProcessLookupError):
+        continue
+    if owner not in (0, os.getuid()):
+        continue
     for fd in glob.glob(proc + '/fd/*'):
         try:
             opened = os.stat(fd)
             if (opened.st_dev, opened.st_ino) == (disk.st_dev, disk.st_ino):
                 exe = os.path.basename(os.readlink(proc + '/exe'))
                 print(f'open disk writer candidate: pid={pid} exe={exe}')
-        except (FileNotFoundError, PermissionError, ProcessLookupError):
+        except (FileNotFoundError, ProcessLookupError):
             pass
+        except PermissionError:
+            unreadable.append(pid)
+if unreadable:
+    print('cannot verify open descriptors for PIDs: ' + ','.join(sorted(set(unreadable))))
+    raise SystemExit(2)
 PY
 fi
 ```
 
 Stop for inspection if a writer is reported or `qmp.sock`/`proxy.port` already exists;
-never remove these during preflight. If `ssh_port` exists, ensure it is a regular
-non-symlink file and `ss -H -ltn` shows no listener on that port. Stop if listener status
-cannot be checked. Use capacity 64 for a fresh parent; for an existing STOPPED disk use
-its current `disk.virtual_capacity_gib` (up does not resize).
+never remove these during preflight. Check a prior SSH-port listener with:
+
+```sh
+STATE_DIR="$HOME/.local/state/little-mester/parent-v3/default"
+if [[ -e "$STATE_DIR/ssh_port" || -L "$STATE_DIR/ssh_port" ]]; then
+  [[ -f "$STATE_DIR/ssh_port" && ! -L "$STATE_DIR/ssh_port" ]]
+  PORT="$(cat "$STATE_DIR/ssh_port")"
+  [[ "$PORT" =~ ^[0-9]{1,5}$ ]] && (( PORT >= 1024 && PORT <= 65535 ))
+  command -v ss >/dev/null
+  LISTENERS="$(ss -H -ltn)"
+  if awk -v p="$PORT" '$4 ~ (":" p "$") { print; found=1 } END { exit !found }' <<<"$LISTENERS"; then
+    echo "REFUSED: listener remains on prior parent SSH port $PORT" >&2
+    exit 2
+  fi
+fi
+```
+
+Stop if any check fails. Use capacity 64 for a fresh parent; for an existing STOPPED disk
+use its current `disk.virtual_capacity_gib` (up does not resize).
 
 ## 3. Up, SSH disconnect/reconnect, duplicate-up
 
