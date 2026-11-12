@@ -6,9 +6,9 @@
   "type": "doc",
   "status": "draft",
   "title": "Phase 1.5 — Consolidate repository documentation",
-  "objective": "After Phase 1 acceptance and merge, audit and consolidate repository Markdown to reduce duplication, obsolete material, and process narration while preserving durable architecture decisions, operational instructions, security rationale, and required history. This work is explicitly deferred until after Phase 1 merge and is not a blocker for Phase 1 acceptance or merge.",
+  "objective": "After Phase 1 is merged, audit and consolidate repository Markdown to reduce duplication, obsolete material, and process narration while preserving durable architecture decisions, operational instructions, security rationale, and required history. This work is deferred until Phase 1 is complete.",
   "created_at": "2026-11-12T19:21:03.255Z",
-  "updated_at": "2026-11-12T19:21:03.255Z",
+  "updated_at": "2026-11-12T19:33:03.545Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -27,7 +27,7 @@
     },
     {
       "id": "A4",
-      "text": "Preserve required security, audit, and provenance records; validate documentation links/navigation and confirm the cleanup does not alter ticket audit history or block Phase 1 acceptance/merge.",
+      "text": "Preserve required security, audit, and provenance records; validate documentation links/navigation and preserve ticket audit history.",
       "status": "pending"
     }
   ],

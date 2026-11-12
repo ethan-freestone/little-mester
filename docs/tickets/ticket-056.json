@@ -8,7 +8,7 @@
   "title": "P1-04 — Host metrics 500-ms parity over identity-bound SSH",
   "objective": "Deliver historical host CPU/RAM/GPU/VRAM/temperature metrics at a 500-ms target using a Sol-reviewed, owner-approved bounded push channel; no guest-initiated host API or copied Compose sidecar topology. Operating policy: docs/workflows/phase1-continuous-execution.md. Reuse current schema/collector; continue independent offline scheduling/codec/display work while runtime/key-lifecycle decisions are pending. Restricted SSH principal proposal (not authorized/implemented; requires owner decision on new guest root-trusted key authorization/lease/revocation authority): docs/metrics-restricted-ssh-proposal.md. Request owner NVIDIA collection/timing evidence before choosing GPU sampling. No criteria relaxed.",
   "created_at": "2026-11-10T21:46:28.237Z",
-  "updated_at": "2026-11-12T00:21:33.873Z",
+  "updated_at": "2026-11-12T19:34:24.136Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -97,6 +97,11 @@
       "timestamp": "2026-11-12T00:21:33.872Z",
       "author": "cli",
       "body": "Luna implementation chunk M3: before new SSH transport authority, obtain explicit owner approval for exact metrics-restricted-ssh-proposal.md trust boundary and scoped Sol assessment (A1/A3); NVIDIA timing output is separately pending before GPU collector selection. Do not implement guest root key authorization/lease/revocation merely because codecs exist; never substitute broader owner key without explicit approval. After approval, wire existing bounded collector + absolute 500ms scheduler + fixed schema into per-run receiver-only key, host-key-pinned existing SSH route, fixed receiver/ACK, private tmpfs snapshot and read-only TUI renderer. Reuse scheduler/codec/collector/formatter; no HTTP sidecar/listener/framework. Ensure one in-flight sample, deadlines/skip/no queue, 1.5s stale/unavailable/recovery, sampler failure never stops parent. Necessary evidence: restricted principal denies command/PTY/forwarding/hooks, wrong-run/replay/overflow/symlink cases, atomic snapshot, measured CPU/RAM/NVIDIA GPU/VRAM cadence/accuracy/push timings and owner live TUI. Batch implementation into transport wiring then display+acceptance, not repeated codec scaffolding. Independent approved work may proceed while owner decisions pending; M1a is not blocked by M3. No criteria changed; no tests run for this plan."
+    },
+    {
+      "timestamp": "2026-11-12T19:34:24.135Z",
+      "author": "cli",
+      "body": "Sol Medium focused delta review of the existing restricted-SSH proposal returned FIX. Remaining material conditions: crash-safe supervisor/renewal/child lifetime and stop draining; durable anti-replay authority across guest reboot; complete root AuthorizedKeysCommandUser/CA/environment/connection-context restrictions and verification; retain disk-scoped control key across persistent stop/up while cleaning run-scoped data keys. No transport implementation is authorized or justified as written. M3 remains gated on these security conditions and explicit owner approval of the privileged guest authority."
     }
   ]
 }

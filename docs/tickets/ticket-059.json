@@ -6,9 +6,9 @@
   "type": "improvement",
   "status": "draft",
   "title": "Reusable audited ticket redaction and comment revision operations",
-  "objective": "After Phase 1 is merged, design and implement reusable MCP operations for owner-authorized redaction of sensitive ticket content with private evidence retention, and revision-history-preserving edits to existing comments. This work is explicitly deferred until after the Phase 1 merge and is not a dependency or blocker for M1a, M1b, M2, M3, M4, or final acceptance.",
+  "objective": "After Phase 1 is merged, design and implement reusable MCP operations for owner-authorized redaction of sensitive ticket content with private evidence retention, and revision-history-preserving edits to existing comments. This work is deferred until Phase 1 is complete.",
   "created_at": "2026-11-12T19:00:05.555Z",
-  "updated_at": "2026-11-12T19:00:05.555Z",
+  "updated_at": "2026-11-12T19:33:03.537Z",
   "acceptance_criteria": [
     {
       "id": "A1",
