@@ -20,7 +20,8 @@ if [[ "${XDG_RUNTIME_DIR-}" == "$desktop_runtime" \
   fi
 fi
 
-if [[ "${TERM-}" =~ ^[A-Za-z0-9_.+-]{1,64}$ ]] \
+if [[ "${1-}" == parent && ( "${2-}" == ssh || "${2-}" == tui ) \
+   && "${TERM-}" =~ ^[A-Za-z0-9_.+-]{1,64}$ ]] \
    && /usr/bin/infocmp -1 "$TERM" 2>/dev/null \
      | /usr/bin/grep -Eq '^[[:space:]]*clear='; then
   terminal_env+=("TERM=$TERM" "LM_VM_TERM_VALIDATED=1")
