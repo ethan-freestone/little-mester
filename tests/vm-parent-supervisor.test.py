@@ -8,7 +8,9 @@ import importlib.util
 import json
 import os
 import pathlib
+import pty
 import pwd
+import select
 import signal
 import shutil
 import socket
@@ -348,6 +350,59 @@ class SupervisorHandoffTests(unittest.TestCase):
                     time.sleep(0.02)
             else:
                 self.fail("restored test sshd did not become ready")
+
+            # Exercise a complete shell command round-trip over the exact production
+            # pinned SSH plan/runner under a real controlling PTY.  The command text
+            # does not contain its expected output, so PTY echo alone cannot pass.
+            with mock.patch.object(parent_state, "_recorded_process_status", return_value="MATCH"):
+                shell_argv, shell_fds = parent_state.parent_ssh_plan(home=self.home)
+            shell_argv[shell_argv.index("mester@127.0.0.1")] = (
+                f"{pwd.getpwuid(os.getuid()).pw_name}@127.0.0.1")
+            master_fd, slave_fd = pty.openpty()
+            shell_runner = r"""
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('parent_state', sys.argv[1])
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
+"""
+            shell_proc = subprocess.Popen(
+                [sys.executable, "-I", "-c", shell_runner,
+                 str(ROOT / "lib/vm/parent-state.py"), json.dumps(shell_argv)],
+                stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, close_fds=True)
+            os.close(slave_fd)
+            shell_output = bytearray()
+            try:
+                os.write(master_fd, b"echo $((19+23))\n")
+                deadline = time.monotonic() + 8
+                while time.monotonic() < deadline and b"\r42\r\n" not in shell_output:
+                    ready, _, _ = select.select([master_fd], [], [], 0.1)
+                    if ready:
+                        try:
+                            chunk = os.read(master_fd, 4096)
+                        except OSError:
+                            break
+                        if not chunk:
+                            break
+                        shell_output.extend(chunk)
+                    if shell_proc.poll() is not None:
+                        break
+                self.assertIn(b"\r42\r\n", shell_output,
+                              f"interactive shell did not execute input; PTY output={bytes(shell_output)!r}")
+                os.write(master_fd, b"exit\n")
+                self.assertEqual(shell_proc.wait(timeout=5), 0,
+                                 bytes(shell_output).decode("utf-8", "replace"))
+            finally:
+                if shell_proc.poll() is None:
+                    shell_proc.terminate()
+                    try:
+                        shell_proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        shell_proc.kill()
+                        shell_proc.wait(timeout=2)
+                os.close(master_fd)
+                for descriptor in shell_fds:
+                    os.close(descriptor)
+
             with mock.patch.object(parent_state, "_recorded_process_status", return_value="MATCH"):
                 interactive, interactive_fds = parent_state.parent_ssh_plan(
                     home=self.home, attach_opencode=True)

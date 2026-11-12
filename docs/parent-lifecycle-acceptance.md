@@ -13,6 +13,13 @@ evidence only. NVIDIA timing remains separately pending.
   but produce no visible execution/output (including `pwd` and `echo hello`). Diagnose the
   interactive SSH I/O path before continuing lifecycle/persistence acceptance. No agent-side
   VM interaction or acceptance is implied by this report.
+- Offline production-path probe: the pinned `parent_ssh_plan()` and
+  `_run_interactive_ssh()` successfully execute a harmless shell arithmetic command over a
+  real local `sshd` and controlling PTY (repeated three times). This verifies host-side PTY
+  allocation, inherited terminal descriptors, and shell input/output in the fixture; it
+  does not reproduce the owner guest or identify its runtime cause. No SSH policy change is
+  justified by this evidence. The next distinction requires owner-approved guest-side
+  observation of shell execution and terminal state.
 
 ## 1. Install the reviewed candidate
 
