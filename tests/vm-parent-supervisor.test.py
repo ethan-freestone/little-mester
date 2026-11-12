@@ -893,6 +893,7 @@ class SupervisorHandoffTests(unittest.TestCase):
     def test_guest_readiness_reaps_exited_qemu_before_transition_classification(self):
         child = subprocess.Popen([sys.executable, "-c", "raise SystemExit(17)"])
         deadline = time.monotonic() + 3
+        observed_zombie = False
         while time.monotonic() < deadline:
             # Wait until the kernel has exited the child without calling
             # Popen.poll()/wait(), leaving it as a zombie for the first probe.
@@ -901,8 +902,10 @@ class SupervisorHandoffTests(unittest.TestCase):
             except FileNotFoundError:
                 break
             if fields[0] == "Z":
+                observed_zombie = True
                 break
             time.sleep(0.01)
+        self.assertTrue(observed_zombie)
         self.assertIsNone(child.returncode)
         observations = []
 
