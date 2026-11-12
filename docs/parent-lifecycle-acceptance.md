@@ -132,9 +132,15 @@ if [[ -e "$STATE_DIR/ssh_port" || -L "$STATE_DIR/ssh_port" ]]; then
   fi
   command -v ss >/dev/null
   LISTENERS="$(ss -H -ltn)"
-  if awk -v p="$PORT" '$4 ~ (":" p "$") { print; found=1 } END { exit !found }' <<<"$LISTENERS"; then
+  if awk -v p="$PORT" '$4 ~ (":" p "$") { print; found=1 } END { exit found ? 0 : 1 }' <<<"$LISTENERS"; then
     echo "REFUSED: listener remains on prior parent SSH port $PORT" >&2
     exit 2
+  else
+    AWK_STATUS=$?
+    if (( AWK_STATUS != 1 )); then
+      echo "REFUSED: could not reliably inspect prior parent SSH port $PORT" >&2
+      exit 2
+    fi
   fi
 fi
 ```
