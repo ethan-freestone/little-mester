@@ -79,8 +79,11 @@ class ProcessScanTests(unittest.TestCase):
     def test_privileged_pid_one_check_uses_only_system_lsof(self):
         completed = subprocess.CompletedProcess(
             ["sudo", "lsof"], 0, stdout="p1\ncsystemd\n", stderr="")
-        with mock.patch.object(gate.subprocess, "run", return_value=completed) as run:
+        with (mock.patch.object(gate, "_system_executable",
+                                side_effect=lambda name: pathlib.Path("/usr/bin") / name) as trusted,
+              mock.patch.object(gate.subprocess, "run", return_value=completed) as run):
             gate._check_pid_one_with_lsof()
+        self.assertEqual(trusted.call_args_list, [mock.call("sudo"), mock.call("lsof")])
         argv = run.call_args.args[0]
         self.assertEqual(argv[:2], ["/usr/bin/sudo", "/usr/bin/lsof"])
         self.assertIn("-p", argv)
@@ -93,9 +96,12 @@ class ProcessScanTests(unittest.TestCase):
             completed = subprocess.CompletedProcess(
                 ["sudo", "lsof"], 0, stdout=stdout, stderr="")
             target = pathlib.Path(f"/proc/{os.getpid()}/fd/{held.fileno()}")
-            with mock.patch.object(gate.subprocess, "run", return_value=completed) as run:
+            with (mock.patch.object(gate, "_system_executable",
+                                    side_effect=lambda name: pathlib.Path("/usr/bin") / name) as trusted,
+                  mock.patch.object(gate.subprocess, "run", return_value=completed) as run):
                 self.assertEqual(
                     gate._scan_with_lsof(target, info.st_dev, info.st_ino), [os.getpid()])
+            self.assertEqual(trusted.call_args_list, [mock.call("sudo"), mock.call("lsof")])
             argv = run.call_args.args[0]
             self.assertEqual(argv[:2], ["/usr/bin/sudo", "/usr/bin/lsof"])
             self.assertNotIn(str(ROOT), " ".join(argv))

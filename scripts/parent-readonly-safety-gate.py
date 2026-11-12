@@ -45,8 +45,8 @@ def _check_pid_one_with_lsof() -> None:
     sudo, lsof = _system_executable("sudo"), _system_executable("lsof")
     try:
         result = subprocess.run([str(sudo), str(lsof), "-Fpc", "-p", "1"],
-                                stdin=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, timeout=15, check=False)
+                                stdin=None, capture_output=True, text=True, timeout=15,
+                                check=False)
     except (OSError, subprocess.SubprocessError) as error:
         raise GateRefused("could not verify PID 1 through trusted lsof") from error
     if (result.returncode != 0 or result.stderr.strip()
@@ -97,8 +97,8 @@ def _parse_lsof(stdout: str, stderr: str, returncode: int,
 
 def _run_json(argv: list[str]) -> dict:
     try:
-        result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, timeout=20, check=False)
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True, timeout=20, check=False)
     except (OSError, subprocess.SubprocessError) as error:
         raise GateRefused(f"command could not be verified: {pathlib.Path(argv[0]).name}") from error
     if result.returncode:
@@ -174,8 +174,7 @@ def _check_listener(state_dir: pathlib.Path) -> None:
         raise GateRefused("recorded ssh_port is outside the valid range")
     try:
         result = subprocess.run(["ss", "-H", "-ltn"], stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, timeout=5, check=True)
+                                capture_output=True, text=True, timeout=5, check=True)
     except (OSError, subprocess.SubprocessError) as error:
         raise GateRefused("could not reliably inspect TCP listeners") from error
     for line in result.stdout.splitlines():
@@ -191,8 +190,8 @@ def _scan_with_lsof(target: pathlib.Path, device: int, inode: int) -> list[int]:
     sudo, lsof = _system_executable("sudo"), _system_executable("lsof")
     command = [str(sudo), str(lsof), "-FpcfDi", "--", str(target)]
     try:
-        result = subprocess.run(command, stdin=None, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, timeout=60, check=False)
+        result = subprocess.run(command, stdin=None, capture_output=True, text=True,
+                                timeout=60, check=False)
     except (OSError, subprocess.SubprocessError) as error:
         raise GateRefused("privileged lsof scan could not run") from error
     return _parse_lsof(result.stdout, result.stderr, result.returncode, device, inode)
@@ -273,7 +272,7 @@ def main() -> int:
         print(f"REFUSED: {error}", file=sys.stderr)
         print("SAFETY GATE: FAIL — no disk attachment authorized", file=sys.stderr)
         return 2
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 — unexpected failures must fail closed before disk attachment
         print(f"REFUSED: unexpected gate failure ({type(error).__name__})", file=sys.stderr)
         print("SAFETY GATE: FAIL — no disk attachment authorized", file=sys.stderr)
         return 2
