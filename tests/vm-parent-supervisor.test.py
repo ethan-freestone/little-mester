@@ -1078,6 +1078,54 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 self.cleanup_gated_child("qemu", transition)
             self.assertEqual(parent_state.exec_transition_status(transition), "STOPPED")
 
+    def test_exec_transition_confirms_one_transient_procfs_mismatch_only(self):
+        executable = os.path.realpath(sys.executable)
+        transition = None
+        with parent_state.lifecycle_lock(home=self.home) as lock_fd:
+            try:
+                transition = parent_supervisor._spawn_gated_target(
+                    parent_state, lock_fd=lock_fd, role="qemu", executable=executable,
+                    argv=[executable, "-c", "import time; time.sleep(30)"], home=str(self.home))
+                target = parent_state.observe_process(transition["pid"])
+                transient = {**target, "argv": [executable, "<exec-transition>"]}
+                with mock.patch.object(parent_state, "observe_process",
+                                       side_effect=[transient, target]) as observe:
+                    self.assertEqual(parent_state.exec_transition_status(transition), "TARGET")
+                    self.assertEqual(observe.call_count, 2)
+                with mock.patch.object(parent_state, "observe_process",
+                                       side_effect=[transient, transient]) as observe:
+                    self.assertEqual(parent_state.exec_transition_status(transition), "AMBIGUOUS")
+                    self.assertEqual(observe.call_count, 2)
+                gate = {**target, **transition["gate"]}
+                with mock.patch.object(parent_state, "observe_process",
+                                       side_effect=[transient, gate]) as observe:
+                    self.assertEqual(parent_state.exec_transition_status(transition), "GATE")
+                    self.assertEqual(observe.call_count, 2)
+                with mock.patch.object(parent_state, "observe_process",
+                                       side_effect=[parent_state.Refused("transient"), target]) as observe:
+                    self.assertEqual(parent_state.exec_transition_status(transition), "TARGET")
+                    self.assertEqual(observe.call_count, 2)
+                with mock.patch.object(parent_state, "observe_process",
+                                       side_effect=[parent_state.Refused("transient"),
+                                                    parent_state.Refused("persistent")]) as observe:
+                    self.assertEqual(parent_state.exec_transition_status(transition), "AMBIGUOUS")
+                    self.assertEqual(observe.call_count, 2)
+                reused = {**target, "start_time": str(int(target["start_time"]) + 1)}
+                with mock.patch.object(parent_state, "observe_process", return_value=reused) as observe:
+                    self.assertEqual(parent_state.exec_transition_status(transition), "AMBIGUOUS")
+                    observe.assert_called_once_with(transition["pid"])
+                for field, replacement in (("uid", target["uid"] + 1),
+                                           ("host_boot_id", "0" * 36),
+                                           ("start_time", str(int(target["start_time"]) + 1))):
+                    changed = {**target, field: replacement}
+                    with self.subTest(field=field), mock.patch.object(
+                            parent_state, "observe_process", side_effect=[transient, changed]) as observe:
+                        self.assertEqual(parent_state.exec_transition_status(transition), "AMBIGUOUS")
+                        self.assertEqual(observe.call_count, 2)
+            finally:
+                if transition is not None:
+                    self.cleanup_gated_child("qemu", transition)
+
     def test_gated_spawn_refuses_lock_fd_alias_without_closing_callers_fd(self):
         executable = os.path.realpath(sys.executable)
         with parent_state.lifecycle_lock(home=self.home) as lock_fd:

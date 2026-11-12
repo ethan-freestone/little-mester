@@ -1342,10 +1342,33 @@ def exec_transition_status(identity: dict) -> str:
             return "STOPPED"
         except OSError:
             return "AMBIGUOUS"
+        current = None
+    if current is not None and (current["uid"] != identity["uid"]
+                                or current["host_boot_id"] != identity["host_boot_id"]
+                                or current["start_time"] != identity["start_time"]):
         return "AMBIGUOUS"
-    if (current["uid"] != identity["uid"] or current["host_boot_id"] != identity["host_boot_id"]
-            or current["start_time"] != identity["start_time"]):
+    phase = _exec_transition_phase(identity, current) if current is not None else "AMBIGUOUS"
+    if phase != "AMBIGUOUS":
+        return phase
+
+    # /proc fields are read separately; during the authorized gate execve they
+    # can expose an incomplete or mixed exe/argv view. Confirm exactly once.
+    # The second sample must independently match the immutable process identity
+    # and one of the two recorded images; persistent or replaced identity stays
+    # AMBIGUOUS and is never signalled as a target.
+    try:
+        confirmed = observe_process(pid)
+    except Refused:
         return "AMBIGUOUS"
+    if (confirmed["uid"] != identity["uid"]
+            or confirmed["host_boot_id"] != identity["host_boot_id"]
+            or confirmed["start_time"] != identity["start_time"]):
+        return "AMBIGUOUS"
+    return _exec_transition_phase(identity, confirmed)
+
+
+def _exec_transition_phase(identity: dict, current: dict) -> str:
+    """Classify a complete procfs sample against the only two authorized images."""
     for phase in ("gate", "target"):
         candidate = identity.get(phase)
         expected_keys = {"exe", "argv"} if phase == "gate" else {"exe", "argv", "fd_contracts"}
