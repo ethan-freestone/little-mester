@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-12T22:18:25.235Z",
+  "updated_at": "2026-11-12T23:56:11.040Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -48,13 +48,15 @@
       "CONFIG-PRECEDENCE (local pinned v2.2.5 only): commit 2a9be6e adds tests/opencode-project-config.test.py. In isolated temporary HOME/workspace, debug config discovers both direct and .opencode configs without guard; both are absent with OPENCODE_DISABLE_PROJECT_CONFIG=1, while protected config source reports updates disabled/share disabled. 2/2 tests pass. Does not prove effective config, project-plugin suppression/load, guest launch enforcement, or owner acceptance; A3 remains pending. Docs explicitly bound claim (94e32b0).",
       "Project config/plugin probe current result (commits 2a9be6e/82fc434/79f4aac): tests/opencode-project-config.test.py 3/3 on v2.2.5. Confirms direct and .opencode config sources are absent under OPENCODE_DISABLE_PROJECT_CONFIG=1; a benign test-authored project plugin creates its private marker without the flag and not with the flag. Guarded negative also requires live TUI to reach Ask anything; no false pass on startup failure. No guest enforcement/effective-config/owner acceptance claim.",
       "MOCK seed-provisioning regression: first-boot parent cloud-init embeds exact root-owned exit-confirm plugin bytes and protected server/CLI config; pins OpenCode 2.2.5, disables project config, routes global plugin discovery to /etc, and installs a tmux attach launcher/runner. Generated scripts pass /bin/sh -n in `tests/vm-parent-supervisor.test.py` (16/16); `bats tests/exit-confirm.bats tests/tui-jsx.bats` 11/11. No guest boot, target-terminal canary, or guest TUI behavior demonstrated.",
-      "tests/vm-parent-supervisor.test.py::test_lab_vm_worker_uses_separate_script_fd_and_preserves_terminal_stdin verifies validated TERM propagation and refuses TERM=dumb"
+      "tests/vm-parent-supervisor.test.py::test_lab_vm_worker_uses_separate_script_fd_and_preserves_terminal_stdin verifies validated TERM propagation and refuses TERM=dumb",
+      "2026-11-12 M2 offline regression rerun: `python3 tests/vm-browser-auth.test.py` 35/35, `python3 tests/opencode-project-config.test.py` 3/3, and protected TERM propagation test `test_lab_vm_worker_uses_separate_script_fd_and_preserves_terminal_stdin` 1/1. Browser-auth test prints expected argparse refusal cases before PASS. No VM/guest auth/TUI/model action; owner acceptance remains pending."
     ],
     "cases": [
       "MOCK seed assets: exact plugin bytes, root ownership/modes, protected config (autoupdate/share disabled, exit keybinds disabled), project-config guard, root XDG global plugin location, pinned install command and tmux scripts asserted; generated shell syntax valid. tests/vm-parent-supervisor.test.py (16/16). No VM/guest acceptance.",
       "STATIC/BATS: exit-confirm and TUI JSX suites 11/11. Owner terminal OSC 52 clipboard canary remains NOT_RUN; docs/opencode.md J.12 records terminal-specific mitigation and safe non-secret canary.",
       "MOCK seed provisioning: protected root-owned OpenCode 2.2.5 config/plugin assets, project-config disable, XDG global discovery under /etc, pinned installation and tmux launcher/runner. `lab-vm parent tui` attaches by fixed SSH remote command through the same pinned, non-forwarding, sealed-memfd path. `tests/vm-parent-supervisor.test.py` 18/18 and Bats exit/TUI 11/11. No guest boot/live TUI/clipboard canary.",
-      "Delta integration: `lab-vm parent tui` executes only the fixed remote `/usr/local/bin/lm-opencode` command via the existing RUNNING-only pinned SSH/sealed-memfd path. Parent startup readiness now checks cloud-init, tmux launcher availability, and exact OpenCode v2.2.5 version. Offline only; no guest boot or terminal canary."
+      "Delta integration: `lab-vm parent tui` executes only the fixed remote `/usr/local/bin/lm-opencode` command via the existing RUNNING-only pinned SSH/sealed-memfd path. Parent startup readiness now checks cloud-init, tmux launcher availability, and exact OpenCode v2.2.5 version. Offline only; no guest boot or terminal canary.",
+      "OWNER-REPORTED M1/M2 handoff (2026-11-12): protected guest is RUNNING on same persistent disk after recovery/restart; owner reports interactive SSH, workspace canary and shell I/O PASS. TERM propagation fix is in source at 9b108be637b6486cfe9089adbb582c6f453c01ab and protected install was a445b3901fea75b3fe4c6b86c3c9069dd504b9f4. No live OpenCode TUI/auth/model-selection/response/session reconnect, guest terminfo/clear, or terminal clipboard canary evidence supplied; M2 acceptance remains pending."
     ]
   },
   "models_used": [],
@@ -98,6 +100,11 @@
       "timestamp": "2026-11-12T22:18:25.235Z",
       "author": "cli",
       "body": "TERM allowlisting was tightened in follow-up commit 9b108be637b6486cfe9089adbb582c6f453c01ab: validated TERM and the validation marker enter the clean worker environment only for `parent ssh` and `parent tui`; noninteractive commands retain the original sanitized environment. The protected PTY regression still passes after this refinement."
+    },
+    {
+      "timestamp": "2026-11-12T23:49:00.154Z",
+      "author": "cli",
+      "body": "Owner reports the protected guest is RUNNING and shell/SSH works after M1b recovery/restart. Continue M2 without operating the guest: local 2.2.5 compatibility/config/plugin/key tests are evidence only. Live TUI, authentication, model selection and actual response, tmux reconnect, auth/config/history persistence, guest TERM/terminfo and terminal clipboard canary remain owner acceptance gaps. TERM propagation correction is committed; no source install or VM operation performed here."
     }
   ]
 }

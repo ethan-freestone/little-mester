@@ -9,7 +9,9 @@ import os
 import importlib.util
 import math
 import pathlib
+import selectors
 import stat
+import subprocess
 import time
 
 
@@ -28,6 +30,120 @@ contract = _load_contract()
 
 class CollectorError(ValueError):
     """A source could not be parsed into the fixed metrics contract."""
+
+
+NVIDIA_QUERY = ("--query-gpu=name,temperature.gpu,utilization.gpu,memory.total,"
+                "memory.used,memory.free", "--format=csv,noheader,nounits")
+NVIDIA_OUTPUT_LIMIT = 8192
+
+
+def nvidia_smi_adapter(*, executable: str = "/usr/bin/nvidia-smi",
+                       clock=time.monotonic_ns, popen=subprocess.Popen,
+                       output_limit: int = NVIDIA_OUTPUT_LIMIT):
+    """Return an opt-in bounded NVIDIA CSV adapter; no probe happens at creation.
+
+    The absolute executable and fixed query prevent PATH/argument injection. The
+    child is reaped on timeout or output overflow, and stdout is capped while read.
+    """
+    if (not isinstance(executable, str) or not os.path.isabs(executable)
+            or "\0" in executable or type(output_limit) is not int
+            or not 1 <= output_limit <= NVIDIA_OUTPUT_LIMIT):
+        raise CollectorError("malformed")
+    executable = os.path.realpath(executable)
+
+    def collect(deadline_ns: int) -> str:
+        if type(deadline_ns) is not int or deadline_ns <= clock():
+            raise TimeoutError
+        try:
+            info = os.stat(executable, follow_symlinks=False)
+        except FileNotFoundError as error:
+            raise CollectorError("no_device") from error
+        except OSError as error:
+            raise CollectorError("unsupported") from error
+        if not stat.S_ISREG(info.st_mode) or not os.access(executable, os.X_OK):
+            raise CollectorError("unsupported")
+        selector = selectors.DefaultSelector()
+        try:
+            process = popen([executable, *NVIDIA_QUERY], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            close_fds=True, env={"PATH": "/usr/bin:/bin", "LANG": "C"})
+        except FileNotFoundError as error:
+            selector.close()
+            raise CollectorError("no_device") from error
+        except OSError as error:
+            selector.close()
+            raise CollectorError("unsupported") from error
+
+        output = bytearray()
+
+        def stop_and_reap():
+            if process.poll() is None:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+                try:
+                    process.wait(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    # Reap this exact Popen child after SIGKILL. The grace period
+                    # is bounded; wait() is required to avoid leaving a zombie.
+                    process.wait()
+            else:
+                process.wait()
+
+        try:
+            if process.stdout is None:
+                raise CollectorError("collector_failed")
+            os.set_blocking(process.stdout.fileno(), False)
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = (deadline_ns - clock()) / 1_000_000_000
+                if remaining <= 0:
+                    raise TimeoutError
+                events = selector.select(remaining)
+                if not events:
+                    raise TimeoutError
+                for key, _ in events:
+                    chunk = os.read(key.fd, min(4096, output_limit + 1 - len(output)))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    output.extend(chunk)
+                    if len(output) > output_limit:
+                        raise CollectorError("malformed")
+            remaining = (deadline_ns - clock()) / 1_000_000_000
+            if remaining <= 0:
+                raise TimeoutError
+            try:
+                return_code = process.wait(timeout=remaining)
+            except subprocess.TimeoutExpired as error:
+                raise TimeoutError from error
+            if return_code != 0:
+                raise CollectorError("unsupported")
+            if clock() >= deadline_ns:
+                raise TimeoutError
+            try:
+                return output.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as error:
+                raise CollectorError("malformed") from error
+        except BaseException:
+            try:
+                stop_and_reap()
+            except (OSError, subprocess.TimeoutExpired):
+                # Preserve the collection failure. Popen retains responsibility
+                # for later reaping if the kernel cannot complete termination now.
+                pass
+            raise
+        finally:
+            selector.close()
+            if process.stdout is not None:
+                process.stdout.close()
+
+    return collect
 
 
 def read_bounded_file(path: str | os.PathLike, maximum_bytes: int) -> str:

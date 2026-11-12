@@ -8,7 +8,7 @@
   "title": "P1-04 — Host metrics 500-ms parity over identity-bound SSH",
   "objective": "Deliver historical host CPU/RAM/GPU/VRAM/temperature metrics at a 500-ms target using a Sol-reviewed, owner-approved bounded push channel; no guest-initiated host API or copied Compose sidecar topology. Operating policy: docs/workflows/phase1-continuous-execution.md. Reuse current schema/collector; continue independent offline scheduling/codec/display work while runtime/key-lifecycle decisions are pending. Restricted SSH principal proposal (not authorized/implemented; requires owner decision on new guest root-trusted key authorization/lease/revocation authority): docs/metrics-restricted-ssh-proposal.md. Request owner NVIDIA collection/timing evidence before choosing GPU sampling. No criteria relaxed.",
   "created_at": "2026-11-10T21:46:28.237Z",
-  "updated_at": "2026-11-12T19:34:24.136Z",
+  "updated_at": "2026-11-12T23:57:17.481Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -71,14 +71,17 @@
       "MOCK/PURE: commits 2bde5e8/0663d6b add side-effect-free injectable parsing/collection (no gather.py import, hardware probe, SSH, or VM). Reuses historical CPU/load, meminfo, GPU CSV and thermal-value shapes; bounds parser input/arrays, invokes fixed adapters synchronously with a monotonic deadline, discards late adapter/parser results and gives timeout precedence, skips later adapters after expiry, validates the final fixed snapshot, and refuses duration >5s. Tests/vm-parent-metrics.test.py: 23/23, including fixture values, malformed/oversized sources, absent hardware, timeout/exact deadline/parse overrun, and duration bounds. Adapter calls must cooperatively enforce deadlines; this block does not prove hardware behavior or a hard preemption guarantee.",
       "Linux proc adapter slice (commits ddb662f/c1033f0): lazy read-only adapters read only fixed cpuinfo/loadavg/meminfo paths via bounded O_NOFOLLOW regular-file reader; injected GPU/temperature adapters remain optional and no device probe occurs. Tests cover fixture extraction, laziness, no-follow/nonregular/oversized rejection, and stopping between proc reads at deadline. Sol review found and follow-up closed missing between-I/O deadline checks. Metrics suite 26/26; no real /proc, hardware, GPU, temperature, SSH, VM, or performance acceptance performed.",
       "MOCK/PURE fixed ACK codec: `parent-metrics.py` encodes/validates one <=256-byte newline-terminated ACK bound to exact v1 run_id+sequence, rejects duplicate keys, extra frames, wrong identities/status and malformed/oversize data; synchronous `exchange_snapshot` reuses existing snapshot encoder and propagates transport failure. `tests/vm-parent-metrics.test.py` 29/29. No SSH sender, receiver, hardware collection, cadence integration, or TUI integration yet.",
-      "MOCK schedule/ACK integration: new `run_exchange_schedule` connects absolute 500-ms slots to one collector and one bounded injected transport+ACK exchange; sequence advances on failure, failed metrics cycles are counted/reported without stopping sampling or queuing. `tests/vm-parent-metrics.test.py` now 31/31. Transport adapter must honor the absolute deadline; no restricted SSH implementation or hardware behavior claimed."
+      "MOCK schedule/ACK integration: new `run_exchange_schedule` connects absolute 500-ms slots to one collector and one bounded injected transport+ACK exchange; sequence advances on failure, failed metrics cycles are counted/reported without stopping sampling or queuing. `tests/vm-parent-metrics.test.py` now 31/31. Transport adapter must honor the absolute deadline; no restricted SSH implementation or hardware behavior claimed.",
+      "2026-11-12: `nvidia_smi_adapter` is now an explicit opt-in adapter in `lib/vm/parent-metrics-collect.py`: fixed absolute executable/query, sanitized environment, no constructor probe, selector-streamed 8192-byte stdout cap, monotonic deadline, terminate→kill/reap cleanup. Fixture tests cover no probe on construction, fixed args/valid parse, output overflow, SIGTERM-resistant timeout/reap/closed pipe, and selector setup failure. `python3 -B tests/vm-parent-metrics.test.py` 32/32; py_compile and diff-check pass. No host GPU, transport, receiver, live cadence or freshness acceptance."
     ],
     "cases": [
       "Design-only Sol assessment: PASS WITH CONCERNS. Owner approved a separate per-run receiver-restricted metrics SSH key, absolute 500-ms schedule, one-frame ACK/backpressure, fixed 1.5-s stale threshold and private tmpfs-only snapshots. GPU unavailable is permitted only where hardware lacks support/during implementation; supported NVIDIA GPU utilisation and VRAM remain Phase 1 acceptance requirements. This is not implementation review or acceptance; no metrics transport exists yet.",
       "MOCK/PURE ACK exchange: valid matching ACK accepted; wrong run/sequence, duplicate JSON key, extra ACK frame, malformed/unframed/oversize bytes rejected; exchange timeout propagates (tests/vm-parent-metrics.test.py, 29/29 total). Transport exchange is injected and boundedness remains the adapter's contract; no SSH/receiver/cadence integration.",
       "MOCK/PURE ACK contract remains 29/29: fixed one-frame <=256-byte ACK tied to run/sequence, duplicate/mismatch/multiframe/oversize refusal; synchronous exchange propagates transport failures. Root-trusted restricted per-run SSH principal install/revoke still requires owner decision; no SSH sender/receiver integration claimed.",
       "MOCK: three scheduled cycles use sequences 1/2/3; injected second-cycle timeout is reported and sampling continues to a third cycle; valid matching ACKs accepted. tests/vm-parent-metrics.test.py, 31/31 total.",
-      "Offline integration expanded: `run_exchange_schedule` connects absolute cadence to one collect/encode/exchange/ACK per sequence; injected transport timeout reports a failure and later sampling continues without queuing. Metrics tests 31/31. NVIDIA timing/collection output not supplied; do not infer GPU method or performance."
+      "Offline integration expanded: `run_exchange_schedule` connects absolute cadence to one collect/encode/exchange/ACK per sequence; injected transport timeout reports a failure and later sampling continues without queuing. Metrics tests 31/31. NVIDIA timing/collection output not supplied; do not infer GPU method or performance.",
+      "M3 boundary reaffirmed (2026-11-12): offline schema/collector/scheduler/ACK tests remain 31/31; no live transport or receiver. Existing restricted-SSH proposal has Sol Medium FIX conditions and requires owner approval for guest-root-trusted authorization/lifecycle authority. No root SSH authority or broader owner key approved; do not implement/use either. Live CPU/RAM/NVIDIA GPU/VRAM cadence and accuracy remain unverified.",
+      "Offline NVIDIA collector adapter and cleanup regression: 32/32 metrics tests pass; Sol Medium focused review PASS. This adds bounded NVIDIA collection capability only; adapter remains opt-in and is not wired to an authorized transport."
     ]
   },
   "models_used": [],
@@ -102,6 +105,16 @@
       "timestamp": "2026-11-12T19:34:24.135Z",
       "author": "cli",
       "body": "Sol Medium focused delta review of the existing restricted-SSH proposal returned FIX. Remaining material conditions: crash-safe supervisor/renewal/child lifetime and stop draining; durable anti-replay authority across guest reboot; complete root AuthorizedKeysCommandUser/CA/environment/connection-context restrictions and verification; retain disk-scoped control key across persistent stop/up while cleaning run-scoped data keys. No transport implementation is authorized or justified as written. M3 remains gated on these security conditions and explicit owner approval of the privileged guest authority."
+    },
+    {
+      "timestamp": "2026-11-12T23:49:01.699Z",
+      "author": "cli",
+      "body": "M3 remains bounded by existing A1/A3 and Sol's FIX findings for the restricted-SSH design. No metrics transport/receiver, guest-root SSH authority, or broader owner-key use is approved by this handoff. Continue existing codec/collector work only; live transport awaits a security-reviewed unprivileged authorization path and explicit owner approval of any guest-root-trusted authority. Live cadence/freshness/ACK and CPU/RAM/NVIDIA GPU/VRAM evidence remain pending."
+    },
+    {
+      "timestamp": "2026-11-12T23:57:17.480Z",
+      "author": "cli",
+      "body": "Sol Medium focused review of the opt-in NVIDIA collector delta: PASS after bounded cleanup and regression fixes.  32/32. Review explicitly limits this to offline adapter robustness; no hardware probe, authorized transport, receiver, cadence/freshness or owner acceptance is established."
     }
   ]
 }

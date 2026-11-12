@@ -7,8 +7,11 @@ import importlib.util
 import json
 import os
 import pathlib
+import subprocess
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -559,6 +562,65 @@ class ParentMetricsContractTests(unittest.TestCase):
             parent_metrics_collect.parse_gpu_csv("G" * 8193)
         with self.assertRaises(parent_metrics_collect.CollectorError):
             parent_metrics_collect.parse_temperatures([(object(), "core", 40)])
+
+    def test_nvidia_smi_adapter_uses_fixed_query_and_bounds_output_and_deadline(self):
+        with tempfile.TemporaryDirectory(prefix="parent-nvidia-fixture-") as temporary:
+            root = pathlib.Path(temporary)
+            args_path = root / "args.json"
+            executable = root / "nvidia-smi-fixture"
+            executable.write_text(
+                "#!/usr/bin/python3\nimport json, pathlib, sys\n"
+                f"pathlib.Path({str(args_path)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+                "print('Fixture GPU, 55, 12, 8192, 1024, 7168')\n",
+                encoding="utf-8")
+            executable.chmod(0o700)
+            adapter = parent_metrics_collect.nvidia_smi_adapter(executable=str(executable))
+            self.assertFalse(args_path.exists(), "adapter creation must not probe hardware")
+            raw = adapter(time.monotonic_ns() + 1_000_000_000)
+            self.assertEqual(parent_metrics_collect.parse_gpu_csv(raw)[0]["name"], "Fixture GPU")
+            self.assertEqual(json.loads(args_path.read_text()),
+                             list(parent_metrics_collect.NVIDIA_QUERY))
+
+            executable.write_text("#!/usr/bin/python3\nprint('x' * 9000)\n", encoding="utf-8")
+            executable.chmod(0o700)
+            with self.assertRaises(parent_metrics_collect.CollectorError):
+                parent_metrics_collect.nvidia_smi_adapter(executable=str(executable))(
+                    time.monotonic_ns() + 1_000_000_000)
+
+            children = []
+            ready_path = root / "sigterm-handler-ready"
+
+            def spawn(*args, **kwargs):
+                child = subprocess.Popen(*args, **kwargs)
+                children.append(child)
+                return child
+
+            executable.write_text(
+                "#!/usr/bin/python3\nimport signal, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                f"open({str(ready_path)!r}, 'w').close()\n"
+                "time.sleep(5)\n",
+                encoding="utf-8")
+            executable.chmod(0o700)
+            started = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                parent_metrics_collect.nvidia_smi_adapter(
+                    executable=str(executable), popen=spawn)(time.monotonic_ns() + 500_000_000)
+            self.assertLess(time.monotonic() - started, 1.5)
+            self.assertEqual(len(children), 1)
+            self.assertIsNotNone(children[0].returncode, "timeout cleanup must wait/reap the child")
+            self.assertTrue(ready_path.exists(), "SIGTERM handler must be installed before timeout")
+            self.assertEqual(children[0].returncode, -9, "SIGTERM-resistant child must be killed")
+            self.assertTrue(children[0].stdout.closed)
+
+            with mock.patch.object(parent_metrics_collect.selectors, "DefaultSelector",
+                                   side_effect=OSError("descriptor exhaustion")), \
+                    mock.patch.object(parent_metrics_collect.subprocess, "Popen") as spawn_mock:
+                with self.assertRaisesRegex(OSError, "descriptor exhaustion"):
+                    parent_metrics_collect.nvidia_smi_adapter(
+                        executable=str(executable), popen=spawn_mock)(
+                        time.monotonic_ns() + 1_000_000_000)
+                spawn_mock.assert_not_called()
 
     def test_category_discards_data_when_adapter_finishes_at_deadline(self):
         reads = iter((0, 100))
