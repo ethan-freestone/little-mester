@@ -58,10 +58,11 @@ INSTALL_FILES = {
     "lib/vm/parent-supervisor.py": 0o644,
     "lib/vm/parent-qemu.py": 0o644,
     "lib/vm/parent-provision.py": 0o644,
+    "scripts/parent-readonly-safety-gate.py": 0o644,
 }
 INSTALL_DIRS = {
     "agent", "agent/opencode", "agent/opencode/plugins",
-    "agent/opencode/plugins/little-mester-exit-confirm", "lib", "lib/vm",
+    "agent/opencode/plugins/little-mester-exit-confirm", "lib", "lib/vm", "scripts",
 }
 
 

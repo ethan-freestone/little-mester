@@ -478,6 +478,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
             "lib/vm/parent-state.py", "lib/vm/parent-launcher.py",
             "lib/vm/parent-gate.py", "lib/vm/parent-supervisor.py",
             "lib/vm/parent-qemu.py", "lib/vm/parent-provision.py",
+            "scripts/parent-readonly-safety-gate.py",
             "agent/opencode/plugins/little-mester-exit-confirm/package.json",
             "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
         }.issubset(manifest["files"]))
@@ -514,6 +515,78 @@ class OwnerAcceptanceTests(unittest.TestCase):
                     self.assertEqual(observed, expected)
                     for name, mode in manifest["files"].items():
                         self.assertEqual(stat.S_IMODE(os.lstat(target / name).st_mode), mode)
+                    if prefix == "/prefix-one":
+                        helper = target / "scripts/parent-readonly-safety-gate.py"
+                        self.assertTrue(helper.is_file())
+                        installed_state_spec = importlib.util.spec_from_file_location(
+                            "installed_parent_state", target / "lib/vm/parent-state.py")
+                        installed_state = importlib.util.module_from_spec(installed_state_spec)
+                        installed_state_spec.loader.exec_module(installed_state)
+                        observed_paths = []
+                        loaded_scanners = []
+                        real_spec_from_file = importlib.util.spec_from_file_location
+
+                        class ScannerLoader:
+                            def __init__(self, wrapped):
+                                self.wrapped = wrapped
+
+                            def create_module(self, module_spec):
+                                return self.wrapped.create_module(module_spec)
+
+                            def exec_module(self, module):
+                                self.wrapped.exec_module(module)
+                                module._check_proc_visibility = mock.Mock()
+                                module._check_pid_one_with_lsof = mock.Mock()
+                                module._scan_with_lsof = mock.Mock(return_value=[os.getpid()])
+                                loaded_scanners.append(module)
+
+                        def installed_helper_spec(name, path):
+                            observed_paths.append(pathlib.Path(path))
+                            actual = real_spec_from_file(name, path)
+                            actual.loader = ScannerLoader(actual.loader)
+                            return actual
+
+                        real_lstat = pathlib.Path.lstat
+
+                        def protected_lstat(path):
+                            path = pathlib.Path(path)
+                            if path == helper:
+                                return SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o644)
+                            if path == target or target in path.parents:
+                                return SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
+                            return real_lstat(path)
+
+                        with (tempfile.TemporaryFile() as disk,
+                              mock.patch.object(pathlib.Path, "lstat", protected_lstat),
+                              mock.patch.object(installed_state.importlib.util,
+                                                "spec_from_file_location",
+                                                side_effect=installed_helper_spec)):
+                            identity = os.fstat(disk.fileno())
+                            installed_state._scan_stale_disk_holders(
+                                disk.fileno(), (identity.st_dev, identity.st_ino))
+                        self.assertEqual(observed_paths, [helper])
+                        loaded_scanners[0]._check_proc_visibility.assert_called_once()
+                        loaded_scanners[0]._check_pid_one_with_lsof.assert_called_once()
+                        self.assertEqual(loaded_scanners[0]._scan_with_lsof.call_count, 3)
+                        for scan_call in loaded_scanners[0]._scan_with_lsof.call_args_list[-2:]:
+                            self.assertEqual(scan_call.args[1:], (identity.st_dev, identity.st_ino))
+                        helper.unlink()
+
+                        def missing_helper_lstat(path):
+                            path = pathlib.Path(path)
+                            if path == helper:
+                                return real_lstat(path)
+                            if path == target or target in path.parents:
+                                return SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
+                            return real_lstat(path)
+
+                        with mock.patch.object(pathlib.Path, "lstat", missing_helper_lstat):
+                            with tempfile.TemporaryFile() as disk:
+                                info = os.fstat(disk.fileno())
+                                with self.assertRaisesRegex(
+                                        installed_state.Refused, "privileged disk-holder verification failed"):
+                                    installed_state._scan_stale_disk_holders(
+                                        disk.fileno(), (info.st_dev, info.st_ino))
 
     def test_default_operation_is_read_only_preflight_and_reports_blocked_install(self):
         with tempfile.TemporaryDirectory() as temporary:
