@@ -73,6 +73,22 @@ jobs:
             python3 "$test"
           done
 
+  # ── Hosted-runner KVM capability trial; never falls back to TCG ──
+  real-qemu-kvm-trial:
+    name: Real QEMU KVM capability trial
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install disposable-VM host dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cloud-image-utils curl genisoimage openssh-client qemu-system-x86 \
+            qemu-utils socat virtiofsd
+      - name: Require usable KVM and boot the pinned disposable image
+        run: bash tests/ci-kvm-capability.sh
+
   # ── 4. Hygiene — ShellCheck, Python compile, ruff lint ───────────
   hygiene:
     name: Hygiene (shellcheck, py_compile, ruff)
