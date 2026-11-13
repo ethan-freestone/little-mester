@@ -10,6 +10,7 @@ import os
 import pathlib
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -37,6 +38,38 @@ DIAG_SPEC.loader.exec_module(diagnostic)
 
 
 class ProcessScanTests(unittest.TestCase):
+    @staticmethod
+    def _ancestry_diagnostic(prefix, install_root):
+        paths = [pathlib.Path("/")]
+        current = pathlib.Path("/")
+        for component in (*prefix.parts[1:], "v3", install_root.name):
+            current /= component
+            paths.append(current)
+        report = []
+        for path in paths:
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                report.append(f"{path}: not created")
+                continue
+            mode = stat.S_IMODE(info.st_mode)
+            problems = []
+            if stat.S_ISLNK(info.st_mode):
+                problems.append("symlink")
+            if not stat.S_ISDIR(info.st_mode):
+                problems.append("not-directory")
+            if info.st_uid != 0:
+                problems.append(f"uid={info.st_uid}, expected root(0)")
+            if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                problems.append("group/world-writable")
+            if not info.st_mode & stat.S_IXOTH:
+                problems.append("not-other-traversable")
+            report.append(
+                f"{path}: uid={info.st_uid} gid={info.st_gid} mode={mode:04o} "
+                f"type={'dir' if stat.S_ISDIR(info.st_mode) else 'other'} "
+                f"checks={'PASS' if not problems else ','.join(problems)}")
+        return "\n".join(report)
+
     @classmethod
     def setUpClass(cls):
         sudo = "/usr/bin/sudo"
@@ -44,21 +77,48 @@ class ProcessScanTests(unittest.TestCase):
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        timeout=10, check=False)
         if authorization.returncode:
+            detail = authorization.stderr.decode("utf-8", "replace").strip()
+            if (os.environ.get("CI", "").lower() == "true"
+                    or os.environ.get("GITHUB_ACTIONS", "").lower() == "true"):
+                raise AssertionError(
+                    "CI requires noninteractive sudo for privileged scanner tests; "
+                    f"authorization failed: {detail}")
             raise unittest.SkipTest(
-                "privileged scanner tests require noninteractive sudo; no trust bypass is used")
+                "NOT RUN: privileged scanner tests require noninteractive sudo; "
+                f"authorization failed: {detail}")
         resolved = owner_acceptance.git(ROOT, "rev-parse", "--verify", "HEAD^{commit}")
         if resolved.returncode:
             raise AssertionError("could not resolve exact source candidate for trusted fixture")
         cls.candidate_sha = resolved.stdout.decode("ascii").strip()
-        cls.install_prefix = pathlib.Path("/opt") / f"lm-procfs-test-{uuid.uuid4().hex}"
+        # /usr/local/lib is a standard root-owned, non-writable, traversable
+        # system prefix on the CI image. The production installer creates the
+        # UUID subtree and all version/candidate directories beneath it.
+        cls.install_prefix = pathlib.Path("/usr/local/lib") / f"lm-procfs-test-{uuid.uuid4().hex}"
+        if cls.install_prefix.exists() or cls.install_prefix.is_symlink():
+            raise AssertionError(f"disposable install prefix unexpectedly exists: {cls.install_prefix}")
+        prefix_report = cls._ancestry_diagnostic(
+            cls.install_prefix, owner_acceptance.install_path(cls.candidate_sha,
+                                                              cls.install_prefix))
+        failed_ancestors = [line for line in prefix_report.splitlines()
+                            if "checks=" in line and "checks=PASS" not in line]
+        if failed_ancestors:
+            raise AssertionError(
+                f"CI protected install ancestry precheck failed for {cls.install_prefix}:\n"
+                f"{prefix_report}")
         cls.protected_root = owner_acceptance.install_path(
             cls.candidate_sha, cls.install_prefix)
         try:
             cls.protected_root = owner_acceptance.install_candidate(
                 ROOT, cls.candidate_sha, cls.install_prefix)
-        except Exception:
-            cls._remove_install_fixture()
-            raise
+        except Exception as error:
+            report = cls._ancestry_diagnostic(cls.install_prefix, cls.protected_root)
+            try:
+                cls._remove_install_fixture()
+            except Exception as cleanup_error:
+                report += f"\nfixture cleanup failed: {cleanup_error}"
+            raise AssertionError(
+                f"protected scanner install failed for prefix {cls.install_prefix}: {error}\n"
+                f"ancestry diagnostic:\n{report}") from error
         cls.protected_helper = cls.protected_root / "scripts/parent-readonly-safety-gate.py"
         cls.protected_state = cls.protected_root / "lib/vm/parent-state.py"
 
