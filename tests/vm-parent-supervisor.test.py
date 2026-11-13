@@ -1829,6 +1829,167 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
         finally:
             self.cleanup_test_supervisor(proc)
 
+    def test_graceful_qemu_exit_between_poll_and_procfs_probe_completes_cleanup(self):
+        executable = os.path.realpath(sys.executable)
+        run_id = "0123456789abcdef0123456789abcdef"
+        qemu_transition = proxy_transition = None
+        qmp_listener = None
+        ambiguous_zombie_samples = []
+        original_status = parent_state.exec_transition_status
+        with parent_state.lifecycle_lock(home=self.home) as lock_fd:
+            try:
+                qemu_transition = parent_supervisor._spawn_gated_target(
+                    parent_state, lock_fd=lock_fd, role="qemu", executable=executable,
+                    argv=[executable, "-c", "import time; time.sleep(30)"], home=str(self.home))
+                proxy_transition = parent_supervisor._spawn_gated_target(
+                    parent_state, lock_fd=lock_fd, role="proxy", executable=executable,
+                    argv=[executable, "-c", "import time; time.sleep(30)"], home=str(self.home))
+                qemu_proc = parent_supervisor._CHILD_PROCESSES["qemu"][0]
+                qemu_identity = {key: qemu_transition[key] for key in (
+                    "schema", "pid", "uid", "host_boot_id", "start_time")}
+                qemu_identity.update(qemu_transition["target"])
+                directory_fd = parent_state._open_directory_chain(
+                    create=False, home_override=self.home)
+                try:
+                    run = {
+                        "schema": 1,
+                        "parent_id": parent_state.PARENT_ID,
+                        "run_id": run_id,
+                        "phase": "RUNNING",
+                        "supervisor": {"pid": os.getpid()},
+                        "qemu": qemu_identity,
+                    }
+                    parent_state._atomic_json(directory_fd, "active-run.json", run)
+                    port_path = self.state_dir / "proxy.port"
+                    port_path.write_text("12345\n", encoding="ascii")
+                    port_path.chmod(0o600)
+                    qmp_path = self.state_dir / "qmp.sock"
+                    qmp_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    qmp_listener.bind(str(qmp_path))
+                    qmp_listener.close()
+                    qmp_listener = None
+                    qmp_path.chmod(0o600)
+                finally:
+                    os.close(directory_fd)
+
+                def status_with_zombie_window(transition):
+                    if transition == qemu_transition and len(ambiguous_zombie_samples) == 0:
+                        # Initial pre-QMP verification remains an exact TARGET.
+                        first = original_status(transition)
+                        self.assertEqual(first, "TARGET")
+                        ambiguous_zombie_samples.append("initial-target")
+                        return first
+                    if transition == qemu_transition and ambiguous_zombie_samples == ["initial-target"]:
+                        # _shutdown_running_qemu has just polled (None). Exit the
+                        # child now and leave its zombie unreaped until the real
+                        # procfs classifier samples it, deterministically opening
+                        # the production poll→/proc race window.
+                        qemu_proc.terminate()
+                        deadline = time.monotonic() + 3
+                        while time.monotonic() < deadline:
+                            try:
+                                fields = pathlib.Path(f"/proc/{qemu_proc.pid}/stat").read_text().rsplit(")", 1)[1].split()
+                            except FileNotFoundError:
+                                break
+                            if fields[0] == "Z":
+                                break
+                            time.sleep(0.005)
+                        else:
+                            self.fail("QEMU fixture did not reach zombie state")
+                        zombie_phase = original_status(transition)
+                        ambiguous_zombie_samples.append(zombie_phase)
+                        return zombie_phase
+                    return original_status(transition)
+
+                fake_state = SimpleNamespace(
+                    Refused=parent_state.Refused,
+                    STATE_COMPONENTS=parent_state.STATE_COMPONENTS,
+                    _open_directory_chain=lambda **_kwargs: parent_state._open_directory_chain(
+                        create=False, home_override=self.home),
+                    _read_json=parent_state._read_json,
+                    exec_transition_status=status_with_zombie_window,
+                    stop_exec_transition=parent_state.stop_exec_transition,
+                )
+                args = SimpleNamespace(run_id=run_id)
+                with mock.patch.object(parent_supervisor, "_qmp_powerdown"):
+                    parent_supervisor._shutdown_running_qemu(fake_state, args, str(self.home))
+
+                self.assertEqual(ambiguous_zombie_samples, ["initial-target", "AMBIGUOUS"])
+                self.assertIsNotNone(qemu_proc.returncode)
+                self.assertEqual(parent_supervisor._CHILD_PROCESSES, {})
+                self.assertFalse((self.state_dir / "proxy.port").exists())
+                self.assertFalse((self.state_dir / "qmp.sock").exists())
+                self.assertTrue((self.state_dir / "disk.qcow2").exists())
+            finally:
+                if qmp_listener is not None:
+                    qmp_listener.close()
+                for role, transition in (("qemu", qemu_transition), ("proxy", proxy_transition)):
+                    if transition is not None and role in parent_supervisor._CHILD_PROCESSES:
+                        self.cleanup_gated_child(role, transition)
+
+    def test_graceful_shutdown_refuses_ambiguous_still_live_qemu(self):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, close_fds=True)
+        transition = {"pid": proc.pid, "target_path": "child-qemu.target.json",
+                      "identity_path": "child-qemu.identity.json"}
+        run_id = "0123456789abcdef0123456789abcdef"
+        parent_supervisor._CHILD_PROCESSES["qemu"] = (proc, transition)
+        try:
+            fake_state = SimpleNamespace(
+                Refused=parent_state.Refused,
+                STATE_COMPONENTS=parent_state.STATE_COMPONENTS,
+                _open_directory_chain=lambda **_kwargs: parent_state._open_directory_chain(
+                    create=False, home_override=self.home),
+                _read_json=lambda _fd, _name: {
+                    "run_id": run_id,
+                    "phase": "RUNNING",
+                    "supervisor": {"pid": os.getpid()},
+                    "qemu": {"pid": proc.pid},
+                },
+                exec_transition_status=mock.Mock(side_effect=["TARGET", "AMBIGUOUS"]),
+            )
+            with mock.patch.object(parent_supervisor, "_qmp_powerdown"), \
+                    self.assertRaisesRegex(parent_state.Refused, "became AMBIGUOUS"):
+                parent_supervisor._shutdown_running_qemu(
+                    fake_state, SimpleNamespace(run_id=run_id), str(self.home))
+            self.assertIsNone(proc.poll(), "live ambiguous child must not be treated as stopped")
+        finally:
+            parent_supervisor._CHILD_PROCESSES.pop("qemu", None)
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=3)
+
+    def test_graceful_shutdown_does_not_override_ambiguous_after_prior_reap(self):
+        proc = mock.Mock(pid=424242)
+        proc.poll.return_value = 17
+        transition = {"pid": proc.pid, "target_path": "child-qemu.target.json",
+                      "identity_path": "child-qemu.identity.json"}
+        run_id = "0123456789abcdef0123456789abcdef"
+        parent_supervisor._CHILD_PROCESSES["qemu"] = (proc, transition)
+        try:
+            fake_state = SimpleNamespace(
+                Refused=parent_state.Refused,
+                STATE_COMPONENTS=parent_state.STATE_COMPONENTS,
+                _open_directory_chain=lambda **_kwargs: parent_state._open_directory_chain(
+                    create=False, home_override=self.home),
+                _read_json=lambda _fd, _name: {
+                    "run_id": run_id,
+                    "phase": "RUNNING",
+                    "supervisor": {"pid": os.getpid()},
+                    "qemu": {"pid": proc.pid},
+                },
+                exec_transition_status=mock.Mock(side_effect=["TARGET", "AMBIGUOUS"]),
+            )
+            with mock.patch.object(parent_supervisor, "_qmp_powerdown"), \
+                    self.assertRaisesRegex(parent_state.Refused, "became AMBIGUOUS"):
+                parent_supervisor._shutdown_running_qemu(
+                    fake_state, SimpleNamespace(run_id=run_id), str(self.home))
+            proc.poll.assert_called_once_with()
+            proc.wait.assert_not_called()
+        finally:
+            parent_supervisor._CHILD_PROCESSES.pop("qemu", None)
+
     def test_qmp_socket_is_removed_only_after_exact_qemu_stop_and_only_if_owned_socket(self):
         qmp_path = self.state_dir / "qmp.sock"
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

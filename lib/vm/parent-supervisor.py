@@ -950,8 +950,16 @@ def _shutdown_running_qemu(state, args, home) -> None:
     deadline = time.monotonic() + 60
     had_proxy = "proxy" in _CHILD_PROCESSES
     while time.monotonic() < deadline:
-        proc.poll()  # Reap the owned process before evaluating its procfs identity.
+        exit_code = proc.poll()  # Reap the owned process before evaluating its procfs identity.
         phase = state.exec_transition_status(transition)
+        if phase == "AMBIGUOUS" and exit_code is None and proc.poll() is not None:
+            # The exact owned Popen child can exit between poll() and the
+            # separately-read /proc identity fields. A zombie has no stable
+            # exe/cmdline image and classifies AMBIGUOUS; a second waitpid via
+            # poll() conclusively reaps this same child. Do not apply this to
+            # a child already reaped before classification: its PID might have
+            # been reused. A still-live or replaced identity remains ambiguous.
+            phase = "STOPPED"
         if phase == "STOPPED":
             proc.wait()
             if not _finish_child_log_capture("qemu"):
