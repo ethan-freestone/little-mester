@@ -12,8 +12,11 @@ fail() {
   exit 1
 }
 
-[[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]] \
-  || fail '/dev/kvm is absent or not readable and writable; TCG fallback is forbidden'
+[[ "$(uname -m)" == x86_64 ]] || fail 'runner architecture is not x86_64'
+[[ -e /dev/kvm || -L /dev/kvm ]] || fail '/dev/kvm is absent; TCG fallback is forbidden'
+[[ -c /dev/kvm ]] || fail '/dev/kvm exists but is not a character device'
+[[ -r /dev/kvm && -w /dev/kvm ]] \
+  || fail '/dev/kvm is not readable and writable after the udev permission step; TCG fallback is forbidden'
 
 for command in qemu-system-x86_64 qemu-img cloud-localds curl ssh ssh-keygen ssh-keyscan socat genisoimage python3 timeout sha256sum; do
   command -v "$command" >/dev/null 2>&1 || fail "required host command is missing: $command"
