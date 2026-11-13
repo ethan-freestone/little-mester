@@ -37,15 +37,29 @@ class ProcessScanTests(unittest.TestCase):
         if created.returncode:
             raise AssertionError(f"CI cannot create protected scanner fixture: {created.stderr}")
         cls.protected_root = pathlib.Path(created.stdout.strip())
-        cls.protected_helper = cls.protected_root / "parent-readonly-safety-gate.py"
+        subprocess.run([sudo, "-n", "/usr/bin/chmod", "0755", str(cls.protected_root)],
+                       check=True, timeout=10)
+        subprocess.run([sudo, "-n", "/usr/bin/install", "-d", "-o", "0", "-g", "0",
+                        "-m", "0755", str(cls.protected_root / "scripts"),
+                        str(cls.protected_root / "lib" / "vm")], check=True, timeout=10)
+        cls.protected_helper = cls.protected_root / "scripts/parent-readonly-safety-gate.py"
         subprocess.run([sudo, "-n", "/usr/bin/install", "-o", "0", "-g", "0", "-m", "0644",
                         str(ROOT / "scripts/parent-readonly-safety-gate.py"),
                         str(cls.protected_helper)], check=True, timeout=10)
+        cls.protected_state = cls.protected_root / "lib/vm/parent-state.py"
+        subprocess.run([sudo, "-n", "/usr/bin/install", "-o", "0", "-g", "0", "-m", "0644",
+                        str(ROOT / "lib/vm/parent-state.py"), str(cls.protected_state)],
+                       check=True, timeout=10)
 
     @classmethod
     def tearDownClass(cls):
         sudo = "/usr/bin/sudo"
         subprocess.run([sudo, "-n", "/usr/bin/rm", "--", str(cls.protected_helper)],
+                       check=True, timeout=10)
+        subprocess.run([sudo, "-n", "/usr/bin/rm", "--", str(cls.protected_state)],
+                       check=True, timeout=10)
+        subprocess.run([sudo, "-n", "/usr/bin/rmdir", "--", str(cls.protected_root / "scripts"),
+                        str(cls.protected_root / "lib/vm"), str(cls.protected_root / "lib")],
                        check=True, timeout=10)
         subprocess.run([sudo, "-n", "/usr/bin/rmdir", "--", str(cls.protected_root)],
                        check=True, timeout=10)
@@ -74,6 +88,26 @@ class ProcessScanTests(unittest.TestCase):
             info = os.fstat(held.fileno())
             holders = self._privileged_scan(info)
             self.assertIn([os.getpid(), "fd", held.fileno()], holders)
+
+    def test_protected_installed_parent_state_invokes_protected_scanner(self):
+        spec = importlib.util.spec_from_file_location("installed_parent_state_scanner_test",
+                                                      self.protected_state)
+        state = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(state)
+        with tempfile.NamedTemporaryFile() as disk:
+            info = os.fstat(disk.fileno())
+            real_run = subprocess.run
+
+            def run(argv, **kwargs):
+                if argv == ["/usr/bin/sudo", "-v"]:
+                    return subprocess.CompletedProcess(argv, 0)
+                return real_run(argv, **kwargs)
+
+            with mock.patch.object(state.subprocess, "run", side_effect=run):
+                result = state._scan_stale_disk_holders(
+                    disk.fileno(), (info.st_dev, info.st_ino),
+                    scratch_dir=pathlib.Path(tempfile.gettempdir()))
+            self.assertIsNone(result)
 
     def test_real_privileged_scanner_refuses_forged_caller_fd_exemption(self):
         with tempfile.NamedTemporaryFile() as held:
