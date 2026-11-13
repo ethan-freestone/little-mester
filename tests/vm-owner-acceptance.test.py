@@ -24,6 +24,14 @@ loader.exec_module(acceptance)
 
 
 class OwnerAcceptanceTests(unittest.TestCase):
+    def test_installer_manifest_and_lab_vm_bootstrap_dependencies_stay_in_sync(self):
+        source = (ROOT / "lab-vm").read_text(encoding="utf-8")
+        for relative in acceptance.INSTALL_FILES:
+            if relative == "lab-vm":
+                continue
+            self.assertIn(f'root / "{relative}"', source,
+                          f"installed runtime dependency missing from lab-vm bootstrap: {relative}")
+
     @staticmethod
     def runtime_fixture(temporary, *, system_mode=0o755, system_uid=0):
         root = pathlib.Path(temporary)
@@ -522,29 +530,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
                             "installed_parent_state", target / "lib/vm/parent-state.py")
                         installed_state = importlib.util.module_from_spec(installed_state_spec)
                         installed_state_spec.loader.exec_module(installed_state)
-                        observed_paths = []
-                        loaded_scanners = []
-                        real_spec_from_file = importlib.util.spec_from_file_location
-
-                        class ScannerLoader:
-                            def __init__(self, wrapped):
-                                self.wrapped = wrapped
-
-                            def create_module(self, module_spec):
-                                return self.wrapped.create_module(module_spec)
-
-                            def exec_module(self, module):
-                                self.wrapped.exec_module(module)
-                                module._check_proc_visibility = mock.Mock()
-                                module._check_pid_one_with_lsof = mock.Mock()
-                                module._scan_with_lsof = mock.Mock(return_value=[os.getpid()])
-                                loaded_scanners.append(module)
-
-                        def installed_helper_spec(name, path):
-                            observed_paths.append(pathlib.Path(path))
-                            actual = real_spec_from_file(name, path)
-                            actual.loader = ScannerLoader(actual.loader)
-                            return actual
+                        scanner_calls = []
 
                         real_lstat = pathlib.Path.lstat
 
@@ -556,20 +542,32 @@ class OwnerAcceptanceTests(unittest.TestCase):
                                 return SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
                             return real_lstat(path)
 
+                        def scanner_run(argv, **_kwargs):
+                            scanner_calls.append(argv)
+                            if argv[1:2] == ["-v"]:
+                                return subprocess.CompletedProcess(argv, 0)
+                            owner_pid = int(argv[-2])
+                            holders = [[os.getpid(), "fd", 1]] if owner_pid == 0 else []
+                            return subprocess.CompletedProcess(
+                                argv, 0, json.dumps({"complete": True, "processes_scanned": 2,
+                                                     "coverage": {"procfs": True,
+                                                                  "pid_namespace": "init-shared",
+                                                                  "user_namespace": "init-shared",
+                                                                  "descriptors": True,
+                                                                  "file_mappings": True},
+                                                     "holders": holders}).encode(), b"")
+
                         with (tempfile.TemporaryFile() as disk,
                               mock.patch.object(pathlib.Path, "lstat", protected_lstat),
-                              mock.patch.object(installed_state.importlib.util,
-                                                "spec_from_file_location",
-                                                side_effect=installed_helper_spec)):
+                              mock.patch.object(installed_state.subprocess, "run",
+                                                side_effect=scanner_run)):
                             identity = os.fstat(disk.fileno())
                             installed_state._scan_stale_disk_holders(
                                 disk.fileno(), (identity.st_dev, identity.st_ino))
-                        self.assertEqual(observed_paths, [helper])
-                        loaded_scanners[0]._check_proc_visibility.assert_called_once()
-                        loaded_scanners[0]._check_pid_one_with_lsof.assert_called_once()
-                        self.assertEqual(loaded_scanners[0]._scan_with_lsof.call_count, 3)
-                        for scan_call in loaded_scanners[0]._scan_with_lsof.call_args_list[-2:]:
-                            self.assertEqual(scan_call.args[1:], (identity.st_dev, identity.st_ino))
+                        self.assertEqual(len(scanner_calls), 3)
+                        self.assertEqual(pathlib.Path(scanner_calls[1][5]), helper)
+                        self.assertEqual(scanner_calls[-1][-4:-2],
+                                         [str(identity.st_dev), str(identity.st_ino)])
                         helper.unlink()
 
                         def missing_helper_lstat(path):

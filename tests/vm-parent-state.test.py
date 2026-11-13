@@ -119,7 +119,9 @@ class ParentStateTests(unittest.TestCase):
             self.assertEqual((self.parent_dir() / "active-run.json").read_bytes(), active_before)
             self.assertFalse((self.parent_dir() / parent_state._stale_reconciliation_filename(
                 run["run_id"])).exists())
-            result = parent_state.stale_boot_reconciliation(home=self.home, execute=True)
+            with mock.patch.object(parent_state.signal, "pidfd_send_signal") as send_signal:
+                result = parent_state.stale_boot_reconciliation(home=self.home, execute=True)
+                send_signal.assert_not_called()
             self.assertEqual(result["status"], "STOPPED")
             self.assertTrue(result["disk_retained"])
             scan.assert_called()
@@ -127,6 +129,13 @@ class ParentStateTests(unittest.TestCase):
         audit_path = self.parent_dir() / parent_state._stale_reconciliation_filename(run["run_id"])
         audited = json.loads(audit_path.read_text())
         self.assertEqual(audited["historical_run"], run)
+        self.assertEqual(audited["transaction"], "COMPLETE")
+        self.assertEqual(audited["historical_transitions"]["qemu"]["identity_path"],
+                         "child-qemu.identity.json")
+        self.assertEqual(audited["historical_transitions"]["proxy"]["identity_path"],
+                         "child-proxy.identity.json")
+        self.assertNotIn("release_token", audited["historical_transitions"]["qemu"])
+        self.assertNotIn("1" * 32, json.dumps(audited["historical_transitions"]["qemu"]))
         with self.stale_reconcile_patches()[0], self.stale_reconcile_patches()[1]:
             self.assertEqual(parent_state.read_status(home=self.home)["status"], "STOPPED")
             fd = parent_state._open_directory_chain(create=False, home_override=self.home)
@@ -135,6 +144,18 @@ class ParentStateTests(unittest.TestCase):
             finally:
                 os.close(fd)
             self.assertEqual(parent_state.recovery_preview(home=self.home)["status"], "STOPPED")
+
+    def test_repeated_stop_returns_run_id_and_accepts_shared_shutdown_budget(self):
+        run_id = "0123456789abcdef0123456789abcdef"
+        with (mock.patch.object(parent_state, "read_status", return_value={
+                "status": "STOPPED", "run_id": run_id}),
+              mock.patch.object(parent_state, "_require_completed_stop") as verify):
+            result = parent_state.request_supervisor_stop(
+                home=self.home, timeout_seconds=61)
+        self.assertEqual(result["status"], "STOPPED")
+        self.assertEqual(result["run_id"], run_id)
+        self.assertTrue(result["disk_retained"])
+        verify.assert_called_once_with(home=self.home, expected_run_id=run_id)
 
     def test_stale_boot_reconciliation_audit_tampering_remains_ambiguous(self):
         self.write_stale_running_fixture()
@@ -158,12 +179,64 @@ class ParentStateTests(unittest.TestCase):
                 self.stale_reconcile_patches()[2], cleanup:
             with self.assertRaisesRegex(parent_state.Refused, "simulated interruption"):
                 parent_state.stale_boot_reconciliation(home=self.home, execute=True)
+        with mock.patch.object(parent_state, "_trusted_parent_runtime_script", return_value=True):
+            self.assertEqual(parent_state.read_status(home=self.home)["status"],
+                             "RECONCILIATION_PENDING")
+        audit = json.loads((self.parent_dir() / parent_state._stale_reconciliation_filename(
+            "0123456789abcdef0123456789abcdef")).read_text())
+        self.assertEqual(audit["transaction"], "PENDING")
         self.assertTrue((self.parent_dir() / parent_state._stale_reconciliation_filename(
             "0123456789abcdef0123456789abcdef")).exists())
         with self.stale_reconcile_patches()[0], self.stale_reconcile_patches()[1], \
                 self.stale_reconcile_patches()[2]:
             retried = parent_state.stale_boot_reconciliation(home=self.home, execute=True)
             self.assertEqual(retried["status"], "STOPPED")
+
+    def test_stale_reconciliation_failure_after_durable_publication_is_safe(self):
+        artifact_names = ("supervisor.sock", "qmp.sock", "proxy.port")
+        for boundary in ("pending-audit", "stopping-tombstone", *artifact_names,
+                         "complete-audit"):
+            with self.subTest(boundary=boundary):
+                fixture = type(self)()
+                fixture.setUp()
+                fixture.write_stale_running_fixture()
+                original_atomic = parent_state._atomic_json
+                original_remove = parent_state._recovery_remove_artifact
+                seen = {"audit": 0}
+
+                def atomic(fd, name, value):
+                    original_atomic(fd, name, value)
+                    if name.startswith(parent_state.STALE_RECONCILIATION_PREFIX):
+                        seen["audit"] += 1
+                        if boundary == "pending-audit" and seen["audit"] == 1:
+                            raise parent_state.Refused("injected after pending audit")
+                        if boundary == "complete-audit" and value.get("transaction") == "COMPLETE":
+                            raise parent_state.Refused("injected after completion audit")
+                    if boundary == "stopping-tombstone" and name == "active-run.json":
+                        raise parent_state.Refused("injected after tombstone")
+
+                def remove(fd, name, kind):
+                    original_remove(fd, name, kind)
+                    if boundary == name:
+                        raise parent_state.Refused("injected after artifact removal")
+
+                try:
+                    with (fixture.stale_reconcile_patches()[0], fixture.stale_reconcile_patches()[1],
+                          fixture.stale_reconcile_patches()[2],
+                          mock.patch.object(parent_state, "_atomic_json", side_effect=atomic),
+                          mock.patch.object(parent_state, "_recovery_remove_artifact",
+                                           side_effect=remove)):
+                        with fixture.assertRaises(parent_state.Refused):
+                            parent_state.stale_boot_reconciliation(home=fixture.home, execute=True)
+                    with mock.patch.object(parent_state, "_trusted_parent_runtime_script",
+                                           return_value=True):
+                        state = parent_state.read_status(home=fixture.home)["status"]
+                    if boundary == "complete-audit":
+                        self.assertEqual(state, "STOPPED")
+                    else:
+                        self.assertEqual(state, "RECONCILIATION_PENDING")
+                finally:
+                    fixture.tearDown()
 
     def test_stale_boot_audit_is_scoped_to_its_run_id(self):
         run, _disk_info, _disk_path = self.write_stale_running_fixture()
@@ -192,24 +265,13 @@ class ParentStateTests(unittest.TestCase):
                 parent, new_run, disk, home=self.home)
         self.assertEqual(projected["status"], "STOPPED")
 
-    def test_stale_disk_scan_requires_positive_control_and_runs_two_inode_scans(self):
+    def test_stale_disk_scan_requires_installed_privileged_positive_control(self):
         from types import SimpleNamespace
+        import subprocess
 
         with tempfile.TemporaryFile() as disk:
             info = os.fstat(disk.fileno())
-            scan = mock.Mock(return_value=[os.getpid()])
-            scanner = SimpleNamespace(
-                GateRefused=RuntimeError,
-                _check_proc_visibility=mock.Mock(),
-                _check_pid_one_with_lsof=mock.Mock(),
-                _scan_with_lsof=scan)
-
-            class Loader:
-                @staticmethod
-                def exec_module(_module):
-                    return None
-
-            protected_spec = SimpleNamespace(loader=Loader())
+            calls = []
             real_lstat = pathlib.Path.lstat
             install_root = pathlib.Path(parent_state.__file__).resolve().parents[2]
             script_path = install_root / "scripts/parent-readonly-safety-gate.py"
@@ -222,17 +284,28 @@ class ParentStateTests(unittest.TestCase):
                     return SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
                 return real_lstat(path)
 
+            def run(argv, **_kwargs):
+                calls.append(argv)
+                if argv[1:2] == ["-v"]:
+                    return subprocess.CompletedProcess(argv, 0)
+                device, inode, owner_pid, owner_fd = map(int, argv[-4:])
+                holders = [[os.getpid(), "fd", owner_fd]] if owner_pid == 0 else []
+                return subprocess.CompletedProcess(
+                    argv, 0, json.dumps({"complete": True, "processes_scanned": 3,
+                                          "coverage": {"procfs": True,
+                                                       "pid_namespace": "init-shared",
+                                                       "user_namespace": "init-shared",
+                                                       "descriptors": True,
+                                                       "file_mappings": True},
+                                          "holders": holders}).encode(), b"")
+
             with (mock.patch.object(pathlib.Path, "lstat", protected_lstat),
-                  mock.patch.object(parent_state.importlib.util, "spec_from_file_location",
-                                   return_value=protected_spec),
-                  mock.patch.object(parent_state.importlib.util, "module_from_spec",
-                                   return_value=scanner)):
+                  mock.patch.object(parent_state.subprocess, "run", side_effect=run)):
                 parent_state._scan_stale_disk_holders(
                     disk.fileno(), (info.st_dev, info.st_ino))
-            scanner._check_proc_visibility.assert_called_once()
-            scanner._check_pid_one_with_lsof.assert_called_once()
-            self.assertEqual(scan.call_count, 3)  # positive control plus two disk scans
-            self.assertEqual(scan.call_args_list[-1].args[1:], (info.st_dev, info.st_ino))
+            self.assertEqual(calls[0][1:2], ["-v"])
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(calls[-1][-4:-2], [str(info.st_dev), str(info.st_ino)])
 
     def test_stale_boot_reconciliation_refuses_malformed_history(self):
         self.write_stale_running_fixture()

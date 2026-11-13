@@ -78,6 +78,7 @@ dependencies = [
     root / "lib/vm/parent-supervisor.py",
     root / "lib/vm/parent-qemu.py",
     root / "lib/vm/parent-provision.py",
+    root / "scripts/parent-readonly-safety-gate.py",
     root / "agent/opencode/plugins/little-mester-exit-confirm/package.json",
     root / "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
 ]

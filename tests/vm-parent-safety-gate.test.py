@@ -7,6 +7,7 @@ import io
 import json
 import os
 import pathlib
+import signal
 import shutil
 import subprocess
 import sys
@@ -27,85 +28,106 @@ DIAG_SPEC.loader.exec_module(diagnostic)
 
 
 class ProcessScanTests(unittest.TestCase):
-    def test_process_fixture_reports_all_matching_pids(self):
+    @classmethod
+    def setUpClass(cls):
+        sudo = "/usr/bin/sudo"
+        created = subprocess.run([sudo, "-n", "/usr/bin/mktemp", "-d",
+                                  "/opt/lm-procfs-test.XXXXXX"],
+                                 capture_output=True, text=True, timeout=10, check=False)
+        if created.returncode:
+            raise AssertionError(f"CI cannot create protected scanner fixture: {created.stderr}")
+        cls.protected_root = pathlib.Path(created.stdout.strip())
+        cls.protected_helper = cls.protected_root / "parent-readonly-safety-gate.py"
+        subprocess.run([sudo, "-n", "/usr/bin/install", "-o", "0", "-g", "0", "-m", "0644",
+                        str(ROOT / "scripts/parent-readonly-safety-gate.py"),
+                        str(cls.protected_helper)], check=True, timeout=10)
+
+    @classmethod
+    def tearDownClass(cls):
+        sudo = "/usr/bin/sudo"
+        subprocess.run([sudo, "-n", "/usr/bin/rm", "--", str(cls.protected_helper)],
+                       check=True, timeout=10)
+        subprocess.run([sudo, "-n", "/usr/bin/rmdir", "--", str(cls.protected_root)],
+                       check=True, timeout=10)
+
+    def _privileged_scan(self, info, allowed_pid=0, allowed_fd=-1):
+        if not pathlib.Path("/usr/bin/sudo").exists():
+            self.fail("CI requires sudo for the real protected scanner integration")
+        result = subprocess.run(
+            ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-B",
+             str(self.protected_helper), "--scan-inode",
+             str(info.st_dev), str(info.st_ino), str(allowed_pid), str(allowed_fd)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=40, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+        value = json.loads(result.stdout)
+        self.assertIs(value["complete"], True)
+        self.assertGreater(value["processes_scanned"], 0)
+        self.assertEqual(value["coverage"], {"procfs": True,
+                                             "pid_namespace": "init-shared",
+                                             "user_namespace": "init-shared",
+                                             "descriptors": True, "file_mappings": True})
+        return value["holders"]
+
+    def test_real_privileged_scanner_finds_invoking_users_scratch_fd(self):
         with tempfile.NamedTemporaryFile() as held:
             info = os.fstat(held.fileno())
-            fixture = (f"p1\ncinit\nf3\nD{info.st_dev:#x}\ni{info.st_ino}\n"
-                       f"p42\ncrunner\nf8\nD{info.st_dev:#x}\ni{info.st_ino}\n")
-            self.assertEqual(gate._parse_lsof(fixture, "", 0, info.st_dev, info.st_ino), [1, 42])
+            holders = self._privileged_scan(info)
+            self.assertIn([os.getpid(), "fd", held.fileno()], holders)
 
-    def test_empty_or_incomplete_process_fixture_is_refused(self):
-        with self.assertRaisesRegex(gate.GateRefused, "no matching open descriptor"):
-            gate._parse_lsof("", "", 0, 1, 2)
-        # An lsof warning about an unreadable live FD table is a hard failure,
-        # even if its partial stdout contains the exact target holder.
-        fixture = "p42\ncrunner\nf8\nD0xfd01\ni77\n"
-        with self.assertRaisesRegex(gate.GateRefused, "incomplete or failed"):
-            gate._parse_lsof(fixture, "lsof: WARNING: cannot inspect PID 43", 0,
-                             64769, 77)
-        with self.assertRaisesRegex(gate.GateRefused, "incomplete or failed"):
-            gate._parse_lsof(fixture, "", 1, 64769, 77)
-
-    def test_missing_device_inode_fields_are_refused(self):
-        with self.assertRaisesRegex(gate.GateRefused, "omitted device/inode"):
-            gate._parse_lsof("p42\ncworker\nf8\n", "", 0, 1, 2)
-
-    def test_real_local_temp_fd_and_ordinary_process_churn(self):
-        lsof = pathlib.Path("/usr/bin/lsof")
-        self.assertTrue(lsof.is_file())
+    def test_real_privileged_scanner_refuses_forged_caller_fd_exemption(self):
         with tempfile.NamedTemporaryFile() as held:
             info = os.fstat(held.fileno())
-            target = f"/proc/{os.getpid()}/fd/{held.fileno()}"
-            churn = subprocess.Popen(
-                [sys.executable, "-c",
-                 "import subprocess; print('ready', flush=True); "
-                 "[subprocess.run(['/bin/true'], check=True) for _ in range(120)]"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            result = subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-B",
+                 str(self.protected_helper), "--scan-inode", str(info.st_dev),
+                 str(info.st_ino), str(os.getpid()), "0"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=10, check=False)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(b"invalid_caller_fd_exemption", result.stderr)
+
+    def test_real_privileged_scanner_finds_cross_uid_holder(self):
+        with tempfile.NamedTemporaryFile() as held:
+            info = os.fstat(held.fileno())
+            child = subprocess.Popen(
+                ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-c",
+                 "import os,sys,time; f=open(sys.argv[1],'rb'); print('READY',os.getpid(),flush=True); time.sleep(20)",
+                 held.name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                start_new_session=True)
             try:
-                self.assertEqual(churn.stdout.readline().strip(), b"ready")
-                result = subprocess.run([str(lsof), "-FpcfDi", "--", target],
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                        text=True, timeout=10, check=False)
-                self.assertEqual(
-                    gate._parse_lsof(result.stdout, result.stderr, result.returncode,
-                                     info.st_dev, info.st_ino), [os.getpid()])
+                ready = child.stdout.readline().split()
+                self.assertEqual(ready[0], "READY")
+                holder_pid = int(ready[1])
+                holders = self._privileged_scan(info, os.getpid(), held.fileno())
+                self.assertTrue(any(item[0] == holder_pid and item[1] == "fd" for item in holders),
+                                holders)
             finally:
-                churn.wait(timeout=10)
-                churn.stdout.close()
+                os.killpg(child.pid, signal.SIGTERM)
+                child.wait(timeout=5)
+                child.stdout.close()
+                child.stderr.close()
 
-    def test_gate_process_and_pid_one_are_visible_without_static_tree_requirement(self):
-        gate._check_proc_visibility()
-
-    def test_privileged_pid_one_check_uses_only_system_lsof(self):
-        completed = subprocess.CompletedProcess(
-            ["sudo", "lsof"], 0, stdout="p1\ncsystemd\n", stderr="")
-        with (mock.patch.object(gate, "_system_executable",
-                                side_effect=lambda name: pathlib.Path("/usr/bin") / name) as trusted,
-              mock.patch.object(gate.subprocess, "run", return_value=completed) as run):
-            gate._check_pid_one_with_lsof()
-        self.assertEqual(trusted.call_args_list, [mock.call("sudo"), mock.call("lsof")])
-        argv = run.call_args.args[0]
-        self.assertEqual(argv[:2], ["/usr/bin/sudo", "/usr/bin/lsof"])
-        self.assertIn("-p", argv)
-        self.assertNotIn(str(ROOT), " ".join(argv))
-
-    def test_privileged_scan_executes_only_protected_system_utilities(self):
+    def test_real_privileged_scanner_finds_mapping_after_fd_close(self):
         with tempfile.NamedTemporaryFile() as held:
+            held.write(b"x" * 4096)
+            held.flush()
             info = os.fstat(held.fileno())
-            stdout = f"p{os.getpid()}\nctest\nf3\nD{info.st_dev:#x}\ni{info.st_ino}\n"
-            completed = subprocess.CompletedProcess(
-                ["sudo", "lsof"], 0, stdout=stdout, stderr="")
-            target = pathlib.Path(f"/proc/{os.getpid()}/fd/{held.fileno()}")
-            with (mock.patch.object(gate, "_system_executable",
-                                    side_effect=lambda name: pathlib.Path("/usr/bin") / name) as trusted,
-                  mock.patch.object(gate.subprocess, "run", return_value=completed) as run):
-                self.assertEqual(
-                    gate._scan_with_lsof(target, info.st_dev, info.st_ino), [os.getpid()])
-            self.assertEqual(trusted.call_args_list, [mock.call("sudo"), mock.call("lsof")])
-            argv = run.call_args.args[0]
-            self.assertEqual(argv[:2], ["/usr/bin/sudo", "/usr/bin/lsof"])
-            self.assertNotIn(str(ROOT), " ".join(argv))
-
+            child = subprocess.Popen(
+                [sys.executable, "-c",
+                 "import mmap,os,sys,time; f=os.open(sys.argv[1],os.O_RDONLY); m=mmap.mmap(f,0,access=mmap.ACCESS_READ); os.close(f); print('READY',flush=True); time.sleep(20)",
+                 held.name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                start_new_session=True)
+            try:
+                self.assertEqual(child.stdout.readline().strip(), "READY")
+                holders = self._privileged_scan(info, os.getpid(), held.fileno())
+                self.assertTrue(any(item[0] == child.pid and item[1] == "map" for item in holders),
+                                holders)
+            finally:
+                os.killpg(child.pid, signal.SIGTERM)
+                child.wait(timeout=5)
+                child.stdout.close()
+                child.stderr.close()
 
 class SafetyGateCliIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -144,9 +166,16 @@ class SafetyGateCliIntegrationTests(unittest.TestCase):
                                                "--install-root", str(self.install),
                                                "--state-dir", str(self.state)]),
               mock.patch.object(gate.os, "geteuid", return_value=1000),
-              mock.patch.object(gate, "_check_proc_visibility"),
-              mock.patch.object(gate, "_check_pid_one_with_lsof"),
-              mock.patch.object(gate, "_scan_with_lsof", return_value=[os.getpid()]),
+              mock.patch.object(gate, "_scan_with_privileged_procfs", side_effect=[
+                  {"complete": True, "processes_scanned": 2,
+                   "coverage": {"procfs": True, "pid_namespace": "init-shared",
+                                "user_namespace": "init-shared", "descriptors": True,
+                                "file_mappings": True},
+                   "holders": [[os.getpid(), "fd", 9]]},
+                  {"complete": True, "processes_scanned": 2,
+                   "coverage": {"procfs": True, "pid_namespace": "init-shared",
+                                "user_namespace": "init-shared", "descriptors": True,
+                                "file_mappings": True}, "holders": []}]),
               contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors)):
             code = gate.main()
         return code, output.getvalue(), errors.getvalue()

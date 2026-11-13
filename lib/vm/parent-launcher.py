@@ -144,7 +144,8 @@ def up(capacity_gib: int = 64, *, home: str | None = None,
         status = state.read_status(home=home)
         if status["status"] in ("STARTING", "RUNNING") and status.get("run_id") == run_id:
             try:
-                state.request_supervisor_stop(home=home, timeout_seconds=60,
+                state.request_supervisor_stop(home=home,
+                                              timeout_seconds=state.PARENT_STOP_TIMEOUT_SECONDS,
                                               reap_supervisor=proc.poll)
             except state.Refused as error:
                 raise Refused(f"startup failed and bounded rollback is ambiguous: {error}") from error

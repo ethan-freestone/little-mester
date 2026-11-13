@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import fcntl
 import hashlib
 import importlib.util
@@ -24,6 +25,7 @@ from contextlib import contextmanager
 PARENT_ID = "default"
 STATE_COMPONENTS = (".local", "state", "little-mester", "parent-v3", PARENT_ID)
 SCHEMA = 1
+PARENT_STOP_TIMEOUT_SECONDS = 90.0
 STALE_RECONCILIATION_PREFIX = "stale-boot-reconciliation-"
 
 
@@ -466,7 +468,7 @@ def stale_boot_reconciliation(*, home: str | os.PathLike | None = None,
     """Preview or explicitly reconcile a validated run from a prior host boot.
 
     Historical identities are never signalled or rewritten. Execution requires
-    the lifecycle lock and two complete privileged holder scans of the exact disk.
+    the lifecycle lock and a complete privileged holder scan of the exact disk.
     """
     if type(execute) is not bool:
         raise Refused("stale-boot execution flag is invalid")
@@ -495,31 +497,29 @@ def stale_boot_reconciliation(*, home: str | os.PathLike | None = None,
         expected = (plan["disk"]["device"], plan["disk"]["inode"])
         if (not stat.S_ISREG(disk_info.st_mode) or (disk_info.st_dev, disk_info.st_ino) != expected):
             raise Refused("persistent disk identity changed before holder scan")
-        _scan_stale_disk_holders(disk_fd, expected)
+        _scan_stale_disk_holders(disk_fd, expected,
+                                 scratch_dir=pathlib.Path(disk_path).parent)
         # The scan is point-in-time: revalidate both the lock and all state/disk
         # evidence immediately before any audit/state writes.
         _verify_lock_fd(lock_fd, home=home)
         fresh = _validated_stale_boot_plan(directory_fd, home=home)
-        if fresh is None or fresh["run"] != plan["run"] or fresh["disk"] != plan["disk"]:
+        if fresh is None or fresh != plan:
             raise Refused("stale-boot evidence changed during holder scan")
         disk_info = os.fstat(disk_fd)
         if (disk_info.st_dev, disk_info.st_ino) != expected:
             raise Refused("persistent disk identity changed during holder scan")
-        if not execute:
-            return {"dry_run": True, "action": "reconcile", "status": "RECONCILABLE",
-                    "parent_id": PARENT_ID, "run_id": plan["run"]["run_id"],
-                    "disk": {"device": expected[0], "inode": expected[1]},
-                    "holder_scans": 2,
-                    "reason": "prior-boot records and no current disk holders verified; execution requires --execute"}
-
         audit = {"schema": 1, "parent_id": PARENT_ID, "run_id": plan["run"]["run_id"],
                  "operator_uid": os.getuid(), "reconciled_at_unix_ns": time.time_ns(),
                  "current_boot_id": plan["current_boot_id"],
                  "historical_boot_id": plan["historical_boot_id"],
                  "disk": {"device": expected[0], "inode": expected[1]},
-                  "holder_scan": {"method": "privileged-lsof", "complete_scans": 2,
-                                  "positive_control": True},
-                  "historical_run": plan["run"]}
+                  "holder_scan": {"method": "privileged-procfs", "complete_scans": 1,
+                                  "positive_control": True,
+                                  "coverage": {"procfs": True, "pid_namespace": "init-shared",
+                                               "user_namespace": "init-shared",
+                                               "descriptors": True, "file_mappings": True}},
+                  "historical_run": plan["run"],
+                   "historical_transitions": _archive_stale_transitions(plan["transitions"])}
         audit_name = _stale_reconciliation_filename(plan["run"]["run_id"])
         try:
             existing_audit = _read_json(directory_fd, audit_name)
@@ -528,12 +528,25 @@ def stale_boot_reconciliation(*, home: str | os.PathLike | None = None,
         if existing_audit is not None:
             audit_tombstone = {key: value for key, value in plan["run"].items() if key != "qemu"}
             audit_tombstone["phase"] = "STOPPING"
-            if (existing_audit.get("historical_run") != plan["run"]
+            if (not isinstance(existing_audit, dict)
+                    or existing_audit.get("historical_run") != plan["run"]
                     or _valid_stale_reconciliation(directory_fd, plan["parent"], audit_tombstone,
-                                                   plan["disk"]) is None):
+                                                   plan["disk"], allow_pending=True) is None):
                 raise Refused("existing stale-boot audit conflicts with current state")
+            if existing_audit.get("transaction") == "COMPLETE":
+                return {"dry_run": not execute, "action": "none", "status": "STOPPED",
+                        "parent_id": PARENT_ID, "run_id": plan["run"]["run_id"],
+                        "disk_retained": True}
+        if not execute:
+            return {"dry_run": True, "action": "reconcile", "status":
+                    "RECONCILIATION_PENDING" if existing_audit is not None else "RECONCILABLE",
+                    "parent_id": PARENT_ID, "run_id": plan["run"]["run_id"],
+                    "disk": {"device": expected[0], "inode": expected[1]},
+                    "holder_scans": 1,
+                    "reason": "prior-boot records and no current disk holders verified; execution requires --execute"}
         _verify_lock_fd(lock_fd, home=home)
         if existing_audit is None:
+            audit["transaction"] = "PENDING"
             _atomic_json(directory_fd, audit_name, audit)
         tombstone = {key: value for key, value in plan["run"].items() if key != "qemu"}
         tombstone["phase"] = "STOPPING"
@@ -542,6 +555,19 @@ def stale_boot_reconciliation(*, home: str | os.PathLike | None = None,
                            ("proxy.port", "file")):
             _verify_lock_fd(lock_fd, home=home)
             _recovery_remove_artifact(directory_fd, name, kind)
+        os.fsync(directory_fd)
+        _verify_lock_fd(lock_fd, home=home)
+        for name in ("supervisor.sock", "qmp.sock", "proxy.port"):
+            try:
+                os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            raise Refused(f"reconciliation cleanup did not remove {name}")
+        # A STOPPING tombstone is not completion. Publish COMPLETE only after
+        # cleanup is verified; interrupted transactions remain ambiguous.
+        completed = dict(audit)
+        completed["transaction"] = "COMPLETE"
+        _atomic_json(directory_fd, audit_name, completed)
         os.fsync(directory_fd)
         status = read_status(home=home)
         if status["status"] != "STOPPED":
@@ -574,8 +600,8 @@ def _validated_stale_boot_plan(directory_fd: int, *, home) -> dict | None:
         except FileNotFoundError as error:
             raise Refused("STOPPING state lacks stale-boot reconciliation audit") from error
         historical = audit.get("historical_run") if isinstance(audit, dict) else None
-        if not isinstance(historical, dict) or not _valid_stale_reconciliation(
-                directory_fd, parent, active_run, disk):
+        if (not isinstance(historical, dict) or not _valid_stale_reconciliation(
+                directory_fd, parent, active_run, disk, allow_pending=True)):
             raise Refused("incomplete stale-boot reconciliation evidence")
         run = historical
     else:
@@ -609,6 +635,12 @@ def _validated_stale_boot_plan(directory_fd: int, *, home) -> dict | None:
         except FileNotFoundError:
             if role in ("qemu", "proxy"):
                 raise Refused(f"stale-boot record lacks required {role} identity")
+            try:
+                _read_json(directory_fd, target_name)
+            except FileNotFoundError:
+                pass
+            else:
+                raise Refused(f"stale-boot record has an unpaired {role} target")
             continue
         _validate_exec_transition(transition)
         if (transition["identity_path"] != ident_name or transition["target_path"] != target_name
@@ -644,7 +676,8 @@ def _validated_stale_boot_plan(directory_fd: int, *, home) -> dict | None:
     for name, kind in (("supervisor.sock", "socket"), ("qmp.sock", "socket"),
                        ("proxy.port", "file")):
         _validate_recovery_artifact(directory_fd, name, kind)
-    return {"parent": parent, "run": run, "disk": disk, "current_boot_id": current_boot,
+    return {"parent": parent, "run": run, "disk": disk, "transitions": transitions,
+            "current_boot_id": current_boot,
             "historical_boot_id": supervisor["host_boot_id"]}
 
 
@@ -663,8 +696,9 @@ def _valid_recorded_identity(identity) -> bool:
             and all(isinstance(arg, str) for arg in identity["argv"]))
 
 
-def _scan_stale_disk_holders(disk_fd: int, expected: tuple[int, int]) -> None:
-    """Fail-closed privileged lsof scans, with a deliberate positive control."""
+def _scan_stale_disk_holders(disk_fd: int, expected: tuple[int, int], *,
+                             scratch_dir: pathlib.Path | None = None) -> None:
+    """Run the installed root-only procfs scanner against a scratch control and disk."""
     try:
         install_root = pathlib.Path(__file__).resolve().parents[2]
         script = install_root / "scripts/parent-readonly-safety-gate.py"
@@ -679,26 +713,82 @@ def _scan_stale_disk_holders(disk_fd: int, expected: tuple[int, int]) -> None:
                 raise Refused("trusted privileged holder scanner parent is unsafe")
             if component == install_root:
                 break
-        spec = importlib.util.spec_from_file_location("parent_reconcile_holder_scan", script)
-        if spec is None or spec.loader is None:
-            raise Refused("could not load trusted privileged holder scanner")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        module._check_proc_visibility()
-        module._check_pid_one_with_lsof()
+        sudo = pathlib.Path("/usr/bin/sudo")
+        python = pathlib.Path("/usr/bin/python3")
+        for executable in (sudo, python):
+            info = executable.stat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                    or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                    or not os.access(executable, os.X_OK)):
+                raise Refused(f"trusted {executable} is unavailable")
+
+        def scan(device: int, inode: int, owner_pid: int, owner_fd: int) -> dict:
+            command = [str(sudo), "-n", str(python), "-I", "-B", str(script),
+                       "--scan-inode", str(device), str(inode), str(owner_pid), str(owner_fd)]
+            try:
+                result = subprocess.run(command, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        timeout=30, check=False,
+                                        env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+                                             "PYTHONDONTWRITEBYTECODE": "1"})
+            except (OSError, subprocess.SubprocessError) as error:
+                raise Refused("privileged procfs scan failed or timed out") from error
+            if result.returncode or len(result.stdout) > 65536 or result.stderr:
+                error = result.stderr.decode("utf-8", "replace") if result.stderr else ""
+                category = next((line.removeprefix("REFUSED: ") for line in error.splitlines()
+                                 if line.startswith("REFUSED: ")), "scan_incomplete")
+                if category not in {
+                        "insufficient_privilege_or_invalid_identity", "procfs_unavailable",
+                        "procfs_restricted",
+                        "pid_namespace_restricted", "user_namespace_restricted",
+                        "procfs_visibility_failed", "procfs_incomplete",
+                        "procfs_enumeration_failed", "malformed_process_identity",
+                        "incomplete_task_enumeration", "incomplete_fd_enumeration",
+                        "descriptor_observation_race", "descriptor_changed_during_observation",
+                        "incomplete_mapping_observation", "malformed_mapping_identity",
+                        "malformed_mapping_observation", "unreadable_live_process",
+                        "incomplete_procfs_scan", "task_enumeration_limit_exceeded",
+                        "descriptor_enumeration_limit_exceeded", "mapping_output_limit_exceeded",
+                        "process_changed_during_scan", "incomplete_live_process_observation",
+                        "invalid_caller_fd_exemption", "caller_changed_during_scan",
+                        "protected_helper_unavailable",
+                        "protected_helper_path_untrusted"}:
+                    category = "scan_incomplete"
+                raise Refused(f"privileged procfs scan refused: {category}")
+            try:
+                value = json.loads(result.stdout)
+            except (ValueError, UnicodeError) as error:
+                raise Refused("privileged procfs scanner returned malformed evidence") from error
+            if (not isinstance(value, dict) or value.get("complete") is not True
+                    or type(value.get("processes_scanned")) is not int
+                    or value["processes_scanned"] < 1
+                    or value.get("coverage") != {"procfs": True,
+                                                   "pid_namespace": "init-shared",
+                                                   "user_namespace": "init-shared",
+                                                   "descriptors": True,
+                                                   "file_mappings": True}
+                    or not isinstance(value.get("holders"), list)):
+                raise Refused("privileged procfs scanner did not affirm complete coverage")
+            return value
+
+        authenticated = subprocess.run([str(sudo), "-v"], check=False, timeout=30)
+        if authenticated.returncode:
+            raise Refused("privileged scanner authentication failed")
         import tempfile
-        with tempfile.NamedTemporaryFile(prefix="parent-reconcile-positive-") as positive:
+        with tempfile.NamedTemporaryFile(prefix="parent-reconcile-positive-",
+                                         dir=scratch_dir) as positive:
             positive_info = os.fstat(positive.fileno())
-            holders = module._scan_with_lsof(pathlib.Path(
-                f"/proc/{os.getpid()}/fd/{positive.fileno()}"),
-                positive_info.st_dev, positive_info.st_ino)
-            if os.getpid() not in holders:
-                raise Refused("privileged lsof positive control failed")
-        target = pathlib.Path(f"/proc/{os.getpid()}/fd/{disk_fd}")
-        for _ in range(2):
-            holders = module._scan_with_lsof(target, *expected)
-            if any(pid != os.getpid() for pid in holders):
-                raise Refused("persistent disk has current external holder(s)")
+            control = scan(positive_info.st_dev, positive_info.st_ino, 0, -1)
+            if not any(isinstance(item, list) and len(item) == 3
+                       and item[0] == os.getpid() and item[1] == "fd"
+                       for item in control["holders"]):
+                raise Refused("privileged procfs positive control was not detected")
+        info = os.fstat(disk_fd)
+        if (info.st_dev, info.st_ino) != expected or not stat.S_ISREG(info.st_mode):
+            raise Refused("persistent disk identity changed before privileged scan")
+        result = scan(*expected, os.getpid(), disk_fd)
+        if result["holders"]:
+            raise Refused("persistent disk has observed descriptor or mapping holders")
     except Exception as error:
         raise Refused(f"privileged disk-holder verification failed: {error}") from error
 
@@ -895,7 +985,7 @@ def _recovery_remove_artifact(directory_fd: int, name: str, kind: str) -> None:
 
 
 def _valid_stale_reconciliation(directory_fd: int, parent: dict, run: dict,
-                                disk: dict | None) -> dict | None:
+                                disk: dict | None, *, allow_pending: bool = False) -> dict | None:
     """Validate the durable audit/tombstone projection without relaxing PID checks."""
     try:
         audit = _read_json(directory_fd, _stale_reconciliation_filename(run.get("run_id")))
@@ -903,7 +993,8 @@ def _valid_stale_reconciliation(directory_fd: int, parent: dict, run: dict,
         return None
     if (not isinstance(audit, dict) or set(audit) != {
             "schema", "parent_id", "run_id", "operator_uid", "reconciled_at_unix_ns",
-            "current_boot_id", "historical_boot_id", "disk", "holder_scan", "historical_run"}
+            "current_boot_id", "historical_boot_id", "disk", "holder_scan", "historical_run",
+            "historical_transitions", "transaction"}
             or type(audit.get("schema")) is not int or audit["schema"] != 1
             or audit.get("parent_id") != PARENT_ID
             or type(audit.get("operator_uid")) is not int or audit["operator_uid"] != os.getuid()
@@ -935,13 +1026,68 @@ def _valid_stale_reconciliation(directory_fd: int, parent: dict, run: dict,
             or not isinstance(audit.get("disk"), dict)
             or audit["disk"] != {"device": disk["device"], "inode": disk["inode"]}
             or not isinstance(scans, dict)
-            or scans != {"method": "privileged-lsof", "complete_scans": 2,
-                         "positive_control": True}):
+             or scans != {"method": "privileged-procfs", "complete_scans": 1,
+                          "positive_control": True,
+                          "coverage": {"procfs": True, "pid_namespace": "init-shared",
+                                       "user_namespace": "init-shared",
+                                       "descriptors": True, "file_mappings": True}}):
         raise Refused("stale-boot reconciliation audit does not match current retained state")
+    allowed_transactions = ("PENDING", "COMPLETE") if allow_pending else ("COMPLETE",)
+    if audit.get("transaction") not in allowed_transactions:
+        raise Refused("stale-boot reconciliation transaction is incomplete")
+    if audit["transaction"] == "COMPLETE":
+        for name in ("supervisor.sock", "qmp.sock", "proxy.port"):
+            try:
+                os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            raise Refused("completed stale-boot reconciliation retains a transient artifact")
+    transitions = audit["historical_transitions"]
+    if (not isinstance(transitions, dict) or not {"qemu", "proxy"}.issubset(transitions)
+            or set(transitions) - {"qemu", "proxy", "metrics"}):
+        raise Refused("stale-boot audit historical transitions are malformed")
+    for role, transition in transitions.items():
+        if not isinstance(transition, dict):
+            raise Refused("stale-boot audit historical transition is malformed")
+        identity_name = f"child-{role}.identity.json"
+        target_name = f"child-{role}.target.json"
+        actual_transition = _read_json(directory_fd, identity_name)
+        _validate_exec_transition(actual_transition)
+        if (actual_transition.get("identity_path") != identity_name
+                or actual_transition.get("target_path") != target_name
+                or actual_transition.get("host_boot_id") != audit["historical_boot_id"]
+                or _archive_stale_transition(actual_transition) != transition):
+            raise Refused("stale-boot audit historical transition changed")
+        target = _read_json(directory_fd, target_name)
+        if target != {"executable": actual_transition["target"]["exe"],
+                      "argv": actual_transition["target"]["argv"],
+                      "fd_contracts": actual_transition["target"]["fd_contracts"]}:
+            raise Refused("stale-boot audit historical target changed")
     qemu = old["qemu"]
     if qemu.get("exe") != "/usr/bin/qemu-system-x86_64":
         raise Refused("stale-boot audit contains unexpected QEMU identity")
     return audit
+
+
+def _archive_stale_transition(transition: dict) -> dict:
+    """Preserve transition evidence without duplicating its one-time release token."""
+    _validate_exec_transition(transition)
+    archived = copy.deepcopy(transition)
+    token = archived.pop("release_token")
+    argv = archived.get("gate", {}).get("argv")
+    if not isinstance(argv, list):
+        raise Refused("historical gate argv is malformed")
+    occurrences = [index for index, value in enumerate(argv) if value == token]
+    if len(occurrences) != 1:
+        raise Refused("historical release token binding is ambiguous")
+    argv[occurrences[0]] = "<redacted-release-token>"
+    archived["release_token_sha256"] = hashlib.sha256(token.encode("ascii")).hexdigest()
+    return archived
+
+
+def _archive_stale_transitions(transitions: dict) -> dict:
+    return {role: _archive_stale_transition(transition)
+            for role, transition in transitions.items()}
 
 
 def _validate_recovery_artifact(directory_fd: int, name: str, kind: str) -> None:
@@ -960,11 +1106,12 @@ def _validate_recovery_artifact(directory_fd: int, name: str, kind: str) -> None
 
 
 def request_supervisor_stop(*, home: str | os.PathLike | None = None,
-                            timeout_seconds: float = 15.0,
+                            timeout_seconds: float = PARENT_STOP_TIMEOUT_SECONDS,
                             reap_supervisor=None) -> dict:
     """Request cooperative stop through a pidfd for a verified supervisor."""
-    if (type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 60):
-        raise Refused("supervisor stop timeout must be between 0 and 60 seconds")
+    if (type(timeout_seconds) not in (int, float)
+            or not 0 < timeout_seconds <= PARENT_STOP_TIMEOUT_SECONDS):
+        raise Refused("supervisor stop timeout exceeds the shared 90-second completion budget")
     if reap_supervisor is not None and not callable(reap_supervisor):
         raise Refused("supervisor reaper must be a callable process poll")
     if reap_supervisor is not None:
@@ -979,7 +1126,8 @@ def request_supervisor_stop(*, home: str | os.PathLike | None = None,
         status = read_status(home=home)
     if status["status"] == "STOPPED":
         _require_completed_stop(home=home, expected_run_id=status.get("run_id"))
-        return {"status": "STOPPED", "parent_id": PARENT_ID, "disk_retained": True}
+        return {"status": "STOPPED", "parent_id": PARENT_ID,
+                "run_id": status.get("run_id"), "disk_retained": True}
     if status["status"] not in ("STARTING", "RUNNING"):
         raise Refused("parent stop requires a verified STARTING or RUNNING supervisor")
     directory_fd = _open_directory_chain(create=False, home_override=home)
@@ -1394,12 +1542,21 @@ def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: s
         if (identity.get("schema") != 1 or type(identity.get("uid")) is not int
                 or identity["uid"] != os.getuid()
                 or identity.get("host_boot_id") != current_boot_id):
-            if run["phase"] == "STOPPING" and identity.get("host_boot_id") != current_boot_id:
+            if (run["phase"] in ("RUNNING", "STOPPING")
+                    and identity.get("host_boot_id") != current_boot_id):
                 state_fd = _open_directory_chain(create=False, home_override=home)
                 if state_fd is not None:
                     try:
-                        if _valid_stale_reconciliation(state_fd, parent, run, disk):
+                        stopping = dict(run)
+                        stopping["phase"] = "STOPPING"
+                        stopping.pop("qemu", None)
+                        audit = _valid_stale_reconciliation(
+                            state_fd, parent, stopping, disk, allow_pending=True)
+                        if audit is not None and audit["transaction"] == "COMPLETE":
                             return {"status": "STOPPED", "parent_id": PARENT_ID,
+                                    "run_id": run["run_id"], "disk": disk}
+                        if audit is not None and audit["transaction"] == "PENDING":
+                            return {"status": "RECONCILIATION_PENDING", "parent_id": PARENT_ID,
                                     "run_id": run["run_id"], "disk": disk}
                     except (OSError, Refused, KeyError, TypeError):
                         pass
@@ -1801,7 +1958,8 @@ def main() -> int:
                 print(f"{args.command.title()}: {result['status']} (action={result['action']}; disk retained)")
             print(result.get("reason", ""))
             return 0 if result["status"] in (
-                "NOT_CREATED", "UNPROVISIONED", "STOPPED", "RECOVERABLE", "RECONCILABLE") else 2
+                "NOT_CREATED", "UNPROVISIONED", "STOPPED", "RECOVERABLE", "RECONCILABLE",
+                "RECONCILIATION_PENDING") else 2
         if args.command == "stop":
             print(f"Parent supervisor stopped: run_id={result['run_id']}; persistent disk retained")
             return 0
