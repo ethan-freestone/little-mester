@@ -1927,6 +1927,91 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                     if transition is not None and role in parent_supervisor._CHILD_PROCESSES:
                         self.cleanup_gated_child(role, transition)
 
+    def test_graceful_shutdown_retries_ambiguous_sample_until_owned_exit_is_verified(self):
+        proc = mock.Mock(pid=424242)
+        proc.poll.side_effect = [None, None, 0]
+        transition = {"pid": proc.pid, "target_path": "child-qemu.target.json",
+                      "identity_path": "child-qemu.identity.json"}
+        run_id = "0123456789abcdef0123456789abcdef"
+        parent_supervisor._CHILD_PROCESSES["qemu"] = (proc, transition)
+        status = mock.Mock(side_effect=["TARGET", "AMBIGUOUS", "STOPPED"])
+        fake_state = SimpleNamespace(
+            Refused=parent_state.Refused,
+            STATE_COMPONENTS=parent_state.STATE_COMPONENTS,
+            _open_directory_chain=lambda **_kwargs: parent_state._open_directory_chain(
+                create=False, home_override=self.home),
+            _read_json=lambda _fd, _name: {
+                "run_id": run_id,
+                "phase": "RUNNING",
+                "supervisor": {"pid": os.getpid()},
+                "qemu": {"pid": proc.pid},
+            },
+            exec_transition_status=status,
+        )
+        try:
+            with (mock.patch.object(parent_supervisor, "_qmp_powerdown"),
+                  mock.patch.object(parent_supervisor, "_finish_child_log_capture", return_value=True),
+                  mock.patch.object(parent_supervisor, "_remove_qmp_socket") as remove_qmp,
+                  mock.patch.object(parent_supervisor.time, "sleep")):
+                parent_supervisor._shutdown_running_qemu(
+                    fake_state, SimpleNamespace(run_id=run_id), str(self.home))
+            self.assertEqual(status.call_count, 3)
+            self.assertEqual(proc.poll.call_count, 3)
+            proc.wait.assert_called_once_with()
+            remove_qmp.assert_called_once_with(fake_state, transition, str(self.home))
+            self.assertEqual(parent_supervisor._CHILD_PROCESSES, {})
+        finally:
+            parent_supervisor._CHILD_PROCESSES.pop("qemu", None)
+
+    def test_graceful_shutdown_refuses_popen_child_mismatched_with_transition_pid(self):
+        proc = mock.Mock(pid=424242)
+        transition = {"pid": 424243, "target_path": "child-qemu.target.json",
+                      "identity_path": "child-qemu.identity.json"}
+        parent_supervisor._CHILD_PROCESSES["qemu"] = (proc, transition)
+        fake_state = SimpleNamespace(Refused=parent_state.Refused)
+        try:
+            with self.assertRaisesRegex(parent_state.Refused, "Popen PID does not match"):
+                parent_supervisor._shutdown_running_qemu(
+                    fake_state, SimpleNamespace(run_id="0123456789abcdef0123456789abcdef"),
+                    str(self.home))
+            proc.poll.assert_not_called()
+        finally:
+            parent_supervisor._CHILD_PROCESSES.pop("qemu", None)
+
+    def test_graceful_shutdown_rechecks_identity_after_second_poll_reaps_child(self):
+        proc = mock.Mock(pid=424242)
+        proc.poll.side_effect = [None, 17]
+        transition = {"pid": proc.pid, "target_path": "child-qemu.target.json",
+                      "identity_path": "child-qemu.identity.json"}
+        run_id = "0123456789abcdef0123456789abcdef"
+        parent_supervisor._CHILD_PROCESSES["qemu"] = (proc, transition)
+        status = mock.Mock(side_effect=["TARGET", "AMBIGUOUS", "AMBIGUOUS"])
+        fake_state = SimpleNamespace(
+            Refused=parent_state.Refused,
+            STATE_COMPONENTS=parent_state.STATE_COMPONENTS,
+            _open_directory_chain=lambda **_kwargs: parent_state._open_directory_chain(
+                create=False, home_override=self.home),
+            _read_json=lambda _fd, _name: {
+                "run_id": run_id,
+                "phase": "RUNNING",
+                "supervisor": {"pid": os.getpid()},
+                "qemu": {"pid": proc.pid},
+            },
+            exec_transition_status=status,
+        )
+        try:
+            with (mock.patch.object(parent_supervisor, "_qmp_powerdown"),
+                  mock.patch.object(parent_supervisor, "_remove_qmp_socket") as remove_qmp):
+                with self.assertRaisesRegex(parent_state.Refused, "did not verify STOPPED"):
+                    parent_supervisor._shutdown_running_qemu(
+                        fake_state, SimpleNamespace(run_id=run_id), str(self.home))
+            self.assertEqual(status.call_count, 3)
+            proc.poll.assert_has_calls([mock.call(), mock.call()])
+            proc.wait.assert_not_called()
+            remove_qmp.assert_not_called()
+        finally:
+            parent_supervisor._CHILD_PROCESSES.pop("qemu", None)
+
     def test_graceful_shutdown_refuses_ambiguous_still_live_qemu(self):
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -1935,6 +2020,13 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                       "identity_path": "child-qemu.identity.json"}
         run_id = "0123456789abcdef0123456789abcdef"
         parent_supervisor._CHILD_PROCESSES["qemu"] = (proc, transition)
+        status_calls = []
+        clock_values = iter((100.0, 100.0, 100.0, 100.5, 101.0))
+
+        def ambiguous_while_live(_transition):
+            status_calls.append(True)
+            return "TARGET" if len(status_calls) == 1 else "AMBIGUOUS"
+
         try:
             fake_state = SimpleNamespace(
                 Refused=parent_state.Refused,
@@ -1947,13 +2039,17 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                     "supervisor": {"pid": os.getpid()},
                     "qemu": {"pid": proc.pid},
                 },
-                exec_transition_status=mock.Mock(side_effect=["TARGET", "AMBIGUOUS"]),
+                exec_transition_status=ambiguous_while_live,
             )
-            with mock.patch.object(parent_supervisor, "_qmp_powerdown"), \
-                    self.assertRaisesRegex(parent_state.Refused, "became AMBIGUOUS"):
-                parent_supervisor._shutdown_running_qemu(
-                    fake_state, SimpleNamespace(run_id=run_id), str(self.home))
+            with (mock.patch.object(parent_supervisor, "_qmp_powerdown"),
+                  mock.patch.object(parent_supervisor.time, "sleep"),
+                  mock.patch.object(parent_supervisor.time, "monotonic",
+                                    side_effect=lambda: next(clock_values))):
+                with self.assertRaisesRegex(parent_state.Refused, "remained AMBIGUOUS"):
+                    parent_supervisor._shutdown_running_qemu(
+                        fake_state, SimpleNamespace(run_id=run_id), str(self.home))
             self.assertIsNone(proc.poll(), "live ambiguous child must not be treated as stopped")
+            self.assertGreaterEqual(len(status_calls), 3)
         finally:
             parent_supervisor._CHILD_PROCESSES.pop("qemu", None)
             if proc.poll() is None:
@@ -1982,7 +2078,7 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 exec_transition_status=mock.Mock(side_effect=["TARGET", "AMBIGUOUS"]),
             )
             with mock.patch.object(parent_supervisor, "_qmp_powerdown"), \
-                    self.assertRaisesRegex(parent_state.Refused, "became AMBIGUOUS"):
+                    self.assertRaisesRegex(parent_state.Refused, "after its owned Popen child was reaped"):
                 parent_supervisor._shutdown_running_qemu(
                     fake_state, SimpleNamespace(run_id=run_id), str(self.home))
             proc.poll.assert_called_once_with()

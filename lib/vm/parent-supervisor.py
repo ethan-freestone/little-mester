@@ -26,6 +26,7 @@ import time
 _CHILD_PROCESSES: dict[str, tuple[subprocess.Popen, dict | None]] = {}
 _CHILD_LOG_CAPTURES: dict[str, "_BoundedOutputCapture"] = {}
 QEMU_LOG_LIMIT_BYTES = 1024 * 1024
+QEMU_AMBIGUOUS_EXIT_GRACE_SECONDS = 1.0
 
 
 class _BoundedOutputCapture:
@@ -930,6 +931,8 @@ def _shutdown_running_qemu(state, args, home) -> None:
     if owned is None or owned[1] is None:
         raise state.Refused("RUNNING QEMU has no supervisor-owned durable transition")
     proc, transition = owned
+    if not isinstance(transition, dict) or proc.pid != transition.get("pid"):
+        raise state.Refused("supervisor-owned QEMU Popen PID does not match its durable transition")
     if state.exec_transition_status(transition) != "TARGET":
         raise state.Refused("RUNNING QEMU transition is not the exact live target")
     directory = pathlib.Path(home if home is not None else state.pwd.getpwuid(os.getuid()).pw_dir)
@@ -948,18 +951,40 @@ def _shutdown_running_qemu(state, args, home) -> None:
         os.close(fd)
     _qmp_powerdown(state, qmp_path, qemu_identity)
     deadline = time.monotonic() + 60
+    ambiguous_since = None
     had_proxy = "proxy" in _CHILD_PROCESSES
     while time.monotonic() < deadline:
         exit_code = proc.poll()  # Reap the owned process before evaluating its procfs identity.
         phase = state.exec_transition_status(transition)
-        if phase == "AMBIGUOUS" and exit_code is None and proc.poll() is not None:
-            # The exact owned Popen child can exit between poll() and the
-            # separately-read /proc identity fields. A zombie has no stable
-            # exe/cmdline image and classifies AMBIGUOUS; a second waitpid via
-            # poll() conclusively reaps this same child. Do not apply this to
-            # a child already reaped before classification: its PID might have
-            # been reused. A still-live or replaced identity remains ambiguous.
-            phase = "STOPPED"
+        if phase == "AMBIGUOUS":
+            if exit_code is not None:
+                raise state.Refused(
+                    "QEMU transition remained AMBIGUOUS after its owned Popen child was reaped; "
+                    "preserving possible PID-reuse evidence")
+            confirmed_exit = proc.poll()
+            if confirmed_exit is not None:
+                # The owned child became waitable after the first poll. Reclassify
+                # after reaping so a reused PID is still refused rather than
+                # treating the earlier ambiguous sample as proof of STOPPED.
+                phase = state.exec_transition_status(transition)
+                if phase != "STOPPED":
+                    raise state.Refused(
+                        "owned QEMU child exited but its transition did not verify STOPPED; "
+                        "preserving ambiguous identity evidence")
+            else:
+                now = time.monotonic()
+                if ambiguous_since is None:
+                    ambiguous_since = now
+                if now - ambiguous_since >= QEMU_AMBIGUOUS_EXIT_GRACE_SECONDS:
+                    raise state.Refused(
+                        "QEMU transition remained AMBIGUOUS while owned-child exit was unconfirmed")
+                # A transient procfs/exit boundary can resolve on the next
+                # bounded sample. No child or artifact is treated as stopped
+                # unless the owned Popen and transition checks confirm it.
+                time.sleep(0.05)
+                continue
+        else:
+            ambiguous_since = None
         if phase == "STOPPED":
             proc.wait()
             if not _finish_child_log_capture("qemu"):
