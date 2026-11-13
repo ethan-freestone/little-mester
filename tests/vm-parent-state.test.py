@@ -215,8 +215,8 @@ class ParentStateTests(unittest.TestCase):
                     if boundary == "stopping-tombstone" and name == "active-run.json":
                         raise parent_state.Refused("injected after tombstone")
 
-                def remove(fd, name, kind):
-                    original_remove(fd, name, kind)
+                def remove(fd, name, kind, *, expected=None):
+                    original_remove(fd, name, kind, expected=expected)
                     if boundary == name:
                         raise parent_state.Refused("injected after artifact removal")
 
@@ -335,6 +335,30 @@ class ParentStateTests(unittest.TestCase):
         self.assertTrue((self.parent_dir() / "disk.qcow2").exists())
         self.assertFalse((self.parent_dir() / parent_state._stale_reconciliation_filename(
             "0123456789abcdef0123456789abcdef")).exists())
+
+    def test_stale_reconciliation_refuses_replaced_cleanup_artifact_before_mutation(self):
+        run, _disk_info, _disk_path = self.write_stale_running_fixture()
+        artifact = self.parent_dir() / "proxy.port"
+        original = artifact.stat()
+
+        def replace_after_scan(_disk_fd, _expected, *, scratch_dir=None):
+            with tempfile.NamedTemporaryFile(dir=artifact.parent, delete=False) as replacement:
+                replacement.write(b"replacement\n")
+                replacement.flush()
+                os.fchmod(replacement.fileno(), 0o600)
+                replacement_path = pathlib.Path(replacement.name)
+            os.replace(replacement_path, artifact)
+
+        with (self.stale_reconcile_patches()[0], self.stale_reconcile_patches()[1],
+              mock.patch.object(parent_state, "_scan_stale_disk_holders",
+                                side_effect=replace_after_scan)):
+            with self.assertRaisesRegex(parent_state.Refused, "evidence changed during holder scan"):
+                parent_state.stale_boot_reconciliation(home=self.home, execute=True)
+        replacement = artifact.stat()
+        self.assertNotEqual((replacement.st_dev, replacement.st_ino),
+                            (original.st_dev, original.st_ino))
+        self.assertFalse((self.parent_dir() / parent_state._stale_reconciliation_filename(
+            run["run_id"])).exists())
 
     def test_stale_boot_reconciliation_refuses_lifecycle_lock_contention(self):
         self.write_stale_running_fixture()

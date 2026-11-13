@@ -4,6 +4,124 @@
 agent must not run it. The owner-reported QEMU/qemu-img scratch PASS ×2 is compatibility
 evidence only. NVIDIA timing remains separately pending.
 
+## Final integrated M1b/M1a acceptance (use after exact-SHA CI)
+
+The procedure below supersedes the historical candidate commands later in this file.
+Only the owner may run it. It does not authorize manual state repair, recovery execution,
+forced process termination, or disk replacement. On any unexpected identity, status,
+return code, scan result, or artifact, stop and preserve evidence.
+
+Set `FINAL_SHA` to the reviewed commit after its exact-SHA GitHub Actions run passes:
+
+```sh
+set -euo pipefail
+REPO="$HOME/Development/little-mester-m1a"
+FINAL_SHA='<exact-reviewed-40-character-sha>'
+cd "$REPO"
+test "$(git rev-parse "$FINAL_SHA^{commit}")" = "$FINAL_SHA"
+test -z "$(git status --porcelain)"
+tools/vm-owner-acceptance --install --sha "$FINAL_SHA" --repo "$REPO"
+I="/opt/little-mester/v3/$FINAL_SHA"
+"$I/lab-vm" preflight
+```
+
+Stop unless the exact-SHA installation and direct installed preflight both pass. `preflight`
+does not require sudo; the reconciliation preview will authenticate sudo separately. The
+preview creates and removes one disposable same-filesystem scratch file for its positive
+control; it does not change the VM state or retained disk.
+
+### M1b — Explicit stale-boot reconciliation
+
+```sh
+"$I/lab-vm" parent status --json
+"$I/lab-vm" parent reconcile --dry-run --json
+```
+
+Before authorizing execution, require the expected historical run
+`6ba127f894aa49bcaf4b49a99c068b57`, disk device/inode `55:10406584`, virtual capacity
+64 GiB, `status=RECONCILABLE`, `action=reconcile`, a complete privileged-procfs scan,
+successful positive control, and `unexpected_holders=0`. The helper must affirm descriptor
+and file-mapping coverage and native-host PID/user namespace visibility. It does not prove
+that a privileged host process cannot open the disk after this point-in-time scan. Any
+refusal (including `RECONCILIATION_PENDING`), changed identity, incomplete coverage, holder,
+or unexpected status is a hard stop; do not improvise or rerun lifecycle commands.
+
+After reviewing that preview, the owner explicitly authorizes the privileged installed
+scanner and reconciliation by running:
+
+```sh
+"$I/lab-vm" parent reconcile --execute --json
+"$I/lab-vm" parent status --json
+"$I/lab-vm" parent recover --dry-run --json
+"$I/lab-vm" parent reconcile --dry-run --json
+```
+
+Require completed reconciliation, `STOPPED`, the same retained disk identity/capacity,
+verified cleanup, recovery `action=none`, and a harmless repeated preview (`action=none`,
+`status=STOPPED`). The private run-scoped audit must preserve the old run and child/target
+identities without copying one-time gate tokens; historical boot IDs remain unchanged.
+No historical PID may be signalled. Stop on any failed command or mismatch and preserve
+the pending audit/artifacts for inspection; do not manually finish cleanup.
+
+### M1a — Original disk, ordinary stop and restart
+
+Use the existing guest canary; do not replace it with a new value. Start the parent at its
+existing capacity and verify the status shows the original disk device/inode and a fresh
+run ID:
+
+```sh
+"$I/lab-vm" parent up --capacity-gib 64
+"$I/lab-vm" parent status --json
+"$I/lab-vm" parent ssh
+```
+
+In the guest, verify the known existing value, then exit SSH normally:
+
+```sh
+cat /home/mester/workspace/.phase1-parent-canary
+# Must print exactly: m1a-persistence-canary
+exit
+```
+
+Reconnect and verify the same content again. Record run, supervisor, QEMU and disk identity;
+invoke duplicate `parent up --capacity-gib 64`, then recheck status. Require unchanged run
+and child identities and no second managed writable QEMU. Stop immediately if any differ.
+
+```sh
+"$I/lab-vm" parent ssh
+cat /home/mester/workspace/.phase1-parent-canary
+exit
+"$I/lab-vm" parent up --capacity-gib 64
+"$I/lab-vm" parent status --json
+"$I/lab-vm" parent stop
+"$I/lab-vm" parent status --json
+"$I/lab-vm" parent recover --dry-run --json
+```
+
+Require ordinary graceful stop success within the shared 90-second completion budget,
+`STOPPED`, same disk identity, verified stopped children, no transient QMP/proxy/supervisor
+artifacts, and recovery `action=none`. A timeout is failed acceptance even if later status
+looks stopped. Do not signal or manually clean anything.
+
+Restart the same disk, confirm a new run ID and unchanged disk/canary, then stop cleanly
+again unless the owner deliberately chooses to retain the accepted VM:
+
+```sh
+"$I/lab-vm" parent up --capacity-gib 64
+"$I/lab-vm" parent status --json
+"$I/lab-vm" parent ssh
+cat /home/mester/workspace/.phase1-parent-canary
+exit
+"$I/lab-vm" parent stop
+"$I/lab-vm" parent status --json
+"$I/lab-vm" parent recover --dry-run --json
+```
+
+M1b closes only after real-host reconciliation succeeds and its audit is verified. M1a
+closes only after this original-disk ordinary stop/restart sequence passes with the historical
+canary intact. Local tests, Sol review, CI, and scratch scanner controls are readiness
+evidence, not owner acceptance.
+
 ## Owner evidence log
 
 - Candidate `24d307089c3931687ea3c07bcc6fa51a303e3be1` started the persistent parent in

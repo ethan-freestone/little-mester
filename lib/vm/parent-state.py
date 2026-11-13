@@ -26,6 +26,7 @@ PARENT_ID = "default"
 STATE_COMPONENTS = (".local", "state", "little-mester", "parent-v3", PARENT_ID)
 SCHEMA = 1
 PARENT_STOP_TIMEOUT_SECONDS = 90.0
+_ARTIFACT_EXPECTATION_UNSET = object()
 STALE_RECONCILIATION_PREFIX = "stale-boot-reconciliation-"
 
 
@@ -512,7 +513,8 @@ def stale_boot_reconciliation(*, home: str | os.PathLike | None = None,
                  "operator_uid": os.getuid(), "reconciled_at_unix_ns": time.time_ns(),
                  "current_boot_id": plan["current_boot_id"],
                  "historical_boot_id": plan["historical_boot_id"],
-                 "disk": {"device": expected[0], "inode": expected[1]},
+                  "disk": {"device": expected[0], "inode": expected[1]},
+                  "artifacts": plan["artifacts"],
                   "holder_scan": {"method": "privileged-procfs", "complete_scans": 1,
                                   "positive_control": True,
                                   "coverage": {"procfs": True, "pid_namespace": "init-shared",
@@ -537,12 +539,21 @@ def stale_boot_reconciliation(*, home: str | os.PathLike | None = None,
                 return {"dry_run": not execute, "action": "none", "status": "STOPPED",
                         "parent_id": PARENT_ID, "run_id": plan["run"]["run_id"],
                         "disk_retained": True}
+            cleanup_artifacts = existing_audit["artifacts"]
+        else:
+            cleanup_artifacts = plan["artifacts"]
         if not execute:
             return {"dry_run": True, "action": "reconcile", "status":
                     "RECONCILIATION_PENDING" if existing_audit is not None else "RECONCILABLE",
                     "parent_id": PARENT_ID, "run_id": plan["run"]["run_id"],
-                    "disk": {"device": expected[0], "inode": expected[1]},
-                    "holder_scans": 1,
+                    "disk": {"device": expected[0], "inode": expected[1],
+                             "virtual_capacity_gib": plan["parent"]["disk"]["virtual_capacity_gib"]},
+                    "holder_scan": {"method": "privileged-procfs", "complete_scans": 1,
+                                    "positive_control": True,
+                                    "coverage": {"procfs": True, "pid_namespace": "init-shared",
+                                                 "user_namespace": "init-shared",
+                                                 "descriptors": True, "file_mappings": True},
+                                    "unexpected_holders": 0},
                     "reason": "prior-boot records and no current disk holders verified; execution requires --execute"}
         _verify_lock_fd(lock_fd, home=home)
         if existing_audit is None:
@@ -554,7 +565,8 @@ def stale_boot_reconciliation(*, home: str | os.PathLike | None = None,
         for name, kind in (("supervisor.sock", "socket"), ("qmp.sock", "socket"),
                            ("proxy.port", "file")):
             _verify_lock_fd(lock_fd, home=home)
-            _recovery_remove_artifact(directory_fd, name, kind)
+            _recovery_remove_artifact(directory_fd, name, kind,
+                                      expected=cleanup_artifacts[name])
         os.fsync(directory_fd)
         _verify_lock_fd(lock_fd, home=home)
         for name in ("supervisor.sock", "qmp.sock", "proxy.port"):
@@ -673,10 +685,12 @@ def _validated_stale_boot_plan(directory_fd: int, *, home) -> dict | None:
                 "fd": 3, "purpose": "parent-disk", "device": disk["device"],
                 "inode": disk["inode"], "access": "read-write", "fdset": 1}]):
         raise Refused("stale-boot QEMU identity does not match its trusted transition")
+    artifacts = {}
     for name, kind in (("supervisor.sock", "socket"), ("qmp.sock", "socket"),
                        ("proxy.port", "file")):
-        _validate_recovery_artifact(directory_fd, name, kind)
+        artifacts[name] = _recovery_artifact_identity(directory_fd, name, kind)
     return {"parent": parent, "run": run, "disk": disk, "transitions": transitions,
+            "artifacts": artifacts,
             "current_boot_id": current_boot,
             "historical_boot_id": supervisor["host_boot_id"]}
 
@@ -975,13 +989,29 @@ def recover_parent(*, home: str | os.PathLike | None = None, execute: bool = Fal
         os.close(directory_fd)
 
 
-def _recovery_remove_artifact(directory_fd: int, name: str, kind: str) -> None:
-    _validate_recovery_artifact(directory_fd, name, kind)
+def _recovery_remove_artifact(directory_fd: int, name: str, kind: str, *,
+                              expected: dict | None | object = _ARTIFACT_EXPECTATION_UNSET) -> None:
     try:
-        os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
     except FileNotFoundError:
         return
+    _validate_recovery_artifact(directory_fd, name, kind)
+    observed = {"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode,
+                "uid": info.st_uid, "nlink": info.st_nlink}
+    if expected is not _ARTIFACT_EXPECTATION_UNSET and (
+            expected is None or observed != expected):
+        raise Refused(f"recovery artifact identity changed: {name}")
     os.unlink(name, dir_fd=directory_fd)
+
+
+def _recovery_artifact_identity(directory_fd: int, name: str, kind: str) -> dict | None:
+    try:
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    _validate_recovery_artifact(directory_fd, name, kind)
+    return {"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode,
+            "uid": info.st_uid, "nlink": info.st_nlink}
 
 
 def _valid_stale_reconciliation(directory_fd: int, parent: dict, run: dict,
@@ -993,7 +1023,7 @@ def _valid_stale_reconciliation(directory_fd: int, parent: dict, run: dict,
         return None
     if (not isinstance(audit, dict) or set(audit) != {
             "schema", "parent_id", "run_id", "operator_uid", "reconciled_at_unix_ns",
-            "current_boot_id", "historical_boot_id", "disk", "holder_scan", "historical_run",
+            "current_boot_id", "historical_boot_id", "disk", "artifacts", "holder_scan", "historical_run",
             "historical_transitions", "transaction"}
             or type(audit.get("schema")) is not int or audit["schema"] != 1
             or audit.get("parent_id") != PARENT_ID
@@ -1035,12 +1065,22 @@ def _valid_stale_reconciliation(directory_fd: int, parent: dict, run: dict,
     allowed_transactions = ("PENDING", "COMPLETE") if allow_pending else ("COMPLETE",)
     if audit.get("transaction") not in allowed_transactions:
         raise Refused("stale-boot reconciliation transaction is incomplete")
-    if audit["transaction"] == "COMPLETE":
-        for name in ("supervisor.sock", "qmp.sock", "proxy.port"):
-            try:
-                os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
+    artifact_kinds = {"supervisor.sock": "socket", "qmp.sock": "socket", "proxy.port": "file"}
+    artifacts = audit["artifacts"]
+    if not isinstance(artifacts, dict) or set(artifacts) != set(artifact_kinds):
+        raise Refused("stale-boot audit artifact snapshot is malformed")
+    for name, kind in artifact_kinds.items():
+        expected_artifact = artifacts[name]
+        if expected_artifact is not None and (
+                not isinstance(expected_artifact, dict)
+                or set(expected_artifact) != {"device", "inode", "mode", "uid", "nlink"}
+                or any(type(expected_artifact.get(key)) is not int for key in
+                       ("device", "inode", "mode", "uid", "nlink"))):
+            raise Refused("stale-boot audit artifact identity is malformed")
+        current_artifact = _recovery_artifact_identity(directory_fd, name, kind)
+        if current_artifact is not None and current_artifact != expected_artifact:
+            raise Refused("stale-boot transient artifact was replaced after verification")
+        if audit["transaction"] == "COMPLETE" and current_artifact is not None:
             raise Refused("completed stale-boot reconciliation retains a transient artifact")
     transitions = audit["historical_transitions"]
     if (not isinstance(transitions, dict) or not {"qemu", "proxy"}.issubset(transitions)
