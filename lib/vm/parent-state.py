@@ -6,24 +6,31 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
 import pwd
+import re
 import secrets
 import select
 import signal
 import stat
 import subprocess
 import sys
-import re
 import time
 from contextlib import contextmanager
-
 
 PARENT_ID = "default"
 STATE_COMPONENTS = (".local", "state", "little-mester", "parent-v3", PARENT_ID)
 SCHEMA = 1
+STALE_RECONCILIATION_PREFIX = "stale-boot-reconciliation-"
+
+
+def _stale_reconciliation_filename(run_id: str) -> str:
+    if not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id):
+        raise Refused("invalid run ID for stale-boot audit lookup")
+    return f"{STALE_RECONCILIATION_PREFIX}{run_id}.json"
 
 
 def _installed_runtime_root(source: str | os.PathLike | None = None,
@@ -454,6 +461,248 @@ def recovery_preview(*, home: str | os.PathLike | None = None) -> dict:
         os.close(directory_fd)
 
 
+def stale_boot_reconciliation(*, home: str | os.PathLike | None = None,
+                              execute: bool = False) -> dict:
+    """Preview or explicitly reconcile a validated run from a prior host boot.
+
+    Historical identities are never signalled or rewritten. Execution requires
+    the lifecycle lock and two complete privileged holder scans of the exact disk.
+    """
+    if type(execute) is not bool:
+        raise Refused("stale-boot execution flag is invalid")
+    directory_fd = _open_directory_chain(create=False, home_override=home)
+    if directory_fd is None:
+        return {"dry_run": not execute, "action": "none", "status": "NOT_CREATED",
+                "parent_id": PARENT_ID}
+    lock_fd = disk_fd = -1
+    try:
+        try:
+            lock_fd = os.open("lifecycle.lock", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                              dir_fd=directory_fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _verify_lock_fd(lock_fd, home=home)
+        except (OSError, Refused) as error:
+            raise Refused("stale-boot reconciliation requires exclusive verified lifecycle ownership") from error
+        plan = _validated_stale_boot_plan(directory_fd, home=home)
+        if plan is None:
+            current = read_status(home=home)
+            return {"dry_run": not execute, "action": "none", "status": current["status"],
+                    "parent_id": PARENT_ID}
+        disk_path = plan["disk"]["path"]
+        disk_fd = os.open(disk_path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                          dir_fd=directory_fd)
+        disk_info = os.fstat(disk_fd)
+        expected = (plan["disk"]["device"], plan["disk"]["inode"])
+        if (not stat.S_ISREG(disk_info.st_mode) or (disk_info.st_dev, disk_info.st_ino) != expected):
+            raise Refused("persistent disk identity changed before holder scan")
+        _scan_stale_disk_holders(disk_fd, expected)
+        # The scan is point-in-time: revalidate both the lock and all state/disk
+        # evidence immediately before any audit/state writes.
+        _verify_lock_fd(lock_fd, home=home)
+        fresh = _validated_stale_boot_plan(directory_fd, home=home)
+        if fresh is None or fresh["run"] != plan["run"] or fresh["disk"] != plan["disk"]:
+            raise Refused("stale-boot evidence changed during holder scan")
+        disk_info = os.fstat(disk_fd)
+        if (disk_info.st_dev, disk_info.st_ino) != expected:
+            raise Refused("persistent disk identity changed during holder scan")
+        if not execute:
+            return {"dry_run": True, "action": "reconcile", "status": "RECONCILABLE",
+                    "parent_id": PARENT_ID, "run_id": plan["run"]["run_id"],
+                    "disk": {"device": expected[0], "inode": expected[1]},
+                    "holder_scans": 2,
+                    "reason": "prior-boot records and no current disk holders verified; execution requires --execute"}
+
+        audit = {"schema": 1, "parent_id": PARENT_ID, "run_id": plan["run"]["run_id"],
+                 "operator_uid": os.getuid(), "reconciled_at_unix_ns": time.time_ns(),
+                 "current_boot_id": plan["current_boot_id"],
+                 "historical_boot_id": plan["historical_boot_id"],
+                 "disk": {"device": expected[0], "inode": expected[1]},
+                  "holder_scan": {"method": "privileged-lsof", "complete_scans": 2,
+                                  "positive_control": True},
+                  "historical_run": plan["run"]}
+        audit_name = _stale_reconciliation_filename(plan["run"]["run_id"])
+        try:
+            existing_audit = _read_json(directory_fd, audit_name)
+        except FileNotFoundError:
+            existing_audit = None
+        if existing_audit is not None:
+            audit_tombstone = {key: value for key, value in plan["run"].items() if key != "qemu"}
+            audit_tombstone["phase"] = "STOPPING"
+            if (existing_audit.get("historical_run") != plan["run"]
+                    or _valid_stale_reconciliation(directory_fd, plan["parent"], audit_tombstone,
+                                                   plan["disk"]) is None):
+                raise Refused("existing stale-boot audit conflicts with current state")
+        _verify_lock_fd(lock_fd, home=home)
+        if existing_audit is None:
+            _atomic_json(directory_fd, audit_name, audit)
+        tombstone = {key: value for key, value in plan["run"].items() if key != "qemu"}
+        tombstone["phase"] = "STOPPING"
+        _atomic_json(directory_fd, "active-run.json", tombstone)
+        for name, kind in (("supervisor.sock", "socket"), ("qmp.sock", "socket"),
+                           ("proxy.port", "file")):
+            _verify_lock_fd(lock_fd, home=home)
+            _recovery_remove_artifact(directory_fd, name, kind)
+        os.fsync(directory_fd)
+        status = read_status(home=home)
+        if status["status"] != "STOPPED":
+            raise Refused("reconciliation committed but final parent status is not STOPPED")
+        return {"dry_run": False, "action": "reconciled", "status": "STOPPED",
+                "parent_id": PARENT_ID, "run_id": plan["run"]["run_id"],
+                "disk_retained": True}
+    finally:
+        if disk_fd >= 0:
+            os.close(disk_fd)
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        os.close(directory_fd)
+
+
+def _validated_stale_boot_plan(directory_fd: int, *, home) -> dict | None:
+    """Validate old-boot evidence structurally without observing/signalling its PIDs."""
+    parent = _read_json(directory_fd, "parent.json")
+    validate_parent(parent)
+    disk = _disk_status(directory_fd, parent)
+    active_run = _read_json(directory_fd, "active-run.json")
+    try:
+        current_boot = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError as error:
+        raise Refused("current host boot identity is unavailable") from error
+    if active_run.get("phase") == "STOPPING":
+        try:
+            audit = _read_json(directory_fd,
+                               _stale_reconciliation_filename(active_run.get("run_id")))
+        except FileNotFoundError as error:
+            raise Refused("STOPPING state lacks stale-boot reconciliation audit") from error
+        historical = audit.get("historical_run") if isinstance(audit, dict) else None
+        if not isinstance(historical, dict) or not _valid_stale_reconciliation(
+                directory_fd, parent, active_run, disk):
+            raise Refused("incomplete stale-boot reconciliation evidence")
+        run = historical
+    else:
+        run = active_run
+    if (not parent["disk"]["provisioned"] or disk is None
+            or run.get("schema") != SCHEMA or run.get("parent_id") != PARENT_ID
+            or run.get("phase") != "RUNNING"
+            or set(run) != {"schema", "parent_id", "run_id", "phase", "supervisor", "qemu"}
+            or not isinstance(run.get("run_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", run["run_id"])):
+        raise Refused("stale-boot run or persistent disk evidence is malformed")
+    supervisor = run["supervisor"]
+    qemu = run["qemu"]
+    if not _valid_recorded_identity(supervisor) or not _valid_recorded_identity(qemu):
+        raise Refused("stale-boot process identity evidence is malformed")
+    if (supervisor["host_boot_id"] == current_boot or qemu["host_boot_id"] == current_boot
+            or supervisor["host_boot_id"] != qemu["host_boot_id"]):
+        raise Refused("run is not a consistent prior-boot run")
+    # Preserve the trusted runtime/argv contract by validating a copy through the
+    # normal schema validator; only the copied boot binding is adjusted, never disk state.
+    stopping = dict(run)
+    stopping["phase"] = "STOPPING"
+    stopping.pop("qemu")
+    if not _valid_supervisor_schema(parent, stopping, supervisor, disk, home):
+        raise Refused("historical supervisor trusted schema or runtime path is invalid")
+    transitions = {}
+    for role in ("qemu", "metrics", "proxy"):
+        ident_name, target_name = f"child-{role}.identity.json", f"child-{role}.target.json"
+        try:
+            transition = _read_json(directory_fd, ident_name)
+        except FileNotFoundError:
+            if role in ("qemu", "proxy"):
+                raise Refused(f"stale-boot record lacks required {role} identity")
+            continue
+        _validate_exec_transition(transition)
+        if (transition["identity_path"] != ident_name or transition["target_path"] != target_name
+                or transition["host_boot_id"] != supervisor["host_boot_id"]):
+            raise Refused(f"stale-boot {role} transition binding is inconsistent")
+        target = _read_json(directory_fd, target_name)
+        if target != {"executable": transition["target"]["exe"],
+                      "argv": transition["target"]["argv"],
+                      "fd_contracts": transition["target"]["fd_contracts"]}:
+            raise Refused(f"stale-boot {role} target record is inconsistent")
+        transitions[role] = transition
+    qemu_transition = transitions.get("qemu")
+    proxy_transition = transitions.get("proxy")
+    proxy_port = str(pathlib.Path(home if home is not None else pwd.getpwuid(os.getuid()).pw_dir)
+                      .joinpath(*STATE_COMPONENTS, "proxy.port"))
+    proxy_argv = proxy_transition["target"]["argv"] if proxy_transition is not None else []
+    if (proxy_transition is None
+            or not pathlib.Path(proxy_transition["target"]["exe"]).name.startswith("python3")
+            or len(proxy_argv) != 5 or proxy_argv[0] != proxy_transition["target"]["exe"]
+            or proxy_argv[1] != "-I" or proxy_argv[3:] != ["--port-file", proxy_port]
+            or not _trusted_parent_runtime_script(
+                proxy_argv[2] if len(proxy_argv) > 2 else "", "proxy.py")):
+        raise Refused("stale-boot proxy identity does not match the trusted runtime invocation")
+    if (qemu_transition is None or any(qemu.get(key) != qemu_transition.get(key)
+                                      for key in ("pid", "uid", "host_boot_id", "start_time"))
+            or qemu.get("exe") != qemu_transition["target"]["exe"]
+            or qemu.get("argv") != qemu_transition["target"]["argv"]
+            or qemu.get("exe") != "/usr/bin/qemu-system-x86_64"
+            or qemu_transition["target"]["fd_contracts"] != [{
+                "fd": 3, "purpose": "parent-disk", "device": disk["device"],
+                "inode": disk["inode"], "access": "read-write", "fdset": 1}]):
+        raise Refused("stale-boot QEMU identity does not match its trusted transition")
+    for name, kind in (("supervisor.sock", "socket"), ("qmp.sock", "socket"),
+                       ("proxy.port", "file")):
+        _validate_recovery_artifact(directory_fd, name, kind)
+    return {"parent": parent, "run": run, "disk": disk, "current_boot_id": current_boot,
+            "historical_boot_id": supervisor["host_boot_id"]}
+
+
+def _valid_recorded_identity(identity) -> bool:
+    return (isinstance(identity, dict)
+            and set(identity) == {"schema", "pid", "uid", "host_boot_id", "start_time", "exe", "argv"}
+            and type(identity.get("schema")) is int and identity["schema"] == 1
+            and type(identity.get("pid")) is int and 1 < identity["pid"] <= 2**31 - 1
+            and type(identity.get("uid")) is int and identity["uid"] == os.getuid()
+            and isinstance(identity.get("host_boot_id"), str)
+            and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                             identity["host_boot_id"]) is not None
+            and isinstance(identity.get("start_time"), str) and identity["start_time"].isdigit()
+            and isinstance(identity.get("exe"), str) and identity["exe"].startswith("/")
+            and isinstance(identity.get("argv"), list) and bool(identity["argv"])
+            and all(isinstance(arg, str) for arg in identity["argv"]))
+
+
+def _scan_stale_disk_holders(disk_fd: int, expected: tuple[int, int]) -> None:
+    """Fail-closed privileged lsof scans, with a deliberate positive control."""
+    try:
+        install_root = pathlib.Path(__file__).resolve().parents[2]
+        script = install_root / "scripts/parent-readonly-safety-gate.py"
+        for component in (script, script.parent, *script.parents[1:]):
+            info = component.lstat()
+            if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                raise Refused("privileged holder scanner path is not protected")
+            if component == script:
+                if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o644:
+                    raise Refused("trusted privileged holder scanner is unavailable")
+            elif not stat.S_ISDIR(info.st_mode):
+                raise Refused("trusted privileged holder scanner parent is unsafe")
+            if component == install_root:
+                break
+        spec = importlib.util.spec_from_file_location("parent_reconcile_holder_scan", script)
+        if spec is None or spec.loader is None:
+            raise Refused("could not load trusted privileged holder scanner")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module._check_proc_visibility()
+        module._check_pid_one_with_lsof()
+        import tempfile
+        with tempfile.NamedTemporaryFile(prefix="parent-reconcile-positive-") as positive:
+            positive_info = os.fstat(positive.fileno())
+            holders = module._scan_with_lsof(pathlib.Path(
+                f"/proc/{os.getpid()}/fd/{positive.fileno()}"),
+                positive_info.st_dev, positive_info.st_ino)
+            if os.getpid() not in holders:
+                raise Refused("privileged lsof positive control failed")
+        target = pathlib.Path(f"/proc/{os.getpid()}/fd/{disk_fd}")
+        for _ in range(2):
+            holders = module._scan_with_lsof(target, *expected)
+            if any(pid != os.getpid() for pid in holders):
+                raise Refused("persistent disk has current external holder(s)")
+    except Exception as error:
+        raise Refused(f"privileged disk-holder verification failed: {error}") from error
+
+
 def _validated_recovery_plan(directory_fd: int, *, home: str | os.PathLike | None) -> dict | None:
     """Validate complete orphan evidence. Never infer an absent child identity."""
     try:
@@ -468,6 +717,23 @@ def _validated_recovery_plan(directory_fd: int, *, home: str | os.PathLike | Non
             or not re.fullmatch(r"[0-9a-f]{32}", run["run_id"])
             or run.get("phase") not in ("STARTING", "RUNNING", "STOPPING")):
         raise Refused("parent recovery run record is malformed")
+
+    reconciled = _valid_stale_reconciliation(directory_fd, parent, run, disk)
+    if reconciled:
+        pending = []
+        for name, kind in (("supervisor.sock", "socket"), ("qmp.sock", "socket"),
+                           ("proxy.port", "file")):
+            _validate_recovery_artifact(directory_fd, name, kind)
+            try:
+                os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            pending.append(name)
+        if pending:
+            raise Refused("reconciled stale run unexpectedly retains cleanup artifacts")
+        return {"run": run, "transitions": {}, "child_states": {},
+                "pending_artifacts": [], "boot_id": reconciled["current_boot_id"],
+                "stale_reconciled": True}
 
     # Reuse the complete supervisor schema/trusted-argv validation in status_for_run,
     # then independently require that exact supervisor identity to be gone.
@@ -626,6 +892,56 @@ def _recovery_remove_artifact(directory_fd: int, name: str, kind: str) -> None:
     except FileNotFoundError:
         return
     os.unlink(name, dir_fd=directory_fd)
+
+
+def _valid_stale_reconciliation(directory_fd: int, parent: dict, run: dict,
+                                disk: dict | None) -> dict | None:
+    """Validate the durable audit/tombstone projection without relaxing PID checks."""
+    try:
+        audit = _read_json(directory_fd, _stale_reconciliation_filename(run.get("run_id")))
+    except FileNotFoundError:
+        return None
+    if (not isinstance(audit, dict) or set(audit) != {
+            "schema", "parent_id", "run_id", "operator_uid", "reconciled_at_unix_ns",
+            "current_boot_id", "historical_boot_id", "disk", "holder_scan", "historical_run"}
+            or type(audit.get("schema")) is not int or audit["schema"] != 1
+            or audit.get("parent_id") != PARENT_ID
+            or type(audit.get("operator_uid")) is not int or audit["operator_uid"] != os.getuid()
+            or type(audit.get("reconciled_at_unix_ns")) is not int
+            or audit["reconciled_at_unix_ns"] <= 0
+            or not isinstance(disk, dict) or not parent["disk"]["provisioned"]):
+        raise Refused("stale-boot reconciliation audit is malformed")
+    old = audit["historical_run"]
+    scans = audit["holder_scan"]
+    if (not isinstance(old, dict) or old.get("phase") != "RUNNING"
+            or set(old) != {"schema", "parent_id", "run_id", "phase", "supervisor", "qemu"}
+            or type(old.get("schema")) is not int or old.get("schema") != SCHEMA
+            or old.get("parent_id") != PARENT_ID
+            or not isinstance(old.get("run_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", old["run_id"])
+            or old.get("run_id") != run.get("run_id")
+            or audit.get("run_id") != run.get("run_id")
+            or run.get("phase") != "STOPPING"
+            or set(run) != {"schema", "parent_id", "run_id", "phase", "supervisor"}
+            or any(run.get(key) != old.get(key) for key in
+                   ("schema", "parent_id", "run_id", "supervisor"))
+            or not _valid_recorded_identity(old.get("supervisor"))
+            or not _valid_recorded_identity(old.get("qemu"))
+            or audit.get("historical_boot_id") != old["supervisor"]["host_boot_id"]
+            or old["qemu"]["host_boot_id"] != audit["historical_boot_id"]
+            or not isinstance(audit.get("current_boot_id"), str)
+            or not audit["current_boot_id"]
+            or audit["current_boot_id"] == audit["historical_boot_id"]
+            or not isinstance(audit.get("disk"), dict)
+            or audit["disk"] != {"device": disk["device"], "inode": disk["inode"]}
+            or not isinstance(scans, dict)
+            or scans != {"method": "privileged-lsof", "complete_scans": 2,
+                         "positive_control": True}):
+        raise Refused("stale-boot reconciliation audit does not match current retained state")
+    qemu = old["qemu"]
+    if qemu.get("exe") != "/usr/bin/qemu-system-x86_64":
+        raise Refused("stale-boot audit contains unexpected QEMU identity")
+    return audit
 
 
 def _validate_recovery_artifact(directory_fd: int, name: str, kind: str) -> None:
@@ -1027,6 +1343,31 @@ def _trusted_parent_runtime_script(path: str, filename: str) -> bool:
     return True
 
 
+def _valid_supervisor_schema(parent: dict, run: dict, identity: object,
+                             disk: dict | None, home) -> bool:
+    invalid = (not isinstance(identity, dict)
+            or set(identity) != {"schema", "pid", "uid", "host_boot_id", "start_time", "exe", "argv"}
+            or type(identity.get("schema")) is not int or identity["schema"] != 1
+            or type(identity.get("pid")) is not int or not 1 < identity["pid"] <= 2**31 - 1
+            or type(identity.get("uid")) is not int or identity["uid"] != os.getuid()
+            or not isinstance(identity.get("host_boot_id"), str)
+            or not isinstance(identity.get("start_time"), str) or not identity["start_time"].isdigit()
+            or not isinstance(identity.get("exe"), str) or not identity["exe"].startswith("/")
+            or not isinstance(identity.get("argv"), list) or not identity["argv"]
+            or not all(isinstance(item, str) for item in identity["argv"])
+            or len(identity["argv"]) not in (11, 13, 15)
+            or not identity["argv"][0].startswith("/")
+            or os.path.realpath(identity["argv"][0]) != identity["exe"]
+            or identity["argv"][1] != "-I"
+            or not _trusted_parent_runtime_script(identity["argv"][2], "parent-supervisor.py")
+            or identity["argv"][3:7] != ["--parent-id", PARENT_ID, "--run-id", run["run_id"]]
+            or identity["argv"][7] != "--lock-fd" or not identity["argv"][8].isdigit()
+            or identity["argv"][9] != "--handoff-fd" or not identity["argv"][10].isdigit()
+            or not _valid_supervisor_options(identity["argv"][11:], home)
+            or not parent["disk"]["provisioned"] or disk is None)
+    return not invalid
+
+
 def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: str | os.PathLike | None = None) -> dict:
     validate_parent(parent)
     if (not isinstance(run, dict) or type(run.get("schema")) is not int or run["schema"] != SCHEMA
@@ -1040,28 +1381,7 @@ def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: s
                 and set(run) != {"schema", "parent_id", "run_id", "phase", "supervisor"})):
         return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
     identity = run.get("supervisor") if isinstance(run, dict) else None
-    if not isinstance(identity, dict):
-        return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
-    if (set(identity) != {"schema", "pid", "uid", "host_boot_id", "start_time", "exe", "argv"}
-            or type(identity.get("schema")) is not int or identity["schema"] != 1
-            or type(identity.get("pid")) is not int or not 1 < identity["pid"] <= 2**31 - 1
-            or type(identity.get("uid")) is not int or identity["uid"] != os.getuid()
-            or not isinstance(identity.get("host_boot_id"), str)
-            or not isinstance(identity.get("start_time"), str)
-            or not identity["start_time"].isdigit()
-            or not isinstance(identity.get("exe"), str) or not identity["exe"].startswith("/")
-            or not isinstance(identity.get("argv"), list)
-            or not identity["argv"] or not all(isinstance(item, str) for item in identity["argv"])
-            or len(identity["argv"]) not in (11, 13, 15)
-            or not identity["argv"][0].startswith("/")
-            or os.path.realpath(identity["argv"][0]) != identity["exe"]
-            or identity["argv"][1] != "-I"
-            or not _trusted_parent_runtime_script(identity["argv"][2], "parent-supervisor.py")
-            or identity["argv"][3:7] != ["--parent-id", PARENT_ID, "--run-id", run["run_id"]]
-            or identity["argv"][7] != "--lock-fd" or not identity["argv"][8].isdigit()
-            or identity["argv"][9] != "--handoff-fd" or not identity["argv"][10].isdigit()
-            or not _valid_supervisor_options(identity["argv"][11:], home)
-            or not parent["disk"]["provisioned"] or disk is None):
+    if not _valid_supervisor_schema(parent, run, identity, disk, home):
         return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
     try:
         current_boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
@@ -1074,6 +1394,17 @@ def status_for_run(parent: dict, run: dict, disk: dict | None = None, *, home: s
         if (identity.get("schema") != 1 or type(identity.get("uid")) is not int
                 or identity["uid"] != os.getuid()
                 or identity.get("host_boot_id") != current_boot_id):
+            if run["phase"] == "STOPPING" and identity.get("host_boot_id") != current_boot_id:
+                state_fd = _open_directory_chain(create=False, home_override=home)
+                if state_fd is not None:
+                    try:
+                        if _valid_stale_reconciliation(state_fd, parent, run, disk):
+                            return {"status": "STOPPED", "parent_id": PARENT_ID,
+                                    "run_id": run["run_id"], "disk": disk}
+                    except (OSError, Refused, KeyError, TypeError):
+                        pass
+                    finally:
+                        os.close(state_fd)
             return {"status": "AMBIGUOUS", "parent_id": PARENT_ID}
         proc = pathlib.Path(f"/proc/{pid}")
         executable = os.path.realpath(proc / "exe")
@@ -1425,15 +1756,15 @@ def stop_exec_transition(identity: dict, *, term_grace_ms: int = 5000, settle_ms
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("status", "recover", "stop", "ssh", "tui"))
+    parser.add_argument("command", choices=("status", "recover", "reconcile", "stop", "ssh", "tui"))
     parser.add_argument("--json", action="store_true")
     recovery_mode = parser.add_mutually_exclusive_group()
     recovery_mode.add_argument("--dry-run", action="store_true", help="preview recovery (the default)")
     recovery_mode.add_argument("--execute", action="store_true",
                                help="explicitly recover fully verified orphan children")
     args = parser.parse_args()
-    if args.command != "recover" and (args.dry_run or args.execute):
-        parser.error("--dry-run/--execute is only valid with recover")
+    if args.command not in ("recover", "reconcile") and (args.dry_run or args.execute):
+        parser.error("--dry-run/--execute is only valid with recover/reconcile")
     if args.command in ("ssh", "tui") and args.json:
         parser.error("--json is not valid with ssh/tui")
     try:
@@ -1451,6 +1782,8 @@ def main() -> int:
                         pass
         if args.command == "recover":
             result = recover_parent(execute=args.execute)
+        elif args.command == "reconcile":
+            result = stale_boot_reconciliation(execute=args.execute)
         elif args.command == "stop":
             result = request_supervisor_stop()
         else:
@@ -1461,14 +1794,14 @@ def main() -> int:
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:
-        if args.command == "recover":
+        if args.command in ("recover", "reconcile"):
             if result.get("dry_run"):
-                print(f"Recovery preview: {result['status']} (dry-run; action={result['action']})")
+                print(f"{args.command.title()} preview: {result['status']} (dry-run; action={result['action']})")
             else:
-                print(f"Recovery: {result['status']} (action={result['action']}; disk retained)")
+                print(f"{args.command.title()}: {result['status']} (action={result['action']}; disk retained)")
             print(result.get("reason", ""))
             return 0 if result["status"] in (
-                "NOT_CREATED", "UNPROVISIONED", "STOPPED", "RECOVERABLE") else 2
+                "NOT_CREATED", "UNPROVISIONED", "STOPPED", "RECOVERABLE", "RECONCILABLE") else 2
         if args.command == "stop":
             print(f"Parent supervisor stopped: run_id={result['run_id']}; persistent disk retained")
             return 0
@@ -1483,7 +1816,8 @@ def main() -> int:
         if result["status"] in ("RUNNING", "STARTING"):
             print(f"Run: {result['run_id']}")
     return 0 if result["status"] in (
-        "NOT_CREATED", "UNPROVISIONED", "STOPPED", "STARTING", "RUNNING", "RECOVERABLE") else 2
+        "NOT_CREATED", "UNPROVISIONED", "STOPPED", "STARTING", "RUNNING", "RECOVERABLE",
+        "RECONCILABLE") else 2
 
 
 if __name__ == "__main__":

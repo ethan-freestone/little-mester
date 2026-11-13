@@ -181,7 +181,7 @@ PY
 export VM_HOST_SCRIPT_ROOT="$root"
 command="${1:-}"
 [[ -n "$command" ]] || {
-  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent up [--capacity-gib N] | parent status [--json] | parent ssh | parent tui | parent stop | parent recover [--dry-run|--execute] [--json]\n' >&2
+  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent up [--capacity-gib N] | parent status [--json] | parent ssh | parent tui | parent stop | parent recover [--dry-run|--execute] [--json] | parent reconcile [--dry-run|--execute] [--json]\n' >&2
   exit 2
 }
 shift
@@ -230,6 +230,10 @@ case "$command" in
       recover)
         exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
           /usr/bin/python3 -I "$root/lib/vm/parent-state.py" recover "$@"
+        ;;
+      reconcile)
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          /usr/bin/python3 -I "$root/lib/vm/parent-state.py" reconcile "$@"
         ;;
       stop)
         exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
