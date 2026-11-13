@@ -2,6 +2,7 @@
 """Focused tests for the read-only parent safety-gate process scanner."""
 
 import contextlib
+import importlib.machinery
 import importlib.util
 import io
 import json
@@ -13,10 +14,18 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+OWNER_ACCEPTANCE_PATH = ROOT / "tools/vm-owner-acceptance"
+OWNER_ACCEPTANCE_LOADER = importlib.machinery.SourceFileLoader(
+    "scanner_fixture_owner_acceptance", str(OWNER_ACCEPTANCE_PATH))
+OWNER_ACCEPTANCE_SPEC = importlib.util.spec_from_loader(
+    OWNER_ACCEPTANCE_LOADER.name, OWNER_ACCEPTANCE_LOADER)
+owner_acceptance = importlib.util.module_from_spec(OWNER_ACCEPTANCE_SPEC)
+OWNER_ACCEPTANCE_LOADER.exec_module(owner_acceptance)
 SPEC = importlib.util.spec_from_file_location(
     "parent_readonly_safety_gate", ROOT / "scripts/parent-readonly-safety-gate.py")
 gate = importlib.util.module_from_spec(SPEC)
@@ -31,38 +40,58 @@ class ProcessScanTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         sudo = "/usr/bin/sudo"
-        created = subprocess.run([sudo, "-n", "/usr/bin/mktemp", "-d",
-                                  "/opt/lm-procfs-test.XXXXXX"],
-                                 capture_output=True, text=True, timeout=10, check=False)
-        if created.returncode:
-            raise AssertionError(f"CI cannot create protected scanner fixture: {created.stderr}")
-        cls.protected_root = pathlib.Path(created.stdout.strip())
-        subprocess.run([sudo, "-n", "/usr/bin/chmod", "0755", str(cls.protected_root)],
-                       check=True, timeout=10)
-        subprocess.run([sudo, "-n", "/usr/bin/install", "-d", "-o", "0", "-g", "0",
-                        "-m", "0755", str(cls.protected_root / "scripts"),
-                        str(cls.protected_root / "lib" / "vm")], check=True, timeout=10)
+        authorization = subprocess.run([sudo, "-n", "-v"], stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       timeout=10, check=False)
+        if authorization.returncode:
+            raise unittest.SkipTest(
+                "privileged scanner tests require noninteractive sudo; no trust bypass is used")
+        resolved = owner_acceptance.git(ROOT, "rev-parse", "--verify", "HEAD^{commit}")
+        if resolved.returncode:
+            raise AssertionError("could not resolve exact source candidate for trusted fixture")
+        cls.candidate_sha = resolved.stdout.decode("ascii").strip()
+        cls.install_prefix = pathlib.Path("/opt") / f"lm-procfs-test-{uuid.uuid4().hex}"
+        cls.protected_root = owner_acceptance.install_path(
+            cls.candidate_sha, cls.install_prefix)
+        try:
+            cls.protected_root = owner_acceptance.install_candidate(
+                ROOT, cls.candidate_sha, cls.install_prefix)
+        except Exception:
+            cls._remove_install_fixture()
+            raise
         cls.protected_helper = cls.protected_root / "scripts/parent-readonly-safety-gate.py"
-        subprocess.run([sudo, "-n", "/usr/bin/install", "-o", "0", "-g", "0", "-m", "0644",
-                        str(ROOT / "scripts/parent-readonly-safety-gate.py"),
-                        str(cls.protected_helper)], check=True, timeout=10)
         cls.protected_state = cls.protected_root / "lib/vm/parent-state.py"
-        subprocess.run([sudo, "-n", "/usr/bin/install", "-o", "0", "-g", "0", "-m", "0644",
-                        str(ROOT / "lib/vm/parent-state.py"), str(cls.protected_state)],
-                       check=True, timeout=10)
+
+    @classmethod
+    def _remove_install_fixture(cls):
+        sudo = "/usr/bin/sudo"
+        root = getattr(cls, "protected_root", None)
+        if root is not None and root.exists():
+            for relative in owner_acceptance.INSTALL_FILES:
+                path = root / relative
+                if path.exists() or path.is_symlink():
+                    subprocess.run([sudo, "-n", "/usr/bin/rm", "--", str(path)],
+                                   check=True, timeout=10)
+            for relative in sorted(owner_acceptance.INSTALL_DIRS,
+                                   key=lambda item: len(pathlib.PurePosixPath(item).parts),
+                                   reverse=True):
+                path = root / relative
+                if path.exists():
+                    subprocess.run([sudo, "-n", "/usr/bin/rmdir", "--", str(path)],
+                                   check=True, timeout=10)
+            subprocess.run([sudo, "-n", "/usr/bin/rmdir", "--", str(root)],
+                           check=True, timeout=10)
+        prefix = getattr(cls, "install_prefix", None)
+        if prefix is not None and prefix.exists():
+            if (prefix / "v3").exists():
+                subprocess.run([sudo, "-n", "/usr/bin/rmdir", "--", str(prefix / "v3")],
+                               check=True, timeout=10)
+            subprocess.run([sudo, "-n", "/usr/bin/rmdir", "--", str(prefix)],
+                           check=True, timeout=10)
 
     @classmethod
     def tearDownClass(cls):
-        sudo = "/usr/bin/sudo"
-        subprocess.run([sudo, "-n", "/usr/bin/rm", "--", str(cls.protected_helper)],
-                       check=True, timeout=10)
-        subprocess.run([sudo, "-n", "/usr/bin/rm", "--", str(cls.protected_state)],
-                       check=True, timeout=10)
-        subprocess.run([sudo, "-n", "/usr/bin/rmdir", "--", str(cls.protected_root / "scripts"),
-                        str(cls.protected_root / "lib/vm"), str(cls.protected_root / "lib")],
-                       check=True, timeout=10)
-        subprocess.run([sudo, "-n", "/usr/bin/rmdir", "--", str(cls.protected_root)],
-                       check=True, timeout=10)
+        cls._remove_install_fixture()
 
     def _privileged_scan(self, info, allowed_pid=0, allowed_fd=-1):
         if not pathlib.Path("/usr/bin/sudo").exists():
@@ -96,18 +125,41 @@ class ProcessScanTests(unittest.TestCase):
         spec.loader.exec_module(state)
         with tempfile.NamedTemporaryFile() as disk:
             info = os.fstat(disk.fileno())
-            real_run = subprocess.run
-
-            def run(argv, **kwargs):
-                if argv == ["/usr/bin/sudo", "-v"]:
-                    return subprocess.CompletedProcess(argv, 0)
-                return real_run(argv, **kwargs)
-
-            with mock.patch.object(state.subprocess, "run", side_effect=run):
-                result = state._scan_stale_disk_holders(
-                    disk.fileno(), (info.st_dev, info.st_ino),
-                    scratch_dir=pathlib.Path(tempfile.gettempdir()))
+            result = state._scan_stale_disk_holders(
+                disk.fileno(), (info.st_dev, info.st_ino),
+                scratch_dir=pathlib.Path(tempfile.gettempdir()))
             self.assertIsNone(result)
+
+    def test_real_privileged_scanner_rejects_untrusted_helper_path(self):
+        with tempfile.NamedTemporaryFile(prefix="untrusted-parent-scanner-") as helper:
+            helper.write((ROOT / "scripts/parent-readonly-safety-gate.py").read_bytes())
+            helper.flush()
+            os.chmod(helper.name, 0o644)
+            result = subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-B", helper.name,
+                 "--scan-inode", "1", "1", "0", "-1"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=10, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b"REFUSED: protected_helper_path_untrusted", result.stderr)
+
+    def test_installer_verification_rejects_tampered_installed_helper(self):
+        with tempfile.NamedTemporaryFile(prefix="tampered-parent-scanner-") as tampered:
+            tampered.write(b"# deliberately altered disposable fixture\n")
+            tampered.flush()
+            subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/install", "-o", "0", "-g", "0",
+                            "-m", "0644", tampered.name, str(self.protected_helper)],
+                           check=True, timeout=10)
+            try:
+                with self.assertRaisesRegex(owner_acceptance.GateError,
+                                            "installed bytes do not match"):
+                    owner_acceptance.verify_install(
+                        ROOT, self.candidate_sha, self.install_prefix)
+            finally:
+                subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/install", "-o", "0", "-g", "0",
+                                "-m", "0644",
+                                str(ROOT / "scripts/parent-readonly-safety-gate.py"),
+                                str(self.protected_helper)], check=True, timeout=10)
 
     def test_real_privileged_scanner_refuses_forged_caller_fd_exemption(self):
         with tempfile.NamedTemporaryFile() as held:

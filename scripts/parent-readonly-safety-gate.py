@@ -111,8 +111,12 @@ def _scan_proc_inode(device: int, inode: int, allowed_pid: int = 0,
             return False
         except OSError:
             return False
-        # A recycled or malformed PID is not evidence that the recorded process
-        # vanished harmlessly; this pass did not inspect the new live process.
+        if len(after) <= 19:
+            raise GateRefused("malformed_process_identity")
+        # PID reuse is not a harmless exit: this pass did not inspect the new
+        # process, so fail closed instead of treating it as gone.
+        if after[19] != before:
+            raise GateRefused("process_changed_during_scan")
         return False
 
     for pid_text in pids:
