@@ -353,6 +353,7 @@ assert 'connect_ex(target)==0' in text
 assert 'ssh-keyscan' not in text
 assert 'TMPDIR=/tmp python3 tests/ci-qemu-oauth-bridge.py' in text
 assert 'readiness_deadline=$((SECONDS + 300))' in text
+assert 'SECONDS < readiness_deadline && SECONDS < qemu_deadline' in text
 assert 'capture_qemu_identity || fail' in text
 assert 'process_starttime' in text and 'qemu_identity_matches' in text
 assert 'stop_owned_qemu || fail' in text

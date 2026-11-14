@@ -570,11 +570,13 @@ qemu_uid=''
 capture_qemu_identity || fail 'could not prove ownership of the restricted-boot QEMU process'
 ready=0
 readiness_deadline=$((SECONDS + 300))
-while (( SECONDS < readiness_deadline )); do
+while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
   qemu_identity_matches || fail 'test-owned QEMU process exited or changed identity during persistent-disk reboot'
   qemu_state="$(process_state "$qemu_pid")"
   [[ -n "$qemu_state" && "$qemu_state" != Z ]] || fail 'QEMU exited during persistent-disk reboot'
   remaining=$((readiness_deadline - SECONDS))
+  overall_remaining=$((qemu_deadline - SECONDS))
+  (( overall_remaining < remaining )) && remaining=$overall_remaining
   (( remaining > 0 )) || break
   attempt_timeout=8
   (( remaining < attempt_timeout )) && attempt_timeout=$remaining
