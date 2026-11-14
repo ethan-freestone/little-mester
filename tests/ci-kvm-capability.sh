@@ -127,6 +127,10 @@ clear_oauth_tracking() {
   oauth_parent=''
 }
 
+terminate_oauth_bridge_groups() {
+  python3 -I "$process_signal_helper" --terminate-marked-groups "$oauth_evidence_root"
+}
+
 stop_oauth_harness() {
   local state='' current_start stat_line rest parent
   [[ -n "$oauth_pid" ]] || { oauth_evidence_is_clear; return; }
@@ -138,6 +142,7 @@ stop_oauth_harness() {
   if [[ -z "$state" || "$state" == Z ]]; then
     wait "$oauth_pid" 2>/dev/null || true
     clear_oauth_tracking
+    terminate_oauth_bridge_groups || { oauth_cleanup_unproved=1; return 1; }
     oauth_evidence_is_clear || { oauth_cleanup_unproved=1; return 1; }
     return 0
   fi
@@ -172,6 +177,9 @@ stop_oauth_harness() {
   done
   state="$(process_state "$oauth_pid")"
   if [[ -n "$state" && "$state" != Z ]]; then
+    # If the harness did not complete its proof-bearing shutdown, kill any
+    # still-owned PTY bridge process groups before escalating the harness.
+    terminate_oauth_bridge_groups || oauth_cleanup_unproved=1
     signal_owned_process "$oauth_pid" "$oauth_starttime" "$oauth_uid" \
       "$oauth_parent" '*' KILL || {
         state="$(process_state "$oauth_pid")"
@@ -188,6 +196,7 @@ stop_oauth_harness() {
   state="$(process_state "$oauth_pid")"
   [[ -z "$state" || "$state" == Z ]] || return 1
   wait "$oauth_pid" 2>/dev/null || true
+  terminate_oauth_bridge_groups || { oauth_cleanup_unproved=1; return 1; }
   clear_oauth_tracking
   oauth_evidence_is_clear || { oauth_cleanup_unproved=1; return 1; }
 }

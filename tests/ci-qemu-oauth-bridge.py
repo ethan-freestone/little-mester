@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import errno
 import importlib.util
+import json
 import os
 import pathlib
 import pty
@@ -68,9 +69,37 @@ def process_group_has_live_members(pgid: int) -> bool:
             rest = stat[stat.rfind(") ") + 2 :].split()
             if len(rest) > 3 and int(rest[2]) == pgid and rest[0] != "Z":
                 return True
-        except (OSError, ValueError, IndexError):
+        except FileNotFoundError:
+            # The process exited between enumerating /proc and reading stat.
             continue
+        except (OSError, ValueError, IndexError):
+            # An entry that remains present but cannot be parsed is not proof
+            # that the owned process group is empty. Fail cleanup closed.
+            try:
+                entry.stat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return True
+            return True
     return False
+
+
+def write_bridge_identity(path: pathlib.Path, pid: int) -> None:
+    stat = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    fields = stat[stat.rfind(") ") + 2 :].split()
+    if len(fields) <= 19 or int(fields[2]) != pid or int(fields[3]) != pid:
+        raise RuntimeError("PTY bridge did not create its own process group")
+    status = pathlib.Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+    uid = int(next(line for line in status.splitlines() if line.startswith("Uid:")).split()[1])
+    record = {"pid": pid, "starttime": int(fields[19]), "uid": uid,
+              "process_group": int(fields[2]), "session_id": int(fields[3])}
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w", encoding="ascii") as output:
+        json.dump(record, output, separators=(",", ":"))
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
 
 
 def parse_live_url(data: bytes) -> str | None:
@@ -118,6 +147,7 @@ class Session:
                 f"({socket_path_bytes} bytes); evidence retained at {self.root}"
             )
         self.proof = self.run_dir / "proof.json"
+        self.bridge_identity = self.root / "bridge-process.json"
         identity = self.run_dir / "identity_file"
         pinned_hosts = self.run_dir / "known_hosts"
         shutil.copyfile(key, identity)
@@ -150,6 +180,21 @@ class Session:
                 # Publish both owned handles before a pending cancellation can
                 # run the handler and enter Session.close().
                 self.pid, self.master_fd = child_pid, master_fd
+                try:
+                    write_bridge_identity(self.bridge_identity, child_pid)
+                except BaseException:
+                    try:
+                        os.killpg(child_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        os.waitpid(child_pid, 0)
+                    except ChildProcessError:
+                        pass
+                    self.pid = -1
+                    os.close(master_fd)
+                    self.master_fd = -1
+                    raise
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
         if child_pid == 0:

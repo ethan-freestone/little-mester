@@ -17,11 +17,20 @@ ci_handle_cancel() {
 }
 
 ci_launch_tracked() {
-  local variable=$1
+  local variable=$1 launched_pid saved_traps
   shift
   CI_LAUNCH_PENDING=1
+  # Bash's async wrapper inherits EXIT/ERR traps and may keep a shell PID rather
+  # than exec the requested binary. Temporarily remove the parent trap while
+  # fork/exec happens so $! identifies the actual launched process.
+  saved_traps="$(trap -p EXIT ERR)"
+  trap - EXIT ERR
   "$@" &
-  printf -v "$variable" '%s' "$!"
+  launched_pid=$!
+  if [[ -n "$saved_traps" ]]; then
+    eval "$saved_traps"
+  fi
+  printf -v "$variable" '%s' "$launched_pid"
   CI_LAUNCH_PENDING=0
   if (( CI_DEFERRED_EXIT_STATUS )); then
     local status=$CI_DEFERRED_EXIT_STATUS

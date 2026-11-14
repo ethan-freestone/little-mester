@@ -27,6 +27,20 @@ PROCESS_SPEC.loader.exec_module(PROCESS)
 
 
 class HarnessSignalTests(unittest.TestCase):
+    def test_unreadable_proc_entry_does_not_prove_process_group_empty(self):
+        entry = pathlib.Path("/proc/424242")
+        with mock.patch.object(pathlib.Path, "iterdir", return_value=iter([entry])), \
+             mock.patch.object(pathlib.Path, "read_text", side_effect=PermissionError("hidden proc")), \
+             mock.patch.object(pathlib.Path, "stat", return_value=object()):
+            self.assertTrue(HARNESS.process_group_has_live_members(424242))
+
+    def test_shell_process_group_scan_fails_closed_on_unreadable_proc(self):
+        entry = pathlib.Path("/proc/424243")
+        with mock.patch.object(pathlib.Path, "iterdir", return_value=iter([entry])), \
+             mock.patch.object(pathlib.Path, "read_text", side_effect=PermissionError("hidden proc")), \
+             mock.patch.object(pathlib.Path, "stat", return_value=object()):
+            self.assertFalse(PROCESS.process_group_empty(424243))
+
     def test_session_records_short_control_directory_before_creating_it(self):
         with tempfile.TemporaryDirectory(prefix="oauth-evidence-root-") as directory:
             root = pathlib.Path(directory)
@@ -47,32 +61,82 @@ class HarnessSignalTests(unittest.TestCase):
     def test_pidfd_signal_requires_the_captured_child_identity(self):
         if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
             self.skipTest("Linux pidfd signaling is unavailable")
+        read_fd, write_fd = os.pipe()
         child = os.fork()
         if child == 0:
+            os.close(read_fd)
+            os.setsid()
+            os.write(write_fd, b"ready")
             while True:
                 signal.pause()
+        os.close(write_fd)
         try:
-            parent, starttime, comm, _cmdline = PROCESS.process_identity(child)
+            self.assertEqual(os.read(read_fd, 5), b"ready")
+            parent, process_group, _session, starttime, comm, _cmdline = PROCESS.process_identity(child)
             uid = os.getuid()
             self.assertEqual(parent, os.getpid())
+            self.assertEqual(process_group, child)
             self.assertFalse(PROCESS.signal_owned_process(
-                child, starttime + 1, uid, parent, comm, (), signal.SIGTERM
+                child, starttime + 1, uid, parent, comm, (), signal.SIGTERM,
+                process_group=True,
             ))
             waited, _status = os.waitpid(child, os.WNOHANG)
             self.assertEqual(waited, 0, "identity mismatch must not signal the live child")
-            self.assertTrue(PROCESS.signal_owned_process(
-                child, starttime, uid, parent, comm, (), signal.SIGTERM
-            ))
+            with tempfile.TemporaryDirectory(prefix="oauth-bridge-group-") as directory:
+                evidence_root = pathlib.Path(directory)
+                HARNESS.write_bridge_identity(evidence_root / "bridge-process.json", child)
+                self.assertEqual(PROCESS.main(["--terminate-marked-groups", str(evidence_root)]), 0)
             waited, status = os.waitpid(child, 0)
             self.assertEqual(waited, child)
             self.assertTrue(os.WIFSIGNALED(status))
+            self.assertTrue(PROCESS.process_group_empty(process_group))
         finally:
+            os.close(read_fd)
             try:
-                os.kill(child, signal.SIGKILL)
+                os.killpg(child, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             try:
                 os.waitpid(child, 0)
+            except ChildProcessError:
+                pass
+
+    def test_shell_group_recovery_kills_descendant_after_bridge_leader_exits(self):
+        read_fd, write_fd = os.pipe()
+        leader = os.fork()
+        if leader == 0:
+            os.close(read_fd)
+            os.setsid()
+            descendant = os.fork()
+            if descendant == 0:
+                os.close(write_fd)
+                while True:
+                    signal.pause()
+            os.write(write_fd, str(descendant).encode("ascii"))
+            while True:
+                signal.pause()
+        os.close(write_fd)
+        descendant_pid = -1
+        try:
+            descendant_pid = int(os.read(read_fd, 32))
+            parent, process_group, _session, _starttime, _comm, _args = PROCESS.process_identity(leader)
+            self.assertEqual(process_group, leader)
+            self.assertEqual(parent, os.getpid())
+            with tempfile.TemporaryDirectory(prefix="oauth-orphan-group-") as directory:
+                evidence_root = pathlib.Path(directory)
+                HARNESS.write_bridge_identity(evidence_root / "bridge-process.json", leader)
+                os.kill(leader, signal.SIGKILL)
+                os.waitpid(leader, 0)
+                self.assertEqual(PROCESS.main(["--terminate-marked-groups", str(evidence_root)]), 0)
+                self.assertTrue(PROCESS.process_group_empty(leader))
+        finally:
+            os.close(read_fd)
+            try:
+                os.killpg(leader, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(leader, 0)
             except ChildProcessError:
                 pass
 
@@ -204,6 +268,7 @@ class HarnessSignalTests(unittest.TestCase):
         session.pid = -1
         session.master_fd = -1
         session.command = ["/unused"]
+        session.bridge_identity = pathlib.Path("/unused/bridge-process.json")
         previous = HARNESS.install_signal_handlers()
 
         def fork_then_signal():
@@ -211,7 +276,8 @@ class HarnessSignalTests(unittest.TestCase):
             return 43210, 73
 
         try:
-            with mock.patch.object(HARNESS.pty, "fork", side_effect=fork_then_signal):
+            with mock.patch.object(HARNESS.pty, "fork", side_effect=fork_then_signal), \
+                 mock.patch.object(HARNESS, "write_bridge_identity"):
                 with self.assertRaises(HARNESS.HarnessCancelled):
                     session.start()
             self.assertEqual(session.pid, 43210)

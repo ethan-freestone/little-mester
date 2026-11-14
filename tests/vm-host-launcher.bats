@@ -359,6 +359,7 @@ assert 'process_starttime' in text and 'qemu_identity_matches' in text
 assert 'stop_owned_qemu || fail' in text
 assert "trap '' INT TERM" in text
 assert 'stop_oauth_harness' in text and 'ci_launch_tracked oauth_pid' in text
+assert 'terminate_oauth_bridge_groups' in text and 'bridge-process.json' in pathlib.Path(sys.argv[1]).with_name('ci-qemu-oauth-bridge.py').read_text()
 assert 'oauth_cleanup_unproved' in text and 'oauth_evidence_is_clear' in text
 assert 'process_state' in text and "printf '?'" in text
 assert text.count('qemu_deadline=$((SECONDS + 2400))') == 1
