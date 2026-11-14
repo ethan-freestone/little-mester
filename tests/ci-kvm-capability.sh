@@ -113,7 +113,11 @@ qemu_identity_matches() {
   comm="$(</proc/"$qemu_pid"/comm)" || return 1
   [[ "$comm" == qemu-system-x86 ]] \
     && grep -azFq -- 'little-mester-hosted-kvm-integration' "/proc/$qemu_pid/cmdline" \
-    && grep -azFq -- "$overlay" "/proc/$qemu_pid/cmdline"
+    && grep -azFq -- "$overlay" "/proc/$qemu_pid/cmdline" \
+    && grep -azFq -- 'accel=kvm' "/proc/$qemu_pid/cmdline" \
+    && ! grep -azFq -- 'accel=tcg' "/proc/$qemu_pid/cmdline" \
+    && { (( ! qemu_restricted )) || grep -azFq -- 'restrict=on' "/proc/$qemu_pid/cmdline"; } \
+    && { (( qemu_restricted )) || ! grep -azFq -- 'restrict=on' "/proc/$qemu_pid/cmdline"; }
 }
 
 capture_qemu_identity() {
@@ -312,12 +316,46 @@ qemu_pid=''
 qemu_starttime=''
 qemu_uid=''
 qemu_parent=''
+qemu_restricted=0
+overlay_device=''
+overlay_inode=''
 oauth_pid=''
 oauth_starttime=''
 oauth_uid=''
 oauth_parent=''
 oauth_cleanup_unproved=0
 qemu_deadline=0
+stage_deadline=0
+stage_name=''
+
+verify_overlay_identity() {
+  local actual_device actual_inode
+  [[ -n "$overlay_device" && -n "$overlay_inode" && -f "$overlay" && ! -L "$overlay" ]] || return 1
+  actual_device="$(stat -c %d -- "$overlay")" || return 1
+  actual_inode="$(stat -c %i -- "$overlay")" || return 1
+  [[ "$actual_device" == "$overlay_device" && "$actual_inode" == "$overlay_inode" ]]
+}
+
+stage_start() {
+  stage_name=$1
+  stage_deadline=$((SECONDS + $2))
+  next_progress=$((SECONDS + 15))
+  printf '::group::KVM_STAGE_START name=%s source_head_sha=%s workflow_sha=%s deadline_seconds=%s\n' \
+    "$1" "${LM_CI_SOURCE_HEAD_SHA:-not-provided}" "${GITHUB_SHA:-local}" "$2"
+}
+
+stage_remaining() {
+  local remaining=$((stage_deadline - SECONDS))
+  (( remaining > 0 )) || fail "bounded KVM stage deadline expired: $stage_name"
+  printf '%s' "$remaining"
+}
+
+stage_end() {
+  printf 'KVM_STAGE_PASS name=%s\n::endgroup::\n' "$1"
+  stage_name=''
+  stage_deadline=0
+}
+
 cleanup() {
   local status=$?
   # Bash may run the inherited EXIT trap in the async launch subshell as well;
@@ -347,6 +385,9 @@ cleanup() {
   else
     printf 'KVM_TRIAL_FAIL: disposable VM artifacts retained at %s because process cleanup was not proved\n' "$tmp" >&2
   fi
+  if [[ -n "$stage_name" ]]; then
+    printf 'KVM_STAGE_ABORT name=%s cleanup_status=%s\n::endgroup::\n' "$stage_name" "$status" >&2
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -369,6 +410,9 @@ host_key="$tmp/guest_host_ed25519"
 known_hosts="$tmp/known_hosts"
 serial_log="$tmp/serial.log"
 
+printf 'KVM_CANDIDATE source_head_sha=%s workflow_sha=%s event=%s\n' \
+  "${LM_CI_SOURCE_HEAD_SHA:-not-provided}" "${GITHUB_SHA:-local}" "${GITHUB_EVENT_NAME:-local}"
+stage_start prepare 180
 printf 'KVM_PROGRESS phase=pinned-image-download max_seconds=120\n'
 curl --fail --location --silent --show-error --connect-timeout 20 --max-time 120 \
   "$image_url" --output "$image"
@@ -426,7 +470,12 @@ EOF
 genisoimage -quiet -output "$seed" -volid cidata -joliet -rock \
   "$tmp/user-data" "$tmp/meta-data"
 qemu-img create -q -f qcow2 -F qcow2 -b "$image" "$overlay"
+overlay_device="$(stat -c %d -- "$overlay")"
+overlay_inode="$(stat -c %i -- "$overlay")"
+verify_overlay_identity || fail 'fresh disposable overlay identity could not be recorded'
+stage_end prepare
 
+stage_start boot 120
 printf 'KVM_TRIAL: starting pinned guest with accel=kvm (no TCG fallback)\n'
 qemu_started=$SECONDS
 qemu_deadline=$((qemu_started + 300))
@@ -457,6 +506,8 @@ ssh_args=(
 ready=0
 qemu_started=$SECONDS
 readiness_deadline=$((qemu_started + 120))
+stage_remaining=$((stage_deadline - SECONDS))
+(( readiness_deadline - SECONDS > stage_remaining )) && readiness_deadline=$((SECONDS + stage_remaining))
 next_progress=$((SECONDS + 15))
 next_serial_tail=$((SECONDS + 30))
 last_ssh_rc=not-attempted
@@ -492,10 +543,15 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
 done
 [[ "$ready" == 1 ]] || fail "guest did not reach cloud-init/SSH readiness within 120s (last ssh status: $last_ssh_rc)"
 printf 'KVM_TRIAL_PASS: pinned guest booted with accel=kvm and passed cloud-init readiness\n'
+stage_end boot
 
 ssh_guest() {
-  local remaining=$((qemu_deadline - SECONDS)) limit=20
+  local remaining=$((qemu_deadline - SECONDS)) limit=20 stage_left
   (( remaining > 0 )) || fail 'QEMU integration exceeded its overall bounded deadline'
+  stage_left="$(stage_remaining)"
+  (( remaining > stage_left )) && remaining=$stage_left
+  qemu_identity_matches || fail 'test-owned QEMU identity changed before guest SSH stage'
+  verify_overlay_identity || fail 'disposable guest disk identity changed before guest SSH stage'
   (( remaining < limit )) && limit=$remaining
   timeout --signal=TERM --kill-after=1 "$limit" ssh "${ssh_args[@]}" "$1"
 }
@@ -508,10 +564,15 @@ spec.loader.exec_module(module)
 print(module.readiness_checks())
 PY
 )"
+stage_start config-tmux 180
 ssh_guest "cloud-init status --long >/dev/null 2>&1 || exit 41; $guest_asset_checks"
 ssh_tty_guest() {
-  local remaining=$((qemu_deadline - SECONDS)) limit=15
+  local remaining=$((qemu_deadline - SECONDS)) limit=15 stage_left
   (( remaining > 0 )) || fail 'QEMU integration exceeded its overall bounded deadline'
+  stage_left="$(stage_remaining)"
+  (( remaining > stage_left )) && remaining=$stage_left
+  qemu_identity_matches || fail 'test-owned QEMU identity changed before guest PTY stage'
+  verify_overlay_identity || fail 'disposable guest disk identity changed before guest PTY stage'
   (( remaining < limit )) && limit=$remaining
   timeout --signal=TERM --kill-after=1 "$limit" ssh \
     -F /dev/null -tt -a -x -i "$key" -p "$port" \
@@ -575,7 +636,9 @@ ssh_tty_guest 'cd /home/mester/workspace && timeout --signal=TERM --kill-after=2
 pane_after="$(ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_id}:#{pane_pid}"')"
 [[ "$pane_before" == "$pane_after" ]] || fail 'tmux reattachment did not preserve the live OpenCode pane identity'
 printf 'KVM_M2_INTEGRATION_PASS: real KVM guest, SSH, pinned OpenCode 2.2.5, protected config, tmux TUI process and persistent workspace fixture\n'
+stage_end config-tmux
 
+stage_start restricted-reboot-egress-persistence 90
 provider_ips="$(timeout --signal=TERM --kill-after=2 12 python3 - <<'PY'
 import ipaddress, socket
 addresses = set()
@@ -605,6 +668,8 @@ PY
 # copying or reinitializing the VM disk. The in-memory tmux socket is expected
 # to be recreated; the session/workspace files remain on the persistent disk.
 stop_owned_qemu || fail 'test-owned QEMU process tree did not stop; preserving its artifacts'
+verify_overlay_identity || fail 'disposable guest disk identity changed before restricted reboot'
+qemu_restricted=1
 ci_launch_tracked qemu_pid qemu-system-x86_64 \
     -name little-mester-hosted-kvm-integration \
     -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
@@ -619,6 +684,8 @@ qemu_uid=''
 capture_qemu_identity || fail 'could not prove ownership of the restricted-boot QEMU process'
 ready=0
 readiness_deadline=$((SECONDS + 60))
+stage_left=$((stage_deadline - SECONDS))
+(( readiness_deadline - SECONDS > stage_left )) && readiness_deadline=$((SECONDS + stage_left))
 next_progress=$((SECONDS + 15))
 next_serial_tail=$((SECONDS + 30))
 last_ssh_rc=not-attempted
@@ -652,8 +719,13 @@ ssh_guest 'test "$(cat /home/mester/workspace/persisted.txt)" = persistent-fixtu
 ssh_tty_guest 'cd /home/mester/workspace && timeout --signal=TERM --kill-after=2 8 /usr/local/bin/lm-opencode >/dev/null 2>&1 || test "$?" = 124'
 ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux has-session -t little-mester-opencode && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_dead}")" = 0 && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_current_path}")" = /home/mester/workspace'
 printf 'KVM_PERSISTENCE_PASS: synthetic OpenCode DB/auth fixtures, workspace data, and TUI recreation survived disposable guest reboot\n'
+stage_end restricted-reboot-egress-persistence
+stage_start synthetic-oauth 120
+qemu_identity_matches || fail 'test-owned QEMU identity changed before synthetic OAuth stage'
+verify_overlay_identity || fail 'disposable guest disk identity changed before synthetic OAuth stage'
 oauth_remaining=$((qemu_deadline - SECONDS))
 (( oauth_remaining > 0 )) || fail 'QEMU integration exceeded its overall bounded deadline before OAuth simulation'
+(( oauth_remaining > 120 )) && oauth_remaining=120
 ci_launch_tracked oauth_pid env TMPDIR=/tmp python3 tests/ci-qemu-oauth-bridge.py \
   --port "$port" --identity "$key" --known-hosts "$known_hosts" \
   --evidence-root "$oauth_evidence_root" --max-runtime-seconds "$oauth_remaining"
@@ -668,3 +740,4 @@ oauth_uid=''
 oauth_parent=''
 [[ "$oauth_status" == 0 ]] || fail "synthetic OAuth harness failed or was cancelled (status $oauth_status)"
 printf 'KVM_M2_AUTH_BOUNDARY: live browser approval, provider token exchange and real model access are NOT_RUN\n'
+stage_end synthetic-oauth

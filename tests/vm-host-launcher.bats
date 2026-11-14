@@ -340,18 +340,31 @@ PY
   [[ "$output" != *"nested"* ]]
 }
 
-@test "M2 hosted egress probe follows restricted QEMU reboot before OAuth simulation" {
+@test "M2 hosted KVM integration is automatic, staged, identity guarded, and credential free" {
   run python3 - "$TEST_ROOT/tests/ci-kvm-capability.sh" <<'PY'
 import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text()
-restricted = text.index('"user,id=net0,restrict=on,hostfwd=')
-probe = text.index('KVM_EGRESS_BOUNDARY_PASS:')
-oauth = text.index('tests/ci-qemu-oauth-bridge.py')
-assert restricted < probe < oauth
-assert 'timeout --signal=TERM --kill-after=2 12 python3' in text
-assert 'connect_ex(target)==0' in text
+workflow = pathlib.Path(sys.argv[1]).parents[1] / '.github/workflows/ci.yml'
+workflow_text = workflow.read_text()
+job = workflow_text.split('  real-qemu-kvm-trial:', 1)[1].split('\n  # ── 4.', 1)[0]
+assert 'pull_request:' in workflow_text and 'types: [opened, synchronize, reopened]' in workflow_text
+assert 'if:' not in job
+assert 'm2-qemu-acceptance' not in workflow_text
+assert 'workflow_dispatch:' not in workflow_text
+assert 'github.event.pull_request.head.sha || github.sha' in job
+assert 'pr_merge_commit_second_parent' in job and 'source_head_sha=' in job
+assert 'timeout-minutes: 20' in job
+assert '::group::KVM_STAGE_START' in text
+for stage in ('prepare', 'boot', 'config-tmux', 'restricted-reboot-egress-persistence', 'synthetic-oauth'):
+    assert f'stage_start {stage} ' in text
+assert 'qemu_identity_matches || fail' in text
+assert 'verify_overlay_identity || fail' in text
+assert 'accel=kvm' in text and 'accel=tcg' in text and 'restrict=on' in text
+assert text.count('file=$overlay,if=virtio,format=qcow2') == 2
+assert 'oauth_remaining > 120' in text
 assert 'ssh-keyscan' not in text
-assert 'TMPDIR=/tmp python3 tests/ci-qemu-oauth-bridge.py' in text
+assert 'ci-qemu-oauth-bridge.py' in text and 'LM_CI_PUBLIC_KEY' in text
+assert 'synthetic-fixture' in text and 'token exchange and real model access are NOT_RUN' in text
 assert 'readiness_deadline=$((qemu_started + 120))' in text
 assert 'readiness_deadline=$((SECONDS + 60))' in text
 assert 'SECONDS < readiness_deadline && SECONDS < qemu_deadline' in text
@@ -364,18 +377,17 @@ assert 'stop_oauth_harness' in text and 'ci_launch_tracked oauth_pid' in text
 assert 'terminate_oauth_bridge_groups' in text and 'bridge-process.json' in pathlib.Path(sys.argv[1]).with_name('ci-qemu-oauth-bridge.py').read_text()
 assert 'oauth_cleanup_unproved' in text and 'oauth_evidence_is_clear' in text
 assert 'process_state' in text and "printf '?'" in text
-workflow = pathlib.Path(sys.argv[1]).parents[1] / '.github/workflows/ci.yml'
-workflow_text = workflow.read_text()
-assert 'timeout-minutes: 8' in workflow_text
-assert "github.event.action == 'labeled'" in workflow_text
-assert "github.event.label.name == 'm2-qemu-acceptance'" in workflow_text
-assert 'runs-on: ubuntu-24.04' in workflow_text
+assert 'runs-on: ubuntu-24.04' in job
+assert 'contents: read' in workflow_text
+assert 'cancel-in-progress: true' in workflow_text
+assert 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' in job
+assert 'cache:' not in job
 assert 'pidfd_send_signal' in pathlib.Path(sys.argv[1]).with_name('ci-process-signal.py').read_text()
 assert 'qemu-system-x86_64 \\\n' in text and 'timeout --signal=TERM --kill-after=10 2400' not in text
-print('M2_RESTRICTED_EGRESS_ORDER_OK')
+print('M2_AUTOMATIC_STAGED_KVM_OK')
 PY
   [ "$status" -eq 0 ]
-  [[ "$output" == *'M2_RESTRICTED_EGRESS_ORDER_OK'* ]]
+  [[ "$output" == *'M2_AUTOMATIC_STAGED_KVM_OK'* ]]
 }
 
 @test "browser auth allowance is bounded and reserves provider and container deadlines" {

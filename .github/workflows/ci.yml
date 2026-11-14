@@ -5,18 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, labeled]
-  workflow_dispatch:
-    inputs:
-      run_real_qemu:
-        description: Run the expensive real-QEMU M2 acceptance gate for this candidate
-        type: boolean
-        required: true
-        default: false
-      candidate_sha:
-        description: Full commit SHA to verify against the selected workflow ref
-        type: string
-        required: true
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
@@ -91,24 +80,30 @@ jobs:
   # ── Hosted-runner disposable M2 guest integration; no TCG fallback ──
   real-qemu-kvm-trial:
     name: Real QEMU KVM M2 integration
-    if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.run_real_qemu == true) ||
-      (github.event_name == 'pull_request' && github.event.action == 'labeled' &&
-       github.event.label.name == 'm2-qemu-acceptance')
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
-      - name: Verify explicit candidate SHA
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Verify and report source-head and workflow SHA provenance
         env:
-          REQUESTED_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
+          SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           actual_sha="$(git rev-parse HEAD)"
-          [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
-          test "$actual_sha" = "$REQUESTED_SHA"
-          printf 'candidate_sha=%s\n' "$actual_sha"
+          [[ "$SOURCE_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$actual_sha" = "$GITHUB_SHA"
+          printf 'source_head_sha=%s\nworkflow_sha=%s\nevent=%s\n' \
+            "$SOURCE_HEAD_SHA" "$GITHUB_SHA" "$GITHUB_EVENT_NAME"
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            merge_parent="$(git rev-parse HEAD^2)"
+            test "$merge_parent" = "$SOURCE_HEAD_SHA"
+            printf 'pr_merge_commit_second_parent=%s\n' "$merge_parent"
+          else
+            test "$SOURCE_HEAD_SHA" = "$actual_sha"
+          fi
       - name: Report runner architecture, identity, and initial KVM device state
         run: |
           printf 'runner_label=ubuntu-24.04\narchitecture=%s\n' "$(uname -m)"
@@ -142,9 +137,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             cloud-image-utils curl genisoimage openssh-client openssh-server qemu-system-x86 \
             qemu-utils socat virtiofsd
-      - name: Require usable KVM and run credential-free M2 guest integration
+      - name: Run bounded, named-stage M2 integration on one disposable KVM guest
+        env:
+          LM_CI_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bash tests/ci-kvm-capability.sh
-      - name: Exercise synthetic OAuth callback bridge over real local OpenSSH
+      - name: Run credential-free synthetic browser-auth and SSH bridge tests
         run: python3 tests/vm-browser-auth.test.py
 
   # ── 4. Hygiene — ShellCheck, Python compile, ruff lint ───────────
