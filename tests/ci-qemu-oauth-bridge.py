@@ -89,7 +89,7 @@ def process_group_has_live_members(pgid: int) -> bool:
     return False
 
 
-def write_bridge_identity(path: pathlib.Path, pid: int) -> None:
+def write_bridge_identity(path: pathlib.Path, pid: int) -> dict[str, int]:
     stat = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
     fields = stat[stat.rfind(") ") + 2 :].split()
     if len(fields) <= 19 or int(fields[2]) != pid or int(fields[3]) != pid:
@@ -104,6 +104,7 @@ def write_bridge_identity(path: pathlib.Path, pid: int) -> None:
         output.write("\n")
         output.flush()
         os.fsync(output.fileno())
+    return record
 
 
 def parse_live_url(data: bytes) -> str | None:
@@ -171,6 +172,8 @@ class Session:
         ]
         self.pid = -1
         self.bridge_pgid = -1
+        self.bridge_pidfd: int | None = None
+        self.bridge_anchor: tuple[int, int] | None = None
         self.master_fd = -1
         self.output = bytearray()
         self.exit_status: int | None = None
@@ -187,11 +190,18 @@ class Session:
                 self.pid, self.master_fd = child_pid, master_fd
                 self.bridge_pgid = child_pid
                 try:
-                    write_bridge_identity(self.bridge_identity, child_pid)
+                    self.bridge_pidfd = os.pidfd_open(child_pid, 0)
+                    identity = write_bridge_identity(self.bridge_identity, child_pid)
+                    self.bridge_anchor = (child_pid, identity["starttime"])
                 except BaseException:
                     try:
-                        os.killpg(child_pid, signal.SIGKILL)
-                    except ProcessLookupError:
+                        if self.bridge_pidfd is not None:
+                            signal.pidfd_send_signal(self.bridge_pidfd, signal.SIGKILL)
+                        else:
+                            # This is the unreaped direct child returned by
+                            # pty.fork(); its PID cannot be reused before waitpid.
+                            os.kill(child_pid, signal.SIGKILL)
+                    except (ProcessLookupError, OSError):
                         pass
                     try:
                         os.waitpid(child_pid, 0)
@@ -200,6 +210,9 @@ class Session:
                     self.pid = -1
                     os.close(master_fd)
                     self.master_fd = -1
+                    if self.bridge_pidfd is not None:
+                        os.close(self.bridge_pidfd)
+                        self.bridge_pidfd = None
                     raise
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
@@ -317,7 +330,9 @@ class Session:
                 failures.append(f"bounded auth-process stop failed ({error})")
             if self.bridge_pgid > 0 and process_group_has_live_members(self.bridge_pgid):
                 try:
-                    group_stopped = PROCESS_SIGNAL.terminate_marked_groups(self.root)
+                    group_stopped = PROCESS_SIGNAL.terminate_marked_groups(
+                        self.root, anchor=getattr(self, "bridge_anchor", None)
+                    )
                 except Exception as error:
                     group_stopped = False
                     failures.append(f"PTY bridge descendant cleanup failed ({error})")
@@ -366,6 +381,10 @@ class Session:
                 shutil.rmtree(self.root)
                 self.closed = True
         finally:
+            bridge_pidfd = getattr(self, "bridge_pidfd", None)
+            if bridge_pidfd is not None:
+                os.close(bridge_pidfd)
+                self.bridge_pidfd = None
             restore_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals())
             try:
                 for signum, handler in previous.items():

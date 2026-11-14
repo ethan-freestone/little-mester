@@ -11,6 +11,7 @@ import signal
 import shutil
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest import mock
@@ -127,13 +128,67 @@ class HarnessSignalTests(unittest.TestCase):
                 HARNESS.write_bridge_identity(evidence_root / "bridge-process.json", leader)
                 os.kill(leader, signal.SIGKILL)
                 os.waitpid(leader, 0)
-                self.assertEqual(PROCESS.main(["--terminate-marked-groups", str(evidence_root)]), 0)
+                self.assertEqual(PROCESS.main(["--terminate-marked-groups", str(evidence_root)]), 1)
+                # The CLI has no lifetime pidfd for the dead leader, so it
+                # must not act on a numeric PGID/SID alone.
+                _parent, _group, _sid, start, comm, _args = PROCESS.process_identity(descendant_pid)
+                self.assertTrue(PROCESS.signal_owned_process(
+                    descendant_pid, start, os.getuid(), None, comm, (), signal.SIGKILL
+                ))
+                deadline = time.monotonic() + 2
+                while not PROCESS.process_group_empty(leader) and time.monotonic() < deadline:
+                    time.sleep(0.02)
                 self.assertTrue(PROCESS.process_group_empty(leader))
         finally:
             os.close(read_fd)
             try:
                 os.killpg(leader, signal.SIGKILL)
             except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(leader, 0)
+            except ChildProcessError:
+                pass
+
+    def test_group_termination_stops_members_before_final_absence_proof(self):
+        read_fd, write_fd = os.pipe()
+        leader = os.fork()
+        if leader == 0:
+            os.close(read_fd)
+            os.setsid()
+            forker = os.fork()
+            if forker == 0:
+                os.close(write_fd)
+                for _ in range(80):
+                    child = os.fork()
+                    if child == 0:
+                        while True:
+                            signal.pause()
+                    time.sleep(0.001)
+                while True:
+                    signal.pause()
+            os.write(write_fd, b"ready")
+            while True:
+                signal.pause()
+        os.close(write_fd)
+        try:
+            self.assertEqual(os.read(read_fd, 5), b"ready")
+            with tempfile.TemporaryDirectory(prefix="oauth-fork-race-") as directory:
+                root = pathlib.Path(directory)
+                HARNESS.write_bridge_identity(root / "bridge-process.json", leader)
+                self.assertEqual(PROCESS.main(["--terminate-marked-groups", str(root)]), 0)
+                self.assertFalse(HARNESS.process_group_has_live_members(leader))
+                waited, status = os.waitpid(leader, 0)
+                self.assertEqual(waited, leader)
+                self.assertTrue(os.WIFSIGNALED(status))
+        finally:
+            os.close(read_fd)
+            try:
+                _parent, _group, _sid, start, comm, _args = PROCESS.process_identity(leader)
+                PROCESS.signal_owned_process(
+                    leader, start, os.getuid(), None, comm, (), signal.SIGKILL
+                )
+            except (OSError, RuntimeError, StopIteration, ValueError):
                 pass
             try:
                 os.waitpid(leader, 0)
@@ -285,7 +340,7 @@ class HarnessSignalTests(unittest.TestCase):
             with tempfile.TemporaryDirectory(prefix="oauth-normal-close-group-") as directory:
                 root = pathlib.Path(directory) / "session"
                 root.mkdir(mode=0o700)
-                HARNESS.write_bridge_identity(root / "bridge-process.json", leader)
+                record = HARNESS.write_bridge_identity(root / "bridge-process.json", leader)
                 proof = root / "proof.json"
                 proof.write_text(json.dumps({
                     "ssh_stopped": True,
@@ -297,6 +352,8 @@ class HarnessSignalTests(unittest.TestCase):
                 session.case = "orphan-descendant"
                 session.pid = -1
                 session.bridge_pgid = leader
+                session.bridge_pidfd = os.pidfd_open(leader, 0)
+                session.bridge_anchor = (leader, record["starttime"])
                 session.master_fd = -1
                 session.exit_status = 0
                 session.forced_kill = False
@@ -338,7 +395,10 @@ class HarnessSignalTests(unittest.TestCase):
 
         try:
             with mock.patch.object(HARNESS.pty, "fork", side_effect=fork_then_signal), \
-                 mock.patch.object(HARNESS, "write_bridge_identity"):
+                 mock.patch.object(HARNESS, "write_bridge_identity"), \
+                 mock.patch.object(HARNESS.os, "pidfd_open", return_value=91), \
+                 mock.patch.object(HARNESS.os, "close"), \
+                 mock.patch.object(HARNESS.signal, "pidfd_send_signal"):
                 with self.assertRaises(HARNESS.HarnessCancelled):
                     session.start()
             self.assertEqual(session.pid, 43210)

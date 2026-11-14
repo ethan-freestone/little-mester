@@ -103,77 +103,102 @@ def process_group_empty(process_group: int) -> bool:
 
 def signal_group_members(process_group: int, session_id: int, expected_uid: int,
                          signum: int = signal.SIGKILL) -> bool:
-    """Pidfd-signal members of the recorded session if its leader has exited."""
+    """Freeze the anchored group, then signal its verified members by pidfd."""
     if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
         return False
-    for entry in pathlib.Path("/proc").iterdir():
-        if not entry.name.isdecimal():
-            continue
-        pid = int(entry.name)
-        try:
-            stat = (entry / "stat").read_text(encoding="ascii")
-            fields = stat[stat.rfind(") ") + 2 :].split()
-            state = fields[0]
-            actual_group = int(fields[2])
-            actual_session = int(fields[3])
-            starttime = int(fields[19])
-        except FileNotFoundError:
-            continue
-        except (OSError, ValueError, IndexError):
-            try:
-                entry.stat()
-            except FileNotFoundError:
-                continue
-            return False
-        if actual_group != process_group or state == "Z":
-            continue
-        try:
-            status = (entry / "status").read_text(encoding="ascii")
-            uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
-            uid = int(uid_line.split()[1])
-        except FileNotFoundError:
-            continue
-        except (OSError, ValueError, StopIteration):
-            return False
-        if actual_session != session_id or uid != expected_uid:
-            return False
-        try:
-            pidfd = os.pidfd_open(pid, 0)
-        except ProcessLookupError:
-            continue
-        except OSError as error:
-            if error.errno == errno.EINVAL:
+    pidfds: dict[int, tuple[int, int]] = {}
+    previous_members: set[int] = set()
+    deadline = time.monotonic() + 3
+    try:
+        while time.monotonic() < deadline:
+            members: set[int] = set()
+            all_stopped = True
+            for entry in pathlib.Path("/proc").iterdir():
+                if not entry.name.isdecimal():
+                    continue
+                pid = int(entry.name)
                 try:
-                    latest = (entry / "stat").read_text(encoding="ascii")
-                    latest_fields = latest[latest.rfind(") ") + 2 :].split()
-                    if latest_fields[0] == "Z":
-                        continue
+                    stat = (entry / "stat").read_text(encoding="ascii")
+                    fields = stat[stat.rfind(") ") + 2 :].split()
+                    state = fields[0]
+                    actual_group = int(fields[2])
+                    actual_session = int(fields[3])
+                    starttime = int(fields[19])
                 except FileNotFoundError:
                     continue
-            return False
-        try:
-            check_stat = (entry / "stat").read_text(encoding="ascii")
-            check_fields = check_stat[check_stat.rfind(") ") + 2 :].split()
-            check_group = int(check_fields[2])
-            check_session = int(check_fields[3])
-            check_start = int(check_fields[19])
-            status = pathlib.Path(f"/proc/{pid}/status").read_text(encoding="ascii")
-            check_uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
-            check_uid = int(check_uid_line.split()[1])
-            if (check_group != process_group or check_session != session_id
-                    or check_start != starttime or check_uid != expected_uid):
-                return False
-            signal.pidfd_send_signal(pidfd, signum)
-        except (ProcessLookupError, FileNotFoundError):
-            continue
-        except (OSError, ValueError, IndexError, StopIteration):
-            return False
-        finally:
-            os.close(pidfd)
-    return True
+                except (OSError, ValueError, IndexError):
+                    try:
+                        entry.stat()
+                    except FileNotFoundError:
+                        continue
+                    return False
+                if actual_group != process_group or state == "Z":
+                    continue
+                try:
+                    status = (entry / "status").read_text(encoding="ascii")
+                    uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
+                    uid = int(uid_line.split()[1])
+                except FileNotFoundError:
+                    continue
+                except (OSError, ValueError, StopIteration):
+                    return False
+                if actual_session != session_id or uid != expected_uid:
+                    return False
+                if pid not in pidfds:
+                    try:
+                        fd = os.pidfd_open(pid, 0)
+                    except ProcessLookupError:
+                        continue
+                    except OSError as error:
+                        if error.errno == errno.EINVAL:
+                            try:
+                                latest = (entry / "stat").read_text(encoding="ascii")
+                                if latest[latest.rfind(") ") + 2 :].split()[0] == "Z":
+                                    continue
+                            except FileNotFoundError:
+                                continue
+                        return False
+                    pidfds[pid] = (fd, starttime)
+                else:
+                    fd, captured_start = pidfds[pid]
+                    if captured_start != starttime:
+                        return False
+                members.add(pid)
+                fd = pidfds[pid][0]
+                # Stop every observed member. If it forks before stopping,
+                # the next full scan discovers and stops the new child.
+                try:
+                    signal.pidfd_send_signal(fd, signal.SIGSTOP)
+                except ProcessLookupError:
+                    continue
+                except OSError:
+                    return False
+                if state not in ("T", "t"):
+                    all_stopped = False
+
+            # A complete scan that finds the same set, already stopped, is
+            # stable: no member can fork while the final verified set is killed.
+            if all_stopped and members == previous_members:
+                for fd, _starttime in pidfds.values():
+                    try:
+                        signal.pidfd_send_signal(fd, signum)
+                    except ProcessLookupError:
+                        pass
+                    except OSError:
+                        return False
+                return True
+            previous_members = members
+            time.sleep(0.02)
+        return False
+    finally:
+        for fd, _starttime in pidfds.values():
+            os.close(fd)
 
 
-def terminate_marked_groups(evidence_root: pathlib.Path) -> bool:
+def terminate_marked_groups(
+    evidence_root: pathlib.Path,
+    anchor: tuple[int, int] | None = None,
+) -> bool:
     if not evidence_root.is_dir():
         return False
     try:
@@ -193,40 +218,52 @@ def terminate_marked_groups(evidence_root: pathlib.Path) -> bool:
                 return False
         except (OSError, ValueError, KeyError, TypeError):
             return False
+        leader_fd = None
         try:
-            _parent, current_group, current_session, current_start, _comm, _args = process_identity(pid)
-        except FileNotFoundError:
-            leader_present = False
-        except (OSError, RuntimeError, ValueError):
-            return False
-        else:
-            if (current_start != starttime or current_group != process_group
-                    or current_session != session_id):
-                return False
-            leader_present = True
-        if leader_present:
             try:
-                leader_signaled = signal_owned_process(
-                    pid, starttime, uid, None, "*", (), signal.SIGKILL,
-                    process_group=True, expected_session_id=session_id,
-                )
-            except OSError as error:
-                if error.errno not in (errno.EINVAL, errno.ENOENT, errno.ESRCH):
+                _parent, current_group, current_session, current_start, _comm, _args = process_identity(pid)
+            except FileNotFoundError:
+                leader_present = False
+            except (OSError, RuntimeError, ValueError):
+                return False
+            else:
+                if (current_start != starttime or current_group != process_group
+                        or current_session != session_id):
                     return False
-                leader_signaled = False
-            except (RuntimeError, StopIteration, ValueError):
+                leader_present = True
+            if leader_present:
+                try:
+                    leader_fd = os.pidfd_open(pid, 0)
+                except ProcessLookupError:
+                    return False
+                # Revalidate through the pinned process identity before using
+                # its numeric PGID/SID as the group lifetime anchor.
+                try:
+                    _parent, current_group, current_session, current_start, _comm, _args = process_identity(pid)
+                    status = pathlib.Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+                    uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
+                    current_uid = int(uid_line.split()[1])
+                except (OSError, RuntimeError, ValueError, StopIteration):
+                    return False
+                if (current_start != starttime or current_group != process_group
+                        or current_session != session_id or current_uid != uid):
+                    return False
+            elif anchor != (pid, starttime):
+                # Without a live leader pidfd or an in-process pidfd retained
+                # from launch, the numeric PGID/SID may have been reused.
                 return False
-            if not leader_signaled and not signal_group_members(pid, session_id, uid):
-                return False
-        elif not signal_group_members(pid, session_id, uid):
-            return False
-        deadline = time.monotonic() + 3
-        while not process_group_empty(process_group) and time.monotonic() < deadline:
             if not signal_group_members(process_group, session_id, uid):
                 return False
-            time.sleep(0.05)
-        if not process_group_empty(process_group):
-            return False
+            deadline = time.monotonic() + 3
+            while not process_group_empty(process_group) and time.monotonic() < deadline:
+                if not signal_group_members(process_group, session_id, uid):
+                    return False
+                time.sleep(0.05)
+            if not process_group_empty(process_group):
+                return False
+        finally:
+            if leader_fd is not None:
+                os.close(leader_fd)
     return True
 
 
