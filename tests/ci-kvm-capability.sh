@@ -29,6 +29,14 @@ report_unhandled_failure() {
 }
 trap 'report_unhandled_failure "$?" "$LINENO"' ERR
 
+process_state() {
+  local stat_line rest
+  [[ -r "/proc/$1/stat" ]] || return 0
+  stat_line="$(<"/proc/$1/stat")"
+  rest="${stat_line##*) }"
+  printf '%s' "${rest%% *}"
+}
+
 [[ "$(uname -m)" == x86_64 ]] || fail 'runner architecture is not x86_64'
 [[ -e /dev/kvm || -L /dev/kvm ]] || fail '/dev/kvm is absent; TCG fallback is forbidden'
 [[ -c /dev/kvm ]] || fail '/dev/kvm exists but is not a character device'
@@ -54,19 +62,41 @@ tmp="$(mktemp -d "$tmp_root/lm-kvm-trial.XXXXXXXX")"
 qemu_pid=''
 cleanup() {
   local status=$?
+  local state=''
   if [[ "$status" == 130 || "$status" == 143 ]]; then
     printf 'KVM_TRIAL_FAIL: cancelled by signal (status %s); cleaning only the disposable guest\n' "$status" >&2
   fi
   if [[ -n "$qemu_pid" ]] && kill -0 "$qemu_pid" 2>/dev/null; then
     kill -TERM "$qemu_pid" 2>/dev/null || true
-    for _ in {1..50}; do
-      kill -0 "$qemu_pid" 2>/dev/null || break
+    for _ in {1..150}; do
+      state="$(process_state "$qemu_pid")"
+      [[ -z "$state" || "$state" == Z ]] && break
       sleep 0.1
     done
-    kill -KILL "$qemu_pid" 2>/dev/null || true
+    if [[ -n "$state" && "$state" != Z ]]; then
+      kill -KILL "$qemu_pid" 2>/dev/null || true
+      for _ in {1..20}; do
+        state="$(process_state "$qemu_pid")"
+        [[ -z "$state" || "$state" == Z ]] && break
+        sleep 0.1
+      done
+    fi
+    if [[ -n "$state" && "$state" != Z ]]; then
+      printf 'KVM_TRIAL_FAIL: test-owned QEMU wrapper did not stop; preserving diagnostics at %s\n' "$tmp" >&2
+      status=1
+    else
+      wait "$qemu_pid" 2>/dev/null || true
+      qemu_pid=''
+    fi
+  elif [[ -n "$qemu_pid" ]]; then
     wait "$qemu_pid" 2>/dev/null || true
+    qemu_pid=''
   fi
-  rm -rf -- "$tmp"
+  if [[ -z "$qemu_pid" ]]; then
+    rm -rf -- "$tmp"
+  else
+    printf 'KVM_TRIAL_FAIL: disposable VM artifacts retained at %s because process cleanup was not proved\n' "$tmp" >&2
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -267,7 +297,7 @@ pane_after="$(ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmu
 [[ "$pane_before" == "$pane_after" ]] || fail 'tmux reattachment did not preserve the live OpenCode pane identity'
 printf 'KVM_M2_INTEGRATION_PASS: real KVM guest, SSH, pinned OpenCode 2.2.5, protected config, tmux TUI process and persistent workspace fixture\n'
 
-provider_ips="$(python3 - <<'PY'
+provider_ips="$(timeout --signal=TERM --kill-after=2 12 python3 - <<'PY'
 import ipaddress, socket
 addresses = set()
 for host in ("api.openai.com", "auth.openai.com"):
@@ -291,15 +321,35 @@ for item in items:
 print(" ".join(shlex.quote(item) for item in items))
 PY
 )"
-ssh_guest "python3 -c 'import socket,sys; targets=[(ip,443) for ip in sys.argv[1:]]+[(\"10.0.2.100\",3128)]; connected=[target for target in targets if (lambda s: (s.settimeout(2),s.connect_ex(target)==0,s.close())[1])(socket.socket())]; assert not connected, \"restricted guest unexpectedly reached an upstream/proxy endpoint\"' $probe_argv"
-printf 'KVM_EGRESS_BOUNDARY_PASS: direct provider HTTPS and configured proxy TCP probes were unreachable in restricted QEMU mode\n'
+
+stop_owned_qemu() {
+  local state=''
+  [[ -n "$qemu_pid" ]] || return 0
+  kill -TERM "$qemu_pid" 2>/dev/null || true
+  for _ in {1..150}; do
+    state="$(process_state "$qemu_pid")"
+    [[ -z "$state" || "$state" == Z ]] && break
+    sleep 0.1
+  done
+  if [[ -n "$state" && "$state" != Z ]]; then
+    kill -KILL "$qemu_pid" 2>/dev/null || true
+    for _ in {1..20}; do
+      state="$(process_state "$qemu_pid")"
+      [[ -z "$state" || "$state" == Z ]] && break
+      sleep 0.1
+    done
+  fi
+  if [[ -n "$state" && "$state" != Z ]]; then
+    fail "test-owned QEMU wrapper $qemu_pid did not stop after bounded TERM/KILL; preserving its artifacts"
+  fi
+  wait "$qemu_pid" 2>/dev/null || true
+  qemu_pid=''
+}
 
 # Reboot the same writable overlay to prove guest-disk durability without
 # copying or reinitializing the VM disk. The in-memory tmux socket is expected
 # to be recreated; the session/workspace files remain on the persistent disk.
-kill -TERM "$qemu_pid" 2>/dev/null || true
-wait "$qemu_pid" 2>/dev/null || true
-qemu_pid=''
+stop_owned_qemu
 timeout --signal=TERM --kill-after=10 600 \
   qemu-system-x86_64 \
     -name little-mester-hosted-kvm-integration \
@@ -324,6 +374,8 @@ for _ in {1..300}; do
   sleep 1
 done
 [[ "$ready" == 1 ]] || fail 'persistent guest disk did not retain OpenCode/workspace state across reboot'
+ssh_guest "python3 -c 'import socket,sys; targets=[(ip,443) for ip in sys.argv[1:]]+[(\"10.0.2.100\",3128)]; connected=[target for target in targets if (lambda s: (s.settimeout(2),s.connect_ex(target)==0,s.close())[1])(socket.socket())]; assert not connected, \"restricted guest unexpectedly reached an upstream/proxy endpoint\"' $probe_argv"
+printf 'KVM_EGRESS_BOUNDARY_PASS: a bounded sample of resolved provider HTTPS addresses and the configured proxy TCP endpoint were unreachable in restricted QEMU mode\n'
 ssh_guest 'test "$(cat /home/mester/workspace/persisted.txt)" = persistent-fixture && test "$(cat /home/mester/.local/share/opencode/auth.json)" = "{\"provider\":\"synthetic-fixture\",\"marker\":\"preserve-auth-bytes\"}" && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && python3 -c '\''import sqlite3; db=sqlite3.connect("/home/mester/.local/share/opencode/opencode.db"); assert db.execute("select value from session_fixture").fetchone() == ("synthetic-session-history",); db.close()'\'''
 ssh_tty_guest 'cd /home/mester/workspace && timeout --signal=TERM --kill-after=2 8 /usr/local/bin/lm-opencode >/dev/null 2>&1 || test "$?" = 124'
 ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux has-session -t little-mester-opencode && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_dead}")" = 0 && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_current_path}")" = /home/mester/workspace'

@@ -340,6 +340,24 @@ PY
   [[ "$output" != *"nested"* ]]
 }
 
+@test "M2 hosted egress probe follows restricted QEMU reboot before OAuth simulation" {
+  run python3 - "$TEST_ROOT/tests/ci-kvm-capability.sh" <<'PY'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+restricted = text.index('"user,id=net0,restrict=on,hostfwd=')
+probe = text.index('KVM_EGRESS_BOUNDARY_PASS:')
+oauth = text.index('tests/ci-qemu-oauth-bridge.py')
+assert restricted < probe < oauth
+assert 'timeout --signal=TERM --kill-after=2 12 python3' in text
+assert 'connect_ex(target)==0' in text
+assert 'ssh-keyscan' not in text
+assert 'TMPDIR=/tmp python3 tests/ci-qemu-oauth-bridge.py' in text
+print('M2_RESTRICTED_EGRESS_ORDER_OK')
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'M2_RESTRICTED_EGRESS_ORDER_OK'* ]]
+}
+
 @test "browser auth allowance is bounded and reserves provider and container deadlines" {
   run vm_host_browser_auth_budget 1800
   [ "$status" -eq 0 ]

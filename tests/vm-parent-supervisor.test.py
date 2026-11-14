@@ -109,9 +109,11 @@ class SupervisorHandoffTests(unittest.TestCase):
         self.assertEqual(parent_supervisor._ssh_failure_label(
             b"guest-provided text", 255, timed_out=False,
             forward_connected=False), "SSH_TRANSPORT_OR_HANDSHAKE_FAILED")
-        self.assertEqual(parent_supervisor._ssh_failure_label(
-            b"", 45, timed_out=False,
-            forward_connected=True), "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED")
+        for status in (42, 43, 44, 45):
+            with self.subTest(status=status):
+                self.assertEqual(parent_supervisor._ssh_failure_label(
+                    b"", status, timed_out=False,
+                    forward_connected=True), "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED")
 
     def test_parent_pinned_known_hosts_accepts_exact_server_key_and_rejects_substitute(self):
         ssh = shutil.which("ssh")
@@ -2166,11 +2168,11 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
         with (mock.patch.object(parent_supervisor, "_protected_tool", return_value="/usr/bin/ssh"),
               mock.patch.object(parent_supervisor, "_read_private_port", return_value=23456),
               mock.patch.object(parent_supervisor, "_loopback_forward_accepts", return_value=True),
-              mock.patch.object(parent_supervisor, "_run_bounded_ssh_attempt", return_value=(45, b"", False)),
+              mock.patch.object(parent_supervisor, "_run_bounded_ssh_attempt", return_value=(43, b"", False)),
               mock.patch.object(parent_supervisor.time, "sleep") as sleep):
             with self.assertRaisesRegex(
                     parent_state.Refused,
-                    "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED.*no automatic migration performed"):
+                    "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED.*no automatic migration"):
                 parent_supervisor._wait_for_guest_readiness(
                     fake_state, None, {"target_path": "child-qemu.target.json"},
                     stop_requested=lambda: False, timeout_seconds=30)

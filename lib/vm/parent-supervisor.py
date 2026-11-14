@@ -515,9 +515,9 @@ def _ssh_failure_label(stderr: bytes, returncode: int, *, timed_out: bool,
         return "SSH_TRANSPORT_OR_HANDSHAKE_FAILED"
     return {
         41: "CLOUD_INIT_STATUS_FAILED",
-        42: "GUEST_TMUX_MISSING",
-        43: "GUEST_LAUNCHER_MISSING",
-        44: "GUEST_OPENCODE_VERSION_MISMATCH",
+        42: "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED",
+        43: "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED",
+        44: "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED",
         45: "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED",
     }.get(returncode, "GUEST_READINESS_COMMAND_FAILED")
 
@@ -592,12 +592,12 @@ def _wait_for_guest_readiness(state, home: str | None, qemu_transition: dict,
             return True
         last_failure = _ssh_failure_label(stderr, returncode, timed_out=timed_out,
                                           forward_connected=True)
-        if returncode == 45:
+        if returncode in (42, 43, 44, 45):
             raise state.Refused(
-                "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED: existing persistent guest does not "
-                "match this runtime; disk and seed preserved, no automatic migration performed. "
-                "Use the previously authorized runtime or obtain owner approval for a separately "
-                "provisioned M2 parent."
+                "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED: existing persistent guest is missing "
+                "or does not match the protected M2 session contract; disk, seed, SSH identity, "
+                "and credentials are preserved, with no automatic migration. Use the previously "
+                "authorized compatible runtime; no migration command is provided."
             )
         time.sleep(1)
     raise state.Refused(f"GUEST_READINESS_DEADLINE_EXPIRED last={last_failure} attempts={attempts}; "
