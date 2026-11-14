@@ -27,6 +27,10 @@ import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BRIDGE = ROOT / "lib/vm/browser-auth-session.py"
+PROCESS_SIGNAL_PATH = pathlib.Path(__file__).with_name("ci-process-signal.py")
+PROCESS_SIGNAL_SPEC = importlib.util.spec_from_file_location("ci_process_signal", PROCESS_SIGNAL_PATH)
+PROCESS_SIGNAL = importlib.util.module_from_spec(PROCESS_SIGNAL_SPEC)
+PROCESS_SIGNAL_SPEC.loader.exec_module(PROCESS_SIGNAL)
 SPEC = importlib.util.spec_from_file_location("browser_auth_contract", BRIDGE)
 AUTH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUTH)
@@ -166,6 +170,7 @@ class Session:
             "--output-limit", "65536", "--persistent-parent",
         ]
         self.pid = -1
+        self.bridge_pgid = -1
         self.master_fd = -1
         self.output = bytearray()
         self.exit_status: int | None = None
@@ -180,6 +185,7 @@ class Session:
                 # Publish both owned handles before a pending cancellation can
                 # run the handler and enter Session.close().
                 self.pid, self.master_fd = child_pid, master_fd
+                self.bridge_pgid = child_pid
                 try:
                     write_bridge_identity(self.bridge_identity, child_pid)
                 except BaseException:
@@ -309,6 +315,25 @@ class Session:
                 self.interrupt()
             except Exception as error:
                 failures.append(f"bounded auth-process stop failed ({error})")
+            if self.bridge_pgid > 0 and process_group_has_live_members(self.bridge_pgid):
+                try:
+                    group_stopped = PROCESS_SIGNAL.terminate_marked_groups(self.root)
+                except Exception as error:
+                    group_stopped = False
+                    failures.append(f"PTY bridge descendant cleanup failed ({error})")
+                if not group_stopped or process_group_has_live_members(self.bridge_pgid):
+                    failures.append(
+                        f"PTY bridge process group {self.bridge_pgid} was not proved empty; "
+                        f"artifacts retained at {self.root}"
+                    )
+                else:
+                    # A clean-looking bridge proof is insufficient if a
+                    # descendant survived it; contain the process but keep
+                    # the case failed and retain its evidence.
+                    failures.append(
+                        f"PTY bridge process group {self.bridge_pgid} had surviving descendants; "
+                        f"they were stopped and evidence is retained at {self.root}"
+                    )
             if self.master_fd >= 0:
                 try:
                     os.close(self.master_fd)
@@ -334,7 +359,7 @@ class Session:
                 proof_complete = True
             except Exception as error:
                 failures.append(f"cleanup proof failed ({error})")
-            if proof_complete:
+            if proof_complete and not failures:
                 # Keep the evidence root as a shell-visible cleanup marker
                 # until the separately located short SSH control directory is gone.
                 shutil.rmtree(self.control_dir)

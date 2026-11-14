@@ -72,13 +72,13 @@ class HarnessSignalTests(unittest.TestCase):
         os.close(write_fd)
         try:
             self.assertEqual(os.read(read_fd, 5), b"ready")
-            parent, process_group, _session, starttime, comm, _cmdline = PROCESS.process_identity(child)
+            parent, process_group, session_id, starttime, comm, _cmdline = PROCESS.process_identity(child)
             uid = os.getuid()
             self.assertEqual(parent, os.getpid())
             self.assertEqual(process_group, child)
             self.assertFalse(PROCESS.signal_owned_process(
                 child, starttime + 1, uid, parent, comm, (), signal.SIGTERM,
-                process_group=True,
+                process_group=True, expected_session_id=session_id,
             ))
             waited, _status = os.waitpid(child, os.WNOHANG)
             self.assertEqual(waited, 0, "identity mismatch must not signal the live child")
@@ -172,6 +172,7 @@ class HarnessSignalTests(unittest.TestCase):
             session = HARNESS.Session.__new__(HARNESS.Session)
             session.case = "signal-cleanup"
             session.pid = -1
+            session.bridge_pgid = -1
             session.master_fd = -1
             session.exit_status = 0
             session.forced_kill = False
@@ -249,6 +250,7 @@ class HarnessSignalTests(unittest.TestCase):
             session = HARNESS.Session.__new__(HARNESS.Session)
             session.case = "missing-proof"
             session.pid = -1
+            session.bridge_pgid = -1
             session.master_fd = -1
             session.exit_status = 0
             session.forced_kill = False
@@ -263,9 +265,68 @@ class HarnessSignalTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_normal_close_stops_orphaned_group_member_and_retains_evidence(self):
+        read_fd, write_fd = os.pipe()
+        leader = os.fork()
+        if leader == 0:
+            os.close(read_fd)
+            os.setsid()
+            descendant = os.fork()
+            if descendant == 0:
+                os.close(write_fd)
+                while True:
+                    signal.pause()
+            os.write(write_fd, str(descendant).encode("ascii"))
+            while True:
+                signal.pause()
+        os.close(write_fd)
+        try:
+            descendant = int(os.read(read_fd, 32))
+            with tempfile.TemporaryDirectory(prefix="oauth-normal-close-group-") as directory:
+                root = pathlib.Path(directory) / "session"
+                root.mkdir(mode=0o700)
+                HARNESS.write_bridge_identity(root / "bridge-process.json", leader)
+                proof = root / "proof.json"
+                proof.write_text(json.dumps({
+                    "ssh_stopped": True,
+                    "control_socket_absent": True,
+                    "listener_verified_closed": True,
+                    "cleanup_complete": True,
+                }))
+                session = HARNESS.Session.__new__(HARNESS.Session)
+                session.case = "orphan-descendant"
+                session.pid = -1
+                session.bridge_pgid = leader
+                session.master_fd = -1
+                session.exit_status = 0
+                session.forced_kill = False
+                session.closed = False
+                session.root = root
+                session.proof = proof
+                session.control_dir = pathlib.Path(directory) / "control-dir"
+                session.control_dir.mkdir()
+                session.interrupt = lambda: None
+                os.kill(leader, signal.SIGKILL)
+                os.waitpid(leader, 0)
+                with self.assertRaisesRegex(RuntimeError, "surviving descendants"):
+                    session.close()
+                self.assertTrue(root.is_dir(), "unexpected survivor must retain its evidence")
+                self.assertTrue(PROCESS.process_group_empty(leader))
+        finally:
+            os.close(read_fd)
+            try:
+                os.killpg(leader, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(leader, 0)
+            except ChildProcessError:
+                pass
+
     def test_signal_during_pty_fork_is_deferred_until_handles_are_published(self):
         session = HARNESS.Session.__new__(HARNESS.Session)
         session.pid = -1
+        session.bridge_pgid = -1
         session.master_fd = -1
         session.command = ["/unused"]
         session.bridge_identity = pathlib.Path("/unused/bridge-process.json")
@@ -282,6 +343,7 @@ class HarnessSignalTests(unittest.TestCase):
                     session.start()
             self.assertEqual(session.pid, 43210)
             self.assertEqual(session.master_fd, 73)
+            self.assertEqual(session.bridge_pgid, 43210)
         finally:
             HARNESS.restore_signal_handlers(previous)
 
@@ -301,6 +363,7 @@ class HarnessSignalTests(unittest.TestCase):
             session = HARNESS.Session.__new__(HARNESS.Session)
             session.case = "pty-read-error"
             session.pid = child
+            session.bridge_pgid = child
             session.exit_status = None
             session.forced_kill = False
             session.wait = mock.Mock(side_effect=OSError("synthetic PTY capture failure"))
