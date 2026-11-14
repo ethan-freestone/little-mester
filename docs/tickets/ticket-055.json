@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-14T09:57:43.468Z",
+  "updated_at": "2026-11-14T10:02:28.094Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -115,6 +115,11 @@
       "timestamp": "2026-11-14T09:57:43.468Z",
       "author": "cli",
       "body": "Candidate 1 local CI reliability evidence (2026-11-14): old tests/ci-kvm-launch.test.py and helper from ce46af3 reproduced TimeoutExpired in 2/50 repetitions inside an Ubuntu 24.04 container constrained to 2 CPUs (Bash 5.2.21, Python 3.12.3; container DNS prevented apt, so host Python plus stdlib/libexpat were mounted). No QEMU ran. Updated regression uses FIFO event synchronization at the child pre-exec / parent pre-PID-publication window, records monotonic event/PID/deferred-cancel state, checks child reaping, and emits bounded procfs state/wchan/signal-mask diagnostics on timeout; fixed current harness passed 50/50 in the same container. These are CI reliability tests only, not guest/owner acceptance; all #55 A1-A5 remain pending. Exact-SHA hosted Persistent parent (Python) run still required before Candidate 2."
+    },
+    {
+      "timestamp": "2026-11-14T10:02:28.093Z",
+      "author": "cli",
+      "body": "Candidate 1 exact-candidate review and verification (2026-11-14): Sol Medium reviewed SHA 11986a3 and found one regression-test gap: cleanup could pass by reaping an unpublished fallback PID. Fixed in 6d8e3f8834d91abdaff68d968d8556e785a9548a by asserting the PID captured before publication equals the caller-visible published PID and the reaped PID; capped failure process diagnostics to 32 records and 80-character command/wchan fields, excluding argv tails and environment. Sol Medium re-reviewed exact SHA 6d8e3f8: PASS. Local targeted suite and parent-python suites pass; Bats 106/106; syntax/ShellCheck pass. Ordinary Ubuntu 24.04 2-CPU container baseline old regression: 2/50 failures; final regression+launcher: 50/50 pass (Bash 5.2.21, Python 3.12.3; host Python mounted because Docker network DNS cannot reach Ubuntu package mirrors). Hosted Persistent parent (Python) exact-SHA green is still REQUIRED before Candidate 2. No real guest/owner acceptance; A1-A5 remain pending."
     }
   ]
 }
