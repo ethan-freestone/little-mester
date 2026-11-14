@@ -37,6 +37,79 @@ process_state() {
   printf '%s' "${rest%% *}"
 }
 
+qemu_child_matches() {
+  local pid=$1 comm
+  [[ -r "/proc/$pid/comm" && -r "/proc/$pid/cmdline" ]] || return 1
+  comm="$(</proc/"$pid"/comm)"
+  [[ "$comm" == qemu-system-x86 ]] \
+    && grep -azFq -- 'little-mester-hosted-kvm-integration' "/proc/$pid/cmdline" \
+    && grep -azFq -- "$overlay" "/proc/$pid/cmdline"
+}
+
+find_qemu_child() {
+  local child found=''
+  [[ -r "/proc/$qemu_pid/task/$qemu_pid/children" ]] || return 1
+  for child in $(</proc/"$qemu_pid"/task/"$qemu_pid"/children); do
+    qemu_child_matches "$child" || continue
+    [[ -z "$found" ]] || return 1
+    found="$child"
+  done
+  [[ -n "$found" ]] || return 1
+  printf '%s\n' "$found"
+}
+
+qemu_child_state() {
+  [[ -n "$qemu_guest_pid" ]] || return 0
+  qemu_child_matches "$qemu_guest_pid" || return 0
+  process_state "$qemu_guest_pid"
+}
+
+stop_owned_qemu() {
+  local wrapper_state='' guest_state=''
+  [[ -n "$qemu_pid" ]] || return 0
+  if [[ -z "$qemu_guest_pid" ]]; then
+    qemu_guest_pid="$(find_qemu_child 2>/dev/null || true)"
+  fi
+  kill -TERM "$qemu_pid" 2>/dev/null || true
+  for _ in {1..150}; do
+    if [[ -z "$qemu_guest_pid" ]]; then
+      qemu_guest_pid="$(find_qemu_child 2>/dev/null || true)"
+    fi
+    if [[ -n "$qemu_guest_pid" ]] && qemu_child_matches "$qemu_guest_pid"; then
+      kill -TERM "$qemu_guest_pid" 2>/dev/null || true
+    fi
+    wrapper_state="$(process_state "$qemu_pid")"
+    guest_state="$(qemu_child_state)"
+    [[ ( -z "$wrapper_state" || "$wrapper_state" == Z ) \
+       && ( -z "$guest_state" || "$guest_state" == Z ) ]] && break
+    sleep 0.1
+  done
+  if [[ ( -n "$wrapper_state" && "$wrapper_state" != Z ) \
+        || ( -n "$guest_state" && "$guest_state" != Z ) ]]; then
+    kill -KILL "$qemu_pid" 2>/dev/null || true
+    for _ in {1..20}; do
+      if [[ -z "$qemu_guest_pid" ]]; then
+        qemu_guest_pid="$(find_qemu_child 2>/dev/null || true)"
+      fi
+      if [[ -n "$qemu_guest_pid" ]] && qemu_child_matches "$qemu_guest_pid"; then
+        kill -KILL "$qemu_guest_pid" 2>/dev/null || true
+      fi
+      wrapper_state="$(process_state "$qemu_pid")"
+      guest_state="$(qemu_child_state)"
+      [[ ( -z "$wrapper_state" || "$wrapper_state" == Z ) \
+         && ( -z "$guest_state" || "$guest_state" == Z ) ]] && break
+      sleep 0.1
+    done
+  fi
+  if [[ ( -n "$wrapper_state" && "$wrapper_state" != Z ) \
+        || ( -n "$guest_state" && "$guest_state" != Z ) ]]; then
+    return 1
+  fi
+  wait "$qemu_pid" 2>/dev/null || true
+  qemu_pid=''
+  qemu_guest_pid=''
+}
+
 [[ "$(uname -m)" == x86_64 ]] || fail 'runner architecture is not x86_64'
 [[ -e /dev/kvm || -L /dev/kvm ]] || fail '/dev/kvm is absent; TCG fallback is forbidden'
 [[ -c /dev/kvm ]] || fail '/dev/kvm exists but is not a character device'
@@ -60,37 +133,15 @@ tmp_root="${RUNNER_TEMP:-/tmp/opencode}"
 mkdir -p "$tmp_root"
 tmp="$(mktemp -d "$tmp_root/lm-kvm-trial.XXXXXXXX")"
 qemu_pid=''
+qemu_guest_pid=''
 cleanup() {
   local status=$?
-  local state=''
   if [[ "$status" == 130 || "$status" == 143 ]]; then
     printf 'KVM_TRIAL_FAIL: cancelled by signal (status %s); cleaning only the disposable guest\n' "$status" >&2
   fi
-  if [[ -n "$qemu_pid" ]] && kill -0 "$qemu_pid" 2>/dev/null; then
-    kill -TERM "$qemu_pid" 2>/dev/null || true
-    for _ in {1..150}; do
-      state="$(process_state "$qemu_pid")"
-      [[ -z "$state" || "$state" == Z ]] && break
-      sleep 0.1
-    done
-    if [[ -n "$state" && "$state" != Z ]]; then
-      kill -KILL "$qemu_pid" 2>/dev/null || true
-      for _ in {1..20}; do
-        state="$(process_state "$qemu_pid")"
-        [[ -z "$state" || "$state" == Z ]] && break
-        sleep 0.1
-      done
-    fi
-    if [[ -n "$state" && "$state" != Z ]]; then
-      printf 'KVM_TRIAL_FAIL: test-owned QEMU wrapper did not stop; preserving diagnostics at %s\n' "$tmp" >&2
-      status=1
-    else
-      wait "$qemu_pid" 2>/dev/null || true
-      qemu_pid=''
-    fi
-  elif [[ -n "$qemu_pid" ]]; then
-    wait "$qemu_pid" 2>/dev/null || true
-    qemu_pid=''
+  if [[ -n "$qemu_pid" ]] && ! stop_owned_qemu; then
+    printf 'KVM_TRIAL_FAIL: test-owned QEMU/wrapper stop was not proved; preserving diagnostics at %s\n' "$tmp" >&2
+    status=1
   fi
   if [[ -z "$qemu_pid" ]]; then
     rm -rf -- "$tmp"
@@ -200,12 +251,23 @@ ssh_args=(
 )
 
 ready=0
-for _ in {1..1500}; do
-  kill -0 "$qemu_pid" 2>/dev/null || fail 'QEMU exited before guest readiness'
+readiness_deadline=$((SECONDS + 1500))
+while (( SECONDS < readiness_deadline )); do
+  wrapper_state="$(process_state "$qemu_pid")"
+  [[ -n "$wrapper_state" && "$wrapper_state" != Z ]] || fail 'QEMU timeout wrapper exited before guest readiness'
+  if [[ -z "$qemu_guest_pid" ]]; then
+    qemu_guest_pid="$(find_qemu_child 2>/dev/null || true)"
+  elif ! qemu_child_matches "$qemu_guest_pid"; then
+    fail 'test-owned QEMU process exited or changed identity before guest readiness'
+  fi
+  remaining=$((readiness_deadline - SECONDS))
+  (( remaining > 0 )) || break
+  attempt_timeout=8
+  (( remaining < attempt_timeout )) && attempt_timeout=$remaining
   # The single-quoted payload is intentionally interpreted only by the guest shell.
   # shellcheck disable=SC2016
   if [[ -s "$known_hosts" ]]; then
-    if timeout --signal=TERM --kill-after=2 8 ssh "${ssh_args[@]}" \
+    if timeout --signal=TERM --kill-after=1 "$attempt_timeout" ssh "${ssh_args[@]}" \
         'state=$(cloud-init status --long 2>&1 || true); printf "%s\n" "$state"; if printf "%s\n" "$state" | grep -Eq "^(status|extended_status): error"; then exit 42; fi; test -f /var/lib/cloud/instance/boot-finished && test "$(cat /var/tmp/lm-kvm-trial-ready)" = ready' \
         >"$tmp/readiness.log" 2>&1; then
       ready=1
@@ -215,7 +277,8 @@ for _ in {1..1500}; do
       fail 'cloud-init reported an error before guest readiness'
     fi
   fi
-  sleep 1
+  remaining=$((readiness_deadline - SECONDS))
+  (( remaining > 0 )) && sleep 1
 done
 [[ "$ready" == 1 ]] || fail 'pinned QEMU guest did not reach bounded cloud-init/SSH readiness'
 printf 'KVM_TRIAL_PASS: pinned guest booted with accel=kvm and passed cloud-init readiness\n'
@@ -322,34 +385,10 @@ print(" ".join(shlex.quote(item) for item in items))
 PY
 )"
 
-stop_owned_qemu() {
-  local state=''
-  [[ -n "$qemu_pid" ]] || return 0
-  kill -TERM "$qemu_pid" 2>/dev/null || true
-  for _ in {1..150}; do
-    state="$(process_state "$qemu_pid")"
-    [[ -z "$state" || "$state" == Z ]] && break
-    sleep 0.1
-  done
-  if [[ -n "$state" && "$state" != Z ]]; then
-    kill -KILL "$qemu_pid" 2>/dev/null || true
-    for _ in {1..20}; do
-      state="$(process_state "$qemu_pid")"
-      [[ -z "$state" || "$state" == Z ]] && break
-      sleep 0.1
-    done
-  fi
-  if [[ -n "$state" && "$state" != Z ]]; then
-    fail "test-owned QEMU wrapper $qemu_pid did not stop after bounded TERM/KILL; preserving its artifacts"
-  fi
-  wait "$qemu_pid" 2>/dev/null || true
-  qemu_pid=''
-}
-
 # Reboot the same writable overlay to prove guest-disk durability without
 # copying or reinitializing the VM disk. The in-memory tmux socket is expected
 # to be recreated; the session/workspace files remain on the persistent disk.
-stop_owned_qemu
+stop_owned_qemu || fail 'test-owned QEMU process tree did not stop; preserving its artifacts'
 timeout --signal=TERM --kill-after=10 600 \
   qemu-system-x86_64 \
     -name little-mester-hosted-kvm-integration \
@@ -361,17 +400,30 @@ timeout --signal=TERM --kill-after=10 600 \
     -netdev "user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:$port-:22" \
     -device virtio-net-pci,netdev=net0 &
 qemu_pid=$!
+qemu_guest_pid=''
 ready=0
-for _ in {1..300}; do
-  kill -0 "$qemu_pid" 2>/dev/null || fail 'QEMU exited during persistent-disk reboot'
+readiness_deadline=$((SECONDS + 300))
+while (( SECONDS < readiness_deadline )); do
+  wrapper_state="$(process_state "$qemu_pid")"
+  [[ -n "$wrapper_state" && "$wrapper_state" != Z ]] || fail 'QEMU timeout wrapper exited during persistent-disk reboot'
+  if [[ -z "$qemu_guest_pid" ]]; then
+    qemu_guest_pid="$(find_qemu_child 2>/dev/null || true)"
+  elif ! qemu_child_matches "$qemu_guest_pid"; then
+    fail 'test-owned QEMU process exited or changed identity during persistent-disk reboot'
+  fi
+  remaining=$((readiness_deadline - SECONDS))
+  (( remaining > 0 )) || break
+  attempt_timeout=8
+  (( remaining < attempt_timeout )) && attempt_timeout=$remaining
 # shellcheck disable=SC2016
-  if timeout --signal=TERM --kill-after=2 8 ssh "${ssh_args[@]}" \
+  if timeout --signal=TERM --kill-after=1 "$attempt_timeout" ssh "${ssh_args[@]}" \
       'test "$(cat /home/mester/workspace/persisted.txt)" = persistent-fixture && test "$(/usr/local/bin/opencode --version)" = "opencode v2.2.5"' \
       >/dev/null 2>&1; then
     ready=1
     break
   fi
-  sleep 1
+  remaining=$((readiness_deadline - SECONDS))
+  (( remaining > 0 )) && sleep 1
 done
 [[ "$ready" == 1 ]] || fail 'persistent guest disk did not retain OpenCode/workspace state across reboot'
 ssh_guest "python3 -c 'import socket,sys; targets=[(ip,443) for ip in sys.argv[1:]]+[(\"10.0.2.100\",3128)]; connected=[target for target in targets if (lambda s: (s.settimeout(2),s.connect_ex(target)==0,s.close())[1])(socket.socket())]; assert not connected, \"restricted guest unexpectedly reached an upstream/proxy endpoint\"' $probe_argv"

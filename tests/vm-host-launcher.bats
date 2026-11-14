@@ -352,6 +352,9 @@ assert 'timeout --signal=TERM --kill-after=2 12 python3' in text
 assert 'connect_ex(target)==0' in text
 assert 'ssh-keyscan' not in text
 assert 'TMPDIR=/tmp python3 tests/ci-qemu-oauth-bridge.py' in text
+assert 'readiness_deadline=$((SECONDS + 300))' in text
+assert 'qemu_child_matches "$qemu_guest_pid"' in text
+assert 'stop_owned_qemu || fail' in text
 print('M2_RESTRICTED_EGRESS_ORDER_OK')
 PY
   [ "$status" -eq 0 ]

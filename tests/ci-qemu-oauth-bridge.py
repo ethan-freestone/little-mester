@@ -31,6 +31,28 @@ AUTH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUTH)
 
 
+class HarnessCancelled(Exception):
+    def __init__(self, signum: int):
+        super().__init__(f"OAuth harness cancelled by signal {signum}")
+        self.signum = signum
+
+
+def _raise_on_signal(signum, _frame):
+    raise HarnessCancelled(signum)
+
+
+def install_signal_handlers() -> dict[int, object]:
+    previous = {}
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous[signum] = signal.signal(signum, _raise_on_signal)
+    return previous
+
+
+def restore_signal_handlers(previous: dict[int, object]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
 def parse_live_url(data: bytes) -> str | None:
     prefix = AUTH.AUTHORIZATION_URL_PREFIX
     start = data.find(prefix)
@@ -95,6 +117,7 @@ class Session:
         self.output = bytearray()
         self.exit_status: int | None = None
         self.forced_kill = False
+        self.closed = False
 
     def start(self) -> str:
         self.pid, self.master_fd = pty.fork()
@@ -153,24 +176,57 @@ class Session:
             if self.pid > 0:
                 self.forced_kill = True
                 os.kill(self.pid, signal.SIGKILL)
-                _, status = os.waitpid(self.pid, 0)
-                self.exit_status = os.waitstatus_to_exitcode(status)
-                self.pid = -1
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    waited, status = os.waitpid(self.pid, os.WNOHANG)
+                    if waited:
+                        self.exit_status = os.waitstatus_to_exitcode(status)
+                        self.pid = -1
+                        break
+                    time.sleep(0.05)
+                if self.pid > 0:
+                    raise RuntimeError(f"{self.case}: auth bridge was not reaped after bounded SIGKILL")
 
     def close(self) -> None:
-        self.interrupt()
-        if self.master_fd >= 0:
-            os.close(self.master_fd)
-            self.master_fd = -1
-        if not self.proof.is_file():
-            raise RuntimeError(f"{self.case}: auth bridge did not publish cleanup proof")
-        proof = __import__("json").loads(self.proof.read_text(encoding="utf-8"))
-        if (not proof.get("ssh_stopped") or not proof.get("control_socket_absent")
-                or not proof.get("listener_verified_closed") or not proof.get("cleanup_complete")):
-            raise RuntimeError(f"{self.case}: complete SSH/listener/control-socket cleanup was not proved")
-        if self.exit_status is None or self.forced_kill:
-            raise RuntimeError(f"{self.case}: auth process did not exit cleanly after its bounded interruption")
-        self.temp.cleanup()
+        if self.closed:
+            return
+        previous = {}
+        if __import__("threading").current_thread() is __import__("threading").main_thread():
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous[signum] = signal.signal(signum, signal.SIG_IGN)
+        failures = []
+        proof_complete = False
+        try:
+            try:
+                self.interrupt()
+            except Exception as error:
+                failures.append(f"bounded auth-process stop failed ({error})")
+            if self.master_fd >= 0:
+                try:
+                    os.close(self.master_fd)
+                except OSError as error:
+                    failures.append(f"PTY close failed ({error})")
+                self.master_fd = -1
+            try:
+                if not self.proof.is_file():
+                    raise RuntimeError("auth bridge did not publish cleanup proof")
+                proof = __import__("json").loads(self.proof.read_text(encoding="utf-8"))
+                if (not proof.get("ssh_stopped") or not proof.get("control_socket_absent")
+                        or not proof.get("listener_verified_closed") or not proof.get("cleanup_complete")):
+                    raise RuntimeError("SSH/listener/control-socket cleanup was not proved")
+                if self.exit_status is None or self.forced_kill:
+                    raise RuntimeError("auth process did not exit cleanly after bounded interruption")
+                proof_complete = True
+            except Exception as error:
+                failures.append(f"cleanup proof failed ({error})")
+            if proof_complete:
+                self.temp.cleanup()
+                self.closed = True
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+        if failures:
+            raise RuntimeError(f"{self.case}: " + "; ".join(failures))
 
 
 def run_case(args, case: str) -> None:
@@ -235,9 +291,17 @@ def main() -> int:
     # The pinned 2.2.5 callback handler does not guarantee duplicate-callback
     # rejection; replay protection is exercised by the deterministic bridge
     # simulator in vm-browser-auth.test.py instead.
-    for case in ("success", "mismatched-state", "denial", "expiration", "malformed", "interruption"):
-        run_case(args, case)
-        print(f"QEMU_OAUTH_SIMULATOR_PASS: {case} (synthetic; no token/provider/model access)")
+    previous = install_signal_handlers()
+    try:
+        for case in ("success", "mismatched-state", "denial", "expiration", "malformed", "interruption"):
+            run_case(args, case)
+            print(f"QEMU_OAUTH_SIMULATOR_PASS: {case} (synthetic; no token/provider/model access)")
+    except HarnessCancelled as cancelled:
+        print(f"QEMU_OAUTH_SIMULATOR_CANCELLED: cleanup attempted after signal {cancelled.signum}",
+              file=__import__("sys").stderr)
+        return 128 + cancelled.signum
+    finally:
+        restore_signal_handlers(previous)
     print("QEMU_OAUTH_UPSTREAM_BOUNDARY: token exchange, real identity provider and model response NOT_RUN")
     return 0
 
