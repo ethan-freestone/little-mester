@@ -20,7 +20,7 @@ if [[ "${XDG_RUNTIME_DIR-}" == "$desktop_runtime" \
   fi
 fi
 
-if [[ "${1-}" == parent && ( "${2-}" == ssh || "${2-}" == tui ) \
+if [[ "${1-}" == parent && ( "${2-}" == ssh || "${2-}" == auth || "${2-}" == tui ) \
    && "${TERM-}" =~ ^[A-Za-z0-9_.+-]{1,64}$ ]] \
    && /usr/bin/infocmp -1 "$TERM" 2>/dev/null \
      | /usr/bin/grep -Eq '^[[:space:]]*clear='; then
@@ -72,6 +72,7 @@ dependencies = [
     root / "lib/vm/browser-auth-session.py",
     root / "lib/vm/virtiofs-socket.py",
     root / "lib/vm/guest-user-dirs.py",
+    root / "lib/vm/parent-session-contract.py",
     root / "lib/vm/parent-state.py",
     root / "lib/vm/parent-launcher.py",
     root / "lib/vm/parent-gate.py",
@@ -182,7 +183,7 @@ PY
 export VM_HOST_SCRIPT_ROOT="$root"
 command="${1:-}"
 [[ -n "$command" ]] || {
-  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent up [--capacity-gib N] | parent status [--json] | parent ssh | parent tui | parent stop | parent recover [--dry-run|--execute] [--json] | parent reconcile [--dry-run|--execute] [--json]\n' >&2
+  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent up [--capacity-gib N] | parent status [--json] | parent ssh | parent auth | parent tui | parent stop | parent recover [--dry-run|--execute] [--json] | parent reconcile [--dry-run|--execute] [--json]\n' >&2
   exit 2
 }
 shift
@@ -248,6 +249,11 @@ case "$command" in
         }
         exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C "TERM=$TERM" \
           /usr/bin/python3 -I "$root/lib/vm/parent-state.py" ssh "$@"
+        ;;
+      auth)
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          "TERM=${TERM:-xterm-256color}" "${desktop_env[@]}" \
+          /usr/bin/python3 -I "$root/lib/vm/parent-state.py" auth "$@"
         ;;
       tui)
         [[ "${LM_VM_TERM_VALIDATED-}" == 1

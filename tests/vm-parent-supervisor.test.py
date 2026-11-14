@@ -538,7 +538,7 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 "lib/vm/host-launcher.sh", "lib/vm/cloud-init.sh", "lib/vm/proxy.py",
                 "lib/vm/bounded-log.py", "lib/vm/executable-policy.py",
                 "lib/vm/browser-auth-session.py", "lib/vm/virtiofs-socket.py",
-                "lib/vm/guest-user-dirs.py", "lib/vm/parent-state.py",
+                "lib/vm/guest-user-dirs.py", "lib/vm/parent-session-contract.py", "lib/vm/parent-state.py",
                 "lib/vm/parent-launcher.py", "lib/vm/parent-gate.py",
                 "lib/vm/parent-supervisor.py", "lib/vm/parent-qemu.py",
                 "lib/vm/parent-provision.py", "scripts/parent-readonly-safety-gate.py",
@@ -1192,6 +1192,8 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 profile = protected["/etc/profile.d/little-mester-opencode.sh"]["content"]
                 launcher = protected["/usr/local/bin/lm-opencode"]["content"]
                 runner = protected["/usr/local/libexec/lm-opencode"]["content"]
+                auth_launcher = protected["/usr/local/libexec/lm-opencode-auth"]["content"]
+                guest_helper = protected["/usr/local/libexec/lm-guest-user-dirs.py"]["content"]
                 self.assertIn("OPENCODE_DISABLE_PROJECT_CONFIG=1", profile)
                 self.assertIn("little-mester-exit-confirm", profile)
                 self.assertIn("tmux new-session -A -s little-mester-opencode", launcher)
@@ -1201,13 +1203,17 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 self.assertIn("HTTPS_PROXY=http://10.0.2.100:3128", runner)
                 self.assertIn("OPENCODE_DISABLE_PROJECT_CONFIG=1", runner)
                 self.assertIn("exec /usr/local/bin/opencode", runner)
+                self.assertIn("prepare-auth", auth_launcher)
+                self.assertIn("auth login openai --method chatgpt-browser", auth_launcher)
+                self.assertIn("TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux", launcher)
+                self.assertEqual(guest_helper.encode(), (ROOT / "lib/vm/guest-user-dirs.py").read_bytes())
                 cli_export = next(line for line in profile.splitlines()
                                   if line.startswith("export OPENCODE_CLI_CONFIG_CONTENT="))
                 cli_content = json.loads(cli_export.split("=", 1)[1].strip("'"))
                 self.assertEqual(cli_content["keybinds"], {"app.exit": "none", "prompt.clear": "none"})
                 self.assertIn("test \"$(opencode --version)\" = 'opencode v2.2.5'",
                               config["runcmd"][0][-1])
-                for script in (launcher, runner):
+                for script in (launcher, runner, auth_launcher):
                     self.assertEqual(real_run(["/bin/sh", "-n"], input=script.encode(),
                                               check=False).returncode, 0)
                 self.assertEqual(config["packages"], ["tmux", "nodejs", "npm"])

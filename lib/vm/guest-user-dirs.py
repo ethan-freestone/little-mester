@@ -211,6 +211,92 @@ def prepare_rootless_config(home_fd: int, uid: int, gid: int) -> None:
         os.close(docker_dir_fd)
 
 
+def prepare_auth_store_at(home_fd: int, uid: int, gid: int) -> None:
+    """Privatize the fixed OpenCode credential store without rewriting data."""
+    if os.geteuid() != uid or os.getegid() != gid:
+        raise Refusal("credential privacy repair must run as guest user mester")
+    home_info = os.fstat(home_fd)
+    if (home_info.st_uid, home_info.st_gid) != (uid, gid):
+        raise Refusal("/home/mester ownership is unsafe for credential privacy repair")
+
+    parent_fd = os.dup(home_fd)
+    try:
+        for component in (".local", "share", "opencode"):
+            try:
+                before = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=parent_fd)
+                except FileExistsError:
+                    pass
+                before = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            except OSError as error:
+                raise Refusal(f"credential directory {component} cannot be inspected") from error
+            if (not stat.S_ISDIR(before.st_mode)
+                    or (before.st_uid, before.st_gid) != (uid, gid)):
+                    raise Refusal(f"credential directory {component} has unsafe type or ownership")
+            try:
+                child_fd = os.open(component, DIR_FLAGS, dir_fd=parent_fd)
+            except OSError as error:
+                raise Refusal(f"credential directory {component} is missing or unsafe") from error
+            try:
+                opened = os.fstat(child_fd)
+                if ((before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+                        or (opened.st_uid, opened.st_gid) != (uid, gid)):
+                    raise Refusal(f"credential directory {component} changed while opening")
+                os.fchmod(child_fd, 0o700)
+            except BaseException:
+                os.close(child_fd)
+                raise
+            os.close(parent_fd)
+            parent_fd = child_fd
+
+        try:
+            tmux_info = os.stat("tmux", dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            try:
+                os.mkdir("tmux", 0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            tmux_info = os.stat("tmux", dir_fd=parent_fd, follow_symlinks=False)
+        if (not stat.S_ISDIR(tmux_info.st_mode)
+                or (tmux_info.st_uid, tmux_info.st_gid) != (uid, gid)):
+            raise Refusal("private tmux socket directory has unsafe type or ownership")
+        tmux_fd = os.open("tmux", DIR_FLAGS, dir_fd=parent_fd)
+        tmux_opened = os.fstat(tmux_fd)
+        if ((tmux_info.st_dev, tmux_info.st_ino) != (tmux_opened.st_dev, tmux_opened.st_ino)
+                or (tmux_opened.st_uid, tmux_opened.st_gid) != (uid, gid)):
+            os.close(tmux_fd)
+            raise Refusal("private tmux socket directory changed while opening")
+        os.fchmod(tmux_fd, 0o700)
+        os.close(tmux_fd)
+
+        # OpenCode 2.2.5 stores provider credentials in its SQLite data DB;
+        # auth.json remains a legacy migration input. Tighten the DB and all
+        # SQLite sidecars without parsing, truncating, or rewriting bytes.
+        for name in ("opencode.db", "opencode.db-wal", "opencode.db-shm",
+                     "opencode.db-journal", "auth.json"):
+            try:
+                credential_fd = os.open(
+                    name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=parent_fd,
+                )
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise Refusal(f"OpenCode credential data file is unsafe: {name}") from error
+            try:
+                info = os.fstat(credential_fd)
+                if (not stat.S_ISREG(info.st_mode) or (info.st_uid, info.st_gid) != (uid, gid)
+                        or info.st_nlink != 1):
+                    raise Refusal(f"OpenCode credential data file has unsafe type, ownership, or link count: {name}")
+                os.fchmod(credential_fd, 0o600)
+            finally:
+                os.close(credential_fd)
+    finally:
+        os.close(parent_fd)
+
+
 def _write_probe(directory_fd: int, uid: int, label: str) -> None:
     for _ in range(8):
         name = f".mester-write-check-{secrets.token_hex(8)}"
@@ -293,18 +379,33 @@ def verify_user_write() -> None:
         os.close(home_fd)
 
 
+def prepare_auth_store() -> None:
+    account = pwd.getpwnam("mester")
+    if (os.geteuid(), os.getegid(), account.pw_dir) != (
+            account.pw_uid, account.pw_gid, "/home/mester"):
+        raise Refusal("credential privacy repair must run as guest user mester")
+    home_fd = open_guest_home(account.pw_uid, account.pw_gid)
+    try:
+        prepare_auth_store_at(home_fd, account.pw_uid, account.pw_gid)
+    finally:
+        os.close(home_fd)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="operation", required=True)
     prepare = commands.add_parser("prepare")
     prepare.add_argument("uid", type=int)
     commands.add_parser("verify-write")
+    commands.add_parser("prepare-auth")
     args = parser.parse_args(argv)
     try:
         if args.operation == "prepare":
             provision(args.uid)
-        else:
+        elif args.operation == "verify-write":
             verify_user_write()
+        else:
+            prepare_auth_store()
     except (OSError, Refusal) as error:
         print(f"guest rootless configuration refused: {error}", file=sys.stderr)
         return 1

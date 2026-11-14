@@ -26,6 +26,7 @@ PARENT_ID = "default"
 STATE_COMPONENTS = (".local", "state", "little-mester", "parent-v3", PARENT_ID)
 SCHEMA = 1
 PARENT_STOP_TIMEOUT_SECONDS = 90.0
+AUTH_CONTROL_SOCKET_LIMIT = 100
 _ARTIFACT_EXPECTATION_UNSET = object()
 STALE_RECONCILIATION_PREFIX = "stale-boot-reconciliation-"
 
@@ -51,12 +52,13 @@ def _installed_runtime_root(source: str | os.PathLike | None = None,
     return install.parent
 
 
-PARENT_READY_COMMAND = (
-    "cloud-init status --long >/dev/null 2>&1 || exit 41; "
-    "test -x /usr/bin/tmux || exit 42; "
-    "test -x /usr/local/bin/lm-opencode || exit 43; "
-    "/usr/local/bin/opencode --version 2>/dev/null | grep -Fx 'opencode v2.2.5' >/dev/null || exit 44"
-)
+_SESSION_CONTRACT_SPEC = importlib.util.spec_from_file_location(
+    "parent_session_contract", pathlib.Path(__file__).with_name("parent-session-contract.py"))
+if _SESSION_CONTRACT_SPEC is None or _SESSION_CONTRACT_SPEC.loader is None:
+    raise RuntimeError("protected parent session contract is unavailable")
+_SESSION_CONTRACT = importlib.util.module_from_spec(_SESSION_CONTRACT_SPEC)
+_SESSION_CONTRACT_SPEC.loader.exec_module(_SESSION_CONTRACT)
+PARENT_READY_COMMAND = "cloud-init status --long >/dev/null 2>&1 || exit 41; " + _SESSION_CONTRACT.readiness_checks()
 DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
@@ -1385,6 +1387,180 @@ def parent_ssh_plan(*, home: str | os.PathLike | None = None,
         os.close(directory_fd)
 
 
+def _private_write(path: pathlib.Path, payload: bytes) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise Refused("could not write private browser-auth transport material")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def parent_auth_paths(runtime: str | os.PathLike, run_name: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    """Build short private auth paths accepted by OpenSSH on high-UID hosts."""
+    if not isinstance(run_name, str) or not re.fullmatch(r"a-[0-9a-f]{24}", run_name):
+        raise Refused("invalid private browser-auth run identifier")
+    runtime_path = pathlib.Path(runtime)
+    run_dir = runtime_path / run_name
+    control_dir = runtime_path / f"lmv3-{run_name}"
+    control_socket = control_dir / "auth-control.sock"
+    if len(os.fsencode(control_socket)) >= AUTH_CONTROL_SOCKET_LIMIT:
+        raise Refused("private SSH control socket path exceeds the OpenSSH limit")
+    return run_dir, control_dir, control_socket
+
+
+def _parent_auth_credentials() -> tuple[int, bytes, bytes]:
+    """Return the verified parent SSH port/key/pin bytes for private auth staging."""
+    status = read_status()
+    if status.get("status") != "RUNNING":
+        raise Refused("persistent parent browser authentication requires a verified RUNNING parent")
+    directory_fd = _open_directory_chain(create=False)
+    if directory_fd is None:
+        raise Refused("parent state disappeared before browser-auth setup")
+    try:
+        parent = _read_json(directory_fd, "parent.json")
+        validate_parent(parent)
+        _validate_seed_identity(directory_fd, parent)
+
+        def read_private(name: str, limit: int = 65536) -> bytes:
+            try:
+                descriptor = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory_fd)
+            except OSError as error:
+                raise Refused(f"persistent browser-auth identity is unavailable: {name}") from error
+            try:
+                info = os.fstat(descriptor)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                    raise Refused(f"persistent browser-auth identity is unsafe: {name}")
+                chunks = bytearray()
+                while len(chunks) <= limit:
+                    chunk = os.read(descriptor, min(4096, limit + 1 - len(chunks)))
+                    if not chunk:
+                        break
+                    chunks.extend(chunk)
+                if len(chunks) > limit:
+                    raise Refused(f"persistent browser-auth identity is too large: {name}")
+                return bytes(chunks)
+            finally:
+                os.close(descriptor)
+
+        identity = parent.get("ssh_identity")
+        key = read_private("id_vm_control")
+        known_hosts = read_private("known_hosts")
+        port_text = read_private("ssh_port", 8).decode("ascii").strip()
+        if (not isinstance(identity, dict)
+                or hashlib.sha256(key).hexdigest() != identity.get("control_private_sha256")
+                or not re.fullmatch(r"[0-9]{1,5}", port_text)
+                or not 1024 <= int(port_text) <= 65535):
+            raise Refused("persistent browser-auth SSH identity does not match its recorded pin")
+        host_key = read_private("ssh_host_ed25519_key.pub", 4096).decode("ascii").strip().split()
+        if (len(host_key) < 2 or host_key[0] != "ssh-ed25519"
+                or hashlib.sha256(read_private("ssh_host_ed25519_key.pub", 4096)).hexdigest()
+                != identity.get("host_public_sha256")
+                or known_hosts != f"[127.0.0.1]:{port_text} {host_key[0]} {host_key[1]}\n".encode()):
+            raise Refused("persistent browser-auth host key does not match its recorded pin")
+        return int(port_text), key, known_hosts
+    finally:
+        os.close(directory_fd)
+
+
+def parent_browser_auth(*, runtime_root: str | os.PathLike | None = None) -> int:
+    """Run the approved browser bridge against the verified persistent parent."""
+    runtime = pathlib.Path(f"/run/user/{os.getuid()}") if runtime_root is None else pathlib.Path(runtime_root)
+    try:
+        runtime_info = os.lstat(runtime)
+    except OSError as error:
+        raise Refused("private per-user runtime directory is unavailable") from error
+    if (not stat.S_ISDIR(runtime_info.st_mode) or runtime_info.st_uid != os.getuid()
+            or stat.S_IMODE(runtime_info.st_mode) != 0o700):
+        raise Refused("private per-user runtime directory is unsafe")
+    port, key, known_hosts = _parent_auth_credentials()
+    # Keep the path comfortably below OpenSSH's 100-byte Unix socket limit,
+    # including for five-digit UIDs.
+    run_name = f"a-{secrets.token_hex(12)}"
+    run_dir, control_dir, control_socket = parent_auth_paths(runtime, run_name)
+    paths = {name: run_dir / name for name in (
+        "identity_file", "known_hosts", "ssh_identity", "callback_port_file", "proof_file")}
+    interrupted: list[int] = []
+    old_handlers: dict[int, object] = {}
+
+    def defer_signal(signum, _frame):
+        if signum not in interrupted:
+            interrupted.append(signum)
+
+    managed = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    for signum in managed:
+        old_handlers[signum] = signal.signal(signum, defer_signal)
+    result = 1
+    run_created = False
+    control_created = False
+    try:
+        run_dir.mkdir(mode=0o700)
+        run_created = True
+        os.chmod(run_dir, 0o700)
+        control_dir.mkdir(mode=0o700)
+        control_created = True
+        os.chmod(control_dir, 0o700)
+        _private_write(paths["identity_file"], key)
+        _private_write(paths["known_hosts"], known_hosts)
+        helper = pathlib.Path(__file__).with_name("browser-auth-session.py")
+        helper_spec = importlib.util.spec_from_file_location("parent_browser_auth_session", helper)
+        if helper_spec is None or helper_spec.loader is None:
+            raise Refused("protected browser-auth bridge is unavailable")
+        bridge = importlib.util.module_from_spec(helper_spec)
+        helper_spec.loader.exec_module(bridge)
+        if not interrupted:
+            arguments = ["--ssh", "/usr/bin/ssh",
+                         "--ssh-port", str(port), "--identity-file", str(paths["identity_file"]),
+                         "--known-hosts", str(paths["known_hosts"]),
+                         "--control-socket", str(control_socket),
+                         "--ssh-identity", str(paths["ssh_identity"]),
+                         "--callback-port-file", str(paths["callback_port_file"]),
+                         "--proof-file", str(paths["proof_file"]), "--run-dir", str(run_dir),
+                         "--guest-auth-dir", "/tmp/mester-v3-auth-parent",
+                         "--timeout-seconds", "600", "--output-limit", "65536", "--persistent-parent"]
+            result = bridge.main(arguments)
+    finally:
+        try:
+            # Remove only exact private files/directories created above.
+            # Unexpected entries are preserved rather than recursively deleted.
+            for path in paths.values():
+                try:
+                    info = os.lstat(path)
+                except FileNotFoundError:
+                    continue
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                        or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
+                    raise Refused("browser-auth temporary credential artifact is unsafe; preserving it")
+                os.unlink(path)
+            if control_created:
+                try:
+                    os.rmdir(control_dir)
+                except FileNotFoundError:
+                    pass
+                except OSError as error:
+                    raise Refused("browser-auth cleanup left unexpected private control evidence") from error
+            if run_created:
+                try:
+                    os.rmdir(run_dir)
+                except FileNotFoundError:
+                    pass
+                except OSError as error:
+                    raise Refused("browser-auth cleanup left unexpected private run evidence") from error
+        finally:
+            for signum, handler in old_handlers.items():
+                signal.signal(signum, handler)
+    if interrupted:
+        return 128 + interrupted[0]
+    return result
+
+
 def _run_interactive_ssh(argv: list[str]) -> int:
     """Run SSH while retaining sealed key memfds and forwarding termination safely."""
     if not isinstance(argv, list) or not argv or argv[0] != "/usr/bin/ssh":
@@ -1953,7 +2129,7 @@ def stop_exec_transition(identity: dict, *, term_grace_ms: int = 5000, settle_ms
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("status", "recover", "reconcile", "stop", "ssh", "tui"))
+    parser.add_argument("command", choices=("status", "recover", "reconcile", "stop", "ssh", "auth", "tui"))
     parser.add_argument("--json", action="store_true")
     recovery_mode = parser.add_mutually_exclusive_group()
     recovery_mode.add_argument("--dry-run", action="store_true", help="preview recovery (the default)")
@@ -1962,8 +2138,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.command not in ("recover", "reconcile") and (args.dry_run or args.execute):
         parser.error("--dry-run/--execute is only valid with recover/reconcile")
-    if args.command in ("ssh", "tui") and args.json:
-        parser.error("--json is not valid with ssh/tui")
+    if args.command in ("ssh", "auth", "tui") and args.json:
+        parser.error("--json is not valid with ssh/auth/tui")
     try:
         if args.command in ("ssh", "tui"):
             argv, descriptors = parent_ssh_plan(attach_opencode=args.command == "tui")
@@ -1977,6 +2153,8 @@ def main() -> int:
                         os.close(fd)
                     except OSError:
                         pass
+        if args.command == "auth":
+            return parent_browser_auth()
         if args.command == "recover":
             result = recover_parent(execute=args.execute)
         elif args.command == "reconcile":

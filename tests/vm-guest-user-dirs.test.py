@@ -9,6 +9,7 @@ import os
 import pathlib
 import pwd
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -158,6 +159,122 @@ class GuestUserDirectoryTests(unittest.TestCase):
             self.assertEqual(external.read_text(encoding="utf-8"), "preserve")
         finally:
             os.close(separate_fd)
+
+    def _run_as_guest(self, operation):
+        if os.geteuid() == 0:
+            os.setgroups([])
+            os.setgid(self.account.pw_gid)
+            os.setuid(self.account.pw_uid)
+        operation()
+
+    def test_auth_store_repair_preserves_existing_credentials_and_tightens_modes(self):
+        store = self.home / ".local/share/opencode"
+        store.mkdir(parents=True, mode=0o775)
+        for path in (self.home / ".local", self.home / ".local/share", store):
+            path.chmod(0o775)
+            if os.geteuid() == 0:
+                os.chown(path, self.account.pw_uid, self.account.pw_gid)
+        credential = store / "auth.json"
+        payload = b'{"openai":{"refresh":"preserve-this-byte-for-byte"}}\n'
+        credential.write_bytes(payload)
+        credential.chmod(0o664)
+        database = store / "opencode.db"
+        database_payload = b"sqlite-database-fixture-preserved-byte-for-byte"
+        database.write_bytes(database_payload)
+        database.chmod(0o664)
+        if os.geteuid() == 0:
+            os.chown(credential, self.account.pw_uid, self.account.pw_gid)
+            os.chown(database, self.account.pw_uid, self.account.pw_gid)
+
+        child = os.fork()
+        if child == 0:
+            try:
+                self._run_as_guest(lambda: guest_dirs.prepare_auth_store_at(
+                    self.home_fd, self.account.pw_uid, self.account.pw_gid))
+            except BaseException as error:
+                print(f"credential privacy repair failed: {error}", file=sys.stderr)
+                os._exit(1)
+            os._exit(0)
+        _, status = os.waitpid(child, 0)
+        self.assertTrue(os.WIFEXITED(status))
+        self.assertEqual(os.WEXITSTATUS(status), 0)
+        self.assertEqual(credential.read_bytes(), payload)
+        self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(database.read_bytes(), database_payload)
+        self.assertEqual(database.stat().st_mode & 0o777, 0o600)
+        for path in (self.home / ".local", self.home / ".local/share", store):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+
+    def test_auth_store_repair_refuses_symlink_and_hardlinked_credentials(self):
+        store = self.home / ".local/share/opencode"
+        store.mkdir(parents=True, mode=0o700)
+        if os.geteuid() == 0:
+            for path in (self.home / ".local", self.home / ".local/share", store):
+                os.chown(path, self.account.pw_uid, self.account.pw_gid)
+
+        def attempt():
+            guest_dirs.prepare_auth_store_at(self.home_fd, self.account.pw_uid, self.account.pw_gid)
+
+        def refuse_as_guest():
+            child = os.fork()
+            if child == 0:
+                try:
+                    self._run_as_guest(lambda: self.assertRaises(guest_dirs.Refusal, attempt))
+                except BaseException:
+                    os._exit(1)
+                os._exit(0)
+            _, status = os.waitpid(child, 0)
+            self.assertTrue(os.WIFEXITED(status))
+            self.assertEqual(os.WEXITSTATUS(status), 0)
+
+        guarded_names = (
+            "opencode.db", "opencode.db-wal", "opencode.db-shm",
+            "opencode.db-journal", "auth.json",
+        )
+        for index, name in enumerate(guarded_names):
+            target = self.root / f"outside-{index}"
+            payload = f"preserve-{name}".encode()
+            target.write_bytes(payload)
+            target.chmod(0o644)
+            if os.geteuid() == 0:
+                os.chown(target, self.account.pw_uid, self.account.pw_gid)
+            (store / name).symlink_to(target)
+            refuse_as_guest()
+            self.assertTrue((store / name).is_symlink())
+            self.assertEqual(target.read_bytes(), payload)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+            (store / name).unlink()
+
+            target.write_bytes(payload)
+            target.chmod(0o644)
+            alias = store / name
+            os.link(target, alias)
+            refuse_as_guest()
+            self.assertEqual(target.read_bytes(), payload)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(target.stat().st_nlink, 2)
+            alias.unlink()
+
+            if os.geteuid() == 0 and self.account.pw_uid != 0:
+                owned_by_root = store / name
+                owned_by_root.write_bytes(payload)
+                owned_by_root.chmod(0o644)
+                os.chown(owned_by_root, 0, 0)
+                refuse_as_guest()
+                info = owned_by_root.stat()
+                self.assertEqual((info.st_uid, info.st_mode & 0o777), (0, 0o644))
+                self.assertEqual(owned_by_root.read_bytes(), payload)
+                owned_by_root.unlink()
+
+            fifo = store / name
+            os.mkfifo(fifo, 0o640)
+            if os.geteuid() == 0:
+                os.chown(fifo, self.account.pw_uid, self.account.pw_gid)
+            refuse_as_guest()
+            info = fifo.lstat()
+            self.assertTrue(stat.S_ISFIFO(info.st_mode))
+            self.assertEqual(info.st_mode & 0o777, 0o640)
+            fifo.unlink()
 
     def test_existing_root_owned_intermediate_dirs_are_fixed_without_recursive_chown(self):
         if os.geteuid() != 0 or self.account.pw_uid == 0:

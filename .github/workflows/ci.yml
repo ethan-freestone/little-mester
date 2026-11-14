@@ -73,11 +73,11 @@ jobs:
             python3 "$test"
           done
 
-  # ── Hosted-runner KVM capability trial; never falls back to TCG ──
+  # ── Hosted-runner disposable M2 guest integration; no TCG fallback ──
   real-qemu-kvm-trial:
-    name: Real QEMU KVM capability trial
+    name: Real QEMU KVM M2 integration
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - name: Report runner architecture, identity, and initial KVM device state
@@ -111,10 +111,12 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            cloud-image-utils curl genisoimage openssh-client qemu-system-x86 \
+            cloud-image-utils curl genisoimage openssh-client openssh-server qemu-system-x86 \
             qemu-utils socat virtiofsd
-      - name: Require usable KVM and boot the pinned disposable image
+      - name: Require usable KVM and run credential-free M2 guest integration
         run: bash tests/ci-kvm-capability.sh
+      - name: Exercise synthetic OAuth callback bridge over real local OpenSSH
+        run: python3 tests/vm-browser-auth.test.py
 
   # ── 4. Hygiene — ShellCheck, Python compile, ruff lint ───────────
   hygiene:

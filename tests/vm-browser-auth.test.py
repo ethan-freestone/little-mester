@@ -18,6 +18,8 @@ import time
 import types
 import unittest
 import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socketserver import BaseRequestHandler, ThreadingTCPServer
 from types import SimpleNamespace
 from unittest import mock
@@ -229,6 +231,12 @@ class AuthorizationValidationTests(unittest.TestCase):
             start_new_session=True, timeout=5, check=False,
         )
         self.assertEqual(check.returncode, 0, check.stderr.decode("utf-8", "replace"))
+
+    def test_persistent_parent_uses_only_the_protected_auth_launcher(self):
+        session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
+        session.args = SimpleNamespace(
+            persistent_parent=True, guest_auth_dir="/tmp/mester-v3-auth-parent")
+        self.assertEqual(session._remote_command(), "exec /usr/local/libexec/lm-opencode-auth")
 
     def test_portal_request_is_after_forward_verification_and_receives_one_validated_url(self):
         url = authorization_url()
@@ -716,6 +724,41 @@ class FakeTargetHandler(BaseRequestHandler):
     def handle(self):
         request = self.request.recv(1024)
         self.request.sendall(b"LOCAL_FAKE_TARGET_OK:" + request)
+
+
+class SyntheticOAuthCallback(BaseHTTPRequestHandler):
+    expected_state = "Q" * 43
+    successful_code = "synthetic-code-fixture"
+    consumed = False
+
+    def do_GET(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        state = query.get("state", [None])[0]
+        code = query.get("code", [None])[0]
+        error = query.get("error", [None])[0]
+        if parsed.path != "/auth/callback":
+            status, body = 404, b"not found"
+        elif state != self.expected_state:
+            status, body = 400, b"state mismatch"
+        elif error == "access_denied":
+            status, body = 403, b"synthetic denial"
+        elif error == "expired":
+            status, body = 410, b"synthetic expiration"
+        elif code == self.successful_code and not self.consumed:
+            type(self).consumed = True
+            status, body = 200, b"synthetic authorization callback accepted"
+        elif code == self.successful_code:
+            status, body = 409, b"synthetic authorization response replayed"
+        else:
+            status, body = 400, b"malformed authorization response"
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format, *_args):
+        return
 
 
 FAKE_SSH_SOURCE = r'''#!/usr/bin/python3 -I
@@ -1274,6 +1317,44 @@ LogLevel QUIET
             self.assertEqual(client.recv(1024), b"LOCAL_FAKE_TARGET_OK:SYNTHETIC_CALLBACK_CANARY")
         self.assertTrue(auth.run_control_command(self._command("cancel", callback_port, self.target_port)))
         self.assertTrue(auth.listener_absent(callback_port))
+
+    def test_real_ssh_callback_transport_with_success_state_replay_denial_and_expiration(self):
+        SyntheticOAuthCallback.consumed = False
+        simulator = ThreadingHTTPServer(("127.0.0.1", 0), SyntheticOAuthCallback)
+        simulator.daemon_threads = True
+        simulator_thread = threading.Thread(target=simulator.serve_forever, daemon=True)
+        simulator_thread.start()
+        callback_port = free_port()
+        try:
+            self.assertTrue(auth.run_control_command(
+                self._command("forward", callback_port, simulator.server_address[1])))
+
+            def callback(query, path="/auth/callback"):
+                url = f"http://127.0.0.1:{callback_port}{path}?{urllib.parse.urlencode(query)}"
+                try:
+                    with urllib.request.urlopen(url, timeout=3) as response:
+                        return response.status, response.read()
+                except urllib.error.HTTPError as error:
+                    return error.code, error.read()
+
+            valid = {"code": SyntheticOAuthCallback.successful_code,
+                     "state": SyntheticOAuthCallback.expected_state}
+            status, body = callback(valid)
+            self.assertEqual(status, 200, body)
+            status, body = callback(valid)
+            self.assertEqual(status, 409, body)
+            self.assertEqual(callback({"code": "synthetic-code-fixture", "state": "wrong-state"})[0], 400)
+            self.assertEqual(callback({"error": "access_denied", "state": SyntheticOAuthCallback.expected_state})[0], 403)
+            self.assertEqual(callback({"error": "expired", "state": SyntheticOAuthCallback.expected_state})[0], 410)
+            self.assertEqual(callback({"code": "", "state": SyntheticOAuthCallback.expected_state})[0], 400)
+            self.assertEqual(callback(valid, path="/not-the-callback")[0], 404)
+        finally:
+            self.assertTrue(auth.run_control_command(
+                self._command("cancel", callback_port, simulator.server_address[1])))
+            self.assertTrue(auth.listener_absent(callback_port))
+            simulator.shutdown()
+            simulator.server_close()
+            simulator_thread.join(timeout=2)
 
     def test_forward_failure_does_not_take_over_an_occupied_listener(self):
         occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

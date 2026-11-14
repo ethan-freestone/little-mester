@@ -7,6 +7,7 @@ import io
 import json
 import os
 import pathlib
+import signal
 import stat
 import subprocess
 import sys
@@ -586,6 +587,44 @@ class ParentStateTests(unittest.TestCase):
             ["--ssh-port", "23456"], self.home))
         self.assertFalse(parent_state._valid_supervisor_options(
             ["--state-home", str(self.home), "--ssh-port", "0"], self.home))
+
+    def test_parent_auth_socket_path_stays_below_openssh_limit_for_five_digit_uid(self):
+        runtime = pathlib.Path("/run/user/10000")
+        run_dir, control_dir, socket_path = parent_state.parent_auth_paths(
+            runtime, "a-" + "a" * 24)
+        self.assertEqual(run_dir.name, "a-" + "a" * 24)
+        self.assertEqual(control_dir.name, "lmv3-a-" + "a" * 24)
+        self.assertLess(len(os.fsencode(socket_path)), parent_state.AUTH_CONTROL_SOCKET_LIMIT)
+        with self.assertRaises(parent_state.Refused):
+            parent_state.parent_auth_paths(runtime, "too-long-or-untrusted")
+
+    def test_parent_auth_staging_signal_removes_copied_key_before_bridge_start(self):
+        runtime = pathlib.Path(self.temp.name) / "runtime"
+        runtime.mkdir(mode=0o700)
+        os.chmod(runtime, 0o700)
+        original_write = parent_state._private_write
+        writes = []
+
+        def write_then_interrupt(path, payload):
+            original_write(path, payload)
+            writes.append(path.name)
+            if len(writes) == 1:
+                os.kill(os.getpid(), signal.SIGTERM)
+
+        fake_bridge = mock.Mock()
+        fake_spec = mock.Mock()
+        fake_spec.loader.exec_module.return_value = None
+        with (mock.patch.object(parent_state, "_parent_auth_credentials",
+                                return_value=(2222, b"synthetic-private-key", b"synthetic-host-pin\n")),
+              mock.patch.object(parent_state, "_private_write", side_effect=write_then_interrupt),
+              mock.patch.object(parent_state.importlib.util, "spec_from_file_location", return_value=fake_spec),
+              mock.patch.object(parent_state.importlib.util, "module_from_spec", return_value=fake_bridge)):
+            result = parent_state.parent_browser_auth(runtime_root=runtime)
+
+        self.assertEqual(result, 128 + signal.SIGTERM)
+        self.assertEqual(writes, ["identity_file", "known_hosts"])
+        fake_bridge.main.assert_not_called()
+        self.assertEqual(list(runtime.iterdir()), [])
 
     def test_previous_candidate_runtime_script_requires_protected_sha_install_chain(self):
         from types import SimpleNamespace

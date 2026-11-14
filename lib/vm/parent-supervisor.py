@@ -222,18 +222,7 @@ def _prepare_parent_seed(state, lock_fd: int, home: str | None = None) -> bytes:
                 "plugins": ["/etc/opencode/plugins/little-mester-exit-confirm"],
                 "keybinds": {"app.exit": "none", "prompt.clear": "none"},
             }, separators=(",", ":"))
-            cli_config_export = f"export OPENCODE_CLI_CONFIG_CONTENT='{cli_config}'\n"
-            opencode_runner = (
-                "#!/bin/sh\n"
-                "set -eu\n"
-                "export XDG_CONFIG_HOME=/etc\n"
-                "export OPENCODE_CONFIG=/etc/opencode/opencode.json\n"
-                "export HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128\n"
-                "export http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128\n"
-                + cli_config_export +
-                "export OPENCODE_DISABLE_PROJECT_CONFIG=1\n"
-                "exec /usr/local/bin/opencode\n")
-            opencode_launcher = "#!/bin/sh\nset -eu\nexec tmux new-session -A -s little-mester-opencode /usr/local/libexec/lm-opencode\n"
+            session_contract = _load_protected_module("parent-session-contract")
             user_data = {
                 "hostname": "little-mester-parent",
                 "ssh_pwauth": False,
@@ -255,12 +244,12 @@ def _prepare_parent_seed(state, lock_fd: int, home: str | None = None) -> bytes:
                     {"path": "/etc/opencode/opencode.json", "owner": "root:root",
                      "permissions": "0644", "content": protected_config},
                     {"path": "/etc/profile.d/little-mester-opencode.sh", "owner": "root:root",
-                     "permissions": "0644", "content": "export OPENCODE_CONFIG=/etc/opencode/opencode.json\n" +
-                     cli_config_export + "export OPENCODE_DISABLE_PROJECT_CONFIG=1\n"},
-                    {"path": "/usr/local/bin/lm-opencode", "owner": "root:root",
-                     "permissions": "0755", "content": opencode_launcher},
-                    {"path": "/usr/local/libexec/lm-opencode", "owner": "root:root",
-                     "permissions": "0755", "content": opencode_runner},
+                      "permissions": "0644", "content": "export OPENCODE_CONFIG=/etc/opencode/opencode.json\n" +
+                      f"export OPENCODE_CLI_CONFIG_CONTENT='{cli_config}'\n"
+                      "export OPENCODE_DISABLE_PROJECT_CONFIG=1\n"},
+                    *[{"path": path, "owner": "root:root", "permissions": mode,
+                       "content": content.decode("utf-8")}
+                      for path, (content, mode) in session_contract.ASSETS.items()],
                     *plugin_files,
                 ],
                 "packages": ["tmux", "nodejs", "npm"],

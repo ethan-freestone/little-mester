@@ -778,6 +778,7 @@ files = {
     "lib/vm/browser-auth-session.py": 0o666,
     "lib/vm/virtiofs-socket.py": 0o666,
     "lib/vm/guest-user-dirs.py": 0o666,
+    "lib/vm/parent-session-contract.py": 0o666,
     "lib/vm/parent-state.py": 0o666,
     "lib/vm/parent-launcher.py": 0o666,
     "lib/vm/parent-gate.py": 0o666,

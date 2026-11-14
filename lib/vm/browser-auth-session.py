@@ -454,6 +454,8 @@ class BrowserAuthSession:
                 self.tty_fd = None
 
     def _remote_command(self) -> str:
+        if getattr(self.args, "persistent_parent", False):
+            return "exec /usr/local/libexec/lm-opencode-auth"
         directory = self.args.guest_auth_dir
         if not re.fullmatch(r"/tmp/mester-v3-auth-[A-Za-z0-9-]{1,80}", directory):
             raise AuthSessionError("temporary guest browser path is invalid")
@@ -1048,6 +1050,7 @@ def _arguments(argv):
     parser.add_argument("--proof-file", required=True)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--guest-auth-dir", required=True)
+    parser.add_argument("--persistent-parent", action="store_true")
     parser.add_argument("--timeout-seconds", required=True, type=int)
     parser.add_argument("--output-limit", required=True, type=int)
     args = parser.parse_args(argv)
