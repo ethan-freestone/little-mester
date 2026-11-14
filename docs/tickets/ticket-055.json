@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-14T10:02:28.094Z",
+  "updated_at": "2026-11-14T10:33:54.894Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -120,6 +120,11 @@
       "timestamp": "2026-11-14T10:02:28.093Z",
       "author": "cli",
       "body": "Candidate 1 exact-candidate review and verification (2026-11-14): Sol Medium reviewed SHA 11986a3 and found one regression-test gap: cleanup could pass by reaping an unpublished fallback PID. Fixed in 6d8e3f8834d91abdaff68d968d8556e785a9548a by asserting the PID captured before publication equals the caller-visible published PID and the reaped PID; capped failure process diagnostics to 32 records and 80-character command/wchan fields, excluding argv tails and environment. Sol Medium re-reviewed exact SHA 6d8e3f8: PASS. Local targeted suite and parent-python suites pass; Bats 106/106; syntax/ShellCheck pass. Ordinary Ubuntu 24.04 2-CPU container baseline old regression: 2/50 failures; final regression+launcher: 50/50 pass (Bash 5.2.21, Python 3.12.3; host Python mounted because Docker network DNS cannot reach Ubuntu package mirrors). Hosted Persistent parent (Python) exact-SHA green is still REQUIRED before Candidate 2. No real guest/owner acceptance; A1-A5 remain pending."
+    },
+    {
+      "timestamp": "2026-11-14T10:33:54.893Z",
+      "author": "cli",
+      "body": "Candidate 2 implementation evidence (2026-11-14): code commit 619860be4c768761e18c66971d0d9d4317db9844. Owner supplied exact-SHA GitHub Actions Persistent parent (Python) PASS for Candidate 1 a93c7ce0e7832e208adbc23d4cfc7316711063ce before this implementation began. KVM workflow now runs automatically on opened/synchronize/reopened PRs without label/manual gate; hosted job checks out the PR merge SHA and verifies its second parent equals source-head SHA, uses immutable checkout action pin, and emits both identities. Existing one-disposable-guest integration is retained with named bounded log stages, one overlay reused for restricted-network reboot, host-key SSH, QEMU command/UID/start-time ownership and overlay device/inode checks at guest stage boundaries, bounded readiness/SSH/OAuth work, and identity-safe EXIT cleanup. Synthetic OAuth only; no provider credentials or model access. No image cache, TCG fallback, nested QEMU, original-parent operation, or real KVM run locally. Focused Sol Medium review PASS after correcting PR merge/source provenance. Local evidence: Bats 106/106; vm-owner-acceptance 37/37; vm-guest-user-dirs 8 passed/2 skipped; ci-qemu-oauth-bridge 18/18; ci-kvm-launch 1/1; vm-parent suites all passed (per-suite results locally); browser-auth 37/37; bash -n, ShellCheck, workflow YAML and git diff checks passed. Candidate 2 hosted real-KVM and hosted exact-SHA checks remain NOT_RUN pending owner push. Original-parent/owner terminal/auth/model acceptance remains NOT_RUN. A1-A5 remain pending; no acceptance status changed."
     }
   ]
 }
