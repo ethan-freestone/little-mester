@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-12T23:56:11.040Z",
+  "updated_at": "2026-11-14T09:57:43.468Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -105,6 +105,16 @@
       "timestamp": "2026-11-12T23:49:00.154Z",
       "author": "cli",
       "body": "Owner reports the protected guest is RUNNING and shell/SSH works after M1b recovery/restart. Continue M2 without operating the guest: local 2.2.5 compatibility/config/plugin/key tests are evidence only. Live TUI, authentication, model selection and actual response, tmux reconnect, auth/config/history persistence, guest TERM/terminfo and terminal clipboard canary remain owner acceptance gaps. TERM propagation correction is committed; no source install or VM operation performed here."
+    },
+    {
+      "timestamp": "2026-11-14T09:38:32.867Z",
+      "author": "cli",
+      "body": "Sol Medium focused planning review at clean HEAD 1a9aad3bb2b79e925a98face9ca7ba8700ceceee, branch feat/vm-approach-3. Reviewed tests/ci-kvm-launch.test.py, tests/ci-kvm-launch.sh, tests/ci-kvm-capability.sh, .github/workflows/ci.yml and tests/vm-host-launcher.bats. Candidate 1: reproduce cancellation about 50 times in an ordinary 2-CPU Ubuntu 24.04 container without QEMU; capture Bash/Python versions, parent/wrapper/exec identity and signal/PID-publication timing, then add deterministic synchronization and the smallest evidenced fix; require the hosted Persistent parent (Python) job green at the exact candidate. No root cause or reproduction claimed here. Candidate 2 only afterward: restore automatic normal-PR real-KVM M2 integration, replacing label/dispatch-only gating and monolithic execution with individually visible guarded stages sharing one disposable guest/disk, including restricted reboot, protected config/plugin checks, tmux reattach, persistence and credential-free synthetic OAuth. Assess existing parent supervisor/gate and bounded-log/identity lifecycle for narrow reuse; avoid a second generic supervisor. Verify run/process/disk/SSH identity before each stage, enforce per-stage/overall deadlines and heartbeats, fail closed after any failed prerequisite, and always attempt bounded identity-safe cleanup with sanitized diagnostics. Update static Bats assertions that currently require label gating; preserve all smoke runner failure/cleanup coverage. Keep contents:read, concurrency cancellation, immutable action pins, pinned image digest, explicit source-head versus PR-merge SHA provenance, and no new caching or architecture/M1/M3 work. Hosted real-VM evidence and owner terminal/key/clipboard/auth/model acceptance remain separate required exits. Existing A1-A5 and ledgers/status remain unchanged and pending. CLI validate passed: 452 audit entries, index synchronized, no lock/orphans, 60 tickets satisfy criteria/ledger policy. Legacy MCP still warns on audit entry #417 privacy-redaction; warning is known/deferred, not a reason to rewrite history or block ordinary edits. Preserve #417 and all prior audit entries. Planning only: no source implementation, no tests or QEMU executed; no new reliability ticket needed."
+    },
+    {
+      "timestamp": "2026-11-14T09:57:43.468Z",
+      "author": "cli",
+      "body": "Candidate 1 local CI reliability evidence (2026-11-14): old tests/ci-kvm-launch.test.py and helper from ce46af3 reproduced TimeoutExpired in 2/50 repetitions inside an Ubuntu 24.04 container constrained to 2 CPUs (Bash 5.2.21, Python 3.12.3; container DNS prevented apt, so host Python plus stdlib/libexpat were mounted). No QEMU ran. Updated regression uses FIFO event synchronization at the child pre-exec / parent pre-PID-publication window, records monotonic event/PID/deferred-cancel state, checks child reaping, and emits bounded procfs state/wchan/signal-mask diagnostics on timeout; fixed current harness passed 50/50 in the same container. These are CI reliability tests only, not guest/owner acceptance; all #55 A1-A5 remain pending. Exact-SHA hosted Persistent parent (Python) run still required before Candidate 2."
     }
   ]
 }
