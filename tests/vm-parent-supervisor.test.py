@@ -109,6 +109,9 @@ class SupervisorHandoffTests(unittest.TestCase):
         self.assertEqual(parent_supervisor._ssh_failure_label(
             b"guest-provided text", 255, timed_out=False,
             forward_connected=False), "SSH_TRANSPORT_OR_HANDSHAKE_FAILED")
+        self.assertEqual(parent_supervisor._ssh_failure_label(
+            b"", 45, timed_out=False,
+            forward_connected=True), "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED")
 
     def test_parent_pinned_known_hosts_accepts_exact_server_key_and_rejects_substitute(self):
         ssh = shutil.which("ssh")
@@ -2151,6 +2154,27 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
         self.assertEqual(argv[-1], fake_state.PARENT_READY_COMMAND)
         self.assertEqual(len(descriptors), 2)
         self.assertTrue(all(fd >= 3 for fd in descriptors))
+
+    def test_guest_contract_mismatch_fails_fast_with_upgrade_recovery_label(self):
+        fake_state = SimpleNamespace(
+            Refused=parent_state.Refused,
+            PARENT_READY_COMMAND=parent_state.PARENT_READY_COMMAND,
+            exec_transition_status=lambda _transition: "TARGET",
+            parent_ssh_plan=lambda **kwargs: (["/usr/bin/ssh", kwargs["remote_command"]], []),
+            read_status=lambda **_kwargs: {"run_id": "0123456789abcdef0123456789abcdef"},
+        )
+        with (mock.patch.object(parent_supervisor, "_protected_tool", return_value="/usr/bin/ssh"),
+              mock.patch.object(parent_supervisor, "_read_private_port", return_value=23456),
+              mock.patch.object(parent_supervisor, "_loopback_forward_accepts", return_value=True),
+              mock.patch.object(parent_supervisor, "_run_bounded_ssh_attempt", return_value=(45, b"", False)),
+              mock.patch.object(parent_supervisor.time, "sleep") as sleep):
+            with self.assertRaisesRegex(
+                    parent_state.Refused,
+                    "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED.*no automatic migration performed"):
+                parent_supervisor._wait_for_guest_readiness(
+                    fake_state, None, {"target_path": "child-qemu.target.json"},
+                    stop_requested=lambda: False, timeout_seconds=30)
+        sleep.assert_not_called()
 
     def test_guest_readiness_reaps_exited_qemu_before_transition_classification(self):
         child = subprocess.Popen([sys.executable, "-c", "raise SystemExit(17)"])

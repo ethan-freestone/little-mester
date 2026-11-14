@@ -65,6 +65,13 @@ class Session:
         self.run_dir.mkdir(mode=0o700)
         self.control_dir = self.root / f"lmv3-{self.run_dir.name}"
         self.control_dir.mkdir(mode=0o700)
+        self.control_socket = self.control_dir / "auth-control.sock"
+        socket_path_bytes = len(os.fsencode(self.control_socket))
+        if socket_path_bytes >= AUTH.CONTROL_SOCKET_LIMIT:
+            raise RuntimeError(
+                "hosted CI private SSH control socket path exceeds the production limit "
+                f"({socket_path_bytes} bytes)"
+            )
         self.proof = self.run_dir / "proof.json"
         identity = self.run_dir / "identity_file"
         pinned_hosts = self.run_dir / "known_hosts"
@@ -76,7 +83,7 @@ class Session:
             "/usr/bin/python3", "-I", str(BRIDGE), "--ssh", "/usr/bin/ssh",
             "--ssh-port", str(port), "--identity-file", str(identity),
             "--known-hosts", str(pinned_hosts),
-            "--control-socket", str(self.control_dir / "auth-control.sock"),
+            "--control-socket", str(self.control_socket),
             "--ssh-identity", str(self.run_dir / "ssh.identity"),
             "--callback-port-file", str(self.run_dir / "callback.port"),
             "--proof-file", str(self.proof), "--run-dir", str(self.run_dir),
@@ -207,7 +214,15 @@ def run_case(args, case: str) -> None:
             session.interrupt()
         if case in ("mismatched-state", "interruption") and session.exit_status != 130:
             raise RuntimeError(f"{case}: expected bounded SIGINT exit 130, got {session.exit_status}")
-    finally:
+    except BaseException as original:
+        try:
+            session.close()
+        except Exception as cleanup_error:
+            raise RuntimeError(
+                f"{case}: test failed ({original}); cleanup proof also failed ({cleanup_error})"
+            ) from original
+        raise
+    else:
         session.close()
 
 
