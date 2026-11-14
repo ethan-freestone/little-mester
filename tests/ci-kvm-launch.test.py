@@ -41,8 +41,11 @@ class TrackedLaunchTests(unittest.TestCase):
                 wchan = (entry / "wchan").read_text().strip()
                 rows.append(
                     f"pid={entry.name} ppid={parent} pgid={process_group} sid={session} "
-                    f"state={state} wchan={wchan} comm={command} signals={status}"
+                    f"state={state} wchan={wchan[:80]} comm={command[:80]} signals={status}"
                 )
+                if len(rows) >= 32:
+                    rows.append("<additional process-group members omitted>")
+                    break
             except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
                 continue
         return "\n".join(rows) if rows else "<no processes remain in isolated test group>"
@@ -87,6 +90,7 @@ cleanup() {
   record_event child-wait
   wait "$cleanup_pid" 2>/dev/null || true
   record_event child-reaped
+  printf 'TRACKED_CHILD_PUBLISHED=%s\n' "${child_pid:-unset}"
   printf 'TRACKED_CHILD_REAPED=%s\n' "$cleanup_pid"
   exit "$status"
 }
@@ -152,12 +156,20 @@ exit 0
         self.assertRegex(events, r"event=signal-deferred[^\n]*deferred=143")
         self.assertIn("published_pid=unset", events)
         self.assertIn("event=child-reaped", events)
+        expected_pid = re.search(
+            r"event=pre-pid-publication[^\n]*launched_pid=(\d+) published_pid=unset", events
+        )
+        self.assertIsNotNone(expected_pid, events)
+        published_pid = re.search(r"TRACKED_CHILD_PUBLISHED=([0-9]+)", stdout)
+        self.assertIsNotNone(published_pid, stdout)
         child_gate = re.search(
             r"event=child-before-signal-reset owner_pid=(\d+) bashpid=(\d+)", events
         )
         self.assertIsNotNone(child_gate, events)
         self.assertNotEqual(child_gate.group(1), child_gate.group(2), events)
         child_pid = int(match.group(1))
+        self.assertEqual(published_pid.group(1), expected_pid.group(1), events + stdout)
+        self.assertEqual(child_pid, int(published_pid.group(1)), events + stdout)
         self.assertFalse(pathlib.Path(f"/proc/{child_pid}").exists(),
                          f"tracked child PID {child_pid} was not reaped")
 
