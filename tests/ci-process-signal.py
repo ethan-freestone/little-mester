@@ -67,7 +67,7 @@ def signal_owned_process(
             # Never use killpg(numeric_pgid): the group could disappear and
             # the number be recycled after identity validation. Pin and signal
             # every still-verified member through its own pidfd instead.
-            return signal_group_members(pid, actual_session, expected_uid, signum)
+            return signal_session_members(actual_session, expected_uid, signum)
         try:
             signal.pidfd_send_signal(pidfd, signum)
         except ProcessLookupError:
@@ -77,7 +77,7 @@ def signal_owned_process(
         os.close(pidfd)
 
 
-def process_group_empty(process_group: int) -> bool:
+def process_session_empty(session_id: int) -> bool:
     for entry in pathlib.Path("/proc").iterdir():
         if not entry.name.isdecimal():
             continue
@@ -86,7 +86,7 @@ def process_group_empty(process_group: int) -> bool:
             rest = stat[stat.rfind(") ") + 2 :].split()
             if len(rest) <= 3:
                 return False
-            if int(rest[2]) == process_group and rest[0] != "Z":
+            if int(rest[3]) == session_id and rest[0] != "Z":
                 return False
         except FileNotFoundError:
             continue
@@ -101,9 +101,9 @@ def process_group_empty(process_group: int) -> bool:
     return True
 
 
-def signal_group_members(process_group: int, session_id: int, expected_uid: int,
-                         signum: int = signal.SIGKILL) -> bool:
-    """Freeze the anchored group, then signal its verified members by pidfd."""
+def signal_session_members(session_id: int, expected_uid: int,
+                           signum: int = signal.SIGKILL) -> bool:
+    """Freeze the anchored session, then signal its verified members by pidfd."""
     if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
         return False
     pidfds: dict[int, tuple[int, int]] = {}
@@ -121,7 +121,6 @@ def signal_group_members(process_group: int, session_id: int, expected_uid: int,
                     stat = (entry / "stat").read_text(encoding="ascii")
                     fields = stat[stat.rfind(") ") + 2 :].split()
                     state = fields[0]
-                    actual_group = int(fields[2])
                     actual_session = int(fields[3])
                     starttime = int(fields[19])
                 except FileNotFoundError:
@@ -132,7 +131,7 @@ def signal_group_members(process_group: int, session_id: int, expected_uid: int,
                     except FileNotFoundError:
                         continue
                     return False
-                if actual_group != process_group or state == "Z":
+                if actual_session != session_id or state == "Z":
                     continue
                 try:
                     status = (entry / "status").read_text(encoding="ascii")
@@ -142,7 +141,7 @@ def signal_group_members(process_group: int, session_id: int, expected_uid: int,
                     continue
                 except (OSError, ValueError, StopIteration):
                     return False
-                if actual_session != session_id or uid != expected_uid:
+                if uid != expected_uid:
                     return False
                 if pid not in pidfds:
                     try:
@@ -237,7 +236,7 @@ def terminate_marked_groups(
                 except ProcessLookupError:
                     return False
                 # Revalidate through the pinned process identity before using
-                # its numeric PGID/SID as the group lifetime anchor.
+                # its numeric SID as the session lifetime anchor.
                 try:
                     _parent, current_group, current_session, current_start, _comm, _args = process_identity(pid)
                     status = pathlib.Path(f"/proc/{pid}/status").read_text(encoding="ascii")
@@ -250,16 +249,14 @@ def terminate_marked_groups(
                     return False
             elif anchor != (pid, starttime):
                 # Without a live leader pidfd or an in-process pidfd retained
-                # from launch, the numeric PGID/SID may have been reused.
-                return False
-            if not signal_group_members(process_group, session_id, uid):
+                # from launch, the numeric SID may have been reused.
                 return False
             deadline = time.monotonic() + 3
-            while not process_group_empty(process_group) and time.monotonic() < deadline:
-                if not signal_group_members(process_group, session_id, uid):
+            while not process_session_empty(session_id) and time.monotonic() < deadline:
+                if not signal_session_members(session_id, uid):
                     return False
                 time.sleep(0.05)
-            if not process_group_empty(process_group):
+            if not process_session_empty(session_id):
                 return False
         finally:
             if leader_fd is not None:
@@ -277,13 +274,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--contains", action="append", default=[])
     parser.add_argument("--signal", choices=("TERM", "KILL"))
     parser.add_argument("--process-group", action="store_true")
-    parser.add_argument("--check-process-group-empty", type=int)
+    parser.add_argument("--check-process-session-empty", type=int)
     parser.add_argument("--terminate-marked-groups")
     args = parser.parse_args(argv)
     if args.terminate_marked_groups is not None:
         return 0 if terminate_marked_groups(pathlib.Path(args.terminate_marked_groups)) else 1
-    if args.check_process_group_empty is not None:
-        return 0 if process_group_empty(args.check_process_group_empty) else 1
+    if args.check_process_session_empty is not None:
+        return 0 if process_session_empty(args.check_process_session_empty) else 1
     if (args.pid is None or args.starttime is None or args.uid is None
             or args.parent is None or args.comm is None or args.signal is None):
         parser.error("process signaling requires --pid, --starttime, --uid, --parent, --comm, and --signal")

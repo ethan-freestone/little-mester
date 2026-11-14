@@ -64,14 +64,14 @@ def handled_signals() -> set[signal.Signals]:
     return {signal.SIGINT, signal.SIGTERM, signal.SIGALRM}
 
 
-def process_group_has_live_members(pgid: int) -> bool:
+def process_session_has_live_members(session_id: int) -> bool:
     for entry in pathlib.Path("/proc").iterdir():
         if not entry.name.isdecimal():
             continue
         try:
             stat = (entry / "stat").read_text(encoding="ascii")
             rest = stat[stat.rfind(") ") + 2 :].split()
-            if len(rest) > 3 and int(rest[2]) == pgid and rest[0] != "Z":
+            if len(rest) > 3 and int(rest[3]) == session_id and rest[0] != "Z":
                 return True
         except FileNotFoundError:
             # The process exited between enumerating /proc and reading stat.
@@ -89,15 +89,22 @@ def process_group_has_live_members(pgid: int) -> bool:
     return False
 
 
-def write_bridge_identity(path: pathlib.Path, pid: int) -> dict[str, int]:
+def bridge_identity_record(pid: int) -> dict[str, int]:
     stat = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
     fields = stat[stat.rfind(") ") + 2 :].split()
     if len(fields) <= 19 or int(fields[2]) != pid or int(fields[3]) != pid:
         raise RuntimeError("PTY bridge did not create its own process group")
     status = pathlib.Path(f"/proc/{pid}/status").read_text(encoding="ascii")
     uid = int(next(line for line in status.splitlines() if line.startswith("Uid:")).split()[1])
-    record = {"pid": pid, "starttime": int(fields[19]), "uid": uid,
+    return {"pid": pid, "starttime": int(fields[19]), "uid": uid,
               "process_group": int(fields[2]), "session_id": int(fields[3])}
+
+
+def write_bridge_identity(path: pathlib.Path, pid: int,
+                          record: dict[str, int] | None = None) -> dict[str, int]:
+    record = bridge_identity_record(pid) if record is None else record
+    if record.get("pid") != pid:
+        raise RuntimeError("PTY bridge identity does not match the launched child")
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "w", encoding="ascii") as output:
         json.dump(record, output, separators=(",", ":"))
@@ -171,7 +178,7 @@ class Session:
             "--output-limit", "65536", "--persistent-parent",
         ]
         self.pid = -1
-        self.bridge_pgid = -1
+        self.bridge_session_id = -1
         self.bridge_pidfd: int | None = None
         self.bridge_anchor: tuple[int, int] | None = None
         self.master_fd = -1
@@ -182,25 +189,40 @@ class Session:
 
     def start(self) -> str:
         old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals())
+        gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
         try:
             child_pid, master_fd = pty.fork()
+            if child_pid == 0:
+                os.close(gate_write)
+                try:
+                    released = os.read(gate_read, 1)
+                finally:
+                    os.close(gate_read)
+                if released != b"\x01":
+                    os._exit(126)
             if child_pid > 0:
+                os.close(gate_read)
+                gate_read = -1
+                os.set_inheritable(gate_write, False)
                 # Publish both owned handles before a pending cancellation can
                 # run the handler and enter Session.close().
                 self.pid, self.master_fd = child_pid, master_fd
-                self.bridge_pgid = child_pid
+                self.bridge_session_id = child_pid
                 try:
                     self.bridge_pidfd = os.pidfd_open(child_pid, 0)
-                    identity = write_bridge_identity(self.bridge_identity, child_pid)
+                    identity = bridge_identity_record(child_pid)
                     self.bridge_anchor = (child_pid, identity["starttime"])
+                    write_bridge_identity(self.bridge_identity, child_pid, identity)
+                    if os.write(gate_write, b"\x01") != 1:
+                        raise RuntimeError("could not release the verified PTY bridge")
                 except BaseException:
+                    try:
+                        os.close(gate_write)
+                    except OSError:
+                        pass
                     try:
                         if self.bridge_pidfd is not None:
                             signal.pidfd_send_signal(self.bridge_pidfd, signal.SIGKILL)
-                        else:
-                            # This is the unreaped direct child returned by
-                            # pty.fork(); its PID cannot be reused before waitpid.
-                            os.kill(child_pid, signal.SIGKILL)
                     except (ProcessLookupError, OSError):
                         pass
                     try:
@@ -214,6 +236,16 @@ class Session:
                         os.close(self.bridge_pidfd)
                         self.bridge_pidfd = None
                     raise
+                os.close(gate_write)
+                gate_write = -1
+        except BaseException:
+            for descriptor in (gate_read, gate_write):
+                if descriptor >= 0:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+            raise
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
         if child_pid == 0:
@@ -275,12 +307,12 @@ class Session:
                 # terminate-and-reap fallback for the owned bridge child.
                 wait_error = error
             if self.pid > 0:
-                owned_pgid = self.pid
+                owned_session_id = self.pid
                 self.forced_kill = True
                 try:
                     # pty.fork() makes the bridge a session/process-group
                     # leader; include its SSH forward if graceful cleanup failed.
-                    os.killpg(owned_pgid, signal.SIGKILL)
+                    os.killpg(owned_session_id, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
                 deadline = time.monotonic() + 3
@@ -298,10 +330,10 @@ class Session:
                 if self.pid > 0:
                     raise RuntimeError(f"{self.case}: auth bridge was not reaped after bounded SIGKILL")
                 group_deadline = time.monotonic() + 3
-                while process_group_has_live_members(owned_pgid) and time.monotonic() < group_deadline:
+                while process_session_has_live_members(owned_session_id) and time.monotonic() < group_deadline:
                     time.sleep(0.05)
-                if process_group_has_live_members(owned_pgid):
-                    raise RuntimeError(f"{self.case}: PTY process group survived bounded SIGKILL")
+                if process_session_has_live_members(owned_session_id):
+                    raise RuntimeError(f"{self.case}: PTY session survived bounded SIGKILL")
             if wait_error is not None:
                 raise wait_error
 
@@ -328,7 +360,7 @@ class Session:
                 self.interrupt()
             except Exception as error:
                 failures.append(f"bounded auth-process stop failed ({error})")
-            if self.bridge_pgid > 0 and process_group_has_live_members(self.bridge_pgid):
+            if self.bridge_session_id > 0 and process_session_has_live_members(self.bridge_session_id):
                 try:
                     group_stopped = PROCESS_SIGNAL.terminate_marked_groups(
                         self.root, anchor=getattr(self, "bridge_anchor", None)
@@ -336,9 +368,9 @@ class Session:
                 except Exception as error:
                     group_stopped = False
                     failures.append(f"PTY bridge descendant cleanup failed ({error})")
-                if not group_stopped or process_group_has_live_members(self.bridge_pgid):
+                if not group_stopped or process_session_has_live_members(self.bridge_session_id):
                     failures.append(
-                        f"PTY bridge process group {self.bridge_pgid} was not proved empty; "
+                        f"PTY bridge session {self.bridge_session_id} was not proved empty; "
                         f"artifacts retained at {self.root}"
                     )
                 else:
@@ -346,7 +378,7 @@ class Session:
                     # descendant survived it; contain the process but keep
                     # the case failed and retain its evidence.
                     failures.append(
-                        f"PTY bridge process group {self.bridge_pgid} had surviving descendants; "
+                        f"PTY bridge session {self.bridge_session_id} had surviving descendants; "
                         f"they were stopped and evidence is retained at {self.root}"
                     )
             if self.master_fd >= 0:
