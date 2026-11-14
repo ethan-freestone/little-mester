@@ -28,6 +28,45 @@ PROCESS_SPEC.loader.exec_module(PROCESS)
 
 
 class HarnessSignalTests(unittest.TestCase):
+    def test_bridge_seccomp_prevents_descendants_from_leaving_the_session(self):
+        read_fd, write_fd = os.pipe()
+        child = os.fork()
+        if child == 0:
+            os.close(read_fd)
+            HARNESS.install_no_setsid_filter()
+            grandchild = os.fork()
+            if grandchild == 0:
+                try:
+                    os.setsid()
+                    result = f"allowed {os.getpid()}\n".encode("ascii")
+                except PermissionError:
+                    result = f"blocked {os.getpid()}\n".encode("ascii")
+                os.write(write_fd, result)
+                while True:
+                    signal.pause()
+            while True:
+                signal.pause()
+        os.close(write_fd)
+        grandchild = -1
+        try:
+            result = os.read(read_fd, 64).decode("ascii").strip().split()
+            self.assertEqual(result[0], "blocked")
+            grandchild = int(result[1])
+            self.assertEqual(os.getsid(grandchild), os.getsid(child))
+        finally:
+            os.close(read_fd)
+            for pid in (grandchild, child):
+                if pid > 0:
+                    try:
+                        _parent, _group, _sid, start, comm, _args = PROCESS.process_identity(pid)
+                        PROCESS.signal_owned_process(pid, start, os.getuid(), None, comm, (), signal.SIGKILL)
+                    except (OSError, RuntimeError, StopIteration, ValueError):
+                        pass
+            try:
+                os.waitpid(child, 0)
+            except ChildProcessError:
+                pass
+
     def test_unreadable_proc_entry_does_not_prove_session_empty(self):
         entry = pathlib.Path("/proc/424242")
         with mock.patch.object(pathlib.Path, "iterdir", return_value=iter([entry])), \
@@ -100,6 +139,15 @@ class HarnessSignalTests(unittest.TestCase):
                 finally:
                     shutil.rmtree(session.control_dir, ignore_errors=True)
                     shutil.rmtree(session.root, ignore_errors=True)
+
+    def test_pipe_creation_failure_restores_the_original_signal_mask(self):
+        session = HARNESS.Session.__new__(HARNESS.Session)
+        original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        with mock.patch.object(HARNESS.os, "pipe2", side_effect=OSError("injected pipe failure")):
+            with self.assertRaisesRegex(OSError, "injected pipe failure"):
+                session.start()
+        restored_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        self.assertEqual(restored_mask, original_mask)
 
     def test_pidfd_signal_requires_the_captured_child_identity(self):
         if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):

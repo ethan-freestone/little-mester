@@ -10,11 +10,13 @@ from reaching any upstream provider.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import errno
 import importlib.util
 import json
 import os
 import pathlib
+import platform
 import pty
 import select
 import shutil
@@ -62,6 +64,39 @@ def restore_signal_handlers(previous: dict[int, object]) -> None:
 
 def handled_signals() -> set[signal.Signals]:
     return {signal.SIGINT, signal.SIGTERM, signal.SIGALRM}
+
+
+class _SockFilter(ctypes.Structure):
+    _fields_ = (("code", ctypes.c_ushort), ("jt", ctypes.c_ubyte),
+                ("jf", ctypes.c_ubyte), ("k", ctypes.c_uint32))
+
+
+class _SockFprog(ctypes.Structure):
+    _fields_ = (("length", ctypes.c_ushort),
+                ("filters", ctypes.POINTER(_SockFilter)))
+
+
+def install_no_setsid_filter() -> None:
+    """Keep the PTY child tree in its anchored session for reliable teardown."""
+    syscall_sets = {"x86_64": 112, "amd64": 112, "aarch64": 157, "arm64": 157}
+    try:
+        setsid_syscall = syscall_sets[platform.machine().lower()]
+    except KeyError as error:
+        raise RuntimeError("unsupported architecture for bridge session containment") from error
+    instructions = (_SockFilter * 4)(
+        _SockFilter(0x20, 0, 0, 0),  # load seccomp_data.nr
+        _SockFilter(0x15, 0, 1, setsid_syscall),  # branch if syscall is setsid
+        _SockFilter(0x06, 0, 0, 0x00050000 | errno.EPERM),  # return EPERM
+        _SockFilter(0x06, 0, 0, 0x7FFF0000),  # allow remaining syscalls
+    )
+    program = _SockFprog(len(instructions), instructions)
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(38, 1, 0, 0, 0) != 0:  # PR_SET_NO_NEW_PRIVS
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), "PR_SET_NO_NEW_PRIVS")
+    if libc.prctl(22, 2, ctypes.byref(program), 0, 0) != 0:  # PR_SET_SECCOMP/FILTER
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), "PR_SET_SECCOMP")
 
 
 def process_session_has_live_members(session_id: int) -> bool:
@@ -189,26 +224,36 @@ class Session:
 
     def start(self) -> str:
         old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals())
-        gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
+        gate_read = gate_write = -1
+        child_pid = master_fd = -1
         try:
+            gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
             child_pid, master_fd = pty.fork()
             if child_pid == 0:
-                os.close(gate_write)
                 try:
+                    os.close(gate_write)
+                except OSError:
+                    os._exit(126)
+                gate_write = -1
+                try:
+                    install_no_setsid_filter()
                     released = os.read(gate_read, 1)
+                except BaseException:
+                    os._exit(126)
                 finally:
                     os.close(gate_read)
+                    gate_read = -1
                 if released != b"\x01":
                     os._exit(126)
             if child_pid > 0:
-                os.close(gate_read)
-                gate_read = -1
-                os.set_inheritable(gate_write, False)
                 # Publish both owned handles before a pending cancellation can
                 # run the handler and enter Session.close().
                 self.pid, self.master_fd = child_pid, master_fd
                 self.bridge_session_id = child_pid
                 try:
+                    os.close(gate_read)
+                    gate_read = -1
+                    os.set_inheritable(gate_write, False)
                     self.bridge_pidfd = os.pidfd_open(child_pid, 0)
                     identity = bridge_identity_record(child_pid)
                     self.bridge_anchor = (child_pid, identity["starttime"])
@@ -216,13 +261,19 @@ class Session:
                     if os.write(gate_write, b"\x01") != 1:
                         raise RuntimeError("could not release the verified PTY bridge")
                 except BaseException:
-                    try:
-                        os.close(gate_write)
-                    except OSError:
-                        pass
+                    for descriptor in (gate_read, gate_write):
+                        if descriptor >= 0:
+                            try:
+                                os.close(descriptor)
+                            except OSError:
+                                pass
                     try:
                         if self.bridge_pidfd is not None:
                             signal.pidfd_send_signal(self.bridge_pidfd, signal.SIGKILL)
+                        else:
+                            # This is still the unreaped direct child returned
+                            # by pty.fork(); the kernel cannot reuse its PID yet.
+                            os.kill(child_pid, signal.SIGKILL)
                     except (ProcessLookupError, OSError):
                         pass
                     try:
@@ -230,13 +281,21 @@ class Session:
                     except ChildProcessError:
                         pass
                     self.pid = -1
-                    os.close(master_fd)
+                    try:
+                        os.close(master_fd)
+                    except OSError:
+                        pass
                     self.master_fd = -1
                     if self.bridge_pidfd is not None:
                         os.close(self.bridge_pidfd)
                         self.bridge_pidfd = None
                     raise
-                os.close(gate_write)
+                try:
+                    os.close(gate_write)
+                except OSError:
+                    # The bridge was released only after its identity was
+                    # durable; don't enter an unsafe partial-startup path.
+                    pass
                 gate_write = -1
         except BaseException:
             for descriptor in (gate_read, gate_write):
