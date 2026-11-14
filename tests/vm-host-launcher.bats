@@ -352,8 +352,10 @@ assert 'timeout --signal=TERM --kill-after=2 12 python3' in text
 assert 'connect_ex(target)==0' in text
 assert 'ssh-keyscan' not in text
 assert 'TMPDIR=/tmp python3 tests/ci-qemu-oauth-bridge.py' in text
-assert 'readiness_deadline=$((SECONDS + 300))' in text
+assert 'readiness_deadline=$((qemu_started + 120))' in text
+assert 'readiness_deadline=$((SECONDS + 60))' in text
 assert 'SECONDS < readiness_deadline && SECONDS < qemu_deadline' in text
+assert 'qemu_deadline=$((qemu_started + 300))' in text
 assert 'capture_qemu_identity || fail' in text
 assert 'process_starttime' in text and 'qemu_identity_matches' in text
 assert 'stop_owned_qemu || fail' in text
@@ -362,7 +364,12 @@ assert 'stop_oauth_harness' in text and 'ci_launch_tracked oauth_pid' in text
 assert 'terminate_oauth_bridge_groups' in text and 'bridge-process.json' in pathlib.Path(sys.argv[1]).with_name('ci-qemu-oauth-bridge.py').read_text()
 assert 'oauth_cleanup_unproved' in text and 'oauth_evidence_is_clear' in text
 assert 'process_state' in text and "printf '?'" in text
-assert text.count('qemu_deadline=$((SECONDS + 2400))') == 1
+workflow = pathlib.Path(sys.argv[1]).parents[1] / '.github/workflows/ci.yml'
+workflow_text = workflow.read_text()
+assert 'timeout-minutes: 8' in workflow_text
+assert "github.event.action == 'labeled'" in workflow_text
+assert "github.event.label.name == 'm2-qemu-acceptance'" in workflow_text
+assert 'runs-on: ubuntu-24.04' in workflow_text
 assert 'pidfd_send_signal' in pathlib.Path(sys.argv[1]).with_name('ci-process-signal.py').read_text()
 assert 'qemu-system-x86_64 \\\n' in text and 'timeout --signal=TERM --kill-after=10 2400' not in text
 print('M2_RESTRICTED_EGRESS_ORDER_OK')

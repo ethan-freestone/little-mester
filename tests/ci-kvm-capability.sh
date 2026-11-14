@@ -14,6 +14,10 @@ readonly image_sha256='04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f9
 
 fail() {
   printf 'KVM_TRIAL_FAIL: %s\n' "$1" >&2
+  if [[ -n "${tmp:-}" && -s "$tmp/readiness.log" ]]; then
+    printf '%s\n' '--- last bounded guest SSH/readiness probe ---' >&2
+    tail -n 12 "$tmp/readiness.log" >&2 || true
+  fi
   if [[ -n "${serial_log:-}" && -f "$serial_log" ]]; then
     printf '%s\n' '--- bounded guest serial tail ---' >&2
     tail -n 80 "$serial_log" >&2 || true
@@ -57,6 +61,29 @@ process_starttime() {
 
 process_uid() {
   awk '$1 == "Uid:" { print $2; exit }' "/proc/$1/status" 2>/dev/null
+}
+
+report_kvm_progress() {
+  local phase=$1 deadline=$2 ssh_rc=$3 now serial_bytes readiness_detail
+  now=$SECONDS
+  (( now >= next_progress )) || return 0
+  next_progress=$((now + 15))
+  serial_bytes=0
+  [[ -f "$serial_log" ]] && serial_bytes="$(wc -c <"$serial_log")"
+  printf 'KVM_PROGRESS phase=%s elapsed=%ss remaining=%ss qemu_state=%s last_ssh_rc=%s serial_bytes=%s\n' \
+    "$phase" "$((now - qemu_started))" "$((deadline - now))" \
+    "$(process_state "$qemu_pid")" "$ssh_rc" "$serial_bytes"
+  if [[ -s "$tmp/readiness.log" ]]; then
+    readiness_detail="$(tail -n 3 "$tmp/readiness.log" | tr '\n' ' ' | cut -c1-300)"
+    [[ -n "$readiness_detail" ]] && printf 'KVM_PROGRESS detail=%s\n' "$readiness_detail"
+  fi
+  if (( now >= next_serial_tail )); then
+    next_serial_tail=$((now + 30))
+    if [[ -s "$serial_log" ]]; then
+      printf '%s\n' 'KVM_PROGRESS guest-serial-tail:'
+      tail -n 5 "$serial_log" || true
+    fi
+  fi
 }
 
 signal_owned_process() {
@@ -342,7 +369,8 @@ host_key="$tmp/guest_host_ed25519"
 known_hosts="$tmp/known_hosts"
 serial_log="$tmp/serial.log"
 
-curl --fail --location --silent --show-error --connect-timeout 20 --max-time 600 \
+printf 'KVM_PROGRESS phase=pinned-image-download max_seconds=120\n'
+curl --fail --location --silent --show-error --connect-timeout 20 --max-time 120 \
   "$image_url" --output "$image"
 printf '%s  %s\n' "$image_sha256" "$image" | sha256sum --check --status \
   || fail 'pinned guest image SHA-256 mismatch'
@@ -400,6 +428,8 @@ genisoimage -quiet -output "$seed" -volid cidata -joliet -rock \
 qemu-img create -q -f qcow2 -F qcow2 -b "$image" "$overlay"
 
 printf 'KVM_TRIAL: starting pinned guest with accel=kvm (no TCG fallback)\n'
+qemu_started=$SECONDS
+qemu_deadline=$((qemu_started + 300))
 ci_launch_tracked qemu_pid qemu-system-x86_64 \
     -name little-mester-hosted-kvm-integration \
     -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
@@ -412,7 +442,7 @@ ci_launch_tracked qemu_pid qemu-system-x86_64 \
 qemu_starttime=''
 qemu_uid=''
 capture_qemu_identity || fail 'could not prove ownership of the launched QEMU process'
-qemu_deadline=$((SECONDS + 2400))
+printf 'KVM_PROGRESS phase=qemu-started readiness_limit=120s integration_limit=300s\n'
 
 ssh_args=(
   -F /dev/null -T -a -x
@@ -425,8 +455,12 @@ ssh_args=(
 )
 
 ready=0
-readiness_deadline=$((SECONDS + 1500))
-while (( SECONDS < readiness_deadline )); do
+qemu_started=$SECONDS
+readiness_deadline=$((qemu_started + 120))
+next_progress=$((SECONDS + 15))
+next_serial_tail=$((SECONDS + 30))
+last_ssh_rc=not-attempted
+while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
   qemu_identity_matches || fail 'test-owned QEMU process exited or changed identity before guest readiness'
   qemu_state="$(process_state "$qemu_pid")"
   [[ -n "$qemu_state" && "$qemu_state" != Z ]] || fail 'QEMU exited before guest readiness'
@@ -442,15 +476,21 @@ while (( SECONDS < readiness_deadline )); do
         >"$tmp/readiness.log" 2>&1; then
       ready=1
       break
-    elif grep -Eq '^(status|extended_status): error' "$tmp/readiness.log"; then
-      cat "$tmp/readiness.log" >&2
-      fail 'cloud-init reported an error before guest readiness'
+    else
+      last_ssh_rc=$?
+      if grep -Eq '^(status|extended_status): error' "$tmp/readiness.log"; then
+        cat "$tmp/readiness.log" >&2
+        fail 'cloud-init reported an error before guest readiness'
+      fi
     fi
+  else
+    last_ssh_rc=no-known-hosts
   fi
+  report_kvm_progress initial-readiness "$readiness_deadline" "$last_ssh_rc"
   remaining=$((readiness_deadline - SECONDS))
   (( remaining > 0 )) && sleep 1
 done
-[[ "$ready" == 1 ]] || fail 'pinned QEMU guest did not reach bounded cloud-init/SSH readiness'
+[[ "$ready" == 1 ]] || fail "guest did not reach cloud-init/SSH readiness within 120s (last ssh status: $last_ssh_rc)"
 printf 'KVM_TRIAL_PASS: pinned guest booted with accel=kvm and passed cloud-init readiness\n'
 
 ssh_guest() {
@@ -578,7 +618,10 @@ qemu_starttime=''
 qemu_uid=''
 capture_qemu_identity || fail 'could not prove ownership of the restricted-boot QEMU process'
 ready=0
-readiness_deadline=$((SECONDS + 300))
+readiness_deadline=$((SECONDS + 60))
+next_progress=$((SECONDS + 15))
+next_serial_tail=$((SECONDS + 30))
+last_ssh_rc=not-attempted
 while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
   qemu_identity_matches || fail 'test-owned QEMU process exited or changed identity during persistent-disk reboot'
   qemu_state="$(process_state "$qemu_pid")"
@@ -595,11 +638,14 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
       >/dev/null 2>&1; then
     ready=1
     break
+  else
+    last_ssh_rc=$?
   fi
+  report_kvm_progress restricted-reboot-readiness "$readiness_deadline" "$last_ssh_rc"
   remaining=$((readiness_deadline - SECONDS))
   (( remaining > 0 )) && sleep 1
 done
-[[ "$ready" == 1 ]] || fail 'persistent guest disk did not retain OpenCode/workspace state across reboot'
+[[ "$ready" == 1 ]] || fail "restricted reboot did not become SSH-ready within 60s (last ssh status: $last_ssh_rc)"
 ssh_guest "python3 -c 'import socket,sys; targets=[(ip,443) for ip in sys.argv[1:]]+[(\"10.0.2.100\",3128)]; connected=[target for target in targets if (lambda s: (s.settimeout(2),s.connect_ex(target)==0,s.close())[1])(socket.socket())]; assert not connected, \"restricted guest unexpectedly reached an upstream/proxy endpoint\"' $probe_argv"
 printf 'KVM_EGRESS_BOUNDARY_PASS: a bounded sample of resolved provider HTTPS addresses and the configured proxy TCP endpoint were unreachable in restricted QEMU mode\n'
 ssh_guest 'test "$(cat /home/mester/workspace/persisted.txt)" = persistent-fixture && test "$(cat /home/mester/.local/share/opencode/auth.json)" = "{\"provider\":\"synthetic-fixture\",\"marker\":\"preserve-auth-bytes\"}" && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && python3 -c '\''import sqlite3; db=sqlite3.connect("/home/mester/.local/share/opencode/opencode.db"); assert db.execute("select value from session_fixture").fetchone() == ("synthetic-session-history",); db.close()'\'''

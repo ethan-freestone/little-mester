@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import pathlib
+import os
+import re
+import signal
 import subprocess
 import unittest
 
@@ -36,16 +39,34 @@ trap 'ci_handle_cancel 143' TERM
 CI_LAUNCH_PENDING=1
 kill -TERM "$BASHPID"
 CI_LAUNCH_PENDING=0
-ci_launch_tracked child_pid sleep 30
+ci_launch_tracked child_pid bash -c 'exec sleep 30 >/dev/null 2>&1'
 exit 0
 '''
-        result = subprocess.run(
+        process = subprocess.Popen(
             ["bash", "--noprofile", "--norc", "-c", script, "launch-test", str(HELPER)],
-            capture_output=True, text=True, timeout=5, check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
         )
-        self.assertEqual(result.returncode, 143, result.stderr + result.stdout)
-        self.assertIn("TRACKED_CHILD_REAPED=", result.stdout)
-        self.assertNotIn("MISSING_CHILD_PID", result.stderr)
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # subprocess.run(timeout=...) kills only its direct child. The
+            # async job can inherit the capture pipes and survive that kill,
+            # obscuring whether Bash itself exited and leaking `sleep`.
+            # Isolate this test process and clean only its test-owned session.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate(timeout=2)
+            self.fail(f"tracked cancellation exceeded 5s; stdout={stdout!r} stderr={stderr!r}")
+        self.assertEqual(process.returncode, 143, stderr + stdout)
+        match = re.search(r"TRACKED_CHILD_REAPED=([0-9]+)", stdout)
+        self.assertIsNotNone(match, stderr + stdout)
+        self.assertNotIn("MISSING_CHILD_PID", stderr)
+        child_pid = int(match.group(1))
+        self.assertFalse(pathlib.Path(f"/proc/{child_pid}").exists(),
+                         f"tracked child PID {child_pid} was not reaped")
 
 
 if __name__ == "__main__":
