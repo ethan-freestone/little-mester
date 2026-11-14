@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import importlib.util
+import ctypes
+import errno
 import json
 import os
 import pathlib
+import platform
 import signal
 import shutil
 import sys
@@ -38,9 +41,16 @@ class HarnessSignalTests(unittest.TestCase):
             if grandchild == 0:
                 try:
                     os.setsid()
-                    result = f"allowed {os.getpid()}\n".encode("ascii")
+                    native_blocked = False
                 except PermissionError:
-                    result = f"blocked {os.getpid()}\n".encode("ascii")
+                    native_blocked = True
+                x32_blocked = True
+                if platform.machine().lower() in ("x86_64", "amd64"):
+                    libc = ctypes.CDLL(None, use_errno=True)
+                    ctypes.set_errno(0)
+                    x32_result = libc.syscall(0x40000070)
+                    x32_blocked = x32_result == -1 and ctypes.get_errno() == errno.EPERM
+                result = f"{int(native_blocked)} {int(x32_blocked)} {os.getpid()}\n".encode("ascii")
                 os.write(write_fd, result)
                 while True:
                     signal.pause()
@@ -50,8 +60,8 @@ class HarnessSignalTests(unittest.TestCase):
         grandchild = -1
         try:
             result = os.read(read_fd, 64).decode("ascii").strip().split()
-            self.assertEqual(result[0], "blocked")
-            grandchild = int(result[1])
+            self.assertEqual(result[:2], ["1", "1"])
+            grandchild = int(result[2])
             self.assertEqual(os.getsid(grandchild), os.getsid(child))
         finally:
             os.close(read_fd)
@@ -148,6 +158,47 @@ class HarnessSignalTests(unittest.TestCase):
                 session.start()
         restored_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
         self.assertEqual(restored_mask, original_mask)
+
+    def test_execed_bridge_receives_original_unblocked_signal_mask(self):
+        with tempfile.TemporaryDirectory(prefix="oauth-child-mask-") as directory:
+            root = pathlib.Path(directory)
+            key = root / "identity"
+            known_hosts = root / "known_hosts"
+            mask_file = root / "mask.txt"
+            key.write_text("synthetic identity")
+            known_hosts.write_text("synthetic host key")
+            session = HARNESS.Session(2222, key, known_hosts, "mask-check", root)
+            script = (
+                "import signal,pathlib; mask=signal.pthread_sigmask(signal.SIG_BLOCK,set()); "
+                f"pathlib.Path({str(mask_file)!r}).write_text(','.join(str(int(s)) for s in mask))"
+            )
+            session.command = [
+                "/usr/bin/python3", "-c", script,
+            ]
+            parent_mask = signal.pthread_sigmask(signal.SIG_BLOCK, HARNESS.handled_signals())
+            try:
+                with self.assertRaises(RuntimeError):
+                    session.start()
+                mask = {int(item) for item in mask_file.read_text(encoding="ascii").split(",") if item}
+                self.assertTrue({int(signal.SIGINT), int(signal.SIGTERM), int(signal.SIGALRM)}.isdisjoint(mask))
+            finally:
+                if session.pid > 0:
+                    if session.bridge_pidfd is not None:
+                        try:
+                            signal.pidfd_send_signal(session.bridge_pidfd, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    try:
+                        os.waitpid(session.pid, 0)
+                    except ChildProcessError:
+                        pass
+                if session.master_fd >= 0:
+                    os.close(session.master_fd)
+                if session.bridge_pidfd is not None:
+                    os.close(session.bridge_pidfd)
+                shutil.rmtree(session.control_dir, ignore_errors=True)
+                shutil.rmtree(session.root, ignore_errors=True)
+                signal.pthread_sigmask(signal.SIG_SETMASK, parent_mask)
 
     def test_pidfd_signal_requires_the_captured_child_identity(self):
         if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):

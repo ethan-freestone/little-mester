@@ -78,17 +78,30 @@ class _SockFprog(ctypes.Structure):
 
 def install_no_setsid_filter() -> None:
     """Keep the PTY child tree in its anchored session for reliable teardown."""
-    syscall_sets = {"x86_64": 112, "amd64": 112, "aarch64": 157, "arm64": 157}
+    syscall_sets = {
+        "x86_64": (0xC000003E, (112, 0x40000070)),  # native and x32 ABI
+        "amd64": (0xC000003E, (112, 0x40000070)),
+        "aarch64": (0xC00000B7, (157,)),
+        "arm64": (0xC00000B7, (157,)),
+    }
     try:
-        setsid_syscall = syscall_sets[platform.machine().lower()]
+        audit_arch, setsid_syscalls = syscall_sets[platform.machine().lower()]
     except KeyError as error:
         raise RuntimeError("unsupported architecture for bridge session containment") from error
-    instructions = (_SockFilter * 4)(
+    filters = [
+        _SockFilter(0x20, 0, 0, 4),  # load seccomp_data.arch
+        _SockFilter(0x15, 1, 0, audit_arch),  # reject syscall ABI changes
+        _SockFilter(0x06, 0, 0, 0x00050000 | errno.EPERM),
         _SockFilter(0x20, 0, 0, 0),  # load seccomp_data.nr
-        _SockFilter(0x15, 0, 1, setsid_syscall),  # branch if syscall is setsid
-        _SockFilter(0x06, 0, 0, 0x00050000 | errno.EPERM),  # return EPERM
-        _SockFilter(0x06, 0, 0, 0x7FFF0000),  # allow remaining syscalls
-    )
+    ]
+    for index, syscall_number in enumerate(setsid_syscalls):
+        jump_to_deny = len(setsid_syscalls) - index
+        filters.append(_SockFilter(0x15, jump_to_deny, 0, syscall_number))
+    filters.extend((
+        _SockFilter(0x06, 0, 0, 0x7FFF0000),  # allow remaining native syscalls
+        _SockFilter(0x06, 0, 0, 0x00050000 | errno.EPERM),  # deny setsid
+    ))
+    instructions = (_SockFilter * len(filters))(*filters)
     program = _SockFprog(len(instructions), instructions)
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(38, 1, 0, 0, 0) != 0:  # PR_SET_NO_NEW_PRIVS
@@ -125,10 +138,15 @@ def process_session_has_live_members(session_id: int) -> bool:
 
 
 def bridge_identity_record(pid: int) -> dict[str, int]:
-    stat = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
-    fields = stat[stat.rfind(") ") + 2 :].split()
-    if len(fields) <= 19 or int(fields[2]) != pid or int(fields[3]) != pid:
-        raise RuntimeError("PTY bridge did not create its own process group")
+    deadline = time.monotonic() + 1
+    while True:
+        stat = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        fields = stat[stat.rfind(") ") + 2 :].split()
+        if len(fields) > 19 and int(fields[2]) == pid and int(fields[3]) == pid:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError("PTY bridge did not create its own process group/session")
+        time.sleep(0.01)
     status = pathlib.Path(f"/proc/{pid}/status").read_text(encoding="ascii")
     uid = int(next(line for line in status.splitlines() if line.startswith("Uid:")).split()[1])
     return {"pid": pid, "starttime": int(fields[19]), "uid": uid,
@@ -230,6 +248,8 @@ class Session:
             gate_read, gate_write = os.pipe2(os.O_CLOEXEC)
             child_pid, master_fd = pty.fork()
             if child_pid == 0:
+                for signum in handled_signals():
+                    signal.signal(signum, signal.SIG_DFL)
                 try:
                     os.close(gate_write)
                 except OSError:
@@ -306,7 +326,12 @@ class Session:
                         pass
             raise
         finally:
-            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+            restore_mask = set(old_mask)
+            if child_pid == 0:
+                # run_case keeps these signals blocked across start(); do not
+                # let that parent-side deferral leak into the execed bridge.
+                restore_mask.difference_update(handled_signals())
+            signal.pthread_sigmask(signal.SIG_SETMASK, restore_mask)
         if child_pid == 0:
             for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"):
                 os.environ.pop(name, None)
