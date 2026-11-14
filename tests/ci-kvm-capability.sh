@@ -5,6 +5,7 @@
 # shellcheck disable=SC2016
 set -Eeuo pipefail
 umask 077
+process_signal_helper="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/ci-process-signal.py"
 
 readonly image_url='https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img'
 readonly image_sha256='04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94'
@@ -37,77 +38,210 @@ process_state() {
   printf '%s' "${rest%% *}"
 }
 
-qemu_child_matches() {
-  local pid=$1 comm
-  [[ -r "/proc/$pid/comm" && -r "/proc/$pid/cmdline" ]] || return 1
-  comm="$(</proc/"$pid"/comm)"
-  [[ "$comm" == qemu-system-x86 ]] \
-    && grep -azFq -- 'little-mester-hosted-kvm-integration' "/proc/$pid/cmdline" \
-    && grep -azFq -- "$overlay" "/proc/$pid/cmdline"
+process_starttime() {
+  local pid=$1 stat_line rest
+  [[ -r "/proc/$pid/stat" ]] || return 1
+  stat_line="$(<"/proc/$pid/stat")"
+  rest="${stat_line##*) }"
+  local -a fields
+  read -r -a fields <<<"$rest"
+  ((${#fields[@]} > 19)) || return 1
+  printf '%s' "${fields[19]}"
 }
 
-find_qemu_child() {
-  local child found=''
-  [[ -r "/proc/$qemu_pid/task/$qemu_pid/children" ]] || return 1
-  for child in $(</proc/"$qemu_pid"/task/"$qemu_pid"/children); do
-    qemu_child_matches "$child" || continue
-    [[ -z "$found" ]] || return 1
-    found="$child"
+process_uid() {
+  awk '$1 == "Uid:" { print $2; exit }' "/proc/$1/status" 2>/dev/null
+}
+
+signal_owned_process() {
+  local pid=$1 starttime=$2 uid=$3 parent=$4 comm=$5 signame=$6 required
+  shift 6
+  local -a args=()
+  for required in "$@"; do
+    args+=(--contains "$required")
   done
-  [[ -n "$found" ]] || return 1
-  printf '%s\n' "$found"
+  python3 -I "$process_signal_helper" --pid "$pid" --starttime "$starttime" \
+    --uid "$uid" --parent "$parent" --comm "$comm" --signal "$signame" "${args[@]}"
 }
 
-qemu_child_state() {
-  [[ -n "$qemu_guest_pid" ]] || return 0
-  qemu_child_matches "$qemu_guest_pid" || return 0
-  process_state "$qemu_guest_pid"
+qemu_identity_matches() {
+  local actual_start actual_uid comm stat_line rest parent
+  [[ -n "$qemu_pid" && -n "$qemu_starttime" && -n "$qemu_uid" && -n "$qemu_parent" ]] || return 1
+  actual_start="$(process_starttime "$qemu_pid")" || return 1
+  [[ "$actual_start" == "$qemu_starttime" ]] || return 1
+  actual_uid="$(process_uid "$qemu_pid")"
+  [[ "$actual_uid" == "$qemu_uid" ]] || return 1
+  stat_line="$(<"/proc/$qemu_pid/stat")"
+  rest="${stat_line##*) }"
+  local -a fields
+  read -r -a fields <<<"$rest"
+  parent="${fields[1]:-}"
+  [[ "$parent" == "$qemu_parent" ]] || return 1
+  comm="$(</proc/"$qemu_pid"/comm)" || return 1
+  [[ "$comm" == qemu-system-x86 ]] \
+    && grep -azFq -- 'little-mester-hosted-kvm-integration' "/proc/$qemu_pid/cmdline" \
+    && grep -azFq -- "$overlay" "/proc/$qemu_pid/cmdline"
 }
 
-stop_owned_qemu() {
-  local wrapper_state='' guest_state=''
-  [[ -n "$qemu_pid" ]] || return 0
-  if [[ -z "$qemu_guest_pid" ]]; then
-    qemu_guest_pid="$(find_qemu_child 2>/dev/null || true)"
+capture_qemu_identity() {
+  local stat_line rest parent comm
+  for _ in {1..20}; do
+    if [[ -r "/proc/$qemu_pid/stat" ]]; then
+      stat_line="$(<"/proc/$qemu_pid/stat")"
+      rest="${stat_line##*) }"
+      local -a fields
+      read -r -a fields <<<"$rest"
+      parent="${fields[1]:-}"
+      comm="$(</proc/"$qemu_pid"/comm)"
+      if [[ "$parent" == "$BASHPID" && "$comm" == qemu-system-x86 ]] \
+          && grep -azFq -- 'little-mester-hosted-kvm-integration' "/proc/$qemu_pid/cmdline" \
+          && grep -azFq -- "$overlay" "/proc/$qemu_pid/cmdline"; then
+        qemu_starttime="$(process_starttime "$qemu_pid")"
+        qemu_uid="$(process_uid "$qemu_pid")"
+        qemu_parent="$BASHPID"
+        qemu_identity_matches && return 0
+      fi
+    fi
+    sleep 0.05
+  done
+  return 1
+}
+
+stop_oauth_harness() {
+  local state='' current_start stat_line rest parent comm
+  [[ -n "$oauth_pid" ]] || return 0
+  current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
+  state="$(process_state "$oauth_pid")"
+  if [[ -z "$current_start" || "$state" == Z ]]; then
+    wait "$oauth_pid" 2>/dev/null || true
+    oauth_pid=''
+    oauth_starttime=''
+    oauth_uid=''
+    oauth_parent=''
+    return 0
   fi
-  kill -TERM "$qemu_pid" 2>/dev/null || true
-  for _ in {1..150}; do
-    if [[ -z "$qemu_guest_pid" ]]; then
-      qemu_guest_pid="$(find_qemu_child 2>/dev/null || true)"
+  if [[ -n "$current_start" && ( -z "$oauth_starttime" || -z "$oauth_uid" || -z "$oauth_parent" ) \
+        && -r "/proc/$oauth_pid/stat" ]]; then
+    stat_line="$(<"/proc/$oauth_pid/stat")"
+    rest="${stat_line##*) }"
+    local -a fields
+    read -r -a fields <<<"$rest"
+    parent="${fields[1]:-}"
+    comm="$(</proc/"$oauth_pid"/comm)"
+    if [[ "$parent" == "$BASHPID" && "$comm" == python3 ]] \
+        && grep -azFq -- 'ci-qemu-oauth-bridge.py' "/proc/$oauth_pid/cmdline"; then
+      oauth_starttime="$current_start"
+      oauth_uid="$(process_uid "$oauth_pid")"
+      oauth_parent="$BASHPID"
     fi
-    if [[ -n "$qemu_guest_pid" ]] && qemu_child_matches "$qemu_guest_pid"; then
-      kill -TERM "$qemu_guest_pid" 2>/dev/null || true
+  fi
+  if [[ -z "$oauth_starttime" || "$current_start" != "$oauth_starttime" ]]; then
+    if [[ "$current_start" != "$oauth_starttime" ]]; then
+      wait "$oauth_pid" 2>/dev/null || true
+      oauth_pid=''
+      oauth_starttime=''
+      oauth_uid=''
+      oauth_parent=''
+      return 0
     fi
-    wrapper_state="$(process_state "$qemu_pid")"
-    guest_state="$(qemu_child_state)"
-    [[ ( -z "$wrapper_state" || "$wrapper_state" == Z ) \
-       && ( -z "$guest_state" || "$guest_state" == Z ) ]] && break
+    return 1
+  fi
+  signal_owned_process "$oauth_pid" "$oauth_starttime" "$oauth_uid" \
+    "$oauth_parent" python3 TERM ci-qemu-oauth-bridge.py || {
+      current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
+      state="$(process_state "$oauth_pid")"
+      [[ -z "$current_start" || "$current_start" != "$oauth_starttime" || "$state" == Z ]] || return 1
+    }
+  # Allow the harness its 10-second child interruption plus bounded process-
+  # group kill/reap and proof check before escalating the harness itself.
+  for _ in {1..200}; do
+    current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
+    state="$(process_state "$oauth_pid")"
+    [[ -z "$current_start" || "$current_start" != "$oauth_starttime" || "$state" == Z ]] && break
     sleep 0.1
   done
-  if [[ ( -n "$wrapper_state" && "$wrapper_state" != Z ) \
-        || ( -n "$guest_state" && "$guest_state" != Z ) ]]; then
-    kill -KILL "$qemu_pid" 2>/dev/null || true
+  current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
+  state="$(process_state "$oauth_pid")"
+  if [[ "$current_start" == "$oauth_starttime" && "$state" != Z ]]; then
+    signal_owned_process "$oauth_pid" "$oauth_starttime" "$oauth_uid" \
+      "$oauth_parent" python3 KILL ci-qemu-oauth-bridge.py || {
+        current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
+        state="$(process_state "$oauth_pid")"
+        [[ -z "$current_start" || "$current_start" != "$oauth_starttime" || "$state" == Z ]] || return 1
+      }
     for _ in {1..20}; do
-      if [[ -z "$qemu_guest_pid" ]]; then
-        qemu_guest_pid="$(find_qemu_child 2>/dev/null || true)"
-      fi
-      if [[ -n "$qemu_guest_pid" ]] && qemu_child_matches "$qemu_guest_pid"; then
-        kill -KILL "$qemu_guest_pid" 2>/dev/null || true
-      fi
-      wrapper_state="$(process_state "$qemu_pid")"
-      guest_state="$(qemu_child_state)"
-      [[ ( -z "$wrapper_state" || "$wrapper_state" == Z ) \
-         && ( -z "$guest_state" || "$guest_state" == Z ) ]] && break
+      current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
+      state="$(process_state "$oauth_pid")"
+      [[ -z "$current_start" || "$current_start" != "$oauth_starttime" || "$state" == Z ]] && break
       sleep 0.1
     done
   fi
-  if [[ ( -n "$wrapper_state" && "$wrapper_state" != Z ) \
-        || ( -n "$guest_state" && "$guest_state" != Z ) ]]; then
+  current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
+  state="$(process_state "$oauth_pid")"
+  if [[ "$current_start" == "$oauth_starttime" && "$state" != Z ]]; then
+    return 1
+  fi
+  wait "$oauth_pid" 2>/dev/null || true
+  oauth_pid=''
+  oauth_starttime=''
+  oauth_uid=''
+  oauth_parent=''
+}
+
+stop_owned_qemu() {
+  local state=''
+  [[ -n "$qemu_pid" ]] || return 0
+  if [[ -z "$qemu_starttime" || -z "$qemu_uid" ]]; then
+    # Recover the identity only if this is still the directly launched QEMU
+    # child of this shell. Otherwise retain all VM evidence and fail closed.
+    capture_qemu_identity || true
+  fi
+  if ! qemu_identity_matches; then
+    state="$(process_state "$qemu_pid")"
+    if [[ -z "$state" || "$state" == Z ]]; then
+      wait "$qemu_pid" 2>/dev/null || true
+      qemu_pid=''
+      qemu_starttime=''
+      qemu_uid=''
+      qemu_parent=''
+      return 0
+    fi
+    return 1
+  fi
+  signal_owned_process "$qemu_pid" "$qemu_starttime" "$qemu_uid" \
+    "$qemu_parent" qemu-system-x86 TERM \
+    little-mester-hosted-kvm-integration "$overlay" \
+    || { state="$(process_state "$qemu_pid")"; [[ -z "$state" || "$state" == Z ]] || return 1; }
+  for _ in {1..150}; do
+    if ! qemu_identity_matches; then
+      state="$(process_state "$qemu_pid")"
+      [[ -z "$state" || "$state" == Z ]] && break
+      return 1
+    fi
+    state="$(process_state "$qemu_pid")"
+    [[ "$state" == Z ]] && break
+    sleep 0.1
+  done
+  if [[ -n "$state" && "$state" != Z ]] && qemu_identity_matches; then
+    signal_owned_process "$qemu_pid" "$qemu_starttime" "$qemu_uid" \
+      "$qemu_parent" qemu-system-x86 KILL \
+      little-mester-hosted-kvm-integration "$overlay" \
+      || { state="$(process_state "$qemu_pid")"; [[ -z "$state" || "$state" == Z ]] || return 1; }
+    for _ in {1..20}; do
+      state="$(process_state "$qemu_pid")"
+      [[ -z "$state" || "$state" == Z ]] && break
+      sleep 0.1
+    done
+  fi
+  state="$(process_state "$qemu_pid")"
+  if [[ -n "$state" && "$state" != Z ]]; then
     return 1
   fi
   wait "$qemu_pid" 2>/dev/null || true
   qemu_pid=''
-  qemu_guest_pid=''
+  qemu_starttime=''
+  qemu_uid=''
+  qemu_parent=''
 }
 
 [[ "$(uname -m)" == x86_64 ]] || fail 'runner architecture is not x86_64'
@@ -133,17 +267,31 @@ tmp_root="${RUNNER_TEMP:-/tmp/opencode}"
 mkdir -p "$tmp_root"
 tmp="$(mktemp -d "$tmp_root/lm-kvm-trial.XXXXXXXX")"
 qemu_pid=''
-qemu_guest_pid=''
+qemu_starttime=''
+qemu_uid=''
+qemu_parent=''
+oauth_pid=''
+oauth_starttime=''
+oauth_uid=''
+oauth_parent=''
+qemu_deadline=0
 cleanup() {
   local status=$?
+  # A repeated cancellation must not interrupt ownership verification or
+  # bounded child reaping once cleanup has started.
+  trap '' INT TERM
   if [[ "$status" == 130 || "$status" == 143 ]]; then
     printf 'KVM_TRIAL_FAIL: cancelled by signal (status %s); cleaning only the disposable guest\n' "$status" >&2
   fi
-  if [[ -n "$qemu_pid" ]] && ! stop_owned_qemu; then
-    printf 'KVM_TRIAL_FAIL: test-owned QEMU/wrapper stop was not proved; preserving diagnostics at %s\n' "$tmp" >&2
+  if [[ -n "$oauth_pid" ]] && ! stop_oauth_harness; then
+    printf 'KVM_TRIAL_FAIL: OAuth harness did not stop; preserving disposable guest diagnostics at %s\n' "$tmp" >&2
     status=1
   fi
-  if [[ -z "$qemu_pid" ]]; then
+  if [[ -n "$qemu_pid" ]] && ! stop_owned_qemu; then
+    printf 'KVM_TRIAL_FAIL: test-owned QEMU stop was not proved; preserving diagnostics at %s\n' "$tmp" >&2
+    status=1
+  fi
+  if [[ -z "$qemu_pid" && -z "$oauth_pid" ]]; then
     rm -rf -- "$tmp"
   else
     printf 'KVM_TRIAL_FAIL: disposable VM artifacts retained at %s because process cleanup was not proved\n' "$tmp" >&2
@@ -228,8 +376,7 @@ genisoimage -quiet -output "$seed" -volid cidata -joliet -rock \
 qemu-img create -q -f qcow2 -F qcow2 -b "$image" "$overlay"
 
 printf 'KVM_TRIAL: starting pinned guest with accel=kvm (no TCG fallback)\n'
-timeout --signal=TERM --kill-after=10 2400 \
-  qemu-system-x86_64 \
+qemu-system-x86_64 \
     -name little-mester-hosted-kvm-integration \
     -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
     -nodefaults -no-user-config -display none -monitor none \
@@ -239,6 +386,10 @@ timeout --signal=TERM --kill-after=10 2400 \
       -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$port-:22" \
     -device virtio-net-pci,netdev=net0 &
 qemu_pid=$!
+qemu_starttime=''
+qemu_uid=''
+capture_qemu_identity || fail 'could not prove ownership of the launched QEMU process'
+qemu_deadline=$((SECONDS + 2400))
 
 ssh_args=(
   -F /dev/null -T -a -x
@@ -253,13 +404,9 @@ ssh_args=(
 ready=0
 readiness_deadline=$((SECONDS + 1500))
 while (( SECONDS < readiness_deadline )); do
-  wrapper_state="$(process_state "$qemu_pid")"
-  [[ -n "$wrapper_state" && "$wrapper_state" != Z ]] || fail 'QEMU timeout wrapper exited before guest readiness'
-  if [[ -z "$qemu_guest_pid" ]]; then
-    qemu_guest_pid="$(find_qemu_child 2>/dev/null || true)"
-  elif ! qemu_child_matches "$qemu_guest_pid"; then
-    fail 'test-owned QEMU process exited or changed identity before guest readiness'
-  fi
+  qemu_identity_matches || fail 'test-owned QEMU process exited or changed identity before guest readiness'
+  qemu_state="$(process_state "$qemu_pid")"
+  [[ -n "$qemu_state" && "$qemu_state" != Z ]] || fail 'QEMU exited before guest readiness'
   remaining=$((readiness_deadline - SECONDS))
   (( remaining > 0 )) || break
   attempt_timeout=8
@@ -284,7 +431,10 @@ done
 printf 'KVM_TRIAL_PASS: pinned guest booted with accel=kvm and passed cloud-init readiness\n'
 
 ssh_guest() {
-  timeout --signal=TERM --kill-after=2 20 ssh "${ssh_args[@]}" "$1"
+  local remaining=$((qemu_deadline - SECONDS)) limit=20
+  (( remaining > 0 )) || fail 'QEMU integration exceeded its overall bounded deadline'
+  (( remaining < limit )) && limit=$remaining
+  timeout --signal=TERM --kill-after=1 "$limit" ssh "${ssh_args[@]}" "$1"
 }
 guest_asset_checks="$(python3 - <<'PY'
 import importlib.util, pathlib
@@ -297,7 +447,10 @@ PY
 )"
 ssh_guest "cloud-init status --long >/dev/null 2>&1 || exit 41; $guest_asset_checks"
 ssh_tty_guest() {
-  timeout --signal=TERM --kill-after=2 15 ssh \
+  local remaining=$((qemu_deadline - SECONDS)) limit=15
+  (( remaining > 0 )) || fail 'QEMU integration exceeded its overall bounded deadline'
+  (( remaining < limit )) && limit=$remaining
+  timeout --signal=TERM --kill-after=1 "$limit" ssh \
     -F /dev/null -tt -a -x -i "$key" -p "$port" \
     -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none \
     -o UserKnownHostsFile="$known_hosts" -o GlobalKnownHostsFile=/dev/null \
@@ -389,8 +542,7 @@ PY
 # copying or reinitializing the VM disk. The in-memory tmux socket is expected
 # to be recreated; the session/workspace files remain on the persistent disk.
 stop_owned_qemu || fail 'test-owned QEMU process tree did not stop; preserving its artifacts'
-timeout --signal=TERM --kill-after=10 600 \
-  qemu-system-x86_64 \
+qemu-system-x86_64 \
     -name little-mester-hosted-kvm-integration \
     -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
     -nodefaults -no-user-config -display none -monitor none \
@@ -400,17 +552,16 @@ timeout --signal=TERM --kill-after=10 600 \
     -netdev "user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:$port-:22" \
     -device virtio-net-pci,netdev=net0 &
 qemu_pid=$!
-qemu_guest_pid=''
+qemu_starttime=''
+qemu_uid=''
+capture_qemu_identity || fail 'could not prove ownership of the restricted-boot QEMU process'
+qemu_deadline=$((SECONDS + 2400))
 ready=0
 readiness_deadline=$((SECONDS + 300))
 while (( SECONDS < readiness_deadline )); do
-  wrapper_state="$(process_state "$qemu_pid")"
-  [[ -n "$wrapper_state" && "$wrapper_state" != Z ]] || fail 'QEMU timeout wrapper exited during persistent-disk reboot'
-  if [[ -z "$qemu_guest_pid" ]]; then
-    qemu_guest_pid="$(find_qemu_child 2>/dev/null || true)"
-  elif ! qemu_child_matches "$qemu_guest_pid"; then
-    fail 'test-owned QEMU process exited or changed identity during persistent-disk reboot'
-  fi
+  qemu_identity_matches || fail 'test-owned QEMU process exited or changed identity during persistent-disk reboot'
+  qemu_state="$(process_state "$qemu_pid")"
+  [[ -n "$qemu_state" && "$qemu_state" != Z ]] || fail 'QEMU exited during persistent-disk reboot'
   remaining=$((readiness_deadline - SECONDS))
   (( remaining > 0 )) || break
   attempt_timeout=8
@@ -432,6 +583,20 @@ ssh_guest 'test "$(cat /home/mester/workspace/persisted.txt)" = persistent-fixtu
 ssh_tty_guest 'cd /home/mester/workspace && timeout --signal=TERM --kill-after=2 8 /usr/local/bin/lm-opencode >/dev/null 2>&1 || test "$?" = 124'
 ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux has-session -t little-mester-opencode && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_dead}")" = 0 && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_current_path}")" = /home/mester/workspace'
 printf 'KVM_PERSISTENCE_PASS: synthetic OpenCode DB/auth fixtures, workspace data, and TUI recreation survived disposable guest reboot\n'
+oauth_remaining=$((qemu_deadline - SECONDS))
+(( oauth_remaining > 0 )) || fail 'QEMU integration exceeded its overall bounded deadline before OAuth simulation'
 TMPDIR=/tmp python3 tests/ci-qemu-oauth-bridge.py \
-  --port "$port" --identity "$key" --known-hosts "$known_hosts"
+  --port "$port" --identity "$key" --known-hosts "$known_hosts" \
+  --max-runtime-seconds "$oauth_remaining" &
+oauth_pid=$!
+oauth_starttime="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
+oauth_uid="$(process_uid "$oauth_pid")"
+oauth_parent="$BASHPID"
+oauth_status=0
+wait "$oauth_pid" || oauth_status=$?
+oauth_pid=''
+oauth_starttime=''
+oauth_uid=''
+oauth_parent=''
+[[ "$oauth_status" == 0 ]] || fail "synthetic OAuth harness failed or was cancelled (status $oauth_status)"
 printf 'KVM_M2_AUTH_BOUNDARY: live browser approval, provider token exchange and real model access are NOT_RUN\n'

@@ -353,8 +353,13 @@ assert 'connect_ex(target)==0' in text
 assert 'ssh-keyscan' not in text
 assert 'TMPDIR=/tmp python3 tests/ci-qemu-oauth-bridge.py' in text
 assert 'readiness_deadline=$((SECONDS + 300))' in text
-assert 'qemu_child_matches "$qemu_guest_pid"' in text
+assert 'capture_qemu_identity || fail' in text
+assert 'process_starttime' in text and 'qemu_identity_matches' in text
 assert 'stop_owned_qemu || fail' in text
+assert "trap '' INT TERM" in text
+assert 'stop_oauth_harness' in text and 'oauth_pid=$!' in text
+assert 'pidfd_send_signal' in pathlib.Path(sys.argv[1]).with_name('ci-process-signal.py').read_text()
+assert 'qemu-system-x86_64 \\\n' in text and 'timeout --signal=TERM --kill-after=10 2400' not in text
 print('M2_RESTRICTED_EGRESS_ORDER_OK')
 PY
   [ "$status" -eq 0 ]

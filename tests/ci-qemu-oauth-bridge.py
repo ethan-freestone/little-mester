@@ -32,9 +32,10 @@ SPEC.loader.exec_module(AUTH)
 
 
 class HarnessCancelled(Exception):
-    def __init__(self, signum: int):
+    def __init__(self, signum: int, cleanup_detail: str | None = None):
         super().__init__(f"OAuth harness cancelled by signal {signum}")
         self.signum = signum
+        self.cleanup_detail = cleanup_detail
 
 
 def _raise_on_signal(signum, _frame):
@@ -43,7 +44,7 @@ def _raise_on_signal(signum, _frame):
 
 def install_signal_handlers() -> dict[int, object]:
     previous = {}
-    for signum in (signal.SIGINT, signal.SIGTERM):
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGALRM):
         previous[signum] = signal.signal(signum, _raise_on_signal)
     return previous
 
@@ -51,6 +52,20 @@ def install_signal_handlers() -> dict[int, object]:
 def restore_signal_handlers(previous: dict[int, object]) -> None:
     for signum, handler in previous.items():
         signal.signal(signum, handler)
+
+
+def process_group_has_live_members(pgid: int) -> bool:
+    for entry in pathlib.Path("/proc").iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="ascii")
+            rest = stat[stat.rfind(") ") + 2 :].split()
+            if len(rest) > 3 and int(rest[2]) == pgid and rest[0] != "Z":
+                return True
+        except (OSError, ValueError, IndexError):
+            continue
+    return False
 
 
 def parse_live_url(data: bytes) -> str | None:
@@ -80,8 +95,7 @@ def request_callback(port: int, query: dict[str, str]) -> tuple[int, bytes]:
 class Session:
     def __init__(self, port: int, key: pathlib.Path, known_hosts: pathlib.Path, case: str):
         self.case = case
-        self.temp = tempfile.TemporaryDirectory(prefix="lm-qemu-auth-")
-        self.root = pathlib.Path(self.temp.name)
+        self.root = pathlib.Path(tempfile.mkdtemp(prefix="lm-qemu-auth-"))
         os.chmod(self.root, 0o700)
         self.run_dir = self.root / f"{case}-{os.getpid()}"
         self.run_dir.mkdir(mode=0o700)
@@ -120,8 +134,17 @@ class Session:
         self.closed = False
 
     def start(self) -> str:
-        self.pid, self.master_fd = pty.fork()
-        if self.pid == 0:
+        handled = {signal.SIGINT, signal.SIGTERM, signal.SIGALRM}
+        old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled)
+        try:
+            child_pid, master_fd = pty.fork()
+            if child_pid > 0:
+                # Publish both owned handles before a pending cancellation can
+                # run the handler and enter Session.close().
+                self.pid, self.master_fd = child_pid, master_fd
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+        if child_pid == 0:
             for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY"):
                 os.environ.pop(name, None)
             os.execv(self.command[0], self.command)
@@ -172,13 +195,29 @@ class Session:
     def interrupt(self) -> None:
         if self.pid > 0:
             os.kill(self.pid, signal.SIGINT)
-            self.wait(10)
+            wait_error = None
+            try:
+                self.wait(10)
+            except BaseException as error:
+                # A PTY read/capture failure must not bypass the bounded
+                # terminate-and-reap fallback for the owned bridge child.
+                wait_error = error
             if self.pid > 0:
+                owned_pgid = self.pid
                 self.forced_kill = True
-                os.kill(self.pid, signal.SIGKILL)
+                try:
+                    # pty.fork() makes the bridge a session/process-group
+                    # leader; include its SSH forward if graceful cleanup failed.
+                    os.killpg(owned_pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 deadline = time.monotonic() + 3
                 while time.monotonic() < deadline:
-                    waited, status = os.waitpid(self.pid, os.WNOHANG)
+                    try:
+                        waited, status = os.waitpid(self.pid, os.WNOHANG)
+                    except ChildProcessError:
+                        self.pid = -1
+                        break
                     if waited:
                         self.exit_status = os.waitstatus_to_exitcode(status)
                         self.pid = -1
@@ -186,14 +225,24 @@ class Session:
                     time.sleep(0.05)
                 if self.pid > 0:
                     raise RuntimeError(f"{self.case}: auth bridge was not reaped after bounded SIGKILL")
+                group_deadline = time.monotonic() + 3
+                while process_group_has_live_members(owned_pgid) and time.monotonic() < group_deadline:
+                    time.sleep(0.05)
+                if process_group_has_live_members(owned_pgid):
+                    raise RuntimeError(f"{self.case}: PTY process group survived bounded SIGKILL")
+            if wait_error is not None:
+                raise wait_error
 
     def close(self) -> None:
         if self.closed:
             return
         previous = {}
+        deferred_signals = []
         if __import__("threading").current_thread() is __import__("threading").main_thread():
-            for signum in (signal.SIGINT, signal.SIGTERM):
-                previous[signum] = signal.signal(signum, signal.SIG_IGN)
+            for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGALRM):
+                previous[signum] = signal.signal(
+                    signum, lambda received, _frame: deferred_signals.append(received)
+                )
         failures = []
         proof_complete = False
         try:
@@ -209,29 +258,45 @@ class Session:
                 self.master_fd = -1
             try:
                 if not self.proof.is_file():
-                    raise RuntimeError("auth bridge did not publish cleanup proof")
+                    raise RuntimeError(
+                        f"auth bridge did not publish cleanup proof; artifacts retained at {self.root}"
+                    )
                 proof = __import__("json").loads(self.proof.read_text(encoding="utf-8"))
                 if (not proof.get("ssh_stopped") or not proof.get("control_socket_absent")
                         or not proof.get("listener_verified_closed") or not proof.get("cleanup_complete")):
-                    raise RuntimeError("SSH/listener/control-socket cleanup was not proved")
+                    raise RuntimeError(
+                        f"SSH/listener/control-socket cleanup was not proved; artifacts retained at {self.root}"
+                    )
                 if self.exit_status is None or self.forced_kill:
-                    raise RuntimeError("auth process did not exit cleanly after bounded interruption")
+                    raise RuntimeError(
+                        f"auth process did not exit cleanly after bounded interruption; "
+                        f"artifacts retained at {self.root}"
+                    )
                 proof_complete = True
             except Exception as error:
                 failures.append(f"cleanup proof failed ({error})")
             if proof_complete:
-                self.temp.cleanup()
+                shutil.rmtree(self.root)
                 self.closed = True
         finally:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
+        if deferred_signals:
+            detail = "; ".join(failures) if failures else None
+            raise HarnessCancelled(deferred_signals[0], cleanup_detail=detail)
         if failures:
             raise RuntimeError(f"{self.case}: " + "; ".join(failures))
 
 
 def run_case(args, case: str) -> None:
-    session = Session(args.port, pathlib.Path(args.identity), pathlib.Path(args.known_hosts), case)
+    session = None
     try:
+        handled = {signal.SIGINT, signal.SIGTERM, signal.SIGALRM}
+        old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled)
+        try:
+            session = Session(args.port, pathlib.Path(args.identity), pathlib.Path(args.known_hosts), case)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
         url = session.start()
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
         callback = urllib.parse.urlsplit(query["redirect_uri"][0])
@@ -271,6 +336,8 @@ def run_case(args, case: str) -> None:
         if case in ("mismatched-state", "interruption") and session.exit_status != 130:
             raise RuntimeError(f"{case}: expected bounded SIGINT exit 130, got {session.exit_status}")
     except BaseException as original:
+        if session is None:
+            raise
         try:
             session.close()
         except Exception as cleanup_error:
@@ -287,20 +354,26 @@ def main() -> int:
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--identity", required=True)
     parser.add_argument("--known-hosts", required=True)
+    parser.add_argument("--max-runtime-seconds", type=int, default=900)
     args = parser.parse_args()
+    if not 1 <= args.max_runtime_seconds <= 2400:
+        parser.error("--max-runtime-seconds must be between 1 and 2400")
     # The pinned 2.2.5 callback handler does not guarantee duplicate-callback
     # rejection; replay protection is exercised by the deterministic bridge
     # simulator in vm-browser-auth.test.py instead.
     previous = install_signal_handlers()
+    signal.alarm(args.max_runtime_seconds)
     try:
         for case in ("success", "mismatched-state", "denial", "expiration", "malformed", "interruption"):
             run_case(args, case)
             print(f"QEMU_OAUTH_SIMULATOR_PASS: {case} (synthetic; no token/provider/model access)")
     except HarnessCancelled as cancelled:
-        print(f"QEMU_OAUTH_SIMULATOR_CANCELLED: cleanup attempted after signal {cancelled.signum}",
+        suffix = f"; {cancelled.cleanup_detail}" if cancelled.cleanup_detail else ""
+        print(f"QEMU_OAUTH_SIMULATOR_CANCELLED: cleanup attempted after signal {cancelled.signum}{suffix}",
               file=__import__("sys").stderr)
         return 128 + cancelled.signum
     finally:
+        signal.alarm(0)
         restore_signal_handlers(previous)
     print("QEMU_OAUTH_UPSTREAM_BOUNDARY: token exchange, real identity provider and model response NOT_RUN")
     return 0
