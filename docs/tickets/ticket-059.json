@@ -1,0 +1,43 @@
+{
+  "id": 59,
+  "file_path": "/workspace/docs/tickets/ticket-059.json",
+  "number": 59,
+  "area": "ticketing engine",
+  "type": "improvement",
+  "status": "draft",
+  "title": "Reusable audited ticket redaction and comment revision operations",
+  "objective": "After Phase 1 is merged, design and implement reusable MCP operations for owner-authorized redaction of sensitive ticket content with private evidence retention, and revision-history-preserving edits to existing comments. This work is deferred until Phase 1 is complete.",
+  "created_at": "2026-11-12T19:00:05.555Z",
+  "updated_at": "2026-11-12T19:33:03.537Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "A supported MCP redaction operation can target ticket cases, comments, and other explicitly approved content fields; it retains original evidence only in an owner-controlled private location and preserves verifiable audit integrity without silently rewriting existing audit history.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "A supported MCP comment-edit operation requires appropriate authorization and preserves prior comment revisions in an auditable history; it never silently overwrites historical discussion or test evidence.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "The reusable operations have documented authorization, retry, failure, and privacy behavior, with tests covering audit preservation, private retention, revision history, and prevention of sensitive-content leakage.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "The completed ticket-engine capabilities are validated through MCP and do not reopen, redesign, or alter the completed ticket #54 correction.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Design and security review of reusable MCP redaction and comment revision authorization, audit, and private-retention semantics.",
+      "Engine/MCP tests for redaction and comment revision history, retries, audit validation, private permissions, and sensitive-content leakage."
+    ],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}

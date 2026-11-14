@@ -1,0 +1,125 @@
+{
+  "id": 55,
+  "file_path": "/workspace/docs/tickets/ticket-055.json",
+  "number": 55,
+  "area": "vm-v3",
+  "type": "improvement",
+  "status": "draft",
+  "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
+  "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
+  "created_at": "2026-11-10T21:46:28.225Z",
+  "updated_at": "2026-11-14T10:02:28.094Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Timebox source/runtime compatibility investigation against pinned OpenCode 2.2.5 before porting; record verified behavior and stop for owner/Sol decision if compatibility or security boundaries are unclear.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Use supported native keybindings when they provide the approved behavior; verify Ctrl+C opens confirmation, Escape/N/Ctrl+C cancel, Y/Q confirm, and Ctrl+D behavior on the pinned binary without losing workspace data.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Any plugins/config are version-pinned, baked into the protected guest and inaccessible for workspace replacement; hostile project config/plugin discovery cannot override protected settings or load an unapproved plugin.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Verify update, telemetry, remote model-list, and sharing behavior under the existing egress policy; keep autoupdate/sharing disabled as configured and do not broaden the allowlist without owner approval.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Document target-terminal clipboard-write mitigation, verify it with a harmless clipboard canary, and state residual terminal-control risks; do not treat SSH EscapeChar=none as a clipboard defense.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Timeboxed OpenCode 2.2.5 TUI/plugin/keybinding/config-precedence probe in an isolated disposable environment.",
+      "PTy key-sequence matrix and harmless OSC-52 clipboard canary on each owner-approved terminal profile.",
+      "Hostile project config/plugin sentinel and egress/update/model-list checks without real credentials.",
+      "Owner verifies the propagated host TERM exists in guest terminfo and clear works; live OpenCode TUI key/resize and M2 terminal acceptance remain required."
+    ],
+    "created": [
+      "Local pinned-binary PTY verification: scripts/verify-exit-confirm.py now rejects any opencode version other than 2.2.5 and uses a temporary HOME, empty workspace, private minimal server config, and sanitized environment; no inherited auth/session/config. On 2.2.5, all 10 checks pass: Ctrl+D inert, yq types while closed, Ctrl+C opens, Esc/N/Ctrl+C cancel, uppercase Y and Q confirm. `bats tests/exit-confirm.bats`: 6/6. No guest/owner-terminal clipboard canary, hostile project config test, guest provenance, egress test, or owner acceptance; criteria remain pending. Source checkpoint 01197bd plus verifier version-enforcement follow-up 3a30f2c.",
+      "CONFIG-PRECEDENCE (local pinned v2.2.5 only): commit 2a9be6e adds tests/opencode-project-config.test.py. In isolated temporary HOME/workspace, debug config discovers both direct and .opencode configs without guard; both are absent with OPENCODE_DISABLE_PROJECT_CONFIG=1, while protected config source reports updates disabled/share disabled. 2/2 tests pass. Does not prove effective config, project-plugin suppression/load, guest launch enforcement, or owner acceptance; A3 remains pending. Docs explicitly bound claim (94e32b0).",
+      "Project config/plugin probe current result (commits 2a9be6e/82fc434/79f4aac): tests/opencode-project-config.test.py 3/3 on v2.2.5. Confirms direct and .opencode config sources are absent under OPENCODE_DISABLE_PROJECT_CONFIG=1; a benign test-authored project plugin creates its private marker without the flag and not with the flag. Guarded negative also requires live TUI to reach Ask anything; no false pass on startup failure. No guest enforcement/effective-config/owner acceptance claim.",
+      "MOCK seed-provisioning regression: first-boot parent cloud-init embeds exact root-owned exit-confirm plugin bytes and protected server/CLI config; pins OpenCode 2.2.5, disables project config, routes global plugin discovery to /etc, and installs a tmux attach launcher/runner. Generated scripts pass /bin/sh -n in `tests/vm-parent-supervisor.test.py` (16/16); `bats tests/exit-confirm.bats tests/tui-jsx.bats` 11/11. No guest boot, target-terminal canary, or guest TUI behavior demonstrated.",
+      "tests/vm-parent-supervisor.test.py::test_lab_vm_worker_uses_separate_script_fd_and_preserves_terminal_stdin verifies validated TERM propagation and refuses TERM=dumb",
+      "2026-11-12 M2 offline regression rerun: `python3 tests/vm-browser-auth.test.py` 35/35, `python3 tests/opencode-project-config.test.py` 3/3, and protected TERM propagation test `test_lab_vm_worker_uses_separate_script_fd_and_preserves_terminal_stdin` 1/1. Browser-auth test prints expected argparse refusal cases before PASS. No VM/guest auth/TUI/model action; owner acceptance remains pending."
+    ],
+    "cases": [
+      "MOCK seed assets: exact plugin bytes, root ownership/modes, protected config (autoupdate/share disabled, exit keybinds disabled), project-config guard, root XDG global plugin location, pinned install command and tmux scripts asserted; generated shell syntax valid. tests/vm-parent-supervisor.test.py (16/16). No VM/guest acceptance.",
+      "STATIC/BATS: exit-confirm and TUI JSX suites 11/11. Owner terminal OSC 52 clipboard canary remains NOT_RUN; docs/opencode.md J.12 records terminal-specific mitigation and safe non-secret canary.",
+      "MOCK seed provisioning: protected root-owned OpenCode 2.2.5 config/plugin assets, project-config disable, XDG global discovery under /etc, pinned installation and tmux launcher/runner. `lab-vm parent tui` attaches by fixed SSH remote command through the same pinned, non-forwarding, sealed-memfd path. `tests/vm-parent-supervisor.test.py` 18/18 and Bats exit/TUI 11/11. No guest boot/live TUI/clipboard canary.",
+      "Delta integration: `lab-vm parent tui` executes only the fixed remote `/usr/local/bin/lm-opencode` command via the existing RUNNING-only pinned SSH/sealed-memfd path. Parent startup readiness now checks cloud-init, tmux launcher availability, and exact OpenCode v2.2.5 version. Offline only; no guest boot or terminal canary.",
+      "OWNER-REPORTED M1/M2 handoff (2026-11-12): protected guest is RUNNING on same persistent disk after recovery/restart; owner reports interactive SSH, workspace canary and shell I/O PASS. TERM propagation fix is in source at 9b108be637b6486cfe9089adbb582c6f453c01ab and protected install was a445b3901fea75b3fe4c6b86c3c9069dd504b9f4. No live OpenCode TUI/auth/model-selection/response/session reconnect, guest terminfo/clear, or terminal clipboard canary evidence supplied; M2 acceptance remains pending."
+    ]
+  },
+  "models_used": [],
+  "comments": [
+    {
+      "timestamp": "2026-11-11T15:40:08.791Z",
+      "author": "cli",
+      "body": "Workflow reminder for #54–#57: record durable discussion, review findings, and owner decisions as append-only comments with the ticket-engine CLI (--comment), not as prose in tests.created. Keep test ledgers limited to concise test evidence and actionable test gaps."
+    },
+    {
+      "timestamp": "2026-11-11T16:20:45.661Z",
+      "author": "cli",
+      "body": "Sol Medium independent review of 01197bd plus 3a30f2c: PASS WITH MINOR CONCERNS, both actionable concerns resolved. The verifier enforces exact OpenCode 2.2.5, isolates HOME/workspace/server config, and drops inherited OpenCode auth/session/config env; rerun passed 10/10 PTY checks and Bats 6/6. No owner terminal, guest, egress, clipboard, or credential acceptance is inferred. No remaining material simplify/security finding."
+    },
+    {
+      "timestamp": "2026-11-11T16:36:08.568Z",
+      "author": "cli",
+      "body": "Sol Medium review of config-precedence probe commit 2a9be6e: PASS WITH MINOR DOCUMENTATION CONCERN. Isolated pinned-binary control-vs-guard tests are valid (2/2); project config sources appear normally and are omitted when OPENCODE_DISABLE_PROJECT_CONFIG=1. Review correctly noted this does not prove final effective config, plugin loading, or guest enforcement. Docs claim was narrowed in 94e32b0; A3 remains pending, and no A3 security acceptance is claimed."
+    },
+    {
+      "timestamp": "2026-11-11T16:41:37.234Z",
+      "author": "cli",
+      "body": "Sol Medium security review of 82fc434: PASS with minor test-quality caveat. The benign sentinel is confined to temporary state and the positive/negative control is appropriate; review noted absence alone could pass if TUI failed to start. Commit 79f4aac resolves this by requiring the guarded TUI to remain alive and reach Ask anything before checking no marker. Focused Sol delta confirmed the caveat closed. 3/3 config/plugin tests pass; protected guest launch enforcement remains pending."
+    },
+    {
+      "timestamp": "2026-11-12T00:21:32.445Z",
+      "author": "cli",
+      "body": "Luna implementation chunk M2 (depends on #54 M1a working parent, not metrics): wire only missing protected pinned OpenCode/TUI/model-selection and approved authentication entry paths on the SAME parent. Reuse settled 2.2.5/plugin findings and protected cloud-init assets; reuse reviewed browser-auth-session machinery where applicable, without broadening ordinary owner SSH forwarding or egress. Prove live tmux disconnect/reattach and exit-confirm key matrix; separately prove auth/config/history/workspace survive stop/up (tmux process itself does not survive reboot). Run hostile project config/plugin sentinel and update/telemetry/model-list/sharing checks; owner performs approved-terminal mitigation+harmless OSC52 canary and authentication. Preserve credentials, no escrow/new host bridge topology. Commit coherent missing wiring, then owner M2 evidence. M1a must not wait on these refinements. Existing A1-A5 remain authoritative; no new deferral. Planning inspection only; no tests run."
+    },
+    {
+      "timestamp": "2026-11-12T22:14:43.755Z",
+      "author": "cli",
+      "body": "Luna TERM investigation: lab-vm used env -i for every command and dropped TERM before protected parent ssh/tui. The interactive path requests a PTY and retains strict SSH policy but does not explicitly override TERM; with TERM absent, Bash supplies TERM=dumb, which has no clear capability. Narrow source fix in progress: pass only a validated host TERM whose local terminfo has clear, only to interactive ssh/tui; refuse if unavailable. Regression covers xterm-256color propagation and dumb refusal. Owner guest-side infocmp/clear and live M2 TUI verification remain required; no terminal type is hard-coded and no SSH policy is weakened."
+    },
+    {
+      "timestamp": "2026-11-12T22:16:12.008Z",
+      "author": "cli",
+      "body": "Luna TERM fix committed as 67ef66744a59e848f23f101a784b83741afbb5d3. lab-vm preserves TERM only when its value passes a bounded character check and local infocmp reports a clear capability; it passes that value only to parent ssh/tui. Missing/unsupported terminal capabilities cause a clear refusal; no TERM is hard-coded and SSH policy is unchanged. Protected launcher PTY test verifies xterm-256color reaches the worker and TERM=dumb is refused. Parent Python suites, Bats 105/105, ShellCheck, Python compilation, Ruff and diff checks pass locally. Guest-side terminfo/clear and live OpenCode TUI acceptance remain pending; the running owner installation has not been modified."
+    },
+    {
+      "timestamp": "2026-11-12T22:18:25.235Z",
+      "author": "cli",
+      "body": "TERM allowlisting was tightened in follow-up commit 9b108be637b6486cfe9089adbb582c6f453c01ab: validated TERM and the validation marker enter the clean worker environment only for `parent ssh` and `parent tui`; noninteractive commands retain the original sanitized environment. The protected PTY regression still passes after this refinement."
+    },
+    {
+      "timestamp": "2026-11-12T23:49:00.154Z",
+      "author": "cli",
+      "body": "Owner reports the protected guest is RUNNING and shell/SSH works after M1b recovery/restart. Continue M2 without operating the guest: local 2.2.5 compatibility/config/plugin/key tests are evidence only. Live TUI, authentication, model selection and actual response, tmux reconnect, auth/config/history persistence, guest TERM/terminfo and terminal clipboard canary remain owner acceptance gaps. TERM propagation correction is committed; no source install or VM operation performed here."
+    },
+    {
+      "timestamp": "2026-11-14T09:38:32.867Z",
+      "author": "cli",
+      "body": "Sol Medium focused planning review at clean HEAD 1a9aad3bb2b79e925a98face9ca7ba8700ceceee, branch feat/vm-approach-3. Reviewed tests/ci-kvm-launch.test.py, tests/ci-kvm-launch.sh, tests/ci-kvm-capability.sh, .github/workflows/ci.yml and tests/vm-host-launcher.bats. Candidate 1: reproduce cancellation about 50 times in an ordinary 2-CPU Ubuntu 24.04 container without QEMU; capture Bash/Python versions, parent/wrapper/exec identity and signal/PID-publication timing, then add deterministic synchronization and the smallest evidenced fix; require the hosted Persistent parent (Python) job green at the exact candidate. No root cause or reproduction claimed here. Candidate 2 only afterward: restore automatic normal-PR real-KVM M2 integration, replacing label/dispatch-only gating and monolithic execution with individually visible guarded stages sharing one disposable guest/disk, including restricted reboot, protected config/plugin checks, tmux reattach, persistence and credential-free synthetic OAuth. Assess existing parent supervisor/gate and bounded-log/identity lifecycle for narrow reuse; avoid a second generic supervisor. Verify run/process/disk/SSH identity before each stage, enforce per-stage/overall deadlines and heartbeats, fail closed after any failed prerequisite, and always attempt bounded identity-safe cleanup with sanitized diagnostics. Update static Bats assertions that currently require label gating; preserve all smoke runner failure/cleanup coverage. Keep contents:read, concurrency cancellation, immutable action pins, pinned image digest, explicit source-head versus PR-merge SHA provenance, and no new caching or architecture/M1/M3 work. Hosted real-VM evidence and owner terminal/key/clipboard/auth/model acceptance remain separate required exits. Existing A1-A5 and ledgers/status remain unchanged and pending. CLI validate passed: 452 audit entries, index synchronized, no lock/orphans, 60 tickets satisfy criteria/ledger policy. Legacy MCP still warns on audit entry #417 privacy-redaction; warning is known/deferred, not a reason to rewrite history or block ordinary edits. Preserve #417 and all prior audit entries. Planning only: no source implementation, no tests or QEMU executed; no new reliability ticket needed."
+    },
+    {
+      "timestamp": "2026-11-14T09:57:43.468Z",
+      "author": "cli",
+      "body": "Candidate 1 local CI reliability evidence (2026-11-14): old tests/ci-kvm-launch.test.py and helper from ce46af3 reproduced TimeoutExpired in 2/50 repetitions inside an Ubuntu 24.04 container constrained to 2 CPUs (Bash 5.2.21, Python 3.12.3; container DNS prevented apt, so host Python plus stdlib/libexpat were mounted). No QEMU ran. Updated regression uses FIFO event synchronization at the child pre-exec / parent pre-PID-publication window, records monotonic event/PID/deferred-cancel state, checks child reaping, and emits bounded procfs state/wchan/signal-mask diagnostics on timeout; fixed current harness passed 50/50 in the same container. These are CI reliability tests only, not guest/owner acceptance; all #55 A1-A5 remain pending. Exact-SHA hosted Persistent parent (Python) run still required before Candidate 2."
+    },
+    {
+      "timestamp": "2026-11-14T10:02:28.093Z",
+      "author": "cli",
+      "body": "Candidate 1 exact-candidate review and verification (2026-11-14): Sol Medium reviewed SHA 11986a3 and found one regression-test gap: cleanup could pass by reaping an unpublished fallback PID. Fixed in 6d8e3f8834d91abdaff68d968d8556e785a9548a by asserting the PID captured before publication equals the caller-visible published PID and the reaped PID; capped failure process diagnostics to 32 records and 80-character command/wchan fields, excluding argv tails and environment. Sol Medium re-reviewed exact SHA 6d8e3f8: PASS. Local targeted suite and parent-python suites pass; Bats 106/106; syntax/ShellCheck pass. Ordinary Ubuntu 24.04 2-CPU container baseline old regression: 2/50 failures; final regression+launcher: 50/50 pass (Bash 5.2.21, Python 3.12.3; host Python mounted because Docker network DNS cannot reach Ubuntu package mirrors). Hosted Persistent parent (Python) exact-SHA green is still REQUIRED before Candidate 2. No real guest/owner acceptance; A1-A5 remain pending."
+    }
+  ]
+}

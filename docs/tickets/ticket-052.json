@@ -1,0 +1,38 @@
+{
+  "id": 52,
+  "file_path": "/workspace/docs/tickets/ticket-052.json",
+  "number": 52,
+  "area": "workflow",
+  "type": "improvement",
+  "status": "draft",
+  "title": "Deferred: durable MCP-linked workflow handoff sequencing",
+  "objective": "Replace agent-authored handoff counters with durable ticket-linked workflow events that sequence atomically and bind source identity, timestamps, and evidence references.",
+  "created_at": "2026-11-10T12:10:17.116Z",
+  "updated_at": "2026-11-10T12:10:17.116Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Workflow event records are durably linked to the relevant ticket and generated from recorded execution/state, not treated as authoritative because an agent narrated them.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Sequence allocation is atomic and monotonic within a documented scope, including concurrent writers and retries; gaps/corrections are explicit and history is append-only.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Each event records actual source identity, timestamp, event type, and stable evidence references; schema and migration are reviewed before implementation.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Design and test atomic sequence allocation under concurrent writers, retries and process interruption.",
+      "Verify event-to-ticket linkage, source identity, timestamp and evidence reference integrity; confirm append-only correction behavior."
+    ],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}

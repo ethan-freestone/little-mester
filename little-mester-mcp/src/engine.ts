@@ -1,6 +1,7 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
-import { readIndex, writeIndex, reconstructIndex } from './index';
+import { atomicWriteFile, readIndex, writeIndex, reconstructIndex } from './index';
 
 const VALID_TYPES = new Set(['spike', 'feature', 'bug', 'improvement', 'doc', 'infra']);
 const STATUS_TRANSITIONS: Record<string, string[]> = {
@@ -50,9 +51,11 @@ import * as crypto from 'crypto';
 const LOCK_FILENAME = '.engine.lock';
 const AUDIT_FILENAME = '_audit.json';
 
-export type AuditOperation = 'create' | 'update' | 'archive' | 'baseline';
+export type AuditOperation = 'create' | 'update' | 'archive' | 'baseline' | 'privacy-redaction';
 
-const AUDIT_OPERATIONS = new Set<AuditOperation>(['create', 'update', 'archive', 'baseline']);
+const AUDIT_OPERATIONS = new Set<AuditOperation>([
+    'create', 'update', 'archive', 'baseline', 'privacy-redaction',
+]);
 
 /** A lean audit entry — one line per engine write, with per-entry hash. */
 export interface AuditEntry {
@@ -263,7 +266,64 @@ function tryReadAuditLog(ticketDir: string): AuditEntry[] {
 
 function writeAuditLog(ticketDir: string, entries: AuditEntry[]): void {
     const auditPath = path.join(ticketDir, AUDIT_FILENAME);
-    fs.writeFileSync(auditPath, JSON.stringify(entries, null, 2), 'utf-8');
+    atomicWriteFile(auditPath, JSON.stringify(entries, null, 2), 0o666);
+}
+
+function syncAuditDurability(ticketDir: string): void {
+    const auditFd = fs.openSync(path.join(ticketDir, AUDIT_FILENAME),
+        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try { fs.fsyncSync(auditFd); } finally { fs.closeSync(auditFd); }
+    const directoryFd = fs.openSync(ticketDir, 'r');
+    try { fs.fsyncSync(directoryFd); } finally { fs.closeSync(directoryFd); }
+}
+
+/** Validate a private archive inode and recover only its matching temporary hard link. */
+function validatePrivateArchiveLinks(
+    archiveFd: number,
+    archiveDirectoryFd: number,
+    expectedContents: string,
+    observedContents: string,
+    ownerUid: number,
+): void {
+    const archive = fs.fstatSync(archiveFd);
+    if (!archive.isFile() || archive.uid !== ownerUid || (archive.mode & 0o777) !== 0o600
+            || observedContents !== expectedContents) {
+        throw new Error('existing private evidence archive is unsafe or does not match');
+    }
+    if (archive.nlink === 1) return;
+
+    const directoryPath = `/proc/self/fd/${archiveDirectoryFd}`;
+    const aliases: Array<{ name: string; pid: number }> = [];
+    for (const name of fs.readdirSync(directoryPath)) {
+        const match = /^\.ticket-054-evidence\.(\d+)\.[a-f0-9]+\.tmp$/.exec(name);
+        if (!match) continue;
+        const aliasPath = `${directoryPath}/${name}`;
+        const alias = fs.lstatSync(aliasPath);
+        if (alias.isSymbolicLink() || !alias.isFile() || alias.dev !== archive.dev
+                || alias.ino !== archive.ino) continue;
+        if (alias.uid !== ownerUid || (alias.mode & 0o777) !== 0o600
+                || fs.readFileSync(aliasPath, 'utf-8') !== expectedContents) {
+            throw new Error('private evidence temporary link is unsafe');
+        }
+        aliases.push({ name, pid: Number(match[1]) });
+    }
+    if (archive.nlink !== aliases.length + 1 || aliases.length !== 1) {
+        throw new Error('private evidence archive has unexpected hard links');
+    }
+    let writerAlive = true;
+    try {
+        process.kill(aliases[0].pid, 0);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') writerAlive = false;
+        else if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
+    }
+    if (!writerAlive) {
+        fs.unlinkSync(`${directoryPath}/${aliases[0].name}`);
+        fs.fsyncSync(archiveDirectoryFd);
+        if (fs.fstatSync(archiveFd).nlink !== 1) {
+            throw new Error('orphaned private evidence link recovery was incomplete');
+        }
+    }
 }
 
 /** Compute SHA-256 of the canonical JSON (no whitespace) of an entry's non-hash fields. */
@@ -495,6 +555,8 @@ export interface TicketEngine {
     create(params: CreateTicketParams): Ticket;
     list(area?: string, status?: string): Ticket[];
     update(number: number, patch: TicketPatch): Ticket | undefined;
+    /** One-time, ticket-054-specific privacy correction; never returns archived raw case data. */
+    reconcileTicket054FingerprintCase(privateArchivePath: string, authorizedCaseSha256: string): Ticket;
     archive(number: number): Ticket | undefined;
     validate(): ValidateResult;
     getEnforcement(): EnforcementResult;
@@ -935,11 +997,8 @@ export function createTicketEngine({
     }
 
     function persist(ticket: Ticket): void {
-        fs.writeFileSync(
-            path.join(ticketDir, ticketFileName(ticket.number)),
-            JSON.stringify({ ...ticket }, null, 2),
-            'utf-8'
-        );
+        atomicWriteFile(path.join(ticketDir, ticketFileName(ticket.number)),
+            JSON.stringify({ ...ticket }, null, 2), 0o666);
 
         const idx = readIndex(indexPath);
         let found = false;
@@ -1101,6 +1160,202 @@ export function createTicketEngine({
 
                 return data;
             });
+        },
+
+        reconcileTicket054FingerprintCase(privateArchivePath: string, authorizedCaseSha256: string): Ticket {
+            const number = 54;
+            if (typeof privateArchivePath !== 'string' || !path.isAbsolute(privateArchivePath)
+                    || !/^[a-f0-9]{64}$/.test(authorizedCaseSha256)) {
+                throw new Error('private evidence archive path must be absolute');
+            }
+            const resolvedTicketDir = fs.realpathSync(ticketDir);
+            const { execFileSync } = require('child_process') as typeof import('child_process');
+            const repoRoot = fs.realpathSync(execFileSync('git', ['-C', resolvedTicketDir,
+                'rev-parse', '--show-toplevel'], { encoding: 'utf-8' }).trim());
+            const resolvedArchive = path.resolve(privateArchivePath);
+            const archiveParentPath = path.dirname(resolvedArchive);
+            const realArchiveParent = fs.realpathSync(archiveParentPath);
+            if (realArchiveParent !== archiveParentPath) {
+                throw new Error('private evidence archive path contains a symlink');
+            }
+            const relativeArchive = path.relative(repoRoot, realArchiveParent);
+            if (relativeArchive === '' || (!relativeArchive.startsWith(`..${path.sep}`)
+                    && relativeArchive !== '..' && !path.isAbsolute(relativeArchive))) {
+                throw new Error('private evidence archive must be outside the repository');
+            }
+            const homePath = path.resolve(os.homedir());
+            const home = fs.realpathSync(homePath);
+            if (home !== homePath) throw new Error('owner home path is not canonical');
+            const relativeHome = path.relative(home, realArchiveParent);
+            if (relativeHome === '' || relativeHome === '..' || relativeHome.startsWith(`..${path.sep}`)
+                    || path.isAbsolute(relativeHome)) {
+                throw new Error('private evidence archive must be under the owner home');
+            }
+            const uid = typeof process.getuid === 'function' ? process.getuid() : -1;
+            const privateDirectories = [home];
+            let directoryPath = home;
+            const components = relativeHome.split(path.sep);
+            for (const component of components) {
+                directoryPath = path.join(directoryPath, component);
+                privateDirectories.push(directoryPath);
+            }
+            for (const directory of privateDirectories) {
+                const info = fs.lstatSync(directory);
+                const expectedMode = directory === realArchiveParent ? 0o700 : undefined;
+                if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== uid
+                        || (info.mode & 0o022) !== 0
+                        || (expectedMode !== undefined && (info.mode & 0o777) !== expectedMode)) {
+                    throw new Error('private evidence ancestry is not owner-controlled');
+                }
+            }
+
+            const archiveDirectoryFd = fs.openSync(realArchiveParent,
+                fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+            const archivePath = `/proc/self/fd/${archiveDirectoryFd}/${path.basename(resolvedArchive)}`;
+
+            const file = path.join(ticketDir, ticketFileName(number));
+            try {
+                return withLock(ticketDir, () => {
+                const raw = fs.readFileSync(file, 'utf-8');
+                const data: Ticket = JSON.parse(raw);
+                validateData(data);
+                if (data.number !== number) throw new Error('ticket-054 persisted identity mismatch');
+                if (!data.tests) throw new Error('ticket-054 test ledger is missing');
+                const cases = data.tests.cases;
+                const marker = 'OWNER-REPORTED HOST-KEY FINGERPRINT CHECK (2026-11-12; post-failure state):';
+                const sanitized = 'OWNER-REPORTED HOST-KEY CHECK (2026-11-12; post-failure state): '
+                    + 'expected persistent host-key vs pinned known_hosts comparison: MATCH. '
+                    + 'Guest-disk active public host-key fingerprint: UNKNOWN (guestfish unavailable). '
+                    + 'No guest mismatch/root-cause inference or M1a acceptance; exact private evidence '
+                    + 'is retained outside the repository.';
+                const matches = cases.map((value, index) => ({ value, index }))
+                    .filter(({ value }) => value.startsWith(marker));
+                if (matches.length === 0) {
+                    let existingFd = -1;
+                    try {
+                        existingFd = fs.openSync(archivePath,
+                            fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+                    } catch (error) {
+                        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                    }
+                    if (existingFd >= 0) {
+                        try {
+                            const archivedContents = fs.readFileSync(existingFd, 'utf-8');
+                            const archived = JSON.parse(archivedContents);
+                            if (archived.ticket_number === number
+                                && typeof archived.evidence === 'string'
+                                && crypto.createHash('sha256').update(archived.evidence).digest('hex')
+                                    === authorizedCaseSha256
+                                && cases.filter(value => value === sanitized).length === 1) {
+                                // Cleanup is a mutation: do not permit it until the persisted
+                                // identity, private authorization digest, and sanitized state
+                                // have all been verified.
+                                validatePrivateArchiveLinks(existingFd, archiveDirectoryFd,
+                                    archivedContents, archivedContents, uid);
+                                const index = readIndex(indexPath);
+                                const indexed = index.tickets.find(entry => entry.number === number);
+                                if (!indexed || indexed.status !== data.status || indexed.area !== data.area) {
+                                    persist(data);
+                                }
+                                const auditStatus = verifyAuditLog(ticketDir);
+                                if (!auditStatus.valid) throw new Error('audit log is invalid');
+                                const auditEntries = readAuditLog(ticketDir);
+                                const matchingAuditEvent = auditEntries.some(entry => entry.ticket_number === number
+                                        && entry.operation === 'privacy-redaction'
+                                        && entry.hash === entryHash({
+                                            timestamp: entry.timestamp,
+                                            operation: entry.operation,
+                                            ticket_number: entry.ticket_number,
+                                        }));
+                                if (!matchingAuditEvent) {
+                                    appendAuditEntry(ticketDir, {
+                                        operation: 'privacy-redaction', ticket_number: number,
+                                    });
+                                }
+                                syncAuditDurability(ticketDir);
+                                return data;
+                            }
+                        } finally {
+                            fs.closeSync(existingFd);
+                        }
+                    }
+                    throw new Error('the exact ticket-054 fingerprint observation was not found');
+                }
+                const originalCase = matches[0]?.value;
+                if (matches.length !== 1 || !originalCase
+                        || crypto.createHash('sha256').update(originalCase).digest('hex')
+                            !== authorizedCaseSha256) {
+                    throw new Error('ticket-054 fingerprint observation is not uniquely identifiable');
+                }
+
+                const archivedContent = JSON.stringify({
+                    ticket_number: number,
+                    evidence: originalCase,
+                }, null, 2) + '\n';
+                let existingFd = -1;
+                try {
+                    existingFd = fs.openSync(archivePath,
+                        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+                } catch (error) {
+                    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                }
+                if (existingFd >= 0) {
+                    try {
+                        validatePrivateArchiveLinks(existingFd, archiveDirectoryFd,
+                            archivedContent, fs.readFileSync(existingFd, 'utf-8'), uid);
+                        fs.fsyncSync(existingFd);
+                    } finally {
+                        fs.closeSync(existingFd);
+                    }
+                    fs.fsyncSync(archiveDirectoryFd);
+                } else {
+                    const temporaryName = `.ticket-054-evidence.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
+                    const temporaryPath = `/proc/self/fd/${archiveDirectoryFd}/${temporaryName}`;
+                    let archiveFd = -1;
+                    try {
+                        archiveFd = fs.openSync(temporaryPath, fs.constants.O_WRONLY | fs.constants.O_CREAT
+                            | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
+                        fs.fchmodSync(archiveFd, 0o600);
+                        fs.writeFileSync(archiveFd, archivedContent, 'utf-8');
+                        fs.fsyncSync(archiveFd);
+                        if (archiveFd >= 0) fs.closeSync(archiveFd);
+                        archiveFd = -1;
+                        try {
+                            // A hard-link publication is atomic and fails if any concurrent
+                            // operation has already claimed the destination; unlike rename,
+                            // it can never replace existing private evidence.
+                            fs.linkSync(temporaryPath, archivePath);
+                        } catch (error) {
+                            if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+                            const racedFd = fs.openSync(archivePath,
+                                fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+                            try {
+                                validatePrivateArchiveLinks(racedFd, archiveDirectoryFd,
+                                    archivedContent, fs.readFileSync(racedFd, 'utf-8'), uid);
+                            } finally {
+                                fs.closeSync(racedFd);
+                            }
+                        }
+                        fs.unlinkSync(temporaryPath);
+                        fs.fsyncSync(archiveDirectoryFd);
+                    } catch (error) {
+                        if (archiveFd >= 0) fs.closeSync(archiveFd);
+                        try { fs.unlinkSync(temporaryPath); } catch { /* retain the primary failure */ }
+                        throw error;
+                    }
+                }
+
+                data.tests.cases[matches[0].index] = sanitized;
+                data.updated_at = new Date().toISOString();
+                const auditStatus = verifyAuditLog(ticketDir);
+                if (!auditStatus.valid) throw new Error('audit log is invalid');
+                persist(data);
+                appendAuditEntry(ticketDir, { operation: 'privacy-redaction', ticket_number: number });
+                return data;
+                });
+            } finally {
+                fs.closeSync(archiveDirectoryFd);
+            }
         },
 
         archive(number: number): Ticket | undefined {

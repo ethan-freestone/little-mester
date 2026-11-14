@@ -1,0 +1,45 @@
+{
+  "id": 61,
+  "file_path": "/workspace/docs/tickets/ticket-061.json",
+  "number": 61,
+  "area": "vm-v3",
+  "type": "improvement",
+  "status": "draft",
+  "title": "Phase 1.5 — Everyday VM developer CLI and profiles",
+  "objective": "After Phase 1 is accepted and merged, provide a simple everyday developer CLI over the existing trusted VM lifecycle core; keep this roadmap separate from M2 acceptance and do not implement during M2.",
+  "created_at": "2026-11-13T21:51:36.011Z",
+  "updated_at": "2026-11-13T21:51:36.011Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Provide ./lab vm up /path/to/workspace, ./lab vm up --profile profile-1 --dir /path/to/workspace, and explicit ./lab vm up --unsafe-recurse forms, plus straightforward status, ssh, tui, stop, and profile-selection commands.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Support a default profile and optional named profiles with safe validated workspace assignment and persistent defaults; each profile has independent persistent VM, disk, and session identities.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Define the exact semantics and safety consequences of --unsafe-recurse before implementing it; make recursion an explicit, auditable opt-in.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Keep the trusted lifecycle, ownership, provenance, and rollback guarantees behind the simpler interface; do not create a second or weaker VM-management implementation.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Deliver as Phase 1.5 after Phase 1; do not expand M2 acceptance or implement this roadmap during M2 except for a minimal compatibility decision needed to avoid throwaway interfaces.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}

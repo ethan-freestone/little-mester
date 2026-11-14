@@ -5,6 +5,18 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      run_real_qemu:
+        description: Run the expensive real-QEMU M2 acceptance gate for this candidate
+        type: boolean
+        required: true
+        default: false
+      candidate_sha:
+        description: Full commit SHA to verify against the selected workflow ref
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -14,7 +26,7 @@ concurrency:
   cancel-in-progress: true
 
 # ── Parallel jobs ──────────────────────────────────────────────────
-# Each job is independent and runs on ubuntu-latest.
+# Each job is independent and uses a pinned Ubuntu LTS image.
 # They start simultaneously and report together, so future
 # aggregate reporting (PR checks, dashboards) just works.
 
@@ -22,7 +34,7 @@ jobs:
   # ── 1. TypeScript / Node ─────────────────────────────────────────
   node:
     name: Build & test (TypeScript)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
       run:
@@ -42,17 +54,103 @@ jobs:
   # ── 2. Bats — lab script, TUI JSX guard, exit-confirm static ────
   bats:
     name: Bats (lab, TUI JSX, exit-confirm)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - run: git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats && sudo /tmp/bats/install.sh /usr/local && rm -rf /tmp/bats
-      - run: bats tests/
+      - name: Install Bats and report its provenance
+        run: |
+          git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats
+          bats_core_commit="$(git -C /tmp/bats rev-parse HEAD)"
+          sudo /tmp/bats/install.sh /usr/local
+          rm -rf /tmp/bats
+          printf 'bats-core commit: %s\n' "$bats_core_commit"
+          bats --version
+      - name: Run Bats with failure output
+        run: bats --print-output-on-failure tests/
 
-  # ── 3. Hygiene — ShellCheck, Python compile, ruff lint ───────────
+  # ── 3. Persistent-parent Python integration/unit suites ─────────
+  parent-python:
+    name: Persistent parent (Python)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install local OpenSSH server for production-path pin regression
+        run: sudo apt-get update -qq && sudo apt-get install -y openssh-server
+      - name: Run parent suites
+        run: |
+          python3 tests/vm-owner-acceptance.test.py
+          python3 tests/vm-guest-user-dirs.test.py
+          python3 tests/ci-qemu-oauth-bridge.test.py
+          python3 tests/ci-kvm-launch.test.py
+          for test in tests/vm-parent-*.test.py; do
+            python3 "$test"
+          done
+
+  # ── Hosted-runner disposable M2 guest integration; no TCG fallback ──
+  real-qemu-kvm-trial:
+    name: Real QEMU KVM M2 integration
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.run_real_qemu == true) ||
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' &&
+       github.event.label.name == 'm2-qemu-acceptance')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || inputs.candidate_sha || github.sha }}
+      - name: Verify explicit candidate SHA
+        env:
+          REQUESTED_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$actual_sha" = "$REQUESTED_SHA"
+          printf 'candidate_sha=%s\n' "$actual_sha"
+      - name: Report runner architecture, identity, and initial KVM device state
+        run: |
+          printf 'runner_label=ubuntu-24.04\narchitecture=%s\n' "$(uname -m)"
+          id
+          if [[ -e /dev/kvm || -L /dev/kvm ]]; then
+            stat -c 'path=%n type=%F mode=%a owner=%U group=%G' -- /dev/kvm
+            if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+              printf 'kvm_access=read-write\n'
+            else
+              printf 'kvm_access=not-read-write\n'
+            fi
+          else
+            printf 'kvm_device=absent\n'
+          fi
+      - name: Apply GitHub-documented KVM udev permissions when needed
+        run: |
+          if [[ -c /dev/kvm && ( ! -r /dev/kvm || ! -w /dev/kvm ) ]]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+              | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+          if [[ -e /dev/kvm || -L /dev/kvm ]]; then
+            stat -c 'path=%n type=%F mode=%a owner=%U group=%G' -- /dev/kvm
+          else
+            printf 'kvm_device=absent-after-udev\n'
+          fi
+      - name: Install disposable-VM host dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cloud-image-utils curl genisoimage openssh-client openssh-server qemu-system-x86 \
+            qemu-utils socat virtiofsd
+      - name: Require usable KVM and run credential-free M2 guest integration
+        run: bash tests/ci-kvm-capability.sh
+      - name: Exercise synthetic OAuth callback bridge over real local OpenSSH
+        run: python3 tests/vm-browser-auth.test.py
+
+  # ── 4. Hygiene — ShellCheck, Python compile, ruff lint ───────────
   hygiene:
     name: Hygiene (shellcheck, py_compile, ruff)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -66,10 +164,10 @@ jobs:
       - name: Install ruff and lint Python
         run: pip install --target=/tmp/.ruff ruff && /tmp/.ruff/bin/ruff check scripts/*.py agent/metrics/gather.py bench/bench.py
 
-  # ── 4. Ticket store ──────────────────────────────────────────────
+  # ── 5. Ticket store ──────────────────────────────────────────────
   ticket-store:
     name: Ticket store validation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     defaults:
       run:

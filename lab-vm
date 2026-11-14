@@ -1,0 +1,272 @@
+#!/usr/bin/bash -p
+# Enter one clean, privileged-mode Bash before processing arguments or loading
+# repository code. -p ignores BASH_ENV and imported functions in the first shell.
+set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+desktop_env=()
+terminal_env=()
+desktop_uid="$(/usr/bin/id -u)"
+desktop_runtime="/run/user/$desktop_uid"
+if [[ "${XDG_RUNTIME_DIR-}" == "$desktop_runtime" \
+   && "${DBUS_SESSION_BUS_ADDRESS-}" == "unix:path=$desktop_runtime/bus" \
+   && -d "$desktop_runtime" && ! -L "$desktop_runtime" \
+   && -S "$desktop_runtime/bus" && ! -L "$desktop_runtime/bus" ]]; then
+  runtime_owner_mode="$(/usr/bin/stat -c '%u:%a' -- "$desktop_runtime" 2>/dev/null || true)"
+  bus_owner="$(/usr/bin/stat -c '%u' -- "$desktop_runtime/bus" 2>/dev/null || true)"
+  if [[ "$runtime_owner_mode" == "$desktop_uid:700" && "$bus_owner" == "$desktop_uid" ]]; then
+    desktop_env+=("XDG_RUNTIME_DIR=$desktop_runtime" "DBUS_SESSION_BUS_ADDRESS=unix:path=$desktop_runtime/bus")
+  fi
+fi
+
+if [[ "${1-}" == parent && ( "${2-}" == ssh || "${2-}" == auth || "${2-}" == tui ) \
+   && "${TERM-}" =~ ^[A-Za-z0-9_.+-]{1,64}$ ]] \
+   && /usr/bin/infocmp -1 "$TERM" 2>/dev/null \
+     | /usr/bin/grep -Eq '^[[:space:]]*clear='; then
+  terminal_env+=("TERM=$TERM" "LM_VM_TERM_VALIDATED=1")
+fi
+
+exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C \
+  "${terminal_env[@]}" "${desktop_env[@]}" \
+  /usr/bin/bash -p /dev/fd/3 "${BASH_SOURCE[0]}" "$@" 3<<'WORKER'
+exec 3<&-
+set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+# The outer entrypoint already verified this exact per-UID runtime directory
+# and bus socket before preserving them through env -i. Rebuild the allowlist
+# array in this worker shell; Bash arrays do not cross the worker boundary.
+desktop_env=()
+desktop_runtime="/run/user/$UID"
+if [[ "${XDG_RUNTIME_DIR-}" == "$desktop_runtime" \
+   && "${DBUS_SESSION_BUS_ADDRESS-}" == "unix:path=$desktop_runtime/bus" \
+   && -d "$desktop_runtime" && ! -L "$desktop_runtime" \
+   && -S "$desktop_runtime/bus" && ! -L "$desktop_runtime/bus" ]]; then
+  desktop_env+=("XDG_RUNTIME_DIR=$desktop_runtime" "DBUS_SESSION_BUS_ADDRESS=unix:path=$desktop_runtime/bus")
+fi
+script_path=$1
+shift
+
+root="$(/usr/bin/python3 -I - "$script_path" <<'PY'
+import os, pathlib, stat, sys
+
+def refuse(message):
+    print(f"REFUSED: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+raw = pathlib.Path(sys.argv[1])
+if not raw.is_absolute():
+    raw = pathlib.Path(os.getcwd()) / raw
+if ".." in raw.parts:
+    refuse("host installation path must not contain parent traversal")
+entry = pathlib.Path(os.path.normpath(raw))
+root = entry.parent
+dependencies = [
+    entry,
+    root / "lib/vm/host-launcher.sh",
+    root / "lib/vm/cloud-init.sh",
+    root / "lib/vm/proxy.py",
+    root / "lib/vm/bounded-log.py",
+    root / "lib/vm/executable-policy.py",
+    root / "lib/vm/browser-auth-session.py",
+    root / "lib/vm/virtiofs-socket.py",
+    root / "lib/vm/guest-user-dirs.py",
+    root / "lib/vm/parent-session-contract.py",
+    root / "lib/vm/parent-state.py",
+    root / "lib/vm/parent-launcher.py",
+    root / "lib/vm/parent-gate.py",
+    root / "lib/vm/parent-supervisor.py",
+    root / "lib/vm/parent-qemu.py",
+    root / "lib/vm/parent-provision.py",
+    root / "scripts/parent-readonly-safety-gate.py",
+    root / "agent/opencode/plugins/little-mester-exit-confirm/package.json",
+    root / "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
+]
+
+# Inspect the original lexical path before resolving anything. A symlink in
+# any installation component is refused even if its current target is trusted.
+facts = {}
+for path in dependencies:
+    current = pathlib.Path(path.anchor)
+    for component in path.parts[1:]:
+        current = current / component
+        try:
+            info = os.lstat(current)
+        except OSError:
+            refuse("incomplete protected host installation")
+        if stat.S_ISLNK(info.st_mode):
+            refuse("protected host installation contains a symlinked path component")
+        facts[current] = info
+
+for path in dependencies:
+    for current in (path, *path.parents):
+        info = facts.get(current)
+        if info is None:
+            info = os.lstat(current)
+        if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            refuse("host installation and every ancestor must be root-owned and not group/world writable")
+        if current == path:
+            if not stat.S_ISREG(info.st_mode):
+                refuse("protected host installation contains a non-regular dependency")
+        elif not stat.S_ISDIR(info.st_mode):
+            refuse("protected host installation path contains a non-directory component")
+
+def validate_bootstrap_executable(raw_tool):
+    """Check every lexical and symlink-target component before bootstrap use."""
+    path = pathlib.Path(raw_tool)
+    if not path.is_absolute():
+        refuse("required protected bootstrap executable path must be absolute")
+
+    components = list(path.parts[1:])
+    current = pathlib.Path("/")
+    try:
+        root_info = os.lstat(current)
+        if (root_info.st_uid != 0
+                or root_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or not stat.S_ISDIR(root_info.st_mode)):
+            refuse("bootstrap executable and every ancestor must be root-owned and not group/world writable")
+
+        symlink_count = 0
+        while components:
+            component = components.pop(0)
+            if component in ("", "."):
+                continue
+            if component == "..":
+                current = current.parent
+                continue
+
+            candidate = current / component
+            info = os.lstat(candidate)
+            if stat.S_ISLNK(info.st_mode):
+                if info.st_uid != 0:
+                    refuse("bootstrap executable symlink must be root-owned")
+                symlink_count += 1
+                if symlink_count > 40:
+                    refuse("bootstrap executable symlink chain is too deep")
+                target = pathlib.Path(os.readlink(candidate))
+                if target.is_absolute():
+                    current = pathlib.Path("/")
+                    components = list(target.parts[1:]) + components
+                else:
+                    components = list(target.parts) + components
+                continue
+
+            if not components:
+                if (info.st_uid != 0
+                        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                        or not stat.S_ISREG(info.st_mode)
+                        or not os.access(candidate, os.X_OK)):
+                    refuse("required protected bootstrap executable is not executable")
+                return
+
+            if (info.st_uid != 0
+                    or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                    or not stat.S_ISDIR(info.st_mode)):
+                refuse("bootstrap executable and every ancestor must be root-owned and not group/world writable")
+            current = candidate
+    except OSError:
+        refuse("required protected bootstrap executable is unavailable")
+
+    refuse("required protected bootstrap executable is unavailable")
+
+
+# These fixed bootstrap executables are reached before normal dependency
+# validation. Keep their paths and order fixed; do not discover them via PATH.
+for raw_tool in ("/usr/bin/env", "/usr/bin/bash", "/usr/bin/python3", "/usr/bin/timeout"):
+    validate_bootstrap_executable(raw_tool)
+
+print(root)
+PY
+)"
+
+export VM_HOST_SCRIPT_ROOT="$root"
+command="${1:-}"
+[[ -n "$command" ]] || {
+  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent up [--capacity-gib N] | parent status [--json] | parent ssh | parent auth | parent tui | parent stop | parent recover [--dry-run|--execute] [--json] | parent reconcile [--dry-run|--execute] [--json]\n' >&2
+  exit 2
+}
+shift
+case "$command" in
+  preflight)
+    exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C \
+      VM_HOST_SCRIPT_ROOT="$root" \
+      /usr/bin/bash -p -c '
+        set -euo pipefail
+        VM_HOST_SCRIPT_ROOT=$1
+        export VM_HOST_SCRIPT_ROOT
+        shift
+        source "$VM_HOST_SCRIPT_ROOT/lib/vm/host-launcher.sh"
+        source "$VM_HOST_SCRIPT_ROOT/lib/vm/cloud-init.sh"
+        vm_host_preflight "$@"
+      ' _ "$root" "$@"
+    ;;
+  smoke)
+    exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C "${desktop_env[@]}" \
+      /usr/bin/timeout --signal=TERM --kill-after=15 8400 \
+      /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C "${desktop_env[@]}" \
+      VM_HOST_SCRIPT_ROOT="$root" \
+      /usr/bin/bash -p -c '
+        set -euo pipefail
+        VM_HOST_SCRIPT_ROOT=$1
+        export VM_HOST_SCRIPT_ROOT
+        shift
+        source "$VM_HOST_SCRIPT_ROOT/lib/vm/host-launcher.sh"
+        source "$VM_HOST_SCRIPT_ROOT/lib/vm/cloud-init.sh"
+        vm_host_smoke "$@"
+      ' _ "$root" "$@"
+    ;;
+  parent)
+    subcommand="${1:-}"
+    [[ -n "$subcommand" ]] || { printf 'REFUSED: parent requires a subcommand\n' >&2; exit 2; }
+    shift
+    case "$subcommand" in
+      up)
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          /usr/bin/python3 -I "$root/lib/vm/parent-launcher.py" "$@"
+        ;;
+      status)
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          /usr/bin/python3 -I "$root/lib/vm/parent-state.py" status "$@"
+        ;;
+      recover)
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          /usr/bin/python3 -I "$root/lib/vm/parent-state.py" recover "$@"
+        ;;
+      reconcile)
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          /usr/bin/python3 -I "$root/lib/vm/parent-state.py" reconcile "$@"
+        ;;
+      stop)
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          /usr/bin/python3 -I "$root/lib/vm/parent-state.py" stop "$@"
+        ;;
+      ssh)
+        [[ "${LM_VM_TERM_VALIDATED-}" == 1
+           && "${TERM-}" =~ ^[A-Za-z0-9_.+-]{1,64}$ ]] || {
+          printf 'REFUSED: interactive parent SSH requires a host-supported TERM with clear capability\n' >&2
+          exit 2
+        }
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C "TERM=$TERM" \
+          /usr/bin/python3 -I "$root/lib/vm/parent-state.py" ssh "$@"
+        ;;
+      auth)
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          "TERM=${TERM:-xterm-256color}" "${desktop_env[@]}" \
+          /usr/bin/python3 -I "$root/lib/vm/parent-state.py" auth "$@"
+        ;;
+      tui)
+        [[ "${LM_VM_TERM_VALIDATED-}" == 1
+           && "${TERM-}" =~ ^[A-Za-z0-9_.+-]{1,64}$ ]] || {
+          printf 'REFUSED: interactive parent TUI requires a host-supported TERM with clear capability\n' >&2
+          exit 2
+        }
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C "TERM=$TERM" \
+          /usr/bin/python3 -I "$root/lib/vm/parent-state.py" tui "$@"
+        ;;
+      *) printf 'REFUSED: unsupported parent command: %s\n' "$subcommand" >&2; exit 2 ;;
+    esac
+    ;;
+  *) printf 'REFUSED: unsupported command: %s\n' "$command" >&2; exit 2 ;;
+esac
+WORKER

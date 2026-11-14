@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+"""Focused tests for the read-only parent safety-gate process scanner."""
+
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+import pathlib
+import signal
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+import uuid
+from unittest import mock
+
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+OWNER_ACCEPTANCE_PATH = ROOT / "tools/vm-owner-acceptance"
+OWNER_ACCEPTANCE_LOADER = importlib.machinery.SourceFileLoader(
+    "scanner_fixture_owner_acceptance", str(OWNER_ACCEPTANCE_PATH))
+OWNER_ACCEPTANCE_SPEC = importlib.util.spec_from_loader(
+    OWNER_ACCEPTANCE_LOADER.name, OWNER_ACCEPTANCE_LOADER)
+owner_acceptance = importlib.util.module_from_spec(OWNER_ACCEPTANCE_SPEC)
+OWNER_ACCEPTANCE_LOADER.exec_module(owner_acceptance)
+SPEC = importlib.util.spec_from_file_location(
+    "parent_readonly_safety_gate", ROOT / "scripts/parent-readonly-safety-gate.py")
+gate = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(gate)
+DIAG_SPEC = importlib.util.spec_from_file_location(
+    "parent_ssh_endpoint_diagnostic", ROOT / "scripts/parent-ssh-endpoint-diagnostic.py")
+diagnostic = importlib.util.module_from_spec(DIAG_SPEC)
+DIAG_SPEC.loader.exec_module(diagnostic)
+
+
+class ProcessScanTests(unittest.TestCase):
+    @staticmethod
+    def _ancestry_diagnostic(prefix, install_root):
+        paths = [pathlib.Path("/")]
+        current = pathlib.Path("/")
+        for component in (*prefix.parts[1:], "v3", install_root.name):
+            current /= component
+            paths.append(current)
+        report = []
+        for path in paths:
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                report.append(f"{path}: not created")
+                continue
+            mode = stat.S_IMODE(info.st_mode)
+            problems = []
+            if stat.S_ISLNK(info.st_mode):
+                problems.append("symlink")
+            if not stat.S_ISDIR(info.st_mode):
+                problems.append("not-directory")
+            if info.st_uid != 0:
+                problems.append(f"uid={info.st_uid}, expected root(0)")
+            if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                problems.append("group/world-writable")
+            if not info.st_mode & stat.S_IXOTH:
+                problems.append("not-other-traversable")
+            report.append(
+                f"{path}: uid={info.st_uid} gid={info.st_gid} mode={mode:04o} "
+                f"type={'dir' if stat.S_ISDIR(info.st_mode) else 'other'} "
+                f"checks={'PASS' if not problems else ','.join(problems)}")
+        return "\n".join(report)
+
+    @classmethod
+    def setUpClass(cls):
+        sudo = "/usr/bin/sudo"
+        authorization = subprocess.run([sudo, "-n", "-v"], stdin=subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       timeout=10, check=False)
+        if authorization.returncode:
+            detail = authorization.stderr.decode("utf-8", "replace").strip()
+            if (os.environ.get("CI", "").lower() == "true"
+                    or os.environ.get("GITHUB_ACTIONS", "").lower() == "true"):
+                raise AssertionError(
+                    "CI requires noninteractive sudo for privileged scanner tests; "
+                    f"authorization failed: {detail}")
+            raise unittest.SkipTest(
+                "NOT RUN: privileged scanner tests require noninteractive sudo; "
+                f"authorization failed: {detail}")
+        resolved = owner_acceptance.git(ROOT, "rev-parse", "--verify", "HEAD^{commit}")
+        if resolved.returncode:
+            raise AssertionError("could not resolve exact source candidate for trusted fixture")
+        cls.candidate_sha = resolved.stdout.decode("ascii").strip()
+        # /usr/local/lib is a standard root-owned, non-writable, traversable
+        # system prefix on the CI image. The production installer creates the
+        # UUID subtree and all version/candidate directories beneath it.
+        cls.install_prefix = pathlib.Path("/usr/local/lib") / f"lm-procfs-test-{uuid.uuid4().hex}"
+        if cls.install_prefix.exists() or cls.install_prefix.is_symlink():
+            raise AssertionError(f"disposable install prefix unexpectedly exists: {cls.install_prefix}")
+        prefix_report = cls._ancestry_diagnostic(
+            cls.install_prefix, owner_acceptance.install_path(cls.candidate_sha,
+                                                              cls.install_prefix))
+        failed_ancestors = [line for line in prefix_report.splitlines()
+                            if "checks=" in line and "checks=PASS" not in line]
+        if failed_ancestors:
+            raise AssertionError(
+                f"CI protected install ancestry precheck failed for {cls.install_prefix}:\n"
+                f"{prefix_report}")
+        cls.protected_root = owner_acceptance.install_path(
+            cls.candidate_sha, cls.install_prefix)
+        try:
+            cls.protected_root = owner_acceptance.install_candidate(
+                ROOT, cls.candidate_sha, cls.install_prefix)
+        except Exception as error:
+            report = cls._ancestry_diagnostic(cls.install_prefix, cls.protected_root)
+            try:
+                cls._remove_install_fixture()
+            except Exception as cleanup_error:
+                report += f"\nfixture cleanup failed: {cleanup_error}"
+            raise AssertionError(
+                f"protected scanner install failed for prefix {cls.install_prefix}: {error}\n"
+                f"ancestry diagnostic:\n{report}") from error
+        cls.protected_helper = cls.protected_root / "scripts/parent-readonly-safety-gate.py"
+        cls.protected_state = cls.protected_root / "lib/vm/parent-state.py"
+
+    @classmethod
+    def _remove_install_fixture(cls):
+        sudo = "/usr/bin/sudo"
+        root = getattr(cls, "protected_root", None)
+        if root is not None and root.exists():
+            for relative in owner_acceptance.INSTALL_FILES:
+                path = root / relative
+                if path.exists() or path.is_symlink():
+                    subprocess.run([sudo, "-n", "/usr/bin/rm", "--", str(path)],
+                                   check=True, timeout=10)
+            for relative in sorted(owner_acceptance.INSTALL_DIRS,
+                                   key=lambda item: len(pathlib.PurePosixPath(item).parts),
+                                   reverse=True):
+                path = root / relative
+                if path.exists():
+                    subprocess.run([sudo, "-n", "/usr/bin/rmdir", "--", str(path)],
+                                   check=True, timeout=10)
+            subprocess.run([sudo, "-n", "/usr/bin/rmdir", "--", str(root)],
+                           check=True, timeout=10)
+        prefix = getattr(cls, "install_prefix", None)
+        if prefix is not None and prefix.exists():
+            if (prefix / "v3").exists():
+                subprocess.run([sudo, "-n", "/usr/bin/rmdir", "--", str(prefix / "v3")],
+                               check=True, timeout=10)
+            subprocess.run([sudo, "-n", "/usr/bin/rmdir", "--", str(prefix)],
+                           check=True, timeout=10)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._remove_install_fixture()
+
+    def _privileged_scan(self, info, allowed_pid=0, allowed_fd=-1):
+        if not pathlib.Path("/usr/bin/sudo").exists():
+            self.fail("CI requires sudo for the real protected scanner integration")
+        result = subprocess.run(
+            ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-B",
+             str(self.protected_helper), "--scan-inode",
+             str(info.st_dev), str(info.st_ino), str(allowed_pid), str(allowed_fd)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=40, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+        value = json.loads(result.stdout)
+        self.assertIs(value["complete"], True)
+        self.assertGreater(value["processes_scanned"], 0)
+        self.assertEqual(value["coverage"], {"procfs": True,
+                                             "pid_namespace": "init-shared",
+                                             "user_namespace": "init-shared",
+                                             "descriptors": True, "file_mappings": True})
+        return value["holders"]
+
+    def test_real_privileged_scanner_finds_invoking_users_scratch_fd(self):
+        with tempfile.NamedTemporaryFile() as held:
+            info = os.fstat(held.fileno())
+            holders = self._privileged_scan(info)
+            self.assertIn([os.getpid(), "fd", held.fileno()], holders)
+
+    def test_protected_installed_parent_state_invokes_protected_scanner(self):
+        spec = importlib.util.spec_from_file_location("installed_parent_state_scanner_test",
+                                                      self.protected_state)
+        state = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(state)
+        with tempfile.NamedTemporaryFile() as disk:
+            info = os.fstat(disk.fileno())
+            result = state._scan_stale_disk_holders(
+                disk.fileno(), (info.st_dev, info.st_ino),
+                scratch_dir=pathlib.Path(tempfile.gettempdir()))
+            self.assertIsNone(result)
+
+    def test_real_privileged_scanner_rejects_untrusted_helper_path(self):
+        with tempfile.NamedTemporaryFile(prefix="untrusted-parent-scanner-") as helper:
+            helper.write((ROOT / "scripts/parent-readonly-safety-gate.py").read_bytes())
+            helper.flush()
+            os.chmod(helper.name, 0o644)
+            result = subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-B", helper.name,
+                 "--scan-inode", "1", "1", "0", "-1"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=10, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b"REFUSED: protected_helper_path_untrusted", result.stderr)
+
+    def test_installer_verification_rejects_tampered_installed_helper(self):
+        with tempfile.NamedTemporaryFile(prefix="tampered-parent-scanner-") as tampered:
+            tampered.write(b"# deliberately altered disposable fixture\n")
+            tampered.flush()
+            subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/install", "-o", "0", "-g", "0",
+                            "-m", "0644", tampered.name, str(self.protected_helper)],
+                           check=True, timeout=10)
+            try:
+                with self.assertRaisesRegex(owner_acceptance.GateError,
+                                            "installed bytes do not match"):
+                    owner_acceptance.verify_install(
+                        ROOT, self.candidate_sha, self.install_prefix)
+            finally:
+                subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/install", "-o", "0", "-g", "0",
+                                "-m", "0644",
+                                str(ROOT / "scripts/parent-readonly-safety-gate.py"),
+                                str(self.protected_helper)], check=True, timeout=10)
+
+    def test_real_privileged_scanner_refuses_forged_caller_fd_exemption(self):
+        with tempfile.NamedTemporaryFile() as held:
+            info = os.fstat(held.fileno())
+            result = subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-B",
+                 str(self.protected_helper), "--scan-inode", str(info.st_dev),
+                 str(info.st_ino), str(os.getpid()), "0"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=10, check=False)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(b"invalid_caller_fd_exemption", result.stderr)
+
+    def test_real_privileged_scanner_finds_cross_uid_holder(self):
+        with tempfile.NamedTemporaryFile() as held:
+            info = os.fstat(held.fileno())
+            child = subprocess.Popen(
+                ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-c",
+                 "import os,sys,time; f=open(sys.argv[1],'rb'); print('READY',os.getpid(),flush=True); time.sleep(20)",
+                 held.name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                start_new_session=True)
+            try:
+                ready = child.stdout.readline().split()
+                self.assertEqual(ready[0], "READY")
+                holder_pid = int(ready[1])
+                holders = self._privileged_scan(info, os.getpid(), held.fileno())
+                self.assertTrue(any(item[0] == holder_pid and item[1] == "fd" for item in holders),
+                                holders)
+            finally:
+                os.killpg(child.pid, signal.SIGTERM)
+                child.wait(timeout=5)
+                child.stdout.close()
+                child.stderr.close()
+
+    def test_real_privileged_scanner_finds_mapping_after_fd_close(self):
+        with tempfile.NamedTemporaryFile() as held:
+            held.write(b"x" * 4096)
+            held.flush()
+            info = os.fstat(held.fileno())
+            child = subprocess.Popen(
+                [sys.executable, "-c",
+                 "import mmap,os,sys,time; f=os.open(sys.argv[1],os.O_RDONLY); m=mmap.mmap(f,0,access=mmap.ACCESS_READ); os.close(f); print('READY',flush=True); time.sleep(20)",
+                 held.name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                start_new_session=True)
+            try:
+                self.assertEqual(child.stdout.readline().strip(), "READY")
+                holders = self._privileged_scan(info, os.getpid(), held.fileno())
+                self.assertTrue(any(item[0] == child.pid and item[1] == "map" for item in holders),
+                                holders)
+            finally:
+                os.killpg(child.pid, signal.SIGTERM)
+                child.wait(timeout=5)
+                child.stdout.close()
+                child.stderr.close()
+
+class SafetyGateCliIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temp.name)
+        self.install = self.root / "install"
+        (self.install / "lib/vm").mkdir(parents=True)
+        self.state = self.root / "state"
+        self.state.mkdir()
+        self.disk = self.state / "disk.qcow2"
+        self.disk.write_bytes(b"isolated fixture disk")
+        disk_info = os.stat(self.disk)
+        self.lab_vm = self.install / "lab-vm"
+        self.lab_vm.write_text(
+            "#!" + sys.executable + "\nimport json,sys\n"
+            f"disk={{'format':'qcow2','device':{disk_info.st_dev},'inode':{disk_info.st_ino}}}\n"
+            "if sys.argv[1:] == ['parent','status','--json']:\n"
+            " print(json.dumps({'status':'STOPPED','disk':disk}))\n"
+            "elif sys.argv[1:] == ['parent','recover','--dry-run','--json']:\n"
+            " print(json.dumps({'dry_run':True,'action':'none','status':'STOPPED'}))\n"
+            "else: raise SystemExit(2)\n")
+        self.lab_vm.chmod(0o700)
+        (self.install / "lib/vm/parent-state.py").write_text(
+            "def exec_transition_status(identity):\n"
+            "    return 'STOPPED' if identity.get('identity_path') in "
+            "('child-proxy.identity.json','child-qemu.identity.json') else 'AMBIGUOUS'\n")
+        for name in ("child-proxy.identity.json", "child-qemu.identity.json"):
+            (self.state / name).write_text(json.dumps({"identity_path": name}))
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _invoke(self):
+        output, errors = io.StringIO(), io.StringIO()
+        with (mock.patch.object(sys, "argv", ["parent-readonly-safety-gate.py",
+                                               "--install-root", str(self.install),
+                                               "--state-dir", str(self.state)]),
+              mock.patch.object(gate.os, "geteuid", return_value=1000),
+              mock.patch.object(gate, "_scan_with_privileged_procfs", side_effect=[
+                  {"complete": True, "processes_scanned": 2,
+                   "coverage": {"procfs": True, "pid_namespace": "init-shared",
+                                "user_namespace": "init-shared", "descriptors": True,
+                                "file_mappings": True},
+                   "holders": [[os.getpid(), "fd", 9]]},
+                  {"complete": True, "processes_scanned": 2,
+                   "coverage": {"procfs": True, "pid_namespace": "init-shared",
+                                "user_namespace": "init-shared", "descriptors": True,
+                                "file_mappings": True}, "holders": []}]),
+              contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors)):
+            code = gate.main()
+        return code, output.getvalue(), errors.getvalue()
+
+    def test_actual_cli_loads_installed_module_and_validates_both_children(self):
+        real_load = gate._load_state_module
+        real_check = gate._check_children
+        with (mock.patch.object(gate, "_load_state_module", wraps=real_load) as load,
+              mock.patch.object(gate, "_check_children", wraps=real_check) as check):
+            code, output, errors = self._invoke()
+        self.assertEqual(code, 0, errors)
+        self.assertIn("SAFETY GATE: PASS", output)
+        self.assertEqual(load.call_count, 1)
+        self.assertEqual(check.call_count, 1)
+
+    def test_actual_cli_converts_unexpected_failure_to_refused_nonzero(self):
+        with mock.patch.object(gate, "_check_children", side_effect=NameError("fixture")):
+            code, output, errors = self._invoke()
+        self.assertEqual(code, 2)
+        self.assertNotIn("SAFETY GATE: PASS", output)
+        self.assertIn("REFUSED: unexpected gate failure (NameError)", errors)
+        self.assertIn("SAFETY GATE: FAIL", errors)
+
+
+class OpenSSHHostLookupTests(unittest.TestCase):
+    def test_parent_bracketed_loopback_port_matches_only_that_port(self):
+        keygen = shutil.which("ssh-keygen")
+        ssh = shutil.which("ssh")
+        if not keygen or not ssh:
+            self.skipTest("OpenSSH tools unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            private = root / "host"
+            subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-f", str(private)],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=10)
+            key_type, public_key, *_ = private.with_suffix(".pub").read_text().split()
+            known_hosts = root / "known_hosts"
+            known_hosts.write_text(f"[127.0.0.1]:46617 {key_type} {public_key}\n")
+            exact = subprocess.run([keygen, "-F", "[127.0.0.1]:46617", "-f", str(known_hosts)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=5, check=False)
+            other_port = subprocess.run(
+                [keygen, "-F", "[127.0.0.1]:46618", "-f", str(known_hosts)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+            self.assertEqual(exact.returncode, 0)
+            self.assertNotEqual(other_port.returncode, 0)
+            config = subprocess.run([ssh, "-G", "-F", "/dev/null", "-p", "46617",
+                                     "mester@127.0.0.1"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    text=True, timeout=5, check=True).stdout.splitlines()
+            values = {line.split(None, 1)[0]: line.split(None, 1)[1]
+                      for line in config if line.startswith(("hostname ", "port ", "hostkeyalias "))}
+            self.assertEqual(values.get("hostname"), "127.0.0.1")
+            self.assertEqual(values.get("port"), "46617")
+            self.assertNotIn("hostkeyalias", values)
+
+    def test_diagnostic_fingerprints_only_keys_and_sanitizes_rejection(self):
+        keygen = shutil.which("ssh-keygen")
+        if not keygen:
+            self.skipTest("ssh-keygen unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            private = pathlib.Path(directory) / "host"
+            subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-f", str(private)],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=10)
+            public_line = private.with_suffix(".pub").read_bytes()
+            expected = diagnostic._fingerprint(b"", public_file=private.with_suffix(".pub"))
+            self.assertEqual(diagnostic._fingerprint(public_line), expected)
+            self.assertEqual(
+                diagnostic._rejection_label(
+                    b"WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! secret-looking text"),
+                "CHANGED_KEY",
+            )
+            self.assertEqual(
+                diagnostic._server_fingerprint(
+                    b"debug1: Server host key: ssh-ed25519 SHA256:"
+                    b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+                "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

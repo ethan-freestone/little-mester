@@ -206,9 +206,54 @@ sequence is therefore **Ctrl+C, then Q** (Q presses the dialog's confirm action)
   the other slash aliases still exist as deliberate, typed commands.
 - `agent/opencode/tui.json` is deleted: dead v1 config that would have bound exit to a single `q`.
 
-**Verification.** Static checks: `tests/tui-jsx.bats`, `tests/exit-confirm.bats` (26 tests total in
-`bats tests/`, one unrelated skip). Live check: `scripts/verify-exit-confirm.py` drives a private
-standalone TUI through a pty and asserts Ctrl+D is inert, `yq` types with the dialog closed, Ctrl+C
-opens the dialog, Esc/N/Ctrl+C cancel without exiting, and q exits. It passed on OpenCode 2.1.4 in
-the agent container; the run is recorded on ticket #37. The image must be rebuilt/restarted for the
-baked `/etc/opencode` copy to replace any stale running copy.
+**Verification.** Static checks: `tests/tui-jsx.bats`, `tests/exit-confirm.bats`. The live check
+`scripts/verify-exit-confirm.py` drives a private standalone TUI through a pty using a temporary
+HOME and disposable workspace, and asserts Ctrl+D is inert, `yq` types with the dialog closed,
+Ctrl+C opens the dialog, Esc/N/Ctrl+C cancel without exiting, and uppercase Y and Q confirm exit.
+The updated sequence passed against OpenCode 2.2.5 in the agent container on 2026-11-11. This
+establishes local pinned-binary behavior only; target-terminal clipboard canary and protected-guest
+configuration/provenance checks remain separate acceptance work. The image must be rebuilt/restarted
+for the baked `/etc/opencode` copy to replace any stale running copy.
+
+### J.11 OpenCode 2.2.5 project-config isolation probe (#55)
+
+The disposable `tests/opencode-project-config.test.py` probe uses the exact OpenCode 2.2.5
+binary, temporary HOME/config/XDG directories and a separate writable project containing
+conflicting `opencode.json` and `.opencode/opencode.json` values. Without a guard, both
+project files appear in `opencode debug config --standalone`. With
+`OPENCODE_DISABLE_PROJECT_CONFIG=1`, both disappear from the discovered configuration
+sources and the protected config still reports updates disabled and sharing disabled. The
+probe also installs a test-authored benign project plugin whose only effect is writing a
+sentinel file inside the disposable test root. The marker is created without the guard and
+not created with `OPENCODE_DISABLE_PROJECT_CONFIG=1`, proving that this pinned binary also
+suppresses project plugin discovery in this isolated probe. This confirms discovery behavior
+and reported protected values; it does not independently establish the final effective
+runtime config or the protected guest's launch enforcement.
+
+For the protected parent guest, #54/#55 must provision immutable root-owned config/plugin
+assets separately from the writable workspace and set the project-config guard in the
+protected OpenCode launch environment. This local probe does not show that the v3 guest
+currently has such config/assets, that the launch environment is non-overridable, or that
+project plugins are not loaded; those remain acceptance requirements.
+
+### J.12 Remote terminal clipboard-write mitigation (#55)
+
+Treat guest/OpenCode output as untrusted terminal control data. In the **owner's selected
+terminal profile**, disable OSC 52 / remote clipboard writes (or the terminal's equivalent
+remote-clipboard integration) before using the parent TUI. `EscapeChar=none` only disables
+OpenSSH's own escape commands; it is not an OSC 52 defense. Until the owner records the
+terminal name/version and passes a harmless clipboard canary, assume clipboard writes may
+reach the host clipboard and do not leave sensitive clipboard contents available while
+attached. Do not claim this mitigation is active based only on an SSH setting.
+
+Owner canary (run only in the selected terminal; this attempts to set clipboard contents to
+the non-secret text `LM-CLIPBOARD-CANARY`):
+
+```sh
+printf '\033]52;c;TE0tQ0xJUEJPQVJELUNBTkFSWQ==\a'
+```
+
+After the terminal-specific OSC 52 block is enabled, verify the clipboard did **not** change
+to the canary text. Record the terminal profile and observed result on #55. This repository
+does not know which terminal/profile the owner uses, so its protection and residual behavior
+remain unverified until that check is returned.

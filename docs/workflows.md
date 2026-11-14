@@ -1,5 +1,8 @@
 # Workflows — how to work through this repo
 
+For the persistent operating procedure for Phase 1 tickets #53–#57, see
+[`workflows/phase1-continuous-execution.md`](workflows/phase1-continuous-execution.md).
+
 ## Core discipline: doc → test → code → commit
 
 Every change follows four stages. No stage is skipped or reordered.
@@ -10,6 +13,65 @@ Every change follows four stages. No stage is skipped or reordered.
 4. **Commit** — One clear commit per logical change. Message follows: `type: concise description` (e.g., `fix`, `feat`, `docs`, `chore`, `refactor`).
 
 If a stage blocks you, you do not skip ahead. You write down *why* in the doc and move to the next blocker. Blocks get their own tickets.
+
+## Workflow execution (shared primitives; not a new ticket state machine)
+
+Ticket lifecycle and work execution are distinct. Ticket statuses (`draft`, `active`,
+`resolved`, `archived`) describe backlog lifecycle; they do not say whether a source
+change, review, CI run, or owner-runtime gate passed. Keep execution evidence in the
+ticket's existing acceptance criteria/test ledger and handoff, without adding schema
+fields or statuses.
+
+Use these primitives for a bounded task:
+
+1. **Plan and decompose.** State the objective, constraints, acceptance evidence,
+   out-of-scope work, dependencies, and stop conditions. Split independent work into
+   reviewable tasks; identify sequencing gates (for example, design → tests → source →
+   review → owner acceptance).
+2. **Manage dependencies.** Mark which tasks can proceed independently and which must
+   wait for a decision, source SHA, review, CI, or owner authorization. Do not treat a
+   blocked downstream gate as a pass because an earlier gate passed.
+3. **Delegate safely.** The orchestrator retains task ownership, integration, and commit
+   authority. Parallelize independent read-only research/reviews when it saves time.
+   Any worker editing source uses a separate Git worktree with a precise scope; never
+   have concurrent workers edit a shared checkout. Workers return findings or changes
+   for orchestrator inspection; only the orchestrator commits to the task branch.
+   Record genuine concurrency, elapsed time, and meaningful correction attempts when
+   evaluating whether delegation helped. Prefer the least expensive reliable model;
+   reserve stronger review for architecture, ambiguous failures, and security risks.
+4. **Implement and verify.** Follow doc → test → code → commit. Keep synthetic tests,
+   local source checks, CI, independent review, and owner-runtime acceptance as separate
+   evidence classes. Preserve evidence and user state; do not run unauthorized host,
+   account, cleanup, or deployment actions.
+5. **Review and integrate.** Security-sensitive source requires independent security
+   review of the exact committed source SHA, regardless of local tests or CI. A material
+   source change after review requires appropriate renewed review. Resolve findings,
+   record provenance (branch, source SHA, reviewer/model, review result, test commands
+   and results), then make documentation/ticket bookkeeping commits separately where
+   required. Re-check the working tree after the last modification.
+6. **Accept and hand off.** Owner-only runtime actions require explicit authorization.
+   Preserve diagnostics and retained evidence unless cleanup is authorized. Report the
+   final HEAD, exact reviewed source SHA, diff from that SHA to final HEAD, literal
+   `git status --porcelain=v1`, test/CI/review evidence, owner gate results, and all
+   remaining `NOT_RUN` or `BLOCKED` gates.
+
+Use the execution outcomes `PASS`, `FAIL`, `BLOCKED`, and `NOT_RUN` precisely. A test
+pass is not owner acceptance; missing evidence is not a pass. Stop at approval
+boundaries, unresolved security assumptions, unverified process ownership, or unsafe
+cleanup conditions. An implementation/review loop is a substantive testable change or
+diagnostic intervention, not a repeated command. If the same blocker remains after two
+meaningful attempts without new evidence or progress, request one consolidated Sol
+diagnostic review with observations, relevant code, attempted corrections, and open
+questions. Do not involve Sol for routine implementation details. These efficiency
+rules never supersede mandatory independent security review. Do not add a `WAIVED`
+execution or ticket status; if a future policy discusses waivers, require explicit
+owner authorization and recorded justification, and never waive mandatory security
+review or owner-runtime acceptance.
+
+Future policy profiles may configure the same primitives for pair programming,
+autonomous operation, learning, testing, project management, or cleanup. Profiles are
+future policy, not current features. Do not implement workflow engines, MCP endpoints,
+schemas, or secondary-runner frameworks as part of this documentation guidance.
 
 ## Documenting architecture decisions
 

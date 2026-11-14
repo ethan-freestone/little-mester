@@ -1,0 +1,97 @@
+{
+  "id": 57,
+  "file_path": "/workspace/docs/tickets/ticket-057.json",
+  "number": 57,
+  "area": "vm-v3",
+  "type": "feature",
+  "status": "draft",
+  "title": "P1-05 — Final Phase 1 acceptance and merge readiness",
+  "objective": "P1-05 final acceptance/merge readiness. Successor to #49/#51; depends on completion of P1-01 #53, P1-02 #54, P1-03 #55, and P1-04 #56. No merge absent explicit owner approval. Operating policy: docs/workflows/phase1-continuous-execution.md, including the owner-approved M1→M2→M3 priority and continuous-execution correction: a runtime gate blocks only dependent operations; continue independent authorized work. Handoffs identify the exact blocked assumption, independent work completed/remaining, and action to unlock it. No acceptance criterion changes.",
+  "created_at": "2026-11-10T21:46:28.245Z",
+  "updated_at": "2026-11-12T23:49:03.322Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Record final integrated source SHA, ticket-evidence SHA and repository HEAD distinctly; preserve candidate a43e9aaa746af22dbd0ab106b5d12fc33b7fb982 smoke/cleanup/CI as historical evidence only.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "All relevant automated tests and owner CI pass on the final integrated SHA; every changed VM runtime/provisioning SHA receives a new owner-run protected full smoke.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Owner demonstrates interactive TUI/model selection, exit-confirm behavior, accurate host metrics, and approved terminal configuration on a distinct interactive Dev VM and private bounded workspace.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Controlled negative tests cover forbidden filesystem, host-loopback/LAN, terminal control, credential persistence and abnormal termination without probing real private services or sensitive data.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Independent cleanup verification is designed for the interactive-session binding, proves identity-bound QEMU/proxy/virtiofsd teardown, and does not rely on PID-file contents.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "Sol combined review covers exact final source SHA; Claude performs final adversarial assessment; owner explicitly approves merge. No tool performs an automated merge.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Final integrated SHA automated suite and owner CI.",
+      "Fresh protected full smoke after runtime/provisioning changes.",
+      "Owner hands-on acceptance and independent cleanup evidence.",
+      "Sol combined review, Claude adversarial assessment, and explicit owner merge approval."
+    ],
+    "created": [],
+    "cases": [
+      "Owner-operated gate output (2026-11-11): NOT_PASS at source f19d0b7. qemu-img 11.1.3 inherited-output-FD conversion exited 0; explicit qcow2 inspection reported format=qcow2, virtual-size=16,777,216, no backing/external data file; QEMU 11.1.3 second process failed before disk open with `-add-fd fd=3 ... fd is not valid or already in use`, not the required writer-lock diagnostic. Thus QEMU fdset opening and single-writer locking are NOT_VALIDATED (neither pass nor lock refusal). Probe retained scratch directory `/tmp/little-mester-parent-gate-onoyn7j4`; owner to inspect/clean only after confirming no probe process remains. Harness defect: second launch remapped a distinct descriptor onto FD 3; fixed in uncommitted source to pass each actual inherited FD number. Do not rerun without owner approval; all parent launch remains disabled.",
+      "Owner-operated scratch host-gate output (source f19d0b7): qemu-img 11.1.3 inherited-output-FD convert exited 0; explicit qcow2 inspect confirmed format, 16-MiB virtual size and no backing/external data file. Second QEMU failed before opening disk: `-add-fd fd=3... fd is not valid or already in use`, not the required writer-lock diagnostic. Therefore QEMU fdset and single-writer gates remain NOT_VALIDATED. Corrected harness now uses each inherited descriptor's actual FD; NOT_RUN pending owner reauthorization. Owner retained scratch path `/tmp/little-mester-parent-gate-onoyn7j4`; no process/image cleanup performed by agent.",
+      "OWNER-REPORTED PASS ×2: corrected `tools/vm-parent-runtime-gate.py` probe at source revision `37f5fb622135831a5195615e175086c8053b0992`, owner host QEMU/qemu-img 11.1.3. Both invocations exited 0; inherited-output-FD qemu-img conversion succeeded; explicit `-f qcow2` inspection reported qcow2, 16,777,216-byte virtual size, no backing/external data file; QEMU fdset opening succeeded; second QEMU was refused with `Failed to get \"write\" lock` / `Is another process using the image [/dev/fdset/1]?`; both scratch directories were removed. No legacy VM or persistent-parent disk touched. This satisfies only the four scratch compatibility checks for this owner host/tool version; it does not establish integrated parent launch, guest readiness, persistent lifecycle, or M1 acceptance. NVIDIA timing result was not supplied and remains pending.",
+      "Owner QEMU/qemu-img gate PASS ×2 is recorded for probe source revision 37f5fb622135831a5195615e175086c8053b0992. Only inherited-FD conversion, explicit qcow2 inspection, fdset opening and independent-writer lock refusal are satisfied. Parent lifecycle acceptance, protected guest, OpenCode/history persistence, OSC52 terminal canary, NVIDIA timing, CI, final reviews and merge approval remain pending. Owner procedure: docs/parent-lifecycle-acceptance.md. No VM was launched by agent.",
+      "M1a candidate `9992eb9896d3475ae43a4017231be637bd565cad` received independent Sol Medium review verdict READY FOR OWNER M1a after blocker fixes. Full real parent lifecycle and final holistic review/CI/owner merge requirements remain pending. No VM was launched by implementer.",
+      "Final M1a deployment/runtime candidate `cd734a38dc4d98e00ea9ffe06a8871701733945c` received fresh Sol Medium exact-source review verdict READY FOR OWNER M1a. Existing SHA-pinned trusted installation is extended and documented. Owner install + M1a test pending; no VM/SSH/privileged host action performed by implementer. Full Phase 1 acceptance/CI/final reviews/merge remain pending.",
+      "Final reviewed owner-handoff candidate SHA `820947aef297aeef199f1b983199a1867cd1e781`; focused Sol Medium exact-SHA verdict READY FOR OWNER M1a. Runtime candidate `cd734a38dc4d98e00ea9ffe06a8871701733945c` remains the unchanged runtime implementation; later commits only corrected the documented owner preflight. Owner protected installation/M1a lifecycle test pending. No VM/SSH/privileged action by implementer; broader Phase 1 CI, acceptance, reviews, and merge remain pending.",
+      "Reviewed handoff commit `903dc8bf62b561293132582c9a7ff1cc9b5caacc` identifies pinned protected-install source `820947aef297aeef199f1b983199a1867cd1e781`; focused Sol Medium review confirms READY FOR OWNER M1a. Owner installation and real lifecycle acceptance pending. No VM/SSH/privileged action by implementer; full Phase 1 acceptance/CI/reviews/merge pending.",
+      "OWNER-REPORTED Phase 1 evidence (2026-11-12): M1b explicit recovery and same-disk persistent restart PASS on protected runtime a445b3901fea75b3fe4c6b86c3c9069dd504b9f4; same disk dev/inode 55:10406584 and workspace canary survived. Corrected ordinary stop/up, M2 TUI/auth/model/session/terminal acceptance, M3 live metrics, final exact-SHA CI, final Sol and Claude reviews, independent cleanup evidence, and explicit owner merge approval remain pending."
+    ]
+  },
+  "models_used": [],
+  "comments": [
+    {
+      "timestamp": "2026-11-11T15:40:20.617Z",
+      "author": "cli",
+      "body": "Workflow reminder for #54–#57: record durable discussion, review findings, and owner decisions as append-only comments with the ticket-engine CLI (--comment), not as prose in tests.created. Keep test ledgers limited to concise test evidence and actionable test gaps."
+    },
+    {
+      "timestamp": "2026-11-11T18:10:57.350Z",
+      "author": "cli",
+      "body": "Owner-approved trajectory correction is persisted in docs/workflows/phase1-continuous-execution.md and ticket objectives #54–#57 through MCP: M1 persistent up/status/ssh/stop/re-up first, then M2 real OpenCode, then M3 metrics; preserve approved security gates. Scratch-only qemu-img/QEMU FD/fdset/single-writer procedure and bounded NVIDIA timing probe are prepared in docs/parent-runtime-gates.md. Both remain NOT_RUN pending owner approval; no merge or acceptance inferred."
+    },
+    {
+      "timestamp": "2026-11-11T18:11:18.857Z",
+      "author": "cli",
+      "body": "Sol Medium prepared-gate review returned FIX: the second QEMU originally reused the first open-file description, so the writer-lock result was not trustworthy. The gate now opens the scratch disk independently for writer two, verifies the same device/inode with a distinct FD, and requires the specific Failed to get \"write\" lock diagnostic. Focused Sol delta PASS. The procedure/script remain PREPARED and NOT_RUN; no qemu-img, QEMU or NVIDIA probe was executed."
+    },
+    {
+      "timestamp": "2026-11-12T00:21:35.345Z",
+      "author": "cli",
+      "body": "Phase 1 convergence plan for Luna High: dependency order #54 M1a minimum fixes->verified committed owner-test candidate->owner real lifecycle demonstration; #54 M1b explicit recovery/failure drill; #55 M2 protected TUI/auth/history; #56 M3 approved restricted-key live metrics; then M4 exact-SHA final acceptance. Reuse existing tickets and acceptance documents, no new plan/workflow system. Final chunk: pin source SHA separately from ticket-evidence SHA/HEAD, full relevant regression+CI and owner protected full smoke for changed runtime/provisioning SHA (A2), bounded negative isolation checks and independent interactive-session teardown verification (A4/A5), final holistic Sol review, reconcile all #53-#56 criteria/evidence, close completed tickets truthfully, owner merge decision only. Historical smoke and scratch compatibility PASS are not integrated acceptance. A6 still names Claude adversarial review while owner currently prohibits requesting/conducting external Claude review: leave criterion pending and obtain owner reconciliation/authorization before final merge readiness, not before M1a; do not silently waive it or initiate review. Every source change must enable required demonstration, fix observed defect, or remove justified duplication. Freeze M1a candidate refactoring while awaiting runtime evidence. No tests run or source changes made by this planning pass."
+    },
+    {
+      "timestamp": "2026-11-12T22:14:45.196Z",
+      "author": "cli",
+      "body": "Sol Medium Phase 1 readiness review (2026-11-12): progressing, not merge-ready. Exact source SHA ddf0e7bcc3424d124c9007808acf3e08139ab9d2 GitHub Actions run 43314731249 completed success; all five jobs passed. M1a now has owner-reported SSH/arithmetic and same-running-guest reconnect-canary evidence, but duplicate-up/stop/same-disk restart remain pending. M1b is implemented offline; live recovery remains pending (active lock refusal alone is not recovery). M2 is implemented but lacks integrated guest TUI/auth/model/persistence/terminal acceptance; source review found env -i dropped TERM, now being fixed narrowly. M3 codecs/scheduler/collector/ACK are offline only; restricted transport design has Sol FIX conditions and no implementation is authorized; owner NVIDIA timing/accuracy pending. M4 remains blocked on integrated acceptance, cleanup, final exact-SHA reviews, and explicit owner merge approval. No Phase 1.5 work is a blocker. Do not merge or operate the owner VM without explicit approval."
+    },
+    {
+      "timestamp": "2026-11-12T23:49:03.321Z",
+      "author": "cli",
+      "body": "Owner-reported M1b recovery and same-disk restart evidence have been recorded. Sol Medium assessment says corrected ordinary stop/up is required by existing #54 A4/A5/A7; #54 remains open. Phase 1 continues M2/M3, but integrated acceptance, exact-SHA CI, final reviews, independent cleanup verification and explicit owner merge approval are still outstanding."
+    }
+  ]
+}

@@ -1,0 +1,357 @@
+"""Filesystem regressions for the exact guest rootless-directory helper."""
+
+from __future__ import annotations
+
+import base64
+import importlib.util
+import json
+import os
+import pathlib
+import pwd
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+HELPER_PATH = ROOT / "lib/vm/guest-user-dirs.py"
+SPEC = importlib.util.spec_from_file_location("guest_user_dirs", HELPER_PATH)
+guest_dirs = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(guest_dirs)
+
+
+class GuestUserDirectoryTests(unittest.TestCase):
+    def setUp(self):
+        if os.geteuid() == 0:
+            self.account = pwd.getpwnam("nobody")
+        else:
+            self.account = pwd.getpwuid(os.getuid())
+        self.temporary = tempfile.TemporaryDirectory(prefix="guest-user-dirs-")
+        self.root = pathlib.Path(self.temporary.name)
+        os.chmod(self.root, 0o755)
+        home_parent = self.root / "home"
+        home_parent.mkdir(mode=0o755)
+        self.home = home_parent / "mester"
+        self.home.mkdir(mode=0o700)
+        if os.geteuid() == 0:
+            os.chown(self.home, self.account.pw_uid, self.account.pw_gid)
+        else:
+            self.assertEqual(self.account.pw_uid, os.getuid())
+            self.assertEqual(self.account.pw_gid, os.getgid())
+        self.home_fd = os.open(self.home, guest_dirs.DIR_FLAGS)
+
+    def tearDown(self):
+        os.close(self.home_fd)
+        self.temporary.cleanup()
+
+    def test_generated_cloud_init_embeds_exact_helper_and_user_bus_gate(self):
+        key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 fixture"
+        command = (
+            f'source "{ROOT / "lib/vm/cloud-init.sh"}"; '
+            f'VM_HOST_SCRIPT_ROOT="{ROOT}"; '
+            f'vm_host_cloud_init smoke-v3 {self.account.pw_uid} "{key}"'
+        )
+        generated = subprocess.run(
+            ["/usr/bin/bash", "-c", command],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            text=True,
+        ).stdout
+        match = re.search(
+            r"(?ms)^  - path: /usr/local/sbin/mester-v3-user-dirs\.py\n"
+            r"(?:^    .*\n)*?^    content: ([A-Za-z0-9+/=]+)$",
+            generated,
+        )
+        self.assertIsNotNone(match, "cloud-init must install the guest helper from its protected source")
+        self.assertEqual(base64.b64decode(match.group(1)), HELPER_PATH.read_bytes())
+        self.assertIn("encoding: b64", generated)
+        self.assertIn("permissions: '0644'", generated)
+        self.assertIn("mester-v3-user-dirs.py prepare", generated)
+        self.assertIn("mester-v3-user-dirs.py verify-write", generated)
+        self.assertIn("user systemd bus did not become ready", generated)
+        self.assertIn("systemctl --user show-environment", generated)
+        self.assertIn("timeout --signal=TERM --kill-after=1s 2s runuser", generated)
+        self.assertIn("groups:\n  - mester\nusers:", generated)
+        self.assertIn("dockerd-rootless-setuptool.sh install", generated)
+        self.assertNotIn("systemctl enable --now docker.service", generated)
+        try:
+            import yaml
+        except ImportError:
+            yaml = None
+        if yaml is not None:
+            config = yaml.safe_load(generated)
+            self.assertEqual(config["groups"], ["mester"])
+            self.assertEqual(config["users"][0]["uid"], self.account.pw_uid)
+            files = {entry["path"]: entry for entry in config["write_files"]}
+            provision_script = files["/usr/local/sbin/mester-v3-provision"]["content"]
+            syntax = subprocess.run(
+                ["bash", "-n"], input=provision_script.encode("utf-8"),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            self.assertEqual(syntax.returncode, 0, syntax.stderr.decode("utf-8", "replace"))
+            embedded = files["/usr/local/sbin/mester-v3-user-dirs.py"]
+            self.assertEqual(embedded["encoding"], "b64")
+            self.assertEqual(base64.b64decode(embedded["content"]), HELPER_PATH.read_bytes())
+
+    def test_all_user_config_parents_are_private_and_nonroot_can_create_file(self):
+        guest_dirs.prepare_config_dirs(self.home_fd, self.account.pw_uid, self.account.pw_gid)
+        for components in guest_dirs.USER_DIRS:
+            path = self.home.joinpath(*components)
+            info = path.lstat()
+            self.assertTrue(path.is_dir())
+            self.assertEqual((info.st_uid, info.st_gid), (self.account.pw_uid, self.account.pw_gid))
+            self.assertEqual(info.st_mode & 0o777, 0o700)
+
+        child = os.fork()
+        if child == 0:
+            try:
+                if os.geteuid() == 0:
+                    os.setgroups([])
+                    os.setgid(self.account.pw_gid)
+                    os.setuid(self.account.pw_uid)
+                guest_dirs.verify_user_write_at(
+                    self.home_fd, self.account.pw_uid, self.account.pw_gid
+                )
+            except BaseException as error:
+                print(f"non-root write failed: {error}", file=sys.stderr)
+                os._exit(1)
+            os._exit(0)
+        _, status = os.waitpid(child, 0)
+        self.assertTrue(os.WIFEXITED(status), f"write-check child status={status}")
+        self.assertEqual(os.WEXITSTATUS(status), 0)
+        self.assertEqual(list(self.home.glob(".mester-write-check-*")), [])
+        self.assertEqual(list((self.home / ".config/systemd/user").glob(".mester-write-check-*")), [])
+
+    def test_proxy_configs_are_created_privately_without_following_existing_symlink(self):
+        guest_dirs.prepare_rootless_config(self.home_fd, self.account.pw_uid, self.account.pw_gid)
+        unit_file = self.home / ".config/systemd/user/docker.service.d/80-mester-proxy.conf"
+        daemon_file = self.home / ".config/docker/daemon.json"
+        for path, contents in (
+            (unit_file, guest_dirs.PROXY_UNIT_CONFIG),
+            (daemon_file, guest_dirs.DOCKER_DAEMON_CONFIG),
+        ):
+            info = path.stat()
+            self.assertTrue(path.is_file())
+            self.assertEqual((info.st_uid, info.st_gid), (self.account.pw_uid, self.account.pw_gid))
+            self.assertEqual(info.st_mode & 0o777, 0o600)
+            self.assertEqual(path.read_bytes(), contents)
+        self.assertIn(b"Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS=--cidr=10.0.3.0/24", unit_file.read_bytes())
+        self.assertEqual(json.loads(daemon_file.read_text(encoding="utf-8"))["proxies"]["http-proxy"], "http://10.0.2.100:3128")
+
+        separate = self.root / "separate-home"
+        separate.mkdir(mode=0o700)
+        os.chown(separate, self.account.pw_uid, self.account.pw_gid)
+        separate_fd = os.open(separate, guest_dirs.DIR_FLAGS)
+        try:
+            guest_dirs.prepare_config_dirs(separate_fd, self.account.pw_uid, self.account.pw_gid)
+            external = self.root / "external-config"
+            external.write_text("preserve", encoding="utf-8")
+            target = separate / ".config/systemd/user/docker.service.d/80-mester-proxy.conf"
+            target.symlink_to(external)
+            with self.assertRaisesRegex(guest_dirs.Refusal, "refusing to replace"):
+                guest_dirs.prepare_rootless_config(separate_fd, self.account.pw_uid, self.account.pw_gid)
+            self.assertTrue(target.is_symlink())
+            self.assertEqual(external.read_text(encoding="utf-8"), "preserve")
+        finally:
+            os.close(separate_fd)
+
+    def _run_as_guest(self, operation):
+        if os.geteuid() == 0:
+            os.setgroups([])
+            os.setgid(self.account.pw_gid)
+            os.setuid(self.account.pw_uid)
+        operation()
+
+    def test_auth_store_repair_preserves_existing_credentials_and_tightens_modes(self):
+        store = self.home / ".local/share/opencode"
+        store.mkdir(parents=True, mode=0o775)
+        for path in (self.home / ".local", self.home / ".local/share", store):
+            path.chmod(0o775)
+            if os.geteuid() == 0:
+                os.chown(path, self.account.pw_uid, self.account.pw_gid)
+        credential = store / "auth.json"
+        payload = b'{"openai":{"refresh":"preserve-this-byte-for-byte"}}\n'
+        credential.write_bytes(payload)
+        credential.chmod(0o664)
+        database = store / "opencode.db"
+        database_payload = b"sqlite-database-fixture-preserved-byte-for-byte"
+        database.write_bytes(database_payload)
+        database.chmod(0o664)
+        if os.geteuid() == 0:
+            os.chown(credential, self.account.pw_uid, self.account.pw_gid)
+            os.chown(database, self.account.pw_uid, self.account.pw_gid)
+
+        child = os.fork()
+        if child == 0:
+            try:
+                self._run_as_guest(lambda: guest_dirs.prepare_auth_store_at(
+                    self.home_fd, self.account.pw_uid, self.account.pw_gid))
+            except BaseException as error:
+                print(f"credential privacy repair failed: {error}", file=sys.stderr)
+                os._exit(1)
+            os._exit(0)
+        _, status = os.waitpid(child, 0)
+        self.assertTrue(os.WIFEXITED(status))
+        self.assertEqual(os.WEXITSTATUS(status), 0)
+        self.assertEqual(credential.read_bytes(), payload)
+        self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(database.read_bytes(), database_payload)
+        self.assertEqual(database.stat().st_mode & 0o777, 0o600)
+        for path in (self.home / ".local", self.home / ".local/share", store):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+
+    def test_auth_store_repair_refuses_symlink_and_hardlinked_credentials(self):
+        store = self.home / ".local/share/opencode"
+        store.mkdir(parents=True, mode=0o700)
+        if os.geteuid() == 0:
+            for path in (self.home / ".local", self.home / ".local/share", store):
+                os.chown(path, self.account.pw_uid, self.account.pw_gid)
+
+        def attempt():
+            guest_dirs.prepare_auth_store_at(self.home_fd, self.account.pw_uid, self.account.pw_gid)
+
+        def refuse_as_guest():
+            child = os.fork()
+            if child == 0:
+                try:
+                    self._run_as_guest(lambda: self.assertRaises(guest_dirs.Refusal, attempt))
+                except BaseException:
+                    os._exit(1)
+                os._exit(0)
+            _, status = os.waitpid(child, 0)
+            self.assertTrue(os.WIFEXITED(status))
+            self.assertEqual(os.WEXITSTATUS(status), 0)
+
+        guarded_names = (
+            "opencode.db", "opencode.db-wal", "opencode.db-shm",
+            "opencode.db-journal", "auth.json",
+        )
+        for index, name in enumerate(guarded_names):
+            target = self.root / f"outside-{index}"
+            payload = f"preserve-{name}".encode()
+            target.write_bytes(payload)
+            target.chmod(0o644)
+            if os.geteuid() == 0:
+                os.chown(target, self.account.pw_uid, self.account.pw_gid)
+            (store / name).symlink_to(target)
+            refuse_as_guest()
+            self.assertTrue((store / name).is_symlink())
+            self.assertEqual(target.read_bytes(), payload)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+            (store / name).unlink()
+
+            target.write_bytes(payload)
+            target.chmod(0o644)
+            alias = store / name
+            os.link(target, alias)
+            refuse_as_guest()
+            self.assertEqual(target.read_bytes(), payload)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(target.stat().st_nlink, 2)
+            alias.unlink()
+
+            if os.geteuid() == 0 and self.account.pw_uid != 0:
+                owned_by_root = store / name
+                owned_by_root.write_bytes(payload)
+                owned_by_root.chmod(0o644)
+                os.chown(owned_by_root, 0, 0)
+                refuse_as_guest()
+                info = owned_by_root.stat()
+                self.assertEqual((info.st_uid, info.st_mode & 0o777), (0, 0o644))
+                self.assertEqual(owned_by_root.read_bytes(), payload)
+                owned_by_root.unlink()
+
+            fifo = store / name
+            os.mkfifo(fifo, 0o640)
+            if os.geteuid() == 0:
+                os.chown(fifo, self.account.pw_uid, self.account.pw_gid)
+            refuse_as_guest()
+            info = fifo.lstat()
+            self.assertTrue(stat.S_ISFIFO(info.st_mode))
+            self.assertEqual(info.st_mode & 0o777, 0o640)
+            fifo.unlink()
+
+    def test_existing_root_owned_intermediate_dirs_are_fixed_without_recursive_chown(self):
+        if os.geteuid() != 0 or self.account.pw_uid == 0:
+            self.skipTest("root-owned directory transition requires root and a distinct unprivileged identity")
+        user_dir = self.home / ".config/systemd/user"
+        user_dir.mkdir(parents=True, mode=0o755)
+        sentinel = user_dir / "root-owned-sentinel"
+        sentinel.write_text("leave file ownership alone", encoding="utf-8")
+        os.chown(sentinel, 0, 0)
+        for path in (self.home / ".config", self.home / ".config/systemd", user_dir):
+            os.chown(path, 0, 0)
+            os.chmod(path, 0o755)
+
+        guest_dirs.prepare_config_dirs(self.home_fd, self.account.pw_uid, self.account.pw_gid)
+
+        for path in (self.home / ".config", self.home / ".config/systemd", user_dir):
+            info = path.stat()
+            self.assertEqual((info.st_uid, info.st_gid), (self.account.pw_uid, self.account.pw_gid))
+            self.assertEqual(info.st_mode & 0o777, 0o700)
+        sentinel_info = sentinel.stat()
+        self.assertEqual((sentinel_info.st_uid, sentinel_info.st_gid), (0, 0))
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "leave file ownership alone")
+
+    def test_symlinked_config_parent_is_refused_without_touching_target(self):
+        target = self.root / "outside"
+        target.mkdir(mode=0o700)
+        marker = target / "preserve"
+        marker.write_text("untouched", encoding="utf-8")
+        (self.home / ".config").symlink_to(target, target_is_directory=True)
+
+        with self.assertRaises(guest_dirs.Refusal):
+            guest_dirs.prepare_config_dirs(self.home_fd, self.account.pw_uid, self.account.pw_gid)
+
+        self.assertTrue((self.home / ".config").is_symlink())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "untouched")
+        self.assertEqual(marker.stat().st_uid, os.getuid())
+
+    def test_symlinked_systemd_user_leaf_is_refused_without_following_it(self):
+        systemd = self.home / ".config/systemd"
+        systemd.mkdir(parents=True, mode=0o700)
+        target = self.root / "outside-user-dir"
+        target.mkdir(mode=0o700)
+        marker = target / "preserve"
+        marker.write_text("untouched", encoding="utf-8")
+        (systemd / "user").symlink_to(target, target_is_directory=True)
+
+        with self.assertRaises(guest_dirs.Refusal):
+            guest_dirs.prepare_config_dirs(self.home_fd, self.account.pw_uid, self.account.pw_gid)
+
+        self.assertTrue((systemd / "user").is_symlink())
+        self.assertEqual(marker.read_text(encoding="utf-8"), "untouched")
+        self.assertEqual(marker.stat().st_uid, os.getuid())
+
+    def test_group_world_writable_existing_config_parent_is_refused_unchanged(self):
+        config = self.home / ".config"
+        config.mkdir(mode=0o777)
+        if os.geteuid() == 0:
+            os.chown(config, self.account.pw_uid, self.account.pw_gid)
+        config.chmod(0o777)
+        original = config.stat()
+
+        with self.assertRaisesRegex(guest_dirs.Refusal, "group/world-writable"):
+            guest_dirs.prepare_config_dirs(self.home_fd, self.account.pw_uid, self.account.pw_gid)
+
+        self.assertEqual(config.stat().st_mode & 0o777, 0o777)
+        self.assertEqual((config.stat().st_uid, config.stat().st_gid), (original.st_uid, original.st_gid))
+
+    def test_wrong_home_owner_fails_without_chowning_home(self):
+        if os.geteuid() != 0 or self.account.pw_uid == 0:
+            self.skipTest("wrong-owner fixture requires root and a distinct unprivileged identity")
+        os.chown(self.home, 0, 0)
+        with self.assertRaises(guest_dirs.Refusal):
+            guest_dirs.prepare_config_dirs(self.home_fd, self.account.pw_uid, self.account.pw_gid)
+        info = self.home.stat()
+        self.assertEqual((info.st_uid, info.st_gid), (0, 0))
+        self.assertFalse((self.home / ".config").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
