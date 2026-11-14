@@ -43,6 +43,7 @@ def _raise_on_signal(signum, _frame):
 
 
 def install_signal_handlers() -> dict[int, object]:
+    """Install handlers while the caller has all handled signals blocked."""
     previous = {}
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGALRM):
         previous[signum] = signal.signal(signum, _raise_on_signal)
@@ -52,6 +53,10 @@ def install_signal_handlers() -> dict[int, object]:
 def restore_signal_handlers(previous: dict[int, object]) -> None:
     for signum, handler in previous.items():
         signal.signal(signum, handler)
+
+
+def handled_signals() -> set[signal.Signals]:
+    return {signal.SIGINT, signal.SIGTERM, signal.SIGALRM}
 
 
 def process_group_has_live_members(pgid: int) -> bool:
@@ -93,20 +98,24 @@ def request_callback(port: int, query: dict[str, str]) -> tuple[int, bytes]:
 
 
 class Session:
-    def __init__(self, port: int, key: pathlib.Path, known_hosts: pathlib.Path, case: str):
+    def __init__(self, port: int, key: pathlib.Path, known_hosts: pathlib.Path,
+                 case: str, evidence_root: pathlib.Path):
         self.case = case
-        self.root = pathlib.Path(tempfile.mkdtemp(prefix="lm-qemu-auth-"))
+        self.root = pathlib.Path(tempfile.mkdtemp(prefix="oauth-case-", dir=evidence_root))
         os.chmod(self.root, 0o700)
         self.run_dir = self.root / f"{case}-{os.getpid()}"
         self.run_dir.mkdir(mode=0o700)
-        self.control_dir = self.root / f"lmv3-{self.run_dir.name}"
+        self.control_dir = pathlib.Path(tempfile.gettempdir()) / f"lmv3-{os.getpid()}-{case}"
+        marker = self.root / "control-directory"
+        marker.write_text(str(self.control_dir), encoding="utf-8")
+        os.chmod(marker, 0o600)
         self.control_dir.mkdir(mode=0o700)
         self.control_socket = self.control_dir / "auth-control.sock"
         socket_path_bytes = len(os.fsencode(self.control_socket))
         if socket_path_bytes >= AUTH.CONTROL_SOCKET_LIMIT:
             raise RuntimeError(
                 "hosted CI private SSH control socket path exceeds the production limit "
-                f"({socket_path_bytes} bytes)"
+                f"({socket_path_bytes} bytes); evidence retained at {self.root}"
             )
         self.proof = self.run_dir / "proof.json"
         identity = self.run_dir / "identity_file"
@@ -134,8 +143,7 @@ class Session:
         self.closed = False
 
     def start(self) -> str:
-        handled = {signal.SIGINT, signal.SIGTERM, signal.SIGALRM}
-        old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled)
+        old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals())
         try:
             child_pid, master_fd = pty.fork()
             if child_pid > 0:
@@ -238,11 +246,17 @@ class Session:
             return
         previous = {}
         deferred_signals = []
+        signal_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals())
         if __import__("threading").current_thread() is __import__("threading").main_thread():
-            for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGALRM):
-                previous[signum] = signal.signal(
-                    signum, lambda received, _frame: deferred_signals.append(received)
-                )
+            try:
+                for signum in handled_signals():
+                    previous[signum] = signal.signal(
+                        signum, lambda received, _frame: deferred_signals.append(received)
+                    )
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, signal_mask)
+        else:
+            signal.pthread_sigmask(signal.SIG_SETMASK, signal_mask)
         failures = []
         proof_complete = False
         try:
@@ -276,11 +290,18 @@ class Session:
             except Exception as error:
                 failures.append(f"cleanup proof failed ({error})")
             if proof_complete:
+                # Keep the evidence root as a shell-visible cleanup marker
+                # until the separately located short SSH control directory is gone.
+                shutil.rmtree(self.control_dir)
                 shutil.rmtree(self.root)
                 self.closed = True
         finally:
-            for signum, handler in previous.items():
-                signal.signal(signum, handler)
+            restore_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals())
+            try:
+                for signum, handler in previous.items():
+                    signal.signal(signum, handler)
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, restore_mask)
         if deferred_signals:
             detail = "; ".join(failures) if failures else None
             raise HarnessCancelled(deferred_signals[0], cleanup_detail=detail)
@@ -294,7 +315,9 @@ def run_case(args, case: str) -> None:
         handled = {signal.SIGINT, signal.SIGTERM, signal.SIGALRM}
         old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled)
         try:
-            session = Session(args.port, pathlib.Path(args.identity), pathlib.Path(args.known_hosts), case)
+            session = Session(args.port, pathlib.Path(args.identity),
+                              pathlib.Path(args.known_hosts), case,
+                              pathlib.Path(args.evidence_root))
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
         url = session.start()
@@ -354,6 +377,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--identity", required=True)
     parser.add_argument("--known-hosts", required=True)
+    parser.add_argument("--evidence-root", required=True)
     parser.add_argument("--max-runtime-seconds", type=int, default=900)
     args = parser.parse_args()
     if not 1 <= args.max_runtime_seconds <= 2400:
@@ -361,9 +385,13 @@ def main() -> int:
     # The pinned 2.2.5 callback handler does not guarantee duplicate-callback
     # rejection; replay protection is exercised by the deterministic bridge
     # simulator in vm-browser-auth.test.py instead.
+    main_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals())
     previous = install_signal_handlers()
     signal.alarm(args.max_runtime_seconds)
     try:
+        # Pending cancellation is delivered only after the handler is active
+        # and execution is protected by the enclosing try/finally.
+        signal.pthread_sigmask(signal.SIG_SETMASK, main_mask)
         for case in ("success", "mismatched-state", "denial", "expiration", "malformed", "interruption"):
             run_case(args, case)
             print(f"QEMU_OAUTH_SIMULATOR_PASS: {case} (synthetic; no token/provider/model access)")
@@ -373,8 +401,10 @@ def main() -> int:
               file=__import__("sys").stderr)
         return 128 + cancelled.signum
     finally:
+        restore_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handled_signals())
         signal.alarm(0)
         restore_signal_handlers(previous)
+        signal.pthread_sigmask(signal.SIG_SETMASK, restore_mask)
     print("QEMU_OAUTH_UPSTREAM_BOUNDARY: token exchange, real identity provider and model response NOT_RUN")
     return 0
 

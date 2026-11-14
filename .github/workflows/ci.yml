@@ -71,6 +71,7 @@ jobs:
           python3 tests/vm-owner-acceptance.test.py
           python3 tests/vm-guest-user-dirs.test.py
           python3 tests/ci-qemu-oauth-bridge.test.py
+          python3 tests/ci-kvm-launch.test.py
           for test in tests/vm-parent-*.test.py; do
             python3 "$test"
           done

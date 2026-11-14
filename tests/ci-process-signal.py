@@ -48,7 +48,7 @@ def signal_owned_process(
         uid = int(uid_line.split()[1])
         argv = cmdline.split(b"\0")
         if (parent != expected_parent or starttime != expected_starttime
-                or uid != expected_uid or comm != expected_comm
+                or uid != expected_uid or (expected_comm not in ("", "*") and comm != expected_comm)
                 or any(not any(argument.encode() in item for item in argv)
                        for argument in required_args)):
             return False

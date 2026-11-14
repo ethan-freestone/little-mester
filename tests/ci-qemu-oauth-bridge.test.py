@@ -9,6 +9,7 @@ import os
 import pathlib
 import signal
 import shutil
+import sys
 import tempfile
 import types
 import unittest
@@ -26,6 +27,23 @@ PROCESS_SPEC.loader.exec_module(PROCESS)
 
 
 class HarnessSignalTests(unittest.TestCase):
+    def test_session_records_short_control_directory_before_creating_it(self):
+        with tempfile.TemporaryDirectory(prefix="oauth-evidence-root-") as directory:
+            root = pathlib.Path(directory)
+            key = root / "identity"
+            known_hosts = root / "known_hosts"
+            key.write_text("synthetic identity")
+            known_hosts.write_text("synthetic host key")
+            session = HARNESS.Session(2222, key, known_hosts, "constructor", root)
+            try:
+                marker = session.root / "control-directory"
+                self.assertEqual(pathlib.Path(marker.read_text()), session.control_dir)
+                self.assertTrue(session.control_dir.is_dir())
+                self.assertLess(len(os.fsencode(session.control_socket)), HARNESS.AUTH.CONTROL_SOCKET_LIMIT)
+            finally:
+                shutil.rmtree(session.control_dir, ignore_errors=True)
+                shutil.rmtree(session.root, ignore_errors=True)
+
     def test_pidfd_signal_requires_the_captured_child_identity(self):
         if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
             self.skipTest("Linux pidfd signaling is unavailable")
@@ -76,7 +94,8 @@ class HarnessSignalTests(unittest.TestCase):
             with mock.patch.object(HARNESS, "Session", FakeSession):
                 with self.assertRaises(HARNESS.HarnessCancelled) as raised:
                     HARNESS.run_case(
-                        types.SimpleNamespace(port=12345, identity="unused", known_hosts="unused"),
+                        types.SimpleNamespace(port=12345, identity="unused", known_hosts="unused",
+                                              evidence_root="/tmp"),
                         "success",
                     )
             self.assertEqual(raised.exception.signum, signal.SIGTERM)
@@ -104,23 +123,61 @@ class HarnessSignalTests(unittest.TestCase):
             session.root = pathlib.Path(directory) / "owned-session"
             session.root.mkdir()
             session.root.joinpath("identity").write_text("synthetic")
+            session.control_dir = pathlib.Path(directory) / "control-dir"
+            session.control_dir.mkdir()
 
-            def interrupt_and_signal():
-                os.kill(os.getpid(), signal.SIGTERM)
-
-            session.interrupt = interrupt_and_signal
+            session.interrupt = lambda: None
             # Exercise the real successful cleanup path without a TemporaryDirectory
             # finalizer; explicit removal is performed only after proof validation.
             with mock.patch.object(HARNESS.shutil, "rmtree", side_effect=lambda _path: cleanup_calls.append(True)):
                 previous = HARNESS.install_signal_handlers()
+                original_signal = signal.signal
+                delivered = []
+
+                def install_and_deliver(signum, handler):
+                    result = original_signal(signum, handler)
+                    if signum == signal.SIGTERM and getattr(handler, "__name__", "") == "<lambda>" and not delivered:
+                        delivered.append(True)
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    return result
+
                 try:
-                    with self.assertRaises(HARNESS.HarnessCancelled) as raised:
-                        session.close()
+                    with mock.patch.object(HARNESS.signal, "signal", side_effect=install_and_deliver):
+                        with self.assertRaises(HARNESS.HarnessCancelled) as raised:
+                            session.close()
                     self.assertEqual(raised.exception.signum, signal.SIGTERM)
-                    self.assertEqual(cleanup_calls, [True])
+                    self.assertEqual(cleanup_calls, [True, True])
                     self.assertTrue(session.closed)
                 finally:
                     HARNESS.restore_signal_handlers(previous)
+
+    def test_signal_during_top_level_handler_installation_is_masked(self):
+        previous_process_handlers = {
+            signum: signal.signal(signum, signal.SIG_DFL)
+            for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGALRM)
+        }
+        sent = []
+        original_signal = signal.signal
+
+        def install_and_signal(signum, handler):
+            result = original_signal(signum, handler)
+            if signum == signal.SIGTERM and not sent:
+                sent.append(True)
+                os.kill(os.getpid(), signal.SIGTERM)
+            return result
+
+        try:
+            with mock.patch.object(HARNESS.signal, "signal", side_effect=install_and_signal), \
+                 mock.patch.object(HARNESS, "run_case") as run_case, \
+                 mock.patch.object(sys, "argv", ["ci-qemu-oauth-bridge.py", "--port", "1",
+                                                  "--identity", "unused", "--known-hosts", "unused",
+                                                  "--evidence-root", "/tmp"]):
+                self.assertEqual(HARNESS.main(), 128 + signal.SIGTERM)
+                run_case.assert_not_called()
+        finally:
+            signal.alarm(0)
+            for signum, handler in previous_process_handlers.items():
+                original_signal(signum, handler)
 
     def test_failed_cleanup_proof_retains_owned_temp_directory(self):
         root = pathlib.Path(tempfile.mkdtemp(prefix="oauth-harness-retained-"))

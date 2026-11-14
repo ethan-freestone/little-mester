@@ -6,6 +6,8 @@
 set -Eeuo pipefail
 umask 077
 process_signal_helper="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/ci-process-signal.py"
+# shellcheck source=tests/ci-kvm-launch.sh
+source "$(dirname -- "$process_signal_helper")/ci-kvm-launch.sh"
 
 readonly image_url='https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img'
 readonly image_sha256='04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94'
@@ -32,8 +34,12 @@ trap 'report_unhandled_failure "$?" "$LINENO"' ERR
 
 process_state() {
   local stat_line rest
-  [[ -r "/proc/$1/stat" ]] || return 0
-  stat_line="$(<"/proc/$1/stat")"
+  [[ -d "/proc/$1" ]] || return 0
+  [[ -r "/proc/$1/stat" ]] || { printf '?'; return 0; }
+  if ! stat_line="$(<"/proc/$1/stat")"; then
+    [[ -d "/proc/$1" ]] && printf '?'
+    return 0
+  fi
   rest="${stat_line##*) }"
   printf '%s' "${rest%% *}"
 }
@@ -71,7 +77,7 @@ qemu_identity_matches() {
   [[ "$actual_start" == "$qemu_starttime" ]] || return 1
   actual_uid="$(process_uid "$qemu_pid")"
   [[ "$actual_uid" == "$qemu_uid" ]] || return 1
-  stat_line="$(<"/proc/$qemu_pid/stat")"
+  stat_line="$(<"/proc/$qemu_pid/stat")" || return 1
   rest="${stat_line##*) }"
   local -a fields
   read -r -a fields <<<"$rest"
@@ -87,7 +93,7 @@ capture_qemu_identity() {
   local stat_line rest parent comm
   for _ in {1..20}; do
     if [[ -r "/proc/$qemu_pid/stat" ]]; then
-      stat_line="$(<"/proc/$qemu_pid/stat")"
+      stat_line="$(<"/proc/$qemu_pid/stat")" || { sleep 0.05; continue; }
       rest="${stat_line##*) }"
       local -a fields
       read -r -a fields <<<"$rest"
@@ -107,85 +113,83 @@ capture_qemu_identity() {
   return 1
 }
 
-stop_oauth_harness() {
-  local state='' current_start stat_line rest parent comm
-  [[ -n "$oauth_pid" ]] || return 0
-  current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
-  state="$(process_state "$oauth_pid")"
-  if [[ -z "$current_start" || "$state" == Z ]]; then
-    wait "$oauth_pid" 2>/dev/null || true
-    oauth_pid=''
-    oauth_starttime=''
-    oauth_uid=''
-    oauth_parent=''
-    return 0
-  fi
-  if [[ -n "$current_start" && ( -z "$oauth_starttime" || -z "$oauth_uid" || -z "$oauth_parent" ) \
-        && -r "/proc/$oauth_pid/stat" ]]; then
-    stat_line="$(<"/proc/$oauth_pid/stat")"
-    rest="${stat_line##*) }"
-    local -a fields
-    read -r -a fields <<<"$rest"
-    parent="${fields[1]:-}"
-    comm="$(</proc/"$oauth_pid"/comm)"
-    if [[ "$parent" == "$BASHPID" && "$comm" == python3 ]] \
-        && grep -azFq -- 'ci-qemu-oauth-bridge.py' "/proc/$oauth_pid/cmdline"; then
-      oauth_starttime="$current_start"
-      oauth_uid="$(process_uid "$oauth_pid")"
-      oauth_parent="$BASHPID"
-    fi
-  fi
-  if [[ -z "$oauth_starttime" || "$current_start" != "$oauth_starttime" ]]; then
-    if [[ "$current_start" != "$oauth_starttime" ]]; then
-      wait "$oauth_pid" 2>/dev/null || true
-      oauth_pid=''
-      oauth_starttime=''
-      oauth_uid=''
-      oauth_parent=''
-      return 0
-    fi
-    return 1
-  fi
-  signal_owned_process "$oauth_pid" "$oauth_starttime" "$oauth_uid" \
-    "$oauth_parent" python3 TERM ci-qemu-oauth-bridge.py || {
-      current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
-      state="$(process_state "$oauth_pid")"
-      [[ -z "$current_start" || "$current_start" != "$oauth_starttime" || "$state" == Z ]] || return 1
-    }
-  # Allow the harness its 10-second child interruption plus bounded process-
-  # group kill/reap and proof check before escalating the harness itself.
-  for _ in {1..200}; do
-    current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
-    state="$(process_state "$oauth_pid")"
-    [[ -z "$current_start" || "$current_start" != "$oauth_starttime" || "$state" == Z ]] && break
-    sleep 0.1
-  done
-  current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
-  state="$(process_state "$oauth_pid")"
-  if [[ "$current_start" == "$oauth_starttime" && "$state" != Z ]]; then
-    signal_owned_process "$oauth_pid" "$oauth_starttime" "$oauth_uid" \
-      "$oauth_parent" python3 KILL ci-qemu-oauth-bridge.py || {
-        current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
-        state="$(process_state "$oauth_pid")"
-        [[ -z "$current_start" || "$current_start" != "$oauth_starttime" || "$state" == Z ]] || return 1
-      }
-    for _ in {1..20}; do
-      current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
-      state="$(process_state "$oauth_pid")"
-      [[ -z "$current_start" || "$current_start" != "$oauth_starttime" || "$state" == Z ]] && break
-      sleep 0.1
-    done
-  fi
-  current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
-  state="$(process_state "$oauth_pid")"
-  if [[ "$current_start" == "$oauth_starttime" && "$state" != Z ]]; then
-    return 1
-  fi
-  wait "$oauth_pid" 2>/dev/null || true
+oauth_evidence_is_clear() {
+  local first_entry
+  [[ -n "$oauth_evidence_root" && -d "$oauth_evidence_root" && -r "$oauth_evidence_root" ]] || return 1
+  first_entry="$(find "$oauth_evidence_root" -mindepth 1 -maxdepth 1 -print -quit)" || return 1
+  [[ -z "$first_entry" ]]
+}
+
+clear_oauth_tracking() {
   oauth_pid=''
   oauth_starttime=''
   oauth_uid=''
   oauth_parent=''
+}
+
+stop_oauth_harness() {
+  local state='' current_start stat_line rest parent
+  [[ -n "$oauth_pid" ]] || { oauth_evidence_is_clear; return; }
+  state="$(process_state "$oauth_pid")"
+  if [[ "$state" == '?' ]]; then
+    return 1
+  fi
+  current_start="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
+  if [[ -z "$state" || "$state" == Z ]]; then
+    wait "$oauth_pid" 2>/dev/null || true
+    clear_oauth_tracking
+    oauth_evidence_is_clear || { oauth_cleanup_unproved=1; return 1; }
+    return 0
+  fi
+  [[ -n "$current_start" ]] || return 1
+  if [[ -z "$oauth_starttime" || -z "$oauth_uid" || -z "$oauth_parent" ]]; then
+    # The child may still be the launcher's pre-exec job. Recover only from a
+    # live direct Bash job; never block in wait on an unidentified process.
+    stat_line="$(<"/proc/$oauth_pid/stat")" || return 1
+    rest="${stat_line##*) }"
+    local -a fields
+    read -r -a fields <<<"$rest"
+    parent="${fields[1]:-}"
+    jobs -pr | grep -Fxq -- "$oauth_pid" || return 1
+    [[ "$parent" == "$BASHPID" ]] || return 1
+    oauth_starttime="$current_start"
+    oauth_uid="$(process_uid "$oauth_pid")"
+    oauth_parent="$BASHPID"
+  fi
+  [[ "$current_start" == "$oauth_starttime" && "$oauth_parent" == "$BASHPID" ]] || return 1
+  signal_owned_process "$oauth_pid" "$oauth_starttime" "$oauth_uid" \
+    "$oauth_parent" '*' TERM || {
+      state="$(process_state "$oauth_pid")"
+      [[ -z "$state" || "$state" == Z ]] || return 1
+    }
+  # Allow the harness its 10-second child interruption plus bounded process-
+  # group kill/reap and proof check before escalating the harness itself.
+  for _ in {1..200}; do
+    state="$(process_state "$oauth_pid")"
+    [[ -z "$state" || "$state" == Z ]] && break
+    [[ "$state" != '?' ]] || return 1
+    sleep 0.1
+  done
+  state="$(process_state "$oauth_pid")"
+  if [[ -n "$state" && "$state" != Z ]]; then
+    signal_owned_process "$oauth_pid" "$oauth_starttime" "$oauth_uid" \
+      "$oauth_parent" '*' KILL || {
+        state="$(process_state "$oauth_pid")"
+        [[ -z "$state" || "$state" == Z ]] || return 1
+      }
+    oauth_cleanup_unproved=1
+    for _ in {1..20}; do
+      state="$(process_state "$oauth_pid")"
+      [[ -z "$state" || "$state" == Z ]] && break
+      [[ "$state" != '?' ]] || return 1
+      sleep 0.1
+    done
+  fi
+  state="$(process_state "$oauth_pid")"
+  [[ -z "$state" || "$state" == Z ]] || return 1
+  wait "$oauth_pid" 2>/dev/null || true
+  clear_oauth_tracking
+  oauth_evidence_is_clear || { oauth_cleanup_unproved=1; return 1; }
 }
 
 stop_owned_qemu() {
@@ -266,6 +270,8 @@ done
 tmp_root="${RUNNER_TEMP:-/tmp/opencode}"
 mkdir -p "$tmp_root"
 tmp="$(mktemp -d "$tmp_root/lm-kvm-trial.XXXXXXXX")"
+oauth_evidence_root="$tmp/oauth-evidence"
+mkdir -m 700 "$oauth_evidence_root"
 qemu_pid=''
 qemu_starttime=''
 qemu_uid=''
@@ -274,9 +280,13 @@ oauth_pid=''
 oauth_starttime=''
 oauth_uid=''
 oauth_parent=''
+oauth_cleanup_unproved=0
 qemu_deadline=0
 cleanup() {
   local status=$?
+  # Bash may run the inherited EXIT trap in the async launch subshell as well;
+  # only the owning top-level shell may stop processes or remove artifacts.
+  [[ "$BASHPID" == "$$" ]] || return "$status"
   # A repeated cancellation must not interrupt ownership verification or
   # bounded child reaping once cleanup has started.
   trap '' INT TERM
@@ -291,7 +301,12 @@ cleanup() {
     printf 'KVM_TRIAL_FAIL: test-owned QEMU stop was not proved; preserving diagnostics at %s\n' "$tmp" >&2
     status=1
   fi
-  if [[ -z "$qemu_pid" && -z "$oauth_pid" ]]; then
+  if (( oauth_cleanup_unproved )) || ! oauth_evidence_is_clear; then
+    printf 'KVM_TRIAL_FAIL: OAuth descendant cleanup/evidence is not proved; retaining diagnostics at %s\n' "$tmp" >&2
+    status=1
+  fi
+  if [[ -z "$qemu_pid" && -z "$oauth_pid" ]] \
+      && (( ! oauth_cleanup_unproved )) && oauth_evidence_is_clear; then
     rm -rf -- "$tmp"
   else
     printf 'KVM_TRIAL_FAIL: disposable VM artifacts retained at %s because process cleanup was not proved\n' "$tmp" >&2
@@ -299,8 +314,8 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+  trap 'ci_handle_cancel 130' INT
+  trap 'ci_handle_cancel 143' TERM
 
 port="$(python3 - <<'PY'
 import socket
@@ -376,7 +391,7 @@ genisoimage -quiet -output "$seed" -volid cidata -joliet -rock \
 qemu-img create -q -f qcow2 -F qcow2 -b "$image" "$overlay"
 
 printf 'KVM_TRIAL: starting pinned guest with accel=kvm (no TCG fallback)\n'
-qemu-system-x86_64 \
+ci_launch_tracked qemu_pid qemu-system-x86_64 \
     -name little-mester-hosted-kvm-integration \
     -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
     -nodefaults -no-user-config -display none -monitor none \
@@ -384,8 +399,7 @@ qemu-system-x86_64 \
     -drive "file=$overlay,if=virtio,format=qcow2" \
     -drive "file=$seed,if=virtio,format=raw,readonly=on" \
       -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$port-:22" \
-    -device virtio-net-pci,netdev=net0 &
-qemu_pid=$!
+    -device virtio-net-pci,netdev=net0
 qemu_starttime=''
 qemu_uid=''
 capture_qemu_identity || fail 'could not prove ownership of the launched QEMU process'
@@ -542,7 +556,7 @@ PY
 # copying or reinitializing the VM disk. The in-memory tmux socket is expected
 # to be recreated; the session/workspace files remain on the persistent disk.
 stop_owned_qemu || fail 'test-owned QEMU process tree did not stop; preserving its artifacts'
-qemu-system-x86_64 \
+ci_launch_tracked qemu_pid qemu-system-x86_64 \
     -name little-mester-hosted-kvm-integration \
     -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
     -nodefaults -no-user-config -display none -monitor none \
@@ -550,12 +564,10 @@ qemu-system-x86_64 \
     -drive "file=$overlay,if=virtio,format=qcow2" \
     -drive "file=$seed,if=virtio,format=raw,readonly=on" \
     -netdev "user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:$port-:22" \
-    -device virtio-net-pci,netdev=net0 &
-qemu_pid=$!
+    -device virtio-net-pci,netdev=net0
 qemu_starttime=''
 qemu_uid=''
 capture_qemu_identity || fail 'could not prove ownership of the restricted-boot QEMU process'
-qemu_deadline=$((SECONDS + 2400))
 ready=0
 readiness_deadline=$((SECONDS + 300))
 while (( SECONDS < readiness_deadline )); do
@@ -585,10 +597,9 @@ ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux has-session 
 printf 'KVM_PERSISTENCE_PASS: synthetic OpenCode DB/auth fixtures, workspace data, and TUI recreation survived disposable guest reboot\n'
 oauth_remaining=$((qemu_deadline - SECONDS))
 (( oauth_remaining > 0 )) || fail 'QEMU integration exceeded its overall bounded deadline before OAuth simulation'
-TMPDIR=/tmp python3 tests/ci-qemu-oauth-bridge.py \
+ci_launch_tracked oauth_pid env TMPDIR=/tmp python3 tests/ci-qemu-oauth-bridge.py \
   --port "$port" --identity "$key" --known-hosts "$known_hosts" \
-  --max-runtime-seconds "$oauth_remaining" &
-oauth_pid=$!
+  --evidence-root "$oauth_evidence_root" --max-runtime-seconds "$oauth_remaining"
 oauth_starttime="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
 oauth_uid="$(process_uid "$oauth_pid")"
 oauth_parent="$BASHPID"
