@@ -63,40 +63,83 @@ class SupervisorHandoffTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_parent_readiness_distinguishes_opencode_install_and_version_failures(self):
-        checks = parent_state._SESSION_CONTRACT.readiness_checks()
-        checks = checks.split("; printf '%s  %s", 1)[0]
+        self.assertNotIn("/usr/local/libexec/lm-opencode-readiness",
+                         parent_state._SESSION_CONTRACT.ASSETS)
+        self.assertNotIn("/usr/local/bin/opencode --version",
+                         parent_state._SESSION_CONTRACT.readiness_checks(include_opencode=False))
+        helper = (ROOT / "lib/vm/opencode-readiness.sh").read_text()
+        self.assertEqual(subprocess.run(["/bin/sh", "-n"], input=helper.encode(),
+                                        check=False).returncode, 0)
         with tempfile.TemporaryDirectory() as directory:
-            fake_opencode = pathlib.Path(directory) / "opencode"
-            checks = (checks.replace("/usr/bin/tmux", "/bin/true")
-                      .replace("/usr/local/bin/lm-opencode", "/bin/true")
-                      .replace("/usr/local/bin/opencode", str(fake_opencode)))
+            root = pathlib.Path(directory)
+            fake_home = root / "home"
+            fake_home.mkdir(mode=0o700)
+            fake_user_dirs = root / "lm-guest-user-dirs.py"
+            fake_user_dirs.write_text("import sys\nsys.exit(0)\n")
+            package = root / "node_modules/@opencode/cli"
+            binary = package / "bin/opencode.exe"
+            binary.parent.mkdir(parents=True)
+            (package / "package.json").write_text('{"name":"@opencode/cli","version":"2.2.5"}')
+            fake_opencode = root / "bin/opencode"
+            fake_opencode.parent.mkdir()
+            fake_opencode.symlink_to(binary)
+            helper = (helper.replace("/usr/local/bin/opencode", str(fake_opencode))
+                      .replace("/home/mester", str(fake_home))
+                      .replace("/usr/local/libexec/lm-guest-user-dirs.py", str(fake_user_dirs)))
+            helper_template = helper
+            helper_path = root / "readiness.sh"
 
-            def invoke(script=None):
-                if script is None:
-                    fake_opencode.unlink(missing_ok=True)
+            def invoke(script, extra_env=None, timeout_seconds=5):
+                if isinstance(script, bytes):
+                    binary.write_bytes(script)
                 else:
-                    fake_opencode.write_text(script)
-                    fake_opencode.chmod(0o755)
-                return subprocess.run(["/bin/bash", "-c", checks], text=True,
+                    binary.write_text(script)
+                binary.chmod(0o755)
+                content = helper_template.replace(
+                    "--kill-after=1 3", f"--kill-after=1 {timeout_seconds}")
+                helper_path.write_text(content)
+                environment = os.environ.copy()
+                environment.update(extra_env or {})
+                return subprocess.run(["/bin/sh", str(helper_path)], env=environment, text=True,
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                       check=False)
 
-            missing = invoke()
-            self.assertEqual(missing.returncode, 44)
-            self.assertIn("check=opencode-executable", missing.stdout)
-
-            failed_command = invoke("#!/bin/sh\nexit 1\n")
-            self.assertEqual(failed_command.returncode, 44)
-            self.assertIn("check=opencode-version-command", failed_command.stdout)
+            env_fallback = invoke(
+                "#!/bin/sh\nif [ \"${MODE:-}\" = ambient-fail ]; then echo private-output >&2; exit 9; fi\nprintf '%s\\n' 'opencode v2.2.5'\n",
+                {"MODE": "ambient-fail"})
+            self.assertEqual(env_fallback.returncode, 0, env_fallback.stderr)
+            self.assertIn("ambient_class=process-exit protected_env=pass", env_fallback.stdout)
+            self.assertNotIn("private-output", env_fallback.stdout + env_fallback.stderr)
 
             wrong_version = invoke("#!/bin/sh\nprintf '%s\\n' 'opencode v9.9.9'\n")
             self.assertEqual(wrong_version.returncode, 44)
-            self.assertIn("check=opencode-version expected=opencode-v2.2.5",
-                          wrong_version.stdout)
+            self.assertIn("check=opencode-version", wrong_version.stdout)
+            self.assertIn("ambient_class=version-mismatch", wrong_version.stdout)
+            self.assertIn("package_version=2.2.5", wrong_version.stdout)
             self.assertNotIn("v9.9.9", wrong_version.stdout)
 
-            correct_version = invoke(
-                "#!/bin/sh\nprintf '%s\\n' 'opencode v2.2.5'\n")
+            missing_interpreter = invoke("#!/missing/opencode-interpreter\n")
+            self.assertEqual(missing_interpreter.returncode, 44)
+            self.assertIn("ambient_class=missing-interpreter-or-runtime",
+                          missing_interpreter.stdout)
+
+            format_error = invoke(
+                "#!/bin/sh\necho 'Exec format error' >&2\nexit 126\n")
+            self.assertEqual(format_error.returncode, 44)
+            self.assertIn("ambient_class=binary-format-or-architecture",
+                          format_error.stdout)
+
+            missing_library = invoke(
+                "#!/bin/sh\necho 'error while loading shared libraries: libfixture.so not found' >&2\nexit 127\n")
+            self.assertEqual(missing_library.returncode, 44)
+            self.assertIn("ambient_class=shared-library-failure", missing_library.stdout)
+            self.assertNotIn("libfixture.so", missing_library.stdout + missing_library.stderr)
+
+            timed_out = invoke("#!/bin/sh\nsleep 10\n", timeout_seconds=1)
+            self.assertEqual(timed_out.returncode, 44)
+            self.assertIn("ambient_class=timeout", timed_out.stdout)
+
+            correct_version = invoke("#!/bin/sh\nprintf '%s\\n' 'opencode v2.2.5'\n")
             self.assertEqual(correct_version.returncode, 0, correct_version.stderr)
 
     def cleanup_gated_child(self, role, transition=None):

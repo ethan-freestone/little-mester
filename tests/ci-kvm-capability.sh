@@ -447,8 +447,12 @@ spec.loader.exec_module(contract)
 files = [{"path": "/etc/opencode/opencode.json", "owner": "root:root", "permissions": "0644",
           "content": '{"autoupdate":false,"share":"disabled","permission":{"edit":"ask","bash":"ask"}}\n'}]
 files.extend({"path": path, "owner": "root:root", "permissions": mode, "encoding": "b64",
-              "content": base64.b64encode(content).decode("ascii")}
-             for path, (content, mode) in contract.ASSETS.items())
+               "content": base64.b64encode(content).decode("ascii")}
+              for path, (content, mode) in contract.ASSETS.items())
+opencode_readiness = root / "lib/vm/opencode-readiness.sh"
+files.append({"path": "/usr/local/libexec/lm-ci-opencode-readiness", "owner": "root:root",
+              "permissions": "0755", "encoding": "b64",
+              "content": base64.b64encode(opencode_readiness.read_bytes()).decode("ascii")})
 for path, content in contract.PROTECTED_PLUGIN_ASSETS.items():
     files.append({"path": path,
                   "owner": "root:root", "permissions": "0644", "encoding": "b64",
@@ -699,7 +703,9 @@ path = pathlib.Path("lib/vm/parent-session-contract.py")
 spec = importlib.util.spec_from_file_location("contract", path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-print(module.readiness_checks())
+print("test -x /usr/local/libexec/lm-ci-opencode-readiness || exit 44; "
+      "/usr/local/libexec/lm-ci-opencode-readiness || exit 44; "
+      + module.readiness_checks(include_opencode=False))
 PY
 )"
 stage_start config-tmux 180
@@ -720,7 +726,7 @@ ssh_tty_guest() {
     -o ProxyCommand=none -o ProxyJump=none "mester@127.0.0.1" "$1"
 }
 
-ssh_guest 'test "$(/usr/local/bin/opencode --version)" = "opencode v2.2.5" && tmux -V >/dev/null'
+ssh_guest 'test -x /usr/local/bin/opencode && tmux -V >/dev/null'
 ssh_guest 'test "$(stat -c %u:%a /etc/opencode/opencode.json)" = "0:644" && grep -Fq "\"share\":\"disabled\"" /etc/opencode/opencode.json'
 # Guest-shell payloads are intentionally single-quoted so the local shell does
 # not expand substitutions before they execute inside the disposable guest.
@@ -837,9 +843,9 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
   (( remaining > 0 )) || break
   attempt_timeout=8
   (( remaining < attempt_timeout )) && attempt_timeout=$remaining
-# shellcheck disable=SC2016
+  # shellcheck disable=SC2016
   if timeout --signal=TERM --kill-after=1 "$attempt_timeout" ssh "${ssh_args[@]}" \
-      'systemctl is-active --quiet ssh.service && test "$(cat /home/mester/workspace/persisted.txt)" = persistent-fixture && test "$(/usr/local/bin/opencode --version)" = "opencode v2.2.5"' \
+      'systemctl is-active --quiet ssh.service && test "$(cat /home/mester/workspace/persisted.txt)" = persistent-fixture && test -x /usr/local/bin/opencode' \
       >/dev/null 2>&1; then
     ready=1
     break

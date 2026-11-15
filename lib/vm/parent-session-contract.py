@@ -59,11 +59,14 @@ ASSET_SHA256.update({
 })
 
 
-def readiness_checks() -> str:
-    checks = ["test -x /usr/bin/tmux || exit 42", "test -x /usr/local/bin/lm-opencode || exit 43",
-              "if [ ! -x /usr/local/bin/opencode ]; then printf '%s\\n' 'KVM_M2_READINESS_FAIL check=opencode-executable path=/usr/local/bin/opencode'; exit 44; fi",
-              "opencode_version=$(/usr/local/bin/opencode --version 2>/dev/null) || { printf '%s\\n' 'KVM_M2_READINESS_FAIL check=opencode-version-command'; exit 44; }",
-              "if [ \"$opencode_version\" != 'opencode v2.2.5' ]; then printf '%s\\n' 'KVM_M2_READINESS_FAIL check=opencode-version expected=opencode-v2.2.5'; exit 44; fi"]
+def readiness_checks(*, include_opencode: bool = True) -> str:
+    checks = ["test -x /usr/bin/tmux || exit 42", "test -x /usr/local/bin/lm-opencode || exit 43"]
+    if include_opencode:
+        checks.extend([
+            "if [ ! -x /usr/local/bin/opencode ]; then printf '%s\\n' 'KVM_M2_READINESS_FAIL check=opencode-executable path=/usr/local/bin/opencode'; exit 44; fi",
+            "opencode_version=$(/usr/local/bin/opencode --version 2>/dev/null) || { printf '%s\\n' 'KVM_M2_READINESS_FAIL check=opencode-version-command'; exit 44; }",
+            "if [ \"$opencode_version\" != 'opencode v2.2.5' ]; then printf '%s\\n' 'KVM_M2_READINESS_FAIL check=opencode-version expected=opencode-v2.2.5'; exit 44; fi",
+        ])
     for path, digest in sorted(ASSET_SHA256.items()):
         checks.append(f"printf '%s  %s\\n' '{digest}' '{path}' | sha256sum -c - >/dev/null || exit 45")
     return "; ".join(checks)
