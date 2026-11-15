@@ -368,7 +368,15 @@ assert '"growpart": {"mode": "growpart", "devices": ["/"], "ignore_growroot_disa
 assert '"resize_rootfs": True' in text
 assert 'df -B1 --output=size,used,avail /' in text and 'df --output=itotal,iused,iavail /' in text
 assert 'KVM_GUEST_STORAGE_PREFLIGHT_FAIL' in text and 'KVM_GUEST_PROVISION_FAIL' in text
-assert 'guest cloud-init storage/package provisioning failed before SSH readiness' in text
+assert 'systemctl enable --now ssh.service' in text
+assert "ss -H -lnt4 'sport = :22'" in text
+assert 'KVM_GUEST_SSH_LISTENER state=ready' in text
+assert 'KVM_GUEST_SSH_LISTENER_FAIL' in text and 'KVM_GUEST_SSH_SERVICE_LOG' in text
+assert 'KVM_GUEST_SSH_NETWORK ipv4-addresses:' in text and 'KVM_GUEST_SSH_NETWORK ipv4-routes:' in text
+assert 'KVM_SSH_FAILURE_CLASS=host-key-verification' in text
+assert 'KVM_SSH_FAILURE_CLASS=authentication-or-ssh-negotiation' in text
+assert 'KVM_SSH_FAILURE_CLASS=pre-identification-transport-reset' in text
+assert 'guest cloud-init provisioning or SSH listener failed before SSH readiness' in text
 assert 'apt-get install -y --no-install-recommends' in text
 assert 'oauth_remaining > 120' in text
 assert 'ssh-keyscan' not in text

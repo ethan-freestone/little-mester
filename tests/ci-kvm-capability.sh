@@ -19,8 +19,21 @@ fail() {
   if [[ -n "${tmp:-}" && -s "$tmp/readiness.log" ]]; then
     printf '%s\n' '--- last bounded guest SSH/readiness probe ---' >&2
     tail -n 12 "$tmp/readiness.log" >&2 || true
+    if grep -Eqi 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed' "$tmp/readiness.log"; then
+      printf '%s\n' 'KVM_SSH_FAILURE_CLASS=host-key-verification' >&2
+    elif grep -Eqi 'Permission denied|no mutual signature|no matching .* found' "$tmp/readiness.log"; then
+      printf '%s\n' 'KVM_SSH_FAILURE_CLASS=authentication-or-ssh-negotiation' >&2
+    elif grep -Eqi 'kex_exchange_identification.*(reset|closed)|Connection refused|Connection reset by peer' "$tmp/readiness.log"; then
+      if [[ -n "${serial_log:-}" ]] && grep -aq 'KVM_GUEST_SSH_LISTENER state=ready' "$serial_log"; then
+        printf '%s\n' 'KVM_SSH_FAILURE_CLASS=pre-identification-transport-reset guest_ipv4_listener=confirmed-during-provisioning inspect_hostfwd-or-later-guest-state' >&2
+      else
+        printf '%s\n' 'KVM_SSH_FAILURE_CLASS=pre-identification-transport-reset guest_ipv4_listener=unconfirmed inspect_guest_sshd_or_network' >&2
+      fi
+    fi
   fi
   if [[ -n "${serial_log:-}" && -f "$serial_log" ]]; then
+    printf '%s\n' '--- bounded SSH/provisioning serial markers ---' >&2
+    grep -aE 'KVM_GUEST_(SSH|PROVISION)' "$serial_log" | tail -n 24 >&2 || true
     printf '%s\n' '--- bounded guest serial tail ---' >&2
     tail -n 80 "$serial_log" >&2 || true
   fi
@@ -453,6 +466,26 @@ storage_report() {
   printf 'KVM_GUEST_STORAGE phase=%s source=%s fstype=%s block_total=%s block_used=%s block_available=%s inode_total=%s inode_used=%s inode_available=%s\n' "$phase" "$root_source" "$root_type" "$block_total" "$block_used" "$block_available" "$inode_total" "$inode_used" "$inode_available"
   lsblk -b -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS
 }
+ssh_diagnostic() {
+  phase=$1
+  package_state=$(dpkg-query -W -f='${Status}' openssh-server 2>/dev/null || printf absent)
+  service_active=$(systemctl is-active ssh.service 2>/dev/null || true)
+  service_enabled=$(systemctl is-enabled ssh.service 2>/dev/null || true)
+  [[ -n "$service_active" ]] || service_active=unknown
+  [[ -n "$service_enabled" ]] || service_enabled=unknown
+  printf 'KVM_GUEST_SSH_DIAG phase=%s package=%s active=%s enabled=%s\n' "$phase" "$package_state" "$service_active" "$service_enabled"
+  systemctl show ssh.service -p ActiveState -p SubState -p Result -p ExecMainStatus --no-pager 2>/dev/null | cut -c1-160 || true
+  printf '%s\n' 'KVM_GUEST_SSH_NETWORK ipv4-addresses:'
+  ip -brief -4 address show 2>/dev/null | sed -n '1,6p' | cut -c1-180 || true
+  printf '%s\n' 'KVM_GUEST_SSH_NETWORK ipv4-routes:'
+  ip -4 route show 2>/dev/null | sed -n '1,6p' | cut -c1-180 || true
+  printf '%s\n' 'KVM_GUEST_SSH_LISTENERS ipv4:'
+  ss -H -lnt4 2>/dev/null | sed -n '1,8p' | cut -c1-180 || true
+  printf '%s\n' 'KVM_GUEST_SSH_SERVICE_LOG:'
+  journalctl -b -u ssh.service --no-pager -n 24 -o cat 2>/dev/null \
+    | grep -Ei 'error|fail|listen|starting|started|host key|sshd' \
+    | tail -n 8 | cut -c1-220 | tr -cd '\11\12\15\40-\176' || true
+}
 provision_error() {
   rc=$?
   trap - ERR
@@ -474,8 +507,25 @@ apt-get update -qq || { rc=$?; storage_report apt-update-failed; printf 'KVM_GUE
 apt-get install -y --no-install-recommends tmux nodejs npm ca-certificates || { rc=$?; storage_report apt-install-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=apt-install exit=%s\n' "$rc" >&2; exit "$rc"; }
 npm install --global @opencode/cli@2.2.5 || { rc=$?; storage_report opencode-install-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=opencode-install exit=%s\n' "$rc" >&2; exit "$rc"; }
 install -d -o mester -g mester -m 0700 /home/mester/workspace /home/mester/.local/share/opencode
+ssh_diagnostic before-ensure
+if systemctl enable --now ssh.service >/dev/null 2>&1; then
+  :
+else
+  rc=$?
+  ssh_diagnostic service-start-failed
+  printf 'KVM_GUEST_PROVISION_FAIL stage=ssh-service exit=%s\n' "$rc" >&2
+  exit "$rc"
+fi
+ssh_diagnostic after-ensure
+if ! ss -H -lnt4 'sport = :22' | awk '$4 == "0.0.0.0:22" || ($4 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:22$/ && $4 !~ /^127\./) { found=1 } END { exit !found }'; then
+  printf 'KVM_GUEST_SSH_LISTENER_FAIL reason=no-nonloopback-ipv4-listener port=22\n' >&2
+  ssh_diagnostic listener-missing
+  exit 74
+fi
+printf 'KVM_GUEST_SSH_LISTENER state=ready address=nonloopback-ipv4 port=22\n'
 storage_report after-packages
 printf ready > /var/tmp/lm-kvm-trial-ready
+printf 'KVM_GUEST_PROVISION_DONE exit=0\n'
 '''
 config = {
     "ssh_pwauth": False,
@@ -574,10 +624,10 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
         cat "$tmp/readiness.log" >&2
         fail 'cloud-init reported an error before guest readiness'
       fi
-      if grep -aEq 'KVM_GUEST_STORAGE_PREFLIGHT_FAIL|KVM_GUEST_PROVISION_FAIL' "$serial_log"; then
-        printf '%s\n' 'KVM_GUEST_PROVISIONING_DIAGNOSTIC: explicit cloud-init storage/package failure marker observed' >&2
-        grep -aE 'KVM_GUEST_STORAGE(_PREFLIGHT_FAIL)?|KVM_GUEST_PROVISION_FAIL' "$serial_log" | tail -n 12 >&2 || true
-        fail 'guest cloud-init storage/package provisioning failed before SSH readiness'
+      if grep -aEq 'KVM_GUEST_STORAGE_PREFLIGHT_FAIL|KVM_GUEST_PROVISION_FAIL|KVM_GUEST_SSH_LISTENER_FAIL' "$serial_log"; then
+        printf '%s\n' 'KVM_GUEST_PROVISIONING_DIAGNOSTIC: explicit cloud-init provisioning/SSH failure marker observed' >&2
+        grep -aE 'KVM_GUEST_(STORAGE|PROVISION|SSH)' "$serial_log" | tail -n 24 >&2 || true
+        fail 'guest cloud-init provisioning or SSH listener failed before SSH readiness'
       fi
     fi
   else

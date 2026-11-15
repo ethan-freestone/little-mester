@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-15T02:54:22.923Z",
+  "updated_at": "2026-11-15T10:44:05.165Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -130,6 +130,11 @@
       "timestamp": "2026-11-15T02:54:22.922Z",
       "author": "cli",
       "body": "2026-11-15 hosted M2 storage-failure follow-up: hosted real-KVM run on source b074e4f0e46b98f0000bfa5ca3b005a14b67739b (PR merge 63d2d4d2520abb5bbdb89b99bef85047ad729edb) reached KVM launch but cloud-init dpkg failed with ENOSPC; SSH readiness then expired. CI-only correction under review: inspect pinned base virtual size, resize only disposable qcow2 overlay to 24 GiB, configure cloud-init growpart mode=growpart and rootfs resize, preflight root >=20 GiB total / >=8 GiB available / >=100,000 inodes, emit bounded storage/provisioning diagnostics and explicit failures, and use apt --no-install-recommends. No timeout change, original persistent-parent storage change, local QEMU/KVM, nested QEMU, or push. Sol Medium final focused review PASS. Local validation: Bats 106/106; ci-kvm-launch 1/1; synthetic OAuth 18/18; browser-auth 37/37; generated cloud-config and embedded shell syntax, bash -n, ShellCheck, diff checks pass. Hosted SSH readiness remains unverified pending owner push and exact-SHA CI. A1-A5 remain pending. Individually visible GitHub Actions steps were assessed but deferred: current lifecycle intentionally shares QEMU process/disk identity, bounded stage deadlines, and cleanup within one runner shell; splitting would require cross-step ownership/state plumbing and is not necessary to fix the demonstrated storage failure."
+    },
+    {
+      "timestamp": "2026-11-15T10:44:05.165Z",
+      "author": "cli",
+      "body": "2026-11-15 hosted SSH-readiness follow-up: owner reports source ce6d9c76e1118e1ac9166478ce3ea8f62740cb8e / merge c6e80afd8d35deff17b86cb5993f2a90a6d11192: 24-GiB overlay/root growth confirmed, ~20 GB available and ~2.9M free inodes, guest package install completes, cloud-init finishes ~62s, but loopback forwarded SSH resets during kex until the unchanged 120s bound expires. Pinned Noble release manifest confirms openssh-server is installed. This reset is before SSH identification, so the report alone does not distinguish guest sshd/listener from QEMU forwarding; it is not evidence of auth or host-key failure. CI-only delta now records bounded package/systemd state, active/enabled status, IPv4 addresses/routes, listener sockets and filtered SSH service errors on serial; explicitly enables/starts ssh.service and requires a non-loopback IPv4 port-22 listener before provisioning success; emits exit markers and classifies host-key/auth/pre-identification reset outcomes without weakening strict known_hosts. QEMU hostfwd remains loopback host port -> guest :22, KVM/identity/deadlines/cleanup unchanged; no disk or timeout change. Local: Bats 106/106, ci-kvm-launch 1/1, synthetic OAuth 18/18, browser-auth 37/37, generated cloud-config and embedded shell syntax, bash -n, ShellCheck, diff checks pass. Sol Medium focused review PASS; no QEMU/KVM run. Hosted root cause and readiness remain unverified pending owner rerun; A1-A5 unchanged and pending."
     }
   ]
 }
