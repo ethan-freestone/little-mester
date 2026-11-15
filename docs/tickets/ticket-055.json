@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-14T10:33:54.894Z",
+  "updated_at": "2026-11-15T02:54:22.923Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -125,6 +125,11 @@
       "timestamp": "2026-11-14T10:33:54.893Z",
       "author": "cli",
       "body": "Candidate 2 implementation evidence (2026-11-14): code commit 619860be4c768761e18c66971d0d9d4317db9844. Owner supplied exact-SHA GitHub Actions Persistent parent (Python) PASS for Candidate 1 a93c7ce0e7832e208adbc23d4cfc7316711063ce before this implementation began. KVM workflow now runs automatically on opened/synchronize/reopened PRs without label/manual gate; hosted job checks out the PR merge SHA and verifies its second parent equals source-head SHA, uses immutable checkout action pin, and emits both identities. Existing one-disposable-guest integration is retained with named bounded log stages, one overlay reused for restricted-network reboot, host-key SSH, QEMU command/UID/start-time ownership and overlay device/inode checks at guest stage boundaries, bounded readiness/SSH/OAuth work, and identity-safe EXIT cleanup. Synthetic OAuth only; no provider credentials or model access. No image cache, TCG fallback, nested QEMU, original-parent operation, or real KVM run locally. Focused Sol Medium review PASS after correcting PR merge/source provenance. Local evidence: Bats 106/106; vm-owner-acceptance 37/37; vm-guest-user-dirs 8 passed/2 skipped; ci-qemu-oauth-bridge 18/18; ci-kvm-launch 1/1; vm-parent suites all passed (per-suite results locally); browser-auth 37/37; bash -n, ShellCheck, workflow YAML and git diff checks passed. Candidate 2 hosted real-KVM and hosted exact-SHA checks remain NOT_RUN pending owner push. Original-parent/owner terminal/auth/model acceptance remains NOT_RUN. A1-A5 remain pending; no acceptance status changed."
+    },
+    {
+      "timestamp": "2026-11-15T02:54:22.922Z",
+      "author": "cli",
+      "body": "2026-11-15 hosted M2 storage-failure follow-up: hosted real-KVM run on source b074e4f0e46b98f0000bfa5ca3b005a14b67739b (PR merge 63d2d4d2520abb5bbdb89b99bef85047ad729edb) reached KVM launch but cloud-init dpkg failed with ENOSPC; SSH readiness then expired. CI-only correction under review: inspect pinned base virtual size, resize only disposable qcow2 overlay to 24 GiB, configure cloud-init growpart mode=growpart and rootfs resize, preflight root >=20 GiB total / >=8 GiB available / >=100,000 inodes, emit bounded storage/provisioning diagnostics and explicit failures, and use apt --no-install-recommends. No timeout change, original persistent-parent storage change, local QEMU/KVM, nested QEMU, or push. Sol Medium final focused review PASS. Local validation: Bats 106/106; ci-kvm-launch 1/1; synthetic OAuth 18/18; browser-auth 37/37; generated cloud-config and embedded shell syntax, bash -n, ShellCheck, diff checks pass. Hosted SSH readiness remains unverified pending owner push and exact-SHA CI. A1-A5 remain pending. Individually visible GitHub Actions steps were assessed but deferred: current lifecycle intentionally shares QEMU process/disk identity, bounded stage deadlines, and cleanup within one runner shell; splitting would require cross-step ownership/state plumbing and is not necessary to fix the demonstrated storage failure."
     }
   ]
 }

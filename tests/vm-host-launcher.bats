@@ -361,6 +361,15 @@ assert 'qemu_identity_matches || fail' in text
 assert 'verify_overlay_identity || fail' in text
 assert 'accel=kvm' in text and 'accel=tcg' in text and 'restrict=on' in text
 assert text.count('file=$overlay,if=virtio,format=qcow2') == 2
+assert 'readonly guest_disk_gib=24' in text
+assert 'qemu-img info --output=json "$image"' in text
+assert 'qemu-img resize -f qcow2 "$overlay" "$guest_disk_bytes"' in text
+assert '"growpart": {"mode": "growpart", "devices": ["/"], "ignore_growroot_disabled": True}' in text
+assert '"resize_rootfs": True' in text
+assert 'df -B1 --output=size,used,avail /' in text and 'df --output=itotal,iused,iavail /' in text
+assert 'KVM_GUEST_STORAGE_PREFLIGHT_FAIL' in text and 'KVM_GUEST_PROVISION_FAIL' in text
+assert 'guest cloud-init storage/package provisioning failed before SSH readiness' in text
+assert 'apt-get install -y --no-install-recommends' in text
 assert 'oauth_remaining > 120' in text
 assert 'ssh-keyscan' not in text
 assert 'ci-qemu-oauth-bridge.py' in text and 'LM_CI_PUBLIC_KEY' in text

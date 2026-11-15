@@ -11,6 +11,8 @@ source "$(dirname -- "$process_signal_helper")/ci-kvm-launch.sh"
 
 readonly image_url='https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img'
 readonly image_sha256='04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94'
+readonly guest_disk_gib=24
+readonly guest_disk_bytes=$((guest_disk_gib * 1024 * 1024 * 1024))
 
 fail() {
   printf 'KVM_TRIAL_FAIL: %s\n' "$1" >&2
@@ -441,17 +443,46 @@ for path, content in contract.PROTECTED_PLUGIN_ASSETS.items():
     files.append({"path": path,
                   "owner": "root:root", "permissions": "0644", "encoding": "b64",
                   "content": base64.b64encode(content).decode("ascii")})
-install_command = (
-    "export DEBIAN_FRONTEND=noninteractive; "
-    "apt-get update -qq && apt-get install -y tmux nodejs npm ca-certificates && "
-    "npm install --global @opencode/cli@2.2.5 && "
-    "install -d -o mester -g mester -m 0700 /home/mester/workspace "
-    "/home/mester/.local/share/opencode && printf ready > /var/tmp/lm-kvm-trial-ready"
-)
+install_command = r'''set -Eeuo pipefail
+storage_report() {
+  phase=$1
+  root_source=$(findmnt -n -o SOURCE --target /)
+  root_type=$(findmnt -n -o FSTYPE --target /)
+  read -r block_total block_used block_available < <(df -B1 --output=size,used,avail / | tail -n 1)
+  read -r inode_total inode_used inode_available < <(df --output=itotal,iused,iavail / | tail -n 1)
+  printf 'KVM_GUEST_STORAGE phase=%s source=%s fstype=%s block_total=%s block_used=%s block_available=%s inode_total=%s inode_used=%s inode_available=%s\n' "$phase" "$root_source" "$root_type" "$block_total" "$block_used" "$block_available" "$inode_total" "$inode_used" "$inode_available"
+  lsblk -b -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS
+}
+provision_error() {
+  rc=$?
+  trap - ERR
+  printf 'KVM_GUEST_PROVISION_FAIL stage=unexpected exit=%s\n' "$rc" >&2
+  storage_report unexpected-failure || true
+  exit "$rc"
+}
+trap provision_error ERR
+storage_report before-packages
+min_root_bytes=$((8 * 1024 * 1024 * 1024))
+min_root_total_bytes=$((20 * 1024 * 1024 * 1024))
+min_free_inodes=100000
+if (( block_total < min_root_total_bytes || block_available < min_root_bytes || inode_available < min_free_inodes )); then
+  printf 'KVM_GUEST_STORAGE_PREFLIGHT_FAIL block_total=%s required_total=%s block_available=%s required_available=%s inode_available=%s required_inodes=%s\n' "$block_total" "$min_root_total_bytes" "$block_available" "$min_root_bytes" "$inode_available" "$min_free_inodes" >&2
+  exit 70
+fi
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq || { rc=$?; storage_report apt-update-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=apt-update exit=%s\n' "$rc" >&2; exit "$rc"; }
+apt-get install -y --no-install-recommends tmux nodejs npm ca-certificates || { rc=$?; storage_report apt-install-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=apt-install exit=%s\n' "$rc" >&2; exit "$rc"; }
+npm install --global @opencode/cli@2.2.5 || { rc=$?; storage_report opencode-install-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=opencode-install exit=%s\n' "$rc" >&2; exit "$rc"; }
+install -d -o mester -g mester -m 0700 /home/mester/workspace /home/mester/.local/share/opencode
+storage_report after-packages
+printf ready > /var/tmp/lm-kvm-trial-ready
+'''
 config = {
     "ssh_pwauth": False,
     "disable_root": True,
     "ssh_deletekeys": False,
+    "growpart": {"mode": "growpart", "devices": ["/"], "ignore_growroot_disabled": True},
+    "resize_rootfs": True,
     "ssh_keys": {"ed25519_private": os.environ["LM_CI_HOST_PRIVATE_KEY"],
                  "ed25519_public": os.environ["LM_CI_HOST_PUBLIC_KEY"]},
     "users": [{"name": "mester", "uid": 1000, "primary_group": "mester",
@@ -469,7 +500,17 @@ local-hostname: little-mester-kvm-trial
 EOF
 genisoimage -quiet -output "$seed" -volid cidata -joliet -rock \
   "$tmp/user-data" "$tmp/meta-data"
+base_virtual_bytes="$(qemu-img info --output=json "$image" | python3 -c 'import json,sys; print(json.load(sys.stdin)["virtual-size"])')"
+[[ "$base_virtual_bytes" =~ ^[0-9]+$ ]] || fail 'pinned guest image reported an invalid virtual capacity'
+(( base_virtual_bytes > 0 && base_virtual_bytes < guest_disk_bytes )) \
+  || fail "pinned guest image capacity ${base_virtual_bytes} is not smaller than the disposable ${guest_disk_gib}-GiB target"
+printf 'KVM_DISK_PLAN base_virtual_bytes=%s overlay_virtual_bytes=%s target_gib=%s resize_rootfs=true\n' \
+  "$base_virtual_bytes" "$guest_disk_bytes" "$guest_disk_gib"
 qemu-img create -q -f qcow2 -F qcow2 -b "$image" "$overlay"
+qemu-img resize -f qcow2 "$overlay" "$guest_disk_bytes"
+overlay_virtual_bytes="$(qemu-img info --output=json "$overlay" | python3 -c 'import json,sys; print(json.load(sys.stdin)["virtual-size"])')"
+[[ "$overlay_virtual_bytes" == "$guest_disk_bytes" ]] \
+  || fail "disposable overlay capacity mismatch: got ${overlay_virtual_bytes}, expected ${guest_disk_bytes}"
 overlay_device="$(stat -c %d -- "$overlay")"
 overlay_inode="$(stat -c %i -- "$overlay")"
 verify_overlay_identity || fail 'fresh disposable overlay identity could not be recorded'
@@ -532,6 +573,11 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
       if grep -Eq '^(status|extended_status): error' "$tmp/readiness.log"; then
         cat "$tmp/readiness.log" >&2
         fail 'cloud-init reported an error before guest readiness'
+      fi
+      if grep -aEq 'KVM_GUEST_STORAGE_PREFLIGHT_FAIL|KVM_GUEST_PROVISION_FAIL' "$serial_log"; then
+        printf '%s\n' 'KVM_GUEST_PROVISIONING_DIAGNOSTIC: explicit cloud-init storage/package failure marker observed' >&2
+        grep -aE 'KVM_GUEST_STORAGE(_PREFLIGHT_FAIL)?|KVM_GUEST_PROVISION_FAIL' "$serial_log" | tail -n 12 >&2 || true
+        fail 'guest cloud-init storage/package provisioning failed before SSH readiness'
       fi
     fi
   else
