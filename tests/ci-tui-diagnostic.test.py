@@ -3,6 +3,8 @@
 
 import importlib.util
 import pathlib
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -109,6 +111,43 @@ class TuiDiagnosticTests(unittest.TestCase):
             self.assertIn("statuses=124,0", result.stdout)
             self.assertNotIn("ERR_TRAP_FIRED", result.stdout)
             self.assertEqual(output.stat().st_size, 0)
+
+    @unittest.skipUnless(shutil.which("script"), "util-linux script is required for PTY capture")
+    def test_terminal_device_output_is_private_and_sanitized(self):
+        with tempfile.TemporaryDirectory(prefix="ci-tui-pty-") as directory:
+            root = pathlib.Path(directory)
+            secret = "pty-terminal-secret"
+            writer = (
+                "import os; fd=os.open('/dev/tty', os.O_WRONLY); "
+                f"os.write(fd, b'\\x1b[31m{secret}\\x1b[0m'); os.close(fd)"
+            )
+            pty = subprocess.run(
+                [shutil.which("script"), "-qefc",
+                 f"{shlex.quote(sys.executable)} -c {shlex.quote(writer)}", "/dev/null"],
+                capture_output=True, timeout=10, check=False,
+            )
+            self.assertEqual(pty.returncode, 0, pty.stderr)
+            self.assertIn(secret.encode(), pty.stdout)
+            self.assertIn(b"\x1b[31m", pty.stdout)
+
+            raw_path = root / "pty.raw"
+            captured = subprocess.run(
+                [sys.executable, str(SCRIPT), "capture", str(raw_path)],
+                input=pty.stdout, capture_output=True, timeout=10, check=False,
+            )
+            self.assertEqual(captured.returncode, 0, captured.stderr)
+            reported = subprocess.run(
+                [sys.executable, str(SCRIPT), "report", "--input", str(raw_path),
+                 "--phase", "reattach", "--actual-exit", "1", "--expected-exit", "124",
+                 "--retain-directory", str(root)],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            self.assertEqual(reported.returncode, 1)
+            self.assertNotIn(secret, reported.stdout)
+            self.assertNotIn("\x1b", reported.stdout)
+            self.assertIn("cause=tui-prompt-not-observed", reported.stdout)
+            retained = pathlib.Path(reported.stdout.strip().split("private_raw=", 1)[1])
+            self.assertIn(secret.encode(), retained.read_bytes())
 
 
 if __name__ == "__main__":

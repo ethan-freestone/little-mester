@@ -114,6 +114,22 @@ class ProjectConfigIsolationTests(unittest.TestCase):
         self.assertEqual(protected.get("share"), "disabled")
 
     def test_standalone_ci_config_check_uses_real_pinned_cli_and_both_controls(self):
+        protected_xdg = self.root / "protected-xdg"
+        protected_xdg_opencode = protected_xdg / "opencode"
+        protected_xdg_opencode.mkdir(parents=True, mode=0o700)
+        protected_xdg_config = protected_xdg_opencode / "opencode.json"
+        protected_xdg_config.write_text(
+            json.dumps({"$schema": "https://opencode.ai/config.json",
+                        "autoupdate": False, "share": "disabled"}),
+            encoding="utf-8",
+        )
+        protected_xdg_config.chmod(0o444)
+        protected_xdg_opencode.chmod(0o555)
+        protected_xdg.chmod(0o555)
+        missing_xdg = self.root / "missing-protected-xdg"
+        missing_xdg.mkdir(mode=0o700)
+        missing_xdg.chmod(0o555)
+
         store = self.home / ".local/share/opencode"
         store.mkdir(parents=True, mode=0o700)
         for directory in (self.home / ".local", self.home / ".local/share", store):
@@ -141,8 +157,27 @@ class ProjectConfigIsolationTests(unittest.TestCase):
             "--protected-config", str(self.home / "protected.json"),
             "--protected-plugin", "/tmp/lm-ci-protected-plugin-fixture",
         ]
+        # Reproduce the parent-python fixture failure: a non-writable XDG root
+        # with no `opencode/` child fails its mkdir before OpenCode can inspect
+        # the deliberately invalid database.
+        missing_config_dir = subprocess.run(
+            [*args, "--xdg-config-home", str(missing_xdg)],
+            cwd=self.workspace,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+        self.assertEqual(missing_config_dir.returncode, 44)
+        self.assertEqual(
+            missing_config_dir.stderr.strip(),
+            "KVM_M2_CONFIG_FAIL operation=opencode-debug-config "
+            "phase=positive-control cause=filesystem-permission exit=1",
+        )
+
         failed = subprocess.run(
-            args,
+            [*args, "--xdg-config-home", str(protected_xdg)],
             cwd=self.workspace,
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
             capture_output=True,
@@ -159,7 +194,7 @@ class ProjectConfigIsolationTests(unittest.TestCase):
 
         (store / "opencode.db").unlink()
         initialized = subprocess.run(
-            [*args, "--initialize-database"],
+            [*args, "--initialize-database", "--xdg-config-home", str(protected_xdg)],
             cwd=self.workspace,
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
             capture_output=True,
@@ -179,7 +214,7 @@ class ProjectConfigIsolationTests(unittest.TestCase):
         history.close()
 
         result = subprocess.run(
-            args,
+            [*args, "--xdg-config-home", str(protected_xdg)],
             cwd=self.workspace,
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
             capture_output=True,
@@ -385,6 +420,13 @@ class ProjectConfigIsolationTests(unittest.TestCase):
                 "keybinds": {"app.exit": "none", "prompt.clear": "none"},
             }, separators=(",", ":")),
         }
+        infocmp = shutil.which("infocmp")
+        self.assertIsNotNone(infocmp, "the smoke-compatible TERM validator requires infocmp")
+        terminfo = subprocess.run(
+            [infocmp, "-1", env["TERM"]], capture_output=True,
+            text=True, timeout=5, check=False)
+        self.assertEqual(terminfo.returncode, 0, terminfo.stderr[:300])
+        self.assertRegex(terminfo.stdout, r"(?m)^\s*clear=")
         bootstrap = subprocess.run(
             [self.binary, "debug", "config", "--standalone"], cwd=self.workspace, env=env,
             capture_output=True, text=True, timeout=20, check=False)
@@ -408,7 +450,11 @@ class ProjectConfigIsolationTests(unittest.TestCase):
 
         session = "protected-standalone"
         tmux = shutil.which("tmux")
-        tmux_env = dict(os.environ, TMUX_TMPDIR=str(tmux_tmp))
+        # Keep the client's terminal contract explicit instead of inheriting a
+        # missing/unsupported runner TERM (the owner launcher validates this
+        # capability before forwarding TERM).
+        tmux_env = {key: value for key, value in os.environ.items() if key != "TERM"}
+        tmux_env.update(TMUX_TMPDIR=str(tmux_tmp), TERM=env["TERM"])
         tmux_command = [tmux, "-f", "/dev/null"]
         run = lambda *args, **kwargs: subprocess.run(
             [*tmux_command, *args], env=tmux_env, capture_output=True,

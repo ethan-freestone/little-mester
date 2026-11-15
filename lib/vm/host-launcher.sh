@@ -412,14 +412,19 @@ PY
 }
 
 vm_host_stop_process_identity() {
-  local identity_file="$1"
-  python3 -I - "$identity_file" "$VM_HOST_PROCESS_STOP_GRACE_MS" "$VM_HOST_PROCESS_KILL_SETTLE_MS" <<'PY'
-import json, os, pathlib, select, signal, sys
+  local identity_file="$1" absolute_deadline_ms="${2:-}"
+  python3 -I - "$identity_file" "$VM_HOST_PROCESS_STOP_GRACE_MS" "$VM_HOST_PROCESS_KILL_SETTLE_MS" "$absolute_deadline_ms" <<'PY'
+import json, os, pathlib, select, signal, sys, time
 
 identity_path = pathlib.Path(sys.argv[1])
+absolute_deadline_ms = None
 try:
     term_grace_ms = int(sys.argv[2])
     kill_settle_ms = int(sys.argv[3])
+    if sys.argv[4]:
+        absolute_deadline_ms = int(sys.argv[4])
+        if absolute_deadline_ms <= 0:
+            raise ValueError()
     if (term_grace_ms <= 0 or kill_settle_ms <= 0
             or term_grace_ms + kill_settle_ms > 15000):
         raise ValueError()
@@ -467,6 +472,14 @@ try:
             raise SystemExit(0)
         print("REFUSED: process identity changed; retaining run state", file=sys.stderr)
         raise SystemExit(2)
+    if absolute_deadline_ms is not None:
+        remaining_ms = absolute_deadline_ms - time.monotonic_ns() // 1_000_000
+        if remaining_ms < 2:
+            raise SystemExit("REFUSED: bounded process cleanup deadline expired")
+        term_grace_ms = max(1, remaining_ms * 4 // 5)
+        kill_settle_ms = remaining_ms - term_grace_ms
+        if kill_settle_ms <= 0:
+            raise SystemExit("REFUSED: bounded process cleanup deadline expired")
     try:
         signal.pidfd_send_signal(pidfd, signal.SIGTERM)
     except ProcessLookupError:
@@ -477,6 +490,10 @@ try:
                 raise SystemExit(0)
             print("REFUSED: process identity changed before escalation; retaining run state", file=sys.stderr)
             raise SystemExit(2)
+        if absolute_deadline_ms is not None:
+            kill_settle_ms = absolute_deadline_ms - time.monotonic_ns() // 1_000_000
+            if kill_settle_ms <= 0:
+                raise SystemExit("REFUSED: bounded process cleanup deadline expired before escalation")
         try:
             signal.pidfd_send_signal(pidfd, signal.SIGKILL)
         except ProcessLookupError:

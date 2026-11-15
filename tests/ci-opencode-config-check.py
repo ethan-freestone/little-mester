@@ -95,7 +95,8 @@ def document_paths(documents: list[dict]) -> set[str]:
 
 
 def make_environment(home: pathlib.Path, protected_config: str,
-                     protected_plugin: str, *, protect_project_config: bool) -> dict[str, str]:
+                     protected_plugin: str, *, protect_project_config: bool,
+                     xdg_config_home: str = "/etc") -> dict[str, str]:
     cli_config = json.dumps(
         {"plugins": [protected_plugin],
          "keybinds": {"app.exit": "none", "prompt.clear": "none"}},
@@ -109,7 +110,7 @@ def make_environment(home: pathlib.Path, protected_config: str,
         "XDG_DATA_HOME": str(home / ".local/share"),
         # Match the actual protected product runner, not the test harness's
         # former user-writable XDG config directory.
-        "XDG_CONFIG_HOME": "/etc",
+        "XDG_CONFIG_HOME": xdg_config_home,
         "OPENCODE_CONFIG": protected_config,
         "OPENCODE_CLI_CONFIG_CONTENT": cli_config,
         "HTTP_PROXY": "http://10.0.2.100:3128",
@@ -125,23 +126,27 @@ def make_environment(home: pathlib.Path, protected_config: str,
 
 
 def initialize_database(binary: str, home: pathlib.Path,
-                        protected_config: str, protected_plugin: str) -> None:
+                        protected_config: str, protected_plugin: str,
+                        xdg_config_home: str = "/etc") -> None:
     """Initialize the pinned OpenCode DB before adding CI synthetic history."""
     env = make_environment(
-        home, protected_config, protected_plugin, protect_project_config=True
+        home, protected_config, protected_plugin, protect_project_config=True,
+        xdg_config_home=xdg_config_home,
     )
     run_config_sources(binary, home, env, "database-bootstrap")
 
 
 def check(binary: str, workspace: pathlib.Path, home: pathlib.Path,
-          protected_config: str, protected_plugin: str) -> None:
+          protected_config: str, protected_plugin: str,
+          xdg_config_home: str = "/etc") -> None:
     hostile_plugin = "/tmp/lm-ci-hostile-plugin-sentinel"
     hostile_paths = {
         str(workspace / "opencode.json"),
         str(workspace / ".opencode/opencode.json"),
     }
     base_environment = make_environment(
-        home, protected_config, protected_plugin, protect_project_config=False
+        home, protected_config, protected_plugin, protect_project_config=False,
+        xdg_config_home=xdg_config_home,
     )
 
     # Positive control: demonstrate these workspace config files and plugin path
@@ -154,7 +159,8 @@ def check(binary: str, workspace: pathlib.Path, home: pathlib.Path,
         raise ConfigCheckFailure("positive-control", "hostile-fixture-not-discovered", 1)
 
     protected_environment = make_environment(
-        home, protected_config, protected_plugin, protect_project_config=True
+        home, protected_config, protected_plugin, protect_project_config=True,
+        xdg_config_home=xdg_config_home,
     )
     protected_sources = run_config_sources(
         binary, workspace, protected_environment, "protected-config"
@@ -171,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--home", type=pathlib.Path, required=True)
     parser.add_argument("--protected-config", required=True)
     parser.add_argument("--protected-plugin", required=True)
+    parser.add_argument("--xdg-config-home", default="/etc")
     parser.add_argument("--initialize-database", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -178,10 +185,12 @@ def main(argv: list[str] | None = None) -> int:
             initialize_database(
                 args.binary, args.home,
                 args.protected_config, args.protected_plugin,
+                args.xdg_config_home,
             )
         else:
             check(args.binary, args.workspace, args.home,
-                  args.protected_config, args.protected_plugin)
+                  args.protected_config, args.protected_plugin,
+                  args.xdg_config_home)
     except ConfigCheckFailure as error:
         print(
             "KVM_M2_CONFIG_FAIL "

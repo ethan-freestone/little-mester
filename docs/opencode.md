@@ -257,3 +257,22 @@ After the terminal-specific OSC 52 block is enabled, verify the clipboard did **
 to the canary text. Record the terminal profile and observed result on #55. This repository
 does not know which terminal/profile the owner uses, so its protection and residual behavior
 remain unverified until that check is returned.
+
+### J.13 OpenCode version policy for M2
+
+OpenCode `2.2.5` remains the approved reproducible M2 baseline. Do not install upstream latest
+into the M2 acceptance environment while launch, storage and lifecycle failures are being
+resolved; doing so would change the runtime under test. This is a temporary compatibility
+baseline, not a permanent version ceiling.
+
+After M2, a separate version-promotion and persistent-disk upgrade design must establish:
+
+- one authoritative approved-version reference and CI/runtime parity against it;
+- a non-blocking compatibility lane that tracks upstream latest without changing acceptance;
+- automated compatibility detection for CLI, plugin, TUI, auth, storage and database changes;
+- reviewed promotion, backup, migration, rollback and owner-approval procedures; and
+- non-destructive upgrades for already-provisioned persistent disks.
+
+New installations may default to the latest **approved and tested** version only after that
+upgrade mechanism exists. Until then, retain the approved M2 baseline and refuse incompatible
+existing-parent assets without replacing or resetting persistent state.

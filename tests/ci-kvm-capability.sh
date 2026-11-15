@@ -8,6 +8,16 @@ umask 077
 process_signal_helper="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/ci-process-signal.py"
 # shellcheck source=tests/ci-kvm-launch.sh
 source "$(dirname -- "$process_signal_helper")/ci-kvm-launch.sh"
+# shellcheck source=tests/ci-kvm-qemu-stop.sh
+source "$(dirname -- "$process_signal_helper")/ci-kvm-qemu-stop.sh"
+# shellcheck source=tests/ci-tui-capture.sh
+source "$(dirname -- "$process_signal_helper")/ci-tui-capture.sh"
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# Reuse the smoke harness's exact-identity/pidfd stop primitive for this direct
+# disposable-QEMU child; lifecycle and disk policy remain CI-specific.
+# shellcheck source=lib/vm/host-launcher.sh
+source "$repo_root/lib/vm/host-launcher.sh"
+VM_HOST_SCRIPT_ROOT="$repo_root"
 
 readonly image_url='https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img'
 readonly image_sha256='04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94'
@@ -247,60 +257,50 @@ stop_oauth_harness() {
   oauth_evidence_is_clear || { oauth_cleanup_unproved=1; return 1; }
 }
 
-stop_owned_qemu() {
-  local state=''
-  [[ -n "$qemu_pid" ]] || return 0
-  if [[ -z "$qemu_starttime" || -z "$qemu_uid" ]]; then
-    # Recover the identity only if this is still the directly launched QEMU
-    # child of this shell. Otherwise retain all VM evidence and fail closed.
-    capture_qemu_identity || true
-  fi
-  if ! qemu_identity_matches; then
-    state="$(process_state "$qemu_pid")"
-    if [[ -z "$state" || "$state" == Z ]]; then
-      wait "$qemu_pid" 2>/dev/null || true
-      qemu_pid=''
-      qemu_starttime=''
-      qemu_uid=''
-      qemu_parent=''
-      return 0
-    fi
-    return 1
-  fi
-  signal_owned_process "$qemu_pid" "$qemu_starttime" "$qemu_uid" \
-    "$qemu_parent" qemu-system-x86 TERM \
-    little-mester-hosted-kvm-integration "$overlay" \
-    || { state="$(process_state "$qemu_pid")"; [[ -z "$state" || "$state" == Z ]] || return 1; }
-  for _ in {1..150}; do
-    if ! qemu_identity_matches; then
-      state="$(process_state "$qemu_pid")"
-      [[ -z "$state" || "$state" == Z ]] && break
-      return 1
-    fi
-    state="$(process_state "$qemu_pid")"
-    [[ "$state" == Z ]] && break
-    sleep 0.1
-  done
-  if [[ -n "$state" && "$state" != Z ]] && qemu_identity_matches; then
-    signal_owned_process "$qemu_pid" "$qemu_starttime" "$qemu_uid" \
-      "$qemu_parent" qemu-system-x86 KILL \
-      little-mester-hosted-kvm-integration "$overlay" \
-      || { state="$(process_state "$qemu_pid")"; [[ -z "$state" || "$state" == Z ]] || return 1; }
-    for _ in {1..20}; do
-      state="$(process_state "$qemu_pid")"
-      [[ -z "$state" || "$state" == Z ]] && break
-      sleep 0.1
-    done
-  fi
-  state="$(process_state "$qemu_pid")"
-  if [[ -n "$state" && "$state" != Z ]]; then
-    return 1
-  fi
-  wait "$qemu_pid" 2>/dev/null || true
+clear_qemu_tracking() {
   qemu_pid=''
   qemu_starttime=''
   qemu_uid=''
   qemu_parent=''
+}
+
+reap_exited_qemu() {
+  local state
+  [[ -n "$qemu_pid" ]] || return 0
+  state="$(process_state "$qemu_pid")"
+  [[ -z "$state" || "$state" == Z ]] || return 1
+  wait "$qemu_pid" 2>/dev/null || true
+  clear_qemu_tracking
+}
+
+stop_owned_qemu() {
+  local mode=${1:-stage} identity_file='' stop_deadline_ms
+  [[ -n "$qemu_pid" ]] || return 0
+  stop_deadline_ms="$(ci_qemu_stop_deadline_ms "$mode" "$stage_deadline" "$qemu_deadline" "$SECONDS")"
+  (( stop_deadline_ms > 0 )) || return 1
+  reap_exited_qemu && return 0
+
+  if [[ -z "$qemu_starttime" || -z "$qemu_uid" || -z "$qemu_parent" ]]; then
+    # Recover only the direct child identity captured by this owning shell.
+    capture_qemu_identity || true
+  fi
+  qemu_identity_matches || return 1
+
+  identity_file="$tmp/qemu-$qemu_pid.identity"
+  if [[ ! -e "$identity_file" && ! -L "$identity_file" ]]; then
+    vm_host_record_process_identity "$identity_file" "$qemu_pid" \
+      "$(command -v qemu-system-x86_64)" little-mester-hosted-kvm-integration \
+      || { reap_exited_qemu && return 0; return 1; }
+  fi
+  vm_host_process_identity_status "$identity_file" \
+    || { reap_exited_qemu && return 0; return 1; }
+  qemu_identity_matches || { reap_exited_qemu && return 0; return 1; }
+  if ! ci_qemu_stop_identity_and_reap "$identity_file" "$qemu_pid" \
+      "$(command -v qemu-system-x86_64)" little-mester-hosted-kvm-integration "$stop_deadline_ms"; then
+    reap_exited_qemu && return 0
+    return 1
+  fi
+  clear_qemu_tracking
 }
 
 [[ "$(uname -m)" == x86_64 ]] || fail 'runner architecture is not x86_64'
@@ -386,7 +386,7 @@ cleanup() {
     printf 'KVM_TRIAL_FAIL: OAuth harness did not stop; preserving disposable guest diagnostics at %s\n' "$tmp" >&2
     status=1
   fi
-  if [[ -n "$qemu_pid" ]] && ! stop_owned_qemu; then
+  if [[ -n "$qemu_pid" ]] && ! stop_owned_qemu cleanup; then
     printf 'KVM_TRIAL_FAIL: test-owned QEMU stop was not proved; preserving diagnostics at %s\n' "$tmp" >&2
     status=1
   fi
@@ -742,22 +742,11 @@ ssh_guest '/usr/bin/python3 -I /usr/local/libexec/lm-ci-opencode-config-check --
 ssh_guest 'mkdir -p /home/mester/.local/share/opencode /home/mester/workspace/.opencode && chmod 0775 /home/mester/.local /home/mester/.local/share /home/mester/.local/share/opencode && python3 -c '\''import sqlite3; db=sqlite3.connect("/home/mester/.local/share/opencode/opencode.db"); db.execute("create table session_fixture(value text)"); db.execute("insert into session_fixture values (?)", ("synthetic-session-history",)); db.commit(); db.close()'\'' && chmod 0664 /home/mester/.local/share/opencode/opencode.db && printf "{\"provider\":\"synthetic-fixture\",\"marker\":\"preserve-auth-bytes\"}" > /home/mester/.local/share/opencode/auth.json && chmod 0664 /home/mester/.local/share/opencode/auth.json && db_before=$(sha256sum /home/mester/.local/share/opencode/opencode.db) && auth_before=$(sha256sum /home/mester/.local/share/opencode/auth.json) && printf persistent-fixture > /home/mester/workspace/persisted.txt && chmod 0600 /home/mester/workspace/persisted.txt && printf "{\"model\":\"hostile-direct-marker\",\"plugins\":[\"/tmp/lm-ci-hostile-plugin-sentinel\"]}" > /home/mester/workspace/opencode.json && printf "{\"model\":\"hostile-nested-marker\",\"plugins\":[\"/tmp/lm-ci-hostile-plugin-sentinel\"]}" > /home/mester/workspace/.opencode/opencode.json && /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth && test "$(stat -c %a /home/mester/.local/share/opencode/opencode.db)" = 600 && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && test "$(sha256sum /home/mester/.local/share/opencode/opencode.db)" = "$db_before" && test "$(sha256sum /home/mester/.local/share/opencode/auth.json)" = "$auth_before"'
 ssh_guest 'printf unsafe-target-preserved > /tmp/lm-auth-unsafe-target && ln -s /tmp/lm-auth-unsafe-target /home/mester/.local/share/opencode/opencode.db-wal; if /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth >/dev/null 2>&1; then exit 1; fi; test "$(cat /tmp/lm-auth-unsafe-target)" = unsafe-target-preserved; rm /home/mester/.local/share/opencode/opencode.db-wal'
 ssh_guest '/usr/bin/python3 -I /usr/local/libexec/lm-ci-opencode-config-check --workspace /home/mester/workspace --home /home/mester --protected-config /etc/opencode/opencode.json --protected-plugin /etc/opencode/plugins/little-mester-exit-confirm' 50
-tui_capture="$tmp/protected-tui.raw"
-if ssh_tty_guest 'cd /home/mester/workspace && timeout --signal=TERM --kill-after=2 8 /usr/local/bin/lm-opencode' 2>&1 \
-    | python3 tests/ci-tui-diagnostic.py capture "$tui_capture"; then
-  tui_pipeline_status=("${PIPESTATUS[@]}")
-else
-  tui_pipeline_status=("${PIPESTATUS[@]}")
-fi
-[[ "${tui_pipeline_status[1]}" == 0 ]] || fail 'private protected-TUI terminal capture failed'
-python3 tests/ci-tui-diagnostic.py report --input "$tui_capture" --phase startup \
-  --actual-exit "${tui_pipeline_status[0]}" --expected-exit 124 \
-  --retain-directory "$tmp_root" \
-  || fail 'protected standalone OpenCode TUI did not reach its interactive prompt'
+capture_tui_probe startup 8 "$tmp" "$tmp_root"
 # shellcheck disable=SC2016
 ssh_guest 'test "$(stat -c %a /home/mester/.local/share/opencode/opencode.db)" = 600 && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && test "$(stat -c %a /home/mester/.local/share/opencode)" = 700 && test ! -e /etc/opencode/service.json && TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux has-session -t little-mester-opencode && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_dead}")" = 0 && TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux show-environment -g OPENCODE_CONFIG | grep -Fx OPENCODE_CONFIG=/etc/opencode/opencode.json && TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux show-environment -g OPENCODE_DISABLE_PROJECT_CONFIG | grep -Fx OPENCODE_DISABLE_PROJECT_CONFIG=1'
 pane_before="$(ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_id}:#{pane_pid}"')"
-ssh_tty_guest 'cd /home/mester/workspace && timeout --signal=TERM --kill-after=2 4 /usr/local/bin/lm-opencode >/dev/null 2>&1 || test "$?" = 124'
+capture_tui_probe reattach 4 "$tmp" "$tmp_root"
 pane_after="$(ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_id}:#{pane_pid}"')"
 [[ "$pane_before" == "$pane_after" ]] || fail 'tmux reattachment did not preserve the live OpenCode pane identity'
 printf 'KVM_M2_INTEGRATION_PASS: real KVM guest, SSH, pinned OpenCode 2.2.5, protected config, tmux TUI process and persistent workspace fixture\n'
@@ -792,7 +781,7 @@ PY
 # Reboot the same writable overlay to prove guest-disk durability without
 # copying or reinitializing the VM disk. The in-memory tmux socket is expected
 # to be recreated; the session/workspace files remain on the persistent disk.
-stop_owned_qemu || fail 'test-owned QEMU process tree did not stop; preserving its artifacts'
+stop_owned_qemu || fail 'test-owned QEMU did not stop or could not be reaped; preserving its artifacts'
 verify_overlay_identity || fail 'disposable guest disk identity changed before restricted reboot'
 qemu_restricted=1
 ci_launch_tracked qemu_pid qemu-system-x86_64 \
@@ -841,7 +830,7 @@ done
 ssh_guest "python3 -c 'import socket,sys; targets=[(ip,443) for ip in sys.argv[1:]]+[(\"10.0.2.100\",3128)]; connected=[target for target in targets if (lambda s: (s.settimeout(2),s.connect_ex(target)==0,s.close())[1])(socket.socket())]; assert not connected, \"restricted guest unexpectedly reached an upstream/proxy endpoint\"' $probe_argv"
 printf 'KVM_EGRESS_BOUNDARY_PASS: a bounded sample of resolved provider HTTPS addresses and the configured proxy TCP endpoint were unreachable in restricted QEMU mode\n'
 ssh_guest 'test "$(cat /home/mester/workspace/persisted.txt)" = persistent-fixture && test "$(cat /home/mester/.local/share/opencode/auth.json)" = "{\"provider\":\"synthetic-fixture\",\"marker\":\"preserve-auth-bytes\"}" && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && python3 -c '\''import sqlite3; db=sqlite3.connect("/home/mester/.local/share/opencode/opencode.db"); assert db.execute("select value from session_fixture").fetchone() == ("synthetic-session-history",); db.close()'\'''
-ssh_tty_guest 'cd /home/mester/workspace && timeout --signal=TERM --kill-after=2 8 /usr/local/bin/lm-opencode >/dev/null 2>&1 || test "$?" = 124'
+capture_tui_probe reboot 8 "$tmp" "$tmp_root"
 ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux has-session -t little-mester-opencode && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_dead}")" = 0 && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_current_path}")" = /home/mester/workspace'
 printf 'KVM_PERSISTENCE_PASS: synthetic OpenCode DB/auth fixtures, workspace data, and TUI recreation survived disposable guest reboot\n'
 stage_end restricted-reboot-egress-persistence

@@ -144,7 +144,9 @@ def main(argv: list[str] | None = None) -> int:
     capture_parser.add_argument("path", type=pathlib.Path)
     report_parser = subparsers.add_parser("report")
     report_parser.add_argument("--input", required=True, type=pathlib.Path)
-    report_parser.add_argument("--phase", required=True, choices=("startup", "reattach"))
+    report_parser.add_argument(
+        "--phase", required=True, choices=("startup", "reattach", "reboot")
+    )
     report_parser.add_argument("--actual-exit", required=True, type=int)
     report_parser.add_argument("--expected-exit", required=True, type=int)
     report_parser.add_argument("--retain-directory", required=True, type=pathlib.Path)

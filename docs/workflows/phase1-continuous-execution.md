@@ -85,6 +85,25 @@ Progress toward these three demonstrations in order:
    NVIDIA utilization and VRAM remain required. Sampler failure must not stop the VM. Reuse
    existing collectors/schema; add no compatibility layer without demonstrated need.
 
+### M2 CI delivery gates: A1 → B0 → B1
+
+Keep these gates ordered; do not begin B0/B1 implementation while A1 is failing.
+
+- **A1:** the complete hosted real-KVM integration, including protected OpenCode TUI,
+  restricted reboot/egress, persistence and safe cleanup, is green on the exact candidate SHA.
+  Local tests and source review do not substitute for this evidence.
+- **B0 (mandatory after A1):** compare smoke, hosted CI and persistent-parent implementations;
+  consolidate each safe overlap into independently executable, offline-testable primitives for
+  provisioning/directory validation, process identity/signalling/shutdown, PTY/tmux, bounded
+  diagnostics and result reporting. For every identified overlap, record that it is consolidated,
+  intentionally separate with its security rationale, or deferred with its dependency. Preserve
+  smoke and the full hosted real-KVM baseline. Do not wrap duplicate implementations, create a
+  general framework, or split files while retaining hidden shared state. Sol Medium reviews the
+  overlap inventory and closure evidence before B0 is complete.
+- **B1:** expose genuinely separate GitHub Actions steps while retaining one safely owned
+  disposable guest, identity-verified state transitions and bounded cleanup. Reuse B0 operations;
+  do not add a competing supervisor or weaken process/disk ownership across steps.
+
 Before more lifecycle helpers, connect existing provisioning, process identity, supervisor,
 gate, SSH and smoke cleanup primitives to supported subcommands. At M1 identify every
 remaining unreachable product function and wire it into the immediate path, explicitly defer
