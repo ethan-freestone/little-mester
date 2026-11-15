@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import pathlib
+import os
+import re
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 
 
@@ -16,9 +20,33 @@ LAUNCHER = ROOT / "lib/vm/host-launcher.sh"
 
 class QemuStopAdapterTests(unittest.TestCase):
     def run_bash(self, script: str, *, timeout: int = 10) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["bash", "-c", script], cwd=ROOT, capture_output=True,
-            text=True, timeout=timeout, check=False,
+        process = subprocess.Popen(
+            ["bash", "-c", script], cwd=ROOT, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, start_new_session=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Background fixture children inherit the captured pipe descriptors.
+            # Kill the whole test-owned process group before draining those pipes.
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                stdout, stderr = process.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = process.communicate(timeout=2)
+            raise AssertionError(
+                f"bash fixture exceeded {timeout}s; process group was cleaned up\n"
+                f"stdout={stdout}\nstderr={stderr}"
+            )
+        return subprocess.CompletedProcess(
+            process.args, process.returncode, stdout, stderr
         )
 
     def test_stop_budgets_expiry_near_expiry_and_cleanup_allowance(self):
@@ -47,6 +75,8 @@ VM_HOST_SCRIPT_ROOT={str(ROOT)!r}
 wait() {{ printf 'wait\\n' >> {str(waited)!r}; builtin wait "$@"; }}
 sleep 60 &
 child=$!
+cleanup_child() {{ kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; }}
+trap cleanup_child EXIT
 exe="$(readlink -f "$(command -v sleep)")"
 vm_host_record_process_identity {str(identity)!r} "$child" "$exe" 60
 deadline="$(ci_qemu_stop_deadline_ms cleanup 0 0 "$SECONDS")"
@@ -66,6 +96,8 @@ source {HELPER!s}
 VM_HOST_SCRIPT_ROOT={str(ROOT)!r}
 sleep 60 &
 child=$!
+cleanup_child() {{ kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; }}
+trap cleanup_child EXIT
 exe="$(readlink -f "$(command -v sleep)")"
 vm_host_record_process_identity {str(identity)!r} "$child" "$exe" 60
 if ci_qemu_stop_identity_and_reap {str(identity)!r} "$child" "$exe" wrong 1000; then
@@ -90,6 +122,8 @@ source {HELPER!s}
 VM_HOST_SCRIPT_ROOT={str(ROOT)!r}
 sleep 60 &
 child=$!
+cleanup_child() {{ kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; }}
+trap cleanup_child EXIT
 exe="$(readlink -f "$(command -v sleep)")"
 vm_host_record_process_identity {str(identity)!r} "$child" "$exe" 60
 deadline="$(ci_qemu_stop_deadline_ms stage "$((SECONDS + 2))" "$((SECONDS + 4))" "$SECONDS")"
@@ -107,6 +141,31 @@ ci_qemu_stop_identity_and_reap {str(identity)!r} "$child" "$exe" 60 "$cleanup_de
             result = self.run_bash(script, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_fixture_timeout_kills_child_that_inherited_capture_pipes(self):
+        script = '''sleep 60 &
+child=$!
+printf '%s\\n' "$child"
+wait "$child"
+'''
+        with self.assertRaisesRegex(AssertionError, "process group was cleaned up") as caught:
+            self.run_bash(script, timeout=1)
+        match = re.search(r"stdout=(\d+)\n", str(caught.exception))
+        self.assertIsNotNone(match, str(caught.exception))
+        child_pid = int(match.group(1))
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                stat_fields = pathlib.Path(f"/proc/{child_pid}/stat").read_text().split()
+            except FileNotFoundError:
+                break
+            # A zombie has stopped consuming resources; the container's init
+            # may reap it asynchronously after the killed parent exits.
+            if len(stat_fields) > 2 and stat_fields[2] == "Z":
+                break
+            time.sleep(0.02)
+        else:
+            self.fail(f"fixture child {child_pid} remained alive after timeout cleanup")
+
     def test_term_resistant_child_is_escalated_inside_absolute_budget(self):
         with tempfile.TemporaryDirectory(prefix="ci-qemu-stop-escalate-") as directory:
             identity = pathlib.Path(directory) / "qemu.identity"
@@ -121,6 +180,8 @@ export READY_FILE={str(ready)!r}
 wait() {{ rc=0; builtin wait "$@" || rc=$?; printf '%s\\n' "$rc" > {str(waited)!r}; return 0; }}
 python3 -c "$program" &
 child=$!
+cleanup_child() {{ kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; }}
+trap cleanup_child EXIT
 exe="$(readlink -f "$(command -v python3)")"
 vm_host_record_process_identity {str(identity)!r} "$child" "$exe" "$program"
 for _ in {{1..100}}; do [[ -e "$READY_FILE" ]] && break; sleep 0.01; done

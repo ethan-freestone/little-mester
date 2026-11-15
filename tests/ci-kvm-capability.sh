@@ -12,6 +12,8 @@ source "$(dirname -- "$process_signal_helper")/ci-kvm-launch.sh"
 source "$(dirname -- "$process_signal_helper")/ci-kvm-contract.sh"
 # shellcheck source=tests/ci-kvm-qemu-stop.sh
 source "$(dirname -- "$process_signal_helper")/ci-kvm-qemu-stop.sh"
+# shellcheck source=tests/ci-kvm-ssh.sh
+source "$(dirname -- "$process_signal_helper")/ci-kvm-ssh.sh"
 # shellcheck source=tests/ci-tui-capture.sh
 source "$(dirname -- "$process_signal_helper")/ci-tui-capture.sh"
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -691,16 +693,6 @@ known_hosts_sha256="$(sha256sum "$known_hosts" | awk '{print $1}')"
 printf 'KVM_TRIAL_PASS: pinned guest booted with accel=kvm and passed cloud-init readiness\n'
 stage_end boot
 
-ssh_guest() {
-  local remaining=$((qemu_deadline - SECONDS)) limit=${2:-20} stage_left
-  (( remaining > 0 )) || fail 'QEMU integration exceeded its overall bounded deadline'
-  stage_left="$(stage_remaining)"
-  (( remaining > stage_left )) && remaining=$stage_left
-  qemu_identity_matches || fail 'test-owned QEMU identity changed before guest SSH stage'
-  verify_overlay_identity || fail 'disposable guest disk identity changed before guest SSH stage'
-  (( remaining < limit )) && limit=$remaining
-  timeout --signal=TERM --kill-after=1 "$limit" ssh "${ssh_args[@]}" "$1"
-}
 guest_asset_checks="$(python3 - <<'PY'
 import importlib.util, pathlib
 path = pathlib.Path("lib/vm/parent-session-contract.py")

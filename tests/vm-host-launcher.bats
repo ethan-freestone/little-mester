@@ -351,6 +351,8 @@ session_contract = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/parent-session
 session_contract_text = session_contract.read_text()
 opencode_readiness_text = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/opencode-readiness.sh'
 opencode_readiness_text = opencode_readiness_text.read_text()
+contract_text = pathlib.Path(sys.argv[1]).with_name('ci-kvm-contract.sh').read_text()
+contract_tests = pathlib.Path(sys.argv[1]).with_name('ci-kvm-contract.test.py').read_text()
 assert 'pull_request:' in workflow_text and 'types: [opened, synchronize, reopened]' in workflow_text
 assert 'if:' not in job
 assert 'm2-qemu-acceptance' not in workflow_text
@@ -364,7 +366,11 @@ for stage in ('prepare', 'boot', 'config-tmux', 'restricted-reboot-egress-persis
 assert 'qemu_identity_matches || fail' in text
 assert 'verify_overlay_identity || fail' in text
 assert 'accel=kvm' in text and 'accel=tcg' in text and 'restrict=on' in text
-assert text.count('file=$overlay,if=virtio,format=qcow2') == 2
+assert 'ci_kvm_qemu_args initial "$overlay" "$seed" "$serial_log" "$port" initial_qemu_args' in text
+assert 'ci_kvm_qemu_args restricted-restart "$overlay" "$seed" "$serial_log" "$port" restricted_qemu_args' in text
+assert 'file=$overlay,if=virtio,format=qcow2' in contract_text
+assert 'file=$seed,if=virtio,format=raw,readonly=on' in contract_text
+assert 'self.assertEqual(initial_qemu_args, restart_qemu_args)' in contract_tests
 assert 'readonly guest_disk_gib=24' in text
 assert 'qemu-img info --output=json "$image"' in text
 assert 'qemu-img resize -f qcow2 "$overlay" "$guest_disk_bytes"' in text
@@ -384,14 +390,15 @@ assert 'KVM_GUEST_SSH_SOCKET state=ready' in text
 assert 'KVM_GUEST_SSH_HOSTKEY_PINNED source=qemu-serial-cloud-init' in text
 assert 'KVM_GUEST_SSH_SERVICE_LOG' in text
 assert 'KVM_GUEST_SSH_NETWORK ipv4-addresses:' in text and 'KVM_GUEST_SSH_NETWORK ipv4-routes:' in text
-assert '-o StrictHostKeyChecking=yes' in text and '-o UserKnownHostsFile="$known_hosts"' in text
+assert 'ci_kvm_ssh_args' in text and 'StrictHostKeyChecking=yes' in contract_text
+assert 'UserKnownHostsFile=$known_hosts' in contract_text and 'GlobalKnownHostsFile=/dev/null' in contract_text
 assert 'KVM_SSH_FAILURE_CLASS=host-key-verification' in text
 assert 'KVM_SSH_FAILURE_CLASS=authentication-or-ssh-negotiation' in text
 assert 'KVM_SSH_FAILURE_CLASS=pre-identification-transport-reset' in text
 assert "Cloud-init v\\..* finished at " in text
 assert 'ci-kvm-hostkey.py' in text
-assert 'systemctl is-active --quiet ssh.service && { state=$(cloud-init status' in text
-assert 'systemctl is-active --quiet ssh.service && test "$(cat /home/mester/workspace/persisted.txt)"' in text
+assert 'ci_kvm_restart_readiness_command' in text and 'KVM_RESTART_REMOTE_AUTHENTICATED' in contract_text
+assert 'persistence-file-missing' in contract_text and 'guest-boot-id-unchanged' in contract_text
 assert 'ssh_deletekeys' in text and '"ssh_deletekeys": True' in text
 assert 'guest cloud-init provisioning or SSH socket failed before SSH readiness' in text
 assert 'KVM_M2_READINESS_FAIL check=opencode-executable' in opencode_readiness_text
@@ -427,7 +434,11 @@ assert 'cancel-in-progress: true' in workflow_text
 assert 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' in job
 assert 'cache:' not in job
 assert 'pidfd_send_signal' in pathlib.Path(sys.argv[1]).with_name('ci-process-signal.py').read_text()
-assert 'qemu-system-x86_64 \\\n' in text and 'timeout --signal=TERM --kill-after=10 2400' not in text
+assert 'ci_kvm_qemu_args()' in contract_text and 'ci_kvm_netdev "$port" "$restricted"' in contract_text
+assert 'self.assertEqual(initial_qemu_args, restart_qemu_args)' in contract_tests
+assert 'self.assertIn(b"restrict=on", restart_netdev)' in contract_tests
+assert 'self.assertNotIn(b"restrict=on", initial_netdev)' in contract_tests
+assert 'timeout --signal=TERM --kill-after=10 2400' not in text
 print('M2_AUTOMATIC_STAGED_KVM_OK')
 PY
   [ "$status" -eq 0 ]
