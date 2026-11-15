@@ -8,6 +8,8 @@ umask 077
 process_signal_helper="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/ci-process-signal.py"
 # shellcheck source=tests/ci-kvm-launch.sh
 source "$(dirname -- "$process_signal_helper")/ci-kvm-launch.sh"
+# shellcheck source=tests/ci-kvm-contract.sh
+source "$(dirname -- "$process_signal_helper")/ci-kvm-contract.sh"
 # shellcheck source=tests/ci-kvm-qemu-stop.sh
 source "$(dirname -- "$process_signal_helper")/ci-kvm-qemu-stop.sh"
 # shellcheck source=tests/ci-tui-capture.sh
@@ -89,15 +91,16 @@ process_uid() {
 }
 
 report_kvm_progress() {
-  local phase=$1 deadline=$2 ssh_rc=$3 now serial_bytes readiness_detail
+  local phase=$1 deadline=$2 ssh_rc=$3 ssh_class=${4:-not-classified}
+  local now serial_bytes readiness_detail
   now=$SECONDS
   (( now >= next_progress )) || return 0
   next_progress=$((now + 15))
   serial_bytes=0
   [[ -f "$serial_log" ]] && serial_bytes="$(wc -c <"$serial_log")"
-  printf 'KVM_PROGRESS phase=%s elapsed=%ss remaining=%ss qemu_state=%s last_ssh_rc=%s serial_bytes=%s\n' \
+  printf 'KVM_PROGRESS phase=%s elapsed=%ss remaining=%ss qemu_state=%s last_ssh_rc=%s ssh_class=%s serial_bytes=%s\n' \
     "$phase" "$((now - qemu_started))" "$((deadline - now))" \
-    "$(process_state "$qemu_pid")" "$ssh_rc" "$serial_bytes"
+    "$(process_state "$qemu_pid")" "$ssh_rc" "$ssh_class" "$serial_bytes"
   if [[ -s "$tmp/readiness.log" ]]; then
     readiness_detail="$(tail -n 3 "$tmp/readiness.log" | tr '\n' ' ' | cut -c1-300)"
     [[ -n "$readiness_detail" ]] && printf 'KVM_PROGRESS detail=%s\n' "$readiness_detail"
@@ -139,6 +142,7 @@ qemu_identity_matches() {
   [[ "$comm" == qemu-system-x86 ]] \
     && grep -azFq -- 'little-mester-hosted-kvm-integration' "/proc/$qemu_pid/cmdline" \
     && grep -azFq -- "$overlay" "/proc/$qemu_pid/cmdline" \
+    && grep -azFq -- "hostfwd=tcp:127.0.0.1:$port-:22" "/proc/$qemu_pid/cmdline" \
     && grep -azFq -- 'accel=kvm' "/proc/$qemu_pid/cmdline" \
     && ! grep -azFq -- 'accel=tcg' "/proc/$qemu_pid/cmdline" \
     && { (( ! qemu_restricted )) || grep -azFq -- 'restrict=on' "/proc/$qemu_pid/cmdline"; } \
@@ -592,29 +596,18 @@ stage_start boot 120
 printf 'KVM_TRIAL: starting pinned guest with accel=kvm (no TCG fallback)\n'
 qemu_started=$SECONDS
 qemu_deadline=$((qemu_started + 300))
-ci_launch_tracked qemu_pid qemu-system-x86_64 \
-    -name little-mester-hosted-kvm-integration \
-    -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
-    -nodefaults -no-user-config -display none -monitor none \
-    -serial "file:$serial_log" \
-    -drive "file=$overlay,if=virtio,format=qcow2" \
-    -drive "file=$seed,if=virtio,format=raw,readonly=on" \
-      -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$port-:22" \
-    -device virtio-net-pci,netdev=net0
+initial_qemu_args=()
+ci_kvm_qemu_args initial "$overlay" "$seed" "$serial_log" "$port" initial_qemu_args
+ci_launch_tracked qemu_pid qemu-system-x86_64 "${initial_qemu_args[@]}"
 qemu_starttime=''
 qemu_uid=''
 capture_qemu_identity || fail 'could not prove ownership of the launched QEMU process'
 printf 'KVM_PROGRESS phase=qemu-started readiness_limit=120s integration_limit=300s\n'
 
-ssh_args=(
-  -F /dev/null -T -a -x
-  -i "$key" -p "$port"
-  -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none
-  -o UserKnownHostsFile="$known_hosts" -o GlobalKnownHostsFile=/dev/null
-  -o StrictHostKeyChecking=yes -o ConnectTimeout=3
-  -o ProxyCommand=none -o ProxyJump=none
-    "mester@127.0.0.1"
-)
+ssh_args=()
+ssh_tty_args=()
+ci_kvm_ssh_args 'mester@127.0.0.1' "$key" "$port" "$known_hosts" batch ssh_args
+ci_kvm_ssh_args 'mester@127.0.0.1' "$key" "$port" "$known_hosts" tty ssh_tty_args
 
 pin_guest_host_key_from_serial() {
   local public_key fingerprint known_hosts_tmp public_key_file
@@ -689,6 +682,12 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
   (( remaining > 0 )) && sleep 1
 done
 [[ "$ready" == 1 ]] || fail "guest did not reach cloud-init/SSH readiness within 120s (last ssh status: $last_ssh_rc)"
+guest_boot_id="$(ssh_guest 'cat /proc/sys/kernel/random/boot_id')"
+[[ "$guest_boot_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+  || fail 'initial guest boot identity was not a valid kernel boot ID'
+known_hosts_sha256="$(sha256sum "$known_hosts" | awk '{print $1}')"
+[[ -n "$known_hosts_sha256" && "$(stat -c %a "$known_hosts")" == 600 ]] \
+  || fail 'serial-pinned guest host identity is not held in a private known_hosts file'
 printf 'KVM_TRIAL_PASS: pinned guest booted with accel=kvm and passed cloud-init readiness\n'
 stage_end boot
 
@@ -724,11 +723,7 @@ ssh_tty_guest() {
   verify_overlay_identity || fail 'disposable guest disk identity changed before guest PTY stage'
   (( remaining < limit )) && limit=$remaining
   timeout --signal=TERM --kill-after=1 "$limit" ssh \
-    -F /dev/null -tt -a -x -i "$key" -p "$port" \
-    -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none \
-    -o UserKnownHostsFile="$known_hosts" -o GlobalKnownHostsFile=/dev/null \
-    -o StrictHostKeyChecking=yes -o ConnectTimeout=3 \
-    -o ProxyCommand=none -o ProxyJump=none "mester@127.0.0.1" "$1"
+    "${ssh_tty_args[@]}" "$1"
 }
 
 ssh_guest 'test -x /usr/local/bin/opencode && tmux -V >/dev/null'
@@ -783,19 +778,17 @@ PY
 # to be recreated; the session/workspace files remain on the persistent disk.
 stop_owned_qemu || fail 'test-owned QEMU did not stop or could not be reaped; preserving its artifacts'
 verify_overlay_identity || fail 'disposable guest disk identity changed before restricted reboot'
+[[ "$(sha256sum "$known_hosts" | awk '{print $1}')" == "$known_hosts_sha256" ]] \
+  || fail 'pinned guest host identity changed before restricted reboot'
 qemu_restricted=1
-ci_launch_tracked qemu_pid qemu-system-x86_64 \
-    -name little-mester-hosted-kvm-integration \
-    -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
-    -nodefaults -no-user-config -display none -monitor none \
-    -serial "file:$serial_log" \
-    -drive "file=$overlay,if=virtio,format=qcow2" \
-    -drive "file=$seed,if=virtio,format=raw,readonly=on" \
-    -netdev "user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:$port-:22" \
-    -device virtio-net-pci,netdev=net0
+restricted_qemu_args=()
+ci_kvm_qemu_args restricted-restart "$overlay" "$seed" "$serial_log" "$port" restricted_qemu_args
+ci_launch_tracked qemu_pid qemu-system-x86_64 "${restricted_qemu_args[@]}"
 qemu_starttime=''
 qemu_uid=''
 capture_qemu_identity || fail 'could not prove ownership of the restricted-boot QEMU process'
+[[ "$(sha256sum "$known_hosts" | awk '{print $1}')" == "$known_hosts_sha256" ]] \
+  || fail 'pinned guest host identity changed while restarting restricted QEMU'
 ready=0
 readiness_deadline=$((SECONDS + 60))
 stage_left=$((stage_deadline - SECONDS))
@@ -803,8 +796,11 @@ stage_left=$((stage_deadline - SECONDS))
 next_progress=$((SECONDS + 15))
 next_serial_tail=$((SECONDS + 30))
 last_ssh_rc=not-attempted
+last_ssh_class=not-attempted
+restart_readiness_command="$(ci_kvm_restart_readiness_command "$guest_boot_id")"
 while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
   qemu_identity_matches || fail 'test-owned QEMU process exited or changed identity during persistent-disk reboot'
+  verify_overlay_identity || fail 'disposable guest disk identity changed during restricted reboot readiness'
   qemu_state="$(process_state "$qemu_pid")"
   [[ -n "$qemu_state" && "$qemu_state" != Z ]] || fail 'QEMU exited during persistent-disk reboot'
   remaining=$((readiness_deadline - SECONDS))
@@ -814,19 +810,32 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
   attempt_timeout=8
   (( remaining < attempt_timeout )) && attempt_timeout=$remaining
   # shellcheck disable=SC2016
-  if timeout --signal=TERM --kill-after=1 "$attempt_timeout" ssh "${ssh_args[@]}" \
-      'systemctl is-active --quiet ssh.service && test "$(cat /home/mester/workspace/persisted.txt)" = persistent-fixture && test -x /usr/local/bin/opencode' \
-      >/dev/null 2>&1; then
-    ready=1
-    break
+  if python3 -I "$repo_root/lib/vm/bounded-log.py" \
+      "$tmp/restart-readiness.raw" 8192 --fail-on-overflow -- \
+      timeout --signal=TERM --kill-after=1 "$attempt_timeout" ssh "${ssh_args[@]}" \
+        "$restart_readiness_command"; then
+    last_ssh_rc=0
   else
     last_ssh_rc=$?
   fi
-  report_kvm_progress restricted-reboot-readiness "$readiness_deadline" "$last_ssh_rc"
+  last_ssh_class="$(python3 tests/ci-kvm-readiness.py --exit-status "$last_ssh_rc" \
+    --input "$tmp/restart-readiness.raw")"
+  if [[ "$last_ssh_class" == ready ]]; then
+    ready=1
+    break
+  fi
+  if (( SECONDS == readiness_deadline || SECONDS == qemu_deadline )); then
+    break
+  fi
+  report_kvm_progress restricted-reboot-readiness "$readiness_deadline" \
+    "$last_ssh_rc" "$last_ssh_class"
   remaining=$((readiness_deadline - SECONDS))
   (( remaining > 0 )) && sleep 1
 done
-[[ "$ready" == 1 ]] || fail "restricted reboot did not become SSH-ready within 60s (last ssh status: $last_ssh_rc)"
+[[ "$ready" == 1 ]] || {
+  printf 'KVM_RESTART_SSH_READINESS_FAILURE class=%s exit=%s\n' "$last_ssh_class" "$last_ssh_rc" >&2
+  fail "restricted reboot did not become SSH-ready within 60s (last ssh status: $last_ssh_rc)"
+}
 ssh_guest "python3 -c 'import socket,sys; targets=[(ip,443) for ip in sys.argv[1:]]+[(\"10.0.2.100\",3128)]; connected=[target for target in targets if (lambda s: (s.settimeout(2),s.connect_ex(target)==0,s.close())[1])(socket.socket())]; assert not connected, \"restricted guest unexpectedly reached an upstream/proxy endpoint\"' $probe_argv"
 printf 'KVM_EGRESS_BOUNDARY_PASS: a bounded sample of resolved provider HTTPS addresses and the configured proxy TCP endpoint were unreachable in restricted QEMU mode\n'
 ssh_guest 'test "$(cat /home/mester/workspace/persisted.txt)" = persistent-fixture && test "$(cat /home/mester/.local/share/opencode/auth.json)" = "{\"provider\":\"synthetic-fixture\",\"marker\":\"preserve-auth-bytes\"}" && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && python3 -c '\''import sqlite3; db=sqlite3.connect("/home/mester/.local/share/opencode/opencode.db"); assert db.execute("select value from session_fixture").fetchone() == ("synthetic-session-history",); db.close()'\'''

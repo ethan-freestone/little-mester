@@ -77,6 +77,7 @@ jobs:
           python3 tests/ci-tui-diagnostic.test.py
           python3 tests/ci-tui-capture.test.py
           python3 tests/ci-kvm-qemu-stop.test.py
+          python3 tests/ci-kvm-contract.test.py
           python3 tests/vm-owner-acceptance.test.py
           python3 tests/vm-guest-user-dirs.test.py
           python3 tests/ci-qemu-oauth-bridge.test.py

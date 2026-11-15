@@ -44,6 +44,10 @@ class GuestUserDirectoryTests(unittest.TestCase):
         self.home_fd = os.open(self.home, guest_dirs.DIR_FLAGS)
 
     def tearDown(self):
+        for path in (getattr(self, "protected_opencode", None),
+                     getattr(self, "protected_xdg", None)):
+            if path is not None:
+                path.chmod(0o700)
         os.close(self.home_fd)
         self.temporary.cleanup()
 
@@ -155,6 +159,19 @@ class GuestUserDirectoryTests(unittest.TestCase):
         (self.home / ".local/share").chmod(0o700)
         (self.home / ".local/share/opencode").chmod(0o700)
         (self.home / ".cache").mkdir(mode=0o700)
+        protected_xdg = self.root / "protected-xdg"
+        protected_opencode = protected_xdg / "opencode"
+        protected_opencode.mkdir(parents=True, mode=0o700)
+        protected_config = protected_opencode / "opencode.json"
+        protected_config.write_text(
+            json.dumps({"autoupdate": False, "share": "disabled"}),
+            encoding="utf-8",
+        )
+        protected_config.chmod(0o444)
+        protected_opencode.chmod(0o555)
+        protected_xdg.chmod(0o555)
+        self.protected_xdg = protected_xdg
+        self.protected_opencode = protected_opencode
         work = self.root / "workspace"
         work.mkdir(mode=0o700)
         if os.geteuid() == 0:
@@ -169,9 +186,11 @@ class GuestUserDirectoryTests(unittest.TestCase):
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "LANG": "C.UTF-8",
             "XDG_DATA_HOME": str(self.home / ".local/share"),
-            "XDG_CONFIG_HOME": "/etc",
+            # Mirror protected `/etc/opencode` without depending on the runner's
+            # host filesystem or granting the unprivileged process write access.
+            "XDG_CONFIG_HOME": str(protected_xdg),
             "XDG_CACHE_HOME": str(self.home / ".cache"),
-            "OPENCODE_CONFIG": "/etc/opencode/opencode.json",
+            "OPENCODE_CONFIG": str(protected_config),
             "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
         }
 
