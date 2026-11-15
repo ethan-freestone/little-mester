@@ -278,6 +278,260 @@ class ProjectConfigIsolationTests(unittest.TestCase):
                 else:
                     child.close()
 
+    @unittest.skipIf(pexpect is None, "pexpect is required for the global plugin isolation probe")
+    def test_writable_xdg_config_can_execute_global_plugin_despite_protected_config(self):
+        config_home = self.home / ".config"
+        config_dir = config_home / "opencode"
+        plugin_dir = config_dir / "plugins/hostile-global"
+        plugin_dir.mkdir(parents=True, mode=0o700)
+        marker = self.root / "hostile-global-plugin-loaded"
+        (plugin_dir / "index.ts").write_text(
+            'import { writeFileSync } from "node:fs"\n'
+            'import { Plugin } from "@opencode/plugin"\n'
+            f'export default Plugin.define({{ id: "hostile-global", async setup() '
+            f'{{ writeFileSync({json.dumps(str(marker))}, "loaded") }} }})\n',
+            encoding="utf-8",
+        )
+        (config_dir / "opencode.json").write_text(
+            json.dumps({"plugins": [str(plugin_dir)]}), encoding="utf-8")
+        env = dict(self.env)
+        env["XDG_CONFIG_HOME"] = str(config_home)
+        env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+        child = pexpect.spawn(
+            self.binary, ["--standalone", "--print-logs", str(self.workspace)],
+            cwd=str(self.workspace), env=env, encoding="utf-8",
+            codec_errors="replace", dimensions=(30, 100), timeout=10)
+        try:
+            deadline = time.monotonic() + 12
+            while time.monotonic() < deadline and child.isalive() and not marker.exists():
+                try:
+                    child.read_nonblocking(size=65536, timeout=0.2)
+                except (pexpect.TIMEOUT, pexpect.EOF):
+                    pass
+            self.assertTrue(child.isalive(), "standalone TUI exited before plugin observation")
+            self.assertTrue(marker.exists(),
+                            "real OpenCode did not execute the writable XDG global plugin fixture")
+        finally:
+            child.close(force=child.isalive())
+
+    @unittest.skipIf(pexpect is None, "pexpect is required for the standalone TUI probe")
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is required for the standalone TUI probe")
+    @unittest.skipUnless(shutil.which("ss"), "iproute2 ss is required for listener-boundary checks")
+    def test_standalone_tui_uses_protected_xdg_and_keeps_tmux_session(self):
+        config_home = self.root / "protected-xdg"
+        config_dir = config_home / "opencode"
+        config_dir.mkdir(parents=True, mode=0o700)
+        protected_config = config_dir / "opencode.json"
+        protected_config.write_text(json.dumps({"share": "disabled", "autoupdate": False}),
+                                    encoding="utf-8")
+        approved_plugin = self.root / "approved-protected-tui-plugin"
+        approved_plugin.mkdir(mode=0o700)
+        (approved_plugin / "package.json").write_text(json.dumps({
+            "name": "approved-protected-tui-plugin",
+            "type": "module",
+            "exports": {"./tui": "./tui.tsx"},
+        }), encoding="utf-8")
+        approved_marker = self.root / "protected-xdg-approved-plugin-loaded"
+        (approved_plugin / "tui.tsx").write_text(
+            'import { writeFileSync } from "node:fs"\n'
+            'import { Plugin } from "@opencode/plugin/tui"\n'
+            f'export default Plugin.define({{ id: "approved-protected-tui", setup() '
+            f'{{ writeFileSync({json.dumps(str(approved_marker))}, "loaded") }} }})\n',
+            encoding="utf-8",
+        )
+        protected_config.chmod(0o444)
+        (approved_plugin / "package.json").chmod(0o444)
+        (approved_plugin / "tui.tsx").chmod(0o444)
+        approved_plugin.chmod(0o555)
+        config_dir.chmod(0o555)
+        config_home.chmod(0o555)
+
+        # Keep a hostile user-global plugin in the ordinary home config path.
+        # The protected runner points XDG_CONFIG_HOME elsewhere and must not load it.
+        user_config_dir = self.home / ".config/opencode"
+        user_plugin = user_config_dir / "plugins/hostile-global"
+        user_plugin.mkdir(parents=True, mode=0o700)
+        hostile_marker = self.root / "protected-xdg-hostile-plugin-loaded"
+        (user_plugin / "index.ts").write_text(
+            'import { writeFileSync } from "node:fs"\n'
+            'import { Plugin } from "@opencode/plugin"\n'
+            f'export default Plugin.define({{ id: "hostile-global", async setup() '
+            f'{{ writeFileSync({json.dumps(str(hostile_marker))}, "loaded") }} }})\n',
+            encoding="utf-8",
+        )
+        (user_config_dir / "opencode.json").write_text(
+            json.dumps({"plugins": [str(user_plugin)]}), encoding="utf-8")
+
+        tmux_tmp = self.home / ".local/share/opencode/tmux"
+        data_home = self.home / ".local/share"
+        state_home = self.home / ".local/state"
+        cache_home = self.home / ".cache"
+        for directory in (data_home, state_home, cache_home, tmux_tmp):
+            directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        env = {
+            "HOME": str(self.home),
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "TERM": "xterm-256color",
+            "LANG": "C.UTF-8",
+            "TMUX_TMPDIR": str(tmux_tmp),
+            "XDG_CONFIG_HOME": str(config_home),
+            "XDG_DATA_HOME": str(data_home),
+            "XDG_STATE_HOME": str(state_home),
+            "XDG_CACHE_HOME": str(cache_home),
+            "OPENCODE_CONFIG": str(protected_config),
+            "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+            "OPENCODE_CLI_CONFIG_CONTENT": json.dumps({
+                "plugins": [str(approved_plugin)],
+                "keybinds": {"app.exit": "none", "prompt.clear": "none"},
+            }, separators=(",", ":")),
+        }
+        bootstrap = subprocess.run(
+            [self.binary, "debug", "config", "--standalone"], cwd=self.workspace, env=env,
+            capture_output=True, text=True, timeout=20, check=False)
+        self.assertEqual(bootstrap.returncode, 0, bootstrap.stderr[:400])
+        database = data_home / "opencode/opencode.db"
+        history = sqlite3.connect(database)
+        history.execute("create table session_fixture(value text)")
+        history.execute("insert into session_fixture values (?)", ("synthetic-session-history",))
+        history.commit()
+        history.close()
+        auth = data_home / "opencode/auth.json"
+        auth_bytes = b'{"provider":"synthetic-fixture","marker":"preserve-auth-bytes"}'
+        auth.write_bytes(auth_bytes)
+        auth.chmod(0o600)
+
+        ordinary_db_path = subprocess.run(
+            [self.binary, "debug", "paths", "db"], cwd=self.workspace, env=env,
+            capture_output=True, text=True, timeout=10, check=False)
+        self.assertEqual(ordinary_db_path.returncode, 0, ordinary_db_path.stderr[:300])
+        self.assertEqual(ordinary_db_path.stdout.strip(), str(database))
+
+        session = "protected-standalone"
+        tmux = shutil.which("tmux")
+        tmux_env = dict(os.environ, TMUX_TMPDIR=str(tmux_tmp))
+        tmux_command = [tmux, "-f", "/dev/null"]
+        run = lambda *args, **kwargs: subprocess.run(
+            [*tmux_command, *args], env=tmux_env, capture_output=True,
+            text=True, timeout=10, check=False, **kwargs)
+        start = run("new-session", "-d", "-s", session,
+                    "/usr/bin/env", "-i",
+                    *[f"{key}={value}" for key, value in env.items()],
+                    self.binary, "--standalone", str(self.workspace))
+        self.assertEqual(start.returncode, 0, start.stderr)
+        try:
+            child_pid = ""
+            for _ in range(100):
+                pane_state = run("display-message", "-p", "-t", f"{session}:0.0",
+                                 "#{pane_dead}:#{pane_pid}")
+                if pane_state.returncode == 0 and pane_state.stdout.startswith("0:"):
+                    child_pid = pane_state.stdout.strip().split(":", 1)[1]
+                    break
+                time.sleep(0.1)
+            self.assertTrue(child_pid, "standalone TUI process did not remain live in tmux")
+
+            for _ in range(2):
+                attached = pexpect.spawn(
+                    tmux, ["-f", "/dev/null", "attach-session", "-t", session],
+                    env=tmux_env, encoding="utf-8", codec_errors="replace",
+                    dimensions=(32, 100), timeout=10)
+                try:
+                    attached.expect("Ask anything", timeout=15)
+                    attached.sendcontrol("b")
+                    attached.send("d")
+                    attached.expect(pexpect.EOF, timeout=5)
+                finally:
+                    attached.close(force=attached.isalive())
+                self.assertEqual(run("has-session", "-t", session).returncode, 0)
+                self.assertEqual(
+                    run("display-message", "-p", "-t", f"{session}:0.0",
+                        "#{pane_dead}:#{pane_pid}").stdout.strip(),
+                    f"0:{child_pid}",
+                )
+
+            database = data_home / "opencode/opencode.db"
+            self.assertTrue(database.is_file(), "standalone TUI did not initialize persistent state")
+            self.assertFalse((config_dir / "service.json").exists(),
+                             "standalone TUI wrote service configuration into protected XDG config")
+            self.assertTrue(approved_marker.exists(),
+                            "standalone TUI failed to load the approved protected plugin")
+            self.assertFalse(hostile_marker.exists(),
+                             "standalone TUI loaded a hostile user-global plugin")
+            self.assertEqual(config_dir.stat().st_mode & 0o777, 0o555)
+            listeners_after = subprocess.run(
+                [shutil.which("ss"), "-H", "-lntp"], capture_output=True,
+                text=True, timeout=10, check=False)
+            self.assertEqual(listeners_after.returncode, 0, listeners_after.stderr[:300])
+            parent_by_pid = {}
+            for process in pathlib.Path("/proc").iterdir():
+                if not process.name.isdigit():
+                    continue
+                try:
+                    stat_line = (process / "stat").read_text(encoding="ascii")
+                    fields = stat_line.rsplit(")", 1)[1].split()
+                    parent_by_pid[int(process.name)] = int(fields[1])
+                except (OSError, ValueError, IndexError):
+                    continue
+            owned_pids = {int(child_pid)}
+            while True:
+                children = {pid for pid, parent in parent_by_pid.items()
+                            if parent in owned_pids}
+                if children <= owned_pids:
+                    break
+                owned_pids.update(children)
+            private_listeners = []
+            for line in listeners_after.stdout.splitlines():
+                listener_pids = {int(pid) for pid in re.findall(r"pid=(\d+)", line)}
+                if listener_pids & owned_pids:
+                    private_listeners.append(line)
+            self.assertTrue(private_listeners,
+                            "standalone TUI process tree did not expose its private server listener")
+            self.assertTrue(
+                all(line.split()[3].startswith(("127.0.0.1:", "[::1]:"))
+                    for line in private_listeners),
+                "standalone private server listened beyond guest loopback",
+            )
+
+            run("kill-session", "-t", session)
+            restart = run("new-session", "-d", "-s", session,
+                          "/usr/bin/env", "-i",
+                          *[f"{key}={value}" for key, value in env.items()],
+                          self.binary, "--standalone", str(self.workspace))
+            self.assertEqual(restart.returncode, 0, restart.stderr)
+            restarted_pid = ""
+            for _ in range(100):
+                state = run("display-message", "-p", "-t", f"{session}:0.0",
+                             "#{pane_dead}:#{pane_pid}")
+                if state.returncode == 0 and state.stdout.startswith("0:"):
+                    restarted_pid = state.stdout.strip().split(":", 1)[1]
+                    break
+                time.sleep(0.1)
+            self.assertTrue(restarted_pid, "standalone TUI did not restart from persistent state")
+            attached = pexpect.spawn(
+                tmux, ["-f", "/dev/null", "attach-session", "-t", session],
+                env=tmux_env, encoding="utf-8", codec_errors="replace",
+                dimensions=(32, 100), timeout=10)
+            try:
+                attached.expect("Ask anything", timeout=15)
+                attached.sendcontrol("b")
+                attached.send("d")
+                attached.expect(pexpect.EOF, timeout=5)
+            finally:
+                attached.close(force=attached.isalive())
+            history = sqlite3.connect(database)
+            self.assertEqual(
+                history.execute("select value from session_fixture").fetchone(),
+                ("synthetic-session-history",),
+            )
+            history.close()
+            self.assertEqual(auth.read_bytes(), auth_bytes)
+            self.assertEqual(
+                run("display-message", "-p", "-t", f"{session}:0.0",
+                    "#{pane_dead}:#{pane_pid}").stdout.strip(),
+                f"0:{restarted_pid}",
+            )
+        finally:
+            run("kill-session", "-t", session)
+
 
 if __name__ == "__main__":
     unittest.main()

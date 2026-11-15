@@ -24,7 +24,7 @@ export HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128
 export http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128
 export OPENCODE_DISABLE_PROJECT_CONFIG=1
 export OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}'
-exec /usr/local/bin/opencode
+exec /usr/local/bin/opencode --standalone
 """
 
 AUTH_LAUNCHER = b"""#!/bin/sh
