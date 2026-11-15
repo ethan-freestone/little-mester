@@ -398,7 +398,18 @@ assert 'KVM_SSH_FAILURE_CLASS=pre-identification-transport-reset' in text
 assert "Cloud-init v\\..* finished at " in text
 assert 'ci-kvm-hostkey.py' in text
 assert 'ci_kvm_restart_readiness_command' in text and 'KVM_RESTART_REMOTE_AUTHENTICATED' in contract_text
-assert 'persistence-file-missing' in contract_text and 'guest-boot-id-unchanged' in contract_text
+assert 'fixture-missing' in contract_text and 'guest-boot-id-unchanged' in contract_text
+assert 'ci_kvm_persistence_check_command' in contract_text
+assert 'ci_kvm_persistence_create_command' in contract_text
+assert 'ci_kvm_persistence_flush_command' in contract_text
+assert text.index('run_persistence_flush\nrun_persistence_proof pre-reboot') < text.index('stop_owned_qemu || fail')
+assert "sync -f -- \"$path\"" in contract_text
+assert text.index('run_persistence_proof pre-reboot') < text.index('stop_owned_qemu || fail')
+assert text.index('run_persistence_proof post-reboot') > text.index('KVM_RESTART_SSH_READINESS_FAILURE')
+assert 'run_persistence_create\nrun_persistence_proof initial-creation' in text
+assert 'test_authenticated_ssh_readiness_is_independent_of_persistence' in contract_tests
+assert 'test_persistence_creator_is_private_and_refuses_preexisting_symlinks' in contract_tests
+assert 'test_persistence_probe_proves_path_owner_content_and_same_root_mount' in contract_tests
 assert 'ssh_deletekeys' in text and '"ssh_deletekeys": True' in text
 assert 'guest cloud-init provisioning or SSH socket failed before SSH readiness' in text
 assert 'KVM_M2_READINESS_FAIL check=opencode-executable' in opencode_readiness_text

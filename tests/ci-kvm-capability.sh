@@ -718,6 +718,91 @@ ssh_tty_guest() {
     "${ssh_tty_args[@]}" "$1"
 }
 
+run_persistence_create() {
+  local command raw rc classification
+  raw="$tmp/persistence-create.raw"
+  command="$(ci_kvm_persistence_create_command \
+    /home/mester/workspace/persisted.txt "$persistence_fixture_content" \
+    1000 1000 /home/mester)" \
+    || fail 'could not construct the guest persistence fixture creation command'
+  qemu_identity_matches || fail 'test-owned QEMU identity changed before persistence fixture creation'
+  verify_overlay_identity || fail 'disposable guest overlay identity changed before persistence fixture creation'
+  if ssh_guest "$command" 12 "$raw"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  classification="$(python3 tests/ci-kvm-readiness.py --exit-status "$rc" --input "$raw")"
+  [[ "$classification" == persistence-create-pass ]] || {
+    printf 'KVM_PERSISTENCE_CREATE_FAILURE class=%s exit=%s\n' "$classification" "$rc" >&2
+    fail "pre-reboot persistence fixture creation failed ($classification)"
+  }
+  printf 'KVM_PERSISTENCE_CREATE_PASS path=workspace/persisted.txt uid=1000 gid=1000 mode=600\n'
+}
+
+run_persistence_proof() {
+  local phase=$1 expected_mount_sha256=${2:-} command raw rc classification content_line mount_line
+  raw="$tmp/persistence-$phase.raw"
+  command="$(ci_kvm_persistence_check_command \
+    /home/mester/workspace/persisted.txt 1000 1000 /home/mester \
+    "$persistence_content_sha256" "$expected_mount_sha256")" \
+    || fail 'could not construct the bounded guest persistence proof'
+  qemu_identity_matches || fail 'test-owned QEMU identity changed before persistence proof'
+  verify_overlay_identity || fail 'disposable guest overlay identity changed before persistence proof'
+  if ssh_guest "$command" 12 "$raw"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  classification="$(python3 tests/ci-kvm-readiness.py --exit-status "$rc" --input "$raw")"
+  if [[ "$classification" != persistence-pass ]]; then
+    if [[ "$phase" == post-reboot ]]; then
+      printf 'KVM_RESTART_PERSISTENCE_FAILURE class=%s exit=%s\n' "$classification" "$rc" >&2
+      fail "restart persistence acceptance failed ($classification)"
+    fi
+    printf 'KVM_PERSISTENCE_PREREQUISITE_FAILURE phase=%s class=%s exit=%s\n' \
+      "$phase" "$classification" "$rc" >&2
+    fail "pre-reboot persistence prerequisite failed ($classification)"
+  fi
+  content_line="$(grep -E '^KVM_PERSISTENCE_CONTENT_SHA256=[0-9a-f]{64}$' "$raw" || true)"
+  mount_line="$(grep -E '^KVM_PERSISTENCE_MOUNT_SHA256=[0-9a-f]{64}$' "$raw" || true)"
+  [[ "$(grep -Ec '^KVM_PERSISTENCE_CONTENT_SHA256=[0-9a-f]{64}$' "$raw" || true)" == 1 \
+      && "${content_line#*=}" == "$persistence_content_sha256" \
+      && "$(grep -Ec '^KVM_PERSISTENCE_MOUNT_SHA256=[0-9a-f]{64}$' "$raw" || true)" == 1 ]] \
+    || fail 'guest persistence proof returned malformed or mismatched fingerprints'
+  persist_mount_sha256="${mount_line#*=}"
+  [[ -z "$expected_mount_sha256" || "$persist_mount_sha256" == "$expected_mount_sha256" ]] \
+    || fail 'guest root filesystem mount identity changed during persistence proof'
+  if [[ "$phase" == post-reboot ]]; then
+    printf 'KVM_RESTART_PERSISTENCE_PASS path=workspace/persisted.txt uid=1000 gid=1000 mode=600 content_sha256=%s mount_sha256=%s\n' \
+      "$persistence_content_sha256" "$persist_mount_sha256"
+  else
+    printf 'KVM_PERSISTENCE_PREREQUISITE_PASS phase=%s path=workspace/persisted.txt uid=1000 gid=1000 mode=600 content_sha256=%s mount_sha256=%s\n' \
+      "$phase" "$persistence_content_sha256" "$persist_mount_sha256"
+  fi
+}
+
+run_persistence_flush() {
+  local command raw rc classification
+  raw="$tmp/persistence-flush.raw"
+  command="$(ci_kvm_persistence_flush_command \
+    /home/mester/workspace/persisted.txt 1000 1000 /home/mester)" \
+    || fail 'could not construct the bounded guest filesystem flush command'
+  qemu_identity_matches || fail 'test-owned QEMU identity changed before persistence filesystem flush'
+  verify_overlay_identity || fail 'disposable guest overlay identity changed before persistence filesystem flush'
+  if ssh_guest "$command" 12 "$raw"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  classification="$(python3 tests/ci-kvm-readiness.py --exit-status "$rc" --input "$raw")"
+  [[ "$classification" == persistence-flush-pass ]] || {
+    printf 'KVM_PERSISTENCE_FLUSH_FAILURE class=%s exit=%s\n' "$classification" "$rc" >&2
+    fail "pre-reboot persistence filesystem flush failed ($classification)"
+  }
+  printf 'KVM_PERSISTENCE_FLUSH_PASS scope=guest-root-filesystem\n'
+}
+
 ssh_guest 'test -x /usr/local/bin/opencode && tmux -V >/dev/null'
 ssh_guest 'test "$(stat -c %u:%a /etc/opencode/opencode.json)" = "0:644" && grep -Fq "\"share\":\"disabled\"" /etc/opencode/opencode.json'
 # Initialize the disposable OpenCode DB with the pinned CLI before adding the
@@ -726,7 +811,13 @@ ssh_guest '/usr/bin/python3 -I /usr/local/libexec/lm-ci-opencode-config-check --
 # Guest-shell payloads are intentionally single-quoted so the local shell does
 # not expand substitutions before they execute inside the disposable guest.
 # shellcheck disable=SC2016
-ssh_guest 'mkdir -p /home/mester/.local/share/opencode /home/mester/workspace/.opencode && chmod 0775 /home/mester/.local /home/mester/.local/share /home/mester/.local/share/opencode && python3 -c '\''import sqlite3; db=sqlite3.connect("/home/mester/.local/share/opencode/opencode.db"); db.execute("create table session_fixture(value text)"); db.execute("insert into session_fixture values (?)", ("synthetic-session-history",)); db.commit(); db.close()'\'' && chmod 0664 /home/mester/.local/share/opencode/opencode.db && printf "{\"provider\":\"synthetic-fixture\",\"marker\":\"preserve-auth-bytes\"}" > /home/mester/.local/share/opencode/auth.json && chmod 0664 /home/mester/.local/share/opencode/auth.json && db_before=$(sha256sum /home/mester/.local/share/opencode/opencode.db) && auth_before=$(sha256sum /home/mester/.local/share/opencode/auth.json) && printf persistent-fixture > /home/mester/workspace/persisted.txt && chmod 0600 /home/mester/workspace/persisted.txt && printf "{\"model\":\"hostile-direct-marker\",\"plugins\":[\"/tmp/lm-ci-hostile-plugin-sentinel\"]}" > /home/mester/workspace/opencode.json && printf "{\"model\":\"hostile-nested-marker\",\"plugins\":[\"/tmp/lm-ci-hostile-plugin-sentinel\"]}" > /home/mester/workspace/.opencode/opencode.json && /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth && test "$(stat -c %a /home/mester/.local/share/opencode/opencode.db)" = 600 && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && test "$(sha256sum /home/mester/.local/share/opencode/opencode.db)" = "$db_before" && test "$(sha256sum /home/mester/.local/share/opencode/auth.json)" = "$auth_before"'
+ssh_guest 'mkdir -p /home/mester/.local/share/opencode /home/mester/workspace/.opencode && chmod 0775 /home/mester/.local /home/mester/.local/share /home/mester/.local/share/opencode && python3 -c '\''import sqlite3; db=sqlite3.connect("/home/mester/.local/share/opencode/opencode.db"); db.execute("create table session_fixture(value text)"); db.execute("insert into session_fixture values (?)", ("synthetic-session-history",)); db.commit(); db.close()'\'' && chmod 0664 /home/mester/.local/share/opencode/opencode.db && printf "{\"provider\":\"synthetic-fixture\",\"marker\":\"preserve-auth-bytes\"}" > /home/mester/.local/share/opencode/auth.json && chmod 0664 /home/mester/.local/share/opencode/auth.json && db_before=$(sha256sum /home/mester/.local/share/opencode/opencode.db) && auth_before=$(sha256sum /home/mester/.local/share/opencode/auth.json) && printf "{\"model\":\"hostile-direct-marker\",\"plugins\":[\"/tmp/lm-ci-hostile-plugin-sentinel\"]}" > /home/mester/workspace/opencode.json && printf "{\"model\":\"hostile-nested-marker\",\"plugins\":[\"/tmp/lm-ci-hostile-plugin-sentinel\"]}" > /home/mester/workspace/.opencode/opencode.json && /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth && test "$(stat -c %a /home/mester/.local/share/opencode/opencode.db)" = 600 && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && test "$(sha256sum /home/mester/.local/share/opencode/opencode.db)" = "$db_before" && test "$(sha256sum /home/mester/.local/share/opencode/auth.json)" = "$auth_before"'
+readonly persistence_fixture_content='persistent-fixture'
+persistence_content_sha256="$(printf '%s' "$persistence_fixture_content" | sha256sum | awk '{print $1}')"
+readonly persistence_content_sha256
+persist_mount_sha256=''
+run_persistence_create
+run_persistence_proof initial-creation ''
 ssh_guest 'printf unsafe-target-preserved > /tmp/lm-auth-unsafe-target && ln -s /tmp/lm-auth-unsafe-target /home/mester/.local/share/opencode/opencode.db-wal; if /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth >/dev/null 2>&1; then exit 1; fi; test "$(cat /tmp/lm-auth-unsafe-target)" = unsafe-target-preserved; rm /home/mester/.local/share/opencode/opencode.db-wal'
 ssh_guest '/usr/bin/python3 -I /usr/local/libexec/lm-ci-opencode-config-check --workspace /home/mester/workspace --home /home/mester --protected-config /etc/opencode/opencode.json --protected-plugin /etc/opencode/plugins/little-mester-exit-confirm' 50
 capture_tui_probe startup 8 "$tmp" "$tmp_root"
@@ -768,6 +859,8 @@ PY
 # Reboot the same writable overlay to prove guest-disk durability without
 # copying or reinitializing the VM disk. The in-memory tmux socket is expected
 # to be recreated; the session/workspace files remain on the persistent disk.
+run_persistence_flush
+run_persistence_proof pre-reboot "$persist_mount_sha256"
 stop_owned_qemu || fail 'test-owned QEMU did not stop or could not be reaped; preserving its artifacts'
 verify_overlay_identity || fail 'disposable guest disk identity changed before restricted reboot'
 [[ "$(sha256sum "$known_hosts" | awk '{print $1}')" == "$known_hosts_sha256" ]] \
@@ -828,9 +921,10 @@ done
   printf 'KVM_RESTART_SSH_READINESS_FAILURE class=%s exit=%s\n' "$last_ssh_class" "$last_ssh_rc" >&2
   fail "restricted reboot did not become SSH-ready within 60s (last ssh status: $last_ssh_rc)"
 }
+run_persistence_proof post-reboot "$persist_mount_sha256"
 ssh_guest "python3 -c 'import socket,sys; targets=[(ip,443) for ip in sys.argv[1:]]+[(\"10.0.2.100\",3128)]; connected=[target for target in targets if (lambda s: (s.settimeout(2),s.connect_ex(target)==0,s.close())[1])(socket.socket())]; assert not connected, \"restricted guest unexpectedly reached an upstream/proxy endpoint\"' $probe_argv"
 printf 'KVM_EGRESS_BOUNDARY_PASS: a bounded sample of resolved provider HTTPS addresses and the configured proxy TCP endpoint were unreachable in restricted QEMU mode\n'
-ssh_guest 'test "$(cat /home/mester/workspace/persisted.txt)" = persistent-fixture && test "$(cat /home/mester/.local/share/opencode/auth.json)" = "{\"provider\":\"synthetic-fixture\",\"marker\":\"preserve-auth-bytes\"}" && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && python3 -c '\''import sqlite3; db=sqlite3.connect("/home/mester/.local/share/opencode/opencode.db"); assert db.execute("select value from session_fixture").fetchone() == ("synthetic-session-history",); db.close()'\'''
+ssh_guest 'test "$(cat /home/mester/.local/share/opencode/auth.json)" = "{\"provider\":\"synthetic-fixture\",\"marker\":\"preserve-auth-bytes\"}" && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && python3 -c '\''import sqlite3; db=sqlite3.connect("/home/mester/.local/share/opencode/opencode.db"); assert db.execute("select value from session_fixture").fetchone() == ("synthetic-session-history",); db.close()'\'''
 capture_tui_probe reboot 8 "$tmp" "$tmp_root"
 ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux has-session -t little-mester-opencode && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_dead}")" = 0 && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_current_path}")" = /home/mester/workspace'
 printf 'KVM_PERSISTENCE_PASS: synthetic OpenCode DB/auth fixtures, workspace data, and TUI recreation survived disposable guest reboot\n'

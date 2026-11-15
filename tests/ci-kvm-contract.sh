@@ -53,11 +53,170 @@ ci_kvm_ssh_args() {
   )
 }
 
+ci_kvm_persistence_create_command() {
+  local path=$1 content=$2 uid=$3 gid=$4 home=$5
+  [[ "$path" == /* && "$path" != *$'\n'* && "$content" != *$'\n'* ]] || return 2
+  [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ && "$home" == /* ]] || return 2
+  printf 'set -eu\npath=%q\ncontent=%q\nexpected_uid=%q\nexpected_gid=%q\nexpected_home=%q\n' \
+    "$path" "$content" "$uid" "$gid" "$home"
+  cat <<'REMOTE'
+printf '%s\n' KVM_PERSISTENCE_CREATE_AUTHENTICATED
+if [[ "$(id -u)" != "$expected_uid" || "$(id -g)" != "$expected_gid" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=identity-mismatch
+  exit 50
+fi
+if [[ "$HOME" != "$expected_home" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=home-mismatch
+  exit 50
+fi
+if [[ "$PWD" != "$expected_home" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=working-directory-mismatch
+  exit 50
+fi
+parent="${path%/*}"
+if [[ ! -d "$parent" || -L "$parent" ]] || [[ "$(realpath -e -- "$parent" 2>/dev/null || true)" != "$parent" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=parent-path-noncanonical
+  exit 50
+fi
+if [[ "$(stat -c '%u:%g:%a' -- "$parent" 2>/dev/null || true)" != "$expected_uid:$expected_gid:700" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=parent-owner-or-mode
+  exit 50
+fi
+if [[ ! -w "$parent" || ! -x "$parent" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=parent-inaccessible
+  exit 50
+fi
+if [[ -e "$path" || -L "$path" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=fixture-path-preoccupied
+  exit 50
+fi
+umask 077
+set -o noclobber
+if ! printf '%s' "$content" >"$path"; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=create-failed
+  exit 50
+fi
+chmod 0600 -- "$path" || { printf '%s\n' KVM_PERSISTENCE_CHECK=create-failed; exit 50; }
+printf '%s\n' KVM_PERSISTENCE_CREATE=PASS
+REMOTE
+}
+
+ci_kvm_persistence_flush_command() {
+  local path=$1 uid=$2 gid=$3 home=$4
+  [[ "$path" == /* && "$path" != *$'\n'* ]] || return 2
+  [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ && "$home" == /* ]] || return 2
+  printf 'set -eu\npath=%q\nexpected_uid=%q\nexpected_gid=%q\nexpected_home=%q\n' \
+    "$path" "$uid" "$gid" "$home"
+  cat <<'REMOTE'
+printf '%s\n' KVM_PERSISTENCE_FLUSH_AUTHENTICATED
+if [[ "$(id -u)" != "$expected_uid" || "$(id -g)" != "$expected_gid" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=identity-mismatch
+  exit 50
+fi
+if [[ "$HOME" != "$expected_home" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=home-mismatch
+  exit 50
+fi
+if [[ "$PWD" != "$expected_home" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=working-directory-mismatch
+  exit 50
+fi
+if [[ ! -f "$path" || -L "$path" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=fixture-not-regular
+  exit 50
+fi
+if ! sync -f -- "$path"; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=filesystem-flush-failed
+  exit 50
+fi
+printf '%s\n' KVM_PERSISTENCE_FLUSH=PASS
+REMOTE
+}
+
+ci_kvm_persistence_check_command() {
+  local path=$1 uid=$2 gid=$3 home=$4 expected_sha256=$5 expected_mount_sha256=${6:-}
+  [[ "$path" == /* && "$path" != *$'\n'* ]] || return 2
+  [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ && "$home" == /* ]] || return 2
+  [[ "$expected_sha256" =~ ^[0-9a-f]{64}$ ]] || return 2
+  [[ -z "$expected_mount_sha256" || "$expected_mount_sha256" =~ ^[0-9a-f]{64}$ ]] || return 2
+  printf 'set -eu\npath=%q\nexpected_uid=%q\nexpected_gid=%q\nexpected_home=%q\nexpected_content_sha256=%q\nexpected_mount_sha256=%q\n' \
+    "$path" "$uid" "$gid" "$home" "$expected_sha256" "$expected_mount_sha256"
+  cat <<'REMOTE'
+printf '%s\n' KVM_PERSISTENCE_REMOTE_AUTHENTICATED
+if [[ "$(id -u)" != "$expected_uid" || "$(id -g)" != "$expected_gid" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=identity-mismatch
+  exit 50
+fi
+if [[ "$HOME" != "$expected_home" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=home-mismatch
+  exit 50
+fi
+if [[ "$PWD" != "$expected_home" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=working-directory-mismatch
+  exit 50
+fi
+parent="${path%/*}"
+if [[ -L "$path" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=fixture-symlink
+  exit 50
+fi
+if [[ ! -e "$path" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=fixture-missing
+  exit 50
+fi
+if [[ ! -f "$path" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=fixture-not-regular
+  exit 50
+fi
+if [[ "$(realpath -e -- "$path" 2>/dev/null || true)" != "$path" || -L "$parent" || "$(realpath -e -- "$parent" 2>/dev/null || true)" != "$parent" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=fixture-path-noncanonical
+  exit 50
+fi
+if [[ "$(stat -c '%u:%g' -- "$path" 2>/dev/null || true)" != "$expected_uid:$expected_gid" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=fixture-owner-mismatch
+  exit 50
+fi
+if [[ "$(stat -c '%a' -- "$path" 2>/dev/null || true)" != 600 ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=fixture-mode-mismatch
+  exit 50
+fi
+if [[ "$(stat -c '%u:%g:%a' -- "$parent" 2>/dev/null || true)" != "$expected_uid:$expected_gid:700" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=parent-owner-or-mode
+  exit 50
+fi
+if [[ ! -r "$path" || ! -w "$path" || ! -r "$parent" || ! -w "$parent" || ! -x "$parent" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=fixture-inaccessible
+  exit 50
+fi
+content_record="$(sha256sum -- "$path" 2>/dev/null)" || { printf '%s\n' KVM_PERSISTENCE_CHECK=fixture-unreadable; exit 50; }
+content_sha256="${content_record%% *}"
+if [[ "$content_sha256" != "$expected_content_sha256" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=fixture-content-mismatch
+  exit 50
+fi
+mount_record="$(findmnt -n --raw -o TARGET,MAJ:MIN,FSTYPE --target "$path" 2>/dev/null)" || { printf '%s\n' KVM_PERSISTENCE_CHECK=mount-identity-unavailable; exit 50; }
+read -r mount_target mount_device mount_type <<<"$mount_record"
+if [[ "$mount_target" != / || ! "$mount_device" =~ ^[0-9]+:[0-9]+$ || -z "$mount_type" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=fixture-not-on-root-filesystem
+  exit 50
+fi
+mount_sha256="$(printf '%s\n' "$mount_record" | sha256sum)"
+mount_sha256="${mount_sha256%% *}"
+if [[ -n "$expected_mount_sha256" && "$mount_sha256" != "$expected_mount_sha256" ]]; then
+  printf '%s\n' KVM_PERSISTENCE_CHECK=mount-identity-changed
+  exit 50
+fi
+printf '%s\n' KVM_PERSISTENCE_CHECK=PASS
+printf 'KVM_PERSISTENCE_CONTENT_SHA256=%s\n' "$content_sha256"
+printf 'KVM_PERSISTENCE_MOUNT_SHA256=%s\n' "$mount_sha256"
+REMOTE
+}
+
 ci_kvm_restart_readiness_command() {
-  local previous_boot_id=${1:-} persistence_file=${2:-/home/mester/workspace/persisted.txt}
-  local opencode_binary=${3:-/usr/local/bin/opencode}
-  local boot_finished=${4:-/var/lib/cloud/instance/boot-finished}
-  local boot_id_file=${5:-/proc/sys/kernel/random/boot_id}
+  local previous_boot_id=${1:-}
+  local opencode_binary=${2:-/usr/local/bin/opencode}
+  local boot_finished=${3:-/var/lib/cloud/instance/boot-finished}
+  local boot_id_file=${4:-/proc/sys/kernel/random/boot_id}
   [[ "$previous_boot_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 2
   printf 'printf "%%s\\n" KVM_RESTART_REMOTE_AUTHENTICATED\n'
   # An authenticated SSH command is the readiness proof. Socket activation can
@@ -82,7 +241,6 @@ ci_kvm_restart_readiness_command() {
   printf 'if ! printf "%%s\\n" "$cloud_init_status" | grep -Eq "^status: done$" || ! printf "%%s\\n" "$cloud_init_status" | grep -Eq "^extended_status: done$"; then printf "%%s\\n" KVM_RESTART_REMOTE_CHECK=cloud-init-not-ready; exit 45; fi\n'
   # Emit guest-shell code with the path safely shell-quoted by printf %q.
   # shellcheck disable=SC2016
-  printf 'if ! test "$(cat %q 2>/dev/null)" = persistent-fixture; then printf "%%s\\n" KVM_RESTART_REMOTE_CHECK=persistence-file-missing; exit 42; fi\n' "$persistence_file"
   printf 'if ! test -x %q; then printf "%%s\\n" KVM_RESTART_REMOTE_CHECK=opencode-binary-missing; exit 43; fi\n' "$opencode_binary"
   cat <<'REMOTE'
 printf '%s\n' KVM_RESTART_REMOTE_READY

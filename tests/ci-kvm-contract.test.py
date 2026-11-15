@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import pathlib
 import pwd
 import shlex
@@ -178,7 +179,8 @@ class LocalSshReadinessTests(unittest.TestCase):
             temp.cleanup()
 
     def run_remote(self, command: str, *, known_hosts: pathlib.Path | None = None,
-                   key: pathlib.Path | None = None) -> subprocess.CompletedProcess[bytes]:
+                   key: pathlib.Path | None = None,
+                   path_prefix: pathlib.Path | None = None) -> subprocess.CompletedProcess[bytes]:
         use_known = known_hosts or self.known_hosts
         use_key = key or self.client_key
         built = subprocess.run(
@@ -188,6 +190,8 @@ class LocalSshReadinessTests(unittest.TestCase):
              str(self.port), str(use_known)],
             cwd=ROOT, capture_output=True, timeout=5, check=True,
         )
+        if path_prefix is not None:
+            command = f"PATH={shlex.quote(str(path_prefix))}:$PATH; {command}"
         args = [self.ssh, *built.stdout.rstrip(b"\0").decode().split("\0"), command]
         return subprocess.run(args, capture_output=True, timeout=8, check=False)
 
@@ -209,10 +213,14 @@ class LocalSshReadinessTests(unittest.TestCase):
         self.assertEqual(self.classify(transport), "transport-or-forwarding")
         timeout = subprocess.CompletedProcess([self.ssh], 124, b"", b"")
         self.assertEqual(self.classify(timeout), "attempt-timeout")
+        remote_timeout = subprocess.CompletedProcess(
+            [self.ssh], 124, b"KVM_PERSISTENCE_REMOTE_AUTHENTICATED\n", b""
+        )
+        self.assertEqual(self.classify(remote_timeout), "persistence-check-timeout")
 
     @staticmethod
     def generated_readiness(root: pathlib.Path, previous_boot_id: str,
-                            state: pathlib.Path, binary: pathlib.Path,
+                            binary: pathlib.Path,
                             *, boot_id_file: pathlib.Path | None = None,
                             cloud_init_output: str = "status: done\nextended_status: done\n",
                             cloud_init_exit: int = 0) -> tuple[str, pathlib.Path]:
@@ -230,64 +238,52 @@ class LocalSshReadinessTests(unittest.TestCase):
         generated = subprocess.run(
             ["bash", "-c",
              f"source {CONTRACT!s}; ci_kvm_restart_readiness_command "
-             f"{shlex.quote(previous_boot_id)} {shlex.quote(str(state))} "
-             f"{shlex.quote(str(binary))} {shlex.quote(str(boot_finished))} "
+             f"{shlex.quote(previous_boot_id)} {shlex.quote(str(binary))} "
+             f"{shlex.quote(str(boot_finished))} "
              f"{shlex.quote(str(boot_id_file or pathlib.Path('/proc/sys/kernel/random/boot_id')))}"],
             cwd=ROOT, capture_output=True, text=True, timeout=5, check=True,
         ).stdout
         return f"PATH={shlex.quote(str(systemd_bin))}:$PATH; export PATH; {generated}", boot_finished
 
-    def test_successful_authentication_remote_failure_and_strict_host_identity(self):
+    def test_authenticated_ssh_readiness_is_independent_of_persistence(self):
         with tempfile.TemporaryDirectory(prefix="ci-kvm-remote-ready-") as directory:
             root = pathlib.Path(directory)
-            state = root / "persisted.txt"
-            binary = root / "opencode"
-            # Socket-activated SSH can answer authenticated requests while the
-            # aggregate ssh.service unit reports inactive after reboot.
-            remote_command, _ = self.generated_readiness(
-                root, "00000000-0000-0000-0000-000000000000", state, binary
-            )
-            remote = self.run_remote(remote_command)
-        self.assertEqual(remote.returncode, 42, remote.stderr.decode(errors="replace"))
-        self.assertEqual(self.classify(remote), "remote-persistence-file-missing")
-
-        with tempfile.TemporaryDirectory(prefix="ci-kvm-remote-ready-pass-") as directory:
-            root = pathlib.Path(directory)
-            state = root / "persisted.txt"
-            state.write_text("persistent-fixture")
             binary = root / "opencode"
             binary.write_text("#!/bin/sh\nexit 0\n")
             binary.chmod(0o755)
+            # Socket-activated SSH can answer authenticated requests while the
+            # aggregate ssh.service unit reports inactive after reboot. The
+            # workspace fixture is intentionally absent: SSH/boot readiness
+            # must still succeed and persistence is checked separately.
             remote_command, _ = self.generated_readiness(
-                root, "00000000-0000-0000-0000-000000000000", state, binary
+                root, "00000000-0000-0000-0000-000000000000", binary
             )
             remote = self.run_remote(remote_command)
         self.assertEqual(remote.returncode, 0, remote.stderr.decode(errors="replace"))
         self.assertEqual(self.classify(remote), "ready")
+        self.assertIn(b"KVM_RESTART_REMOTE_AUTHENTICATED", remote.stdout)
+        self.assertIn(b"KVM_RESTART_REMOTE_READY", remote.stdout)
+
         self.assertIn(b"KVM_RESTART_REMOTE_NOTE=ssh-service-inactive", remote.stdout)
 
         with tempfile.TemporaryDirectory(prefix="ci-kvm-remote-boot-id-") as directory:
             root = pathlib.Path(directory)
-            state = root / "persisted.txt"
-            state.write_text("persistent-fixture")
             binary = root / "opencode"
             binary.write_text("#!/bin/sh\nexit 0\n")
             binary.chmod(0o755)
             current_boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-            remote_command, _ = self.generated_readiness(root, current_boot_id, state, binary)
+            remote_command, _ = self.generated_readiness(root, current_boot_id, binary)
             unchanged = self.run_remote(remote_command)
         self.assertEqual(unchanged.returncode, 44)
         self.assertEqual(self.classify(unchanged), "remote-guest-boot-id-unchanged")
 
         with tempfile.TemporaryDirectory(prefix="ci-kvm-remote-missing-boot-id-") as directory:
             root = pathlib.Path(directory)
-            state = root / "persisted.txt"
-            state.write_text("persistent-fixture")
             binary = root / "opencode"
             binary.write_text("#!/bin/sh\nexit 0\n")
             binary.chmod(0o755)
             remote_command, _ = self.generated_readiness(
-                root, "00000000-0000-0000-0000-000000000000", state, binary,
+                root, "00000000-0000-0000-0000-000000000000", binary,
                 boot_id_file=root / "missing-boot-id",
             )
             missing_id = self.run_remote(remote_command)
@@ -296,13 +292,11 @@ class LocalSshReadinessTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix="ci-kvm-remote-cloud-init-degraded-") as directory:
             root = pathlib.Path(directory)
-            state = root / "persisted.txt"
-            state.write_text("persistent-fixture")
             binary = root / "opencode"
             binary.write_text("#!/bin/sh\nexit 0\n")
             binary.chmod(0o755)
             remote_command, _ = self.generated_readiness(
-                root, "00000000-0000-0000-0000-000000000000", state, binary,
+                root, "00000000-0000-0000-0000-000000000000", binary,
                 cloud_init_output="status: done\nextended_status: degraded done\n",
                 cloud_init_exit=2,
             )
@@ -326,6 +320,225 @@ class LocalSshReadinessTests(unittest.TestCase):
         failed = self.run_remote("true", key=wrong_key)
         self.assertEqual(failed.returncode, 255)
         self.assertEqual(self.classify(failed), "authentication-or-ssh-negotiation")
+
+    @staticmethod
+    def generated_persistence_check(path: pathlib.Path, content_sha256: str,
+                                    *, uid: int | None = None, gid: int | None = None,
+                                    home: pathlib.Path | None = None,
+                                    mount_sha256: str = "") -> str:
+        uid = os.getuid() if uid is None else uid
+        gid = os.getgid() if gid is None else gid
+        home = pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir) if home is None else home
+        generated = subprocess.run(
+            ["bash", "-c",
+             f"source {CONTRACT!s}; ci_kvm_persistence_check_command \"$1\" \"$2\" \"$3\" \"$4\" \"$5\" \"$6\"",
+             "persistence-contract", str(path), str(uid), str(gid), str(home),
+             content_sha256, mount_sha256],
+            cwd=ROOT, capture_output=True, text=True, timeout=5, check=True,
+        ).stdout
+        return generated
+
+    @staticmethod
+    def generated_persistence_create(path: pathlib.Path, content: str) -> str:
+        uid = os.getuid()
+        gid = os.getgid()
+        home = pwd.getpwuid(uid).pw_dir
+        return subprocess.run(
+            ["bash", "-c",
+             f"source {CONTRACT!s}; ci_kvm_persistence_create_command \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"",
+             "persistence-create-contract", str(path), content, str(uid), str(gid), home],
+            cwd=ROOT, capture_output=True, text=True, timeout=5, check=True,
+        ).stdout
+
+    @staticmethod
+    def generated_persistence_flush(path: pathlib.Path) -> str:
+        uid = os.getuid()
+        gid = os.getgid()
+        home = pwd.getpwuid(uid).pw_dir
+        return subprocess.run(
+            ["bash", "-c",
+             f"source {CONTRACT!s}; ci_kvm_persistence_flush_command \"$1\" \"$2\" \"$3\" \"$4\"",
+             "persistence-flush-contract", str(path), str(uid), str(gid), home],
+            cwd=ROOT, capture_output=True, text=True, timeout=5, check=True,
+        ).stdout
+
+    def test_persistence_flush_is_bounded_contract_and_failure_is_classified(self):
+        with tempfile.TemporaryDirectory(prefix="ci-kvm-persistence-flush-") as directory:
+            root = pathlib.Path(directory)
+            fixture = root / "flush-proof"
+            fixture.write_text("synthetic flush fixture")
+            fixture.chmod(0o600)
+            command = self.generated_persistence_flush(fixture)
+            success = self.run_remote(command)
+            self.assertEqual(success.returncode, 0, success.stderr.decode(errors="replace"))
+            self.assertEqual(self.classify(success), "persistence-flush-pass")
+            self.assertIn(b"KVM_PERSISTENCE_FLUSH=PASS", success.stdout)
+
+            missing = self.run_remote(
+                self.generated_persistence_flush(root / "missing-fixture")
+            )
+            self.assertEqual(missing.returncode, 50)
+            self.assertEqual(self.classify(missing), "persistence-fixture-not-regular")
+
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_sync = fake_bin / "sync"
+            fake_sync.write_text("#!/bin/sh\nexit 1\n")
+            fake_sync.chmod(0o755)
+            failed_flush = self.run_remote(command, path_prefix=fake_bin)
+            self.assertEqual(failed_flush.returncode, 50)
+            self.assertEqual(
+                self.classify(failed_flush), "persistence-filesystem-flush-failed"
+            )
+
+    def test_persistence_creator_is_private_and_refuses_preexisting_symlinks(self):
+        content = "synthetic create contract content"
+        with tempfile.TemporaryDirectory(prefix="ci-kvm-persistence-create-") as directory:
+            root = pathlib.Path(directory)
+            fixture = root / "workspace with spaces" / "persisted fixture.bin"
+            fixture.parent.mkdir(mode=0o700)
+
+            created = self.run_remote(self.generated_persistence_create(fixture, content))
+            self.assertEqual(created.returncode, 0, created.stderr.decode(errors="replace"))
+            self.assertEqual(self.classify(created), "persistence-create-pass")
+            self.assertEqual(fixture.read_text(), content)
+            self.assertEqual(fixture.stat().st_uid, os.getuid())
+            self.assertEqual(fixture.stat().st_gid, os.getgid())
+            self.assertEqual(fixture.stat().st_mode & 0o777, 0o600)
+
+            fixture.write_text("existing bytes must remain")
+            fixture.chmod(0o600)
+            refused = self.run_remote(self.generated_persistence_create(fixture, content))
+            self.assertEqual(refused.returncode, 50)
+            self.assertEqual(self.classify(refused), "persistence-fixture-path-preoccupied")
+            self.assertEqual(fixture.read_text(), "existing bytes must remain")
+
+            fixture.unlink()
+            target = fixture.parent / "target"
+            target.write_text("symlink target must remain")
+            fixture.symlink_to(target.name)
+            refused = self.run_remote(self.generated_persistence_create(fixture, content))
+            self.assertEqual(refused.returncode, 50)
+            self.assertEqual(self.classify(refused), "persistence-fixture-path-preoccupied")
+            self.assertEqual(target.read_text(), "symlink target must remain")
+
+    def test_persistence_probe_proves_path_owner_content_and_same_root_mount(self):
+        content = b"synthetic persistence proof only"
+        content_sha256 = hashlib.sha256(content).hexdigest()
+        with tempfile.TemporaryDirectory(prefix="ci-kvm-persistence-") as directory:
+            root = pathlib.Path(directory)
+            fixture = root / "workspace with spaces" / "persisted fixture.bin"
+            fixture.parent.mkdir(mode=0o700)
+            fixture.write_bytes(content)
+            fixture.chmod(0o600)
+
+            pre_command = self.generated_persistence_check(fixture, content_sha256)
+            pre = self.run_remote(pre_command)
+            self.assertEqual(pre.returncode, 0, pre.stderr.decode(errors="replace"))
+            self.assertEqual(self.classify(pre), "persistence-pass")
+            self.assertIn(
+                f"KVM_PERSISTENCE_CONTENT_SHA256={content_sha256}".encode(), pre.stdout
+            )
+            mount_line = next(
+                line for line in pre.stdout.decode().splitlines()
+                if line.startswith("KVM_PERSISTENCE_MOUNT_SHA256=")
+            )
+            mount_sha256 = mount_line.split("=", 1)[1]
+            self.assertRegex(mount_sha256, r"^[0-9a-f]{64}$")
+
+            post = self.run_remote(
+                self.generated_persistence_check(
+                    fixture, content_sha256, mount_sha256=mount_sha256
+                )
+            )
+            self.assertEqual(post.returncode, 0, post.stderr.decode(errors="replace"))
+            self.assertEqual(self.classify(post), "persistence-pass")
+
+            missing = fixture.parent / "missing.bin"
+            result = self.run_remote(
+                self.generated_persistence_check(missing, content_sha256)
+            )
+            self.assertEqual(result.returncode, 50)
+            self.assertEqual(self.classify(result), "persistence-fixture-missing")
+
+            wrong_home = self.run_remote(
+                self.generated_persistence_check(
+                    fixture, content_sha256, home=pathlib.Path("/not/the/ssh/home")
+                )
+            )
+            self.assertEqual(self.classify(wrong_home), "persistence-home-mismatch")
+
+            wrong_uid = self.run_remote(
+                self.generated_persistence_check(
+                    fixture, content_sha256, uid=os.getuid() + 1
+                )
+            )
+            self.assertEqual(self.classify(wrong_uid), "persistence-identity-mismatch")
+
+            fixture.chmod(0o644)
+            result = self.run_remote(
+                self.generated_persistence_check(fixture, content_sha256)
+            )
+            self.assertEqual(self.classify(result), "persistence-fixture-mode-mismatch")
+            fixture.chmod(0o600)
+
+            fixture.write_bytes(b"different content")
+            fixture.chmod(0o600)
+            result = self.run_remote(
+                self.generated_persistence_check(fixture, content_sha256)
+            )
+            self.assertEqual(self.classify(result), "persistence-fixture-content-mismatch")
+
+            fixture.chmod(0o600)
+            fixture.parent.chmod(0o755)
+            bad_parent = self.run_remote(
+                self.generated_persistence_check(fixture, content_sha256)
+            )
+            self.assertEqual(self.classify(bad_parent), "persistence-parent-owner-or-mode")
+            fixture.parent.chmod(0o700)
+
+            fixture.unlink()
+            target = fixture.parent / "outside-target"
+            target.write_bytes(content)
+            target.chmod(0o600)
+            fixture.symlink_to(target.name)
+            result = self.run_remote(
+                self.generated_persistence_check(fixture, content_sha256)
+            )
+            self.assertEqual(self.classify(result), "persistence-fixture-symlink")
+
+            fixture.unlink()
+            fixture.write_bytes(content)
+            fixture.chmod(0o600)
+            result = self.run_remote(
+                self.generated_persistence_check(
+                    fixture, content_sha256,
+                    mount_sha256="0" * 64,
+                )
+            )
+            self.assertEqual(self.classify(result), "persistence-mount-identity-changed")
+
+            fake_bin = root / "fake-findmnt"
+            fake_bin.mkdir()
+            fake_findmnt = fake_bin / "findmnt"
+            fake_findmnt.write_text("#!/bin/sh\nprintf '%s\\n' 'workspace 0:99 tmpfs'\n")
+            fake_findmnt.chmod(0o755)
+            nonroot = self.run_remote(
+                self.generated_persistence_check(fixture, content_sha256),
+                path_prefix=fake_bin,
+            )
+            self.assertEqual(
+                self.classify(nonroot), "persistence-fixture-not-on-root-filesystem"
+            )
+
+            fake_findmnt.write_text("#!/bin/sh\nexit 1\n")
+            unavailable = self.run_remote(
+                self.generated_persistence_check(fixture, content_sha256),
+                path_prefix=fake_bin,
+            )
+            self.assertEqual(
+                self.classify(unavailable), "persistence-mount-identity-unavailable"
+            )
 
 
 if __name__ == "__main__":
