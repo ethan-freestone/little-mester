@@ -24,8 +24,8 @@ fail() {
     elif grep -Eqi 'Permission denied|no mutual signature|no matching .* found' "$tmp/readiness.log"; then
       printf '%s\n' 'KVM_SSH_FAILURE_CLASS=authentication-or-ssh-negotiation' >&2
     elif grep -Eqi 'kex_exchange_identification.*(reset|closed)|Connection refused|Connection reset by peer' "$tmp/readiness.log"; then
-      if [[ -n "${serial_log:-}" ]] && grep -aq 'KVM_GUEST_SSH_KEYS_READY state=validated' "$serial_log"; then
-        printf '%s\n' 'KVM_SSH_FAILURE_CLASS=pre-identification-transport-reset guest_hostkeys=validated inspect_socket-activation-or-qemu-hostfwd' >&2
+      if [[ -n "${serial_log:-}" ]] && grep -aq 'KVM_GUEST_SSH_HOSTKEY_PINNED source=qemu-serial-cloud-init' "$serial_log"; then
+        printf '%s\n' 'KVM_SSH_FAILURE_CLASS=pre-identification-transport-reset guest_hostkey=serial-pinned inspect_socket-activation-or-qemu-hostfwd' >&2
       else
         printf '%s\n' 'KVM_SSH_FAILURE_CLASS=pre-identification-transport-reset guest_hostkeys=unconfirmed inspect_guest_cloud-init-or-network' >&2
       fi
@@ -421,7 +421,6 @@ image="$tmp/noble.img"
 seed="$tmp/seed.iso"
 overlay="$tmp/guest.qcow2"
 key="$tmp/id_ed25519"
-host_key="$tmp/guest_host_ed25519"
 known_hosts="$tmp/known_hosts"
 serial_log="$tmp/serial.log"
 
@@ -435,12 +434,10 @@ printf '%s  %s\n' "$image_sha256" "$image" | sha256sum --check --status \
   || fail 'pinned guest image SHA-256 mismatch'
 
 ssh-keygen -q -t ed25519 -N '' -f "$key"
-ssh-keygen -q -t ed25519 -N '' -f "$host_key"
-printf '[127.0.0.1]:%s %s\n' "$port" "$(awk '{print $1 " " $2}' "$host_key.pub")" >"$known_hosts"
+: >"$known_hosts"
+chmod 0600 "$known_hosts"
 LM_CI_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" \
 LM_CI_PUBLIC_KEY="$(<"$key.pub")" \
-LM_CI_HOST_PRIVATE_KEY="$(<"$host_key")" \
-LM_CI_HOST_PUBLIC_KEY="$(<"$host_key.pub")" \
 python3 - <<'PY' >"$tmp/user-data"
 import base64, importlib.util, json, os, pathlib
 root = pathlib.Path(os.environ["LM_CI_REPO"])
@@ -468,6 +465,7 @@ storage_report() {
 }
 ssh_diagnostic() {
   phase=$1
+  local key_check_log=/run/lm-hostkey-check.log key_meta=absent hostkey_state=absent key_error=''
   package_state=$(dpkg-query -W -f='${Status}' openssh-server 2>/dev/null || printf absent)
   service_active=$(systemctl is-active ssh.service 2>/dev/null || true)
   service_enabled=$(systemctl is-enabled ssh.service 2>/dev/null || true)
@@ -475,12 +473,18 @@ ssh_diagnostic() {
   [[ -n "$service_active" ]] || service_active=unknown
   [[ -n "$service_enabled" ]] || service_enabled=unknown
   [[ -n "$socket_active" ]] || socket_active=unknown
-  if [[ -s /etc/ssh/ssh_host_ed25519_key ]] && ssh-keygen -y -f /etc/ssh/ssh_host_ed25519_key >/dev/null 2>&1; then
-    hostkey_state=usable
-  else
-    hostkey_state=missing-or-unusable
+  if [[ -f /etc/ssh/ssh_host_ed25519_key && ! -L /etc/ssh/ssh_host_ed25519_key ]]; then
+    key_meta=$(stat -c 'mode=%a uid=%u gid=%g bytes=%s' /etc/ssh/ssh_host_ed25519_key 2>/dev/null || printf stat-failed)
+    if timeout --signal=TERM --kill-after=1 3 ssh-keygen -y -P '' -f /etc/ssh/ssh_host_ed25519_key >/dev/null 2>"$key_check_log"; then
+      hostkey_state=usable
+    else
+      hostkey_state=unusable
+      key_error=$(sed -n '1p' "$key_check_log" 2>/dev/null | cut -c1-180 | tr -cd '\11\12\15\40-\176' || true)
+    fi
   fi
-  printf 'KVM_GUEST_SSH_DIAG phase=%s package=%s service_active=%s service_enabled=%s socket_active=%s ed25519_private=%s\n' "$phase" "$package_state" "$service_active" "$service_enabled" "$socket_active" "$hostkey_state"
+  rm -f "$key_check_log"
+  printf 'KVM_GUEST_SSH_DIAG phase=%s package=%s service_active=%s service_enabled=%s socket_active=%s ed25519_private=%s %s\n' "$phase" "$package_state" "$service_active" "$service_enabled" "$socket_active" "$hostkey_state" "$key_meta"
+  [[ -z "$key_error" ]] || printf 'KVM_GUEST_SSH_KEY_ERROR detail=%s\n' "$key_error"
   systemctl show ssh.service -p ActiveState -p SubState -p Result -p ExecMainStatus --no-pager 2>/dev/null | cut -c1-160 || true
   printf '%s\n' 'KVM_GUEST_SSH_NETWORK ipv4-addresses:'
   ip -brief -4 address show 2>/dev/null | sed -n '1,6p' | cut -c1-180 || true
@@ -514,29 +518,9 @@ apt-get update -qq || { rc=$?; storage_report apt-update-failed; printf 'KVM_GUE
 apt-get install -y --no-install-recommends tmux nodejs npm ca-certificates || { rc=$?; storage_report apt-install-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=apt-install exit=%s\n' "$rc" >&2; exit "$rc"; }
 npm install --global @opencode/cli@2.2.5 || { rc=$?; storage_report opencode-install-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=opencode-install exit=%s\n' "$rc" >&2; exit "$rc"; }
 install -d -o mester -g mester -m 0700 /home/mester/workspace /home/mester/.local/share/opencode
-# cloud-init 26.1 runs its ssh module in the init stage before runcmd. The
-# systemd ssh.socket can accept connections earlier, so validate per-instance
-# keys here and clear any socket-triggered ssh.service start-limit failures.
+# cloud-init's ssh module generates keys in its init stage, before runcmd.
+# Keep early socket failures recoverable and report only key metadata.
 ssh_diagnostic before-ensure
-if ! ssh-keygen -A >/dev/null 2>&1; then
-  ssh_diagnostic hostkey-generation-failed
-  printf 'KVM_GUEST_SSH_HOSTKEY_FAIL stage=ssh-keygen-A\n' >&2
-  exit 75
-fi
-if [[ ! -s /etc/ssh/ssh_host_ed25519_key ]] || ! ssh-keygen -y -f /etc/ssh/ssh_host_ed25519_key >/dev/null 2>&1; then
-  ssh_diagnostic hostkey-validation-failed
-  printf 'KVM_GUEST_SSH_HOSTKEY_FAIL stage=ed25519-private-unusable\n' >&2
-  exit 76
-fi
-if sshd -t >/run/lm-sshd-config-check.log 2>&1; then
-  rm -f /run/lm-sshd-config-check.log
-else
-  rc=$?
-  printf 'KVM_GUEST_SSH_HOSTKEY_FAIL stage=sshd-config-check exit=%s\n' "$rc" >&2
-  sed -n '1,5p' /run/lm-sshd-config-check.log | cut -c1-200 | tr -cd '\11\12\15\40-\176' >&2 || true
-  ssh_diagnostic sshd-config-check-failed
-  exit 77
-fi
 systemctl reset-failed ssh.service || { ssh_diagnostic reset-failed-error; printf 'KVM_GUEST_SSH_SERVICE_FAIL stage=reset-failed\n' >&2; exit 78; }
 if ! systemctl is-active --quiet ssh.socket; then
   if ! systemctl enable --now ssh.socket >/dev/null 2>&1; then
@@ -545,14 +529,13 @@ if ! systemctl is-active --quiet ssh.socket; then
     exit 79
   fi
 fi
-ssh_diagnostic after-hostkey-validation
+ssh_diagnostic after-user-script
 if ! ss -H -lnt4 'sport = :22' | awk '$4 == "0.0.0.0:22" || ($4 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:22$/ && $4 !~ /^127\./) { found=1 } END { exit !found }'; then
   printf 'KVM_GUEST_SSH_SOCKET_FAIL reason=no-nonloopback-ipv4-listener port=22\n' >&2
   ssh_diagnostic socket-listener-missing
   exit 74
 fi
 printf 'KVM_GUEST_SSH_SOCKET state=ready address=nonloopback-ipv4 port=22\n'
-printf 'KVM_GUEST_SSH_KEYS_READY state=validated ed25519_private=usable sshd_config=valid\n'
 storage_report after-packages
 printf ready > /var/tmp/lm-kvm-trial-ready
 printf 'KVM_GUEST_PROVISION_DONE exit=0\n'
@@ -560,11 +543,11 @@ printf 'KVM_GUEST_PROVISION_DONE exit=0\n'
 config = {
     "ssh_pwauth": False,
     "disable_root": True,
-    "ssh_deletekeys": False,
+    "ssh_deletekeys": True,
+    "ssh_genkeytypes": ["ed25519"],
+    "ssh_quiet_keygen": True,
     "growpart": {"mode": "growpart", "devices": ["/"], "ignore_growroot_disabled": True},
     "resize_rootfs": True,
-    "ssh_keys": {"ed25519_private": os.environ["LM_CI_HOST_PRIVATE_KEY"],
-                 "ed25519_public": os.environ["LM_CI_HOST_PUBLIC_KEY"]},
     "users": [{"name": "mester", "uid": 1000, "primary_group": "mester",
                "shell": "/bin/bash", "lock_passwd": True,
                "ssh_authorized_keys": [os.environ["LM_CI_PUBLIC_KEY"]]}],
@@ -624,6 +607,22 @@ ssh_args=(
     "mester@127.0.0.1"
 )
 
+pin_guest_host_key_from_serial() {
+  local public_key fingerprint known_hosts_tmp public_key_file
+  public_key="$(python3 "$(dirname -- "$process_signal_helper")/ci-kvm-hostkey.py" "$serial_log")" \
+    || fail 'cloud-init completed without one valid Ed25519 host public key in the owned serial log'
+  public_key_file="$tmp/guest_host_ed25519.pub"
+  printf '%s\n' "$public_key" >"$public_key_file"
+  chmod 0600 "$public_key_file"
+  fingerprint="$(ssh-keygen -lf "$public_key_file" | awk '{print $2}')" \
+    || fail 'cloud-init serial host public key failed OpenSSH validation'
+  known_hosts_tmp="$tmp/known_hosts.tmp"
+  printf '[127.0.0.1]:%s %s\n' "$port" "$public_key" >"$known_hosts_tmp"
+  chmod 0600 "$known_hosts_tmp"
+  mv -- "$known_hosts_tmp" "$known_hosts"
+  printf 'KVM_GUEST_SSH_HOSTKEY_PINNED source=qemu-serial-cloud-init fingerprint=%s\n' "$fingerprint"
+}
+
 ready=0
 qemu_started=$SECONDS
 readiness_deadline=$((qemu_started + 120))
@@ -640,7 +639,8 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
   (( remaining > 0 )) || break
   attempt_timeout=8
   (( remaining < attempt_timeout )) && attempt_timeout=$remaining
-  if grep -aEq 'KVM_GUEST_SSH_HOSTKEY_FAIL|KVM_GUEST_SSH_SERVICE_FAIL|KVM_GUEST_SSH_SOCKET_FAIL' "$serial_log"; then
+  if grep -aEq 'KVM_GUEST_SSH_SERVICE_FAIL|KVM_GUEST_SSH_SOCKET_FAIL' "$serial_log" \
+      || grep -aFq 'sshd: no hostkeys available -- exiting' "$serial_log"; then
     printf '%s\n' 'KVM_GUEST_SSH_DIAGNOSTIC: cloud-init host-key/socket preparation failed' >&2
     grep -aE 'KVM_GUEST_(SSH|PROVISION)' "$serial_log" | tail -n 24 >&2 || true
     fail 'guest SSH host-key or socket preparation failed before readiness'
@@ -648,10 +648,15 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
   # The single-quoted payload is intentionally interpreted only by the guest shell.
   # shellcheck disable=SC2016
   # Do not connect through the already-listening ssh.socket until cloud-init
-  # has installed/validated host keys, or the service can hit systemd's start limit.
-  if ! grep -aq 'KVM_GUEST_SSH_KEYS_READY state=validated' "$serial_log"; then
-    last_ssh_rc=waiting-for-cloud-init-hostkeys
-  elif [[ -s "$known_hosts" ]]; then
+  # has completed and published its public host key, or sshd may start keyless.
+  if ! grep -aEq 'Cloud-init v\..* finished at ' "$serial_log"; then
+    last_ssh_rc=waiting-for-cloud-init-finish
+  else
+    if [[ ! -s "$known_hosts" ]]; then
+      pin_guest_host_key_from_serial
+    fi
+  fi
+  if [[ -s "$known_hosts" ]]; then
     if timeout --signal=TERM --kill-after=1 "$attempt_timeout" ssh "${ssh_args[@]}" \
         'systemctl is-active --quiet ssh.service && { state=$(cloud-init status --long 2>&1 || true); printf "%s\n" "$state"; if printf "%s\n" "$state" | grep -Eq "^(status|extended_status): error"; then exit 42; fi; test -f /var/lib/cloud/instance/boot-finished && test "$(cat /var/tmp/lm-kvm-trial-ready)" = ready; }' \
         >"$tmp/readiness.log" 2>&1; then
@@ -669,8 +674,6 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
         fail 'guest cloud-init provisioning or SSH socket failed before SSH readiness'
       fi
     fi
-  else
-    last_ssh_rc=no-known-hosts
   fi
   report_kvm_progress initial-readiness "$readiness_deadline" "$last_ssh_rc"
   remaining=$((readiness_deadline - SECONDS))

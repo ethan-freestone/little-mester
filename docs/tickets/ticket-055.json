@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-15T11:19:13.276Z",
+  "updated_at": "2026-11-15T11:52:42.667Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -145,6 +145,21 @@
       "timestamp": "2026-11-15T11:19:13.275Z",
       "author": "cli",
       "body": "Correction: the exact hosted SSH diagnostic is sshd: no hostkeys available -- exiting. A shell quoting issue omitted that diagnostic text from the preceding comment; the recorded cloud-init ordering analysis, scoped fix, test results, Sol review, and pending acceptance statements are otherwise accurate."
+    },
+    {
+      "timestamp": "2026-11-15T11:51:52.548Z",
+      "author": "cli",
+      "body": "2026-11-15 follow-up to hosted candidate a0624a133cf888b44a42e848eb413cb28dc538d0: hosted failure was KVM_GUEST_SSH_HOSTKEY_FAIL stage=ed25519-private-unusable; cloud-init later emitted ED25519 host-key fingerprints. The old marker only showed ssh-keygen -y returned failure; it did not record whether the private file was absent, mode/owner incorrect, or malformed, so the exact private-key failure cannot be distinguished from that run. Source inspection of cloud-init 26.1 cc_ssh confirms ssh_deletekeys removes image-provided host keys, then ssh_genkeytypes generates requested key types during cloud_init_modules; cc_keys_to_console later emits an SSH HOST KEY KEYS block containing public keys. Ubuntu ssh.socket can be listening before an sshd handshake, so listener state alone is not readiness. Current Change A replaces injected host private-key cloud-config with native per-instance cloud-init Ed25519 generation (ssh_deletekeys=true, ssh_genkeytypes=[ed25519], ssh_quiet_keygen=true), records only private-key metadata and bounded ssh-keygen error text if diagnostics are needed, and waits for cloud-init final completion before extracting one validated public Ed25519 key from the marked serial block and pinning it in strict known_hosts. SSH readiness then requires the actual forwarded authenticated strict-key SSH command, active ssh.service, successful cloud-init and provisioning markers. cloud-init runs once per instance on the same overlay; reboot keeps that generated private key and strict pinned identity. No local/nested QEMU or push. Local checks: Bats 106/106, ci-kvm-launch 1/1, synthetic OAuth 18/18, browser-auth 37/37, host-key parser 4/4, generated cloud-config and embedded shell syntax, bash -n, ShellCheck and diff checks pass. Hosted validation of this correction is NOT_RUN and required before Change B. A1-A5 remain pending."
+    },
+    {
+      "timestamp": "2026-11-15T11:52:03.295Z",
+      "author": "cli",
+      "body": "Sol Medium technical design for Change B (planning only; no implementation or KVM evidence): retain one real-KVM job, runner, disposable guest and overlay, but expose lifecycle through separate named Actions steps: prepare; start and verify readiness; security/configuration tests; synthetic OAuth; OpenCode/tmux/TUI/reconnect; restricted reboot/persistence; always-run sanitized diagnostics and cleanup. Current tests/ci-kvm-capability.sh owns QEMU, OAuth harness, private temp state and an EXIT trap; that trap cannot span Actions step shells. A minimal detached test-owned supervisor must own/reap QEMU across steps and enforce a watchdog expiry, with atomic mode-0600 versioned private state under mode-0700 RUNNER_TEMP. Every operation must validate run/boot identity, phase prerequisites, QEMU/supervisor UID/parent/start-time/argv, overlay device+inode, loopback port and strict known_hosts/key identity; reboot reuses overlay and records new QEMU identity. Never export keys, cloud-config, auth fixtures, raw argv or state as outputs/artifacts; only a non-secret run locator/status may cross Actions outputs. Carry existing absolute stage/overall deadlines and reserve cleanup time. Use always() cleanup as best effort plus supervisor expiry for cancellation/hard runner loss; report cleanup ambiguity and retain private evidence fail-closed. Preserve existing smoke, security/config, strict host-key, synthetic OAuth descendant cleanup, TUI/reconnect, reboot/persistence, provenance and offline signal/identity coverage; add offline tests for state tamper, identity substitution, deadlines, prerequisites and cleanup failure. Planning only; implementation stays blocked until Change A has complete green hosted real-KVM evidence. A1-A5 remain pending."
+    },
+    {
+      "timestamp": "2026-11-15T11:52:42.666Z",
+      "author": "cli",
+      "body": "Correction to the 11:19 comment: the hosted evidence does not establish that host-key generation ran after runcmd, and the earlier claim that ssh-keygen -A fixes the root cause was not evidenced. cloud-init 26.1 source places cc_ssh in cloud_init_modules before runcmd; candidate a0624a only recorded ssh-keygen -y failure without key path metadata or stderr, so absent, permission and malformed-key causes cannot be distinguished retrospectively. The current uncommitted Change A uses native cloud-init generation and serial public-key pinning, avoids host-injected private key material, and delays SSH until cloud-init completion. This is a tested candidate, not hosted proof."
     }
   ]
 }
