@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-15T11:52:42.667Z",
+  "updated_at": "2026-11-15T12:05:37.636Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -160,6 +160,11 @@
       "timestamp": "2026-11-15T11:52:42.666Z",
       "author": "cli",
       "body": "Correction to the 11:19 comment: the hosted evidence does not establish that host-key generation ran after runcmd, and the earlier claim that ssh-keygen -A fixes the root cause was not evidenced. cloud-init 26.1 source places cc_ssh in cloud_init_modules before runcmd; candidate a0624a only recorded ssh-keygen -y failure without key path metadata or stderr, so absent, permission and malformed-key causes cannot be distinguished retrospectively. The current uncommitted Change A uses native cloud-init generation and serial public-key pinning, avoids host-injected private key material, and delays SSH until cloud-init completion. This is a tested candidate, not hosted proof."
+    },
+    {
+      "timestamp": "2026-11-15T12:05:37.635Z",
+      "author": "cli",
+      "body": "2026-11-15 Change A hosted integration update: owner reports source 86552174349230f9e7f1f750f1ac08a4e1068b62 / PR merge bdb5160397fc8aa6ceba2018c48c648b227e2757 passed KVM boot and cloud-init/strict SSH readiness, then config-tmux failed at tests/ci-kvm-capability.sh:694 with remote status 44. Source trace: line 706 runs parent-session-contract.readiness_checks(); exit 44 is only from the OpenCode checks: missing/non-executable /usr/local/bin/opencode, or --version not matching opencode v2.2.5. The hosted log suppressed both details, so supplied evidence does not identify which one occurred; this is not evidence against SSH, disk, tmux, TUI or security tests, which had not yet run. Focused harness-diagnostic correction emits distinct fixed markers for executable missing, version command failure and version mismatch, preserves exit 44 and assertions, and never logs raw CLI output. Sol Medium review PASS: minimal diagnostic-only response, no secret exposure and no change to persistent-parent refusal behavior. Tests cover each diagnostic and passing version; local Bats 106/106, vm-parent suite 52/52, all vm-parent tests and focused launch/OAuth/browser-auth suites pass, plus bash syntax, ShellCheck and diff checks. This candidate still needs hosted rerun to determine which OpenCode check failed; no product/provisioning fix is claimed yet. A1-A5 remain pending."
     }
   ]
 }

@@ -347,6 +347,8 @@ text = pathlib.Path(sys.argv[1]).read_text()
 workflow = pathlib.Path(sys.argv[1]).parents[1] / '.github/workflows/ci.yml'
 workflow_text = workflow.read_text()
 job = workflow_text.split('  real-qemu-kvm-trial:', 1)[1].split('\n  # ── 4.', 1)[0]
+session_contract = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/parent-session-contract.py'
+session_contract_text = session_contract.read_text()
 assert 'pull_request:' in workflow_text and 'types: [opened, synchronize, reopened]' in workflow_text
 assert 'if:' not in job
 assert 'm2-qemu-acceptance' not in workflow_text
@@ -390,6 +392,9 @@ assert 'systemctl is-active --quiet ssh.service && { state=$(cloud-init status' 
 assert 'systemctl is-active --quiet ssh.service && test "$(cat /home/mester/workspace/persisted.txt)"' in text
 assert 'ssh_deletekeys' in text and '"ssh_deletekeys": True' in text
 assert 'guest cloud-init provisioning or SSH socket failed before SSH readiness' in text
+assert 'KVM_M2_READINESS_FAIL check=opencode-executable' in session_contract_text
+assert 'KVM_M2_READINESS_FAIL check=opencode-version-command' in session_contract_text
+assert 'KVM_M2_READINESS_FAIL check=opencode-version expected=opencode-v2.2.5' in session_contract_text
 assert 'apt-get install -y --no-install-recommends' in text
 assert 'oauth_remaining > 120' in text
 assert 'ssh-keyscan' not in text

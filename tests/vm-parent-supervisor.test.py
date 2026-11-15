@@ -62,6 +62,43 @@ class SupervisorHandoffTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_parent_readiness_distinguishes_opencode_install_and_version_failures(self):
+        checks = parent_state._SESSION_CONTRACT.readiness_checks()
+        checks = checks.split("; printf '%s  %s", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            fake_opencode = pathlib.Path(directory) / "opencode"
+            checks = (checks.replace("/usr/bin/tmux", "/bin/true")
+                      .replace("/usr/local/bin/lm-opencode", "/bin/true")
+                      .replace("/usr/local/bin/opencode", str(fake_opencode)))
+
+            def invoke(script=None):
+                if script is None:
+                    fake_opencode.unlink(missing_ok=True)
+                else:
+                    fake_opencode.write_text(script)
+                    fake_opencode.chmod(0o755)
+                return subprocess.run(["/bin/bash", "-c", checks], text=True,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      check=False)
+
+            missing = invoke()
+            self.assertEqual(missing.returncode, 44)
+            self.assertIn("check=opencode-executable", missing.stdout)
+
+            failed_command = invoke("#!/bin/sh\nexit 1\n")
+            self.assertEqual(failed_command.returncode, 44)
+            self.assertIn("check=opencode-version-command", failed_command.stdout)
+
+            wrong_version = invoke("#!/bin/sh\nprintf '%s\\n' 'opencode v9.9.9'\n")
+            self.assertEqual(wrong_version.returncode, 44)
+            self.assertIn("check=opencode-version expected=opencode-v2.2.5",
+                          wrong_version.stdout)
+            self.assertNotIn("v9.9.9", wrong_version.stdout)
+
+            correct_version = invoke(
+                "#!/bin/sh\nprintf '%s\\n' 'opencode v2.2.5'\n")
+            self.assertEqual(correct_version.returncode, 0, correct_version.stderr)
+
     def cleanup_gated_child(self, role, transition=None):
         owned = parent_supervisor._CHILD_PROCESSES.get(role)
         if transition is None and owned is not None:
