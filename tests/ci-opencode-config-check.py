@@ -26,6 +26,10 @@ def failure_cause(stderr: str) -> str:
         return "cli-invocation"
     if re.search(r"enoent|no such file or directory", text):
         return "missing-path"
+    if "database is not empty and has no session table" in text:
+        return "invalid-state-database"
+    if re.search(r"database.{0,40}(?:locked|corrupt|malformed)", text):
+        return "database-startup"
     if re.search(
         r"(?:invalid|malformed|parse error|failed to parse).{0,80}(?:config|json)"
         r"|(?:config|json).{0,80}(?:invalid|malformed|parse error)",
@@ -52,7 +56,7 @@ def run_config_sources(
 ) -> list[dict]:
     try:
         result = subprocess.run(
-            [binary, "debug", "config", "--standalone"],
+            [binary, "debug", "config", "--standalone", "--print-logs"],
             cwd=workspace,
             env=environment,
             text=True,
@@ -90,6 +94,45 @@ def document_paths(documents: list[dict]) -> set[str]:
     }
 
 
+def make_environment(home: pathlib.Path, protected_config: str,
+                     protected_plugin: str, *, protect_project_config: bool) -> dict[str, str]:
+    cli_config = json.dumps(
+        {"plugins": [protected_plugin],
+         "keybinds": {"app.exit": "none", "prompt.clear": "none"}},
+        separators=(",", ":"),
+    )
+    environment = {
+        "HOME": str(home),
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "TERM": "xterm-256color",
+        "LANG": "C.UTF-8",
+        "XDG_DATA_HOME": str(home / ".local/share"),
+        # Match the actual protected product runner, not the test harness's
+        # former user-writable XDG config directory.
+        "XDG_CONFIG_HOME": "/etc",
+        "OPENCODE_CONFIG": protected_config,
+        "OPENCODE_CLI_CONFIG_CONTENT": cli_config,
+        "HTTP_PROXY": "http://10.0.2.100:3128",
+        "HTTPS_PROXY": "http://10.0.2.100:3128",
+        "http_proxy": "http://10.0.2.100:3128",
+        "https_proxy": "http://10.0.2.100:3128",
+        "NO_PROXY": "localhost,127.0.0.1,10.0.2.100",
+        "no_proxy": "localhost,127.0.0.1,10.0.2.100",
+    }
+    if protect_project_config:
+        environment["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+    return environment
+
+
+def initialize_database(binary: str, home: pathlib.Path,
+                        protected_config: str, protected_plugin: str) -> None:
+    """Initialize the pinned OpenCode DB before adding CI synthetic history."""
+    env = make_environment(
+        home, protected_config, protected_plugin, protect_project_config=True
+    )
+    run_config_sources(binary, home, env, "database-bootstrap")
+
+
 def check(binary: str, workspace: pathlib.Path, home: pathlib.Path,
           protected_config: str, protected_plugin: str) -> None:
     hostile_plugin = "/tmp/lm-ci-hostile-plugin-sentinel"
@@ -97,21 +140,9 @@ def check(binary: str, workspace: pathlib.Path, home: pathlib.Path,
         str(workspace / "opencode.json"),
         str(workspace / ".opencode/opencode.json"),
     }
-    cli_config = json.dumps(
-        {"plugins": [protected_plugin],
-         "keybinds": {"app.exit": "none", "prompt.clear": "none"}},
-        separators=(",", ":"),
+    base_environment = make_environment(
+        home, protected_config, protected_plugin, protect_project_config=False
     )
-    base_environment = {
-        "HOME": str(home),
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
-        "TERM": "xterm-256color",
-        "LANG": "C.UTF-8",
-        "XDG_DATA_HOME": str(home / ".local/share"),
-        "XDG_CONFIG_HOME": str(home / ".config"),
-        "OPENCODE_CONFIG": protected_config,
-        "OPENCODE_CLI_CONFIG_CONTENT": cli_config,
-    }
 
     # Positive control: demonstrate these workspace config files and plugin path
     # are discoverable when the product protection switch is absent.
@@ -122,8 +153,9 @@ def check(binary: str, workspace: pathlib.Path, home: pathlib.Path,
     if not hostile_paths <= enabled_paths or hostile_plugin not in json.dumps(enabled_sources):
         raise ConfigCheckFailure("positive-control", "hostile-fixture-not-discovered", 1)
 
-    protected_environment = dict(base_environment)
-    protected_environment["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+    protected_environment = make_environment(
+        home, protected_config, protected_plugin, protect_project_config=True
+    )
     protected_sources = run_config_sources(
         binary, workspace, protected_environment, "protected-config"
     )
@@ -139,19 +171,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--home", type=pathlib.Path, required=True)
     parser.add_argument("--protected-config", required=True)
     parser.add_argument("--protected-plugin", required=True)
+    parser.add_argument("--initialize-database", action="store_true")
     args = parser.parse_args(argv)
     try:
-        check(args.binary, args.workspace, args.home,
-              args.protected_config, args.protected_plugin)
+        if args.initialize_database:
+            initialize_database(
+                args.binary, args.home,
+                args.protected_config, args.protected_plugin,
+            )
+        else:
+            check(args.binary, args.workspace, args.home,
+                  args.protected_config, args.protected_plugin)
     except ConfigCheckFailure as error:
         print(
             "KVM_M2_CONFIG_FAIL "
-            f"operation=opencode-debug-config phase={error.phase} "
+            f"operation={'opencode-schema-bootstrap' if args.initialize_database else 'opencode-debug-config'} "
+            f"phase={error.phase} "
             f"cause={error.cause} exit={error.exit_code}",
             file=sys.stderr,
         )
         return 44
-    print("KVM_M2_CONFIG_PASS operation=opencode-debug-config")
+    marker = (
+        "KVM_M2_CONFIG_DB_PASS operation=opencode-schema-bootstrap"
+        if args.initialize_database
+        else "KVM_M2_CONFIG_PASS operation=opencode-debug-config"
+    )
+    print(marker)
     return 0
 
 

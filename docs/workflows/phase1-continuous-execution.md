@@ -27,6 +27,13 @@ The ticket CLI is reserved for appending comments/handoff discussion; use MCP fo
 ticket fields and criteria. Keep test ledgers factual and concise; record review discussion
 as ticket comments. Preserve pending criteria until their stated evidence exists.
 
+**Temporary owner authorization (2026-11-15):** until the MCP is fixed after Phase 1,
+the repository ticket CLI's documented `update <number> --comment <text>` operation is
+authorized solely to append comments. Inspect the current ticket first, append without
+replacing historical comments, then validate the ticket store. This exception does not
+authorize CLI edits to fields, criteria, test ledgers, audit history, or other ticket data;
+all ordinary ticket mutations continue through MCP.
+
 At a security-sensitive boundary, review the exact source SHA. A material change after
 review receives an appropriately scoped delta review. Sol reviews assess whether code is
 necessary and reachable, not only locally correct: report the acceptance behavior or verified

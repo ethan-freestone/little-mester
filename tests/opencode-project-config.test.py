@@ -7,6 +7,7 @@ import os
 import pathlib
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -113,15 +114,72 @@ class ProjectConfigIsolationTests(unittest.TestCase):
         self.assertEqual(protected.get("share"), "disabled")
 
     def test_standalone_ci_config_check_uses_real_pinned_cli_and_both_controls(self):
+        store = self.home / ".local/share/opencode"
+        store.mkdir(parents=True, mode=0o700)
+        for directory in (self.home / ".local", self.home / ".local/share", store):
+            directory.chmod(0o700)
+        malformed = sqlite3.connect(store / "opencode.db")
+        malformed.execute("create table session_fixture(value text)")
+        malformed.commit()
+        malformed.close()
+        auth = store / "auth.json"
+        auth.write_text('{"provider":"synthetic-fixture","marker":"preserve-auth-bytes"}')
+        for directory in (self.home / ".local", self.home / ".local/share", store):
+            directory.chmod(0o777)
+        (store / "opencode.db").chmod(0o666)
+        auth.chmod(0o666)
+        for directory in (self.home / ".local", self.home / ".local/share", store):
+            directory.chmod(0o700)
+        (store / "opencode.db").chmod(0o600)
+        auth.chmod(0o600)
+
+        args = [
+            os.environ.get("PYTHON", "/usr/bin/python3"), str(CHECK_PATH),
+            "--binary", self.binary,
+            "--workspace", str(self.workspace),
+            "--home", str(self.home),
+            "--protected-config", str(self.home / "protected.json"),
+            "--protected-plugin", "/tmp/lm-ci-protected-plugin-fixture",
+        ]
+        failed = subprocess.run(
+            args,
+            cwd=self.workspace,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+        self.assertEqual(failed.returncode, 44)
+        self.assertEqual(
+            failed.stderr.strip(),
+            "KVM_M2_CONFIG_FAIL operation=opencode-debug-config "
+            "phase=positive-control cause=invalid-state-database exit=1",
+        )
+
+        (store / "opencode.db").unlink()
+        initialized = subprocess.run(
+            [*args, "--initialize-database"],
+            cwd=self.workspace,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+        self.assertEqual(initialized.returncode, 0, initialized.stderr[:400])
+        self.assertEqual(
+            initialized.stdout.strip(),
+            "KVM_M2_CONFIG_DB_PASS operation=opencode-schema-bootstrap",
+        )
+        history = sqlite3.connect(store / "opencode.db")
+        history.execute("create table session_fixture(value text)")
+        history.execute("insert into session_fixture values (?)", ("synthetic-session-history",))
+        history.commit()
+        history.close()
+
         result = subprocess.run(
-            [
-                os.environ.get("PYTHON", "/usr/bin/python3"), str(CHECK_PATH),
-                "--binary", self.binary,
-                "--workspace", str(self.workspace),
-                "--home", str(self.home),
-                "--protected-config", str(self.home / "protected.json"),
-                "--protected-plugin", "/tmp/lm-ci-protected-plugin-fixture",
-            ],
+            args,
             cwd=self.workspace,
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
             capture_output=True,

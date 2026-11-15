@@ -733,6 +733,9 @@ ssh_tty_guest() {
 
 ssh_guest 'test -x /usr/local/bin/opencode && tmux -V >/dev/null'
 ssh_guest 'test "$(stat -c %u:%a /etc/opencode/opencode.json)" = "0:644" && grep -Fq "\"share\":\"disabled\"" /etc/opencode/opencode.json'
+# Initialize the disposable OpenCode DB with the pinned CLI before adding the
+# test-only history table; a nonempty DB without its session schema is refused.
+ssh_guest '/usr/bin/python3 -I /usr/local/libexec/lm-ci-opencode-config-check --workspace /home/mester/workspace --home /home/mester --protected-config /etc/opencode/opencode.json --protected-plugin /etc/opencode/plugins/little-mester-exit-confirm --initialize-database' 30
 # Guest-shell payloads are intentionally single-quoted so the local shell does
 # not expand substitutions before they execute inside the disposable guest.
 # shellcheck disable=SC2016
