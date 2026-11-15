@@ -74,8 +74,6 @@ class SupervisorHandoffTests(unittest.TestCase):
             root = pathlib.Path(directory)
             fake_home = root / "home"
             fake_home.mkdir(mode=0o700)
-            fake_user_dirs = root / "lm-guest-user-dirs.py"
-            fake_user_dirs.write_text("import sys\nsys.exit(0)\n")
             package = root / "node_modules/@opencode/cli"
             binary = package / "bin/opencode.exe"
             binary.parent.mkdir(parents=True)
@@ -84,10 +82,10 @@ class SupervisorHandoffTests(unittest.TestCase):
             fake_opencode.parent.mkdir()
             fake_opencode.symlink_to(binary)
             helper = (helper.replace("/usr/local/bin/opencode", str(fake_opencode))
-                      .replace("/home/mester", str(fake_home))
-                      .replace("/usr/local/libexec/lm-guest-user-dirs.py", str(fake_user_dirs)))
+                      .replace("/home/mester", str(fake_home)))
             helper_template = helper
             helper_path = root / "readiness.sh"
+            self.assertNotIn("prepare-auth", helper_template)
 
             def invoke(script, extra_env=None, timeout_seconds=5):
                 if isinstance(script, bytes):
@@ -108,7 +106,7 @@ class SupervisorHandoffTests(unittest.TestCase):
                 "#!/bin/sh\nif [ \"${MODE:-}\" = ambient-fail ]; then echo private-output >&2; exit 9; fi\nprintf '%s\\n' 'opencode v2.2.5'\n",
                 {"MODE": "ambient-fail"})
             self.assertEqual(env_fallback.returncode, 0, env_fallback.stderr)
-            self.assertIn("ambient_class=process-exit protected_env=pass", env_fallback.stdout)
+            self.assertIn("ambient_class=process-exit protected_version=pass", env_fallback.stdout)
             self.assertNotIn("private-output", env_fallback.stdout + env_fallback.stderr)
 
             wrong_version = invoke("#!/bin/sh\nprintf '%s\\n' 'opencode v9.9.9'\n")

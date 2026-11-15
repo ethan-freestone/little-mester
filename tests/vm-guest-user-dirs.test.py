@@ -167,6 +167,28 @@ class GuestUserDirectoryTests(unittest.TestCase):
             os.setuid(self.account.pw_uid)
         operation()
 
+    def test_auth_store_preparation_needs_no_credentials(self):
+        child = os.fork()
+        if child == 0:
+            try:
+                self._run_as_guest(lambda: guest_dirs.prepare_auth_store_at(
+                    self.home_fd, self.account.pw_uid, self.account.pw_gid))
+            except BaseException as error:
+                print(f"empty credential-store preparation failed: {error}", file=sys.stderr)
+                os._exit(1)
+            os._exit(0)
+        _, status = os.waitpid(child, 0)
+        self.assertTrue(os.WIFEXITED(status))
+        self.assertEqual(os.WEXITSTATUS(status), 0)
+        store = self.home / ".local/share/opencode"
+        self.assertTrue(store.is_dir())
+        self.assertEqual({path.name for path in store.iterdir()}, {"tmux"},
+                         "prepare-auth must not require or create credentials")
+        self.assertEqual(store.stat().st_mode & 0o777, 0o700)
+        tmux_dir = store / "tmux"
+        self.assertTrue(tmux_dir.is_dir())
+        self.assertEqual(tmux_dir.stat().st_mode & 0o777, 0o700)
+
     def test_auth_store_repair_preserves_existing_credentials_and_tightens_modes(self):
         store = self.home / ".local/share/opencode"
         store.mkdir(parents=True, mode=0o775)

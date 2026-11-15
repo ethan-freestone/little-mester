@@ -69,17 +69,9 @@ if [ "$ambient_status" -eq 0 ] && version_is_pinned "$diagnostic_dir/ambient.out
   exit 0
 fi
 
-# Match the environment used by the protected OpenCode runner. This retry
-# distinguishes an SSH-shell environment mismatch from an installation defect.
-if timeout --signal=TERM --kill-after=1 3 /usr/bin/python3 -I \
-    /usr/local/libexec/lm-guest-user-dirs.py prepare-auth >/dev/null 2>&1; then
-  :
-else
-  prepare_auth_status=$?
-  printf 'KVM_M2_READINESS_FAIL check=opencode-prepare-auth exit=%s\n' "$prepare_auth_status"
-  cleanup_diagnostics
-  exit 44
-fi
+# Version is independent of authentication. Retry only in the exact
+# credential-free runner environment; auth-store preparation is tested by
+# the separate synthetic credential-store integration below.
 if run_version "$diagnostic_dir/protected.out" "$diagnostic_dir/protected.err" \
     /usr/bin/env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin \
     TERM=xterm-256color LANG=C.UTF-8 TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux \
@@ -94,7 +86,7 @@ else
   protected_status=$?
 fi
 if [ "$protected_status" -eq 0 ] && version_is_pinned "$diagnostic_dir/protected.out"; then
-  printf 'KVM_M2_READINESS_ENV_DIAG ambient_exit=%s ambient_class=%s protected_env=pass\n' \
+  printf 'KVM_M2_READINESS_ENV_DIAG ambient_exit=%s ambient_class=%s protected_version=pass\n' \
     "$ambient_status" \
     "$(failure_class "$ambient_status" "$diagnostic_dir/ambient.err" "$diagnostic_dir/ambient.out")"
   cleanup_diagnostics
