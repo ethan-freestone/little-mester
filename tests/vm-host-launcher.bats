@@ -368,15 +368,25 @@ assert '"growpart": {"mode": "growpart", "devices": ["/"], "ignore_growroot_disa
 assert '"resize_rootfs": True' in text
 assert 'df -B1 --output=size,used,avail /' in text and 'df --output=itotal,iused,iavail /' in text
 assert 'KVM_GUEST_STORAGE_PREFLIGHT_FAIL' in text and 'KVM_GUEST_PROVISION_FAIL' in text
-assert 'systemctl enable --now ssh.service' in text
+assert 'ssh-keygen -A' in text
+assert 'ssh-keygen -y -f /etc/ssh/ssh_host_ed25519_key >/dev/null 2>&1' in text
+assert 'sshd -t >/run/lm-sshd-config-check.log 2>&1' in text
+assert 'systemctl reset-failed ssh.service' in text
+assert 'systemctl enable --now ssh.socket' in text
 assert "ss -H -lnt4 'sport = :22'" in text
-assert 'KVM_GUEST_SSH_LISTENER state=ready' in text
-assert 'KVM_GUEST_SSH_LISTENER_FAIL' in text and 'KVM_GUEST_SSH_SERVICE_LOG' in text
+assert 'KVM_GUEST_SSH_SOCKET state=ready' in text
+assert 'KVM_GUEST_SSH_KEYS_READY state=validated' in text
+assert 'KVM_GUEST_SSH_HOSTKEY_FAIL' in text and 'KVM_GUEST_SSH_SERVICE_LOG' in text
 assert 'KVM_GUEST_SSH_NETWORK ipv4-addresses:' in text and 'KVM_GUEST_SSH_NETWORK ipv4-routes:' in text
+assert '-o StrictHostKeyChecking=yes' in text and '-o UserKnownHostsFile="$known_hosts"' in text
 assert 'KVM_SSH_FAILURE_CLASS=host-key-verification' in text
 assert 'KVM_SSH_FAILURE_CLASS=authentication-or-ssh-negotiation' in text
 assert 'KVM_SSH_FAILURE_CLASS=pre-identification-transport-reset' in text
-assert 'guest cloud-init provisioning or SSH listener failed before SSH readiness' in text
+assert "if ! grep -aq 'KVM_GUEST_SSH_KEYS_READY state=validated' \"$serial_log\"" in text
+assert 'systemctl is-active --quiet ssh.service && { state=$(cloud-init status' in text
+assert 'systemctl is-active --quiet ssh.service && test "$(cat /home/mester/workspace/persisted.txt)"' in text
+assert 'ssh_deletekeys' in text and '"ssh_deletekeys": False' in text
+assert 'guest cloud-init provisioning or SSH socket failed before SSH readiness' in text
 assert 'apt-get install -y --no-install-recommends' in text
 assert 'oauth_remaining > 120' in text
 assert 'ssh-keyscan' not in text

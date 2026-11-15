@@ -24,10 +24,10 @@ fail() {
     elif grep -Eqi 'Permission denied|no mutual signature|no matching .* found' "$tmp/readiness.log"; then
       printf '%s\n' 'KVM_SSH_FAILURE_CLASS=authentication-or-ssh-negotiation' >&2
     elif grep -Eqi 'kex_exchange_identification.*(reset|closed)|Connection refused|Connection reset by peer' "$tmp/readiness.log"; then
-      if [[ -n "${serial_log:-}" ]] && grep -aq 'KVM_GUEST_SSH_LISTENER state=ready' "$serial_log"; then
-        printf '%s\n' 'KVM_SSH_FAILURE_CLASS=pre-identification-transport-reset guest_ipv4_listener=confirmed-during-provisioning inspect_hostfwd-or-later-guest-state' >&2
+      if [[ -n "${serial_log:-}" ]] && grep -aq 'KVM_GUEST_SSH_KEYS_READY state=validated' "$serial_log"; then
+        printf '%s\n' 'KVM_SSH_FAILURE_CLASS=pre-identification-transport-reset guest_hostkeys=validated inspect_socket-activation-or-qemu-hostfwd' >&2
       else
-        printf '%s\n' 'KVM_SSH_FAILURE_CLASS=pre-identification-transport-reset guest_ipv4_listener=unconfirmed inspect_guest_sshd_or_network' >&2
+        printf '%s\n' 'KVM_SSH_FAILURE_CLASS=pre-identification-transport-reset guest_hostkeys=unconfirmed inspect_guest_cloud-init-or-network' >&2
       fi
     fi
   fi
@@ -471,9 +471,16 @@ ssh_diagnostic() {
   package_state=$(dpkg-query -W -f='${Status}' openssh-server 2>/dev/null || printf absent)
   service_active=$(systemctl is-active ssh.service 2>/dev/null || true)
   service_enabled=$(systemctl is-enabled ssh.service 2>/dev/null || true)
+  socket_active=$(systemctl is-active ssh.socket 2>/dev/null || true)
   [[ -n "$service_active" ]] || service_active=unknown
   [[ -n "$service_enabled" ]] || service_enabled=unknown
-  printf 'KVM_GUEST_SSH_DIAG phase=%s package=%s active=%s enabled=%s\n' "$phase" "$package_state" "$service_active" "$service_enabled"
+  [[ -n "$socket_active" ]] || socket_active=unknown
+  if [[ -s /etc/ssh/ssh_host_ed25519_key ]] && ssh-keygen -y -f /etc/ssh/ssh_host_ed25519_key >/dev/null 2>&1; then
+    hostkey_state=usable
+  else
+    hostkey_state=missing-or-unusable
+  fi
+  printf 'KVM_GUEST_SSH_DIAG phase=%s package=%s service_active=%s service_enabled=%s socket_active=%s ed25519_private=%s\n' "$phase" "$package_state" "$service_active" "$service_enabled" "$socket_active" "$hostkey_state"
   systemctl show ssh.service -p ActiveState -p SubState -p Result -p ExecMainStatus --no-pager 2>/dev/null | cut -c1-160 || true
   printf '%s\n' 'KVM_GUEST_SSH_NETWORK ipv4-addresses:'
   ip -brief -4 address show 2>/dev/null | sed -n '1,6p' | cut -c1-180 || true
@@ -507,22 +514,45 @@ apt-get update -qq || { rc=$?; storage_report apt-update-failed; printf 'KVM_GUE
 apt-get install -y --no-install-recommends tmux nodejs npm ca-certificates || { rc=$?; storage_report apt-install-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=apt-install exit=%s\n' "$rc" >&2; exit "$rc"; }
 npm install --global @opencode/cli@2.2.5 || { rc=$?; storage_report opencode-install-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=opencode-install exit=%s\n' "$rc" >&2; exit "$rc"; }
 install -d -o mester -g mester -m 0700 /home/mester/workspace /home/mester/.local/share/opencode
+# cloud-init 26.1 runs its ssh module in the init stage before runcmd. The
+# systemd ssh.socket can accept connections earlier, so validate per-instance
+# keys here and clear any socket-triggered ssh.service start-limit failures.
 ssh_diagnostic before-ensure
-if systemctl enable --now ssh.service >/dev/null 2>&1; then
-  :
+if ! ssh-keygen -A >/dev/null 2>&1; then
+  ssh_diagnostic hostkey-generation-failed
+  printf 'KVM_GUEST_SSH_HOSTKEY_FAIL stage=ssh-keygen-A\n' >&2
+  exit 75
+fi
+if [[ ! -s /etc/ssh/ssh_host_ed25519_key ]] || ! ssh-keygen -y -f /etc/ssh/ssh_host_ed25519_key >/dev/null 2>&1; then
+  ssh_diagnostic hostkey-validation-failed
+  printf 'KVM_GUEST_SSH_HOSTKEY_FAIL stage=ed25519-private-unusable\n' >&2
+  exit 76
+fi
+if sshd -t >/run/lm-sshd-config-check.log 2>&1; then
+  rm -f /run/lm-sshd-config-check.log
 else
   rc=$?
-  ssh_diagnostic service-start-failed
-  printf 'KVM_GUEST_PROVISION_FAIL stage=ssh-service exit=%s\n' "$rc" >&2
-  exit "$rc"
+  printf 'KVM_GUEST_SSH_HOSTKEY_FAIL stage=sshd-config-check exit=%s\n' "$rc" >&2
+  sed -n '1,5p' /run/lm-sshd-config-check.log | cut -c1-200 | tr -cd '\11\12\15\40-\176' >&2 || true
+  ssh_diagnostic sshd-config-check-failed
+  exit 77
 fi
-ssh_diagnostic after-ensure
+systemctl reset-failed ssh.service || { ssh_diagnostic reset-failed-error; printf 'KVM_GUEST_SSH_SERVICE_FAIL stage=reset-failed\n' >&2; exit 78; }
+if ! systemctl is-active --quiet ssh.socket; then
+  if ! systemctl enable --now ssh.socket >/dev/null 2>&1; then
+    ssh_diagnostic socket-start-failed
+    printf 'KVM_GUEST_SSH_SERVICE_FAIL stage=ssh-socket\n' >&2
+    exit 79
+  fi
+fi
+ssh_diagnostic after-hostkey-validation
 if ! ss -H -lnt4 'sport = :22' | awk '$4 == "0.0.0.0:22" || ($4 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:22$/ && $4 !~ /^127\./) { found=1 } END { exit !found }'; then
-  printf 'KVM_GUEST_SSH_LISTENER_FAIL reason=no-nonloopback-ipv4-listener port=22\n' >&2
-  ssh_diagnostic listener-missing
+  printf 'KVM_GUEST_SSH_SOCKET_FAIL reason=no-nonloopback-ipv4-listener port=22\n' >&2
+  ssh_diagnostic socket-listener-missing
   exit 74
 fi
-printf 'KVM_GUEST_SSH_LISTENER state=ready address=nonloopback-ipv4 port=22\n'
+printf 'KVM_GUEST_SSH_SOCKET state=ready address=nonloopback-ipv4 port=22\n'
+printf 'KVM_GUEST_SSH_KEYS_READY state=validated ed25519_private=usable sshd_config=valid\n'
 storage_report after-packages
 printf ready > /var/tmp/lm-kvm-trial-ready
 printf 'KVM_GUEST_PROVISION_DONE exit=0\n'
@@ -610,11 +640,20 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
   (( remaining > 0 )) || break
   attempt_timeout=8
   (( remaining < attempt_timeout )) && attempt_timeout=$remaining
+  if grep -aEq 'KVM_GUEST_SSH_HOSTKEY_FAIL|KVM_GUEST_SSH_SERVICE_FAIL|KVM_GUEST_SSH_SOCKET_FAIL' "$serial_log"; then
+    printf '%s\n' 'KVM_GUEST_SSH_DIAGNOSTIC: cloud-init host-key/socket preparation failed' >&2
+    grep -aE 'KVM_GUEST_(SSH|PROVISION)' "$serial_log" | tail -n 24 >&2 || true
+    fail 'guest SSH host-key or socket preparation failed before readiness'
+  fi
   # The single-quoted payload is intentionally interpreted only by the guest shell.
   # shellcheck disable=SC2016
-  if [[ -s "$known_hosts" ]]; then
+  # Do not connect through the already-listening ssh.socket until cloud-init
+  # has installed/validated host keys, or the service can hit systemd's start limit.
+  if ! grep -aq 'KVM_GUEST_SSH_KEYS_READY state=validated' "$serial_log"; then
+    last_ssh_rc=waiting-for-cloud-init-hostkeys
+  elif [[ -s "$known_hosts" ]]; then
     if timeout --signal=TERM --kill-after=1 "$attempt_timeout" ssh "${ssh_args[@]}" \
-        'state=$(cloud-init status --long 2>&1 || true); printf "%s\n" "$state"; if printf "%s\n" "$state" | grep -Eq "^(status|extended_status): error"; then exit 42; fi; test -f /var/lib/cloud/instance/boot-finished && test "$(cat /var/tmp/lm-kvm-trial-ready)" = ready' \
+        'systemctl is-active --quiet ssh.service && { state=$(cloud-init status --long 2>&1 || true); printf "%s\n" "$state"; if printf "%s\n" "$state" | grep -Eq "^(status|extended_status): error"; then exit 42; fi; test -f /var/lib/cloud/instance/boot-finished && test "$(cat /var/tmp/lm-kvm-trial-ready)" = ready; }' \
         >"$tmp/readiness.log" 2>&1; then
       ready=1
       break
@@ -624,10 +663,10 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
         cat "$tmp/readiness.log" >&2
         fail 'cloud-init reported an error before guest readiness'
       fi
-      if grep -aEq 'KVM_GUEST_STORAGE_PREFLIGHT_FAIL|KVM_GUEST_PROVISION_FAIL|KVM_GUEST_SSH_LISTENER_FAIL' "$serial_log"; then
+      if grep -aEq 'KVM_GUEST_STORAGE_PREFLIGHT_FAIL|KVM_GUEST_PROVISION_FAIL|KVM_GUEST_SSH_SOCKET_FAIL' "$serial_log"; then
         printf '%s\n' 'KVM_GUEST_PROVISIONING_DIAGNOSTIC: explicit cloud-init provisioning/SSH failure marker observed' >&2
         grep -aE 'KVM_GUEST_(STORAGE|PROVISION|SSH)' "$serial_log" | tail -n 24 >&2 || true
-        fail 'guest cloud-init provisioning or SSH listener failed before SSH readiness'
+        fail 'guest cloud-init provisioning or SSH socket failed before SSH readiness'
       fi
     fi
   else
@@ -797,7 +836,7 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
   (( remaining < attempt_timeout )) && attempt_timeout=$remaining
 # shellcheck disable=SC2016
   if timeout --signal=TERM --kill-after=1 "$attempt_timeout" ssh "${ssh_args[@]}" \
-      'test "$(cat /home/mester/workspace/persisted.txt)" = persistent-fixture && test "$(/usr/local/bin/opencode --version)" = "opencode v2.2.5"' \
+      'systemctl is-active --quiet ssh.service && test "$(cat /home/mester/workspace/persisted.txt)" = persistent-fixture && test "$(/usr/local/bin/opencode --version)" = "opencode v2.2.5"' \
       >/dev/null 2>&1; then
     ready=1
     break

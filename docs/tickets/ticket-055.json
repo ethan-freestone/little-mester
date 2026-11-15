@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-15T10:44:05.165Z",
+  "updated_at": "2026-11-15T11:19:13.276Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -135,6 +135,16 @@
       "timestamp": "2026-11-15T10:44:05.165Z",
       "author": "cli",
       "body": "2026-11-15 hosted SSH-readiness follow-up: owner reports source ce6d9c76e1118e1ac9166478ce3ea8f62740cb8e / merge c6e80afd8d35deff17b86cb5993f2a90a6d11192: 24-GiB overlay/root growth confirmed, ~20 GB available and ~2.9M free inodes, guest package install completes, cloud-init finishes ~62s, but loopback forwarded SSH resets during kex until the unchanged 120s bound expires. Pinned Noble release manifest confirms openssh-server is installed. This reset is before SSH identification, so the report alone does not distinguish guest sshd/listener from QEMU forwarding; it is not evidence of auth or host-key failure. CI-only delta now records bounded package/systemd state, active/enabled status, IPv4 addresses/routes, listener sockets and filtered SSH service errors on serial; explicitly enables/starts ssh.service and requires a non-loopback IPv4 port-22 listener before provisioning success; emits exit markers and classifies host-key/auth/pre-identification reset outcomes without weakening strict known_hosts. QEMU hostfwd remains loopback host port -> guest :22, KVM/identity/deadlines/cleanup unchanged; no disk or timeout change. Local: Bats 106/106, ci-kvm-launch 1/1, synthetic OAuth 18/18, browser-auth 37/37, generated cloud-config and embedded shell syntax, bash -n, ShellCheck, diff checks pass. Sol Medium focused review PASS; no QEMU/KVM run. Hosted root cause and readiness remain unverified pending owner rerun; A1-A5 unchanged and pending."
+    },
+    {
+      "timestamp": "2026-11-15T11:19:00.435Z",
+      "author": "cli",
+      "body": "2026-11-15 hosted SSH root-cause/fix follow-up: owner-provided candidate 429621a evidence was , repeated ssh.service failures while ssh.socket listened on 0.0.0.0:22; cloud-init displayed host-key information later. Source inspection of the pinned cloud-init 26.1 cloud.cfg.tmpl confirms its ssh module runs in cloud_init_modules (init stage) before config-stage runcmd/scripts-user. The CI runner was opening the forwarded SSH port immediately during boot, allowing ssh.socket to activate ssh.service before cloud-init had installed the per-instance keys; repeated failed activations could leave the unit start-limited. Fix gates all initial SSH probes on a guest marker emitted only after ssh-keygen -A (fills missing per-instance keys without replacing existing ones), Ed25519 private-key parse check, sshd -t, and systemd reset-failed. It retains ssh.socket activation, does not print private keys, and uses the existing host-generated unique per-run key with ssh_deletekeys=false. Readiness now requires the strict pre-pinned known_hosts SSH identity to authenticate and the remote command to confirm ssh.service active; the post-reboot strict SSH probe checks service activity too, verifying persisted identity. No disk, timeout, workflow, KVM, cleanup, or persistent-parent change. Local validation: Bats 106/106, ci-kvm-launch 1/1, synthetic OAuth 18/18, browser-auth 37/37, generated cloud-config/embedded shell syntax, bash -n, ShellCheck and diff checks pass. Sol Medium review PASS. No local QEMU/KVM run. Hosted confirmation pending owner push; A1-A5 remain pending."
+    },
+    {
+      "timestamp": "2026-11-15T11:19:13.275Z",
+      "author": "cli",
+      "body": "Correction: the exact hosted SSH diagnostic is sshd: no hostkeys available -- exiting. A shell quoting issue omitted that diagnostic text from the preceding comment; the recorded cloud-init ordering analysis, scoped fix, test results, Sol review, and pending acceptance statements are otherwise accurate."
     }
   ]
 }
