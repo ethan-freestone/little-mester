@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prove pinned OpenCode can ignore workspace-controlled server config."""
 
+import importlib.util
 import json
 import os
 import pathlib
@@ -15,6 +16,11 @@ try:
     import pexpect
 except ImportError:  # pragma: no cover - environment guard
     pexpect = None
+
+CHECK_PATH = pathlib.Path(__file__).with_name("ci-opencode-config-check.py")
+CHECK_SPEC = importlib.util.spec_from_file_location("ci_opencode_config_check", CHECK_PATH)
+CONFIG_CHECK = importlib.util.module_from_spec(CHECK_SPEC)
+CHECK_SPEC.loader.exec_module(CONFIG_CHECK)
 
 
 class ProjectConfigIsolationTests(unittest.TestCase):
@@ -47,12 +53,14 @@ class ProjectConfigIsolationTests(unittest.TestCase):
             "share": "manual",
             "model": "attacker/untrusted",
             "permission": {"bash": "allow"},
+            "plugins": ["/tmp/lm-ci-hostile-plugin-sentinel"],
         }), encoding="utf-8")
         local_config = self.workspace / ".opencode"
         local_config.mkdir(mode=0o700)
         (local_config / "opencode.json").write_text(json.dumps({
             "$schema": "https://opencode.ai/config.json",
             "share": "manual",
+            "plugins": ["/tmp/lm-ci-hostile-plugin-sentinel"],
         }), encoding="utf-8")
         self.plugin_dir = local_config / "plugins/sentinel"
         self.plugin_dir.mkdir(parents=True, mode=0o700)
@@ -103,6 +111,78 @@ class ProjectConfigIsolationTests(unittest.TestCase):
         protected = documents[str(self.home / "protected.json")]
         self.assertEqual(protected.get("update"), "disable")
         self.assertEqual(protected.get("share"), "disabled")
+
+    def test_standalone_ci_config_check_uses_real_pinned_cli_and_both_controls(self):
+        result = subprocess.run(
+            [
+                os.environ.get("PYTHON", "/usr/bin/python3"), str(CHECK_PATH),
+                "--binary", self.binary,
+                "--workspace", str(self.workspace),
+                "--home", str(self.home),
+                "--protected-config", str(self.home / "protected.json"),
+                "--protected-plugin", "/tmp/lm-ci-protected-plugin-fixture",
+            ],
+            cwd=self.workspace,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr[:400])
+        self.assertEqual(
+            result.stdout.strip(),
+            "KVM_M2_CONFIG_PASS operation=opencode-debug-config",
+        )
+
+    def test_failure_diagnostic_uses_fixed_allowlisted_cause(self):
+        message = (
+            "EACCES: permission denied reading /private/path/opencode.json "
+            "token=synthetic-secret-value"
+        )
+        cause = CONFIG_CHECK.failure_cause(message)
+        self.assertEqual(cause, "filesystem-permission")
+        self.assertNotIn("/private/path", cause)
+        self.assertNotIn("synthetic-secret-value", cause)
+        self.assertEqual(
+            CONFIG_CHECK.failure_cause("unrecognized argument --standalone"),
+            "cli-invocation",
+        )
+        self.assertEqual(CONFIG_CHECK.failure_cause("Invalid JSON config"), "invalid-config")
+        self.assertEqual(CONFIG_CHECK.failure_cause("ENOENT: missing file"), "missing-path")
+        self.assertEqual(CONFIG_CHECK.failure_cause("cannot open config.json"), "opencode-exit")
+
+    def test_failed_cli_emits_sanitized_operation_diagnostic(self):
+        fake = self.root / "failing-opencode"
+        fake.write_text(
+            "#!/bin/sh\nprintf '%s\\n' 'EACCES /private/opencode.json token=do-not-print' >&2\nexit 1\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o700)
+        result = subprocess.run(
+            [
+                os.environ.get("PYTHON", "/usr/bin/python3"), str(CHECK_PATH),
+                "--binary", str(fake),
+                "--workspace", str(self.workspace),
+                "--home", str(self.home),
+                "--protected-config", str(self.home / "protected.json"),
+                "--protected-plugin", "/tmp/lm-ci-protected-plugin-fixture",
+            ],
+            cwd=self.workspace,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 44)
+        self.assertEqual(
+            result.stderr.strip(),
+            "KVM_M2_CONFIG_FAIL operation=opencode-debug-config "
+            "phase=positive-control cause=filesystem-permission exit=1",
+        )
+        self.assertNotIn("/private/opencode.json", result.stderr)
+        self.assertNotIn("do-not-print", result.stderr)
 
     @unittest.skipIf(pexpect is None, "pexpect is required for project plugin discovery probe")
     def test_disable_project_config_prevents_project_plugin_discovery(self):

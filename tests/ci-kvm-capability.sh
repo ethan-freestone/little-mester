@@ -453,6 +453,10 @@ opencode_readiness = root / "lib/vm/opencode-readiness.sh"
 files.append({"path": "/usr/local/libexec/lm-ci-opencode-readiness", "owner": "root:root",
               "permissions": "0755", "encoding": "b64",
               "content": base64.b64encode(opencode_readiness.read_bytes()).decode("ascii")})
+opencode_config_check = root / "tests/ci-opencode-config-check.py"
+files.append({"path": "/usr/local/libexec/lm-ci-opencode-config-check", "owner": "root:root",
+              "permissions": "0755", "encoding": "b64",
+              "content": base64.b64encode(opencode_config_check.read_bytes()).decode("ascii")})
 for path, content in contract.PROTECTED_PLUGIN_ASSETS.items():
     files.append({"path": path,
                   "owner": "root:root", "permissions": "0644", "encoding": "b64",
@@ -689,7 +693,7 @@ printf 'KVM_TRIAL_PASS: pinned guest booted with accel=kvm and passed cloud-init
 stage_end boot
 
 ssh_guest() {
-  local remaining=$((qemu_deadline - SECONDS)) limit=20 stage_left
+  local remaining=$((qemu_deadline - SECONDS)) limit=${2:-20} stage_left
   (( remaining > 0 )) || fail 'QEMU integration exceeded its overall bounded deadline'
   stage_left="$(stage_remaining)"
   (( remaining > stage_left )) && remaining=$stage_left
@@ -734,45 +738,7 @@ ssh_guest 'test "$(stat -c %u:%a /etc/opencode/opencode.json)" = "0:644" && grep
 # shellcheck disable=SC2016
 ssh_guest 'mkdir -p /home/mester/.local/share/opencode /home/mester/workspace/.opencode && chmod 0775 /home/mester/.local /home/mester/.local/share /home/mester/.local/share/opencode && python3 -c '\''import sqlite3; db=sqlite3.connect("/home/mester/.local/share/opencode/opencode.db"); db.execute("create table session_fixture(value text)"); db.execute("insert into session_fixture values (?)", ("synthetic-session-history",)); db.commit(); db.close()'\'' && chmod 0664 /home/mester/.local/share/opencode/opencode.db && printf "{\"provider\":\"synthetic-fixture\",\"marker\":\"preserve-auth-bytes\"}" > /home/mester/.local/share/opencode/auth.json && chmod 0664 /home/mester/.local/share/opencode/auth.json && db_before=$(sha256sum /home/mester/.local/share/opencode/opencode.db) && auth_before=$(sha256sum /home/mester/.local/share/opencode/auth.json) && printf persistent-fixture > /home/mester/workspace/persisted.txt && chmod 0600 /home/mester/workspace/persisted.txt && printf "{\"model\":\"hostile-direct-marker\",\"plugins\":[\"/tmp/lm-ci-hostile-plugin-sentinel\"]}" > /home/mester/workspace/opencode.json && printf "{\"model\":\"hostile-nested-marker\",\"plugins\":[\"/tmp/lm-ci-hostile-plugin-sentinel\"]}" > /home/mester/workspace/.opencode/opencode.json && /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth && test "$(stat -c %a /home/mester/.local/share/opencode/opencode.db)" = 600 && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && test "$(sha256sum /home/mester/.local/share/opencode/opencode.db)" = "$db_before" && test "$(sha256sum /home/mester/.local/share/opencode/auth.json)" = "$auth_before"'
 ssh_guest 'printf unsafe-target-preserved > /tmp/lm-auth-unsafe-target && ln -s /tmp/lm-auth-unsafe-target /home/mester/.local/share/opencode/opencode.db-wal; if /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth >/dev/null 2>&1; then exit 1; fi; test "$(cat /tmp/lm-auth-unsafe-target)" = unsafe-target-preserved; rm /home/mester/.local/share/opencode/opencode.db-wal'
-ssh_guest 'cd /home/mester/workspace && /usr/bin/python3 - <<'\''PY'\''
-import json, os, pathlib, subprocess
-
-workspace = pathlib.Path("/home/mester/workspace")
-protected = {
-    "HOME": "/home/mester", "PATH": "/usr/local/bin:/usr/bin:/bin",
-    "TERM": "xterm-256color", "LANG": "C.UTF-8",
-    "XDG_DATA_HOME": "/home/mester/.local/share",
-    "XDG_CONFIG_HOME": "/home/mester/.config",
-    "OPENCODE_CONFIG": "/etc/opencode/opencode.json",
-    "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
-    "OPENCODE_CLI_CONFIG_CONTENT": json.dumps({
-        "plugins": ["/etc/opencode/plugins/little-mester-exit-confirm"],
-        "keybinds": {"app.exit": "none", "prompt.clear": "none"},
-    }, separators=(",", ":")),
-}
-command = ["/usr/local/bin/opencode", "debug", "config", "--standalone"]
-def config_sources(environment):
-    result = subprocess.run(command, cwd=workspace, env=environment, text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            timeout=20, check=True)
-    return json.loads(result.stdout)
-
-hostile = {str(workspace / "opencode.json"),
-           str(workspace / ".opencode/opencode.json")}
-enabled = {key: value for key, value in protected.items()
-           if key != "OPENCODE_DISABLE_PROJECT_CONFIG"}
-enabled_sources = config_sources(enabled)
-assert hostile <= {item["path"] for item in enabled_sources
-                   if item.get("type") == "document"}, "positive control did not discover project configs"
-assert "/tmp/lm-ci-hostile-plugin-sentinel" in json.dumps(enabled_sources), \
-    "positive control did not load hostile plugin configuration"
-protected_sources = config_sources(protected)
-assert hostile.isdisjoint({item["path"] for item in protected_sources
-                           if item.get("type") == "document"}), \
-    "protected configuration discovered hostile project files"
-assert "/tmp/lm-ci-hostile-plugin-sentinel" not in json.dumps(protected_sources), \
-    "protected configuration retained hostile plugin configuration"
-PY'
+ssh_guest '/usr/bin/python3 -I /usr/local/libexec/lm-ci-opencode-config-check --workspace /home/mester/workspace --home /home/mester --protected-config /etc/opencode/opencode.json --protected-plugin /etc/opencode/plugins/little-mester-exit-confirm' 50
 ssh_tty_guest 'cd /home/mester/workspace && timeout --signal=TERM --kill-after=2 8 /usr/local/bin/lm-opencode >/dev/null 2>&1 || test "$?" = 124'
 # shellcheck disable=SC2016
 ssh_guest 'test "$(stat -c %a /home/mester/.local/share/opencode/opencode.db)" = 600 && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && test "$(stat -c %a /home/mester/.local/share/opencode)" = 700 && TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux has-session -t little-mester-opencode && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_dead}")" = 0 && TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux show-environment -g OPENCODE_CONFIG | grep -Fx OPENCODE_CONFIG=/etc/opencode/opencode.json && TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux show-environment -g OPENCODE_DISABLE_PROJECT_CONFIG | grep -Fx OPENCODE_DISABLE_PROJECT_CONFIG=1'
