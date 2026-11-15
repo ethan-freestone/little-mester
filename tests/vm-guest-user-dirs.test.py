@@ -100,7 +100,7 @@ class GuestUserDirectoryTests(unittest.TestCase):
 
     def test_all_user_config_parents_are_private_and_nonroot_can_create_file(self):
         guest_dirs.prepare_config_dirs(self.home_fd, self.account.pw_uid, self.account.pw_gid)
-        for components in guest_dirs.USER_DIRS:
+        for components in (*guest_dirs.USER_DIRS, *guest_dirs.OPENCODE_RUNTIME_DIRS[3:]):
             path = self.home.joinpath(*components)
             info = path.lstat()
             self.assertTrue(path.is_dir())
@@ -126,6 +126,81 @@ class GuestUserDirectoryTests(unittest.TestCase):
         self.assertEqual(os.WEXITSTATUS(status), 0)
         self.assertEqual(list(self.home.glob(".mester-write-check-*")), [])
         self.assertEqual(list((self.home / ".config/systemd/user").glob(".mester-write-check-*")), [])
+
+    def test_opencode_runtime_preparation_is_credential_independent(self):
+        guest_dirs.prepare_opencode_dirs(
+            self.home_fd, self.account.pw_uid, self.account.pw_gid
+        )
+        for components in guest_dirs.OPENCODE_RUNTIME_DIRS:
+            path = self.home.joinpath(*components)
+            info = path.lstat()
+            self.assertTrue(stat.S_ISDIR(info.st_mode))
+            self.assertEqual((info.st_uid, info.st_gid), (self.account.pw_uid, self.account.pw_gid))
+            self.assertEqual(stat.S_IMODE(info.st_mode), 0o700)
+        self.assertFalse((self.home / ".local/share/opencode/auth.json").exists())
+
+    @unittest.skipUnless(pathlib.Path("/usr/local/bin/opencode").is_file(),
+                         "pinned OpenCode executable is not installed")
+    def test_pinned_opencode_version_needs_prepared_default_state_chain(self):
+        executable = pathlib.Path("/usr/local/bin/opencode")
+        version = subprocess.run(
+            [str(executable), "--version"], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, check=False, timeout=8,
+        )
+        if version.returncode != 0 or version.stdout.strip() != "opencode v2.2.5":
+            self.skipTest("installed OpenCode is not the pinned 2.2.5 runtime")
+
+        (self.home / ".local/share/opencode").mkdir(parents=True, mode=0o700)
+        (self.home / ".local").chmod(0o700)
+        (self.home / ".local/share").chmod(0o700)
+        (self.home / ".local/share/opencode").chmod(0o700)
+        (self.home / ".cache").mkdir(mode=0o700)
+        work = self.root / "workspace"
+        work.mkdir(mode=0o700)
+        if os.geteuid() == 0:
+            for path in (work, self.home / ".local/share", self.home / ".local/share/opencode",
+                         self.home / ".cache"):
+                os.chown(path, self.account.pw_uid, self.account.pw_gid)
+            (self.home / ".local").chmod(0o755)
+        else:
+            (self.home / ".local").chmod(0o500)
+        env = {
+            "HOME": str(self.home),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "XDG_DATA_HOME": str(self.home / ".local/share"),
+            "XDG_CONFIG_HOME": "/etc",
+            "XDG_CACHE_HOME": str(self.home / ".cache"),
+            "OPENCODE_CONFIG": "/etc/opencode/opencode.json",
+            "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        }
+
+        def drop_privileges():
+            if os.geteuid() == 0:
+                os.setgroups([])
+                os.setgid(self.account.pw_gid)
+                os.setuid(self.account.pw_uid)
+
+        def run_version():
+            return subprocess.run(
+                [str(executable), "--version"], cwd=work, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                check=False, timeout=8,
+                preexec_fn=drop_privileges if os.geteuid() == 0 else None,
+            )
+
+        denied = run_version()
+        self.assertEqual(denied.returncode, 1)
+        self.assertIn("EACCES", denied.stderr)
+        self.assertIn(".local/state", denied.stderr)
+
+        guest_dirs.prepare_opencode_dirs(
+            self.home_fd, self.account.pw_uid, self.account.pw_gid
+        )
+        self.assertTrue((self.home / ".local/state/opencode").is_dir())
+        corrected = run_version()
+        self.assertEqual(corrected.returncode, 0, corrected.stderr[:300])
+        self.assertEqual(corrected.stdout.strip(), "opencode v2.2.5")
 
     def test_proxy_configs_are_created_privately_without_following_existing_symlink(self):
         guest_dirs.prepare_rootless_config(self.home_fd, self.account.pw_uid, self.account.pw_gid)
@@ -310,15 +385,31 @@ class GuestUserDirectoryTests(unittest.TestCase):
             os.chown(path, 0, 0)
             os.chmod(path, 0o755)
 
+        state_dir = self.home / ".local/state"
+        state_dir.mkdir(parents=True, mode=0o755)
+        state_sentinel = state_dir / "root-owned-sentinel"
+        state_sentinel.write_text("leave state contents alone", encoding="utf-8")
+        os.chown(state_sentinel, 0, 0)
+        for path in (self.home / ".local", state_dir):
+            os.chown(path, 0, 0)
+            os.chmod(path, 0o755)
+
         guest_dirs.prepare_config_dirs(self.home_fd, self.account.pw_uid, self.account.pw_gid)
 
         for path in (self.home / ".config", self.home / ".config/systemd", user_dir):
             info = path.stat()
             self.assertEqual((info.st_uid, info.st_gid), (self.account.pw_uid, self.account.pw_gid))
             self.assertEqual(info.st_mode & 0o777, 0o700)
+        for path in (self.home / ".local", state_dir, state_dir / "opencode"):
+            info = path.stat()
+            self.assertEqual((info.st_uid, info.st_gid), (self.account.pw_uid, self.account.pw_gid))
+            self.assertEqual(info.st_mode & 0o777, 0o700)
         sentinel_info = sentinel.stat()
         self.assertEqual((sentinel_info.st_uid, sentinel_info.st_gid), (0, 0))
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "leave file ownership alone")
+        state_info = state_sentinel.stat()
+        self.assertEqual((state_info.st_uid, state_info.st_mode & 0o777), (0, 0o644))
+        self.assertEqual(state_sentinel.read_text(encoding="utf-8"), "leave state contents alone")
 
     def test_symlinked_config_parent_is_refused_without_touching_target(self):
         target = self.root / "outside"

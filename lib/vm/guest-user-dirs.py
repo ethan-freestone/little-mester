@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare only the fixed guest user's rootless Docker configuration dirs."""
+"""Prepare the fixed guest user's rootless and OpenCode runtime directories."""
 
 from __future__ import annotations
 
@@ -21,6 +21,13 @@ USER_DIRS = (
     (".local",),
     (".local", "share"),
     (".local", "share", "opencode"),
+)
+OPENCODE_RUNTIME_DIRS = (
+    (".local",),
+    (".local", "share"),
+    (".local", "share", "opencode"),
+    (".local", "state"),
+    (".local", "state", "opencode"),
 )
 PROXY_UNIT_CONFIG = (
     b"[Service]\n"
@@ -131,15 +138,32 @@ def prepare_config_dirs(home_fd: int, uid: int, gid: int) -> None:
         raise Refusal("/home/mester ownership changed during provisioning")
     os.fchmod(home_fd, 0o700)
 
-    for components in USER_DIRS:
-        parent_fd = os.dup(home_fd)
-        try:
-            for component in components:
-                child_fd = _open_or_create_owned_dir(parent_fd, component, uid, gid)
-                os.close(parent_fd)
-                parent_fd = child_fd
-        finally:
+    for components in (*USER_DIRS, *OPENCODE_RUNTIME_DIRS[3:]):
+        _prepare_owned_directory_chain(home_fd, components, uid, gid)
+
+
+def _prepare_owned_directory_chain(
+    home_fd: int, components: tuple[str, ...], uid: int, gid: int
+) -> None:
+    parent_fd = os.dup(home_fd)
+    try:
+        for component in components:
+            child_fd = _open_or_create_owned_dir(parent_fd, component, uid, gid)
             os.close(parent_fd)
+            parent_fd = child_fd
+    finally:
+        os.close(parent_fd)
+
+
+def prepare_opencode_dirs(home_fd: int, uid: int, gid: int) -> None:
+    """Prepare OpenCode data and state directories without touching credentials."""
+    home_info = os.fstat(home_fd)
+    _protected_directory(home_info, label="/home/mester")
+    if (home_info.st_uid, home_info.st_gid) != (uid, gid):
+        raise Refusal("/home/mester ownership changed during provisioning")
+    os.fchmod(home_fd, 0o700)
+    for components in OPENCODE_RUNTIME_DIRS:
+        _prepare_owned_directory_chain(home_fd, components, uid, gid)
 
 
 def _open_directory_chain(home_fd: int, components: tuple[str, ...]) -> int:
@@ -396,12 +420,23 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="operation", required=True)
     prepare = commands.add_parser("prepare")
     prepare.add_argument("uid", type=int)
+    prepare_opencode = commands.add_parser("prepare-opencode")
+    prepare_opencode.add_argument("uid", type=int)
     commands.add_parser("verify-write")
     commands.add_parser("prepare-auth")
     args = parser.parse_args(argv)
     try:
         if args.operation == "prepare":
             provision(args.uid)
+        elif args.operation == "prepare-opencode":
+            account = pwd.getpwnam("mester")
+            if os.geteuid() != 0 or account.pw_uid != args.uid or account.pw_dir != "/home/mester":
+                raise Refusal("OpenCode directories require root and the matching guest mester account")
+            home_fd = open_guest_home(args.uid, account.pw_gid)
+            try:
+                prepare_opencode_dirs(home_fd, args.uid, account.pw_gid)
+            finally:
+                os.close(home_fd)
         elif args.operation == "verify-write":
             verify_user_write()
         else:

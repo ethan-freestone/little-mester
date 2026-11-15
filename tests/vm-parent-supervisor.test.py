@@ -1296,6 +1296,8 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 self.assertEqual(cli_content["keybinds"], {"app.exit": "none", "prompt.clear": "none"})
                 self.assertIn("test \"$(opencode --version)\" = 'opencode v2.2.5'",
                               config["runcmd"][0][-1])
+                self.assertIn("guest-user-dirs.py prepare-opencode 1000",
+                              config["runcmd"][0][-1])
                 for script in (launcher, runner, auth_launcher):
                     self.assertEqual(real_run(["/bin/sh", "-n"], input=script.encode(),
                                               check=False).returncode, 0)

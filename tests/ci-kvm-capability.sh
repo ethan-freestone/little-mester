@@ -521,7 +521,8 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq || { rc=$?; storage_report apt-update-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=apt-update exit=%s\n' "$rc" >&2; exit "$rc"; }
 apt-get install -y --no-install-recommends tmux nodejs npm ca-certificates || { rc=$?; storage_report apt-install-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=apt-install exit=%s\n' "$rc" >&2; exit "$rc"; }
 npm install --global @opencode/cli@2.2.5 || { rc=$?; storage_report opencode-install-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=opencode-install exit=%s\n' "$rc" >&2; exit "$rc"; }
-install -d -o mester -g mester -m 0700 /home/mester/workspace /home/mester/.local/share/opencode
+install -d -o mester -g mester -m 0700 /home/mester/workspace
+/usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-opencode 1000
 # cloud-init's ssh module generates keys in its init stage, before runcmd.
 # Keep early socket failures recoverable and report only key metadata.
 ssh_diagnostic before-ensure

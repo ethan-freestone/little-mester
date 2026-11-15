@@ -253,7 +253,7 @@ def _prepare_parent_seed(state, lock_fd: int, home: str | None = None) -> bytes:
                     *plugin_files,
                 ],
                 "packages": ["tmux", "nodejs", "npm"],
-                "runcmd": [["bash", "-lc", "install -d -o mester -g mester -m 0750 /home/mester/workspace && npm install --global @opencode/cli@2.2.5 && test \"$(opencode --version)\" = 'opencode v2.2.5' && chown root:root /usr/local/bin/opencode && chmod 0755 /usr/local/bin/opencode && systemctl restart ssh"]],
+                "runcmd": [["bash", "-lc", "install -d -o mester -g mester -m 0750 /home/mester/workspace && /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-opencode 1000 && npm install --global @opencode/cli@2.2.5 && test \"$(opencode --version)\" = 'opencode v2.2.5' && chown root:root /usr/local/bin/opencode && chmod 0755 /usr/local/bin/opencode && systemctl restart ssh"]],
             }
             userdata = b"#cloud-config\n" + json.dumps(user_data, separators=(",", ":")).encode("utf-8") + b"\n"
             metadata = b"instance-id: little-mester-parent-default\nlocal-hostname: little-mester-parent\n"
