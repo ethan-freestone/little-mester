@@ -26,6 +26,17 @@ parent_state = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(parent_state)
 
 
+def _script_for_fixture_uid(source: str, uid: int | None = None) -> str:
+    """Adapt only the guest's fixed mester UID for host-owned temp fixtures."""
+    fixture_uid = os.getuid() if uid is None else uid
+    source_uids = [int(value) for value in re.findall(r"(?:s\.st_uid==|st\.st_uid!=)(\d+)", source)]
+    if not source_uids or any(value != 1000 for value in source_uids):
+        raise AssertionError("extracted guest source no longer pins mester UID 1000")
+    adapted = re.sub(r"(s\.st_uid==)\d+", rf"\g<1>{fixture_uid}", source)
+    adapted = re.sub(r"(st\.st_uid!=)\d+", rf"\g<1>{fixture_uid}", adapted)
+    return adapted
+
+
 class ParentStateTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -109,6 +120,14 @@ class ParentStateTests(unittest.TestCase):
                 f"p={str(database)!r}")
             namespace = {"__name__": "__main__"}
             output = io.StringIO()
+            wrong_uid_source = _script_for_fixture_uid(source, os.getuid() + 1)
+            with mock.patch.object(sys, "argv", ["history-probe", second, second[::-1],
+                                                   "openai/gpt-test", first]), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    exec(compile(wrong_uid_source, "history-probe-wrong-owner", "exec"), namespace)
+            self.assertEqual(error.exception.code, 44)
+            source = _script_for_fixture_uid(source)
             with mock.patch.object(sys, "argv", ["history-probe", second, second[::-1],
                                                    "openai/gpt-test", first]), \
                     contextlib.redirect_stdout(output):
@@ -174,6 +193,15 @@ class ParentStateTests(unittest.TestCase):
             plugin_path.chmod(0o600)
             source = parent_state._M2_PROTECTION_CLEANUP_SCRIPT.replace(
                 "w='/home/mester/workspace'", f"w={str(workspace)!r}")
+            wrong_uid_source = _script_for_fixture_uid(source, os.getuid() + 1)
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    exec(compile(wrong_uid_source, "protection-cleanup-wrong-owner", "exec"),
+                         {"__name__": "__main__"})
+            self.assertEqual(error.exception.code, 44)
+            self.assertTrue(config_path.exists())
+            self.assertTrue(plugin_path.exists())
+            source = _script_for_fixture_uid(source)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 exec(compile(source, "protection-cleanup", "exec"), {"__name__": "__main__"})
@@ -195,8 +223,8 @@ class ParentStateTests(unittest.TestCase):
             marker.write_bytes(parent_state._M2_HOSTILE_PLUGIN.encode())
             marker.chmod(0o600)
             (workspace / ".opencode").symlink_to(outside, target_is_directory=True)
-            source = parent_state._M2_PROTECTION_CLEANUP_SCRIPT.replace(
-                "w='/home/mester/workspace'", f"w={str(workspace)!r}")
+            source = _script_for_fixture_uid(parent_state._M2_PROTECTION_CLEANUP_SCRIPT.replace(
+                "w='/home/mester/workspace'", f"w={str(workspace)!r}"))
             with self.assertRaises(OSError):
                 exec(compile(source, "protection-cleanup", "exec"), {"__name__": "__main__"})
             self.assertTrue(config_path.exists())
@@ -209,14 +237,20 @@ class ParentStateTests(unittest.TestCase):
             os.chmod(workspace, 0o750)
             create_source = parent_state._WORKSPACE_CANARY_CREATE_SCRIPT.replace(
                 "'/home/mester/workspace'", repr(str(workspace)))
+            create_source = _script_for_fixture_uid(create_source)
             with contextlib.redirect_stdout(io.StringIO()):
                 exec(compile(create_source, "canary-create", "exec"), {"__name__": "__main__"})
             check_source = parent_state._WORKSPACE_CANARY_CHECK_SCRIPT.replace(
                 "'/home/mester/workspace'", repr(str(workspace)))
+            wrong_uid_check = _script_for_fixture_uid(check_source, os.getuid() + 1)
+            check_source = _script_for_fixture_uid(check_source)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 exec(compile(check_source, "canary-check", "exec"), {"__name__": "__main__"})
             self.assertEqual(json.loads(output.getvalue())["status"], "PRESENT")
+            with self.assertRaises(SystemExit) as error:
+                exec(compile(wrong_uid_check, "canary-check-wrong-owner", "exec"), {"__name__": "__main__"})
+            self.assertEqual(error.exception.code, 44)
             marker = workspace / ".lm-m2-owner-acceptance-canary"
             marker.write_bytes(b"different contents")
             marker.chmod(0o600)
