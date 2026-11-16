@@ -41,6 +41,10 @@ VALIDATE_BOOTSTRAP_EXECUTABLE = load_bootstrap_validator()
 
 
 class BootstrapPolicyTests(unittest.TestCase):
+    def test_callback_listener_is_in_protected_runtime_dependency_inventory(self):
+        source = LAB_VM.read_text(encoding="utf-8")
+        self.assertIn('root / "lib/vm/callback-listener.py"', source)
+
     def _validate(self, path, *, uid_overrides=None, mode_overrides=None):
         uid_overrides = uid_overrides or {}
         mode_overrides = mode_overrides or {}
