@@ -4,12 +4,59 @@
 agent must not run it. The owner-reported QEMU/qemu-img scratch PASS ×2 is compatibility
 evidence only. NVIDIA timing remains separately pending.
 
-## Final integrated M1b/M1a acceptance (use after exact-SHA CI)
+## M1/M2 fresh-parent owner acceptance (reviewed candidate)
 
-The procedure below supersedes the historical candidate commands later in this file.
-Only the owner may run it. It does not authorize manual state repair, recovery execution,
-forced process termination, or disk replacement. On any unexpected identity, status,
-return code, scan result, or artifact, stop and preserve evidence.
+Use this only after the candidate commit has passed required hosted exact-SHA CI and the
+owner has reviewed the exact diff. This command is deliberately separate from the
+historical M1a/M1b recovery procedure below: it asks for exact approval, stops only the
+identity-verified existing parent, retains its complete state as a private retired bundle,
+and then provisions the replacement through the ordinary protected `up` path. It never
+deletes the retired disk. On interruption, rerun the same acceptance command; an
+incomplete retirement is identity-bound and resumable, while ambiguous state is preserved
+and blocks progress.
+
+```sh
+set -euo pipefail
+REPO="$HOME/Development/little-mester-m1a"
+SHA='<exact-reviewed-40-character-commit-sha>'
+cd "$REPO"
+test "$(git rev-parse "$SHA^{commit}")" = "$SHA"
+test -z "$(git status --porcelain)"
+
+# Protected root-owned install. This may request sudo for installation only.
+tools/vm-owner-acceptance --install --sha "$SHA" --repo "$REPO"
+I="/opt/little-mester/v3/$SHA"
+
+# The single complete owner acceptance command. Select an OpenAI model ID that
+# the owner is authorized to use; it is not an API key or credential.
+"$I/lab-vm" parent accept --milestone M2 --repo "$REPO" --model 'openai/<model-id>'
+```
+
+Keep the terminal interactive and use a host-supported `TERM`. The runner prompts for
+the exact old-parent retirement phrase, fresh-provision approval, browser authentication,
+plain SSH checks, selected-terminal profile and harmless OSC-52 observation, protected
+TUI/model responses, and ordinary stop/up approval. Do not paste OAuth URLs, tokens,
+credentials, or conversation text into the report. Each attempt writes a private,
+sanitized JSON report below `/run/user/<uid>/little-mester-vm-acceptance/`; only
+`M2_OWNER_ACCEPTANCE_PASS` with every required gate `PASS` is conclusive. A BLOCKED/FAIL
+result preserves the VM and report for diagnosis; rerun the same command to resume when
+the stated checkpoint allows it. Do not manually edit or remove VM state or report files.
+
+The automated positive-path test uses simulated human/model evidence and validates only
+orchestration. It is not owner acceptance. The real owner must complete browser consent,
+the selected OpenAI model interaction, target-terminal clipboard canary, and host VM
+lifecycle. If changes touch protected guest assets or provisioning, the owner must push
+the reviewed commit and obtain the required exact-SHA hosted CI before installation.
+
+## Historical M1b/M1a recovery procedure (not part of fresh-parent M2 flow)
+
+This procedure is retained as historical evidence for its specifically identified old
+parent. Do not run it as part of the fresh-parent M1/M2 flow above or against the new
+replacement. Only follow it if the owner separately decides to resume that exact historical
+recovery, after verifying its state-specific identity and authorization. It does not
+authorize manual state repair, forced process termination, or disk replacement. On any
+unexpected identity, status, return code, scan result, or artifact, stop and preserve
+evidence.
 
 Set `FINAL_SHA` to the reviewed commit after its exact-SHA GitHub Actions run passes:
 

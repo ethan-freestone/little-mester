@@ -2,6 +2,7 @@
 """Prove pinned OpenCode can ignore workspace-controlled server config."""
 
 import importlib.util
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 import pathlib
@@ -10,6 +11,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 
@@ -104,6 +106,14 @@ class ProjectConfigIsolationTests(unittest.TestCase):
         self.assertIn(str(self.workspace / ".opencode/opencode.json"), paths)
 
     def test_disable_project_config_ignores_workspace_config_and_keeps_protected_values(self):
+        unprotected_docs = self.sources(disabled=False)
+        unprotected = {item.get("path"): item.get("info", {}) for item in unprotected_docs
+                       if item.get("type") == "document"}
+        hostile_project = unprotected[str(self.workspace / "opencode.json")]
+        self.assertNotEqual(hostile_project.get("update"), "disable",
+                            "positive control did not expose the hostile auto-update setting")
+        self.assertEqual(hostile_project.get("share"), "manual",
+                         "positive control did not expose the hostile sharing setting")
         docs = self.sources(disabled=True)
         documents = {item.get("path"): item.get("info", {})
                      for item in docs if item.get("type") == "document"}
@@ -112,6 +122,64 @@ class ProjectConfigIsolationTests(unittest.TestCase):
         protected = documents[str(self.home / "protected.json")]
         self.assertEqual(protected.get("update"), "disable")
         self.assertEqual(protected.get("share"), "disabled")
+
+    def test_pinned_runtime_has_no_share_command(self):
+        result = subprocess.run([self.binary, "--help"], cwd=self.workspace, env=self.env,
+                                check=False, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        section = result.stdout.partition("SUBCOMMANDS")[2]
+        commands = {line.split()[0] for line in section.splitlines() if line.startswith("  ")}
+        self.assertNotIn("share", commands)
+
+    def test_pinned_runtime_otlp_export_is_disabled_with_positive_control(self):
+        class Collector(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                self.server.paths.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        collector = HTTPServer(("127.0.0.1", 0), Collector)
+        collector.paths = []
+        thread = threading.Thread(target=collector.serve_forever, daemon=True)
+        thread.start()
+        try:
+            env = dict(self.env)
+            env.update({
+                "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{collector.server_port}",
+                "OTEL_TRACES_EXPORTER": "otlp",
+                "OTEL_LOGS_EXPORTER": "otlp",
+            })
+            # Positive control: the pinned executable exports actual OTLP data
+            # to this loopback-only synthetic collector when explicitly enabled.
+            env["OTEL_SDK_DISABLED"] = "false"
+            enabled = subprocess.run(
+                [self.binary, "debug", "config", "--standalone"], cwd=self.workspace,
+                env=env, check=False, capture_output=True, timeout=20)
+            self.assertEqual(enabled.returncode, 0, enabled.stderr[:300])
+            self.assertTrue(collector.paths, "positive control did not exercise the local OTLP sink")
+            collector.paths.clear()
+
+            # Negative control matches the protected runner's no-exporter path.
+            env["OTEL_SDK_DISABLED"] = "true"
+            env["OTEL_TRACES_EXPORTER"] = "none"
+            env["OTEL_LOGS_EXPORTER"] = "none"
+            env["OTEL_METRICS_EXPORTER"] = "none"
+            env.pop("OTEL_EXPORTER_OTLP_ENDPOINT")
+            disabled = subprocess.run(
+                [self.binary, "debug", "config", "--standalone"], cwd=self.workspace,
+                env=env, check=False, capture_output=True, timeout=20)
+            self.assertEqual(disabled.returncode, 0, disabled.stderr[:300])
+            self.assertEqual(collector.paths, [], "pinned runtime emitted OTLP without a configured exporter")
+        finally:
+            collector.shutdown()
+            collector.server_close()
+            thread.join(timeout=2)
 
     def test_standalone_ci_config_check_uses_real_pinned_cli_and_both_controls(self):
         protected_xdg = self.root / "protected-xdg"

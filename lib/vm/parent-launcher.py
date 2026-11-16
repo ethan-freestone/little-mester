@@ -103,7 +103,7 @@ def up(capacity_gib: int = 64, *, home: str | None = None,
                 if current["disk"]["virtual_capacity_gib"] != capacity_gib:
                     raise Refused("running parent capacity differs from the requested capacity")
                 return current
-            if current["status"] not in ("NOT_CREATED", "UNPROVISIONED", "STOPPED"):
+            if current["status"] not in ("NOT_CREATED", "RETIRED", "UNPROVISIONED", "STOPPED"):
                 raise Refused(f"parent cannot start from status {current['status']}; preserve evidence")
             parent = state.initialize(capacity_gib, home=home, lock_fd=lock_fd)
             parent = provision.create_initial_disk(

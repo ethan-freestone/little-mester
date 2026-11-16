@@ -11,9 +11,14 @@ GUEST_HELPER = pathlib.Path(__file__).with_name("guest-user-dirs.py").read_bytes
 
 TUI_LAUNCHER = b"""#!/bin/sh
 set -eu
+if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != '--continue' ]; }; then
+  printf '%s\\n' 'REFUSED: unsupported protected OpenCode session mode' >&2
+  exit 64
+fi
 /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth
 umask 077
-exec /usr/bin/env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin TERM=${TERM:-xterm-256color} LANG=C.UTF-8 TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux XDG_DATA_HOME=/home/mester/.local/share XDG_CONFIG_HOME=/home/mester/.config OPENCODE_CONFIG=/etc/opencode/opencode.json OPENCODE_DISABLE_PROJECT_CONFIG=1 HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128 NO_PROXY=localhost,127.0.0.1,10.0.2.100 no_proxy=localhost,127.0.0.1,10.0.2.100 OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}' /usr/bin/tmux new-session -A -s little-mester-opencode /usr/local/libexec/lm-opencode
+cd /home/mester/workspace
+exec /usr/bin/env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin TERM=${TERM:-xterm-256color} LANG=C.UTF-8 TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux XDG_DATA_HOME=/home/mester/.local/share XDG_CONFIG_HOME=/home/mester/.config OPENCODE_CONFIG=/etc/opencode/opencode.json OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_SHARE=1 OPENCODE_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 SENTRY_DSN= OTEL_EXPORTER_OTLP_ENDPOINT= OTEL_EXPORTER_OTLP_HEADERS= HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128 NO_PROXY=localhost,127.0.0.1,10.0.2.100 no_proxy=localhost,127.0.0.1,10.0.2.100 OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}' /usr/bin/tmux new-session -A -s little-mester-opencode /usr/local/libexec/lm-opencode "$@"
 """
 
 OPENCODE_RUNNER = b"""#!/bin/sh
@@ -23,15 +28,23 @@ export OPENCODE_CONFIG=/etc/opencode/opencode.json
 export HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128
 export http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128
 export OPENCODE_DISABLE_PROJECT_CONFIG=1
+export OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_SHARE=1 OPENCODE_DISABLE_TELEMETRY=1
+export DO_NOT_TRACK=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 OTEL_SDK_DISABLED=true
+export OTEL_TRACES_EXPORTER=none OTEL_LOGS_EXPORTER=none OTEL_METRICS_EXPORTER=none
+export SENTRY_DSN= OTEL_EXPORTER_OTLP_ENDPOINT= OTEL_EXPORTER_OTLP_HEADERS=
 export OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}'
-exec /usr/local/bin/opencode --standalone
+if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != '--continue' ]; }; then
+  printf '%s\\n' 'REFUSED: unsupported protected OpenCode session mode' >&2
+  exit 64
+fi
+exec /usr/local/bin/opencode --standalone "$@"
 """
 
 AUTH_LAUNCHER = b"""#!/bin/sh
 set -eu
 /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth
 umask 077
-exec /usr/bin/env -i HOME=/home/mester PATH=/usr/local/bin TERM=xterm-256color LANG=C.UTF-8 XDG_DATA_HOME=/home/mester/.local/share XDG_CONFIG_HOME=/home/mester/.config OPENCODE_CONFIG=/etc/opencode/opencode.json OPENCODE_DISABLE_PROJECT_CONFIG=1 HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128 NO_PROXY=localhost,127.0.0.1,10.0.2.100 no_proxy=localhost,127.0.0.1,10.0.2.100 OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}' /usr/local/bin/opencode auth login openai --method chatgpt-browser
+exec /usr/bin/env -i HOME=/home/mester PATH=/usr/local/bin TERM=xterm-256color LANG=C.UTF-8 XDG_DATA_HOME=/home/mester/.local/share XDG_CONFIG_HOME=/home/mester/.config OPENCODE_CONFIG=/etc/opencode/opencode.json OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_SHARE=1 OPENCODE_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 SENTRY_DSN= OTEL_EXPORTER_OTLP_ENDPOINT= OTEL_EXPORTER_OTLP_HEADERS= HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128 NO_PROXY=localhost,127.0.0.1,10.0.2.100 no_proxy=localhost,127.0.0.1,10.0.2.100 OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/etc/opencode/plugins/little-mester-exit-confirm"],"keybinds":{"app.exit":"none","prompt.clear":"none"}}' /usr/local/bin/opencode auth login openai --method chatgpt-browser
 """
 
 

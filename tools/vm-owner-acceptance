@@ -11,17 +11,25 @@ from __future__ import annotations
 
 import argparse
 import errno
+import fcntl
 import hashlib
 import importlib.util
 import json
 import os
 import pathlib
+import pty
 import pwd
 import re
+import secrets
+import select
+import shlex
+import signal
+import struct
 import stat
 import subprocess
 import sys
 import tarfile
+import termios
 import tempfile
 import time
 import uuid
@@ -113,6 +121,11 @@ def clean_env(*, desktop_session: bool = False) -> dict[str, str]:
                 env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
         except OSError:
             pass
+    term = os.environ.get("TERM", "")
+    if (os.environ.get("LM_VM_TERM_VALIDATED") == "1"
+            and re.fullmatch(r"[A-Za-z0-9_.+-]{1,64}", term)):
+        env["TERM"] = term
+        env["LM_VM_TERM_VALIDATED"] = "1"
     return env
 
 
@@ -834,18 +847,579 @@ def verify_cleanup_report(sha: str, run_id: str) -> None:
 
 
 def report_template(sha: str, mode: str, report_dir: pathlib.Path) -> dict:
+    gates = [
+        "candidate", "preflight", "install", "storage_proof", "run", "cleanup",
+        "parent_identity", "guest_compatibility", "retirement", "fresh_provision",
+        "owner_interaction",
+        "ssh_reconnect", "duplicate_up", "m1_recovery_guards", "network_boundaries",
+        "protected_configuration", "authentication", "model_response_before_restart",
+        "model_list_behavior",
+        "telemetry_behavior",
+        "configuration_persistence",
+        "tmux_controls", "terminal_clipboard_mitigation", "workspace_persistence",
+        "credentials_persistence", "history_persistence", "same_disk_restart",
+        "model_response_after_restart", "temporary_cleanup", "final_vm_state",
+    ]
+    if mode == "parent_accept":
+        gates = [name for name in gates if name not in ("storage_proof", "run", "cleanup")]
+    else:
+        gates = [name for name in gates if name != "owner_interaction"]
     return {
         "version": 1,
         "candidate_sha": sha,
         "mode": mode,
         "attempt_id": report_dir.name,
         "status": "IN_PROGRESS",
-        "gates": {name: "NOT_RUN" for name in (
-            "candidate", "preflight", "install", "storage_proof", "run", "cleanup",
-            "parent_identity", "guest_compatibility", "owner_interaction", "same_disk_restart",
-        )},
+        "gates": {name: "NOT_RUN" for name in gates},
         "evidence": {"report": str(report_dir / "report.json")},
         "notes": [],
+    }
+
+
+def _checkpoint(report_dir: pathlib.Path, data: dict) -> None:
+    path = report_dir / "report.json"
+    payload = (json.dumps(data, sort_keys=True, indent=2) + "\n").encode()
+    temporary = report_dir / f".report-{uuid.uuid4().hex}.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    directory_fd = os.open(report_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _parent_command(root: pathlib.Path, *args: str, interactive: bool = False,
+                    timeout: int = 45) -> subprocess.CompletedProcess:
+    env = clean_env(desktop_session=interactive)
+    return subprocess.run(
+        [str(root / "lab-vm"), "parent", *args],
+        stdin=None if interactive else subprocess.DEVNULL,
+        stdout=None if interactive else subprocess.PIPE,
+        stderr=None if interactive else subprocess.PIPE,
+        env=env, timeout=timeout, check=False,
+    )
+
+
+def _parent_json(root: pathlib.Path, *args: str, timeout: int = 45) -> tuple[subprocess.CompletedProcess, dict]:
+    result = _parent_command(root, *args, timeout=timeout)
+    if result.returncode:
+        raise GateError("FAIL", f"protected parent operation {args[0]} returned nonzero")
+    try:
+        value = json.loads(result.stdout)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise GateError("FAIL", f"protected parent operation {args[0]} returned malformed evidence") from error
+    if not isinstance(value, dict):
+        raise GateError("FAIL", f"protected parent operation {args[0]} returned invalid evidence")
+    return result, value
+
+
+def _parent_ok(root: pathlib.Path, *args: str, timeout: int = 45,
+               interactive: bool = False) -> subprocess.CompletedProcess:
+    result = _parent_command(root, *args, interactive=interactive, timeout=timeout)
+    if result.returncode:
+        raise GateError("FAIL", f"protected parent operation {args[0]} failed")
+    return result
+
+
+def _identity(status: dict) -> dict:
+    disk = status.get("disk") if isinstance(status.get("disk"), dict) else {}
+    return ({key: status.get(key) for key in (
+                "status", "run_id", "parent_id", "supervisor_pid", "qemu_pid")}
+            | {"disk_device": disk.get("device"), "disk_inode": disk.get("inode"),
+               "disk_format": disk.get("format"), "disk_provisioned": disk.get("provisioned"),
+               "virtual_capacity_gib": disk.get("virtual_capacity_gib"),
+               "disk_file_bytes": disk.get("file_bytes"),
+               "disk_host_allocated_bytes": disk.get("host_allocated_bytes")})
+
+
+def _require_probe(value: dict, required: tuple[str, ...], label: str) -> None:
+    failed = [name for name in required if value.get(name) is not True]
+    if failed:
+        raise GateError("FAIL", f"{label} checks failed: {', '.join(failed)}")
+
+
+def _owner_approval(prompt: str, expected: str) -> None:
+    print(prompt)
+    print(f"Type exactly: {expected}")
+    try:
+        answer = input("> ")
+    except (EOFError, KeyboardInterrupt) as error:
+        raise GateError("BLOCKED", "owner approval was cancelled") from error
+    if answer != expected:
+        raise GateError("BLOCKED", "owner approval did not match; no operation was started")
+
+
+def _tui_key(root: pathlib.Path, key: str) -> None:
+    _parent_ok(root, "tui-key", "--key", key, timeout=30)
+
+
+def _tui_state(root: pathlib.Path) -> dict:
+    _, state = _parent_json(root, "tui-state", timeout=30)
+    if state.get("status") != "OK":
+        raise GateError("FAIL", "protected tmux state is unavailable; no session-count inference is safe")
+    return state
+
+
+def _wait_tui(root: pathlib.Path, predicate, timeout: float = 8.0) -> dict:
+    deadline = time.monotonic() + timeout
+    last = {}
+    while time.monotonic() < deadline:
+        last = _tui_state(root)
+        if predicate(last):
+            return last
+        time.sleep(0.15)
+    raise GateError("FAIL", "protected tmux/TUI state did not reach the expected bounded state")
+
+
+def _probe_history(root: pathlib.Path, token: str, model: str,
+                   prior_token: str | None = None) -> dict:
+    args = ["history-probe", "--token", token, "--model", model]
+    if prior_token:
+        args.extend(("--prior-token", prior_token))
+    _, result = _parent_json(root, *args, timeout=45)
+    return result
+
+
+def _interactive_tui(root: pathlib.Path, *, continue_session: bool, title: str,
+                     token: str, model: str) -> None:
+    print(f"\n{title}")
+    if not continue_session:
+        print(f"In OpenCode, use /models and select exactly {model}.")
+    print(f"Submit exactly: Reverse this string and return only the result: {token}")
+    print("Wait for the model response, then detach with Ctrl-b followed by d (do not exit OpenCode).")
+    args = ("tui", "--continue") if continue_session else ("tui",)
+    result = _parent_command(root, *args, interactive=True, timeout=900)
+    if result.returncode:
+        raise GateError("FAIL", "protected interactive TUI session exited unsuccessfully")
+
+
+def _exercise_tui_keys(root: pathlib.Path) -> None:
+    state = _wait_tui(root, lambda x: x.get("target_count") == 1)
+    if state.get("session_count") != 1:
+        raise GateError("FAIL", "tmux did not retain exactly one protected OpenCode session")
+    for cancel_key in ("escape", "n", "ctrl-c"):
+        _tui_key(root, "ctrl-c")
+        _wait_tui(root, lambda x: x.get("exit_dialog_visible") is True)
+        _tui_key(root, cancel_key)
+        state = _wait_tui(root, lambda x: x.get("exit_dialog_visible") is False)
+        if state.get("target_count") != 1 or state.get("session_count") != 1:
+            raise GateError("FAIL", "exit cancellation did not preserve the OpenCode session")
+    _tui_key(root, "ctrl-d")
+    state = _wait_tui(root, lambda x: x.get("target_count") == 1)
+    if state.get("session_count") != 1:
+        raise GateError("FAIL", "Ctrl-D unexpectedly closed the protected OpenCode session")
+    _tui_key(root, "ctrl-c")
+    _wait_tui(root, lambda x: x.get("exit_dialog_visible") is True)
+    _tui_key(root, "q")
+    state = _wait_tui(root, lambda x: x.get("session_count") == 0)
+    if state.get("target_count") != 0:
+        raise GateError("FAIL", "Q confirmation closed OpenCode but left its tmux session")
+
+
+def _exercise_simultaneous_attach_and_resize(root: pathlib.Path) -> dict:
+    clients: list[tuple[int, int, subprocess.Popen]] = []
+    try:
+        def attach(rows: int, columns: int) -> tuple[int, int, subprocess.Popen]:
+            master_fd, slave_fd = pty.openpty()
+            fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+            process = subprocess.Popen(
+                [str(root / "lab-vm"), "parent", "tui", "--continue"],
+                stdin=slave_fd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=clean_env(), close_fds=True,
+            )
+            os.close(slave_fd)
+            clients.append((master_fd, -1, process))
+            return clients[-1]
+
+        first = attach(37, 91)
+        first_state = _wait_tui(root, lambda x: x.get("attached_clients") == 1, timeout=15)
+        if first_state.get("session_count") != 1 or first_state.get("target_count") != 1:
+            raise GateError("FAIL", "first TUI attach did not reach the unique protected session")
+        second_client = attach(41, 103)
+        simultaneous = _wait_tui(root, lambda x: x.get("attached_clients") == 2, timeout=15)
+        if simultaneous.get("session_count") != 1 or simultaneous.get("target_count") != 1:
+            raise GateError("FAIL", "two clients did not attach to the same unique tmux session")
+        fcntl.ioctl(second_client[0], termios.TIOCSWINSZ, struct.pack("HHHH", 43, 107, 0, 0))
+        second_client[2].send_signal(signal.SIGWINCH)
+        resized = _wait_tui(root, lambda x: x.get("size") == "107x43", timeout=8)
+        if resized.get("session_count") != 1:
+            raise GateError("FAIL", "tmux resize changed protected session count")
+        os.write(second_client[0], b"\x02d")
+        second_client[2].wait(timeout=15)
+        one_left = _wait_tui(root, lambda x: x.get("attached_clients") == 1, timeout=8)
+        if one_left.get("session_count") != 1:
+            raise GateError("FAIL", "detaching the second TUI client lost the shared session")
+        os.write(first[0], b"\x02d")
+        first[2].wait(timeout=15)
+        detached = _wait_tui(root, lambda x: x.get("attached_clients") == 0, timeout=8)
+        if detached.get("session_count") != 1:
+            raise GateError("FAIL", "detaching both TUI clients lost the protected session")
+        return {"session_count": detached["session_count"], "resize": resized["size"],
+                "simultaneous_attach": simultaneous.get("attached_clients") == 2}
+    except subprocess.TimeoutExpired as error:
+        raise GateError("FAIL", "bounded simultaneous TUI attach did not detach") from error
+    finally:
+        for master_fd, _slave_fd, process in clients:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+            os.close(master_fd)
+
+
+def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
+                          report_dir: pathlib.Path) -> None:
+    """One-command, owner-confirmed fresh provisioning and real M1/M2 acceptance."""
+    def active(name: str) -> None:
+        data["gates"][name] = "NOT_RUN"
+        data["evidence"].pop(name, None)
+        data["active_gate"] = name
+        _checkpoint(report_dir, data)
+
+    def passed(name: str, evidence=None) -> None:
+        data["gates"][name] = "PASS"
+        if evidence is not None:
+            data["evidence"][name] = evidence
+        data.pop("active_gate", None)
+        _checkpoint(report_dir, data)
+
+    active("owner_interaction")
+    if not re.fullmatch(r"openai/[A-Za-z0-9._-]{1,100}", model):
+        raise GateError("BLOCKED", "owner acceptance requires one exact openai/<model-id>")
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise GateError("BLOCKED", "complete owner acceptance requires a controlling terminal")
+    if os.environ.get("LM_VM_TERM_VALIDATED") != "1" or "TERM" not in clean_env():
+        raise GateError("BLOCKED", "host TERM is not validated for the protected guest TUI")
+    active("parent_identity")
+    _, initial = _parent_json(root, "status", "--json")
+    initial_status = initial.get("status")
+    if initial_status == "AMBIGUOUS":
+        raise GateError("BLOCKED", "parent identity is ambiguous; no lifecycle operation was attempted")
+    retired_disk = initial.get("retired_disk_identity")
+    disk = initial.get("disk") if isinstance(initial.get("disk"), dict) else {}
+    is_replacement = (
+        bool(initial.get("retired_bundle"))
+        and initial_status in ("RUNNING", "STARTING", "STOPPED", "UNPROVISIONED")
+        and (retired_disk is None
+             or (retired_disk.get("device"), retired_disk.get("inode"))
+                != (disk.get("device"), disk.get("inode"))
+             or retired_disk.get("device") is None and initial_status == "UNPROVISIONED")
+    )
+    if initial_status == "RETIRING":
+        active("retirement")
+        _parent_ok(root, "retire", interactive=True, timeout=900)
+        _, initial = _parent_json(root, "status", "--json")
+        if initial.get("status") != "RETIRED":
+            raise GateError("FAIL", "resumable retirement did not reach its committed RETIRED state")
+        passed("retirement", {"status": "RESUMED_RETIRED", "retired_bundle": initial.get("retired_bundle")})
+        initial_status = "RETIRED"
+        is_replacement = False
+    elif initial_status not in ("RETIRED", "NOT_CREATED") and not is_replacement:
+        active("retirement")
+        _parent_ok(root, "retire", interactive=True, timeout=900)
+        _, initial = _parent_json(root, "status", "--json")
+        if initial.get("status") != "RETIRED":
+            raise GateError("FAIL", "old parent was not safely retired into a retained bundle")
+        passed("retirement", {"status": "RETIRED", "retired_bundle": initial.get("retired_bundle"),
+                               "old_disk_retained": True})
+        initial_status = "RETIRED"
+        is_replacement = False
+    elif initial_status == "RETIRED":
+        passed("retirement", {"status": "ALREADY_RETIRED", "old_disk_retained": True})
+    elif initial_status == "NOT_CREATED":
+        passed("retirement", {"status": "NO_PRIOR_PARENT"})
+    elif is_replacement:
+        passed("retirement", {"status": "RETIRED_BUNDLE_PRESERVED", "old_disk_retained": True})
+
+    if initial_status not in ("RUNNING",):
+        active("fresh_provision")
+        status_now = initial_status
+        approval = f"PROVISION parent=default capacity_gib=64 from={status_now}"
+        _owner_approval("The old VM remains retained. Approve fresh persistent VM provisioning.", approval)
+        _parent_ok(root, "up", "--capacity-gib", "64", timeout=1100)
+    else:
+        passed("fresh_provision", {"status": "ALREADY_RUNNING_VERIFIED_REPLACEMENT",
+                                   "same_disk_identity_validated": True})
+    _, before_identity = _parent_json(root, "status", "--json")
+    if before_identity.get("status") != "RUNNING":
+        raise GateError("FAIL", "parent up returned without a verified RUNNING parent")
+    new_identity = _identity(before_identity)
+    if (new_identity.get("disk_format") != "qcow2"
+            or new_identity.get("disk_provisioned") is not True
+            or new_identity.get("virtual_capacity_gib") != 64
+            or type(new_identity.get("disk_device")) is not int
+            or type(new_identity.get("disk_inode")) is not int
+            or not isinstance(new_identity.get("run_id"), str)
+            or not isinstance(new_identity.get("supervisor_pid"), int)):
+        raise GateError("FAIL", "replacement lacks verified qcow2, capacity, disk, run or supervisor identity")
+    old_identity = initial.get("retired_disk_identity")
+    if isinstance(old_identity, dict) and (old_identity.get("device"), old_identity.get("inode")) == (
+            new_identity["disk_device"], new_identity["disk_inode"]):
+        raise GateError("FAIL", "fresh parent reused the retired guest disk identity")
+    passed("fresh_provision", new_identity)
+    passed("parent_identity", new_identity)
+
+    active("duplicate_up")
+    _parent_ok(root, "up", "--capacity-gib", "64", timeout=90)
+    _, duplicate_identity = _parent_json(root, "status", "--json")
+    if _identity(duplicate_identity) != new_identity:
+        raise GateError("FAIL", "idempotent parent up changed run or disk identity")
+    passed("duplicate_up", {"same_run_and_disk": True})
+
+    active("guest_compatibility")
+    live = inspect_live_parent(root)
+    if not live.get("m2_contract_compatible"):
+        raise GateError("FAIL", "fresh guest protected asset inventory does not match the candidate")
+    passed("guest_compatibility", {
+        "m2_contract_compatible": True,
+        "guest_opencode_version": live.get("guest_opencode_version"),
+        "guest_assets": live.get("guest_assets"),
+        "disk_identity": new_identity,
+    })
+
+    active("owner_interaction")
+    _, guest_term = _parent_json(root, "term-check", "--term", clean_env()["TERM"], timeout=30)
+    if (guest_term.get("status") != "PASS" or guest_term.get("terminfo_entry") is not True
+            or guest_term.get("clear_capability") is not True
+            or guest_term.get("clear_command") is not True):
+        raise GateError("FAIL", "propagated host TERM is unavailable or clear does not work in the guest")
+    passed("owner_interaction", {"controlling_terminal": True, "host_term_validated": True,
+                                  "guest_terminal": guest_term})
+
+    active("ssh_reconnect")
+    _parent_ok(root, "inspect", timeout=60)
+    _parent_ok(root, "inspect", timeout=60)
+    if _identity(_parent_json(root, "status", "--json")[1]) != new_identity:
+        raise GateError("FAIL", "pinned SSH reconnection changed parent identity")
+    print("Pinned plain SSH connection test: at the shell run `pwd`, then `exit`.")
+    _parent_ok(root, "ssh", interactive=True, timeout=900)
+    print("Reconnect once more; at the shell run `pwd`, then `exit`.")
+    _parent_ok(root, "ssh", interactive=True, timeout=900)
+    for prompt in ("Did both shells show /home/mester and exit cleanly? Type YES to confirm.",):
+        if input(prompt + " ").strip() != "YES":
+            raise GateError("FAIL", "owner did not confirm both pinned SSH shell sessions")
+    passed("ssh_reconnect", {"strict_host_key_pinned": True, "two_nonforwarding_connections": True})
+
+    active("m1_recovery_guards")
+    refused = _parent_command(root, "recover", "--dry-run", "--json", timeout=30)
+    if (refused.returncode != 2 or refused.stderr.decode("utf-8", "replace").strip()
+            != "REFUSED: live supervisor or lifecycle operation owns the parent lock"):
+        raise GateError("FAIL", "live-supervisor recovery refusal was not positively verified")
+    passed("m1_recovery_guards", {"live_lock_refused": True,
+                                  "normal_recovery_execution": "NOT_RUN_BY_DESIGN"})
+
+    active("network_boundaries")
+    _, network = _parent_json(root, "network-check", timeout=45)
+    if (network.get("public_proxy") != "PASS" or network.get("private_proxy") != "BLOCKED"
+            or network.get("direct_public") != "BLOCKED"):
+        raise GateError("FAIL", "approved public proxy or private/direct egress boundary failed")
+    passed("network_boundaries", network)
+
+    active("authentication")
+    print("Complete real ChatGPT browser authentication in the host browser. Do not copy the OAuth URL or token.")
+    _parent_ok(root, "auth", interactive=True, timeout=660)
+    _, auth_state = _parent_json(root, "auth-check", timeout=45)
+    if auth_state.get("openai_credential_present") is not True:
+        raise GateError("FAIL", "real OpenAI browser authentication did not create an active credential")
+    passed("authentication", {"active_openai_credential_present": True,
+                               "credential_contents_recorded": False})
+
+    active("model_list_behavior")
+    _, model_list = _parent_json(root, "models-check", "--model", model, timeout=120)
+    if (model_list.get("status") != "OK"
+            or model_list.get("model_list_command_succeeded") is not True
+            or model_list.get("selected_openai_model_listed") is not True
+            or model_list.get("empty_user_data_before_probe") is not True):
+        raise GateError("FAIL", "protected remote model-list behavior did not list the selected OpenAI model")
+    passed("model_list_behavior", {"selected_model_listed": True, "empty_user_data_before_probe": True,
+                                   "telemetry_configuration": "disabled_in_protected_runtime",
+                                   "share_configuration": "disabled_in_protected_runtime"})
+
+    active("telemetry_behavior")
+    _, telemetry = _parent_json(root, "telemetry-check", timeout=90)
+    if (telemetry.get("status") != "PASS"
+            or telemetry.get("both_runtime_invocations_succeeded") is not True
+            or telemetry.get("positive_control_exported_to_loopback") is not True
+            or telemetry.get("no_exporter_configured_control_exported_nothing") is not True):
+        raise GateError("FAIL", "pinned runtime failed the loopback OTLP positive/negative control")
+    passed("telemetry_behavior", {**telemetry,
+        "scope": "bounded local loopback control; not a claim about all future network traffic"})
+
+    active("terminal_clipboard_mitigation")
+    print("Before TUI use, enable OSC-52/remote clipboard-write blocking in the selected host terminal profile.")
+    profile = input("Terminal profile name/version (do not include private host details): ").strip()
+    if not profile:
+        raise GateError("BLOCKED", "selected terminal profile was not identified")
+    print("Harmless clipboard canary follows. Verify the host clipboard does not become LM-CLIPBOARD-CANARY.")
+    sys.stdout.write("\033]52;c;TE0tQ0xJUEJPQVJELUNBTkFSWQ==\a")
+    sys.stdout.flush()
+    observed = input("Type exactly CLIPBOARD_UNCHANGED only after checking the clipboard: ").strip()
+    if observed != "CLIPBOARD_UNCHANGED":
+        raise GateError("BLOCKED", "terminal clipboard mitigation was not confirmed")
+    passed("terminal_clipboard_mitigation", {"profile_reported": True,
+        "harmless_osc52_canary": "owner_observed_unchanged", "residual_terminal_control_risk": True})
+
+    active("workspace_persistence")
+    canary = _parent_command(root, "canary-create", timeout=45)
+    if canary.returncode:
+        canary = _parent_command(root, "canary-check", timeout=45)
+        if canary.returncode:
+            raise GateError("FAIL", "guest workspace canary could not be created or safely resumed")
+
+    active("protected_configuration")
+    prepared = _parent_command(root, "protection-prepare", timeout=45)
+    if prepared.returncode:
+        # Resume only an exact prior fixture from an interrupted acceptance attempt.
+        check = _parent_command(root, "protection-check", timeout=45)
+        if check.returncode:
+            raise GateError("BLOCKED", "workspace has conflicting hostile-config probe files; preserved them")
+    passed("protected_configuration", {"hostile_project_fixture": "prepared_or_resumed"})
+
+    token1 = secrets.token_hex(6).upper()
+    active("model_response_before_restart")
+    _interactive_tui(root, continue_session=False, title="Protected TUI and real model acceptance",
+                     token=token1, model=model)
+    probe1 = _probe_history(root, token1, model)
+    if probe1.get("first_response_persisted") is not True:
+        raise GateError("FAIL", "no matching real assistant response for the selected model was saved")
+    passed("model_response_before_restart", {"model": model,
+        "assistant_response_in_sqlite": True,
+        "session_id_sha256": probe1.get("session_id_sha256")})
+
+    active("protected_configuration")
+    _, protection = _parent_json(root, "protection-check", timeout=60)
+    _require_probe(protection, (
+        "project_config_ignored", "protected_update_disabled", "runtime_config_update_disabled",
+        "protected_share_disabled", "runtime_config_sharing_disabled", "update_share_positive_control_accepted",
+        "hostile_fixture_is_expected_negative_control",
+        "share_command_absent_from_pinned_runtime", "runtime_is_pinned_v225",
+        "hostile_plugin_not_executed", "runtime_cwd_is_workspace",
+        "runtime_project_config_disabled", "runtime_config_path_protected",
+        "runtime_plugin_config_protected", "runtime_autoupdate_disabled",
+        "runtime_sharing_disabled", "runtime_telemetry_optout", "runtime_error_reporting_off",
+        "runtime_otel_sdk_disabled", "runtime_otel_exporters_disabled",
+        "runtime_otlp_exporter_absent"),
+        "protected configuration")
+    _parent_ok(root, "protection-cleanup", timeout=45)
+    passed("protected_configuration", protection)
+
+    active("tmux_controls")
+    attach_resize = _exercise_simultaneous_attach_and_resize(root)
+    _exercise_tui_keys(root)
+    passed("tmux_controls", {**attach_resize, "cancel_keys": ["Escape", "N", "Ctrl-C"],
+        "confirm_keys": ["Q"], "ctrl_d_preserved_session": True})
+
+    active("credentials_persistence")
+    _, auth_before = _parent_json(root, "auth-check", timeout=45)
+    if auth_before.get("openai_credential_present") is not True:
+        raise GateError("FAIL", "active ChatGPT credential disappeared before ordinary restart")
+
+    active("same_disk_restart")
+    disk_id = f"{new_identity['disk_device']}:{new_identity['disk_inode']}"
+    approval = f"STOP-AND-RESTART parent=default run={new_identity['run_id']} disk={disk_id}"
+    _owner_approval("Authorize the ordinary persistent-parent stop/up test (no recovery, no disk deletion).", approval)
+    _parent_ok(root, "stop", timeout=120)
+    _, stopped = _parent_json(root, "status", "--json")
+    if stopped.get("status") != "STOPPED" or _identity(stopped).get("disk_device") != new_identity["disk_device"] \
+            or _identity(stopped).get("disk_inode") != new_identity["disk_inode"]:
+        raise GateError("FAIL", "ordinary stop did not retain the same guest disk identity")
+    _, recovery = _parent_json(root, "recover", "--dry-run", "--json", timeout=45)
+    _, reconciliation = _parent_json(root, "reconcile", "--dry-run", "--json", timeout=45)
+    if recovery.get("action") != "none" or reconciliation.get("action") != "none":
+        raise GateError("FAIL", "ordinary clean stop left a recovery/reconciliation action")
+    _parent_ok(root, "up", "--capacity-gib", "64", timeout=1100)
+    _, after = _parent_json(root, "status", "--json")
+    after_id = _identity(after)
+    if (after.get("status") != "RUNNING" or after_id["run_id"] == new_identity["run_id"]
+            or (after_id["disk_device"], after_id["disk_inode"])
+               != (new_identity["disk_device"], new_identity["disk_inode"])):
+        raise GateError("FAIL", "ordinary up failed same-disk/fresh-run identity validation")
+    passed("same_disk_restart", {"same_disk": True, "new_run_id": True,
+        "disk_device": after_id["disk_device"], "disk_inode": after_id["disk_inode"]})
+
+    active("history_persistence")
+    canary_after = _parent_command(root, "canary-check", timeout=45)
+    if canary_after.returncode:
+        raise GateError("FAIL", "guest workspace file did not survive ordinary stop/up")
+    passed("workspace_persistence", {"guest_disk_backed_workspace_canary_survived_stop_up": True})
+    restart_live = inspect_live_parent(root)
+    if not restart_live.get("m2_contract_compatible"):
+        raise GateError("FAIL", "protected guest assets/configuration changed across ordinary stop/up")
+    _, auth_after = _parent_json(root, "auth-check", timeout=45)
+    if auth_after.get("openai_credential_present") is not True:
+        raise GateError("FAIL", "active ChatGPT credential did not survive ordinary stop/up")
+    passed("credentials_persistence", {"active_openai_credential_after_restart": True})
+    token2 = secrets.token_hex(6).upper()
+    active("model_response_after_restart")
+    _interactive_tui(root, continue_session=True, title="Reopen saved conversation after ordinary restart",
+                     token=token2, model=model)
+    _, protection_after = _parent_json(root, "protection-check", timeout=60)
+    _require_probe(protection_after, (
+        "project_config_ignored", "protected_update_disabled", "runtime_config_update_disabled",
+        "protected_share_disabled", "runtime_config_sharing_disabled", "update_share_positive_control_accepted",
+        "hostile_fixture_cleaned_after_probe",
+        "share_command_absent_from_pinned_runtime", "runtime_is_pinned_v225",
+        "hostile_plugin_not_executed", "runtime_cwd_is_workspace",
+        "runtime_project_config_disabled", "runtime_config_path_protected",
+        "runtime_plugin_config_protected", "runtime_autoupdate_disabled",
+        "runtime_sharing_disabled", "runtime_telemetry_optout", "runtime_error_reporting_off",
+        "runtime_otel_sdk_disabled", "runtime_otel_exporters_disabled",
+        "runtime_otlp_exporter_absent"),
+        "post-restart protected configuration")
+    passed("configuration_persistence", protection_after)
+    active("history_persistence")
+    probe2 = _probe_history(root, token2, model, prior_token=token1)
+    if (probe2.get("first_response_persisted") is not True
+            or probe2.get("second_response_persisted") is not True
+            or probe2.get("same_session") is not True
+            or probe2.get("conversation_ordered") is not True
+            or probe2.get("session_id_sha256") != probe1.get("session_id_sha256")):
+        raise GateError("FAIL", "saved OpenCode conversation was not reopened and continued on the same model/session")
+    passed("model_response_after_restart", {"model": model,
+        "saved_conversation_reopened": True, "second_assistant_response_in_same_session": True,
+        "session_id_sha256": probe2.get("session_id_sha256")})
+    passed("history_persistence", {"saved_conversation_reopened": True,
+        "same_session_continued_after_stop_up": True, "session_id_sha256": probe2.get("session_id_sha256")})
+
+    active("tmux_controls")
+    _tui_key(root, "ctrl-c")
+    _wait_tui(root, lambda x: x.get("exit_dialog_visible") is True)
+    _tui_key(root, "y")
+    _wait_tui(root, lambda x: x.get("session_count") == 0)
+    passed("tmux_controls", {"confirm_keys": ["Q", "Y"],
+        "cancel_keys": ["Escape", "N", "Ctrl-C"], "simultaneous_attach_and_resize": True,
+        "ctrl_d_preserved_session": True})
+
+    active("temporary_cleanup")
+    _parent_ok(root, "canary-remove", timeout=45)
+    # The hostile fixture is removed immediately after its check; if it remains,
+    # the fixed cleanup must refuse rather than unlink owner-modified data.
+    _, final_inspect = _parent_json(root, "inspect", timeout=60)
+    if final_inspect.get("/home/mester/.local/share/opencode/tmux", {}).get("socket_count") != 0:
+        raise GateError("FAIL", "protected TUI tmux socket/process resources remain after confirmation")
+    passed("temporary_cleanup", {"workspace_canary_removed": True,
+        "hostile_fixture_removed": True, "tmux_socket_count": 0,
+        "browser_auth_helper_cleanup": "returned_success_with_internal_identity_checks"})
+    _, final = _parent_json(root, "status", "--json")
+    if final.get("status") != "RUNNING" or _identity(final)["disk_inode"] != new_identity["disk_inode"]:
+        raise GateError("FAIL", "final persistent parent state is not the verified RUNNING replacement")
+    passed("final_vm_state", _identity(final))
+    data["status"] = "PASS"
+    data["evidence"]["m2_owner_acceptance"] = {
+        "model": model, "old_disk_retained": True,
+        "replacement_disk_identity": {"device": new_identity["disk_device"], "inode": new_identity["disk_inode"]},
+        "final_run_id": _identity(final)["run_id"],
+        "real_auth_and_model_responses": True,
+        "owner_terminal_clipboard_observation": "reported_unchanged",
+        "conversation_content_recorded": False,
     }
 
 
@@ -856,7 +1430,9 @@ def print_report(data: dict) -> None:
         print(f"{name}: {status}")
     print(f"OVERALL: {data['status']}")
     if data["mode"] == "parent_accept":
-        print("M2_OWNER_ACCEPTANCE_FAIL")
+        print("M2_OWNER_ACCEPTANCE_PASS" if data["status"] == "PASS"
+              and all(value == "PASS" for value in data["gates"].values())
+              else "M2_OWNER_ACCEPTANCE_FAIL")
 
 
 def run_smoke(root: pathlib.Path, workspace: str, model: str, state_before: set[str], data: dict,
@@ -900,18 +1476,14 @@ def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     modes = p.add_mutually_exclusive_group()
     for name in ("preflight", "install", "storage-proof", "run", "verify-cleanup", "all", "parent-accept"):
-        help_text = (
-            "M2 live read-only compatibility gate; interactive owner acceptance remains incomplete"
-            if name == "parent-accept" else None
-        )
-        modes.add_argument(f"--{name}", action="store_true", dest=name.replace("-", "_"), help=help_text)
+        modes.add_argument(f"--{name}", action="store_true", dest=name.replace("-", "_"))
     p.add_argument("--milestone", choices=("M2",), help="owner acceptance milestone")
     p.add_argument("--sha", required=True, type=full_sha, help="full lowercase 40-character candidate commit SHA")
     p.add_argument("--prefix", type=install_prefix,
                    help="protected root-owned install prefix (default: /opt/little-mester)")
     p.add_argument("--repo", help="repository containing the exact candidate commit")
     p.add_argument("--workspace", help="existing owner-provisioned bounded filesystem root")
-    p.add_argument("--model", help="OpenAI model identifier for the interactive smoke")
+    p.add_argument("--model", help="exact OpenAI model identifier (required for --parent-accept)")
     p.add_argument("--run-id", help="exact fresh VM run id for read-only cleanup verification")
     p.add_argument("--debug", action="store_true", help="stream bounded, sanitized guest provisioning progress during --run/--all")
     return p
@@ -933,6 +1505,8 @@ def main(argv: list[str] | None = None) -> int:
         parser().error("--parent-accept requires --milestone M2, and --milestone is only valid with --parent-accept")
     if mode == "parent_accept" and not args.repo:
         parser().error("--parent-accept requires --repo PATH")
+    if mode == "parent_accept" and not args.model:
+        parser().error("--parent-accept requires --model openai/<model-id>")
     if args.debug and mode not in ("run", "all"):
         parser().error("--debug is supported only with --run or --all")
     try:
@@ -989,26 +1563,8 @@ def main(argv: list[str] | None = None) -> int:
             data["gates"]["install"] = "PASS"
             installed_preflight(root, None)
             data["gates"]["preflight"] = "PASS"
-            current_gate = "guest_compatibility"
-            live = inspect_live_parent(root)
-            data["gates"]["parent_identity"] = "PASS"
-            data["evidence"]["parent_acceptance"] = {
-                "milestone": "M2", "inspection": live,
-                "parent_operations_started": ["read_only_status", "read_only_guest_inspection"],
-            }
-            if not live["m2_contract_compatible"]:
-                data["gates"]["guest_compatibility"] = "BLOCKED"
-                data["notes"].append(M2_DEPLOYMENT_REQUIREMENT)
-                raise GateError("BLOCKED", M2_DEPLOYMENT_REQUIREMENT)
-            data["gates"]["guest_compatibility"] = "PASS"
-            data["notes"].append(
-                "Live guest assets satisfy the M2 contract. Interactive owner acceptance has not yet been implemented; "
-                "no auth, TUI, stop/up, or persistence criteria were claimed."
-            )
-            raise GateError(
-                "BLOCKED",
-                "guest compatibility passed, but the interactive M2 owner acceptance sequence is not yet implemented",
-            )
+            current_gate = "parent_acceptance"
+            run_parent_acceptance(root, args.model, data, report_dir)
         elif mode in ("install", "all"):
             current_gate = "install"
             root = install_candidate(repo, args.sha, args.prefix)
@@ -1055,18 +1611,27 @@ def main(argv: list[str] | None = None) -> int:
             raise GateError("FAIL", "unsupported operation")
     except KeyboardInterrupt:
         data["status"] = "BLOCKED"
+        active = data.get("active_gate")
+        if active in data["gates"] and data["gates"][active] == "NOT_RUN":
+            data["gates"][active] = "BLOCKED"
         if data["gates"].get(current_gate) == "NOT_RUN":
             data["gates"][current_gate] = "BLOCKED"
         data["notes"].append("interrupted; no automatic cleanup or historical deletion was attempted")
         result_code = 3
     except GateError as error:
         data["status"] = error.status
+        active = data.get("active_gate")
+        if active in data["gates"] and data["gates"][active] == "NOT_RUN":
+            data["gates"][active] = error.status
         if data["gates"].get(current_gate) == "NOT_RUN":
             data["gates"][current_gate] = error.status
         data["notes"].append(error.message)
         result_code = 3 if error.status == "BLOCKED" else 1
     except (OSError, subprocess.SubprocessError, ValueError) as error:
         data["status"] = "FAIL"
+        active = data.get("active_gate")
+        if active in data["gates"] and data["gates"][active] == "NOT_RUN":
+            data["gates"][active] = "FAIL"
         if data["gates"].get(current_gate) == "NOT_RUN":
             data["gates"][current_gate] = "FAIL"
         data["notes"].append(f"operation failed ({type(error).__name__}); details omitted")

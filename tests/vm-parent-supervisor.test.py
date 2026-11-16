@@ -1450,6 +1450,17 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 self.assertEqual(tui_argv[-2:], ["mester@127.0.0.1",
                                                  "exec /usr/local/bin/lm-opencode"])
                 self.assertEqual(len(tui_descriptors), len(descriptors))
+                with mock.patch.object(parent_state, "_recorded_process_status", return_value="MATCH"):
+                    continue_argv, continue_descriptors = parent_state.parent_ssh_plan(
+                        home=self.home, attach_continue=True)
+                self.assertEqual(continue_argv[-2:], [
+                    "mester@127.0.0.1", "exec /usr/local/bin/lm-opencode --continue"])
+                self.assertEqual(len(continue_descriptors), len(descriptors))
+                with self.assertRaisesRegex(parent_state.Refused, "mode is invalid"):
+                    parent_state.parent_ssh_plan(
+                        home=self.home, attach_opencode=True, attach_continue=True)
+                for descriptor in continue_descriptors:
+                    os.close(descriptor)
                 for descriptor in tui_descriptors:
                     os.close(descriptor)
                 key_arg = argv[argv.index("-i") + 1]

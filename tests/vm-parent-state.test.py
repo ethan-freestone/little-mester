@@ -2,14 +2,18 @@
 """Unprivileged REAL_PROCESS tests for persistent-parent state primitives."""
 
 import contextlib
+import base64
 import importlib.util
 import io
 import json
 import os
 import pathlib
+import re
+import sqlite3
 import signal
 import stat
 import subprocess
+import shlex
 import sys
 import tempfile
 import unittest
@@ -34,6 +38,374 @@ class ParentStateTests(unittest.TestCase):
 
     def parent_dir(self):
         return self.home / ".local/state/little-mester/parent-v3/default"
+
+    def test_fixed_m2_guest_probe_scripts_are_valid_python(self):
+        for name in (
+            "PARENT_CANARY_CREATE_COMMAND", "PARENT_CANARY_CHECK_COMMAND",
+            "PARENT_CANARY_REMOVE_COMMAND", "PARENT_AUTH_CHECK_COMMAND",
+            "PARENT_NETWORK_CHECK_COMMAND", "PARENT_TUI_STATE_COMMAND",
+            "PARENT_PROTECTION_PREPARE_COMMAND", "PARENT_PROTECTION_CHECK_COMMAND",
+            "PARENT_PROTECTION_CLEANUP_COMMAND",
+        ):
+            with self.subTest(command=name):
+                command = getattr(parent_state, name)
+                wrapper = shlex.split(command)[3]
+                encoded = re.search(r"b64decode\('([^']+)'\)", wrapper).group(1)
+                compile(base64.b64decode(encoded), name, "exec")
+        compile(parent_state._M2_HISTORY_PROBE_SCRIPT, "history-probe", "exec")
+        compile(parent_state._M2_MODELS_PROBE_SCRIPT, "models-probe", "exec")
+        compile(parent_state._M2_TELEMETRY_BEHAVIOR_SCRIPT, "telemetry-behavior", "exec")
+
+    def test_model_list_probe_is_exactly_allowlisted_and_redacts_output(self):
+        command = parent_state.parent_models_probe_command("openai/gpt-test")
+        self.assertTrue(parent_state._allowed_models_probe(command))
+        self.assertFalse(parent_state._allowed_models_probe(command + "; touch /tmp/unsafe"))
+        with self.assertRaises(parent_state.Refused):
+            parent_state.parent_models_probe_command("attacker/model")
+        output = io.StringIO()
+        completed = subprocess.CompletedProcess([], 0, b"openai/gpt-test\nopenai/other\n", b"")
+        with mock.patch.object(sys, "argv", ["models-probe", "openai/gpt-test"]), \
+                mock.patch.object(subprocess, "run", return_value=completed), \
+                contextlib.redirect_stdout(output):
+            exec(compile(parent_state._M2_MODELS_PROBE_SCRIPT, "models-probe", "exec"),
+                 {"__name__": "__main__"})
+        report = json.loads(output.getvalue())
+        self.assertTrue(report["selected_openai_model_listed"])
+        self.assertNotIn("openai/gpt-test", output.getvalue())
+
+    def test_guest_term_probe_is_exactly_allowlisted(self):
+        command = parent_state.parent_term_probe_command("xterm-256color")
+        self.assertTrue(parent_state._allowed_term_probe(command))
+        self.assertFalse(parent_state._allowed_term_probe(command + " extra"))
+        with self.assertRaises(parent_state.Refused):
+            parent_state.parent_term_probe_command("xterm;touch")
+
+    def test_history_probe_recognizes_instructed_prompt_and_exact_pinned_model_answers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            database = pathlib.Path(temporary) / "opencode.db"
+            db = sqlite3.connect(database)
+            db.execute("CREATE TABLE session_message(session_id TEXT, type TEXT, seq INTEGER, data TEXT)")
+            session_id = "ses-private-history-fixture"
+            first = "AB12CD34EF56"
+            second = "9876ZYXWVU12"
+            rows = (
+                (session_id, "user", 1, json.dumps({
+                    "text": f"Reverse this string and return only the result: {first}"})),
+                (session_id, "assistant", 2, json.dumps({
+                    "content": [{"type": "text", "text": first[::-1]}],
+                    "model": {"providerID": "openai", "id": "gpt-test"}})),
+                (session_id, "user", 3, json.dumps({
+                    "text": f"Reverse this string and return only the result: {second}"})),
+                (session_id, "assistant", 4, json.dumps({
+                    "content": [{"type": "text", "text": second[::-1]}],
+                    "model": {"providerID": "openai", "id": "gpt-test"}})),
+            )
+            db.executemany("INSERT INTO session_message VALUES (?,?,?,?)", rows)
+            db.commit()
+            db.close()
+            database.chmod(0o600)
+            source = parent_state._M2_HISTORY_PROBE_SCRIPT.replace(
+                "p='/home/mester/.local/share/opencode/opencode.db'",
+                f"p={str(database)!r}")
+            namespace = {"__name__": "__main__"}
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", ["history-probe", second, second[::-1],
+                                                   "openai/gpt-test", first]), \
+                    contextlib.redirect_stdout(output):
+                exec(compile(source, "history-probe", "exec"), namespace)
+            result = json.loads(output.getvalue())
+            self.assertTrue(result["first_response_persisted"])
+            self.assertTrue(result["second_response_persisted"])
+            self.assertTrue(result["same_session"])
+            self.assertTrue(result["conversation_ordered"])
+            self.assertEqual(result["session_id_sha256"],
+                             __import__("hashlib").sha256(session_id.encode()).hexdigest())
+            self.assertNotIn(first, output.getvalue())
+            self.assertNotIn(second, output.getvalue())
+
+            db = sqlite3.connect(database)
+            db.execute("UPDATE session_message SET data=? WHERE seq=2", (json.dumps({
+                "content": [{"type": "text", "text": "The answer is " + first[::-1]}],
+                "snapshot": {"start": first[::-1]},
+                "model": {"providerID": "openai", "id": "gpt-test"}}),))
+            db.execute("UPDATE session_message SET seq=seq+10 WHERE seq IN (1, 2)")
+            db.commit()
+            db.close()
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", ["history-probe", first, first[::-1],
+                                                   "openai/gpt-test", "-"]), \
+                    contextlib.redirect_stdout(output):
+                exec(compile(source, "history-probe-negative", "exec"), {"__name__": "__main__"})
+            self.assertFalse(json.loads(output.getvalue())["first_response_persisted"])
+
+            db = sqlite3.connect(database)
+            db.execute("UPDATE session_message SET data=? WHERE seq=12", (json.dumps({
+                "content": [{"type": "text", "text": first[::-1]}],
+                "model": {"providerID": "openai", "id": "gpt-test"}}),))
+            db.commit()
+            db.close()
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", ["history-probe", second, second[::-1],
+                                                   "openai/gpt-test", first]), \
+                    contextlib.redirect_stdout(output):
+                exec(compile(source, "history-probe-out-of-order", "exec"), {"__name__": "__main__"})
+            self.assertFalse(json.loads(output.getvalue())["conversation_ordered"])
+            db = sqlite3.connect(database)
+            db.execute("UPDATE session_message SET seq=seq-10 WHERE seq IN (11, 12)")
+            db.commit()
+            db.close()
+
+    def test_hostile_config_cleanup_validates_complete_anchored_inventory_before_unlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = pathlib.Path(temporary) / "workspace"
+            workspace.mkdir(mode=0o750)
+            os.chmod(workspace, 0o750)
+            opencode_config = parent_state._M2_HOSTILE_CONFIG.encode() + b"\n"
+            plugin = parent_state._M2_HOSTILE_PLUGIN.encode()
+            config_path = workspace / "opencode.json"
+            config_path.write_bytes(opencode_config)
+            config_path.chmod(0o600)
+            probe_dir = workspace / ".opencode/plugins/lm-m2-hostile-probe"
+            probe_dir.mkdir(parents=True, mode=0o700)
+            for directory in (workspace / ".opencode", workspace / ".opencode/plugins", probe_dir):
+                directory.chmod(0o700)
+            plugin_path = probe_dir / "index.ts"
+            plugin_path.write_bytes(plugin)
+            plugin_path.chmod(0o600)
+            source = parent_state._M2_PROTECTION_CLEANUP_SCRIPT.replace(
+                "w='/home/mester/workspace'", f"w={str(workspace)!r}")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                exec(compile(source, "protection-cleanup", "exec"), {"__name__": "__main__"})
+            self.assertEqual(json.loads(out.getvalue())["status"], "REMOVED")
+            self.assertFalse(config_path.exists())
+            self.assertFalse((workspace / ".opencode").exists())
+
+    def test_hostile_config_cleanup_refuses_symlinked_parent_before_deleting_any_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = pathlib.Path(temporary) / "workspace"
+            outside = pathlib.Path(temporary) / "outside"
+            workspace.mkdir(mode=0o750)
+            outside.mkdir(mode=0o700)
+            os.chmod(workspace, 0o750)
+            config_path = workspace / "opencode.json"
+            config_path.write_bytes(parent_state._M2_HOSTILE_CONFIG.encode() + b"\n")
+            config_path.chmod(0o600)
+            marker = outside / "index.ts"
+            marker.write_bytes(parent_state._M2_HOSTILE_PLUGIN.encode())
+            marker.chmod(0o600)
+            (workspace / ".opencode").symlink_to(outside, target_is_directory=True)
+            source = parent_state._M2_PROTECTION_CLEANUP_SCRIPT.replace(
+                "w='/home/mester/workspace'", f"w={str(workspace)!r}")
+            with self.assertRaises(OSError):
+                exec(compile(source, "protection-cleanup", "exec"), {"__name__": "__main__"})
+            self.assertTrue(config_path.exists())
+            self.assertTrue(marker.exists())
+
+    def test_workspace_canary_check_requires_exact_payload_not_just_file_presence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = pathlib.Path(temporary) / "workspace"
+            workspace.mkdir(mode=0o750)
+            os.chmod(workspace, 0o750)
+            create_source = parent_state._WORKSPACE_CANARY_CREATE_SCRIPT.replace(
+                "'/home/mester/workspace'", repr(str(workspace)))
+            with contextlib.redirect_stdout(io.StringIO()):
+                exec(compile(create_source, "canary-create", "exec"), {"__name__": "__main__"})
+            check_source = parent_state._WORKSPACE_CANARY_CHECK_SCRIPT.replace(
+                "'/home/mester/workspace'", repr(str(workspace)))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                exec(compile(check_source, "canary-check", "exec"), {"__name__": "__main__"})
+            self.assertEqual(json.loads(output.getvalue())["status"], "PRESENT")
+            marker = workspace / ".lm-m2-owner-acceptance-canary"
+            marker.write_bytes(b"different contents")
+            marker.chmod(0o600)
+            with self.assertRaises(SystemExit) as error:
+                exec(compile(check_source, "canary-check-tampered", "exec"), {"__name__": "__main__"})
+            self.assertEqual(error.exception.code, 45)
+
+    def test_retirement_requires_exact_confirmation_and_preserves_unknown_state(self):
+        parent_state.initialize(home=self.home)
+        parent_dir = self.parent_dir()
+        metadata = parent_dir / "parent.json"
+        original = metadata.read_bytes()
+        status = parent_state.read_status(home=self.home)
+        phrase = parent_state._retirement_phrase(status.get("run_id"), status["disk"]["device"], status["disk"]["inode"])
+        with self.assertRaisesRegex(parent_state.Refused, "did not match"):
+            parent_state.retire_parent(confirmation="yes", home=self.home)
+        self.assertEqual(metadata.read_bytes(), original)
+
+        unknown = parent_dir / "owner-note.txt"
+        unknown.write_text("preserve", encoding="utf-8")
+        unknown.chmod(0o600)
+        with self.assertRaisesRegex(parent_state.Refused, "unexpected parent state entry"):
+            parent_state.retire_parent(confirmation=phrase, home=self.home)
+        self.assertEqual(metadata.read_bytes(), original)
+        self.assertEqual(unknown.read_text(encoding="utf-8"), "preserve")
+
+    def test_retirement_rejects_parent_run_changed_since_confirmation(self):
+        parent_state.initialize(home=self.home)
+        displayed = parent_state.read_status(home=self.home)
+        phrase = parent_state._retirement_phrase(displayed.get("run_id"),
+                                                 displayed["disk"]["device"], displayed["disk"]["inode"])
+        changed = dict(displayed, run_id="different-run")
+        with mock.patch.object(parent_state, "read_status", return_value=changed):
+            with self.assertRaisesRegex(parent_state.Refused, "changed while awaiting"):
+                parent_state.retire_parent(confirmation=phrase, expected_identity=displayed, home=self.home)
+
+    def test_authorized_stop_refuses_replacement_run_before_any_process_lookup(self):
+        status = {"status": "RUNNING", "run_id": "replacement",
+                  "disk": {"device": 10, "inode": 20}}
+        with mock.patch.object(parent_state, "read_status", return_value=status):
+            with self.assertRaisesRegex(parent_state.Refused, "changed before the authorized stop"):
+                parent_state.request_supervisor_stop(
+                    home=self.home, expected_run_id="authorized",
+                    expected_disk_identity=(10, 20))
+
+    def test_retirement_preserves_complete_bundle_and_lock_inode(self):
+        parent_state.initialize(home=self.home)
+        directory = self.parent_dir()
+        directory_fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+        try:
+            parent_state._atomic_bytes(directory_fd, "known_hosts", b"old-pinned-host-key")
+        finally:
+            os.close(directory_fd)
+        lock_path = directory / "lifecycle.lock"
+        lock_identity = (lock_path.stat().st_dev, lock_path.stat().st_ino)
+        status = parent_state.read_status(home=self.home)
+        phrase = parent_state._retirement_phrase(status.get("run_id"), None, None)
+        result = parent_state.retire_parent(confirmation=phrase, expected_identity=status, home=self.home)
+        self.assertTrue(result["retired"])
+        bundle = directory / result["retired_bundle"]
+        self.assertTrue((bundle / "parent.json").is_file())
+        self.assertTrue((bundle / "known_hosts").is_file())
+        self.assertEqual((bundle / "known_hosts").read_bytes(), b"old-pinned-host-key")
+        self.assertEqual((lock_path.stat().st_dev, lock_path.stat().st_ino), lock_identity)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "RETIRED")
+        fresh = parent_state.initialize(home=self.home)
+        self.assertFalse(fresh.get("ssh_identity"))
+        self.assertTrue((bundle / "parent.json").is_file())
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "UNPROVISIONED")
+
+    def test_retirement_resumes_after_interrupted_rename_without_losing_old_bundle(self):
+        parent_state.initialize(home=self.home)
+        directory = self.parent_dir()
+        directory_fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+        try:
+            parent_state._atomic_bytes(directory_fd, "known_hosts", b"retained-identity")
+        finally:
+            os.close(directory_fd)
+        displayed = parent_state.read_status(home=self.home)
+        phrase = parent_state._retirement_phrase(None, None, None)
+        real_rename = os.rename
+        count = 0
+
+        def interrupt_after_first(*args, **kwargs):
+            nonlocal count
+            real_rename(*args, **kwargs)
+            count += 1
+            if count == 1:
+                raise OSError("injected interruption after atomic move")
+
+        with mock.patch.object(parent_state.os, "rename", side_effect=interrupt_after_first):
+            with self.assertRaisesRegex(OSError, "injected interruption"):
+                parent_state.retire_parent(confirmation=phrase, expected_identity=displayed, home=self.home)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "RETIRING")
+        resumed = parent_state.read_status(home=self.home)
+        result = parent_state.retire_parent(confirmation=phrase, expected_identity=resumed, home=self.home)
+        self.assertTrue(result["retired"])
+        bundle = directory / result["retired_bundle"]
+        self.assertEqual((bundle / "known_hosts").read_bytes(), b"retained-identity")
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "RETIRED")
+
+    def test_retirement_resumes_after_journal_creation_and_before_first_move(self):
+        parent_state.initialize(home=self.home)
+        directory = self.parent_dir()
+        directory_fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+        try:
+            parent_state._atomic_bytes(directory_fd, "known_hosts", b"retained-at-journal-boundary")
+        finally:
+            os.close(directory_fd)
+        displayed = parent_state.read_status(home=self.home)
+        phrase = parent_state._retirement_phrase(None, None, None)
+        with mock.patch.object(parent_state, "_resume_retirement",
+                               side_effect=OSError("injected after journal commit")):
+            with self.assertRaisesRegex(OSError, "after journal commit"):
+                parent_state.retire_parent(confirmation=phrase, expected_identity=displayed, home=self.home)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "RETIRING")
+        directory_fd = os.open(directory, parent_state.DIRECTORY_FLAGS)
+        try:
+            journal = parent_state._read_json(directory_fd, "retirement.json")
+        finally:
+            os.close(directory_fd)
+        self.assertEqual(journal["phase"], "PREPARING")
+        resumed = parent_state.read_status(home=self.home)
+        result = parent_state.retire_parent(confirmation=phrase, expected_identity=resumed, home=self.home)
+        self.assertTrue(result["retired"])
+        self.assertEqual((directory / result["retired_bundle"] / "known_hosts").read_bytes(),
+                         b"retained-at-journal-boundary")
+
+    def test_retirement_resumes_after_bundle_creation_before_identity_commit(self):
+        parent_state.initialize(home=self.home)
+        directory = self.parent_dir()
+        directory_fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+        try:
+            parent_state._atomic_bytes(directory_fd, "known_hosts", b"retained-at-bundle-boundary")
+        finally:
+            os.close(directory_fd)
+        displayed = parent_state.read_status(home=self.home)
+        phrase = parent_state._retirement_phrase(None, None, None)
+        atomic_json = parent_state._atomic_json
+
+        def fail_moving_commit(fd, name, value):
+            if name == "retirement.json" and value.get("phase") == "MOVING":
+                raise OSError("injected after bundle creation")
+            return atomic_json(fd, name, value)
+
+        with mock.patch.object(parent_state, "_atomic_json", side_effect=fail_moving_commit):
+            with self.assertRaisesRegex(OSError, "after bundle creation"):
+                parent_state.retire_parent(confirmation=phrase, expected_identity=displayed, home=self.home)
+        status = parent_state.read_status(home=self.home)
+        self.assertEqual(status["status"], "RETIRING")
+        directory_fd = os.open(directory, parent_state.DIRECTORY_FLAGS)
+        try:
+            journal = parent_state._read_json(directory_fd, "retirement.json")
+        finally:
+            os.close(directory_fd)
+        bundle = directory / journal["bundle"]
+        self.assertTrue(bundle.is_dir())
+        self.assertEqual(list(bundle.iterdir()), [])
+        result = parent_state.retire_parent(confirmation=phrase, expected_identity=status, home=self.home)
+        self.assertTrue(result["retired"])
+        self.assertEqual((directory / result["retired_bundle"] / "known_hosts").read_bytes(),
+                         b"retained-at-bundle-boundary")
+
+    def test_retirement_resumes_after_all_moves_before_retired_commit(self):
+        parent_state.initialize(home=self.home)
+        directory = self.parent_dir()
+        directory_fd = parent_state._open_directory_chain(create=False, home_override=self.home)
+        try:
+            parent_state._atomic_bytes(directory_fd, "known_hosts", b"retained-before-final-journal")
+        finally:
+            os.close(directory_fd)
+        displayed = parent_state.read_status(home=self.home)
+        phrase = parent_state._retirement_phrase(None, None, None)
+        atomic_json = parent_state._atomic_json
+
+        def fail_final_commit(fd, name, value):
+            if name == "retirement.json" and value.get("phase") == "RETIRED":
+                raise OSError("injected before retired commit")
+            return atomic_json(fd, name, value)
+
+        with mock.patch.object(parent_state, "_atomic_json", side_effect=fail_final_commit):
+            with self.assertRaisesRegex(OSError, "before retired commit"):
+                parent_state.retire_parent(confirmation=phrase, expected_identity=displayed, home=self.home)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "RETIRING")
+        resumed = parent_state.read_status(home=self.home)
+        result = parent_state.retire_parent(confirmation=phrase, expected_identity=resumed, home=self.home)
+        self.assertTrue(result["retired"])
+        self.assertEqual((directory / result["retired_bundle"] / "known_hosts").read_bytes(),
+                         b"retained-before-final-journal")
 
     def write_stale_running_fixture(self):
         parent = parent_state.initialize(home=self.home)

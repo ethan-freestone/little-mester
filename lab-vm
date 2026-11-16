@@ -20,7 +20,7 @@ if [[ "${XDG_RUNTIME_DIR-}" == "$desktop_runtime" \
   fi
 fi
 
-if [[ "${1-}" == parent && ( "${2-}" == ssh || "${2-}" == auth || "${2-}" == tui ) \
+if [[ "${1-}" == parent && ( "${2-}" == ssh || "${2-}" == auth || "${2-}" == tui || "${2-}" == accept ) \
    && "${TERM-}" =~ ^[A-Za-z0-9_.+-]{1,64}$ ]] \
    && /usr/bin/infocmp -1 "$TERM" 2>/dev/null \
      | /usr/bin/grep -Eq '^[[:space:]]*clear='; then
@@ -185,7 +185,7 @@ PY
 export VM_HOST_SCRIPT_ROOT="$root"
 command="${1:-}"
 [[ -n "$command" ]] || {
-  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent up [--capacity-gib N] | parent status [--json] | parent inspect | parent ssh | parent auth | parent tui | parent stop | parent accept --milestone M2 --repo PATH | parent recover [--dry-run|--execute] [--json] | parent reconcile [--dry-run|--execute] [--json]\n' >&2
+  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent up [--capacity-gib N] | parent status [--json] | parent inspect | parent retire | parent canary-create|canary-check|canary-remove|network-check|tui-state|history-probe|protection-prepare|protection-check|protection-cleanup|auth-check|tui-key | parent ssh | parent auth | parent tui [--continue] | parent stop | parent accept --milestone M2 --repo PATH --model openai/<model-id> | parent recover [--dry-run|--execute] [--json] | parent reconcile [--dry-run|--execute] [--json]\n' >&2
   exit 2
 }
 shift
@@ -235,6 +235,14 @@ case "$command" in
         exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
           /usr/bin/python3 -I "$root/lib/vm/parent-state.py" inspect "$@"
         ;;
+      retire)
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          /usr/bin/python3 -I "$root/lib/vm/parent-state.py" retire "$@"
+        ;;
+      canary-create|canary-check|canary-remove|network-check|tui-state|history-probe|models-check|term-check|telemetry-check|protection-prepare|protection-check|protection-cleanup|auth-check|tui-key)
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          /usr/bin/python3 -I "$root/lib/vm/parent-state.py" "$subcommand" "$@"
+        ;;
       recover)
         exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
           /usr/bin/python3 -I "$root/lib/vm/parent-state.py" recover "$@"
@@ -259,6 +267,7 @@ case "$command" in
         [[ -n "$repo_path" ]] || { printf 'REFUSED: parent accept requires a source repository path\n' >&2; exit 2; }
         shift
         exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          "TERM=${TERM-}" "LM_VM_TERM_VALIDATED=${LM_VM_TERM_VALIDATED-}" "${desktop_env[@]}" \
           /usr/bin/python3 -I "$root/tools/vm-owner-acceptance" --parent-accept \
           --milestone M2 --sha "${root##*/}" --repo "$repo_path" "$@"
         ;;

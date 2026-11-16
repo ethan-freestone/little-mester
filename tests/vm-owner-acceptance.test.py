@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -24,7 +25,40 @@ acceptance = importlib.util.module_from_spec(spec)
 loader.exec_module(acceptance)
 
 
+class TTYBuffer(io.StringIO):
+    def isatty(self):
+        return True
+
+
 class OwnerAcceptanceTests(unittest.TestCase):
+    def test_missing_a4_behavioral_evidence_is_a_hard_gate(self):
+        evidence = {
+            "protected_update_disabled": True,
+            "runtime_config_update_disabled": True,
+            "protected_share_disabled": True,
+            "runtime_config_sharing_disabled": True,
+            "update_share_positive_control_accepted": True,
+            "hostile_fixture_is_expected_negative_control": True,
+            "share_command_absent_from_pinned_runtime": True,
+            "runtime_is_pinned_v225": True,
+            "runtime_autoupdate_disabled": True,
+            "runtime_sharing_disabled": True,
+            "runtime_telemetry_optout": True,
+            "runtime_otel_sdk_disabled": True,
+            "runtime_otel_exporters_disabled": True,
+            "runtime_otlp_exporter_absent": True,
+            "empty_user_data_before_probe": True,
+            "selected_model_listed": True,
+        }
+        required = tuple(evidence)
+        acceptance._require_probe(evidence, required, "#55 A4 behavior")
+        for omitted in required:
+            with self.subTest(omitted=omitted):
+                incomplete = dict(evidence)
+                incomplete.pop(omitted)
+                with self.assertRaises(acceptance.GateError):
+                    acceptance._require_probe(incomplete, required, "#55 A4 behavior")
+
     def test_live_guest_compatibility_uses_fixed_hashes_modes_version_and_identity(self):
         contract_spec = importlib.util.spec_from_file_location(
             "test_guest_contract", ROOT / "lib/vm/parent-session-contract.py")
@@ -460,63 +494,257 @@ class OwnerAcceptanceTests(unittest.TestCase):
             "preflight", "install", "storage_proof", "run", "verify_cleanup", "all", "parent_accept"
         )))
 
-    def test_parent_acceptance_uses_live_guest_evidence_not_source_diffs(self):
-        with tempfile.TemporaryDirectory(prefix="owner-m2-acceptance-") as temporary:
+    def test_parent_acceptance_has_simulated_complete_positive_pass_path(self):
+        with tempfile.TemporaryDirectory(prefix="owner-m2-positive-") as temporary:
             report_dir = pathlib.Path(temporary)
-            live = {
-                "parent_identity": {"status": "RUNNING", "run_id": "a" * 32},
-                "guest_assets": {"/usr/local/libexec/lm-opencode-auth": "MISMATCH"},
-                "guest_opencode_version": "opencode v2.2.5",
-                "m2_contract_compatible": False,
-                "inspection": "read_only_fixed_inventory",
-            }
-            with mock.patch.object(acceptance, "new_report_dir", return_value=report_dir), \
-                    mock.patch.object(acceptance, "candidate_commit"), \
-                    mock.patch.object(acceptance, "verify_install", return_value=pathlib.Path("/protected/install")), \
-                    mock.patch.object(acceptance, "installed_preflight") as preflight, \
-                    mock.patch.object(acceptance, "inspect_live_parent", return_value=live), \
-                    contextlib.redirect_stdout(io.StringIO()) as output:
-                result = acceptance.main([
-                    "--parent-accept", "--milestone", "M2", "--sha", "a" * 40,
-                    "--repo", str(ROOT),
-                ])
-            self.assertEqual(result, 3)
-            preflight.assert_called_once_with(pathlib.Path("/protected/install"), None)
-            report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["status"], "BLOCKED")
-            self.assertEqual(report["gates"]["install"], "PASS")
-            self.assertEqual(report["gates"]["preflight"], "PASS")
-            self.assertEqual(report["gates"]["parent_identity"], "PASS")
-            self.assertEqual(report["gates"]["guest_compatibility"], "BLOCKED")
-            evidence = report["evidence"]["parent_acceptance"]
-            self.assertEqual(evidence["inspection"]["guest_assets"]["/usr/local/libexec/lm-opencode-auth"], "MISMATCH")
-            self.assertEqual(evidence["parent_operations_started"], ["read_only_status", "read_only_guest_inspection"])
-            self.assertIn("M2_OWNER_ACCEPTANCE_FAIL", output.getvalue())
-            self.assertIn("same-disk guest updater", " ".join(report["notes"]))
+            operations = []
+            old = {"status": "RUNNING", "run_id": "a" * 32, "parent_id": "default",
+                   "supervisor_pid": 101, "qemu_pid": 202,
+                   "retired_bundle": "retired-" + "c" * 32,
+                   "retired_disk_identity": {"device": 1, "inode": 11},
+                   "disk": {"device": 1, "inode": 22, "format": "qcow2", "provisioned": True,
+                            "virtual_capacity_gib": 64, "file_bytes": 4096,
+                            "host_allocated_bytes": 4096}}
+            after = {**old, "run_id": "b" * 32}
+            status_results = iter((old, old, old, old,
+                                   {**old, "status": "STOPPED"}, after, after))
+            protections = {name: True for name in (
+                "project_config_ignored", "protected_update_disabled", "runtime_config_update_disabled",
+                "protected_share_disabled", "runtime_config_sharing_disabled",
+                "update_share_positive_control_accepted",
+                "hostile_fixture_is_expected_negative_control",
+                "share_command_absent_from_pinned_runtime", "runtime_is_pinned_v225",
+                "hostile_plugin_not_executed", "runtime_cwd_is_workspace",
+                "runtime_project_config_disabled", "runtime_config_path_protected",
+                "runtime_plugin_config_protected", "runtime_autoupdate_disabled",
+                "runtime_sharing_disabled", "runtime_telemetry_optout", "runtime_error_reporting_off",
+                "runtime_otel_sdk_disabled", "runtime_otel_exporters_disabled",
+                "runtime_otlp_exporter_absent", "hostile_fixture_cleaned_after_probe")}
+            protections["hostile_fixture_cleaned_after_probe"] = False
+            post_protections = {**protections,
+                                "hostile_fixture_is_expected_negative_control": False,
+                                "hostile_fixture_cleaned_after_probe": True}
+            protection_checks = iter((protections, post_protections))
 
-    def test_parent_acceptance_records_live_compatible_guest_but_does_not_fake_acceptance(self):
-        with tempfile.TemporaryDirectory(prefix="owner-m2-no-guest-proof-") as temporary:
-            report_dir = pathlib.Path(temporary)
-            live = {
-                "parent_identity": {"status": "RUNNING", "run_id": "b" * 32},
-                "guest_assets": {}, "guest_opencode_version": "opencode v2.2.5",
-                "m2_contract_compatible": True, "inspection": "read_only_fixed_inventory",
-            }
-            with mock.patch.object(acceptance, "new_report_dir", return_value=report_dir), \
-                    mock.patch.object(acceptance, "candidate_commit"), \
-                    mock.patch.object(acceptance, "verify_install", return_value=pathlib.Path("/protected/install")), \
-                    mock.patch.object(acceptance, "installed_preflight"), \
-                    mock.patch.object(acceptance, "inspect_live_parent", return_value=live), \
-                    contextlib.redirect_stdout(io.StringIO()):
+            def parent_json(_root, *args, **_kwargs):
+                operations.append(("json", args[0]))
+                if args[0] == "term-check":
+                    return None, {"status": "PASS", "terminfo_entry": True,
+                                  "clear_capability": True, "clear_command": True}
+                if args[0] == "status":
+                    return None, next(status_results)
+                if args[0] == "network-check":
+                    return None, {"public_proxy": "PASS", "private_proxy": "BLOCKED", "direct_public": "BLOCKED"}
+                if args[0] == "models-check":
+                    return None, {"status": "OK", "model_list_command_succeeded": True,
+                                  "selected_openai_model_listed": True, "empty_user_data_before_probe": True}
+                if args[0] == "telemetry-check":
+                    return None, {"status": "PASS", "both_runtime_invocations_succeeded": True,
+                                  "positive_control_exported_to_loopback": True,
+                                  "no_exporter_configured_control_exported_nothing": True}
+                if args[0] == "auth-check":
+                    return None, {"openai_credential_present": True}
+                if args[0] == "protection-check":
+                    return None, next(protection_checks)
+                if args[0] in ("recover", "reconcile"):
+                    return None, {"action": "none"}
+                if args[0] == "inspect":
+                    return None, {"/home/mester/.local/share/opencode/tmux": {"socket_count": 0}}
+                self.fail(f"unexpected parent JSON operation: {args}")
+
+            def parent_command(_root, *args, **_kwargs):
+                operations.append(("command", args[0]))
+                blocked = args[:2] == ("recover", "--dry-run")
+                return subprocess.CompletedProcess(
+                    [], 2 if blocked else 0, b"",
+                    b"REFUSED: live supervisor or lifecycle operation owns the parent lock" if blocked else b"")
+
+            def wait_tui(_root, predicate, timeout=8.0):
+                states = (
+                    {"session_count": 1, "target_count": 1, "exit_dialog_visible": False,
+                     "attached_clients": 0, "size": "107x43"},
+                    {"session_count": 1, "target_count": 1, "exit_dialog_visible": True,
+                     "attached_clients": 0, "size": "107x43"},
+                    {"session_count": 0, "target_count": 0, "exit_dialog_visible": False,
+                     "attached_clients": 0, "size": "107x43"},
+                )
+                return next(state for state in states if predicate(state))
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(acceptance.sys, "stdin", TTYBuffer()))
+                output = TTYBuffer()
+                stack.enter_context(mock.patch.object(acceptance.sys, "stdout", output))
+                stack.enter_context(mock.patch.dict(os.environ, {"LM_VM_TERM_VALIDATED": "1", "TERM": "xterm-256color"}))
+                for target, name, kwargs in (
+                    (acceptance, "new_report_dir", {"return_value": report_dir}),
+                    (acceptance, "candidate_commit", {}),
+                    (acceptance, "verify_install", {"return_value": pathlib.Path("/protected/install")}),
+                    (acceptance, "installed_preflight", {}),
+                    (acceptance, "inspect_live_parent", {"return_value": {
+                        "m2_contract_compatible": True, "guest_opencode_version": "opencode v2.2.5",
+                        "guest_assets": {"protected": "verified"}}}),
+                    (acceptance, "_parent_json", {"side_effect": parent_json}),
+                    (acceptance, "_parent_ok", {"side_effect": lambda _root, *args, **_kwargs: (
+                        operations.append(("command", args[0])) or subprocess.CompletedProcess([], 0))}),
+                    (acceptance, "_parent_command", {"side_effect": parent_command}),
+                    (acceptance, "_exercise_simultaneous_attach_and_resize", {"return_value": {
+                        "session_count": 1, "resize": "103x41", "simultaneous_attach": True}}),
+                    (acceptance, "_tui_key", {}),
+                    (acceptance, "_wait_tui", {"side_effect": wait_tui}),
+                    (acceptance, "_probe_history", {"side_effect": (
+                        {"first_response_persisted": True, "session_id_sha256": "d" * 64},
+                        {"first_response_persisted": True, "second_response_persisted": True,
+                         "same_session": True, "conversation_ordered": True,
+                         "session_id_sha256": "d" * 64})}),
+                ):
+                    stack.enter_context(mock.patch.object(target, name, **kwargs))
+                stack.enter_context(mock.patch("builtins.input", side_effect=(
+                    "YES", "xterm test profile", "CLIPBOARD_UNCHANGED",
+                    f"STOP-AND-RESTART parent=default run={'a' * 32} disk=1:22")))
                 result = acceptance.main([
                     "--parent-accept", "--milestone", "M2", "--sha", "a" * 40,
-                    "--repo", str(ROOT),
+                    "--repo", str(ROOT), "--model", "openai/gpt-test",
+                ])
+            report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(result, 0, output.getvalue() + json.dumps(report, indent=2))
+            self.assertEqual(report["status"], "PASS")
+            self.assertTrue(all(value == "PASS" for value in report["gates"].values()))
+            self.assertIn("M2_OWNER_ACCEPTANCE_PASS", output.getvalue())
+            names = [name for _kind, name in operations]
+            self.assertGreater(names.index("term-check"), names.index("up"))
+            serialized = json.dumps(report)
+            self.assertNotIn("LM-CLIPBOARD-CANARY", serialized)
+            self.assertNotIn("OAuth", serialized)
+
+    def test_parent_acceptance_blocks_ambiguous_identity_without_lifecycle_actions(self):
+        report_dir = pathlib.Path(tempfile.mkdtemp(prefix="owner-m2-ambiguous-"))
+        try:
+            def parent_json(_root, *args, **_kwargs):
+                if args[0] == "term-check":
+                    return None, {"status": "PASS", "terminfo_entry": True,
+                                  "clear_capability": True, "clear_command": True}
+                self.assertEqual(args, ("status", "--json"))
+                return None, {"status": "AMBIGUOUS"}
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(acceptance.sys, "stdin", TTYBuffer()))
+                output = TTYBuffer()
+                stack.enter_context(mock.patch.object(acceptance.sys, "stdout", output))
+                stack.enter_context(mock.patch.dict(os.environ, {"LM_VM_TERM_VALIDATED": "1", "TERM": "xterm-256color"}))
+                for target, name, kwargs in (
+                    (acceptance, "new_report_dir", {"return_value": report_dir}),
+                    (acceptance, "candidate_commit", {}),
+                    (acceptance, "verify_install", {"return_value": pathlib.Path("/protected/install")}),
+                    (acceptance, "installed_preflight", {}),
+                    (acceptance, "_parent_json", {"side_effect": parent_json}),
+                ):
+                    stack.enter_context(mock.patch.object(target, name, **kwargs))
+                parent_ok = stack.enter_context(mock.patch.object(acceptance, "_parent_ok"))
+                result = acceptance.main([
+                    "--parent-accept", "--milestone", "M2", "--sha", "a" * 40,
+                    "--repo", str(ROOT), "--model", "openai/gpt-test",
                 ])
             self.assertEqual(result, 3)
+            parent_ok.assert_not_called()
             report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["gates"]["guest_compatibility"], "PASS")
             self.assertEqual(report["status"], "BLOCKED")
-            self.assertIn("interactive M2 owner acceptance", " ".join(report["notes"]))
+            self.assertIn("M2_OWNER_ACCEPTANCE_FAIL", output.getvalue())
+        finally:
+            import shutil
+            shutil.rmtree(report_dir)
+
+    def test_parent_acceptance_cancellation_is_reported_and_does_not_provision(self):
+        with tempfile.TemporaryDirectory(prefix="owner-m2-cancel-") as temporary:
+            report_dir = pathlib.Path(temporary)
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(acceptance.sys, "stdin", TTYBuffer()))
+                output = TTYBuffer()
+                stack.enter_context(mock.patch.object(acceptance.sys, "stdout", output))
+                stack.enter_context(mock.patch.dict(os.environ, {"LM_VM_TERM_VALIDATED": "1", "TERM": "xterm-256color"}))
+                for target, name, kwargs in (
+                    (acceptance, "new_report_dir", {"return_value": report_dir}),
+                    (acceptance, "candidate_commit", {}),
+                    (acceptance, "verify_install", {"return_value": pathlib.Path("/protected/install")}),
+                    (acceptance, "installed_preflight", {}),
+                    (acceptance, "_parent_json", {"side_effect": lambda _root, *args, **_kwargs: (
+                        (None, {"status": "PASS", "terminfo_entry": True,
+                                "clear_capability": True, "clear_command": True})
+                        if args[0] == "term-check" else
+                        (None, {"status": "RETIRED", "retired_bundle": "retired-" + "c" * 32,
+                                "retired_disk_identity": {"device": 1, "inode": 2}}))}),
+                ):
+                    stack.enter_context(mock.patch.object(target, name, **kwargs))
+                approve = stack.enter_context(mock.patch.object(acceptance, "_owner_approval",
+                    side_effect=acceptance.GateError("BLOCKED", "owner approval cancelled")))
+                parent_ok = stack.enter_context(mock.patch.object(acceptance, "_parent_ok"))
+                result = acceptance.main([
+                    "--parent-accept", "--milestone", "M2", "--sha", "a" * 40,
+                    "--repo", str(ROOT), "--model", "openai/gpt-test",
+                ])
+            self.assertEqual(result, 3)
+            approve.assert_called_once()
+            parent_ok.assert_not_called()
+            report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "BLOCKED")
+            self.assertEqual(report["gates"]["fresh_provision"], "BLOCKED")
+            self.assertIn("M2_OWNER_ACCEPTANCE_FAIL", output.getvalue())
+
+    def test_simultaneous_attach_drives_two_clients_and_delivers_resize_signal(self):
+        class FakeClient:
+            def __init__(self):
+                self.returncode = None
+                self.signals = []
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.returncode = 0
+                return 0
+
+            def send_signal(self, value):
+                self.signals.append(value)
+
+            def terminate(self):
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+        clients = []
+
+        def popen(*_args, **_kwargs):
+            client = FakeClient()
+            clients.append(client)
+            return client
+
+        states = (
+            {"attached_clients": 1, "session_count": 1, "target_count": 1},
+            {"attached_clients": 2, "session_count": 1, "target_count": 1},
+            {"size": "107x43", "session_count": 1},
+            {"attached_clients": 1, "session_count": 1},
+            {"attached_clients": 0, "session_count": 1},
+        )
+        observed_sizes = []
+        ioctl = acceptance.fcntl.ioctl
+
+        def record_ioctl(fd, request, payload):
+            if request == acceptance.termios.TIOCSWINSZ:
+                observed_sizes.append(struct.unpack("HHHH", payload)[:2])
+            return ioctl(fd, request, payload)
+
+        with (
+            mock.patch.object(acceptance.subprocess, "Popen", side_effect=popen),
+            mock.patch.object(acceptance, "clean_env", return_value={}),
+            mock.patch.object(acceptance, "_wait_tui", side_effect=states),
+            mock.patch.object(acceptance.fcntl, "ioctl", side_effect=record_ioctl),
+        ):
+            result = acceptance._exercise_simultaneous_attach_and_resize(ROOT)
+        self.assertEqual(result["session_count"], 1)
+        self.assertTrue(result["simultaneous_attach"])
+        self.assertEqual(len(clients), 2)
+        self.assertEqual(clients[1].signals, [acceptance.signal.SIGWINCH])
+        self.assertEqual(observed_sizes, [(37, 91), (41, 103), (43, 107)])
 
     def test_parent_acceptance_requires_explicit_source_repository(self):
         with self.assertRaises(SystemExit):
