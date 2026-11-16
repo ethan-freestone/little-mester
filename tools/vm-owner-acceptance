@@ -50,6 +50,7 @@ INSTALL_FILES = {
     "lib/vm/bounded-log.py": 0o644,
     "lib/vm/executable-policy.py": 0o644,
     "lib/vm/browser-auth-session.py": 0o644,
+    "lib/vm/callback-listener.py": 0o644,
     "lib/vm/virtiofs-socket.py": 0o644,
     "lib/vm/guest-user-dirs.py": 0o644,
     "lib/vm/parent-session-contract.py": 0o644,

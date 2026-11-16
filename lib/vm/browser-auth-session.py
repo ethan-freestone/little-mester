@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import os
@@ -15,12 +16,19 @@ import shlex
 import signal
 import socket
 import stat
-import struct
 import subprocess
 import sys
 import time
 import uuid
 from urllib.parse import parse_qsl, urlsplit
+
+_CALLBACK_LISTENER_SPEC = importlib.util.spec_from_file_location(
+    "callback_listener", pathlib.Path(__file__).with_name("callback-listener.py")
+)
+if _CALLBACK_LISTENER_SPEC is None or _CALLBACK_LISTENER_SPEC.loader is None:
+    raise RuntimeError("callback listener helper is unavailable")
+_CALLBACK_LISTENER = importlib.util.module_from_spec(_CALLBACK_LISTENER_SPEC)
+_CALLBACK_LISTENER_SPEC.loader.exec_module(_CALLBACK_LISTENER)
 
 MAX_AUTH_URL_LENGTH = 8192
 MAX_AUTH_OUTPUT_BYTES = 65536
@@ -368,44 +376,7 @@ def _write_port(path: pathlib.Path, port: int) -> None:
 
 def listener_absent(port: int) -> bool:
     """Prove no TCP listener can accept the exact host-loopback port."""
-    if not isinstance(port, int) or not 1024 <= port <= 65535:
-        return False
-    try:
-        expected_loopback = struct.unpack("=I", socket.inet_aton("127.0.0.1"))[0]
-
-        def ipv6_accepts_ipv4(local_address: str) -> bool:
-            address = b"".join(
-                bytes.fromhex(local_address[index : index + 8])[::-1]
-                for index in range(0, 32, 8)
-            )
-            if address == b"\0" * 16:
-                return True
-            if address == b"\0" * 15 + b"\1":
-                return True
-            return address[:12] == b"\0" * 10 + b"\xff\xff" and address[12:] in {
-                b"\0" * 4,
-                socket.inet_aton("127.0.0.1"),
-            }
-
-        for table in ("/proc/net/tcp", "/proc/net/tcp6"):
-            rows = pathlib.Path(table).read_text(encoding="ascii").splitlines()[1:]
-            for row in rows:
-                fields = row.split()
-                if len(fields) < 4 or fields[3] != "0A":
-                    continue
-                local_address, local_port = fields[1].split(":", 1)
-                if int(local_port, 16) != port:
-                    continue
-                if table.endswith("tcp"):
-                    address = int(local_address, 16)
-                    if address in {0, expected_loopback}:
-                        return False
-                elif ipv6_accepts_ipv4(local_address):
-                    # IPv6 wildcard or IPv4-mapped loopback can accept IPv4 too.
-                    return False
-        return True
-    except (OSError, UnicodeError, ValueError, IndexError):
-        return False
+    return _CALLBACK_LISTENER.listener_absent(port)
 
 
 class BrowserAuthSession:

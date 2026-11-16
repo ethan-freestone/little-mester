@@ -70,6 +70,7 @@ dependencies = [
     root / "lib/vm/bounded-log.py",
     root / "lib/vm/executable-policy.py",
     root / "lib/vm/browser-auth-session.py",
+    root / "lib/vm/callback-listener.py",
     root / "lib/vm/virtiofs-socket.py",
     root / "lib/vm/guest-user-dirs.py",
     root / "lib/vm/parent-session-contract.py",

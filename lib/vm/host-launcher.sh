@@ -608,47 +608,8 @@ PY
 }
 
 vm_host_auth_listener_closed() {
-  local port_file="$1"
-  python3 -I - "$port_file" <<'PY'
-import os, pathlib, stat, struct, socket, sys
-path = pathlib.Path(sys.argv[1])
-try:
-    info = os.lstat(path)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
-        raise ValueError()
-    raw = path.read_text(encoding="ascii").strip()
-    if not raw.isdigit():
-        raise ValueError()
-    port = int(raw)
-    if not 1024 <= port <= 65535:
-        raise ValueError()
-except (OSError, ValueError, UnicodeError):
-    raise SystemExit("REFUSED: callback listener identity is invalid")
-try:
-    expected_loopback = struct.unpack("=I", socket.inet_aton("127.0.0.1"))[0]
-    def ipv6_accepts_ipv4(local_address):
-        address = b"".join(bytes.fromhex(local_address[index:index + 8])[::-1]
-                           for index in range(0, 32, 8))
-        if address == b"\0" * 16:
-            return True
-        return (address[:12] == b"\0" * 10 + b"\xff\xff"
-                and address[12:] in {b"\0" * 4, socket.inet_aton("127.0.0.1")})
-    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
-        rows = pathlib.Path(table).read_text(encoding="ascii").splitlines()[1:]
-        for row in rows:
-            fields = row.split()
-            if len(fields) < 4 or fields[3] != "0A":
-                continue
-            local_address, local_port = fields[1].split(":", 1)
-            if int(local_port, 16) != port:
-                continue
-            if table.endswith("tcp") and int(local_address, 16) in {0, expected_loopback}:
-                raise SystemExit("REFUSED: owned callback listener is still present or ambiguous")
-            if table.endswith("tcp6") and ipv6_accepts_ipv4(local_address):
-                raise SystemExit("REFUSED: owned callback listener is still present or ambiguous")
-except (OSError, UnicodeError, ValueError, IndexError) as error:
-    raise SystemExit("REFUSED: callback listener absence could not be verified") from error
-PY
+  local port_file="$1" helper="$(dirname -- "${BASH_SOURCE[0]}")/callback-listener.py"
+  python3 -I "$helper" "$port_file"
 }
 
 vm_host_cleanup_browser_auth() {

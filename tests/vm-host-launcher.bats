@@ -907,6 +907,7 @@ files = {
     "lib/vm/bounded-log.py": 0o666,
     "lib/vm/executable-policy.py": 0o666,
     "lib/vm/browser-auth-session.py": 0o666,
+    "lib/vm/callback-listener.py": 0o666,
     "lib/vm/virtiofs-socket.py": 0o666,
     "lib/vm/guest-user-dirs.py": 0o666,
     "lib/vm/parent-session-contract.py": 0o666,
@@ -1532,7 +1533,7 @@ SH
   local fixture="$TEST_TMP/protected-helper-shape"
   mkdir -p "$fixture/lib/vm"
   cp "$TEST_ROOT/lab-vm" "$fixture/lab-vm"
-  for name in host-launcher.sh cloud-init.sh proxy.py bounded-log.py executable-policy.py browser-auth-session.py guest-user-dirs.py; do
+  for name in host-launcher.sh cloud-init.sh proxy.py bounded-log.py executable-policy.py browser-auth-session.py callback-listener.py guest-user-dirs.py; do
     cp "$TEST_ROOT/lib/vm/$name" "$fixture/lib/vm/$name"
   done
   ln -s "$TEST_ROOT/lib/vm/virtiofs-socket.py" "$fixture/lib/vm/virtiofs-socket.py"

@@ -620,7 +620,7 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 "lab-vm",
                 "lib/vm/host-launcher.sh", "lib/vm/cloud-init.sh", "lib/vm/proxy.py",
                 "lib/vm/bounded-log.py", "lib/vm/executable-policy.py",
-                "lib/vm/browser-auth-session.py", "lib/vm/virtiofs-socket.py",
+                "lib/vm/browser-auth-session.py", "lib/vm/callback-listener.py", "lib/vm/virtiofs-socket.py",
                 "lib/vm/guest-user-dirs.py", "lib/vm/parent-session-contract.py", "lib/vm/parent-state.py",
                 "lib/vm/parent-launcher.py", "lib/vm/parent-gate.py",
                 "lib/vm/parent-supervisor.py", "lib/vm/parent-qemu.py",

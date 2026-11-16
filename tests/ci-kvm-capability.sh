@@ -821,11 +821,11 @@ run_persistence_create
 run_persistence_proof initial-creation ''
 ssh_guest 'printf unsafe-target-preserved > /tmp/lm-auth-unsafe-target && ln -s /tmp/lm-auth-unsafe-target /home/mester/.local/share/opencode/opencode.db-wal; if /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth >/dev/null 2>&1; then exit 1; fi; test "$(cat /tmp/lm-auth-unsafe-target)" = unsafe-target-preserved; rm /home/mester/.local/share/opencode/opencode.db-wal'
 ssh_guest '/usr/bin/python3 -I /usr/local/libexec/lm-ci-opencode-config-check --workspace /home/mester/workspace --home /home/mester --protected-config /etc/opencode/opencode.json --protected-plugin /etc/opencode/plugins/little-mester-exit-confirm' 50
-capture_tui_probe startup 8 "$tmp" "$tmp_root"
+capture_tui_probe startup 8 "$tmp" "$tmp_root" ssh_tty_guest "$repo_root/tests/ci-tui-diagnostic.py" fail
 # shellcheck disable=SC2016
 ssh_guest 'test "$(stat -c %a /home/mester/.local/share/opencode/opencode.db)" = 600 && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && test "$(stat -c %a /home/mester/.local/share/opencode)" = 700 && test ! -e /etc/opencode/service.json && TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux has-session -t little-mester-opencode && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_dead}")" = 0 && TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux show-environment -g OPENCODE_CONFIG | grep -Fx OPENCODE_CONFIG=/etc/opencode/opencode.json && TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux show-environment -g OPENCODE_DISABLE_PROJECT_CONFIG | grep -Fx OPENCODE_DISABLE_PROJECT_CONFIG=1'
 pane_before="$(ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_id}:#{pane_pid}"')"
-capture_tui_probe reattach 4 "$tmp" "$tmp_root"
+capture_tui_probe reattach 4 "$tmp" "$tmp_root" ssh_tty_guest "$repo_root/tests/ci-tui-diagnostic.py" fail
 pane_after="$(ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_id}:#{pane_pid}"')"
 [[ "$pane_before" == "$pane_after" ]] || fail 'tmux reattachment did not preserve the live OpenCode pane identity'
 printf 'KVM_M2_INTEGRATION_PASS: real KVM guest, SSH, pinned OpenCode 2.2.5, protected config, tmux TUI process and persistent workspace fixture\n'
@@ -926,7 +926,7 @@ run_persistence_proof post-reboot "$persist_mount_sha256"
 ssh_guest "python3 -c 'import socket,sys; targets=[(ip,443) for ip in sys.argv[1:]]+[(\"10.0.2.100\",3128)]; connected=[target for target in targets if (lambda s: (s.settimeout(2),s.connect_ex(target)==0,s.close())[1])(socket.socket())]; assert not connected, \"restricted guest unexpectedly reached an upstream/proxy endpoint\"' $probe_argv"
 printf 'KVM_EGRESS_BOUNDARY_PASS: a bounded sample of resolved provider HTTPS addresses and the configured proxy TCP endpoint were unreachable in restricted QEMU mode\n'
 ssh_guest 'test "$(cat /home/mester/.local/share/opencode/auth.json)" = "{\"provider\":\"synthetic-fixture\",\"marker\":\"preserve-auth-bytes\"}" && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && python3 -c '\''import sqlite3; db=sqlite3.connect("/home/mester/.local/share/opencode/opencode.db"); assert db.execute("select value from session_fixture").fetchone() == ("synthetic-session-history",); db.close()'\'''
-capture_tui_probe reboot 8 "$tmp" "$tmp_root"
+capture_tui_probe reboot 8 "$tmp" "$tmp_root" ssh_tty_guest "$repo_root/tests/ci-tui-diagnostic.py" fail
 ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux has-session -t little-mester-opencode && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_dead}")" = 0 && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_current_path}")" = /home/mester/workspace'
 printf 'KVM_PERSISTENCE_PASS: synthetic OpenCode DB/auth fixtures, workspace data, and TUI recreation survived disposable guest reboot\n'
 stage_end restricted-reboot-egress-persistence

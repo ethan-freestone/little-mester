@@ -37,7 +37,7 @@ ssh_tty_guest() {{
   script -qefc {shlex.quote(f'python3 {writer}')} /dev/null
   return 124
 }}
-capture_tui_probe reattach 4 {capture_dir!s} {retained!s}
+capture_tui_probe reattach 4 {capture_dir!s} {retained!s} ssh_tty_guest {ROOT!s}/tests/ci-tui-diagnostic.py fail
 '''
             result = subprocess.run(
                 ["bash", "-c", script], cwd=ROOT, capture_output=True,
@@ -52,6 +52,43 @@ capture_tui_probe reattach 4 {capture_dir!s} {retained!s}
             self.assertIn(b"private-ssh-pty-secret", raw.read_bytes())
             self.assertIn(b"\x1b[32m", raw.read_bytes())
             self.assertEqual(raw.stat().st_mode & 0o777, 0o600)
+
+    def test_missing_diagnostic_fails_even_if_reporter_returns_success(self):
+        with tempfile.TemporaryDirectory(prefix="ci-tui-missing-deps-") as directory:
+            root = pathlib.Path(directory)
+            capture_dir = root / "capture"
+            retained = root / "retained"
+            capture_dir.mkdir(mode=0o700)
+            retained.mkdir(mode=0o700)
+            script = f'''set -euo pipefail
+source {CAPTURE!s}
+ssh_tty_guest() {{ return 124; }}
+report_ok() {{ return 0; }}
+capture_tui_probe startup 2 {capture_dir!s} {retained!s} ssh_tty_guest {root / "missing.py"!s} report_ok
+'''
+            result = subprocess.run(
+                ["bash", "-c", script], cwd=ROOT, capture_output=True,
+                text=True, timeout=5, check=False,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+
+    def test_invalid_runner_is_rejected_before_capture(self):
+        with tempfile.TemporaryDirectory(prefix="ci-tui-invalid-runner-") as directory:
+            root = pathlib.Path(directory)
+            capture_dir = root / "capture"
+            retained = root / "retained"
+            capture_dir.mkdir(mode=0o700)
+            retained.mkdir(mode=0o700)
+            script = f'''set -euo pipefail
+source {CAPTURE!s}
+report_ok() {{ return 0; }}
+capture_tui_probe startup 2 {capture_dir!s} {retained!s} missing_runner {ROOT!s}/tests/ci-tui-diagnostic.py report_ok
+'''
+            result = subprocess.run(
+                ["bash", "-c", script], cwd=ROOT, capture_output=True,
+                text=True, timeout=5, check=False,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
 
 
 if __name__ == "__main__":
