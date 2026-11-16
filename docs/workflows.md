@@ -3,6 +3,10 @@
 For the persistent operating procedure for Phase 1 tickets #53–#57, see
 [`workflows/phase1-continuous-execution.md`](workflows/phase1-continuous-execution.md).
 
+For how ideas, optional phases/PRs, milestones, submilestones, tasks, and
+acceptance evidence fit together, see the canonical
+[`PROJECT-PLANNING.md`](PROJECT-PLANNING.md) convention.
+
 ## Core discipline: doc → test → code → commit
 
 Every change follows four stages. No stage is skipped or reordered.
