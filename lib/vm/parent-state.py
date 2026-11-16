@@ -1998,6 +1998,354 @@ def retire_parent(*, confirmation: str, expected_identity: dict | None = None,
             os.close(directory_fd)
 
 
+def _factory_reset_mounts_clear(state_path: pathlib.Path) -> bool:
+    """Reject any mount at or below the fixed parent state boundary."""
+    try:
+        lines = pathlib.Path("/proc/self/mountinfo").read_text().splitlines()
+    except OSError as error:
+        raise Refused("mount table is unavailable; factory reset refused") from error
+
+    def unescape(value: str) -> str:
+        return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+    boundary = str(state_path)
+    boundaries = {str(state_path), *(str(state_path.parents[index])
+                                     for index in range(len(STATE_COMPONENTS) - 1))}
+    for line in lines:
+        columns = line.split()
+        if len(columns) < 6:
+            raise Refused("mount table is malformed; factory reset refused")
+        mountpoint = pathlib.Path(unescape(columns[4]))
+        text = str(mountpoint)
+        # A mount at any Little Mester state component changes the storage boundary;
+        # a mount of the user's home itself is the normal host layout and is allowed.
+        if text in boundaries or text.startswith(str(state_path) + os.sep):
+            return False
+    return True
+
+
+def _factory_reset_process_check(state_path: pathlib.Path) -> None:
+    """Fail closed on visible Little Mester parent processes; never signal here."""
+    try:
+        entries = list(os.scandir("/proc"))
+    except OSError as error:
+        raise Refused("process table is unavailable; factory reset refused") from error
+    state_text = str(state_path)
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        proc = pathlib.Path("/proc") / entry.name
+        try:
+            raw = (proc / "cmdline").read_bytes()
+            exe = os.path.basename(os.readlink(proc / "exe"))
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            # Disk-holder inspection below is the authoritative cross-UID check.
+            continue
+        except OSError as error:
+            raise Refused("process identity could not be inspected; factory reset refused") from error
+        argv = [os.fsdecode(item) for item in raw.split(b"\0") if item]
+        supervisor = (len(argv) >= 7 and pathlib.Path(argv[2]).name == "parent-supervisor.py"
+                      and _trusted_parent_runtime_script(argv[2], "parent-supervisor.py")
+                      and argv[3:7] == ["--parent-id", PARENT_ID, "--run-id", argv[6]]
+                      and re.fullmatch(r"[0-9a-f]{32}", argv[6]) is not None)
+        qemu = exe == "qemu-system-x86_64" and any(state_text in item for item in argv)
+        if supervisor or qemu:
+            raise Refused("Little Mester parent process is present; stop it through the protected lifecycle command")
+
+
+def _factory_reset_holder_scan(fd: int) -> None:
+    """Use the existing protected complete procfs descriptor/map scanner."""
+    info = os.fstat(fd)
+    helper = pathlib.Path(__file__).resolve().parents[2] / "scripts/parent-readonly-safety-gate.py"
+    python = pathlib.Path("/usr/bin/python3")
+    sudo = pathlib.Path("/usr/bin/sudo")
+    install_root = helper.parent.parent
+    for component in (helper, helper.parent, *helper.parents[1:]):
+        metadata = component.lstat()
+        if (metadata.st_uid != 0 or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or component == helper and (not stat.S_ISREG(metadata.st_mode)
+                                             or stat.S_IMODE(metadata.st_mode) != 0o644)
+                or component != helper and not stat.S_ISDIR(metadata.st_mode)):
+            raise Refused("protected disk-holder scanner path is unavailable or unsafe")
+        if component == install_root:
+            break
+    for executable in (sudo, python):
+        metadata = executable.stat()
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+                or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or not os.access(executable, os.X_OK)):
+            raise Refused("protected disk-holder scanner executable is unavailable")
+    try:
+        result = subprocess.run(
+            [str(sudo), "-n", str(python), "-I", "-B", str(helper), "--scan-inode",
+             str(info.st_dev), str(info.st_ino), str(os.getpid()), str(fd)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=35, check=False,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+                 "PYTHONDONTWRITEBYTECODE": "1"})
+    except (OSError, subprocess.SubprocessError) as error:
+        raise Refused("protected disk-holder scan failed; factory reset refused") from error
+    if result.returncode or result.stderr or len(result.stdout) > 65536:
+        raise Refused("protected disk-holder scan was refused or incomplete")
+    try:
+        evidence = json.loads(result.stdout)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise Refused("protected disk-holder scan returned malformed evidence") from error
+    if (not isinstance(evidence, dict) or evidence.get("complete") is not True
+            or evidence.get("coverage") != {"procfs": True, "pid_namespace": "init-shared",
+                                             "user_namespace": "init-shared", "descriptors": True,
+                                             "file_mappings": True}
+            or not isinstance(evidence.get("holders"), list)):
+        raise Refused("protected disk-holder scan did not affirm complete coverage")
+    if evidence["holders"]:
+        raise Refused("a process holds a Little Mester state file; factory reset refused")
+
+
+def _factory_reset_scan_resource(name: str) -> bool:
+    return name.endswith((".qcow2", ".iso")) or name in {
+        "disk.qcow2.part", "seed.iso.part", "base-image.part",
+    }
+
+
+def _factory_reset_inventory(directory_fd: int, *, scan_holders: bool = True) -> list[dict]:
+    inventory = []
+    allowed = _RESET_FIXED_FILES | {
+        "lifecycle.lock", "retirement.json", "supervisor.sock", "qmp.sock",
+    }
+    for name in sorted(os.listdir(directory_fd)):
+        if name == "lifecycle.lock":
+            continue
+        is_bundle = re.fullmatch(r"retired-[0-9a-f]{32}", name) is not None
+        if name not in allowed and not is_bundle and not _reset_artifact_name(name):
+            raise Refused("unexpected parent state entry; factory reset refused")
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if is_bundle:
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o700 or info.st_nlink < 2):
+                raise Refused("retired bundle boundary is unsafe; factory reset refused")
+            bundle_fd = os.open(name, DIRECTORY_FLAGS, dir_fd=directory_fd)
+            try:
+                bundle_items = []
+                for child in sorted(os.listdir(bundle_fd)):
+                    if not _reset_artifact_name(child):
+                        raise Refused("unexpected retired-bundle entry; factory reset refused")
+                    child_info = os.stat(child, dir_fd=bundle_fd, follow_symlinks=False)
+                    if (not stat.S_ISREG(child_info.st_mode) or child_info.st_uid != os.getuid()
+                            or stat.S_IMODE(child_info.st_mode) != 0o600 or child_info.st_nlink != 1):
+                        raise Refused("retired-bundle artifact is unsafe; factory reset refused")
+                    if scan_holders and _factory_reset_scan_resource(child):
+                        child_fd = os.open(child, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                                           dir_fd=bundle_fd)
+                        try:
+                            opened_child = os.fstat(child_fd)
+                            if (opened_child.st_dev, opened_child.st_ino) != (
+                                    child_info.st_dev, child_info.st_ino):
+                                raise Refused("retired-bundle artifact changed during reset inspection")
+                            _factory_reset_holder_scan(child_fd)
+                        finally:
+                            os.close(child_fd)
+                    bundle_items.append({"name": child, "device": child_info.st_dev,
+                                         "inode": child_info.st_ino, "size": child_info.st_size})
+                inventory.append({"name": name, "device": info.st_dev, "inode": info.st_ino,
+                                  "kind": "bundle", "children": bundle_items})
+            finally:
+                os.close(bundle_fd)
+            continue
+        safe_socket = (name in ("supervisor.sock", "qmp.sock") and stat.S_ISSOCK(info.st_mode)
+                       and info.st_uid == os.getuid())
+        if not safe_socket and (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            raise Refused("parent state artifact has unsafe type, owner, mode, or link count")
+        item = {"name": name, "device": info.st_dev, "inode": info.st_ino,
+                "size": info.st_size, "kind": "socket" if safe_socket else "file"}
+        if not safe_socket and scan_holders and _factory_reset_scan_resource(name):
+            fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory_fd)
+            try:
+                opened = os.fstat(fd)
+                if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                    raise Refused("parent state artifact changed during reset inspection")
+                _factory_reset_holder_scan(fd)
+            finally:
+                os.close(fd)
+        inventory.append(item)
+    return inventory
+
+
+def factory_reset_parent(*, confirmation: str | None = None,
+                         home: str | os.PathLike | None = None,
+                         stop_confirmation: str | None = None) -> dict:
+    """Owner-authorized disposal of only the fixed, isolated persistent-parent state tree."""
+    initial = read_status(home=home)
+    if initial.get("status") in ("RUNNING", "STARTING"):
+        disk = initial.get("disk") if isinstance(initial.get("disk"), dict) else {}
+        stop_phrase = (f"FACTORY-STOP parent={PARENT_ID} run={initial.get('run_id')} "
+                       f"disk={disk.get('device')}:{disk.get('inode')}")
+        if stop_confirmation is None:
+            print("The currently running parent has a verified process identity. The next action will stop only that parent through the protected pidfd lifecycle path.")
+            print(f"Type exactly: {stop_phrase}")
+            stop_confirmation = input("Confirmation: ")
+        if stop_confirmation != stop_phrase:
+            raise Refused("verified-parent stop confirmation did not match the displayed run and disk identity")
+        # Reuse the normal pidfd-based stop path only while every recorded identity
+        # predicate validates. Ambiguous identities are never signalled.
+        request_supervisor_stop(home=home, expected_run_id=initial.get("run_id"),
+                                expected_disk_identity=(disk.get("device"), disk.get("inode")))
+    directory_fd = _open_directory_chain(create=False, home_override=home)
+    if directory_fd is None:
+        return {"status": "NOT_CREATED", "reset": False, "parent_id": PARENT_ID}
+    lock_fd = -1
+    try:
+        state_path = pathlib.Path(home if home is not None else pwd.getpwuid(os.getuid()).pw_dir)
+        state_path = state_path.resolve(strict=True).joinpath(*STATE_COMPONENTS)
+        if not _factory_reset_mounts_clear(state_path):
+            raise Refused("parent state contains a mountpoint; factory reset refused")
+        try:
+            lock_fd = os.open("lifecycle.lock", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                              dir_fd=directory_fd)
+        except OSError as error:
+            raise Refused("existing lifecycle lock is missing or unsafe; factory reset refused") from error
+        try:
+            _verify_lock_fd(lock_fd, home=home)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _verify_lock_fd(lock_fd, home=home)
+        except (OSError, Refused) as error:
+            raise Refused("lifecycle lock is busy or unsafe; factory reset refused") from error
+        # The complete privileged scanner covers the held lock file as well as the
+        # virtual disk. A live supervisor that retained its lock FD is a holder even
+        # when its argv is unreadable or does not match this candidate's schema.
+        _factory_reset_process_check(state_path)
+        _factory_reset_holder_scan(lock_fd)
+        inventory = _factory_reset_inventory(directory_fd)
+        encoded = json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()
+        inventory_id = hashlib.sha256(encoded).hexdigest()
+        expected = f"FACTORY-RESET parent={PARENT_ID} state={state_path} inventory={inventory_id}"
+        if confirmation is None:
+            print("Factory reset scope: the Little Mester persistent parent state directory only.")
+            print(f"State path: {state_path}")
+            print("Exact entries to destroy:")
+            for item in inventory:
+                print(f"  {item['name']} ({item['kind']}, device={item['device']}, inode={item['inode']})")
+                for child in item.get("children", []):
+                    print(f"    {child['name']} (device={child['device']}, inode={child['inode']})")
+            print(f"Type exactly: {expected}")
+            confirmation = input("Confirmation: ")
+        if confirmation != expected:
+            raise Refused("factory-reset confirmation did not match the exact resource inventory")
+
+        # Recheck every inventory identity immediately before each unlink. Retrying an
+        # interrupted reset simply presents a new exact inventory and confirmation.
+        if not _factory_reset_mounts_clear(state_path):
+            raise Refused("parent state mount boundary changed after confirmation; reset stopped")
+        directory_info = os.fstat(directory_fd)
+        path_info = os.stat(state_path, follow_symlinks=False)
+        if (directory_info.st_dev, directory_info.st_ino) != (path_info.st_dev, path_info.st_ino):
+            raise Refused("parent state directory identity changed after confirmation; reset stopped")
+        _factory_reset_process_check(state_path)
+        for index, item in enumerate(inventory):
+            if not _factory_reset_mounts_clear(state_path):
+                raise Refused("parent state mount boundary changed during reset; reset stopped")
+            current_directory = os.fstat(directory_fd)
+            current_path = os.stat(state_path, follow_symlinks=False)
+            if (current_directory.st_dev, current_directory.st_ino) != (
+                    current_path.st_dev, current_path.st_ino):
+                raise Refused("parent state directory identity changed during reset; reset stopped")
+            if _factory_reset_inventory(directory_fd, scan_holders=False) != inventory[index:]:
+                raise Refused("parent state inventory changed after confirmation; reset stopped")
+            expected_root_names = {"lifecycle.lock", *(entry["name"] for entry in inventory[index:])}
+            if set(os.listdir(directory_fd)) != expected_root_names:
+                raise Refused("unexpected parent state entry appeared after confirmation; reset stopped")
+            _factory_reset_process_check(state_path)
+            name = item["name"]
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (item["device"], item["inode"]):
+                raise Refused("parent state entry changed after confirmation; reset stopped")
+            if item["kind"] == "bundle":
+                bundle_fd = os.open(name, DIRECTORY_FLAGS, dir_fd=directory_fd)
+                try:
+                    opened_bundle = os.fstat(bundle_fd)
+                    if (not stat.S_ISDIR(opened_bundle.st_mode) or opened_bundle.st_uid != os.getuid()
+                            or stat.S_IMODE(opened_bundle.st_mode) != 0o700
+                            or (opened_bundle.st_dev, opened_bundle.st_ino) != (
+                                item["device"], item["inode"])):
+                        raise Refused("retired-bundle identity changed after confirmation; reset stopped")
+                    remaining_children = list(item["children"])
+                    for child_index, child in enumerate(item["children"]):
+                        if not _factory_reset_mounts_clear(state_path):
+                            raise Refused("parent state mount boundary changed during bundle reset")
+                        current_directory = os.fstat(directory_fd)
+                        current_path = os.stat(state_path, follow_symlinks=False)
+                        if (current_directory.st_dev, current_directory.st_ino) != (
+                                current_path.st_dev, current_path.st_ino):
+                            raise Refused("parent state directory identity changed during bundle reset")
+                        _factory_reset_process_check(state_path)
+                        pending_inventory = [dict(entry) for entry in inventory[index:]]
+                        pending_inventory[0]["children"] = item["children"][child_index:]
+                        if _factory_reset_inventory(directory_fd, scan_holders=False) != pending_inventory:
+                            raise Refused("complete parent inventory changed during bundle reset")
+                        if set(os.listdir(bundle_fd)) != {
+                                value["name"] for value in remaining_children[child_index:]}:
+                            raise Refused("retired-bundle inventory changed after confirmation; reset stopped")
+                        current_child = os.stat(child["name"], dir_fd=bundle_fd, follow_symlinks=False)
+                        if (current_child.st_dev, current_child.st_ino, current_child.st_size) != (
+                                child["device"], child["inode"], child["size"]):
+                            raise Refused("retired-bundle entry changed after confirmation; reset stopped")
+                        child_fd = os.open(child["name"], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                                           dir_fd=bundle_fd)
+                        try:
+                            opened_child = os.fstat(child_fd)
+                            if (opened_child.st_dev, opened_child.st_ino, opened_child.st_uid,
+                                    stat.S_IMODE(opened_child.st_mode), opened_child.st_nlink) != (
+                                    child["device"], child["inode"], os.getuid(), 0o600, 1):
+                                raise Refused("retired-bundle entry changed after confirmation; reset stopped")
+                            if _factory_reset_scan_resource(child["name"]):
+                                _factory_reset_holder_scan(child_fd)
+                        finally:
+                            os.close(child_fd)
+                        checked_child = os.stat(child["name"], dir_fd=bundle_fd, follow_symlinks=False)
+                        if (checked_child.st_dev, checked_child.st_ino) != (
+                                child["device"], child["inode"]):
+                            raise Refused("retired-bundle entry changed before unlink; reset stopped")
+                        os.unlink(child["name"], dir_fd=bundle_fd)
+                    os.fsync(bundle_fd)
+                finally:
+                    os.close(bundle_fd)
+                checked_bundle = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if (checked_bundle.st_dev, checked_bundle.st_ino) != (item["device"], item["inode"]):
+                    raise Refused("retired-bundle identity changed before removal; reset stopped")
+                os.rmdir(name, dir_fd=directory_fd)
+            else:
+                if item["kind"] == "file" and _factory_reset_scan_resource(name):
+                    check_fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                                       dir_fd=directory_fd)
+                    try:
+                        opened = os.fstat(check_fd)
+                        if (opened.st_dev, opened.st_ino, opened.st_uid,
+                                stat.S_IMODE(opened.st_mode), opened.st_nlink) != (
+                                item["device"], item["inode"], os.getuid(), 0o600, 1):
+                            raise Refused("parent state entry changed after confirmation; reset stopped")
+                        _factory_reset_holder_scan(check_fd)
+                    finally:
+                        os.close(check_fd)
+                checked = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if (checked.st_dev, checked.st_ino) != (item["device"], item["inode"]):
+                    raise Refused("parent state entry changed before unlink; reset stopped")
+                os.unlink(name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        if set(os.listdir(directory_fd)) != {"lifecycle.lock"}:
+            raise Refused("unexpected state appeared during factory reset; remaining state preserved")
+        status = read_status(home=home)
+        if status.get("status") != "NOT_CREATED":
+            raise Refused("factory reset did not produce a clean NOT_CREATED parent state")
+        return {"status": "NOT_CREATED", "reset": bool(inventory), "parent_id": PARENT_ID,
+                "destroyed_entries": len(inventory), "inventory_id": inventory_id}
+    finally:
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        os.close(directory_fd)
+
+
 def _require_completed_stop(*, home: str | os.PathLike | None,
                             expected_run_id: str | None = None) -> None:
     """Accept stop only after the same run publishes its verified STOPPING tombstone."""
@@ -2913,7 +3261,7 @@ def stop_exec_transition(identity: dict, *, term_grace_ms: int = 5000, settle_ms
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("status", "recover", "reconcile", "stop", "ssh", "auth", "tui", "inspect", "retire", "canary-create", "canary-check", "canary-remove", "network-check", "tui-state", "history-probe", "protection-prepare", "protection-check", "protection-cleanup", "auth-check", "tui-key", "models-check", "term-check", "telemetry-check"))
+    parser.add_argument("command", choices=("status", "recover", "reconcile", "stop", "ssh", "auth", "tui", "inspect", "retire", "factory-reset", "canary-create", "canary-check", "canary-remove", "network-check", "tui-state", "history-probe", "protection-prepare", "protection-check", "protection-cleanup", "auth-check", "tui-key", "models-check", "term-check", "telemetry-check"))
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--continue", action="store_true", dest="continue_session")
     parser.add_argument("--token")
@@ -2930,7 +3278,7 @@ def main() -> int:
         parser.error("--dry-run/--execute is only valid with recover/reconcile")
     if args.continue_session and args.command != "tui":
         parser.error("--continue is only valid with tui")
-    if args.command in ("ssh", "auth", "tui", "inspect", "retire", "canary-create", "canary-check", "canary-remove", "network-check", "tui-state", "history-probe", "protection-prepare", "protection-check", "protection-cleanup", "auth-check", "tui-key", "models-check", "term-check", "telemetry-check") and args.json:
+    if args.command in ("ssh", "auth", "tui", "inspect", "retire", "factory-reset", "canary-create", "canary-check", "canary-remove", "network-check", "tui-state", "history-probe", "protection-prepare", "protection-check", "protection-cleanup", "auth-check", "tui-key", "models-check", "term-check", "telemetry-check") and args.json:
         parser.error("--json is not valid with interactive/fixed remote parent commands")
     if args.command == "history-probe":
         if not args.token or not args.model:
@@ -3014,6 +3362,16 @@ def main() -> int:
             except OSError as error:
                 raise Refused("retirement was interrupted at a recoverable boundary; preserve all state, inspect status, and rerun the identity confirmation") from error
             print(f"Parent retired: bundle={result['retired_bundle']}; old disk retained; lifecycle lock retained")
+            return 0
+        if args.command == "factory-reset":
+            if not sys.stdin.isatty():
+                raise Refused("factory reset requires a controlling terminal for explicit owner authorization")
+            try:
+                result = factory_reset_parent()
+            except (EOFError, KeyboardInterrupt):
+                print("Factory reset cancelled; no state was deleted (a separately authorized stop may have completed).", file=sys.stderr)
+                return 3
+            print(f"Factory reset complete: {result['status']}; protected tooling and unrelated resources were not touched")
             return 0
         if args.command == "auth":
             return parent_browser_auth()

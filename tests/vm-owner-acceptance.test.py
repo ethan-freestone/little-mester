@@ -554,6 +554,8 @@ class OwnerAcceptanceTests(unittest.TestCase):
 
             def parent_command(_root, *args, **_kwargs):
                 operations.append(("command", args[0]))
+                if args == ("status", "--json"):
+                    return subprocess.CompletedProcess([], 0, json.dumps(next(status_results)).encode(), b"")
                 blocked = args[:2] == ("recover", "--dry-run")
                 return subprocess.CompletedProcess(
                     [], 2 if blocked else 0, b"",
@@ -619,12 +621,15 @@ class OwnerAcceptanceTests(unittest.TestCase):
     def test_parent_acceptance_blocks_ambiguous_identity_without_lifecycle_actions(self):
         report_dir = pathlib.Path(tempfile.mkdtemp(prefix="owner-m2-ambiguous-"))
         try:
+            status_reads = 0
             def parent_json(_root, *args, **_kwargs):
+                nonlocal status_reads
                 if args[0] == "term-check":
                     return None, {"status": "PASS", "terminfo_entry": True,
                                   "clear_capability": True, "clear_command": True}
                 self.assertEqual(args, ("status", "--json"))
-                return None, {"status": "AMBIGUOUS"}
+                status_reads += 1
+                return None, {"status": "NOT_CREATED"}
 
             with contextlib.ExitStack() as stack:
                 stack.enter_context(mock.patch.object(acceptance.sys, "stdin", TTYBuffer()))
@@ -637,15 +642,21 @@ class OwnerAcceptanceTests(unittest.TestCase):
                     (acceptance, "verify_install", {"return_value": pathlib.Path("/protected/install")}),
                     (acceptance, "installed_preflight", {}),
                     (acceptance, "_parent_json", {"side_effect": parent_json}),
+                    (acceptance, "_parent_command", {"return_value": subprocess.CompletedProcess(
+                        [], 2, b'{"status":"AMBIGUOUS"}', b"")}),
                 ):
                     stack.enter_context(mock.patch.object(target, name, **kwargs))
                 parent_ok = stack.enter_context(mock.patch.object(acceptance, "_parent_ok"))
+                approval = stack.enter_context(mock.patch.object(acceptance, "_owner_approval",
+                    side_effect=acceptance.GateError("BLOCKED", "fresh provisioning not approved in test")))
                 result = acceptance.main([
                     "--parent-accept", "--milestone", "M2", "--sha", "a" * 40,
                     "--repo", str(ROOT), "--model", "openai/gpt-test",
                 ])
             self.assertEqual(result, 3)
-            parent_ok.assert_not_called()
+            parent_ok.assert_called_once()
+            self.assertEqual(parent_ok.call_args.args[1], "factory-reset")
+            self.assertIn("factory-reset", approval.call_args.args[0])
             report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["status"], "BLOCKED")
             self.assertIn("M2_OWNER_ACCEPTANCE_FAIL", output.getvalue())
@@ -669,9 +680,11 @@ class OwnerAcceptanceTests(unittest.TestCase):
                     (acceptance, "_parent_json", {"side_effect": lambda _root, *args, **_kwargs: (
                         (None, {"status": "PASS", "terminfo_entry": True,
                                 "clear_capability": True, "clear_command": True})
-                        if args[0] == "term-check" else
+                         if args[0] == "term-check" else
                         (None, {"status": "RETIRED", "retired_bundle": "retired-" + "c" * 32,
                                 "retired_disk_identity": {"device": 1, "inode": 2}}))}),
+                    (acceptance, "_parent_command", {"return_value": subprocess.CompletedProcess(
+                        [], 0, b'{"status":"RETIRED"}', b"")}),
                 ):
                     stack.enter_context(mock.patch.object(target, name, **kwargs))
                 approve = stack.enter_context(mock.patch.object(acceptance, "_owner_approval",

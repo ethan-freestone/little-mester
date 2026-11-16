@@ -8,12 +8,15 @@ evidence only. NVIDIA timing remains separately pending.
 
 Use this only after the candidate commit has passed required hosted exact-SHA CI and the
 owner has reviewed the exact diff. This command is deliberately separate from the
-historical M1a/M1b recovery procedure below: it asks for exact approval, stops only the
-identity-verified existing parent, retains its complete state as a private retired bundle,
-and then provisions the replacement through the ordinary protected `up` path. It never
-deletes the retired disk. On interruption, rerun the same acceptance command; an
-incomplete retirement is identity-bound and resumable, while ambiguous state is preserved
-and blocks progress.
+historical M1a/M1b recovery procedure below. When normal identity validation succeeds, it
+stops only the identity-verified existing parent, retains its state as a private retired
+bundle, and provisions through the ordinary protected `up` path. If the parent is
+`AMBIGUOUS`, it offers a separate owner-authorized `factory-reset` for only the fixed Little
+Mester persistent-parent state directory. That path requires exact inventory confirmation,
+refuses unexpected mounts/resources, a held lifecycle lock, or any holder of the parent lock,
+virtual disk, or seed, then removes only the isolated VM state; it never touches the protected installation, repository,
+or other host paths. On interruption, rerun this same acceptance command and re-confirm the
+then-current inventory.
 
 ```sh
 set -euo pipefail
@@ -27,13 +30,15 @@ test -z "$(git status --porcelain)"
 tools/vm-owner-acceptance --install --sha "$SHA" --repo "$REPO"
 I="/opt/little-mester/v3/$SHA"
 
-# The single complete owner acceptance command. Select an OpenAI model ID that
-# the owner is authorized to use; it is not an API key or credential.
+# The single complete owner acceptance command. On AMBIGUOUS it presents the explicit
+# factory-reset confirmation before fresh provisioning. Select an OpenAI model ID that the
+# owner is authorized to use; it is not an API key or credential.
 "$I/lab-vm" parent accept --milestone M2 --repo "$REPO" --model 'openai/<model-id>'
 ```
 
 Keep the terminal interactive and use a host-supported `TERM`. The runner prompts for
-the exact old-parent retirement phrase, fresh-provision approval, browser authentication,
+the exact old-parent retirement phrase or (for `AMBIGUOUS`) the exact fixed-path factory-reset
+inventory phrase, fresh-provision approval, browser authentication,
 plain SSH checks, selected-terminal profile and harmless OSC-52 observation, protected
 TUI/model responses, and ordinary stop/up approval. Do not paste OAuth URLs, tokens,
 credentials, or conversation text into the report. Each attempt writes a private,

@@ -908,7 +908,8 @@ def _parent_command(root: pathlib.Path, *args: str, interactive: bool = False,
 def _parent_json(root: pathlib.Path, *args: str, timeout: int = 45) -> tuple[subprocess.CompletedProcess, dict]:
     result = _parent_command(root, *args, timeout=timeout)
     if result.returncode:
-        raise GateError("FAIL", f"protected parent operation {args[0]} returned nonzero")
+        category = "refused" if result.stderr.startswith(b"REFUSED:") else "command_failure"
+        raise GateError("FAIL", f"protected parent operation {args[0]} returned nonzero (exit={result.returncode}; reason={category})")
     try:
         value = json.loads(result.stdout)
     except (ValueError, UnicodeDecodeError) as error:
@@ -922,7 +923,8 @@ def _parent_ok(root: pathlib.Path, *args: str, timeout: int = 45,
                interactive: bool = False) -> subprocess.CompletedProcess:
     result = _parent_command(root, *args, interactive=interactive, timeout=timeout)
     if result.returncode:
-        raise GateError("FAIL", f"protected parent operation {args[0]} failed")
+        category = "refused" if result.stderr and result.stderr.startswith(b"REFUSED:") else "command_failure"
+        raise GateError("FAIL", f"protected parent operation {args[0]} failed (exit={result.returncode}; reason={category})")
     return result
 
 
@@ -935,6 +937,13 @@ def _identity(status: dict) -> dict:
                "virtual_capacity_gib": disk.get("virtual_capacity_gib"),
                "disk_file_bytes": disk.get("file_bytes"),
                "disk_host_allocated_bytes": disk.get("host_allocated_bytes")})
+
+
+def _has_retained_disk(status: dict) -> bool:
+    retired = status.get("retired_disk_identity")
+    return (bool(status.get("retired_bundle")) and isinstance(retired, dict)
+            and type(retired.get("device")) is int and retired["device"] >= 0
+            and type(retired.get("inode")) is int and retired["inode"] > 0)
 
 
 def _require_probe(value: dict, required: tuple[str, ...], label: str) -> None:
@@ -1099,10 +1108,27 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
     if os.environ.get("LM_VM_TERM_VALIDATED") != "1" or "TERM" not in clean_env():
         raise GateError("BLOCKED", "host TERM is not validated for the protected guest TUI")
     active("parent_identity")
-    _, initial = _parent_json(root, "status", "--json")
+    status_result = _parent_command(root, "status", "--json")
+    try:
+        initial = json.loads(status_result.stdout)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise GateError("FAIL", f"protected parent status returned malformed evidence (exit={status_result.returncode})") from error
+    if not isinstance(initial, dict):
+        raise GateError("FAIL", f"protected parent status returned invalid evidence (exit={status_result.returncode})")
     initial_status = initial.get("status")
+    factory_reset_done = False
     if initial_status == "AMBIGUOUS":
-        raise GateError("BLOCKED", "parent identity is ambiguous; no lifecycle operation was attempted")
+        active("retirement")
+        _parent_ok(root, "factory-reset", interactive=True, timeout=900)
+        _, initial = _parent_json(root, "status", "--json")
+        if initial.get("status") != "NOT_CREATED":
+            raise GateError("FAIL", "authorized factory reset did not produce a fresh NOT_CREATED state")
+        passed("retirement", {"status": "FACTORY_RESET", "old_parent_data_destroyed": True,
+                               "scope": "fixed Little Mester persistent-parent state directory"})
+        initial_status = "NOT_CREATED"
+        factory_reset_done = True
+    elif status_result.returncode:
+        raise GateError("FAIL", f"protected parent status returned nonzero (exit={status_result.returncode})")
     retired_disk = initial.get("retired_disk_identity")
     disk = initial.get("disk") if isinstance(initial.get("disk"), dict) else {}
     is_replacement = (
@@ -1119,7 +1145,8 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
         _, initial = _parent_json(root, "status", "--json")
         if initial.get("status") != "RETIRED":
             raise GateError("FAIL", "resumable retirement did not reach its committed RETIRED state")
-        passed("retirement", {"status": "RESUMED_RETIRED", "retired_bundle": initial.get("retired_bundle")})
+        passed("retirement", {"status": "RESUMED_RETIRED", "retired_bundle": initial.get("retired_bundle"),
+                               "old_disk_retained": _has_retained_disk(initial)})
         initial_status = "RETIRED"
         is_replacement = False
     elif initial_status not in ("RETIRED", "NOT_CREATED") and not is_replacement:
@@ -1129,21 +1156,26 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
         if initial.get("status") != "RETIRED":
             raise GateError("FAIL", "old parent was not safely retired into a retained bundle")
         passed("retirement", {"status": "RETIRED", "retired_bundle": initial.get("retired_bundle"),
-                               "old_disk_retained": True})
+                               "old_disk_retained": _has_retained_disk(initial)})
         initial_status = "RETIRED"
         is_replacement = False
     elif initial_status == "RETIRED":
-        passed("retirement", {"status": "ALREADY_RETIRED", "old_disk_retained": True})
-    elif initial_status == "NOT_CREATED":
+        passed("retirement", {"status": "ALREADY_RETIRED",
+                               "old_disk_retained": _has_retained_disk(initial)})
+    elif initial_status == "NOT_CREATED" and not factory_reset_done:
         passed("retirement", {"status": "NO_PRIOR_PARENT"})
     elif is_replacement:
-        passed("retirement", {"status": "RETIRED_BUNDLE_PRESERVED", "old_disk_retained": True})
+        passed("retirement", {"status": "RETIRED_BUNDLE_PRESERVED",
+                               "old_disk_retained": _has_retained_disk(initial)})
 
     if initial_status not in ("RUNNING",):
         active("fresh_provision")
         status_now = initial_status
         approval = f"PROVISION parent=default capacity_gib=64 from={status_now}"
-        _owner_approval("The old VM remains retained. Approve fresh persistent VM provisioning.", approval)
+        prompt = ("The old VM state has been factory-reset. Approve fresh persistent VM provisioning."
+                  if factory_reset_done else
+                  "The old VM remains retained. Approve fresh persistent VM provisioning.")
+        _owner_approval(prompt, approval)
         _parent_ok(root, "up", "--capacity-gib", "64", timeout=1100)
     else:
         passed("fresh_provision", {"status": "ALREADY_RUNNING_VERIFIED_REPLACEMENT",
@@ -1413,8 +1445,11 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
         raise GateError("FAIL", "final persistent parent state is not the verified RUNNING replacement")
     passed("final_vm_state", _identity(final))
     data["status"] = "PASS"
+    retirement_evidence = data["evidence"].get("retirement", {})
     data["evidence"]["m2_owner_acceptance"] = {
-        "model": model, "old_disk_retained": True,
+        "model": model,
+        "old_disk_retained": bool(retirement_evidence.get("old_disk_retained")),
+        "old_parent_data_destroyed_by_authorized_factory_reset": factory_reset_done,
         "replacement_disk_identity": {"device": new_identity["disk_device"], "inode": new_identity["disk_inode"]},
         "final_run_id": _identity(final)["run_id"],
         "real_auth_and_model_responses": True,

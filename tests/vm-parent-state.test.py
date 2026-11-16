@@ -3,6 +3,7 @@
 
 import contextlib
 import base64
+import hashlib
 import importlib.util
 import io
 import json
@@ -66,6 +67,12 @@ class ParentStateTests(unittest.TestCase):
         compile(parent_state._M2_HISTORY_PROBE_SCRIPT, "history-probe", "exec")
         compile(parent_state._M2_MODELS_PROBE_SCRIPT, "models-probe", "exec")
         compile(parent_state._M2_TELEMETRY_BEHAVIOR_SCRIPT, "telemetry-behavior", "exec")
+
+    def test_lab_vm_has_a_distinct_factory_reset_dispatch(self):
+        source = (ROOT / "lab-vm").read_text(encoding="utf-8")
+        self.assertIn('      factory-reset)', source)
+        self.assertIn('parent-state.py" factory-reset "$@"', source)
+        self.assertNotIn('retire|factory-reset)', source)
 
     def test_model_list_probe_is_exactly_allowlisted_and_redacts_output(self):
         command = parent_state.parent_models_probe_command("openai/gpt-test")
@@ -1183,6 +1190,122 @@ class ParentStateTests(unittest.TestCase):
         self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
         os.unlink(disk_path)
         self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+
+    def _factory_confirmation(self):
+        directory = parent_state._open_directory_chain(create=False, home_override=self.home)
+        try:
+            with mock.patch.object(parent_state, "_factory_reset_holder_scan"):
+                inventory = parent_state._factory_reset_inventory(directory)
+        finally:
+            os.close(directory)
+        state_path = self.parent_dir().resolve()
+        digest = hashlib.sha256(json.dumps(inventory, sort_keys=True,
+                                           separators=(",", ":")).encode()).hexdigest()
+        return f"FACTORY-RESET parent=default state={state_path} inventory={digest}"
+
+    def test_factory_reset_absent_state_is_idempotent(self):
+        result = parent_state.factory_reset_parent(home=self.home)
+        self.assertEqual(result["status"], "NOT_CREATED")
+        self.assertFalse(result["reset"])
+
+    def test_factory_reset_disposes_ambiguous_state_then_allows_fresh_initialization(self):
+        parent_state.initialize(home=self.home)
+        directory = self.parent_dir()
+        (directory / "parent.json").write_text("{corrupt\n")
+        os.chmod(directory / "parent.json", 0o600)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "AMBIGUOUS")
+        confirmation = self._factory_confirmation()
+        with mock.patch.object(parent_state, "_factory_reset_holder_scan"):
+            result = parent_state.factory_reset_parent(confirmation=confirmation, home=self.home)
+        self.assertEqual(result["status"], "NOT_CREATED")
+        self.assertEqual(set(item.name for item in directory.iterdir()), {"lifecycle.lock"})
+        parent_state.initialize(home=self.home)
+        self.assertEqual(parent_state.read_status(home=self.home)["status"], "UNPROVISIONED")
+
+    def test_factory_reset_refuses_unexpected_resource_without_deleting_anything(self):
+        parent_state.initialize(home=self.home)
+        unexpected = self.parent_dir() / "owner-notes.txt"
+        unexpected.write_text("unrelated")
+        os.chmod(unexpected, 0o600)
+        with mock.patch.object(parent_state, "_factory_reset_holder_scan"):
+            with self.assertRaises(parent_state.Refused):
+                parent_state.factory_reset_parent(home=self.home)
+        self.assertTrue(unexpected.exists())
+        self.assertTrue((self.parent_dir() / "parent.json").exists())
+
+    def test_factory_reset_refuses_live_process_evidence_before_confirmation(self):
+        parent_state.initialize(home=self.home)
+        process = pathlib.Path(self.temp.name) / "parent-supervisor.py"
+        process.write_text("import time\ntime.sleep(5)\n")
+        os.chmod(process, 0o600)
+        child = subprocess.Popen([sys.executable, "-I", str(process), "--parent-id", "default",
+                                  "--run-id", "a" * 32, "--lock-fd", "3", "--handoff-fd", "4"])
+        try:
+            with mock.patch.object(parent_state, "_trusted_parent_runtime_script", return_value=True):
+                with self.assertRaisesRegex(parent_state.Refused, "Little Mester parent process"):
+                    parent_state.factory_reset_parent(home=self.home)
+        finally:
+            child.terminate()
+            child.wait(timeout=3)
+        self.assertTrue((self.parent_dir() / "parent.json").exists())
+
+    def test_factory_reset_refuses_entry_added_after_confirmation_before_deleting(self):
+        parent_state.initialize(home=self.home)
+        confirmation = self._factory_confirmation()
+        original_inventory = parent_state._factory_reset_inventory
+        calls = 0
+
+        def inventory_then_add(directory_fd, **kwargs):
+            nonlocal calls
+            calls += 1
+            result = original_inventory(directory_fd, **kwargs)
+            if calls == 2:
+                added = self.parent_dir() / "late-owner-file"
+                added.write_text("unconfirmed")
+                os.chmod(added, 0o600)
+            return result
+
+        with mock.patch.object(parent_state, "_factory_reset_holder_scan"), \
+                mock.patch.object(parent_state, "_factory_reset_inventory", side_effect=inventory_then_add):
+            with self.assertRaisesRegex(parent_state.Refused, "unexpected parent state entry"):
+                parent_state.factory_reset_parent(confirmation=confirmation, home=self.home)
+        self.assertTrue((self.parent_dir() / "parent.json").exists())
+        self.assertTrue((self.parent_dir() / "late-owner-file").exists())
+
+    def test_factory_reset_interrupted_deletion_can_be_reauthorized_and_retried(self):
+        parent_state.initialize(home=self.home)
+        (self.parent_dir() / "seed.iso").write_bytes(b"stale seed")
+        os.chmod(self.parent_dir() / "seed.iso", 0o600)
+        original_unlink = os.unlink
+        failed = False
+
+        def unlink_then_interrupt(*args, **kwargs):
+            nonlocal failed
+            original_unlink(*args, **kwargs)
+            if not failed:
+                failed = True
+                raise OSError("simulated interruption after unlink")
+
+        with mock.patch.object(parent_state, "_factory_reset_holder_scan"), \
+                mock.patch.object(parent_state.os, "unlink", side_effect=unlink_then_interrupt):
+            with self.assertRaisesRegex(OSError, "simulated interruption"):
+                parent_state.factory_reset_parent(confirmation=self._factory_confirmation(), home=self.home)
+        retry_confirmation = self._factory_confirmation()
+        with mock.patch.object(parent_state, "_factory_reset_holder_scan"):
+            result = parent_state.factory_reset_parent(confirmation=retry_confirmation, home=self.home)
+        self.assertEqual(result["status"], "NOT_CREATED")
+        self.assertEqual(set(item.name for item in self.parent_dir().iterdir()), {"lifecycle.lock"})
+
+    def test_factory_reset_refuses_mountpoint_at_fixed_state_boundary(self):
+        parent_state.initialize(home=self.home)
+        mount_line = f"1 0 0:1 / {self.parent_dir()} rw - tmpfs tmpfs rw"
+        original_read_text = pathlib.Path.read_text
+        with mock.patch.object(pathlib.Path, "read_text", autospec=True,
+                               side_effect=lambda path, *a, **k: mount_line
+                               if str(path) == "/proc/self/mountinfo" else original_read_text(path, *a, **k)):
+            with self.assertRaisesRegex(parent_state.Refused, "mountpoint"):
+                parent_state.factory_reset_parent(home=self.home)
+        self.assertTrue((self.parent_dir() / "parent.json").exists())
 
 
 if __name__ == "__main__":
