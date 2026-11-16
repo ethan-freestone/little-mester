@@ -869,6 +869,7 @@ def main(argv: list[str] | None = None) -> int:
         elif mode == "parent_accept":
             current_gate = "preflight"
             root = verify_install(repo, args.sha, args.prefix)
+            data["gates"]["install"] = "PASS"
             installed_preflight(root, None)
             data["gates"]["preflight"] = "PASS"
             current_gate = "guest_compatibility"

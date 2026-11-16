@@ -410,6 +410,8 @@ class OwnerAcceptanceTests(unittest.TestCase):
             preflight.assert_called_once_with(pathlib.Path("/protected/install"), None)
             report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["status"], "BLOCKED")
+            self.assertEqual(report["gates"]["install"], "PASS")
+            self.assertEqual(report["gates"]["preflight"], "PASS")
             self.assertEqual(report["gates"]["guest_compatibility"], "BLOCKED")
             evidence = report["evidence"]["parent_acceptance"]
             self.assertEqual(evidence["protected_guest_assets_changed_since_m1"], changed)
