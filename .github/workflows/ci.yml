@@ -96,7 +96,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      LM_CI_STATE_DIR: ${{ runner.temp }}/little-mester-kvm-${{ github.run_id }}-${{ github.run_attempt }}
       LM_CI_RUN_ID: ${{ github.run_id }}
       LM_CI_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
@@ -104,6 +103,13 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+      - name: Initialize private KVM state path
+        shell: bash
+        run: |
+          : "${RUNNER_TEMP:?RUNNER_TEMP is required}" "${GITHUB_ENV:?GITHUB_ENV is required}"
+          [[ "$RUNNER_TEMP" == /* && "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          state_dir="$RUNNER_TEMP/little-mester-kvm-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf 'LM_CI_STATE_DIR=%s\n' "$state_dir" >> "$GITHUB_ENV"
       - name: Verify and report source-head and workflow SHA provenance
         env:
           SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -192,6 +198,8 @@ jobs:
 
       - name: Install ruff and lint Python
         run: pip install --target=/tmp/.ruff ruff && /tmp/.ruff/bin/ruff check scripts/*.py agent/metrics/gather.py bench/bench.py
+      - name: Validate GitHub Actions workflows
+        run: scripts/check-workflows.sh
 
   # ── 5. Ticket store ──────────────────────────────────────────────
   ticket-store:

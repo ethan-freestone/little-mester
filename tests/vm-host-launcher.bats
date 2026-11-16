@@ -383,7 +383,8 @@ positions = [job.index(name) for name in staged_steps]
 assert positions == sorted(positions)
 assert 'if: always()' in job
 assert job.count('ci-kvm-stage.sh --stage') == 6
-assert 'LM_CI_STATE_DIR' in job and 'github.run_attempt' in job
+assert 'LM_CI_STATE_DIR' in job and 'GITHUB_RUN_ATTEMPT' in job
+assert 'RUNNER_TEMP' in job and 'GITHUB_ENV' in job and 'runner.temp' not in job
 assert 'run_stage()' in wrapper and 'tests/ci-kvm-stage.sh' in wrapper
 assert "run_stage prepare" in wrapper and "run_stage synthetic-oauth" in wrapper
 assert 'start_new_session=True' in owner
