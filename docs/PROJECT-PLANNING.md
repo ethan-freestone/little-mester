@@ -73,3 +73,14 @@ incomplete until every mandatory milestone is accepted **and** its PR is merged.
 Here A1, B0, and B1 are work packages beneath M2, not separate PRs. This
 illustrates the hierarchy; it does not require changing historical tickets or
 forcing existing project work into a new schema.
+
+## Future architectural intent — not implemented
+
+Eventually, Little Mester should manage plans as structured, validated,
+programmatically accessible records through modular MCP capabilities, rather
+than treating Markdown semantics as the machine-readable source of truth. Plans
+should have stable identities and explicit, potentially many-to-many links to
+existing tickets: plans may span multiple tickets, and tickets may belong to
+multiple plans. This hierarchy is the default planning strategy, not the only
+strategy the future architecture must support. Markdown remains suitable for
+documentation today. **This is future intent, not an implemented feature.**
