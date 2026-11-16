@@ -459,9 +459,11 @@ class OwnerAcceptanceTests(unittest.TestCase):
             "--", *acceptance.PARENT_GUEST_ASSETS,
         ))
 
-        with mock.patch.object(acceptance, "git", return_value=subprocess.CompletedProcess([], 0, b"lab-vm\n", b"")):
-            with self.assertRaises(acceptance.GateError):
-                acceptance.changed_parent_guest_assets(ROOT, sha)
+        with (
+            mock.patch.object(acceptance, "git", return_value=subprocess.CompletedProcess([], 0, b"lab-vm\n", b"")),
+            self.assertRaises(acceptance.GateError),
+        ):
+            acceptance.changed_parent_guest_assets(ROOT, sha)
 
     def test_candidate_requires_exact_commit_and_matching_runner_bytes(self):
         with mock.patch.object(acceptance, "git") as git:
