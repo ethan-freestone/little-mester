@@ -8,9 +8,8 @@ import subprocess
 import tempfile
 import unittest
 
-
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "tests/ci-kvm-capability.sh"
+SCRIPT = ROOT / "tests/ci-kvm-stage.sh"
 HELPER = ROOT / "tests/ci-kvm-ssh.sh"
 
 

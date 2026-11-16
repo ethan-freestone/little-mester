@@ -79,6 +79,8 @@ jobs:
           python3 tests/ci-kvm-qemu-stop.test.py
           python3 tests/ci-kvm-ssh.test.py
           python3 tests/ci-kvm-contract.test.py
+          python3 tests/ci-kvm-stage-state.test.py
+          python3 tests/ci-kvm-qemu-owner.test.py
           python3 tests/vm-owner-acceptance.test.py
           python3 tests/vm-guest-user-dirs.test.py
           python3 tests/ci-qemu-oauth-bridge.test.py
@@ -93,6 +95,10 @@ jobs:
     name: Real QEMU KVM M2 integration
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      LM_CI_STATE_DIR: ${{ runner.temp }}/little-mester-kvm-${{ github.run_id }}-${{ github.run_attempt }}
+      LM_CI_RUN_ID: ${{ github.run_id }}
+      LM_CI_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -148,12 +154,27 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             cloud-image-utils curl genisoimage openssh-client openssh-server qemu-system-x86 \
             qemu-utils socat virtiofsd
-      - name: Run bounded, named-stage M2 integration on one disposable KVM guest
-        env:
-          LM_CI_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: bash tests/ci-kvm-capability.sh
-      - name: Run credential-free synthetic browser-auth and SSH bridge tests
-        run: python3 tests/vm-browser-auth.test.py
+      - name: Prepare disposable guest and pinned inputs
+        timeout-minutes: 5
+        run: bash tests/ci-kvm-stage.sh --stage prepare --run-dir "$LM_CI_STATE_DIR"
+      - name: Start real KVM guest and prove strict SSH readiness
+        timeout-minutes: 5
+        run: bash tests/ci-kvm-stage.sh --stage boot --run-dir "$LM_CI_STATE_DIR"
+      - name: Verify protected OpenCode config, TUI, and tmux
+        timeout-minutes: 5
+        run: bash tests/ci-kvm-stage.sh --stage config-tmux --run-dir "$LM_CI_STATE_DIR"
+      - name: Verify restricted reboot, persistence, and egress
+        timeout-minutes: 5
+        run: bash tests/ci-kvm-stage.sh --stage restricted-reboot-egress-persistence --run-dir "$LM_CI_STATE_DIR"
+      - name: Exercise synthetic OAuth and browser-auth regressions
+        timeout-minutes: 5
+        run: |
+          bash tests/ci-kvm-stage.sh --stage synthetic-oauth --run-dir "$LM_CI_STATE_DIR"
+          python3 tests/vm-browser-auth.test.py
+      - name: Prove final identity-safe cleanup
+        if: always()
+        timeout-minutes: 3
+        run: bash tests/ci-kvm-stage.sh --stage cleanup --run-dir "$LM_CI_STATE_DIR"
 
   # ── 4. Hygiene — ShellCheck, Python compile, ruff lint ───────────
   hygiene:

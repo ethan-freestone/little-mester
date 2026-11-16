@@ -341,9 +341,10 @@ PY
 }
 
 @test "M2 hosted KVM integration is automatic, staged, identity guarded, and credential free" {
-  run python3 - "$TEST_ROOT/tests/ci-kvm-capability.sh" <<'PY'
+  run python3 - "$TEST_ROOT/tests/ci-kvm-stage.sh" <<'PY'
 import pathlib, sys
-text = pathlib.Path(sys.argv[1]).read_text()
+stage = pathlib.Path(sys.argv[1])
+text = stage.read_text() + stage.with_name('ci-kvm-stage-operations.sh').read_text()
 workflow = pathlib.Path(sys.argv[1]).parents[1] / '.github/workflows/ci.yml'
 workflow_text = workflow.read_text()
 job = workflow_text.split('  real-qemu-kvm-trial:', 1)[1].split('\n  # ── 4.', 1)[0]
@@ -358,21 +359,56 @@ oauth_tests = pathlib.Path(sys.argv[1]).with_name('ci-qemu-oauth-bridge.test.py'
 launch_helper = pathlib.Path(sys.argv[1]).with_name('ci-kvm-launch.sh').read_text()
 launch_tests = pathlib.Path(sys.argv[1]).with_name('ci-kvm-launch.test.py').read_text()
 qemu_stop_tests = pathlib.Path(sys.argv[1]).with_name('ci-kvm-qemu-stop.test.py').read_text()
+owner = pathlib.Path(sys.argv[1]).with_name('ci-kvm-qemu-owner.py').read_text()
+owner_tests = pathlib.Path(sys.argv[1]).with_name('ci-kvm-qemu-owner.test.py').read_text()
+state = pathlib.Path(sys.argv[1]).with_name('ci-kvm-stage-state.py').read_text()
+state_tests = pathlib.Path(sys.argv[1]).with_name('ci-kvm-stage-state.test.py').read_text()
+wrapper = pathlib.Path(sys.argv[1]).with_name('ci-kvm-capability.sh').read_text()
 assert 'pull_request:' in workflow_text and 'types: [opened, synchronize, reopened]' in workflow_text
-assert 'if:' not in job
+assert job.count('if:') == 1 and 'if: always()' in job
 assert 'm2-qemu-acceptance' not in workflow_text
 assert 'workflow_dispatch:' not in workflow_text
 assert 'github.event.pull_request.head.sha || github.sha' in job
 assert 'pr_merge_commit_second_parent' in job and 'source_head_sha=' in job
 assert 'timeout-minutes: 20' in job
+staged_steps = [
+    'Prepare disposable guest and pinned inputs',
+    'Start real KVM guest and prove strict SSH readiness',
+    'Verify protected OpenCode config, TUI, and tmux',
+    'Verify restricted reboot, persistence, and egress',
+    'Exercise synthetic OAuth and browser-auth regressions',
+    'Prove final identity-safe cleanup',
+]
+positions = [job.index(name) for name in staged_steps]
+assert positions == sorted(positions)
+assert 'if: always()' in job
+assert job.count('ci-kvm-stage.sh --stage') == 6
+assert 'LM_CI_STATE_DIR' in job and 'github.run_attempt' in job
+assert 'run_stage()' in wrapper and 'tests/ci-kvm-stage.sh' in wrapper
+assert "run_stage prepare" in wrapper and "run_stage synthetic-oauth" in wrapper
+assert 'start_new_session=True' in owner
+assert 'pidfd_send_signal' in pathlib.Path(sys.argv[1]).with_name('ci-process-signal.py').read_text()
+for check in ('QEMU process identity changed', 'restricted-restart', 'overall deadline',
+              'verify_stopped', 'RUNNER_TRACKING_ID'):
+    assert check in owner
+for test in ('test_owner_owns_only_lifecycle_and_direct_action_processes_can_call_it',
+             'test_owner_sigterm_runs_its_bounded_exit_path',
+             'test_overlay_replacement_and_wrong_run_identity_are_refused'):
+    assert test in owner_tests
+for test in ('test_private_run_state_is_exclusive_versioned_and_atomic',
+             'test_wrong_attempt_expired_deadline_symlinks_and_overlay_replacement_refuse'):
+    assert test in state_tests
+assert 'stage_results' in state and 'deadline_monotonic' in state
+assert 'primary_status=$?' in text and 'cleanup_failed=0' in text
+assert 'status=$primary_status' in text and 'elif (( cleanup_failed )); then' in text
 assert '::group::KVM_STAGE_START' in text
 for stage in ('prepare', 'boot', 'config-tmux', 'restricted-reboot-egress-persistence', 'synthetic-oauth'):
     assert f'stage_start {stage} ' in text
 assert 'qemu_identity_matches || fail' in text
 assert 'verify_overlay_identity || fail' in text
-assert 'accel=kvm' in text and 'accel=tcg' in text and 'restrict=on' in text
-assert 'ci_kvm_qemu_args initial "$overlay" "$seed" "$serial_log" "$port" initial_qemu_args' in text
-assert 'ci_kvm_qemu_args restricted-restart "$overlay" "$seed" "$serial_log" "$port" restricted_qemu_args' in text
+assert 'accel=kvm' in (text + owner + contract_text) and 'accel=tcg' in owner and 'restrict=on' in (owner + contract_text)
+assert 'ci_kvm_qemu_args "$2" "$3" "$4" "$5" "$6" args' in owner
+assert 'owner_call start-initial' in text and 'owner_call restart-restricted' in text
 assert 'file=$overlay,if=virtio,format=qcow2' in contract_text
 assert 'file=$seed,if=virtio,format=raw,readonly=on' in contract_text
 assert 'self.assertEqual(initial_qemu_args, restart_qemu_args)' in contract_tests

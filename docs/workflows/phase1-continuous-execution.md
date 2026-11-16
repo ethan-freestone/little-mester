@@ -104,6 +104,15 @@ Keep these gates ordered; do not begin B0/B1 implementation while A1 is failing.
   disposable guest, identity-verified state transitions and bounded cleanup. Reuse B0 operations;
   do not add a competing supervisor or weaken process/disk ownership across steps.
 
+The hosted-KVM workflow invokes each substantive stage in the foreground and keeps only the
+minimal QEMU lifecycle owner detached between steps. The owner closes inherited step pipes and
+preserves `RUNNER_TRACKING_ID`; the unconditional cleanup step requests identity-checked stop,
+reap and private-state removal. Stage failure or ordinary cancellation also attempts bounded
+cleanup. This cannot guarantee cleanup after runner/VM hard termination, host power loss, or
+forced process kill that prevents both the stage trap and the Actions `always()` step from
+running. In that case the runner itself is expected to be discarded; no cross-run recovery or
+claim of host-level orphan prevention is made.
+
 Before more lifecycle helpers, connect existing provisioning, process identity, supervisor,
 gate, SSH and smoke cleanup primitives to supported subcommands. At M1 identify every
 remaining unreachable product function and wire it into the immediate path, explicitly defer
