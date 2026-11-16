@@ -40,6 +40,18 @@ SUPERVISOR_SPEC.loader.exec_module(parent_supervisor)
 
 
 class SupervisorHandoffTests(unittest.TestCase):
+    def test_fixed_live_inspection_command_is_shell_roundtrippable_and_read_only(self):
+        import shlex
+
+        argv = shlex.split(parent_state.PARENT_INSPECT_COMMAND)
+        self.assertEqual(argv[:3], ["/usr/bin/python3", "-I", "-c"])
+        compile(argv[3], "<fixed-guest-inspection>", "exec")
+        source = base64.b64decode(argv[3].split("'", 2)[1]).decode()
+        compile(source, "<decoded-fixed-guest-inspection>", "exec")
+        self.assertIn("os.O_NOFOLLOW", source)
+        self.assertNotIn("subprocess", source)
+        self.assertIn("/usr/local/libexec/lm-opencode-auth", source)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.home = pathlib.Path(self.temp.name) / "home"
@@ -379,6 +391,16 @@ class SupervisorHandoffTests(unittest.TestCase):
                 parent_state._atomic_json(fd, "active-run.json", run)
             finally:
                 os.close(fd)
+
+            with mock.patch.object(parent_state, "_recorded_process_status", return_value="MATCH"):
+                inspect_argv, inspect_descriptors = parent_state.parent_ssh_plan(
+                    home=self.home, remote_command=parent_state.PARENT_INSPECT_COMMAND, tty=False)
+            try:
+                self.assertEqual(inspect_argv[-1], parent_state.PARENT_INSPECT_COMMAND)
+                self.assertIn("base64.b64decode", inspect_argv[-1])
+            finally:
+                for descriptor in inspect_descriptors:
+                    os.close(descriptor)
 
             with mock.patch.object(parent_state, "_recorded_process_status", return_value="MATCH"):
                 argv, descriptors = parent_state.parent_ssh_plan(

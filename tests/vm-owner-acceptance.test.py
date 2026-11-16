@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -24,6 +25,73 @@ loader.exec_module(acceptance)
 
 
 class OwnerAcceptanceTests(unittest.TestCase):
+    def test_live_guest_compatibility_uses_fixed_hashes_modes_version_and_identity(self):
+        contract_spec = importlib.util.spec_from_file_location(
+            "test_guest_contract", ROOT / "lib/vm/parent-session-contract.py")
+        contract = importlib.util.module_from_spec(contract_spec)
+        contract_spec.loader.exec_module(contract)
+        protected = json.dumps(
+            {"autoupdate": False, "share": "disabled", "permission": {"edit": "ask", "bash": "ask"}},
+            separators=(",", ":"),
+        ).encode()
+        inventory = {
+            path: {"type": "file", "uid": 0, "gid": 0,
+                   "mode": "0755" if path in (
+                       "/usr/local/bin/lm-opencode", "/usr/local/libexec/lm-opencode",
+                       "/usr/local/libexec/lm-opencode-auth") else "0644", "sha256": digest}
+            for path, digest in contract.ASSET_SHA256.items()
+        }
+        inventory["/etc/opencode/opencode.json"] = {
+            "type": "file", "uid": 0, "gid": 0, "mode": "0644",
+            "sha256": hashlib.sha256(protected).hexdigest(),
+        }
+        inventory.update({
+            "/usr/local/bin/opencode": {
+                "type": "symlink", "target": "../lib/node_modules/@opencode/cli/bin/opencode",
+                "uid": 0, "gid": 0, "mode": "0777",
+            },
+            "/usr/local/lib/node_modules/@opencode/cli/package.json": {
+                "type": "file", "uid": 0, "gid": 0, "mode": "0644", "version": "2.2.5",
+            },
+            "/usr/local/lib/node_modules/@opencode/cli/bin/opencode": {
+                "type": "file", "uid": 0, "gid": 0, "mode": "0755", "sha256": "1" * 64,
+            },
+            "/usr/bin/tmux": {"type": "file", "uid": 0, "mode": "0755"},
+        })
+        parent_status = {"status": "RUNNING", "run_id": "a" * 32,
+                         "supervisor_pid": 1234,
+                         "disk": {"path": "/private/disk.qcow2", "device": 1, "inode": 2}}
+        completed = [
+            subprocess.CompletedProcess([], 0, json.dumps(parent_status).encode(), b""),
+            subprocess.CompletedProcess([], 0, json.dumps(inventory).encode(), b""),
+            subprocess.CompletedProcess([], 0, json.dumps(parent_status).encode(), b""),
+        ]
+        with mock.patch.object(acceptance.subprocess, "run", side_effect=completed):
+            result = acceptance.inspect_live_parent(ROOT)
+        self.assertTrue(result["m2_contract_compatible"])
+        self.assertEqual(result["parent_identity"]["disk"]["inode"], 2)
+        self.assertIn("sha256", result["observed_guest_inventory"]["/usr/local/libexec/lm-opencode-auth"])
+
+        inventory["/usr/local/libexec/lm-opencode-auth"]["sha256"] = "0" * 64
+        completed[1] = subprocess.CompletedProcess([], 0, json.dumps(inventory).encode(), b"")
+        with mock.patch.object(acceptance.subprocess, "run", side_effect=completed):
+            result = acceptance.inspect_live_parent(ROOT)
+        self.assertFalse(result["m2_contract_compatible"])
+
+        malformed = [
+            subprocess.CompletedProcess([], 0, b"[]", b""),
+        ]
+        with mock.patch.object(acceptance.subprocess, "run", side_effect=malformed):
+            with self.assertRaisesRegex(acceptance.GateError, "invalid evidence shape"):
+                acceptance.inspect_live_parent(ROOT)
+        malformed_inventory = [
+            subprocess.CompletedProcess([], 0, json.dumps(parent_status).encode(), b""),
+            subprocess.CompletedProcess([], 0, b"[]", b""),
+        ]
+        with mock.patch.object(acceptance.subprocess, "run", side_effect=malformed_inventory):
+            with self.assertRaisesRegex(acceptance.GateError, "invalid inventory shape"):
+                acceptance.inspect_live_parent(ROOT)
+
     def test_installer_manifest_and_lab_vm_bootstrap_dependencies_stay_in_sync(self):
         source = (ROOT / "lab-vm").read_text(encoding="utf-8")
         for relative in acceptance.INSTALL_FILES:
@@ -392,15 +460,21 @@ class OwnerAcceptanceTests(unittest.TestCase):
             "preflight", "install", "storage_proof", "run", "verify_cleanup", "all", "parent_accept"
         )))
 
-    def test_parent_acceptance_blocks_changed_protected_guest_assets_before_parent_operations(self):
+    def test_parent_acceptance_uses_live_guest_evidence_not_source_diffs(self):
         with tempfile.TemporaryDirectory(prefix="owner-m2-acceptance-") as temporary:
             report_dir = pathlib.Path(temporary)
-            changed = ["lib/vm/guest-user-dirs.py", "lib/vm/parent-session-contract.py"]
+            live = {
+                "parent_identity": {"status": "RUNNING", "run_id": "a" * 32},
+                "guest_assets": {"/usr/local/libexec/lm-opencode-auth": "MISMATCH"},
+                "guest_opencode_version": "opencode v2.2.5",
+                "m2_contract_compatible": False,
+                "inspection": "read_only_fixed_inventory",
+            }
             with mock.patch.object(acceptance, "new_report_dir", return_value=report_dir), \
                     mock.patch.object(acceptance, "candidate_commit"), \
                     mock.patch.object(acceptance, "verify_install", return_value=pathlib.Path("/protected/install")), \
                     mock.patch.object(acceptance, "installed_preflight") as preflight, \
-                    mock.patch.object(acceptance, "changed_parent_guest_assets", return_value=changed), \
+                    mock.patch.object(acceptance, "inspect_live_parent", return_value=live), \
                     contextlib.redirect_stdout(io.StringIO()) as output:
                 result = acceptance.main([
                     "--parent-accept", "--milestone", "M2", "--sha", "a" * 40,
@@ -412,23 +486,27 @@ class OwnerAcceptanceTests(unittest.TestCase):
             self.assertEqual(report["status"], "BLOCKED")
             self.assertEqual(report["gates"]["install"], "PASS")
             self.assertEqual(report["gates"]["preflight"], "PASS")
+            self.assertEqual(report["gates"]["parent_identity"], "PASS")
             self.assertEqual(report["gates"]["guest_compatibility"], "BLOCKED")
             evidence = report["evidence"]["parent_acceptance"]
-            self.assertEqual(evidence["protected_guest_assets_changed_since_m1"], changed)
-            self.assertEqual(evidence["comparison_basis"], "git_source")
-            self.assertFalse(evidence["live_guest_identity_verified"])
-            self.assertFalse(report["evidence"]["parent_acceptance"]["parent_operations_started"])
+            self.assertEqual(evidence["inspection"]["guest_assets"]["/usr/local/libexec/lm-opencode-auth"], "MISMATCH")
+            self.assertEqual(evidence["parent_operations_started"], ["read_only_status", "read_only_guest_inspection"])
             self.assertIn("M2_OWNER_ACCEPTANCE_FAIL", output.getvalue())
-            self.assertIn("non-destructive deployment", " ".join(report["notes"]))
+            self.assertIn("same-disk guest updater", " ".join(report["notes"]))
 
-    def test_parent_acceptance_blocks_unchanged_source_without_guest_identity_proof(self):
+    def test_parent_acceptance_records_live_compatible_guest_but_does_not_fake_acceptance(self):
         with tempfile.TemporaryDirectory(prefix="owner-m2-no-guest-proof-") as temporary:
             report_dir = pathlib.Path(temporary)
+            live = {
+                "parent_identity": {"status": "RUNNING", "run_id": "b" * 32},
+                "guest_assets": {}, "guest_opencode_version": "opencode v2.2.5",
+                "m2_contract_compatible": True, "inspection": "read_only_fixed_inventory",
+            }
             with mock.patch.object(acceptance, "new_report_dir", return_value=report_dir), \
                     mock.patch.object(acceptance, "candidate_commit"), \
                     mock.patch.object(acceptance, "verify_install", return_value=pathlib.Path("/protected/install")), \
                     mock.patch.object(acceptance, "installed_preflight"), \
-                    mock.patch.object(acceptance, "changed_parent_guest_assets", return_value=[]), \
+                    mock.patch.object(acceptance, "inspect_live_parent", return_value=live), \
                     contextlib.redirect_stdout(io.StringIO()):
                 result = acceptance.main([
                     "--parent-accept", "--milestone", "M2", "--sha", "a" * 40,
@@ -436,9 +514,9 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 ])
             self.assertEqual(result, 3)
             report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["gates"]["guest_compatibility"], "BLOCKED")
-            self.assertFalse(report["evidence"]["parent_acceptance"]["live_guest_identity_verified"])
-            self.assertFalse(report["evidence"]["parent_acceptance"]["parent_operations_started"])
+            self.assertEqual(report["gates"]["guest_compatibility"], "PASS")
+            self.assertEqual(report["status"], "BLOCKED")
+            self.assertIn("interactive M2 owner acceptance", " ".join(report["notes"]))
 
     def test_parent_acceptance_requires_explicit_source_repository(self):
         with self.assertRaises(SystemExit):

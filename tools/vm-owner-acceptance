@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import errno
+import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -75,11 +77,8 @@ PARENT_GUEST_ASSETS = (
     "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
 )
 M2_DEPLOYMENT_REQUIREMENT = (
-    "BLOCKED: the M2 protected guest contract differs from the M1-accepted parent baseline. "
-    "Before original-parent acceptance, the owner needs a reviewed, non-destructive deployment "
-    "operation that updates and verifies only the protected guest runtime assets on the same "
-    "disk while preserving workspace, OpenCode database/auth, configuration, and history. "
-    "No such in-place operation exists; do not run up/stop, regenerate cloud-init, replace the disk, or hot-patch the guest."
+    "Live inspection did not prove the installed guest satisfies the exact M2 protected asset contract. "
+    "No reviewed same-disk guest updater exists; stop without lifecycle changes."
 )
 
 
@@ -173,6 +172,124 @@ def changed_parent_guest_assets(repo: pathlib.Path, sha: str) -> list[str]:
     if any(path not in PARENT_GUEST_ASSETS for path in changed):
         raise GateError("FAIL", "protected guest-asset comparison returned an unexpected path")
     return changed
+
+
+def inspect_live_parent(root: pathlib.Path) -> dict:
+    """Read parent identity and fixed guest asset metadata; never starts/stops it."""
+    def read_status() -> dict:
+        status_result = subprocess.run(
+            [str(root / "lab-vm"), "parent", "status", "--json"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=clean_env(), timeout=30, check=False,
+        )
+        if status_result.returncode:
+            raise GateError("BLOCKED", "live parent status is unavailable; no guest operation was attempted")
+        try:
+            decoded = json.loads(status_result.stdout)
+        except (ValueError, UnicodeDecodeError) as error:
+            raise GateError("FAIL", "parent status returned malformed identity evidence") from error
+        if not isinstance(decoded, dict):
+            raise GateError("FAIL", "parent status returned an invalid evidence shape")
+        return decoded
+
+    status = read_status()
+    # Keep only non-secret identity/status fields in the private acceptance report.
+    identity = {key: status[key] for key in (
+        "status", "run_id", "supervisor_pid", "qemu_pid"
+    ) if key in status and isinstance(status[key], (str, int, type(None)))}
+    disk = status.get("disk")
+    if isinstance(disk, dict):
+        identity["disk"] = {key: disk[key] for key in ("path", "device", "inode", "provisioned")
+                            if key in disk and isinstance(disk[key], (str, int, bool, type(None)))}
+    if status.get("status") != "RUNNING":
+        raise GateError("BLOCKED", "read-only guest inspection requires the already-running verified parent")
+    result = subprocess.run(
+        [str(root / "lab-vm"), "parent", "inspect"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=clean_env(), timeout=60, check=False,
+    )
+    if result.returncode:
+        raise GateError("BLOCKED", "fixed read-only guest inspection failed; no lifecycle action was attempted")
+    try:
+        observed = json.loads(result.stdout)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise GateError("FAIL", "guest inspection returned malformed or non-JSON output") from error
+    if not isinstance(observed, dict) or any(not isinstance(value, dict) for value in observed.values()):
+        raise GateError("FAIL", "guest inspection returned an invalid inventory shape")
+    contract_path = root / "lib/vm/parent-session-contract.py"
+    spec = importlib.util.spec_from_file_location("m2_guest_contract", contract_path)
+    if spec is None or spec.loader is None:
+        raise GateError("BLOCKED", "verified installed guest contract cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    expected = dict(module.ASSET_SHA256)
+    protected_config = json.dumps(
+        {"autoupdate": False, "share": "disabled", "permission": {"edit": "ask", "bash": "ask"}},
+        separators=(",", ":"),
+    ).encode()
+    expected["/etc/opencode/opencode.json"] = hashlib.sha256(protected_config).hexdigest()
+    checks = {}
+    compatible = True
+    for path, digest in sorted(expected.items()):
+        item = observed.get(path, {})
+        okay = (
+            item.get("type") == "file" and item.get("sha256") == digest
+            and item.get("uid") == 0 and item.get("gid") == 0
+            and item.get("mode") == ("0755" if path in (
+                "/usr/local/bin/lm-opencode", "/usr/local/libexec/lm-opencode",
+                "/usr/local/libexec/lm-opencode-auth",
+            ) else "0644")
+        )
+        checks[path] = "PASS" if okay else "MISMATCH"
+        compatible = compatible and okay
+    # npm installs the protected CLI as a symlink into its fixed global package.
+    # Verify the literal link, package provenance metadata, and executable target
+    # metadata without executing guest code during this read-only inspection.
+    opencode_link = observed.get("/usr/local/bin/opencode", {})
+    package = observed.get("/usr/local/lib/node_modules/@opencode/cli/package.json", {})
+    executable = observed.get("/usr/local/lib/node_modules/@opencode/cli/bin/opencode", {})
+    link_ok = (
+        opencode_link.get("type") == "symlink"
+        and opencode_link.get("target") == "../lib/node_modules/@opencode/cli/bin/opencode"
+        and opencode_link.get("uid") == 0 and opencode_link.get("gid") == 0
+        and package.get("type") == "file" and package.get("uid") == 0 and package.get("gid") == 0
+        and package.get("mode") == "0644" and package.get("version") == "2.2.5"
+        and executable.get("type") == "file" and executable.get("uid") == 0
+        and executable.get("gid") == 0 and executable.get("mode") == "0755"
+    )
+    checks["/usr/local/bin/opencode+package"] = "PASS" if link_ok else "MISMATCH"
+    compatible = compatible and link_ok
+    for path in ("/usr/bin/tmux",):
+        item = observed.get(path, {})
+        okay = item.get("type") == "file" and item.get("uid") == 0 and item.get("mode") == "0755"
+        checks[path] = "PASS" if okay else "MISMATCH"
+        compatible = compatible and okay
+    version_ok = package.get("version") == "2.2.5"
+    checks["opencode_package_version"] = "PASS" if version_ok else "MISMATCH"
+    compatible = compatible and version_ok
+    after = read_status()
+    def stable_identity(value: dict) -> tuple:
+        disk_value = value.get("disk") if isinstance(value.get("disk"), dict) else {}
+        return (value.get("status"), value.get("run_id"), value.get("supervisor_pid"),
+                value.get("qemu_pid"), disk_value.get("path"), disk_value.get("device"),
+                disk_value.get("inode"))
+    if stable_identity(status) != stable_identity(after):
+        raise GateError("BLOCKED", "parent identity changed during guest inspection; evidence was discarded")
+    observed_evidence = {}
+    for path, item in sorted(observed.items()):
+        if path.startswith("/") and isinstance(item, dict):
+            observed_evidence[path] = {key: item[key] for key in (
+                "type", "uid", "gid", "mode", "sha256", "target", "version"
+            ) if key in item and isinstance(item[key], (str, int))}
+    return {
+        "parent_identity": identity,
+        "guest_assets": checks,
+        "observed_guest_inventory": observed_evidence,
+        "expected_guest_sha256": expected,
+        "guest_opencode_version": package.get("version", "unavailable"),
+        "m2_contract_compatible": compatible,
+        "inspection": "read_only_fixed_inventory",
+    }
 
 
 def install_path(sha: str, prefix: pathlib.Path | None = None) -> pathlib.Path:
@@ -784,7 +901,7 @@ def parser() -> argparse.ArgumentParser:
     modes = p.add_mutually_exclusive_group()
     for name in ("preflight", "install", "storage-proof", "run", "verify-cleanup", "all", "parent-accept"):
         help_text = (
-            "M2 safety preflight only; the complete original-parent acceptance is not implemented"
+            "M2 live read-only compatibility gate; interactive owner acceptance remains incomplete"
             if name == "parent-accept" else None
         )
         modes.add_argument(f"--{name}", action="store_true", dest=name.replace("-", "_"), help=help_text)
@@ -873,30 +990,24 @@ def main(argv: list[str] | None = None) -> int:
             installed_preflight(root, None)
             data["gates"]["preflight"] = "PASS"
             current_gate = "guest_compatibility"
-            changed = changed_parent_guest_assets(repo, args.sha)
+            live = inspect_live_parent(root)
+            data["gates"]["parent_identity"] = "PASS"
             data["evidence"]["parent_acceptance"] = {
-                "milestone": "M2",
-                "m1_accepted_sha": M1_ACCEPTED_SHA,
-                "comparison_basis": "git_source",
-                "live_guest_identity_verified": False,
-                "protected_guest_assets_changed_since_m1": changed,
-                "parent_operations_started": False,
+                "milestone": "M2", "inspection": live,
+                "parent_operations_started": ["read_only_status", "read_only_guest_inspection"],
             }
-            if changed:
+            if not live["m2_contract_compatible"]:
                 data["gates"]["guest_compatibility"] = "BLOCKED"
                 data["notes"].append(M2_DEPLOYMENT_REQUIREMENT)
                 raise GateError("BLOCKED", M2_DEPLOYMENT_REQUIREMENT)
-            data["gates"]["guest_compatibility"] = "BLOCKED"
+            data["gates"]["guest_compatibility"] = "PASS"
             data["notes"].append(
-                "BLOCKED: the candidate protected guest source matches M1, but no durable guest-asset identity "
-                "proves the existing VM matches it. Obtain a read-only guest compatibility proof before any "
-                "owner interaction or lifecycle action."
+                "Live guest assets satisfy the M2 contract. Interactive owner acceptance has not yet been implemented; "
+                "no auth, TUI, stop/up, or persistence criteria were claimed."
             )
             raise GateError(
                 "BLOCKED",
-                "candidate protected guest source matches the accepted M1 baseline, but this candidate has no recorded "
-                "guest-asset identity proving the existing VM matches it; original-parent operations remain disabled "
-                "until a read-only guest compatibility proof is available",
+                "guest compatibility passed, but the interactive M2 owner acceptance sequence is not yet implemented",
             )
         elif mode in ("install", "all"):
             current_gate = "install"

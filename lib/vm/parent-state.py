@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import fcntl
 import hashlib
@@ -14,6 +15,7 @@ import pathlib
 import pwd
 import re
 import secrets
+import shlex
 import select
 import signal
 import stat
@@ -59,6 +61,26 @@ if _SESSION_CONTRACT_SPEC is None or _SESSION_CONTRACT_SPEC.loader is None:
 _SESSION_CONTRACT = importlib.util.module_from_spec(_SESSION_CONTRACT_SPEC)
 _SESSION_CONTRACT_SPEC.loader.exec_module(_SESSION_CONTRACT)
 PARENT_READY_COMMAND = "cloud-init status --long >/dev/null 2>&1 || exit 41; " + _SESSION_CONTRACT.readiness_checks()
+
+# A single, fixed read-only guest command. Keep this independent of caller input:
+# SSH accepts this exact command only and the guest script reads metadata/hashes
+# for the reviewed M2 inventory without opening credential or history contents.
+_INSPECT_SCRIPT = (
+    "import hashlib,json,os,stat;"
+    "paths=['/usr/local/bin/lm-opencode','/usr/local/libexec/lm-opencode',"
+    "'/usr/local/bin/opencode','/usr/bin/tmux','/usr/local/libexec/lm-opencode-auth',"
+    "'/usr/local/libexec/lm-guest-user-dirs.py','/etc/opencode/opencode.json',"
+    "'/usr/local/lib/node_modules/@opencode/cli/package.json',"
+    "'/usr/local/lib/node_modules/@opencode/cli/bin/opencode',"
+    "'/etc/opencode/plugins/little-mester-exit-confirm/package.json',"
+    "'/etc/opencode/plugins/little-mester-exit-confirm/tui.tsx'];"
+    "out={};"
+    "\nfor p in paths:\n try:\n  l=os.lstat(p)\n  if stat.S_ISLNK(l.st_mode): out[p]={'type':'symlink','target':os.readlink(p),'uid':l.st_uid,'gid':l.st_gid,'mode':format(stat.S_IMODE(l.st_mode),'04o')}; continue\n  fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK); s=os.fstat(fd)\n  if not stat.S_ISREG(s.st_mode): os.close(fd); raise OSError()\n  d={'uid':s.st_uid,'gid':s.st_gid,'mode':format(stat.S_IMODE(s.st_mode),'04o'),'type':'file'}; h=hashlib.sha256(); chunks=[]\n  while True:\n   b=os.read(fd,65536)\n   if not b: break\n   h.update(b)\n   if p.endswith('package.json') and sum(map(len,chunks))+len(b)<=1048576: chunks.append(b)\n  os.close(fd); d['sha256']=h.hexdigest()\n  if p.endswith('package.json'):\n   try: d['version']=json.loads(b''.join(chunks)).get('version','unknown')\n   except Exception: d['version']='invalid'\n  out[p]=d\n except FileNotFoundError: out[p]={'type':'missing'}\n except OSError: out[p]={'type':'unreadable'}\n"
+    "print(json.dumps(out,sort_keys=True,separators=(',',':')))"
+)
+PARENT_INSPECT_COMMAND = "/usr/bin/python3 -I -c " + shlex.quote(
+    "import base64;exec(base64.b64decode('" + base64.b64encode(_INSPECT_SCRIPT.encode()).decode("ascii") + "'))"
+)
 DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
@@ -1265,7 +1287,8 @@ def parent_ssh_plan(*, home: str | os.PathLike | None = None,
                  or "\0" in remote_command or "\n" in remote_command or "\r" in remote_command))
             or attach_opencode and (allow_starting or remote_command is not None or not tty)
             or allow_starting and (remote_command != PARENT_READY_COMMAND or tty or attach_opencode)
-            or not allow_starting and remote_command not in (None, "exec /usr/local/bin/lm-opencode")):
+            or not allow_starting and remote_command not in (
+                None, "exec /usr/local/bin/lm-opencode", PARENT_INSPECT_COMMAND)):
         raise Refused("parent SSH mode is invalid")
     status = read_status(home=home)
     allowed = ("RUNNING", "STARTING") if allow_starting else ("RUNNING",)
@@ -2129,7 +2152,7 @@ def stop_exec_transition(identity: dict, *, term_grace_ms: int = 5000, settle_ms
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("status", "recover", "reconcile", "stop", "ssh", "auth", "tui"))
+    parser.add_argument("command", choices=("status", "recover", "reconcile", "stop", "ssh", "auth", "tui", "inspect"))
     parser.add_argument("--json", action="store_true")
     recovery_mode = parser.add_mutually_exclusive_group()
     recovery_mode.add_argument("--dry-run", action="store_true", help="preview recovery (the default)")
@@ -2138,11 +2161,15 @@ def main() -> int:
     args = parser.parse_args()
     if args.command not in ("recover", "reconcile") and (args.dry_run or args.execute):
         parser.error("--dry-run/--execute is only valid with recover/reconcile")
-    if args.command in ("ssh", "auth", "tui") and args.json:
+    if args.command in ("ssh", "auth", "tui", "inspect") and args.json:
         parser.error("--json is not valid with ssh/auth/tui")
     try:
-        if args.command in ("ssh", "tui"):
-            argv, descriptors = parent_ssh_plan(attach_opencode=args.command == "tui")
+        if args.command in ("ssh", "tui", "inspect"):
+            argv, descriptors = parent_ssh_plan(
+                attach_opencode=args.command == "tui",
+                remote_command=PARENT_INSPECT_COMMAND if args.command == "inspect" else None,
+                tty=args.command != "inspect",
+            )
             try:
                 # Keep the sealed memfds open in this process while OpenSSH reads
                 # their /proc/<caller>/fd paths. OpenSSH closes inherited FDs.
