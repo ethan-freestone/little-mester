@@ -199,7 +199,10 @@ class Session:
         os.chmod(self.root, 0o700)
         self.run_dir = self.root / f"{case}-{os.getpid()}"
         self.run_dir.mkdir(mode=0o700)
-        self.control_dir = pathlib.Path(tempfile.gettempdir()) / f"lmv3-{os.getpid()}-{case}"
+        # The production bridge validates this directory against the private
+        # run directory basename: lmv3-<run_dir.name>. Derive both from the
+        # same value so the harness cannot drift from that contract.
+        self.control_dir = pathlib.Path(tempfile.gettempdir()) / f"lmv3-{self.run_dir.name}"
         marker = self.root / "control-directory"
         marker.write_text(str(self.control_dir), encoding="utf-8")
         os.chmod(marker, 0o600)
@@ -344,7 +347,24 @@ class Session:
                     chunk = os.read(self.master_fd, 8192)
                 except OSError as error:
                     if error.errno == errno.EIO:
-                        break
+                        # A closed PTY is not evidence that the URL deadline
+                        # elapsed. Reap an immediately-exited parser/bridge
+                        # child and report its status distinctly; if it is
+                        # still alive, let run_case perform owned cleanup.
+                        reap_deadline = min(deadline, time.monotonic() + 0.25)
+                        while time.monotonic() < reap_deadline:
+                            waited, status = os.waitpid(self.pid, os.WNOHANG)
+                            if waited:
+                                self.exit_status = os.waitstatus_to_exitcode(status)
+                                self.pid = -1
+                                raise RuntimeError(
+                                    "OpenCode auth bridge exited before producing its URL "
+                                    f"(status={self.exit_status})"
+                                )
+                            time.sleep(0.01)
+                        raise RuntimeError(
+                            "OpenCode auth PTY closed before producing its URL while the bridge remained active"
+                        ) from error
                     raise
                 self.output.extend(chunk)
                 if len(self.output) > 65536:
@@ -570,7 +590,8 @@ def run_case(args, case: str) -> None:
             session.close()
         except Exception as cleanup_error:
             raise RuntimeError(
-                f"{case}: test failed ({original}); cleanup proof also failed ({cleanup_error})"
+                f"{case}: primary operation failure ({original}); "
+                f"independent cleanup-proof failure ({cleanup_error})"
             ) from original
         raise
     else:

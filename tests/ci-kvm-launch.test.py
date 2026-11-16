@@ -16,6 +16,55 @@ HELPER = pathlib.Path(__file__).with_name("ci-kvm-launch.sh")
 
 
 class TrackedLaunchTests(unittest.TestCase):
+    def test_stage_runtime_budget_is_fresh_and_bounded_by_both_deadlines(self):
+        script = f'''set -euo pipefail
+source {HELPER!s}
+[[ "$(ci_kvm_stage_runtime_seconds 150 190 100 120)" == 49 ]]
+[[ "$(ci_kvm_stage_runtime_seconds 190 150 100 120)" == 49 ]]
+[[ "$(ci_kvm_stage_runtime_seconds 500 600 100 120)" == 119 ]]
+if ci_kvm_stage_runtime_seconds 100 600 100 120; then exit 8; else [[ "$?" == 1 ]]; fi
+if ci_kvm_stage_runtime_seconds 600 100 100 120; then exit 9; else [[ "$?" == 1 ]]; fi
+if ci_kvm_stage_runtime_seconds 101 600 100 120; then exit 10; else [[ "$?" == 1 ]]; fi
+if ci_kvm_stage_runtime_seconds invalid 100 0 120; then exit 11; else [[ "$?" == 2 ]]; fi
+'''
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def test_wait_retains_child_identity_until_independent_cleanup_proof(self):
+        script = f'''set -euo pipefail
+source {HELPER!s}
+child_status=0
+cleanup_status=0
+child_pid=''
+cleanup() {{
+  [[ "$child_pid" == "$expected_pid" ]]
+  ! kill -0 "$child_pid" 2>/dev/null
+  child_pid=''
+}}
+bash -c 'exit 17' &
+child_pid=$!
+expected_pid=$child_pid
+ci_wait_tracked_and_cleanup child_pid child_status cleanup_status cleanup
+[[ "$child_status" == 17 && "$cleanup_status" == 0 && -z "$child_pid" ]]
+
+failing_cleanup() {{
+  [[ "$child_pid" == "$expected_pid" ]]
+  return 23
+}}
+bash -c 'exit 19' &
+child_pid=$!
+expected_pid=$child_pid
+if ci_wait_tracked_and_cleanup child_pid child_status cleanup_status failing_cleanup; then exit 8; fi
+[[ "$child_status" == 19 && "$cleanup_status" == 23 && "$child_pid" == "$expected_pid" ]]
+child_pid=''
+'''
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
     @staticmethod
     def _process_group_diagnostics(pgid: int) -> str:
         rows = []

@@ -78,6 +78,7 @@ child=$!
 cleanup_child() {{ kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; }}
 trap cleanup_child EXIT
 exe="$(readlink -f "$(command -v sleep)")"
+ci_qemu_wait_process_identity "$child" "$exe" 60 3000
 vm_host_record_process_identity {str(identity)!r} "$child" "$exe" 60
 deadline="$(ci_qemu_stop_deadline_ms cleanup 0 0 "$SECONDS")"
 ci_qemu_stop_identity_and_reap {str(identity)!r} "$child" "$exe" 60 "$deadline"
@@ -99,6 +100,7 @@ child=$!
 cleanup_child() {{ kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; }}
 trap cleanup_child EXIT
 exe="$(readlink -f "$(command -v sleep)")"
+ci_qemu_wait_process_identity "$child" "$exe" 60 3000
 vm_host_record_process_identity {str(identity)!r} "$child" "$exe" 60
 if ci_qemu_stop_identity_and_reap {str(identity)!r} "$child" "$exe" wrong 1000; then
   kill "$child" 2>/dev/null || true
@@ -113,7 +115,76 @@ ci_qemu_stop_identity_and_reap {str(identity)!r} "$child" "$exe" 60 "$cleanup_de
             result = self.run_bash(script)
             self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_deadline_expiring_during_preparation_refuses_to_signal(self):
+    def test_delayed_exec_is_observed_before_identity_recording_repeatedly(self):
+        with tempfile.TemporaryDirectory(prefix="ci-qemu-stop-exec-ready-") as directory:
+            identity = pathlib.Path(directory) / "qemu.identity"
+            script = f'''set -euo pipefail
+source {LAUNCHER!s}
+source {HELPER!s}
+VM_HOST_SCRIPT_ROOT={str(ROOT)!r}
+exe="$(readlink -f "$(command -v sleep)")"
+child=''
+cleanup_child() {{
+  if [[ -n "$child" ]]; then
+    kill "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+  fi
+}}
+trap cleanup_child EXIT
+for iteration in {{1..5}}; do
+  for delay_ms in 0 1 5 20; do
+    program="import os,time; time.sleep($delay_ms / 1000); os.execv('$exe', ['sleep','60'])"
+    python3 -c "$program" &
+    child=$!
+    ci_qemu_wait_process_identity "$child" "$exe" 60 3000
+    vm_host_record_process_identity {str(identity)!r} "$child" "$exe" 60
+    deadline="$(ci_qemu_stop_deadline_ms cleanup 0 0 "$SECONDS")"
+    ci_qemu_stop_identity_and_reap {str(identity)!r} "$child" "$exe" 60 "$deadline"
+    ! kill -0 "$child" 2>/dev/null
+    rm -f -- {str(identity)!r}
+    child=''
+  done
+done
+'''
+            result = self.run_bash(script, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_recorded_identity_cannot_be_reused_for_another_live_child(self):
+        with tempfile.TemporaryDirectory(prefix="ci-qemu-stop-reuse-") as directory:
+            identity_a = pathlib.Path(directory) / "first.identity"
+            identity_b = pathlib.Path(directory) / "second.identity"
+            script = f'''set -euo pipefail
+source {LAUNCHER!s}
+source {HELPER!s}
+VM_HOST_SCRIPT_ROOT={str(ROOT)!r}
+sleep 60 & first=$!
+sleep 60 & second=$!
+cleanup_children() {{
+  kill "$first" "$second" 2>/dev/null || true
+  wait "$first" 2>/dev/null || true
+  wait "$second" 2>/dev/null || true
+}}
+trap cleanup_children EXIT
+exe="$(readlink -f "$(command -v sleep)")"
+ci_qemu_wait_process_identity "$first" "$exe" 60 3000
+ci_qemu_wait_process_identity "$second" "$exe" 60 3000
+vm_host_record_process_identity {str(identity_a)!r} "$first" "$exe" 60
+if ci_qemu_stop_identity_and_reap {str(identity_a)!r} "$second" "$exe" 60 1000; then
+  exit 8
+fi
+kill -0 "$first"
+kill -0 "$second"
+vm_host_record_process_identity {str(identity_b)!r} "$second" "$exe" 60
+deadline="$(ci_qemu_stop_deadline_ms cleanup 0 0 "$SECONDS")"
+ci_qemu_stop_identity_and_reap {str(identity_a)!r} "$first" "$exe" 60 "$deadline"
+deadline="$(ci_qemu_stop_deadline_ms cleanup 0 0 "$SECONDS")"
+ci_qemu_stop_identity_and_reap {str(identity_b)!r} "$second" "$exe" 60 "$deadline"
+! kill -0 "$first" "$second" 2>/dev/null
+'''
+            result = self.run_bash(script, timeout=8)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_deadline_expiring_after_identity_preparation_refuses_to_signal(self):
         with tempfile.TemporaryDirectory(prefix="ci-qemu-stop-expiry-") as directory:
             identity = pathlib.Path(directory) / "qemu.identity"
             script = f'''set -euo pipefail
@@ -125,9 +196,17 @@ child=$!
 cleanup_child() {{ kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; }}
 trap cleanup_child EXIT
 exe="$(readlink -f "$(command -v sleep)")"
+ci_qemu_wait_process_identity "$child" "$exe" 60 3000
 vm_host_record_process_identity {str(identity)!r} "$child" "$exe" 60
-deadline="$(ci_qemu_stop_deadline_ms stage "$((SECONDS + 2))" "$((SECONDS + 4))" "$SECONDS")"
-sleep 1.1
+deadline="$(python3 -I -c 'import time; print(time.monotonic_ns() // 1_000_000 + 100)')"
+python3 -I - "$deadline" <<'PY'
+import sys, time
+deadline = int(sys.argv[1])
+if deadline - time.monotonic_ns() // 1_000_000 > 1000:
+    raise SystemExit("test deadline unexpectedly exceeds its bounded wait")
+while time.monotonic_ns() // 1_000_000 <= deadline:
+    time.sleep(0.005)
+PY
 if ci_qemu_stop_identity_and_reap {str(identity)!r} "$child" "$exe" 60 "$deadline"; then
   kill -0 "$child" 2>/dev/null && kill "$child" || true
   wait "$child" 2>/dev/null || true
@@ -183,9 +262,9 @@ child=$!
 cleanup_child() {{ kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; }}
 trap cleanup_child EXIT
 exe="$(readlink -f "$(command -v python3)")"
-vm_host_record_process_identity {str(identity)!r} "$child" "$exe" "$program"
 for _ in {{1..100}}; do [[ -e "$READY_FILE" ]] && break; sleep 0.01; done
 [[ -e "$READY_FILE" ]]
+vm_host_record_process_identity {str(identity)!r} "$child" "$exe" "$program"
 read uptime _ </proc/uptime
 up="${{uptime%%.*}}"; frac="${{uptime#*.}}"
 frac="${{frac}}00"

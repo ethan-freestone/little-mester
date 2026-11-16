@@ -353,6 +353,11 @@ opencode_readiness_text = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/opencod
 opencode_readiness_text = opencode_readiness_text.read_text()
 contract_text = pathlib.Path(sys.argv[1]).with_name('ci-kvm-contract.sh').read_text()
 contract_tests = pathlib.Path(sys.argv[1]).with_name('ci-kvm-contract.test.py').read_text()
+oauth_harness = pathlib.Path(sys.argv[1]).with_name('ci-qemu-oauth-bridge.py').read_text()
+oauth_tests = pathlib.Path(sys.argv[1]).with_name('ci-qemu-oauth-bridge.test.py').read_text()
+launch_helper = pathlib.Path(sys.argv[1]).with_name('ci-kvm-launch.sh').read_text()
+launch_tests = pathlib.Path(sys.argv[1]).with_name('ci-kvm-launch.test.py').read_text()
+qemu_stop_tests = pathlib.Path(sys.argv[1]).with_name('ci-kvm-qemu-stop.test.py').read_text()
 assert 'pull_request:' in workflow_text and 'types: [opened, synchronize, reopened]' in workflow_text
 assert 'if:' not in job
 assert 'm2-qemu-acceptance' not in workflow_text
@@ -410,6 +415,16 @@ assert 'run_persistence_create\nrun_persistence_proof initial-creation' in text
 assert 'test_authenticated_ssh_readiness_is_independent_of_persistence' in contract_tests
 assert 'test_persistence_creator_is_private_and_refuses_preexisting_symlinks' in contract_tests
 assert 'test_persistence_probe_proves_path_owner_content_and_same_root_mount' in contract_tests
+assert 'ci_kvm_stage_runtime_seconds' in text
+assert 'ci_kvm_stage_runtime_seconds' in launch_helper
+assert 'ci_wait_tracked_and_cleanup' in text and 'stop_oauth_harness' in text
+assert 'primary_exit=%s cleanup_exit=%s' in text
+assert 'test_stage_runtime_budget_is_fresh_and_bounded_by_both_deadlines' in launch_tests
+assert 'test_wait_retains_child_identity_until_independent_cleanup_proof' in launch_tests
+assert 'lmv3-{self.run_dir.name}' in oauth_harness
+assert 'test_actual_bridge_immediate_start_failure_is_not_called_a_url_timeout' in oauth_tests
+assert 'test_delayed_exec_is_observed_before_identity_recording_repeatedly' in qemu_stop_tests
+assert 'ci_qemu_wait_process_identity' in qemu_stop_tests
 assert 'ssh_deletekeys' in text and '"ssh_deletekeys": True' in text
 assert 'guest cloud-init provisioning or SSH socket failed before SSH readiness' in text
 assert 'KVM_M2_READINESS_FAIL check=opencode-executable' in opencode_readiness_text
@@ -423,7 +438,7 @@ assert 'opencode_readiness = root / "lib/vm/opencode-readiness.sh"' in text
 assert 'test -x /usr/local/bin/opencode && tmux -V' in text
 assert 'test "$(/usr/local/bin/opencode --version)"' not in text
 assert 'apt-get install -y --no-install-recommends' in text
-assert 'oauth_remaining > 120' in text
+assert 'ci_kvm_stage_runtime_seconds' in text
 assert 'ssh-keyscan' not in text
 assert 'ci-qemu-oauth-bridge.py' in text and 'LM_CI_PUBLIC_KEY' in text
 assert 'synthetic-fixture' in text and 'token exchange and real model access are NOT_RUN' in text

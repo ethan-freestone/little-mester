@@ -12,6 +12,7 @@ import pathlib
 import platform
 import signal
 import shutil
+import socket
 import sys
 import tempfile
 import time
@@ -31,6 +32,13 @@ PROCESS_SPEC.loader.exec_module(PROCESS)
 
 
 class HarnessSignalTests(unittest.TestCase):
+    def test_simulator_callback_endpoint_unavailable_is_not_reported_as_auth_success(self):
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        with self.assertRaises(OSError):
+            HARNESS.request_callback(port, {"code": "synthetic", "state": "synthetic"})
+
     def test_bridge_seccomp_prevents_descendants_from_leaving_the_session(self):
         read_fd, write_fd = os.pipe()
         child = os.fork()
@@ -103,8 +111,63 @@ class HarnessSignalTests(unittest.TestCase):
                 marker = session.root / "control-directory"
                 self.assertEqual(pathlib.Path(marker.read_text()), session.control_dir)
                 self.assertTrue(session.control_dir.is_dir())
+                self.assertEqual(
+                    session.control_dir.name, f"lmv3-{session.run_dir.name}"
+                )
                 self.assertLess(len(os.fsencode(session.control_socket)), HARNESS.AUTH.CONTROL_SOCKET_LIMIT)
+                # Exercise the exact argument vector the harness gives the
+                # production bridge, not a hand-built parser fixture.
+                arguments = HARNESS.AUTH._arguments(session.command[3:])
+                self.assertEqual(pathlib.Path(arguments.run_dir), session.run_dir)
+                self.assertEqual(pathlib.Path(arguments.control_socket), session.control_socket)
             finally:
+                shutil.rmtree(session.control_dir, ignore_errors=True)
+                shutil.rmtree(session.root, ignore_errors=True)
+
+    def test_actual_bridge_immediate_start_failure_is_not_called_a_url_timeout(self):
+        with tempfile.TemporaryDirectory(prefix="oauth-bridge-start-failure-") as directory:
+            root = pathlib.Path(directory)
+            key = root / "identity"
+            known_hosts = root / "known_hosts"
+            key.write_text("synthetic identity")
+            known_hosts.write_text("synthetic host key")
+            fake_ssh = root / "ssh-fails-immediately"
+            fake_ssh.write_text(
+                "#!/usr/bin/python3\nimport time; time.sleep(0.05); raise SystemExit(255)\n"
+            )
+            fake_ssh.chmod(0o700)
+            session = HARNESS.Session(2222, key, known_hosts, "startup-failure", root)
+            try:
+                # Keep the real production bridge and parser; replace only the
+                # unavailable guest SSH boundary with an immediate failure.
+                session.command[session.command.index("--ssh") + 1] = str(fake_ssh)
+                with self.assertRaisesRegex(RuntimeError, r"bridge exited.*status="):
+                    session.start()
+                self.assertIsNotNone(session.exit_status)
+                self.assertEqual(session.exit_status, 78)
+                self.assertEqual(session.pid, -1)
+                self.assertTrue(session.proof.is_file())
+                proof = json.loads(session.proof.read_text(encoding="utf-8"))
+                self.assertTrue(proof["ssh_stopped"])
+                self.assertTrue(proof["control_socket_absent"])
+                self.assertTrue(proof["listener_verified_closed"])
+                self.assertTrue(proof["cleanup_complete"])
+                session.close()
+                self.assertTrue(session.closed)
+            finally:
+                if session.pid > 0:
+                    try:
+                        signal.pidfd_send_signal(session.bridge_pidfd, signal.SIGKILL)
+                    except (AttributeError, OSError, TypeError):
+                        pass
+                    try:
+                        os.waitpid(session.pid, 0)
+                    except ChildProcessError:
+                        pass
+                if session.master_fd >= 0:
+                    os.close(session.master_fd)
+                if session.bridge_pidfd is not None:
+                    os.close(session.bridge_pidfd)
                 shutil.rmtree(session.control_dir, ignore_errors=True)
                 shutil.rmtree(session.root, ignore_errors=True)
 
@@ -404,6 +467,36 @@ class HarnessSignalTests(unittest.TestCase):
             self.assertEqual(closed, [True])
         finally:
             HARNESS.restore_signal_handlers(previous)
+
+    def test_primary_start_failure_and_independent_cleanup_failure_are_both_reported(self):
+        events = []
+
+        class FailingSession:
+            def __init__(self, *_args):
+                pass
+
+            def start(self):
+                events.append("start")
+                raise RuntimeError("controlled startup failure")
+
+            def close(self):
+                events.append("close")
+                raise RuntimeError("cleanup proof unavailable")
+
+        with mock.patch.object(HARNESS, "Session", FailingSession):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"primary operation failure \(controlled startup failure\); "
+                r"independent cleanup-proof failure \(cleanup proof unavailable\)",
+            ):
+                HARNESS.run_case(
+                    types.SimpleNamespace(
+                        port=12345, identity="unused", known_hosts="unused",
+                        evidence_root="/tmp",
+                    ),
+                    "success",
+                )
+        self.assertEqual(events, ["start", "close"])
 
     def test_first_termination_during_normal_close_is_reported_after_cleanup(self):
         with tempfile.TemporaryDirectory(prefix="oauth-harness-signal-") as directory:

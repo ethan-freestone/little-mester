@@ -345,6 +345,7 @@ oauth_starttime=''
 oauth_uid=''
 oauth_parent=''
 oauth_cleanup_unproved=0
+oauth_cleanup_status=0
 qemu_deadline=0
 stage_deadline=0
 stage_name=''
@@ -932,9 +933,9 @@ stage_end restricted-reboot-egress-persistence
 stage_start synthetic-oauth 120
 qemu_identity_matches || fail 'test-owned QEMU identity changed before synthetic OAuth stage'
 verify_overlay_identity || fail 'disposable guest disk identity changed before synthetic OAuth stage'
-oauth_remaining=$((qemu_deadline - SECONDS))
-(( oauth_remaining > 0 )) || fail 'QEMU integration exceeded its overall bounded deadline before OAuth simulation'
-(( oauth_remaining > 120 )) && oauth_remaining=120
+oauth_remaining="$(ci_kvm_stage_runtime_seconds \
+  "$stage_deadline" "$qemu_deadline" "$SECONDS" 120)" \
+  || fail 'synthetic OAuth stage had no remaining bounded stage/overall runtime'
 ci_launch_tracked oauth_pid env TMPDIR=/tmp python3 tests/ci-qemu-oauth-bridge.py \
   --port "$port" --identity "$key" --known-hosts "$known_hosts" \
   --evidence-root "$oauth_evidence_root" --max-runtime-seconds "$oauth_remaining"
@@ -942,11 +943,12 @@ oauth_starttime="$(process_starttime "$oauth_pid" 2>/dev/null || true)"
 oauth_uid="$(process_uid "$oauth_pid")"
 oauth_parent="$BASHPID"
 oauth_status=0
-wait "$oauth_pid" || oauth_status=$?
-oauth_pid=''
-oauth_starttime=''
-oauth_uid=''
-oauth_parent=''
+oauth_cleanup_status=0
+if ! ci_wait_tracked_and_cleanup oauth_pid oauth_status oauth_cleanup_status stop_oauth_harness; then
+  printf 'KVM_OAUTH_CLEANUP_FAILURE primary_exit=%s cleanup_exit=%s evidence_retained=%s\n' \
+    "$oauth_status" "$oauth_cleanup_status" "$oauth_evidence_root" >&2
+  fail 'synthetic OAuth harness cleanup/descendant proof failed'
+fi
 [[ "$oauth_status" == 0 ]] || fail "synthetic OAuth harness failed or was cancelled (status $oauth_status)"
 printf 'KVM_M2_AUTH_BOUNDARY: live browser approval, provider token exchange and real model access are NOT_RUN\n'
 stage_end synthetic-oauth

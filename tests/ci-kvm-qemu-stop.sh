@@ -1,6 +1,27 @@
 # shellcheck shell=bash
 # Small, independently testable budget/reap adapter for the direct CI QEMU child.
 
+ci_qemu_wait_process_identity() {
+  local pid=$1 executable=$2 required_arg=$3 timeout_ms=${4:-3000}
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$timeout_ms" =~ ^[1-9][0-9]*$ ]] || return 2
+  python3 -I - "$pid" "$executable" "$required_arg" "$timeout_ms" <<'PY'
+import os, pathlib, sys, time
+
+pid, expected_exe, required_arg = int(sys.argv[1]), os.path.realpath(sys.argv[2]), sys.argv[3]
+deadline = time.monotonic() + int(sys.argv[4]) / 1000
+while time.monotonic() < deadline:
+    try:
+        actual_exe = os.path.realpath(f"/proc/{pid}/exe")
+        argv = [os.fsdecode(item) for item in pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if item]
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+        raise SystemExit(1)
+    if actual_exe == expected_exe and required_arg in argv:
+        raise SystemExit(0)
+    time.sleep(0.005)
+raise SystemExit(1)
+PY
+}
+
 ci_qemu_stop_budget_ms() {
   local mode=$1 stage_deadline=$2 overall_deadline=$3 now=$4
   local stage_left overall_left budget_ms=13000
