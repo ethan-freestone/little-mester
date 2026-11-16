@@ -42,6 +42,7 @@ RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-(?:[A-Za-z0-9]{8}|[0-9a-f]{32})$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 INSTALL_FILES = {
     "lab-vm": 0o755,
+    "tools/vm-owner-acceptance": 0o755,
     "agent/opencode/plugins/little-mester-exit-confirm/package.json": 0o644,
     "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx": 0o644,
     "lib/vm/host-launcher.sh": 0o644,
@@ -64,8 +65,22 @@ INSTALL_FILES = {
 }
 INSTALL_DIRS = {
     "agent", "agent/opencode", "agent/opencode/plugins",
-    "agent/opencode/plugins/little-mester-exit-confirm", "lib", "lib/vm", "scripts",
+    "agent/opencode/plugins/little-mester-exit-confirm", "lib", "lib/vm", "scripts", "tools",
 }
+M1_ACCEPTED_SHA = "9a98f0c93ff65d38b181ecb9ab91df0633c1d280"
+PARENT_GUEST_ASSETS = (
+    "lib/vm/guest-user-dirs.py",
+    "lib/vm/parent-session-contract.py",
+    "agent/opencode/plugins/little-mester-exit-confirm/package.json",
+    "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
+)
+M2_DEPLOYMENT_REQUIREMENT = (
+    "BLOCKED: the M2 protected guest contract differs from the M1-accepted parent baseline. "
+    "Before original-parent acceptance, the owner needs a reviewed, non-destructive deployment "
+    "operation that updates and verifies only the protected guest runtime assets on the same "
+    "disk while preserving workspace, OpenCode database/auth, configuration, and history. "
+    "No such in-place operation exists; do not run up/stop, regenerate cloud-init, replace the disk, or hot-patch the guest."
+)
 
 
 class GateError(Exception):
@@ -145,6 +160,19 @@ def candidate_commit(repo: pathlib.Path, sha: str) -> None:
         raise GateError("BLOCKED", "runner source cannot be read safely") from error
     if runner_blob.returncode or runner_blob.stdout != current:
         raise GateError("BLOCKED", "running acceptance runner does not match the pinned candidate")
+
+
+def changed_parent_guest_assets(repo: pathlib.Path, sha: str) -> list[str]:
+    """Conservatively detect protected guest assets changed since accepted M1."""
+    if not SHA_RE.fullmatch(sha):
+        raise GateError("BLOCKED", "candidate SHA is not a full lowercase 40-character commit SHA")
+    result = git(repo, "diff", "--name-only", M1_ACCEPTED_SHA, sha, "--", *PARENT_GUEST_ASSETS)
+    if result.returncode:
+        raise GateError("BLOCKED", "could not compare protected guest assets with accepted M1 source")
+    changed = result.stdout.decode("utf-8", "strict").splitlines()
+    if any(path not in PARENT_GUEST_ASSETS for path in changed):
+        raise GateError("FAIL", "protected guest-asset comparison returned an unexpected path")
+    return changed
 
 
 def install_path(sha: str, prefix: pathlib.Path | None = None) -> pathlib.Path:
@@ -695,7 +723,10 @@ def report_template(sha: str, mode: str, report_dir: pathlib.Path) -> dict:
         "mode": mode,
         "attempt_id": report_dir.name,
         "status": "IN_PROGRESS",
-        "gates": {name: "NOT_RUN" for name in ("candidate", "preflight", "install", "storage_proof", "run", "cleanup")},
+        "gates": {name: "NOT_RUN" for name in (
+            "candidate", "preflight", "install", "storage_proof", "run", "cleanup",
+            "parent_identity", "guest_compatibility", "owner_interaction", "same_disk_restart",
+        )},
         "evidence": {"report": str(report_dir / "report.json")},
         "notes": [],
     }
@@ -707,6 +738,8 @@ def print_report(data: dict) -> None:
     for name, status in data["gates"].items():
         print(f"{name}: {status}")
     print(f"OVERALL: {data['status']}")
+    if data["mode"] == "parent_accept":
+        print("M2_OWNER_ACCEPTANCE_FAIL")
 
 
 def run_smoke(root: pathlib.Path, workspace: str, model: str, state_before: set[str], data: dict,
@@ -749,12 +782,17 @@ def run_smoke(root: pathlib.Path, workspace: str, model: str, state_before: set[
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     modes = p.add_mutually_exclusive_group()
-    for name in ("preflight", "install", "storage-proof", "run", "verify-cleanup", "all"):
-        modes.add_argument(f"--{name}", action="store_true", dest=name.replace("-", "_"))
+    for name in ("preflight", "install", "storage-proof", "run", "verify-cleanup", "all", "parent-accept"):
+        help_text = (
+            "M2 safety preflight only; the complete original-parent acceptance is not implemented"
+            if name == "parent-accept" else None
+        )
+        modes.add_argument(f"--{name}", action="store_true", dest=name.replace("-", "_"), help=help_text)
+    p.add_argument("--milestone", choices=("M2",), help="owner acceptance milestone")
     p.add_argument("--sha", required=True, type=full_sha, help="full lowercase 40-character candidate commit SHA")
     p.add_argument("--prefix", type=install_prefix,
                    help="protected root-owned install prefix (default: /opt/little-mester)")
-    p.add_argument("--repo", default=str(ROOT), help="repository containing the exact candidate commit")
+    p.add_argument("--repo", help="repository containing the exact candidate commit")
     p.add_argument("--workspace", help="existing owner-provisioned bounded filesystem root")
     p.add_argument("--model", help="OpenAI model identifier for the interactive smoke")
     p.add_argument("--run-id", help="exact fresh VM run id for read-only cleanup verification")
@@ -770,23 +808,35 @@ def full_sha(value: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    modes = [name for name in ("preflight", "install", "storage_proof", "run", "verify_cleanup", "all") if getattr(args, name)]
+    modes = [name for name in (
+        "preflight", "install", "storage_proof", "run", "verify_cleanup", "all", "parent_accept",
+    ) if getattr(args, name)]
     mode = modes[0] if modes else "preflight"
+    if (mode == "parent_accept") != (args.milestone == "M2"):
+        parser().error("--parent-accept requires --milestone M2, and --milestone is only valid with --parent-accept")
+    if mode == "parent_accept" and not args.repo:
+        parser().error("--parent-accept requires --repo PATH")
     if args.debug and mode not in ("run", "all"):
         parser().error("--debug is supported only with --run or --all")
     try:
-        repo = pathlib.Path(args.repo).resolve(strict=True)
+        repo = pathlib.Path(args.repo or ROOT).resolve(strict=True)
         report_dir = new_report_dir()
         data = report_template(args.sha, mode, report_dir)
         save_report(report_dir, data)
     except KeyboardInterrupt:
         print("BLOCKED: interrupted during runner initialization; no report directory was trusted", file=sys.stderr)
+        if mode == "parent_accept":
+            print("M2_OWNER_ACCEPTANCE_FAIL")
         return 3
     except GateError as error:
         print(f"{error.status}: {error.message}", file=sys.stderr)
+        if mode == "parent_accept":
+            print("M2_OWNER_ACCEPTANCE_FAIL")
         return 3 if error.status == "BLOCKED" else 1
     except (OSError, subprocess.SubprocessError, ValueError) as error:
         print(f"FAIL: runner initialization failed ({type(error).__name__}); details omitted", file=sys.stderr)
+        if mode == "parent_accept":
+            print("M2_OWNER_ACCEPTANCE_FAIL")
         return 1
 
     result_code = 0
@@ -816,6 +866,37 @@ def main(argv: list[str] | None = None) -> int:
                 data["gates"]["preflight"] = "BLOCKED"
                 data["notes"].append("protected install absent; read-only preflight did not install or execute the mutable candidate")
                 raise GateError("BLOCKED", "candidate is verified in Git but not yet installed")
+        elif mode == "parent_accept":
+            current_gate = "preflight"
+            root = verify_install(repo, args.sha, args.prefix)
+            installed_preflight(root, None)
+            data["gates"]["preflight"] = "PASS"
+            current_gate = "guest_compatibility"
+            changed = changed_parent_guest_assets(repo, args.sha)
+            data["evidence"]["parent_acceptance"] = {
+                "milestone": "M2",
+                "m1_accepted_sha": M1_ACCEPTED_SHA,
+                "comparison_basis": "git_source",
+                "live_guest_identity_verified": False,
+                "protected_guest_assets_changed_since_m1": changed,
+                "parent_operations_started": False,
+            }
+            if changed:
+                data["gates"]["guest_compatibility"] = "BLOCKED"
+                data["notes"].append(M2_DEPLOYMENT_REQUIREMENT)
+                raise GateError("BLOCKED", M2_DEPLOYMENT_REQUIREMENT)
+            data["gates"]["guest_compatibility"] = "BLOCKED"
+            data["notes"].append(
+                "BLOCKED: the candidate protected guest source matches M1, but no durable guest-asset identity "
+                "proves the existing VM matches it. Obtain a read-only guest compatibility proof before any "
+                "owner interaction or lifecycle action."
+            )
+            raise GateError(
+                "BLOCKED",
+                "candidate protected guest source matches the accepted M1 baseline, but this candidate has no recorded "
+                "guest-asset identity proving the existing VM matches it; original-parent operations remain disabled "
+                "until a read-only guest compatibility proof is available",
+            )
         elif mode in ("install", "all"):
             current_gate = "install"
             root = install_candidate(repo, args.sha, args.prefix)

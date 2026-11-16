@@ -81,6 +81,7 @@ dependencies = [
     root / "lib/vm/parent-qemu.py",
     root / "lib/vm/parent-provision.py",
     root / "scripts/parent-readonly-safety-gate.py",
+    root / "tools/vm-owner-acceptance",
     root / "agent/opencode/plugins/little-mester-exit-confirm/package.json",
     root / "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
 ]
@@ -184,7 +185,7 @@ PY
 export VM_HOST_SCRIPT_ROOT="$root"
 command="${1:-}"
 [[ -n "$command" ]] || {
-  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent up [--capacity-gib N] | parent status [--json] | parent ssh | parent auth | parent tui | parent stop | parent recover [--dry-run|--execute] [--json] | parent reconcile [--dry-run|--execute] [--json]\n' >&2
+  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent up [--capacity-gib N] | parent status [--json] | parent ssh | parent auth | parent tui | parent stop | parent accept --milestone M2 --repo PATH | parent recover [--dry-run|--execute] [--json] | parent reconcile [--dry-run|--execute] [--json]\n' >&2
   exit 2
 }
 shift
@@ -241,6 +242,21 @@ case "$command" in
       stop)
         exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
           /usr/bin/python3 -I "$root/lib/vm/parent-state.py" stop "$@"
+        ;;
+      accept)
+        milestone="${1:-}"
+        [[ "$milestone" == --milestone ]] || { printf 'REFUSED: parent accept requires --milestone M2\n' >&2; exit 2; }
+        shift
+        [[ "${1:-}" == M2 ]] || { printf 'REFUSED: only M2 owner acceptance is supported\n' >&2; exit 2; }
+        shift
+        [[ "${1:-}" == --repo ]] || { printf 'REFUSED: parent accept requires --repo PATH\n' >&2; exit 2; }
+        shift
+        repo_path="${1:-}"
+        [[ -n "$repo_path" ]] || { printf 'REFUSED: parent accept requires a source repository path\n' >&2; exit 2; }
+        shift
+        exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+          /usr/bin/python3 -I "$root/tools/vm-owner-acceptance" --parent-accept \
+          --milestone M2 --sha "${root##*/}" --repo "$repo_path" "$@"
         ;;
       ssh)
         [[ "${LM_VM_TERM_VALIDATED-}" == 1

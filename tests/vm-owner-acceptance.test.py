@@ -31,6 +31,9 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 continue
             self.assertIn(f'root / "{relative}"', source,
                           f"installed runtime dependency missing from lab-vm bootstrap: {relative}")
+        self.assertIn("accept)", source)
+        self.assertIn("--parent-accept", source)
+        self.assertIn("--milestone M2", source)
 
     @staticmethod
     def runtime_fixture(temporary, *, system_mode=0o755, system_uid=0):
@@ -386,8 +389,77 @@ class OwnerAcceptanceTests(unittest.TestCase):
         debug = acceptance.parser().parse_args(["--run", "--sha", "a" * 40, "--debug"])
         self.assertTrue(debug.debug)
         self.assertFalse(any(getattr(parsed, name) for name in (
-            "preflight", "install", "storage_proof", "run", "verify_cleanup", "all"
+            "preflight", "install", "storage_proof", "run", "verify_cleanup", "all", "parent_accept"
         )))
+
+    def test_parent_acceptance_blocks_changed_protected_guest_assets_before_parent_operations(self):
+        with tempfile.TemporaryDirectory(prefix="owner-m2-acceptance-") as temporary:
+            report_dir = pathlib.Path(temporary)
+            changed = ["lib/vm/guest-user-dirs.py", "lib/vm/parent-session-contract.py"]
+            with mock.patch.object(acceptance, "new_report_dir", return_value=report_dir), \
+                    mock.patch.object(acceptance, "candidate_commit"), \
+                    mock.patch.object(acceptance, "verify_install", return_value=pathlib.Path("/protected/install")), \
+                    mock.patch.object(acceptance, "installed_preflight") as preflight, \
+                    mock.patch.object(acceptance, "changed_parent_guest_assets", return_value=changed), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                result = acceptance.main([
+                    "--parent-accept", "--milestone", "M2", "--sha", "a" * 40,
+                    "--repo", str(ROOT),
+                ])
+            self.assertEqual(result, 3)
+            preflight.assert_called_once_with(pathlib.Path("/protected/install"), None)
+            report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "BLOCKED")
+            self.assertEqual(report["gates"]["guest_compatibility"], "BLOCKED")
+            evidence = report["evidence"]["parent_acceptance"]
+            self.assertEqual(evidence["protected_guest_assets_changed_since_m1"], changed)
+            self.assertEqual(evidence["comparison_basis"], "git_source")
+            self.assertFalse(evidence["live_guest_identity_verified"])
+            self.assertFalse(report["evidence"]["parent_acceptance"]["parent_operations_started"])
+            self.assertIn("M2_OWNER_ACCEPTANCE_FAIL", output.getvalue())
+            self.assertIn("non-destructive deployment", " ".join(report["notes"]))
+
+    def test_parent_acceptance_blocks_unchanged_source_without_guest_identity_proof(self):
+        with tempfile.TemporaryDirectory(prefix="owner-m2-no-guest-proof-") as temporary:
+            report_dir = pathlib.Path(temporary)
+            with mock.patch.object(acceptance, "new_report_dir", return_value=report_dir), \
+                    mock.patch.object(acceptance, "candidate_commit"), \
+                    mock.patch.object(acceptance, "verify_install", return_value=pathlib.Path("/protected/install")), \
+                    mock.patch.object(acceptance, "installed_preflight"), \
+                    mock.patch.object(acceptance, "changed_parent_guest_assets", return_value=[]), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                result = acceptance.main([
+                    "--parent-accept", "--milestone", "M2", "--sha", "a" * 40,
+                    "--repo", str(ROOT),
+                ])
+            self.assertEqual(result, 3)
+            report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["gates"]["guest_compatibility"], "BLOCKED")
+            self.assertFalse(report["evidence"]["parent_acceptance"]["live_guest_identity_verified"])
+            self.assertFalse(report["evidence"]["parent_acceptance"]["parent_operations_started"])
+
+    def test_parent_acceptance_requires_explicit_source_repository(self):
+        with self.assertRaises(SystemExit):
+            acceptance.main([
+                "--parent-accept", "--milestone", "M2", "--sha", "a" * 40,
+            ])
+
+    def test_changed_parent_asset_detection_is_full_sha_pinned_and_path_scoped(self):
+        sha = "b" * 40
+        expected = subprocess.CompletedProcess([], 0, b"lib/vm/guest-user-dirs.py\n", b"")
+        with mock.patch.object(acceptance, "git", return_value=expected) as git:
+            self.assertEqual(
+                acceptance.changed_parent_guest_assets(ROOT, sha),
+                ["lib/vm/guest-user-dirs.py"],
+            )
+        self.assertEqual(git.call_args.args[1:], (
+            "diff", "--name-only", acceptance.M1_ACCEPTED_SHA, sha,
+            "--", *acceptance.PARENT_GUEST_ASSETS,
+        ))
+
+        with mock.patch.object(acceptance, "git", return_value=subprocess.CompletedProcess([], 0, b"lab-vm\n", b"")):
+            with self.assertRaises(acceptance.GateError):
+                acceptance.changed_parent_guest_assets(ROOT, sha)
 
     def test_candidate_requires_exact_commit_and_matching_runner_bytes(self):
         with mock.patch.object(acceptance, "git") as git:

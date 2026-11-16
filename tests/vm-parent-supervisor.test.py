@@ -625,13 +625,14 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 "lib/vm/parent-launcher.py", "lib/vm/parent-gate.py",
                 "lib/vm/parent-supervisor.py", "lib/vm/parent-qemu.py",
                 "lib/vm/parent-provision.py", "scripts/parent-readonly-safety-gate.py",
+                "tools/vm-owner-acceptance",
                 "agent/opencode/plugins/little-mester-exit-confirm/package.json",
                 "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
             ]
             for relative in fixture_files:
                 destination = source_root / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                if relative == "lab-vm":
+                if relative in ("lab-vm", "tools/vm-owner-acceptance"):
                     shutil.copyfile(ROOT / relative, destination)
                     destination.chmod(0o755)
                 elif relative == "lib/vm/parent-state.py":
