@@ -177,6 +177,9 @@ jobs:
         run: |
           bash tests/ci-kvm-stage.sh --stage synthetic-oauth --run-dir "$LM_CI_STATE_DIR"
           python3 tests/vm-browser-auth.test.py
+      - name: Exercise live OAuth harness cancellation cleanup
+        timeout-minutes: 2
+        run: python3 tests/ci-kvm-oauth-cleanup.test.py
       - name: Prove final identity-safe cleanup
         if: always()
         timeout-minutes: 3

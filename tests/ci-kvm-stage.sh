@@ -90,6 +90,7 @@ report_unhandled_failure() {
 }
 trap 'report_unhandled_failure "$?" "$LINENO"' ERR
 
+# BEGIN: live OAuth harness cleanup primitives; exercised by ci-kvm-oauth-cleanup.test.py.
 process_state() {
   local stat_line rest
   [[ -d "/proc/$1" ]] || return 0
@@ -115,6 +116,17 @@ process_starttime() {
 
 process_uid() {
   awk '$1 == "Uid:" { print $2; exit }' "/proc/$1/status" 2>/dev/null
+}
+
+signal_owned_process() {
+  local pid=$1 starttime=$2 uid=$3 parent=$4 comm=$5 signame=$6 required
+  shift 6
+  local -a args=()
+  for required in "$@"; do
+    args+=(--contains "$required")
+  done
+  python3 -I "$process_signal_helper" --pid "$pid" --starttime "$starttime" \
+    --uid "$uid" --parent "$parent" --comm "$comm" --signal "$signame" "${args[@]}"
 }
 
 report_kvm_progress() {
@@ -251,6 +263,7 @@ stop_oauth_harness() {
   clear_oauth_tracking
   oauth_evidence_is_clear || { oauth_cleanup_unproved=1; return 1; }
 }
+# END: live OAuth harness cleanup primitives.
 
 stop_owned_qemu() {
   owner_call stop >/dev/null

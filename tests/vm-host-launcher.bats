@@ -382,6 +382,8 @@ staged_steps = [
 positions = [job.index(name) for name in staged_steps]
 assert positions == sorted(positions)
 assert 'if: always()' in job
+assert job.index('Exercise live OAuth harness cancellation cleanup') < job.index('Prove final identity-safe cleanup')
+assert 'python3 tests/ci-kvm-oauth-cleanup.test.py' in job
 assert job.count('ci-kvm-stage.sh --stage') == 6
 assert 'LM_CI_STATE_DIR' in job and 'GITHUB_RUN_ATTEMPT' in job
 assert 'RUNNER_TEMP' in job and 'GITHUB_ENV' in job and 'runner.temp' not in job
