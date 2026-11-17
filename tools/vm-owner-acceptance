@@ -846,12 +846,348 @@ def verify_cleanup_report(sha: str, run_id: str) -> None:
         raise GateError("BLOCKED", "no unique successful smoke report binds this SHA to that run id; early startup failure is not cleanup acceptance")
 
 
+def _replacement_provision_origin(sha: str, repo: pathlib.Path | None = None) -> dict | None:
+    """Find unique private evidence that binds a replacement disk to this candidate lineage."""
+    parent = runtime_dir()
+    reports = []
+    has_replacement_evidence = False
+    ancestry_cache = {sha: True}
+
+    def candidate_in_lineage(candidate: object) -> bool:
+        if not isinstance(candidate, str) or not SHA_RE.fullmatch(candidate):
+            return False
+        if candidate not in ancestry_cache:
+            ancestry_cache[candidate] = bool(
+                repo is not None
+                and git(repo, "merge-base", "--is-ancestor", candidate, sha).returncode == 0
+            )
+        return ancestry_cache[candidate]
+
+    runtime_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        runtime_info = os.fstat(runtime_fd)
+        if (not stat.S_ISDIR(runtime_info.st_mode) or runtime_info.st_uid != os.getuid()
+                or stat.S_IMODE(runtime_info.st_mode) != 0o700):
+            raise GateError("BLOCKED", "private acceptance report directory changed; resume provenance unavailable")
+        for entry_name in os.listdir(runtime_fd):
+            if not re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{32}", entry_name):
+                continue
+            attempt_fd = report_fd = -1
+            try:
+                attempt_fd = os.open(entry_name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=runtime_fd)
+                attempt_info = os.fstat(attempt_fd)
+                if (not stat.S_ISDIR(attempt_info.st_mode)
+                        or attempt_info.st_uid != os.getuid()
+                        or stat.S_IMODE(attempt_info.st_mode) != 0o700):
+                    continue
+                report_fd = os.open("report.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=attempt_fd)
+                info = os.fstat(report_fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                        or info.st_size > 1024 * 1024):
+                    continue
+                payload = bytearray()
+                while len(payload) < info.st_size:
+                    chunk = os.read(report_fd, min(info.st_size - len(payload), 65536))
+                    if not chunk:
+                        raise ValueError("short report read")
+                    payload.extend(chunk)
+                content = json.loads(payload)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            finally:
+                if report_fd >= 0:
+                    os.close(report_fd)
+                if attempt_fd >= 0:
+                    os.close(attempt_fd)
+            if not isinstance(content, dict):
+                continue
+            raw_evidence = content.get("evidence", {})
+            raw_evidence = raw_evidence if isinstance(raw_evidence, dict) else {}
+            raw_retirement = raw_evidence.get("retirement", {})
+            raw_retirement = raw_retirement if isinstance(raw_retirement, dict) else {}
+            if (raw_retirement.get("status") == "FACTORY_RESET"
+                    or bool(raw_evidence.get("provisioning_origin"))
+                    or bool(raw_evidence.get("fresh_provision_approval"))):
+                has_replacement_evidence = True
+            if not candidate_in_lineage(content.get("candidate_sha")):
+                continue
+            if (content.get("attempt_id") == entry_name
+                    and content.get("mode") == "parent_accept"):
+                reports.append(content)
+
+        by_attempt = {content["attempt_id"]: content for content in reports}
+
+        def dict_at(mapping: object, key: str) -> dict:
+            value = mapping.get(key, {}) if isinstance(mapping, dict) else {}
+            return value if isinstance(value, dict) else {}
+
+        def disk_identity(value: object) -> dict | None:
+            if (isinstance(value, dict) and type(value.get("device")) is int
+                    and value["device"] >= 0 and type(value.get("inode")) is int
+                    and value["inode"] > 0):
+                return {"device": value["device"], "inode": value["inode"]}
+            return None
+
+        has_replacement_evidence = has_replacement_evidence or any(
+            dict_at(dict_at(content, "evidence"), "retirement").get("status") == "FACTORY_RESET"
+            or bool(dict_at(dict_at(content, "evidence"), "provisioning_origin"))
+            or bool(dict_at(dict_at(content, "evidence"), "fresh_provision_approval"))
+            for content in reports
+        )
+
+        def reset_root(content: dict) -> bool:
+            gates = dict_at(content, "gates")
+            evidence = dict_at(content, "evidence")
+            retirement = dict_at(evidence, "retirement")
+            approval = dict_at(evidence, "fresh_provision_approval")
+            failure = dict_at(evidence, "fresh_provision_failure")
+            notes = content.get("notes", [])
+            legacy_failed_up = (
+                isinstance(notes, list)
+                and any(isinstance(note, str) and re.fullmatch(
+                    r"protected parent operation up failed \(exit=[1-9][0-9]{0,2}; reason=(?:refused|command_failure)\)",
+                    note) for note in notes)
+            )
+            recorded_failed_up = (
+                failure.get("operation") == "parent up"
+                and type(failure.get("exit_status")) is int
+                and failure["exit_status"] != 0
+            )
+            approved_attempt = (
+                approval.get("owner_approved") is True
+                and approval.get("candidate_sha") == content.get("candidate_sha")
+                and approval.get("capacity_gib") == 64
+                and approval.get("from_status") in ("NOT_CREATED", "RETIRED", "UNPROVISIONED")
+            )
+            return (
+                gates.get("retirement") == "PASS"
+                and retirement.get("status") == "FACTORY_RESET"
+                and ((content.get("status") == "FAIL"
+                      and gates.get("fresh_provision") == "FAIL"
+                      and (legacy_failed_up or recorded_failed_up))
+                     or (approved_attempt and content.get("status") in (
+                         "IN_PROGRESS", "BLOCKED", "FAIL", "PASS"))
+                     or (content.get("status") == "IN_PROGRESS"
+                         and gates.get("fresh_provision") in (None, "NOT_RUN", "BLOCKED")))
+            )
+
+        def pre_disk_provision(content: dict, origin: dict, reset_id: object) -> bool:
+            evidence = dict_at(content, "evidence")
+            approval = dict_at(evidence, "fresh_provision_approval")
+            failure = dict_at(evidence, "fresh_provision_failure")
+            return (
+                disk_identity(origin.get("disk_identity")) is None
+                and not failure
+                and content.get("status") in ("IN_PROGRESS", "BLOCKED")
+                and origin.get("owner_approved_fresh_provision") is True
+                and approval.get("owner_approved") is True
+                and approval.get("candidate_sha") == content.get("candidate_sha")
+                and approval.get("capacity_gib") == 64
+                and approval.get("factory_reset_attempt_id") == reset_id
+            )
+        def report_chain_valid(attempt_id: object, reset_id: object,
+                               visited: set[str] | None = None) -> bool:
+            if not isinstance(attempt_id, str) or not isinstance(reset_id, str):
+                return False
+            if visited is None:
+                visited = set()
+            if attempt_id in visited:
+                return False
+            visited.add(attempt_id)
+            content = by_attempt.get(attempt_id)
+            if (not isinstance(content, dict)
+                    or not candidate_in_lineage(content.get("candidate_sha"))):
+                return False
+            if attempt_id == reset_id:
+                return reset_root(content)
+            evidence = dict_at(content, "evidence")
+            origin = dict_at(evidence, "provisioning_origin")
+            if (origin.get("factory_reset_attempt_id") != reset_id
+                    or not candidate_in_lineage(origin.get("candidate_sha"))):
+                return False
+            if disk_identity(origin.get("disk_identity")) is None:
+                if not pre_disk_provision(content, origin, reset_id):
+                    return False
+            return report_chain_valid(origin.get("prior_attempt_id"), reset_id, visited)
+
+        matches = []
+        valid_links = []
+        invalid_origin_evidence = False
+        for content in reports:
+            evidence = dict_at(content, "evidence")
+            if ("provisioning_origin" in evidence
+                    and (not isinstance(evidence["provisioning_origin"], dict)
+                         or not evidence["provisioning_origin"])):
+                invalid_origin_evidence = True
+                continue
+            origin = dict_at(evidence, "provisioning_origin")
+            if not origin:
+                if reset_root(content):
+                    failure = dict_at(evidence, "fresh_provision_failure")
+                    matches.append({
+                        "attempt_id": content["attempt_id"],
+                        "factory_reset_attempt_id": content["attempt_id"],
+                        "disk_identity": disk_identity(failure.get("post_failure_disk_identity")),
+                    })
+                continue
+
+            prior_id = origin.get("prior_attempt_id")
+            reset_id = origin.get("factory_reset_attempt_id")
+            recorded_identity = disk_identity(origin.get("disk_identity"))
+            approval = dict_at(dict_at(content, "evidence"), "fresh_provision_approval")
+            owner_confirmed = (
+                origin.get("owner_confirmed_same_disk_resume") is True
+                or origin.get("already_running_owner_approval_in_prior_attempt") is True
+                or (origin.get("owner_approved_fresh_provision") is True
+                    and approval.get("owner_approved") is True
+                    and approval.get("candidate_sha") == content.get("candidate_sha")
+                    and approval.get("capacity_gib") == 64
+                    and approval.get("factory_reset_attempt_id") == reset_id)
+            )
+            prior = by_attempt.get(prior_id) if isinstance(prior_id, str) else None
+            reset_report = by_attempt.get(reset_id) if isinstance(reset_id, str) else None
+            if (not candidate_in_lineage(origin.get("candidate_sha"))
+                    or (recorded_identity is None
+                        and not pre_disk_provision(content, origin, reset_id))
+                    or not owner_confirmed
+                    or prior is None or reset_report is None or not reset_root(reset_report)):
+                invalid_origin_evidence = True
+                continue
+            if (not candidate_in_lineage(prior.get("candidate_sha"))
+                    or not report_chain_valid(prior_id, reset_id)):
+                invalid_origin_evidence = True
+                continue
+            prior_evidence = dict_at(prior, "evidence")
+            prior_origin = dict_at(prior_evidence, "provisioning_origin")
+            prior_failure = dict_at(prior_evidence, "fresh_provision_failure")
+            prior_identity = (disk_identity(prior_origin.get("disk_identity"))
+                              or disk_identity(prior_failure.get("post_failure_disk_identity")))
+            if (recorded_identity is not None and prior_identity is not None
+                    and prior_identity != recorded_identity):
+                invalid_origin_evidence = True
+                continue
+            if prior_id != content["attempt_id"]:
+                valid_links.append((prior_id, recorded_identity))
+            matches.append({
+                "attempt_id": content["attempt_id"],
+                "factory_reset_attempt_id": reset_id,
+                "disk_identity": recorded_identity,
+            })
+
+        # A report supersedes its predecessor only when its candidate-bound origin,
+        # reset root, owner confirmation, and disk identity all validate above.
+        superseded = {prior_id for prior_id, _identity in valid_links}
+        matches = [match for match in matches if match.get("attempt_id") not in superseded]
+        if invalid_origin_evidence:
+            raise GateError(
+                "BLOCKED",
+                "a candidate-linked report contains inconsistent replacement identity evidence; preserve the parent without lifecycle changes",
+            )
+        if not matches:
+            if has_replacement_evidence:
+                raise GateError(
+                    "BLOCKED",
+                    "private replacement evidence exists but its provenance chain is incomplete or inconsistent; preserve the parent without lifecycle changes",
+                )
+            return None
+        if len(matches) != 1 or not isinstance(matches[0].get("attempt_id"), str):
+            raise GateError(
+                "BLOCKED",
+                "cannot establish one unique private replacement-provenance chain for this SHA; preserve the parent without lifecycle changes",
+            )
+        return matches[0]
+    finally:
+        os.close(runtime_fd)
+
+
+def _parent_up_failure(stderr: bytes, exit_status: int | None) -> dict:
+    """Map protected parent-up diagnostics to fixed, non-secret report categories."""
+    text = stderr[:16384].decode("utf-8", "ignore")
+    stage, reason = "startup", "protected_refusal"
+    if "QEMU_PROCESS_EXITED_BEFORE_READINESS" in text:
+        stage, reason = "qemu_boot", "qemu_exited_before_readiness"
+    elif "QEMU_IDENTITY_AMBIGUOUS" in text or "QEMU_IDENTITY_CHANGED" in text:
+        stage, reason = "identity", "qemu_identity_transition_refused"
+    elif "GUEST_READINESS_DEADLINE_EXPIRED" in text:
+        last = re.search(r"\blast=([A-Z_]{1,64})\b", text)
+        last_reason = {
+            "CLOUD_INIT_STATUS_FAILED": "cloud_init_status_failed",
+            "SSH_HOST_KEY_REJECTED": "ssh_host_key_rejected",
+            "SSH_AUTH_REJECTED": "ssh_auth_rejected",
+            "SSH_FORWARD_NOT_LISTENING": "ssh_forward_unavailable",
+            "SSH_FORWARD_UNRESPONSIVE": "ssh_forward_unresponsive",
+            "SSH_CLIENT_ATTEMPT_TIMED_OUT": "ssh_readiness_timeout",
+            "GUEST_SSH_SERVICE_UNAVAILABLE": "guest_ssh_unavailable",
+            "GUEST_SSH_SERVICE_UNRESPONSIVE": "guest_ssh_unresponsive",
+            "SSH_TRANSPORT_OR_HANDSHAKE_FAILED": "ssh_transport_or_handshake_failed",
+            "GUEST_READINESS_COMMAND_FAILED": "guest_readiness_command_failed",
+        }.get(last.group(1) if last else "")
+        if last_reason == "cloud_init_status_failed":
+            stage, reason = "guest_readiness", last_reason
+        elif (last_reason and last_reason.startswith("ssh_")) or last_reason in (
+                "guest_ssh_unavailable", "guest_ssh_unresponsive"):
+            stage, reason = "ssh_readiness", last_reason
+        else:
+            stage, reason = "guest_readiness", "readiness_deadline_expired"
+    elif "CLOUD_INIT_STATUS_FAILED" in text:
+        stage, reason = "guest_readiness", "cloud_init_status_failed"
+    elif "SSH_HOST_KEY_REJECTED" in text:
+        stage, reason = "ssh_readiness", "ssh_host_key_rejected"
+    elif "SSH_AUTH_REJECTED" in text:
+        stage, reason = "ssh_readiness", "ssh_auth_rejected"
+    elif "SSH_FORWARD_NOT_LISTENING" in text:
+        stage, reason = "ssh_readiness", "ssh_forward_unavailable"
+    elif "SSH_FORWARD_UNRESPONSIVE" in text:
+        stage, reason = "ssh_readiness", "ssh_forward_unresponsive"
+    elif "SSH_CLIENT_ATTEMPT_TIMED_OUT" in text or "SSH_FORWARD_UNRESPONSIVE" in text:
+        stage, reason = "ssh_readiness", "ssh_readiness_timeout"
+    elif "GUEST_SSH_SERVICE_UNAVAILABLE" in text:
+        stage, reason = "ssh_readiness", "guest_ssh_unavailable"
+    elif "SSH_TRANSPORT_OR_HANDSHAKE_FAILED" in text:
+        stage, reason = "ssh_readiness", "ssh_transport_or_handshake_failed"
+    elif "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED" in text:
+        stage, reason = "guest_readiness", "guest_contract_mismatch"
+    elif "supervisor startup failed:" in text:
+        stage, reason = "supervisor_startup", "supervisor_invariant_refused"
+    elif "parent provisioning refused:" in text:
+        stage, reason = "provisioning", "provisioning_invariant_refused"
+    elif "parent cannot start from status" in text or "different parent run appeared" in text:
+        stage, reason = "identity", "parent_state_transition_refused"
+    elif "parent supervisor/startup failed; status is" in text:
+        stage, reason = "supervisor_or_readiness", "startup_failed_stage_unavailable"
+    elif "REFUSED:" not in text:
+        reason = "command_failure"
+    return {"operation": "parent up", "exit_status": exit_status,
+            "stage": stage, "reason_category": reason}
+
+
+def _post_failure_parent_evidence(root: pathlib.Path) -> dict:
+    """Retain only fixed status labels and validated numeric disk identity."""
+    try:
+        _, status = _parent_json(root, "status", "--json")
+    except (GateError, OSError, subprocess.SubprocessError):
+        return {"post_failure_status": "UNAVAILABLE"}
+    allowed = {"NOT_CREATED", "UNPROVISIONED", "RUNNING", "STARTING", "STOPPED",
+               "RETIRED", "RETIRING", "AMBIGUOUS"}
+    result = {"post_failure_status": status.get("status")
+              if status.get("status") in allowed else "UNRECOGNIZED"}
+    disk = status.get("disk") if isinstance(status.get("disk"), dict) else {}
+    if (type(disk.get("device")) is int and disk["device"] >= 0
+            and type(disk.get("inode")) is int and disk["inode"] > 0):
+        result["post_failure_disk_identity"] = {
+            "device": disk["device"], "inode": disk["inode"]}
+    return result
+
+
 def report_template(sha: str, mode: str, report_dir: pathlib.Path) -> dict:
     gates = [
         "candidate", "preflight", "install", "storage_proof", "run", "cleanup",
         "parent_identity", "guest_compatibility", "retirement", "fresh_provision",
         "owner_interaction",
         "ssh_reconnect", "duplicate_up", "m1_recovery_guards", "network_boundaries",
+        "m1_revalidation",
         "protected_configuration", "authentication", "model_response_before_restart",
         "model_list_behavior",
         "telemetry_behavior",
@@ -933,10 +1269,30 @@ def _identity(status: dict) -> dict:
     return ({key: status.get(key) for key in (
                 "status", "run_id", "parent_id", "supervisor_pid", "qemu_pid")}
             | {"disk_device": disk.get("device"), "disk_inode": disk.get("inode"),
+               "disk_path": disk.get("path"),
                "disk_format": disk.get("format"), "disk_provisioned": disk.get("provisioned"),
                "virtual_capacity_gib": disk.get("virtual_capacity_gib"),
                "disk_file_bytes": disk.get("file_bytes"),
                "disk_host_allocated_bytes": disk.get("host_allocated_bytes")})
+
+
+def _verified_resume_parent(status: dict) -> dict:
+    """Require the protected state projection to identify one persistent 64-GiB qcow2."""
+    disk = status.get("disk") if isinstance(status.get("disk"), dict) else {}
+    identity = _identity(status)
+    if (status.get("status") not in ("STOPPED", "RUNNING")
+            or status.get("parent_id") != "default"
+            or disk.get("path") != "disk.qcow2"
+            or disk.get("format") != "qcow2" or disk.get("provisioned") is not True
+            or disk.get("virtual_capacity_gib") != 64
+            or type(disk.get("device")) is not int or disk["device"] < 0
+            or type(disk.get("inode")) is not int or disk["inode"] <= 0
+            or not isinstance(status.get("run_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", status["run_id"])):
+        raise GateError("BLOCKED", "parent lacks complete protected replacement identity; preserve it without lifecycle changes")
+    if status["status"] == "RUNNING" and type(status.get("supervisor_pid")) is not int:
+        raise GateError("BLOCKED", "running replacement lacks verified supervisor identity; preserve it")
+    return identity
 
 
 def _has_retained_disk(status: dict) -> bool:
@@ -950,6 +1306,13 @@ def _require_probe(value: dict, required: tuple[str, ...], label: str) -> None:
     failed = [name for name in required if value.get(name) is not True]
     if failed:
         raise GateError("FAIL", f"{label} checks failed: {', '.join(failed)}")
+
+
+def _require_clean_stopped_previews(recovery: dict, reconciliation: dict) -> None:
+    if (recovery.get("action") != "none" or recovery.get("status") != "STOPPED"
+            or reconciliation.get("action") != "none"
+            or reconciliation.get("status") != "STOPPED"):
+        raise GateError("FAIL", "ordinary clean stop left a recovery/reconciliation action or ambiguous status")
 
 
 def _owner_approval(prompt: str, expected: str) -> None:
@@ -1085,7 +1448,7 @@ def _exercise_simultaneous_attach_and_resize(root: pathlib.Path) -> dict:
 
 
 def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
-                          report_dir: pathlib.Path) -> None:
+                          report_dir: pathlib.Path, repo: pathlib.Path | None = None) -> None:
     """One-command, owner-confirmed fresh provisioning and real M1/M2 acceptance."""
     def active(name: str) -> None:
         data["gates"][name] = "NOT_RUN"
@@ -1117,7 +1480,15 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
         raise GateError("FAIL", f"protected parent status returned invalid evidence (exit={status_result.returncode})")
     initial_status = initial.get("status")
     factory_reset_done = False
+    prior_factory_reset_attempt_id = None
+    prior_provision_attempt_id = None
     if initial_status == "AMBIGUOUS":
+        interrupted_origin = _replacement_provision_origin(data["candidate_sha"], repo)
+        if interrupted_origin is not None:
+            raise GateError(
+                "BLOCKED",
+                "replacement provisioning provenance exists but current parent identity is AMBIGUOUS; preserve the disk and do not factory-reset",
+            )
         active("retirement")
         _parent_ok(root, "factory-reset", interactive=True, timeout=900)
         _, initial = _parent_json(root, "status", "--json")
@@ -1127,10 +1498,19 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
                                "scope": "fixed Little Mester persistent-parent state directory"})
         initial_status = "NOT_CREATED"
         factory_reset_done = True
+        prior_factory_reset_attempt_id = data["attempt_id"]
+        prior_provision_attempt_id = data["attempt_id"]
     elif status_result.returncode:
         raise GateError("FAIL", f"protected parent status returned nonzero (exit={status_result.returncode})")
+    if initial_status in ("NOT_CREATED", "UNPROVISIONED") and not factory_reset_done:
+        interrupted_origin = _replacement_provision_origin(data["candidate_sha"], repo)
+        if interrupted_origin is not None:
+            prior_factory_reset_attempt_id = interrupted_origin["factory_reset_attempt_id"]
+            prior_provision_attempt_id = interrupted_origin["attempt_id"]
     retired_disk = initial.get("retired_disk_identity")
     disk = initial.get("disk") if isinstance(initial.get("disk"), dict) else {}
+    same_disk_resume = False
+    resume_origin = None
     is_replacement = (
         bool(initial.get("retired_bundle"))
         and initial_status in ("RUNNING", "STARTING", "STOPPED", "UNPROVISIONED")
@@ -1139,6 +1519,34 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
                 != (disk.get("device"), disk.get("inode"))
              or retired_disk.get("device") is None and initial_status == "UNPROVISIONED")
     )
+    same_disk_resume = False
+    resume_already_running = False
+    resume_origin = None
+    stopped_id = None
+    if initial_status == "RUNNING":
+        resume_origin = _replacement_provision_origin(data["candidate_sha"], repo)
+        if resume_origin is not None:
+            running_id = _verified_resume_parent(initial)
+            recorded_disk = resume_origin.get("disk_identity")
+            if recorded_disk is None or recorded_disk != {
+                    "device": running_id["disk_device"], "inode": running_id["disk_inode"]}:
+                raise GateError("BLOCKED", "RUNNING disk does not match the prior acceptance provenance; preserve it")
+            stopped_id = running_id
+            same_disk_resume = True
+            resume_already_running = True
+            prior_factory_reset_attempt_id = resume_origin["factory_reset_attempt_id"]
+            passed("retirement", {
+                "status": "NO_RETIREMENT_ALREADY_RUNNING_REPLACEMENT",
+                "prior_attempt_id": resume_origin["attempt_id"],
+                "factory_reset_attempt_id": prior_factory_reset_attempt_id,
+                "old_parent_data_destroyed": False,
+                "disk_identity": {"device": running_id["disk_device"],
+                "inode": running_id["disk_inode"]},
+            })
+        elif is_replacement:
+            raise GateError("BLOCKED", "RUNNING replacement lacks a complete private disk-provenance chain; preserve it without retirement")
+    if initial_status == "STARTING":
+        raise GateError("BLOCKED", "parent startup is still STARTING; no retire, reset, replacement, or second writer was attempted")
     if initial_status == "RETIRING":
         active("retirement")
         _parent_ok(root, "retire", interactive=True, timeout=900)
@@ -1149,7 +1557,27 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
                                "old_disk_retained": _has_retained_disk(initial)})
         initial_status = "RETIRED"
         is_replacement = False
-    elif initial_status not in ("RETIRED", "NOT_CREATED") and not is_replacement:
+    elif initial_status == "STOPPED":
+        resume_origin = _replacement_provision_origin(data["candidate_sha"], repo)
+        if resume_origin is None:
+            raise GateError("BLOCKED", "STOPPED parent has no private reset-and-failed-start provenance for this candidate; it will not be retired or replaced")
+        prior_factory_reset_attempt_id = resume_origin["factory_reset_attempt_id"]
+        stopped_id = _verified_resume_parent(initial)
+        recorded_disk = resume_origin.get("disk_identity")
+        if recorded_disk is None or recorded_disk != {
+                "device": stopped_id["disk_device"], "inode": stopped_id["disk_inode"]}:
+            raise GateError("BLOCKED", "STOPPED disk does not match the prior failed-provision report; preserve it")
+        same_disk_resume = True
+        passed("retirement", {
+            "status": "NO_RETIREMENT_SAME_DISK_RESUME",
+            "prior_attempt_id": resume_origin["attempt_id"],
+            "factory_reset_attempt_id": resume_origin["factory_reset_attempt_id"],
+            "old_parent_data_destroyed": False,
+            "disk_identity": {"device": stopped_id["disk_device"],
+                              "inode": stopped_id["disk_inode"]},
+        })
+    elif (initial_status not in ("RETIRED", "NOT_CREATED")
+          and not is_replacement and not same_disk_resume):
         active("retirement")
         _parent_ok(root, "retire", interactive=True, timeout=900)
         _, initial = _parent_json(root, "status", "--json")
@@ -1168,7 +1596,65 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
         passed("retirement", {"status": "RETIRED_BUNDLE_PRESERVED",
                                "old_disk_retained": _has_retained_disk(initial)})
 
-    if initial_status not in ("RUNNING",):
+    if same_disk_resume:
+        expected_disk = (stopped_id["disk_device"], stopped_id["disk_inode"])
+        approval = (f"RESUME SAME DISK parent=default candidate={data['candidate_sha']} "
+                    f"prior_attempt={resume_origin['attempt_id']} from={initial_status} "
+                    f"run={stopped_id['run_id']} disk={expected_disk[0]}:{expected_disk[1]}")
+        if not resume_already_running:
+            _owner_approval(
+                "Prior replacement provenance is recorded. Confirm acceptance against this exact STOPPED parent/disk; only an identity-checked start will be attempted. No reset, retirement, replacement, or resize will be performed.",
+                approval,
+            )
+        data["evidence"]["provisioning_origin"] = {
+            "prior_attempt_id": resume_origin["attempt_id"],
+            "factory_reset_attempt_id": resume_origin["factory_reset_attempt_id"],
+            "candidate_sha": data["candidate_sha"],
+            "disk_identity": {"device": expected_disk[0], "inode": expected_disk[1]},
+            "resume_from_status": initial_status,
+            "parent_run_id": stopped_id["run_id"],
+            "owner_confirmed_same_disk_resume": not resume_already_running,
+            "already_running_owner_approval_in_prior_attempt": resume_already_running,
+            "reset_or_retirement_repeated": False,
+        }
+        _checkpoint(report_dir, data)
+        _, immediately_before = _parent_json(root, "status", "--json")
+        if (_identity(immediately_before) != stopped_id
+                or immediately_before.get("status") != initial_status):
+            raise GateError("BLOCKED", "parent identity changed before same-disk acceptance resume; no lifecycle action was attempted")
+        if resume_already_running:
+            passed("fresh_provision", {"status": "ALREADY_RUNNING_VERIFIED_RESUME",
+                "same_disk_identity_validated": True,
+                "disk_identity": {"device": expected_disk[0], "inode": expected_disk[1]}})
+        else:
+            active("fresh_provision")
+            try:
+                up_result = _parent_command(
+                    root, "up", "--capacity-gib", "64",
+                    "--expected-disk-device", str(expected_disk[0]),
+                    "--expected-disk-inode", str(expected_disk[1]), timeout=1100)
+            except subprocess.SubprocessError:
+                failure = {"operation": "parent up", "exit_status": None,
+                           "stage": "command", "reason_category": "command_timeout_or_spawn_failure"}
+                failure.update(_post_failure_parent_evidence(root))
+                data["evidence"]["fresh_provision_failure"] = failure
+                origin = data["evidence"].get("provisioning_origin")
+                failure_disk = failure.get("post_failure_disk_identity")
+                if isinstance(origin, dict) and isinstance(failure_disk, dict):
+                    origin["disk_identity"] = failure_disk
+                _checkpoint(report_dir, data)
+                raise GateError("FAIL", "same-disk parent up did not complete; sanitized failure evidence was recorded")
+            if up_result.returncode:
+                failure = _parent_up_failure(up_result.stderr, up_result.returncode)
+                failure.update(_post_failure_parent_evidence(root))
+                data["evidence"]["fresh_provision_failure"] = failure
+                origin = data["evidence"].get("provisioning_origin")
+                failure_disk = failure.get("post_failure_disk_identity")
+                if isinstance(origin, dict) and isinstance(failure_disk, dict):
+                    origin["disk_identity"] = failure_disk
+                _checkpoint(report_dir, data)
+                raise GateError("FAIL", f"same-disk parent up failed (exit={up_result.returncode}; stage={failure['stage']}; reason={failure['reason_category']})")
+    elif initial_status not in ("RUNNING",):
         active("fresh_provision")
         status_now = initial_status
         approval = f"PROVISION parent=default capacity_gib=64 from={status_now}"
@@ -1176,7 +1662,48 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
                   if factory_reset_done else
                   "The old VM remains retained. Approve fresh persistent VM provisioning.")
         _owner_approval(prompt, approval)
-        _parent_ok(root, "up", "--capacity-gib", "64", timeout=1100)
+        data["evidence"]["fresh_provision_approval"] = {
+            "owner_approved": True,
+            "candidate_sha": data["candidate_sha"],
+            "capacity_gib": 64,
+            "from_status": status_now,
+            "factory_reset_attempt_id": prior_factory_reset_attempt_id,
+        }
+        if prior_factory_reset_attempt_id is not None:
+            data["evidence"]["provisioning_origin"] = {
+                "prior_attempt_id": (prior_provision_attempt_id
+                                     if prior_provision_attempt_id is not None
+                                     else data["attempt_id"]),
+                "factory_reset_attempt_id": prior_factory_reset_attempt_id,
+                "candidate_sha": data["candidate_sha"],
+                "disk_identity": None,
+                "owner_approved_fresh_provision": True,
+                "owner_confirmed_same_disk_resume": False,
+            }
+        _checkpoint(report_dir, data)
+        try:
+            up_result = _parent_command(root, "up", "--capacity-gib", "64", timeout=1100)
+        except subprocess.SubprocessError:
+            failure = {"operation": "parent up", "exit_status": None,
+                       "stage": "command", "reason_category": "command_timeout_or_spawn_failure"}
+            failure.update(_post_failure_parent_evidence(root))
+            data["evidence"]["fresh_provision_failure"] = failure
+            origin = data["evidence"].get("provisioning_origin")
+            failure_disk = failure.get("post_failure_disk_identity")
+            if isinstance(origin, dict) and isinstance(failure_disk, dict):
+                origin["disk_identity"] = failure_disk
+            _checkpoint(report_dir, data)
+            raise GateError("FAIL", "parent up did not complete; sanitized failure evidence was recorded")
+        if up_result.returncode:
+            failure = _parent_up_failure(up_result.stderr, up_result.returncode)
+            failure.update(_post_failure_parent_evidence(root))
+            data["evidence"]["fresh_provision_failure"] = failure
+            origin = data["evidence"].get("provisioning_origin")
+            failure_disk = failure.get("post_failure_disk_identity")
+            if isinstance(origin, dict) and isinstance(failure_disk, dict):
+                origin["disk_identity"] = failure_disk
+            _checkpoint(report_dir, data)
+            raise GateError("FAIL", f"parent up failed (exit={up_result.returncode}; stage={failure['stage']}; reason={failure['reason_category']})")
     else:
         passed("fresh_provision", {"status": "ALREADY_RUNNING_VERIFIED_REPLACEMENT",
                                    "same_disk_identity_validated": True})
@@ -1185,6 +1712,7 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
         raise GateError("FAIL", "parent up returned without a verified RUNNING parent")
     new_identity = _identity(before_identity)
     if (new_identity.get("disk_format") != "qcow2"
+            or new_identity.get("disk_path") != "disk.qcow2"
             or new_identity.get("disk_provisioned") is not True
             or new_identity.get("virtual_capacity_gib") != 64
             or type(new_identity.get("disk_device")) is not int
@@ -1192,6 +1720,23 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
             or not isinstance(new_identity.get("run_id"), str)
             or not isinstance(new_identity.get("supervisor_pid"), int)):
         raise GateError("FAIL", "replacement lacks verified qcow2, capacity, disk, run or supervisor identity")
+    if same_disk_resume and (
+            (new_identity.get("disk_device"), new_identity.get("disk_inode"))
+            != (stopped_id["disk_device"], stopped_id["disk_inode"])):
+        raise GateError("FAIL", "same-disk retry changed the provisioned disk identity")
+    if not same_disk_resume and prior_factory_reset_attempt_id is not None:
+        data["evidence"]["provisioning_origin"] = {
+            "prior_attempt_id": (prior_provision_attempt_id
+                                 if prior_provision_attempt_id is not None
+                                 else data["attempt_id"]),
+            "factory_reset_attempt_id": prior_factory_reset_attempt_id,
+            "candidate_sha": data["candidate_sha"],
+            "disk_identity": {"device": new_identity["disk_device"],
+                              "inode": new_identity["disk_inode"]},
+            "owner_approved_fresh_provision": True,
+            "owner_confirmed_same_disk_resume": False,
+        }
+        _checkpoint(report_dir, data)
     old_identity = initial.get("retired_disk_identity")
     if isinstance(old_identity, dict) and (old_identity.get("device"), old_identity.get("inode")) == (
             new_identity["disk_device"], new_identity["disk_inode"]):
@@ -1365,8 +1910,7 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
         raise GateError("FAIL", "ordinary stop did not retain the same guest disk identity")
     _, recovery = _parent_json(root, "recover", "--dry-run", "--json", timeout=45)
     _, reconciliation = _parent_json(root, "reconcile", "--dry-run", "--json", timeout=45)
-    if recovery.get("action") != "none" or reconciliation.get("action") != "none":
-        raise GateError("FAIL", "ordinary clean stop left a recovery/reconciliation action")
+    _require_clean_stopped_previews(recovery, reconciliation)
     _parent_ok(root, "up", "--capacity-gib", "64", timeout=1100)
     _, after = _parent_json(root, "status", "--json")
     after_id = _identity(after)
@@ -1375,13 +1919,39 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
                != (new_identity["disk_device"], new_identity["disk_inode"])):
         raise GateError("FAIL", "ordinary up failed same-disk/fresh-run identity validation")
     passed("same_disk_restart", {"same_disk": True, "new_run_id": True,
-        "disk_device": after_id["disk_device"], "disk_inode": after_id["disk_inode"]})
+        "disk_device": after_id["disk_device"], "disk_inode": after_id["disk_inode"],
+        "stopped_recovery_preview_action": recovery.get("action"),
+        "stopped_recovery_preview_status": recovery.get("status"),
+        "stopped_reconciliation_preview_action": reconciliation.get("action"),
+        "stopped_reconciliation_preview_status": reconciliation.get("status")})
 
     active("history_persistence")
     canary_after = _parent_command(root, "canary-check", timeout=45)
     if canary_after.returncode:
         raise GateError("FAIL", "guest workspace file did not survive ordinary stop/up")
     passed("workspace_persistence", {"guest_disk_backed_workspace_canary_survived_stop_up": True})
+    required_m1_gates = (
+        "parent_identity", "duplicate_up", "ssh_reconnect", "m1_recovery_guards",
+        "same_disk_restart", "workspace_persistence",
+    )
+    if any(data["gates"].get(name) != "PASS" for name in required_m1_gates):
+        raise GateError("FAIL", "required live M1 revalidation checks did not all pass")
+    passed("m1_revalidation", {
+        "result": "PASS",
+        "replacement_disk_identity": {"device": new_identity["disk_device"],
+                                       "inode": new_identity["disk_inode"]},
+        "executed_checks": {
+            "verified_parent_identity": True,
+            "duplicate_up_preserved_run_and_disk": True,
+            "two_pinned_ssh_reconnections_owner_confirmed": True,
+            "live_recovery_guard_refused_while_supervisor_owned": True,
+            "clean_stopped_recovery_and_reconciliation_previews": True,
+            "ordinary_stop_up_preserved_disk_and_created_fresh_run": True,
+            "workspace_canary_survived_same_disk_restart": True,
+        },
+        "destructive_stale_boot_recovery_repeated": False,
+        "prior_owner_accepted_destructive_recovery": "historical evidence only; not re-executed",
+    })
     restart_live = inspect_live_parent(root)
     if not restart_live.get("m2_contract_compatible"):
         raise GateError("FAIL", "protected guest assets/configuration changed across ordinary stop/up")
@@ -1449,7 +2019,9 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
     data["evidence"]["m2_owner_acceptance"] = {
         "model": model,
         "old_disk_retained": bool(retirement_evidence.get("old_disk_retained")),
-        "old_parent_data_destroyed_by_authorized_factory_reset": factory_reset_done,
+        "old_parent_data_destroyed_by_authorized_factory_reset": (
+            factory_reset_done or prior_factory_reset_attempt_id is not None),
+        "factory_reset_completed_in_prior_attempt": prior_factory_reset_attempt_id,
         "replacement_disk_identity": {"device": new_identity["disk_device"], "inode": new_identity["disk_inode"]},
         "final_run_id": _identity(final)["run_id"],
         "real_auth_and_model_responses": True,
@@ -1599,7 +2171,7 @@ def main(argv: list[str] | None = None) -> int:
             installed_preflight(root, None)
             data["gates"]["preflight"] = "PASS"
             current_gate = "parent_acceptance"
-            run_parent_acceptance(root, args.model, data, report_dir)
+            run_parent_acceptance(root, args.model, data, report_dir, repo)
         elif mode in ("install", "all"):
             current_gate = "install"
             root = install_candidate(repo, args.sha, args.prefix)

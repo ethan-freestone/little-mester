@@ -185,7 +185,7 @@ PY
 export VM_HOST_SCRIPT_ROOT="$root"
 command="${1:-}"
 [[ -n "$command" ]] || {
-  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent up [--capacity-gib N] | parent status [--json] | parent inspect | parent retire | parent factory-reset | parent canary-create|canary-check|canary-remove|network-check|tui-state|history-probe|protection-prepare|protection-check|protection-cleanup|auth-check|tui-key | parent ssh | parent auth | parent tui [--continue] | parent stop | parent accept --milestone M2 --repo PATH --model openai/<model-id> | parent recover [--dry-run|--execute] [--json] | parent reconcile [--dry-run|--execute] [--json]\n' >&2
+  printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | parent up [--capacity-gib N] [--expected-disk-device N --expected-disk-inode N] | parent status [--json] | parent inspect | parent retire | parent factory-reset | parent canary-create|canary-check|canary-remove|network-check|tui-state|history-probe|protection-prepare|protection-check|protection-cleanup|auth-check|tui-key | parent ssh | parent auth | parent tui [--continue] | parent stop | parent accept --milestone M2 --repo PATH --model openai/<model-id> | parent recover [--dry-run|--execute] [--json] | parent reconcile [--dry-run|--execute] [--json]\n' >&2
   exit 2
 }
 shift

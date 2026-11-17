@@ -14,9 +14,21 @@ bundle, and provisions through the ordinary protected `up` path. If the parent i
 `AMBIGUOUS`, it offers a separate owner-authorized `factory-reset` for only the fixed Little
 Mester persistent-parent state directory. That path requires exact inventory confirmation,
 refuses unexpected mounts/resources, a held lifecycle lock, or any holder of the parent lock,
-virtual disk, or seed, then removes only the isolated VM state; it never touches the protected installation, repository,
-or other host paths. On interruption, rerun this same acceptance command and re-confirm the
-then-current inventory.
+virtual disk, or seed, then removes only the isolated VM state; it never touches the protected
+installation, repository, or other host paths.
+
+If an owner-approved fresh start fails and leaves a provisioned `STOPPED` parent, rerunning
+this acceptance command does **not** retire or reprovision it. The runner requires a unique
+private report tying this candidate to the completed reset and owner-approved provisioning
+attempt (including an interrupted start), verifies the
+current parent and qcow2 disk identity/capacity, and asks for confirmation naming the exact
+run and disk device/inode. The protected `up` then rechecks that disk identity under the
+lifecycle lock before retrying. Missing or conflicting provenance blocks without lifecycle
+changes. Re-running after an interrupted retry uses the resulting attempt's identity-bound
+evidence. If interruption occurs before a disk is created, a fresh attempt can continue from
+the recorded reset approval. If a disk exists but its identity was not durably recorded in
+the private report, the runner blocks rather than claiming that disk as the replacement.
+No factory reset, retirement, resize, or replacement is implied by a same-disk resume.
 
 ```sh
 set -euo pipefail
@@ -31,8 +43,9 @@ tools/vm-owner-acceptance --install --sha "$SHA" --repo "$REPO"
 I="/opt/little-mester/v3/$SHA"
 
 # The single complete owner acceptance command. On AMBIGUOUS it presents the explicit
-# factory-reset confirmation before fresh provisioning. Select an OpenAI model ID that the
-# owner is authorized to use; it is not an API key or credential.
+# factory-reset confirmation before fresh provisioning; after a provenance-verified failed
+# first start it offers an identity-bound same-disk resume instead. Select an OpenAI model ID
+# that the owner is authorized to use; it is not an API key or credential.
 "$I/lab-vm" parent accept --milestone M2 --repo "$REPO" --model 'openai/<model-id>'
 ```
 
@@ -52,6 +65,12 @@ orchestration. It is not owner acceptance. The real owner must complete browser 
 the selected OpenAI model interaction, target-terminal clipboard canary, and host VM
 lifecycle. If changes touch protected guest assets or provisioning, the owner must push
 the reviewed commit and obtain the required exact-SHA hosted CI before installation.
+
+The report contains a separate `m1_revalidation` gate. It passes only when checks on this
+replacement VM establish identity, duplicate-up idempotence, two pinned SSH reconnections,
+live recovery refusal, clean stopped recovery/reconciliation previews, ordinary same-disk
+stop/up with a fresh run ID, and workspace-canary persistence. It does not repeat destructive
+stale-boot recovery; prior owner-accepted M1a/M1b destructive evidence remains historical.
 
 ## Historical M1b/M1a recovery procedure (not part of fresh-parent M2 flow)
 

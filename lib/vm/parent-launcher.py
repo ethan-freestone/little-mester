@@ -78,7 +78,8 @@ def _spawn_supervisor(state, lock_fd: int, run_id: str, ssh_port: int,
 
 
 def up(capacity_gib: int = 64, *, home: str | None = None,
-       startup_timeout_seconds: int = STARTUP_TIMEOUT_SECONDS) -> dict:
+       startup_timeout_seconds: int = STARTUP_TIMEOUT_SECONDS,
+       expected_disk_identity: tuple[int, int] | None = None) -> dict:
     """Create/reuse one parent and return only after verified RUNNING readiness."""
     if not PARENT_LAUNCH_ENABLED:
         raise Refused("parent launch is disabled by its protected configuration gate")
@@ -86,11 +87,21 @@ def up(capacity_gib: int = 64, *, home: str | None = None,
             or type(startup_timeout_seconds) is not int
             or not 1 <= startup_timeout_seconds <= 1800):
         raise Refused("parent capacity or startup timeout is outside the supported bound")
+    if (expected_disk_identity is not None
+            and (not isinstance(expected_disk_identity, tuple)
+                 or len(expected_disk_identity) != 2
+                 or any(type(value) is not int or value < 0 for value in expected_disk_identity)
+                 or expected_disk_identity[1] == 0)):
+        raise Refused("expected parent disk identity is invalid")
     state = _load("parent-state")
     provision = _load("parent-provision")
     supervisor = _load("parent-supervisor")
     current = state.read_status(home=home)
     if current["status"] == "RUNNING":
+        if expected_disk_identity is not None:
+            disk = current.get("disk", {})
+            if (disk.get("device"), disk.get("inode")) != expected_disk_identity:
+                raise Refused("running parent disk identity differs from the expected resume disk")
         if current["disk"]["virtual_capacity_gib"] != capacity_gib:
             raise Refused("running parent capacity differs from the requested capacity")
         return current
@@ -100,11 +111,22 @@ def up(capacity_gib: int = 64, *, home: str | None = None,
         with state.lifecycle_lock(home=home) as lock_fd:
             current = state.read_status(home=home)
             if current["status"] == "RUNNING":
+                if expected_disk_identity is not None:
+                    disk = current.get("disk", {})
+                    if (disk.get("device"), disk.get("inode")) != expected_disk_identity:
+                        raise Refused("running parent disk identity differs from the expected resume disk")
                 if current["disk"]["virtual_capacity_gib"] != capacity_gib:
                     raise Refused("running parent capacity differs from the requested capacity")
                 return current
             if current["status"] not in ("NOT_CREATED", "RETIRED", "UNPROVISIONED", "STOPPED"):
                 raise Refused(f"parent cannot start from status {current['status']}; preserve evidence")
+            if expected_disk_identity is not None:
+                disk = current.get("disk") if isinstance(current.get("disk"), dict) else {}
+                if (current["status"] != "STOPPED"
+                        or disk.get("provisioned") is not True
+                        or (disk.get("device"), disk.get("inode")) != expected_disk_identity
+                        or disk.get("virtual_capacity_gib") != capacity_gib):
+                    raise Refused("stopped parent does not match the expected provisioned resume disk")
             parent = state.initialize(capacity_gib, home=home, lock_fd=lock_fd)
             parent = provision.create_initial_disk(
                 state=state, capacity_gib=capacity_gib,
@@ -157,9 +179,16 @@ def up(capacity_gib: int = 64, *, home: str | None = None,
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--capacity-gib", type=int, default=64)
+    parser.add_argument("--expected-disk-device", type=int)
+    parser.add_argument("--expected-disk-inode", type=int)
     args = parser.parse_args()
+    if (args.expected_disk_device is None) != (args.expected_disk_inode is None):
+        parser.error("--expected-disk-device and --expected-disk-inode must be supplied together")
+    expected_disk_identity = None
+    if args.expected_disk_device is not None:
+        expected_disk_identity = (args.expected_disk_device, args.expected_disk_inode)
     try:
-        status = up(args.capacity_gib)
+        status = up(args.capacity_gib, expected_disk_identity=expected_disk_identity)
     except (OSError, ValueError, subprocess.SubprocessError, Refused) as error:
         print(f"REFUSED: {error}", file=sys.stderr)
         return 2

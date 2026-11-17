@@ -61,6 +61,92 @@ class ParentLauncherTests(unittest.TestCase):
             with self.assertRaisesRegex(parent_launcher.Refused, "lifecycle lock is held"):
                 parent_launcher.up(64)
 
+    def test_expected_resume_disk_mismatch_refuses_before_initialization_or_provisioning(self):
+        class State:
+            PARENT_ID = "default"
+            Refused = parent_state.Refused
+
+            @staticmethod
+            def read_status(*_args, **_kwargs):
+                return {"status": "STOPPED", "disk": {
+                    "virtual_capacity_gib": 64, "provisioned": True,
+                    "device": 55, "inode": 11441015}}
+
+            @staticmethod
+            @contextlib.contextmanager
+            def lifecycle_lock(*_args, **_kwargs):
+                yield 42
+
+            @staticmethod
+            def initialize(*_args, **_kwargs):
+                raise AssertionError("mismatched disk must not initialize")
+
+        with (mock.patch.object(parent_launcher, "_load", return_value=State),
+              mock.patch.object(parent_launcher, "_free_loopback_port", return_value=23456),
+              mock.patch.object(parent_launcher, "_spawn_supervisor",
+                                side_effect=AssertionError("mismatched disk must not launch"))):
+            with self.assertRaisesRegex(parent_launcher.Refused, "does not match"):
+                parent_launcher.up(64, expected_disk_identity=(55, 999))
+
+    def test_expected_resume_disk_identity_is_checked_under_lifecycle_lock(self):
+        events = []
+
+        class State:
+            PARENT_ID = "default"
+            Refused = parent_state.Refused
+            reads = 0
+
+            @classmethod
+            def read_status(cls, *_args, **_kwargs):
+                cls.reads += 1
+                if cls.reads >= 3:
+                    return {"status": "RUNNING", "parent_id": "default", "run_id": "b" * 32,
+                            "disk": {"virtual_capacity_gib": 64, "provisioned": True,
+                                     "device": 55, "inode": 11441015}}
+                return {"status": "STOPPED", "parent_id": "default", "run_id": "a" * 32,
+                        "disk": {"virtual_capacity_gib": 64, "provisioned": True,
+                                 "device": 55, "inode": 11441015}}
+
+            @staticmethod
+            @contextlib.contextmanager
+            def lifecycle_lock(*_args, **_kwargs):
+                events.append("locked")
+                yield 42
+
+            @staticmethod
+            def initialize(capacity, *, home, lock_fd):
+                events.append(("initialize", capacity, lock_fd))
+                return {"disk": {"provisioned": True}}
+
+        class Provision:
+            Refused = RuntimeError
+
+            @staticmethod
+            def create_initial_disk(**kwargs):
+                events.append(("validated_existing_disk", kwargs["capacity_gib"]))
+                return {"disk": {"provisioned": True}}
+
+        class Supervisor:
+            @staticmethod
+            def _protected_tool(name, _candidates):
+                return f"/mock/{name}"
+
+            @staticmethod
+            def _prepare_parent_seed(*_args):
+                events.append("seed")
+
+        fake_proc = SimpleNamespace(poll=lambda: None)
+        with (mock.patch.object(parent_launcher, "_load", side_effect=[State, Provision, Supervisor]),
+              mock.patch.object(parent_launcher, "_free_loopback_port", return_value=23456),
+              mock.patch.object(parent_launcher.secrets, "token_hex", return_value="b" * 32),
+              mock.patch.object(parent_launcher, "_spawn_supervisor", return_value=fake_proc)):
+            status = parent_launcher.up(64, expected_disk_identity=(55, 11441015),
+                                        startup_timeout_seconds=1)
+        self.assertEqual(status["status"], "RUNNING")
+        self.assertEqual(events[0], "locked")
+        self.assertEqual(events[1], ("initialize", 64, 42))
+        self.assertIn(("validated_existing_disk", 64), events)
+
     def test_owner_up_pipeline_uses_state_lock_provision_seed_then_supervisor(self):
         events = []
 
