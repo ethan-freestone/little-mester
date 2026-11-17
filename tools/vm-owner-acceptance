@@ -1209,6 +1209,26 @@ def _parent_up_failure(stderr: bytes, exit_status: int | None) -> dict:
         stage, reason = "ssh_readiness", "ssh_transport_or_handshake_failed"
     elif "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED" in text:
         stage, reason = "guest_readiness", "guest_contract_mismatch"
+    elif "startup_failure_stage=supervisor_exit" in text:
+        stage, reason = "supervisor_exit", "supervisor_exited_before_ready"
+        recovery_categories = {
+            "lifecycle_lock_conflict": "orphan_recovery_lock_conflict",
+            "disk_holder_verification": "orphan_recovery_holder_verification_refused",
+            "recovery_identity_validation": "orphan_recovery_identity_refused",
+            "child_stop_or_identity": "orphan_recovery_child_refused",
+            "recovery_validation": "orphan_recovery_refused",
+        }
+        if "orphan_recovery=STOPPED" in text:
+            reason = "supervisor_exited_orphan_recovered"
+        else:
+            category = re.search(r"\brecovery_refusal_category=([a-z_]{1,64})\b", text)
+            if category and category.group(1) in recovery_categories:
+                reason = recovery_categories[category.group(1)]
+        exit_match = re.search(r"\bsupervisor_exit_status=([0-9]{1,3})\b", text)
+        if exit_match and int(exit_match.group(1)) <= 255:
+            return {"operation": "parent up", "exit_status": exit_status,
+                    "stage": stage, "reason_category": reason,
+                    "supervisor_exit_status": int(exit_match.group(1))}
     elif "supervisor startup failed:" in text:
         stage, reason = "supervisor_startup", "supervisor_invariant_refused"
     elif "parent provisioning refused:" in text:

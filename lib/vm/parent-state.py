@@ -1043,7 +1043,7 @@ def stale_boot_reconciliation(*, home: str | os.PathLike | None = None,
         if (not stat.S_ISREG(disk_info.st_mode) or (disk_info.st_dev, disk_info.st_ino) != expected):
             raise Refused("persistent disk identity changed before holder scan")
         _scan_stale_disk_holders(disk_fd, expected,
-                                 scratch_dir=pathlib.Path(disk_path).parent)
+                                 scratch_dir=_recovery_scratch_dir(directory_fd))
         # The scan is point-in-time: revalidate both the lock and all state/disk
         # evidence immediately before any audit/state writes.
         _verify_lock_fd(lock_fd, home=home)
@@ -1351,6 +1351,13 @@ def _scan_stale_disk_holders(disk_fd: int, expected: tuple[int, int], *,
         raise Refused(f"privileged disk-holder verification failed: {error}") from error
 
 
+def _recovery_scratch_dir(directory_fd: int) -> pathlib.Path:
+    """Address the already-verified parent directory without cwd/path races."""
+    if type(directory_fd) is not int or directory_fd < 0:
+        raise Refused("verified parent state directory descriptor is invalid")
+    return pathlib.Path(f"/proc/self/fd/{directory_fd}")
+
+
 def _validated_recovery_plan(directory_fd: int, *, home: str | os.PathLike | None) -> dict | None:
     """Validate complete orphan evidence. Never infer an absent child identity."""
     try:
@@ -1379,7 +1386,8 @@ def _validated_recovery_plan(directory_fd: int, *, home: str | os.PathLike | Non
             pending.append(name)
         if pending:
             raise Refused("reconciled stale run unexpectedly retains cleanup artifacts")
-        return {"run": run, "transitions": {}, "child_states": {},
+        return {"run": run, "parent": parent, "disk": disk,
+                "transitions": {}, "child_states": {},
                 "pending_artifacts": [], "boot_id": reconciled["current_boot_id"],
                 "stale_reconciled": True}
 
@@ -1434,6 +1442,8 @@ def _validated_recovery_plan(directory_fd: int, *, home: str | os.PathLike | Non
                               "fd_contracts": transition["target"]["fd_contracts"]}):
             raise Refused(f"recovery {role} target does not match its durable identity")
         child_state = exec_transition_status(transition)
+        if child_state == "AMBIGUOUS" and _exec_transition_zombie_stopped(transition):
+            child_state = "STOPPED"
         if child_state not in ("GATE", "TARGET", "STOPPED"):
             raise Refused(f"recovery {role} process identity is ambiguous")
         transitions[role] = transition
@@ -1469,14 +1479,20 @@ def _validated_recovery_plan(directory_fd: int, *, home: str | os.PathLike | Non
             continue
         _validate_recovery_artifact(directory_fd, name, kind)
         pending_artifacts.append(name)
-    return {"run": run, "transitions": transitions, "child_states": child_states,
+    return {"run": run, "parent": parent, "disk": disk,
+            "transitions": transitions, "child_states": child_states,
             "pending_artifacts": pending_artifacts, "boot_id": boot_id}
 
 
-def recover_parent(*, home: str | os.PathLike | None = None, execute: bool = False) -> dict:
+def recover_parent(*, home: str | os.PathLike | None = None, execute: bool = False,
+                   expected_run_id: str | None = None) -> dict:
     """Explicitly stop only fully recorded orphan children; default remains preview-only."""
     if type(execute) is not bool:
         raise Refused("recovery execution flag is invalid")
+    if (expected_run_id is not None
+            and (not isinstance(expected_run_id, str)
+                 or not re.fullmatch(r"[0-9a-f]{32}", expected_run_id))):
+        raise Refused("expected recovery run identity is invalid")
     if not execute:
         return recovery_preview(home=home)
     directory_fd = _open_directory_chain(create=False, home_override=home)
@@ -1494,25 +1510,84 @@ def recover_parent(*, home: str | os.PathLike | None = None, execute: bool = Fal
             raise Refused("recovery could not acquire the verified exclusive lifecycle lock") from error
         plan = _validated_recovery_plan(directory_fd, home=home)
         if plan is None:
+            if expected_run_id is not None:
+                raise Refused("expected recovery run is unavailable")
             status = read_status(home=home)
             return {"dry_run": False, "action": "none", "status": status["status"],
                     "parent_id": PARENT_ID}
         run = plan["run"]
+        if expected_run_id is not None and run.get("run_id") != expected_run_id:
+            raise Refused("recovery run identity differs from the failed startup run")
         transitions = plan["transitions"]
-        children_stopped = all(value == "STOPPED" for value in plan["child_states"].values())
-        if run["phase"] == "STOPPING" and children_stopped and not plan["pending_artifacts"]:
-            return {"dry_run": False, "action": "none", "status": "STOPPED",
-                    "parent_id": PARENT_ID, "run_id": run["run_id"], "disk_retained": True}
+        stopped_roles = {role for role, value in plan["child_states"].items()
+                         if value == "STOPPED"}
         for role in ("qemu", "metrics", "proxy"):
             transition = transitions.get(role)
             if transition is None or plan["child_states"][role] == "STOPPED":
                 continue
             _verify_lock_fd(lock_fd, home=home)
+            fresh = _validated_recovery_plan(directory_fd, home=home)
+            if (fresh is None or fresh["run"] != run
+                    or fresh["parent"] != plan["parent"] or fresh["disk"] != plan["disk"]
+                    or fresh["transitions"] != transitions
+                    or fresh["pending_artifacts"] != plan["pending_artifacts"]
+                    or any(state != "STOPPED" and role in stopped_roles
+                           for role, state in fresh["child_states"].items())
+                    or any(state != plan["child_states"].get(role)
+                           and state != "STOPPED"
+                           for role, state in fresh["child_states"].items())
+                    or (expected_run_id is not None
+                        and fresh["run"].get("run_id") != expected_run_id)):
+                raise Refused("recovery evidence changed before exact child stop")
             if stop_exec_transition(
                     transition, authorize_signal=lambda: _verify_lock_fd(lock_fd, home=home)) != "STOPPED":
                 raise Refused(f"recovery could not stop the exact {role} child")
+            stopped_roles.add(role)
 
-        # Publish STOPPING only after every recorded child is independently stopped.
+        # Revalidate exact records, verify every child is stopped, then scan all
+        # descriptor/mapping holders of this exact disk before publishing STOPPING.
+        _verify_lock_fd(lock_fd, home=home)
+        fresh = _validated_recovery_plan(directory_fd, home=home)
+        if (fresh is None or fresh["run"] != run
+                or fresh["parent"] != plan["parent"] or fresh["disk"] != plan["disk"]
+                or fresh["transitions"] != transitions
+                or fresh["pending_artifacts"] != plan["pending_artifacts"]
+                or any(value != "STOPPED" for value in fresh["child_states"].values())
+                or (expected_run_id is not None
+                    and fresh["run"].get("run_id") != expected_run_id)):
+            raise Refused("recovery evidence changed or a recorded child remains live")
+        disk = fresh.get("disk")
+        if not isinstance(disk, dict):
+            raise Refused("recovery lacks validated persistent disk identity")
+        disk_path = disk["path"]
+        disk_fd = -1
+        try:
+            disk_fd = os.open(disk_path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                              dir_fd=directory_fd)
+            disk_info = os.fstat(disk_fd)
+            expected_disk = (disk["device"], disk["inode"])
+            if (not stat.S_ISREG(disk_info.st_mode)
+                    or (disk_info.st_dev, disk_info.st_ino) != expected_disk):
+                raise Refused("persistent disk identity changed before recovery holder scan")
+            _scan_stale_disk_holders(disk_fd, expected_disk,
+                                     scratch_dir=_recovery_scratch_dir(directory_fd))
+            _verify_lock_fd(lock_fd, home=home)
+            after_scan = _validated_recovery_plan(directory_fd, home=home)
+            if (after_scan is None or after_scan["run"] != run
+                    or after_scan["parent"] != plan["parent"]
+                    or after_scan["disk"] != plan["disk"]
+                    or after_scan["transitions"] != transitions
+                    or after_scan["pending_artifacts"] != plan["pending_artifacts"]
+                    or any(value != "STOPPED" for value in after_scan["child_states"].values())):
+                raise Refused("recovery evidence changed during disk-holder verification")
+            disk_info = os.fstat(disk_fd)
+            if (disk_info.st_dev, disk_info.st_ino) != expected_disk:
+                raise Refused("persistent disk identity changed during recovery holder scan")
+        finally:
+            if disk_fd >= 0:
+                os.close(disk_fd)
+
+        # Publish STOPPING only after exact children and disk holders are verified absent.
         _verify_lock_fd(lock_fd, home=home)
         run["phase"] = "STOPPING"
         run.pop("qemu", None)
@@ -3201,6 +3276,24 @@ def exec_transition_status(identity: dict) -> str:
             or confirmed["start_time"] != identity["start_time"]):
         return "AMBIGUOUS"
     return _exec_transition_phase(identity, confirmed)
+
+
+def _exec_transition_zombie_stopped(identity: dict) -> bool:
+    """Confirm a dead transition process still visible as its exact zombie."""
+    try:
+        _validate_exec_transition(identity)
+        boot_id = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        if identity["host_boot_id"] != boot_id:
+            return False
+        proc = pathlib.Path(f"/proc/{identity['pid']}")
+        fields = (proc / "stat").read_text().rsplit(")", 1)[1].split()
+        uid_fields = next((line.split() for line in (proc / "status").read_text().splitlines()
+                           if line.startswith("Uid:")), [])
+        return (len(fields) > 19 and fields[0] == "Z" and len(uid_fields) >= 2
+                and fields[19] == identity["start_time"]
+                and int(uid_fields[1]) == identity["uid"])
+    except (OSError, ValueError, IndexError, StopIteration, Refused, TypeError, KeyError):
+        return False
 
 
 def _exec_transition_phase(identity: dict, current: dict) -> str:

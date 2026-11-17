@@ -70,8 +70,13 @@ class SupervisorHandoffTests(unittest.TestCase):
                 parent_state._atomic_json(fd, "parent.json", self.parent)
             finally:
                 os.close(fd)
+        self.real_holder_scan = parent_state._scan_stale_disk_holders
+        self.holder_scan_patcher = mock.patch.object(
+            parent_state, "_scan_stale_disk_holders", return_value=None)
+        self.holder_scan_patcher.start()
 
     def tearDown(self):
+        self.holder_scan_patcher.stop()
         self.temp.cleanup()
 
     def test_parent_readiness_distinguishes_opencode_install_and_version_failures(self):
@@ -1532,6 +1537,117 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 if child.poll() is None:
                     child.kill()
                     child.wait(timeout=3)
+
+    def test_recovery_binds_run_and_preserves_starting_evidence_when_holder_scan_refuses(self):
+        supervisor, run_id = self.spawn_supervisor()
+        children = []
+        disk_before = (self.state_dir / "disk.qcow2").stat()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            directory_fd = parent_state._open_directory_chain(
+                create=False, home_override=self.home)
+            try:
+                for role in ("qemu", "proxy"):
+                    child, _transition = self.spawn_recovery_target(directory_fd, role)
+                    children.append(child)
+            finally:
+                os.close(directory_fd)
+            supervisor.kill()
+            supervisor.wait(timeout=3)
+
+            with self.assertRaisesRegex(parent_state.Refused, "run identity differs"):
+                parent_state.recover_parent(home=self.home, execute=True,
+                                            expected_run_id="f" * 32)
+            self.assertTrue(all(child.poll() is None for child in children))
+
+            with mock.patch.object(parent_state, "_scan_stale_disk_holders",
+                                   side_effect=parent_state.Refused("injected unexpected holder")):
+                with self.assertRaisesRegex(parent_state.Refused, "injected unexpected holder"):
+                    parent_state.recover_parent(home=self.home, execute=True,
+                                                expected_run_id=run_id)
+            run = json.loads((self.state_dir / "active-run.json").read_text())
+            self.assertEqual(run["phase"], "STARTING",
+                             "failed holder verification must not publish STOPPING")
+            self.assertTrue(all(child.poll() is not None for child in children))
+
+            recovered = parent_state.recover_parent(home=self.home, execute=True,
+                                                     expected_run_id=run_id)
+            self.assertEqual(recovered["status"], "STOPPED")
+            disk_after = (self.state_dir / "disk.qcow2").stat()
+            self.assertEqual((disk_after.st_dev, disk_after.st_ino),
+                             (disk_before.st_dev, disk_before.st_ino))
+        finally:
+            self.cleanup_test_supervisor(supervisor)
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=3)
+
+    def test_holder_scan_uses_verified_state_directory_and_refuses_reported_holder(self):
+        directory_fd = parent_state._open_directory_chain(
+            create=False, home_override=self.home)
+        disk_fd = -1
+        positive_control_paths = []
+        scan_calls = [0]
+        try:
+            disk_fd = os.open("disk.qcow2", os.O_RDONLY | os.O_NOFOLLOW,
+                              dir_fd=directory_fd)
+            disk_info = os.fstat(disk_fd)
+            protected_script = ROOT / "scripts/parent-readonly-safety-gate.py"
+            protected_directories = {protected_script, protected_script.parent,
+                                     ROOT, pathlib.Path("/")}
+            original_lstat = pathlib.Path.lstat
+
+            def trusted_lstat(path, *args, **kwargs):
+                if path in protected_directories:
+                    is_script = path == protected_script
+                    return SimpleNamespace(
+                        st_uid=0,
+                        st_mode=(stat.S_IFREG | 0o644) if is_script else (stat.S_IFDIR | 0o755),
+                    )
+                return original_lstat(path, *args, **kwargs)
+
+            def fake_run(command, **_kwargs):
+                if command[1] == "-v":
+                    return subprocess.CompletedProcess(command, 0, b"", b"")
+                scan_calls[0] += 1
+                owner_pid, owner_fd = int(command[-2]), int(command[-1])
+                if scan_calls[0] == 1:
+                    for fd_name in os.listdir("/proc/self/fd"):
+                        try:
+                            target = os.readlink(f"/proc/self/fd/{fd_name}")
+                        except OSError:
+                            continue
+                        if "parent-reconcile-positive-" in target:
+                            positive_control_paths.append(target)
+                            break
+                    holders = [[os.getpid(), "fd", 7]]
+                else:
+                    holders = [[424242, "fd", 7]]
+                evidence = {
+                    "complete": True,
+                    "processes_scanned": 1,
+                    "coverage": {"procfs": True, "pid_namespace": "init-shared",
+                                 "user_namespace": "init-shared", "descriptors": True,
+                                 "file_mappings": True},
+                    "holders": holders,
+                }
+                return subprocess.CompletedProcess(
+                    command, 0, json.dumps(evidence).encode(), b"")
+
+            with (mock.patch.object(pathlib.Path, "lstat", trusted_lstat),
+                  mock.patch.object(parent_state.subprocess, "run", side_effect=fake_run)):
+                with self.assertRaisesRegex(parent_state.Refused, "observed descriptor or mapping holders"):
+                    self.real_holder_scan(
+                        disk_fd, (disk_info.st_dev, disk_info.st_ino),
+                        scratch_dir=parent_state._recovery_scratch_dir(directory_fd))
+            self.assertEqual(pathlib.Path(positive_control_paths[0]).parent, self.state_dir)
+        finally:
+            if disk_fd >= 0:
+                os.close(disk_fd)
+            os.close(directory_fd)
 
     def test_partial_startup_recovery_refuses_missing_child_identity_without_signalling(self):
         supervisor, _run_id = self.spawn_supervisor()

@@ -539,6 +539,10 @@ class ParentStateTests(unittest.TestCase):
             self.assertEqual(result["status"], "STOPPED")
             self.assertTrue(result["disk_retained"])
             scan.assert_called()
+            repeated = parent_state.recover_parent(
+                home=self.home, execute=True, expected_run_id=run["run_id"])
+            self.assertEqual(repeated["status"], "STOPPED")
+            self.assertTrue(repeated["disk_retained"])
         self.assertEqual(disk_path.read_bytes(), before)
         audit_path = self.parent_dir() / parent_state._stale_reconciliation_filename(run["run_id"])
         audited = json.loads(audit_path.read_text())

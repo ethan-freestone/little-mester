@@ -666,6 +666,12 @@ class OwnerAcceptanceTests(unittest.TestCase):
              "ssh_readiness", "ssh_host_key_rejected"),
             (b"REFUSED: parent provisioning refused: secret-token-value",
              "provisioning", "provisioning_invariant_refused"),
+            (b"REFUSED: startup_failure_stage=supervisor_exit; supervisor_exit_status=2; "
+             b"orphan_recovery=refused; recovery_refusal_category=disk_holder_verification",
+             "supervisor_exit", "orphan_recovery_holder_verification_refused"),
+            (b"REFUSED: startup_failure_stage=supervisor_exit; supervisor_exit_status=2; "
+             b"orphan_recovery=STOPPED; disk retained",
+             "supervisor_exit", "supervisor_exited_orphan_recovered"),
         )
         for stderr, stage, reason in cases:
             with self.subTest(stage=stage, reason=reason):

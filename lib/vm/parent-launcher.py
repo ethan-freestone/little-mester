@@ -23,6 +23,20 @@ class Refused(RuntimeError):
     pass
 
 
+def _recovery_refusal_category(error: BaseException) -> str:
+    """Map recovery failures to fixed, non-sensitive report categories."""
+    message = str(error).lower()
+    if "lock" in message:
+        return "lifecycle_lock_conflict"
+    if "holder" in message or "procfs" in message or "privileged" in message:
+        return "disk_holder_verification"
+    if any(word in message for word in ("identity", "transition", "schema", "run record")):
+        return "recovery_identity_validation"
+    if "child" in message or "process" in message:
+        return "child_stop_or_identity"
+    return "recovery_validation"
+
+
 def _load(name: str):
     path = pathlib.Path(__file__).with_name(f"{name}.py")
     spec = importlib.util.spec_from_file_location(f"parent_{name.replace('-', '_')}", path)
@@ -159,7 +173,10 @@ def up(capacity_gib: int = 64, *, home: str | None = None,
                 # and poll() does not leave the caller with a stale
                 # AMBIGUOUS zombie-race projection.
                 last_status = state.read_status(home=home)
-                raise Refused(f"parent supervisor/startup failed; status is {last_status['status']}")
+                raise Refused(
+                    f"startup_failure_stage=supervisor_exit; "
+                    f"supervisor_exit_status={getattr(proc, 'returncode', None)}; "
+                    f"parent_status={last_status['status']}")
             time.sleep(0.1)
         raise Refused("parent startup/readiness exceeded its bounded deadline")
     except Refused:
@@ -171,6 +188,29 @@ def up(capacity_gib: int = 64, *, home: str | None = None,
                                               reap_supervisor=proc.poll)
             except state.Refused as error:
                 raise Refused(f"startup failed and bounded rollback is ambiguous: {error}") from error
+        elif proc.poll() is not None and status["status"] == "AMBIGUOUS":
+            # The supervisor can exit after a failed startup cleanup (or be
+            # terminated abruptly), leaving only exact durable child identities.
+            # Recovery is bound to this launcher run and revalidates everything
+            # under the lifecycle lock before signalling any child.
+            try:
+                recovered = state.recover_parent(
+                    home=home, execute=True, expected_run_id=run_id)
+            except state.Refused as error:
+                raise Refused(
+                    f"startup_failure_stage=supervisor_exit; "
+                    f"supervisor_exit_status={getattr(proc, 'returncode', None)}; "
+                    "orphan_recovery=refused; "
+                    f"recovery_refusal_category={_recovery_refusal_category(error)}") from error
+            if recovered.get("status") != "STOPPED":
+                raise Refused(
+                    f"startup_failure_stage=supervisor_exit; "
+                    f"supervisor_exit_status={proc.returncode}; "
+                    "orphan_recovery=incomplete; parent state preserved")
+            raise Refused(
+                f"startup_failure_stage=supervisor_exit; "
+                f"supervisor_exit_status={getattr(proc, 'returncode', None)}; "
+                "orphan_recovery=STOPPED; disk retained; retry may resume the verified disk")
         raise
     finally:
         proc.poll()
