@@ -37,6 +37,156 @@ diagnostic = importlib.util.module_from_spec(DIAG_SPEC)
 DIAG_SPEC.loader.exec_module(diagnostic)
 
 
+class ScannerPermissionCategoryUnitTests(unittest.TestCase):
+    def _proc_read_text(self, path, *args, **kwargs):
+        if os.fspath(path) == "/proc/self/mountinfo":
+            return "1 0 0:1 / /proc rw - proc proc rw\n"
+        if os.fspath(path) == "/proc/1/stat":
+            return "1 (init) S " + " ".join(["0"] * 18 + ["123"])
+        return self.real_read_text(path, *args, **kwargs)
+
+    def setUp(self):
+        self.real_read_text = pathlib.Path.read_text
+
+    def _mock_proc_read_text(self):
+        return mock.patch.object(pathlib.Path, "read_text", autospec=True,
+                                 side_effect=self._proc_read_text)
+
+    def test_task_enumeration_permission_refusal_has_operation_category(self):
+        real_scandir = gate.os.scandir
+
+        class Entry:
+            def __init__(self, name):
+                self.name = name
+
+        class Entries:
+            def __init__(self, entries):
+                self.entries = entries
+
+            def __iter__(self):
+                return iter(self.entries)
+
+        class DeniedIteration:
+            def __iter__(self):
+                raise PermissionError(13, "denied during iteration")
+                yield None
+
+        def deny_task_enumeration(path):
+            path = os.fspath(path)
+            if path == "/proc":
+                return Entries([Entry("1"), Entry("2")])
+            if path == "/proc/1/task":
+                return DeniedIteration()
+            return real_scandir(path)
+
+        with mock.patch.object(gate.os, "geteuid", return_value=0), \
+                mock.patch.object(gate.os, "readlink", return_value="namespace"), \
+                mock.patch.object(gate, "_verify_protected_helper"), \
+                mock.patch.object(gate.os, "scandir", side_effect=deny_task_enumeration), \
+                self._mock_proc_read_text():
+            with self.assertRaisesRegex(gate.GateRefused, "unreadable_task_enumeration"):
+                gate._scan_proc_inode(1, 1)
+
+    def _scan_with_fd_stat_failures(self, failures):
+        real_scandir = gate.os.scandir
+
+        class Entry:
+            def __init__(self, name, path=None):
+                self.name = name
+                self.path = path or name
+
+        class Entries:
+            def __init__(self, entries):
+                self.entries = entries
+
+            def __iter__(self):
+                return iter(self.entries)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_scandir(path):
+            path = os.fspath(path)
+            if path == "/proc":
+                return Entries([Entry("1"), Entry("2")])
+            if path == "/proc/1/task":
+                return Entries([Entry("1")])
+            if path == "/proc/1/task/1/fd":
+                return Entries([Entry("9", "/proc/1/task/1/fd/9")])
+            return real_scandir(path)
+
+        def denied_stat(path, *args, **kwargs):
+            if os.fspath(path) == "/proc/1/task/1/fd/9":
+                error = failures.pop(0)
+                raise error
+            return real_stat(path, *args, **kwargs)
+
+        real_stat = gate.os.stat
+        with mock.patch.object(gate.os, "geteuid", return_value=0), \
+                mock.patch.object(gate.os, "readlink", return_value="namespace"), \
+                mock.patch.object(gate, "_verify_protected_helper"), \
+                mock.patch.object(gate.os, "scandir", side_effect=fake_scandir), \
+                mock.patch.object(gate.os, "stat", side_effect=denied_stat), \
+                self._mock_proc_read_text():
+            with self.assertRaisesRegex(gate.GateRefused, "unreadable_fd_target_stat"):
+                gate._scan_proc_inode(1, 1)
+
+    def test_fd_target_stat_permission_refusal_has_operation_category(self):
+        self._scan_with_fd_stat_failures([PermissionError(13, "denied")])
+
+    def test_fd_target_stat_retry_permission_refusal_has_operation_category(self):
+        self._scan_with_fd_stat_failures([
+            FileNotFoundError(2, "slot disappeared"), PermissionError(13, "denied on retry")])
+
+    def test_maps_permission_refusal_has_operation_category(self):
+        real_scandir = gate.os.scandir
+        real_open = pathlib.Path.open
+
+        class Entry:
+            def __init__(self, name):
+                self.name = name
+
+        class Entries:
+            def __init__(self, entries):
+                self.entries = entries
+
+            def __iter__(self):
+                return iter(self.entries)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_scandir(path):
+            path = os.fspath(path)
+            if path == "/proc":
+                return Entries([Entry("1"), Entry("2")])
+            if path == "/proc/1/task":
+                return Entries([Entry("1")])
+            if path == "/proc/1/task/1/fd":
+                return Entries([])
+            return real_scandir(path)
+
+        def denied_maps_open(path, *args, **kwargs):
+            if os.fspath(path) == "/proc/1/task/1/maps":
+                raise PermissionError(13, "denied")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch.object(gate.os, "geteuid", return_value=0), \
+                mock.patch.object(gate.os, "readlink", return_value="namespace"), \
+                mock.patch.object(gate, "_verify_protected_helper"), \
+                mock.patch.object(gate.os, "scandir", side_effect=fake_scandir), \
+                mock.patch.object(pathlib.Path, "open", denied_maps_open), \
+                self._mock_proc_read_text():
+            with self.assertRaisesRegex(gate.GateRefused, "unreadable_task_maps"):
+                gate._scan_proc_inode(1, 1)
+
+
 class ProcessScanTests(unittest.TestCase):
     @staticmethod
     def _ancestry_diagnostic(prefix, install_root):

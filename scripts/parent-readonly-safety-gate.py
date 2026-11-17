@@ -123,11 +123,18 @@ def _scan_proc_inode(device: int, inode: int, allowed_pid: int = 0,
         pid_path = pathlib.Path("/proc") / pid_text
         start_time = ""
         try:
-            before = (pid_path / "stat").read_text().rsplit(")", 1)[1].split()
+            try:
+                before = (pid_path / "stat").read_text().rsplit(")", 1)[1].split()
+            except PermissionError as error:
+                raise GateRefused("unreadable_process_stat") from error
             if len(before) <= 19:
                 raise GateRefused("malformed_process_identity")
             start_time = before[19]
-            task_names = [item.name for item in os.scandir(pid_path / "task") if item.name.isdigit()]
+            try:
+                task_names = [item.name for item in os.scandir(pid_path / "task")
+                              if item.name.isdigit()]
+            except PermissionError as error:
+                raise GateRefused("unreadable_task_enumeration") from error
             if len(task_names) > 4096:
                 raise GateRefused("task_enumeration_limit_exceeded")
             if not task_names:
@@ -138,14 +145,20 @@ def _scan_proc_inode(device: int, inode: int, allowed_pid: int = 0,
                 task = pid_path / "task" / tid
                 fd_dir = task / "fd"
                 try:
-                    fds = list(os.scandir(fd_dir))
+                    try:
+                        fds = list(os.scandir(fd_dir))
+                    except PermissionError as error:
+                        raise GateRefused("unreadable_fd_enumeration") from error
                     if len(fds) > 65536:
                         raise GateRefused("descriptor_enumeration_limit_exceeded")
                     for entry in fds:
                         if not entry.name.isdigit():
                             continue
                         try:
-                            info = os.stat(entry.path)
+                            try:
+                                info = os.stat(entry.path)
+                            except PermissionError as error:
+                                raise GateRefused("unreadable_fd_target_stat") from error
                         except FileNotFoundError:
                             # A descriptor can close between readdir and stat. Confirm
                             # that the same slot has disappeared before treating it as
@@ -154,6 +167,8 @@ def _scan_proc_inode(device: int, inode: int, allowed_pid: int = 0,
                                 os.stat(entry.path)
                             except FileNotFoundError:
                                 continue
+                            except PermissionError as error:
+                                raise GateRefused("unreadable_fd_target_stat") from error
                             else:
                                 raise GateRefused("descriptor_changed_during_observation")
                         if (info.st_dev, info.st_ino) == (device, inode):
@@ -172,6 +187,8 @@ def _scan_proc_inode(device: int, inode: int, allowed_pid: int = 0,
                     if len(raw_maps) > 8 * 1024 * 1024:
                         raise GateRefused("mapping_output_limit_exceeded")
                     maps = raw_maps.decode("ascii", "strict")
+                except PermissionError as error:
+                    raise GateRefused("unreadable_task_maps") from error
                 except FileNotFoundError:
                     if not task.exists():
                         continue
@@ -192,7 +209,10 @@ def _scan_proc_inode(device: int, inode: int, allowed_pid: int = 0,
                         holders.add((int(pid_text), "map", 0))
             if exited(pid_path, start_time):
                 continue
-            after = (pid_path / "stat").read_text().rsplit(")", 1)[1].split()
+            try:
+                after = (pid_path / "stat").read_text().rsplit(")", 1)[1].split()
+            except PermissionError as error:
+                raise GateRefused("unreadable_process_post_stat") from error
             if len(after) <= 19 or after[19] != start_time:
                 raise GateRefused("process_changed_during_scan")
             scanned += 1
