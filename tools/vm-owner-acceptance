@@ -91,10 +91,11 @@ M2_DEPLOYMENT_REQUIREMENT = (
 
 
 class GateError(Exception):
-    def __init__(self, status: str, message: str):
+    def __init__(self, status: str, message: str, *, category: str | None = None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.category = category
 
 
 def clean_env(*, desktop_session: bool = False) -> dict[str, str]:
@@ -851,6 +852,7 @@ def _replacement_provision_origin(sha: str, repo: pathlib.Path | None = None) ->
     parent = runtime_dir()
     reports = []
     has_replacement_evidence = False
+    replacement_evidence_attempts = set()
     ancestry_cache = {sha: True}
 
     def candidate_in_lineage(candidate: object) -> bool:
@@ -909,8 +911,10 @@ def _replacement_provision_origin(sha: str, repo: pathlib.Path | None = None) ->
             raw_retirement = raw_retirement if isinstance(raw_retirement, dict) else {}
             if (raw_retirement.get("status") == "FACTORY_RESET"
                     or bool(raw_evidence.get("provisioning_origin"))
-                    or bool(raw_evidence.get("fresh_provision_approval"))):
+                    or bool(raw_evidence.get("fresh_provision_approval"))
+                    or bool(raw_evidence.get("fresh_provision_failure"))):
                 has_replacement_evidence = True
+                replacement_evidence_attempts.add(entry_name)
             if not candidate_in_lineage(content.get("candidate_sha")):
                 continue
             if (content.get("attempt_id") == entry_name
@@ -930,10 +934,21 @@ def _replacement_provision_origin(sha: str, repo: pathlib.Path | None = None) ->
                 return {"device": value["device"], "inode": value["inode"]}
             return None
 
+        def has_replacement_record(content: dict) -> bool:
+            evidence = dict_at(content, "evidence")
+            retirement = dict_at(evidence, "retirement")
+            return (
+                retirement.get("status") == "FACTORY_RESET"
+                or bool(evidence.get("provisioning_origin"))
+                or bool(evidence.get("fresh_provision_approval"))
+                or bool(evidence.get("fresh_provision_failure"))
+            )
+
         has_replacement_evidence = has_replacement_evidence or any(
             dict_at(dict_at(content, "evidence"), "retirement").get("status") == "FACTORY_RESET"
             or bool(dict_at(dict_at(content, "evidence"), "provisioning_origin"))
             or bool(dict_at(dict_at(content, "evidence"), "fresh_provision_approval"))
+            or bool(dict_at(dict_at(content, "evidence"), "fresh_provision_failure"))
             for content in reports
         )
 
@@ -950,6 +965,7 @@ def _replacement_provision_origin(sha: str, repo: pathlib.Path | None = None) ->
                     r"protected parent operation up failed \(exit=[1-9][0-9]{0,2}; reason=(?:refused|command_failure)\)",
                     note) for note in notes)
             )
+
             recorded_failed_up = (
                 failure.get("operation") == "parent up"
                 and type(failure.get("exit_status")) is int
@@ -961,6 +977,12 @@ def _replacement_provision_origin(sha: str, repo: pathlib.Path | None = None) ->
                 and approval.get("capacity_gib") == 64
                 and approval.get("from_status") in ("NOT_CREATED", "RETIRED", "UNPROVISIONED")
             )
+            reset_complete_before_provision_approval = (
+                content.get("status") in ("IN_PROGRESS", "BLOCKED")
+                and gates.get("fresh_provision") in (None, "NOT_RUN", "BLOCKED")
+                and not approval
+                and not failure
+            )
             return (
                 gates.get("retirement") == "PASS"
                 and retirement.get("status") == "FACTORY_RESET"
@@ -969,9 +991,40 @@ def _replacement_provision_origin(sha: str, repo: pathlib.Path | None = None) ->
                       and (legacy_failed_up or recorded_failed_up))
                      or (approved_attempt and content.get("status") in (
                          "IN_PROGRESS", "BLOCKED", "FAIL", "PASS"))
-                     or (content.get("status") == "IN_PROGRESS"
-                         and gates.get("fresh_provision") in (None, "NOT_RUN", "BLOCKED")))
+                     or reset_complete_before_provision_approval)
             )
+
+        reset_roots = [content for content in reports if reset_root(content)]
+        reset_time = max((content["attempt_id"][:16] for content in reset_roots), default=None)
+        latest_roots = [content for content in reset_roots
+                        if content["attempt_id"][:16] == reset_time]
+        if len(latest_roots) > 1:
+            raise GateError(
+                "BLOCKED",
+                "multiple completed factory resets share an ambiguous report timestamp; preserve provenance",
+                category="provenance_reset_order_ambiguous",
+            )
+        active_reset = latest_roots[0] if latest_roots else None
+        reconciled_attempt_ids = []
+        if active_reset is not None:
+            reset_attempt_id = active_reset["attempt_id"]
+            reconciled_attempt_ids = sorted(
+                attempt_id for attempt_id in replacement_evidence_attempts
+                if attempt_id[:16] < reset_time
+            )
+            # A completed, verified factory reset makes older parent/disk provenance
+            # historical, not authoritative for the now-empty persistent-parent state.
+            # Keep those private reports; only exclude them from the active chain.
+            reports = [content for content in reports
+                       if content["attempt_id"][:16] >= reset_time]
+            active_report_ids = {content["attempt_id"] for content in reports}
+            if any(attempt_id[:16] >= reset_time and attempt_id not in active_report_ids
+                   for attempt_id in replacement_evidence_attempts):
+                raise GateError(
+                    "BLOCKED",
+                    "replacement evidence after the latest verified reset is not bound to this candidate; preserve state",
+                    category="provenance_unknown_after_reset",
+                )
 
         def pre_disk_provision(content: dict, origin: dict, reset_id: object) -> bool:
             evidence = dict_at(content, "evidence")
@@ -1030,7 +1083,10 @@ def _replacement_provision_origin(sha: str, repo: pathlib.Path | None = None) ->
                         "attempt_id": content["attempt_id"],
                         "factory_reset_attempt_id": content["attempt_id"],
                         "disk_identity": disk_identity(failure.get("post_failure_disk_identity")),
+                        "reconciled_attempt_ids": reconciled_attempt_ids,
                     })
+                elif has_replacement_record(content):
+                    invalid_origin_evidence = True
                 continue
 
             prior_id = origin.get("prior_attempt_id")
@@ -1074,6 +1130,7 @@ def _replacement_provision_origin(sha: str, repo: pathlib.Path | None = None) ->
                 "attempt_id": content["attempt_id"],
                 "factory_reset_attempt_id": reset_id,
                 "disk_identity": recorded_identity,
+                "reconciled_attempt_ids": reconciled_attempt_ids,
             })
 
         # A report supersedes its predecessor only when its candidate-bound origin,
@@ -1084,18 +1141,21 @@ def _replacement_provision_origin(sha: str, repo: pathlib.Path | None = None) ->
             raise GateError(
                 "BLOCKED",
                 "a candidate-linked report contains inconsistent replacement identity evidence; preserve the parent without lifecycle changes",
+                category="provenance_invalid_descendant",
             )
         if not matches:
             if has_replacement_evidence:
                 raise GateError(
                     "BLOCKED",
                     "private replacement evidence exists but its provenance chain is incomplete or inconsistent; preserve the parent without lifecycle changes",
+                    category="provenance_orphaned_evidence",
                 )
             return None
         if len(matches) != 1 or not isinstance(matches[0].get("attempt_id"), str):
             raise GateError(
                 "BLOCKED",
                 "cannot establish one unique private replacement-provenance chain for this SHA; preserve the parent without lifecycle changes",
+                category="provenance_multiple_active_chains",
             )
         return matches[0]
     finally:
@@ -1482,12 +1542,14 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
     factory_reset_done = False
     prior_factory_reset_attempt_id = None
     prior_provision_attempt_id = None
+    reconciled_attempt_ids = []
     if initial_status == "AMBIGUOUS":
         interrupted_origin = _replacement_provision_origin(data["candidate_sha"], repo)
         if interrupted_origin is not None:
             raise GateError(
                 "BLOCKED",
                 "replacement provisioning provenance exists but current parent identity is AMBIGUOUS; preserve the disk and do not factory-reset",
+                category="provenance_parent_identity_ambiguous",
             )
         active("retirement")
         _parent_ok(root, "factory-reset", interactive=True, timeout=900)
@@ -1507,6 +1569,15 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
         if interrupted_origin is not None:
             prior_factory_reset_attempt_id = interrupted_origin["factory_reset_attempt_id"]
             prior_provision_attempt_id = interrupted_origin["attempt_id"]
+            reconciled_attempt_ids = interrupted_origin.get("reconciled_attempt_ids", [])
+            if reconciled_attempt_ids:
+                data["evidence"]["provenance_reconciliation"] = {
+                    "factory_reset_attempt_id": prior_factory_reset_attempt_id,
+                    "superseded_attempt_ids": reconciled_attempt_ids,
+                    "prior_reports_preserved": True,
+                    "basis": "owner-approved reset completed and protected status is NOT_CREATED",
+                }
+                _checkpoint(report_dir, data)
     retired_disk = initial.get("retired_disk_identity")
     disk = initial.get("disk") if isinstance(initial.get("disk"), dict) else {}
     same_disk_resume = False
@@ -1530,7 +1601,10 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
             recorded_disk = resume_origin.get("disk_identity")
             if recorded_disk is None or recorded_disk != {
                     "device": running_id["disk_device"], "inode": running_id["disk_inode"]}:
-                raise GateError("BLOCKED", "RUNNING disk does not match the prior acceptance provenance; preserve it")
+                raise GateError(
+                    "BLOCKED", "RUNNING disk does not match the prior acceptance provenance; preserve it",
+                    category="provenance_running_disk_identity_mismatch",
+                )
             stopped_id = running_id
             same_disk_resume = True
             resume_already_running = True
@@ -1544,7 +1618,11 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
                 "inode": running_id["disk_inode"]},
             })
         elif is_replacement:
-            raise GateError("BLOCKED", "RUNNING replacement lacks a complete private disk-provenance chain; preserve it without retirement")
+            raise GateError(
+                "BLOCKED",
+                "RUNNING replacement lacks a complete private disk-provenance chain; preserve it without retirement",
+                category="provenance_running_disk_unbound",
+            )
     if initial_status == "STARTING":
         raise GateError("BLOCKED", "parent startup is still STARTING; no retire, reset, replacement, or second writer was attempted")
     if initial_status == "RETIRING":
@@ -1560,13 +1638,20 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
     elif initial_status == "STOPPED":
         resume_origin = _replacement_provision_origin(data["candidate_sha"], repo)
         if resume_origin is None:
-            raise GateError("BLOCKED", "STOPPED parent has no private reset-and-failed-start provenance for this candidate; it will not be retired or replaced")
+            raise GateError(
+                "BLOCKED",
+                "STOPPED parent has no private reset-and-failed-start provenance for this candidate; it will not be retired or replaced",
+                category="provenance_stopped_disk_unbound",
+            )
         prior_factory_reset_attempt_id = resume_origin["factory_reset_attempt_id"]
         stopped_id = _verified_resume_parent(initial)
         recorded_disk = resume_origin.get("disk_identity")
         if recorded_disk is None or recorded_disk != {
                 "device": stopped_id["disk_device"], "inode": stopped_id["disk_inode"]}:
-            raise GateError("BLOCKED", "STOPPED disk does not match the prior failed-provision report; preserve it")
+            raise GateError(
+                "BLOCKED", "STOPPED disk does not match the prior failed-provision report; preserve it",
+                category="provenance_stopped_disk_identity_mismatch",
+            )
         same_disk_resume = True
         passed("retirement", {
             "status": "NO_RETIREMENT_SAME_DISK_RESUME",
@@ -1616,6 +1701,7 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
             "owner_confirmed_same_disk_resume": not resume_already_running,
             "already_running_owner_approval_in_prior_attempt": resume_already_running,
             "reset_or_retirement_repeated": False,
+            "reconciled_attempt_ids": resume_origin.get("reconciled_attempt_ids", []),
         }
         _checkpoint(report_dir, data)
         _, immediately_before = _parent_json(root, "status", "--json")
@@ -1679,6 +1765,7 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
                 "disk_identity": None,
                 "owner_approved_fresh_provision": True,
                 "owner_confirmed_same_disk_resume": False,
+                "reconciled_attempt_ids": reconciled_attempt_ids,
             }
         _checkpoint(report_dir, data)
         try:
@@ -1735,6 +1822,7 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
                               "inode": new_identity["disk_inode"]},
             "owner_approved_fresh_provision": True,
             "owner_confirmed_same_disk_resume": False,
+            "reconciled_attempt_ids": reconciled_attempt_ids,
         }
         _checkpoint(report_dir, data)
     old_identity = initial.get("retired_disk_identity")
@@ -2227,6 +2315,8 @@ def main(argv: list[str] | None = None) -> int:
         result_code = 3
     except GateError as error:
         data["status"] = error.status
+        if error.category:
+            data["evidence"]["failure_category"] = error.category
         active = data.get("active_gate")
         if active in data["gates"] and data["gates"][active] == "NOT_RUN":
             data["gates"][active] = error.status

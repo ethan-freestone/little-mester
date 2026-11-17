@@ -54,7 +54,8 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 found = acceptance._replacement_provision_origin("1" * 40)
             self.assertEqual(found, {"attempt_id": attempt_id,
                                      "factory_reset_attempt_id": attempt_id,
-                                     "disk_identity": None})
+                                     "disk_identity": None,
+                                     "reconciled_attempt_ids": []})
 
     def test_interrupted_approved_first_start_is_resumable_without_failure_exit_record(self):
         with tempfile.TemporaryDirectory(prefix="owner-interrupted-origin-") as temporary:
@@ -83,7 +84,8 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 found = acceptance._replacement_provision_origin("5" * 40)
             self.assertEqual(found, {"attempt_id": attempt_id,
                                      "factory_reset_attempt_id": attempt_id,
-                                     "disk_identity": None})
+                                     "disk_identity": None,
+                                     "reconciled_attempt_ids": []})
 
     def test_reset_checkpoint_before_provision_approval_remains_a_valid_origin(self):
         with tempfile.TemporaryDirectory(prefix="owner-reset-interruption-") as temporary:
@@ -94,8 +96,8 @@ class OwnerAcceptanceTests(unittest.TestCase):
             attempt.mkdir(mode=0o700)
             content = {
                 "candidate_sha": "9" * 40, "mode": "parent_accept",
-                "attempt_id": attempt_id, "status": "IN_PROGRESS",
-                "gates": {"retirement": "PASS"},
+                "attempt_id": attempt_id, "status": "BLOCKED",
+                "gates": {"retirement": "PASS", "fresh_provision": "BLOCKED"},
                 "evidence": {"retirement": {"status": "FACTORY_RESET"}},
                 "notes": [],
             }
@@ -108,7 +110,361 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 "attempt_id": attempt_id,
                 "factory_reset_attempt_id": attempt_id,
                 "disk_identity": None,
+                "reconciled_attempt_ids": [],
             })
+
+    def test_verified_reset_reconciles_older_conflicting_private_attempt_without_deleting_it(self):
+        with tempfile.TemporaryDirectory(prefix="owner-reset-reconcile-") as temporary:
+            reports = pathlib.Path(temporary)
+            os.chmod(reports, 0o700)
+            old_id = "20261117T080000Z-" + "a" * 32
+            reset_id = "20261117T084000Z-" + "b" * 32
+            old_dir = reports / old_id
+            reset_dir = reports / reset_id
+            old_dir.mkdir(mode=0o700)
+            reset_dir.mkdir(mode=0o700)
+            old_path = old_dir / "report.json"
+            old_path.write_text(json.dumps({
+                "candidate_sha": "1" * 40, "mode": "parent_accept",
+                "attempt_id": old_id, "status": "BLOCKED",
+                "gates": {"retirement": "PASS", "fresh_provision": "BLOCKED"},
+                "evidence": {"provisioning_origin": {"corrupt_old_link": True}},
+            }), encoding="utf-8")
+            os.chmod(old_path, 0o600)
+            reset_path = reset_dir / "report.json"
+            reset_path.write_text(json.dumps({
+                "candidate_sha": "2" * 40, "mode": "parent_accept",
+                "attempt_id": reset_id, "status": "BLOCKED",
+                "gates": {"retirement": "PASS", "fresh_provision": "BLOCKED"},
+                "evidence": {"retirement": {"status": "FACTORY_RESET"}},
+            }), encoding="utf-8")
+            os.chmod(reset_path, 0o600)
+            with (mock.patch.object(acceptance, "runtime_dir", return_value=reports),
+                  mock.patch.object(acceptance, "git",
+                                    return_value=subprocess.CompletedProcess([], 0, b"", b""))):
+                found = acceptance._replacement_provision_origin("3" * 40, pathlib.Path("/repo"))
+            self.assertEqual(found, {
+                "attempt_id": reset_id,
+                "factory_reset_attempt_id": reset_id,
+                "disk_identity": None,
+                "reconciled_attempt_ids": [old_id],
+            })
+            self.assertTrue(old_path.is_file(), "reconciliation must preserve older report files")
+
+    def test_newer_unlinked_fresh_approval_cannot_be_ignored_after_verified_reset(self):
+        with tempfile.TemporaryDirectory(prefix="owner-newer-unlinked-evidence-") as temporary:
+            reports = pathlib.Path(temporary)
+            os.chmod(reports, 0o700)
+            reset_id = "20261117T084000Z-" + "c" * 32
+            newer_id = "20261117T084100Z-" + "d" * 32
+            for attempt_id, content in (
+                (reset_id, {
+                    "candidate_sha": "2" * 40, "mode": "parent_accept",
+                    "attempt_id": reset_id, "status": "BLOCKED",
+                    "gates": {"retirement": "PASS", "fresh_provision": "BLOCKED"},
+                    "evidence": {"retirement": {"status": "FACTORY_RESET"}},
+                }),
+                (newer_id, {
+                    "candidate_sha": "3" * 40, "mode": "parent_accept",
+                    "attempt_id": newer_id, "status": "BLOCKED",
+                    "gates": {"retirement": "PASS", "fresh_provision": "BLOCKED"},
+                    "evidence": {"fresh_provision_approval": {
+                        "owner_approved": True, "candidate_sha": "3" * 40,
+                        "capacity_gib": 64, "factory_reset_attempt_id": reset_id,
+                    }},
+                }),
+            ):
+                directory = reports / attempt_id
+                directory.mkdir(mode=0o700)
+                path = directory / "report.json"
+                path.write_text(json.dumps(content), encoding="utf-8")
+                os.chmod(path, 0o600)
+            with (mock.patch.object(acceptance, "runtime_dir", return_value=reports),
+                  mock.patch.object(acceptance, "git",
+                                    return_value=subprocess.CompletedProcess([], 0, b"", b""))):
+                with self.assertRaisesRegex(acceptance.GateError, "inconsistent replacement identity") as caught:
+                    acceptance._replacement_provision_origin("3" * 40, pathlib.Path("/repo"))
+            self.assertEqual(caught.exception.category, "provenance_invalid_descendant")
+
+    def test_sequential_not_created_provision_then_running_resume_uses_verified_reset_root(self):
+        with tempfile.TemporaryDirectory(prefix="owner-sequential-reset-") as temporary:
+            reports = pathlib.Path(temporary) / "reports"
+            reports.mkdir(mode=0o700)
+            old_id = "20261117T080000Z-" + "1" * 32
+            reset_id = "20261117T084000Z-" + "2" * 32
+            first_id = "20261117T084100Z-" + "3" * 32
+            second_id = "20261117T084200Z-" + "4" * 32
+            third_id = "20261117T084300Z-" + "5" * 32
+            old_dir, reset_dir = reports / old_id, reports / reset_id
+            old_dir.mkdir(mode=0o700)
+            reset_dir.mkdir(mode=0o700)
+            old_path = old_dir / "report.json"
+            old_path.write_text(json.dumps({
+                "candidate_sha": "1" * 40, "mode": "parent_accept",
+                "attempt_id": old_id, "status": "BLOCKED",
+                "gates": {"retirement": "PASS", "fresh_provision": "BLOCKED"},
+                "evidence": {
+                    "parent_identity": {"status": "STOPPED",
+                                        "disk_identity": {"device": 55, "inode": 11441015}},
+                    "provisioning_origin": {"bad_prior_link": True},
+                },
+            }), encoding="utf-8")
+            os.chmod(old_path, 0o600)
+            reset_path = reset_dir / "report.json"
+            reset_path.write_text(json.dumps({
+                "candidate_sha": "2" * 40, "mode": "parent_accept",
+                "attempt_id": reset_id, "status": "BLOCKED",
+                "gates": {"retirement": "PASS", "fresh_provision": "BLOCKED"},
+                "evidence": {"retirement": {"status": "FACTORY_RESET"}},
+            }), encoding="utf-8")
+            os.chmod(reset_path, 0o600)
+
+            disk = {"path": "disk.qcow2", "device": 55, "inode": 11441015,
+                    "format": "qcow2", "provisioned": True,
+                    "virtual_capacity_gib": 64, "file_bytes": 2048,
+                    "host_allocated_bytes": 4096}
+            running = {"status": "RUNNING", "parent_id": "default", "run_id": "b" * 32,
+                       "supervisor_pid": 101, "qemu_pid": 202, "disk": disk}
+            stopped = {"status": "STOPPED", "parent_id": "default", "run_id": "a" * 32,
+                       "disk": disk}
+
+            def run_attempt(attempt_id, initial_status, *, expect_up):
+                report_dir = reports / attempt_id
+                report_dir.mkdir(mode=0o700)
+                data = acceptance.report_template("3" * 40, "parent_accept", report_dir)
+                operations = []
+
+                def parent_command(_root, *args, **_kwargs):
+                    operations.append(args)
+                    if args == ("status", "--json"):
+                        status = (running if initial_status == "RUNNING" else
+                                  stopped if initial_status == "STOPPED" else
+                                  {"status": "NOT_CREATED", "parent_id": "default"})
+                        return subprocess.CompletedProcess([], 0, json.dumps(status).encode(), b"")
+                    if args and args[0] == "up":
+                        return subprocess.CompletedProcess([], 0, b"RUNNING", b"")
+                    self.fail(f"unexpected parent command: {args}")
+
+                def parent_json(_root, *args, **_kwargs):
+                    if args[0] == "term-check":
+                        return None, {"status": "PASS", "terminfo_entry": True,
+                                      "clear_capability": True, "clear_command": True}
+                    if args == ("status", "--json"):
+                        states = ([stopped, running, running] if initial_status == "STOPPED"
+                                  else [running, running, running])
+                        if not hasattr(parent_json, "statuses"):
+                            parent_json.statuses = iter(states)
+                        return None, next(parent_json.statuses)
+                    self.fail(f"unexpected parent JSON operation: {args}")
+
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(mock.patch.object(acceptance.sys, "stdin", TTYBuffer()))
+                    stack.enter_context(mock.patch.object(acceptance.sys, "stdout", TTYBuffer()))
+                    stack.enter_context(mock.patch.dict(os.environ, {
+                        "LM_VM_TERM_VALIDATED": "1", "TERM": "xterm-256color"}))
+                    stack.enter_context(mock.patch.object(acceptance, "runtime_dir",
+                                                          return_value=reports))
+                    stack.enter_context(mock.patch.object(acceptance, "git",
+                        return_value=subprocess.CompletedProcess([], 0, b"", b"")))
+                    stack.enter_context(mock.patch.object(acceptance, "_parent_command",
+                                                          side_effect=parent_command))
+                    stack.enter_context(mock.patch.object(acceptance, "_parent_json",
+                                                          side_effect=parent_json))
+                    approval = stack.enter_context(mock.patch.object(acceptance, "_owner_approval"))
+                    stack.enter_context(mock.patch.object(acceptance, "inspect_live_parent",
+                        return_value={"m2_contract_compatible": False}))
+                    with self.assertRaisesRegex(acceptance.GateError, "guest protected asset"):
+                        acceptance.run_parent_acceptance(pathlib.Path("/protected/install"),
+                            "openai/gpt-test", data, report_dir, pathlib.Path("/repo"))
+                self.assertNotIn("retire", [op[0] for op in operations])
+                self.assertNotIn("factory-reset", [op[0] for op in operations])
+                if expect_up:
+                    self.assertEqual([op[0] for op in operations], ["status", "up", "up"])
+                    approval.assert_called_once()
+                else:
+                    self.assertEqual([op[0] for op in operations], ["status", "up"])
+                    approval.assert_not_called()
+                if initial_status == "STOPPED":
+                    self.assertIn("--expected-disk-device", operations[1])
+                    self.assertIn("55", operations[1])
+                    self.assertIn("--expected-disk-inode", operations[1])
+                    self.assertIn("11441015", operations[1])
+                return data
+
+            first = run_attempt(first_id, "NOT_CREATED", expect_up=True)
+            self.assertEqual(first["evidence"]["provenance_reconciliation"], {
+                "factory_reset_attempt_id": reset_id,
+                "superseded_attempt_ids": [old_id],
+                "prior_reports_preserved": True,
+                "basis": "owner-approved reset completed and protected status is NOT_CREATED",
+            })
+            self.assertEqual(first["evidence"]["provisioning_origin"]["disk_identity"],
+                             {"device": 55, "inode": 11441015})
+            self.assertTrue(old_path.is_file())
+
+            second = run_attempt(second_id, "STOPPED", expect_up=True)
+            self.assertEqual(second["evidence"]["provisioning_origin"]["disk_identity"],
+                             {"device": 55, "inode": 11441015})
+
+            third = run_attempt(third_id, "RUNNING", expect_up=False)
+            self.assertEqual(third["evidence"]["fresh_provision"]["status"], "RUNNING")
+            self.assertEqual(third["evidence"]["provisioning_origin"]["disk_identity"],
+                             {"device": 55, "inode": 11441015})
+
+    def test_not_created_with_unverifiable_replacement_evidence_blocks_without_lifecycle_action(self):
+        with tempfile.TemporaryDirectory(prefix="owner-orphaned-reset-") as temporary:
+            reports = pathlib.Path(temporary) / "reports"
+            reports.mkdir(mode=0o700)
+            orphan_id = "20261117T070000Z-" + "6" * 32
+            orphan_dir = reports / orphan_id
+            orphan_dir.mkdir(mode=0o700)
+            orphan_report = orphan_dir / "report.json"
+            orphan_report.write_text(json.dumps({
+                "candidate_sha": "1" * 40, "mode": "parent_accept",
+                "attempt_id": orphan_id, "status": "BLOCKED",
+                "gates": {"retirement": "PASS", "fresh_provision": "BLOCKED"},
+                "evidence": {"provisioning_origin": {"unknown": True}},
+            }), encoding="utf-8")
+            os.chmod(orphan_report, 0o600)
+            report_dir = reports / ("20261117T084900Z-" + "7" * 32)
+            report_dir.mkdir(mode=0o700)
+            data = acceptance.report_template("3" * 40, "parent_accept", report_dir)
+            operations = []
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(acceptance.sys, "stdin", TTYBuffer()))
+                stack.enter_context(mock.patch.object(acceptance.sys, "stdout", TTYBuffer()))
+                stack.enter_context(mock.patch.dict(os.environ, {
+                    "LM_VM_TERM_VALIDATED": "1", "TERM": "xterm-256color"}))
+                stack.enter_context(mock.patch.object(acceptance, "runtime_dir",
+                                                      return_value=reports))
+                stack.enter_context(mock.patch.object(acceptance, "git",
+                    return_value=subprocess.CompletedProcess([], 1, b"", b"")))
+                stack.enter_context(mock.patch.object(acceptance, "_parent_command",
+                    side_effect=lambda _root, *args, **_kwargs: (
+                        operations.append(args) or subprocess.CompletedProcess(
+                            [], 0, b'{"parent_id":"default","status":"NOT_CREATED"}', b""))))
+                owner_approval = stack.enter_context(mock.patch.object(acceptance, "_owner_approval"))
+                parent_ok = stack.enter_context(mock.patch.object(acceptance, "_parent_ok"))
+                with self.assertRaisesRegex(acceptance.GateError, "provenance chain") as caught:
+                    acceptance.run_parent_acceptance(pathlib.Path("/protected/install"),
+                        "openai/gpt-test", data, report_dir, pathlib.Path("/repo"))
+            self.assertEqual(caught.exception.category, "provenance_orphaned_evidence")
+            self.assertEqual(operations, [("status", "--json")])
+            owner_approval.assert_not_called()
+            parent_ok.assert_not_called()
+
+    def test_provenance_block_writes_fixed_failure_category_to_report(self):
+        with tempfile.TemporaryDirectory(prefix="owner-provenance-category-") as temporary:
+            reports = pathlib.Path(temporary) / "reports"
+            reports.mkdir(mode=0o700)
+            orphan_id = "20261117T070100Z-" + "9" * 32
+            orphan_dir = reports / orphan_id
+            orphan_dir.mkdir(mode=0o700)
+            orphan = orphan_dir / "report.json"
+            orphan.write_text(json.dumps({
+                "candidate_sha": "a" * 40, "mode": "parent_accept",
+                "attempt_id": orphan_id, "status": "BLOCKED",
+                "gates": {"retirement": "PASS", "fresh_provision": "BLOCKED"},
+                "evidence": {
+                    "parent_identity": {"status": "STOPPED",
+                                        "disk_identity": {"device": 55, "inode": 11441015}},
+                    "provisioning_origin": {"bad_prior_link": True},
+                },
+            }), encoding="utf-8")
+            os.chmod(orphan, 0o600)
+            report_dir = reports / ("20261117T085100Z-" + "a" * 32)
+            report_dir.mkdir(mode=0o700)
+            output = TTYBuffer()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(acceptance.sys, "stdin", TTYBuffer()))
+                stack.enter_context(mock.patch.object(acceptance.sys, "stdout", output))
+                stack.enter_context(mock.patch.dict(os.environ, {
+                    "LM_VM_TERM_VALIDATED": "1", "TERM": "xterm-256color"}))
+                stack.enter_context(mock.patch.object(acceptance, "runtime_dir",
+                                                      return_value=reports))
+                stack.enter_context(mock.patch.object(acceptance, "new_report_dir",
+                                                      return_value=report_dir))
+                stack.enter_context(mock.patch.object(acceptance, "candidate_commit"))
+                stack.enter_context(mock.patch.object(acceptance, "verify_install",
+                    return_value=pathlib.Path("/protected/install")))
+                stack.enter_context(mock.patch.object(acceptance, "installed_preflight"))
+                parent_command = stack.enter_context(mock.patch.object(acceptance, "_parent_command",
+                    return_value=subprocess.CompletedProcess([], 0,
+                        b'{"parent_id":"default","status":"NOT_CREATED"}', b"")))
+                parent_ok = stack.enter_context(mock.patch.object(acceptance, "_parent_ok"))
+                with contextlib.redirect_stderr(io.StringIO()):
+                    result = acceptance.main([
+                        "--parent-accept", "--milestone", "M2", "--sha", "a" * 40,
+                        "--repo", str(ROOT), "--model", "openai/gpt-test",
+                    ])
+            self.assertEqual(result, 3)
+            parent_command.assert_called_once_with(pathlib.Path("/protected/install"),
+                                                   "status", "--json")
+            parent_ok.assert_not_called()
+            report = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["evidence"]["failure_category"],
+                             "provenance_invalid_descendant")
+            self.assertNotIn("bad_prior_link", json.dumps(report))
+
+    def test_ambiguous_reset_then_not_created_provision_is_explicit_and_links_reset(self):
+        with tempfile.TemporaryDirectory(prefix="owner-reset-fresh-transition-") as temporary:
+            reports = pathlib.Path(temporary)
+            report_dir = reports / ("20261117T085000Z-" + "8" * 32)
+            report_dir.mkdir(mode=0o700)
+            data = acceptance.report_template("a" * 40, "parent_accept", report_dir)
+            initial = {"status": "AMBIGUOUS", "parent_id": "default"}
+            after_reset = {"status": "NOT_CREATED", "parent_id": "default"}
+            running = {"status": "RUNNING", "parent_id": "default", "run_id": "a" * 32,
+                       "supervisor_pid": 101, "qemu_pid": 202,
+                       "disk": {"path": "disk.qcow2", "device": 55, "inode": 11441015,
+                                "format": "qcow2", "provisioned": True,
+                                "virtual_capacity_gib": 64, "file_bytes": 2048,
+                                "host_allocated_bytes": 4096}}
+            statuses = iter((after_reset, running, running))
+            commands = []
+
+            def parent_command(_root, *args, **_kwargs):
+                commands.append(args)
+                if args == ("status", "--json"):
+                    return subprocess.CompletedProcess([], 0, json.dumps(initial).encode(), b"")
+                if args[0] == "up":
+                    return subprocess.CompletedProcess([], 0, b"RUNNING", b"")
+                self.fail(f"unexpected command: {args}")
+
+            def parent_json(_root, *args, **_kwargs):
+                if args == ("status", "--json"):
+                    return None, next(statuses)
+                self.fail(f"unexpected JSON command: {args}")
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(acceptance.sys, "stdin", TTYBuffer()))
+                stack.enter_context(mock.patch.object(acceptance.sys, "stdout", TTYBuffer()))
+                stack.enter_context(mock.patch.dict(os.environ, {
+                    "LM_VM_TERM_VALIDATED": "1", "TERM": "xterm-256color"}))
+                stack.enter_context(mock.patch.object(acceptance, "runtime_dir",
+                                                      return_value=reports))
+                stack.enter_context(mock.patch.object(acceptance, "_parent_command",
+                                                      side_effect=parent_command))
+                stack.enter_context(mock.patch.object(acceptance, "_parent_json",
+                                                      side_effect=parent_json))
+                owner_approval = stack.enter_context(mock.patch.object(acceptance, "_owner_approval"))
+                parent_ok = stack.enter_context(mock.patch.object(acceptance, "_parent_ok"))
+                stack.enter_context(mock.patch.object(acceptance, "inspect_live_parent",
+                    return_value={"m2_contract_compatible": False}))
+                with self.assertRaisesRegex(acceptance.GateError, "guest protected asset"):
+                    acceptance.run_parent_acceptance(pathlib.Path("/protected/install"),
+                        "openai/gpt-test", data, report_dir)
+            parent_ok.assert_any_call(pathlib.Path("/protected/install"), "factory-reset",
+                                     interactive=True, timeout=900)
+            owner_approval.assert_called_once()
+            self.assertEqual([args[0] for args in commands], ["status", "up"])
+            self.assertEqual(data["evidence"]["retirement"]["status"], "FACTORY_RESET")
+            self.assertEqual(data["evidence"]["provisioning_origin"]["prior_attempt_id"],
+                             data["attempt_id"])
+            self.assertEqual(data["evidence"]["provisioning_origin"]["factory_reset_attempt_id"],
+                             data["attempt_id"])
+            self.assertEqual(data["evidence"]["provisioning_origin"]["disk_identity"],
+                             {"device": 55, "inode": 11441015})
 
     def test_reset_interruption_then_failed_provision_links_disk_to_reset_root(self):
         with tempfile.TemporaryDirectory(prefix="owner-reset-chain-") as temporary:
@@ -165,6 +521,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 "attempt_id": attempt_id,
                 "factory_reset_attempt_id": reset_id,
                 "disk_identity": {"device": 55, "inode": 11441015},
+                "reconciled_attempt_ids": [],
             })
 
     def test_successful_post_reset_provision_preserves_prior_link_for_running_resume(self):
@@ -231,6 +588,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 "attempt_id": success_id,
                 "factory_reset_attempt_id": reset_id,
                 "disk_identity": {"device": 55, "inode": 11441015},
+                "reconciled_attempt_ids": [],
             })
 
     def test_continued_resume_provenance_binds_exact_disk_and_supersedes_legacy_attempt(self):
@@ -274,6 +632,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 "attempt_id": second_id,
                 "factory_reset_attempt_id": first_id,
                 "disk_identity": {"device": 55, "inode": 11441015},
+                "reconciled_attempt_ids": [],
             })
             corrupt_id = "20261116T224000Z-" + "c" * 32
             corrupt_dir = reports / corrupt_id
@@ -441,6 +800,39 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 with self.assertRaisesRegex(acceptance.GateError, "does not match"):
                     acceptance.run_parent_acceptance(pathlib.Path("/protected/install"),
                         "openai/gpt-test", data, report_dir)
+            owner_approval.assert_not_called()
+            parent_ok.assert_not_called()
+
+    def test_running_disk_identity_mismatch_has_sanitized_report_category_and_no_lifecycle_action(self):
+        with tempfile.TemporaryDirectory(prefix="owner-running-mismatch-") as temporary:
+            report_dir = pathlib.Path(temporary)
+            running = {
+                "status": "RUNNING", "parent_id": "default", "run_id": "a" * 32,
+                "supervisor_pid": 101, "qemu_pid": 202,
+                "disk": {"path": "disk.qcow2", "device": 55, "inode": 999,
+                         "format": "qcow2", "provisioned": True,
+                         "virtual_capacity_gib": 64},
+            }
+            data = acceptance.report_template("a" * 40, "parent_accept", report_dir)
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(acceptance.sys, "stdin", TTYBuffer()))
+                stack.enter_context(mock.patch.object(acceptance.sys, "stdout", TTYBuffer()))
+                stack.enter_context(mock.patch.dict(os.environ, {
+                    "LM_VM_TERM_VALIDATED": "1", "TERM": "xterm-256color"}))
+                stack.enter_context(mock.patch.object(acceptance, "_parent_command",
+                    return_value=subprocess.CompletedProcess([], 0,
+                        json.dumps(running).encode(), b"")))
+                stack.enter_context(mock.patch.object(acceptance, "_replacement_provision_origin",
+                    return_value={"attempt_id": "20261117T070000Z-" + "e" * 32,
+                                  "factory_reset_attempt_id": "20261117T060000Z-" + "f" * 32,
+                                  "disk_identity": {"device": 55, "inode": 11441015}}))
+                owner_approval = stack.enter_context(mock.patch.object(acceptance, "_owner_approval"))
+                parent_ok = stack.enter_context(mock.patch.object(acceptance, "_parent_ok"))
+                with self.assertRaisesRegex(acceptance.GateError, "RUNNING disk does not match") as caught:
+                    acceptance.run_parent_acceptance(pathlib.Path("/protected/install"),
+                        "openai/gpt-test", data, report_dir)
+            self.assertEqual(caught.exception.category,
+                             "provenance_running_disk_identity_mismatch")
             owner_approval.assert_not_called()
             parent_ok.assert_not_called()
 

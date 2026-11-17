@@ -29,10 +29,13 @@ evidence. If interruption occurs before a disk is created, a fresh attempt can c
 the recorded reset approval. If a disk exists but its identity was not durably recorded in
 the private report, the runner blocks rather than claiming that disk as the replacement.
 No factory reset, retirement, resize, or replacement is implied by a same-disk resume.
+A completed owner-approved factory reset is the reconciliation boundary: older private
+replacement reports are preserved and marked superseded in the new report, while
+unverifiable evidence newer than that reset still blocks.
 
 ```sh
 set -euo pipefail
-REPO="$HOME/Development/little-mester-m1a"
+REPO="$HOME/Development/little-mester"
 SHA='<exact-reviewed-40-character-commit-sha>'
 cd "$REPO"
 test "$(git rev-parse "$SHA^{commit}")" = "$SHA"
@@ -86,7 +89,7 @@ Set `FINAL_SHA` to the reviewed commit after its exact-SHA GitHub Actions run pa
 
 ```sh
 set -euo pipefail
-REPO="$HOME/Development/little-mester-m1a"
+REPO="$HOME/Development/little-mester"
 FINAL_SHA='<exact-reviewed-40-character-sha>'
 cd "$REPO"
 test "$(git rev-parse "$FINAL_SHA^{commit}")" = "$FINAL_SHA"
@@ -256,7 +259,7 @@ From a clean owner clone containing the final reviewed commit:
 
 ```sh
 set -euo pipefail
-REPO="$HOME/Development/little-mester-m1a"
+REPO="$HOME/Development/little-mester"
 CANDIDATE_SHA='24d307089c3931687ea3c07bcc6fa51a303e3be1'
 cd "$REPO"
 test "$(git -C "$REPO" rev-parse "$CANDIDATE_SHA^{commit}")" = "$CANDIDATE_SHA"
