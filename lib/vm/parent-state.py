@@ -1376,19 +1376,19 @@ def _validated_recovery_plan(directory_fd: int, *, home: str | os.PathLike | Non
     reconciled = _valid_stale_reconciliation(directory_fd, parent, run, disk)
     if reconciled:
         pending = []
+        artifact_identities = {}
         for name, kind in (("supervisor.sock", "socket"), ("qmp.sock", "socket"),
                            ("proxy.port", "file")):
-            _validate_recovery_artifact(directory_fd, name, kind)
-            try:
-                os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            pending.append(name)
+            identity = _recovery_artifact_identity(directory_fd, name, kind)
+            artifact_identities[name] = identity
+            if identity is not None:
+                pending.append(name)
         if pending:
             raise Refused("reconciled stale run unexpectedly retains cleanup artifacts")
         return {"run": run, "parent": parent, "disk": disk,
                 "transitions": {}, "child_states": {},
-                "pending_artifacts": [], "boot_id": reconciled["current_boot_id"],
+                "pending_artifacts": [], "artifact_identities": artifact_identities,
+                "boot_id": reconciled["current_boot_id"],
                 "stale_reconciled": True}
 
     # Reuse the complete supervisor schema/trusted-argv validation in status_for_run,
@@ -1471,17 +1471,17 @@ def _validated_recovery_plan(directory_fd: int, *, home: str | os.PathLike | Non
                                             current_boot_id=boot_id) not in ("MATCH", "GONE")):
             raise Refused("RUNNING QEMU identity does not match its durable child transition")
     pending_artifacts = []
+    artifact_identities = {}
     for name, kind in (("supervisor.sock", "socket"), ("qmp.sock", "socket"),
                        ("proxy.port", "file")):
-        try:
-            os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            continue
-        _validate_recovery_artifact(directory_fd, name, kind)
-        pending_artifacts.append(name)
+        identity = _recovery_artifact_identity(directory_fd, name, kind)
+        artifact_identities[name] = identity
+        if identity is not None:
+            pending_artifacts.append(name)
     return {"run": run, "parent": parent, "disk": disk,
             "transitions": transitions, "child_states": child_states,
-            "pending_artifacts": pending_artifacts, "boot_id": boot_id}
+            "pending_artifacts": pending_artifacts,
+            "artifact_identities": artifact_identities, "boot_id": boot_id}
 
 
 def recover_parent(*, home: str | os.PathLike | None = None, execute: bool = False,
@@ -1529,16 +1529,21 @@ def recover_parent(*, home: str | os.PathLike | None = None, execute: bool = Fal
             fresh = _validated_recovery_plan(directory_fd, home=home)
             if (fresh is None or fresh["run"] != run
                     or fresh["parent"] != plan["parent"] or fresh["disk"] != plan["disk"]
-                    or fresh["transitions"] != transitions
-                    or fresh["pending_artifacts"] != plan["pending_artifacts"]
-                    or any(state != "STOPPED" and role in stopped_roles
-                           for role, state in fresh["child_states"].items())
-                    or any(state != plan["child_states"].get(role)
-                           and state != "STOPPED"
-                           for role, state in fresh["child_states"].items())
                     or (expected_run_id is not None
                         and fresh["run"].get("run_id") != expected_run_id)):
-                raise Refused("recovery evidence changed before exact child stop")
+                raise Refused("recovery parent, disk, or run identity changed before exact child stop")
+            if fresh["transitions"] != transitions:
+                raise Refused("recovery child transition identity changed before exact child stop")
+            if (any(state != "STOPPED" and role in stopped_roles
+                    for role, state in fresh["child_states"].items())
+                    or any(state != plan["child_states"].get(role)
+                           and state != "STOPPED"
+                           for role, state in fresh["child_states"].items())):
+                raise Refused("recovery child state changed before exact child stop")
+            if not _recovery_artifacts_compatible(
+                    plan["artifact_identities"], fresh["artifact_identities"],
+                    fresh["child_states"]):
+                raise Refused("recovery artifact identity changed before exact child stop")
             if stop_exec_transition(
                     transition, authorize_signal=lambda: _verify_lock_fd(lock_fd, home=home)) != "STOPPED":
                 raise Refused(f"recovery could not stop the exact {role} child")
@@ -1551,7 +1556,9 @@ def recover_parent(*, home: str | os.PathLike | None = None, execute: bool = Fal
         if (fresh is None or fresh["run"] != run
                 or fresh["parent"] != plan["parent"] or fresh["disk"] != plan["disk"]
                 or fresh["transitions"] != transitions
-                or fresh["pending_artifacts"] != plan["pending_artifacts"]
+                or not _recovery_artifacts_compatible(
+                    plan["artifact_identities"], fresh["artifact_identities"],
+                    fresh["child_states"])
                 or any(value != "STOPPED" for value in fresh["child_states"].values())
                 or (expected_run_id is not None
                     and fresh["run"].get("run_id") != expected_run_id)):
@@ -1577,7 +1584,9 @@ def recover_parent(*, home: str | os.PathLike | None = None, execute: bool = Fal
                     or after_scan["parent"] != plan["parent"]
                     or after_scan["disk"] != plan["disk"]
                     or after_scan["transitions"] != transitions
-                    or after_scan["pending_artifacts"] != plan["pending_artifacts"]
+                    or not _recovery_artifacts_compatible(
+                        plan["artifact_identities"], after_scan["artifact_identities"],
+                        after_scan["child_states"])
                     or any(value != "STOPPED" for value in after_scan["child_states"].values())):
                 raise Refused("recovery evidence changed during disk-holder verification")
             disk_info = os.fstat(disk_fd)
@@ -1595,7 +1604,9 @@ def recover_parent(*, home: str | os.PathLike | None = None, execute: bool = Fal
         for name, kind in (("supervisor.sock", "socket"), ("qmp.sock", "socket"),
                            ("proxy.port", "file")):
             _verify_lock_fd(lock_fd, home=home)
-            _recovery_remove_artifact(directory_fd, name, kind)
+            _recovery_remove_artifact(
+                directory_fd, name, kind,
+                expected=plan["artifact_identities"].get(name))
         os.fsync(directory_fd)
         status = read_status(home=home)
         if status["status"] != "STOPPED":
@@ -1631,6 +1642,25 @@ def _recovery_artifact_identity(directory_fd: int, name: str, kind: str) -> dict
     _validate_recovery_artifact(directory_fd, name, kind)
     return {"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode,
             "uid": info.st_uid, "nlink": info.st_nlink}
+
+
+def _recovery_artifacts_compatible(expected: dict, current: dict,
+                                  child_states: dict) -> bool:
+    """Allow only disappearance caused by an exactly verified stopped child."""
+    if (not isinstance(expected, dict) or not isinstance(current, dict)
+            or set(expected) != {"supervisor.sock", "qmp.sock", "proxy.port"}
+            or set(current) != set(expected)):
+        return False
+    removal_owner = {"qmp.sock": "qemu", "proxy.port": "proxy"}
+    for name, original in expected.items():
+        observed = current[name]
+        if observed == original:
+            continue
+        role = removal_owner.get(name)
+        if (original is None or observed is not None or role is None
+                or child_states.get(role) != "STOPPED"):
+            return False
+    return True
 
 
 def _valid_stale_reconciliation(directory_fd: int, parent: dict, run: dict,

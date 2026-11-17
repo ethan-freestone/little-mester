@@ -1585,6 +1585,119 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                     child.kill()
                     child.wait(timeout=3)
 
+    def test_recovery_accepts_qmp_removal_after_exact_qemu_exit_and_finishes_same_disk(self):
+        supervisor, run_id = self.spawn_supervisor()
+        children = []
+        qmp = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        disk_before = (self.state_dir / "disk.qcow2").stat()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            directory_fd = parent_state._open_directory_chain(
+                create=False, home_override=self.home)
+            try:
+                qemu, _qemu_transition = self.spawn_recovery_target(directory_fd, "qemu")
+                proxy, _proxy_transition = self.spawn_recovery_target(directory_fd, "proxy")
+                children.extend((qemu, proxy))
+            finally:
+                os.close(directory_fd)
+            qmp.bind(str(self.state_dir / "qmp.sock"))
+            os.chmod(self.state_dir / "qmp.sock", 0o600)
+            (self.state_dir / "proxy.port").write_text("12345\n")
+            (self.state_dir / "proxy.port").chmod(0o600)
+            supervisor.kill()
+            supervisor.wait(timeout=3)
+
+            preview = parent_state.recovery_preview(home=self.home)
+            self.assertEqual(preview["run_id"], run_id)
+            self.assertEqual(preview["children"], {"qemu": "TARGET", "proxy": "TARGET"})
+            self.assertCountEqual(preview["artifacts"], ["qmp.sock", "proxy.port"])
+
+            stop_transition = parent_state.stop_exec_transition
+
+            def stop_qemu_and_remove_its_qmp_path(transition, **kwargs):
+                result = stop_transition(transition, **kwargs)
+                if result == "STOPPED" and transition["identity_path"] == "child-qemu.identity.json":
+                    (self.state_dir / "qmp.sock").unlink()
+                return result
+
+            with mock.patch.object(parent_state, "stop_exec_transition",
+                                   side_effect=stop_qemu_and_remove_its_qmp_path):
+                recovered = parent_state.recover_parent(
+                    home=self.home, execute=True, expected_run_id=run_id)
+
+            self.assertEqual(recovered["status"], "STOPPED")
+            self.assertTrue(recovered["disk_retained"])
+            self.assertEqual(qemu.wait(timeout=2), -signal.SIGTERM)
+            self.assertEqual(proxy.wait(timeout=2), -signal.SIGTERM)
+            self.assertEqual(parent_state.read_status(home=self.home)["status"], "STOPPED")
+            disk_after = (self.state_dir / "disk.qcow2").stat()
+            self.assertEqual((disk_after.st_dev, disk_after.st_ino),
+                             (disk_before.st_dev, disk_before.st_ino))
+            self.assertFalse((self.state_dir / "qmp.sock").exists())
+            self.assertFalse((self.state_dir / "proxy.port").exists())
+        finally:
+            qmp.close()
+            self.cleanup_test_supervisor(supervisor)
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=3)
+
+    def test_recovery_resumes_when_qemu_exits_between_preview_and_execution(self):
+        supervisor, run_id = self.spawn_supervisor()
+        children = []
+        qmp = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        disk_before = (self.state_dir / "disk.qcow2").stat()
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and parent_state.read_status(home=self.home)["status"] != "STARTING":
+                time.sleep(0.01)
+            directory_fd = parent_state._open_directory_chain(
+                create=False, home_override=self.home)
+            try:
+                qemu, _ = self.spawn_recovery_target(directory_fd, "qemu")
+                proxy, _ = self.spawn_recovery_target(directory_fd, "proxy")
+                children.extend((qemu, proxy))
+            finally:
+                os.close(directory_fd)
+            qmp.bind(str(self.state_dir / "qmp.sock"))
+            os.chmod(self.state_dir / "qmp.sock", 0o600)
+            (self.state_dir / "proxy.port").write_text("12345\n")
+            (self.state_dir / "proxy.port").chmod(0o600)
+            supervisor.kill()
+            supervisor.wait(timeout=3)
+
+            before_exit = parent_state.recovery_preview(home=self.home)
+            self.assertEqual(before_exit["children"], {"qemu": "TARGET", "proxy": "TARGET"})
+            qemu.terminate()
+            self.assertEqual(qemu.wait(timeout=2), -signal.SIGTERM)
+            # Model the QMP pathname disappearing with the exact QEMU endpoint.
+            (self.state_dir / "qmp.sock").unlink()
+
+            partial = parent_state.recovery_preview(home=self.home)
+            self.assertEqual(partial["status"], "RECOVERABLE")
+            self.assertEqual(partial["run_id"], run_id)
+            self.assertEqual(partial["children"], {"qemu": "STOPPED", "proxy": "TARGET"})
+            self.assertEqual(partial["artifacts"], ["proxy.port"])
+
+            recovered = parent_state.recover_parent(
+                home=self.home, execute=True, expected_run_id=run_id)
+            self.assertEqual(recovered["status"], "STOPPED")
+            self.assertTrue(recovered["disk_retained"])
+            self.assertEqual(proxy.wait(timeout=2), -signal.SIGTERM)
+            disk_after = (self.state_dir / "disk.qcow2").stat()
+            self.assertEqual((disk_after.st_dev, disk_after.st_ino),
+                             (disk_before.st_dev, disk_before.st_ino))
+        finally:
+            qmp.close()
+            self.cleanup_test_supervisor(supervisor)
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=3)
+
     def test_holder_scan_uses_verified_state_directory_and_refuses_reported_holder(self):
         directory_fd = parent_state._open_directory_chain(
             create=False, home_override=self.home)
@@ -1694,10 +1807,10 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
 
             remove_artifact = parent_state._recovery_remove_artifact
 
-            def interrupt_before_proxy_port(directory_fd, name, kind):
+            def interrupt_before_proxy_port(directory_fd, name, kind, **kwargs):
                 if name == "proxy.port":
                     raise parent_state.Refused("injected interruption before proxy cleanup")
-                return remove_artifact(directory_fd, name, kind)
+                return remove_artifact(directory_fd, name, kind, **kwargs)
 
             with mock.patch.object(parent_state, "_recovery_remove_artifact",
                                    side_effect=interrupt_before_proxy_port):

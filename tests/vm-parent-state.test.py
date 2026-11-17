@@ -833,6 +833,24 @@ class ParentStateTests(unittest.TestCase):
             with self.assertRaisesRegex(parent_state.Refused, "exclusive lifecycle lock"):
                 parent_state.recover_parent(home=self.home, execute=True)
 
+    def test_recovery_artifact_disappearance_requires_exact_child_stopped(self):
+        original = {"device": 1, "inode": 2, "mode": stat.S_IFSOCK | 0o600,
+                    "uid": os.getuid(), "nlink": 1}
+        expected = {"supervisor.sock": None, "qmp.sock": original,
+                    "proxy.port": {"device": 1, "inode": 3, "mode": stat.S_IFREG | 0o600,
+                                   "uid": os.getuid(), "nlink": 1}}
+        current = {**expected, "qmp.sock": None}
+        self.assertTrue(parent_state._recovery_artifacts_compatible(
+            expected, current, {"qemu": "STOPPED", "proxy": "TARGET"}))
+        self.assertFalse(parent_state._recovery_artifacts_compatible(
+            expected, current, {"qemu": "TARGET", "proxy": "TARGET"}))
+        substituted = {**current, "qmp.sock": {**original, "inode": 999}}
+        self.assertFalse(parent_state._recovery_artifacts_compatible(
+            expected, substituted, {"qemu": "STOPPED", "proxy": "TARGET"}))
+        unexpected = {**expected, "supervisor.sock": original}
+        self.assertFalse(parent_state._recovery_artifacts_compatible(
+            expected, unexpected, {"qemu": "STOPPED", "proxy": "TARGET"}))
+
     def test_recoverable_preview_exit_code_matches_text_and_json(self):
         recoverable = {"dry_run": True, "action": "recover", "status": "RECOVERABLE",
                        "parent_id": "default", "run_id": "0" * 32,
