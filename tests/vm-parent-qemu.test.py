@@ -14,6 +14,47 @@ SPEC.loader.exec_module(parent_qemu)
 
 
 class ParentQemuArgvTests(unittest.TestCase):
+    def test_shared_network_builder_covers_parent_smoke_and_ci_modes(self):
+        self.assertEqual(
+            parent_qemu.build_user_netdev(ssh_port=22222, restricted=True, proxy_port=23456),
+            "user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22,"
+            "guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:23456,restrict=on")
+        self.assertEqual(
+            parent_qemu.build_user_netdev(ssh_port=22222, restricted=False),
+            "user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22")
+        self.assertEqual(
+            parent_qemu.build_user_netdev(ssh_port=22222, restricted=True),
+            "user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:22222-:22")
+
+    def test_shared_network_builder_rejects_malformed_policy_inputs(self):
+        for kwargs in (
+            {"ssh_port": 22, "restricted": False},
+            {"ssh_port": 22222, "restricted": True, "proxy_port": 80},
+            {"ssh_port": 22222, "restricted": True, "proxy_port": 23456.0},
+            {"ssh_port": 22222, "restricted": 1},
+            {"ssh_port": 22222, "restricted": False, "proxy_port": 23456},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                parent_qemu.build_user_netdev(**kwargs)
+
+    def test_fixed_system_unit_argv_uses_only_direct_locked_disk_and_shared_network(self):
+        argv = parent_qemu.build_system_qemu_argv(
+            executable="/usr/bin/qemu-system-x86_64",
+            disk_path="/var/lib/little-mester-vm/disk.qcow2",
+            seed_iso="/var/lib/little-mester-vm/seed.iso", ssh_port=22222,
+            proxy_port=32128, qmp_socket="/run/little-mester-vm/qmp.sock",
+            vm_name="little-mester-system-vm")
+        self.assertEqual(argv[0], "/usr/bin/qemu-system-x86_64")
+        self.assertIn("filename=/var/lib/little-mester-vm/disk.qcow2,locking=on", " ".join(argv))
+        self.assertNotIn("/dev/fdset", " ".join(argv))
+        self.assertIn("guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:32128", " ".join(argv))
+        with self.assertRaises(ValueError):
+            parent_qemu.build_system_qemu_argv(
+                executable="/usr/bin/qemu-system-x86_64",
+                disk_path="/safe/disk.qcow2,readonly=on", seed_iso="/seed.iso",
+                ssh_port=22222, proxy_port=32128, qmp_socket="/qmp.sock",
+                vm_name="little-mester-system-vm")
+
     def test_disk_is_fdset_backed_with_explicit_qcow2_and_writer_locking(self):
         argv = parent_qemu.build_qemu_argv(
             executable="/usr/bin/qemu-system-x86_64", seed_iso="/private/parent/seed.iso",

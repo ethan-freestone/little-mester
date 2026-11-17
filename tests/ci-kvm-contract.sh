@@ -5,34 +5,29 @@ ci_kvm_netdev() {
   local port=$1 restricted=$2
   [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( port >= 1024 && port <= 65535 )) || return 2
   case "$restricted" in
-    0) printf 'user,id=net0,hostfwd=tcp:127.0.0.1:%s-:22\n' "$port" ;;
-    1) printf 'user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:%s-:22\n' "$port" ;;
+    0) python3 -I "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/vm/parent-qemu.py" \
+         --netdev --ssh-port "$port" ;;
+    1) python3 -I "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/vm/parent-qemu.py" \
+         --netdev --ssh-port "$port" --restricted ;;
     *) return 2 ;;
   esac
 }
 
 ci_kvm_qemu_args() {
   local mode=$1 overlay=$2 seed=$3 serial_log=$4 port=$5
-  local restricted=0
+  local qemu_lines
   # shellcheck disable=SC2178
   local -n output_ref=$6
   case "$mode" in
-    initial) restricted=0 ;;
-    restricted-restart) restricted=1 ;;
+    initial|restricted-restart) ;;
     *) return 2 ;;
   esac
-  # output_ref is a nameref; its target array is filled for the caller.
-  # shellcheck disable=SC2034,SC2054
-  output_ref=(
-    -name little-mester-hosted-kvm-integration
-    -machine q35,accel=kvm -cpu host -smp 2 -m 4096
-    -nodefaults -no-user-config -display none -monitor none
-    -serial "file:$serial_log"
-    -drive "file=$overlay,if=virtio,format=qcow2"
-    -drive "file=$seed,if=virtio,format=raw,readonly=on"
-    -netdev "$(ci_kvm_netdev "$port" "$restricted")"
-    -device virtio-net-pci,netdev=net0
-  )
+  qemu_lines="$(python3 -I "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/vm/parent-qemu.py" \
+    --ci-argv --mode "$mode" --disk "$overlay" --seed "$seed" \
+    --serial-log "$serial_log" --ssh-port "$port")" || return 1
+  # The builder rejects line breaks in path/option values, so line-oriented
+  # argv transfer preserves every generated argument without shell evaluation.
+  mapfile -t output_ref <<<"$qemu_lines"
 }
 
 ci_kvm_ssh_args() {

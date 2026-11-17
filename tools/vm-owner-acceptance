@@ -71,11 +71,18 @@ INSTALL_FILES = {
     "lib/vm/parent-supervisor.py": 0o644,
     "lib/vm/parent-qemu.py": 0o644,
     "lib/vm/parent-provision.py": 0o644,
+    "lib/vm/system-vm.py": 0o644,
+    "lib/vm/guest-bootstrap.py": 0o644,
     "scripts/parent-readonly-safety-gate.py": 0o644,
+    "tools/vm-system-install": 0o755,
+    "systemd/little-mester-vm.service": 0o644,
+    "systemd/little-mester-vm-proxy.service": 0o644,
+    "sudoers/little-mester-vm": 0o440,
 }
 INSTALL_DIRS = {
     "agent", "agent/opencode", "agent/opencode/plugins",
     "agent/opencode/plugins/little-mester-exit-confirm", "lib", "lib/vm", "scripts", "tools",
+    "systemd", "sudoers",
 }
 M1_ACCEPTED_SHA = "9a98f0c93ff65d38b181ecb9ab91df0633c1d280"
 PARENT_GUEST_ASSETS = (
@@ -128,6 +135,21 @@ def clean_env(*, desktop_session: bool = False) -> dict[str, str]:
         env["TERM"] = term
         env["LM_VM_TERM_VALIDATED"] = "1"
     return env
+
+
+def owner_system_vm(root: pathlib.Path, operation: str) -> int:
+    """Delegate fixed system-VM operations to lab-vm; keep no second lifecycle."""
+    if operation not in ("up", "down", "status", "ssh", "auth", "tui"):
+        raise GateError("BLOCKED", "unsupported fixed system VM operation")
+    env = clean_env(desktop_session=operation == "auth")
+    term = os.environ.get("TERM", "")
+    if operation in ("ssh", "auth", "tui") and re.fullmatch(r"[A-Za-z0-9_.+-]{1,64}", term):
+        # lab-vm independently verifies this terminfo entry before preserving it.
+        env["TERM"] = term
+    result = subprocess.run([str(root / "lab-vm"), "system", operation],
+                            stdin=None if operation in ("ssh", "auth", "tui") else subprocess.DEVNULL,
+                            env=env, check=False)
+    return result.returncode
 
 
 def protected_executable(repo: pathlib.Path, path: str) -> str:
@@ -2192,6 +2214,8 @@ def parser() -> argparse.ArgumentParser:
     modes = p.add_mutually_exclusive_group()
     for name in ("preflight", "install", "storage-proof", "run", "verify-cleanup", "all", "parent-accept"):
         modes.add_argument(f"--{name}", action="store_true", dest=name.replace("-", "_"))
+    modes.add_argument("--system-vm", choices=("up", "down", "status", "ssh", "auth", "tui"),
+                       help="delegate one fixed system-VM operation to the installed lab-vm entrypoint")
     p.add_argument("--milestone", choices=("M2",), help="owner acceptance milestone")
     p.add_argument("--sha", required=True, type=full_sha, help="full lowercase 40-character candidate commit SHA")
     p.add_argument("--prefix", type=install_prefix,
@@ -2212,6 +2236,17 @@ def full_sha(value: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.system_vm:
+        if not args.repo:
+            parser().error("--system-vm requires --repo PATH for the candidate source repository")
+        try:
+            repo = pathlib.Path(args.repo or ROOT).resolve(strict=True)
+            candidate_commit(repo, args.sha)
+            root = verify_install(repo, args.sha, args.prefix)
+            return owner_system_vm(root, args.system_vm)
+        except (GateError, OSError, subprocess.SubprocessError, ValueError) as error:
+            print(f"BLOCKED: system VM owner command refused ({error})", file=sys.stderr)
+            return 3
     modes = [name for name in (
         "preflight", "install", "storage_proof", "run", "verify_cleanup", "all", "parent_accept",
     ) if getattr(args, name)]

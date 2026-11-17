@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import fcntl
 import hashlib
 import importlib.util
@@ -203,58 +202,11 @@ def _prepare_parent_seed(state, lock_fd: int, home: str | None = None) -> bytes:
                 raise state.Refused("persistent cloud-init seed is unsafe")
             state._validate_seed_identity(directory_fd, parent)
         else:
-            plugin_root = pathlib.Path(__file__).resolve().parents[2] / "agent/opencode/plugins/little-mester-exit-confirm"
-            plugin_files = []
-            for name, destination in (("package.json", "/etc/opencode/plugins/little-mester-exit-confirm/package.json"),
-                                      ("tui.tsx", "/etc/opencode/plugins/little-mester-exit-confirm/tui.tsx")):
-                source = plugin_root / name
-                info = os.lstat(source)
-                if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o022:
-                    raise state.Refused(f"protected OpenCode plugin asset is unsafe: {name}")
-                payload = source.read_bytes()
-                plugin_files.append({"path": destination, "owner": "root:root", "permissions": "0644",
-                                     "encoding": "b64",
-                                     "content": base64.b64encode(payload).decode("ascii")})
-            protected_config = json.dumps({"autoupdate": False, "share": "disabled",
-                                           "permission": {"edit": "ask", "bash": "ask"}},
-                                          separators=(",", ":"))
-            cli_config = json.dumps({
-                "plugins": ["/etc/opencode/plugins/little-mester-exit-confirm"],
-                "keybinds": {"app.exit": "none", "prompt.clear": "none"},
-            }, separators=(",", ":"))
             session_contract = _load_protected_module("parent-session-contract")
-            user_data = {
-                "hostname": "little-mester-parent",
-                "ssh_pwauth": False,
-                "disable_root": True,
-                "ssh_deletekeys": False,
-                "ssh_keys": {"ed25519_private": host_private.decode("ascii"),
-                             "ed25519_public": host_public.decode("ascii").strip()},
-                "users": [{"name": "mester", "uid": 1000, "primary_group": "mester",
-                           "groups": ["users"], "shell": "/bin/bash", "lock_passwd": True,
-                           "ssh_authorized_keys": [control_public.decode("ascii").strip()]}],
-                "groups": ["mester"],
-                "write_files": [
-                    {"path": "/etc/ssh/sshd_config.d/99-little-mester-parent.conf", "owner": "root:root",
-                     "permissions": "0644", "content": "HostKeyAlgorithms ssh-ed25519\n"},
-                    {"path": "/etc/profile.d/little-mester-parent.sh", "owner": "root:root",
-                      "permissions": "0644", "content": "export HTTP_PROXY=http://10.0.2.100:3128\nexport HTTPS_PROXY=http://10.0.2.100:3128\nexport http_proxy=http://10.0.2.100:3128\nexport https_proxy=http://10.0.2.100:3128\n"},
-                    {"path": "/etc/apt/apt.conf.d/90little-mester-parent-proxy", "owner": "root:root",
-                     "permissions": "0644", "content": 'Acquire::http::Proxy "http://10.0.2.100:3128";\nAcquire::https::Proxy "http://10.0.2.100:3128";\n'},
-                    {"path": "/etc/opencode/opencode.json", "owner": "root:root",
-                     "permissions": "0644", "content": protected_config},
-                    {"path": "/etc/profile.d/little-mester-opencode.sh", "owner": "root:root",
-                      "permissions": "0644", "content": "export OPENCODE_CONFIG=/etc/opencode/opencode.json\n" +
-                      f"export OPENCODE_CLI_CONFIG_CONTENT='{cli_config}'\n"
-                      "export OPENCODE_DISABLE_PROJECT_CONFIG=1\n"},
-                    *[{"path": path, "owner": "root:root", "permissions": mode,
-                       "content": content.decode("utf-8")}
-                      for path, (content, mode) in session_contract.ASSETS.items()],
-                    *plugin_files,
-                ],
-                "packages": ["tmux", "nodejs", "npm"],
-                "runcmd": [["bash", "-lc", "install -d -o mester -g mester -m 0750 /home/mester/workspace && /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-opencode 1000 && npm install --global @opencode/cli@2.2.5 && test \"$(opencode --version)\" = 'opencode v2.2.5' && chown root:root /usr/local/bin/opencode && chmod 0755 /usr/local/bin/opencode && systemctl restart ssh"]],
-            }
+            user_data = session_contract.parent_cloud_init_data(
+                host_private=host_private.decode("ascii"),
+                host_public=host_public.decode("ascii"),
+                control_public=control_public.decode("ascii"))
             userdata = b"#cloud-config\n" + json.dumps(user_data, separators=(",", ":")).encode("utf-8") + b"\n"
             metadata = b"instance-id: little-mester-parent-default\nlocal-hostname: little-mester-parent\n"
             state._atomic_bytes(directory_fd, "user-data", userdata)

@@ -464,7 +464,16 @@ if __name__ == "__main__":
     server = BoundedThreadingHTTPServer(("127.0.0.1", args.port), Proxy)
     server.policy = PolicyStore(None)
     server.upstream_proxy = None
-    args.port_file.write_text(str(server.server_port))
+    # The service runtime directory is private, and the readiness record is
+    # deliberately private as well. Create exclusively so stale evidence is
+    # not silently overwritten by a second proxy instance.
+    descriptor = os.open(args.port_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600)
+    try:
+        os.write(descriptor, f"{server.server_port}\n".encode("ascii"))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
     def stop_proxy(_signum, _frame):
         # shutdown() must run from a thread other than serve_forever's thread.

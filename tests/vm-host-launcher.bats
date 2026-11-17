@@ -412,8 +412,8 @@ assert 'verify_overlay_identity || fail' in text
 assert 'accel=kvm' in (text + owner + contract_text) and 'accel=tcg' in owner and 'restrict=on' in (owner + contract_text)
 assert 'ci_kvm_qemu_args "$2" "$3" "$4" "$5" "$6" args' in owner
 assert 'owner_call start-initial' in text and 'owner_call restart-restricted' in text
-assert 'file=$overlay,if=virtio,format=qcow2' in contract_text
-assert 'file=$seed,if=virtio,format=raw,readonly=on' in contract_text
+assert '--ci-argv --mode "$mode"' in contract_text
+assert 'file={disk_path},format=qcow2,if=virtio' in pathlib.Path(sys.argv[1]).parents[1].joinpath('lib/vm/parent-qemu.py').read_text()
 assert 'self.assertEqual(initial_qemu_args, restart_qemu_args)' in contract_tests
 assert 'readonly guest_disk_gib=24' in text
 assert 'qemu-img info --output=json "$image"' in text
@@ -499,7 +499,9 @@ assert 'cancel-in-progress: true' in workflow_text
 assert 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' in job
 assert 'cache:' not in job
 assert 'pidfd_send_signal' in pathlib.Path(sys.argv[1]).with_name('ci-process-signal.py').read_text()
-assert 'ci_kvm_qemu_args()' in contract_text and 'ci_kvm_netdev "$port" "$restricted"' in contract_text
+assert 'ci_kvm_qemu_args()' in contract_text and '--ci-argv --mode "$mode"' in contract_text
+assert 'build_ci_qemu_argv' in pathlib.Path(sys.argv[1]).parents[1].joinpath('lib/vm/parent-qemu.py').read_text()
+assert '--smoke-argv' in pathlib.Path(sys.argv[1]).parents[1].joinpath('lib/vm/host-launcher.sh').read_text()
 assert 'self.assertEqual(initial_qemu_args, restart_qemu_args)' in contract_tests
 assert 'self.assertIn(b"restrict=on", restart_netdev)' in contract_tests
 assert 'self.assertNotIn(b"restrict=on", initial_netdev)' in contract_tests
@@ -1787,6 +1789,10 @@ SH
   python3() {
     if [[ "${2:-}" == *virtiofs-socket.py && "${3:-}" == path ]]; then
       printf '%s\n' "$TEST_TMP/virtiofs.sock"
+    elif [[ " $* " == *' --smoke-argv '* ]]; then
+      /usr/bin/python3 "$@"
+    elif [[ "${2:-}" == *parent-qemu.py ]]; then
+      printf 'user,id=net0,hostfwd=tcp:127.0.0.1:43210-:22,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:32123,restrict=on\n'
     else
       printf '%s\n' "$@" >"$argv_file"
     fi
@@ -1815,6 +1821,10 @@ SH
   python3() {
     if [[ "${2:-}" == *virtiofs-socket.py && "${3:-}" == path ]]; then
       printf '%s\n' "$TEST_TMP/virtiofs.sock"
+    elif [[ " $* " == *' --smoke-argv '* ]]; then
+      /usr/bin/python3 "$@"
+    elif [[ "${2:-}" == *parent-qemu.py ]]; then
+      printf 'user,id=net0,hostfwd=tcp:127.0.0.1:43210-:22,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:32123,restrict=on\n'
     else
       return 73
     fi

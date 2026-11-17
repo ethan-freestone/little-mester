@@ -48,7 +48,8 @@ vm_host_qemu_network_args() {
   local ssh_port="${1:-}" proxy_port="${2:-}"
   [[ "$ssh_port" =~ ^[0-9]{1,5}$ && "$proxy_port" =~ ^[0-9]{1,5}$ ]] || return 2
   (( ssh_port >= 1024 && ssh_port <= 65535 && proxy_port >= 1024 && proxy_port <= 65535 )) || return 2
-  printf 'user,id=net0,hostfwd=tcp:127.0.0.1:%s-:22,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:%s,restrict=on\n' "$ssh_port" "$proxy_port"
+  python3 -I "$VM_HOST_SCRIPT_ROOT/lib/vm/parent-qemu.py" --netdev \
+    --ssh-port "$ssh_port" --proxy-port "$proxy_port" --restricted
 }
 
 vm_host_require_kvm() {
@@ -1019,7 +1020,7 @@ vm_host_free_port() {
 }
 
 vm_host_start_qemu() {
-  local run_dir="$1" vm_name="$2" workspace="$3" ssh_port="$4" netdev pid executable status end
+  local run_dir="$1" vm_name="$2" workspace="$3" ssh_port="$4" pid executable status end qemu_lines
   local socket
   local bounded_logger="$VM_HOST_SCRIPT_ROOT/lib/vm/bounded-log.py"
   local completion_file="$1/qemu.complete"
@@ -1031,18 +1032,15 @@ vm_host_start_qemu() {
     vm_host_error 'could not verify the allocated short virtiofs socket path for QEMU'
     return 1
   }
-  netdev="$(vm_host_qemu_network_args "$ssh_port" "$VM_HOST_PROXY_PORT")" || return 1
-  local -a qemu=(qemu-system-x86_64 -enable-kvm -name "$vm_name" -machine q35,accel=kvm
-    -cpu host -smp "$VM_HOST_CPU_COUNT" -m "$VM_HOST_MEMORY_MIB"
-    -object "memory-backend-memfd,id=mem,size=${VM_HOST_MEMORY_MIB}M,share=on"
-    -numa node,memdev=mem
-    -drive "file=$run_dir/seed.iso,format=raw,if=none,id=cloud,readonly=on"
-    -device virtio-scsi-pci,id=scsi0 -device scsi-cd,drive=cloud
-    -drive "file=$run_dir/disk.qcow2,format=qcow2,if=virtio"
-    -chardev "socket,id=charfs,path=$socket"
-    -device vhost-user-fs-pci,chardev=charfs,tag=workspace
-    -display none -serial stdio -monitor none
-    -netdev "$netdev" -device virtio-net-pci,netdev=net0 -no-reboot)
+  qemu_lines="$(python3 -I "$VM_HOST_SCRIPT_ROOT/lib/vm/parent-qemu.py" --smoke-argv \
+    --executable "$(command -v qemu-system-x86_64)" --vm-name "$vm_name" \
+    --cpus "$VM_HOST_CPU_COUNT" --memory-mib "$VM_HOST_MEMORY_MIB" \
+    --seed "$run_dir/seed.iso" --disk "$run_dir/disk.qcow2" \
+    --virtiofs-socket "$socket" --ssh-port "$ssh_port" \
+    --proxy-port "$VM_HOST_PROXY_PORT")" || return 1
+  local -a qemu=()
+  mapfile -t qemu <<<"$qemu_lines"
+  (( ${#qemu[@]} > 0 )) || return 1
   printf '%q ' "${qemu[@]}" >"$run_dir/qemu.command" || return 1
   chmod 0600 "$run_dir/qemu.command" || return 1
   : >"$run_dir/qemu.log" || return 1

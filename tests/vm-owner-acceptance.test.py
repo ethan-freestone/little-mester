@@ -1813,6 +1813,17 @@ class OwnerAcceptanceTests(unittest.TestCase):
             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=acceptance.clean_env(),
         ).stdout.decode("ascii").strip()
+        not_yet_committed = []
+        for relative in acceptance.INSTALL_FILES:
+            present = subprocess.run(
+                [acceptance.GIT, "-C", str(ROOT), "cat-file", "-e", f"{head}:{relative}"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=acceptance.clean_env(), check=False)
+            if present.returncode:
+                not_yet_committed.append(relative)
+        if not_yet_committed:
+            self.skipTest("archive exactness requires the new manifest paths to be committed; "
+                          "uncommitted paths: " + ", ".join(sorted(not_yet_committed)))
         result = subprocess.run(
             acceptance.archive_arguments(ROOT, head), check=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,

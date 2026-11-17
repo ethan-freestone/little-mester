@@ -14,11 +14,16 @@ import subprocess
 import tempfile
 import time
 import unittest
+import importlib.util
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "tests/ci-kvm-contract.sh"
 CLASSIFIER = ROOT / "tests/ci-kvm-readiness.py"
+QEMU_BUILDER_PATH = ROOT / "lib/vm/parent-qemu.py"
+_BUILDER_SPEC = importlib.util.spec_from_file_location("ci_parent_qemu_builder", QEMU_BUILDER_PATH)
+QEMU_BUILDER = importlib.util.module_from_spec(_BUILDER_SPEC)
+_BUILDER_SPEC.loader.exec_module(QEMU_BUILDER)
 
 
 def free_port() -> int:
@@ -28,6 +33,20 @@ def free_port() -> int:
 
 
 class HostedKvmCommandTests(unittest.TestCase):
+    def test_ci_and_smoke_adapters_use_shared_full_argv_builder(self):
+        adapter = CONTRACT.read_text()
+        smoke_adapter = (ROOT / "lib/vm/host-launcher.sh").read_text()
+        probe = (ROOT / "tests/ci-kvm-shared-launch-probe.py").read_text()
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("--ci-argv --mode \"$mode\"", adapter)
+        self.assertIn("--smoke-argv", smoke_adapter)
+        self.assertIn("build_ci_qemu_argv", probe)
+        self.assertIn("-S", probe)
+        self.assertIn("RuntimeMaxSec=12s", probe)
+        self.assertIn("HOSTED_SYSTEMD_TRANSIENT_QEMU=NOT_RUN", probe)
+        self.assertIn("PRODUCTION_SYSTEMD_VM_UNIT=NOT_RUN", probe)
+        self.assertIn("Probe shared QEMU builder with bounded disposable KVM launch", workflow)
+
     def test_boot_modes_share_loopback_forward_and_ssh_trust_options(self):
         command = f'''source {CONTRACT!s}
 printf 'INITIAL=%s\\n' "$(ci_kvm_netdev 43210 0)"
@@ -66,6 +85,12 @@ printf 'PTY='; printf '%s\\0' "${{pty[@]}}"
         self.assertNotIn(b"restrict=on", initial_netdev)
         self.assertIn(b"hostfwd=tcp:127.0.0.1:43210-:22", initial_netdev)
         self.assertIn(b"hostfwd=tcp:127.0.0.1:43210-:22", restart_netdev)
+        self.assertEqual(initial_qemu_args, [item.encode() for item in QEMU_BUILDER.build_ci_qemu_argv(
+            mode="initial", disk_path="/tmp/guest.qcow2", seed_iso="/tmp/seed.iso",
+            serial_log="/tmp/serial.log", ssh_port=43210)])
+        self.assertEqual(restart_qemu_args, [item.encode() for item in QEMU_BUILDER.build_ci_qemu_argv(
+            mode="restricted-restart", disk_path="/tmp/guest.qcow2", seed_iso="/tmp/seed.iso",
+            serial_log="/tmp/serial.log", ssh_port=43210)])
         restart_qemu_args[restart_qemu_args.index(b"-netdev") + 1] = initial_netdev
         self.assertEqual(initial_qemu_args, restart_qemu_args)
         self.assertTrue(any(arg.startswith(b"file=/tmp/guest.qcow2,") for arg in initial_qemu_args))

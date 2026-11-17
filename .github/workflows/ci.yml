@@ -82,6 +82,7 @@ jobs:
           python3 tests/ci-kvm-stage-state.test.py
           python3 tests/ci-kvm-qemu-owner.test.py
           python3 tests/vm-owner-acceptance.test.py
+          python3 tests/vm-systemd.test.py
           python3 tests/vm-guest-user-dirs.test.py
           python3 tests/ci-qemu-oauth-bridge.test.py
           python3 tests/ci-kvm-launch.test.py
@@ -163,6 +164,9 @@ jobs:
       - name: Prepare disposable guest and pinned inputs
         timeout-minutes: 5
         run: bash tests/ci-kvm-stage.sh --stage prepare --run-dir "$LM_CI_STATE_DIR"
+      - name: Probe shared QEMU builder with bounded disposable KVM launch
+        timeout-minutes: 2
+        run: python3 tests/ci-kvm-shared-launch-probe.py --run-dir "$LM_CI_STATE_DIR"
       - name: Start real KVM guest and prove strict SSH readiness
         timeout-minutes: 5
         run: bash tests/ci-kvm-stage.sh --stage boot --run-dir "$LM_CI_STATE_DIR"
