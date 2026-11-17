@@ -8,6 +8,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import signal
 import shutil
 import stat
@@ -52,6 +53,174 @@ class ScannerPermissionCategoryUnitTests(unittest.TestCase):
         return mock.patch.object(pathlib.Path, "read_text", autospec=True,
                                  side_effect=self._proc_read_text)
 
+    def _stat_with_denied_proc_fd_stat(self, held, before_fallback=None):
+        path = pathlib.Path(f"/proc/self/fd/{held.fileno()}")
+        real_stat = gate.os.stat
+        real_open = gate.os.open
+
+        def denied_stat(candidate, *args, **kwargs):
+            if os.fspath(candidate) == os.fspath(path):
+                if before_fallback is not None:
+                    before_fallback(real_open, path, args, kwargs)
+                raise PermissionError(13, "injected target-stat denial")
+            return real_stat(candidate, *args, **kwargs)
+
+        with mock.patch.object(gate.os, "stat", side_effect=denied_stat):
+            return gate._stat_fd_target(path)
+
+    def test_o_path_fallback_pins_real_proc_fd_target(self):
+        with tempfile.NamedTemporaryFile() as held:
+            expected = os.fstat(held.fileno())
+            actual = self._stat_with_denied_proc_fd_stat(held)
+        self.assertEqual((actual.st_dev, actual.st_ino), (expected.st_dev, expected.st_ino))
+
+    def test_o_path_fallback_identifies_pipe_fd_without_opening_data(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            with os.fdopen(read_fd, "rb") as held:
+                expected = os.fstat(held.fileno())
+                actual = self._stat_with_denied_proc_fd_stat(held)
+            self.assertEqual((actual.st_dev, actual.st_ino),
+                             (expected.st_dev, expected.st_ino))
+        finally:
+            os.close(write_fd)
+
+    def test_full_scanner_uses_o_path_fallback_for_real_proc_fd(self):
+        with tempfile.NamedTemporaryFile() as held:
+            process = os.getpid()
+            held_fd = held.fileno()
+            held_info = os.fstat(held_fd)
+            device, inode = held_info.st_dev, held_info.st_ino
+            denied = [False]
+            real_scandir = gate.os.scandir
+            real_stat = gate.os.stat
+            real_read_text = pathlib.Path.read_text
+
+            class Entry:
+                def __init__(self, name):
+                    self.name = name
+
+            class Entries:
+                def __init__(self, entries):
+                    self.entries = entries
+
+                def __iter__(self):
+                    return iter(self.entries)
+
+            def fake_scandir(path):
+                if os.fspath(path) == "/proc":
+                    return Entries([Entry("1"), Entry(str(process))])
+                return real_scandir(path)
+
+            def deny_once_for_target(path, *args, **kwargs):
+                text = os.fspath(path)
+                match = re.fullmatch(r"/proc/(\d+)/task/(\d+)/fd/(\d+)", text)
+                if text == "/proc/1":
+                    raise FileNotFoundError(2, "synthetic PID disappeared")
+                if (match and int(match.group(1)) == process
+                        and int(match.group(3)) == held_fd and not denied[0]):
+                    denied[0] = True
+                    raise PermissionError(13, "injected target-stat denial")
+                return real_stat(path, *args, **kwargs)
+
+            def fake_read_text(path, *args, **kwargs):
+                if os.fspath(path) == "/proc/1/stat":
+                    raise FileNotFoundError(2, "synthetic PID disappeared")
+                return real_read_text(path, *args, **kwargs)
+
+            with mock.patch.object(gate.os, "geteuid", return_value=0), \
+                    mock.patch.object(gate.os, "readlink", return_value="namespace"), \
+                    mock.patch.object(gate, "_verify_protected_helper"), \
+                    mock.patch.object(gate.os, "scandir", side_effect=fake_scandir), \
+                    mock.patch.object(gate.os, "stat", side_effect=deny_once_for_target), \
+                    mock.patch.object(pathlib.Path, "read_text", autospec=True,
+                                     side_effect=fake_read_text):
+                result = gate._scan_proc_inode(device, inode)
+
+        self.assertTrue(denied[0])
+        self.assertIn([process, "fd", held_fd], result["holders"])
+
+    def test_o_path_fallback_observes_fd_replaced_before_open(self):
+        with tempfile.NamedTemporaryFile() as held, tempfile.NamedTemporaryFile() as replacement:
+            replacement_info = os.fstat(replacement.fileno())
+
+            def replace_before_open(_real_open, _path, _args, _kwargs):
+                os.dup2(replacement.fileno(), held.fileno())
+
+            actual = self._stat_with_denied_proc_fd_stat(held, replace_before_open)
+        self.assertEqual((actual.st_dev, actual.st_ino),
+                         (replacement_info.st_dev, replacement_info.st_ino))
+
+    def test_o_path_fallback_keeps_identity_when_fd_replaced_after_open(self):
+        with tempfile.NamedTemporaryFile() as held, tempfile.NamedTemporaryFile() as replacement:
+            held_info = os.fstat(held.fileno())
+            path = pathlib.Path(f"/proc/self/fd/{held.fileno()}")
+            real_stat = gate.os.stat
+            real_open = gate.os.open
+
+            def denied_stat(candidate, *args, **kwargs):
+                if os.fspath(candidate) == os.fspath(path):
+                    raise PermissionError(13, "injected target-stat denial")
+                return real_stat(candidate, *args, **kwargs)
+
+            def replace_after_open(candidate, flags, *args, **kwargs):
+                fd = real_open(candidate, flags, *args, **kwargs)
+                if os.fspath(candidate) == os.fspath(path):
+                    os.dup2(replacement.fileno(), held.fileno())
+                return fd
+
+            with mock.patch.object(gate.os, "stat", side_effect=denied_stat), \
+                    mock.patch.object(gate.os, "open", side_effect=replace_after_open):
+                actual = gate._stat_fd_target(path)
+        self.assertEqual((actual.st_dev, actual.st_ino), (held_info.st_dev, held_info.st_ino))
+
+    def test_o_path_fallback_refuses_when_target_remains_unresolved(self):
+        with tempfile.NamedTemporaryFile() as held:
+            path = pathlib.Path(f"/proc/self/fd/{held.fileno()}")
+
+            def denied(*_args, **_kwargs):
+                raise PermissionError(13, "injected denial")
+
+            with mock.patch.object(gate.os, "stat", side_effect=denied), \
+                    mock.patch.object(gate.os, "open", side_effect=PermissionError(13, "denied")):
+                with self.assertRaisesRegex(gate.GateRefused, "unreadable_fd_target_stat"):
+                    gate._stat_fd_target(path)
+
+    def test_o_path_fallback_refuses_if_fstat_fails(self):
+        with tempfile.NamedTemporaryFile() as held:
+            path = pathlib.Path(f"/proc/self/fd/{held.fileno()}")
+            real_stat = gate.os.stat
+
+            def denied_stat(candidate, *args, **kwargs):
+                if os.fspath(candidate) == os.fspath(path):
+                    raise PermissionError(13, "injected target-stat denial")
+                return real_stat(candidate, *args, **kwargs)
+
+            with mock.patch.object(gate.os, "stat", side_effect=denied_stat), \
+                    mock.patch.object(gate.os, "fstat", side_effect=PermissionError(13, "denied")):
+                with self.assertRaisesRegex(gate.GateRefused, "unreadable_fd_target_stat"):
+                    gate._stat_fd_target(path)
+
+    def test_o_path_fallback_refuses_if_closing_pinned_fd_fails(self):
+        with tempfile.NamedTemporaryFile() as held:
+            path = pathlib.Path(f"/proc/self/fd/{held.fileno()}")
+            real_stat = gate.os.stat
+            real_close = gate.os.close
+
+            def denied_stat(candidate, *args, **kwargs):
+                if os.fspath(candidate) == os.fspath(path):
+                    raise PermissionError(13, "injected target-stat denial")
+                return real_stat(candidate, *args, **kwargs)
+
+            def failed_close(fd):
+                real_close(fd)
+                raise OSError(5, "injected close failure")
+
+            with mock.patch.object(gate.os, "stat", side_effect=denied_stat), \
+                    mock.patch.object(gate.os, "close", side_effect=failed_close):
+                with self.assertRaisesRegex(gate.GateRefused, "unreadable_fd_target_stat"):
+                    gate._stat_fd_target(path)
+
     def test_task_enumeration_permission_refusal_has_operation_category(self):
         real_scandir = gate.os.scandir
 
@@ -89,6 +258,7 @@ class ScannerPermissionCategoryUnitTests(unittest.TestCase):
 
     def _scan_with_fd_stat_failures(self, failures):
         real_scandir = gate.os.scandir
+        real_open = gate.os.open
 
         class Entry:
             def __init__(self, name, path=None):
@@ -124,12 +294,18 @@ class ScannerPermissionCategoryUnitTests(unittest.TestCase):
                 raise error
             return real_stat(path, *args, **kwargs)
 
+        def denied_open(path, *args, **kwargs):
+            if os.fspath(path) == "/proc/1/task/1/fd/9":
+                raise PermissionError(13, "denied fallback")
+            return real_open(path, *args, **kwargs)
+
         real_stat = gate.os.stat
         with mock.patch.object(gate.os, "geteuid", return_value=0), \
                 mock.patch.object(gate.os, "readlink", return_value="namespace"), \
                 mock.patch.object(gate, "_verify_protected_helper"), \
                 mock.patch.object(gate.os, "scandir", side_effect=fake_scandir), \
                 mock.patch.object(gate.os, "stat", side_effect=denied_stat), \
+                mock.patch.object(gate.os, "open", side_effect=denied_open), \
                 self._mock_proc_read_text():
             with self.assertRaisesRegex(gate.GateRefused, "unreadable_fd_target_stat"):
                 gate._scan_proc_inode(1, 1)

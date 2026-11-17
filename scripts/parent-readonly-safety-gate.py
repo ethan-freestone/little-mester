@@ -19,6 +19,31 @@ class GateRefused(RuntimeError):
     pass
 
 
+def _stat_fd_target(path: os.PathLike | str) -> os.stat_result:
+    """Identify a proc FD target, pinning it with O_PATH if path stat is denied."""
+    try:
+        return os.stat(path)
+    except PermissionError as error:
+        path_only = getattr(os, "O_PATH", None)
+        if path_only is None:
+            raise GateRefused("unreadable_fd_target_stat") from error
+        try:
+            fd = os.open(path, path_only | os.O_CLOEXEC)
+        except OSError as fallback_error:
+            raise GateRefused("unreadable_fd_target_stat") from fallback_error
+        try:
+            try:
+                info = os.fstat(fd)
+            except OSError as fallback_error:
+                raise GateRefused("unreadable_fd_target_stat") from fallback_error
+        finally:
+            try:
+                os.close(fd)
+            except OSError as close_error:
+                raise GateRefused("unreadable_fd_target_stat") from close_error
+        return info
+
+
 def _verify_protected_helper(path: pathlib.Path) -> pathlib.Path:
     path = pathlib.Path(os.path.abspath(path))
     current = pathlib.Path(path.anchor)
@@ -156,7 +181,7 @@ def _scan_proc_inode(device: int, inode: int, allowed_pid: int = 0,
                             continue
                         try:
                             try:
-                                info = os.stat(entry.path)
+                                info = _stat_fd_target(entry.path)
                             except PermissionError as error:
                                 raise GateRefused("unreadable_fd_target_stat") from error
                         except FileNotFoundError:
@@ -164,7 +189,7 @@ def _scan_proc_inode(device: int, inode: int, allowed_pid: int = 0,
                             # that the same slot has disappeared before treating it as
                             # a harmless close race.
                             try:
-                                os.stat(entry.path)
+                                _stat_fd_target(entry.path)
                             except FileNotFoundError:
                                 continue
                             except PermissionError as error:
