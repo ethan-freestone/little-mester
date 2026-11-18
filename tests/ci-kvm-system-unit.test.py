@@ -17,6 +17,11 @@ SPEC = importlib.util.spec_from_file_location("ci_kvm_system_unit", SCRIPT)
 unit = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(unit)
+PROBE_SCRIPT = ROOT / "tests/ci-kvm-shared-launch-probe.py"
+PROBE_SPEC = importlib.util.spec_from_file_location("ci_kvm_shared_launch_probe", PROBE_SCRIPT)
+probe = importlib.util.module_from_spec(PROBE_SPEC)
+assert PROBE_SPEC.loader is not None
+PROBE_SPEC.loader.exec_module(probe)
 
 
 class HostedSystemUnitTests(unittest.TestCase):
@@ -64,12 +69,14 @@ class HostedSystemUnitTests(unittest.TestCase):
                                       install_parent=pathlib.Path(temp))
 
     def test_sudoers_bytes_use_only_the_fixed_read_only_sudo_cat(self):
-        payload = "%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/systemctl stop little-mester-vm.service\n"
-        with mock.patch.object(unit, "run", return_value=type("Result", (), {"stdout": payload})()) as run:
+        payload = b"%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/systemctl stop little-mester-vm.service\n"
+        with mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                returncode=0, stdout=payload)) as run:
             self.assertEqual(unit.installed_asset_bytes("/etc/sudoers.d/little-mester-vm"),
-                             payload.encode())
+                             payload)
         run.assert_called_once_with([
-            "/usr/bin/sudo", "-n", "/usr/bin/cat", "--", "/etc/sudoers.d/little-mester-vm"])
+            "/usr/bin/sudo", "-n", "/usr/bin/cat", "--", "/etc/sudoers.d/little-mester-vm"],
+            stdin=unit.subprocess.DEVNULL, capture_output=True, check=False)
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(unit, "run") as run:
             ordinary = pathlib.Path(temp) / "unit.service"
             ordinary.write_bytes(b"[Service]\n")
@@ -81,26 +88,128 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertEqual(unit.PINNED_INSTALL_ASSETS.get(proxy_dest),
                          ("systemd/little-mester-vm-proxy.service", 0o644))
         with tempfile.TemporaryDirectory() as temp:
-            root = pathlib.Path(temp) / "candidate"
             destination = pathlib.Path(temp) / "installed-proxy.service"
-            source = root / "systemd/little-mester-vm-proxy.service"
-            source.parent.mkdir(parents=True)
-            source.write_bytes(b"[Unit]\nDescription=pinned proxy\n")
-            destination.write_bytes(source.read_bytes())
-            expected = {str(destination): ("systemd/little-mester-vm-proxy.service", 0o644)}
+            payload = b"[Unit]\nDescription=pinned proxy\n"
+            destination.write_bytes(payload)
             root_info = SimpleNamespace(st_mode=0o100644, st_uid=0)
+            expected = {str(destination): ("systemd/little-mester-vm-proxy.service", 0o644)}
             with mock.patch.dict(unit.PINNED_INSTALL_ASSETS, expected, clear=True), \
+                 mock.patch.dict(os.environ, {"GITHUB_SHA": "a" * 40}), \
                  mock.patch.object(unit.os, "lstat", return_value=root_info), \
+                 mock.patch.object(unit, "installed_asset_bytes", return_value=payload), \
+                 mock.patch.object(unit, "git_object_bytes", return_value=payload) as git_bytes, \
                  mock.patch.object(unit, "run"):
-                unit.verify_installed_files(root)
+                unit.verify_installed_files()
+                git_bytes.assert_called_once_with("a" * 40, "systemd/little-mester-vm-proxy.service")
                 destination.write_bytes(b"[Unit]\nDescription=changed proxy\n")
-                with self.assertRaisesRegex(RuntimeError, "installed production asset bytes differ"):
-                    unit.verify_installed_files(root)
-                destination.write_bytes(source.read_bytes())
+                with mock.patch.object(unit, "installed_asset_bytes", return_value=destination.read_bytes()):
+                    git_bytes.reset_mock()
+                    git_bytes.return_value = payload
+                    with self.assertRaisesRegex(RuntimeError, "installed production asset bytes differ"):
+                        unit.verify_installed_files()
                 with mock.patch.object(unit.os, "lstat",
                                        return_value=SimpleNamespace(st_mode=0o100600, st_uid=0)), \
                      self.assertRaisesRegex(RuntimeError, "installed production asset metadata mismatch"):
-                    unit.verify_installed_files(root)
+                    unit.verify_installed_files()
+
+    def test_sudoers_compare_to_git_object_without_reading_candidate_file(self):
+        dest = "/etc/sudoers.d/little-mester-vm"
+        payload = b"%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/systemctl stop\xff\n"
+        with tempfile.TemporaryDirectory() as temp:
+            candidate = pathlib.Path(temp) / "sudoers/little-mester-vm"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(b"mutable candidate bytes")
+            installed = SimpleNamespace(st_mode=0o100440, st_uid=0)
+            original_read_bytes = pathlib.Path.read_bytes
+
+            def guarded_read_bytes(path):
+                if path == candidate:
+                    raise PermissionError("candidate sudoers is unreadable")
+                return original_read_bytes(path)
+
+            with mock.patch.dict(unit.PINNED_INSTALL_ASSETS, {
+                    dest: ("sudoers/little-mester-vm", 0o440)}, clear=True), \
+                 mock.patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}), \
+                 mock.patch.object(unit.os, "lstat", return_value=installed), \
+                 mock.patch.object(pathlib.Path, "read_bytes", guarded_read_bytes), \
+                 mock.patch.object(unit, "installed_asset_bytes", return_value=payload) as installed_bytes, \
+                 mock.patch.object(unit, "git_object_bytes", return_value=payload) as git_bytes, \
+                 mock.patch.object(unit, "run"):
+                unit.verify_installed_files()
+            installed_bytes.assert_called_once_with(dest)
+            git_bytes.assert_called_once_with("b" * 40, "sudoers/little-mester-vm")
+
+    def test_git_object_fetch_uses_exact_sha_path_and_raw_bytes(self):
+        sha = "c" * 40
+        payload = b"\xff\x00raw\n"
+        completed = SimpleNamespace(returncode=0, stdout=payload, stderr=b"")
+        with mock.patch.object(unit.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(unit.git_object_bytes(sha, "sudoers/little-mester-vm"), payload)
+        run.assert_called_once_with([
+            "/usr/bin/git", "-C", str(unit.REPO), "show",
+            f"{sha}:sudoers/little-mester-vm"], stdin=unit.subprocess.DEVNULL,
+            capture_output=True, check=False)
+        run.reset_mock()
+        with self.assertRaisesRegex(RuntimeError, "full exact commit SHA"):
+            unit.git_object_bytes("not-a-sha", "sudoers/little-mester-vm")
+        with self.assertRaisesRegex(RuntimeError, "untrusted pinned source path"):
+            unit.git_object_bytes(sha, "../mutable-candidate")
+        run.assert_not_called()
+
+    def test_degraded_system_manager_is_accepted_even_with_nonzero_exit(self):
+        completed = SimpleNamespace(returncode=1, stdout=b"degraded\n")
+        with mock.patch.object(probe.shutil, "which", return_value="/usr/bin/tool"), \
+             mock.patch.object(probe.subprocess, "run", side_effect=[completed,
+                                                                        SimpleNamespace(returncode=0)]):
+            available, reasons = probe.systemd_preflight()
+        self.assertTrue(available)
+        self.assertEqual(reasons, [])
+
+        with mock.patch.object(unit.pathlib.Path, "is_file", return_value=True), \
+             mock.patch.object(unit.subprocess, "run", side_effect=[
+                 SimpleNamespace(returncode=1, stdout="degraded\n"),
+                 SimpleNamespace(returncode=0)]):
+            unit.production_host_preflight()
+
+    def test_unavailable_system_manager_rejects_before_install(self):
+        with mock.patch.object(unit, "hosted_kvm_guard"), \
+             mock.patch.object(unit.pathlib.Path, "is_file", return_value=True), \
+             mock.patch.object(unit.subprocess, "run", side_effect=[
+                 SimpleNamespace(returncode=1, stdout="stopping\n"),
+                 SimpleNamespace(returncode=0)]), \
+             mock.patch.object(unit, "run") as run, \
+             mock.patch.object(unit.sys, "argv", [str(SCRIPT)]):
+            self.assertEqual(unit.main(), 1)
+        run.assert_not_called()
+
+    def test_shared_probe_separates_system_manager_and_noninteractive_sudo_failures(self):
+        def completed(code, output=b""):
+            return SimpleNamespace(returncode=code, stdout=output)
+
+        with mock.patch.object(probe.shutil, "which", return_value="/usr/bin/tool"), \
+             mock.patch.object(probe.subprocess, "run", side_effect=[completed(1, b"stopped\n"),
+                                                                        completed(0)]) as run:
+            available, reasons = probe.systemd_preflight()
+        self.assertFalse(available)
+        self.assertEqual(reasons, ["system-manager(scope=system,state=stopped,exit=1)"])
+        self.assertEqual(run.call_args_list[0].args[0], ["systemctl", "is-system-running"])
+        self.assertNotIn("--user", run.call_args_list[0].args[0])
+
+        with mock.patch.object(probe.shutil, "which", return_value="/usr/bin/tool"), \
+             mock.patch.object(probe.subprocess, "run", side_effect=[completed(0, b"running\n"),
+                                                                        completed(1)]):
+            available, reasons = probe.systemd_preflight()
+        self.assertFalse(available)
+        self.assertEqual(reasons, ["sudo(mode=noninteractive,exit=1)"])
+
+    def test_shared_probe_reports_timeout_separately(self):
+        with mock.patch.object(probe.shutil, "which", return_value="/usr/bin/tool"), \
+             mock.patch.object(probe.subprocess, "run", side_effect=[
+                 __import__("subprocess").TimeoutExpired("systemctl", 2),
+                 SimpleNamespace(returncode=0, stdout=b"")]):
+            available, reasons = probe.systemd_preflight()
+        self.assertFalse(available)
+        self.assertEqual(reasons, ["system-manager(scope=system,reason=timeout)"])
 
     def test_cleanup_requires_this_attempts_durable_start_marker(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ, {

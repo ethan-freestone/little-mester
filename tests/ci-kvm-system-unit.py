@@ -29,6 +29,7 @@ PINNED_INSTALL_ASSETS = {
         ("systemd/little-mester-vm-proxy.service", 0o644),
     "/etc/sudoers.d/little-mester-vm": ("sudoers/little-mester-vm", 0o440),
 }
+PINNED_SOURCE_PATHS = frozenset(source for source, _mode in PINNED_INSTALL_ASSETS.values())
 FIXED_FILES = (
     "/etc/systemd/system/little-mester-vm.service",
     "/etc/systemd/system/little-mester-vm-proxy.service",
@@ -194,23 +195,82 @@ def invoke_verified_cleanup(sha: str) -> None:
 def installed_asset_bytes(destination: str) -> bytes:
     path = pathlib.Path(destination)
     if destination == "/etc/sudoers.d/little-mester-vm":
-        return run(["/usr/bin/sudo", "-n", "/usr/bin/cat", "--", destination]).stdout.encode()
+        result = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/cat", "--", destination],
+                                stdin=subprocess.DEVNULL, capture_output=True, check=False)
+        require(result.returncode == 0,
+                f"command failed ({result.returncode}): /usr/bin/sudo /usr/bin/cat")
+        return result.stdout
     return path.read_bytes()
 
 
-def verify_installed_files(root: pathlib.Path,
-                           expected: dict[str, tuple[str, int]] | None = None) -> None:
-    for dest, (source, mode) in (PINNED_INSTALL_ASSETS if expected is None else expected).items():
+def git_object_bytes(sha: str, source: str) -> bytes:
+    require(SHA_RE.fullmatch(sha) is not None, "GITHUB_SHA is not a full exact commit SHA")
+    require(source in PINNED_SOURCE_PATHS, f"untrusted pinned source path: {source}")
+    result = subprocess.run(["/usr/bin/git", "-C", str(REPO), "show", f"{sha}:{source}"],
+                            stdin=subprocess.DEVNULL, capture_output=True, check=False)
+    require(result.returncode == 0, f"unable to read pinned Git object path: {source}")
+    return result.stdout
+
+
+def verify_installed_files() -> None:
+    sha = os.environ.get("GITHUB_SHA", "")
+    require(SHA_RE.fullmatch(sha) is not None, "GITHUB_SHA is not a full exact commit SHA")
+    for dest, (source, mode) in PINNED_INSTALL_ASSETS.items():
         path = pathlib.Path(dest)
         info = os.lstat(path)
         require(stat.S_ISREG(info.st_mode) and info.st_uid == 0
                 and stat.S_IMODE(info.st_mode) == mode,
                 f"installed production asset metadata mismatch: {dest}")
         installed = installed_asset_bytes(dest)
-        require(installed == (root / source).read_bytes(),
+        require(installed == git_object_bytes(sha, source),
                 f"installed production asset bytes differ from exact candidate: {dest}")
     run(["/usr/sbin/visudo", "-cf", "/etc/sudoers.d/little-mester-vm"])
     print("production_unit_install=PASS pinned_bytes=true sudoers=PASS")
+
+
+def production_host_preflight() -> None:
+    """Require the system manager and noninteractive sudo before any install."""
+    systemctl = "/usr/bin/systemctl"
+    sudo = "/usr/bin/sudo"
+    manager_ok = False
+    if not pathlib.Path(systemctl).is_file():
+        print("production_preflight_system_manager=FAIL scope=system reason=missing-tool")
+    else:
+        try:
+            manager = subprocess.run([systemctl, "is-system-running"], stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                     text=True, timeout=2, check=False)
+        except subprocess.TimeoutExpired:
+            print("production_preflight_system_manager=FAIL scope=system reason=timeout")
+        except OSError as error:
+            print("production_preflight_system_manager=FAIL scope=system "
+                  f"reason={type(error).__name__}")
+        else:
+            state = manager.stdout.strip() or "unknown"
+            manager_ok = state in ("running", "degraded")
+            print(f"production_preflight_system_manager={'PASS' if manager_ok else 'FAIL'} "
+                  f"scope=system state={state} exit={manager.returncode}")
+
+    sudo_ok = False
+    if not pathlib.Path(sudo).is_file():
+        print("production_preflight_sudo=FAIL mode=noninteractive reason=missing-tool")
+    else:
+        try:
+            sudo_result = subprocess.run([sudo, "-n", "true"], stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                         timeout=2, check=False)
+        except subprocess.TimeoutExpired:
+            print("production_preflight_sudo=FAIL mode=noninteractive reason=timeout")
+        except OSError as error:
+            print("production_preflight_sudo=FAIL mode=noninteractive "
+                  f"reason={type(error).__name__}")
+        else:
+            sudo_ok = sudo_result.returncode == 0
+            print(f"production_preflight_sudo={'PASS' if sudo_ok else 'FAIL'} "
+                  f"mode=noninteractive exit={sudo_result.returncode}")
+
+    require(manager_ok, "production preflight system manager unavailable (scope=system)")
+    require(sudo_ok, "production preflight noninteractive sudo unavailable")
 
 
 def guest_command(command: str, *, timeout: int = 30) -> None:
@@ -436,7 +496,7 @@ def cleanup_only() -> int:
         print("production_unit_cleanup=NOT_APPLICABLE production_unit_absent=true")
         return 0
     require(all(present), "partial fixed unit installation; preserving it without lifecycle action")
-    verify_installed_files(root)
+    verify_installed_files()
     states = [service_state(UNIT), service_state(PROXY_UNIT)]
     loaded = [state.get("LoadState") == "loaded" for state in states]
     if not any(loaded):
@@ -462,6 +522,7 @@ def main() -> int:
     failure: BaseException | None = None
     try:
         hosted_kvm_guard()
+        production_host_preflight()
         fixed_name_preflight()
         sha = os.environ["GITHUB_SHA"]
         print(f"evidence_scope=production_systemd_unit candidate_sha={sha} runner=ubuntu-24.04-kvm")
@@ -479,7 +540,7 @@ def main() -> int:
         run([str(REPO / "tools/vm-owner-acceptance"), "--install", "--sha", sha,
              "--repo", str(REPO)], timeout=120)
         installed_root = pathlib.Path("/opt/little-mester/v3") / sha
-        verify_installed_files(installed_root)
+        verify_installed_files()
         run(["/usr/bin/sudo", "-n", str(installed_root / "tools/vm-system-install")], timeout=300)
         unit_identity_checks()
         marker = uuid.uuid4().hex

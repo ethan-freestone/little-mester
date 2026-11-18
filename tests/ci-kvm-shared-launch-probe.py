@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import grp
 import importlib.util
 import os
 import pathlib
 import pwd
-import grp
 import secrets
 import shutil
 import socket
@@ -66,20 +66,37 @@ def qmp_quit(path: pathlib.Path, process: subprocess.Popen, deadline: float) -> 
     raise RuntimeError(f"shared-builder QEMU did not publish its QMP socket: {last_error}")
 
 
-def systemd_available() -> bool:
-    if not shutil.which("systemd-run") or not shutil.which("systemctl") or not shutil.which("sudo"):
-        return False
+def systemd_preflight() -> tuple[bool, list[str]]:
+    missing = [name for name in ("systemd-run", "systemctl", "sudo") if not shutil.which(name)]
+    if missing:
+        return False, [f"missing-tools={','.join(missing)}"]
+
+    reasons: list[str] = []
     try:
         status = subprocess.run(["systemctl", "is-system-running"], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 timeout=2, check=False)
-        state = status.stdout.decode("ascii", "replace").strip()
+    except subprocess.TimeoutExpired:
+        reasons.append("system-manager(scope=system,reason=timeout)")
+    except OSError as error:
+        reasons.append(f"system-manager(scope=system,reason={type(error).__name__})")
+    else:
+        state = status.stdout.decode("ascii", "replace").strip() or "unknown"
+        if state not in ("running", "degraded"):
+            reasons.append(f"system-manager(scope=system,state={state},exit={status.returncode})")
+
+    try:
         sudo = subprocess.run(["sudo", "-n", "true"], stdin=subprocess.DEVNULL,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                               timeout=2, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return state in ("running", "degraded") and sudo.returncode == 0
+    except subprocess.TimeoutExpired:
+        reasons.append("sudo(mode=noninteractive,reason=timeout)")
+    except OSError as error:
+        reasons.append(f"sudo(mode=noninteractive,reason={type(error).__name__})")
+    else:
+        if sudo.returncode != 0:
+            reasons.append(f"sudo(mode=noninteractive,exit={sudo.returncode})")
+    return not reasons, reasons
 
 
 def launch(command: list[str], qmp_path: pathlib.Path, *, unit: str | None) -> None:
@@ -140,7 +157,7 @@ def main() -> int:
         qemu = ["/usr/bin/qemu-system-x86_64", *argv, "-S",
                 "-qmp", f"unix:{qmp},server=on,wait=off"]
         transient_pass = False
-        managed = systemd_available()
+        managed, manager_reasons = systemd_preflight()
         if managed:
             unit = f"lm-ci-shared-qemu-{os.getpid()}-{secrets.token_hex(4)}.service"
             command = ["sudo", "-n", "systemd-run", "--unit", unit, "--wait", "--collect",
@@ -169,7 +186,8 @@ def main() -> int:
             command = ["/usr/bin/timeout", "--foreground", "--signal=TERM",
                        "--kill-after=2s", "10s", *qemu]
             launch(command, qmp, unit=None)
-            print("HOSTED_SYSTEMD_TRANSIENT_QEMU=NOT_RUN reason=manager-unavailable")
+            print("HOSTED_SYSTEMD_TRANSIENT_QEMU=NOT_RUN "
+                  f"reason={' ; '.join(manager_reasons)}")
         if transient_pass:
             print("HOSTED_SYSTEMD_TRANSIENT_QEMU=PASS")
         print("SHARED_KVM_BUILDER_LAUNCH=PASS")
