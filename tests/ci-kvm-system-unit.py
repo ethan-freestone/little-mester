@@ -21,6 +21,8 @@ import time
 import uuid
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+CI_INSTALL_PREFIX = pathlib.Path("/srv/little-mester-ci")
+CI_INSTALL_PARENT = CI_INSTALL_PREFIX / "v3"
 UNIT = "little-mester-vm.service"
 PROXY_UNIT = "little-mester-vm-proxy.service"
 PINNED_INSTALL_ASSETS = {
@@ -97,8 +99,9 @@ def hosted_kvm_guard() -> None:
 def fixed_name_preflight(*, paths: tuple[str, ...] = FIXED_FILES,
                          users: tuple[str, ...] = FIXED_USERS,
                          groups: tuple[str, ...] = FIXED_GROUPS,
-                         install_parent: pathlib.Path = pathlib.Path("/opt/little-mester/v3")) -> None:
+                         install_parent: pathlib.Path | None = None) -> None:
     """Fail closed on any existing fixed production identity or install target."""
+    install_parent = CI_INSTALL_PARENT if install_parent is None else install_parent
     for raw in paths:
         path = pathlib.Path(raw)
         if raw == PROTECTED_PREFLIGHT_PATH:
@@ -215,7 +218,7 @@ def invoke_lab(root: pathlib.Path, operation: str, timeout: int, *, check: bool 
 
 def invoke_verified_cleanup(sha: str) -> None:
     args = [str(REPO / "tools/vm-owner-acceptance"), "--system-vm", "down",
-            "--sha", sha, "--repo", str(REPO)]
+            "--sha", sha, "--repo", str(REPO), "--prefix", str(CI_INSTALL_PREFIX)]
     command = " ".join(shlex.quote(value) for value in args)
     run(["/usr/bin/sg", "lm-vm-control", "-c", command], timeout=90, capture=False)
 
@@ -547,7 +550,7 @@ def cleanup_only() -> int:
     if not has_valid_start_marker(sha):
         print("production_unit_cleanup=NOT_APPLICABLE production_start_not_attempted=true")
         return 0
-    root = pathlib.Path("/opt/little-mester/v3") / sha
+    root = CI_INSTALL_PARENT / sha
     if not root.exists() and not root.is_symlink():
         print("production_unit_cleanup=NOT_APPLICABLE pinned_install_absent=true")
         return 0
@@ -588,7 +591,7 @@ def main() -> int:
     try:
         hosted_kvm_guard()
         production_host_preflight()
-        fixed_name_preflight()
+        fixed_name_preflight(install_parent=CI_INSTALL_PARENT)
         sha = os.environ["GITHUB_SHA"]
         print(f"evidence_scope=production_systemd_unit candidate_sha={sha} runner=ubuntu-24.04-kvm")
         # owner-acceptance's private report root requires the standard per-user
@@ -603,8 +606,8 @@ def main() -> int:
                 and stat.S_IMODE(runtime_info.st_mode) == 0o700,
                 "runner private runtime path is unsafe")
         run([str(REPO / "tools/vm-owner-acceptance"), "--install", "--sha", sha,
-             "--repo", str(REPO)], timeout=120)
-        installed_root = pathlib.Path("/opt/little-mester/v3") / sha
+             "--prefix", str(CI_INSTALL_PREFIX), "--repo", str(REPO)], timeout=120)
+        installed_root = CI_INSTALL_PARENT / sha
         verify_installed_files()
         run(["/usr/bin/sudo", "-n", str(installed_root / "tools/vm-system-install")], timeout=300)
         require_fixed_units_loaded()

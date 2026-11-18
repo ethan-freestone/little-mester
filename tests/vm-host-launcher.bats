@@ -365,7 +365,8 @@ state = pathlib.Path(sys.argv[1]).with_name('ci-kvm-stage-state.py').read_text()
 state_tests = pathlib.Path(sys.argv[1]).with_name('ci-kvm-stage-state.test.py').read_text()
 wrapper = pathlib.Path(sys.argv[1]).with_name('ci-kvm-capability.sh').read_text()
 assert 'pull_request:' in workflow_text and 'types: [opened, synchronize, reopened]' in workflow_text
-assert job.count('if:') == 2 and 'if: always()' in job
+assert job.count('if:') == 3 and job.count('if: always()') == 2
+assert "if: ${{ !cancelled() && steps.smoke_cleanup.outcome == 'success' }}" in job
 assert 'm2-qemu-acceptance' not in workflow_text
 assert 'workflow_dispatch:' not in workflow_text
 assert 'github.event.pull_request.head.sha || github.sha' in job
@@ -486,7 +487,7 @@ assert 'ci_kvm_stage_runtime_seconds' in text
 assert 'ssh-keyscan' not in text
 assert 'ci-qemu-oauth-bridge.py' in text and 'LM_CI_PUBLIC_KEY' in text
 assert 'synthetic-fixture' in text and 'token exchange and real model access are NOT_RUN' in text
-assert 'readiness_deadline=$((qemu_started + 120))' in text
+assert 'readiness_deadline=$((qemu_started + 180))' in text
 assert 'readiness_deadline=$((SECONDS + 60))' in text
 assert 'SECONDS < readiness_deadline && SECONDS < qemu_deadline' in text
 assert 'qemu_deadline=$((qemu_started + 300))' in text

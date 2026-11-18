@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import pathlib
+import shlex
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -41,6 +42,8 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("steps.smoke_cleanup.outcome == 'success'", job)
         self.assertIn("!cancelled()", job)
         self.assertIn("evidence_scope=production_systemd_unit", SCRIPT.read_text())
+        self.assertEqual(unit.CI_INSTALL_PREFIX, pathlib.Path("/srv/little-mester-ci"))
+        self.assertEqual(unit.CI_INSTALL_PARENT, unit.CI_INSTALL_PREFIX / "v3")
         self.assertIn("ci-kvm-shared-launch-probe.py", job)
         self.assertIn("python3 tests/ci-kvm-system-unit.py --cleanup", job)
         self.assertIn("if: always()", job)
@@ -72,6 +75,18 @@ class HostedSystemUnitTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "pre-existing pinned install"):
                         unit.fixed_name_preflight(paths=(), users=(), groups=(),
                                                   install_parent=install_parent)
+
+    def test_default_install_preflight_uses_the_selected_ci_prefix(self):
+        sha = "f" * 40
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(os.environ, {
+                "GITHUB_SHA": sha, "RUNNER_TEMP": temporary,
+                "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
+        }), mock.patch.object(unit, "CI_INSTALL_PREFIX", pathlib.Path(temporary) / "ci-prefix"), \
+                mock.patch.object(unit, "CI_INSTALL_PARENT", pathlib.Path(temporary) / "ci-prefix/v3"):
+            target = unit.CI_INSTALL_PARENT / sha
+            target.mkdir(parents=True)
+            with self.assertRaisesRegex(RuntimeError, "preserving pre-existing pinned install"):
+                unit.fixed_name_preflight(paths=(), users=(), groups=())
 
     def test_preflight_preserves_preexisting_fixed_service_identity(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.dict(
@@ -366,10 +381,22 @@ class HostedSystemUnitTests(unittest.TestCase):
             invoke.assert_not_called()
             verified.assert_not_called()
 
+    def test_verified_cleanup_passes_the_selected_install_prefix(self):
+        with mock.patch.object(unit, "run") as run:
+            unit.invoke_verified_cleanup("a" * 40)
+        command = run.call_args.args[0]
+        self.assertEqual(command[:3], ["/usr/bin/sg", "lm-vm-control", "-c"])
+        self.assertIn("--prefix", shlex.split(command[3]))
+        self.assertEqual(shlex.split(command[3])[shlex.split(command[3]).index("--prefix") + 1],
+                         str(unit.CI_INSTALL_PREFIX))
+
     def test_script_uses_production_fixed_operations_and_bounded_stop_cleanup(self):
         source = SCRIPT.read_text()
         for required in (
             '"--install", "--sha", sha',
+            '"--prefix", str(CI_INSTALL_PREFIX)',
+            'installed_root = CI_INSTALL_PARENT / sha',
+            'root = CI_INSTALL_PARENT / sha',
             '"tools/vm-system-install"',
             'f"{root}/lab-vm system {operation}"',
             '"up", 16 * 60 + 45',

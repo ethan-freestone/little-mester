@@ -50,9 +50,8 @@ def source_root() -> pathlib.Path:
         if stat.S_ISLNK(info.st_mode):
             refuse("installer path contains a symlink")
     root = entry.parent.parent
-    if (not re.fullmatch(r"[0-9a-f]{40}", root.name) or root.parent.name != "v3"
-            or root.parent.parent != pathlib.Path("/opt/little-mester")):
-        refuse("installer must be invoked from the root-protected pinned v3 installation")
+    if not re.fullmatch(r"[0-9a-f]{40}", root.name) or root.parent.name != "v3":
+        refuse("installer must be invoked from a root-protected pinned v3 installation")
     for path in (root, *root.parents):
         info = os.lstat(path)
         if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)

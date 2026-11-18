@@ -33,11 +33,56 @@ def load(name: str, path: pathlib.Path):
 
 vm = load("system_vm", ROOT / "lib/vm/system-vm.py")
 owner = load("vm_owner_acceptance", ROOT / "tools/vm-owner-acceptance")
+system_installer = load("vm_system_install", ROOT / "tools/vm-system-install")
 contract = load("parent_session_contract", ROOT / "lib/vm/parent-session-contract.py")
 bootstrap = load("guest_bootstrap", ROOT / "lib/vm/guest-bootstrap.py")
 
 
 class SystemdPolicyTests(unittest.TestCase):
+    def test_system_installer_discovers_root_from_protected_installed_location(self):
+        for prefix in (pathlib.Path("/opt/little-mester"),
+                       pathlib.Path("/srv/little-mester-ci")):
+            with self.subTest(prefix=prefix):
+                root = prefix / "v3" / ("a" * 40)
+                entry = root / "tools/vm-system-install"
+
+                def safe_lstat(path):
+                    if pathlib.Path(path) == entry:
+                        return type("Info", (), {
+                            "st_mode": stat.S_IFREG | 0o755, "st_uid": 0,
+                        })()
+                    return type("Info", (), {
+                        "st_mode": stat.S_IFDIR | 0o755, "st_uid": 0,
+                    })()
+
+                with mock.patch.object(system_installer, "__file__", str(entry)), \
+                     mock.patch.object(system_installer.os, "lstat", side_effect=safe_lstat):
+                    self.assertEqual(system_installer.source_root(), root)
+
+    def test_system_installer_refuses_unsafe_alternate_prefix_ancestry(self):
+        prefix = pathlib.Path("/srv/little-mester-ci")
+        root = prefix / "v3" / ("b" * 40)
+        entry = root / "tools/vm-system-install"
+
+        def unsafe_lstat(path):
+            path = pathlib.Path(path)
+            if path == prefix:
+                return type("Info", (), {
+                    "st_mode": stat.S_IFDIR | 0o777, "st_uid": 0,
+                })()
+            if path == entry:
+                return type("Info", (), {
+                    "st_mode": stat.S_IFREG | 0o755, "st_uid": 0,
+                })()
+            return type("Info", (), {
+                "st_mode": stat.S_IFDIR | 0o755, "st_uid": 0,
+            })()
+
+        with mock.patch.object(system_installer, "__file__", str(entry)), \
+             mock.patch.object(system_installer.os, "lstat", side_effect=unsafe_lstat), \
+             self.assertRaisesRegex(RuntimeError, "ancestry must be root-owned"):
+            system_installer.source_root()
+
     def test_qemu_is_main_process_and_service_policy_has_bounded_cgroup_fallback(self):
         unit = (ROOT / "systemd/little-mester-vm.service").read_text()
         self.assertIn("Type=exec", unit)
