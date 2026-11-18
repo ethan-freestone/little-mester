@@ -70,6 +70,53 @@ class HostedSystemUnitTests(unittest.TestCase):
             unit.fixed_name_preflight(paths=(), users=("lm-vm",), groups=(),
                                       install_parent=pathlib.Path(temp))
 
+    def test_sudoers_preflight_uses_root_lstat_and_absence_is_the_only_allow(self):
+        dest = unit.PROTECTED_PREFLIGHT_PATH
+        command = ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c",
+                   unit.PROTECTED_PREFLIGHT_CHECK, dest]
+        with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ, {
+                "GITHUB_SHA": "c" * 40, "RUNNER_TEMP": temp,
+                "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
+        }), mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                returncode=1)) as run:
+            unit.fixed_name_preflight(paths=(dest,), users=(), groups=(),
+                                      install_parent=pathlib.Path(temp) / "v3")
+        run.assert_called_once_with(command, stdin=unit.subprocess.DEVNULL,
+                                    stdout=unit.subprocess.DEVNULL,
+                                    stderr=unit.subprocess.DEVNULL, timeout=5, check=False)
+
+        # lstat succeeds for any directory entry, including a symlink; status 0
+        # must always preserve it rather than treating it as absent.
+        for code, message in ((0, "pre-existing fixed system VM path"),
+                              (2, "unable to safely inspect fixed system VM path"),
+                              (127, "unable to safely inspect fixed system VM path")):
+            with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ, {
+                    "GITHUB_SHA": "c" * 40, "RUNNER_TEMP": temp,
+                    "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
+            }), mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                    returncode=code)), self.assertRaisesRegex(RuntimeError, message):
+                unit.fixed_name_preflight(paths=(dest,), users=(), groups=(),
+                                          install_parent=pathlib.Path(temp) / "v3")
+
+    def test_preflight_other_paths_still_use_unprivileged_path_checks(self):
+        original_exists = pathlib.Path.exists
+        original_is_symlink = pathlib.Path.is_symlink
+        with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ, {
+                "GITHUB_SHA": "d" * 40, "RUNNER_TEMP": temp,
+                "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
+        }), mock.patch.object(pathlib.Path, "exists", autospec=True,
+                              side_effect=original_exists) as exists, \
+                mock.patch.object(pathlib.Path, "is_symlink", autospec=True,
+                                  side_effect=original_is_symlink) as is_symlink, \
+                mock.patch.object(unit.subprocess, "run") as run:
+            ordinary = pathlib.Path(temp) / "ordinary"
+            unit.fixed_name_preflight(paths=(str(ordinary),),
+                                      users=(), groups=(),
+                                      install_parent=pathlib.Path(temp) / "v3")
+            run.assert_not_called()
+            exists.assert_any_call(ordinary)
+            is_symlink.assert_any_call(ordinary)
+
     def test_sudoers_bytes_use_only_the_fixed_read_only_sudo_cat(self):
         payload = b"%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/systemctl stop little-mester-vm.service\n"
         with mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(

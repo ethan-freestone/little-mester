@@ -46,6 +46,16 @@ FIXED_FILES = (
 )
 FIXED_USERS = ("lm-vm", "lm-vm-proxy")
 FIXED_GROUPS = ("lm-vm", "lm-vm-proxy", "lm-vm-control")
+PROTECTED_PREFLIGHT_PATH = "/etc/sudoers.d/little-mester-vm"
+PROTECTED_PREFLIGHT_CHECK = (
+    "import os, sys\n"
+    "try:\n"
+    "    os.lstat(sys.argv[1])\n"
+    "except FileNotFoundError:\n"
+    "    raise SystemExit(1)\n"
+    "except OSError:\n"
+    "    raise SystemExit(2)\n"
+)
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 
 
@@ -91,6 +101,18 @@ def fixed_name_preflight(*, paths: tuple[str, ...] = FIXED_FILES,
     """Fail closed on any existing fixed production identity or install target."""
     for raw in paths:
         path = pathlib.Path(raw)
+        if raw == PROTECTED_PREFLIGHT_PATH:
+            result = subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c",
+                 PROTECTED_PREFLIGHT_CHECK, PROTECTED_PREFLIGHT_PATH],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=5, check=False,
+            )
+            require(result.returncode in (0, 1),
+                    f"unable to safely inspect fixed system VM path: {raw}")
+            require(result.returncode == 1,
+                    f"preserving pre-existing fixed system VM path: {raw}")
+            continue
         require(not path.exists() and not path.is_symlink(),
                 f"preserving pre-existing fixed system VM path: {raw}")
     for name in users:
