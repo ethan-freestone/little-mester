@@ -72,12 +72,14 @@ INSTALL_FILES = {
     "lib/vm/parent-qemu.py": 0o644,
     "lib/vm/parent-provision.py": 0o644,
     "lib/vm/system-vm.py": 0o644,
+    "lib/vm/system-acceptance.py": 0o644,
     "lib/vm/guest-bootstrap.py": 0o644,
     "scripts/parent-readonly-safety-gate.py": 0o644,
     "tools/vm-system-install": 0o755,
     "systemd/little-mester-vm.service": 0o644,
     "systemd/little-mester-vm-proxy.service": 0o644,
-    "sudoers/little-mester-vm": 0o440,
+    # Candidate source is public deployment policy; deployed sudoers remains 0440.
+    "sudoers/little-mester-vm": 0o444,
 }
 INSTALL_DIRS = {
     "agent", "agent/opencode", "agent/opencode/plugins",
@@ -137,8 +139,26 @@ def clean_env(*, desktop_session: bool = False) -> dict[str, str]:
     return env
 
 
-def owner_system_vm(root: pathlib.Path, operation: str) -> int:
-    """Delegate fixed system-VM operations to lab-vm; keep no second lifecycle."""
+def owner_system_vm(root: pathlib.Path, operation: str, *, approve_lifecycle: bool = False,
+                    progress=None) -> int:
+    """Dispatch fixed VM operations and the shared installed acceptance command."""
+    if operation in ("verify", "accept"):
+        if operation == "accept" and not approve_lifecycle:
+            if not sys.stdin.isatty():
+                raise GateError("BLOCKED", "lifecycle acceptance requires --approve-system-vm-lifecycle")
+            print("Acceptance may stop and restart the fixed production VM, including if it is already running; success leaves it running.")
+            if input("Type ACCEPT SYSTEM VM LIFECYCLE: ") != "ACCEPT SYSTEM VM LIFECYCLE":
+                raise GateError("BLOCKED", "owner declined system VM lifecycle acceptance")
+        module_path = root / "lib/vm/system-acceptance.py"
+        spec = importlib.util.spec_from_file_location("installed_system_acceptance", module_path)
+        if spec is None or spec.loader is None:
+            raise GateError("BLOCKED", "installed production system VM acceptance command is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        if operation == "verify":
+            module.verify(root, progress=progress)
+            return 0
+        return module.accept(root, progress=progress)
     if operation not in ("up", "down", "status", "ssh", "auth", "tui"):
         raise GateError("BLOCKED", "unsupported fixed system VM operation")
     env = clean_env(desktop_session=operation == "auth")
@@ -1332,6 +1352,24 @@ def _post_failure_parent_evidence(root: pathlib.Path) -> dict:
 
 
 def report_template(sha: str, mode: str, report_dir: pathlib.Path) -> dict:
+    if mode in ("system_vm_verify", "system_vm_accept"):
+        gates = ["candidate", "deployed_candidate_verification"]
+        if mode == "system_vm_accept":
+            gates += ["preflight", "proxy_private_target_policy", "guest_readiness_ssh",
+                      "network_boundaries", "direct_egress_blocked", "opencode_tui",
+                      "same_disk_persistence", "final_vm_state"]
+        return {
+            "version": 1,
+            "candidate_sha": sha,
+            "mode": mode,
+            "attempt_id": report_dir.name,
+            "status": "IN_PROGRESS",
+            "gates": {name: "NOT_RUN" for name in gates},
+            "evidence": {"report": str(report_dir / "report.json"),
+                         **({"restoration_outcome": "NOT_REQUIRED"}
+                            if mode == "system_vm_accept" else {})},
+            "notes": [],
+        }
     gates = [
         "candidate", "preflight", "install", "storage_proof", "run", "cleanup",
         "parent_identity", "guest_compatibility", "retirement", "fresh_provision",
@@ -2262,8 +2300,10 @@ def parser() -> argparse.ArgumentParser:
     modes = p.add_mutually_exclusive_group()
     for name in ("preflight", "install", "storage-proof", "run", "verify-cleanup", "all", "parent-accept"):
         modes.add_argument(f"--{name}", action="store_true", dest=name.replace("-", "_"))
-    modes.add_argument("--system-vm", choices=("up", "down", "status", "ssh", "auth", "tui"),
-                       help="delegate one fixed system-VM operation to the installed lab-vm entrypoint")
+    modes.add_argument("--system-vm", choices=("verify", "accept", "up", "down", "status", "ssh", "auth", "tui"),
+                       help="verify read-only, explicitly accept the fixed VM lifecycle, or run one fixed operation")
+    p.add_argument("--approve-system-vm-lifecycle", action="store_true",
+                   help="explicitly authorize system VM lifecycle acceptance")
     p.add_argument("--milestone", choices=("M2",), help="owner acceptance milestone")
     p.add_argument("--sha", required=True, type=full_sha, help="full lowercase 40-character candidate commit SHA")
     p.add_argument("--prefix", type=install_prefix,
@@ -2284,17 +2324,72 @@ def full_sha(value: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.approve_system_vm_lifecycle and args.system_vm != "accept":
+        parser().error("--approve-system-vm-lifecycle is valid only with --system-vm accept")
     if args.system_vm:
         if not args.repo:
             parser().error("--system-vm requires --repo PATH for the candidate source repository")
+        if args.system_vm not in ("verify", "accept"):
+            try:
+                repo = pathlib.Path(args.repo).resolve(strict=True)
+                candidate_commit(repo, args.sha)
+                root = verify_install(repo, args.sha, args.prefix)
+                return owner_system_vm(root, args.system_vm)
+            except (GateError, OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+                print(f"BLOCKED: system VM owner command refused ({error})", file=sys.stderr)
+                return 3
         try:
-            repo = pathlib.Path(args.repo or ROOT).resolve(strict=True)
-            candidate_commit(repo, args.sha)
-            root = verify_install(repo, args.sha, args.prefix)
-            return owner_system_vm(root, args.system_vm)
-        except (GateError, OSError, subprocess.SubprocessError, ValueError) as error:
-            print(f"BLOCKED: system VM owner command refused ({error})", file=sys.stderr)
+            repo = pathlib.Path(args.repo).resolve(strict=True)
+            report_dir = new_report_dir()
+            mode = "system_vm_verify" if args.system_vm == "verify" else "system_vm_accept"
+            data = report_template(args.sha, mode, report_dir)
+            save_report(report_dir, data)
+        except (GateError, OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+            print(f"BLOCKED: system VM report initialization failed ({type(error).__name__})", file=sys.stderr)
             return 3
+
+        current_gate = "candidate"
+
+        def record_gate(name: str, **evidence) -> None:
+            nonlocal current_gate
+            data["evidence"].update(evidence)
+            if name in data["gates"]:
+                data["gates"][name] = "PASS"
+                names = list(data["gates"])
+                index = names.index(name)
+                current_gate = names[index + 1] if index + 1 < len(names) else name
+            _checkpoint(report_dir, data)
+
+        try:
+            candidate_commit(repo, args.sha)
+            record_gate("candidate")
+            current_gate = "deployed_candidate_verification"
+            root = verify_install(repo, args.sha, args.prefix)
+            owner_system_vm(root, args.system_vm,
+                            approve_lifecycle=args.approve_system_vm_lifecycle,
+                            progress=record_gate)
+        except KeyboardInterrupt:
+            status, message = "BLOCKED", "interrupted; initial lifecycle state was restored when possible"
+        except GateError as error:
+            status, message = error.status, error.message
+        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+            status, message = "FAIL", f"system VM acceptance failed ({type(error).__name__})"
+        except Exception as error:
+            status, message = "FAIL", f"system VM acceptance failed ({type(error).__name__})"
+        else:
+            data["status"] = "PASS"
+            _checkpoint(report_dir, data)
+            print_report(data)
+            return 0
+
+        data["status"] = status
+        if data["gates"].get(current_gate) == "NOT_RUN":
+            data["gates"][current_gate] = status
+        data["notes"].append(message)
+        _checkpoint(report_dir, data)
+        print_report(data)
+        print(f"{status}: {message}", file=sys.stderr)
+        return 3 if status == "BLOCKED" else 1
     modes = [name for name in (
         "preflight", "install", "storage_proof", "run", "verify_cleanup", "all", "parent_accept",
     ) if getattr(args, name)]

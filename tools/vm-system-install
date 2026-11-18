@@ -306,6 +306,9 @@ def main() -> int:
                      "/usr/sbin/usermod"):
             if not os.path.isfile(tool) or not os.access(tool, os.X_OK):
                 refuse(f"fixed system VM host dependency is unavailable: {pathlib.Path(tool).name}")
+        # Parse the exact pinned policy before creating accounts, files, or disks.
+        subprocess.run(["/usr/sbin/visudo", "-cf", str(root / "sudoers/little-mester-vm")],
+                       check=True, stdin=subprocess.DEVNULL)
         preflight(root, owner)
         # Do not claim a pre-existing system identity. Only groups and accounts
         # with these exact fixed names are ever created by this explicit tool.

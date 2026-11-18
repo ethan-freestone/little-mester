@@ -36,6 +36,7 @@ owner = load("vm_owner_acceptance", ROOT / "tools/vm-owner-acceptance")
 system_installer = load("vm_system_install", ROOT / "tools/vm-system-install")
 contract = load("parent_session_contract", ROOT / "lib/vm/parent-session-contract.py")
 bootstrap = load("guest_bootstrap", ROOT / "lib/vm/guest-bootstrap.py")
+acceptance = load("system_acceptance", ROOT / "lib/vm/system-acceptance.py")
 
 
 class SystemdPolicyTests(unittest.TestCase):
@@ -140,6 +141,9 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertEqual(entries, [
             "%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/systemctl start little-mester-vm.service",
             "%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/systemctl stop little-mester-vm.service",
+            "%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/stat --format=%f\\:%d\\:%i -- /var/lib/little-mester-vm/disk.qcow2",
+            "%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/cat -- /etc/sudoers.d/little-mester-vm",
+            "%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/stat --format=%f\\:%u\\:%g\\:%h -- /etc/sudoers.d/little-mester-vm",
         ])
         self.assertFalse(any(token in "\n".join(entries) for token in ("*", "?", "[", "\"")))
         with mock.patch.object(vm.subprocess, "run") as run:
@@ -171,6 +175,8 @@ class SystemdPolicyTests(unittest.TestCase):
             "tools/vm-system-install", "lib/vm/guest-bootstrap.py",
         }
         self.assertTrue(required.issubset(owner.INSTALL_FILES))
+        self.assertIn("lib/vm/system-acceptance.py", owner.INSTALL_FILES)
+        self.assertEqual(owner.INSTALL_FILES["sudoers/little-mester-vm"], 0o444)
         self.assertTrue({"systemd", "sudoers"}.issubset(owner.INSTALL_DIRS))
         self.assertEqual(owner.INSTALL_FILES["tools/vm-system-install"], 0o755)
         installer = (ROOT / "tools/vm-system-install").read_text()
@@ -179,6 +185,7 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn('"lib/vm/guest-bootstrap.py": ("/usr/lib/little-mester-vm/guest-bootstrap.py"',
                       installer)
         self.assertIn('"lib/vm/system-vm.py": ("/usr/lib/little-mester-vm/system-vm.py"', installer)
+        self.assertIn('Parse the exact pinned policy before creating accounts', installer)
         self.assertIn('preflight(root, owner)', installer)
         self.assertLess(installer.index('preflight(root, owner)'),
                         installer.index('ensure_group("lm-vm")'))
@@ -190,6 +197,68 @@ class SystemdPolicyTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0], ["/opt/fixed/lab-vm", "system", "down"])
         with self.assertRaises(owner.GateError):
             owner.owner_system_vm(pathlib.Path("/opt/fixed"), "down;id")
+
+    def test_lifecycle_acceptance_requires_explicit_consent_without_tty(self):
+        with mock.patch.object(owner.sys.stdin, "isatty", return_value=False), \
+                self.assertRaisesRegex(owner.GateError, "requires --approve-system-vm-lifecycle"):
+            owner.owner_system_vm(pathlib.Path("/opt/fixed"), "accept")
+
+    def test_owner_acceptance_cli_has_read_only_verify_and_explicit_accept_modes(self):
+        cli = (ROOT / "tools/vm-owner-acceptance").read_text()
+        self.assertIn('choices=("verify", "accept", "up", "down", "status", "ssh", "auth", "tui")', cli)
+        self.assertIn('"--approve-system-vm-lifecycle"', cli)
+
+    def test_acceptance_refuses_ambiguous_start_states_without_stopping_vm(self):
+        with self.assertRaisesRegex(acceptance.AcceptanceError, "starting state is ambiguous"):
+            acceptance._initial_running_state(
+                {"ActiveState": "active", "MainPID": "123"},
+                {"ActiveState": "inactive", "MainPID": "0"})
+        with self.assertRaisesRegex(acceptance.AcceptanceError, "unit state is ambiguous"):
+            acceptance._initial_running_state(
+                {"ActiveState": "active", "MainPID": "0"},
+                {"ActiveState": "active", "MainPID": "456"})
+
+    def test_acceptance_failure_restores_preexisting_running_state(self):
+        with mock.patch.object(acceptance, "run") as run, \
+                mock.patch.object(acceptance, "service_state", return_value={
+                    "ActiveState": "active", "MainPID": "987"}):
+            acceptance._restore_initial_state(pathlib.Path("/opt/candidate"), True)
+        self.assertEqual(run.call_args.args[0], [
+            "/opt/candidate/lab-vm", "system", "up"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 1005)
+
+    def test_normal_acceptance_stop_rejects_systemd_fallback_failure(self):
+        with mock.patch.object(acceptance, "service_state", side_effect=[
+                {"ActiveState": "failed", "MainPID": "0", "Result": "exit-code"},
+                {"ActiveState": "inactive", "MainPID": "0", "Result": "success"}]), \
+                self.assertRaisesRegex(acceptance.AcceptanceError, "did not stop cleanly"):
+            acceptance._require_normal_stop()
+
+    def test_effective_systemd_command_parser_preserves_exact_argument_boundaries(self):
+        value = ('{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I '
+                 '/usr/lib/little-mester-vm/system-vm.py qmp-stop $MAINPID ; '
+                 'ignore_errors=no ; start_time=[x] }')
+        self.assertEqual(acceptance._effective_argv(value), (
+            "/usr/bin/python3", "/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py qmp-stop $MAINPID"))
+        qemu = ('{ path=/usr/bin/qemu-system-x86_64 ; argv[]=/usr/bin/qemu-system-x86_64 '
+                '-netdev user,id=net0,guestfwd=cmd:socat - TCP:127.0.0.1:32128,restrict=on ; '
+                'ignore_errors=no ; start_time=[x] }')
+        self.assertEqual(acceptance._effective_argv(qemu), (
+            "/usr/bin/qemu-system-x86_64",
+            "/usr/bin/qemu-system-x86_64 -netdev user,id=net0,guestfwd=cmd:socat - TCP:127.0.0.1:32128,restrict=on"))
+        with self.assertRaisesRegex(acceptance.AcceptanceError, "effective command"):
+            acceptance._effective_argv("ExecStart=/usr/bin/false")
+        multiple = value + ' { path=/usr/bin/false ; argv[]=/usr/bin/false ; ignore_errors=no }'
+        with self.assertRaisesRegex(acceptance.AcceptanceError, "multiple effective commands"):
+            acceptance._effective_argv(multiple)
+
+    def test_system_acceptance_report_contains_protected_lifecycle_gates(self):
+        report = owner.report_template("a" * 40, "system_vm_accept", pathlib.Path("attempt"))
+        self.assertEqual(report["evidence"]["restoration_outcome"], "NOT_REQUIRED")
+        self.assertIn("candidate", report["gates"])
+        self.assertIn("deployed_candidate_verification", report["gates"])
+        self.assertIn("same_disk_persistence", report["gates"])
+        self.assertIn("final_vm_state", report["gates"])
 
     def test_system_disk_paths_are_new_fixed_paths_and_never_parent_v3(self):
         self.assertEqual(str(vm.DISK), "/var/lib/little-mester-vm/disk.qcow2")

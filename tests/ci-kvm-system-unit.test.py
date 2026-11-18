@@ -246,27 +246,18 @@ class HostedSystemUnitTests(unittest.TestCase):
                  self.assertRaisesRegex(RuntimeError, "invalid privileged installed asset metadata"):
                 unit.installed_asset_metadata(dest)
 
-    def test_known_hosts_is_read_only_through_fixed_sudo_cat_and_fails_closed(self):
-        payload = b"[127.0.0.1]:22222 ssh-ed25519 AAAA\n"
-        command = ["/usr/bin/sudo", "-n", "/usr/bin/cat", "--",
-                   "/etc/little-mester-vm/known_hosts"]
-        completed = SimpleNamespace(returncode=0, stdout=payload)
-        with mock.patch.object(unit.subprocess, "run", return_value=completed) as run:
-            self.assertEqual(unit.read_known_hosts(), payload)
-        run.assert_called_once_with(command, stdin=unit.subprocess.DEVNULL,
-                                    capture_output=True, check=False)
+    def test_shared_acceptance_reads_group_protected_ssh_assets_without_root_interface(self):
+        source = (ROOT / "lib/vm/system-acceptance.py").read_text()
+        self.assertIn('pathlib.Path("/etc/little-mester-vm/control_ed25519").read_bytes()', source)
+        self.assertIn('pathlib.Path("/etc/little-mester-vm/known_hosts").read_bytes()', source)
+        self.assertIn('"/usr/bin/sudo", "-n", "/usr/bin/cat", "--", destination', source)
 
+    def test_ci_invokes_exact_installed_owner_acceptance_command(self):
         source = SCRIPT.read_text()
-        self.assertEqual(source.count("known_hosts = read_known_hosts()"), 1)
-        self.assertEqual(source.count("known = read_known_hosts()"), 1)
-        self.assertNotIn('pathlib.Path("/etc/little-mester-vm/known_hosts")', source)
-
-        with mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
-                returncode=1, stdout=b"")) as run, \
-                self.assertRaisesRegex(RuntimeError, "command failed \\(1\\)"):
-            unit.read_known_hosts()
-        run.assert_called_once_with(command, stdin=unit.subprocess.DEVNULL,
-                                    capture_output=True, check=False)
+        self.assertIn('installed = CI_INSTALL_PARENT / sha / "tools/vm-owner-acceptance"', source)
+        self.assertIn('"--system-vm", "accept", "--approve-system-vm-lifecycle"', source)
+        self.assertIn("invoke_shared_acceptance(sha)", source)
+        self.assertNotIn('invoke_lab(installed_root, "up", 16 * 60 + 45)', source)
 
     def test_git_object_fetch_uses_exact_sha_path_and_raw_bytes(self):
         sha = "c" * 40
@@ -393,6 +384,7 @@ class HostedSystemUnitTests(unittest.TestCase):
 
     def test_script_uses_production_fixed_operations_and_bounded_stop_cleanup(self):
         source = SCRIPT.read_text()
+        shared = (ROOT / "lib/vm/system-acceptance.py").read_text()
         for required in (
             '"--install", "--sha", sha',
             '"--prefix", str(CI_INSTALL_PREFIX)',
@@ -404,35 +396,29 @@ class HostedSystemUnitTests(unittest.TestCase):
             '"down", 45',
             'invoke_lab(root, "down", 60, check=False)',
             'same_disk=true',
-            'production_unit_normal_stop=PASS qmp_execstop=true graceful=true',
             '"/usr/bin/systemctl", "kill", "--signal=SIGSTOP"',
             '"--kill-whom=main", UNIT',
             'stopped.get("Result") == "exit-code"',
             'system_qemu_pids()',
             'fixed production disk identity changed during forced fallback',
             '"reset-failed", UNIT',
-            'production_unit_forced_stop_recovery=PASS same_disk=true canary=true',
+            'production_unit_forced_stop_recovery=PASS same_disk=true',
             'poller.poll(1000)',
             'TimeoutStopSec=25s',
             'KillMode=control-group',
             'SendSIGKILL=yes',
             'production_unit_forced_stop=PASS',
-            'restrict=on',
-            'hostfwd=tcp:127.0.0.1:22222-:22',
-            'production_tui_probe(installed_root)',
-            '"/usr/bin/sg", ["lm-vm-control", "-c", f"{root}/lab-vm system tui"]',
-            'child.expect(b"Ask anything"',
-            'child.sendcontrol("c")',
-            'child.expect(b"Close Little Mester?"',
-            'child.send(b"q")',
-            'production_unit_direct_egress=PASS target=192.0.2.1:443 connected=false',
-            'production_proxy_private_target_policy=PASS existing_unit_tests=true',
             'production_unit_cleanup=PASS',
             'installed_asset_bytes(dest)',
             '"--system-vm", "down"',
             'invoke_verified_cleanup(sha)',
         ):
             self.assertIn(required, source)
+        for required in ('b"restrict=on"', 'b"hostfwd=tcp:127.0.0.1:22222-:22"',
+                         '1.1.1.1', 'child.expect(b"Ask anything"',
+                         'child.sendcontrol("c")', 'same_disk_persistence:PASS',
+                         '_proxy_policy_checks()', '_is_allowed_public_destination'):
+            self.assertIn(required, shared)
         for forbidden in ("systemctl enable", "systemctl disable", "unlink(", "shutil.rmtree",
                           "rm -rf"):
             self.assertNotIn(forbidden, source)

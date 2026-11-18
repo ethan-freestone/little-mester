@@ -4,20 +4,16 @@
 from __future__ import annotations
 
 import grp
-import importlib.util
 import os
 import pathlib
 import pwd
 import re
 import select
 import shlex
-import socket
 import stat
 import subprocess
 import sys
-import tempfile
 import time
-import uuid
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 CI_INSTALL_PREFIX = pathlib.Path("/srv/little-mester-ci")
@@ -336,6 +332,15 @@ def invoke_verified_cleanup(sha: str) -> None:
     run(["/usr/bin/sg", "lm-vm-control", "-c", command], timeout=90, capture=False)
 
 
+def invoke_shared_acceptance(sha: str) -> None:
+    """Run the exact installed owner-facing acceptance implementation."""
+    installed = CI_INSTALL_PARENT / sha / "tools/vm-owner-acceptance"
+    args = [str(installed), "--system-vm", "accept", "--approve-system-vm-lifecycle",
+            "--sha", sha, "--repo", str(REPO), "--prefix", str(CI_INSTALL_PREFIX)]
+    command = " ".join(shlex.quote(value) for value in args)
+    run(["/usr/bin/sg", "lm-vm-control", "-c", command], timeout=45 * 60, capture=False)
+
+
 def installed_asset_bytes(destination: str) -> bytes:
     path = pathlib.Path(destination)
     if destination == "/etc/sudoers.d/little-mester-vm":
@@ -442,40 +447,6 @@ def production_host_preflight() -> None:
     require(sudo_ok, "production preflight noninteractive sudo unavailable")
 
 
-def guest_command(command: str, *, timeout: int = 30) -> None:
-    key_result = run(["/usr/bin/sudo", "-n", "/usr/bin/cat",
-                      "/etc/little-mester-vm/control_ed25519"])
-    known_hosts = read_known_hosts()
-    temp_root = pathlib.Path(os.environ["RUNNER_TEMP"])
-    with tempfile.TemporaryDirectory(prefix="lm-system-ssh-", dir=temp_root) as directory:
-        key_path = pathlib.Path(directory) / "identity"
-        key_path.write_text(key_result.stdout, encoding="ascii")
-        key_path.chmod(0o600)
-        hosts_path = pathlib.Path(directory) / "known_hosts"
-        hosts_path.write_bytes(known_hosts)
-        hosts_path.chmod(0o600)
-        run([
-            "/usr/bin/ssh", "-F", "/dev/null", "-p", "22222", "-i", str(key_path),
-            "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
-            "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={hosts_path}",
-            "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ProxyCommand=none",
-            "-o", "ProxyJump=none", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes",
-            "mester@127.0.0.1", f"/bin/bash -lc {shlex.quote(command)}",
-        ], timeout=timeout)
-
-
-def read_known_hosts() -> bytes:
-    """Read only the fixed, group-protected known_hosts path through noninteractive sudo."""
-    result = subprocess.run(
-        ["/usr/bin/sudo", "-n", "/usr/bin/cat", "--",
-         "/etc/little-mester-vm/known_hosts"],
-        stdin=subprocess.DEVNULL, capture_output=True, check=False,
-    )
-    require(result.returncode == 0,
-            f"command failed ({result.returncode}): /usr/bin/sudo /usr/bin/cat known_hosts")
-    return result.stdout
-
-
 def unit_identity_checks() -> None:
     checks = (
         ("lm-vm", "lm-vm"), ("lm-vm-proxy", "lm-vm-proxy"),
@@ -501,117 +472,6 @@ def unit_identity_checks() -> None:
     print("production_unit_identity=PASS")
 
 
-def ssh_canary(marker: str, expected: str) -> None:
-    remote_path = f"/home/mester/workspace/.lm-system-ci-{marker}"
-    command = ("set -eu; test -d /home/mester/workspace; "
-               f"test \"$(cat {remote_path})\" = '{expected}'")
-    guest_command(command)
-
-
-def check_direct_egress_blocked() -> None:
-    # TEST-NET-1 is reserved and cannot be a legitimate public dependency. The
-    # probe makes no HTTP request and uses only the already-pinned guest SSH path.
-    remote = ("python3 -c 'import socket; s=socket.socket(); s.settimeout(2); "
-              "result=s.connect_ex((\"192.0.2.1\",443)); s.close(); "
-              "assert result != 0, \"reserved direct target connected\"'")
-    guest_command(remote, timeout=15)
-    print("production_unit_direct_egress=PASS target=192.0.2.1:443 connected=false")
-
-
-def check_proxy_private_target_policy() -> None:
-    run([sys.executable, str(REPO / "tests/vm-proxy.test.py")], timeout=30)
-    print("production_proxy_private_target_policy=PASS existing_unit_tests=true")
-
-
-class _BoundedRawCapture:
-    def __init__(self, stream, limit: int = 256 * 1024):
-        self.stream = stream
-        self.limit = limit
-        self.retained = 0
-
-    def write(self, data: bytes) -> None:
-        remaining = self.limit - self.retained
-        if remaining > 0:
-            chunk = data[:remaining]
-            self.stream.write(chunk)
-            self.retained += len(chunk)
-
-    def flush(self) -> None:
-        self.stream.flush()
-
-
-def production_tui_probe(root: pathlib.Path) -> None:
-    """Reach the real no-auth prompt through the fixed production owner route."""
-    try:
-        import pexpect
-    except ImportError as error:
-        raise RuntimeError("python3-pexpect is required for the production TUI probe") from error
-
-    diagnostic_path = REPO / "tests/ci-tui-diagnostic.py"
-    spec = importlib.util.spec_from_file_location("production_tui_diagnostic", diagnostic_path)
-    require(spec is not None and spec.loader is not None, "TUI diagnostic helper is unavailable")
-    diagnostic = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(diagnostic)
-    fd, raw_name = tempfile.mkstemp(prefix="lm-system-tui-", suffix=".raw",
-                                    dir=os.environ["RUNNER_TEMP"])
-    os.fchmod(fd, 0o600)
-    raw_path = pathlib.Path(raw_name)
-    child = None
-    deadline = time.monotonic() + 110
-    try:
-        with os.fdopen(fd, "wb") as raw_stream:
-            child_env = os.environ.copy()
-            child_env.update(TERM="xterm-256color", LM_VM_TERM_VALIDATED="1")
-            child = pexpect.spawn(
-                "/usr/bin/sg", ["lm-vm-control", "-c", f"{root}/lab-vm system tui"],
-                env=child_env, encoding=None, dimensions=(32, 100), timeout=30,
-                maxread=4096,
-            )
-            child.logfile_read = _BoundedRawCapture(raw_stream)
-            child.expect(b"Ask anything", timeout=max(1, min(90, deadline - time.monotonic())))
-            child.sendcontrol("c")
-            child.expect(b"Close Little Mester?",
-                         timeout=max(1, min(10, deadline - time.monotonic())))
-            child.send(b"q")
-            child.expect(pexpect.EOF, timeout=max(1, min(20, deadline - time.monotonic())))
-            child.close()
-            require(child.exitstatus == 0 and child.signalstatus is None,
-                    "production TUI did not close cleanly: "
-                    f"exit={child.exitstatus} signal={child.signalstatus}")
-            raw_stream.flush()
-            os.fsync(raw_stream.fileno())
-        raw = diagnostic.read_private(raw_path)
-        require(diagnostic.classify(raw) == "tui-prompt-reached",
-                "bounded production TUI capture did not contain the expected no-auth prompt")
-        print("production_unit_tui=PASS route=lab-vm-system-tui prompt=Ask-anything close=ctrl-c,q")
-    except BaseException as error:
-        if child is not None and child.isalive():
-            child.close(force=True)
-        print(f"production_unit_tui=FAIL error={type(error).__name__} private_raw={raw_path}",
-              file=sys.stderr)
-        raise
-
-
-def check_network_basics() -> None:
-    state = service_state(UNIT)
-    require(state.get("ActiveState") == "active" and int(state.get("MainPID", "0")) > 1,
-            f"production VM unit is not active with a MainPID: {state}")
-    pid = state["MainPID"]
-    argv = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
-    require("restrict=on" in argv and "hostfwd=tcp:127.0.0.1:22222-:22" in argv,
-            "production QEMU lacks restricted user networking or loopback-only SSH forwarding")
-    proxy_state = service_state(PROXY_UNIT)
-    require(proxy_state.get("ActiveState") == "active" and int(proxy_state.get("MainPID", "0")) > 1,
-            f"production egress proxy is not active: {proxy_state}")
-    with socket.create_connection(("127.0.0.1", 32128), timeout=2):
-        pass
-    listeners = run(["/usr/bin/ss", "-H", "-ltn"]).stdout
-    require("127.0.0.1:32128" in listeners and "0.0.0.0:32128" not in listeners
-            and "[::]:32128" not in listeners,
-            "proxy listener is not loopback-only")
-    print("production_unit_network=PASS qemu_restrict=on ssh_forward=127.0.0.1 proxy=loopback")
-
-
 def system_qemu_pids() -> list[int]:
     """Return processes with the fixed production VM's unique QEMU name."""
     matches = []
@@ -629,7 +489,7 @@ def system_qemu_pids() -> list[int]:
     return matches
 
 
-def force_systemd_fallback(root: pathlib.Path, marker: str, expected: str) -> None:
+def force_systemd_fallback(root: pathlib.Path) -> None:
     """Freeze only this unit's verified QEMU MainPID and prove systemd kills it."""
     state = service_state(UNIT)
     require(state.get("ActiveState") == "active", "forced-stop case requires the active fixed unit")
@@ -685,10 +545,9 @@ def force_systemd_fallback(root: pathlib.Path, marker: str, expected: str) -> No
         require(restarted.get("ActiveState") == "active"
                 and int(restarted.get("MainPID", "0")) > 1,
                 f"production VM did not restart after expected forced-stop failure: {restarted}")
-        ssh_canary(marker, expected)
         require(fixed_disk_identity() == disk_before,
                 "fixed production restart did not retain the same disk identity")
-        print("production_unit_forced_stop_recovery=PASS same_disk=true canary=true")
+        print("production_unit_forced_stop_recovery=PASS same_disk=true")
     finally:
         os.close(pidfd)
 
@@ -762,63 +621,10 @@ def main() -> int:
         verify_installed_files()
         require_fixed_units_loaded()
         unit_identity_checks()
-        marker = uuid.uuid4().hex
-        expected = f"systemd-production-canary-{marker}"
-        started_at = time.monotonic()
         write_start_marker(sha)
         start_attempted = True
-        invoke_lab(installed_root, "up", 16 * 60 + 45)
-        first = service_state(UNIT)
-        require(first.get("ActiveState") == "active" and int(first.get("MainPID", "0")) > 1,
-                f"systemd unit failed readiness/start: {first}")
-        invoke_lab(installed_root, "up", 60)
-        duplicate = service_state(UNIT)
-        require(duplicate.get("ActiveState") == "active"
-                and duplicate.get("MainPID") == first.get("MainPID"),
-                "duplicate production start replaced the active QEMU MainPID")
-        check_network_basics()
-        check_direct_egress_blocked()
-        check_proxy_private_target_policy()
-        status = run([str(installed_root / "lab-vm"), "system", "status"], timeout=20)
-        require("active" in status.stdout.lower() and first["MainPID"] in status.stdout,
-                "fixed owner status operation did not report the active production MainPID")
-        # Create a uniquely named guest workspace marker with the existing SSH
-        # identity, then prove the same disk retains it over the real unit stop.
-        key = run(["/usr/bin/sudo", "-n", "/usr/bin/cat",
-                   "/etc/little-mester-vm/control_ed25519"]).stdout
-        known = read_known_hosts()
-        with tempfile.TemporaryDirectory(prefix="lm-system-write-", dir=os.environ["RUNNER_TEMP"]) as d:
-            key_file, hosts_file = pathlib.Path(d) / "identity", pathlib.Path(d) / "known_hosts"
-            key_file.write_text(key, encoding="ascii"); key_file.chmod(0o600)
-            hosts_file.write_bytes(known); hosts_file.chmod(0o600)
-            remote = f"/home/mester/workspace/.lm-system-ci-{marker}"
-            write = f"umask 077; printf '%s' '{expected}' > {remote}; test \"$(cat {remote})\" = '{expected}'"
-            run(["/usr/bin/ssh", "-F", "/dev/null", "-p", "22222", "-i", str(key_file),
-                 "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
-                 "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={hosts_file}",
-                 "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ProxyCommand=none",
-                 "-o", "ProxyJump=none", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes",
-                 "mester@127.0.0.1", f"/bin/bash -lc {shlex.quote(write)}"], timeout=30)
-        ssh_canary(marker, expected)
-        print("production_unit_canary=PASS before_stop=true")
-        production_tui_probe(installed_root)
-        before_disk = fixed_disk_identity()
-        invoke_lab(installed_root, "down", 45)
-        assert_stopped(vm_result="success")
-        print("production_unit_normal_stop=PASS qmp_execstop=true graceful=true")
-        stopped_disk = fixed_disk_identity()
-        require(before_disk == stopped_disk,
-                "fixed production disk identity changed across stop")
-        invoke_lab(installed_root, "up", 16 * 60 + 45)
-        after = service_state(UNIT)
-        require(after.get("ActiveState") == "active" and int(after.get("MainPID", "0")) > 1,
-                f"production VM did not become ready after same-disk restart: {after}")
-        ssh_canary(marker, expected)
-        after_disk = fixed_disk_identity()
-        require(before_disk == after_disk,
-                "production restart did not use the same fresh disk inode")
-        print(f"production_unit_restart=PASS same_disk=true elapsed_seconds={int(time.monotonic()-started_at)}")
-        force_systemd_fallback(installed_root, marker, expected)
+        invoke_shared_acceptance(sha)
+        force_systemd_fallback(installed_root)
     except BaseException as error:  # noqa: BLE001 - finally below must stop a started unit on cancellation
         failure = error
         print(f"production_unit_result=FAIL error={type(error).__name__}: {error}", file=sys.stderr)

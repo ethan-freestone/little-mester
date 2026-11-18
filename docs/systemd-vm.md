@@ -45,14 +45,22 @@ The fixed owner interface is:
 lab-vm system up|down|status|ssh|auth|tui
 ```
 
-The equivalent owner-acceptance adapter is:
+The SHA-pinned owner-acceptance command offers read-only verification and an
+explicit lifecycle acceptance mode:
 
 ```sh
-tools/vm-owner-acceptance --system-vm <operation> --sha <commit> --repo <source-repository>
+tools/vm-owner-acceptance --system-vm verify --sha <commit> --repo <source-repository>
+tools/vm-owner-acceptance --system-vm accept --sha <commit> --repo <source-repository>
 ```
 
-Both dispatch to `lab-vm`; neither accepts a unit, disk path, QEMU option,
-arbitrary systemd property, or remote command. `up` waits for cloud-init, SSH, and the existing protected parent
+`verify` never changes lifecycle state. `accept` requires the exact interactive
+confirmation or `--approve-system-vm-lifecycle`, checks the deployed candidate,
+network restrictions, OpenCode TUI, and same-disk persistence across restart,
+then leaves the VM running. Hosted CI invokes this same installed command, then
+runs CI-only forced-stop fault injection and disposable cleanup. Neither this
+command nor the fixed owner interface accepts a unit, disk path, QEMU option,
+arbitrary systemd property, or remote command. `up` waits for cloud-init, SSH,
+and the existing protected parent
 session-contract readiness checks. `auth` uses the existing bounded browser
 callback bridge.
 
