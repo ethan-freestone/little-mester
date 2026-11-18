@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
 import pathlib
@@ -434,6 +435,23 @@ class HostedSystemUnitTests(unittest.TestCase):
         kvm_job = workflow.split("  real-qemu-kvm-trial:", 1)[1].split("\n  # ── 4.", 1)[0]
         self.assertIn("python3-pexpect", kvm_job)
         self.assertIn("ncurses-bin", kvm_job)
+
+    def test_system_assets_are_installed_before_pinned_file_verification(self):
+        source = SCRIPT.read_text()
+        tree = ast.parse(source)
+        main = next(node for node in tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name == "main")
+        calls = []
+        for node in ast.walk(main):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Name) and node.func.id == "verify_installed_files":
+                calls.append((node.lineno, "verify"))
+            elif isinstance(node.func, ast.Name) and node.func.id == "run":
+                args = ast.get_source_segment(source, node)
+                if args and "tools/vm-system-install" in args:
+                    calls.append((node.lineno, "system-install"))
+        self.assertEqual([name for _, name in sorted(calls)], ["system-install", "verify"])
 
 
 if __name__ == "__main__":

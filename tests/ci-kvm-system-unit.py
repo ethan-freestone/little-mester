@@ -608,8 +608,8 @@ def main() -> int:
         run([str(REPO / "tools/vm-owner-acceptance"), "--install", "--sha", sha,
              "--prefix", str(CI_INSTALL_PREFIX), "--repo", str(REPO)], timeout=120)
         installed_root = CI_INSTALL_PARENT / sha
-        verify_installed_files()
         run(["/usr/bin/sudo", "-n", str(installed_root / "tools/vm-system-install")], timeout=300)
+        verify_installed_files()
         require_fixed_units_loaded()
         unit_identity_checks()
         marker = uuid.uuid4().hex
