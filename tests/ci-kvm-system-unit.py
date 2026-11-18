@@ -230,7 +230,8 @@ def verify_installed_files() -> None:
         installed = installed_asset_bytes(dest)
         require(installed == git_object_bytes(sha, source),
                 f"installed production asset bytes differ from exact candidate: {dest}")
-    run(["/usr/sbin/visudo", "-cf", "/etc/sudoers.d/little-mester-vm"])
+    run(["/usr/bin/sudo", "-n", "/usr/sbin/visudo", "-cf",
+         "/etc/sudoers.d/little-mester-vm"])
     print("production_unit_install=PASS pinned_bytes=true sudoers=PASS")
 
 
@@ -287,7 +288,7 @@ def production_host_preflight() -> None:
 def guest_command(command: str, *, timeout: int = 30) -> None:
     key_result = run(["/usr/bin/sudo", "-n", "/usr/bin/cat",
                       "/etc/little-mester-vm/control_ed25519"])
-    known_hosts = pathlib.Path("/etc/little-mester-vm/known_hosts").read_bytes()
+    known_hosts = read_known_hosts()
     temp_root = pathlib.Path(os.environ["RUNNER_TEMP"])
     with tempfile.TemporaryDirectory(prefix="lm-system-ssh-", dir=temp_root) as directory:
         key_path = pathlib.Path(directory) / "identity"
@@ -304,6 +305,18 @@ def guest_command(command: str, *, timeout: int = 30) -> None:
             "-o", "ProxyJump=none", "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes",
             "mester@127.0.0.1", f"/bin/bash -lc {shlex.quote(command)}",
         ], timeout=timeout)
+
+
+def read_known_hosts() -> bytes:
+    """Read only the fixed, group-protected known_hosts path through noninteractive sudo."""
+    result = subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/cat", "--",
+         "/etc/little-mester-vm/known_hosts"],
+        stdin=subprocess.DEVNULL, capture_output=True, check=False,
+    )
+    require(result.returncode == 0,
+            f"command failed ({result.returncode}): /usr/bin/sudo /usr/bin/cat known_hosts")
+    return result.stdout
 
 
 def unit_identity_checks() -> None:
@@ -579,11 +592,11 @@ def main() -> int:
         # identity, then prove the same disk retains it over the real unit stop.
         key = run(["/usr/bin/sudo", "-n", "/usr/bin/cat",
                    "/etc/little-mester-vm/control_ed25519"]).stdout
-        known = pathlib.Path("/etc/little-mester-vm/known_hosts").read_text(encoding="ascii")
+        known = read_known_hosts()
         with tempfile.TemporaryDirectory(prefix="lm-system-write-", dir=os.environ["RUNNER_TEMP"]) as d:
             key_file, hosts_file = pathlib.Path(d) / "identity", pathlib.Path(d) / "known_hosts"
             key_file.write_text(key, encoding="ascii"); key_file.chmod(0o600)
-            hosts_file.write_text(known, encoding="ascii"); hosts_file.chmod(0o600)
+            hosts_file.write_bytes(known); hosts_file.chmod(0o600)
             remote = f"/home/mester/workspace/.lm-system-ci-{marker}"
             write = f"umask 077; printf '%s' '{expected}' > {remote}; test \"$(cat {remote})\" = '{expected}'"
             run(["/usr/bin/ssh", "-F", "/dev/null", "-p", "22222", "-i", str(key_file),

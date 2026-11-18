@@ -98,9 +98,12 @@ class HostedSystemUnitTests(unittest.TestCase):
                  mock.patch.object(unit.os, "lstat", return_value=root_info), \
                  mock.patch.object(unit, "installed_asset_bytes", return_value=payload), \
                  mock.patch.object(unit, "git_object_bytes", return_value=payload) as git_bytes, \
-                 mock.patch.object(unit, "run"):
+                 mock.patch.object(unit, "run") as run:
                 unit.verify_installed_files()
                 git_bytes.assert_called_once_with("a" * 40, "systemd/little-mester-vm-proxy.service")
+                run.assert_called_once_with([
+                    "/usr/bin/sudo", "-n", "/usr/sbin/visudo", "-cf",
+                    "/etc/sudoers.d/little-mester-vm"])
                 destination.write_bytes(b"[Unit]\nDescription=changed proxy\n")
                 with mock.patch.object(unit, "installed_asset_bytes", return_value=destination.read_bytes()):
                     git_bytes.reset_mock()
@@ -138,6 +141,28 @@ class HostedSystemUnitTests(unittest.TestCase):
                 unit.verify_installed_files()
             installed_bytes.assert_called_once_with(dest)
             git_bytes.assert_called_once_with("b" * 40, "sudoers/little-mester-vm")
+
+    def test_known_hosts_is_read_only_through_fixed_sudo_cat_and_fails_closed(self):
+        payload = b"[127.0.0.1]:22222 ssh-ed25519 AAAA\n"
+        command = ["/usr/bin/sudo", "-n", "/usr/bin/cat", "--",
+                   "/etc/little-mester-vm/known_hosts"]
+        completed = SimpleNamespace(returncode=0, stdout=payload)
+        with mock.patch.object(unit.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(unit.read_known_hosts(), payload)
+        run.assert_called_once_with(command, stdin=unit.subprocess.DEVNULL,
+                                    capture_output=True, check=False)
+
+        source = SCRIPT.read_text()
+        self.assertEqual(source.count("known_hosts = read_known_hosts()"), 1)
+        self.assertEqual(source.count("known = read_known_hosts()"), 1)
+        self.assertNotIn('pathlib.Path("/etc/little-mester-vm/known_hosts")', source)
+
+        with mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                returncode=1, stdout=b"")) as run, \
+                self.assertRaisesRegex(RuntimeError, "command failed \\(1\\)"):
+            unit.read_known_hosts()
+        run.assert_called_once_with(command, stdin=unit.subprocess.DEVNULL,
+                                    capture_output=True, check=False)
 
     def test_git_object_fetch_uses_exact_sha_path_and_raw_bytes(self):
         sha = "c" * 40
