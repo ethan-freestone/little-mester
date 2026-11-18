@@ -612,11 +612,29 @@ def check_network_basics() -> None:
     print("production_unit_network=PASS qemu_restrict=on ssh_forward=127.0.0.1 proxy=loopback")
 
 
-def force_systemd_fallback(root: pathlib.Path) -> None:
+def system_qemu_pids() -> list[int]:
+    """Return processes with the fixed production VM's unique QEMU name."""
+    matches = []
+    for entry in pathlib.Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        if b"qemu-system-x86_64" in argv[0] and any(
+                argv[index:index + 2] == [b"-name", b"little-mester-system-vm"]
+                for index in range(len(argv) - 1)):
+            matches.append(int(entry.name))
+    return matches
+
+
+def force_systemd_fallback(root: pathlib.Path, marker: str, expected: str) -> None:
     """Freeze only this unit's verified QEMU MainPID and prove systemd kills it."""
     state = service_state(UNIT)
     require(state.get("ActiveState") == "active", "forced-stop case requires the active fixed unit")
     pid = int(state.get("MainPID", "0"))
+    disk_before = fixed_disk_identity()
     require(pid > 1, "fixed systemd unit has no QEMU MainPID for fallback test")
     cmdline_path = pathlib.Path(f"/proc/{pid}/cmdline")
     argv = cmdline_path.read_bytes().replace(b"\0", b" ").decode()
@@ -642,17 +660,35 @@ def force_systemd_fallback(root: pathlib.Path) -> None:
         print(f"production_unit_forced_stop_started=pidfd_bound_mainpid={pid} signal=SIGSTOP")
         down_result = invoke_lab(root, "down", 60, check=False)
         stopped = service_state(UNIT)
-        require(stopped.get("ActiveState") == "inactive" and stopped.get("MainPID") == "0",
+        require(stopped.get("ActiveState") == "failed" and stopped.get("MainPID") == "0",
                 f"systemd did not finish forced fallback stop: {stopped}")
-        require(stopped.get("Result") == "timeout",
-                f"systemd did not report the bounded stop-timeout fallback: {stopped}")
+        require(stopped.get("Result") == "exit-code",
+                f"systemd did not record the failed identity-bound QMP ExecStop: {stopped}")
         poller = select.poll()
         poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
         require(bool(poller.poll(1000)), "pidfd did not report exit of the exact frozen QEMU MainPID")
+        require(not system_qemu_pids(),
+                "a QEMU process with the fixed production VM identity remains after fallback")
+        require(fixed_disk_identity() == disk_before,
+                "fixed production disk identity changed during forced fallback")
         require(down_result.returncode in (0, 1),
                 f"fixed system down returned an unexpected status after proven fallback: {down_result.returncode}")
-        print("production_unit_forced_stop=PASS result=timeout timeout_stop=25s "
-              "killmode=control-group send_sigkill=yes pidfd_exit=true")
+        print("production_unit_forced_stop=PASS result=exit-code qmp_execstop_failed=true "
+              "systemd_term_fallback=true pidfd_exit=true no_qemu=true same_disk=true")
+
+        # A failed unit is expected when ExecStop cannot perform graceful QMP
+        # shutdown. Reset only this test's expected failed state, then prove the
+        # protected disk is still bootable and retains the canary.
+        run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reset-failed", UNIT], timeout=5)
+        invoke_lab(root, "up", 16 * 60 + 45)
+        restarted = service_state(UNIT)
+        require(restarted.get("ActiveState") == "active"
+                and int(restarted.get("MainPID", "0")) > 1,
+                f"production VM did not restart after expected forced-stop failure: {restarted}")
+        ssh_canary(marker, expected)
+        require(fixed_disk_identity() == disk_before,
+                "fixed production restart did not retain the same disk identity")
+        print("production_unit_forced_stop_recovery=PASS same_disk=true canary=true")
     finally:
         os.close(pidfd)
 
@@ -782,7 +818,7 @@ def main() -> int:
         require(before_disk == after_disk,
                 "production restart did not use the same fresh disk inode")
         print(f"production_unit_restart=PASS same_disk=true elapsed_seconds={int(time.monotonic()-started_at)}")
-        force_systemd_fallback(installed_root)
+        force_systemd_fallback(installed_root, marker, expected)
     except BaseException as error:  # noqa: BLE001 - finally below must stop a started unit on cancellation
         failure = error
         print(f"production_unit_result=FAIL error={type(error).__name__}: {error}", file=sys.stderr)

@@ -8,7 +8,7 @@
   "title": "P1-02 — Persistent owner parent VM, supervisor and SSH",
   "objective": "Deliver one owner-operated protected persistent parent with persistent qcow2/home/workspace, stable host/control identities and fresh run IDs, exact terminal-independent supervisor ownership, bounded readiness, non-forwarding SSH/TUI, pidfd stop and disk-preserving re-up. Preserve approved R1–R10 and dry-run recovery/security requirements; no implicit host exports or state deletion. M1a/M1b real-host acceptance is owner-reported PASS on exact-SHA CI-green candidate 9a98f0c93ff65d38b181ecb9ab91df0633c1d280, with owner acceptance evidence recorded below. The broader #54 criteria remain pending their additional auth/config/history/TUI/storage/security clauses and must not be inferred from M1a/M1b alone. Owner reports four scratch QEMU/qemu-img compatibility checks PASS ×2 on source 37f5fb6/QEMU 11.1.3. Workflow: docs/workflows/phase1-continuous-execution.md; no criteria relaxed.",
   "created_at": "2026-11-10T21:46:28.200Z",
-  "updated_at": "2026-11-18T17:17:01.234Z",
+  "updated_at": "2026-11-18T17:53:51.429Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -205,6 +205,11 @@
       "timestamp": "2026-11-12T23:48:58.641Z",
       "author": "cli",
       "body": "Owner-reported M1b execution PASS and same-disk recovery/restart evidence are now recorded in the structured cases ledger. Sol Medium bounded closure assessment: M1b recovery criterion is supported, but M1a/full #54 cannot be closed yet: existing A4/A5/A7 require corrected ordinary stop/up and broader persistence/lifecycle acceptance. One minimal owner-run ordinary stop/up/canary check remains; no agent VM action."
+    },
+    {
+      "timestamp": "2026-11-18T17:53:51.428Z",
+      "author": "cli",
+      "body": "2026-11-18 forced-stop investigation: hosted run 44357312842 confirms normal production QMP stop and same-disk restart PASS. Forced SIGSTOP made identity-bound qmp-stop ExecStop fail (status 2); systemd then terminated the exact QEMU via its declared TERM fallback, leaving ActiveState=failed, Result=exit-code, MainPID=0. This is consistent with docs/systemd-vm.md; the previous test's inactive/timeout expectation was wrong. CI assertion now expects that failed result only after pidfd confirms the exact QEMU exited, no process with the fixed VM identity remains, and disk device/inode is unchanged; it then resets only the VM unit's expected failed state, restarts on the same disk, and verifies the existing canary. No production behavior/exit code changed. Local py_compile, system-unit test 27/27, and diff check PASS. Sol Medium exact-diff review PASS; no live systemd/KVM rerun yet, so hosted forced-stop recovery remains unverified."
     }
   ]
 }
