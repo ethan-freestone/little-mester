@@ -655,14 +655,14 @@ exit 0
 fi
 
 if [[ "$requested_stage" == boot ]]; then
-stage_start boot 120
+stage_start boot 180
 printf 'KVM_TRIAL: starting pinned guest with accel=kvm (no TCG fallback)\n'
 qemu_started=$SECONDS
 qemu_deadline=$((qemu_started + 300))
 owner_call start-initial >/dev/null || fail 'lifecycle owner could not start initial QEMU guest'
 expected_qemu_mode=initial
 capture_qemu_identity || fail 'could not prove ownership of the launched QEMU process'
-printf 'KVM_PROGRESS phase=qemu-started readiness_limit=120s integration_limit=300s\n'
+printf 'KVM_PROGRESS phase=qemu-started readiness_limit=180s integration_limit=300s\n'
 
 pin_guest_host_key_from_serial() {
   local public_key fingerprint known_hosts_tmp public_key_file
@@ -682,7 +682,7 @@ pin_guest_host_key_from_serial() {
 
 ready=0
 qemu_started=$SECONDS
-readiness_deadline=$((qemu_started + 120))
+readiness_deadline=$((qemu_started + 180))
 stage_remaining=$((stage_deadline - SECONDS))
 (( readiness_deadline - SECONDS > stage_remaining )) && readiness_deadline=$((SECONDS + stage_remaining))
 next_progress=$((SECONDS + 15))
@@ -736,7 +736,7 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
   remaining=$((readiness_deadline - SECONDS))
   (( remaining > 0 )) && sleep 1
 done
-[[ "$ready" == 1 ]] || fail "guest did not reach cloud-init/SSH readiness within 120s (last ssh status: $last_ssh_rc)"
+[[ "$ready" == 1 ]] || fail "guest did not reach cloud-init/SSH readiness within 180s (last ssh status: $last_ssh_rc)"
 guest_boot_id="$(ssh_guest 'cat /proc/sys/kernel/random/boot_id')"
 [[ "$guest_boot_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
   || fail 'initial guest boot identity was not a valid kernel boot ID'

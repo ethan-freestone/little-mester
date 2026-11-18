@@ -37,12 +37,24 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertNotIn("workflow_dispatch:", workflow)
         self.assertLess(job.index("Prove final identity-safe cleanup"),
                         job.index("Exercise exact pinned production systemd VM unit"))
+        self.assertIn("id: smoke_cleanup", job)
+        self.assertIn("steps.smoke_cleanup.outcome == 'success'", job)
+        self.assertIn("!cancelled()", job)
         self.assertIn("evidence_scope=production_systemd_unit", SCRIPT.read_text())
         self.assertIn("ci-kvm-shared-launch-probe.py", job)
         self.assertIn("python3 tests/ci-kvm-system-unit.py --cleanup", job)
         self.assertIn("if: always()", job)
         self.assertLess(job.index("Exercise exact pinned production systemd VM unit"),
                         job.index("Require production systemd VM and proxy stopped"))
+    def test_boot_readiness_has_bounded_three_minute_window(self):
+        stage = (ROOT / "tests/ci-kvm-stage.sh").read_text()
+        boot = stage.split('if [[ "$requested_stage" == boot ]]; then', 1)[1].split(
+            'if [[ "$requested_stage" == "restricted-reboot-egress-persistence" ]]; then', 1
+        )[0]
+        self.assertIn("stage_start boot 180", boot)
+        self.assertIn("readiness_deadline=$((qemu_started + 180))", boot)
+        self.assertIn("readiness_limit=180s integration_limit=300s", boot)
+        self.assertIn("readiness within 180s", boot)
 
     def test_preflight_refuses_existing_fixed_path_account_group_and_install(self):
         sha = "a" * 40

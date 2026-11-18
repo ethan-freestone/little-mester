@@ -186,10 +186,12 @@ jobs:
         timeout-minutes: 2
         run: python3 tests/ci-kvm-oauth-cleanup.test.py
       - name: Prove final identity-safe cleanup
+        id: smoke_cleanup
         if: always()
         timeout-minutes: 3
         run: bash tests/ci-kvm-stage.sh --stage cleanup --run-dir "$LM_CI_STATE_DIR"
       - name: Exercise exact pinned production systemd VM unit on disposable hosted KVM
+        if: ${{ !cancelled() && steps.smoke_cleanup.outcome == 'success' }}
         timeout-minutes: 45
         run: python3 tests/ci-kvm-system-unit.py
       - name: Require production systemd VM and proxy stopped

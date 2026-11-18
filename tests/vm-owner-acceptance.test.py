@@ -1829,6 +1829,58 @@ class OwnerAcceptanceTests(unittest.TestCase):
                     acceptance.install_candidate(ROOT, sha)
             self.assertEqual(marker.read_text(encoding="utf-8"), "historical")
 
+    def test_install_worker_reports_exact_unsafe_ancestry_metadata_without_following_links(self):
+        worker = acceptance.INSTALL_WORKER
+        substitutions = (
+            ('or os.geteuid() != 0', 'or False'),
+            ('fd = os.open("/", flags)', 'fd = os.open(sys.argv[4], flags)'),
+            ('if root.st_uid != 0 or root.st_mode & (stat.S_IWGRP | stat.S_IWOTH):', 'if False:'),
+            ('os.fchown(child, 0, 0)', 'pass'),
+            (
+                'if info.st_uid != 0:\n            failures.append("uid-not-root")',
+                'if False:\n            failures.append("uid-not-root")',
+            ),
+        )
+        for original, replacement in substitutions:
+            self.assertIn(original, worker)
+            worker = worker.replace(original, replacement, 1)
+
+        with tempfile.TemporaryDirectory(prefix="lm-install-worker-") as temporary:
+            root = pathlib.Path(temporary)
+            protected = root / "opt/little-mester/v3"
+            protected.mkdir(parents=True)
+            (root / "opt").chmod(0o755)
+            (root / "opt/little-mester").chmod(0o755)
+            protected.chmod(0o700)
+            result = subprocess.run(
+                [sys.executable, "-I", "-c", worker, "a" * 40,
+                 acceptance.installer_manifest(), "/opt/little-mester", str(root)],
+                input=b"", stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            diagnostic = result.stderr.decode("utf-8", "replace")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("component='/opt/little-mester/v3'", diagnostic)
+            self.assertIn("type=drwx------", diagnostic)
+            self.assertIn("mode=0700", diagnostic)
+            self.assertIn("checks=missing-other-execute", diagnostic)
+            self.assertNotIn("PINNED_INSTALL_CREATED", result.stdout.decode())
+
+        with tempfile.TemporaryDirectory(prefix="lm-install-worker-link-") as temporary:
+            root = pathlib.Path(temporary)
+            (root / "opt").mkdir()
+            (root / "opt").chmod(0o755)
+            (root / "opt/little-mester").symlink_to(root / "elsewhere")
+            result = subprocess.run(
+                [sys.executable, "-I", "-c", worker, "a" * 40,
+                 acceptance.installer_manifest(), "/opt/little-mester", str(root)],
+                input=b"", stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            diagnostic = result.stderr.decode("utf-8", "replace")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("component='/opt/little-mester'", diagnostic)
+            self.assertIn("type=lrwxrwxrwx", diagnostic)
+            self.assertIn("checks=not-directory,symlink", diagnostic)
+
     def test_install_archive_contains_exactly_the_worker_allowlisted_runtime(self):
         head = subprocess.run(
             [acceptance.GIT, "-C", str(ROOT), "rev-parse", "HEAD"],
@@ -1873,7 +1925,10 @@ class OwnerAcceptanceTests(unittest.TestCase):
             ('or os.geteuid() != 0', 'or False'),
             ('fd = os.open("/", flags)', 'fd = os.open(sys.argv[4], flags)'),
             ('if root.st_uid != 0 or root.st_mode & (stat.S_IWGRP | stat.S_IWOTH):', 'if False:'),
-            ('or info.st_uid != 0', 'or False'),
+            (
+                'if info.st_uid != 0:\n            failures.append("uid-not-root")',
+                'if False:\n            failures.append("uid-not-root")',
+            ),
             ('os.fchown(child, 0, 0)', 'pass'),
             ('os.fchown(target, 0, 0)', 'pass'),
             ('os.fchown(next_fd, 0, 0)', 'pass'),
@@ -1889,6 +1944,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
                         [sys.executable, "-I", "-c", worker, head,
                          acceptance.installer_manifest(), prefix, temporary],
                         input=result.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                        preexec_fn=lambda: os.umask(0o002),
                     )
                     self.assertEqual(installed.returncode, 0,
                                      installed.stderr.decode("utf-8", "replace"))

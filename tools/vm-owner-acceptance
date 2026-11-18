@@ -506,7 +506,32 @@ try:
     root = os.fstat(fd)
     if root.st_uid != 0 or root.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise SystemExit("REFUSED: filesystem root is not protected")
+
+    def require_protected_ancestry(path, info, created):
+        failures = []
+        if not stat.S_ISDIR(info.st_mode):
+            failures.append("not-directory")
+        if stat.S_ISLNK(info.st_mode):
+            failures.append("symlink")
+        if info.st_uid != 0:
+            failures.append("uid-not-root")
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            failures.append("group-or-world-writable")
+        if not created and not info.st_mode & stat.S_IXOTH:
+            failures.append("missing-other-execute")
+        if failures:
+            raise SystemExit(
+                "REFUSED: installation ancestry is not root-owned and protected "
+                f"component={path!r} type={stat.filemode(info.st_mode)} "
+                f"uid={info.st_uid} gid={info.st_gid} "
+                f"mode={stat.S_IMODE(info.st_mode):04o} "
+                f"dev={info.st_dev} ino={info.st_ino} "
+                f"checks={','.join(failures)}"
+            )
+
+    walked = []
     for component in parts:
+        walked.append(component)
         created = False
         try:
             info = os.stat(component, dir_fd=fd, follow_symlinks=False)
@@ -514,18 +539,19 @@ try:
             os.mkdir(component, 0o755, dir_fd=fd)
             created = True
             info = os.stat(component, dir_fd=fd, follow_symlinks=False)
-        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-                or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-                or (not created and not info.st_mode & stat.S_IXOTH)):
-            raise SystemExit("REFUSED: installation ancestry is not root-owned and protected")
+        path = "/" + "/".join(walked)
+        if not created:
+            require_protected_ancestry(path, info, created)
         child = os.open(component, flags, dir_fd=fd)
-        if created:
-            os.fchown(child, 0, 0)
-            os.fchmod(child, 0o755)
         opened = os.fstat(child)
         if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
             os.close(child)
             raise SystemExit("REFUSED: installation ancestry changed while opening")
+        if created:
+            os.fchown(child, 0, 0)
+            os.fchmod(child, 0o755)
+            info = os.fstat(child)
+        require_protected_ancestry(path, info, created)
         os.close(fd)
         fd = child
     try:
