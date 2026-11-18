@@ -168,13 +168,6 @@ jobs:
       - name: Probe shared QEMU builder with bounded disposable KVM launch
         timeout-minutes: 2
         run: python3 tests/ci-kvm-shared-launch-probe.py --run-dir "$LM_CI_STATE_DIR"
-      - name: Exercise exact pinned production systemd VM unit on disposable hosted KVM
-        timeout-minutes: 45
-        run: python3 tests/ci-kvm-system-unit.py
-      - name: Require production systemd VM and proxy stopped
-        if: always()
-        timeout-minutes: 2
-        run: python3 tests/ci-kvm-system-unit.py --cleanup
       - name: Start real KVM guest and prove strict SSH readiness
         timeout-minutes: 5
         run: bash tests/ci-kvm-stage.sh --stage boot --run-dir "$LM_CI_STATE_DIR"
@@ -196,6 +189,13 @@ jobs:
         if: always()
         timeout-minutes: 3
         run: bash tests/ci-kvm-stage.sh --stage cleanup --run-dir "$LM_CI_STATE_DIR"
+      - name: Exercise exact pinned production systemd VM unit on disposable hosted KVM
+        timeout-minutes: 45
+        run: python3 tests/ci-kvm-system-unit.py
+      - name: Require production systemd VM and proxy stopped
+        if: always()
+        timeout-minutes: 2
+        run: python3 tests/ci-kvm-system-unit.py --cleanup
 
   # ── 4. Hygiene — ShellCheck, Python compile, ruff lint ───────────
   hygiene:

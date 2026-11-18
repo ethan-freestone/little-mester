@@ -35,12 +35,14 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 90", job)
         self.assertNotIn("runs-on: self-hosted", job)
         self.assertNotIn("workflow_dispatch:", workflow)
-        self.assertLess(job.index("Probe shared QEMU builder"),
+        self.assertLess(job.index("Prove final identity-safe cleanup"),
                         job.index("Exercise exact pinned production systemd VM unit"))
         self.assertIn("evidence_scope=production_systemd_unit", SCRIPT.read_text())
         self.assertIn("ci-kvm-shared-launch-probe.py", job)
         self.assertIn("python3 tests/ci-kvm-system-unit.py --cleanup", job)
         self.assertIn("if: always()", job)
+        self.assertLess(job.index("Exercise exact pinned production systemd VM unit"),
+                        job.index("Require production systemd VM and proxy stopped"))
 
     def test_preflight_refuses_existing_fixed_path_account_group_and_install(self):
         sha = "a" * 40
@@ -122,7 +124,6 @@ class HostedSystemUnitTests(unittest.TestCase):
             candidate = pathlib.Path(temp) / "sudoers/little-mester-vm"
             candidate.parent.mkdir(parents=True)
             candidate.write_bytes(b"mutable candidate bytes")
-            installed = SimpleNamespace(st_mode=0o100440, st_uid=0)
             original_read_bytes = pathlib.Path.read_bytes
 
             def guarded_read_bytes(path):
@@ -133,14 +134,42 @@ class HostedSystemUnitTests(unittest.TestCase):
             with mock.patch.dict(unit.PINNED_INSTALL_ASSETS, {
                     dest: ("sudoers/little-mester-vm", 0o440)}, clear=True), \
                  mock.patch.dict(os.environ, {"GITHUB_SHA": "b" * 40}), \
-                 mock.patch.object(unit.os, "lstat", return_value=installed), \
+                 mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                     returncode=0, stdout=b"8120:0\n")) as metadata_run, \
                  mock.patch.object(pathlib.Path, "read_bytes", guarded_read_bytes), \
                  mock.patch.object(unit, "installed_asset_bytes", return_value=payload) as installed_bytes, \
                  mock.patch.object(unit, "git_object_bytes", return_value=payload) as git_bytes, \
                  mock.patch.object(unit, "run"):
                 unit.verify_installed_files()
+            metadata_run.assert_called_once_with([
+                "/usr/bin/sudo", "-n", "/usr/bin/stat", "--format=%f:%u", "--", dest],
+                stdin=unit.subprocess.DEVNULL, capture_output=True, check=False)
             installed_bytes.assert_called_once_with(dest)
             git_bytes.assert_called_once_with("b" * 40, "sudoers/little-mester-vm")
+
+    def test_sudoers_privileged_metadata_parsing_and_policy_refusal(self):
+        dest = "/etc/sudoers.d/little-mester-vm"
+        command = ["/usr/bin/sudo", "-n", "/usr/bin/stat", "--format=%f:%u", "--", dest]
+        with mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                returncode=0, stdout=b"8120:0\n")) as run:
+            self.assertEqual(unit.installed_asset_metadata(dest), (0o100440, 0))
+        run.assert_called_once_with(command, stdin=unit.subprocess.DEVNULL,
+                                    capture_output=True, check=False)
+
+        for metadata in (b"8180:0\n", b"8120:1\n"):
+            with mock.patch.dict(unit.PINNED_INSTALL_ASSETS, {
+                    dest: ("sudoers/little-mester-vm", 0o440)}, clear=True), \
+                 mock.patch.dict(os.environ, {"GITHUB_SHA": "c" * 40}), \
+                 mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                     returncode=0, stdout=metadata)), \
+                 self.assertRaisesRegex(RuntimeError, "installed production asset metadata mismatch"):
+                unit.verify_installed_files()
+
+        for malformed in (b"8120:0", b"8120:x\n", b"not-metadata\n"):
+            with mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                    returncode=0, stdout=malformed)), \
+                 self.assertRaisesRegex(RuntimeError, "invalid privileged installed asset metadata"):
+                unit.installed_asset_metadata(dest)
 
     def test_known_hosts_is_read_only_through_fixed_sudo_cat_and_fails_closed(self):
         payload = b"[127.0.0.1]:22222 ssh-ed25519 AAAA\n"

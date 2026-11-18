@@ -209,6 +209,26 @@ def installed_asset_bytes(destination: str) -> bytes:
     return path.read_bytes()
 
 
+def installed_asset_metadata(destination: str) -> tuple[int, int]:
+    """Return mode and owner for the protected sudoers file via fixed sudo stat."""
+    if destination != "/etc/sudoers.d/little-mester-vm":
+        info = os.lstat(destination)
+        return info.st_mode, info.st_uid
+    result = subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/stat", "--format=%f:%u", "--", destination],
+        stdin=subprocess.DEVNULL, capture_output=True, check=False,
+    )
+    require(result.returncode == 0,
+            f"command failed ({result.returncode}): /usr/bin/sudo /usr/bin/stat")
+    try:
+        output = result.stdout.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise RuntimeError("invalid privileged installed asset metadata") from error
+    match = re.fullmatch(r"([0-9a-fA-F]{1,8}):([0-9]+)\n", output)
+    require(match is not None, "invalid privileged installed asset metadata")
+    return int(match.group(1), 16), int(match.group(2), 10)
+
+
 def git_object_bytes(sha: str, source: str) -> bytes:
     require(SHA_RE.fullmatch(sha) is not None, "GITHUB_SHA is not a full exact commit SHA")
     require(source in PINNED_SOURCE_PATHS, f"untrusted pinned source path: {source}")
@@ -222,10 +242,9 @@ def verify_installed_files() -> None:
     sha = os.environ.get("GITHUB_SHA", "")
     require(SHA_RE.fullmatch(sha) is not None, "GITHUB_SHA is not a full exact commit SHA")
     for dest, (source, mode) in PINNED_INSTALL_ASSETS.items():
-        path = pathlib.Path(dest)
-        info = os.lstat(path)
-        require(stat.S_ISREG(info.st_mode) and info.st_uid == 0
-                and stat.S_IMODE(info.st_mode) == mode,
+        installed_mode, installed_uid = installed_asset_metadata(dest)
+        require(stat.S_ISREG(installed_mode) and installed_uid == 0
+                and stat.S_IMODE(installed_mode) == mode,
                 f"installed production asset metadata mismatch: {dest}")
         installed = installed_asset_bytes(dest)
         require(installed == git_object_bytes(sha, source),

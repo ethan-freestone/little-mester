@@ -373,6 +373,8 @@ assert 'pr_merge_commit_second_parent' in job and 'source_head_sha=' in job
 assert 'timeout-minutes: 90' in job
 assert 'Exercise exact pinned production systemd VM unit on disposable hosted KVM' in job
 assert 'Require production systemd VM and proxy stopped' in job
+assert job.index('Prove final identity-safe cleanup') < job.index('Exercise exact pinned production systemd VM unit')
+assert job.index('Prove final identity-safe cleanup') < job.index('Require production systemd VM and proxy stopped')
 assert 'timeout-minutes: 45' in job
 staged_steps = [
     'Prepare disposable guest and pinned inputs',
