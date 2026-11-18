@@ -73,17 +73,19 @@ def systemd_preflight() -> tuple[bool, list[str]]:
 
     reasons: list[str] = []
     try:
-        status = subprocess.run(["systemctl", "is-system-running"], stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                timeout=2, check=False)
+        status = subprocess.run(["systemctl", "show", "--property=Version", "--value"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, timeout=3, check=False)
     except subprocess.TimeoutExpired:
         reasons.append("system-manager(scope=system,reason=timeout)")
     except OSError as error:
         reasons.append(f"system-manager(scope=system,reason={type(error).__name__})")
     else:
-        state = status.stdout.decode("ascii", "replace").strip() or "unknown"
-        if state not in ("running", "degraded"):
-            reasons.append(f"system-manager(scope=system,state={state},exit={status.returncode})")
+        version = status.stdout.decode("ascii", "replace").strip()
+        if status.returncode != 0:
+            reasons.append(f"system-manager(scope=system,reason=command-failed,exit={status.returncode})")
+        elif not version:
+            reasons.append("system-manager(scope=system,reason=empty-version)")
 
     try:
         sudo = subprocess.run(["sudo", "-n", "true"], stdin=subprocess.DEVNULL,

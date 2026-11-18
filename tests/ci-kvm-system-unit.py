@@ -165,6 +165,12 @@ def service_state(unit: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
 
 
+def require_fixed_units_loaded() -> None:
+    states = {unit: service_state(unit) for unit in (UNIT, PROXY_UNIT)}
+    require(all(state.get("LoadState") == "loaded" for state in states.values()),
+            f"installed production systemd units are not both loaded: {states}")
+
+
 def assert_stopped(*, vm_result: str | None = None) -> None:
     for unit in (UNIT, PROXY_UNIT):
         state = service_state(unit)
@@ -237,19 +243,24 @@ def production_host_preflight() -> None:
         print("production_preflight_system_manager=FAIL scope=system reason=missing-tool")
     else:
         try:
-            manager = subprocess.run([systemctl, "is-system-running"], stdin=subprocess.DEVNULL,
-                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                     text=True, timeout=2, check=False)
+            manager = subprocess.run([systemctl, "show", "--property=Version", "--value"],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, text=True, timeout=3, check=False)
         except subprocess.TimeoutExpired:
             print("production_preflight_system_manager=FAIL scope=system reason=timeout")
         except OSError as error:
             print("production_preflight_system_manager=FAIL scope=system "
                   f"reason={type(error).__name__}")
         else:
-            state = manager.stdout.strip() or "unknown"
-            manager_ok = state in ("running", "degraded")
-            print(f"production_preflight_system_manager={'PASS' if manager_ok else 'FAIL'} "
-                  f"scope=system state={state} exit={manager.returncode}")
+            version = manager.stdout.strip()
+            manager_ok = manager.returncode == 0 and bool(version)
+            if manager_ok:
+                print("production_preflight_system_manager=PASS scope=system "
+                      f"responsive=true version={version} boot_state=not_a_gate")
+            else:
+                print("production_preflight_system_manager=FAIL scope=system "
+                      f"reason={'empty-version' if manager.returncode == 0 else 'command-failed'} "
+                      f"exit={manager.returncode}")
 
     sudo_ok = False
     if not pathlib.Path(sudo).is_file():
@@ -542,6 +553,7 @@ def main() -> int:
         installed_root = pathlib.Path("/opt/little-mester/v3") / sha
         verify_installed_files()
         run(["/usr/bin/sudo", "-n", str(installed_root / "tools/vm-system-install")], timeout=300)
+        require_fixed_units_loaded()
         unit_identity_checks()
         marker = uuid.uuid4().hex
         expected = f"systemd-production-canary-{marker}"

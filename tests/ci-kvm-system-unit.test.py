@@ -156,26 +156,28 @@ class HostedSystemUnitTests(unittest.TestCase):
             unit.git_object_bytes(sha, "../mutable-candidate")
         run.assert_not_called()
 
-    def test_degraded_system_manager_is_accepted_even_with_nonzero_exit(self):
-        completed = SimpleNamespace(returncode=1, stdout=b"degraded\n")
+    def test_system_manager_starting_state_is_not_a_preflight_gate(self):
+        completed = SimpleNamespace(returncode=0, stdout=b"257\n")
         with mock.patch.object(probe.shutil, "which", return_value="/usr/bin/tool"), \
              mock.patch.object(probe.subprocess, "run", side_effect=[completed,
-                                                                        SimpleNamespace(returncode=0)]):
+                                                                         SimpleNamespace(returncode=0)]) as run:
             available, reasons = probe.systemd_preflight()
         self.assertTrue(available)
         self.assertEqual(reasons, [])
+        self.assertEqual(run.call_args_list[0].args[0],
+                         ["systemctl", "show", "--property=Version", "--value"])
 
         with mock.patch.object(unit.pathlib.Path, "is_file", return_value=True), \
              mock.patch.object(unit.subprocess, "run", side_effect=[
-                 SimpleNamespace(returncode=1, stdout="degraded\n"),
-                 SimpleNamespace(returncode=0)]):
+                 SimpleNamespace(returncode=0, stdout="257\n"),
+                  SimpleNamespace(returncode=0)]):
             unit.production_host_preflight()
 
-    def test_unavailable_system_manager_rejects_before_install(self):
+    def test_nonresponsive_system_manager_rejects_before_install(self):
         with mock.patch.object(unit, "hosted_kvm_guard"), \
              mock.patch.object(unit.pathlib.Path, "is_file", return_value=True), \
              mock.patch.object(unit.subprocess, "run", side_effect=[
-                 SimpleNamespace(returncode=1, stdout="stopping\n"),
+                 SimpleNamespace(returncode=1, stdout=""),
                  SimpleNamespace(returncode=0)]), \
              mock.patch.object(unit, "run") as run, \
              mock.patch.object(unit.sys, "argv", [str(SCRIPT)]):
@@ -187,29 +189,46 @@ class HostedSystemUnitTests(unittest.TestCase):
             return SimpleNamespace(returncode=code, stdout=output)
 
         with mock.patch.object(probe.shutil, "which", return_value="/usr/bin/tool"), \
-             mock.patch.object(probe.subprocess, "run", side_effect=[completed(1, b"stopped\n"),
-                                                                        completed(0)]) as run:
+             mock.patch.object(probe.subprocess, "run", side_effect=[completed(1, b""),
+                                                                         completed(0)]) as run:
             available, reasons = probe.systemd_preflight()
         self.assertFalse(available)
-        self.assertEqual(reasons, ["system-manager(scope=system,state=stopped,exit=1)"])
-        self.assertEqual(run.call_args_list[0].args[0], ["systemctl", "is-system-running"])
+        self.assertEqual(reasons, ["system-manager(scope=system,reason=command-failed,exit=1)"])
+        self.assertEqual(run.call_args_list[0].args[0],
+                         ["systemctl", "show", "--property=Version", "--value"])
         self.assertNotIn("--user", run.call_args_list[0].args[0])
 
         with mock.patch.object(probe.shutil, "which", return_value="/usr/bin/tool"), \
-             mock.patch.object(probe.subprocess, "run", side_effect=[completed(0, b"running\n"),
-                                                                        completed(1)]):
+             mock.patch.object(probe.subprocess, "run", side_effect=[completed(0, b"257\n"),
+                                                                         completed(1)]):
             available, reasons = probe.systemd_preflight()
         self.assertFalse(available)
         self.assertEqual(reasons, ["sudo(mode=noninteractive,exit=1)"])
 
     def test_shared_probe_reports_timeout_separately(self):
         with mock.patch.object(probe.shutil, "which", return_value="/usr/bin/tool"), \
-             mock.patch.object(probe.subprocess, "run", side_effect=[
-                 __import__("subprocess").TimeoutExpired("systemctl", 2),
-                 SimpleNamespace(returncode=0, stdout=b"")]):
+                 mock.patch.object(probe.subprocess, "run", side_effect=[
+                  __import__("subprocess").TimeoutExpired("systemctl", 2),
+                  SimpleNamespace(returncode=0, stdout=b"")]):
             available, reasons = probe.systemd_preflight()
         self.assertFalse(available)
         self.assertEqual(reasons, ["system-manager(scope=system,reason=timeout)"])
+
+    def test_shared_probe_rejects_empty_manager_version(self):
+        with mock.patch.object(probe.shutil, "which", return_value="/usr/bin/tool"), \
+             mock.patch.object(probe.subprocess, "run", side_effect=[
+                 SimpleNamespace(returncode=0, stdout=b""),
+                 SimpleNamespace(returncode=0)]):
+            available, reasons = probe.systemd_preflight()
+        self.assertFalse(available)
+        self.assertEqual(reasons, ["system-manager(scope=system,reason=empty-version)"])
+
+    def test_fixed_units_must_be_loaded_before_start(self):
+        with mock.patch.object(unit, "service_state", side_effect=[
+                {"LoadState": "loaded"}, {"LoadState": "not-found"}]) as state, \
+                self.assertRaisesRegex(RuntimeError, "not both loaded"):
+            unit.require_fixed_units_loaded()
+        self.assertEqual(state.call_args_list, [mock.call(unit.UNIT), mock.call(unit.PROXY_UNIT)])
 
     def test_cleanup_requires_this_attempts_durable_start_marker(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ, {
