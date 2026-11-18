@@ -83,6 +83,7 @@ jobs:
           python3 tests/ci-kvm-qemu-owner.test.py
           python3 tests/vm-owner-acceptance.test.py
           python3 tests/vm-systemd.test.py
+          python3 tests/ci-kvm-system-unit.test.py
           python3 tests/vm-guest-user-dirs.test.py
           python3 tests/ci-qemu-oauth-bridge.test.py
           python3 tests/ci-kvm-launch.test.py
@@ -95,7 +96,7 @@ jobs:
   real-qemu-kvm-trial:
     name: Real QEMU KVM M2 integration
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 90
     env:
       LM_CI_RUN_ID: ${{ github.run_id }}
       LM_CI_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -160,13 +161,20 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             cloud-image-utils curl genisoimage openssh-client openssh-server qemu-system-x86 \
-            qemu-utils socat virtiofsd
+            qemu-utils socat virtiofsd python3-pexpect ncurses-bin
       - name: Prepare disposable guest and pinned inputs
         timeout-minutes: 5
         run: bash tests/ci-kvm-stage.sh --stage prepare --run-dir "$LM_CI_STATE_DIR"
       - name: Probe shared QEMU builder with bounded disposable KVM launch
         timeout-minutes: 2
         run: python3 tests/ci-kvm-shared-launch-probe.py --run-dir "$LM_CI_STATE_DIR"
+      - name: Exercise exact pinned production systemd VM unit on disposable hosted KVM
+        timeout-minutes: 45
+        run: python3 tests/ci-kvm-system-unit.py
+      - name: Require production systemd VM and proxy stopped
+        if: always()
+        timeout-minutes: 2
+        run: python3 tests/ci-kvm-system-unit.py --cleanup
       - name: Start real KVM guest and prove strict SSH readiness
         timeout-minutes: 5
         run: bash tests/ci-kvm-stage.sh --stage boot --run-dir "$LM_CI_STATE_DIR"

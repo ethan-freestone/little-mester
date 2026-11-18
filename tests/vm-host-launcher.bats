@@ -365,12 +365,15 @@ state = pathlib.Path(sys.argv[1]).with_name('ci-kvm-stage-state.py').read_text()
 state_tests = pathlib.Path(sys.argv[1]).with_name('ci-kvm-stage-state.test.py').read_text()
 wrapper = pathlib.Path(sys.argv[1]).with_name('ci-kvm-capability.sh').read_text()
 assert 'pull_request:' in workflow_text and 'types: [opened, synchronize, reopened]' in workflow_text
-assert job.count('if:') == 1 and 'if: always()' in job
+assert job.count('if:') == 2 and 'if: always()' in job
 assert 'm2-qemu-acceptance' not in workflow_text
 assert 'workflow_dispatch:' not in workflow_text
 assert 'github.event.pull_request.head.sha || github.sha' in job
 assert 'pr_merge_commit_second_parent' in job and 'source_head_sha=' in job
-assert 'timeout-minutes: 20' in job
+assert 'timeout-minutes: 90' in job
+assert 'Exercise exact pinned production systemd VM unit on disposable hosted KVM' in job
+assert 'Require production systemd VM and proxy stopped' in job
+assert 'timeout-minutes: 45' in job
 staged_steps = [
     'Prepare disposable guest and pinned inputs',
     'Start real KVM guest and prove strict SSH readiness',
