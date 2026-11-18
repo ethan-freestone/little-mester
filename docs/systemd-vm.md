@@ -24,12 +24,19 @@ and fresh disk with:
 sudo /opt/little-mester/v3/<commit>/tools/vm-system-install
 ```
 
-Installation requires the host already to have `/dev/kvm` group-owned by the
-existing `kvm` group with group read/write permission, plus the listed QEMU,
+The protected runtime is installed under `/usr/lib/little-mester-vm`, a path
+available on both Ubuntu and merged-`/usr` distributions such as Arch. The
+installer verifies root ownership and non-writable ancestry before creating any
+host account, directory, or file. Installation requires the host already to
+have `/dev/kvm` group-owned by the existing `kvm` group with group read/write
+permission, plus the listed QEMU,
 image, ISO, SSH, and socat tools. The installer deliberately does not change
 device rules, install packages, enable or start units, or remove pre-existing
-artifacts. It downloads and verifies the pinned base image only when explicitly invoked. If
-the owner is newly added to `lm-vm-control`, a new login is needed for group
+artifacts. It downloads and verifies the pinned base image only when explicitly
+invoked. Any pre-existing VM disk, seed, identity, or partial-provisioning
+artifact is preserved and blocks the installer for owner inspection; the
+installer does not attempt automatic state adoption or repair. If the owner is
+newly added to `lm-vm-control`, a new login is needed for group
 membership to take effect.
 
 The fixed owner interface is:

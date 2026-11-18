@@ -18,23 +18,42 @@ FILES = {
     "systemd/little-mester-vm.service": ("/etc/systemd/system/little-mester-vm.service", 0o644),
     "systemd/little-mester-vm-proxy.service": ("/etc/systemd/system/little-mester-vm-proxy.service", 0o644),
     "sudoers/little-mester-vm": ("/etc/sudoers.d/little-mester-vm", 0o440),
-    "lib/vm/system-vm.py": ("/usr/libexec/little-mester-vm/system-vm.py", 0o644),
-    "lib/vm/guest-bootstrap.py": ("/usr/libexec/little-mester-vm/guest-bootstrap.py", 0o644),
-    "lib/vm/parent-qemu.py": ("/usr/libexec/little-mester-vm/parent-qemu.py", 0o644),
-    "lib/vm/parent-provision.py": ("/usr/libexec/little-mester-vm/parent-provision.py", 0o644),
-    "lib/vm/parent-session-contract.py": ("/usr/libexec/little-mester-vm/parent-session-contract.py", 0o644),
-    "lib/vm/guest-bootstrap.py": ("/usr/libexec/little-mester-vm/guest-bootstrap.py", 0o644),
-    "lib/vm/guest-user-dirs.py": ("/usr/libexec/little-mester-vm/guest-user-dirs.py", 0o644),
-    "lib/vm/proxy.py": ("/usr/libexec/little-mester-vm/proxy.py", 0o644),
-    "lib/vm/browser-auth-session.py": ("/usr/libexec/little-mester-vm/browser-auth-session.py", 0o644),
-    "lib/vm/callback-listener.py": ("/usr/libexec/little-mester-vm/callback-listener.py", 0o644),
+    "lib/vm/system-vm.py": ("/usr/lib/little-mester-vm/system-vm.py", 0o644),
+    "lib/vm/guest-bootstrap.py": ("/usr/lib/little-mester-vm/guest-bootstrap.py", 0o644),
+    "lib/vm/parent-qemu.py": ("/usr/lib/little-mester-vm/parent-qemu.py", 0o644),
+    "lib/vm/parent-provision.py": ("/usr/lib/little-mester-vm/parent-provision.py", 0o644),
+    "lib/vm/parent-session-contract.py": ("/usr/lib/little-mester-vm/parent-session-contract.py", 0o644),
+    "lib/vm/guest-user-dirs.py": ("/usr/lib/little-mester-vm/guest-user-dirs.py", 0o644),
+    "lib/vm/proxy.py": ("/usr/lib/little-mester-vm/proxy.py", 0o644),
+    "lib/vm/browser-auth-session.py": ("/usr/lib/little-mester-vm/browser-auth-session.py", 0o644),
+    "lib/vm/callback-listener.py": ("/usr/lib/little-mester-vm/callback-listener.py", 0o644),
     "agent/opencode/plugins/little-mester-exit-confirm/package.json":
-        ("/usr/libexec/little-mester-vm/plugins/package.json", 0o644),
+        ("/usr/lib/little-mester-vm/plugins/package.json", 0o644),
     "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx":
-        ("/usr/libexec/little-mester-vm/plugins/tui.tsx", 0o644),
+        ("/usr/lib/little-mester-vm/plugins/tui.tsx", 0o644),
 }
-DIRS = ("/usr/libexec/little-mester-vm", "/usr/libexec/little-mester-vm/plugins",
+DIRS = ("/usr/lib/little-mester-vm", "/usr/lib/little-mester-vm/plugins",
         "/etc/little-mester-vm", "/var/lib/little-mester-vm")
+PROVISION_FINALS = (
+    "/var/lib/little-mester-vm/disk.qcow2",
+    "/var/lib/little-mester-vm/seed.iso",
+    "/etc/little-mester-vm/control_ed25519",
+    "/etc/little-mester-vm/control_ed25519.pub",
+    "/etc/little-mester-vm/ssh_host_ed25519_key",
+    "/etc/little-mester-vm/ssh_host_ed25519_key.pub",
+    "/etc/little-mester-vm/known_hosts",
+)
+PROVISION_PARTIALS = (
+    "/var/lib/little-mester-vm/base-image.part",
+    "/var/lib/little-mester-vm/base-image.qcow2",
+    "/var/lib/little-mester-vm/disk.qcow2.part",
+    "/var/lib/little-mester-vm/seed.iso.part",
+    "/var/lib/little-mester-vm/user-data",
+    "/var/lib/little-mester-vm/meta-data",
+)
+PROTECTED_PARENTS = (
+    "/usr/lib", "/etc/systemd/system", "/etc/sudoers.d", "/etc", "/var/lib",
+)
 
 
 def refuse(message: str) -> None:
@@ -90,6 +109,19 @@ def ensure_group(name: str, *, allowed_members: set[str] = frozenset()) -> None:
             refuse(f"existing {name} group has unexpected members; preserving it")
 
 
+def validate_group(name: str, *, allowed_members: set[str] = frozenset()) -> grp.struct_group | None:
+    try:
+        existing = grp.getgrnam(name)
+    except KeyError:
+        return None
+    if existing.gr_gid >= 1000:
+        refuse(f"existing {name} group is not in the protected system-group ID range")
+    unexpected = set(existing.gr_mem) - allowed_members
+    if unexpected:
+        refuse(f"existing {name} group has unexpected members; preserving it")
+    return existing
+
+
 def ensure_user(name: str, group: str, home: str) -> None:
     try:
         pwd.getpwnam(name)
@@ -103,6 +135,99 @@ def ensure_user(name: str, group: str, home: str) -> None:
     if (not 1 <= user.pw_uid < 1000 or user.pw_gid != expected_group
             or user.pw_shell != "/usr/sbin/nologin" or user.pw_dir != home):
         refuse(f"existing {name} identity differs from the fixed service identity; preserving it")
+
+
+def validate_user(name: str, group: str, home: str) -> pwd.struct_passwd | None:
+    try:
+        user = pwd.getpwnam(name)
+    except KeyError:
+        return None
+    try:
+        expected_group = grp.getgrnam(group).gr_gid
+    except KeyError as error:
+        raise RuntimeError(f"existing {name} account has no matching fixed primary group") from error
+    if (not 1 <= user.pw_uid < 1000 or user.pw_gid != expected_group
+            or user.pw_shell != "/usr/sbin/nologin" or user.pw_dir != home):
+        refuse(f"existing {name} identity differs from the fixed service identity; preserving it")
+    return user
+
+
+def validate_root_directory(path: pathlib.Path) -> os.stat_result:
+    current = pathlib.Path(path.anchor)
+    info = os.lstat(current)
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        refuse(f"host parent is not a root-controlled directory: {current}")
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError as error:
+            raise RuntimeError(f"required protected host parent is missing: {current}") from error
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            refuse(f"host parent is not a root-controlled directory: {current}")
+    return info
+
+
+def preflight(root: pathlib.Path, owner: str) -> None:
+    """Validate every fixed host target and prior state before the first mutation.
+
+    Any existing provisioning artifact blocks automatic continuation. In
+    particular, do not parse or adopt a service-writable disk as root.
+    """
+    sys.dont_write_bytecode = True
+    for raw in PROTECTED_PARENTS:
+        validate_root_directory(pathlib.Path(raw))
+
+    for name in ("lm-vm", "lm-vm-proxy", "lm-vm-control"):
+        validate_group(name, allowed_members={owner} if name == "lm-vm-control" else set())
+    validate_user("lm-vm", "lm-vm", "/var/lib/little-mester-vm")
+    validate_user("lm-vm-proxy", "lm-vm-proxy", "/var/empty")
+
+    for raw, group, mode in (
+        ("/usr/lib/little-mester-vm", "root", 0o755),
+        ("/usr/lib/little-mester-vm/plugins", "root", 0o755),
+        ("/etc/little-mester-vm", "lm-vm-control", 0o750),
+        ("/var/lib/little-mester-vm", "lm-vm", 0o750),
+    ):
+        path = pathlib.Path(raw)
+        if path.exists() or path.is_symlink():
+            try:
+                gid = grp.getgrnam(group).gr_gid
+            except KeyError as error:
+                raise RuntimeError(f"existing fixed directory has no expected group: {path}") from error
+            info = os.lstat(path)
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != 0 or info.st_gid != gid or stat.S_IMODE(info.st_mode) != mode):
+                refuse(f"fixed system VM directory is unsafe: {path}")
+
+    for relative, (raw, mode) in FILES.items():
+        target = pathlib.Path(raw)
+        if not (target.exists() or target.is_symlink()):
+            continue
+        info = os.lstat(target)
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != mode
+                or target.read_bytes() != (root / relative).read_bytes()):
+            refuse(f"preserving pre-existing non-matching protected install target: {target}")
+
+    for raw, allowed in (
+        ("/etc/little-mester-vm", {pathlib.Path(path).name for path in PROVISION_FINALS[2:]}),
+        ("/var/lib/little-mester-vm",
+         {pathlib.Path(PROVISION_FINALS[0]).name, pathlib.Path(PROVISION_FINALS[1]).name,
+          *(pathlib.Path(path).name for path in PROVISION_PARTIALS)}),
+    ):
+        directory = pathlib.Path(raw)
+        if directory.is_dir() and not directory.is_symlink():
+            unexpected = {entry.name for entry in directory.iterdir()} - allowed
+            if unexpected:
+                refuse(f"unexpected fixed system VM state exists; preserving {directory}")
+
+    artifacts = (*PROVISION_FINALS, *PROVISION_PARTIALS)
+    if any(pathlib.Path(path).exists() or pathlib.Path(path).is_symlink()
+           for path in artifacts):
+        refuse("pre-existing system VM provisioning evidence exists; preserving it for owner inspection")
 
 
 def ensure_dir(path: pathlib.Path, *, group: str, mode: int) -> None:
@@ -137,7 +262,7 @@ def install_file(source: pathlib.Path, destination: pathlib.Path, mode: int) -> 
     if destination.exists() or destination.is_symlink():
         info = os.lstat(destination)
         if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
-                or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != mode
+                or info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != mode
                 or destination.read_bytes() != payload):
             refuse(f"preserving pre-existing non-matching protected install target: {destination}")
         return
@@ -181,6 +306,7 @@ def main() -> int:
                      "/usr/sbin/usermod"):
             if not os.path.isfile(tool) or not os.access(tool, os.X_OK):
                 refuse(f"fixed system VM host dependency is unavailable: {pathlib.Path(tool).name}")
+        preflight(root, owner)
         # Do not claim a pre-existing system identity. Only groups and accounts
         # with these exact fixed names are ever created by this explicit tool.
         ensure_group("lm-vm")
@@ -188,16 +314,15 @@ def main() -> int:
         ensure_group("lm-vm-control", allowed_members={owner})
         ensure_user("lm-vm", "lm-vm", "/var/lib/little-mester-vm")
         ensure_user("lm-vm-proxy", "lm-vm-proxy", "/var/empty")
-        ensure_dir(pathlib.Path("/usr/libexec/little-mester-vm"), group="root", mode=0o755)
-        ensure_dir(pathlib.Path("/usr/libexec/little-mester-vm/plugins"), group="root", mode=0o755)
+        ensure_dir(pathlib.Path("/usr/lib/little-mester-vm"), group="root", mode=0o755)
+        ensure_dir(pathlib.Path("/usr/lib/little-mester-vm/plugins"), group="root", mode=0o755)
         ensure_dir(pathlib.Path("/etc/little-mester-vm"), group="lm-vm-control", mode=0o750)
         ensure_dir(pathlib.Path("/var/lib/little-mester-vm"), group="lm-vm", mode=0o750)
         for relative, (target, mode) in FILES.items():
             install_file(root / relative, pathlib.Path(target), mode)
-        # First install creates only the new fixed disk/seed. Existing evidence
-        # is preserved by the provisioner's exclusive-create checks.
-        subprocess.run(["/usr/bin/python3", "-I", "/usr/libexec/little-mester-vm/system-vm.py",
-                        "provision"], check=True, stdin=subprocess.DEVNULL)
+        # Existing provisioning evidence was refused before any host mutation.
+        subprocess.run(["/usr/bin/python3", "-I", "/usr/lib/little-mester-vm/system-vm.py",
+                       "provision"], check=True, stdin=subprocess.DEVNULL)
         subprocess.run(["/usr/sbin/usermod", "-a", "-G", "lm-vm-control", owner], check=True,
                        stdin=subprocess.DEVNULL)
         subprocess.run(["/usr/sbin/visudo", "-cf", "/etc/sudoers.d/little-mester-vm"],

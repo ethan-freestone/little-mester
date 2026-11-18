@@ -93,7 +93,7 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn("KillMode=control-group", unit)
         self.assertIn("TimeoutStopSec=25s", unit)
         self.assertIn("SendSIGKILL=yes", unit)
-        self.assertIn("ExecStop=/usr/bin/python3 -I /usr/libexec/little-mester-vm/system-vm.py qmp-stop $MAINPID", unit)
+        self.assertIn("ExecStop=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py qmp-stop $MAINPID", unit)
         self.assertIn("DeviceAllow=/dev/kvm rw", unit)
         self.assertIn("SupplementaryGroups=kvm lm-vm-control", unit)
         self.assertIn("ReadWritePaths=/var/lib/little-mester-vm/disk.qcow2 /run/little-mester-vm", unit)
@@ -113,7 +113,7 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn("Requires=little-mester-vm-proxy.service", vm_unit)
         self.assertIn("BindsTo=little-mester-vm-proxy.service", vm_unit)
         self.assertIn("After=little-mester-vm-proxy.service", vm_unit)
-        self.assertIn("ExecStartPost=/usr/bin/python3 -I /usr/libexec/little-mester-vm/system-vm.py proxy-ready", proxy)
+        self.assertIn("ExecStartPost=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py proxy-ready", proxy)
         self.assertIn("User=lm-vm-proxy", proxy)
         self.assertIn("PartOf=little-mester-vm.service", proxy)
         self.assertIn("--port 32128", proxy)
@@ -175,9 +175,13 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertEqual(owner.INSTALL_FILES["tools/vm-system-install"], 0o755)
         installer = (ROOT / "tools/vm-system-install").read_text()
         self.assertIn("does not change host device policy", installer)
-        self.assertIn("system-vm.py\",\n                        \"provision", installer)
-        self.assertIn('"lib/vm/guest-bootstrap.py": ("/usr/libexec/little-mester-vm/guest-bootstrap.py"',
+        self.assertIn('"provision"], check=True, stdin=subprocess.DEVNULL)', installer)
+        self.assertIn('"lib/vm/guest-bootstrap.py": ("/usr/lib/little-mester-vm/guest-bootstrap.py"',
                       installer)
+        self.assertIn('"lib/vm/system-vm.py": ("/usr/lib/little-mester-vm/system-vm.py"', installer)
+        self.assertIn('preflight(root, owner)', installer)
+        self.assertLess(installer.index('preflight(root, owner)'),
+                        installer.index('ensure_group("lm-vm")'))
 
     def test_owner_acceptance_is_only_an_adapter_to_lab_vm(self):
         with mock.patch.object(owner.subprocess, "run") as run:

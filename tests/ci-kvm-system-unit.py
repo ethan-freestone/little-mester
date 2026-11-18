@@ -39,7 +39,7 @@ FIXED_FILES = (
     "/etc/systemd/system/multi-user.target.wants/little-mester-vm.service",
     "/etc/systemd/system/multi-user.target.wants/little-mester-vm-proxy.service",
     "/etc/sudoers.d/little-mester-vm",
-    "/usr/libexec/little-mester-vm",
+    "/usr/lib/little-mester-vm",
     "/etc/little-mester-vm",
     "/var/lib/little-mester-vm",
     "/run/little-mester-vm",
@@ -647,7 +647,7 @@ def force_systemd_fallback(root: pathlib.Path, marker: str, expected: str) -> No
             "fixed unit MainPID is not owned by lm-vm")
     unit_text = pathlib.Path("/etc/systemd/system/little-mester-vm.service").read_text()
     for directive in (
-        "ExecStop=/usr/bin/python3 -I /usr/libexec/little-mester-vm/system-vm.py qmp-stop $MAINPID",
+        "ExecStop=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py qmp-stop $MAINPID",
         "TimeoutStopSec=25s", "KillMode=control-group", "SendSIGKILL=yes",
     ):
         require(directive in unit_text, f"production systemd fallback directive is absent: {directive}")
