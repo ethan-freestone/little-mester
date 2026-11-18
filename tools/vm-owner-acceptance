@@ -460,12 +460,34 @@ def verify_install(repo: pathlib.Path, sha: str,
             if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != INSTALL_FILES.get(relative):
                 raise GateError("BLOCKED", "installation file ownership or mode differs")
             source = git(repo, "show", f"{sha}:{relative}")
-            if source.returncode or path.read_bytes() != source.stdout:
+            if source.returncode or _read_install_bytes(repo, path, relative) != source.stdout:
                 raise GateError("BLOCKED", "installed bytes do not match the pinned commit")
             observed.add(relative)
     if observed != expected:
         raise GateError("BLOCKED", "installation file set differs from the pinned runtime inventory")
     return root
+
+
+def _read_install_bytes(repo: pathlib.Path, path: pathlib.Path, relative: str) -> bytes:
+    """Read installed bytes without weakening the protected sudoers mode."""
+    try:
+        return path.read_bytes()
+    except PermissionError as error:
+        # The sudoers drop-in is intentionally root-owned and mode 0440. Only
+        # this fixed manifest entry may use a non-interactive, read-only root
+        # read; all ownership/mode and byte-integrity checks still apply.
+        if relative != "sudoers/little-mester-vm":
+            raise GateError("BLOCKED", "installed file is not readable for verification") from error
+        sudo = protected_executable(repo, SUDO)
+        cat = protected_executable(repo, "/usr/bin/cat")
+        result = subprocess.run(
+            [sudo, "-n", cat, "--", str(path)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env=clean_env(), check=False,
+        )
+        if result.returncode:
+            raise GateError("BLOCKED", "protected sudoers bytes could not be read for verification")
+        return result.stdout
 
 
 INSTALL_WORKER = r'''import json, os, pathlib, re, stat, sys, tarfile

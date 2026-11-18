@@ -1797,6 +1797,13 @@ SH
       printf '%s\n' "$@" >"$argv_file"
     fi
   }
+  command() {
+    if [[ "$#" -eq 2 && "$1" == -v && "$2" == qemu-system-x86_64 ]]; then
+      printf '%s\n' "$TEST_TMP/qemu-system-x86_64"
+    else
+      builtin command "$@"
+    fi
+  }
   readlink() {
     printf '/usr/bin/python3\n'
   }
@@ -1827,6 +1834,13 @@ SH
       printf 'user,id=net0,hostfwd=tcp:127.0.0.1:43210-:22,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:32123,restrict=on\n'
     else
       return 73
+    fi
+  }
+  command() {
+    if [[ "$#" -eq 2 && "$1" == -v && "$2" == qemu-system-x86_64 ]]; then
+      printf '%s\n' "$TEST_TMP/qemu-system-x86_64"
+    else
+      builtin command "$@"
     fi
   }
   readlink() {

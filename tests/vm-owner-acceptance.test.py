@@ -31,6 +31,28 @@ class TTYBuffer(io.StringIO):
 
 
 class OwnerAcceptanceTests(unittest.TestCase):
+    def test_protected_sudoers_bytes_are_read_only_and_still_available_for_integrity_check(self):
+        expected = b"%lm-vm-control ALL=(root) NOPASSWD: fixed-command\n"
+        path = pathlib.Path("/protected/install/sudoers/little-mester-vm")
+        with (mock.patch.object(pathlib.Path, "read_bytes", side_effect=PermissionError),
+              mock.patch.object(acceptance, "protected_executable",
+                                side_effect=["/usr/bin/sudo", "/usr/bin/cat"]),
+              mock.patch.object(acceptance.subprocess, "run",
+                                return_value=SimpleNamespace(returncode=0, stdout=expected)) as run):
+            observed = acceptance._read_install_bytes(ROOT, path, "sudoers/little-mester-vm")
+        self.assertEqual(observed, expected)
+        self.assertEqual(run.call_args.args[0], [
+            "/usr/bin/sudo", "-n", "/usr/bin/cat", "--", str(path)])
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_unreadable_non_sudoers_install_never_uses_privileged_read(self):
+        path = pathlib.Path("/protected/install/lib/vm/system-vm.py")
+        with (mock.patch.object(pathlib.Path, "read_bytes", side_effect=PermissionError),
+              mock.patch.object(acceptance.subprocess, "run") as run):
+            with self.assertRaisesRegex(acceptance.GateError, "not readable"):
+                acceptance._read_install_bytes(ROOT, path, "lib/vm/system-vm.py")
+        run.assert_not_called()
+
     def test_failed_reset_then_provision_report_is_accepted_as_resume_provenance(self):
         with tempfile.TemporaryDirectory(prefix="owner-resume-origin-") as temporary:
             reports = pathlib.Path(temporary)
