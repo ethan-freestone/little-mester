@@ -11,7 +11,6 @@ import pwd
 import re
 import select
 import shlex
-import signal
 import socket
 import stat
 import subprocess
@@ -190,6 +189,24 @@ def service_state(unit: str) -> dict[str, str]:
                   "--property=SubState", "--property=MainPID",
                   "--property=Result", "--property=TimeoutStopUSec", unit])
     return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+
+def fixed_disk_identity() -> tuple[int, int]:
+    """Read identity of only the fixed protected disk through privileged stat."""
+    disk = "/var/lib/little-mester-vm/disk.qcow2"
+    result = subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/stat", "--format=%F:%d:%i", "--", disk],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        timeout=5, check=False,
+    )
+    require(result.returncode == 0, "unable to read fixed production disk identity")
+    try:
+        output = result.stdout.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise RuntimeError("invalid fixed production disk identity") from error
+    match = re.fullmatch(r"regular file:([0-9]+):([0-9]+)\n", output)
+    require(match is not None, "fixed production disk is not a regular file")
+    return int(match.group(1)), int(match.group(2))
 
 
 def bounded_diagnostic_command(argv: list[str]) -> tuple[int, str, bool]:
@@ -620,7 +637,8 @@ def force_systemd_fallback(root: pathlib.Path) -> None:
             f"loaded systemd stop timeout differs from fixed 25s policy: {state}")
     pidfd = os.pidfd_open(pid, 0)
     try:
-        signal.pidfd_send_signal(pidfd, signal.SIGSTOP)
+        run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "kill", "--signal=SIGSTOP",
+             "--kill-whom=main", UNIT], timeout=5)
         print(f"production_unit_forced_stop_started=pidfd_bound_mainpid={pid} signal=SIGSTOP")
         down_result = invoke_lab(root, "down", 60, check=False)
         stopped = service_state(UNIT)
@@ -748,20 +766,20 @@ def main() -> int:
         ssh_canary(marker, expected)
         print("production_unit_canary=PASS before_stop=true")
         production_tui_probe(installed_root)
-        before_disk = os.stat("/var/lib/little-mester-vm/disk.qcow2")
+        before_disk = fixed_disk_identity()
         invoke_lab(installed_root, "down", 45)
         assert_stopped(vm_result="success")
         print("production_unit_normal_stop=PASS qmp_execstop=true graceful=true")
-        stopped_disk = os.stat("/var/lib/little-mester-vm/disk.qcow2")
-        require((before_disk.st_dev, before_disk.st_ino) == (stopped_disk.st_dev, stopped_disk.st_ino),
+        stopped_disk = fixed_disk_identity()
+        require(before_disk == stopped_disk,
                 "fixed production disk identity changed across stop")
         invoke_lab(installed_root, "up", 16 * 60 + 45)
         after = service_state(UNIT)
         require(after.get("ActiveState") == "active" and int(after.get("MainPID", "0")) > 1,
                 f"production VM did not become ready after same-disk restart: {after}")
         ssh_canary(marker, expected)
-        after_disk = os.stat("/var/lib/little-mester-vm/disk.qcow2")
-        require((before_disk.st_dev, before_disk.st_ino) == (after_disk.st_dev, after_disk.st_ino),
+        after_disk = fixed_disk_identity()
+        require(before_disk == after_disk,
                 "production restart did not use the same fresh disk inode")
         print(f"production_unit_restart=PASS same_disk=true elapsed_seconds={int(time.monotonic()-started_at)}")
         force_systemd_fallback(installed_root)

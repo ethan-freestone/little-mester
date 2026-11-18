@@ -405,7 +405,8 @@ class HostedSystemUnitTests(unittest.TestCase):
             'invoke_lab(root, "down", 60, check=False)',
             'same_disk=true',
             'production_unit_normal_stop=PASS qmp_execstop=true graceful=true',
-            'signal.pidfd_send_signal(pidfd, signal.SIGSTOP)',
+            '"/usr/bin/systemctl", "kill", "--signal=SIGSTOP"',
+            '"--kill-whom=main", UNIT',
             'stopped.get("Result") == "timeout"',
             'poller.poll(1000)',
             'TimeoutStopSec=25s',
@@ -435,6 +436,23 @@ class HostedSystemUnitTests(unittest.TestCase):
         kvm_job = workflow.split("  real-qemu-kvm-trial:", 1)[1].split("\n  # ── 4.", 1)[0]
         self.assertIn("python3-pexpect", kvm_job)
         self.assertIn("ncurses-bin", kvm_job)
+
+    def test_fixed_disk_identity_uses_privileged_stat_for_only_fixed_regular_disk(self):
+        command = ["/usr/bin/sudo", "-n", "/usr/bin/stat", "--format=%F:%d:%i", "--",
+                   "/var/lib/little-mester-vm/disk.qcow2"]
+        with mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                returncode=0, stdout=b"regular file:2049:123456\n")) as run:
+            self.assertEqual(unit.fixed_disk_identity(), (2049, 123456))
+        run.assert_called_once_with(command, stdin=unit.subprocess.DEVNULL,
+                                    stdout=unit.subprocess.PIPE,
+                                    stderr=unit.subprocess.DEVNULL, timeout=5, check=False)
+
+        for code, output in ((1, b""), (0, b"symbolic link:2049:123456\n"),
+                             (0, b"regular file:not-a-device:123456\n")):
+            with mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                    returncode=code, stdout=output)), \
+                    self.assertRaisesRegex(RuntimeError, "fixed production disk"):
+                unit.fixed_disk_identity()
 
     def test_system_assets_are_installed_before_pinned_file_verification(self):
         source = SCRIPT.read_text()
