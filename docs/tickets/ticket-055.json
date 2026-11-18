@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-16T14:08:15.104Z",
+  "updated_at": "2026-11-18T13:08:51.340Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -64,7 +64,8 @@
       "Source review: prepare-auth performs fixed-home ownership, UID/GID, directory/file type, symlink and link-count checks and permission normalization; it requires no authentication material and is not needed for --version. The readiness helper had incorrectly coupled protected-environment version retry to this credential-store mutation while suppressing its refusal details.",
       "Correction removes prepare-auth from version readiness. Version now retries under credential-free env -i independently; synthetic credential-store preparation and hostile-path/file-preservation checks remain separate CI tests, and actual protected launchers still prepare-auth before TUI/auth launch.",
       "Ambient --version's exact failure remains unobserved in the hosted log because the coupled prepare-auth branch aborted first. The revised helper reports bounded sanitized ambient/protected outcomes on the next hosted run; no guest installation/runtime conclusion is claimed yet.",
-      "B1 hosted acceptance evidence: owner reports exact source SHA 9892f0be5d83938ac1392081b78643e4489bed04 passed real-KVM hosted run 43878974345. All six stages, the live OAuth harness cancellation regression, and final identity-safe guest cleanup passed. Sol Medium's focused source review of the cancellation correction was PASS; local cancellation regression and OAuth bridge tests also passed before commit. This records only B1 CI/smoke evidence; it does not claim M2 original-parent TUI, auth, model, terminal, or same-disk history acceptance. No push or original-parent action by agent."
+      "B1 hosted acceptance evidence: owner reports exact source SHA 9892f0be5d83938ac1392081b78643e4489bed04 passed real-KVM hosted run 43878974345. All six stages, the live OAuth harness cancellation regression, and final identity-safe guest cleanup passed. Sol Medium's focused source review of the cancellation correction was PASS; local cancellation regression and OAuth bridge tests also passed before commit. This records only B1 CI/smoke evidence; it does not claim M2 original-parent TUI, auth, model, terminal, or same-disk history acceptance. No push or original-parent action by agent.",
+      "Hosted PR run 44306993176: shared guest/OpenCode TUI and other KVM smoke reported PASS, but production systemd integration failed during protected installation before the production VM unit/TUI ran. Source/head 02bca4b57ac2dc93145e3c30116885597e52504d; tested PR merge 1f6ab56cf42835051367691edd70c797b56de57b. This is smoke evidence only, not production-unit TUI acceptance; criteria unchanged."
     ]
   },
   "models_used": [],
