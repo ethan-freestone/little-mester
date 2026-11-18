@@ -260,6 +260,71 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn("same_disk_persistence", report["gates"])
         self.assertIn("final_vm_state", report["gates"])
 
+    def test_acceptance_command_failure_has_bounded_sanitized_operation_diagnostic(self):
+        result = subprocess.CompletedProcess(
+            ["/fixed/command"], 17, b"", (
+                b"safe failure detail\n"
+                b"Permission denied (publickey).\n"
+                b"https://alice:secret@example.com/repo\n"
+                b"https://abc123456789@example.com/repo\n"
+                b"Bearer ghp_1234567890abcdefghijklmnop\n"
+                b"github_pat_abcdefghijklmnopqrstuvwxyz1234567890\n"
+                b"-----BEGIN OPENSSH PRIVATE KEY-----\nprivate-key-material\n"
+                b"-----END OPENSSH PRIVATE KEY-----\n"
+                b"-----BEGIN OPENSSH PRIVATE KEY-----\nincomplete-private-key-material\n"
+                b"ghp_1234567890abcdefghijklmnop\n" + b"x" * 5000))
+        with mock.patch.object(acceptance.subprocess, "run", return_value=result):
+            with self.assertRaises(acceptance.AcceptanceError) as raised:
+                acceptance.run(["/fixed/command"], operation="verify_persistence_marker_after_restart")
+        message = str(raised.exception)
+        self.assertIn("verify_persistence_marker_after_restart", message)
+        self.assertIn("exit=17", message)
+        self.assertIn("safe failure detail", message)
+        self.assertNotIn("Permission denied", message)
+        self.assertNotIn("alice:secret", message)
+        self.assertNotIn("abc123456789", message)
+        self.assertNotIn("ghp_1234567890", message)
+        self.assertNotIn("github_pat_abcdefghijklmnopqrstuvwxyz", message)
+        self.assertNotIn("private-key-material", message)
+        self.assertNotIn("incomplete-private-key-material", message)
+        self.assertLess(len(message), 1400)
+
+    def test_system_acceptance_failure_diagnostic_is_printed_to_ci_output(self):
+        report = owner.report_template("a" * 40, "system_vm_accept", pathlib.Path("attempt"))
+        report["evidence"]["failure_diagnostic"] = {
+            "stage": "same_disk_persistence",
+            "operation": "restart_vm_on_same_disk",
+            "exception_type": "AcceptanceError",
+            "reason": "restart_vm_on_same_disk failed (exit=1)",
+        }
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            owner.print_report(report)
+        self.assertIn('system_vm_failure_diagnostic={"exception_type":"AcceptanceError"', output.getvalue())
+        self.assertIn('"operation":"restart_vm_on_same_disk"', output.getvalue())
+
+    def test_failure_report_write_error_does_not_skip_initial_state_restoration(self):
+        stopped = {"ActiveState": "inactive", "MainPID": "0", "Result": "success"}
+
+        def progress(name, **_evidence):
+            if name == "failure_diagnostic":
+                raise OSError("report storage unavailable")
+
+        with mock.patch.object(acceptance, "verify", return_value=(stopped, stopped)), \
+                mock.patch.object(acceptance, "_initial_running_state", return_value=False), \
+                mock.patch.object(acceptance, "_lifecycle_preflight"), \
+                mock.patch.object(acceptance, "_proxy_policy_checks"), \
+                mock.patch.object(acceptance, "disk_identity", return_value=(1, 2)), \
+                mock.patch.object(acceptance, "run", side_effect=[
+                    acceptance.AcceptanceError("initial VM start failed"),
+                    subprocess.CompletedProcess([], 0, b"", b""),
+                ]) as run, \
+                mock.patch.object(acceptance, "service_state", return_value=stopped):
+            with self.assertRaisesRegex(acceptance.AcceptanceError, "start_initial_vm"):
+                acceptance.accept(pathlib.Path("/opt/candidate"), progress=progress)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args.kwargs["operation"], "restore_initial_vm_state_down")
+
     def test_system_disk_paths_are_new_fixed_paths_and_never_parent_v3(self):
         self.assertEqual(str(vm.DISK), "/var/lib/little-mester-vm/disk.qcow2")
         self.assertEqual(str(vm.SEED), "/var/lib/little-mester-vm/seed.iso")

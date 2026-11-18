@@ -26,17 +26,63 @@ DISK = "/var/lib/little-mester-vm/disk.qcow2"
 
 
 class AcceptanceError(RuntimeError):
-    pass
+    safe_report_message = True
 
 
-def run(argv: list[str], *, timeout: int = 30, capture: bool = True) -> subprocess.CompletedProcess:
-    result = subprocess.run(argv, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE if capture else None,
-                            stderr=subprocess.PIPE if capture else None,
-                            timeout=timeout, check=False,
-                            env={**os.environ, "LC_ALL": "C"})
+_DIAGNOSTIC_OUTPUT_LIMIT = 1200
+_SENSITIVE_OUTPUT_LINE = re.compile(
+    r"(?i)(auth|permission denied|publickey|private key|identity|password|token|secret|"
+    r"credential|bearer|authorization|ssh.agent|host key)"
+)
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+_PRIVATE_KEY_BLOCK = re.compile(
+    r"-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?(?:-----END [^-\r\n]*PRIVATE KEY-----|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+_URL_CREDENTIALS = re.compile(r"(https?://)[^/@\s]+@", re.IGNORECASE)
+_BEARER_CREDENTIAL = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_GITHUB_TOKEN = re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{10,}\b")
+_GITHUB_FINE_GRAINED_TOKEN = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")
+
+
+def _safe_output(value: bytes | str | None) -> str:
+    if not value:
+        return ""
+    text = value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+    text = _ANSI_ESCAPE.sub("", text)
+    text = _CONTROL_CHARS.sub("", text)
+    text = _PRIVATE_KEY_BLOCK.sub("[private-key-redacted]", text)
+    text = _URL_CREDENTIALS.sub(r"\1[credentials-redacted]@", text)
+    text = _BEARER_CREDENTIAL.sub("Bearer [redacted]", text)
+    text = _GITHUB_TOKEN.sub("[github-token-redacted]", text)
+    text = _GITHUB_FINE_GRAINED_TOKEN.sub("[github-token-redacted]", text)
+    lines = [line.strip() for line in text.splitlines()
+             if line.strip() and not _SENSITIVE_OUTPUT_LINE.search(line)]
+    joined = "\n".join(lines)
+    return joined[:_DIAGNOSTIC_OUTPUT_LIMIT] + (
+        "…[truncated]" if len(joined) > _DIAGNOSTIC_OUTPUT_LIMIT else "")
+
+
+def run(argv: list[str], *, timeout: int = 30, capture: bool = True,
+        operation: str = "fixed acceptance command") -> subprocess.CompletedProcess:
+    try:
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE if capture else None,
+                                stderr=subprocess.PIPE if capture else None,
+                                timeout=timeout, check=False,
+                                env={**os.environ, "LC_ALL": "C"})
+    except subprocess.TimeoutExpired as error:
+        output = _safe_output(error.stderr)
+        detail = f"; stderr={output}" if output else ""
+        raise AcceptanceError(f"{operation} timed out after {timeout}s{detail}") from error
+    except OSError as error:
+        reason = error.strerror or type(error).__name__
+        raise AcceptanceError(f"{operation} failed ({type(error).__name__}: {reason})") from error
     if result.returncode:
-        raise AcceptanceError(f"fixed acceptance operation failed: {argv[0]} (exit={result.returncode})")
+        output = _safe_output(result.stderr)
+        detail = f"; stderr={output}" if output else ""
+        raise AcceptanceError(f"{operation} failed (exit={result.returncode}){detail}")
     return result
 
 
@@ -218,16 +264,17 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
     return states[0], states[1]
 
 
-def _wait_active(unit: str, timeout: int = 900) -> dict[str, str]:
+def _wait_active(unit: str, timeout: int = 900, *,
+                 operation: str = "wait for VM readiness") -> dict[str, str]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         state = service_state(unit)
         if state.get("ActiveState") == "active" and int(state.get("MainPID", "0")) > 1:
             return state
         if state.get("ActiveState") == "failed":
-            raise AcceptanceError(f"production unit failed readiness: {unit}")
+            raise AcceptanceError(f"{operation}: production unit entered failed state")
         time.sleep(1)
-    raise AcceptanceError(f"production unit readiness timed out: {unit}")
+    raise AcceptanceError(f"{operation}: production unit readiness timed out after {timeout}s")
 
 
 def _network_checks(vm: dict[str, str]) -> None:
@@ -246,7 +293,8 @@ def _network_checks(vm: dict[str, str]) -> None:
         raise AcceptanceError("proxy listener is not loopback-only")
 
 
-def _guest_ssh(command: str, *, timeout: int = 30) -> None:
+def _guest_ssh(command: str, *, timeout: int = 30,
+               operation: str = "run fixed guest SSH check") -> None:
     key = pathlib.Path("/etc/little-mester-vm/control_ed25519").read_bytes()
     known = pathlib.Path("/etc/little-mester-vm/known_hosts").read_bytes()
     runtime = pathlib.Path(f"/run/user/{os.getuid()}")
@@ -264,7 +312,8 @@ def _guest_ssh(command: str, *, timeout: int = 30) -> None:
              "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={hosts_path}",
              "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ProxyCommand=none", "-o", "ProxyJump=none",
              "-o", "ConnectTimeout=5", "-o", "ClearAllForwardings=yes",
-             "mester@127.0.0.1", f"/bin/bash -lc {shlex.quote(command)}"], timeout=timeout)
+             "mester@127.0.0.1", f"/bin/bash -lc {shlex.quote(command)}"],
+            timeout=timeout, operation=operation)
 
 
 def _tui_check(root: pathlib.Path) -> None:
@@ -343,7 +392,7 @@ def _initial_running_state(vm: dict[str, str], proxy: dict[str, str]) -> bool:
 def _restore_initial_state(root: pathlib.Path, was_running: bool) -> tuple[dict[str, str], dict[str, str]]:
     operation = "up" if was_running else "down"
     run([str(root / "lab-vm"), "system", operation], timeout=1005 if was_running else 60,
-        capture=False)
+        operation=f"restore_initial_vm_state_{operation}")
     states = tuple(service_state(unit) for unit in (UNIT, PROXY_UNIT))
     if was_running:
         restored = all(state.get("ActiveState") == "active" and int(state.get("MainPID", "0")) > 1
@@ -380,37 +429,62 @@ def accept(root: pathlib.Path, progress=None) -> int:
     expected = f"systemd-owner-acceptance-{uuid.uuid4().hex}"
     _mark(progress, "lifecycle_started", lifecycle_started=True,
           restoration_outcome="PENDING")
+    stage = "guest_readiness_ssh"
+    operation = "start_initial_vm"
     try:
-        run([str(root / "lab-vm"), "system", "up"], timeout=1005, capture=False)
-        first = _wait_active(UNIT)
+        run([str(root / "lab-vm"), "system", "up"], timeout=1005, operation=operation)
+        operation = "wait_for_initial_guest_readiness"
+        first = _wait_active(UNIT, operation=operation)
         _mark(progress, "guest_readiness_ssh")
         print("system_vm_gate=guest_readiness_ssh:PASS")
-        run([str(root / "lab-vm"), "system", "up"], timeout=60, capture=False)
+        stage = "network_boundaries"
+        operation = "verify_duplicate_start_is_idempotent"
+        run([str(root / "lab-vm"), "system", "up"], timeout=60, operation=operation)
         duplicate = service_state(UNIT)
         if duplicate.get("MainPID") != first.get("MainPID"):
             raise AcceptanceError("duplicate start replaced the active QEMU MainPID")
+        operation = "verify_initial_network_boundaries"
         _network_checks(first)
         _mark(progress, "network_boundaries")
         print("system_vm_gate=network_boundaries:PASS")
+        stage = "persistence_fixture"
+        operation = "create_and_verify_persistence_marker"
         _guest_ssh(f"umask 077; printf '%s' {shlex.quote(expected)} > {shlex.quote(marker)}; "
-                   f"test \"$(cat {shlex.quote(marker)})\" = {shlex.quote(expected)}")
+                   f"test \"$(cat {shlex.quote(marker)})\" = {shlex.quote(expected)}",
+                   operation=operation)
+        stage = "direct_egress_blocked"
+        operation = "verify_direct_egress_is_blocked"
         _guest_ssh("python3 -c 'import socket; s=socket.socket(); s.settimeout(2); "
-                   "r=s.connect_ex((\"1.1.1.1\",443)); s.close(); assert r != 0'")
+                   "r=s.connect_ex((\"1.1.1.1\",443)); s.close(); assert r != 0'",
+                   operation=operation)
         _mark(progress, "direct_egress_blocked")
         print("system_vm_gate=direct_egress_blocked:PASS")
+        stage = "opencode_tui"
+        operation = "exercise_opencode_tui"
         _tui_check(root)
         _mark(progress, "opencode_tui")
         print("system_vm_gate=opencode_tui:PASS")
-        run([str(root / "lab-vm"), "system", "down"], timeout=60, capture=False)
+        stage = "same_disk_persistence"
+        operation = "stop_vm_cleanly_before_restart"
+        run([str(root / "lab-vm"), "system", "down"], timeout=60, operation=operation)
+        operation = "verify_clean_vm_shutdown"
         _require_normal_stop()
+        operation = "verify_disk_identity_after_shutdown"
         if disk_identity() != before_disk:
             raise AcceptanceError("fixed disk identity changed during shutdown")
-        run([str(root / "lab-vm"), "system", "up"], timeout=1005, capture=False)
-        restarted = _wait_active(UNIT)
+        operation = "restart_vm_on_same_disk"
+        run([str(root / "lab-vm"), "system", "up"], timeout=1005, operation=operation)
+        operation = "wait_for_restarted_guest_readiness"
+        restarted = _wait_active(UNIT, operation=operation)
+        operation = "verify_disk_identity_after_restart"
         if disk_identity() != before_disk:
             raise AcceptanceError("fixed disk identity changed across restart")
-        _guest_ssh(f"test \"$(cat {shlex.quote(marker)})\" = {shlex.quote(expected)}")
-        _guest_ssh(f"rm -- {shlex.quote(marker)}")
+        operation = "verify_persistence_marker_after_restart"
+        _guest_ssh(f"test \"$(cat {shlex.quote(marker)})\" = {shlex.quote(expected)}",
+                   operation=operation)
+        operation = "remove_persistence_marker"
+        _guest_ssh(f"rm -- {shlex.quote(marker)}", operation=operation)
+        operation = "verify_restarted_network_boundaries"
         _network_checks(restarted)
         _mark(progress, "same_disk_persistence")
         _mark(progress, "final_vm_state", final_vm_state=restarted,
@@ -424,11 +498,29 @@ def accept(root: pathlib.Path, progress=None) -> int:
         return 0
     except BaseException as failure:
         print("system_vm_result=FAIL")
+        if isinstance(failure, AcceptanceError):
+            reason = str(failure)
+        elif isinstance(failure, OSError):
+            reason = f"{type(failure).__name__}: {failure.strerror or 'operation failed'}"
+        elif isinstance(failure, subprocess.TimeoutExpired):
+            reason = f"command timed out after {failure.timeout}s; captured output omitted"
+        else:
+            reason = "exception detail omitted to avoid recording guest or terminal output"
+        diagnostic = {
+            "stage": stage,
+            "operation": operation,
+            "exception_type": type(failure).__name__,
+            "cause_type": type(failure.__cause__).__name__ if failure.__cause__ else None,
+            "reason": reason[:1600],
+        }
+        try:
+            _mark(progress, "failure_diagnostic", failure_diagnostic=diagnostic)
+        except BaseException:
+            # Diagnostic persistence must never prevent lifecycle restoration.
+            pass
         # Restore the initial lifecycle state on failure, including an already-running owner VM.
         try:
             restored = _restore_initial_state(root, vm_running)
-            _mark(progress, "restoration", restoration_outcome="PASS",
-                  restored_vm_state=restored[0], restored_proxy_state=restored[1])
         except BaseException as restore_error:
             observed = {}
             for unit in (UNIT, PROXY_UNIT):
@@ -436,9 +528,26 @@ def accept(root: pathlib.Path, progress=None) -> int:
                     observed[unit] = service_state(unit)
                 except BaseException:
                     observed[unit] = {"ActiveState": "UNAVAILABLE", "MainPID": "UNAVAILABLE"}
-            _mark(progress, "restoration", restoration_outcome="FAIL",
-                  restoration_error=type(restore_error).__name__,
-                  restoration_observed_state=observed)
+            restore_reason = (str(restore_error) if isinstance(restore_error, AcceptanceError)
+                              else f"{type(restore_error).__name__}; details omitted for safety")
+            try:
+                _mark(progress, "restoration", restoration_outcome="FAIL",
+                      restoration_error=type(restore_error).__name__,
+                      restoration_reason=restore_reason[:1600],
+                      restoration_observed_state=observed)
+            except BaseException:
+                pass
             raise AcceptanceError(
-                f"acceptance failed and could not restore initial running={vm_running} state") from restore_error
-        raise failure
+                f"{stage}/{operation} failed ({type(failure).__name__}: {reason}); "
+                f"initial running={vm_running} state could not be restored "
+                f"({restore_reason[:500]})") from restore_error
+        try:
+            _mark(progress, "restoration", restoration_outcome="PASS",
+                  restored_vm_state=restored[0], restored_proxy_state=restored[1])
+        except BaseException:
+            # State restoration succeeded; a report write failure cannot undo it.
+            pass
+        if isinstance(failure, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise AcceptanceError(
+            f"{stage}/{operation} failed ({type(failure).__name__}: {reason})") from failure

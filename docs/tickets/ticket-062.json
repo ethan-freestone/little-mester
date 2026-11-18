@@ -1,0 +1,56 @@
+{
+  "id": 62,
+  "file_path": "/workspace/docs/tickets/ticket-062.json",
+  "number": 62,
+  "area": "vm",
+  "type": "feature",
+  "status": "draft",
+  "title": "Per-run GitHub reachability and credentials",
+  "objective": "Future GitHub access must be controlled per individual Little Mester run, not by a permanently privileged VM or Unix account. Default runs should not reach GitHub and receive no GitHub credentials, especially no SSH agent/key. Ordinary public internet access may remain allowed; controlling GitHub reachability is distinct from controlling authentication. This is backlog capture only; do not implement as part of Stage A or Phase 1 cleanup.",
+  "created_at": "2026-11-18T21:00:34.833Z",
+  "updated_at": "2026-11-18T22:14:05.644Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "GitHub credentials are denied by default per run; general public network access is allowed and is not treated as credential authorization.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "A selected run can explicitly opt in to narrowly scoped, short-lived repository credentials that are available only for that run and revoked or terminated when it ends.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Credentials are not persisted in VM filesystems, OpenCode sessions, workspaces, logs, or reusable shared state, and another run sharing the VM cannot reuse them.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Design distinguishes Git-over-SSH, GitHub API or gh credentials, and public network access as separate capabilities.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "High-impact operations such as pushing or merging retain owner approval under the eventual autonomy policy.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "GitHub network reachability, including unauthenticated GitHub access, is denied by default for each run, independently of ordinary public internet access.",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "A selected run can separately opt in to bounded GitHub network reachability and to narrowly scoped, short-lived GitHub credentials; both permissions apply only to that run.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [],
+    "created": [],
+    "cases": []
+  },
+  "priority": "major",
+  "models_used": []
+}

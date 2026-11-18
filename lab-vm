@@ -82,6 +82,7 @@ dependencies = [
     root / "lib/vm/parent-qemu.py",
     root / "lib/vm/parent-provision.py",
     root / "lib/vm/system-vm.py",
+    root / "lib/vm/system-acceptance.py",
     root / "lib/vm/guest-bootstrap.py",
     root / "scripts/parent-readonly-safety-gate.py",
     root / "tools/vm-owner-acceptance",

@@ -2251,6 +2251,11 @@ def print_report(data: dict) -> None:
     print(f"Report: {data['evidence']['report']}")
     for name, status in data["gates"].items():
         print(f"{name}: {status}")
+    if data["mode"] in ("system_vm_verify", "system_vm_accept"):
+        diagnostic = data.get("evidence", {}).get("failure_diagnostic")
+        if isinstance(diagnostic, dict):
+            print("system_vm_failure_diagnostic=" + json.dumps(diagnostic, sort_keys=True,
+                                                                  separators=(",", ":")))
     print(f"OVERALL: {data['status']}")
     if data["mode"] == "parent_accept":
         print("M2_OWNER_ACCEPTANCE_PASS" if data["status"] == "PASS"
@@ -2373,7 +2378,10 @@ def main(argv: list[str] | None = None) -> int:
         except GateError as error:
             status, message = error.status, error.message
         except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
-            status, message = "FAIL", f"system VM acceptance failed ({type(error).__name__})"
+            if getattr(error, "safe_report_message", False):
+                status, message = "FAIL", f"system VM acceptance failed: {error}"
+            else:
+                status, message = "FAIL", f"system VM acceptance failed ({type(error).__name__})"
         except Exception as error:
             status, message = "FAIL", f"system VM acceptance failed ({type(error).__name__})"
         else:
@@ -2386,8 +2394,15 @@ def main(argv: list[str] | None = None) -> int:
         if data["gates"].get(current_gate) == "NOT_RUN":
             data["gates"][current_gate] = status
         data["notes"].append(message)
-        _checkpoint(report_dir, data)
         print_report(data)
+        try:
+            _checkpoint(report_dir, data)
+        except OSError as error:
+            reason = error.strerror or type(error).__name__
+            print(f"FAIL: acceptance report persistence failed ({type(error).__name__}: {reason})",
+                  file=sys.stderr)
+            print(f"{status}: {message}", file=sys.stderr)
+            return 3 if status == "BLOCKED" else 1
         print(f"{status}: {message}", file=sys.stderr)
         return 3 if status == "BLOCKED" else 1
     modes = [name for name in (

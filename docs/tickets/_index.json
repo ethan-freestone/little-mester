@@ -360,7 +360,13 @@
       "file_path": "ticket-061.json",
       "status": "draft",
       "area": "vm-v3"
+    },
+    {
+      "number": 62,
+      "file_path": "ticket-062.json",
+      "status": "draft",
+      "area": "vm"
     }
   ],
-  "updated_at": "2026-11-18T19:31:08.768Z"
+  "updated_at": "2026-11-18T22:14:05.649Z"
 }
