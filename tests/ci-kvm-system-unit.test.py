@@ -453,6 +453,31 @@ class HostedSystemUnitTests(unittest.TestCase):
                     calls.append((node.lineno, "system-install"))
         self.assertEqual([name for _, name in sorted(calls)], ["system-install", "verify"])
 
+    def test_startup_diagnostic_sanitizer_redacts_multiline_credentials_and_keys(self):
+        diagnostic = "\n".join((
+            "Authorization: Bearer bearer-secret-value",
+            'password="two words containing a secret"',
+            "token='first line\nsecond secret line'",
+            ("-----BEGIN OPENSSH PRIVATE KEY-----\nprivate-key-bytes\n"
+             "-----END OPENSSH PRIVATE KEY-----"),
+            "sk-" + "x" * 32,
+        ))
+        sanitized = unit.sanitize_diagnostic_output(diagnostic)
+        for secret in ("bearer-secret-value", "two words containing a secret",
+                       "second secret line", "private-key-bytes", "sk-" + "x" * 32):
+            self.assertNotIn(secret, sanitized)
+        self.assertIn("[REDACTED PRIVATE KEY BLOCK]", sanitized)
+        multibyte = unit.sanitize_diagnostic_output("界" * 20_000)
+        self.assertLessEqual(len(multibyte.encode("utf-8")), unit.DIAGNOSTIC_OUTPUT_LIMIT)
+
+    def test_startup_diagnostic_command_caps_captured_output(self):
+        code, output, truncated = unit.bounded_diagnostic_command([
+            "/usr/bin/python3", "-c", "import sys; sys.stdout.write('x' * 400000)",
+        ])
+        self.assertEqual(len(output.encode("utf-8")), unit.DIAGNOSTIC_CAPTURE_LIMIT)
+        self.assertTrue(truncated)
+        self.assertNotEqual(code, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

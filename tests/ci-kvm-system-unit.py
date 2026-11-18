@@ -49,6 +49,8 @@ FIXED_FILES = (
 FIXED_USERS = ("lm-vm", "lm-vm-proxy")
 FIXED_GROUPS = ("lm-vm", "lm-vm-proxy", "lm-vm-control")
 PROTECTED_PREFLIGHT_PATH = "/etc/sudoers.d/little-mester-vm"
+DIAGNOSTIC_CAPTURE_LIMIT = 256 * 1024
+DIAGNOSTIC_OUTPUT_LIMIT = 24 * 1024
 PROTECTED_PREFLIGHT_CHECK = (
     "import os, sys\n"
     "try:\n"
@@ -190,6 +192,94 @@ def service_state(unit: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
 
 
+def bounded_diagnostic_command(argv: list[str]) -> tuple[int, str, bool]:
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT)
+    assert process.stdout is not None
+    fd = process.stdout.fileno()
+    os.set_blocking(fd, False)
+    poller = select.poll()
+    poller.register(fd, select.POLLIN | select.POLLHUP | select.POLLERR)
+    deadline = time.monotonic() + 5
+    output = bytearray()
+    truncated = False
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                truncated = True
+                process.kill()
+                break
+            events = poller.poll(max(1, min(100, int(remaining * 1000))))
+            if events:
+                chunk = os.read(fd, min(8192, DIAGNOSTIC_CAPTURE_LIMIT + 1 - len(output)))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > DIAGNOSTIC_CAPTURE_LIMIT:
+                    del output[DIAGNOSTIC_CAPTURE_LIMIT:]
+                    truncated = True
+                    process.kill()
+                    break
+            elif process.poll() is not None:
+                break
+        try:
+            return_code = process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            return_code = process.wait(timeout=1)
+    finally:
+        process.stdout.close()
+    return return_code, output.decode("utf-8", errors="replace"), truncated
+
+
+def sanitize_diagnostic_output(value: str) -> str:
+    redactions = (
+        (re.compile(r"-----BEGIN [^\r\n]*PRIVATE KEY-----.*?-----END [^\r\n]*PRIVATE KEY-----",
+                    re.DOTALL), "[REDACTED PRIVATE KEY BLOCK]"),
+        (re.compile(r"-----BEGIN [^\r\n]*PRIVATE KEY-----.*\Z", re.DOTALL),
+         "[REDACTED INCOMPLETE PRIVATE KEY BLOCK]"),
+        (re.compile(r"(?i)(https?://)[^/\s:@]+:[^/\s@]+@"), r"\1[REDACTED]@"),
+        (re.compile(r"(?im)\b(password|passwd|token|secret|authorization|api[_-]?key)"
+                    r"\b(\s*[=:]\s*)(?:\".*?\"|'.*?'|[^\r\n,;]*)", re.DOTALL),
+         r"\1\2[REDACTED]"),
+        (re.compile(r"(?i)\bBearer\s+[^\s,;]+"), "Bearer [REDACTED]"),
+        (re.compile(r"\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,})\b"),
+         "[REDACTED TOKEN]"),
+    )
+    for pattern, replacement in redactions:
+        value = pattern.sub(replacement, value)
+    return value.encode("utf-8")[-DIAGNOSTIC_OUTPUT_LIMIT:].decode("utf-8", errors="ignore")
+
+
+def report_startup_diagnostics() -> None:
+    """Emit bounded, redacted systemd and QEMU serial evidence before cleanup."""
+    properties = (
+        "LoadState,ActiveState,SubState,Result,MainPID,ControlPID,ExecMainCode,"
+        "ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp,TimeoutStartUSec,"
+        "TimeoutStopUSec,ExecStartPre,ExecStart,ExecStartPost,ExecStop"
+    )
+    commands = (
+        ("unit-properties", ["/usr/bin/systemctl", "show", "--no-pager",
+         f"--property={properties}", UNIT, PROXY_UNIT]),
+        ("unit-status", ["/usr/bin/systemctl", "status", "--no-pager", "--full", UNIT, PROXY_UNIT]),
+        # QEMU's serial console is attached to stdout and therefore lands in this journal.
+        ("unit-and-guest-journal", ["/usr/bin/journalctl", "--no-pager", "-b",
+         "-u", UNIT, "-u", PROXY_UNIT, "-n", "120", "-o", "short-iso"]),
+    )
+    print("production_unit_failure_diagnostics=BEGIN", flush=True)
+    for label, argv in commands:
+        try:
+            return_code, output, truncated = bounded_diagnostic_command(argv)
+            output = sanitize_diagnostic_output(output)
+            suffix = " truncated=true" if truncated else ""
+            print(f"--- {label} exit={return_code}{suffix} ---", flush=True)
+            print(output or "[no output]", flush=True)
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            print(f"--- {label} unavailable ({type(error).__name__}) ---", flush=True)
+    print("production_unit_failure_diagnostics=END", flush=True)
+
+
 def require_fixed_units_loaded() -> None:
     states = {unit: service_state(unit) for unit in (UNIT, PROXY_UNIT)}
     require(all(state.get("LoadState") == "loaded" for state in states.values()),
@@ -197,14 +287,20 @@ def require_fixed_units_loaded() -> None:
 
 
 def assert_stopped(*, vm_result: str | None = None) -> None:
-    for unit in (UNIT, PROXY_UNIT):
-        state = service_state(unit)
-        require(state.get("ActiveState") in ("inactive", "failed")
-                and state.get("MainPID") == "0",
-                f"final service cleanup did not stop {unit}: {state}")
-        if unit == UNIT and vm_result is not None:
-            require(state.get("Result") == vm_result,
-                    f"production VM unit result differs from {vm_result}: {state}")
+    deadline = time.monotonic() + 30
+    states: dict[str, dict[str, str]] = {}
+    while True:
+        states = {unit: service_state(unit) for unit in (UNIT, PROXY_UNIT)}
+        stopped = all(state.get("ActiveState") in ("inactive", "failed")
+                      and state.get("MainPID") == "0" for state in states.values())
+        if stopped:
+            break
+        require(time.monotonic() < deadline,
+                f"final service cleanup did not stop both units within 30s: {states}")
+        time.sleep(0.1)
+    if vm_result is not None:
+        require(states[UNIT].get("Result") == vm_result,
+                f"production VM unit result differs from {vm_result}: {states[UNIT]}")
     print("production_unit_cleanup=PASS")
 
 
@@ -672,6 +768,8 @@ def main() -> int:
     except BaseException as error:  # noqa: BLE001 - finally below must stop a started unit on cancellation
         failure = error
         print(f"production_unit_result=FAIL error={type(error).__name__}: {error}", file=sys.stderr)
+        if start_attempted:
+            report_startup_diagnostics()
     finally:
         if start_attempted and installed_root is not None:
             try:
@@ -679,6 +777,7 @@ def main() -> int:
                 assert_stopped()
             except BaseException as error:  # noqa: BLE001 - preserve both primary and cleanup failures
                 print(f"production_unit_cleanup=FAIL error={type(error).__name__}: {error}", file=sys.stderr)
+                report_startup_diagnostics()
                 failure = failure or error
     if failure:
         return 1
