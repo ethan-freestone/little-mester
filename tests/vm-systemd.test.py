@@ -231,7 +231,40 @@ class SystemdPolicyTests(unittest.TestCase):
         with mock.patch.object(acceptance, "service_state", side_effect=[
                 {"ActiveState": "failed", "MainPID": "0", "Result": "exit-code"},
                 {"ActiveState": "inactive", "MainPID": "0", "Result": "success"}]), \
-                self.assertRaisesRegex(acceptance.AcceptanceError, "did not stop cleanly"):
+                self.assertRaisesRegex(acceptance.AcceptanceError, "failed state"):
+            acceptance._require_normal_stop()
+
+    def test_normal_acceptance_stop_waits_for_proxy_deactivation_then_requires_clean_exit(self):
+        vm_stopped = {"ActiveState": "inactive", "MainPID": "0", "Result": "success"}
+        proxy_stopping = {"ActiveState": "deactivating", "MainPID": "4321", "Result": "success"}
+        proxy_stopped = {"ActiveState": "inactive", "MainPID": "0", "Result": "success"}
+        with mock.patch.object(acceptance, "service_state", side_effect=[
+                vm_stopped, proxy_stopping, vm_stopped, proxy_stopped]) as state, \
+                mock.patch.object(acceptance.time, "sleep") as sleep:
+            acceptance._require_normal_stop()
+        self.assertEqual(state.call_count, 4)
+        sleep.assert_called_once()
+
+    def test_normal_acceptance_stop_times_out_if_deactivating_unit_never_exits(self):
+        vm_stopped = {"ActiveState": "inactive", "MainPID": "0", "Result": "success"}
+        proxy_stopping = {"ActiveState": "deactivating", "MainPID": "4321", "Result": "success"}
+        with mock.patch.object(acceptance, "service_state", side_effect=[vm_stopped, proxy_stopping]), \
+                mock.patch.object(acceptance.time, "monotonic",
+                                  side_effect=[10.0, 10.0, 10.0, 41.0]), \
+                self.assertRaisesRegex(acceptance.AcceptanceError, "did not complete within 30s"):
+            acceptance._require_normal_stop(timeout=30)
+
+    def test_normal_acceptance_stop_rejects_inactive_unit_with_live_mainpid(self):
+        vm_unexpected = {"ActiveState": "inactive", "MainPID": "4321", "Result": "success"}
+        proxy_stopped = {"ActiveState": "inactive", "MainPID": "0", "Result": "success"}
+        with mock.patch.object(acceptance, "service_state", side_effect=[vm_unexpected, proxy_stopped]), \
+                self.assertRaisesRegex(acceptance.AcceptanceError, "unexpected live MainPID"):
+            acceptance._require_normal_stop()
+
+    def test_normal_acceptance_stop_rejects_missing_mainpid_evidence(self):
+        vm_without_pid = {"ActiveState": "inactive", "Result": "success"}
+        with mock.patch.object(acceptance, "service_state", return_value=vm_without_pid), \
+                self.assertRaisesRegex(acceptance.AcceptanceError, "omitted MainPID"):
             acceptance._require_normal_stop()
 
     def test_effective_systemd_command_parser_preserves_exact_argument_boundaries(self):

@@ -64,7 +64,7 @@ def _safe_output(value: bytes | str | None) -> str:
         "…[truncated]" if len(joined) > _DIAGNOSTIC_OUTPUT_LIMIT else "")
 
 
-def run(argv: list[str], *, timeout: int = 30, capture: bool = True,
+def run(argv: list[str], *, timeout: float = 30, capture: bool = True,
         operation: str = "fixed acceptance command") -> subprocess.CompletedProcess:
     try:
         result = subprocess.run(argv, stdin=subprocess.DEVNULL,
@@ -86,9 +86,10 @@ def run(argv: list[str], *, timeout: int = 30, capture: bool = True,
     return result
 
 
-def service_state(unit: str) -> dict[str, str]:
+def service_state(unit: str, *, timeout: float = 30) -> dict[str, str]:
     result = run(["/usr/bin/systemctl", "show", "--no-pager", "--property=LoadState",
-                  "--property=ActiveState", "--property=MainPID", "--property=Result", unit])
+                  "--property=ActiveState", "--property=MainPID", "--property=Result", unit],
+                 timeout=timeout)
     return dict(line.split("=", 1) for line in result.stdout.decode().splitlines() if "=" in line)
 
 
@@ -405,12 +406,45 @@ def _restore_initial_state(root: pathlib.Path, was_running: bool) -> tuple[dict[
     return states
 
 
-def _require_normal_stop() -> None:
-    for unit in (UNIT, PROXY_UNIT):
-        state = service_state(unit)
-        if (state.get("ActiveState") != "inactive" or state.get("MainPID") != "0"
-                or state.get("Result") != "success"):
-            raise AcceptanceError(f"unit did not stop cleanly: {unit}")
+def _require_normal_stop(timeout: int = 30) -> None:
+    """Wait for both systemd stop jobs to finish, rejecting failures and live PIDs."""
+    deadline = time.monotonic() + timeout
+    states: dict[str, dict[str, str]] = {}
+    while True:
+        states = {}
+        pending = False
+        for unit in (UNIT, PROXY_UNIT):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AcceptanceError(f"unit shutdown did not complete within {timeout}s: {states}")
+            state = service_state(unit, timeout=remaining)
+            states[unit] = state
+            active = state.get("ActiveState")
+            raw_pid = state.get("MainPID")
+            if raw_pid is None:
+                raise AcceptanceError(f"systemd omitted MainPID during normal shutdown: {unit} ({state})")
+            pid = int(raw_pid)
+            if active == "failed":
+                raise AcceptanceError(f"unit entered failed state during normal shutdown: {unit} ({state})")
+            if active == "inactive":
+                if pid != 0:
+                    raise AcceptanceError(f"inactive unit has an unexpected live MainPID: {unit} ({state})")
+                if state.get("Result") != "success":
+                    raise AcceptanceError(f"unit did not stop cleanly: {unit} ({state})")
+                continue
+            if active == "deactivating":
+                # A live MainPID is expected only while systemd completes this stop job.
+                if pid < 0 or pid == 1:
+                    raise AcceptanceError(f"deactivating unit has an unexpected MainPID: {unit} ({state})")
+                pending = True
+                continue
+            raise AcceptanceError(f"unit was not stopped and is not completing shutdown: {unit} ({state})")
+        if not pending:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AcceptanceError(f"unit shutdown did not complete within {timeout}s: {states}")
+        time.sleep(min(0.1, remaining))
 
 
 def accept(root: pathlib.Path, progress=None) -> int:
