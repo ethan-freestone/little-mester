@@ -227,6 +227,78 @@ class SystemdPolicyTests(unittest.TestCase):
             "/opt/candidate/lab-vm", "system", "up"])
         self.assertEqual(run.call_args.kwargs["timeout"], 1005)
 
+    def test_acceptance_requires_effective_control_group_before_lifecycle_preflight(self):
+        fake_pexpect = type("Pexpect", (), {})()
+        runtime_dir = type("Info", (), {
+            "st_mode": stat.S_IFDIR | 0o700, "st_uid": 1234,
+        })()
+        with mock.patch.dict("sys.modules", {"pexpect": fake_pexpect}), \
+             mock.patch.object(acceptance.os.path, "isfile", return_value=True), \
+             mock.patch.object(acceptance.os, "access", return_value=True), \
+             mock.patch.object(acceptance.os, "getuid", return_value=1234), \
+             mock.patch.object(acceptance.os, "getgroups", return_value=[99]), \
+             mock.patch.object(acceptance.os, "getegid", return_value=100), \
+             mock.patch.object(acceptance.os, "lstat", return_value=runtime_dir), \
+             mock.patch.object(acceptance.grp, "getgrnam", return_value=type("Group", (), {"gr_gid": 42})()), \
+             self.assertRaisesRegex(acceptance.AcceptanceError, "lacks effective lm-vm-control"):
+            acceptance._lifecycle_preflight(pathlib.Path("/opt/candidate"))
+
+    def test_acceptance_accepts_effective_supplementary_control_group_and_checks_key_metadata(self):
+        fake_pexpect = type("Pexpect", (), {})()
+        runtime_dir = type("Info", (), {
+            "st_mode": stat.S_IFDIR | 0o700, "st_uid": 1234,
+        })()
+        control_key = type("Info", (), {
+            "st_mode": stat.S_IFREG | 0o640, "st_uid": 0, "st_gid": 42, "st_nlink": 1,
+        })()
+        known_hosts = type("Info", (), {
+            "st_mode": stat.S_IFREG | 0o644, "st_uid": 0, "st_gid": 0, "st_nlink": 1,
+        })()
+        with mock.patch.dict("sys.modules", {"pexpect": fake_pexpect}), \
+             mock.patch.object(acceptance.os.path, "isfile", return_value=True), \
+             mock.patch.object(acceptance.os, "access", return_value=True), \
+             mock.patch.object(acceptance.os, "getuid", return_value=1234), \
+             mock.patch.object(acceptance.os, "getgroups", return_value=[42]), \
+             mock.patch.object(acceptance.os, "getegid", return_value=100), \
+             mock.patch.object(acceptance.os, "lstat", side_effect=[runtime_dir, control_key, known_hosts]), \
+             mock.patch.object(acceptance.grp, "getgrnam", return_value=type("Group", (), {"gr_gid": 42})()):
+            acceptance._lifecycle_preflight(pathlib.Path("/opt/candidate"))
+
+    def test_tui_acceptance_executes_installed_owner_interface_directly(self):
+        class FakeChild:
+            exitstatus = 0
+            signalstatus = None
+
+            def expect(self, _pattern, timeout=None):
+                return None
+
+            def sendcontrol(self, _value):
+                return None
+
+            def send(self, _value):
+                return None
+
+            def close(self, force=False):
+                return None
+
+            def isalive(self):
+                return False
+
+        child = FakeChild()
+        fake_pexpect = type("Pexpect", (), {"EOF": object(), "spawn": mock.Mock(return_value=child)})()
+        with mock.patch.dict("sys.modules", {"pexpect": fake_pexpect}):
+            acceptance._tui_check(pathlib.Path("/opt/candidate"))
+        args, kwargs = fake_pexpect.spawn.call_args
+        self.assertEqual(args[:2], ("/opt/candidate/lab-vm", ["system", "tui"]))
+        self.assertEqual(kwargs["encoding"], None)
+        self.assertEqual(kwargs["timeout"], 90)
+
+    def test_owner_acceptance_no_longer_depends_on_sg_but_ci_group_activation_remains(self):
+        acceptance_source = (ROOT / "lib/vm/system-acceptance.py").read_text()
+        ci_source = (ROOT / "tests/ci-kvm-system-unit.py").read_text()
+        self.assertNotIn("/usr/bin/sg", acceptance_source)
+        self.assertIn('"/usr/bin/sg", "lm-vm-control", "-c"', ci_source)
+
     def test_normal_acceptance_stop_rejects_systemd_fallback_failure(self):
         with mock.patch.object(acceptance, "service_state", side_effect=[
                 {"ActiveState": "failed", "MainPID": "0", "Result": "exit-code"},

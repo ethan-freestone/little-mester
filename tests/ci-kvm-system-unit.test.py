@@ -394,6 +394,15 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertEqual(shlex.split(command[3])[shlex.split(command[3]).index("--prefix") + 1],
                          str(unit.CI_INSTALL_PREFIX))
 
+    def test_ci_activates_post_install_control_group_for_shared_acceptance(self):
+        sha = "a" * 40
+        with mock.patch.object(unit, "run") as run:
+            unit.invoke_shared_acceptance(sha)
+        command = run.call_args.args[0]
+        self.assertEqual(command[:3], ["/usr/bin/sg", "lm-vm-control", "-c"])
+        self.assertIn(f"/tools/vm-owner-acceptance --system-vm accept", command[3])
+        self.assertIn("--approve-system-vm-lifecycle", command[3])
+
     def test_script_uses_production_fixed_operations_and_bounded_stop_cleanup(self):
         source = SCRIPT.read_text()
         shared = (ROOT / "lib/vm/system-acceptance.py").read_text()

@@ -322,7 +322,7 @@ def _tui_check(root: pathlib.Path) -> None:
         import pexpect
     except ImportError as error:
         raise AcceptanceError("python3-pexpect is required for the OpenCode TUI acceptance check") from error
-    child = pexpect.spawn("/usr/bin/sg", ["lm-vm-control", "-c", f"{root}/lab-vm system tui"],
+    child = pexpect.spawn(str(root / "lab-vm"), ["system", "tui"],
                           env={**os.environ, "TERM": "xterm-256color", "LM_VM_TERM_VALIDATED": "1"},
                           encoding=None, timeout=90, dimensions=(32, 100))
     try:
@@ -345,7 +345,7 @@ def _lifecycle_preflight(root: pathlib.Path) -> None:
         import pexpect  # noqa: F401
     except ImportError as error:
         raise AcceptanceError("python3-pexpect is required for OpenCode TUI acceptance") from error
-    for tool in ("/usr/bin/ssh", "/usr/bin/sg", "/usr/bin/ss", "/usr/bin/stat"):
+    for tool in ("/usr/bin/ssh", "/usr/bin/ss", "/usr/bin/stat"):
         if not os.path.isfile(tool) or not os.access(tool, os.X_OK):
             raise AcceptanceError(f"fixed owner acceptance dependency is unavailable: {pathlib.Path(tool).name}")
     runtime = pathlib.Path(f"/run/user/{os.getuid()}")
@@ -353,6 +353,8 @@ def _lifecycle_preflight(root: pathlib.Path) -> None:
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
         raise AcceptanceError("private owner runtime directory is unavailable or unsafe")
     control_gid = grp.getgrnam("lm-vm-control").gr_gid
+    if control_gid not in os.getgroups() and control_gid != os.getegid():
+        raise AcceptanceError("invoking process lacks effective lm-vm-control group membership")
     for path, gid, mode in ((pathlib.Path("/etc/little-mester-vm/control_ed25519"), control_gid, 0o640),
                             (pathlib.Path("/etc/little-mester-vm/known_hosts"), 0, 0o644)):
         info = os.lstat(path)
