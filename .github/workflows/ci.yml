@@ -218,8 +218,10 @@ jobs:
             merge_parent="$(git rev-parse HEAD^2)"
             test "$merge_parent" = "$SOURCE_HEAD_SHA"
             printf 'pr_merge_commit_second_parent=%s\n' "$merge_parent"
+            printf 'LM_CI_PR_MERGE_PARENT_SHA=%s\n' "$merge_parent" >> "$GITHUB_ENV"
           else
             test "$SOURCE_HEAD_SHA" = "$actual_sha"
+            printf 'LM_CI_PR_MERGE_PARENT_SHA=not-applicable\n' >> "$GITHUB_ENV"
           fi
       - name: Report runner architecture, identity, and initial KVM device state
         run: |

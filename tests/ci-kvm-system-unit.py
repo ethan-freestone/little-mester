@@ -605,9 +605,17 @@ def main() -> int:
         source_sha = os.environ.get("LM_CI_SOURCE_HEAD_SHA", sha)
         require(SHA_RE.fullmatch(source_sha) is not None,
                 "LM_CI_SOURCE_HEAD_SHA is not a full exact commit SHA")
+        event = os.environ.get("GITHUB_EVENT_NAME", "unknown")
+        merge_parent = os.environ.get("LM_CI_PR_MERGE_PARENT_SHA", "not-applicable")
+        if event == "pull_request":
+            require(SHA_RE.fullmatch(merge_parent) is not None and merge_parent == source_sha,
+                    "verified PR merge parent does not match source HEAD")
+        else:
+            require(merge_parent == "not-applicable",
+                    "unexpected PR merge-parent evidence for a non-PR event")
         print(f"evidence_scope=production_systemd_unit candidate_sha={sha} "
               f"workflow_sha={sha} source_head_sha={source_sha} "
-              f"event={os.environ.get('GITHUB_EVENT_NAME', 'unknown')} runner=ubuntu-24.04-kvm")
+              f"pr_merge_commit_second_parent={merge_parent} event={event} runner=ubuntu-24.04-kvm")
         # owner-acceptance's private report root requires the standard per-user
         # runtime directory. Create only this ephemeral runner-owned directory
         # when absent; reject any existing path that is not the exact safe form.
