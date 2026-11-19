@@ -246,18 +246,58 @@ class HostDependencyTests(unittest.TestCase):
              mock.patch.object(dependencies, "_package_installed", side_effect=lambda _b, p: p == "qemu-img"), \
              self.assertRaisesRegex(dependencies.DependencyError, "unsupported partial upgrade"):
             dependencies._pacman_plan(["qemu-desktop"])
+        for unsafe_output in ("qemu-desktop 9.2.0\nconflict: replacing package\n",
+                              "qemu-desktop 9.2.0\nremoving unrelated package\n"):
+            with self.subTest(unsafe_output=unsafe_output), \
+                 mock.patch.object(dependencies, "_run", side_effect=[
+                     subprocess.CompletedProcess([], 0, ""),
+                     subprocess.CompletedProcess([], 0, unsafe_output)]), \
+                 self.assertRaisesRegex(dependencies.DependencyError, "could not prove a safe"):
+                dependencies._pacman_plan(["qemu-desktop"])
+
+    def test_pacman_accepts_empty_no_upgrade_result_with_exit_zero(self):
         with mock.patch.object(dependencies, "_run", side_effect=[
                 subprocess.CompletedProcess([], 0, ""),
-                subprocess.CompletedProcess([], 0, "conflict: replacing package\n")]), \
-             self.assertRaisesRegex(dependencies.DependencyError, "could not prove a safe"):
-            dependencies._pacman_plan(["qemu-desktop"])
+                subprocess.CompletedProcess([], 0, "qemu-desktop 9.2.0\n")]) as run, \
+             mock.patch.object(dependencies, "_package_installed", return_value=False):
+            self.assertEqual(dependencies._pacman_plan(["qemu-desktop"]), ("qemu-desktop=9.2.0",))
+        self.assertEqual(run.call_args_list[0].args[0], [dependencies.PACMAN, "-Qu"])
+
+    def test_pacman_accepts_empty_no_upgrade_result_with_exit_one(self):
+        with mock.patch.object(dependencies, "_run", side_effect=[
+                subprocess.CompletedProcess([], 1, ""),
+                subprocess.CompletedProcess([], 0, "qemu-desktop 9.2.0\n")]) as run, \
+             mock.patch.object(dependencies, "_package_installed", return_value=False):
+            self.assertEqual(dependencies._pacman_plan(["qemu-desktop"]), ("qemu-desktop=9.2.0",))
+        self.assertEqual(run.call_args_list[0].args[0], [dependencies.PACMAN, "-Qu"])
 
     def test_pacman_refuses_pending_full_system_upgrades_without_syncing(self):
-        with mock.patch.object(dependencies, "_run", return_value=subprocess.CompletedProcess(
-                [], 0, "linux 6.12.1-1 -> 6.12.2-1\n")) as run, \
-             self.assertRaisesRegex(dependencies.DependencyError, "partial upgrade"):
+        for status in (0, 1):
+            with self.subTest(status=status), \
+                 mock.patch.object(dependencies, "_run", return_value=subprocess.CompletedProcess(
+                     [], status, "linux 6.12.1-1 -> 6.12.2-1\n")) as run, \
+                 self.assertRaisesRegex(dependencies.DependencyError, "partial upgrade"):
+                dependencies._pacman_plan(["qemu-desktop"])
+            self.assertEqual(run.call_args.args[0], [dependencies.PACMAN, "-Qu"])
+
+    def test_pacman_refuses_query_errors_and_unknown_results(self):
+        for status, output in ((1, "error: failed to synchronize all databases\n"),
+                               (2, ""), (127, "")):
+            with self.subTest(status=status, output=output), \
+                 mock.patch.object(dependencies, "_run", return_value=subprocess.CompletedProcess(
+                     [], status, output)) as run, \
+                 self.assertRaisesRegex(dependencies.DependencyError, "cannot verify package state") as raised:
+                dependencies._pacman_plan(["qemu-desktop"])
+            self.assertEqual(run.call_args.args[0], [dependencies.PACMAN, "-Qu"])
+            if output:
+                self.assertIn(output.strip(), str(raised.exception))
+
+    def test_pacman_query_fails_closed_on_captured_stderr_diagnostic(self):
+        with mock.patch.object(dependencies.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 1, "pacman diagnostic\n")) as run, \
+             self.assertRaisesRegex(dependencies.DependencyError, "pacman diagnostic"):
             dependencies._pacman_plan(["qemu-desktop"])
-        self.assertEqual(run.call_args.args[0], [dependencies.PACMAN, "-Qu"])
+        self.assertIs(run.call_args.kwargs["stderr"], subprocess.STDOUT)
 
     def test_interrupted_package_process_is_reported_and_not_retried(self):
         absent = [dependencies.Requirement("curl", "/usr/bin/curl", packages=(("apt", "curl"),))]

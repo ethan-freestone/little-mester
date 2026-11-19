@@ -287,14 +287,18 @@ def _pacman_plan(packages: list[str], *, display: bool = False) -> tuple[str, ..
     # constitute a partial upgrade. Print-only resolution must expose exactly
     # the additions before the owner is asked to approve anything.
     upgrades = _run([PACMAN, "-Qu"])
-    if upgrades.returncode or upgrades.stdout.strip():
+    # _run merges stderr into stdout. Pacman may use status 1 for a legitimate
+    # empty query result; any output (including diagnostics) or any other
+    # status remains ambiguous and must fail closed.
+    if upgrades.returncode not in (0, 1) or upgrades.stdout != "":
         raise DependencyError(
             "pacman reports pending system upgrades or cannot verify package state; "
-            "refusing a partial upgrade. Perform normal full system maintenance separately.\n" + upgrades.stdout
+            "refusing a partial upgrade. Perform normal full system maintenance separately.\n"
+            + (upgrades.stdout or "")
         )
     result = _run([PACMAN, "-S", "--needed", "--print", "--print-format", "%n %v", "--", *packages])
     output = result.stdout
-    if result.returncode or re.search(r"(?i)conflict|replac|remove|upgrade|synchroniz.*database", output):
+    if result.returncode or re.search(r"(?i)conflict|replac|remov|upgrade|synchroniz.*database", output):
         raise DependencyError("pacman could not prove a safe install-only transaction; do not run -Sy or a partial upgrade\n" + output)
     if display and output:
         print("pacman transaction preview:", file=sys.stderr)
