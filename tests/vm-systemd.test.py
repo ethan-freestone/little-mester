@@ -135,6 +135,23 @@ class SystemdPolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(vm.Refused, "group-owned by kvm"):
                 vm._verify_kvm_access()
 
+    def test_service_kvm_gate_still_requires_its_own_group_and_effective_access(self):
+        world_rw_device = type("Device", (), {"st_mode": stat.S_IFCHR | 0o666, "st_gid": 4242})()
+        group = type("Group", (), {"gr_gid": 4242})()
+        with mock.patch.object(vm.grp, "getgrnam", return_value=group), \
+             mock.patch.object(vm.os, "stat", return_value=world_rw_device), \
+             mock.patch.object(vm.os, "getgroups", return_value=[]), \
+             mock.patch.object(vm.os, "access", return_value=True):
+            with self.assertRaisesRegex(vm.Refused, "exact supplementary group"):
+                vm._verify_kvm_access()
+        with mock.patch.object(vm.grp, "getgrnam", return_value=group), \
+             mock.patch.object(vm.os, "stat", return_value=world_rw_device), \
+             mock.patch.object(vm.os, "getgroups", return_value=[4242]), \
+             mock.patch.object(vm.os, "access", return_value=False) as access:
+            with self.assertRaisesRegex(vm.Refused, "lacks DAC read/write access"):
+                vm._verify_kvm_access()
+        access.assert_called_once_with("/dev/kvm", vm.os.R_OK | vm.os.W_OK, effective_ids=True)
+
     def test_sudoers_and_owner_cli_have_only_fixed_unit_and_operations(self):
         sudoers = (ROOT / "sudoers/little-mester-vm").read_text().splitlines()
         entries = [line for line in sudoers if line.startswith("%")]

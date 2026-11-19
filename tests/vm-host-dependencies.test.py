@@ -26,6 +26,49 @@ OWNER_SPEC.loader.exec_module(owner_cli)
 
 
 class HostDependencyTests(unittest.TestCase):
+    def test_kvm_capability_does_not_depend_on_sg_invokers_group_list(self):
+        requirement = dependencies.Requirement("KVM", capability="kvm")
+        device = type("Device", (), {
+            "st_mode": dependencies.stat.S_IFCHR | 0o660,
+            "st_gid": 4242,
+        })()
+        with mock.patch.object(dependencies.grp, "getgrnam", return_value=type("Group", (), {"gr_gid": 4242})()), \
+             mock.patch.object(dependencies.os, "stat", return_value=device), \
+             mock.patch.object(dependencies.os, "getgroups", return_value=[4343]), \
+             mock.patch.object(dependencies.os, "getegid", return_value=4343), \
+             mock.patch.object(dependencies.os, "access", return_value=False) as owner_access:
+            okay, detail = dependencies._capability(requirement)
+        self.assertTrue(okay)
+        self.assertIn("group read/write", detail)
+        owner_access.assert_not_called()
+
+    def test_kvm_capability_accepts_world_rw_device_without_owner_kvm_membership(self):
+        requirement = dependencies.Requirement("KVM", capability="kvm")
+        device = type("Device", (), {
+            "st_mode": dependencies.stat.S_IFCHR | 0o666,
+            "st_gid": 4242,
+        })()
+        with mock.patch.object(dependencies.grp, "getgrnam", return_value=type("Group", (), {"gr_gid": 4242})()), \
+             mock.patch.object(dependencies.os, "stat", return_value=device), \
+             mock.patch.object(dependencies.os, "getgroups", return_value=[]), \
+             mock.patch.object(dependencies.os, "getegid", return_value=4343), \
+             mock.patch.object(dependencies.os, "access", return_value=False):
+            okay, _detail = dependencies._capability(requirement)
+        self.assertTrue(okay)
+
+    def test_kvm_capability_still_requires_service_compatible_device_contract(self):
+        requirement = dependencies.Requirement("KVM", capability="kvm")
+        kvm_group = type("Group", (), {"gr_gid": 4242})()
+        for mode, gid in ((dependencies.stat.S_IFREG | 0o660, 4242),
+                          (dependencies.stat.S_IFCHR | 0o660, 4343),
+                          (dependencies.stat.S_IFCHR | 0o640, 4242)):
+            device = type("Device", (), {"st_mode": mode, "st_gid": gid})()
+            with self.subTest(mode=oct(mode), gid=gid), \
+                 mock.patch.object(dependencies.grp, "getgrnam", return_value=kvm_group), \
+                 mock.patch.object(dependencies.os, "stat", return_value=device):
+                okay, _detail = dependencies._capability(requirement)
+            self.assertFalse(okay)
+
     def test_all_present_has_no_package_manager_or_prompt(self):
         with mock.patch.object(dependencies, "missing", return_value=([], [])), \
              mock.patch.object(dependencies, "detect_backend", return_value="apt") as backend, \

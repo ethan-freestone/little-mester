@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import dataclasses
+import grp
 import os
 import pathlib
 import re
+import stat
 import subprocess
 import sys
 
@@ -133,17 +135,16 @@ def _capability(requirement: Requirement) -> tuple[bool, str]:
         return result.returncode == 0, f"{PYTHON}: import {requirement.module}"
     if requirement.capability == "kvm":
         try:
-            import grp
-            import stat
             info = os.stat("/dev/kvm", follow_symlinks=False)
             gid = grp.getgrnam("kvm").gr_gid
             okay = (stat.S_ISCHR(info.st_mode) and info.st_gid == gid
-                    and stat.S_IMODE(info.st_mode) & 0o060 == 0o060
-                    and (os.getegid() == gid or gid in os.getgroups())
-                    and os.access("/dev/kvm", os.R_OK | os.W_OK))
-            return okay, "/dev/kvm accessible through the existing kvm group"
+                    and stat.S_IMODE(info.st_mode) & 0o060 == 0o060)
+            # This is a service prerequisite, not an owner-process access test:
+            # systemd runs the VM as lm-vm with SupplementaryGroups=kvm.
+            # Actual access under that identity is enforced by system-vm.py.
+            return okay, "/dev/kvm must be a kvm-group character device with group read/write access"
         except (OSError, KeyError):
-            return False, "/dev/kvm accessible through the existing kvm group"
+            return False, "/dev/kvm must be a kvm-group character device with group read/write access"
     if requirement.capability == "systemd-manager":
         if not pathlib.Path("/run/systemd/system").is_dir() or not _executable("/usr/bin/systemctl"):
             return False, "responsive systemd system manager"
