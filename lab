@@ -204,6 +204,34 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   done
 
   case "${1:-}" in
+    vm)
+      shift
+      vm_operation="${1:-}"
+      [[ -n "$vm_operation" ]] || {
+        echo "Usage: ./lab vm {up|down|status|ssh|auth|tui|verify|accept|prepare-dependencies} [OPTIONS]" >&2
+        exit 2
+      }
+      shift
+      if [[ "$vm_operation" == "prepare-dependencies" ]]; then
+        scope="${1:-production}"
+        [[ $# -eq 1 ]] || { echo "Usage: ./lab vm prepare-dependencies [production|acceptance|system-install]" >&2; exit 2; }
+        exec "$LAB_DIR/tools/vm-owner-acceptance" --prepare-dependencies "$scope"
+      fi
+      case "$vm_operation" in
+        up|down|status|ssh|auth|tui|verify|accept) ;;
+        *) echo "Unknown VM operation: $vm_operation" >&2; exit 2 ;;
+      esac
+      case "$vm_operation" in
+        up|ssh|auth|tui|accept)
+          dependency_scope=production
+          [[ "$vm_operation" != "accept" ]] || dependency_scope=acceptance
+          "$LAB_DIR/tools/vm-owner-acceptance" --prepare-dependencies "$dependency_scope"
+          ;;
+      esac
+      vm_sha="$(/usr/bin/git -C "$LAB_DIR" rev-parse --verify HEAD)" || die "cannot resolve the pinned VM candidate commit"
+      exec "$LAB_DIR/tools/vm-owner-acceptance" --system-vm "$vm_operation" \
+        --sha "$vm_sha" --repo "$LAB_DIR" "$@"
+      ;;
     setup)
       command -v pacman >/dev/null || die "automated setup is Arch/CachyOS only; see docs/01-host-setup.md"
       nvidia-smi -L || die "NVIDIA driver not working on host (fix this first)"
@@ -437,6 +465,7 @@ HELPTEXT
       echo "  ./lab [flags] shell <path-to-workspace>"
       echo "  ./lab exec <path-to-workspace> '<command>'"
       echo "  ./lab setup | build | pull | stop | bench [--json] [-n N]"
+      echo "  ./lab vm {up|down|status|ssh|auth|tui|verify|accept|prepare-dependencies}"
       echo "  ./lab restart-llama [--cache] | tune [--analyse] | ai-analyze [OPTIONS]"
       echo
       echo "Flags (before path):"

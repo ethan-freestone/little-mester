@@ -176,6 +176,7 @@ class SystemdPolicyTests(unittest.TestCase):
         }
         self.assertTrue(required.issubset(owner.INSTALL_FILES))
         self.assertIn("lib/vm/system-acceptance.py", owner.INSTALL_FILES)
+        self.assertIn("lib/vm/host-dependencies.py", owner.INSTALL_FILES)
         self.assertEqual(owner.INSTALL_FILES["sudoers/little-mester-vm"], 0o444)
         self.assertTrue({"systemd", "sudoers"}.issubset(owner.INSTALL_DIRS))
         self.assertEqual(owner.INSTALL_FILES["tools/vm-system-install"], 0o755)
@@ -185,6 +186,7 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn('"lib/vm/guest-bootstrap.py": ("/usr/lib/little-mester-vm/guest-bootstrap.py"',
                       installer)
         self.assertIn('"lib/vm/system-vm.py": ("/usr/lib/little-mester-vm/system-vm.py"', installer)
+        self.assertIn('"lib/vm/host-dependencies.py": ("/usr/lib/little-mester-vm/host-dependencies.py"', installer)
         self.assertIn('Parse the exact pinned policy before creating accounts', installer)
         self.assertIn('preflight(root, owner)', installer)
         self.assertLess(installer.index('preflight(root, owner)'),

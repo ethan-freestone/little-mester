@@ -652,7 +652,7 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 "lib/vm/parent-launcher.py", "lib/vm/parent-gate.py",
                 "lib/vm/parent-supervisor.py", "lib/vm/parent-qemu.py",
                 "lib/vm/parent-provision.py", "lib/vm/system-vm.py",
-                "lib/vm/system-acceptance.py", "lib/vm/guest-bootstrap.py",
+                "lib/vm/system-acceptance.py", "lib/vm/host-dependencies.py", "lib/vm/guest-bootstrap.py",
                 "scripts/parent-readonly-safety-gate.py",
                 "tools/vm-owner-acceptance",
                 "tools/vm-system-install", "systemd/little-mester-vm.service",
