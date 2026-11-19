@@ -694,6 +694,14 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
   [[ -n "$qemu_state" && "$qemu_state" != Z ]] || fail 'QEMU exited before guest readiness'
   remaining=$((readiness_deadline - SECONDS))
   (( remaining > 0 )) || break
+  # These markers are emitted by the fixed provisioning script only after a
+  # definitive storage/package/provisioning failure. Inspect serial output
+  # before waiting for cloud-init completion or SSH host-key publication.
+  if grep -aEq 'KVM_GUEST_STORAGE_PREFLIGHT_FAIL|KVM_GUEST_PROVISION_FAIL|KVM_GUEST_SSH_SOCKET_FAIL' "$serial_log"; then
+    printf '%s\n' 'KVM_GUEST_PROVISIONING_DIAGNOSTIC: explicit cloud-init provisioning/SSH failure marker observed' >&2
+    grep -aE 'KVM_GUEST_(STORAGE|PROVISION|SSH)' "$serial_log" | tail -n 24 >&2 || true
+    fail 'guest cloud-init provisioning or SSH socket failed before SSH readiness'
+  fi
   attempt_timeout=8
   (( remaining < attempt_timeout )) && attempt_timeout=$remaining
   if grep -aEq 'KVM_GUEST_SSH_SERVICE_FAIL|KVM_GUEST_SSH_SOCKET_FAIL' "$serial_log" \
@@ -724,11 +732,6 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
       if grep -Eq '^(status|extended_status): error' "$tmp/readiness.log"; then
         cat "$tmp/readiness.log" >&2
         fail 'cloud-init reported an error before guest readiness'
-      fi
-      if grep -aEq 'KVM_GUEST_STORAGE_PREFLIGHT_FAIL|KVM_GUEST_PROVISION_FAIL|KVM_GUEST_SSH_SOCKET_FAIL' "$serial_log"; then
-        printf '%s\n' 'KVM_GUEST_PROVISIONING_DIAGNOSTIC: explicit cloud-init provisioning/SSH failure marker observed' >&2
-        grep -aE 'KVM_GUEST_(STORAGE|PROVISION|SSH)' "$serial_log" | tail -n 24 >&2 || true
-        fail 'guest cloud-init provisioning or SSH socket failed before SSH readiness'
       fi
     fi
   fi

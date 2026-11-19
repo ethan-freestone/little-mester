@@ -438,6 +438,10 @@ assert '"growpart": {"mode": "growpart", "devices": ["/"], "ignore_growroot_disa
 assert '"resize_rootfs": True' in text
 assert 'df -B1 --output=size,used,avail /' in text and 'df --output=itotal,iused,iavail /' in text
 assert 'KVM_GUEST_STORAGE_PREFLIGHT_FAIL' in text and 'KVM_GUEST_PROVISION_FAIL' in text
+boot_text = text.split('if [[ "$requested_stage" == boot ]]; then', 1)[1].split(
+    'if [[ "$requested_stage" == "config-tmux" ]]; then', 1)[0]
+assert boot_text.index('KVM_GUEST_PROVISION_FAIL') < boot_text.index('Cloud-init v\\..* finished at ')
+assert boot_text.index('KVM_GUEST_PROVISION_FAIL') < boot_text.index('if [[ -s "$known_hosts" ]]')
 assert '"ssh_deletekeys": True' in text
 assert '"ssh_genkeytypes": ["ed25519"]' in text
 assert '"ssh_quiet_keygen": True' in text
