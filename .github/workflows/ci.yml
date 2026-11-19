@@ -84,6 +84,7 @@ jobs:
           python3 tests/vm-owner-acceptance.test.py
           python3 tests/vm-systemd.test.py
           python3 tests/ci-kvm-system-unit.test.py
+          python3 tests/ci-kvm-host-dependencies.test.py
           python3 tests/vm-guest-user-dirs.test.py
           python3 tests/ci-qemu-oauth-bridge.test.py
           python3 tests/ci-kvm-launch.test.py
@@ -156,12 +157,12 @@ jobs:
           else
             printf 'kvm_device=absent-after-udev\n'
           fi
+      - name: Update Ubuntu package indexes for disposable KVM
+        timeout-minutes: 4
+        run: bash tests/ci-kvm-host-dependencies.sh update
       - name: Install disposable-VM host dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            cloud-image-utils curl genisoimage openssh-client openssh-server qemu-system-x86 \
-            qemu-utils socat virtiofsd python3-pexpect ncurses-bin
+        timeout-minutes: 10
+        run: bash tests/ci-kvm-host-dependencies.sh install
       - name: Prepare disposable guest and pinned inputs
         timeout-minutes: 5
         run: bash tests/ci-kvm-stage.sh --stage prepare --run-dir "$LM_CI_STATE_DIR"
@@ -250,13 +251,14 @@ jobs:
           else
             printf 'kvm_device=absent-after-udev\n'
           fi
+      - name: Update Ubuntu package indexes for production KVM
+        timeout-minutes: 4
+        run: bash tests/ci-kvm-host-dependencies.sh update
       - name: Install disposable-VM host dependencies
         id: host_dependencies
+        timeout-minutes: 10
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            cloud-image-utils curl genisoimage openssh-client openssh-server qemu-system-x86 \
-            qemu-utils socat virtiofsd python3-pexpect ncurses-bin
+          bash tests/ci-kvm-host-dependencies.sh install
       - name: Exercise exact pinned production systemd VM unit on disposable hosted KVM
         if: ${{ !cancelled() && steps.host_dependencies.outcome == 'success' }}
         timeout-minutes: 45

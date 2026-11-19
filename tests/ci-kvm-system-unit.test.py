@@ -437,8 +437,9 @@ class HostedSystemUnitTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         production = workflow.split("  production-systemd-vm-acceptance:", 1)[1].split(
             "  # ── 6.", 1)[0]
-        self.assertIn("python3-pexpect", production)
-        self.assertIn("ncurses-bin", production)
+        host_dependencies = (ROOT / "tests/ci-kvm-host-dependencies.sh").read_text()
+        self.assertIn("python3-pexpect", host_dependencies)
+        self.assertIn("ncurses-bin", host_dependencies)
 
     def test_fixed_disk_identity_uses_privileged_stat_for_only_fixed_regular_disk(self):
         command = ["/usr/bin/sudo", "-n", "/usr/bin/stat", "--format=%F:%d:%i", "--",
