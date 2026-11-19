@@ -27,29 +27,39 @@ PROBE_SPEC.loader.exec_module(probe)
 
 
 class HostedSystemUnitTests(unittest.TestCase):
-    def test_workflow_runs_production_unit_only_in_existing_ephemeral_hosted_kvm_job(self):
+    def test_workflow_separates_production_acceptance_from_transient_guest_job(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-        job = workflow.split("  real-qemu-kvm-trial:", 1)[1].split("\n  # ── 4.", 1)[0]
-        self.assertIn("runs-on: ubuntu-24.04", job)
-        self.assertIn("GITHUB_SHA", job)
-        self.assertIn("tests/ci-kvm-system-unit.py", job)
-        self.assertIn("timeout-minutes: 45", job)
-        self.assertIn("timeout-minutes: 90", job)
-        self.assertNotIn("runs-on: self-hosted", job)
+        transient = workflow.split("  transient-qemu-integration:", 1)[1].split(
+            "  # ── 5. Exact installed production", 1)[0]
+        production = workflow.split("  production-systemd-vm-acceptance:", 1)[1].split(
+            "  # ── 6.", 1)[0]
+        self.assertIn("name: Transient QEMU guest integration", transient)
+        self.assertIn("name: Production systemd VM acceptance", production)
+        self.assertIn("runs-on: ubuntu-24.04", production)
+        self.assertIn("GITHUB_SHA", production)
+        self.assertIn("tests/ci-kvm-system-unit.py", production)
+        self.assertIn("timeout-minutes: 45", production)
+        self.assertIn("timeout-minutes: 90", production)
+        self.assertNotIn("runs-on: self-hosted", production)
+        self.assertNotIn("tests/ci-kvm-system-unit.py", transient)
+        self.assertNotIn("needs:", transient + production)
+        self.assertNotIn("steps.smoke_cleanup", production)
+        self.assertIn("steps.host_dependencies.outcome == 'success'", production)
+        self.assertIn("LM_CI_SOURCE_HEAD_SHA", production)
+        self.assertIn("pr_merge_commit_second_parent", production)
         self.assertNotIn("workflow_dispatch:", workflow)
-        self.assertLess(job.index("Prove final identity-safe cleanup"),
-                        job.index("Exercise exact pinned production systemd VM unit"))
-        self.assertIn("id: smoke_cleanup", job)
-        self.assertIn("steps.smoke_cleanup.outcome == 'success'", job)
-        self.assertIn("!cancelled()", job)
-        self.assertIn("evidence_scope=production_systemd_unit", SCRIPT.read_text())
+        self.assertIn("workflow_sha={sha} source_head_sha={source_sha}", SCRIPT.read_text())
+        self.assertIn("LM_CI_SOURCE_HEAD_SHA", SCRIPT.read_text())
         self.assertEqual(unit.CI_INSTALL_PREFIX, pathlib.Path("/srv/little-mester-ci"))
         self.assertEqual(unit.CI_INSTALL_PARENT, unit.CI_INSTALL_PREFIX / "v3")
-        self.assertIn("ci-kvm-shared-launch-probe.py", job)
-        self.assertIn("python3 tests/ci-kvm-system-unit.py --cleanup", job)
-        self.assertIn("if: always()", job)
-        self.assertLess(job.index("Exercise exact pinned production systemd VM unit"),
-                        job.index("Require production systemd VM and proxy stopped"))
+        self.assertLess(production.index("Exercise exact pinned production systemd VM unit"),
+                        production.index("Require production systemd VM and proxy stopped"))
+        self.assertIn("if: always()", production)
+        self.assertIn("python3 tests/ci-kvm-system-unit.py --cleanup", production)
+        self.assertIn("production_unit_forced_stop=PASS", SCRIPT.read_text())
+        self.assertIn("cancel-in-progress: true", workflow)
+        self.assertNotIn("concurrency:", transient)
+        self.assertNotIn("concurrency:", production)
     def test_boot_readiness_has_bounded_three_minute_window(self):
         stage = (ROOT / "tests/ci-kvm-stage.sh").read_text()
         boot = stage.split('if [[ "$requested_stage" == boot ]]; then', 1)[1].split(
@@ -423,9 +433,10 @@ class HostedSystemUnitTests(unittest.TestCase):
                           "rm -rf"):
             self.assertNotIn(forbidden, source)
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-        kvm_job = workflow.split("  real-qemu-kvm-trial:", 1)[1].split("\n  # ── 4.", 1)[0]
-        self.assertIn("python3-pexpect", kvm_job)
-        self.assertIn("ncurses-bin", kvm_job)
+        production = workflow.split("  production-systemd-vm-acceptance:", 1)[1].split(
+            "  # ── 6.", 1)[0]
+        self.assertIn("python3-pexpect", production)
+        self.assertIn("ncurses-bin", production)
 
     def test_fixed_disk_identity_uses_privileged_stat_for_only_fixed_regular_disk(self):
         command = ["/usr/bin/sudo", "-n", "/usr/bin/stat", "--format=%F:%d:%i", "--",

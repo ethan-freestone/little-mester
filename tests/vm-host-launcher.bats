@@ -347,7 +347,10 @@ stage = pathlib.Path(sys.argv[1])
 text = stage.read_text() + stage.with_name('ci-kvm-stage-operations.sh').read_text()
 workflow = pathlib.Path(sys.argv[1]).parents[1] / '.github/workflows/ci.yml'
 workflow_text = workflow.read_text()
-job = workflow_text.split('  real-qemu-kvm-trial:', 1)[1].split('\n  # ── 4.', 1)[0]
+job = workflow_text.split('  transient-qemu-integration:', 1)[1].split(
+    '  # ── 5. Exact installed production', 1)[0]
+production_job = workflow_text.split('  production-systemd-vm-acceptance:', 1)[1].split(
+    '\n  # ── 6.', 1)[0]
 session_contract = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/parent-session-contract.py'
 session_contract_text = session_contract.read_text()
 opencode_readiness_text = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/opencode-readiness.sh'
@@ -365,18 +368,24 @@ state = pathlib.Path(sys.argv[1]).with_name('ci-kvm-stage-state.py').read_text()
 state_tests = pathlib.Path(sys.argv[1]).with_name('ci-kvm-stage-state.test.py').read_text()
 wrapper = pathlib.Path(sys.argv[1]).with_name('ci-kvm-capability.sh').read_text()
 assert 'pull_request:' in workflow_text and 'types: [opened, synchronize, reopened]' in workflow_text
-assert job.count('if:') == 3 and job.count('if: always()') == 2
-assert "if: ${{ !cancelled() && steps.smoke_cleanup.outcome == 'success' }}" in job
+assert 'name: Transient QEMU guest integration' in job
+assert 'name: Production systemd VM acceptance' in production_job
+assert job.count('if:') == 1 and job.count('if: always()') == 1
+assert 'needs:' not in job and 'needs:' not in production_job
+assert 'tests/ci-kvm-system-unit.py' not in job
+assert 'steps.smoke_cleanup.outcome' not in production_job
+assert "if: ${{ !cancelled() && steps.host_dependencies.outcome == 'success' }}" in production_job
 assert 'm2-qemu-acceptance' not in workflow_text
 assert 'workflow_dispatch:' not in workflow_text
 assert 'github.event.pull_request.head.sha || github.sha' in job
 assert 'pr_merge_commit_second_parent' in job and 'source_head_sha=' in job
+assert 'github.event.pull_request.head.sha || github.sha' in production_job
+assert 'pr_merge_commit_second_parent' in production_job and 'source_head_sha=' in production_job
 assert 'timeout-minutes: 90' in job
-assert 'Exercise exact pinned production systemd VM unit on disposable hosted KVM' in job
-assert 'Require production systemd VM and proxy stopped' in job
-assert job.index('Prove final identity-safe cleanup') < job.index('Exercise exact pinned production systemd VM unit')
-assert job.index('Prove final identity-safe cleanup') < job.index('Require production systemd VM and proxy stopped')
-assert 'timeout-minutes: 45' in job
+assert 'timeout-minutes: 90' in production_job
+assert 'Exercise exact pinned production systemd VM unit on disposable hosted KVM' in production_job
+assert 'Require production systemd VM and proxy stopped' in production_job
+assert 'timeout-minutes: 45' in production_job
 staged_steps = [
     'Prepare disposable guest and pinned inputs',
     'Start real KVM guest and prove strict SSH readiness',
@@ -392,6 +401,7 @@ assert job.index('Exercise live OAuth harness cancellation cleanup') < job.index
 assert 'python3 tests/ci-kvm-oauth-cleanup.test.py' in job
 assert job.count('ci-kvm-stage.sh --stage') == 6
 assert 'LM_CI_STATE_DIR' in job and 'GITHUB_RUN_ATTEMPT' in job
+assert 'little-mester-transient-kvm-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT' in job
 assert 'RUNNER_TEMP' in job and 'GITHUB_ENV' in job and 'runner.temp' not in job
 assert 'run_stage()' in wrapper and 'tests/ci-kvm-stage.sh' in wrapper
 assert "run_stage prepare" in wrapper and "run_stage synthetic-oauth" in wrapper
@@ -500,10 +510,16 @@ assert 'terminate_oauth_bridge_groups' in text and 'bridge-process.json' in path
 assert 'oauth_cleanup_unproved' in text and 'oauth_evidence_is_clear' in text
 assert 'process_state' in text and "printf '?'" in text
 assert 'runs-on: ubuntu-24.04' in job
+assert 'runs-on: ubuntu-24.04' in production_job
 assert 'contents: read' in workflow_text
 assert 'cancel-in-progress: true' in workflow_text
 assert 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' in job
+assert 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' in production_job
 assert 'cache:' not in job
+assert 'cache:' not in production_job
+assert 'cancel-in-progress: true' in workflow_text
+assert 'concurrency:' not in job and 'concurrency:' not in production_job
+assert 'Prove final identity-safe cleanup' not in production_job
 assert 'pidfd_send_signal' in pathlib.Path(sys.argv[1]).with_name('ci-process-signal.py').read_text()
 assert 'ci_kvm_qemu_args()' in contract_text and '--ci-argv --mode "$mode"' in contract_text
 assert 'build_ci_qemu_argv' in pathlib.Path(sys.argv[1]).parents[1].joinpath('lib/vm/parent-qemu.py').read_text()

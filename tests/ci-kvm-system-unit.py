@@ -602,7 +602,12 @@ def main() -> int:
         production_host_preflight()
         fixed_name_preflight(install_parent=CI_INSTALL_PARENT)
         sha = os.environ["GITHUB_SHA"]
-        print(f"evidence_scope=production_systemd_unit candidate_sha={sha} runner=ubuntu-24.04-kvm")
+        source_sha = os.environ.get("LM_CI_SOURCE_HEAD_SHA", sha)
+        require(SHA_RE.fullmatch(source_sha) is not None,
+                "LM_CI_SOURCE_HEAD_SHA is not a full exact commit SHA")
+        print(f"evidence_scope=production_systemd_unit candidate_sha={sha} "
+              f"workflow_sha={sha} source_head_sha={source_sha} "
+              f"event={os.environ.get('GITHUB_EVENT_NAME', 'unknown')} runner=ubuntu-24.04-kvm")
         # owner-acceptance's private report root requires the standard per-user
         # runtime directory. Create only this ephemeral runner-owned directory
         # when absent; reject any existing path that is not the exact safe form.
