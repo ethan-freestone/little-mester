@@ -780,6 +780,7 @@ class BrowserAuthSession:
             return False
 
     def _portal_or_manual(self, url: str, deadline: float | None = None) -> None:
+        validate_authorization_url(url)
         opened = self._open_portal(url, deadline)
         self._check_auth_abort(deadline)
         if getattr(self, "auth_process_completed", False):
@@ -798,9 +799,14 @@ class BrowserAuthSession:
             self._assert_auth_live(deadline)
             if getattr(self, "auth_process_completed", False):
                 return
+            copied = self._copy_url_to_clipboard(url)
+            self._assert_auth_live(deadline)
             fallback = (
                 "\r\nDesktop browser portal unavailable or declined; manual fallback: open this validated URL in the host browser:\r\n"
-                + url + "\r\n\r\n"
+                + url + "\r\n"
+                + ("The validated URL was copied to the host clipboard.\r\n" if copied
+                   else "Clipboard tools were unavailable; copy the URL manually.\r\n")
+                + "\r\n"
             )
             self._write_tty(fallback.encode("ascii"))
         else:
@@ -808,6 +814,31 @@ class BrowserAuthSession:
             raise AuthSessionError(
                 "desktop browser portal unavailable and no interactive manual fallback is available", 76
             )
+
+    def _copy_url_to_clipboard(self, url: str) -> bool:
+        """Copy only a validated authorization URL through a fixed host clipboard tool."""
+        try:
+            validate_authorization_url(url)
+            payload = url.encode("ascii", "strict")
+        except (AuthSessionError, ValueError, UnicodeError):
+            return False
+        for command in (
+            ("/usr/bin/wl-copy", ()),
+            ("/usr/bin/xclip", ("-selection", "clipboard")),
+            ("/usr/bin/xsel", ("--clipboard", "--input")),
+        ):
+            executable, args = command
+            if not os.path.isfile(executable) or not os.access(executable, os.X_OK):
+                continue
+            try:
+                result = subprocess.run([executable, *args], input=payload,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=2, check=False)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if result.returncode == 0:
+                return True
+        return False
 
     def _start_ssh(self) -> None:
         command = self._ssh_command()

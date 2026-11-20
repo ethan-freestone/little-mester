@@ -43,17 +43,23 @@ class ParentQemuArgvTests(unittest.TestCase):
             disk_path="/var/lib/little-mester-vm/disk.qcow2",
             seed_iso="/var/lib/little-mester-vm/seed.iso", ssh_port=22222,
             proxy_port=32128, qmp_socket="/run/little-mester-vm/qmp.sock",
-            vm_name="little-mester-system-vm")
+            vm_name="little-mester-system-vm",
+            virtiofs_socket="/run/little-mester-vm-workspace/virtiofs.sock")
         self.assertEqual(argv[0], "/usr/bin/qemu-system-x86_64")
         self.assertIn("filename=/var/lib/little-mester-vm/disk.qcow2,locking=on", " ".join(argv))
         self.assertNotIn("/dev/fdset", " ".join(argv))
         self.assertIn("guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:32128", " ".join(argv))
+        self.assertIn("vhost-user-fs-pci,chardev=workspace,tag=workspace", " ".join(argv))
+        self.assertEqual(argv[argv.index("-m") + 1], "4096")
+        self.assertIn("size=4096M", " ".join(argv))
+        self.assertIn("guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:32129", " ".join(argv))
         with self.assertRaises(ValueError):
             parent_qemu.build_system_qemu_argv(
                 executable="/usr/bin/qemu-system-x86_64",
                 disk_path="/safe/disk.qcow2,readonly=on", seed_iso="/seed.iso",
                 ssh_port=22222, proxy_port=32128, qmp_socket="/qmp.sock",
-                vm_name="little-mester-system-vm")
+                vm_name="little-mester-system-vm",
+                virtiofs_socket="/run/little-mester-vm-workspace/virtiofs.sock")
 
     def test_disk_is_fdset_backed_with_explicit_qcow2_and_writer_locking(self):
         argv = parent_qemu.build_qemu_argv(

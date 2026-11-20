@@ -417,6 +417,54 @@ class ProjectConfigIsolationTests(unittest.TestCase):
         finally:
             child.close(force=child.isalive())
 
+    @unittest.skipIf(pexpect is None, "pexpect is required for protected exit-key acceptance")
+    def test_protected_exit_plugin_esc_and_n_cancel_in_real_pty(self):
+        plugin = self.root / "protected-exit-plugin"
+        plugin.mkdir(mode=0o700)
+        source = pathlib.Path(__file__).resolve().parent.parent / "agent/opencode/plugins/little-mester-exit-confirm"
+        shutil.copyfile(source / "package.json", plugin / "package.json")
+        shutil.copyfile(source / "tui.tsx", plugin / "tui.tsx")
+        for file in plugin.iterdir():
+            file.chmod(0o444)
+        plugin.chmod(0o555)
+        (self.workspace / "opencode.json").unlink(missing_ok=True)
+        (self.workspace / ".opencode/opencode.json").unlink(missing_ok=True)
+        env = dict(self.env)
+        env.update({
+            "TERM": "xterm-256color", "LANG": "C.UTF-8",
+            "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+            "OPENCODE_CLI_CONFIG_CONTENT": json.dumps({
+                "plugins": [str(plugin)],
+                "theme": {"name": "dark"},
+                "keybinds": {"app.exit": "none", "prompt.clear": "none"},
+            }, separators=(",", ":")),
+        })
+        for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+            pathlib.Path(env[name]).mkdir(parents=True, mode=0o700, exist_ok=True)
+        child = pexpect.spawn(
+            self.binary, ["--standalone", str(self.workspace)], cwd=str(self.workspace),
+            env=env, encoding="utf-8", codec_errors="replace", dimensions=(32, 100), timeout=10)
+        try:
+            child.expect("Ask anything", timeout=20)
+            child.sendcontrol("c")
+            child.expect("Close Little Mester\\?", timeout=10)
+            child.send("\x1b")
+            child.expect("Ask anything", timeout=10)
+            self.assertTrue(child.isalive(), "Escape cancelled the dialog but exited the TUI")
+
+            child.sendcontrol("c")
+            child.expect("Close Little Mester\\?", timeout=10)
+            child.send("n")
+            child.expect("Ask anything", timeout=10)
+            self.assertTrue(child.isalive(), "N cancelled the dialog but exited the TUI")
+
+            child.sendcontrol("c")
+            child.expect("Close Little Mester\\?", timeout=10)
+            child.send("y")
+            child.expect(pexpect.EOF, timeout=10)
+        finally:
+            child.close(force=child.isalive())
+
     @unittest.skipIf(pexpect is None, "pexpect is required for the standalone TUI probe")
     @unittest.skipUnless(shutil.which("tmux"), "tmux is required for the standalone TUI probe")
     @unittest.skipUnless(shutil.which("ss"), "iproute2 ss is required for listener-boundary checks")

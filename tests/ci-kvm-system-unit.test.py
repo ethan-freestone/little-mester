@@ -357,10 +357,13 @@ class HostedSystemUnitTests(unittest.TestCase):
 
     def test_fixed_units_must_be_loaded_before_start(self):
         with mock.patch.object(unit, "service_state", side_effect=[
+                {"LoadState": "loaded"}, {"LoadState": "loaded"},
                 {"LoadState": "loaded"}, {"LoadState": "not-found"}]) as state, \
-                self.assertRaisesRegex(RuntimeError, "not both loaded"):
+                self.assertRaisesRegex(RuntimeError, "not all loaded"):
             unit.require_fixed_units_loaded()
-        self.assertEqual(state.call_args_list, [mock.call(unit.UNIT), mock.call(unit.PROXY_UNIT)])
+        self.assertEqual(state.call_args_list, [mock.call(unit.UNIT), mock.call(unit.PROXY_UNIT),
+                                                mock.call(unit.WORKSPACE_UNIT),
+                                                mock.call(unit.METRICS_UNIT)])
 
     def test_cleanup_requires_this_attempts_durable_start_marker(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ, {

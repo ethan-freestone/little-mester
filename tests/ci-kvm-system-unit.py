@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import grp
+import json
 import os
 import pathlib
 import pwd
@@ -20,26 +21,56 @@ CI_INSTALL_PREFIX = pathlib.Path("/srv/little-mester-ci")
 CI_INSTALL_PARENT = CI_INSTALL_PREFIX / "v3"
 UNIT = "little-mester-vm.service"
 PROXY_UNIT = "little-mester-vm-proxy.service"
+WORKSPACE_UNIT = "little-mester-vm-workspace.service"
+METRICS_UNIT = "little-mester-vm-metrics.service"
 PINNED_INSTALL_ASSETS = {
+    "/usr/lib/little-mester-vm/system-vm.py": ("lib/vm/system-vm.py", 0o644),
+    "/usr/lib/little-mester-vm/system-vm-workspace.py":
+        ("lib/vm/system-vm-workspace.py", 0o644),
+    "/usr/lib/little-mester-vm/parent-qemu.py": ("lib/vm/parent-qemu.py", 0o644),
+    "/usr/lib/little-mester-vm/guest-bootstrap.py": ("lib/vm/guest-bootstrap.py", 0o644),
+    "/usr/lib/little-mester-vm/guest-opencode-preferences.py":
+        ("lib/vm/guest-opencode-preferences.py", 0o644),
     "/etc/systemd/system/little-mester-vm.service": ("systemd/little-mester-vm.service", 0o644),
     "/etc/systemd/system/little-mester-vm-proxy.service":
         ("systemd/little-mester-vm-proxy.service", 0o644),
+    "/etc/systemd/system/little-mester-vm-workspace.service":
+        ("systemd/little-mester-vm-workspace.service", 0o644),
+    "/etc/systemd/system/little-mester-vm-metrics.service":
+        ("systemd/little-mester-vm-metrics.service", 0o644),
+    "/usr/lib/little-mester-vm/system-vm-metrics.py":
+        ("lib/vm/system-vm-metrics.py", 0o644),
+    "/usr/lib/little-mester-vm/parent-metrics.py": ("lib/vm/parent-metrics.py", 0o644),
+    "/usr/lib/little-mester-vm/parent-metrics-collect.py":
+        ("lib/vm/parent-metrics-collect.py", 0o644),
+    "/usr/lib/little-mester-vm/parent-metrics.py": ("lib/vm/parent-metrics.py", 0o644),
+    "/usr/lib/little-mester-vm/parent-metrics-collect.py":
+        ("lib/vm/parent-metrics-collect.py", 0o644),
+    "/usr/lib/little-mester-vm/host-metrics-tui/package.json":
+        ("agent/opencode/plugins/host-metrics-tui/package.json", 0o644),
+    "/usr/lib/little-mester-vm/host-metrics-tui/tui.tsx":
+        ("agent/opencode/plugins/host-metrics-tui/tui.tsx", 0o644),
     "/etc/sudoers.d/little-mester-vm": ("sudoers/little-mester-vm", 0o440),
 }
 PINNED_SOURCE_PATHS = frozenset(source for source, _mode in PINNED_INSTALL_ASSETS.values())
 FIXED_FILES = (
     "/etc/systemd/system/little-mester-vm.service",
     "/etc/systemd/system/little-mester-vm-proxy.service",
+    "/etc/systemd/system/little-mester-vm-workspace.service",
+    "/etc/systemd/system/little-mester-vm-metrics.service",
     "/etc/systemd/system/little-mester-vm.service.d",
     "/etc/systemd/system/little-mester-vm-proxy.service.d",
+    "/etc/systemd/system/little-mester-vm-workspace.service.d",
     "/etc/systemd/system/multi-user.target.wants/little-mester-vm.service",
     "/etc/systemd/system/multi-user.target.wants/little-mester-vm-proxy.service",
     "/etc/sudoers.d/little-mester-vm",
     "/usr/lib/little-mester-vm",
+    "/usr/lib/little-mester-vm/host-metrics-tui",
     "/etc/little-mester-vm",
     "/var/lib/little-mester-vm",
     "/run/little-mester-vm",
     "/run/lm-vm-proxy",
+    "/run/little-mester-vm-workspace",
 )
 FIXED_USERS = ("lm-vm", "lm-vm-proxy")
 FIXED_GROUPS = ("lm-vm", "lm-vm-proxy", "lm-vm-control")
@@ -274,11 +305,13 @@ def report_startup_diagnostics() -> None:
     )
     commands = (
         ("unit-properties", ["/usr/bin/systemctl", "show", "--no-pager",
-         f"--property={properties}", UNIT, PROXY_UNIT]),
-        ("unit-status", ["/usr/bin/systemctl", "status", "--no-pager", "--full", UNIT, PROXY_UNIT]),
+         f"--property={properties}", UNIT, PROXY_UNIT, WORKSPACE_UNIT, METRICS_UNIT]),
+        ("unit-status", ["/usr/bin/systemctl", "status", "--no-pager", "--full",
+         UNIT, PROXY_UNIT, WORKSPACE_UNIT, METRICS_UNIT]),
         # QEMU's serial console is attached to stdout and therefore lands in this journal.
         ("unit-and-guest-journal", ["/usr/bin/journalctl", "--no-pager", "-b",
-         "-u", UNIT, "-u", PROXY_UNIT, "-n", "120", "-o", "short-iso"]),
+          "-u", UNIT, "-u", PROXY_UNIT, "-u", WORKSPACE_UNIT, "-u", METRICS_UNIT,
+          "-n", "120", "-o", "short-iso"]),
     )
     print("production_unit_failure_diagnostics=BEGIN", flush=True)
     for label, argv in commands:
@@ -294,22 +327,24 @@ def report_startup_diagnostics() -> None:
 
 
 def require_fixed_units_loaded() -> None:
-    states = {unit: service_state(unit) for unit in (UNIT, PROXY_UNIT)}
+    states = {unit: service_state(unit) for unit in
+              (UNIT, PROXY_UNIT, WORKSPACE_UNIT, METRICS_UNIT)}
     require(all(state.get("LoadState") == "loaded" for state in states.values()),
-            f"installed production systemd units are not both loaded: {states}")
+            f"installed production systemd units are not all loaded: {states}")
 
 
 def assert_stopped(*, vm_result: str | None = None) -> None:
     deadline = time.monotonic() + 30
     states: dict[str, dict[str, str]] = {}
     while True:
-        states = {unit: service_state(unit) for unit in (UNIT, PROXY_UNIT)}
+        states = {unit: service_state(unit) for unit in
+                  (UNIT, PROXY_UNIT, WORKSPACE_UNIT, METRICS_UNIT)}
         stopped = all(state.get("ActiveState") in ("inactive", "failed")
                       and state.get("MainPID") == "0" for state in states.values())
         if stopped:
             break
         require(time.monotonic() < deadline,
-                f"final service cleanup did not stop both units within 30s: {states}")
+                f"final service cleanup did not stop all fixed units within 30s: {states}")
         time.sleep(0.1)
     if vm_result is not None:
         require(states[UNIT].get("Result") == vm_result,
@@ -339,6 +374,99 @@ def invoke_shared_acceptance(sha: str) -> None:
             "--sha", sha, "--repo", str(REPO), "--prefix", str(CI_INSTALL_PREFIX)]
     command = " ".join(shlex.quote(value) for value in args)
     run(["/usr/bin/sg", "lm-vm-control", "-c", command], timeout=45 * 60, capture=False)
+
+
+def disposable_workspace_path() -> pathlib.Path:
+    temp = pathlib.Path(os.environ["RUNNER_TEMP"])
+    run_id, attempt = os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_RUN_ATTEMPT", "")
+    require(temp.is_absolute() and temp.is_dir() and not temp.is_symlink()
+            and os.lstat(temp).st_uid == os.getuid(), "runner temporary directory is unsafe")
+    require(run_id.isdigit() and attempt.isdigit(), "GitHub run identity is unavailable")
+    return temp / f"little-mester-system-workspace-{run_id}-{attempt}"
+
+
+def configure_disposable_workspace(installed_root: pathlib.Path) -> pathlib.Path:
+    workspace = disposable_workspace_path()
+    require(not workspace.exists() and not workspace.is_symlink(),
+            f"preserving pre-existing disposable workspace evidence: {workspace}")
+    workspace.mkdir(mode=0o700)
+    payload = json.dumps({"dir": str(workspace), "repository": str(REPO),
+                          "owner_uid": os.getuid(), "unsafe_recurse": False,
+                          "reassign": False})
+    command = shlex.join(["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I",
+                          str(installed_root / "lib/vm/system-vm-workspace.py"), "configure"])
+    result = subprocess.run(["/usr/bin/sg", "lm-vm-control", "-c", command], input=payload,
+                            text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=30, check=False)
+    require(result.returncode == 0,
+            f"disposable workspace configurator failed safely (exit={result.returncode})")
+    return workspace
+
+
+def remove_disposable_workspace() -> None:
+    workspace = disposable_workspace_path()
+    try:
+        info = os.lstat(workspace)
+    except FileNotFoundError:
+        return
+    require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+            and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700,
+            "preserving unsafe disposable workspace path")
+    require(not any(workspace.iterdir()), "disposable workspace contains unexpected evidence; preserving it")
+    workspace.rmdir()
+
+
+def create_escape_sentinel(workspace: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, tuple[int, int], tuple[int, int], bytes]:
+    outside = workspace.parent / f"{workspace.name}-outside-sentinel"
+    link = workspace / ".lm-vm-outside-boundary"
+    require(not outside.exists() and not outside.is_symlink()
+            and not link.exists() and not link.is_symlink(),
+            "preserving pre-existing workspace boundary test evidence")
+    payload = (f"LM-CI-BOUNDARY:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}\n"
+               .encode("ascii"))
+    fd = os.open(outside, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, payload)
+        os.fsync(fd)
+        file_info = os.fstat(fd)
+    finally:
+        os.close(fd)
+    os.symlink(outside, link)
+    link_info = os.lstat(link)
+    return outside, link, (file_info.st_dev, file_info.st_ino), (link_info.st_dev, link_info.st_ino), payload
+
+
+def verify_guest_cannot_read_escape() -> None:
+    command = shlex.join(["/usr/bin/python3", "-I", str(pathlib.Path(__file__).resolve()),
+                          "--guest-workspace-boundary"])
+    run(["/usr/bin/sg", "lm-vm-control", "-c", command], timeout=30)
+
+
+def remove_escape_sentinel(evidence) -> None:
+    if evidence is None:
+        workspace = disposable_workspace_path()
+        outside = workspace.parent / f"{workspace.name}-outside-sentinel"
+        link = workspace / ".lm-vm-outside-boundary"
+        file_identity = link_identity = None
+        payload = (f"LM-CI-BOUNDARY:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}\n"
+                   .encode("ascii"))
+        if not outside.exists() and not outside.is_symlink() and not link.exists() and not link.is_symlink():
+            return
+    else:
+        outside, link, file_identity, link_identity, payload = evidence
+    link_info = os.lstat(link)
+    require(stat.S_ISLNK(link_info.st_mode)
+            and (link_identity is None or (link_info.st_dev, link_info.st_ino) == link_identity)
+            and os.readlink(link) == str(outside),
+            "preserving changed guest escape-symlink evidence")
+    file_info = os.lstat(outside)
+    require(stat.S_ISREG(file_info.st_mode) and file_info.st_uid == os.getuid()
+            and stat.S_IMODE(file_info.st_mode) == 0o600
+            and (file_identity is None or (file_info.st_dev, file_info.st_ino) == file_identity)
+            and outside.read_bytes() == payload,
+            "preserving changed host-only escape sentinel")
+    os.remove(link)
+    os.remove(outside)
 
 
 def installed_asset_bytes(destination: str) -> bytes:
@@ -381,6 +509,17 @@ def git_object_bytes(sha: str, source: str) -> bytes:
     return result.stdout
 
 
+def expected_installed_bytes(sha: str, source: str) -> bytes:
+    payload = git_object_bytes(sha, source)
+    if source == "systemd/little-mester-vm-workspace.service":
+        owner = pwd.getpwuid(os.getuid())
+        for marker, value in ((b"@LM_VM_OWNER@", owner.pw_name),
+                              (b"@LM_VM_OWNER_GROUP@", grp.getgrgid(owner.pw_gid).gr_name)):
+            require(payload.count(marker) == 1, "pinned workspace unit identity marker is ambiguous")
+            payload = payload.replace(marker, value.encode("ascii"))
+    return payload
+
+
 def verify_installed_files() -> None:
     sha = os.environ.get("GITHUB_SHA", "")
     require(SHA_RE.fullmatch(sha) is not None, "GITHUB_SHA is not a full exact commit SHA")
@@ -390,7 +529,7 @@ def verify_installed_files() -> None:
                 and stat.S_IMODE(installed_mode) == mode,
                 f"installed production asset metadata mismatch: {dest}")
         installed = installed_asset_bytes(dest)
-        require(installed == git_object_bytes(sha, source),
+        require(installed == expected_installed_bytes(sha, source),
                 f"installed production asset bytes differ from exact candidate: {dest}")
     run(["/usr/bin/sudo", "-n", "/usr/sbin/visudo", "-cf",
          "/etc/sudoers.d/little-mester-vm"])
@@ -567,14 +706,19 @@ def cleanup_only() -> int:
     require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
             and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o755,
             "preserving unsafe pinned candidate during cleanup")
-    unit_paths = (pathlib.Path(FIXED_FILES[0]), pathlib.Path(FIXED_FILES[1]))
+    unit_paths = tuple(pathlib.Path(path) for path in (
+        "/etc/systemd/system/little-mester-vm.service",
+        "/etc/systemd/system/little-mester-vm-proxy.service",
+        "/etc/systemd/system/little-mester-vm-workspace.service",
+        "/etc/systemd/system/little-mester-vm-metrics.service"))
     present = [path.exists() or path.is_symlink() for path in unit_paths]
     if not any(present):
         print("production_unit_cleanup=NOT_APPLICABLE production_unit_absent=true")
         return 0
     require(all(present), "partial fixed unit installation; preserving it without lifecycle action")
     verify_installed_files()
-    states = [service_state(UNIT), service_state(PROXY_UNIT)]
+    states = [service_state(UNIT), service_state(PROXY_UNIT), service_state(WORKSPACE_UNIT),
+              service_state(METRICS_UNIT)]
     loaded = [state.get("LoadState") == "loaded" for state in states]
     if not any(loaded):
         print("production_unit_cleanup=NOT_APPLICABLE systemd_units_not_loaded=true")
@@ -582,11 +726,27 @@ def cleanup_only() -> int:
     require(all(loaded), "only one fixed system VM unit is loaded; preserving ambiguous state")
     invoke_verified_cleanup(sha)
     assert_stopped()
+    remove_escape_sentinel(None)
+    remove_disposable_workspace()
     print("production_unit_cleanup_scope=production_systemd_unit")
     return 0
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--guest-workspace-boundary"]:
+        hosted_kvm_guard()
+        root = CI_INSTALL_PARENT / os.environ["GITHUB_SHA"]
+        spec = __import__("importlib.util", fromlist=["spec_from_file_location"]).spec_from_file_location(
+            "ci_workspace_boundary_system_vm", root / "lib/vm/system-vm.py")
+        if spec is None or spec.loader is None:
+            raise RuntimeError("installed fixed system VM helper is unavailable")
+        module = __import__("importlib.util", fromlist=["module_from_spec"]).module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        result = module._guest_ssh("test ! -r /workspace/.lm-vm-outside-boundary", timeout=20)
+        require(result == 0, "guest read an out-of-boundary host sentinel through a symlink")
+        print("production_workspace_boundary=PASS sibling_sentinel=unreadable")
+        return 0
     if sys.argv[1:] == ["--cleanup"]:
         try:
             return cleanup_only()
@@ -595,6 +755,8 @@ def main() -> int:
             return 1
     require(not sys.argv[1:], "unsupported argument")
     installed_root: pathlib.Path | None = None
+    workspace_path: pathlib.Path | None = None
+    escape_evidence = None
     start_attempted = False
     failure: BaseException | None = None
     try:
@@ -634,9 +796,13 @@ def main() -> int:
         verify_installed_files()
         require_fixed_units_loaded()
         unit_identity_checks()
+        workspace_path = disposable_workspace_path()
         write_start_marker(sha)
         start_attempted = True
+        configure_disposable_workspace(installed_root)
+        escape_evidence = create_escape_sentinel(workspace_path)
         invoke_shared_acceptance(sha)
+        verify_guest_cannot_read_escape()
         force_systemd_fallback(installed_root)
     except BaseException as error:  # noqa: BLE001 - finally below must stop a started unit on cancellation
         failure = error
@@ -648,6 +814,8 @@ def main() -> int:
             try:
                 invoke_lab(installed_root, "down", 45)
                 assert_stopped()
+                remove_escape_sentinel(escape_evidence)
+                remove_disposable_workspace()
             except BaseException as error:  # noqa: BLE001 - preserve both primary and cleanup failures
                 print(f"production_unit_cleanup=FAIL error={type(error).__name__}: {error}", file=sys.stderr)
                 report_startup_diagnostics()

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import importlib.machinery
 import contextlib
 import io
@@ -40,6 +41,16 @@ acceptance = load("system_acceptance", ROOT / "lib/vm/system-acceptance.py")
 
 
 class SystemdPolicyTests(unittest.TestCase):
+    def test_workspace_daemon_acceptance_checks_kernel_nnp_not_unit_property(self):
+        active = {"ActiveState": "active", "MainPID": "123"}
+        with mock.patch.object(acceptance, "service_state", return_value=active), \
+                mock.patch.object(pathlib.Path, "read_text", return_value="Name:\tvirtiofsd\nNoNewPrivs:\t0\n"):
+            acceptance._verify_workspace_daemon_privileges()
+        with mock.patch.object(acceptance, "service_state", return_value=active), \
+                mock.patch.object(pathlib.Path, "read_text", return_value="NoNewPrivs:\t1\n"), \
+                self.assertRaisesRegex(acceptance.AcceptanceError, "effective NoNewPrivs"):
+            acceptance._verify_workspace_daemon_privileges()
+
     def test_system_installer_discovers_root_from_protected_installed_location(self):
         for prefix in (pathlib.Path("/opt/little-mester"),
                        pathlib.Path("/srv/little-mester-ci")):
@@ -104,6 +115,7 @@ class SystemdPolicyTests(unittest.TestCase):
         with mock.patch.object(vm, "_verify_kvm_access"), \
              mock.patch.object(vm, "_require_fixed_file"), \
              mock.patch.object(vm, "_validate_runtime_directory"), \
+             mock.patch.object(vm, "_verify_workspace_share"), \
              mock.patch.object(vm, "read_proxy_port", return_value=vm.PROXY_PORT):
             expected = vm.qemu_argv()
         self.assertEqual(shlex.split(exec_line[len("ExecStart="):]), expected)
@@ -158,16 +170,24 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertEqual(entries, [
             "%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/systemctl start little-mester-vm.service",
             "%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/systemctl stop little-mester-vm.service",
+            "%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py configure",
             "%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/stat --format=%f\\:%d\\:%i -- /var/lib/little-mester-vm/disk.qcow2",
             "%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/cat -- /etc/sudoers.d/little-mester-vm",
             "%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/stat --format=%f\\:%u\\:%g\\:%h -- /etc/sudoers.d/little-mester-vm",
         ])
         self.assertFalse(any(token in "\n".join(entries) for token in ("*", "?", "[", "\"")))
-        with mock.patch.object(vm.subprocess, "run") as run:
+        policy = type("Policy", (), {
+            "ASSIGNMENT": pathlib.Path("/etc/little-mester-vm/workspace.json"),
+            "read_assignment": staticmethod(lambda *_args, **_kwargs: object()),
+        })()
+        with mock.patch.object(vm, "_workspace_policy", return_value=policy), \
+             mock.patch.object(vm.subprocess, "run") as run, \
+             mock.patch.object(vm, "_probe_workspace") as probe:
             run.return_value.returncode = 0
             self.assertEqual(vm._fixed_exec("up"), 0)
             self.assertEqual(run.call_args.args[0], [
                 "/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", "little-mester-vm.service"])
+            probe.assert_called_once_with()
         with self.assertRaises(vm.Refused):
             vm._fixed_exec("systemctl")
         with mock.patch.object(vm.sys, "argv", ["system-vm.py", "owner", "up"]), \
@@ -188,6 +208,13 @@ class SystemdPolicyTests(unittest.TestCase):
     def test_install_manifest_contains_all_fixed_assets(self):
         required = {
             "lib/vm/system-vm.py", "systemd/little-mester-vm.service",
+            "lib/vm/system-vm-workspace.py", "systemd/little-mester-vm-workspace.service",
+            "systemd/little-mester-vm-metrics.service",
+            "lib/vm/guest-opencode-preferences.py",
+            "lib/vm/system-vm-metrics.py", "lib/vm/parent-metrics.py",
+            "lib/vm/parent-metrics-collect.py",
+            "agent/opencode/plugins/host-metrics-tui/package.json",
+            "agent/opencode/plugins/host-metrics-tui/tui.tsx",
             "systemd/little-mester-vm-proxy.service", "sudoers/little-mester-vm",
             "tools/vm-system-install", "lib/vm/guest-bootstrap.py",
         }
@@ -203,6 +230,29 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn('"lib/vm/guest-bootstrap.py": ("/usr/lib/little-mester-vm/guest-bootstrap.py"',
                       installer)
         self.assertIn('"lib/vm/system-vm.py": ("/usr/lib/little-mester-vm/system-vm.py"', installer)
+        self.assertIn('"lib/vm/system-vm-workspace.py": ("/usr/lib/little-mester-vm/system-vm-workspace.py"', installer)
+        self.assertIn('"lib/vm/system-vm-metrics.py":', installer)
+        self.assertIn('"lib/vm/parent-metrics-collect.py":', installer)
+        self.assertIn('"lib/vm/guest-opencode-preferences.py":', installer)
+        self.assertIn('"agent/opencode/plugins/host-metrics-tui/tui.tsx":', installer)
+        self.assertIn('"systemd/little-mester-vm-metrics.service":', installer)
+        self.assertIn('"systemd/little-mester-vm-workspace.service":', installer)
+
+    def test_code_update_is_explicit_stopped_and_state_preserving(self):
+        installer = (ROOT / "tools/vm-system-install").read_text()
+        for required in (
+            'sys.argv[1:] == ["--update-code-only"]',
+            "def update_code_only(root: pathlib.Path, owner: str)",
+            '"little-mester-vm-workspace.service"',
+            "before_state = _state_fingerprint(state_paths)",
+            "if _state_fingerprint(state_paths) != before_state:",
+            '"/usr/bin/systemctl", "daemon-reload"',
+            "services remain stopped",
+            "UPDATE_ADDITIONALS",
+            "ensure_dir(pathlib.Path(\"/etc/systemd/system/little-mester-vm-workspace.service.d\")",
+        ):
+            self.assertIn(required, installer)
+        self.assertIn("--update-code-only", installer)
         self.assertIn('"lib/vm/host-dependencies.py": ("/usr/lib/little-mester-vm/host-dependencies.py"', installer)
         self.assertIn('Parse the exact pinned policy before creating accounts', installer)
         self.assertIn('preflight(root, owner)', installer)
@@ -228,11 +278,15 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn('"--approve-system-vm-lifecycle"', cli)
 
     def test_acceptance_refuses_ambiguous_start_states_without_stopping_vm(self):
-        with self.assertRaisesRegex(acceptance.AcceptanceError, "starting state is ambiguous"):
+        with mock.patch.object(acceptance, "service_state", return_value={
+                "ActiveState": "inactive", "MainPID": "0"}), \
+                self.assertRaisesRegex(acceptance.AcceptanceError, "lifecycle state is ambiguous"):
             acceptance._initial_running_state(
                 {"ActiveState": "active", "MainPID": "123"},
                 {"ActiveState": "inactive", "MainPID": "0"})
-        with self.assertRaisesRegex(acceptance.AcceptanceError, "unit state is ambiguous"):
+        with mock.patch.object(acceptance, "service_state", return_value={
+                "ActiveState": "inactive", "MainPID": "0"}), \
+                self.assertRaisesRegex(acceptance.AcceptanceError, "unit state is ambiguous"):
             acceptance._initial_running_state(
                 {"ActiveState": "active", "MainPID": "0"},
                 {"ActiveState": "active", "MainPID": "456"})
@@ -330,16 +384,18 @@ class SystemdPolicyTests(unittest.TestCase):
         proxy_stopping = {"ActiveState": "deactivating", "MainPID": "4321", "Result": "success"}
         proxy_stopped = {"ActiveState": "inactive", "MainPID": "0", "Result": "success"}
         with mock.patch.object(acceptance, "service_state", side_effect=[
-                vm_stopped, proxy_stopping, vm_stopped, proxy_stopped]) as state, \
+                vm_stopped, proxy_stopping, vm_stopped, vm_stopped,
+                proxy_stopped, vm_stopped, vm_stopped, vm_stopped]) as state, \
                 mock.patch.object(acceptance.time, "sleep") as sleep:
             acceptance._require_normal_stop()
-        self.assertEqual(state.call_count, 4)
+        self.assertEqual(state.call_count, 8)
         sleep.assert_called_once()
 
     def test_normal_acceptance_stop_times_out_if_deactivating_unit_never_exits(self):
         vm_stopped = {"ActiveState": "inactive", "MainPID": "0", "Result": "success"}
         proxy_stopping = {"ActiveState": "deactivating", "MainPID": "4321", "Result": "success"}
-        with mock.patch.object(acceptance, "service_state", side_effect=[vm_stopped, proxy_stopping]), \
+        with mock.patch.object(acceptance, "service_state", side_effect=[
+                vm_stopped, proxy_stopping, vm_stopped, vm_stopped]), \
                 mock.patch.object(acceptance.time, "monotonic",
                                   side_effect=[10.0, 10.0, 10.0, 41.0]), \
                 self.assertRaisesRegex(acceptance.AcceptanceError, "did not complete within 30s"):
@@ -348,7 +404,8 @@ class SystemdPolicyTests(unittest.TestCase):
     def test_normal_acceptance_stop_rejects_inactive_unit_with_live_mainpid(self):
         vm_unexpected = {"ActiveState": "inactive", "MainPID": "4321", "Result": "success"}
         proxy_stopped = {"ActiveState": "inactive", "MainPID": "0", "Result": "success"}
-        with mock.patch.object(acceptance, "service_state", side_effect=[vm_unexpected, proxy_stopped]), \
+        with mock.patch.object(acceptance, "service_state", side_effect=[
+                vm_unexpected, proxy_stopped, proxy_stopped, proxy_stopped]), \
                 self.assertRaisesRegex(acceptance.AcceptanceError, "unexpected live MainPID"):
             acceptance._require_normal_stop()
 
@@ -459,11 +516,11 @@ class SystemdPolicyTests(unittest.TestCase):
     def test_system_guest_seed_uses_canonical_parent_cloud_init_and_session_contract(self):
         data = bootstrap.build_foundation(
             name="little-mester-system-vm", uid=1000,
-            ssh_key="ssh-ed25519 AAAA control", workspace="disk",
+            ssh_key="ssh-ed25519 AAAA control", workspace="virtiofs",
             helper="/usr/local/libexec/lm-guest-user-dirs.py")
         contract.add_protected_session(
             data, host_private="private-key\n", host_public="ssh-ed25519 AAAA host\n",
-            control_public="ssh-ed25519 AAAA control\n")
+            control_public="ssh-ed25519 AAAA control\n", workspace_path=contract.SYSTEM_WORKSPACE)
         self.assertEqual(data["hostname"], "little-mester-system-vm")
         self.assertTrue(data["ssh_keys"]["ed25519_private"].startswith("private-key"))
         files = {item["path"]: item for item in data["write_files"]}
@@ -471,6 +528,10 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn("/usr/local/libexec/lm-opencode-auth", files)
         self.assertIn("/usr/local/libexec/lm-guest-user-dirs.py", files)
         self.assertIn("/etc/opencode/plugins/little-mester-exit-confirm/tui.tsx", files)
+        self.assertIn("/etc/opencode/plugins/little-mester-host-metrics-tui/tui.tsx", files)
+        self.assertIn("/etc/opencode/opencode-model.json", files)
+        model_config = json.loads(files["/etc/opencode/opencode-model.json"]["content"])
+        self.assertEqual(model_config["model"], "{env:LM_OPENCODE_MODEL}")
         provision = files["/usr/local/sbin/mester-v3-provision"]["content"]
         self.assertIn("docker-ce-rootless-extras", provision)
         self.assertIn("dockerd-rootless-setuptool.sh install", provision)
@@ -478,8 +539,10 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn("prepare 1000", provision)
         self.assertIn("@opencode/cli@2.2.5", provision)
         self.assertIn("prepare-auth", files["/usr/local/bin/lm-opencode"]["content"])
-        self.assertIn("/home/mester/workspace", provision)
-        self.assertNotIn("virtiofs", provision)
+        self.assertIn("cd /workspace", files["/usr/local/bin/lm-opencode"]["content"])
+        self.assertIn("lm-guest-opencode-preferences.py model", files["/usr/local/libexec/lm-opencode"]["content"])
+        self.assertIn("workspace /workspace virtiofs", provision)
+        self.assertNotIn("/home/mester/workspace", provision)
         system_source = (ROOT / "lib/vm/system-vm.py").read_text()
         self.assertIn("bootstrap.build_foundation(", system_source)
         self.assertIn("contract.add_protected_session(", system_source)
@@ -487,6 +550,16 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertTrue(data["disable_root"])
         self.assertTrue(any(item["path"] == "/etc/apt/apt.conf.d/80mester-proxy"
                             for item in data["write_files"]))
+        legacy = contract.parent_cloud_init_data(
+            host_private="private-key\n", host_public="ssh-ed25519 AAAA host\n",
+            control_public="ssh-ed25519 AAAA control\n")
+        legacy_launcher = next(item["content"] for item in legacy["write_files"]
+                               if item.get("path") == "/usr/local/bin/lm-opencode")
+        self.assertIn("cd /home/mester/workspace", legacy_launcher)
+        self.assertNotIn("--host-metrics", legacy_launcher)
+        legacy_profile = next(item["content"] for item in legacy["write_files"]
+                              if item.get("path") == "/etc/profile.d/little-mester-opencode.sh")
+        self.assertNotIn("host-metrics-tui", legacy_profile)
         with self.assertRaises(ValueError):
             bootstrap.build_foundation(name="bad/name", uid=1000, ssh_key="key",
                                        workspace="disk", helper="/usr/local/libexec/lm-guest-user-dirs.py")
@@ -498,13 +571,15 @@ class SystemdPolicyTests(unittest.TestCase):
             "smoke-v3", 1234,
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test")
         system_script = bootstrap.provision_script(
-            1000, "disk", "/usr/local/libexec/lm-guest-user-dirs.py")
+            1000, "virtiofs", "/usr/local/libexec/lm-guest-user-dirs.py")
         self.assertIn("guest-bootstrap.py\" smoke-cloud-init", (ROOT / "lib/vm/cloud-init.sh").read_text())
         self.assertIn("apt-get install -y docker-ce docker-ce-cli containerd.io", smoke_script)
         self.assertIn("apt-get install -y docker-ce docker-ce-cli containerd.io", system_script)
         self.assertIn("/workspace virtiofs", smoke_script)
-        self.assertNotIn("virtiofs", system_script)
-        self.assertIn("/home/mester/workspace", system_script)
+        self.assertIn("workspace /workspace virtiofs", system_script)
+        self.assertNotIn("/home/mester/workspace", system_script)
+        self.assertIn("mountpoint -q /workspace", vm._guest_workspace_mount.__code__.co_consts[1])
+        self.assertNotIn("sudo -n", vm._guest_workspace_mount.__code__.co_consts[1])
         self.assertIn("export DOCKER_HOST=unix:///run/user/1234/docker.sock", smoke_yaml)
         self.assertIn("NO_PROXY=localhost,127.0.0.1,10.0.2.100", smoke_yaml)
         self.assertIn("disable_root: true", smoke_yaml)
@@ -515,13 +590,20 @@ class SystemdPolicyTests(unittest.TestCase):
             installed = pathlib.Path(temporary) / "libexec/little-mester-vm"
             plugin_dir = installed / "plugins"
             plugin_dir.mkdir(parents=True)
+            metrics_plugin_dir = installed / "host-metrics-tui"
+            metrics_plugin_dir.mkdir()
             shutil.copyfile(ROOT / "lib/vm/guest-user-dirs.py", installed / "guest-user-dirs.py")
+            shutil.copyfile(ROOT / "lib/vm/guest-opencode-preferences.py",
+                            installed / "guest-opencode-preferences.py")
             shutil.copyfile(ROOT / "lib/vm/guest-bootstrap.py", installed / "guest-bootstrap.py")
             shutil.copyfile(ROOT / "lib/vm/parent-session-contract.py",
                             installed / "parent-session-contract.py")
             source_plugins = ROOT / "agent/opencode/plugins/little-mester-exit-confirm"
             shutil.copyfile(source_plugins / "package.json", plugin_dir / "package.json")
             shutil.copyfile(source_plugins / "tui.tsx", plugin_dir / "tui.tsx")
+            source_metrics_plugin = ROOT / "agent/opencode/plugins/host-metrics-tui"
+            shutil.copyfile(source_metrics_plugin / "package.json", metrics_plugin_dir / "package.json")
+            shutil.copyfile(source_metrics_plugin / "tui.tsx", metrics_plugin_dir / "tui.tsx")
             (plugin_dir / "package.json").chmod(0o644)
             (plugin_dir / "tui.tsx").chmod(0o644)
             installed_contract = load("installed_parent_session_contract",

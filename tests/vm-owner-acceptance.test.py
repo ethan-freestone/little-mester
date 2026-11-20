@@ -2181,6 +2181,30 @@ class OwnerAcceptanceTests(unittest.TestCase):
         self.assertNotIn("DISPLAY", env)
         self.assertNotIn("WAYLAND_DISPLAY", env)
 
+    def test_clean_env_preserves_only_validated_x11_and_wayland_clipboard_endpoints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            authority = pathlib.Path(directory) / "Xauthority"
+            authority.write_bytes(b"private cookie material")
+            authority.chmod(0o600)
+            uid = os.getuid()
+            with mock.patch.dict(os.environ, {
+                    "DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0",
+                    "XAUTHORITY": str(authority), "XDG_SESSION_TYPE": "x11"}, clear=False):
+                real_lstat = os.lstat
+
+                def fake_lstat(path, *args, **kwargs):
+                    if pathlib.Path(path) == pathlib.Path(f"/run/user/{uid}/wayland-0"):
+                        return SimpleNamespace(st_mode=stat.S_IFSOCK | 0o600, st_uid=uid)
+                    return real_lstat(path, *args, **kwargs)
+
+                with mock.patch.object(acceptance.os, "lstat", fake_lstat):
+                    env = acceptance.clean_env(desktop_session=True)
+            self.assertEqual(env.get("DISPLAY"), ":0")
+            self.assertEqual(env.get("WAYLAND_DISPLAY"), "wayland-0")
+            self.assertEqual(env.get("XAUTHORITY"), str(authority))
+            self.assertNotIn("XDG_SESSION_TYPE", env)
+            self.assertEqual(authority.stat().st_uid, uid)
+
     def test_nonzero_smoke_is_blocked_and_never_claims_cleanup(self):
         class TTY(io.StringIO):
             def isatty(self):

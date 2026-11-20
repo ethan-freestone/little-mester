@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import grp
+import hashlib
 import os
 import pathlib
 import pwd
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -17,8 +19,22 @@ import sys
 FILES = {
     "systemd/little-mester-vm.service": ("/etc/systemd/system/little-mester-vm.service", 0o644),
     "systemd/little-mester-vm-proxy.service": ("/etc/systemd/system/little-mester-vm-proxy.service", 0o644),
+    "systemd/little-mester-vm-workspace.service":
+        ("/etc/systemd/system/little-mester-vm-workspace.service", 0o644),
+    "systemd/little-mester-vm-metrics.service":
+        ("/etc/systemd/system/little-mester-vm-metrics.service", 0o644),
     "sudoers/little-mester-vm": ("/etc/sudoers.d/little-mester-vm", 0o440),
     "lib/vm/system-vm.py": ("/usr/lib/little-mester-vm/system-vm.py", 0o644),
+    "lib/vm/system-vm-workspace.py": ("/usr/lib/little-mester-vm/system-vm-workspace.py", 0o644),
+    "lib/vm/system-vm-metrics.py": ("/usr/lib/little-mester-vm/system-vm-metrics.py", 0o644),
+    "lib/vm/parent-metrics.py": ("/usr/lib/little-mester-vm/parent-metrics.py", 0o644),
+    "lib/vm/parent-metrics-collect.py": ("/usr/lib/little-mester-vm/parent-metrics-collect.py", 0o644),
+    "lib/vm/guest-opencode-preferences.py":
+        ("/usr/lib/little-mester-vm/guest-opencode-preferences.py", 0o644),
+    "agent/opencode/plugins/host-metrics-tui/package.json":
+        ("/usr/lib/little-mester-vm/host-metrics-tui/package.json", 0o644),
+    "agent/opencode/plugins/host-metrics-tui/tui.tsx":
+        ("/usr/lib/little-mester-vm/host-metrics-tui/tui.tsx", 0o644),
     "lib/vm/guest-bootstrap.py": ("/usr/lib/little-mester-vm/guest-bootstrap.py", 0o644),
     "lib/vm/parent-qemu.py": ("/usr/lib/little-mester-vm/parent-qemu.py", 0o644),
     "lib/vm/parent-provision.py": ("/usr/lib/little-mester-vm/parent-provision.py", 0o644),
@@ -34,7 +50,9 @@ FILES = {
         ("/usr/lib/little-mester-vm/plugins/tui.tsx", 0o644),
 }
 DIRS = ("/usr/lib/little-mester-vm", "/usr/lib/little-mester-vm/plugins",
-        "/etc/little-mester-vm", "/var/lib/little-mester-vm")
+        "/usr/lib/little-mester-vm/host-metrics-tui",
+        "/etc/little-mester-vm", "/etc/systemd/system/little-mester-vm-workspace.service.d",
+        "/var/lib/little-mester-vm")
 PROVISION_FINALS = (
     "/var/lib/little-mester-vm/disk.qcow2",
     "/var/lib/little-mester-vm/seed.iso",
@@ -52,6 +70,17 @@ PROVISION_PARTIALS = (
     "/var/lib/little-mester-vm/user-data",
     "/var/lib/little-mester-vm/meta-data",
 )
+UPDATE_ADDITIONALS = frozenset({
+    "systemd/little-mester-vm-workspace.service",
+    "systemd/little-mester-vm-metrics.service",
+    "lib/vm/system-vm-workspace.py",
+    "lib/vm/system-vm-metrics.py",
+    "lib/vm/parent-metrics.py",
+    "lib/vm/parent-metrics-collect.py",
+    "lib/vm/guest-opencode-preferences.py",
+    "agent/opencode/plugins/host-metrics-tui/package.json",
+    "agent/opencode/plugins/host-metrics-tui/tui.tsx",
+})
 PROTECTED_PARENTS = (
     "/usr/lib", "/etc/systemd/system", "/etc/sudoers.d", "/etc", "/var/lib",
 )
@@ -59,6 +88,20 @@ PROTECTED_PARENTS = (
 
 def refuse(message: str) -> None:
     raise RuntimeError(message)
+
+
+def source_payload(root: pathlib.Path, relative: str, owner: str) -> bytes:
+    payload = (root / relative).read_bytes()
+    if relative == "systemd/little-mester-vm-workspace.service":
+        owner_marker = b"@LM_VM_OWNER@"
+        group_marker = b"@LM_VM_OWNER_GROUP@"
+        if payload.count(owner_marker) != 1 or payload.count(group_marker) != 1:
+            refuse("workspace unit must contain exactly one owner and primary group identity marker")
+        owner_info = pwd.getpwnam(owner)
+        owner_group = grp.getgrgid(owner_info.pw_gid).gr_name
+        payload = payload.replace(owner_marker, owner.encode("ascii"))
+        payload = payload.replace(group_marker, owner_group.encode("ascii"))
+    return payload
 
 
 def source_root() -> pathlib.Path:
@@ -189,7 +232,9 @@ def preflight(root: pathlib.Path, owner: str) -> None:
     for raw, group, mode in (
         ("/usr/lib/little-mester-vm", "root", 0o755),
         ("/usr/lib/little-mester-vm/plugins", "root", 0o755),
+        ("/usr/lib/little-mester-vm/host-metrics-tui", "root", 0o755),
         ("/etc/little-mester-vm", "lm-vm-control", 0o750),
+        ("/etc/systemd/system/little-mester-vm-workspace.service.d", "root", 0o755),
         ("/var/lib/little-mester-vm", "lm-vm", 0o750),
     ):
         path = pathlib.Path(raw)
@@ -210,11 +255,12 @@ def preflight(root: pathlib.Path, owner: str) -> None:
         info = os.lstat(target)
         if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
                 or info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != mode
-                or target.read_bytes() != (root / relative).read_bytes()):
+                or target.read_bytes() != source_payload(root, relative, owner)):
             refuse(f"preserving pre-existing non-matching protected install target: {target}")
 
     for raw, allowed in (
-        ("/etc/little-mester-vm", {pathlib.Path(path).name for path in PROVISION_FINALS[2:]}),
+        ("/etc/little-mester-vm", {pathlib.Path(path).name for path in PROVISION_FINALS[2:]} |
+         {"workspace.json"}),
         ("/var/lib/little-mester-vm",
          {pathlib.Path(PROVISION_FINALS[0]).name, pathlib.Path(PROVISION_FINALS[1]).name,
           *(pathlib.Path(path).name for path in PROVISION_PARTIALS)}),
@@ -251,7 +297,8 @@ def ensure_dir(path: pathlib.Path, *, group: str, mode: int) -> None:
     os.chmod(path, mode)
 
 
-def install_file(source: pathlib.Path, destination: pathlib.Path, mode: int) -> None:
+def install_file(source: pathlib.Path, destination: pathlib.Path, mode: int,
+                 *, payload: bytes | None = None) -> None:
     current = pathlib.Path(destination.anchor)
     for component in destination.parent.parts[1:]:
         current /= component
@@ -259,7 +306,7 @@ def install_file(source: pathlib.Path, destination: pathlib.Path, mode: int) -> 
         if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
                 or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
             refuse("system installation target ancestry is not root-controlled")
-    payload = source.read_bytes()
+    payload = source.read_bytes() if payload is None else payload
     if destination.exists() or destination.is_symlink():
         info = os.lstat(destination)
         if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
@@ -282,16 +329,145 @@ def install_file(source: pathlib.Path, destination: pathlib.Path, mode: int) -> 
         os.close(fd)
 
 
+def _state_fingerprint(paths: tuple[pathlib.Path, ...]) -> dict[str, tuple]:
+    result = {}
+    for path in paths:
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            result[str(path)] = ("missing",)
+            continue
+        if (stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+                and path != pathlib.Path("/var/lib/little-mester-vm/disk.qcow2")):
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        else:
+            digest = "not-regular"
+        result[str(path)] = (info.st_dev, info.st_ino, info.st_uid, info.st_gid,
+                             stat.S_IMODE(info.st_mode), info.st_nlink, info.st_size,
+                             info.st_mtime_ns, info.st_ctime_ns, digest)
+    return result
+
+
+def update_code_only(root: pathlib.Path, owner: str) -> None:
+    """Atomically replace only existing protected host code; preserve VM state."""
+    if os.geteuid() != 0:
+        refuse("code-only update requires explicit root through sudo")
+    try:
+        owner_info = pwd.getpwnam(owner)
+        control_gid = grp.getgrnam("lm-vm-control").gr_gid
+    except KeyError as error:
+        raise RuntimeError("intended workspace owner or control group is unavailable") from error
+    if owner == "root" or owner_info.pw_uid == 0:
+        refuse("root cannot be the fixed VM owner")
+    state_units = ("little-mester-vm.service", "little-mester-vm-proxy.service",
+                   "little-mester-vm-workspace.service", "little-mester-vm-metrics.service")
+    for unit in state_units:
+        state = subprocess.run(["/usr/bin/systemctl", "show", "--property=ActiveState",
+                                "--value", unit], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               text=True, check=False)
+        if (state.returncode and unit == "little-mester-vm-workspace.service"
+                and not pathlib.Path("/etc/systemd/system/little-mester-vm-workspace.service").exists()):
+            continue
+        if (state.returncode and unit == "little-mester-vm-metrics.service"
+                and not pathlib.Path("/etc/systemd/system/little-mester-vm-metrics.service").exists()):
+            continue
+        if state.returncode or state.stdout.strip() not in ("inactive", "failed"):
+            refuse(f"code-only update requires all fixed services stopped ({unit})")
+    state_paths = tuple(pathlib.Path(path) for path in (
+        "/var/lib/little-mester-vm/disk.qcow2", "/var/lib/little-mester-vm/seed.iso",
+        "/etc/little-mester-vm/control_ed25519", "/etc/little-mester-vm/ssh_host_ed25519_key",
+        "/etc/little-mester-vm/control_ed25519.pub",
+        "/etc/little-mester-vm/ssh_host_ed25519_key.pub",
+        "/etc/little-mester-vm/known_hosts", "/etc/little-mester-vm/workspace.json",
+        "/etc/systemd/system/little-mester-vm-workspace.service.d/20-workspace.conf"))
+    before_state = _state_fingerprint(state_paths)
+    pending: list[tuple[pathlib.Path, pathlib.Path, bytes, int]] = []
+    for relative, (raw_target, mode) in FILES.items():
+        target = pathlib.Path(raw_target)
+        try:
+            info = os.lstat(target)
+        except FileNotFoundError:
+            if relative not in UPDATE_ADDITIONALS:
+                raise RuntimeError(f"code-only update requires existing protected asset: {target}")
+            pending.append((root / relative, target, source_payload(root, relative, owner), mode))
+            continue
+        except OSError as error:
+            raise RuntimeError(f"code-only update cannot inspect protected install asset: {target}") from error
+        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != mode
+                or info.st_nlink != 1):
+            refuse(f"protected install asset has unsafe metadata; preserving it: {target}")
+        pending.append((root / relative, target, source_payload(root, relative, owner), mode))
+    # Validate all sources, destinations, and the candidate before changing a byte.
+    verify_source(root)
+    ensure_dir(pathlib.Path("/usr/lib/little-mester-vm/host-metrics-tui"),
+               group="root", mode=0o755)
+    ensure_dir(pathlib.Path("/etc/systemd/system/little-mester-vm-workspace.service.d"),
+               group="root", mode=0o755)
+    temps: list[tuple[pathlib.Path, pathlib.Path]] = []
+    try:
+        for source, destination, payload, mode in pending:
+            current = pathlib.Path(destination.anchor)
+            for component in destination.parent.parts[1:]:
+                current /= component
+                ancestor = os.lstat(current)
+                if (not stat.S_ISDIR(ancestor.st_mode) or stat.S_ISLNK(ancestor.st_mode)
+                        or ancestor.st_uid != 0 or ancestor.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+                    refuse("protected update target ancestry is unsafe")
+            temp = destination.parent / f".{destination.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+            temps.append((temp, destination))
+            try:
+                view = memoryview(payload)
+                while view:
+                    count = os.write(fd, view)
+                    if count <= 0:
+                        refuse("protected update write made no progress")
+                    view = view[count:]
+                os.fchown(fd, 0, 0)
+                os.fchmod(fd, mode)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        for temp, destination in temps:
+            os.replace(temp, destination)
+            directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        subprocess.run(["/usr/sbin/visudo", "-cf", "/etc/sudoers.d/little-mester-vm"],
+                       stdin=subprocess.DEVNULL, check=True)
+        subprocess.run(["/usr/bin/systemctl", "daemon-reload"],
+                       stdin=subprocess.DEVNULL, check=True)
+        if _state_fingerprint(state_paths) != before_state:
+            raise RuntimeError("protected VM state changed during code-only update; inspect before retry")
+    finally:
+        for temp, _destination in temps:
+            try:
+                temp.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def main() -> int:
     try:
         if os.geteuid() != 0:
             refuse("explicit system VM installation requires root")
+        update_mode = sys.argv[1:] == ["--update-code-only"]
+        if sys.argv[1:] and not update_mode:
+            refuse("supported operation is no argument (fresh install) or --update-code-only")
         root = source_root()
         verify_source(root)
         owner = os.environ.get("SUDO_USER", "")
         if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}\$?", owner) or owner == "root":
             refuse("run the explicit installer through sudo from the intended owner account")
         pwd.getpwnam(owner)
+        if update_mode:
+            update_code_only(root, owner)
+            print("Code-only update complete. VM state and lifecycle were preserved; services remain stopped.")
+            return 0
         try:
             kvm_gid = grp.getgrnam("kvm").gr_gid
             kvm = os.stat("/dev/kvm", follow_symlinks=False)
@@ -321,10 +497,15 @@ def main() -> int:
         ensure_user("lm-vm-proxy", "lm-vm-proxy", "/var/empty")
         ensure_dir(pathlib.Path("/usr/lib/little-mester-vm"), group="root", mode=0o755)
         ensure_dir(pathlib.Path("/usr/lib/little-mester-vm/plugins"), group="root", mode=0o755)
+        ensure_dir(pathlib.Path("/usr/lib/little-mester-vm/host-metrics-tui"),
+                   group="root", mode=0o755)
         ensure_dir(pathlib.Path("/etc/little-mester-vm"), group="lm-vm-control", mode=0o750)
+        ensure_dir(pathlib.Path("/etc/systemd/system/little-mester-vm-workspace.service.d"),
+                   group="root", mode=0o755)
         ensure_dir(pathlib.Path("/var/lib/little-mester-vm"), group="lm-vm", mode=0o750)
         for relative, (target, mode) in FILES.items():
-            install_file(root / relative, pathlib.Path(target), mode)
+            install_file(root / relative, pathlib.Path(target), mode,
+                         payload=source_payload(root, relative, owner))
         # Existing provisioning evidence was refused before any host mutation.
         subprocess.run(["/usr/bin/python3", "-I", "/usr/lib/little-mester-vm/system-vm.py",
                        "provision"], check=True, stdin=subprocess.DEVNULL)
