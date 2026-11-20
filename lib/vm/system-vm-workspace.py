@@ -403,8 +403,7 @@ def configure(raw_path: str, repository: pathlib.Path, *, owner_uid: int,
 
 
 def fix_socket_permissions() -> None:
-    if os.geteuid() != 0:
-        raise Refused("virtiofs socket permission setup is root-only")
+    """Wait for and verify the owner-created socket; never mutate it as root."""
     deadline = time.monotonic() + 8
     while True:
         try:
@@ -416,7 +415,8 @@ def fix_socket_permissions() -> None:
             time.sleep(0.05)
     try:
         assignment_uid = assignment_owner_uid()
-        # ExecStartPost validates the isolated virtiofs socket after startup.
+        if os.geteuid() != assignment_uid:
+            raise Refused("virtiofs socket readiness must run as the assigned workspace owner")
         read_assignment(ASSIGNMENT, uid=assignment_uid, verify_path=False)
         owner = pwd.getpwuid(assignment_uid)
         control_gid = grp.getgrnam("lm-vm-control").gr_gid
@@ -426,12 +426,25 @@ def fix_socket_permissions() -> None:
     if (not stat.S_ISDIR(directory.st_mode) or directory.st_uid != owner.pw_uid
             or directory.st_gid not in (owner.pw_gid, control_gid)
             or stat.S_IMODE(directory.st_mode) != 0o750
-            or not stat.S_ISSOCK(info.st_mode) or info.st_uid != owner.pw_uid):
+            or not stat.S_ISSOCK(info.st_mode) or info.st_uid != owner.pw_uid
+            or info.st_gid != control_gid or stat.S_IMODE(info.st_mode) != 0o770
+            or info.st_nlink != 1):
         raise Refused("virtiofs socket has unsafe type, owner, or runtime directory")
-    os.chown(SOCKET, owner.pw_uid, control_gid, follow_symlinks=False)
-    os.chmod(SOCKET, 0o660, follow_symlinks=False)
+    # virtiofsd's --socket-group intentionally yields 0770 (its fixed umask
+    # protects all other users). The assigned owner is also a member of the
+    # fixed control group, so it can safely assign that group to its private
+    # runtime directory and remove the semantically unused socket execute bits.
     os.chown(SOCKET_DIR, owner.pw_uid, control_gid, follow_symlinks=False)
     os.chmod(SOCKET_DIR, 0o750, follow_symlinks=False)
+    os.chmod(SOCKET, 0o660, follow_symlinks=False)
+    directory = os.lstat(SOCKET_DIR)
+    info = os.lstat(SOCKET)
+    if (not stat.S_ISDIR(directory.st_mode) or directory.st_uid != owner.pw_uid
+            or directory.st_gid != control_gid or stat.S_IMODE(directory.st_mode) != 0o750
+            or not stat.S_ISSOCK(info.st_mode) or info.st_uid != owner.pw_uid
+            or info.st_gid != control_gid or stat.S_IMODE(info.st_mode) != 0o660
+            or info.st_nlink != 1):
+        raise Refused("virtiofs socket permissions did not normalize safely")
 
 
 def verify_service_socket() -> None:
@@ -468,7 +481,8 @@ def build_virtiofsd_argv(executable: str, *, uid: int, gid: int) -> list[str]:
     if (executable not in VIRTIOFSD_CANDIDATES or type(uid) is not int or uid <= 0
             or type(gid) is not int or gid < 0):
         raise Refused("virtiofsd executable or fixed identity mapping is invalid")
-    return [executable, "--socket-path", str(SOCKET), "--shared-dir", str(SHARE_DIR),
+    return [executable, "--socket-path", str(SOCKET), "--socket-group", "lm-vm-control",
+            "--shared-dir", str(SHARE_DIR),
             "--sandbox", "namespace", "--no-announce-submounts",
             f"--uid-map=:1000:{uid}:1:", f"--gid-map=:1000:{gid}:1:"]
 

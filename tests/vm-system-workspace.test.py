@@ -4,9 +4,12 @@
 import importlib.util
 import os
 import pathlib
+import socket
+import stat
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -165,10 +168,38 @@ class QemuWorkspaceArgvTests(unittest.TestCase):
 
 
 class ServiceBoundaryTests(unittest.TestCase):
+    def test_post_start_normalizes_socket_metadata_as_owner_without_root_privileges(self):
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = pathlib.Path(temp)
+            socket_path = runtime / "virtiofs.sock"
+            with socket.socket(socket.AF_UNIX) as sock:
+                sock.bind(str(socket_path))
+            socket_path.chmod(0o770)
+            runtime.chmod(0o750)
+            owner_uid, control_gid = os.getuid(), os.getgid()
+            owner = SimpleNamespace(pw_uid=owner_uid, pw_gid=control_gid)
+            with mock.patch.object(workspace, "SOCKET", socket_path), \
+                    mock.patch.object(workspace, "SOCKET_DIR", runtime), \
+                    mock.patch.object(workspace, "assignment_owner_uid", return_value=owner_uid), \
+                    mock.patch.object(workspace, "read_assignment"), \
+                    mock.patch.object(workspace.pwd, "getpwuid", return_value=owner), \
+                    mock.patch.object(workspace.grp, "getgrnam",
+                                      return_value=SimpleNamespace(gr_gid=control_gid)), \
+                    mock.patch.object(workspace.os, "geteuid", return_value=owner_uid), \
+                    mock.patch.object(workspace.os, "chown", wraps=os.chown) as chown:
+                workspace.fix_socket_permissions()
+            chown.assert_called_once_with(runtime, owner_uid, control_gid,
+                                          follow_symlinks=False)
+            info = socket_path.lstat()
+            self.assertTrue(stat.S_ISSOCK(info.st_mode))
+            self.assertEqual((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)),
+                             (owner_uid, control_gid, 0o660))
+
     def test_virtiofsd_fixed_host_identity_mapping(self):
         argv = workspace.build_virtiofsd_argv("/usr/libexec/virtiofsd", uid=1001, gid=1002)
         self.assertIn("--uid-map=:1000:1001:1:", argv)
         self.assertIn("--gid-map=:1000:1002:1:", argv)
+        self.assertEqual(argv[argv.index("--socket-group") + 1], "lm-vm-control")
         self.assertIn("--no-announce-submounts", argv)
         with self.assertRaises(workspace.Refused):
             workspace.build_virtiofsd_argv("/tmp/virtiofsd", uid=1001, gid=1002)
@@ -212,6 +243,13 @@ class ServiceBoundaryTests(unittest.TestCase):
             self.assertNotIn(forced_nnp, unit)
         self.assertIn("RuntimeDirectory=little-mester-vm-workspace little-mester-vm-workspace-share", unit)
         self.assertIn("ReadWritePaths=/run/little-mester-vm-workspace-share", unit)
+        self.assertIn("ExecStartPost=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py socket-permissions", unit)
+        self.assertNotIn("ExecStartPost=+", unit)
+        self.assertIn('"--socket-group", "lm-vm-control"', helper)
+        self.assertIn("stat.S_IMODE(info.st_mode) != 0o660", helper)
+        self.assertNotIn("os.chown(SOCKET,", helper)
+        self.assertIn("os.chown(SOCKET_DIR", helper)
+        self.assertIn("os.chmod(SOCKET, 0o660, follow_symlinks=False)", helper)
 
     def test_systemd_host_bind_target_is_created_runtime_path_not_guest_mountpoint(self):
         unit = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()

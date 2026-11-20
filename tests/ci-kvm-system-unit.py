@@ -377,6 +377,21 @@ def invoke_shared_acceptance(sha: str) -> None:
     run(["/usr/bin/sg", "lm-vm-control", "-c", command], timeout=45 * 60, capture=False)
 
 
+def verify_workspace_startup_post() -> None:
+    """Require the actual fixed workspace ExecStartPost to finish successfully."""
+    result = run(["/usr/bin/systemctl", "show", "--no-pager",
+                  "--property=ActiveState", "--property=SubState",
+                  "--property=ExecStartPost", WORKSPACE_UNIT])
+    properties = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    require(properties.get("ActiveState") == "active" and properties.get("SubState") == "running",
+            "production workspace service is not active after VM acceptance")
+    post = properties.get("ExecStartPost", "")
+    require("socket-permissions" in post and "code=exited" in post
+            and re.search(r"\bstatus=0(?:/|\s|;|})", post) is not None,
+            "production workspace ExecStartPost did not complete socket readiness successfully")
+    print("production_workspace_exec_start_post=PASS socket_metadata=owner-normalized")
+
+
 def disposable_workspace_path() -> pathlib.Path:
     temp = pathlib.Path(os.environ["RUNNER_TEMP"])
     run_id, attempt = os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_RUN_ATTEMPT", "")
@@ -807,6 +822,7 @@ def main() -> int:
         configure_disposable_workspace(installed_root)
         escape_evidence = create_escape_sentinel(workspace_path)
         invoke_shared_acceptance(sha)
+        verify_workspace_startup_post()
         verify_guest_cannot_read_escape()
         force_systemd_fallback(installed_root)
     except BaseException as error:  # noqa: BLE001 - finally below must stop a started unit on cancellation

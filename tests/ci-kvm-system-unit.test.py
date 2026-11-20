@@ -421,6 +421,20 @@ class HostedSystemUnitTests(unittest.TestCase):
                         main.index("invoke_shared_acceptance(sha)"))
         self.assertIn("/run/little-mester-vm-workspace-share", source)
 
+    def test_hosted_acceptance_requires_real_workspace_exec_start_post_success(self):
+        source = SCRIPT.read_text()
+        checker = source[source.index("def verify_workspace_startup_post"):
+                         source.index("def disposable_workspace_path")]
+        main = source[source.index("def main()") :]
+        self.assertIn('"--property=ExecStartPost"', checker)
+        self.assertIn('"socket-permissions"', checker)
+        self.assertIn('"code=exited"', checker)
+        self.assertIn('"production workspace ExecStartPost did not complete', checker)
+        self.assertLess(main.index("invoke_shared_acceptance(sha)"),
+                        main.index("verify_workspace_startup_post()"))
+        self.assertLess(main.index("verify_workspace_startup_post()"),
+                        main.index("verify_guest_cannot_read_escape()"))
+
     def test_script_uses_production_fixed_operations_and_bounded_stop_cleanup(self):
         source = SCRIPT.read_text()
         shared = (ROOT / "lib/vm/system-acceptance.py").read_text()

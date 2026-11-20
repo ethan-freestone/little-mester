@@ -92,13 +92,17 @@ Pass the explicit virtiofsd namespace sandbox option; do not enable submount ann
 
 The root installer creates a dedicated runtime socket directory owned by the workspace
 owner and group `lm-vm-control`, with mode `0750`; the workspace service starts with the
-owner's primary group so virtiofsd's supported user-namespace ID maps work, then its root
-`ExecStartPost` normalizes the socket directory and socket to `lm-vm-control`. The service creates the
-socket there with group `lm-vm-control` and mode `0660`. The directory is not writable by
-the QEMU group, so QEMU can connect but cannot replace the socket. The installed account
-policy must limit `lm-vm-control` to the owner and `lm-vm`. The socket path and every
-ancestor are checked for type, owner/group, mode, and symlinks before QEMU starts. No
-socket is placed under the owner's `0700` `/run/user/<uid>` directory, and no service
+owner's primary group so virtiofsd's supported user-namespace ID maps work. virtiofsd is
+given the fixed `lm-vm-control` socket group, and its owner-identity `ExecStartPost`
+waits for the socket and normalizes its mode to `0660` without root-side ownership
+changes. Systemd creates the private runtime directory before starting commands; the
+owner-side post step changes only that owner-controlled directory's group to
+`lm-vm-control`. The daemon sets the socket group during its own startup. The directory
+is not writable by the QEMU group, so QEMU can connect but cannot replace the socket.
+The installed account policy must limit `lm-vm-control` to the owner and `lm-vm`. The
+socket path and every ancestor are checked for type, owner/group, mode, and symlinks
+before QEMU starts. No socket is placed under the owner's `0700` `/run/user/<uid>`
+directory, and no service
 opens a TCP listener for filesystem access.
 
 The VM unit requires and follows the workspace unit; the workspace unit is part of the
