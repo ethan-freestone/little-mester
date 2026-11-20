@@ -35,6 +35,7 @@ DROPIN_DIR = pathlib.Path("/etc/systemd/system/little-mester-vm-workspace.servic
 DROPIN = DROPIN_DIR / "20-workspace.conf"
 SOCKET_DIR = pathlib.Path("/run/little-mester-vm-workspace")
 SOCKET = SOCKET_DIR / "virtiofs.sock"
+SHARE_DIR = pathlib.Path("/run/little-mester-vm-workspace-share")
 VM_UNIT = "little-mester-vm.service"
 VIRTIOFSD_CANDIDATES = (
     "/usr/bin/virtiofsd",
@@ -262,7 +263,7 @@ def _mountpoints() -> tuple[pathlib.Path, ...]:
 
 
 def reject_nested_mounts(mountpoints: tuple[pathlib.Path, ...], *,
-                         share_root: pathlib.Path = pathlib.Path("/workspace")) -> None:
+                         share_root: pathlib.Path = SHARE_DIR) -> None:
     for point in mountpoints:
         if point != share_root and share_root in point.parents:
             raise Refused("workspace contains a nested mount boundary")
@@ -277,7 +278,19 @@ def _systemd_bind_path(path: pathlib.Path) -> str:
     # systemd's word and mount-spec parsers.
     if "\\" in raw or '"' in raw:
         raise Refused("workspace path contains unsupported systemd quoting characters")
-    return f'[Service]\nBindPaths="{raw.replace("%", "%%")}:/workspace"\n'
+    return f'[Service]\nBindPaths="{raw.replace("%", "%%")}:{SHARE_DIR}"\n'
+
+
+def verify_host_assignment(uid: int) -> Workspace:
+    """Validate assignment and generated systemd source before lifecycle actions."""
+    workspace = read_assignment(ASSIGNMENT, uid=uid)
+    try:
+        actual = DROPIN.read_bytes()
+    except OSError as error:
+        raise Refused("workspace systemd bind configuration is unavailable") from error
+    if actual != _systemd_bind_path(workspace.path).encode("utf-8"):
+        raise Refused("workspace assignment and systemd bind configuration disagree")
+    return workspace
 
 
 def _atomic_root_file(path: pathlib.Path, payload: bytes, *, mode: int, group: int,
@@ -403,8 +416,7 @@ def fix_socket_permissions() -> None:
             time.sleep(0.05)
     try:
         assignment_uid = assignment_owner_uid()
-        # ExecStartPost inherits ProtectHome and sees the source only at the
-        # validated /workspace bind mount checked by ExecStartPre.
+        # ExecStartPost validates the isolated virtiofs socket after startup.
         read_assignment(ASSIGNMENT, uid=assignment_uid, verify_path=False)
         owner = pwd.getpwuid(assignment_uid)
         control_gid = grp.getgrnam("lm-vm-control").gr_gid
@@ -442,21 +454,21 @@ def verify_service_workspace() -> None:
     assignment_uid = assignment_owner_uid()
     workspace = read_assignment(ASSIGNMENT, uid=assignment_uid, verify_path=False)
     try:
-        mounted = os.stat("/workspace", follow_symlinks=False)
+        mounted = os.stat(SHARE_DIR, follow_symlinks=False)
         actual = DROPIN.read_bytes()
     except OSError as error:
-        raise Refused("validated /workspace bind mount is unavailable") from error
+        raise Refused("validated host workspace bind mount is unavailable") from error
     if (not stat.S_ISDIR(mounted.st_mode)
             or (mounted.st_dev, mounted.st_ino) != workspace.identity
             or actual != _systemd_bind_path(workspace.path).encode("utf-8")):
-        raise Refused("service /workspace does not match the exact validated host directory")
+        raise Refused("service workspace bind mount does not match the exact validated host directory")
 
 
 def build_virtiofsd_argv(executable: str, *, uid: int, gid: int) -> list[str]:
     if (executable not in VIRTIOFSD_CANDIDATES or type(uid) is not int or uid <= 0
             or type(gid) is not int or gid < 0):
         raise Refused("virtiofsd executable or fixed identity mapping is invalid")
-    return [executable, "--socket-path", str(SOCKET), "--shared-dir", "/workspace",
+    return [executable, "--socket-path", str(SOCKET), "--shared-dir", str(SHARE_DIR),
             "--sandbox", "namespace", "--no-announce-submounts",
             f"--uid-map=:1000:{uid}:1:", f"--gid-map=:1000:{gid}:1:"]
 
@@ -464,9 +476,9 @@ def build_virtiofsd_argv(executable: str, *, uid: int, gid: int) -> list[str]:
 def _serve() -> None:
     assignment_uid = assignment_owner_uid()
     workspace = read_assignment(ASSIGNMENT, uid=assignment_uid, verify_path=False)
-    mounted = os.stat("/workspace", follow_symlinks=False)
+    mounted = os.stat(SHARE_DIR, follow_symlinks=False)
     if not stat.S_ISDIR(mounted.st_mode) or (mounted.st_dev, mounted.st_ino) != workspace.identity:
-        raise Refused("mounted /workspace differs from the approved source identity")
+        raise Refused("host workspace bind target differs from the approved source identity")
     reject_nested_mounts(_mountpoints())
     mount_text = _systemd_bind_path(workspace.path).encode()
     try:

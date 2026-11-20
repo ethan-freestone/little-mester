@@ -50,6 +50,12 @@ class ProjectConfigIsolationTests(unittest.TestCase):
             "autoupdate": False,
             "share": "disabled",
         }), encoding="utf-8")
+        self.model_config = self.home / "protected-model.json"
+        self.model_config.write_text(json.dumps({
+            "autoupdate": False, "share": "disabled",
+            "permission": {"edit": "ask", "bash": "ask"},
+            "model": "{env:LM_OPENCODE_MODEL}",
+        }), encoding="utf-8")
         (self.workspace / "opencode.json").write_text(json.dumps({
             "$schema": "https://opencode.ai/config.json",
             "autoupdate": True,
@@ -224,6 +230,7 @@ class ProjectConfigIsolationTests(unittest.TestCase):
             "--home", str(self.home),
             "--protected-config", str(self.home / "protected.json"),
             "--protected-plugin", "/tmp/lm-ci-protected-plugin-fixture",
+            "--model-config", str(self.model_config), "--model", "openai/gpt-5",
         ]
         # Reproduce the parent-python fixture failure: a non-writable XDG root
         # with no `opencode/` child fails its mkdir before OpenCode can inspect
@@ -293,7 +300,7 @@ class ProjectConfigIsolationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr[:400])
         self.assertEqual(
             result.stdout.strip(),
-            "KVM_M2_CONFIG_PASS operation=opencode-debug-config",
+            "KVM_M2_CONFIG_PASS operation=opencode-model-config",
         )
 
     def test_failure_diagnostic_uses_fixed_allowlisted_cause(self):

@@ -71,6 +71,7 @@ FIXED_FILES = (
     "/run/little-mester-vm",
     "/run/lm-vm-proxy",
     "/run/little-mester-vm-workspace",
+    "/run/little-mester-vm-workspace-share",
 )
 FIXED_USERS = ("lm-vm", "lm-vm-proxy")
 FIXED_GROUPS = ("lm-vm", "lm-vm-proxy", "lm-vm-control")
@@ -400,6 +401,10 @@ def configure_disposable_workspace(installed_root: pathlib.Path) -> pathlib.Path
                             stderr=subprocess.PIPE, timeout=30, check=False)
     require(result.returncode == 0,
             f"disposable workspace configurator failed safely (exit={result.returncode})")
+    dropin = pathlib.Path("/etc/systemd/system/little-mester-vm-workspace.service.d/20-workspace.conf")
+    expected_bind = f'[Service]\nBindPaths="{workspace}:/run/little-mester-vm-workspace-share"\n'
+    require(dropin.read_text(encoding="utf-8") == expected_bind,
+            "fresh production unit assignment did not render the explicit disposable host path to its runtime target")
     return workspace
 
 

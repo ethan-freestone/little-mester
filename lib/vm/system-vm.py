@@ -512,9 +512,10 @@ def _fixed_exec(action: str) -> int:
     if action == "up":
         policy = _workspace_policy()
         try:
-            policy.read_assignment(policy.ASSIGNMENT, uid=os.getuid())
+            policy.verify_host_assignment(os.getuid())
         except policy.Refused as error:
-            raise Refused("no valid host workspace is assigned; use ./lab vm up --dir PATH") from error
+            raise Refused(f"host workspace preflight failed before VM lifecycle: {error}; "
+                          "configure it with ./lab vm up --dir PATH") from error
     if action == "status":
         result = subprocess.run(commands[action], stdin=subprocess.DEVNULL, check=False)
         if result.returncode == 0:

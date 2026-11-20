@@ -406,6 +406,21 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn(f"/tools/vm-owner-acceptance --system-vm accept", command[3])
         self.assertIn("--approve-system-vm-lifecycle", command[3])
 
+    def test_fresh_production_install_configures_disposable_host_source_before_real_unit_start(self):
+        source = SCRIPT.read_text()
+        configure = source.index("def configure_disposable_workspace")
+        configure_body_end = source.index("def remove_disposable_workspace", configure)
+        config_body = source[configure:configure_body_end]
+        main = source[source.index("def main()") :]
+        self.assertIn("disposable_workspace_path()", config_body)
+        self.assertIn('"owner_uid": os.getuid()', config_body)
+        self.assertIn('"unsafe_recurse": False', config_body)
+        self.assertIn('BindPaths="{workspace}:/run/little-mester-vm-workspace-share', config_body)
+        self.assertNotIn(":/workspace", config_body)
+        self.assertLess(main.index("configure_disposable_workspace(installed_root)"),
+                        main.index("invoke_shared_acceptance(sha)"))
+        self.assertIn("/run/little-mester-vm-workspace-share", source)
+
     def test_script_uses_production_fixed_operations_and_bounded_stop_cleanup(self):
         source = SCRIPT.read_text()
         shared = (ROOT / "lib/vm/system-acceptance.py").read_text()

@@ -349,7 +349,7 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
                    for path in ("/usr/bin", "/usr/lib", "/usr/libexec", "/lib"))
             or workspace_properties.get("NeedDaemonReload") != "no"
             or not workspace_commands_match
-            or "/workspace" not in workspace_properties.get("ReadWritePaths", "")
+            or str(workspace_policy.SHARE_DIR) not in workspace_properties.get("ReadWritePaths", "")
             or metrics_properties.get("User") != "lm-vm"
             or metrics_properties.get("Group") != "lm-vm"
             or metrics_properties.get("ProtectSystem") != "strict"

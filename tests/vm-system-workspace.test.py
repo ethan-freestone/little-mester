@@ -7,6 +7,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -114,13 +115,26 @@ class WorkspaceValidationTests(unittest.TestCase):
         with self.assertRaises(workspace.Refused):
             workspace.read_assignment(path, uid=os.getuid())
 
+    def test_vm_host_preflight_requires_assignment_and_exact_generated_dropin(self):
+        assigned = self.validate(self.project)
+        assignment = self.root / "workspace.json"
+        dropin = self.root / "20-workspace.conf"
+        workspace.write_assignment(assignment, assigned, uid=os.getuid())
+        dropin.write_bytes(workspace._systemd_bind_path(self.project).encode())
+        with mock.patch.object(workspace, "ASSIGNMENT", assignment), \
+                mock.patch.object(workspace, "DROPIN", dropin):
+            self.assertEqual(workspace.verify_host_assignment(os.getuid()), assigned)
+            dropin.write_text('[Service]\nBindPaths="/tmp:/workspace"\n')
+            with self.assertRaisesRegex(workspace.Refused, "disagree"):
+                workspace.verify_host_assignment(os.getuid())
+
     def test_systemd_bind_mount_quoting_preserves_spaces_and_rejects_ambiguity(self):
         rendered = workspace._systemd_bind_path(self.project)
-        self.assertEqual(rendered, f'[Service]\nBindPaths="{self.project}:/workspace"\n')
+        self.assertEqual(rendered, f'[Service]\nBindPaths="{self.project}:{workspace.SHARE_DIR}"\n')
         specifier_path = self.home / "literal%u-name"
         specifier_path.mkdir()
         self.assertEqual(workspace._systemd_bind_path(specifier_path),
-                         f'[Service]\nBindPaths="{specifier_path.as_posix().replace("%", "%%")}:/workspace"\n')
+                         f'[Service]\nBindPaths="{specifier_path.as_posix().replace("%", "%%")}:{workspace.SHARE_DIR}"\n')
         with self.assertRaisesRegex(workspace.Refused, "unsafe for systemd"):
             workspace._systemd_bind_path(pathlib.Path("/tmp/work:other"))
 
@@ -160,10 +174,10 @@ class ServiceBoundaryTests(unittest.TestCase):
             workspace.build_virtiofsd_argv("/tmp/virtiofsd", uid=1001, gid=1002)
 
     def test_nested_mounts_are_rejected_in_the_export_namespace(self):
-        workspace.reject_nested_mounts((pathlib.Path("/"), pathlib.Path("/workspace")))
+        workspace.reject_nested_mounts((pathlib.Path("/"), workspace.SHARE_DIR))
         with self.assertRaisesRegex(workspace.Refused, "nested mount"):
-            workspace.reject_nested_mounts((pathlib.Path("/workspace"),
-                                            pathlib.Path("/workspace/foreign-mount")))
+            workspace.reject_nested_mounts((workspace.SHARE_DIR,
+                                            workspace.SHARE_DIR / "foreign-mount"))
 
     def test_qemu_is_ordered_after_and_bound_to_owner_scoped_share(self):
         unit = (ROOT / "systemd/little-mester-vm.service").read_text()
@@ -181,7 +195,7 @@ class ServiceBoundaryTests(unittest.TestCase):
         self.assertNotIn("ExecStartPre=", unit)
         self.assertIn("ExecStart=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py serve", unit)
         helper = (ROOT / "lib/vm/system-vm-workspace.py").read_text()
-        self.assertIn('"--shared-dir", "/workspace"', helper)
+        self.assertIn('"--shared-dir", str(SHARE_DIR)', helper)
         self.assertIn('"--sandbox", "namespace"', helper)
         self.assertIn('"/usr/libexec/virtiofsd"', helper)
         self.assertIn("build_virtiofsd_argv", helper)
@@ -196,7 +210,15 @@ class ServiceBoundaryTests(unittest.TestCase):
                            "ProtectKernelModules=", "RestrictSUIDSGID=",
                            "LockPersonality=", "RestrictAddressFamilies="):
             self.assertNotIn(forced_nnp, unit)
-        self.assertIn("ReadWritePaths=/workspace", unit)
+        self.assertIn("RuntimeDirectory=little-mester-vm-workspace little-mester-vm-workspace-share", unit)
+        self.assertIn("ReadWritePaths=/run/little-mester-vm-workspace-share", unit)
+
+    def test_systemd_host_bind_target_is_created_runtime_path_not_guest_mountpoint(self):
+        unit = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
+        dropin = workspace._systemd_bind_path(pathlib.Path("/selected/disposable-workspace"))
+        self.assertIn(str(workspace.SHARE_DIR), dropin)
+        self.assertNotIn(":/workspace\n", dropin)
+        self.assertNotIn("/workspace", unit)
         self.assertIn("RuntimeDirectoryMode=0750", unit)
 
     def test_metrics_endpoint_is_loopback_only_and_get_only(self):

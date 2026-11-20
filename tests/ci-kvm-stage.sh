@@ -499,6 +499,8 @@ contract = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(contract)
 files = [{"path": "/etc/opencode/opencode.json", "owner": "root:root", "permissions": "0644",
           "content": '{"autoupdate":false,"share":"disabled","permission":{"edit":"ask","bash":"ask"}}\n'}]
+files.append({"path": "/etc/opencode/opencode-model.json", "owner": "root:root",
+              "permissions": "0644", "content": contract.PROTECTED_CONFIG_MODEL})
 files.extend({"path": path, "owner": "root:root", "permissions": mode, "encoding": "b64",
                "content": base64.b64encode(content).decode("ascii")}
               for path, (content, mode) in contract.ASSETS.items())
@@ -772,6 +774,7 @@ stage_start config-tmux 180
 ssh_guest "cloud-init status --long >/dev/null 2>&1 || exit 41; $guest_asset_checks"
 ssh_guest 'test -x /usr/local/bin/opencode && tmux -V >/dev/null'
 ssh_guest 'test "$(stat -c %u:%a /etc/opencode/opencode.json)" = "0:644" && grep -Fq "\"share\":\"disabled\"" /etc/opencode/opencode.json'
+ssh_guest 'test "$(stat -c %u:%g:%a /etc/opencode/opencode-model.json)" = "0:0:644"'
 # Initialize the disposable OpenCode DB with the pinned CLI before adding the
 # test-only history table; a nonempty DB without its session schema is refused.
 ssh_guest '/usr/bin/python3 -I /usr/local/libexec/lm-ci-opencode-config-check --workspace /home/mester/workspace --home /home/mester --protected-config /etc/opencode/opencode.json --protected-plugin /etc/opencode/plugins/little-mester-exit-confirm --initialize-database' 30
@@ -786,7 +789,7 @@ persist_mount_sha256=''
 run_persistence_create
 run_persistence_proof initial-creation ''
 ssh_guest 'printf unsafe-target-preserved > /tmp/lm-auth-unsafe-target && ln -s /tmp/lm-auth-unsafe-target /home/mester/.local/share/opencode/opencode.db-wal; if /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth >/dev/null 2>&1; then exit 1; fi; test "$(cat /tmp/lm-auth-unsafe-target)" = unsafe-target-preserved; rm /home/mester/.local/share/opencode/opencode.db-wal'
-ssh_guest '/usr/bin/python3 -I /usr/local/libexec/lm-ci-opencode-config-check --workspace /home/mester/workspace --home /home/mester --protected-config /etc/opencode/opencode.json --protected-plugin /etc/opencode/plugins/little-mester-exit-confirm' 50
+ssh_guest '/usr/bin/python3 -I /usr/local/libexec/lm-ci-opencode-config-check --workspace /home/mester/workspace --home /home/mester --protected-config /etc/opencode/opencode.json --protected-plugin /etc/opencode/plugins/little-mester-exit-confirm --model-config /etc/opencode/opencode-model.json --model openai/gpt-5' 50
 capture_tui_probe startup 8 "$tmp" "$tmp_root" ssh_tty_guest "$repo_root/tests/ci-tui-diagnostic.py" fail
 # shellcheck disable=SC2016
 ssh_guest 'test "$(stat -c %a /home/mester/.local/share/opencode/opencode.db)" = 600 && test "$(stat -c %a /home/mester/.local/share/opencode/auth.json)" = 600 && test "$(stat -c %a /home/mester/.local/share/opencode)" = 700 && test ! -e /etc/opencode/service.json && TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux has-session -t little-mester-opencode && test "$(TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_dead}")" = 0 && TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux show-environment -g OPENCODE_CONFIG | grep -Fx OPENCODE_CONFIG=/etc/opencode/opencode.json && TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux show-environment -g OPENCODE_DISABLE_PROJECT_CONFIG | grep -Fx OPENCODE_DISABLE_PROJECT_CONFIG=1'

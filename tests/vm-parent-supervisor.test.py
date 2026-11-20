@@ -645,7 +645,8 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
             source_root = pathlib.Path(source_temp)
             fixture_files = [
                 "lab-vm",
-                "lib/vm/host-launcher.sh", "lib/vm/cloud-init.sh", "lib/vm/proxy.py",
+                "lib/vm/host-launcher.sh", "lib/vm/desktop-session-env.sh",
+                "lib/vm/cloud-init.sh", "lib/vm/proxy.py",
                 "lib/vm/bounded-log.py", "lib/vm/executable-policy.py",
                 "lib/vm/browser-auth-session.py", "lib/vm/callback-listener.py", "lib/vm/virtiofs-socket.py",
                 "lib/vm/guest-user-dirs.py", "lib/vm/guest-opencode-preferences.py",
@@ -674,6 +675,9 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 if relative in ("lab-vm", "tools/vm-owner-acceptance"):
                     shutil.copyfile(ROOT / relative, destination)
                     destination.chmod(0o755)
+                elif relative == "lib/vm/desktop-session-env.sh":
+                    shutil.copyfile(ROOT / relative, destination)
+                    destination.chmod(0o644)
                 elif relative == "lib/vm/parent-state.py":
                     destination.write_text(
                         "import os, subprocess, sys\n"

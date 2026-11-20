@@ -75,9 +75,12 @@ not receive access by broadening host permissions.
 
 Keep QEMU under the dedicated `lm-vm` system service identity. Add a separate systemd
 workspace service running `virtiofsd` as the invoking owner, not as root and not as
-`lm-vm`. The service receives the selected source only through one systemd bind mount at
-`/workspace`, with `ProtectHome=yes`, `ProtectSystem=strict`, `ReadWritePaths=/workspace`,
-private temp, and a `NoExecPaths=/` execution boundary. `NoNewPrivileges` is disabled
+`lm-vm`. Systemd binds the selected host source onto the pre-created, owner-scoped
+`/run/little-mester-vm-workspace-share` runtime directory. That host-side target is
+deliberately distinct from guest `/workspace`: virtiofsd serves the runtime target and
+the guest mounts that export at `/workspace`. The service uses `ProtectHome=yes`,
+`ProtectSystem=strict`, `ReadWritePaths` limited to the runtime share and socket
+directories, private temp, and a `NoExecPaths=/` execution boundary. `NoNewPrivileges` is disabled
 only because virtiofsd 1.10 creates its user namespace through the setuid
 `newuidmap`/`newgidmap` helpers. Sandboxing options that systemd uses to force
 `NoNewPrivileges` (including `PrivateDevices`, `RestrictSUIDSGID`, and

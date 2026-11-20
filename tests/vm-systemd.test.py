@@ -178,7 +178,7 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertFalse(any(token in "\n".join(entries) for token in ("*", "?", "[", "\"")))
         policy = type("Policy", (), {
             "ASSIGNMENT": pathlib.Path("/etc/little-mester-vm/workspace.json"),
-            "read_assignment": staticmethod(lambda *_args, **_kwargs: object()),
+            "verify_host_assignment": staticmethod(lambda *_args, **_kwargs: object()),
         })()
         with mock.patch.object(vm, "_workspace_policy", return_value=policy), \
              mock.patch.object(vm.subprocess, "run") as run, \
@@ -188,6 +188,16 @@ class SystemdPolicyTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0], [
                 "/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", "little-mester-vm.service"])
             probe.assert_called_once_with()
+        invalid_policy = type("Policy", (), {
+            "Refused": RuntimeError,
+            "verify_host_assignment": staticmethod(
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("bad drop-in"))),
+        })()
+        with mock.patch.object(vm, "_workspace_policy", return_value=invalid_policy), \
+                mock.patch.object(vm.subprocess, "run") as run:
+            with self.assertRaisesRegex(vm.Refused, "before VM lifecycle.*bad drop-in"):
+                vm._fixed_exec("up")
+        run.assert_not_called()
         with self.assertRaises(vm.Refused):
             vm._fixed_exec("systemctl")
         with mock.patch.object(vm.sys, "argv", ["system-vm.py", "owner", "up"]), \
@@ -217,6 +227,7 @@ class SystemdPolicyTests(unittest.TestCase):
             "agent/opencode/plugins/host-metrics-tui/tui.tsx",
             "systemd/little-mester-vm-proxy.service", "sudoers/little-mester-vm",
             "tools/vm-system-install", "lib/vm/guest-bootstrap.py",
+            "lib/vm/desktop-session-env.sh",
         }
         self.assertTrue(required.issubset(owner.INSTALL_FILES))
         self.assertIn("lib/vm/system-acceptance.py", owner.INSTALL_FILES)

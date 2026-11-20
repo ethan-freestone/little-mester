@@ -138,6 +138,7 @@ def initialize_database(binary: str, home: pathlib.Path,
 
 def check(binary: str, workspace: pathlib.Path, home: pathlib.Path,
           protected_config: str, protected_plugin: str,
+          model_config: str | None = None, model: str | None = None,
           xdg_config_home: str = "/etc") -> None:
     hostile_plugin = "/tmp/lm-ci-hostile-plugin-sentinel"
     hostile_paths = {
@@ -169,6 +170,20 @@ def check(binary: str, workspace: pathlib.Path, home: pathlib.Path,
     if hostile_paths & protected_paths or hostile_plugin in json.dumps(protected_sources):
         raise ConfigCheckFailure("protected-config", "hostile-config-not-suppressed", 1)
 
+    if model_config is not None:
+        if not model or not model.startswith("openai/"):
+            raise ConfigCheckFailure("protected-model", "invalid-model-fixture", 64)
+        model_environment = make_environment(
+            home, model_config, protected_plugin, protect_project_config=True,
+            xdg_config_home=xdg_config_home,
+        )
+        model_environment["LM_OPENCODE_MODEL"] = model
+        model_sources = run_config_sources(
+            binary, workspace, model_environment, "protected-model"
+        )
+        if model_config not in document_paths(model_sources):
+            raise ConfigCheckFailure("protected-model", "protected-model-source-not-loaded", 1)
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -177,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--home", type=pathlib.Path, required=True)
     parser.add_argument("--protected-config", required=True)
     parser.add_argument("--protected-plugin", required=True)
+    parser.add_argument("--model-config")
+    parser.add_argument("--model")
     parser.add_argument("--xdg-config-home", default="/etc")
     parser.add_argument("--initialize-database", action="store_true")
     args = parser.parse_args(argv)
@@ -190,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             check(args.binary, args.workspace, args.home,
                   args.protected_config, args.protected_plugin,
+                  args.model_config, args.model,
                   args.xdg_config_home)
     except ConfigCheckFailure as error:
         print(
@@ -203,7 +221,8 @@ def main(argv: list[str] | None = None) -> int:
     marker = (
         "KVM_M2_CONFIG_DB_PASS operation=opencode-schema-bootstrap"
         if args.initialize_database
-        else "KVM_M2_CONFIG_PASS operation=opencode-debug-config"
+        else ("KVM_M2_CONFIG_PASS operation=opencode-model-config"
+              if args.model_config else "KVM_M2_CONFIG_PASS operation=opencode-debug-config")
     )
     print(marker)
     return 0
