@@ -78,8 +78,10 @@ workspace service running `virtiofsd` as the invoking owner, not as root and not
 `lm-vm`. Systemd binds the selected host source onto the pre-created, owner-scoped
 `/run/little-mester-vm-workspace-share` runtime directory. That host-side target is
 deliberately distinct from guest `/workspace`: virtiofsd serves the runtime target and
-the guest mounts that export at `/workspace`. The service uses `ProtectHome=yes`,
-`ProtectSystem=strict`, `ReadWritePaths` limited to the runtime share and socket
+the guest mounts that export at `/workspace`. The service uses `ProtectHome=tmpfs` to
+hide the host home hierarchy while allowing systemd's explicit workspace bind; systemd
+does not support `BindPaths=` sources nested under `/home` with `ProtectHome=yes`.
+It uses `ProtectSystem=strict`, `ReadWritePaths` limited to the runtime share and socket
 directories, private temp, and a `NoExecPaths=/` execution boundary. `NoNewPrivileges` is disabled
 only because virtiofsd 1.10 creates its user namespace through the setuid
 `newuidmap`/`newgidmap` helpers. Sandboxing options that systemd uses to force

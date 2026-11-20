@@ -383,6 +383,13 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertNotIn("/usr/bin/sg", acceptance_source)
         self.assertIn('"/usr/bin/sg", "lm-vm-control", "-c"', ci_source)
 
+    def test_workspace_acceptance_requires_bind_compatible_home_isolation(self):
+        acceptance_source = (ROOT / "lib/vm/system-acceptance.py").read_text()
+        unit_source = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
+        self.assertIn('workspace_properties.get("ProtectHome") != "tmpfs"', acceptance_source)
+        self.assertIn("ProtectHome=tmpfs", unit_source)
+        self.assertIn("ProtectSystem=strict", unit_source)
+
     def test_normal_acceptance_stop_rejects_systemd_fallback_failure(self):
         with mock.patch.object(acceptance, "service_state", side_effect=[
                 {"ActiveState": "failed", "MainPID": "0", "Result": "exit-code"},

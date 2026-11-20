@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import json
 import os
@@ -269,6 +270,146 @@ def reject_nested_mounts(mountpoints: tuple[pathlib.Path, ...], *,
             raise Refused("workspace contains a nested mount boundary")
 
 
+def _mount_context(path: pathlib.Path) -> dict:
+    """Return bounded mount metadata for path without disclosing host paths."""
+    try:
+        lines = pathlib.Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        return {"mountinfo": "unavailable", "errno": error.errno}
+    best = None
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 10 or "-" not in fields:
+            continue
+        separator = fields.index("-")
+        if separator + 2 >= len(fields):
+            continue
+        mountpoint = fields[4]
+        for sequence, character in (("\\040", " "), ("\\011", "\t"),
+                                    ("\\012", "\n"), ("\\134", "\\")):
+            mountpoint = mountpoint.replace(sequence, character)
+        point = pathlib.Path(mountpoint)
+        if path == point or point in path.parents:
+            if best is None or len(point.parts) > best[0]:
+                best = (len(point.parts), {
+                    "mount_id": int(fields[0]),
+                    "is_exact_mountpoint": path == point,
+                    "filesystem": fields[separator + 1],
+                })
+    return best[1] if best is not None else {"mountinfo": "no-covering-entry"}
+
+
+def _path_identity(path: pathlib.Path) -> dict:
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except OSError as error:
+        return {"state": "unavailable", "errno": error.errno,
+                "error": errno.errorcode.get(error.errno, "UNKNOWN")}
+    return {
+        "state": "present",
+        "kind": "directory" if stat.S_ISDIR(info.st_mode) else "other",
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "uid": info.st_uid,
+        "gid": info.st_gid,
+        "mode": stat.S_IMODE(info.st_mode),
+    }
+
+
+def _source_visibility(path: pathlib.Path, source: dict, mount: dict) -> str:
+    if source.get("state") == "present":
+        return "visible"
+    if source.get("error") in ("EACCES", "EPERM"):
+        return "inaccessible"
+    if (source.get("error") == "ENOENT" and str(path).startswith("/home/")
+            and mount.get("filesystem") == "tmpfs"):
+        return "hidden-by-ProtectHome-tmpfs"
+    if source.get("error") == "ENOENT":
+        try:
+            os.stat(path.parent, follow_symlinks=False)
+            return "missing-source"
+        except PermissionError:
+            return "inaccessible-parent"
+        except FileNotFoundError:
+            return "missing-parent"
+        except OSError:
+            return "inaccessible-parent"
+    return "unavailable"
+
+
+def _workspace_bind_diagnostic(workspace: Workspace, target: pathlib.Path,
+                               dropin_matches: bool) -> dict:
+    source = _path_identity(workspace.path)
+    destination = _path_identity(target)
+    source_mount = _mount_context(workspace.path)
+    target_mount = _mount_context(target)
+    expected = {"device": workspace.identity[0], "inode": workspace.identity[1]}
+    source_matches = (source.get("state") == "present"
+                      and (source.get("device"), source.get("inode")) == workspace.identity)
+    target_matches = (destination.get("state") == "present"
+                      and (destination.get("device"), destination.get("inode")) == workspace.identity)
+    source_visibility = _source_visibility(workspace.path, source, source_mount)
+    if not dropin_matches:
+        diagnosis = "incorrect-bind-configuration"
+    elif source["state"] == "present" and not source_matches:
+        diagnosis = "approved-source-replaced"
+    elif destination["state"] == "unavailable":
+        diagnosis = "destination-inaccessible" if destination.get("error") in (
+            "EACCES", "EPERM") else "destination-missing-or-bind-absent"
+    elif not target_mount.get("is_exact_mountpoint"):
+        diagnosis = "bind-absent-or-wrong-destination"
+    elif not target_matches:
+        diagnosis = "bind-target-identity-mismatch"
+    else:
+        diagnosis = "approved-bind-present"
+    return {
+        "event": "workspace_bind_identity",
+        "diagnosis": diagnosis,
+        "expected": expected,
+        "source": source,
+        "source_visibility": source_visibility,
+        "source_matches_assignment": source_matches if source["state"] == "present" else None,
+        "source_mount": source_mount,
+        "destination": destination,
+        "destination_matches_assignment": target_matches,
+        "destination_mount": target_mount,
+        "dropin_matches_assignment": dropin_matches,
+    }
+
+
+def _log_workspace_bind_diagnostic(workspace: Workspace, target: pathlib.Path,
+                                   dropin_matches: bool) -> None:
+    try:
+        detail = _workspace_bind_diagnostic(workspace, target, dropin_matches)
+        print("WORKSPACE_BIND_DIAGNOSTIC " + json.dumps(detail, sort_keys=True,
+                                                        separators=(",", ":")),
+              file=sys.stderr, flush=True)
+    except (OSError, ValueError, TypeError):
+        # Diagnostics must never change fail-closed startup behavior.
+        print("WORKSPACE_BIND_DIAGNOSTIC {\"event\":\"unavailable\"}",
+              file=sys.stderr, flush=True)
+
+
+def _verify_bind_identity(workspace: Workspace, target: pathlib.Path,
+                          dropin_matches: bool) -> None:
+    source = _path_identity(workspace.path)
+    destination = _path_identity(target)
+    source_mount = _mount_context(workspace.path)
+    target_mount = _mount_context(target)
+    if source["state"] == "present" and (
+            source.get("device"), source.get("inode")) != workspace.identity:
+        _log_workspace_bind_diagnostic(workspace, target, dropin_matches)
+        raise Refused("approved host workspace source changed after assignment")
+    if (source["state"] != "present"
+            and _source_visibility(workspace.path, source, source_mount)
+            != "hidden-by-ProtectHome-tmpfs"):
+        _log_workspace_bind_diagnostic(workspace, target, dropin_matches)
+        raise Refused("approved host workspace source is missing or inaccessible at service startup")
+    if (destination["state"] != "present" or destination.get("kind") != "directory"
+            or (destination.get("device"), destination.get("inode")) != workspace.identity
+            or not target_mount.get("is_exact_mountpoint") or not dropin_matches):
+        _log_workspace_bind_diagnostic(workspace, target, dropin_matches)
+        raise Refused("host workspace bind target differs from the approved source identity")
 def _systemd_bind_path(path: pathlib.Path) -> str:
     raw = str(path)
     if not raw.startswith("/") or any(character in raw for character in ("\0", "\n", "\r", ":")):
@@ -467,14 +608,11 @@ def verify_service_workspace() -> None:
     assignment_uid = assignment_owner_uid()
     workspace = read_assignment(ASSIGNMENT, uid=assignment_uid, verify_path=False)
     try:
-        mounted = os.stat(SHARE_DIR, follow_symlinks=False)
         actual = DROPIN.read_bytes()
     except OSError as error:
         raise Refused("validated host workspace bind mount is unavailable") from error
-    if (not stat.S_ISDIR(mounted.st_mode)
-            or (mounted.st_dev, mounted.st_ino) != workspace.identity
-            or actual != _systemd_bind_path(workspace.path).encode("utf-8")):
-        raise Refused("service workspace bind mount does not match the exact validated host directory")
+    dropin_matches = actual == _systemd_bind_path(workspace.path).encode("utf-8")
+    _verify_bind_identity(workspace, SHARE_DIR, dropin_matches)
 
 
 def build_virtiofsd_argv(executable: str, *, uid: int, gid: int) -> list[str]:
@@ -490,17 +628,14 @@ def build_virtiofsd_argv(executable: str, *, uid: int, gid: int) -> list[str]:
 def _serve() -> None:
     assignment_uid = assignment_owner_uid()
     workspace = read_assignment(ASSIGNMENT, uid=assignment_uid, verify_path=False)
-    mounted = os.stat(SHARE_DIR, follow_symlinks=False)
-    if not stat.S_ISDIR(mounted.st_mode) or (mounted.st_dev, mounted.st_ino) != workspace.identity:
-        raise Refused("host workspace bind target differs from the approved source identity")
-    reject_nested_mounts(_mountpoints())
     mount_text = _systemd_bind_path(workspace.path).encode()
     try:
         actual = DROPIN.read_bytes()
     except OSError as error:
         raise Refused("systemd workspace bind configuration is unavailable") from error
-    if actual != mount_text:
-        raise Refused("systemd workspace bind configuration differs from the validated assignment")
+    dropin_matches = actual == mount_text
+    _verify_bind_identity(workspace, SHARE_DIR, dropin_matches)
+    reject_nested_mounts(_mountpoints())
     executable = None
     for candidate in VIRTIOFSD_CANDIDATES:
         try:

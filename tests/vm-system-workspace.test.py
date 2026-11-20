@@ -168,6 +168,67 @@ class QemuWorkspaceArgvTests(unittest.TestCase):
 
 
 class ServiceBoundaryTests(unittest.TestCase):
+    def test_exact_bind_identity_accepts_only_assignment_inode_at_mount_target(self):
+        identity = (123, 456)
+        target = pathlib.Path("/run/little-mester-test-share")
+        assigned = workspace.Workspace(pathlib.Path("/tmp/approved"), identity, os.getuid())
+        present = {"state": "present", "kind": "directory",
+                   "device": identity[0], "inode": identity[1]}
+        with mock.patch.object(workspace, "_path_identity", return_value=present), \
+                mock.patch.object(workspace, "_mount_context",
+                                  return_value={"is_exact_mountpoint": True}):
+            workspace._verify_bind_identity(assigned, target, True)
+
+        hidden = {"state": "unavailable", "errno": workspace.errno.ENOENT,
+                  "error": "ENOENT"}
+        home_assigned = workspace.Workspace(pathlib.Path("/home/runner/approved"),
+                                            identity, os.getuid())
+        with mock.patch.object(workspace, "_path_identity", side_effect=[hidden, present]), \
+                mock.patch.object(workspace, "_mount_context", side_effect=[
+                    {"filesystem": "tmpfs"}, {"is_exact_mountpoint": True}]):
+            workspace._verify_bind_identity(home_assigned, target, True)
+
+        replaced = {**present, "inode": identity[1] + 1}
+        with mock.patch.object(workspace, "_path_identity", side_effect=[replaced, present]), \
+                mock.patch.object(workspace, "_mount_context",
+                                  return_value={"is_exact_mountpoint": True}), \
+                mock.patch.object(workspace, "_log_workspace_bind_diagnostic"):
+            with self.assertRaisesRegex(workspace.Refused, "source changed"):
+                workspace._verify_bind_identity(assigned, target, True)
+
+        missing = {"state": "unavailable", "errno": workspace.errno.ENOENT,
+                   "error": "ENOENT"}
+        with mock.patch.object(workspace, "_path_identity", side_effect=[missing, present]), \
+                mock.patch.object(workspace, "_mount_context", side_effect=[{}, {
+                    "is_exact_mountpoint": True}]), \
+                mock.patch.object(workspace, "_log_workspace_bind_diagnostic"):
+            with self.assertRaisesRegex(workspace.Refused, "missing or inaccessible"):
+                workspace._verify_bind_identity(assigned, target, True)
+
+    def test_bind_failure_diagnostic_distinguishes_protected_source_and_wrong_target(self):
+        identity = (123, 456)
+        assigned = workspace.Workspace(pathlib.Path("/home/runner/workspace"),
+                                       identity, os.getuid())
+        hidden = {"state": "unavailable", "errno": workspace.errno.ENOENT,
+                  "error": "ENOENT"}
+        target = pathlib.Path("/run/little-mester-test-share")
+        present = {"state": "present", "kind": "directory",
+                   "device": identity[0], "inode": identity[1]}
+        with mock.patch.object(workspace, "_path_identity", side_effect=[hidden, present]), \
+                mock.patch.object(workspace, "_mount_context", side_effect=[
+                    {"mount_id": 9, "filesystem": "tmpfs"},
+                    {"mount_id": 10, "filesystem": "ext4", "is_exact_mountpoint": True}]):
+            diagnostic = workspace._workspace_bind_diagnostic(assigned, target, True)
+        self.assertEqual(diagnostic["source_visibility"], "hidden-by-ProtectHome-tmpfs")
+        self.assertEqual(diagnostic["diagnosis"], "approved-bind-present")
+
+        mismatch = {**present, "inode": identity[1] + 1}
+        with mock.patch.object(workspace, "_path_identity", side_effect=[present, mismatch]), \
+                mock.patch.object(workspace, "_mount_context", side_effect=[{}, {
+                    "mount_id": 10, "filesystem": "ext4", "is_exact_mountpoint": True}]):
+            diagnostic = workspace._workspace_bind_diagnostic(assigned, target, True)
+        self.assertEqual(diagnostic["diagnosis"], "bind-target-identity-mismatch")
+
     def test_post_start_normalizes_socket_metadata_as_owner_without_root_privileges(self):
         with tempfile.TemporaryDirectory() as temp:
             runtime = pathlib.Path(temp)
@@ -233,7 +294,8 @@ class ServiceBoundaryTests(unittest.TestCase):
         self.assertIn("verify_service_workspace()", helper)
         self.assertNotIn("--announce-submounts", unit)
         self.assertIn("ProtectSystem=strict", unit)
-        self.assertIn("ProtectHome=yes", unit)
+        self.assertIn("ProtectHome=tmpfs", unit)
+        self.assertNotIn("ProtectHome=yes", unit)
         self.assertIn("NoNewPrivileges=no", unit)
         self.assertIn("NoExecPaths=/", unit)
         self.assertIn("ExecPaths=/usr/bin /usr/lib -/usr/lib64 -/usr/libexec /lib -/lib64", unit)

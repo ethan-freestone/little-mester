@@ -341,7 +341,7 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
     if (workspace_properties.get("User") != pwd.getpwuid(os.getuid()).pw_name
             or workspace_properties.get("Group") != grp.getgrgid(pwd.getpwuid(os.getuid()).pw_gid).gr_name
             or "lm-vm-control" not in workspace_properties.get("SupplementaryGroups", "")
-            or workspace_properties.get("ProtectHome") != "yes"
+            or workspace_properties.get("ProtectHome") != "tmpfs"
             or workspace_properties.get("ProtectSystem") != "strict"
             or workspace_properties.get("NoNewPrivileges") != "no"
             or workspace_properties.get("NoExecPaths") != "/"

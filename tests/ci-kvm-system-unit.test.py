@@ -435,6 +435,18 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertLess(main.index("verify_workspace_startup_post()"),
                         main.index("verify_guest_cannot_read_escape()"))
 
+    def test_workspace_service_preserves_home_isolation_while_allowing_explicit_bind(self):
+        unit = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
+        self.assertIn("ProtectHome=tmpfs", unit)
+        self.assertIn("ProtectSystem=strict", unit)
+        self.assertIn("RuntimeDirectory=little-mester-vm-workspace little-mester-vm-workspace-share", unit)
+        self.assertNotIn("ProtectHome=yes", unit)
+        helper = (ROOT / "lib/vm/system-vm-workspace.py").read_text()
+        self.assertIn('"destination_mount": target_mount', helper)
+        self.assertIn('"dropin_matches_assignment": dropin_matches', helper)
+        self.assertIn("WORKSPACE_BIND_DIAGNOSTIC ", helper)
+        self.assertIn("approved host workspace source changed after assignment", helper)
+
     def test_script_uses_production_fixed_operations_and_bounded_stop_cleanup(self):
         source = SCRIPT.read_text()
         shared = (ROOT / "lib/vm/system-acceptance.py").read_text()
