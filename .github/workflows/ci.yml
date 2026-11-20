@@ -66,7 +66,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install local OpenSSH server for production-path pin regression
-        run: sudo apt-get update -qq && sudo apt-get install -y iproute2 ncurses-bin openssh-server python3-pexpect
+        run: |
+          mapfile -t packages < <(python3 -I lib/vm/host-dependencies.py ci-tools --list-packages apt)
+          test "${#packages[@]}" -gt 0
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends --no-upgrade --no-remove "${packages[@]}"
       - name: Install pinned OpenCode for real-binary config and TUI regressions
         run: |
           sudo npm install --global @opencode/cli@2.2.5
@@ -83,6 +87,7 @@ jobs:
           python3 tests/ci-kvm-qemu-owner.test.py
           python3 tests/vm-owner-acceptance.test.py
           python3 tests/vm-systemd.test.py
+          python3 tests/vm-host-dependencies.test.py
           python3 tests/ci-kvm-system-unit.test.py
           python3 tests/ci-kvm-host-dependencies.test.py
           python3 tests/vm-guest-user-dirs.test.py

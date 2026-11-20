@@ -27,6 +27,7 @@ FILES = {
     "lib/vm/proxy.py": ("/usr/lib/little-mester-vm/proxy.py", 0o644),
     "lib/vm/browser-auth-session.py": ("/usr/lib/little-mester-vm/browser-auth-session.py", 0o644),
     "lib/vm/callback-listener.py": ("/usr/lib/little-mester-vm/callback-listener.py", 0o644),
+    "lib/vm/host-dependencies.py": ("/usr/lib/little-mester-vm/host-dependencies.py", 0o644),
     "agent/opencode/plugins/little-mester-exit-confirm/package.json":
         ("/usr/lib/little-mester-vm/plugins/package.json", 0o644),
     "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx":
@@ -305,7 +306,8 @@ def main() -> int:
                      "/usr/sbin/visudo", "/usr/sbin/groupadd", "/usr/sbin/useradd",
                      "/usr/sbin/usermod"):
             if not os.path.isfile(tool) or not os.access(tool, os.X_OK):
-                refuse(f"fixed system VM host dependency is unavailable: {pathlib.Path(tool).name}")
+                refuse(f"fixed system VM host dependency is unavailable: {pathlib.Path(tool).name}; "
+                       "review the pinned owner bootstrap's production/system-install scopes before retrying")
         # Parse the exact pinned policy before creating accounts, files, or disks.
         subprocess.run(["/usr/sbin/visudo", "-cf", str(root / "sudoers/little-mester-vm")],
                        check=True, stdin=subprocess.DEVNULL)

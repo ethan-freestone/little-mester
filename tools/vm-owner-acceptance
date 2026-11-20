@@ -73,6 +73,7 @@ INSTALL_FILES = {
     "lib/vm/parent-provision.py": 0o644,
     "lib/vm/system-vm.py": 0o644,
     "lib/vm/system-acceptance.py": 0o644,
+    "lib/vm/host-dependencies.py": 0o644,
     "lib/vm/guest-bootstrap.py": 0o644,
     "scripts/parent-readonly-safety-gate.py": 0o644,
     "tools/vm-system-install": 0o755,
@@ -2307,10 +2308,12 @@ def parser() -> argparse.ArgumentParser:
         modes.add_argument(f"--{name}", action="store_true", dest=name.replace("-", "_"))
     modes.add_argument("--system-vm", choices=("verify", "accept", "up", "down", "status", "ssh", "auth", "tui"),
                        help="verify read-only, explicitly accept the fixed VM lifecycle, or run one fixed operation")
+    p.add_argument("--prepare-dependencies", choices=("production", "acceptance", "system-install"),
+                   help="check host requirements and, with separate approval, install supported missing packages")
     p.add_argument("--approve-system-vm-lifecycle", action="store_true",
                    help="explicitly authorize system VM lifecycle acceptance")
     p.add_argument("--milestone", choices=("M2",), help="owner acceptance milestone")
-    p.add_argument("--sha", required=True, type=full_sha, help="full lowercase 40-character candidate commit SHA")
+    p.add_argument("--sha", type=full_sha, help="full lowercase 40-character candidate commit SHA")
     p.add_argument("--prefix", type=install_prefix,
                    help="protected root-owned install prefix (default: /opt/little-mester)")
     p.add_argument("--repo", help="repository containing the exact candidate commit")
@@ -2327,8 +2330,36 @@ def full_sha(value: str) -> str:
     return value
 
 
+def load_host_dependencies():
+    module_path = ROOT / "lib/vm/host-dependencies.py"
+    spec = importlib.util.spec_from_file_location("host_dependencies", module_path)
+    if spec is None or spec.loader is None:
+        raise GateError("BLOCKED", "shared host dependency checker is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    workflow_modes = ("preflight", "install", "storage_proof", "run", "verify_cleanup", "all", "parent_accept")
+    if args.prepare_dependencies and (
+            args.system_vm or args.approve_system_vm_lifecycle or args.sha or args.repo
+            or any(getattr(args, name) for name in workflow_modes)):
+        parser().error("--prepare-dependencies must be used on its own")
+    if args.prepare_dependencies:
+        try:
+            load_host_dependencies().ensure(args.prepare_dependencies)
+            return 0
+        except KeyboardInterrupt:
+            print("BLOCKED: dependency preparation interrupted; inspect package state before retrying", file=sys.stderr)
+            return 130
+        except (GateError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+            print(f"BLOCKED: dependency preparation failed ({error})", file=sys.stderr)
+            return 3
+    if not args.sha:
+        parser().error("--sha is required for acceptance and VM operations")
     if args.approve_system_vm_lifecycle and args.system_vm != "accept":
         parser().error("--approve-system-vm-lifecycle is valid only with --system-vm accept")
     if args.system_vm:
@@ -2336,6 +2367,8 @@ def main(argv: list[str] | None = None) -> int:
             parser().error("--system-vm requires --repo PATH for the candidate source repository")
         if args.system_vm not in ("verify", "accept"):
             try:
+                if args.system_vm in ("up", "ssh", "auth", "tui"):
+                    load_host_dependencies().ensure("production")
                 repo = pathlib.Path(args.repo).resolve(strict=True)
                 candidate_commit(repo, args.sha)
                 root = verify_install(repo, args.sha, args.prefix)
@@ -2367,6 +2400,8 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             candidate_commit(repo, args.sha)
+            if args.system_vm == "accept":
+                load_host_dependencies().ensure("acceptance")
             record_gate("candidate")
             current_gate = "deployed_candidate_verification"
             root = verify_install(repo, args.sha, args.prefix)

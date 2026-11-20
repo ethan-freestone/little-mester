@@ -86,8 +86,12 @@ exit "${FAKE_APT_EXIT_STATUS:-0}"
         self.assertNotIn("private-password", text)
         self.assertNotIn("private-token", text)
         args = self.args_file.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(args[-4:], ["socat", "virtiofsd", "python3-pexpect", "ncurses-bin"])
+        self.assertEqual(args[-4:], ["cloud-image-utils", "openssh-server", "virtiofsd", "ncurses-bin"])
+        self.assertIn("python3-pexpect", args)
+        self.assertIn("qemu-system-x86", args)
         self.assertIn("--no-install-recommends", args)
+        self.assertIn("--no-upgrade", args)
+        self.assertIn("--no-remove", args)
 
     def test_sanitizes_bearer_and_url_credentials_before_truncating_records(self):
         prefix = "x" * 8170

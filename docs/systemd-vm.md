@@ -45,6 +45,38 @@ The fixed owner interface is:
 lab-vm system up|down|status|ssh|auth|tui
 ```
 
+The legacy `./lab` command also has a thin VM dispatcher. It pins the current
+checkout's full Git commit and forwards operations to the existing owner
+acceptance/runtime path; it does not implement a second VM controller:
+
+```sh
+./lab vm up|down|status|ssh|auth|tui|verify|accept
+./lab vm prepare-dependencies production|acceptance|system-install
+```
+
+The shared host capability checker supports apt on Ubuntu and pacman on Arch
+and CachyOS (the distributions mapped and validated here). It checks fixed
+executable paths, `/usr/bin/python3` imports, KVM access, and a responsive
+systemd manager. Production dependencies do not
+include `pexpect`; acceptance does. When packages are missing, it previews the
+native transaction with versions, asks separately for package approval, then
+rechecks. Apt targets the reviewed versions and leaves its final native summary
+and confirmation visible; pacman likewise leaves its final transaction and
+confirmation visible, with no noninteractive auto-confirmation. Decline any
+unexpected replacement, removal, or upgrade. The bootstrap never runs a
+system upgrade or removes packages. Pacman setup refuses when `pacman -Qu`
+reports pending upgrades and never runs `-Sy`; it
+uses only cached sync databases and cannot prove remote database freshness.
+The owner must have recently completed a full system upgrade against those
+repositories and must decline if that is uncertain; the tool never performs
+that maintenance itself. Unsupported distribution identities, unsafe
+previews, non-installable requirements, and
+noninteractive missing-dependency cases fail without attempting installation.
+Read-only `verify` and owner preflight do not invoke package setup. Pinned
+deployment and VM lifecycle approvals remain separate.
+Hosted CI reads the same apt package definitions for its VM host and local
+acceptance utilities while retaining independent job setup and cleanup.
+
 The SHA-pinned owner-acceptance command offers read-only verification and an
 explicit lifecycle acceptance mode:
 

@@ -11,9 +11,14 @@ case "$phase" in
     ;;
   install)
     timeout_seconds=480
+    repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    mapfile -t vm_packages < <(/usr/bin/python3 -I "$repo_root/lib/vm/host-dependencies.py" ci --list-packages apt)
+    ((${#vm_packages[@]} > 0)) || {
+      printf 'HOST_APT_SETUP_FAIL phase=install exit_status=2 reason=empty_shared_dependency_manifest\n' >&2
+      exit 2
+    }
     apt_command=(install -y --no-install-recommends
-      cloud-image-utils curl genisoimage openssh-client openssh-server qemu-system-x86
-      qemu-utils socat virtiofsd python3-pexpect ncurses-bin)
+      --no-upgrade --no-remove "${vm_packages[@]}")
     ;;
   *)
     printf 'HOST_APT_SETUP_FAIL phase=invalid exit_status=2\n' >&2

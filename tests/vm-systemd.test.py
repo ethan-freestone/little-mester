@@ -135,6 +135,23 @@ class SystemdPolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(vm.Refused, "group-owned by kvm"):
                 vm._verify_kvm_access()
 
+    def test_service_kvm_gate_still_requires_its_own_group_and_effective_access(self):
+        world_rw_device = type("Device", (), {"st_mode": stat.S_IFCHR | 0o666, "st_gid": 4242})()
+        group = type("Group", (), {"gr_gid": 4242})()
+        with mock.patch.object(vm.grp, "getgrnam", return_value=group), \
+             mock.patch.object(vm.os, "stat", return_value=world_rw_device), \
+             mock.patch.object(vm.os, "getgroups", return_value=[]), \
+             mock.patch.object(vm.os, "access", return_value=True):
+            with self.assertRaisesRegex(vm.Refused, "exact supplementary group"):
+                vm._verify_kvm_access()
+        with mock.patch.object(vm.grp, "getgrnam", return_value=group), \
+             mock.patch.object(vm.os, "stat", return_value=world_rw_device), \
+             mock.patch.object(vm.os, "getgroups", return_value=[4242]), \
+             mock.patch.object(vm.os, "access", return_value=False) as access:
+            with self.assertRaisesRegex(vm.Refused, "lacks DAC read/write access"):
+                vm._verify_kvm_access()
+        access.assert_called_once_with("/dev/kvm", vm.os.R_OK | vm.os.W_OK, effective_ids=True)
+
     def test_sudoers_and_owner_cli_have_only_fixed_unit_and_operations(self):
         sudoers = (ROOT / "sudoers/little-mester-vm").read_text().splitlines()
         entries = [line for line in sudoers if line.startswith("%")]
@@ -176,6 +193,7 @@ class SystemdPolicyTests(unittest.TestCase):
         }
         self.assertTrue(required.issubset(owner.INSTALL_FILES))
         self.assertIn("lib/vm/system-acceptance.py", owner.INSTALL_FILES)
+        self.assertIn("lib/vm/host-dependencies.py", owner.INSTALL_FILES)
         self.assertEqual(owner.INSTALL_FILES["sudoers/little-mester-vm"], 0o444)
         self.assertTrue({"systemd", "sudoers"}.issubset(owner.INSTALL_DIRS))
         self.assertEqual(owner.INSTALL_FILES["tools/vm-system-install"], 0o755)
@@ -185,6 +203,7 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn('"lib/vm/guest-bootstrap.py": ("/usr/lib/little-mester-vm/guest-bootstrap.py"',
                       installer)
         self.assertIn('"lib/vm/system-vm.py": ("/usr/lib/little-mester-vm/system-vm.py"', installer)
+        self.assertIn('"lib/vm/host-dependencies.py": ("/usr/lib/little-mester-vm/host-dependencies.py"', installer)
         self.assertIn('Parse the exact pinned policy before creating accounts', installer)
         self.assertIn('preflight(root, owner)', installer)
         self.assertLess(installer.index('preflight(root, owner)'),
