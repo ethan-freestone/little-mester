@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import * as path from 'path';
 
 const SCHEMA_VERSION = 1;
@@ -44,7 +45,42 @@ export function writeIndex(
         ...index,
         updated_at: new Date().toISOString(),
     }, null, 2);
-    fs.writeFileSync(indexPath, serialized, 'utf-8');
+    atomicWriteFile(indexPath, serialized, 0o666);
+}
+
+export function atomicWriteFile(filePath: string, contents: string, mode: number): void {
+    const directory = path.dirname(filePath);
+    let existingMode: number | undefined;
+    try {
+        const existing = fs.lstatSync(filePath);
+        if (!existing.isFile() || existing.isSymbolicLink() || existing.nlink !== 1) {
+            throw new Error(`Refusing unsafe replacement target: ${path.basename(filePath)}`);
+        }
+        existingMode = existing.mode & 0o777;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const temporary = path.join(directory,
+        `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`);
+    const fd = fs.openSync(temporary, 'wx', mode);
+    try {
+        if (existingMode !== undefined) fs.fchmodSync(fd, existingMode);
+        fs.writeFileSync(fd, contents, 'utf-8');
+        fs.fsyncSync(fd);
+    } catch (error) {
+        fs.closeSync(fd);
+        try { fs.unlinkSync(temporary); } catch { /* preserve the primary write failure */ }
+        throw error;
+    }
+    fs.closeSync(fd);
+    try {
+        fs.renameSync(temporary, filePath);
+    } catch (error) {
+        try { fs.unlinkSync(temporary); } catch { /* preserve the primary rename failure */ }
+        throw error;
+    }
+    const directoryFd = fs.openSync(directory, 'r');
+    try { fs.fsyncSync(directoryFd); } finally { fs.closeSync(directoryFd); }
 }
 
 export function scanTicketDir(ticketDir: string): IndexEntry[] {

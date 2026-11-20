@@ -8,7 +8,7 @@
   "title": "Executable work plans: deterministic implementation, review, evidence and repair workflows",
   "objective": "Upgrade the existing JSON-first ticket engine so a frontier planner can publish a versioned, sufficiently detailed implementation plan that a low-reasoning implementer can execute through programmatic steps, editable discussion, scoped review, truthful evidence and non-deadlocking acceptance/repair loops.",
   "created_at": "2026-11-06T23:17:17.902Z",
-  "updated_at": "2026-11-06T23:17:17.902Z",
+  "updated_at": "2026-11-11T16:02:12.004Z",
   "acceptance_criteria": [
     {
       "id": "A01",
@@ -188,6 +188,11 @@
     {
       "id": "A36",
       "text": "ONE-TICKET BOUNDARY AND FUTURE EXTENSION POLICY. Keep the initial improvement specification and phase progress in this one ticket; phase/step IDs are enough, do not auto-create dozens of child tickets to make the engine usable. Additional UIs, distributed workers, provider-specific model execution, forecasting and broad graph analytics are optional follow-ups after the complete vertical slice, not blockers or presumed scope. This ticket is independent of feat/vm-approach-2 and must merge separately. Its newly allocated human number is local to the selected main-derived store and must not be confused with historical similarly numbered VM tickets on other branches. The active VM workstream remains governed by its PR_REIMPLEMENTATION documents until an explicit later migration to the implemented plan engine. Writing this draft changes no VM gate, source/runtime, owner authorization or active workflow.",
+      "status": "pending"
+    },
+    {
+      "id": "A37",
+      "text": "Reusable versioned workflows: define centrally maintained reusable workflow definitions that tickets can reference, including explicit inheritance/override semantics and consistent execution across sessions; preserve ticket-specific requirements and owner/runtime authority. This is deferred workflow-engine scope, not Phase 1 implementation. The current Phase 1 operating workflow is docs/workflows/phase1-continuous-execution.md; preserve it as the migration source, but its repository-document form does not satisfy this future engine requirement.",
       "status": "pending"
     }
   ],

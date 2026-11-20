@@ -88,6 +88,7 @@ This repo has **two decision logs**. Read both before making changes:
 - [`docs/ticketing.md`](docs/ticketing.md) — Ticket schema & workflow
 - [`docs/opencode.md`](docs/opencode.md) — OpenCode customisation
 - [`docs/github-actions.md`](docs/github-actions.md) — CI/CD decisions
+- [`docs/PROJECT-PLANNING.md`](docs/PROJECT-PLANNING.md) — idea/phase/milestone hierarchy and acceptance evidence
 
 The default development cycle is **doc → test → code → commit**. See [`docs/workflows.md`](docs/workflows.md). Do not skip stages or reorder them without a ticket explaining why.
 

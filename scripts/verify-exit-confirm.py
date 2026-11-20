@@ -9,19 +9,21 @@ behaviour that static tests cannot see:
   * y/q type into the prompt while the confirmation dialog is closed.
   * Ctrl+C opens a visible "Close Little Mester?" dialog.
   * Esc, n and Ctrl+C cancel the dialog without exiting.
-  * q confirms and exits.
+  * Y and Q confirm and exit.
 
 Usage:
     python3 scripts/verify-exit-confirm.py [repo-root]
 
 Requires: Python 3 and pexpect (installed in the lab venv). Exits non-zero on
-any failed check. Set OPENCODE_CONFIG to override the server config; the script
-only overrides the CLI plugin list and keybinds.
+any failed check. Requires exactly OpenCode v2.2.5. The script ignores inherited
+OpenCode configuration, credentials, and session variables; it supplies a minimal
+private server config and overrides the CLI plugin list/keybinds.
 """
 
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -35,6 +37,7 @@ ROOT = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.pat
 PLUGIN = os.path.join(ROOT, "agent", "opencode", "plugins", "little-mester-exit-confirm")
 
 DIALOG_TEXT = "Close Little Mester?"
+OPENCODE_BINARY = None
 CLI_CONFIG = {
     "plugins": [PLUGIN],
     "keybinds": {"app.exit": "none", "prompt.clear": "none"},
@@ -43,9 +46,13 @@ CLI_CONFIG = {
 
 class Driver:
     def __init__(self, home):
-        env = dict(os.environ)
-        for key in ("OPENCODE_SESSION_ID", "OPENCODE", "OPENCODE_TERMINAL", "OPENCODE_CLI_CONFIG_CONTENT"):
-            env.pop(key, None)
+        workspace = os.path.join(home, "workspace")
+        server_config = os.path.join(home, "opencode.json")
+        with open(server_config, "w", encoding="utf-8") as stream:
+            json.dump({"$schema": "https://opencode.ai/config.json",
+                       "autoupdate": False, "share": "disabled"}, stream)
+        os.chmod(server_config, 0o600)
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         env.update(
             {
                 "HOME": home,
@@ -55,13 +62,14 @@ class Driver:
                 "XDG_CACHE_HOME": os.path.join(home, ".cache"),
                 "TERM": "xterm-256color",
                 "COLORTERM": "truecolor",
+                "OPENCODE_CONFIG": server_config,
                 "OPENCODE_CLI_CONFIG_CONTENT": json.dumps(CLI_CONFIG),
             }
         )
         self.child = pexpect.spawn(
-            "opencode",
-            ["--standalone", ROOT],
-            cwd=ROOT,
+            OPENCODE_BINARY,
+            ["--standalone", workspace],
+            cwd=workspace,
             env=env,
             encoding="utf-8",
             codec_errors="replace",
@@ -113,7 +121,21 @@ def check(label, condition):
 
 
 def main():
+    global OPENCODE_BINARY
+    OPENCODE_BINARY = shutil.which("opencode")
+    if OPENCODE_BINARY is None:
+        sys.exit("opencode v2.2.5 is required on PATH")
+    try:
+        version = subprocess.run([OPENCODE_BINARY, "--version"], check=False,
+                                 capture_output=True, text=True, timeout=5,
+                                 env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+    except (OSError, subprocess.TimeoutExpired) as error:
+        sys.exit(f"could not verify pinned OpenCode version: {error}")
+    if version.returncode != 0 or version.stdout.strip() != "opencode v2.2.5":
+        sys.exit("OpenCode v2.2.5 is required; refusing to test an unpinned binary")
     home = tempfile.mkdtemp(prefix="opencode-exit-confirm-")
+    workspace = os.path.join(home, "workspace")
+    os.mkdir(workspace, 0o700)
     driver = None
     failures = []
     try:
@@ -147,9 +169,16 @@ def main():
 
         driver.buffer = ""
         driver.ctrl("c")
-        driver.send("q")
+        driver.send("Y")
         time.sleep(1.5)
-        failures.append(not check("q confirms and exits", not driver.alive()))
+        failures.append(not check("Y confirms and exits", not driver.alive()))
+        driver.close()
+
+        driver = Driver(home)
+        driver.ctrl("c")
+        driver.send("Q")
+        time.sleep(1.5)
+        failures.append(not check("Q confirms and exits", not driver.alive()))
     finally:
         if driver:
             driver.close()

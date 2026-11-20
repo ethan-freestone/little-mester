@@ -1,0 +1,37 @@
+{
+  "id": 58,
+  "file_path": "/workspace/docs/tickets/ticket-058.json",
+  "number": 58,
+  "area": "workflow",
+  "type": "improvement",
+  "status": "draft",
+  "title": "Post-Phase 1 backlog — expose ticket comments through MCP",
+  "objective": "Post-Phase-1 deferred backlog. Depends on Phase 1 completion/merge under P1-05 ticket #57; do not implement as part of current Phase 1 completion.",
+  "created_at": "2026-11-10T21:46:28.253Z",
+  "updated_at": "2026-11-10T21:46:51.767Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "MCP exposes append and read of timestamped ticket comments without replacing existing comments or modifying ticket lifecycle fields implicitly.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Comment operations validate ticket identity and body size, preserve audit/index synchronization, and have tests for append, readback, concurrent writers, and malformed input.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Once released, new handoffs use MCP comments and the temporary CLI append-comment exception is removed from the workflow; historical comments and tests.cases remain intact.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Implement and test MCP comment append/read after Phase 1; verify audit/index synchronization and concurrency."
+    ],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}

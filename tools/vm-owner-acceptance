@@ -1,0 +1,2601 @@
+#!/usr/bin/env python3
+"""Owner-controlled, distro-independent orchestration for the VM v3 gates.
+
+The installed lab-vm remains the authority for executable provenance,
+workspace policy, lifecycle, native browser authentication, and process cleanup.
+This entry point only pins a candidate, sequences those existing gates, and
+stores a small secret-free report. It never performs automatic cleanup.
+"""
+
+from __future__ import annotations
+
+import argparse
+import errno
+import fcntl
+import hashlib
+import importlib.util
+import json
+import os
+import pathlib
+import pty
+import pwd
+import re
+import secrets
+import select
+import shlex
+import signal
+import struct
+import stat
+import subprocess
+import sys
+import tarfile
+import termios
+import tempfile
+import time
+import uuid
+
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+ENTRY = pathlib.Path(__file__).resolve()
+FIXED_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+PYTHON = "/usr/bin/python3"
+GIT = "/usr/bin/git"
+SUDO = "/usr/bin/sudo"
+INSTALL_PARENT = pathlib.Path("/opt/little-mester/v3")
+RUNTIME_ROOT = pathlib.Path(f"/run/user/{os.getuid()}/little-mester-vm-acceptance")
+RUN_ROOT_NAME = "v3-smoke"
+WORKSPACE_PROOF_BYTES = 64 * 1024 * 1024
+WORKSPACE_MAX_BYTES = WORKSPACE_PROOF_BYTES
+MAX_ARCHIVE_FILE = 4 * 1024 * 1024
+MAX_ARCHIVE_TOTAL = 16 * 1024 * 1024
+RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-(?:[A-Za-z0-9]{8}|[0-9a-f]{32})$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+INSTALL_FILES = {
+    "lab-vm": 0o755,
+    "tools/vm-owner-acceptance": 0o755,
+    "agent/opencode/plugins/little-mester-exit-confirm/package.json": 0o644,
+    "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx": 0o644,
+    "lib/vm/host-launcher.sh": 0o644,
+    "lib/vm/cloud-init.sh": 0o644,
+    "lib/vm/proxy.py": 0o644,
+    "lib/vm/bounded-log.py": 0o644,
+    "lib/vm/executable-policy.py": 0o644,
+    "lib/vm/browser-auth-session.py": 0o644,
+    "lib/vm/callback-listener.py": 0o644,
+    "lib/vm/virtiofs-socket.py": 0o644,
+    "lib/vm/guest-user-dirs.py": 0o644,
+    "lib/vm/parent-session-contract.py": 0o644,
+    "lib/vm/parent-state.py": 0o644,
+    "lib/vm/parent-launcher.py": 0o644,
+    "lib/vm/parent-gate.py": 0o644,
+    "lib/vm/parent-supervisor.py": 0o644,
+    "lib/vm/parent-qemu.py": 0o644,
+    "lib/vm/parent-provision.py": 0o644,
+    "lib/vm/system-vm.py": 0o644,
+    "lib/vm/system-acceptance.py": 0o644,
+    "lib/vm/host-dependencies.py": 0o644,
+    "lib/vm/guest-bootstrap.py": 0o644,
+    "scripts/parent-readonly-safety-gate.py": 0o644,
+    "tools/vm-system-install": 0o755,
+    "systemd/little-mester-vm.service": 0o644,
+    "systemd/little-mester-vm-proxy.service": 0o644,
+    # Candidate source is public deployment policy; deployed sudoers remains 0440.
+    "sudoers/little-mester-vm": 0o444,
+}
+INSTALL_DIRS = {
+    "agent", "agent/opencode", "agent/opencode/plugins",
+    "agent/opencode/plugins/little-mester-exit-confirm", "lib", "lib/vm", "scripts", "tools",
+    "systemd", "sudoers",
+}
+M1_ACCEPTED_SHA = "9a98f0c93ff65d38b181ecb9ab91df0633c1d280"
+PARENT_GUEST_ASSETS = (
+    "lib/vm/guest-user-dirs.py",
+    "lib/vm/parent-session-contract.py",
+    "agent/opencode/plugins/little-mester-exit-confirm/package.json",
+    "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
+)
+M2_DEPLOYMENT_REQUIREMENT = (
+    "Live inspection did not prove the installed guest satisfies the exact M2 protected asset contract. "
+    "No reviewed same-disk guest updater exists; stop without lifecycle changes."
+)
+
+
+class GateError(Exception):
+    def __init__(self, status: str, message: str, *, category: str | None = None):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+        self.category = category
+
+
+def clean_env(*, desktop_session: bool = False) -> dict[str, str]:
+    env = {
+        "PATH": FIXED_PATH,
+        "HOME": "/nonexistent",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    }
+    # Preserve only the invoking user's standard session-bus endpoints so the
+    # auth helper can call the desktop portal. Never inherit arbitrary desktop
+    # or application environment variables.
+    if desktop_session:
+        uid = os.getuid()
+        runtime = pathlib.Path(f"/run/user/{uid}")
+        bus = runtime / "bus"
+        try:
+            runtime_info = runtime.stat()
+            bus_info = bus.stat()
+            if (runtime_info.st_uid == uid and runtime_info.st_mode & 0o777 == 0o700
+                    and stat.S_ISSOCK(bus_info.st_mode) and bus_info.st_uid == uid):
+                env["XDG_RUNTIME_DIR"] = str(runtime)
+                env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
+        except OSError:
+            pass
+    term = os.environ.get("TERM", "")
+    if (os.environ.get("LM_VM_TERM_VALIDATED") == "1"
+            and re.fullmatch(r"[A-Za-z0-9_.+-]{1,64}", term)):
+        env["TERM"] = term
+        env["LM_VM_TERM_VALIDATED"] = "1"
+    return env
+
+
+def owner_system_vm(root: pathlib.Path, operation: str, *, approve_lifecycle: bool = False,
+                    progress=None) -> int:
+    """Dispatch fixed VM operations and the shared installed acceptance command."""
+    if operation in ("verify", "accept"):
+        if operation == "accept" and not approve_lifecycle:
+            if not sys.stdin.isatty():
+                raise GateError("BLOCKED", "lifecycle acceptance requires --approve-system-vm-lifecycle")
+            print("Acceptance may stop and restart the fixed production VM, including if it is already running; success leaves it running.")
+            if input("Type ACCEPT SYSTEM VM LIFECYCLE: ") != "ACCEPT SYSTEM VM LIFECYCLE":
+                raise GateError("BLOCKED", "owner declined system VM lifecycle acceptance")
+        module_path = root / "lib/vm/system-acceptance.py"
+        spec = importlib.util.spec_from_file_location("installed_system_acceptance", module_path)
+        if spec is None or spec.loader is None:
+            raise GateError("BLOCKED", "installed production system VM acceptance command is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        if operation == "verify":
+            module.verify(root, progress=progress)
+            return 0
+        return module.accept(root, progress=progress)
+    if operation not in ("up", "down", "status", "ssh", "auth", "tui"):
+        raise GateError("BLOCKED", "unsupported fixed system VM operation")
+    env = clean_env(desktop_session=operation == "auth")
+    term = os.environ.get("TERM", "")
+    if operation in ("ssh", "auth", "tui") and re.fullmatch(r"[A-Za-z0-9_.+-]{1,64}", term):
+        # lab-vm independently verifies this terminfo entry before preserving it.
+        env["TERM"] = term
+    result = subprocess.run([str(root / "lab-vm"), "system", operation],
+                            stdin=None if operation in ("ssh", "auth", "tui") else subprocess.DEVNULL,
+                            env=env, check=False)
+    return result.returncode
+
+
+def protected_executable(repo: pathlib.Path, path: str) -> str:
+    candidate = pathlib.Path(path)
+    if not candidate.is_absolute():
+        raise GateError("BLOCKED", "required fixed executable path is not absolute")
+    policy = repo / "lib/vm/executable-policy.py"
+    result = subprocess.run(
+        [PYTHON, "-I", str(policy), str(candidate)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=clean_env(),
+        check=False,
+    )
+    if result.returncode:
+        raise GateError("BLOCKED", "required executable failed protected-path policy")
+    return str(candidate)
+
+
+def git(repo: pathlib.Path, *args: str, capture: bool = True) -> subprocess.CompletedProcess:
+    executable = protected_executable(repo, GIT)
+    return subprocess.run(
+        [executable, "-C", str(repo), *args],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+        env={**clean_env(), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"},
+        check=False,
+    )
+
+
+def candidate_commit(repo: pathlib.Path, sha: str) -> None:
+    if not SHA_RE.fullmatch(sha):
+        raise GateError("BLOCKED", "candidate must be a full lowercase 40-character commit SHA")
+    resolved = git(repo, "rev-parse", "--verify", f"{sha}^{{commit}}")
+    if resolved.returncode or resolved.stdout.decode("ascii", "replace").strip() != sha:
+        raise GateError("BLOCKED", "candidate SHA is not an available exact commit")
+    runner_blob = git(repo, "show", f"{sha}:tools/vm-owner-acceptance")
+    try:
+        current = ENTRY.read_bytes()
+    except OSError as error:
+        raise GateError("BLOCKED", "runner source cannot be read safely") from error
+    if runner_blob.returncode or runner_blob.stdout != current:
+        raise GateError("BLOCKED", "running acceptance runner does not match the pinned candidate")
+
+
+def changed_parent_guest_assets(repo: pathlib.Path, sha: str) -> list[str]:
+    """Conservatively detect protected guest assets changed since accepted M1."""
+    if not SHA_RE.fullmatch(sha):
+        raise GateError("BLOCKED", "candidate SHA is not a full lowercase 40-character commit SHA")
+    result = git(repo, "diff", "--name-only", M1_ACCEPTED_SHA, sha, "--", *PARENT_GUEST_ASSETS)
+    if result.returncode:
+        raise GateError("BLOCKED", "could not compare protected guest assets with accepted M1 source")
+    changed = result.stdout.decode("utf-8", "strict").splitlines()
+    if any(path not in PARENT_GUEST_ASSETS for path in changed):
+        raise GateError("FAIL", "protected guest-asset comparison returned an unexpected path")
+    return changed
+
+
+def inspect_live_parent(root: pathlib.Path) -> dict:
+    """Read parent identity and fixed guest asset metadata; never starts/stops it."""
+    def read_status() -> dict:
+        status_result = subprocess.run(
+            [str(root / "lab-vm"), "parent", "status", "--json"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=clean_env(), timeout=30, check=False,
+        )
+        if status_result.returncode:
+            raise GateError("BLOCKED", "live parent status is unavailable; no guest operation was attempted")
+        try:
+            decoded = json.loads(status_result.stdout)
+        except (ValueError, UnicodeDecodeError) as error:
+            raise GateError("FAIL", "parent status returned malformed identity evidence") from error
+        if not isinstance(decoded, dict):
+            raise GateError("FAIL", "parent status returned an invalid evidence shape")
+        return decoded
+
+    status = read_status()
+    # Keep only non-secret identity/status fields in the private acceptance report.
+    identity = {key: status[key] for key in (
+        "status", "run_id", "supervisor_pid", "qemu_pid"
+    ) if key in status and isinstance(status[key], (str, int, type(None)))}
+    disk = status.get("disk")
+    if isinstance(disk, dict):
+        identity["disk"] = {key: disk[key] for key in ("path", "device", "inode", "provisioned")
+                            if key in disk and isinstance(disk[key], (str, int, bool, type(None)))}
+    if status.get("status") != "RUNNING":
+        raise GateError("BLOCKED", "read-only guest inspection requires the already-running verified parent")
+    result = subprocess.run(
+        [str(root / "lab-vm"), "parent", "inspect"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=clean_env(), timeout=60, check=False,
+    )
+    if result.returncode:
+        raise GateError("BLOCKED", "fixed read-only guest inspection failed; no lifecycle action was attempted")
+    try:
+        observed = json.loads(result.stdout)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise GateError("FAIL", "guest inspection returned malformed or non-JSON output") from error
+    if not isinstance(observed, dict) or any(not isinstance(value, dict) for value in observed.values()):
+        raise GateError("FAIL", "guest inspection returned an invalid inventory shape")
+    contract_path = root / "lib/vm/parent-session-contract.py"
+    spec = importlib.util.spec_from_file_location("m2_guest_contract", contract_path)
+    if spec is None or spec.loader is None:
+        raise GateError("BLOCKED", "verified installed guest contract cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    expected = dict(module.ASSET_SHA256)
+    protected_config = json.dumps(
+        {"autoupdate": False, "share": "disabled", "permission": {"edit": "ask", "bash": "ask"}},
+        separators=(",", ":"),
+    ).encode()
+    expected["/etc/opencode/opencode.json"] = hashlib.sha256(protected_config).hexdigest()
+    checks = {}
+    compatible = True
+    for path, digest in sorted(expected.items()):
+        item = observed.get(path, {})
+        okay = (
+            item.get("type") == "file" and item.get("sha256") == digest
+            and item.get("uid") == 0 and item.get("gid") == 0
+            and item.get("mode") == ("0755" if path in (
+                "/usr/local/bin/lm-opencode", "/usr/local/libexec/lm-opencode",
+                "/usr/local/libexec/lm-opencode-auth",
+            ) else "0644")
+        )
+        checks[path] = "PASS" if okay else "MISMATCH"
+        compatible = compatible and okay
+    # npm installs the protected CLI as a symlink into its fixed global package.
+    # Verify the literal link, package provenance metadata, and executable target
+    # metadata without executing guest code during this read-only inspection.
+    opencode_link = observed.get("/usr/local/bin/opencode", {})
+    package = observed.get("/usr/local/lib/node_modules/@opencode/cli/package.json", {})
+    executable = observed.get("/usr/local/lib/node_modules/@opencode/cli/bin/opencode", {})
+    link_ok = (
+        opencode_link.get("type") == "symlink"
+        and opencode_link.get("target") == "../lib/node_modules/@opencode/cli/bin/opencode"
+        and opencode_link.get("uid") == 0 and opencode_link.get("gid") == 0
+        and package.get("type") == "file" and package.get("uid") == 0 and package.get("gid") == 0
+        and package.get("mode") == "0644" and package.get("version") == "2.2.5"
+        and executable.get("type") == "file" and executable.get("uid") == 0
+        and executable.get("gid") == 0 and executable.get("mode") == "0755"
+    )
+    checks["/usr/local/bin/opencode+package"] = "PASS" if link_ok else "MISMATCH"
+    compatible = compatible and link_ok
+    for path in ("/usr/bin/tmux",):
+        item = observed.get(path, {})
+        okay = item.get("type") == "file" and item.get("uid") == 0 and item.get("mode") == "0755"
+        checks[path] = "PASS" if okay else "MISMATCH"
+        compatible = compatible and okay
+    version_ok = package.get("version") == "2.2.5"
+    checks["opencode_package_version"] = "PASS" if version_ok else "MISMATCH"
+    compatible = compatible and version_ok
+    after = read_status()
+    def stable_identity(value: dict) -> tuple:
+        disk_value = value.get("disk") if isinstance(value.get("disk"), dict) else {}
+        return (value.get("status"), value.get("run_id"), value.get("supervisor_pid"),
+                value.get("qemu_pid"), disk_value.get("path"), disk_value.get("device"),
+                disk_value.get("inode"))
+    if stable_identity(status) != stable_identity(after):
+        raise GateError("BLOCKED", "parent identity changed during guest inspection; evidence was discarded")
+    observed_evidence = {}
+    for path, item in sorted(observed.items()):
+        if path.startswith("/") and isinstance(item, dict):
+            observed_evidence[path] = {key: item[key] for key in (
+                "type", "uid", "gid", "mode", "sha256", "target", "version"
+            ) if key in item and isinstance(item[key], (str, int))}
+    return {
+        "parent_identity": identity,
+        "guest_assets": checks,
+        "observed_guest_inventory": observed_evidence,
+        "expected_guest_sha256": expected,
+        "guest_opencode_version": package.get("version", "unavailable"),
+        "m2_contract_compatible": compatible,
+        "inspection": "read_only_fixed_inventory",
+    }
+
+
+def install_path(sha: str, prefix: pathlib.Path | None = None) -> pathlib.Path:
+    return install_parent(prefix) / sha
+
+
+def install_parent(prefix: pathlib.Path | None = None) -> pathlib.Path:
+    return INSTALL_PARENT if prefix is None else prefix / "v3"
+
+
+def install_prefix(value: str) -> pathlib.Path:
+    path = pathlib.PurePosixPath(value)
+    if (not path.is_absolute() or str(path) != value or path == pathlib.PurePosixPath("/")
+            or ".." in path.parts):
+        raise argparse.ArgumentTypeError("prefix must be an absolute normalized non-root path")
+    return pathlib.Path(value)
+
+
+def installer_manifest() -> str:
+    return json.dumps({"files": INSTALL_FILES, "directories": sorted(INSTALL_DIRS)}, sort_keys=True)
+
+
+def archive_arguments(repo: pathlib.Path, sha: str, git_executable: str = GIT) -> list[str]:
+    return [git_executable, "-C", str(repo), "archive", "--format=tar", sha, *INSTALL_FILES]
+
+
+def check_directory_chain(path: pathlib.Path, final_uid: int, final_mode: int) -> None:
+    """Require a lexical, symlink-free root-protected installation chain."""
+    if not path.is_absolute():
+        raise GateError("BLOCKED", "protected path is not absolute")
+    current = pathlib.Path("/")
+    for index, component in enumerate(path.parts[1:]):
+        current = current / component
+        try:
+            info = os.lstat(current)
+        except OSError as error:
+            raise GateError("BLOCKED", "protected directory path is missing or inaccessible") from error
+        last = index == len(path.parts[1:]) - 1
+        expected_uid = final_uid if last else 0
+        search_bit = stat.S_IXUSR if info.st_uid == os.getuid() else stat.S_IXOTH
+        if stat.S_ISLNK(info.st_mode):
+            raise GateError("BLOCKED", "protected directory path contains a symlink")
+        if not stat.S_ISDIR(info.st_mode):
+            raise GateError("BLOCKED", "protected path component is not a directory")
+        if info.st_uid != expected_uid:
+            raise GateError("BLOCKED", "protected directory owner does not match the required UID")
+        if info.st_mode & stat.S_IWGRP:
+            raise GateError("BLOCKED", "protected directory is group-writable")
+        if info.st_mode & stat.S_IWOTH:
+            raise GateError("BLOCKED", "protected directory is world-writable")
+        if not info.st_mode & search_bit:
+            raise GateError("BLOCKED", "protected directory is not traversable")
+        if last and stat.S_IMODE(info.st_mode) != final_mode:
+            raise GateError("BLOCKED", "protected directory mode differs from the normalized mode")
+
+
+def check_protected_directory_prefix(path: pathlib.Path) -> None:
+    """Validate root-owned system ancestors that an invoking user must traverse."""
+    if not path.is_absolute():
+        raise GateError("BLOCKED", "protected system directory is not absolute")
+    current = pathlib.Path("/")
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            info = os.lstat(current)
+        except OSError as error:
+            raise GateError("BLOCKED", "protected system directory is missing or inaccessible") from error
+        search_bit = stat.S_IXUSR if info.st_uid == os.getuid() else stat.S_IXOTH
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or not info.st_mode & search_bit):
+            raise GateError("BLOCKED", "protected system directory ownership, type, mode, or traversal check failed")
+
+
+def check_private_directory(path: pathlib.Path, uid: int, mode: int = 0o700) -> None:
+    """Validate one owner-controlled private directory without world-execute assumptions."""
+    try:
+        info = os.lstat(path)
+    except OSError as error:
+        raise GateError("BLOCKED", "private runtime directory is missing or inaccessible") from error
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != uid or stat.S_IMODE(info.st_mode) != mode
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not info.st_mode & stat.S_IXUSR):
+        raise GateError("BLOCKED", "private runtime directory ownership, type, mode, or owner traversal check failed")
+
+
+def check_private_runtime_chain(
+    path: pathlib.Path,
+    system_parent: pathlib.Path | None = None,
+    uid: int | None = None,
+) -> None:
+    """Validate root-owned /run/user ancestry followed by the private UID subtree."""
+    uid = os.getuid() if uid is None else uid
+    system_parent = system_parent or RUNTIME_ROOT.parent.parent
+    if not path.is_absolute() or not system_parent.is_absolute():
+        raise GateError("BLOCKED", "private runtime path is not absolute")
+    user_root = system_parent / str(uid)
+    if path != user_root and user_root not in path.parents:
+        raise GateError("BLOCKED", "private runtime path is outside the invoking user's runtime directory")
+    check_protected_directory_prefix(system_parent)
+    current = user_root
+    check_private_directory(current, uid)
+    for component in path.relative_to(user_root).parts:
+        current /= component
+        check_private_directory(current, uid)
+
+
+def verify_install(repo: pathlib.Path, sha: str,
+                   prefix: pathlib.Path | None = None) -> pathlib.Path:
+    root = install_path(sha, prefix)
+    check_directory_chain(root, 0, 0o755)
+    expected = set(INSTALL_FILES) | INSTALL_DIRS
+    observed: set[str] = set()
+    for directory, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        parent = pathlib.Path(directory)
+        for name in list(dirs):
+            path = parent / name
+            info = os.lstat(path)
+            relative = path.relative_to(root).as_posix()
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                raise GateError("BLOCKED", "installation contains a symlink or non-directory")
+            if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o755:
+                raise GateError("BLOCKED", "installation directory ownership or mode differs")
+            observed.add(relative)
+        for name in files:
+            path = parent / name
+            info = os.lstat(path)
+            relative = path.relative_to(root).as_posix()
+            if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                raise GateError("BLOCKED", "installation contains a symlink or non-regular file")
+            if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != INSTALL_FILES.get(relative):
+                raise GateError("BLOCKED", "installation file ownership or mode differs")
+            source = git(repo, "show", f"{sha}:{relative}")
+            if source.returncode or _read_install_bytes(repo, path, relative) != source.stdout:
+                raise GateError("BLOCKED", "installed bytes do not match the pinned commit")
+            observed.add(relative)
+    if observed != expected:
+        raise GateError("BLOCKED", "installation file set differs from the pinned runtime inventory")
+    return root
+
+
+def _read_install_bytes(repo: pathlib.Path, path: pathlib.Path, relative: str) -> bytes:
+    """Read installed bytes without weakening the protected sudoers mode."""
+    try:
+        return path.read_bytes()
+    except PermissionError as error:
+        # The sudoers drop-in is intentionally root-owned and mode 0440. Only
+        # this fixed manifest entry may use a non-interactive, read-only root
+        # read; all ownership/mode and byte-integrity checks still apply.
+        if relative != "sudoers/little-mester-vm":
+            raise GateError("BLOCKED", "installed file is not readable for verification") from error
+        sudo = protected_executable(repo, SUDO)
+        cat = protected_executable(repo, "/usr/bin/cat")
+        result = subprocess.run(
+            [sudo, "-n", cat, "--", str(path)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env=clean_env(), check=False,
+        )
+        if result.returncode:
+            raise GateError("BLOCKED", "protected sudoers bytes could not be read for verification")
+        return result.stdout
+
+
+INSTALL_WORKER = r'''import json, os, pathlib, re, stat, sys, tarfile
+
+sha = sys.argv[1]
+prefix_text = sys.argv[3]
+prefix = pathlib.PurePosixPath(prefix_text)
+if (not re.fullmatch(r"[0-9a-f]{40}", sha) or os.geteuid() != 0
+        or not prefix.is_absolute() or str(prefix) != prefix_text
+        or prefix == pathlib.PurePosixPath("/") or ".." in prefix.parts):
+    raise SystemExit("REFUSED: invalid pinned install request")
+parts = prefix.parts[1:] + ("v3",)
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+fd = os.open("/", flags)
+try:
+    root = os.fstat(fd)
+    if root.st_uid != 0 or root.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SystemExit("REFUSED: filesystem root is not protected")
+
+    def require_protected_ancestry(path, info, created):
+        failures = []
+        if not stat.S_ISDIR(info.st_mode):
+            failures.append("not-directory")
+        if stat.S_ISLNK(info.st_mode):
+            failures.append("symlink")
+        if info.st_uid != 0:
+            failures.append("uid-not-root")
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            failures.append("group-or-world-writable")
+        if not created and not info.st_mode & stat.S_IXOTH:
+            failures.append("missing-other-execute")
+        if failures:
+            raise SystemExit(
+                "REFUSED: installation ancestry is not root-owned and protected "
+                f"component={path!r} type={stat.filemode(info.st_mode)} "
+                f"uid={info.st_uid} gid={info.st_gid} "
+                f"mode={stat.S_IMODE(info.st_mode):04o} "
+                f"dev={info.st_dev} ino={info.st_ino} "
+                f"checks={','.join(failures)}"
+            )
+
+    walked = []
+    for component in parts:
+        walked.append(component)
+        created = False
+        try:
+            info = os.stat(component, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            os.mkdir(component, 0o755, dir_fd=fd)
+            created = True
+            info = os.stat(component, dir_fd=fd, follow_symlinks=False)
+        path = "/" + "/".join(walked)
+        if not created:
+            require_protected_ancestry(path, info, created)
+        child = os.open(component, flags, dir_fd=fd)
+        opened = os.fstat(child)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            os.close(child)
+            raise SystemExit("REFUSED: installation ancestry changed while opening")
+        if created:
+            os.fchown(child, 0, 0)
+            os.fchmod(child, 0o755)
+            info = os.fstat(child)
+        require_protected_ancestry(path, info, created)
+        os.close(fd)
+        fd = child
+    try:
+        os.mkdir(sha, 0o755, dir_fd=fd)
+    except FileExistsError:
+        raise SystemExit("REFUSED: candidate installation already exists; refusing overwrite")
+    target = os.open(sha, flags, dir_fd=fd)
+    os.fchmod(target, 0o755)
+    os.fchown(target, 0, 0)
+    manifest = json.loads(sys.argv[2])
+    expected = manifest["files"]
+    directories = set(manifest["directories"])
+    required_directories = set()
+    for name in expected:
+        required_directories.update(str(parent) for parent in pathlib.PurePosixPath(name).parents
+                                    if str(parent) != ".")
+    if directories != required_directories:
+        raise SystemExit("REFUSED: installer directory manifest does not match runtime files")
+    observed = set()
+    total = 0
+    archive = tarfile.open(fileobj=sys.stdin.buffer, mode="r|")
+    for item in archive:
+        name = item.name.removeprefix("./").rstrip("/")
+        if name in directories:
+            if not item.isdir():
+                raise SystemExit("REFUSED: archive directory entry has an unsafe type")
+            observed.add(name)
+            continue
+        if name not in expected or not item.isreg() or item.size > 4 * 1024 * 1024:
+            raise SystemExit("REFUSED: archive has an unexpected path, link, type, or size")
+        total += item.size
+        if total > 16 * 1024 * 1024 or name in observed:
+            raise SystemExit("REFUSED: archive exceeds bounds or duplicates a member")
+        parent_fd = os.dup(target)
+        parent_parts = pathlib.PurePosixPath(name).parts[:-1]
+        for component in parent_parts:
+            try:
+                os.mkdir(component, 0o755, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            next_fd = os.open(component, flags, dir_fd=parent_fd)
+            os.fchown(next_fd, 0, 0)
+            os.fchmod(next_fd, 0o755)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        output = os.open(pathlib.PurePosixPath(name).name,
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o600, dir_fd=parent_fd)
+        source = archive.extractfile(item)
+        if source is None:
+            raise SystemExit("REFUSED: archive member could not be read")
+        with source, os.fdopen(output, "wb") as stream:
+            remaining = item.size
+            while remaining:
+                chunk = source.read(min(65536, remaining))
+                if not chunk:
+                    raise SystemExit("REFUSED: archive member was truncated")
+                stream.write(chunk)
+                remaining -= len(chunk)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.fchown(stream.fileno(), 0, 0)
+            os.fchmod(stream.fileno(), expected[name])
+        os.close(parent_fd)
+        observed.add(name)
+    if observed != set(expected) | directories:
+        raise SystemExit("REFUSED: archive does not contain the exact runtime inventory")
+    os.fsync(target)
+    os.close(target)
+    print("PINNED_INSTALL_CREATED")
+finally:
+    os.close(fd)
+'''
+
+
+def install_candidate(repo: pathlib.Path, sha: str,
+                      prefix: pathlib.Path | None = None) -> pathlib.Path:
+    target = install_path(sha, prefix)
+    if target.exists() or target.is_symlink():
+        raise GateError("BLOCKED", "candidate installation path already exists; preserving it")
+    sudo = protected_executable(repo, SUDO)
+    # Let sudo authenticate on the controlling terminal before its stdin is
+    # occupied by the immutable archive stream. The privileged worker itself
+    # runs non-interactively after this explicit authorization step.
+    authorization = subprocess.run(
+        [sudo, "-v"], stdin=None, stdout=None, stderr=None, env=clean_env(), check=False
+    )
+    if authorization.returncode:
+        raise GateError("BLOCKED", "privileged installation authorization was not granted")
+    archive = subprocess.Popen(
+        archive_arguments(repo, sha, protected_executable(repo, GIT)),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=None,
+        env={**clean_env(), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"},
+    )
+    assert archive.stdout is not None
+    try:
+        worker = subprocess.run(
+            [sudo, "-n", PYTHON, "-I", "-c", INSTALL_WORKER, sha,
+             installer_manifest(), str(prefix if prefix is not None else INSTALL_PARENT.parent)],
+            stdin=archive.stdout,
+            env=clean_env(),
+            check=False,
+        )
+    except KeyboardInterrupt:
+        archive.terminate()
+        archive.wait()
+        raise
+    finally:
+        archive.stdout.close()
+    archive_status = archive.wait()
+    if worker.returncode or archive_status:
+        raise GateError("FAIL", "protected installation failed; any partial target is preserved")
+    return verify_install(repo, sha, prefix)
+
+
+def runtime_dir() -> pathlib.Path:
+    uid = os.getuid()
+    system_parent = RUNTIME_ROOT.parent.parent
+    user_root = system_parent / str(uid)
+    check_private_runtime_chain(user_root, system_parent, uid)
+    target = RUNTIME_ROOT
+    try:
+        os.mkdir(target, 0o700)
+    except FileExistsError:
+        pass
+    except OSError as error:
+        raise GateError("BLOCKED", "trusted private runtime directory could not be created") from error
+    check_private_runtime_chain(target, system_parent, uid)
+    return target
+
+
+def new_report_dir(parent: pathlib.Path | None = None) -> pathlib.Path:
+    parent = runtime_dir() if parent is None else parent
+    check_private_directory(parent, os.getuid())
+    for _ in range(20):
+        identity = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex
+        path = parent / identity
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            continue
+        except OSError as error:
+            raise GateError("BLOCKED", "trusted report directory could not be created") from error
+        check_private_directory(path, os.getuid())
+        return path
+    raise GateError("FAIL", "could not allocate a fresh evidence directory")
+
+
+def save_report(report_dir: pathlib.Path, data: dict) -> None:
+    path = report_dir / "report.json"
+    payload = (json.dumps(data, sort_keys=True, indent=2) + "\n").encode()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def mount_facts(path: pathlib.Path) -> tuple[str, set[str], set[str]]:
+    resolved = path.resolve(strict=True)
+    match = None
+    with open("/proc/self/mountinfo", "r", encoding="ascii") as stream:
+        for line in stream:
+            left, separator, right = line.rstrip("\n").partition(" - ")
+            if not separator:
+                continue
+            fields = left.split()
+            tail = right.split()
+            if len(fields) >= 6 and len(tail) >= 3 and fields[4].replace("\\040", " ") == str(resolved):
+                match = (tail[0], set(fields[5].split(",")), set(tail[2].split(",")))
+                break
+    if match is None:
+        raise GateError("BLOCKED", "workspace is not a mount root")
+    return match
+
+
+def verify_workspace_mount(path_text: str, exact_tmpfs: bool) -> pathlib.Path:
+    path = pathlib.Path(path_text)
+    if not path.is_absolute():
+        raise GateError("BLOCKED", "workspace path must be absolute")
+    try:
+        resolved = path.resolve(strict=True)
+        info = os.lstat(path)
+        usage = os.statvfs(resolved)
+    except OSError as error:
+        raise GateError("BLOCKED", "workspace path or filesystem cannot be verified") from error
+    if resolved != path or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise GateError("BLOCKED", "workspace must be a canonical owner-owned directory")
+    fs_type, mount_options, super_options = mount_facts(resolved)
+    total = usage.f_blocks * usage.f_frsize
+    if exact_tmpfs:
+        options = mount_options | super_options
+        required = {"nosuid", "nodev", "noexec", "mode=700", f"uid={os.getuid()}"}
+        if (fs_type != "tmpfs" or total != WORKSPACE_PROOF_BYTES
+                or not required.issubset(options) or stat.S_IMODE(info.st_mode) != 0o700
+                or info.st_gid != os.getgid()):
+            raise GateError("BLOCKED", "storage proof requires the pre-existing confined 64-MiB tmpfs")
+    elif total > 8 * 1024 * 1024 * 1024:
+        raise GateError("BLOCKED", "workspace filesystem exceeds the 8-GiB smoke bound")
+    return resolved
+
+
+def storage_proof(workspace_text: str) -> None:
+    workspace = verify_workspace_mount(workspace_text, exact_tmpfs=True)
+    if list(workspace.iterdir()):
+        raise GateError("BLOCKED", "workspace must be empty before the bounded ENOSPC proof")
+    fd = open_anonymous_probe(workspace)
+    written = 0
+    with os.fdopen(fd, "wb", buffering=0) as stream:
+        block = b"\0" * min(1024 * 1024, WORKSPACE_PROOF_BYTES)
+        while written < WORKSPACE_PROOF_BYTES + 1:
+            amount = min(len(block), WORKSPACE_PROOF_BYTES + 1 - written)
+            try:
+                count = stream.write(block[:amount])
+            except OSError as error:
+                if error.errno == errno.ENOSPC and written == WORKSPACE_PROOF_BYTES:
+                    print("ENOSPC_CONFIRMED after 67108864 bytes; 67108865 bytes attempted at most")
+                    return
+                raise GateError("FAIL", "bounded storage proof failed before the expected ENOSPC boundary") from error
+            if count != amount:
+                raise GateError("FAIL", "bounded storage proof encountered a short write")
+            written += count
+    raise GateError("FAIL", "workspace accepted a write beyond the 64-MiB capacity")
+
+
+def open_anonymous_probe(workspace: pathlib.Path) -> int:
+    """Open an unnamed file so interruption cannot unlink a replacement path."""
+    if not hasattr(os, "O_TMPFILE"):
+        raise GateError("BLOCKED", "platform does not support anonymous temporary files for the storage proof")
+    directory_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        return os.open(".", os.O_TMPFILE | os.O_RDWR | os.O_CLOEXEC, 0o600, dir_fd=directory_fd)
+    except OSError as error:
+        raise GateError("BLOCKED", "workspace does not support a safe anonymous temporary proof file") from error
+    finally:
+        os.close(directory_fd)
+
+
+def state_root() -> pathlib.Path:
+    home = pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=True)
+    path = home / ".local/state/little-mester" / RUN_ROOT_NAME
+    return path
+
+
+def installed_preflight(root: pathlib.Path, workspace: str | None) -> None:
+    command = [str(root / "lab-vm"), "preflight"]
+    if workspace:
+        command.extend(["--workspace", workspace])
+    status = subprocess.run(command, stdin=subprocess.DEVNULL, env=clean_env(), check=False).returncode
+    if status:
+        raise GateError("BLOCKED", "protected installed preflight failed")
+
+
+def list_runs(root: pathlib.Path) -> set[str]:
+    try:
+        return {entry.name for entry in root.iterdir() if entry.is_dir() and not entry.is_symlink()}
+    except FileNotFoundError:
+        return set()
+
+
+def inspect_cleanup(sha: str, run_id: str, install_root: pathlib.Path) -> dict:
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise GateError("BLOCKED", "run identity format is invalid")
+    root = state_root()
+    run_dir = root / run_id
+    verify_user_directory_chain(run_dir)
+    if not run_dir.is_relative_to(root):
+        raise GateError("BLOCKED", "run directory escaped private state")
+    allowed = {"qemu.log", "virtiofsd.log", "proxy.log", "virtiofs.socket-path"}
+    required_logs = {"qemu.log", "virtiofsd.log", "proxy.log"}
+    entries = {entry.name for entry in run_dir.iterdir()}
+    if "qemu.log" not in entries:
+        raise GateError("BLOCKED", "QEMU never created its log; this was an early startup failure, not cleanup acceptance")
+    if not required_logs.issubset(entries) or not entries.issubset(allowed):
+        raise GateError("BLOCKED", "run contains missing expected logs or unexpected retained artifacts")
+    for name in required_logs:
+        info = os.lstat(run_dir / name)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 1024 * 1024):
+            raise GateError("BLOCKED", "retained helper log failed type, ownership, mode, or size checks")
+    if list(run_dir.glob("*.identity")) or list(run_dir.glob("*.complete")):
+        raise GateError("BLOCKED", "run retains process identity or incomplete logger proof; no cleanup attempted")
+    for name in ("disk.qcow2", "ubuntu.img.part", "id_vm_control", "id_vm_control.pub"):
+        if (run_dir / name).exists() or (run_dir / name).is_symlink():
+            raise GateError("BLOCKED", "run retains transient VM or key material; no cleanup attempted")
+    metadata = run_dir / "virtiofs.socket-path"
+    try:
+        info = os.lstat(metadata)
+    except OSError as error:
+        raise GateError("BLOCKED", "short virtiofs socket-path evidence is missing") from error
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600):
+        raise GateError("BLOCKED", "short virtiofs socket-path evidence has unsafe metadata")
+    socket_state = inspect_virtiofs_artifacts(run_dir, install_root)
+    residual = ["virtiofs.socket-path (retained private allocation evidence)"]
+    if socket_state["socket_present"]:
+        residual.append("short virtiofs socket (retained in private runtime directory)")
+    if socket_state["pid_present"]:
+        residual.append("short virtiofs PID artifact (retained; contents are not process authority)")
+    return {"status": "PASS", "run_id": run_id, "residual_artifacts": residual,
+            "note": "No identity/PID artifact was used to signal a process; an expired volatile runtime directory is distinguished from a live listener."}
+
+
+def inspect_virtiofs_artifacts(run_dir: pathlib.Path, install_root: pathlib.Path) -> dict:
+    helper = install_root / "lib/vm/virtiofs-socket.py"
+    result = subprocess.run(
+        [sys.executable, "-I", str(helper), "stopped", str(run_dir)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=clean_env(), check=False,
+    )
+    if result.returncode:
+        raise GateError("BLOCKED", "short virtiofs socket/PID artifacts or listener state failed validation")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise GateError("BLOCKED", "short virtiofs artifact validator returned invalid evidence") from error
+
+
+def verify_user_directory_chain(path: pathlib.Path) -> None:
+    if not path.is_absolute():
+        raise GateError("BLOCKED", "private run path is not absolute")
+    home = pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=True)
+    if path != home and home not in path.parents:
+        raise GateError("BLOCKED", "VM run path is outside the invoking user's home")
+    current = pathlib.Path("/")
+    for index, component in enumerate(path.parts[1:]):
+        current /= component
+        try:
+            info = os.lstat(current)
+        except OSError as error:
+            raise GateError("BLOCKED", "private run path is missing or inaccessible") from error
+        final = index == len(path.parts[1:]) - 1
+        expected_uid = os.getuid() if current == home or home in current.parents else 0
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != expected_uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or (final and stat.S_IMODE(info.st_mode) != 0o700)):
+            raise GateError("BLOCKED", "private run path ownership or mode check failed")
+
+
+def verify_cleanup_report(sha: str, run_id: str) -> None:
+    parent = runtime_dir()
+    matches = []
+    for entry in parent.iterdir():
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        report = entry / "report.json"
+        try:
+            info = os.lstat(report)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600):
+                continue
+            content = json.loads(report.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if (content.get("candidate_sha") == sha
+                and content.get("evidence", {}).get("vm_run_id") == run_id
+                and content.get("gates", {}).get("run") == "PASS"
+                and content.get("gates", {}).get("cleanup") == "PASS"):
+            matches.append(content)
+    if len(matches) != 1:
+        raise GateError("BLOCKED", "no unique successful smoke report binds this SHA to that run id; early startup failure is not cleanup acceptance")
+
+
+def _replacement_provision_origin(sha: str, repo: pathlib.Path | None = None) -> dict | None:
+    """Find unique private evidence that binds a replacement disk to this candidate lineage."""
+    parent = runtime_dir()
+    reports = []
+    has_replacement_evidence = False
+    replacement_evidence_attempts = set()
+    ancestry_cache = {sha: True}
+
+    def candidate_in_lineage(candidate: object) -> bool:
+        if not isinstance(candidate, str) or not SHA_RE.fullmatch(candidate):
+            return False
+        if candidate not in ancestry_cache:
+            ancestry_cache[candidate] = bool(
+                repo is not None
+                and git(repo, "merge-base", "--is-ancestor", candidate, sha).returncode == 0
+            )
+        return ancestry_cache[candidate]
+
+    runtime_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        runtime_info = os.fstat(runtime_fd)
+        if (not stat.S_ISDIR(runtime_info.st_mode) or runtime_info.st_uid != os.getuid()
+                or stat.S_IMODE(runtime_info.st_mode) != 0o700):
+            raise GateError("BLOCKED", "private acceptance report directory changed; resume provenance unavailable")
+        for entry_name in os.listdir(runtime_fd):
+            if not re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{32}", entry_name):
+                continue
+            attempt_fd = report_fd = -1
+            try:
+                attempt_fd = os.open(entry_name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=runtime_fd)
+                attempt_info = os.fstat(attempt_fd)
+                if (not stat.S_ISDIR(attempt_info.st_mode)
+                        or attempt_info.st_uid != os.getuid()
+                        or stat.S_IMODE(attempt_info.st_mode) != 0o700):
+                    continue
+                report_fd = os.open("report.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=attempt_fd)
+                info = os.fstat(report_fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                        or info.st_size > 1024 * 1024):
+                    continue
+                payload = bytearray()
+                while len(payload) < info.st_size:
+                    chunk = os.read(report_fd, min(info.st_size - len(payload), 65536))
+                    if not chunk:
+                        raise ValueError("short report read")
+                    payload.extend(chunk)
+                content = json.loads(payload)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            finally:
+                if report_fd >= 0:
+                    os.close(report_fd)
+                if attempt_fd >= 0:
+                    os.close(attempt_fd)
+            if not isinstance(content, dict):
+                continue
+            raw_evidence = content.get("evidence", {})
+            raw_evidence = raw_evidence if isinstance(raw_evidence, dict) else {}
+            raw_retirement = raw_evidence.get("retirement", {})
+            raw_retirement = raw_retirement if isinstance(raw_retirement, dict) else {}
+            if (raw_retirement.get("status") == "FACTORY_RESET"
+                    or bool(raw_evidence.get("provisioning_origin"))
+                    or bool(raw_evidence.get("fresh_provision_approval"))
+                    or bool(raw_evidence.get("fresh_provision_failure"))):
+                has_replacement_evidence = True
+                replacement_evidence_attempts.add(entry_name)
+            if not candidate_in_lineage(content.get("candidate_sha")):
+                continue
+            if (content.get("attempt_id") == entry_name
+                    and content.get("mode") == "parent_accept"):
+                reports.append(content)
+
+        by_attempt = {content["attempt_id"]: content for content in reports}
+
+        def dict_at(mapping: object, key: str) -> dict:
+            value = mapping.get(key, {}) if isinstance(mapping, dict) else {}
+            return value if isinstance(value, dict) else {}
+
+        def disk_identity(value: object) -> dict | None:
+            if (isinstance(value, dict) and type(value.get("device")) is int
+                    and value["device"] >= 0 and type(value.get("inode")) is int
+                    and value["inode"] > 0):
+                return {"device": value["device"], "inode": value["inode"]}
+            return None
+
+        def has_replacement_record(content: dict) -> bool:
+            evidence = dict_at(content, "evidence")
+            retirement = dict_at(evidence, "retirement")
+            return (
+                retirement.get("status") == "FACTORY_RESET"
+                or bool(evidence.get("provisioning_origin"))
+                or bool(evidence.get("fresh_provision_approval"))
+                or bool(evidence.get("fresh_provision_failure"))
+            )
+
+        has_replacement_evidence = has_replacement_evidence or any(
+            dict_at(dict_at(content, "evidence"), "retirement").get("status") == "FACTORY_RESET"
+            or bool(dict_at(dict_at(content, "evidence"), "provisioning_origin"))
+            or bool(dict_at(dict_at(content, "evidence"), "fresh_provision_approval"))
+            or bool(dict_at(dict_at(content, "evidence"), "fresh_provision_failure"))
+            for content in reports
+        )
+
+        def reset_root(content: dict) -> bool:
+            gates = dict_at(content, "gates")
+            evidence = dict_at(content, "evidence")
+            retirement = dict_at(evidence, "retirement")
+            approval = dict_at(evidence, "fresh_provision_approval")
+            failure = dict_at(evidence, "fresh_provision_failure")
+            notes = content.get("notes", [])
+            legacy_failed_up = (
+                isinstance(notes, list)
+                and any(isinstance(note, str) and re.fullmatch(
+                    r"protected parent operation up failed \(exit=[1-9][0-9]{0,2}; reason=(?:refused|command_failure)\)",
+                    note) for note in notes)
+            )
+
+            recorded_failed_up = (
+                failure.get("operation") == "parent up"
+                and type(failure.get("exit_status")) is int
+                and failure["exit_status"] != 0
+            )
+            approved_attempt = (
+                approval.get("owner_approved") is True
+                and approval.get("candidate_sha") == content.get("candidate_sha")
+                and approval.get("capacity_gib") == 64
+                and approval.get("from_status") in ("NOT_CREATED", "RETIRED", "UNPROVISIONED")
+            )
+            reset_complete_before_provision_approval = (
+                content.get("status") in ("IN_PROGRESS", "BLOCKED")
+                and gates.get("fresh_provision") in (None, "NOT_RUN", "BLOCKED")
+                and not approval
+                and not failure
+            )
+            return (
+                gates.get("retirement") == "PASS"
+                and retirement.get("status") == "FACTORY_RESET"
+                and ((content.get("status") == "FAIL"
+                      and gates.get("fresh_provision") == "FAIL"
+                      and (legacy_failed_up or recorded_failed_up))
+                     or (approved_attempt and content.get("status") in (
+                         "IN_PROGRESS", "BLOCKED", "FAIL", "PASS"))
+                     or reset_complete_before_provision_approval)
+            )
+
+        reset_roots = [content for content in reports if reset_root(content)]
+        reset_time = max((content["attempt_id"][:16] for content in reset_roots), default=None)
+        latest_roots = [content for content in reset_roots
+                        if content["attempt_id"][:16] == reset_time]
+        if len(latest_roots) > 1:
+            raise GateError(
+                "BLOCKED",
+                "multiple completed factory resets share an ambiguous report timestamp; preserve provenance",
+                category="provenance_reset_order_ambiguous",
+            )
+        active_reset = latest_roots[0] if latest_roots else None
+        reconciled_attempt_ids = []
+        if active_reset is not None:
+            reset_attempt_id = active_reset["attempt_id"]
+            reconciled_attempt_ids = sorted(
+                attempt_id for attempt_id in replacement_evidence_attempts
+                if attempt_id[:16] < reset_time
+            )
+            # A completed, verified factory reset makes older parent/disk provenance
+            # historical, not authoritative for the now-empty persistent-parent state.
+            # Keep those private reports; only exclude them from the active chain.
+            reports = [content for content in reports
+                       if content["attempt_id"][:16] >= reset_time]
+            active_report_ids = {content["attempt_id"] for content in reports}
+            if any(attempt_id[:16] >= reset_time and attempt_id not in active_report_ids
+                   for attempt_id in replacement_evidence_attempts):
+                raise GateError(
+                    "BLOCKED",
+                    "replacement evidence after the latest verified reset is not bound to this candidate; preserve state",
+                    category="provenance_unknown_after_reset",
+                )
+
+        def pre_disk_provision(content: dict, origin: dict, reset_id: object) -> bool:
+            evidence = dict_at(content, "evidence")
+            approval = dict_at(evidence, "fresh_provision_approval")
+            failure = dict_at(evidence, "fresh_provision_failure")
+            return (
+                disk_identity(origin.get("disk_identity")) is None
+                and not failure
+                and content.get("status") in ("IN_PROGRESS", "BLOCKED")
+                and origin.get("owner_approved_fresh_provision") is True
+                and approval.get("owner_approved") is True
+                and approval.get("candidate_sha") == content.get("candidate_sha")
+                and approval.get("capacity_gib") == 64
+                and approval.get("factory_reset_attempt_id") == reset_id
+            )
+        def report_chain_valid(attempt_id: object, reset_id: object,
+                               visited: set[str] | None = None) -> bool:
+            if not isinstance(attempt_id, str) or not isinstance(reset_id, str):
+                return False
+            if visited is None:
+                visited = set()
+            if attempt_id in visited:
+                return False
+            visited.add(attempt_id)
+            content = by_attempt.get(attempt_id)
+            if (not isinstance(content, dict)
+                    or not candidate_in_lineage(content.get("candidate_sha"))):
+                return False
+            if attempt_id == reset_id:
+                return reset_root(content)
+            evidence = dict_at(content, "evidence")
+            origin = dict_at(evidence, "provisioning_origin")
+            if (origin.get("factory_reset_attempt_id") != reset_id
+                    or not candidate_in_lineage(origin.get("candidate_sha"))):
+                return False
+            if disk_identity(origin.get("disk_identity")) is None:
+                if not pre_disk_provision(content, origin, reset_id):
+                    return False
+            return report_chain_valid(origin.get("prior_attempt_id"), reset_id, visited)
+
+        matches = []
+        valid_links = []
+        invalid_origin_evidence = False
+        for content in reports:
+            evidence = dict_at(content, "evidence")
+            if ("provisioning_origin" in evidence
+                    and (not isinstance(evidence["provisioning_origin"], dict)
+                         or not evidence["provisioning_origin"])):
+                invalid_origin_evidence = True
+                continue
+            origin = dict_at(evidence, "provisioning_origin")
+            if not origin:
+                if reset_root(content):
+                    failure = dict_at(evidence, "fresh_provision_failure")
+                    matches.append({
+                        "attempt_id": content["attempt_id"],
+                        "factory_reset_attempt_id": content["attempt_id"],
+                        "disk_identity": disk_identity(failure.get("post_failure_disk_identity")),
+                        "reconciled_attempt_ids": reconciled_attempt_ids,
+                    })
+                elif has_replacement_record(content):
+                    invalid_origin_evidence = True
+                continue
+
+            prior_id = origin.get("prior_attempt_id")
+            reset_id = origin.get("factory_reset_attempt_id")
+            recorded_identity = disk_identity(origin.get("disk_identity"))
+            approval = dict_at(dict_at(content, "evidence"), "fresh_provision_approval")
+            owner_confirmed = (
+                origin.get("owner_confirmed_same_disk_resume") is True
+                or origin.get("already_running_owner_approval_in_prior_attempt") is True
+                or (origin.get("owner_approved_fresh_provision") is True
+                    and approval.get("owner_approved") is True
+                    and approval.get("candidate_sha") == content.get("candidate_sha")
+                    and approval.get("capacity_gib") == 64
+                    and approval.get("factory_reset_attempt_id") == reset_id)
+            )
+            prior = by_attempt.get(prior_id) if isinstance(prior_id, str) else None
+            reset_report = by_attempt.get(reset_id) if isinstance(reset_id, str) else None
+            if (not candidate_in_lineage(origin.get("candidate_sha"))
+                    or (recorded_identity is None
+                        and not pre_disk_provision(content, origin, reset_id))
+                    or not owner_confirmed
+                    or prior is None or reset_report is None or not reset_root(reset_report)):
+                invalid_origin_evidence = True
+                continue
+            if (not candidate_in_lineage(prior.get("candidate_sha"))
+                    or not report_chain_valid(prior_id, reset_id)):
+                invalid_origin_evidence = True
+                continue
+            prior_evidence = dict_at(prior, "evidence")
+            prior_origin = dict_at(prior_evidence, "provisioning_origin")
+            prior_failure = dict_at(prior_evidence, "fresh_provision_failure")
+            prior_identity = (disk_identity(prior_origin.get("disk_identity"))
+                              or disk_identity(prior_failure.get("post_failure_disk_identity")))
+            if (recorded_identity is not None and prior_identity is not None
+                    and prior_identity != recorded_identity):
+                invalid_origin_evidence = True
+                continue
+            if prior_id != content["attempt_id"]:
+                valid_links.append((prior_id, recorded_identity))
+            matches.append({
+                "attempt_id": content["attempt_id"],
+                "factory_reset_attempt_id": reset_id,
+                "disk_identity": recorded_identity,
+                "reconciled_attempt_ids": reconciled_attempt_ids,
+            })
+
+        # A report supersedes its predecessor only when its candidate-bound origin,
+        # reset root, owner confirmation, and disk identity all validate above.
+        superseded = {prior_id for prior_id, _identity in valid_links}
+        matches = [match for match in matches if match.get("attempt_id") not in superseded]
+        if invalid_origin_evidence:
+            raise GateError(
+                "BLOCKED",
+                "a candidate-linked report contains inconsistent replacement identity evidence; preserve the parent without lifecycle changes",
+                category="provenance_invalid_descendant",
+            )
+        if not matches:
+            if has_replacement_evidence:
+                raise GateError(
+                    "BLOCKED",
+                    "private replacement evidence exists but its provenance chain is incomplete or inconsistent; preserve the parent without lifecycle changes",
+                    category="provenance_orphaned_evidence",
+                )
+            return None
+        if len(matches) != 1 or not isinstance(matches[0].get("attempt_id"), str):
+            raise GateError(
+                "BLOCKED",
+                "cannot establish one unique private replacement-provenance chain for this SHA; preserve the parent without lifecycle changes",
+                category="provenance_multiple_active_chains",
+            )
+        return matches[0]
+    finally:
+        os.close(runtime_fd)
+
+
+def _parent_up_failure(stderr: bytes, exit_status: int | None) -> dict:
+    """Map protected parent-up diagnostics to fixed, non-secret report categories."""
+    text = stderr[:16384].decode("utf-8", "ignore")
+    stage, reason = "startup", "protected_refusal"
+    if "QEMU_PROCESS_EXITED_BEFORE_READINESS" in text:
+        stage, reason = "qemu_boot", "qemu_exited_before_readiness"
+    elif "QEMU_IDENTITY_AMBIGUOUS" in text or "QEMU_IDENTITY_CHANGED" in text:
+        stage, reason = "identity", "qemu_identity_transition_refused"
+    elif "GUEST_READINESS_DEADLINE_EXPIRED" in text:
+        last = re.search(r"\blast=([A-Z_]{1,64})\b", text)
+        last_reason = {
+            "CLOUD_INIT_STATUS_FAILED": "cloud_init_status_failed",
+            "SSH_HOST_KEY_REJECTED": "ssh_host_key_rejected",
+            "SSH_AUTH_REJECTED": "ssh_auth_rejected",
+            "SSH_FORWARD_NOT_LISTENING": "ssh_forward_unavailable",
+            "SSH_FORWARD_UNRESPONSIVE": "ssh_forward_unresponsive",
+            "SSH_CLIENT_ATTEMPT_TIMED_OUT": "ssh_readiness_timeout",
+            "GUEST_SSH_SERVICE_UNAVAILABLE": "guest_ssh_unavailable",
+            "GUEST_SSH_SERVICE_UNRESPONSIVE": "guest_ssh_unresponsive",
+            "SSH_TRANSPORT_OR_HANDSHAKE_FAILED": "ssh_transport_or_handshake_failed",
+            "GUEST_READINESS_COMMAND_FAILED": "guest_readiness_command_failed",
+        }.get(last.group(1) if last else "")
+        if last_reason == "cloud_init_status_failed":
+            stage, reason = "guest_readiness", last_reason
+        elif (last_reason and last_reason.startswith("ssh_")) or last_reason in (
+                "guest_ssh_unavailable", "guest_ssh_unresponsive"):
+            stage, reason = "ssh_readiness", last_reason
+        else:
+            stage, reason = "guest_readiness", "readiness_deadline_expired"
+    elif "CLOUD_INIT_STATUS_FAILED" in text:
+        stage, reason = "guest_readiness", "cloud_init_status_failed"
+    elif "SSH_HOST_KEY_REJECTED" in text:
+        stage, reason = "ssh_readiness", "ssh_host_key_rejected"
+    elif "SSH_AUTH_REJECTED" in text:
+        stage, reason = "ssh_readiness", "ssh_auth_rejected"
+    elif "SSH_FORWARD_NOT_LISTENING" in text:
+        stage, reason = "ssh_readiness", "ssh_forward_unavailable"
+    elif "SSH_FORWARD_UNRESPONSIVE" in text:
+        stage, reason = "ssh_readiness", "ssh_forward_unresponsive"
+    elif "SSH_CLIENT_ATTEMPT_TIMED_OUT" in text or "SSH_FORWARD_UNRESPONSIVE" in text:
+        stage, reason = "ssh_readiness", "ssh_readiness_timeout"
+    elif "GUEST_SSH_SERVICE_UNAVAILABLE" in text:
+        stage, reason = "ssh_readiness", "guest_ssh_unavailable"
+    elif "SSH_TRANSPORT_OR_HANDSHAKE_FAILED" in text:
+        stage, reason = "ssh_readiness", "ssh_transport_or_handshake_failed"
+    elif "PARENT_SESSION_CONTRACT_UPGRADE_REQUIRED" in text:
+        stage, reason = "guest_readiness", "guest_contract_mismatch"
+    elif "startup_failure_stage=supervisor_exit" in text:
+        stage, reason = "supervisor_exit", "supervisor_exited_before_ready"
+        recovery_categories = {
+            "lifecycle_lock_conflict": "orphan_recovery_lock_conflict",
+            "disk_holder_verification": "orphan_recovery_holder_verification_refused",
+            "recovery_identity_validation": "orphan_recovery_identity_refused",
+            "child_stop_or_identity": "orphan_recovery_child_refused",
+            "recovery_validation": "orphan_recovery_refused",
+        }
+        if "orphan_recovery=STOPPED" in text:
+            reason = "supervisor_exited_orphan_recovered"
+        else:
+            category = re.search(r"\brecovery_refusal_category=([a-z_]{1,64})\b", text)
+            if category and category.group(1) in recovery_categories:
+                reason = recovery_categories[category.group(1)]
+        exit_match = re.search(r"\bsupervisor_exit_status=([0-9]{1,3})\b", text)
+        if exit_match and int(exit_match.group(1)) <= 255:
+            return {"operation": "parent up", "exit_status": exit_status,
+                    "stage": stage, "reason_category": reason,
+                    "supervisor_exit_status": int(exit_match.group(1))}
+    elif "supervisor startup failed:" in text:
+        stage, reason = "supervisor_startup", "supervisor_invariant_refused"
+    elif "parent provisioning refused:" in text:
+        stage, reason = "provisioning", "provisioning_invariant_refused"
+    elif "parent cannot start from status" in text or "different parent run appeared" in text:
+        stage, reason = "identity", "parent_state_transition_refused"
+    elif "parent supervisor/startup failed; status is" in text:
+        stage, reason = "supervisor_or_readiness", "startup_failed_stage_unavailable"
+    elif "REFUSED:" not in text:
+        reason = "command_failure"
+    return {"operation": "parent up", "exit_status": exit_status,
+            "stage": stage, "reason_category": reason}
+
+
+def _post_failure_parent_evidence(root: pathlib.Path) -> dict:
+    """Retain only fixed status labels and validated numeric disk identity."""
+    try:
+        _, status = _parent_json(root, "status", "--json")
+    except (GateError, OSError, subprocess.SubprocessError):
+        return {"post_failure_status": "UNAVAILABLE"}
+    allowed = {"NOT_CREATED", "UNPROVISIONED", "RUNNING", "STARTING", "STOPPED",
+               "RETIRED", "RETIRING", "AMBIGUOUS"}
+    result = {"post_failure_status": status.get("status")
+              if status.get("status") in allowed else "UNRECOGNIZED"}
+    disk = status.get("disk") if isinstance(status.get("disk"), dict) else {}
+    if (type(disk.get("device")) is int and disk["device"] >= 0
+            and type(disk.get("inode")) is int and disk["inode"] > 0):
+        result["post_failure_disk_identity"] = {
+            "device": disk["device"], "inode": disk["inode"]}
+    return result
+
+
+def report_template(sha: str, mode: str, report_dir: pathlib.Path) -> dict:
+    if mode in ("system_vm_verify", "system_vm_accept"):
+        gates = ["candidate", "deployed_candidate_verification"]
+        if mode == "system_vm_accept":
+            gates += ["preflight", "proxy_private_target_policy", "guest_readiness_ssh",
+                      "network_boundaries", "direct_egress_blocked", "opencode_tui",
+                      "same_disk_persistence", "final_vm_state"]
+        return {
+            "version": 1,
+            "candidate_sha": sha,
+            "mode": mode,
+            "attempt_id": report_dir.name,
+            "status": "IN_PROGRESS",
+            "gates": {name: "NOT_RUN" for name in gates},
+            "evidence": {"report": str(report_dir / "report.json"),
+                         **({"restoration_outcome": "NOT_REQUIRED"}
+                            if mode == "system_vm_accept" else {})},
+            "notes": [],
+        }
+    gates = [
+        "candidate", "preflight", "install", "storage_proof", "run", "cleanup",
+        "parent_identity", "guest_compatibility", "retirement", "fresh_provision",
+        "owner_interaction",
+        "ssh_reconnect", "duplicate_up", "m1_recovery_guards", "network_boundaries",
+        "m1_revalidation",
+        "protected_configuration", "authentication", "model_response_before_restart",
+        "model_list_behavior",
+        "telemetry_behavior",
+        "configuration_persistence",
+        "tmux_controls", "terminal_clipboard_mitigation", "workspace_persistence",
+        "credentials_persistence", "history_persistence", "same_disk_restart",
+        "model_response_after_restart", "temporary_cleanup", "final_vm_state",
+    ]
+    if mode == "parent_accept":
+        gates = [name for name in gates if name not in ("storage_proof", "run", "cleanup")]
+    else:
+        gates = [name for name in gates if name != "owner_interaction"]
+    return {
+        "version": 1,
+        "candidate_sha": sha,
+        "mode": mode,
+        "attempt_id": report_dir.name,
+        "status": "IN_PROGRESS",
+        "gates": {name: "NOT_RUN" for name in gates},
+        "evidence": {"report": str(report_dir / "report.json")},
+        "notes": [],
+    }
+
+
+def _checkpoint(report_dir: pathlib.Path, data: dict) -> None:
+    path = report_dir / "report.json"
+    payload = (json.dumps(data, sort_keys=True, indent=2) + "\n").encode()
+    temporary = report_dir / f".report-{uuid.uuid4().hex}.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    directory_fd = os.open(report_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _parent_command(root: pathlib.Path, *args: str, interactive: bool = False,
+                    timeout: int = 45) -> subprocess.CompletedProcess:
+    env = clean_env(desktop_session=interactive)
+    return subprocess.run(
+        [str(root / "lab-vm"), "parent", *args],
+        stdin=None if interactive else subprocess.DEVNULL,
+        stdout=None if interactive else subprocess.PIPE,
+        stderr=None if interactive else subprocess.PIPE,
+        env=env, timeout=timeout, check=False,
+    )
+
+
+def _parent_json(root: pathlib.Path, *args: str, timeout: int = 45) -> tuple[subprocess.CompletedProcess, dict]:
+    result = _parent_command(root, *args, timeout=timeout)
+    if result.returncode:
+        category = "refused" if result.stderr.startswith(b"REFUSED:") else "command_failure"
+        raise GateError("FAIL", f"protected parent operation {args[0]} returned nonzero (exit={result.returncode}; reason={category})")
+    try:
+        value = json.loads(result.stdout)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise GateError("FAIL", f"protected parent operation {args[0]} returned malformed evidence") from error
+    if not isinstance(value, dict):
+        raise GateError("FAIL", f"protected parent operation {args[0]} returned invalid evidence")
+    return result, value
+
+
+def _parent_ok(root: pathlib.Path, *args: str, timeout: int = 45,
+               interactive: bool = False) -> subprocess.CompletedProcess:
+    result = _parent_command(root, *args, interactive=interactive, timeout=timeout)
+    if result.returncode:
+        category = "refused" if result.stderr and result.stderr.startswith(b"REFUSED:") else "command_failure"
+        raise GateError("FAIL", f"protected parent operation {args[0]} failed (exit={result.returncode}; reason={category})")
+    return result
+
+
+def _identity(status: dict) -> dict:
+    disk = status.get("disk") if isinstance(status.get("disk"), dict) else {}
+    return ({key: status.get(key) for key in (
+                "status", "run_id", "parent_id", "supervisor_pid", "qemu_pid")}
+            | {"disk_device": disk.get("device"), "disk_inode": disk.get("inode"),
+               "disk_path": disk.get("path"),
+               "disk_format": disk.get("format"), "disk_provisioned": disk.get("provisioned"),
+               "virtual_capacity_gib": disk.get("virtual_capacity_gib"),
+               "disk_file_bytes": disk.get("file_bytes"),
+               "disk_host_allocated_bytes": disk.get("host_allocated_bytes")})
+
+
+def _verified_resume_parent(status: dict) -> dict:
+    """Require the protected state projection to identify one persistent 64-GiB qcow2."""
+    disk = status.get("disk") if isinstance(status.get("disk"), dict) else {}
+    identity = _identity(status)
+    if (status.get("status") not in ("STOPPED", "RUNNING")
+            or status.get("parent_id") != "default"
+            or disk.get("path") != "disk.qcow2"
+            or disk.get("format") != "qcow2" or disk.get("provisioned") is not True
+            or disk.get("virtual_capacity_gib") != 64
+            or type(disk.get("device")) is not int or disk["device"] < 0
+            or type(disk.get("inode")) is not int or disk["inode"] <= 0
+            or not isinstance(status.get("run_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", status["run_id"])):
+        raise GateError("BLOCKED", "parent lacks complete protected replacement identity; preserve it without lifecycle changes")
+    if status["status"] == "RUNNING" and type(status.get("supervisor_pid")) is not int:
+        raise GateError("BLOCKED", "running replacement lacks verified supervisor identity; preserve it")
+    return identity
+
+
+def _has_retained_disk(status: dict) -> bool:
+    retired = status.get("retired_disk_identity")
+    return (bool(status.get("retired_bundle")) and isinstance(retired, dict)
+            and type(retired.get("device")) is int and retired["device"] >= 0
+            and type(retired.get("inode")) is int and retired["inode"] > 0)
+
+
+def _require_probe(value: dict, required: tuple[str, ...], label: str) -> None:
+    failed = [name for name in required if value.get(name) is not True]
+    if failed:
+        raise GateError("FAIL", f"{label} checks failed: {', '.join(failed)}")
+
+
+def _require_clean_stopped_previews(recovery: dict, reconciliation: dict) -> None:
+    if (recovery.get("action") != "none" or recovery.get("status") != "STOPPED"
+            or reconciliation.get("action") != "none"
+            or reconciliation.get("status") != "STOPPED"):
+        raise GateError("FAIL", "ordinary clean stop left a recovery/reconciliation action or ambiguous status")
+
+
+def _owner_approval(prompt: str, expected: str) -> None:
+    print(prompt)
+    print(f"Type exactly: {expected}")
+    try:
+        answer = input("> ")
+    except (EOFError, KeyboardInterrupt) as error:
+        raise GateError("BLOCKED", "owner approval was cancelled") from error
+    if answer != expected:
+        raise GateError("BLOCKED", "owner approval did not match; no operation was started")
+
+
+def _tui_key(root: pathlib.Path, key: str) -> None:
+    _parent_ok(root, "tui-key", "--key", key, timeout=30)
+
+
+def _tui_state(root: pathlib.Path) -> dict:
+    _, state = _parent_json(root, "tui-state", timeout=30)
+    if state.get("status") != "OK":
+        raise GateError("FAIL", "protected tmux state is unavailable; no session-count inference is safe")
+    return state
+
+
+def _wait_tui(root: pathlib.Path, predicate, timeout: float = 8.0) -> dict:
+    deadline = time.monotonic() + timeout
+    last = {}
+    while time.monotonic() < deadline:
+        last = _tui_state(root)
+        if predicate(last):
+            return last
+        time.sleep(0.15)
+    raise GateError("FAIL", "protected tmux/TUI state did not reach the expected bounded state")
+
+
+def _probe_history(root: pathlib.Path, token: str, model: str,
+                   prior_token: str | None = None) -> dict:
+    args = ["history-probe", "--token", token, "--model", model]
+    if prior_token:
+        args.extend(("--prior-token", prior_token))
+    _, result = _parent_json(root, *args, timeout=45)
+    return result
+
+
+def _interactive_tui(root: pathlib.Path, *, continue_session: bool, title: str,
+                     token: str, model: str) -> None:
+    print(f"\n{title}")
+    if not continue_session:
+        print(f"In OpenCode, use /models and select exactly {model}.")
+    print(f"Submit exactly: Reverse this string and return only the result: {token}")
+    print("Wait for the model response, then detach with Ctrl-b followed by d (do not exit OpenCode).")
+    args = ("tui", "--continue") if continue_session else ("tui",)
+    result = _parent_command(root, *args, interactive=True, timeout=900)
+    if result.returncode:
+        raise GateError("FAIL", "protected interactive TUI session exited unsuccessfully")
+
+
+def _exercise_tui_keys(root: pathlib.Path) -> None:
+    state = _wait_tui(root, lambda x: x.get("target_count") == 1)
+    if state.get("session_count") != 1:
+        raise GateError("FAIL", "tmux did not retain exactly one protected OpenCode session")
+    for cancel_key in ("escape", "n", "ctrl-c"):
+        _tui_key(root, "ctrl-c")
+        _wait_tui(root, lambda x: x.get("exit_dialog_visible") is True)
+        _tui_key(root, cancel_key)
+        state = _wait_tui(root, lambda x: x.get("exit_dialog_visible") is False)
+        if state.get("target_count") != 1 or state.get("session_count") != 1:
+            raise GateError("FAIL", "exit cancellation did not preserve the OpenCode session")
+    _tui_key(root, "ctrl-d")
+    state = _wait_tui(root, lambda x: x.get("target_count") == 1)
+    if state.get("session_count") != 1:
+        raise GateError("FAIL", "Ctrl-D unexpectedly closed the protected OpenCode session")
+    _tui_key(root, "ctrl-c")
+    _wait_tui(root, lambda x: x.get("exit_dialog_visible") is True)
+    _tui_key(root, "q")
+    state = _wait_tui(root, lambda x: x.get("session_count") == 0)
+    if state.get("target_count") != 0:
+        raise GateError("FAIL", "Q confirmation closed OpenCode but left its tmux session")
+
+
+def _exercise_simultaneous_attach_and_resize(root: pathlib.Path) -> dict:
+    clients: list[tuple[int, int, subprocess.Popen]] = []
+    try:
+        def attach(rows: int, columns: int) -> tuple[int, int, subprocess.Popen]:
+            master_fd, slave_fd = pty.openpty()
+            fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+            process = subprocess.Popen(
+                [str(root / "lab-vm"), "parent", "tui", "--continue"],
+                stdin=slave_fd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=clean_env(), close_fds=True,
+            )
+            os.close(slave_fd)
+            clients.append((master_fd, -1, process))
+            return clients[-1]
+
+        first = attach(37, 91)
+        first_state = _wait_tui(root, lambda x: x.get("attached_clients") == 1, timeout=15)
+        if first_state.get("session_count") != 1 or first_state.get("target_count") != 1:
+            raise GateError("FAIL", "first TUI attach did not reach the unique protected session")
+        second_client = attach(41, 103)
+        simultaneous = _wait_tui(root, lambda x: x.get("attached_clients") == 2, timeout=15)
+        if simultaneous.get("session_count") != 1 or simultaneous.get("target_count") != 1:
+            raise GateError("FAIL", "two clients did not attach to the same unique tmux session")
+        fcntl.ioctl(second_client[0], termios.TIOCSWINSZ, struct.pack("HHHH", 43, 107, 0, 0))
+        second_client[2].send_signal(signal.SIGWINCH)
+        resized = _wait_tui(root, lambda x: x.get("size") == "107x43", timeout=8)
+        if resized.get("session_count") != 1:
+            raise GateError("FAIL", "tmux resize changed protected session count")
+        os.write(second_client[0], b"\x02d")
+        second_client[2].wait(timeout=15)
+        one_left = _wait_tui(root, lambda x: x.get("attached_clients") == 1, timeout=8)
+        if one_left.get("session_count") != 1:
+            raise GateError("FAIL", "detaching the second TUI client lost the shared session")
+        os.write(first[0], b"\x02d")
+        first[2].wait(timeout=15)
+        detached = _wait_tui(root, lambda x: x.get("attached_clients") == 0, timeout=8)
+        if detached.get("session_count") != 1:
+            raise GateError("FAIL", "detaching both TUI clients lost the protected session")
+        return {"session_count": detached["session_count"], "resize": resized["size"],
+                "simultaneous_attach": simultaneous.get("attached_clients") == 2}
+    except subprocess.TimeoutExpired as error:
+        raise GateError("FAIL", "bounded simultaneous TUI attach did not detach") from error
+    finally:
+        for master_fd, _slave_fd, process in clients:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+            os.close(master_fd)
+
+
+def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
+                          report_dir: pathlib.Path, repo: pathlib.Path | None = None) -> None:
+    """One-command, owner-confirmed fresh provisioning and real M1/M2 acceptance."""
+    def active(name: str) -> None:
+        data["gates"][name] = "NOT_RUN"
+        data["evidence"].pop(name, None)
+        data["active_gate"] = name
+        _checkpoint(report_dir, data)
+
+    def passed(name: str, evidence=None) -> None:
+        data["gates"][name] = "PASS"
+        if evidence is not None:
+            data["evidence"][name] = evidence
+        data.pop("active_gate", None)
+        _checkpoint(report_dir, data)
+
+    active("owner_interaction")
+    if not re.fullmatch(r"openai/[A-Za-z0-9._-]{1,100}", model):
+        raise GateError("BLOCKED", "owner acceptance requires one exact openai/<model-id>")
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise GateError("BLOCKED", "complete owner acceptance requires a controlling terminal")
+    if os.environ.get("LM_VM_TERM_VALIDATED") != "1" or "TERM" not in clean_env():
+        raise GateError("BLOCKED", "host TERM is not validated for the protected guest TUI")
+    active("parent_identity")
+    status_result = _parent_command(root, "status", "--json")
+    try:
+        initial = json.loads(status_result.stdout)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise GateError("FAIL", f"protected parent status returned malformed evidence (exit={status_result.returncode})") from error
+    if not isinstance(initial, dict):
+        raise GateError("FAIL", f"protected parent status returned invalid evidence (exit={status_result.returncode})")
+    initial_status = initial.get("status")
+    factory_reset_done = False
+    prior_factory_reset_attempt_id = None
+    prior_provision_attempt_id = None
+    reconciled_attempt_ids = []
+    if initial_status == "AMBIGUOUS":
+        interrupted_origin = _replacement_provision_origin(data["candidate_sha"], repo)
+        if interrupted_origin is not None:
+            raise GateError(
+                "BLOCKED",
+                "replacement provisioning provenance exists but current parent identity is AMBIGUOUS; preserve the disk and do not factory-reset",
+                category="provenance_parent_identity_ambiguous",
+            )
+        active("retirement")
+        _parent_ok(root, "factory-reset", interactive=True, timeout=900)
+        _, initial = _parent_json(root, "status", "--json")
+        if initial.get("status") != "NOT_CREATED":
+            raise GateError("FAIL", "authorized factory reset did not produce a fresh NOT_CREATED state")
+        passed("retirement", {"status": "FACTORY_RESET", "old_parent_data_destroyed": True,
+                               "scope": "fixed Little Mester persistent-parent state directory"})
+        initial_status = "NOT_CREATED"
+        factory_reset_done = True
+        prior_factory_reset_attempt_id = data["attempt_id"]
+        prior_provision_attempt_id = data["attempt_id"]
+    elif status_result.returncode:
+        raise GateError("FAIL", f"protected parent status returned nonzero (exit={status_result.returncode})")
+    if initial_status in ("NOT_CREATED", "UNPROVISIONED") and not factory_reset_done:
+        interrupted_origin = _replacement_provision_origin(data["candidate_sha"], repo)
+        if interrupted_origin is not None:
+            prior_factory_reset_attempt_id = interrupted_origin["factory_reset_attempt_id"]
+            prior_provision_attempt_id = interrupted_origin["attempt_id"]
+            reconciled_attempt_ids = interrupted_origin.get("reconciled_attempt_ids", [])
+            if reconciled_attempt_ids:
+                data["evidence"]["provenance_reconciliation"] = {
+                    "factory_reset_attempt_id": prior_factory_reset_attempt_id,
+                    "superseded_attempt_ids": reconciled_attempt_ids,
+                    "prior_reports_preserved": True,
+                    "basis": "owner-approved reset completed and protected status is NOT_CREATED",
+                }
+                _checkpoint(report_dir, data)
+    retired_disk = initial.get("retired_disk_identity")
+    disk = initial.get("disk") if isinstance(initial.get("disk"), dict) else {}
+    same_disk_resume = False
+    resume_origin = None
+    is_replacement = (
+        bool(initial.get("retired_bundle"))
+        and initial_status in ("RUNNING", "STARTING", "STOPPED", "UNPROVISIONED")
+        and (retired_disk is None
+             or (retired_disk.get("device"), retired_disk.get("inode"))
+                != (disk.get("device"), disk.get("inode"))
+             or retired_disk.get("device") is None and initial_status == "UNPROVISIONED")
+    )
+    same_disk_resume = False
+    resume_already_running = False
+    resume_origin = None
+    stopped_id = None
+    if initial_status == "RUNNING":
+        resume_origin = _replacement_provision_origin(data["candidate_sha"], repo)
+        if resume_origin is not None:
+            running_id = _verified_resume_parent(initial)
+            recorded_disk = resume_origin.get("disk_identity")
+            if recorded_disk is None or recorded_disk != {
+                    "device": running_id["disk_device"], "inode": running_id["disk_inode"]}:
+                raise GateError(
+                    "BLOCKED", "RUNNING disk does not match the prior acceptance provenance; preserve it",
+                    category="provenance_running_disk_identity_mismatch",
+                )
+            stopped_id = running_id
+            same_disk_resume = True
+            resume_already_running = True
+            prior_factory_reset_attempt_id = resume_origin["factory_reset_attempt_id"]
+            passed("retirement", {
+                "status": "NO_RETIREMENT_ALREADY_RUNNING_REPLACEMENT",
+                "prior_attempt_id": resume_origin["attempt_id"],
+                "factory_reset_attempt_id": prior_factory_reset_attempt_id,
+                "old_parent_data_destroyed": False,
+                "disk_identity": {"device": running_id["disk_device"],
+                "inode": running_id["disk_inode"]},
+            })
+        elif is_replacement:
+            raise GateError(
+                "BLOCKED",
+                "RUNNING replacement lacks a complete private disk-provenance chain; preserve it without retirement",
+                category="provenance_running_disk_unbound",
+            )
+    if initial_status == "STARTING":
+        raise GateError("BLOCKED", "parent startup is still STARTING; no retire, reset, replacement, or second writer was attempted")
+    if initial_status == "RETIRING":
+        active("retirement")
+        _parent_ok(root, "retire", interactive=True, timeout=900)
+        _, initial = _parent_json(root, "status", "--json")
+        if initial.get("status") != "RETIRED":
+            raise GateError("FAIL", "resumable retirement did not reach its committed RETIRED state")
+        passed("retirement", {"status": "RESUMED_RETIRED", "retired_bundle": initial.get("retired_bundle"),
+                               "old_disk_retained": _has_retained_disk(initial)})
+        initial_status = "RETIRED"
+        is_replacement = False
+    elif initial_status == "STOPPED":
+        resume_origin = _replacement_provision_origin(data["candidate_sha"], repo)
+        if resume_origin is None:
+            raise GateError(
+                "BLOCKED",
+                "STOPPED parent has no private reset-and-failed-start provenance for this candidate; it will not be retired or replaced",
+                category="provenance_stopped_disk_unbound",
+            )
+        prior_factory_reset_attempt_id = resume_origin["factory_reset_attempt_id"]
+        stopped_id = _verified_resume_parent(initial)
+        recorded_disk = resume_origin.get("disk_identity")
+        if recorded_disk is None or recorded_disk != {
+                "device": stopped_id["disk_device"], "inode": stopped_id["disk_inode"]}:
+            raise GateError(
+                "BLOCKED", "STOPPED disk does not match the prior failed-provision report; preserve it",
+                category="provenance_stopped_disk_identity_mismatch",
+            )
+        same_disk_resume = True
+        passed("retirement", {
+            "status": "NO_RETIREMENT_SAME_DISK_RESUME",
+            "prior_attempt_id": resume_origin["attempt_id"],
+            "factory_reset_attempt_id": resume_origin["factory_reset_attempt_id"],
+            "old_parent_data_destroyed": False,
+            "disk_identity": {"device": stopped_id["disk_device"],
+                              "inode": stopped_id["disk_inode"]},
+        })
+    elif (initial_status not in ("RETIRED", "NOT_CREATED")
+          and not is_replacement and not same_disk_resume):
+        active("retirement")
+        _parent_ok(root, "retire", interactive=True, timeout=900)
+        _, initial = _parent_json(root, "status", "--json")
+        if initial.get("status") != "RETIRED":
+            raise GateError("FAIL", "old parent was not safely retired into a retained bundle")
+        passed("retirement", {"status": "RETIRED", "retired_bundle": initial.get("retired_bundle"),
+                               "old_disk_retained": _has_retained_disk(initial)})
+        initial_status = "RETIRED"
+        is_replacement = False
+    elif initial_status == "RETIRED":
+        passed("retirement", {"status": "ALREADY_RETIRED",
+                               "old_disk_retained": _has_retained_disk(initial)})
+    elif initial_status == "NOT_CREATED" and not factory_reset_done:
+        passed("retirement", {"status": "NO_PRIOR_PARENT"})
+    elif is_replacement:
+        passed("retirement", {"status": "RETIRED_BUNDLE_PRESERVED",
+                               "old_disk_retained": _has_retained_disk(initial)})
+
+    if same_disk_resume:
+        expected_disk = (stopped_id["disk_device"], stopped_id["disk_inode"])
+        approval = (f"RESUME SAME DISK parent=default candidate={data['candidate_sha']} "
+                    f"prior_attempt={resume_origin['attempt_id']} from={initial_status} "
+                    f"run={stopped_id['run_id']} disk={expected_disk[0]}:{expected_disk[1]}")
+        if not resume_already_running:
+            _owner_approval(
+                "Prior replacement provenance is recorded. Confirm acceptance against this exact STOPPED parent/disk; only an identity-checked start will be attempted. No reset, retirement, replacement, or resize will be performed.",
+                approval,
+            )
+        data["evidence"]["provisioning_origin"] = {
+            "prior_attempt_id": resume_origin["attempt_id"],
+            "factory_reset_attempt_id": resume_origin["factory_reset_attempt_id"],
+            "candidate_sha": data["candidate_sha"],
+            "disk_identity": {"device": expected_disk[0], "inode": expected_disk[1]},
+            "resume_from_status": initial_status,
+            "parent_run_id": stopped_id["run_id"],
+            "owner_confirmed_same_disk_resume": not resume_already_running,
+            "already_running_owner_approval_in_prior_attempt": resume_already_running,
+            "reset_or_retirement_repeated": False,
+            "reconciled_attempt_ids": resume_origin.get("reconciled_attempt_ids", []),
+        }
+        _checkpoint(report_dir, data)
+        _, immediately_before = _parent_json(root, "status", "--json")
+        if (_identity(immediately_before) != stopped_id
+                or immediately_before.get("status") != initial_status):
+            raise GateError("BLOCKED", "parent identity changed before same-disk acceptance resume; no lifecycle action was attempted")
+        if resume_already_running:
+            passed("fresh_provision", {"status": "ALREADY_RUNNING_VERIFIED_RESUME",
+                "same_disk_identity_validated": True,
+                "disk_identity": {"device": expected_disk[0], "inode": expected_disk[1]}})
+        else:
+            active("fresh_provision")
+            try:
+                up_result = _parent_command(
+                    root, "up", "--capacity-gib", "64",
+                    "--expected-disk-device", str(expected_disk[0]),
+                    "--expected-disk-inode", str(expected_disk[1]), timeout=1100)
+            except subprocess.SubprocessError:
+                failure = {"operation": "parent up", "exit_status": None,
+                           "stage": "command", "reason_category": "command_timeout_or_spawn_failure"}
+                failure.update(_post_failure_parent_evidence(root))
+                data["evidence"]["fresh_provision_failure"] = failure
+                origin = data["evidence"].get("provisioning_origin")
+                failure_disk = failure.get("post_failure_disk_identity")
+                if isinstance(origin, dict) and isinstance(failure_disk, dict):
+                    origin["disk_identity"] = failure_disk
+                _checkpoint(report_dir, data)
+                raise GateError("FAIL", "same-disk parent up did not complete; sanitized failure evidence was recorded")
+            if up_result.returncode:
+                failure = _parent_up_failure(up_result.stderr, up_result.returncode)
+                failure.update(_post_failure_parent_evidence(root))
+                data["evidence"]["fresh_provision_failure"] = failure
+                origin = data["evidence"].get("provisioning_origin")
+                failure_disk = failure.get("post_failure_disk_identity")
+                if isinstance(origin, dict) and isinstance(failure_disk, dict):
+                    origin["disk_identity"] = failure_disk
+                _checkpoint(report_dir, data)
+                raise GateError("FAIL", f"same-disk parent up failed (exit={up_result.returncode}; stage={failure['stage']}; reason={failure['reason_category']})")
+    elif initial_status not in ("RUNNING",):
+        active("fresh_provision")
+        status_now = initial_status
+        approval = f"PROVISION parent=default capacity_gib=64 from={status_now}"
+        prompt = ("The old VM state has been factory-reset. Approve fresh persistent VM provisioning."
+                  if factory_reset_done else
+                  "The old VM remains retained. Approve fresh persistent VM provisioning.")
+        _owner_approval(prompt, approval)
+        data["evidence"]["fresh_provision_approval"] = {
+            "owner_approved": True,
+            "candidate_sha": data["candidate_sha"],
+            "capacity_gib": 64,
+            "from_status": status_now,
+            "factory_reset_attempt_id": prior_factory_reset_attempt_id,
+        }
+        if prior_factory_reset_attempt_id is not None:
+            data["evidence"]["provisioning_origin"] = {
+                "prior_attempt_id": (prior_provision_attempt_id
+                                     if prior_provision_attempt_id is not None
+                                     else data["attempt_id"]),
+                "factory_reset_attempt_id": prior_factory_reset_attempt_id,
+                "candidate_sha": data["candidate_sha"],
+                "disk_identity": None,
+                "owner_approved_fresh_provision": True,
+                "owner_confirmed_same_disk_resume": False,
+                "reconciled_attempt_ids": reconciled_attempt_ids,
+            }
+        _checkpoint(report_dir, data)
+        try:
+            up_result = _parent_command(root, "up", "--capacity-gib", "64", timeout=1100)
+        except subprocess.SubprocessError:
+            failure = {"operation": "parent up", "exit_status": None,
+                       "stage": "command", "reason_category": "command_timeout_or_spawn_failure"}
+            failure.update(_post_failure_parent_evidence(root))
+            data["evidence"]["fresh_provision_failure"] = failure
+            origin = data["evidence"].get("provisioning_origin")
+            failure_disk = failure.get("post_failure_disk_identity")
+            if isinstance(origin, dict) and isinstance(failure_disk, dict):
+                origin["disk_identity"] = failure_disk
+            _checkpoint(report_dir, data)
+            raise GateError("FAIL", "parent up did not complete; sanitized failure evidence was recorded")
+        if up_result.returncode:
+            failure = _parent_up_failure(up_result.stderr, up_result.returncode)
+            failure.update(_post_failure_parent_evidence(root))
+            data["evidence"]["fresh_provision_failure"] = failure
+            origin = data["evidence"].get("provisioning_origin")
+            failure_disk = failure.get("post_failure_disk_identity")
+            if isinstance(origin, dict) and isinstance(failure_disk, dict):
+                origin["disk_identity"] = failure_disk
+            _checkpoint(report_dir, data)
+            raise GateError("FAIL", f"parent up failed (exit={up_result.returncode}; stage={failure['stage']}; reason={failure['reason_category']})")
+    else:
+        passed("fresh_provision", {"status": "ALREADY_RUNNING_VERIFIED_REPLACEMENT",
+                                   "same_disk_identity_validated": True})
+    _, before_identity = _parent_json(root, "status", "--json")
+    if before_identity.get("status") != "RUNNING":
+        raise GateError("FAIL", "parent up returned without a verified RUNNING parent")
+    new_identity = _identity(before_identity)
+    if (new_identity.get("disk_format") != "qcow2"
+            or new_identity.get("disk_path") != "disk.qcow2"
+            or new_identity.get("disk_provisioned") is not True
+            or new_identity.get("virtual_capacity_gib") != 64
+            or type(new_identity.get("disk_device")) is not int
+            or type(new_identity.get("disk_inode")) is not int
+            or not isinstance(new_identity.get("run_id"), str)
+            or not isinstance(new_identity.get("supervisor_pid"), int)):
+        raise GateError("FAIL", "replacement lacks verified qcow2, capacity, disk, run or supervisor identity")
+    if same_disk_resume and (
+            (new_identity.get("disk_device"), new_identity.get("disk_inode"))
+            != (stopped_id["disk_device"], stopped_id["disk_inode"])):
+        raise GateError("FAIL", "same-disk retry changed the provisioned disk identity")
+    if not same_disk_resume and prior_factory_reset_attempt_id is not None:
+        data["evidence"]["provisioning_origin"] = {
+            "prior_attempt_id": (prior_provision_attempt_id
+                                 if prior_provision_attempt_id is not None
+                                 else data["attempt_id"]),
+            "factory_reset_attempt_id": prior_factory_reset_attempt_id,
+            "candidate_sha": data["candidate_sha"],
+            "disk_identity": {"device": new_identity["disk_device"],
+                              "inode": new_identity["disk_inode"]},
+            "owner_approved_fresh_provision": True,
+            "owner_confirmed_same_disk_resume": False,
+            "reconciled_attempt_ids": reconciled_attempt_ids,
+        }
+        _checkpoint(report_dir, data)
+    old_identity = initial.get("retired_disk_identity")
+    if isinstance(old_identity, dict) and (old_identity.get("device"), old_identity.get("inode")) == (
+            new_identity["disk_device"], new_identity["disk_inode"]):
+        raise GateError("FAIL", "fresh parent reused the retired guest disk identity")
+    passed("fresh_provision", new_identity)
+    passed("parent_identity", new_identity)
+
+    active("duplicate_up")
+    _parent_ok(root, "up", "--capacity-gib", "64", timeout=90)
+    _, duplicate_identity = _parent_json(root, "status", "--json")
+    if _identity(duplicate_identity) != new_identity:
+        raise GateError("FAIL", "idempotent parent up changed run or disk identity")
+    passed("duplicate_up", {"same_run_and_disk": True})
+
+    active("guest_compatibility")
+    live = inspect_live_parent(root)
+    if not live.get("m2_contract_compatible"):
+        raise GateError("FAIL", "fresh guest protected asset inventory does not match the candidate")
+    passed("guest_compatibility", {
+        "m2_contract_compatible": True,
+        "guest_opencode_version": live.get("guest_opencode_version"),
+        "guest_assets": live.get("guest_assets"),
+        "disk_identity": new_identity,
+    })
+
+    active("owner_interaction")
+    _, guest_term = _parent_json(root, "term-check", "--term", clean_env()["TERM"], timeout=30)
+    if (guest_term.get("status") != "PASS" or guest_term.get("terminfo_entry") is not True
+            or guest_term.get("clear_capability") is not True
+            or guest_term.get("clear_command") is not True):
+        raise GateError("FAIL", "propagated host TERM is unavailable or clear does not work in the guest")
+    passed("owner_interaction", {"controlling_terminal": True, "host_term_validated": True,
+                                  "guest_terminal": guest_term})
+
+    active("ssh_reconnect")
+    _parent_ok(root, "inspect", timeout=60)
+    _parent_ok(root, "inspect", timeout=60)
+    if _identity(_parent_json(root, "status", "--json")[1]) != new_identity:
+        raise GateError("FAIL", "pinned SSH reconnection changed parent identity")
+    print("Pinned plain SSH connection test: at the shell run `pwd`, then `exit`.")
+    _parent_ok(root, "ssh", interactive=True, timeout=900)
+    print("Reconnect once more; at the shell run `pwd`, then `exit`.")
+    _parent_ok(root, "ssh", interactive=True, timeout=900)
+    for prompt in ("Did both shells show /home/mester and exit cleanly? Type YES to confirm.",):
+        if input(prompt + " ").strip() != "YES":
+            raise GateError("FAIL", "owner did not confirm both pinned SSH shell sessions")
+    passed("ssh_reconnect", {"strict_host_key_pinned": True, "two_nonforwarding_connections": True})
+
+    active("m1_recovery_guards")
+    refused = _parent_command(root, "recover", "--dry-run", "--json", timeout=30)
+    if (refused.returncode != 2 or refused.stderr.decode("utf-8", "replace").strip()
+            != "REFUSED: live supervisor or lifecycle operation owns the parent lock"):
+        raise GateError("FAIL", "live-supervisor recovery refusal was not positively verified")
+    passed("m1_recovery_guards", {"live_lock_refused": True,
+                                  "normal_recovery_execution": "NOT_RUN_BY_DESIGN"})
+
+    active("network_boundaries")
+    _, network = _parent_json(root, "network-check", timeout=45)
+    if (network.get("public_proxy") != "PASS" or network.get("private_proxy") != "BLOCKED"
+            or network.get("direct_public") != "BLOCKED"):
+        raise GateError("FAIL", "approved public proxy or private/direct egress boundary failed")
+    passed("network_boundaries", network)
+
+    active("authentication")
+    print("Complete real ChatGPT browser authentication in the host browser. Do not copy the OAuth URL or token.")
+    _parent_ok(root, "auth", interactive=True, timeout=660)
+    _, auth_state = _parent_json(root, "auth-check", timeout=45)
+    if auth_state.get("openai_credential_present") is not True:
+        raise GateError("FAIL", "real OpenAI browser authentication did not create an active credential")
+    passed("authentication", {"active_openai_credential_present": True,
+                               "credential_contents_recorded": False})
+
+    active("model_list_behavior")
+    _, model_list = _parent_json(root, "models-check", "--model", model, timeout=120)
+    if (model_list.get("status") != "OK"
+            or model_list.get("model_list_command_succeeded") is not True
+            or model_list.get("selected_openai_model_listed") is not True
+            or model_list.get("empty_user_data_before_probe") is not True):
+        raise GateError("FAIL", "protected remote model-list behavior did not list the selected OpenAI model")
+    passed("model_list_behavior", {"selected_model_listed": True, "empty_user_data_before_probe": True,
+                                   "telemetry_configuration": "disabled_in_protected_runtime",
+                                   "share_configuration": "disabled_in_protected_runtime"})
+
+    active("telemetry_behavior")
+    _, telemetry = _parent_json(root, "telemetry-check", timeout=90)
+    if (telemetry.get("status") != "PASS"
+            or telemetry.get("both_runtime_invocations_succeeded") is not True
+            or telemetry.get("positive_control_exported_to_loopback") is not True
+            or telemetry.get("no_exporter_configured_control_exported_nothing") is not True):
+        raise GateError("FAIL", "pinned runtime failed the loopback OTLP positive/negative control")
+    passed("telemetry_behavior", {**telemetry,
+        "scope": "bounded local loopback control; not a claim about all future network traffic"})
+
+    active("terminal_clipboard_mitigation")
+    print("Before TUI use, enable OSC-52/remote clipboard-write blocking in the selected host terminal profile.")
+    profile = input("Terminal profile name/version (do not include private host details): ").strip()
+    if not profile:
+        raise GateError("BLOCKED", "selected terminal profile was not identified")
+    print("Harmless clipboard canary follows. Verify the host clipboard does not become LM-CLIPBOARD-CANARY.")
+    sys.stdout.write("\033]52;c;TE0tQ0xJUEJPQVJELUNBTkFSWQ==\a")
+    sys.stdout.flush()
+    observed = input("Type exactly CLIPBOARD_UNCHANGED only after checking the clipboard: ").strip()
+    if observed != "CLIPBOARD_UNCHANGED":
+        raise GateError("BLOCKED", "terminal clipboard mitigation was not confirmed")
+    passed("terminal_clipboard_mitigation", {"profile_reported": True,
+        "harmless_osc52_canary": "owner_observed_unchanged", "residual_terminal_control_risk": True})
+
+    active("workspace_persistence")
+    canary = _parent_command(root, "canary-create", timeout=45)
+    if canary.returncode:
+        canary = _parent_command(root, "canary-check", timeout=45)
+        if canary.returncode:
+            raise GateError("FAIL", "guest workspace canary could not be created or safely resumed")
+
+    active("protected_configuration")
+    prepared = _parent_command(root, "protection-prepare", timeout=45)
+    if prepared.returncode:
+        # Resume only an exact prior fixture from an interrupted acceptance attempt.
+        check = _parent_command(root, "protection-check", timeout=45)
+        if check.returncode:
+            raise GateError("BLOCKED", "workspace has conflicting hostile-config probe files; preserved them")
+    passed("protected_configuration", {"hostile_project_fixture": "prepared_or_resumed"})
+
+    token1 = secrets.token_hex(6).upper()
+    active("model_response_before_restart")
+    _interactive_tui(root, continue_session=False, title="Protected TUI and real model acceptance",
+                     token=token1, model=model)
+    probe1 = _probe_history(root, token1, model)
+    if probe1.get("first_response_persisted") is not True:
+        raise GateError("FAIL", "no matching real assistant response for the selected model was saved")
+    passed("model_response_before_restart", {"model": model,
+        "assistant_response_in_sqlite": True,
+        "session_id_sha256": probe1.get("session_id_sha256")})
+
+    active("protected_configuration")
+    _, protection = _parent_json(root, "protection-check", timeout=60)
+    _require_probe(protection, (
+        "project_config_ignored", "protected_update_disabled", "runtime_config_update_disabled",
+        "protected_share_disabled", "runtime_config_sharing_disabled", "update_share_positive_control_accepted",
+        "hostile_fixture_is_expected_negative_control",
+        "share_command_absent_from_pinned_runtime", "runtime_is_pinned_v225",
+        "hostile_plugin_not_executed", "runtime_cwd_is_workspace",
+        "runtime_project_config_disabled", "runtime_config_path_protected",
+        "runtime_plugin_config_protected", "runtime_autoupdate_disabled",
+        "runtime_sharing_disabled", "runtime_telemetry_optout", "runtime_error_reporting_off",
+        "runtime_otel_sdk_disabled", "runtime_otel_exporters_disabled",
+        "runtime_otlp_exporter_absent"),
+        "protected configuration")
+    _parent_ok(root, "protection-cleanup", timeout=45)
+    passed("protected_configuration", protection)
+
+    active("tmux_controls")
+    attach_resize = _exercise_simultaneous_attach_and_resize(root)
+    _exercise_tui_keys(root)
+    passed("tmux_controls", {**attach_resize, "cancel_keys": ["Escape", "N", "Ctrl-C"],
+        "confirm_keys": ["Q"], "ctrl_d_preserved_session": True})
+
+    active("credentials_persistence")
+    _, auth_before = _parent_json(root, "auth-check", timeout=45)
+    if auth_before.get("openai_credential_present") is not True:
+        raise GateError("FAIL", "active ChatGPT credential disappeared before ordinary restart")
+
+    active("same_disk_restart")
+    disk_id = f"{new_identity['disk_device']}:{new_identity['disk_inode']}"
+    approval = f"STOP-AND-RESTART parent=default run={new_identity['run_id']} disk={disk_id}"
+    _owner_approval("Authorize the ordinary persistent-parent stop/up test (no recovery, no disk deletion).", approval)
+    _parent_ok(root, "stop", timeout=120)
+    _, stopped = _parent_json(root, "status", "--json")
+    if stopped.get("status") != "STOPPED" or _identity(stopped).get("disk_device") != new_identity["disk_device"] \
+            or _identity(stopped).get("disk_inode") != new_identity["disk_inode"]:
+        raise GateError("FAIL", "ordinary stop did not retain the same guest disk identity")
+    _, recovery = _parent_json(root, "recover", "--dry-run", "--json", timeout=45)
+    _, reconciliation = _parent_json(root, "reconcile", "--dry-run", "--json", timeout=45)
+    _require_clean_stopped_previews(recovery, reconciliation)
+    _parent_ok(root, "up", "--capacity-gib", "64", timeout=1100)
+    _, after = _parent_json(root, "status", "--json")
+    after_id = _identity(after)
+    if (after.get("status") != "RUNNING" or after_id["run_id"] == new_identity["run_id"]
+            or (after_id["disk_device"], after_id["disk_inode"])
+               != (new_identity["disk_device"], new_identity["disk_inode"])):
+        raise GateError("FAIL", "ordinary up failed same-disk/fresh-run identity validation")
+    passed("same_disk_restart", {"same_disk": True, "new_run_id": True,
+        "disk_device": after_id["disk_device"], "disk_inode": after_id["disk_inode"],
+        "stopped_recovery_preview_action": recovery.get("action"),
+        "stopped_recovery_preview_status": recovery.get("status"),
+        "stopped_reconciliation_preview_action": reconciliation.get("action"),
+        "stopped_reconciliation_preview_status": reconciliation.get("status")})
+
+    active("history_persistence")
+    canary_after = _parent_command(root, "canary-check", timeout=45)
+    if canary_after.returncode:
+        raise GateError("FAIL", "guest workspace file did not survive ordinary stop/up")
+    passed("workspace_persistence", {"guest_disk_backed_workspace_canary_survived_stop_up": True})
+    required_m1_gates = (
+        "parent_identity", "duplicate_up", "ssh_reconnect", "m1_recovery_guards",
+        "same_disk_restart", "workspace_persistence",
+    )
+    if any(data["gates"].get(name) != "PASS" for name in required_m1_gates):
+        raise GateError("FAIL", "required live M1 revalidation checks did not all pass")
+    passed("m1_revalidation", {
+        "result": "PASS",
+        "replacement_disk_identity": {"device": new_identity["disk_device"],
+                                       "inode": new_identity["disk_inode"]},
+        "executed_checks": {
+            "verified_parent_identity": True,
+            "duplicate_up_preserved_run_and_disk": True,
+            "two_pinned_ssh_reconnections_owner_confirmed": True,
+            "live_recovery_guard_refused_while_supervisor_owned": True,
+            "clean_stopped_recovery_and_reconciliation_previews": True,
+            "ordinary_stop_up_preserved_disk_and_created_fresh_run": True,
+            "workspace_canary_survived_same_disk_restart": True,
+        },
+        "destructive_stale_boot_recovery_repeated": False,
+        "prior_owner_accepted_destructive_recovery": "historical evidence only; not re-executed",
+    })
+    restart_live = inspect_live_parent(root)
+    if not restart_live.get("m2_contract_compatible"):
+        raise GateError("FAIL", "protected guest assets/configuration changed across ordinary stop/up")
+    _, auth_after = _parent_json(root, "auth-check", timeout=45)
+    if auth_after.get("openai_credential_present") is not True:
+        raise GateError("FAIL", "active ChatGPT credential did not survive ordinary stop/up")
+    passed("credentials_persistence", {"active_openai_credential_after_restart": True})
+    token2 = secrets.token_hex(6).upper()
+    active("model_response_after_restart")
+    _interactive_tui(root, continue_session=True, title="Reopen saved conversation after ordinary restart",
+                     token=token2, model=model)
+    _, protection_after = _parent_json(root, "protection-check", timeout=60)
+    _require_probe(protection_after, (
+        "project_config_ignored", "protected_update_disabled", "runtime_config_update_disabled",
+        "protected_share_disabled", "runtime_config_sharing_disabled", "update_share_positive_control_accepted",
+        "hostile_fixture_cleaned_after_probe",
+        "share_command_absent_from_pinned_runtime", "runtime_is_pinned_v225",
+        "hostile_plugin_not_executed", "runtime_cwd_is_workspace",
+        "runtime_project_config_disabled", "runtime_config_path_protected",
+        "runtime_plugin_config_protected", "runtime_autoupdate_disabled",
+        "runtime_sharing_disabled", "runtime_telemetry_optout", "runtime_error_reporting_off",
+        "runtime_otel_sdk_disabled", "runtime_otel_exporters_disabled",
+        "runtime_otlp_exporter_absent"),
+        "post-restart protected configuration")
+    passed("configuration_persistence", protection_after)
+    active("history_persistence")
+    probe2 = _probe_history(root, token2, model, prior_token=token1)
+    if (probe2.get("first_response_persisted") is not True
+            or probe2.get("second_response_persisted") is not True
+            or probe2.get("same_session") is not True
+            or probe2.get("conversation_ordered") is not True
+            or probe2.get("session_id_sha256") != probe1.get("session_id_sha256")):
+        raise GateError("FAIL", "saved OpenCode conversation was not reopened and continued on the same model/session")
+    passed("model_response_after_restart", {"model": model,
+        "saved_conversation_reopened": True, "second_assistant_response_in_same_session": True,
+        "session_id_sha256": probe2.get("session_id_sha256")})
+    passed("history_persistence", {"saved_conversation_reopened": True,
+        "same_session_continued_after_stop_up": True, "session_id_sha256": probe2.get("session_id_sha256")})
+
+    active("tmux_controls")
+    _tui_key(root, "ctrl-c")
+    _wait_tui(root, lambda x: x.get("exit_dialog_visible") is True)
+    _tui_key(root, "y")
+    _wait_tui(root, lambda x: x.get("session_count") == 0)
+    passed("tmux_controls", {"confirm_keys": ["Q", "Y"],
+        "cancel_keys": ["Escape", "N", "Ctrl-C"], "simultaneous_attach_and_resize": True,
+        "ctrl_d_preserved_session": True})
+
+    active("temporary_cleanup")
+    _parent_ok(root, "canary-remove", timeout=45)
+    # The hostile fixture is removed immediately after its check; if it remains,
+    # the fixed cleanup must refuse rather than unlink owner-modified data.
+    _, final_inspect = _parent_json(root, "inspect", timeout=60)
+    if final_inspect.get("/home/mester/.local/share/opencode/tmux", {}).get("socket_count") != 0:
+        raise GateError("FAIL", "protected TUI tmux socket/process resources remain after confirmation")
+    passed("temporary_cleanup", {"workspace_canary_removed": True,
+        "hostile_fixture_removed": True, "tmux_socket_count": 0,
+        "browser_auth_helper_cleanup": "returned_success_with_internal_identity_checks"})
+    _, final = _parent_json(root, "status", "--json")
+    if final.get("status") != "RUNNING" or _identity(final)["disk_inode"] != new_identity["disk_inode"]:
+        raise GateError("FAIL", "final persistent parent state is not the verified RUNNING replacement")
+    passed("final_vm_state", _identity(final))
+    data["status"] = "PASS"
+    retirement_evidence = data["evidence"].get("retirement", {})
+    data["evidence"]["m2_owner_acceptance"] = {
+        "model": model,
+        "old_disk_retained": bool(retirement_evidence.get("old_disk_retained")),
+        "old_parent_data_destroyed_by_authorized_factory_reset": (
+            factory_reset_done or prior_factory_reset_attempt_id is not None),
+        "factory_reset_completed_in_prior_attempt": prior_factory_reset_attempt_id,
+        "replacement_disk_identity": {"device": new_identity["disk_device"], "inode": new_identity["disk_inode"]},
+        "final_run_id": _identity(final)["run_id"],
+        "real_auth_and_model_responses": True,
+        "owner_terminal_clipboard_observation": "reported_unchanged",
+        "conversation_content_recorded": False,
+    }
+
+
+def print_report(data: dict) -> None:
+    print(f"Candidate: {data['candidate_sha']}")
+    print(f"Report: {data['evidence']['report']}")
+    for name, status in data["gates"].items():
+        print(f"{name}: {status}")
+    if data["mode"] in ("system_vm_verify", "system_vm_accept"):
+        diagnostic = data.get("evidence", {}).get("failure_diagnostic")
+        if isinstance(diagnostic, dict):
+            print("system_vm_failure_diagnostic=" + json.dumps(diagnostic, sort_keys=True,
+                                                                  separators=(",", ":")))
+    print(f"OVERALL: {data['status']}")
+    if data["mode"] == "parent_accept":
+        print("M2_OWNER_ACCEPTANCE_PASS" if data["status"] == "PASS"
+              and all(value == "PASS" for value in data["gates"].values())
+              else "M2_OWNER_ACCEPTANCE_FAIL")
+
+
+def run_smoke(root: pathlib.Path, workspace: str, model: str, state_before: set[str], data: dict,
+              debug: bool = False) -> None:
+    resolved = verify_workspace_mount(workspace, exact_tmpfs=False)
+    if list(resolved.iterdir()):
+        raise GateError("BLOCKED", "selected smoke workspace must be empty before launch")
+    command = [str(root / "lab-vm"), "smoke", "--workspace", str(resolved), "--model", model]
+    if debug:
+        command.insert(2, "--debug")
+    result = subprocess.run(
+        command,
+        stdin=None,
+        stdout=None,
+        stderr=None,
+        env=clean_env(desktop_session=True),
+        check=False,
+    )
+    created = list_runs(state_root()) - state_before
+    if len(created) == 1:
+        run_id = next(iter(created))
+        data["evidence"]["vm_run_id"] = run_id
+    elif created:
+        data["notes"].append("ambiguous new VM run directories; none were modified")
+    data["gates"]["run"] = "PASS" if result.returncode == 0 else "BLOCKED"
+    data["evidence"]["smoke_exit_code"] = result.returncode
+    if result.returncode:
+        raise GateError("BLOCKED", "protected smoke returned nonzero; inspect its retained private run logs")
+    if len(created) != 1:
+        raise GateError("BLOCKED", "smoke succeeded but a unique new VM run directory was not observed")
+    try:
+        cleanup = inspect_cleanup(data["candidate_sha"], next(iter(created)), root)
+    except GateError as error:
+        data["gates"]["cleanup"] = error.status
+        raise
+    data["gates"]["cleanup"] = cleanup["status"]
+    data["evidence"]["cleanup"] = cleanup
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=__doc__)
+    modes = p.add_mutually_exclusive_group()
+    for name in ("preflight", "install", "storage-proof", "run", "verify-cleanup", "all", "parent-accept"):
+        modes.add_argument(f"--{name}", action="store_true", dest=name.replace("-", "_"))
+    modes.add_argument("--system-vm", choices=("verify", "accept", "up", "down", "status", "ssh", "auth", "tui"),
+                       help="verify read-only, explicitly accept the fixed VM lifecycle, or run one fixed operation")
+    p.add_argument("--prepare-dependencies", choices=("production", "acceptance", "system-install"),
+                   help="check host requirements and, with separate approval, install supported missing packages")
+    p.add_argument("--approve-system-vm-lifecycle", action="store_true",
+                   help="explicitly authorize system VM lifecycle acceptance")
+    p.add_argument("--milestone", choices=("M2",), help="owner acceptance milestone")
+    p.add_argument("--sha", type=full_sha, help="full lowercase 40-character candidate commit SHA")
+    p.add_argument("--prefix", type=install_prefix,
+                   help="protected root-owned install prefix (default: /opt/little-mester)")
+    p.add_argument("--repo", help="repository containing the exact candidate commit")
+    p.add_argument("--workspace", help="existing owner-provisioned bounded filesystem root")
+    p.add_argument("--model", help="exact OpenAI model identifier (required for --parent-accept)")
+    p.add_argument("--run-id", help="exact fresh VM run id for read-only cleanup verification")
+    p.add_argument("--debug", action="store_true", help="stream bounded, sanitized guest provisioning progress during --run/--all")
+    return p
+
+
+def full_sha(value: str) -> str:
+    if not SHA_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError("expected a full lowercase 40-character commit SHA")
+    return value
+
+
+def load_host_dependencies():
+    module_path = ROOT / "lib/vm/host-dependencies.py"
+    spec = importlib.util.spec_from_file_location("host_dependencies", module_path)
+    if spec is None or spec.loader is None:
+        raise GateError("BLOCKED", "shared host dependency checker is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    workflow_modes = ("preflight", "install", "storage_proof", "run", "verify_cleanup", "all", "parent_accept")
+    if args.prepare_dependencies and (
+            args.system_vm or args.approve_system_vm_lifecycle or args.sha or args.repo
+            or any(getattr(args, name) for name in workflow_modes)):
+        parser().error("--prepare-dependencies must be used on its own")
+    if args.prepare_dependencies:
+        try:
+            load_host_dependencies().ensure(args.prepare_dependencies)
+            return 0
+        except KeyboardInterrupt:
+            print("BLOCKED: dependency preparation interrupted; inspect package state before retrying", file=sys.stderr)
+            return 130
+        except (GateError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+            print(f"BLOCKED: dependency preparation failed ({error})", file=sys.stderr)
+            return 3
+    if not args.sha:
+        parser().error("--sha is required for acceptance and VM operations")
+    if args.approve_system_vm_lifecycle and args.system_vm != "accept":
+        parser().error("--approve-system-vm-lifecycle is valid only with --system-vm accept")
+    if args.system_vm:
+        if not args.repo:
+            parser().error("--system-vm requires --repo PATH for the candidate source repository")
+        if args.system_vm not in ("verify", "accept"):
+            try:
+                if args.system_vm in ("up", "ssh", "auth", "tui"):
+                    load_host_dependencies().ensure("production")
+                repo = pathlib.Path(args.repo).resolve(strict=True)
+                candidate_commit(repo, args.sha)
+                root = verify_install(repo, args.sha, args.prefix)
+                return owner_system_vm(root, args.system_vm)
+            except (GateError, OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+                print(f"BLOCKED: system VM owner command refused ({error})", file=sys.stderr)
+                return 3
+        try:
+            repo = pathlib.Path(args.repo).resolve(strict=True)
+            report_dir = new_report_dir()
+            mode = "system_vm_verify" if args.system_vm == "verify" else "system_vm_accept"
+            data = report_template(args.sha, mode, report_dir)
+            save_report(report_dir, data)
+        except (GateError, OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+            print(f"BLOCKED: system VM report initialization failed ({type(error).__name__})", file=sys.stderr)
+            return 3
+
+        current_gate = "candidate"
+
+        def record_gate(name: str, **evidence) -> None:
+            nonlocal current_gate
+            data["evidence"].update(evidence)
+            if name in data["gates"]:
+                data["gates"][name] = "PASS"
+                names = list(data["gates"])
+                index = names.index(name)
+                current_gate = names[index + 1] if index + 1 < len(names) else name
+            _checkpoint(report_dir, data)
+
+        try:
+            candidate_commit(repo, args.sha)
+            if args.system_vm == "accept":
+                load_host_dependencies().ensure("acceptance")
+            record_gate("candidate")
+            current_gate = "deployed_candidate_verification"
+            root = verify_install(repo, args.sha, args.prefix)
+            owner_system_vm(root, args.system_vm,
+                            approve_lifecycle=args.approve_system_vm_lifecycle,
+                            progress=record_gate)
+        except KeyboardInterrupt:
+            status, message = "BLOCKED", "interrupted; initial lifecycle state was restored when possible"
+        except GateError as error:
+            status, message = error.status, error.message
+        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+            if getattr(error, "safe_report_message", False):
+                status, message = "FAIL", f"system VM acceptance failed: {error}"
+            else:
+                status, message = "FAIL", f"system VM acceptance failed ({type(error).__name__})"
+        except Exception as error:
+            status, message = "FAIL", f"system VM acceptance failed ({type(error).__name__})"
+        else:
+            data["status"] = "PASS"
+            _checkpoint(report_dir, data)
+            print_report(data)
+            return 0
+
+        data["status"] = status
+        if data["gates"].get(current_gate) == "NOT_RUN":
+            data["gates"][current_gate] = status
+        data["notes"].append(message)
+        print_report(data)
+        try:
+            _checkpoint(report_dir, data)
+        except OSError as error:
+            reason = error.strerror or type(error).__name__
+            print(f"FAIL: acceptance report persistence failed ({type(error).__name__}: {reason})",
+                  file=sys.stderr)
+            print(f"{status}: {message}", file=sys.stderr)
+            return 3 if status == "BLOCKED" else 1
+        print(f"{status}: {message}", file=sys.stderr)
+        return 3 if status == "BLOCKED" else 1
+    modes = [name for name in (
+        "preflight", "install", "storage_proof", "run", "verify_cleanup", "all", "parent_accept",
+    ) if getattr(args, name)]
+    mode = modes[0] if modes else "preflight"
+    if (mode == "parent_accept") != (args.milestone == "M2"):
+        parser().error("--parent-accept requires --milestone M2, and --milestone is only valid with --parent-accept")
+    if mode == "parent_accept" and not args.repo:
+        parser().error("--parent-accept requires --repo PATH")
+    if mode == "parent_accept" and not args.model:
+        parser().error("--parent-accept requires --model openai/<model-id>")
+    if args.debug and mode not in ("run", "all"):
+        parser().error("--debug is supported only with --run or --all")
+    try:
+        repo = pathlib.Path(args.repo or ROOT).resolve(strict=True)
+        report_dir = new_report_dir()
+        data = report_template(args.sha, mode, report_dir)
+        save_report(report_dir, data)
+    except KeyboardInterrupt:
+        print("BLOCKED: interrupted during runner initialization; no report directory was trusted", file=sys.stderr)
+        if mode == "parent_accept":
+            print("M2_OWNER_ACCEPTANCE_FAIL")
+        return 3
+    except GateError as error:
+        print(f"{error.status}: {error.message}", file=sys.stderr)
+        if mode == "parent_accept":
+            print("M2_OWNER_ACCEPTANCE_FAIL")
+        return 3 if error.status == "BLOCKED" else 1
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        print(f"FAIL: runner initialization failed ({type(error).__name__}); details omitted", file=sys.stderr)
+        if mode == "parent_accept":
+            print("M2_OWNER_ACCEPTANCE_FAIL")
+        return 1
+
+    result_code = 0
+    current_gate = "candidate"
+    try:
+        candidate_commit(repo, args.sha)
+        data["gates"]["candidate"] = "PASS"
+        if mode == "verify_cleanup":
+            current_gate = "cleanup"
+            if not args.run_id:
+                raise GateError("BLOCKED", "--verify-cleanup requires --run-id")
+            verify_cleanup_report(args.sha, args.run_id)
+            root = verify_install(repo, args.sha, args.prefix)
+            cleanup = inspect_cleanup(args.sha, args.run_id, root)
+            data["gates"]["cleanup"] = cleanup["status"]
+            data["evidence"]["cleanup"] = cleanup
+            data["status"] = "PASS"
+        elif mode == "preflight":
+            current_gate = "preflight"
+            root = install_path(args.sha, args.prefix)
+            if root.exists():
+                root = verify_install(repo, args.sha, args.prefix)
+                installed_preflight(root, args.workspace)
+                data["gates"]["preflight"] = "PASS"
+                data["status"] = "PASS"
+            else:
+                data["gates"]["preflight"] = "BLOCKED"
+                data["notes"].append("protected install absent; read-only preflight did not install or execute the mutable candidate")
+                raise GateError("BLOCKED", "candidate is verified in Git but not yet installed")
+        elif mode == "parent_accept":
+            current_gate = "preflight"
+            root = verify_install(repo, args.sha, args.prefix)
+            data["gates"]["install"] = "PASS"
+            installed_preflight(root, None)
+            data["gates"]["preflight"] = "PASS"
+            current_gate = "parent_acceptance"
+            run_parent_acceptance(root, args.model, data, report_dir, repo)
+        elif mode in ("install", "all"):
+            current_gate = "install"
+            root = install_candidate(repo, args.sha, args.prefix)
+            data["gates"]["install"] = "PASS"
+            current_gate = "preflight"
+            installed_preflight(root, args.workspace)
+            data["gates"]["preflight"] = "PASS"
+            if mode == "install":
+                data["status"] = "PASS"
+            else:
+                current_gate = "storage_proof"
+                if not args.workspace or not args.model:
+                    raise GateError("BLOCKED", "--all requires --workspace and --model")
+                verify_workspace_mount(args.workspace, exact_tmpfs=True)
+                storage_proof(args.workspace)
+                data["gates"]["storage_proof"] = "PASS"
+                before = list_runs(state_root())
+                current_gate = "run"
+                run_smoke(root, args.workspace, args.model, before, data, debug=args.debug)
+                data["status"] = "PASS"
+        elif mode == "storage_proof":
+            current_gate = "preflight"
+            root = verify_install(repo, args.sha, args.prefix)
+            if not args.workspace:
+                raise GateError("BLOCKED", "--storage-proof requires --workspace")
+            installed_preflight(root, args.workspace)
+            data["gates"]["preflight"] = "PASS"
+            current_gate = "storage_proof"
+            storage_proof(args.workspace)
+            data["gates"]["storage_proof"] = "PASS"
+            data["status"] = "PASS"
+        elif mode == "run":
+            current_gate = "preflight"
+            root = verify_install(repo, args.sha, args.prefix)
+            if not args.workspace or not args.model:
+                raise GateError("BLOCKED", "--run requires --workspace and --model")
+            installed_preflight(root, args.workspace)
+            data["gates"]["preflight"] = "PASS"
+            before = list_runs(state_root())
+            current_gate = "run"
+            run_smoke(root, args.workspace, args.model, before, data, debug=args.debug)
+            data["status"] = "PASS"
+        else:
+            raise GateError("FAIL", "unsupported operation")
+    except KeyboardInterrupt:
+        data["status"] = "BLOCKED"
+        active = data.get("active_gate")
+        if active in data["gates"] and data["gates"][active] == "NOT_RUN":
+            data["gates"][active] = "BLOCKED"
+        if data["gates"].get(current_gate) == "NOT_RUN":
+            data["gates"][current_gate] = "BLOCKED"
+        data["notes"].append("interrupted; no automatic cleanup or historical deletion was attempted")
+        result_code = 3
+    except GateError as error:
+        data["status"] = error.status
+        if error.category:
+            data["evidence"]["failure_category"] = error.category
+        active = data.get("active_gate")
+        if active in data["gates"] and data["gates"][active] == "NOT_RUN":
+            data["gates"][active] = error.status
+        if data["gates"].get(current_gate) == "NOT_RUN":
+            data["gates"][current_gate] = error.status
+        data["notes"].append(error.message)
+        result_code = 3 if error.status == "BLOCKED" else 1
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        data["status"] = "FAIL"
+        active = data.get("active_gate")
+        if active in data["gates"] and data["gates"][active] == "NOT_RUN":
+            data["gates"][active] = "FAIL"
+        if data["gates"].get(current_gate) == "NOT_RUN":
+            data["gates"][current_gate] = "FAIL"
+        data["notes"].append(f"operation failed ({type(error).__name__}); details omitted")
+        result_code = 1
+    try:
+        save_report_update = report_dir / "report.json"
+        payload = (json.dumps(data, sort_keys=True, indent=2) + "\n").encode()
+        fd = os.open(save_report_update, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError:
+        print(f"FAIL: report update failed; preserve evidence directory {report_dir}", file=sys.stderr)
+        data["status"] = "FAIL"
+        result_code = 1
+    print_report(data)
+    return result_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -21,12 +21,40 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createTicketEngine, Ticket } from './engine.js';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { z } from 'zod';
 
 // ── Configuration ──────────────────────────────────────────────────
 
 const TICKET_DIR = process.env.TICKET_DIR || './docs/tickets';
+
+function privateTicketEvidencePath(): string {
+    const home = os.homedir();
+    const uid = typeof process.getuid === 'function' ? process.getuid() : -1;
+    const homeInfo = fs.lstatSync(home);
+    if (!homeInfo.isDirectory() || homeInfo.isSymbolicLink() || homeInfo.uid !== uid
+            || (homeInfo.mode & 0o022) !== 0) {
+        throw new Error('owner home directory is unsafe for private ticket evidence');
+    }
+    let current = home;
+    for (const component of ['.local', 'share', 'little-mester', 'private-ticket-evidence']) {
+        current = path.join(current, component);
+        try {
+            fs.mkdirSync(current, { mode: 0o700 });
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        }
+        const info = fs.lstatSync(current);
+        if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== uid
+                || (info.mode & 0o022) !== 0
+                || (component === 'private-ticket-evidence' && (info.mode & 0o777) !== 0o700)) {
+            throw new Error('owner private ticket evidence directory is unsafe');
+        }
+    }
+    return path.join(current, 'ticket-054-host-key-observation.json');
+}
 
 function resolveDir(raw: string): string {
     return path.resolve(raw);
@@ -236,6 +264,47 @@ server.registerTool(
             };
         }
     }
+);
+
+/** One-time, narrowly scoped correction authorized for ticket #54 only. */
+server.registerTool(
+    'mester_tickets_reconcile_054_fingerprint_case',
+    {
+        title: 'Reconcile Ticket 54 Private Evidence',
+        description: 'One-time owner-authorized correction of the identified ticket-054 fingerprint case. Archives its exact original text to an owner-only location outside the repository, replaces it with sanitized MATCH/UNKNOWN evidence, and appends a hash-only privacy-redaction audit event. Does not change criteria or ticket status.',
+        inputSchema: z.object({
+            authorized_case_sha256: z.string().regex(/^[a-f0-9]{64}$/)
+                .describe('Private SHA-256 authorization of the exact previously identified case; never persisted.'),
+        }),
+    },
+    async ({ authorized_case_sha256 }) => {
+        try {
+            const ticketDir = resolveDir(BASE_TICKET_DIR);
+            const engine = createTicketEngine({
+                ticketDir,
+                indexPath: path.join(ticketDir, '_index.json'),
+            });
+            const archive = privateTicketEvidencePath();
+            const ticket = engine.reconcileTicket054FingerprintCase(archive, authorized_case_sha256);
+            return {
+                content: [{
+                    type: 'text',
+                    text: `Ticket #54 evidence reconciled. Sanitized case retained; original evidence archived privately outside the repository. Existing audit history was preserved and a hash-only privacy-redaction event was appended.`,
+                }],
+                structuredContent: {
+                    ticket_number: ticket.number,
+                    status: ticket.status,
+                    sanitized_case_retained: true,
+                    acceptance_criteria_unchanged: true,
+                },
+            };
+        } catch (err: unknown) {
+            return {
+                content: [{ type: 'text', text: '❌ Privacy reconciliation failed closed; no evidence content was returned. Inspect the private archive and ticket state before retry.' }],
+                isError: true,
+            };
+        }
+    },
 );
 
 /**

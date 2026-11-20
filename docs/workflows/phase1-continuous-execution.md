@@ -1,0 +1,169 @@
+# Phase 1 continuous execution workflow
+
+**Scope:** tickets #53–#57 and their approved Phase 1 work. This is the operating
+workflow for those tickets; it preserves approved functional objectives, security
+architecture, acceptance criteria and owner authority. The owner-approved trajectory
+correction below prioritizes working integration and review efficiency, not weaker controls.
+
+## Roles and execution loop
+
+- **Luna High** owns orchestration, implementation, integration, source commits, ticket
+  updates, and truthful reporting. It continues across approved tickets and implementation
+  slices instead of stopping after a successful test, commit, review, or routine ticket
+  update.
+- **Luna Low/Explore** gathers targeted, read-only source and test evidence when discovery
+  is useful. It does not make implementation or security decisions.
+- **Sol Medium** supplies a focused technical plan when a material design choice warrants
+  one and independently reviews meaningful correctness, maintainability, reuse,
+  complexity, and security boundaries. Sol's PASS/JUSTIFIED verdicts mean continue;
+  actionable SIMPLIFY findings are resolved within scope. A BLOCKED finding is assessed
+  for a safe in-scope correction before escalation.
+
+For each coherent block: identify its ticket requirements and existing reuse points, make
+the smallest implementation, run focused REAL_PROCESS/mock/regression tests appropriate to
+the claims, commit tested source, obtain any required independent review, resolve actionable
+findings, and update the ticket through MCP. Commit ticket evidence separately when useful.
+The ticket CLI is reserved for appending comments/handoff discussion; use MCP for ordinary
+ticket fields and criteria. Keep test ledgers factual and concise; record review discussion
+as ticket comments. Preserve pending criteria until their stated evidence exists.
+
+**Temporary owner authorization (2026-11-15):** until the MCP is fixed after Phase 1,
+the repository ticket CLI's documented `update <number> --comment <text>` operation is
+authorized solely to append comments. Inspect the current ticket first, append without
+replacing historical comments, then validate the ticket store. This exception does not
+authorize CLI edits to fields, criteria, test ledgers, audit history, or other ticket data;
+all ordinary ticket mutations continue through MCP.
+
+At a security-sensitive boundary, review the exact source SHA. A material change after
+review receives an appropriately scoped delta review. Sol reviews assess whether code is
+necessary and reachable, not only locally correct: report the acceptance behavior or verified
+risk advanced, CLI/smoke/milestone reachability, duplication/complexity, security impact, code
+growth by production/tests/docs, and one verdict: PASS, FIX, SIMPLIFY, DEFER, or BLOCKED.
+SIMPLIFY requires actual justified consolidation while preserving trust-boundary checks; do
+not answer it with more defensive scaffolding. Review integrated boundaries rather than every
+small commit. Keep independent combined quality/security review for changed trust boundaries
+and the final holistic review on #57.
+
+## Phase 1 progression and stopping conditions
+
+**Continuous-execution correction (owner-approved 2026-11-11):** M1→M2→M3 is a
+priority order, not a prohibition on independent later-milestone work. When an owner-only
+runtime gate blocks an assumption, name the exact dependent operations and pause only those.
+Continue useful authorized implementation elsewhere in #54–#56; do not stop at a gate,
+review, commit, or ticket update. Do not invent a new architecture to route around a gate.
+For M1, unverified qemu-img inherited-FD/QEMU fdset/locking behavior blocks only enabling or
+claiming real parent disk launch and owner VM acceptance; it does not block offline lifecycle,
+status/readiness, shutdown, SSH, guest config, or tests that preserve the launch-disabled gate.
+For #55, reuse settled 2.2.5 probes and continue protected configuration/tmux wiring and
+offline tests without claiming live guest behavior. For #56, continue the already approved
+schema, scheduler, collector, restricted receiver/ACK, stale snapshot and display work with
+bounded offline tests; hardware timing/accuracy remains pending the owner NVIDIA probe.
+Return to the owner only after independent safe work is exhausted, an actual owner decision is
+needed, or a batched host acceptance action is ready. Every handoff must say what the gate
+blocks, what independent work was completed or remains, and the exact action that unlocks it.
+
+Progress toward these three demonstrations in order:
+
+1. **M1 persistent parent:** protected `up` → validated `status` → interactive/reconnectable
+   `ssh` → identity-bound `stop` → `up` reuses the same disk and workspace; ordinary smoke
+    still deletes its ephemeral disk. `recover` initially remains a dry-run report. The owner
+    reported all four qemu-img/QEMU scratch compatibility checks PASS ×2 for source `37f5fb6`;
+    see the [runtime-gate record](../parent-runtime-gates.md). This unblocks implementing the
+    launch path, not lifecycle acceptance: only the separate owner-run
+    [parent acceptance procedure](../parent-lifecycle-acceptance.md) can establish the first
+    real up/status/ssh/stop/re-up demonstration.
+   Default workspace is guest-disk-backed, with no implicit virtiofs export.
+   Confirm whether virtiofsd serves any other parent-launch requirement before omitting it.
+2. **M2 real OpenCode:** after M1 integration, provision pinned 2.2.5 and protected assets,
+   support SSH/TUI and tmux reattachment, and prove configuration, credentials and session
+   history survive ordinary stop/up. Provisioning must not erase credentials. Reuse existing
+   compatibility probes; do not repeat settled investigations without contradictory live
+   guest evidence. New egress requires owner approval.
+3. **M3 live metrics:** integrate the approved schema/collector through restricted per-boot
+   SSH push/ACK, receiver, tmpfs snapshot and 1.5-second freshness behavior. Request an
+   owner-operated NVIDIA collection/timing probe before selecting the GPU method; supported
+   NVIDIA utilization and VRAM remain required. Sampler failure must not stop the VM. Reuse
+   existing collectors/schema; add no compatibility layer without demonstrated need.
+
+### M2 CI delivery gates: A1 → B0 → B1
+
+Keep these gates ordered; do not begin B0/B1 implementation while A1 is failing.
+
+- **A1:** the complete hosted real-KVM integration, including protected OpenCode TUI,
+  restricted reboot/egress, persistence and safe cleanup, is green on the exact candidate SHA.
+  Local tests and source review do not substitute for this evidence.
+- **B0 (mandatory after A1):** compare smoke, hosted CI and persistent-parent implementations;
+  consolidate each safe overlap into independently executable, offline-testable primitives for
+  provisioning/directory validation, process identity/signalling/shutdown, PTY/tmux, bounded
+  diagnostics and result reporting. For every identified overlap, record that it is consolidated,
+  intentionally separate with its security rationale, or deferred with its dependency. Preserve
+  smoke and the full hosted real-KVM baseline. Do not wrap duplicate implementations, create a
+  general framework, or split files while retaining hidden shared state. Sol Medium reviews the
+  overlap inventory and closure evidence before B0 is complete.
+- **B1:** expose genuinely separate GitHub Actions steps while retaining one safely owned
+  disposable guest, identity-verified state transitions and bounded cleanup. Reuse B0 operations;
+  do not add a competing supervisor or weaken process/disk ownership across steps.
+
+The hosted-KVM workflow invokes each substantive stage in the foreground and keeps only the
+minimal QEMU lifecycle owner detached between steps. The owner closes inherited step pipes and
+preserves `RUNNER_TRACKING_ID`; the unconditional cleanup step requests identity-checked stop,
+reap and private-state removal. Stage failure or ordinary cancellation also attempts bounded
+cleanup. This cannot guarantee cleanup after runner/VM hard termination, host power loss, or
+forced process kill that prevents both the stage trap and the Actions `always()` step from
+running. In that case the runner itself is expected to be discarded; no cross-run recovery or
+claim of host-level orphan prevention is made.
+
+Before more lifecycle helpers, connect existing provisioning, process identity, supervisor,
+gate, SSH and smoke cleanup primitives to supported subcommands. At M1 identify every
+remaining unreachable product function and wire it into the immediate path, explicitly defer
+it, or remove it if unjustified. Prefer real unprivileged process/lock/signal/identity tests
+for lifecycle behavior; mocks do not establish VM behavior. Never run a real VM, SSH listener,
+or owner-host QEMU/qemu-img gate without explicit owner authority.
+
+Stop only for a genuine owner decision/authorization, an unresolved security or architecture
+boundary outside the approved scope, an unresolvable blocking review finding, required
+owner-host acceptance, or final merge readiness. Batch related owner-host checks into one
+coherent request. Do not autonomously perform owner-host QEMU/VM actions, privileged host
+operations, owner authentication, legacy VM changes, network-authority expansion, push,
+merge, or cutover.
+
+The owner-only runtime and security gates are defined by the relevant ticket criteria and
+test ledgers, [the Phase 1 smoke/owner procedure](../vm-v3-phase1-smoke.md), and the
+authoritative subsystem decisions in
+[`docs/tickets/architecture/DECISIONS.md`](../tickets/architecture/DECISIONS.md).
+Follow those sources rather than copying or weakening their procedures here. No parent
+launch is enabled before its required owner-host QEMU fdset and single-writer validation.
+
+## Reviews, commits, and ticket closure
+
+- Keep Git provenance accurate: implementation and milestone evidence commits should be
+  scoped and describe incomplete work honestly. Avoid review-only commits and repeated prose;
+  consolidate ticket evidence at meaningful milestones. Inspect the full diff and working
+  tree before each commit; leave clean worktrees at handoff boundaries where possible.
+- Commit meaningful tested checkpoints; do not wait for a whole ticket to finish.
+- Record concise tests, source SHAs, Sol verdicts and acceptance progress on the relevant
+  ticket. Test ledgers contain actual tests and actionable test gaps; discussion belongs in
+  append-only comments. Do not mark an end-to-end criterion passing without its demonstration.
+  Split a criterion once through MCP only if it truly bundles independently verifiable
+  behaviors; never split merely to manufacture progress. Validate the ticket store after
+  ticket operations. Normal mutations use MCP; the temporary CLI exception is only for
+  appending handoff comments.
+- When a ticket is complete, reconcile every criterion with evidence, record legitimate
+  deferrals in the appropriate existing successor/backlog ticket, resolve/supersede
+  obsolete requirements, and transition the ticket through MCP. Then continue to the next
+  approved dependent ticket. Do not close a ticket whose owner-host acceptance is pending.
+- #57 requires a final holistic Sol review and owner-host acceptance preparation. Only the
+  owner authorizes the Git merge.
+
+## After Phase 1
+
+After Phase 1 merges, begin Phase 1.5 with a bounded ticket/backlog/roadmap review—not
+immediate local-model implementation. Reconcile completed and deferred work, identify
+duplicates/obsolete/oversized tickets, and propose the Phase 1.5 scope for owner agreement
+where material roadmap changes are needed. Only then implement and validate the agreed
+local-model development cutover. Keep later multi-VM/orchestration scope in its existing
+roadmap until that phase approaches. This roadmap does not authorize future-phase work.
+
+This workflow is currently maintained as a repository document referenced by tickets.
+Future work should migrate reusable workflow definitions and ticket associations into the
+MCP workflow engine.

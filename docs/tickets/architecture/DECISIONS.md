@@ -349,7 +349,10 @@ stale lock (an error worth raising). A **missing** lock is normal.
 }
 ```
 
-- `operation` is `create`, `update`, `archive`, or `baseline`.
+- `operation` is `create`, `update`, `archive`, `baseline`, or the one-time
+  `privacy-redaction` event for the owner-authorized ticket-054 correction. That event
+  records only its timestamp, operation, ticket number and integrity hash; the sensitive
+  original is preserved separately in owner-only storage outside the repository.
 - `hash = sha256(canonical_json({timestamp, operation, ticket_number}))`, where
   `canonical_json` is `JSON.stringify(value)` with no extra whitespace and keys in the
   order shown above.
@@ -570,3 +573,59 @@ diagram: `docs/vm-architecture.md`.
    `docs/DECISIONS.md`/this log and a ticket with acceptance criteria and test evidence.
    Hand-editing a boundary into `lab`, `compose.yaml` or the agent image is a validation
    failure.
+
+## L. v3 Phase 1 trusted host execution boundary (2026-11-08, #49/#51)
+
+**Decision:** Phase 1 lifecycle authority exists only in a host-installed launcher/core
+outside the one exported workspace. The owner explicitly installs that trusted copy on the
+host; implementation/agent code must not install or refresh it. The running guest and
+workspace have no host lifecycle endpoint, socket, capability, or privilege-grant path.
+Do not dispatch trusted VM work through `./lab`: the current `lab` sources the mutable
+workspace `.little-mester.conf` before dispatch (see `lab` config-loading block), so that
+checkout is not a trusted host execution source.
+
+**Identity and workspace authority:** The core derives authority from the actual host
+process/transport context, never caller-supplied role, identity, capability, workspace
+configuration, or guest state. Phase 1 provides an owner-operated CLI and shared
+security/policy core. The host lifecycle MCP adapter is deferred until the Dev VM smoke
+succeeds; it will use that same core. The canonical workspace is selected/authorized on
+the host; a future MCP request cannot
+select arbitrary paths or executables. Resolve and validate one canonical path on the host
+before VM startup/export; reject unsafe symlinks, path substitution, and overlap with
+private host policy/state/credentials. Export exactly that workspace and nothing else.
+Host policy/runtime state and the installed executable remain outside the export. No host
+Docker socket, credentials, extra workspace, host command execution facility, or guest-to-
+host lifecycle control is exposed.
+
+**Phase scope:** Direct guest agent startup and rootless Docker follow v1. Disable/avoid
+system rootful Docker and verify the guest user daemon is rootless. Preserve QEMU
+`restrict=on`, mediated public HTTP(S), private/LAN denial and loopback-only control. Test
+VMs, snapshots, recursion, self-test grants, and capability-grant mechanisms are absent
+in this phase. This entry records #49/#51's intended constraints; it does not
+authorize host installation or runtime operations in the implementation environment.
+
+**Verification and review status:** External review considers the architecture sound in
+principle. Security guarantees remain unverified until implementation and negative tests
+pass. Sol's earlier statements attributing human approval of §L to external reviewers
+were incorrect. The user's consolidated review authorizes these implementation
+corrections, not a claim of verified security. Only the user can authorize scope or
+security-policy changes. Sol alone maintains this decision log.
+
+**Future host MCP boundary (not implemented in Phase 1):** The owner will start the
+trusted host installation with private stdio pipes
+connected only to the owner-controlled host client. That process/pipe boundary is the
+authority; it is not a role supplied in a tool argument. `mcp-server.ts` never imports,
+registers or dispatches lifecycle code. Only the separate host-installed
+`vm-host-server.ts` imports and registers lifecycle tools, using host-bound workspace
+context. Selection is which entrypoint is installed and spawned, never a runtime flag,
+environment variable or workspace configuration. Do not expose or forward the host
+process or its private pipes to any agent. Guest copies must have no access to the host
+core, host transport or VM resources. No remote listener, authentication service, bearer
+token scheme or guest lifecycle access is needed for Phase 1. If the future deployment
+cannot enforce those process/pipe/resource boundaries, stop with concrete evidence.
+
+**Command discovery status:** Legacy source documents `./lab-vm run [workspace]` and
+`./lab-vm agent` as v1 direct-guest invocations; historical host results do not establish
+the required v3 clean-checkout → real model response → successful guest container flow.
+The new trusted-install invocation and exact v3 smoke command are therefore proposals to
+validate after implementation, not verified commands. Host smoke remains owner-coordinated.
