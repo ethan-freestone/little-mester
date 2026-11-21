@@ -2774,6 +2774,166 @@ def _ensure_diagnostic_control_group() -> None:
     # the coherent NSS entry just validated is the required evidence.
 
 
+def diagnostic_lock_fixture_script(action: str, *, parent: pathlib.Path,
+                                   group_gid: int, owner_uid: int,
+                                   expected: dict | None = None) -> str:
+    """Build the narrowly scoped lock-fixture operation for the disposable diagnostic."""
+    require(action in ("create", "cleanup"), "invalid diagnostic lock fixture action")
+    require(parent.is_absolute() and ".." not in parent.parts,
+            "diagnostic lock fixture parent must be an absolute normalized path")
+    if action == "cleanup":
+        require(isinstance(expected, dict), "cleanup requires captured fixture identities")
+    payload = json.dumps(expected, sort_keys=True, separators=(",", ":"))
+    return textwrap.dedent(f"""\
+        import fcntl, json, os, pathlib, stat
+        parent = pathlib.Path({str(parent)!r})
+        group_gid = {int(group_gid)!r}
+        owner_uid = {int(owner_uid)!r}
+        action = {action!r}
+        expected = json.loads({payload!r})
+        name = 'code-update.lock'
+
+        def facts(info):
+            return {{'device': info.st_dev, 'inode': info.st_ino, 'uid': info.st_uid,
+                    'gid': info.st_gid, 'mode': stat.S_IMODE(info.st_mode)}}
+
+        def validate_parent(info):
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != owner_uid or info.st_gid != group_gid
+                    or stat.S_IMODE(info.st_mode) != 0o750):
+                raise RuntimeError('diagnostic lock fixture parent identity or metadata changed')
+
+        def validate_lock(info):
+            if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != owner_uid or info.st_gid != group_gid
+                    or stat.S_IMODE(info.st_mode) != 0o660 or info.st_nlink != 1
+                    or info.st_size != 0):
+                raise RuntimeError('diagnostic lock fixture file is unsafe or changed')
+
+        if action == 'create':
+            if parent.exists() or parent.is_symlink():
+                raise RuntimeError('preserving pre-existing diagnostic lock fixture path')
+            os.mkdir(parent, 0o750)
+            parent_created = os.lstat(parent)
+            lock_created = False
+            lock_identity = None
+            try:
+                os.chown(parent, owner_uid, group_gid, follow_symlinks=False)
+                os.chmod(parent, 0o750, follow_symlinks=False)
+                parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    pinfo = os.fstat(parent_fd)
+                    validate_parent(pinfo)
+                    lock_fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL |
+                                      os.O_NOFOLLOW | os.O_CLOEXEC, 0o660, dir_fd=parent_fd)
+                    lock_created = True
+                    try:
+                        lock_identity = os.fstat(lock_fd)
+                        os.fchown(lock_fd, owner_uid, group_gid)
+                        os.fchmod(lock_fd, 0o660)
+                        linfo = os.fstat(lock_fd)
+                        validate_lock(linfo)
+                        result = {{'parent': facts(pinfo), 'lock': facts(linfo)}}
+                    finally:
+                        os.close(lock_fd)
+                finally:
+                    os.close(parent_fd)
+            except BaseException:
+                # Partial setup is removed only when both objects still match
+                # identities created by this invocation; otherwise preserve it.
+                try:
+                    now_parent = os.lstat(parent)
+                    if (stat.S_ISDIR(now_parent.st_mode) and not stat.S_ISLNK(now_parent.st_mode)
+                            and (now_parent.st_dev, now_parent.st_ino) ==
+                                (parent_created.st_dev, parent_created.st_ino)
+                            and now_parent.st_uid == owner_uid and now_parent.st_gid == group_gid
+                            and stat.S_IMODE(now_parent.st_mode) == 0o750):
+                        fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                        try:
+                            if lock_created and lock_identity is not None:
+                                try:
+                                    current = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                                    if ((current.st_dev, current.st_ino) ==
+                                            (lock_identity.st_dev, lock_identity.st_ino)
+                                            and stat.S_ISREG(current.st_mode)
+                                            and current.st_nlink == 1 and current.st_size == 0
+                                            and current.st_uid == owner_uid
+                                            and current.st_gid == group_gid
+                                            and stat.S_IMODE(current.st_mode) == 0o660):
+                                        os.unlink(name, dir_fd=fd)
+                                except FileNotFoundError:
+                                    pass
+                        finally:
+                            os.close(fd)
+                        if not any(parent.iterdir()):
+                            os.rmdir(parent)
+                except OSError:
+                    pass
+                raise
+            print(json.dumps(result, sort_keys=True, separators=(',', ':')))
+        else:
+            if set(expected) != {{'parent', 'lock'}}:
+                raise RuntimeError('diagnostic lock fixture identity record is malformed')
+            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                pinfo = os.fstat(parent_fd)
+                validate_parent(pinfo)
+                if facts(pinfo) != expected['parent']:
+                    raise RuntimeError('diagnostic lock fixture parent identity mismatch')
+                entries = os.listdir(parent_fd)
+                if entries != [name]:
+                    raise RuntimeError('preserving unexpected diagnostic lock fixture contents')
+                lock_fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+                try:
+                    linfo = os.fstat(lock_fd)
+                    validate_lock(linfo)
+                    if facts(linfo) != expected['lock']:
+                        raise RuntimeError('diagnostic lock fixture file identity mismatch')
+                    try:
+                        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError as error:
+                        raise RuntimeError('diagnostic code-update lock is still held') from error
+                    current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    if facts(current) != expected['lock']:
+                        raise RuntimeError('diagnostic lock fixture changed before unlink')
+                    os.unlink(name, dir_fd=parent_fd)
+                finally:
+                    os.close(lock_fd)
+                if os.listdir(parent_fd):
+                    raise RuntimeError('preserving unexpected diagnostic lock fixture contents')
+            finally:
+                os.close(parent_fd)
+            current_parent = os.lstat(parent)
+            if facts(current_parent) != expected['parent']:
+                raise RuntimeError('diagnostic lock fixture parent changed before removal')
+            os.rmdir(parent)
+    """)
+
+
+def _run_diagnostic_lock_fixture(action: str, *, expected: dict | None = None) -> dict:
+    """Create/remove only the standalone diagnostic's protected update-lock fixture."""
+    parent = pathlib.Path("/etc/little-mester-vm")
+    group_gid = grp.getgrnam("lm-vm-control").gr_gid
+    script = diagnostic_lock_fixture_script(
+        action, parent=parent, group_gid=group_gid, owner_uid=0, expected=expected)
+    result = subprocess.run(
+        ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c", script],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=30, check=False)
+    require(result.returncode == 0,
+            f"diagnostic lock fixture {action} failed (exit={result.returncode}; "
+            f"stderr={result.stderr[:2048]!r})")
+    if action == "cleanup":
+        require(not result.stdout.strip(), "diagnostic lock fixture cleanup returned unexpected output")
+        return {}
+    try:
+        identity = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError("diagnostic lock fixture returned invalid identity evidence") from error
+    require(set(identity) == {"parent", "lock"}, "diagnostic lock fixture identity is incomplete")
+    return identity
+
+
 @contextlib.contextmanager
 def _timed_ci_stage(label: str):
     spec = importlib.util.spec_from_file_location(
@@ -2797,7 +2957,12 @@ def namespace_diagnostics_only() -> int:
     created = os.lstat(workspace)
     try:
         _ensure_diagnostic_control_group()
+        lock_fixture = _run_diagnostic_lock_fixture("create")
         run_workspace_bind_reproductions(workspace)
+        # The reproduction returns only after its units are stopped and its
+        # unit/runtime cleanup gates pass. On any earlier failure, retain the
+        # lock and diagnostic artifacts for investigation on this disposable runner.
+        _run_diagnostic_lock_fixture("cleanup", expected=lock_fixture)
     finally:
         current = os.lstat(workspace)
         require(stat.S_ISDIR(current.st_mode) and not stat.S_ISLNK(current.st_mode)

@@ -12,6 +12,7 @@ import os
 import pathlib
 import re
 import shlex
+import stat
 import subprocess
 import tempfile
 import textwrap
@@ -30,6 +31,12 @@ PROBE_SPEC = importlib.util.spec_from_file_location("ci_kvm_shared_launch_probe"
 probe = importlib.util.module_from_spec(PROBE_SPEC)
 assert PROBE_SPEC.loader is not None
 PROBE_SPEC.loader.exec_module(probe)
+SYSTEM_ACCEPTANCE_PATH = ROOT / "lib/vm/system-acceptance.py"
+SYSTEM_ACCEPTANCE_SPEC = importlib.util.spec_from_file_location(
+    "vm_system_acceptance", SYSTEM_ACCEPTANCE_PATH)
+system_acceptance = importlib.util.module_from_spec(SYSTEM_ACCEPTANCE_SPEC)
+assert SYSTEM_ACCEPTANCE_SPEC.loader is not None
+SYSTEM_ACCEPTANCE_SPEC.loader.exec_module(system_acceptance)
 
 
 def workflow_job(workflow: str, name: str) -> str:
@@ -174,15 +181,21 @@ class HostedSystemUnitTests(unittest.TestCase):
             with mock.patch.object(unit.sys, "argv", [str(SCRIPT), "--namespace-diagnostics"]), \
                     mock.patch.object(unit, "hosted_runner_guard"), \
                     mock.patch.object(unit, "production_host_preflight"), \
-                    mock.patch.object(unit, "disposable_workspace_path", return_value=workspace), \
-                    mock.patch.object(unit, "run_workspace_bind_reproductions") as reproduce, \
-                    mock.patch.object(unit.grp, "getgrnam", side_effect=by_name), \
+                     mock.patch.object(unit, "disposable_workspace_path", return_value=workspace), \
+                     mock.patch.object(unit, "run_workspace_bind_reproductions") as reproduce, \
+                     mock.patch.object(unit, "_run_diagnostic_lock_fixture",
+                                       side_effect=[{"parent": {}, "lock": {}}, {}]) as lock_fixture, \
+                     mock.patch.object(unit.grp, "getgrnam", side_effect=by_name), \
                     mock.patch.object(unit.grp, "getgrgid", return_value=group), \
                     mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
                         returncode=0, stdout="", stderr="")) as process, \
                     mock.patch("sys.stdout", io.StringIO()):
                 self.assertEqual(unit.main(), 0)
             reproduce.assert_called_once_with(workspace)
+            self.assertEqual(lock_fixture.call_args_list, [
+                mock.call("create"),
+                mock.call("cleanup", expected={"parent": {}, "lock": {}}),
+            ])
             self.assertEqual(group_lookups, [self.DIAGNOSTIC_GROUP] * 2)
             self.assertEqual(process.call_args.args[0], self.GROUPADD_ARGV)
             self.assertFalse(workspace.exists())
@@ -2188,6 +2201,156 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertEqual(len(output.encode("utf-8")), unit.DIAGNOSTIC_CAPTURE_LIMIT)
         self.assertTrue(truncated)
         self.assertNotEqual(code, 0)
+
+    def test_diagnostic_lock_fixture_is_exclusive_and_identity_checked(self):
+        with tempfile.TemporaryDirectory(prefix="diagnostic-lock-fixture-") as temporary:
+            parent = pathlib.Path(temporary) / "little-mester-vm"
+            script = unit.diagnostic_lock_fixture_script(
+                "create", parent=parent, group_gid=os.getgid(), owner_uid=os.getuid())
+            created = subprocess.run(["/usr/bin/python3", "-I", "-c", script],
+                                     check=True, capture_output=True, text=True)
+            identity = json.loads(created.stdout)
+            lock = parent / "code-update.lock"
+            self.assertEqual(identity["parent"]["inode"], parent.stat().st_ino)
+            self.assertEqual(identity["lock"]["inode"], lock.stat().st_ino)
+            self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o750)
+            self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o660)
+            self.assertEqual(lock.read_bytes(), b"")
+
+            collision = subprocess.run(["/usr/bin/python3", "-I", "-c", script],
+                                       check=False, capture_output=True, text=True)
+            self.assertNotEqual(collision.returncode, 0)
+            self.assertEqual(lock.stat().st_ino, identity["lock"]["inode"])
+
+            cleanup = unit.diagnostic_lock_fixture_script(
+                "cleanup", parent=parent, group_gid=os.getgid(), owner_uid=os.getuid(),
+                expected=identity)
+            subprocess.run(["/usr/bin/python3", "-I", "-c", cleanup], check=True,
+                           capture_output=True, text=True)
+            self.assertFalse(parent.exists())
+
+    def test_diagnostic_lock_fixture_preserves_replaced_or_nonempty_paths(self):
+        with tempfile.TemporaryDirectory(prefix="diagnostic-lock-preserve-") as temporary:
+            parent = pathlib.Path(temporary) / "little-mester-vm"
+            script = unit.diagnostic_lock_fixture_script(
+                "create", parent=parent, group_gid=os.getgid(), owner_uid=os.getuid())
+            created = subprocess.run(["/usr/bin/python3", "-I", "-c", script],
+                                     check=True, capture_output=True, text=True)
+            identity = json.loads(created.stdout)
+            (parent / "unexpected").touch()
+            cleanup = unit.diagnostic_lock_fixture_script(
+                "cleanup", parent=parent, group_gid=os.getgid(), owner_uid=os.getuid(),
+                expected=identity)
+            result = subprocess.run(["/usr/bin/python3", "-I", "-c", cleanup],
+                                    check=False, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((parent / "code-update.lock").exists())
+            self.assertTrue((parent / "unexpected").exists())
+
+    def test_diagnostic_lock_fixture_refuses_symlink_collision_and_lock_replacement(self):
+        with tempfile.TemporaryDirectory(prefix="diagnostic-lock-collision-") as temporary:
+            root = pathlib.Path(temporary)
+            parent = root / "little-mester-vm"
+            target = root / "target"
+            target.mkdir()
+            parent.symlink_to(target, target_is_directory=True)
+            symlink_setup = unit.diagnostic_lock_fixture_script(
+                "create", parent=parent, group_gid=os.getgid(), owner_uid=os.getuid())
+            refused = subprocess.run(["/usr/bin/python3", "-I", "-c", symlink_setup],
+                                     check=False, capture_output=True, text=True)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertTrue(parent.is_symlink())
+            parent.unlink()
+
+            setup = unit.diagnostic_lock_fixture_script(
+                "create", parent=parent, group_gid=os.getgid(), owner_uid=os.getuid())
+            identity = json.loads(subprocess.run(
+                ["/usr/bin/python3", "-I", "-c", setup], check=True,
+                capture_output=True, text=True).stdout)
+            lock = parent / "code-update.lock"
+            replacement = root / "replacement"
+            replacement.write_bytes(b"")
+            os.chmod(replacement, 0o660)
+            os.replace(replacement, lock)
+            cleanup = unit.diagnostic_lock_fixture_script(
+                "cleanup", parent=parent, group_gid=os.getgid(), owner_uid=os.getuid(),
+                expected=identity)
+            refused = subprocess.run(["/usr/bin/python3", "-I", "-c", cleanup],
+                                     check=False, capture_output=True, text=True)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertTrue(lock.exists())
+
+    def test_diagnostic_lock_fixture_cleans_its_partial_setup_after_injected_failure(self):
+        with tempfile.TemporaryDirectory(prefix="diagnostic-lock-partial-") as temporary:
+            parent = pathlib.Path(temporary) / "little-mester-vm"
+            script = unit.diagnostic_lock_fixture_script(
+                "create", parent=parent, group_gid=os.getgid(), owner_uid=os.getuid())
+            with mock.patch.object(unit.os, "chown", side_effect=OSError("injected chown failure")), \
+                    self.assertRaisesRegex(OSError, "injected chown failure"):
+                exec(compile(script, "<diagnostic-lock-fixture>", "exec"), {})
+            self.assertFalse(parent.exists())
+
+    def test_diagnostic_lock_fixture_cleanup_refuses_a_held_lock(self):
+        with tempfile.TemporaryDirectory(prefix="diagnostic-lock-held-") as temporary:
+            parent = pathlib.Path(temporary) / "little-mester-vm"
+            setup = unit.diagnostic_lock_fixture_script(
+                "create", parent=parent, group_gid=os.getgid(), owner_uid=os.getuid())
+            identity = json.loads(subprocess.run(
+                ["/usr/bin/python3", "-I", "-c", setup], check=True,
+                capture_output=True, text=True).stdout)
+            lock = parent / "code-update.lock"
+            with lock.open("r+b") as held:
+                import fcntl
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                cleanup = unit.diagnostic_lock_fixture_script(
+                    "cleanup", parent=parent, group_gid=os.getgid(),
+                    owner_uid=os.getuid(), expected=identity)
+                refused = subprocess.run(["/usr/bin/python3", "-I", "-c", cleanup],
+                                         check=False, capture_output=True, text=True)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertTrue(lock.exists())
+                fcntl.flock(held, fcntl.LOCK_UN)
+            subprocess.run(["/usr/bin/python3", "-I", "-c", cleanup], check=True,
+                           capture_output=True, text=True)
+
+    def test_workspace_candidate_rendering_requires_exact_owner_and_group_markers(self):
+        template = (ROOT / "systemd/little-mester-vm-workspace.service").read_bytes()
+        rendered = system_acceptance.render_workspace_unit_template(
+            template, owner="fixture-owner", owner_group="fixture-group")
+        self.assertEqual(rendered.count(b"fixture-owner"), 2)
+        self.assertEqual(rendered.count(b"fixture-group"), 1)
+        self.assertNotIn(b"@LM_VM_OWNER@", rendered)
+        self.assertNotIn(b"@LM_VM_OWNER_GROUP@", rendered)
+        for malformed in (template.replace(b"@LM_VM_OWNER@", b"", 1),
+                          template + b"\n# @LM_VM_OWNER@\n",
+                          template.replace(b"@LM_VM_OWNER_GROUP@", b"", 1),
+                          template + b"\n# @LM_VM_OWNER_GROUP@\n"):
+            with self.subTest(malformed=malformed[-32:]), \
+                    self.assertRaises(system_acceptance.AcceptanceError):
+                system_acceptance.render_workspace_unit_template(
+                    malformed, owner="fixture-owner", owner_group="fixture-group")
+
+    def test_protected_pty_fixture_lists_all_fixed_launcher_dependencies(self):
+        path = ROOT / "tests/vm-parent-supervisor.test.py"
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        test = next(node for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "test_lab_vm_worker_uses_separate_script_fd_and_preserves_terminal_stdin")
+        fixture_assignment = next(node for node in ast.walk(test)
+                                  if isinstance(node, ast.Assign)
+                                  and any(isinstance(target, ast.Name)
+                                          and target.id == "fixture_files"
+                                          for target in node.targets))
+        fixture_files = ast.literal_eval(fixture_assignment.value)
+        required = {
+            "lib/vm/guest-compatibility.py", "lib/vm/code-update-transaction.py",
+            "systemd/little-mester-vm.service.d/90-code-update-guard.conf",
+            "systemd/little-mester-vm-proxy.service.d/90-code-update-guard.conf",
+            "systemd/little-mester-vm-workspace.service.d/90-code-update-guard.conf",
+            "systemd/little-mester-vm-metrics.service.d/90-code-update-guard.conf",
+        }
+        self.assertTrue(required.issubset(fixture_files), sorted(required - set(fixture_files)))
 
 
 if __name__ == "__main__":

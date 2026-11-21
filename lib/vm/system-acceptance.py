@@ -331,6 +331,21 @@ def _mark(progress, name: str, **evidence) -> None:
         progress(name, **evidence)
 
 
+def render_workspace_unit_template(payload: bytes, *, owner: str, owner_group: str) -> bytes:
+    """Render the exact fixed owner identity in both workspace unit positions."""
+    markers = ((b"@LM_VM_OWNER@", owner, 2),
+               (b"@LM_VM_OWNER_GROUP@", owner_group, 1))
+    for marker, value, count in markers:
+        if payload.count(marker) != count:
+            raise AcceptanceError("candidate workspace unit identity marker is ambiguous")
+        try:
+            encoded = value.encode("ascii")
+        except UnicodeEncodeError as error:
+            raise AcceptanceError("candidate workspace unit identity is not ASCII") from error
+        payload = payload.replace(marker, encoded)
+    return payload
+
+
 def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str, str]]:
     """Read-only verification: never starts, stops, installs, or repairs anything."""
     manager = run(["/usr/bin/systemctl", "show", "--property=Version", "--value"], timeout=5)
@@ -391,11 +406,9 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
         expected = (root / source).read_bytes()
         if source == "systemd/little-mester-vm-workspace.service":
             owner_info = pwd.getpwuid(os.getuid())
-            for marker, value in ((b"@LM_VM_OWNER@", owner_info.pw_name),
-                                  (b"@LM_VM_OWNER_GROUP@", grp.getgrgid(owner_info.pw_gid).gr_name)):
-                if expected.count(marker) != 1:
-                    raise AcceptanceError("candidate workspace unit identity marker is ambiguous")
-                expected = expected.replace(marker, value.encode("ascii"))
+            expected = render_workspace_unit_template(
+                expected, owner=owner_info.pw_name,
+                owner_group=grp.getgrgid(owner_info.pw_gid).gr_name)
         if destination.endswith("sudoers.d/little-mester-vm"):
             actual = run(["/usr/bin/sudo", "-n", "/usr/bin/cat", "--", destination]).stdout
         else:
