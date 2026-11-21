@@ -8,7 +8,7 @@
   "title": "Epic: VM-based Docker agent environment (all-in-one, model-agnostic harness)",
   "objective": "Deliver an all-in-one, model-agnostic harness: point Little Mester at a directory and run an agent there, with real Docker capability for the workspace's dependencies, while keeping the agent's blast radius inside a disposable VM. The agent runs in a Docker container inside a full Linux VM (not on the host), with a Docker CLI that can run the workspace's compose files; ./lab on the host orchestrates VM lifecycle, workspace transport, the agent container and teardown. Works with local models and no subscription, and can use cloud providers (Kimi, Claude, OpenAI) when available. Includes documentation, egress and decision-log housekeeping.",
   "created_at": "2026-10-26T17:39:37.714Z",
-  "updated_at": "2026-11-21T13:38:12.818Z",
+  "updated_at": "2026-11-21T13:58:18.302Z",
   "priority": "critical",
   "comments": [
     {
@@ -177,7 +177,9 @@
     "cases": [
       "topology decision review (full Linux VM + Docker)",
       "PR #20 retrospective review: independent Sol review completed at HEAD dd0e3b056b23b42f980c9e51238aabadb645a529; verdict block merge/owner deployment; ten commits reviewed. Blocking issues include red production acceptance, Docker metrics endpoint regression, existing guest contract upgrade gap; exact namespace root cause unresolved. Full evidence and commit dispositions are recorded on child #41. Owner/manual acceptance not run. Review date 2026-11-21.",
-      "PR #20 diagnostic follow-up: hosted run 44903344913 reproduces production-shaped workspace 226/NAMESPACE; four transient bind cases pass. Revised one-variable systemd differential harness is locally tested (60 passed) and final uncommitted diff independently approved by Sol, but has not yet run on hosted KVM. Exact causal directive/minimal pass delta therefore remains unproven and production hardening is unchanged. Host dependency audit: current apt update/install 12s+15s; original ~90s cause unknown without logs. Full evidence and remaining Phase 1 owner gates recorded on #41."
+      "PR #20 diagnostic follow-up: hosted run 44903344913 reproduces production-shaped workspace 226/NAMESPACE; four transient bind cases pass. Revised one-variable systemd differential harness is locally tested (60 passed) and final uncommitted diff independently approved by Sol, but has not yet run on hosted KVM. Exact causal directive/minimal pass delta therefore remains unproven and production hardening is unchanged. Host dependency audit: current apt update/install 12s+15s; original ~90s cause unknown without logs. Full evidence and remaining Phase 1 owner gates recorded on #41.",
+      "PR #20 hosted diagnostic follow-up: for run 44910267935, source inspection shows a matched standalone 226 is not itself fatal; run_case proceeds only after stop, runtime/state/config/reset gates. The emitted generic cleanup message came from a finally path that obscured the original later failure; raw hosted logs unavailable here, so exact failing gate remains unknown. Added explicit expected standalone-control classification and preserved the original exception/evidence on incomplete matrices. Local system-unit suite: 62 passed; py_compile and diff-check PASS. No hosted KVM/systemd run, production hardening edit, commit, push, or merge. Root cause and remaining Phase 1 owner obligations remain open.",
+      "PR #20 diagnostic commit 91ab28db5c2d2571687ead88f7608b902e9a1a20 committed and independently approved by Sol for this diagnostic delta only. Exact later failing gate in run 44910267935 remains unknown; no hosted rerun or production-policy correction. See #41 for test/review evidence and outstanding blockers."
     ]
   },
   "is_epic": true
