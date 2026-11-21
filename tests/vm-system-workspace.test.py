@@ -6,6 +6,7 @@ import os
 import pathlib
 import socket
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -39,8 +40,10 @@ class WorkspaceValidationTests(unittest.TestCase):
         self.repo.mkdir()
         self.project = self.home / "project with spaces"
         self.project.mkdir()
+        self.safe_project = self.home / "project-safe_2"
+        self.safe_project.mkdir()
         self.protected = (self.root / "etc/lm-vm", self.root / "var/lib/lm-vm")
-        for path in (self.home, self.repo, self.project):
+        for path in (self.home, self.repo, self.project, self.safe_project):
             path.chmod(0o755)
 
     def validate(self, path, **kwargs):
@@ -119,11 +122,11 @@ class WorkspaceValidationTests(unittest.TestCase):
             workspace.read_assignment(path, uid=os.getuid())
 
     def test_vm_host_preflight_requires_assignment_and_exact_generated_dropin(self):
-        assigned = self.validate(self.project)
+        assigned = self.validate(self.safe_project)
         assignment = self.root / "workspace.json"
         dropin = self.root / "20-workspace.conf"
         workspace.write_assignment(assignment, assigned, uid=os.getuid())
-        dropin.write_bytes(workspace._systemd_bind_path(self.project).encode())
+        dropin.write_bytes(workspace._systemd_bind_path(self.safe_project).encode())
         with mock.patch.object(workspace, "ASSIGNMENT", assignment), \
                 mock.patch.object(workspace, "DROPIN", dropin):
             self.assertEqual(workspace.verify_host_assignment(os.getuid()), assigned)
@@ -131,27 +134,242 @@ class WorkspaceValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(workspace.Refused, "disagree"):
                 workspace.verify_host_assignment(os.getuid())
 
-    def test_systemd_bind_mount_quoting_preserves_spaces_and_rejects_ambiguity(self):
-        rendered = workspace._systemd_bind_path(self.project)
-        self.assertEqual(rendered, f'[Service]\nBindPaths="{self.project}:{workspace.SHARE_DIR}"\n')
+    def test_systemd_bind_writer_emits_only_unquoted_parser_safe_paths(self):
+        safe_path = self.home / "project-with.safe_chars_2"
+        self.assertEqual(workspace._systemd_bind_path(safe_path),
+                         f"[Service]\nBindPaths={safe_path}:{workspace.SHARE_DIR}\n")
+        with self.assertRaisesRegex(workspace.Refused, "characters unsupported"):
+            workspace._systemd_bind_path(self.project)
         specifier_path = self.home / "literal%u-name"
         specifier_path.mkdir()
-        self.assertEqual(workspace._systemd_bind_path(specifier_path),
-                         f'[Service]\nBindPaths="{specifier_path.as_posix().replace("%", "%%")}:{workspace.SHARE_DIR}"\n')
-        with self.assertRaisesRegex(workspace.Refused, "unsafe for systemd"):
+        with self.assertRaisesRegex(workspace.Refused, "characters unsupported"):
+            workspace._systemd_bind_path(specifier_path)
+        with self.assertRaisesRegex(workspace.Refused, "characters unsupported"):
             workspace._systemd_bind_path(pathlib.Path("/tmp/work:other"))
 
-    def test_systemd_bind_writer_encodes_accepted_whitespace_and_percent_literals(self):
-        path = self.home / "white space\tand%literal's"
-        self.assertEqual(
-            workspace._systemd_bind_path(path),
-            f'[Service]\nBindPaths="{str(path).replace("%", "%%")}:{workspace.SHARE_DIR}"\n')
-
-    def test_systemd_bind_writer_refuses_unrepresentable_characters(self):
-        for raw in ("/tmp/a\\b", '/tmp/a"b', "/tmp/a\nb", "/tmp/a\rb", "/tmp/a\x00b",
-                    "/tmp/a:b"):
+    def test_systemd_bind_writer_rejects_parser_sensitive_paths(self):
+        for raw in ("/tmp/with space", "/tmp/with\ttab", "/tmp/a%b", "/tmp/a\\b",
+                    '/tmp/a"b', "/tmp/a'b", "/tmp/a:b", "/tmp/a\nb", "/tmp/a\rb",
+                    "/tmp/a\x00b", "/tmp/a\x1fb", "/tmp/café"):
             with self.subTest(raw=raw), self.assertRaises(workspace.Refused):
                 workspace._systemd_bind_path(pathlib.Path(raw))
+
+    def test_effective_bind_property_requires_exactly_one_intended_recursive_bind(self):
+        source = self.home / "path-safe_2"
+        destination = workspace.SHARE_DIR
+        dropin = workspace._systemd_bind_path(source)
+        self.assertEqual(dropin,
+                         f"[Service]\nBindPaths={source}:{destination}\n")
+        self.assertTrue(workspace.effective_bind_paths_match(
+            f"{source}:{destination}:rbind", source, destination))
+        self.assertFalse(workspace.effective_bind_paths_match(
+            f"{source}:{destination}:{source}:{destination}:rbind", source, destination))
+        self.assertFalse(workspace.effective_bind_paths_match(
+            f"/wrong:{destination}:rbind", source, destination))
+
+    def test_rollback_pair_preserves_both_files_on_assignment_conflict(self):
+        assignment_path = self.root / "workspace.json"
+        dropin_path = self.root / "20-workspace.conf"
+        assignment_path.write_bytes(b"unexpected concurrent assignment")
+        dropin_path.write_bytes(b"candidate drop-in")
+        with mock.patch.object(workspace, "_atomic_root_file") as write_file, \
+                mock.patch.object(workspace, "_remove_root_file_if_unchanged") as remove_file:
+            with self.assertRaisesRegex(workspace.Refused, "changed during rollback"):
+                workspace._restore_workspace_pair(
+                    assignment_path, dropin_path, assignment=b"candidate assignment",
+                    previous_assignment=None, dropin=b"candidate drop-in",
+                    previous_dropin=None, control_gid=55)
+        write_file.assert_not_called()
+        remove_file.assert_not_called()
+        self.assertEqual(assignment_path.read_bytes(), b"unexpected concurrent assignment")
+        self.assertEqual(dropin_path.read_bytes(), b"candidate drop-in")
+
+    def test_rollback_pair_preserves_both_files_on_dropin_conflict(self):
+        assignment_path = self.root / "workspace.json"
+        dropin_path = self.root / "20-workspace.conf"
+        assignment_path.write_bytes(b"candidate assignment")
+        dropin_path.write_bytes(b"unexpected concurrent drop-in")
+        with mock.patch.object(workspace, "_atomic_root_file") as write_file, \
+                mock.patch.object(workspace, "_remove_root_file_if_unchanged") as remove_file:
+            with self.assertRaisesRegex(workspace.Refused, "changed during rollback"):
+                workspace._restore_workspace_pair(
+                    assignment_path, dropin_path, assignment=b"candidate assignment",
+                    previous_assignment=None, dropin=b"candidate drop-in",
+                    previous_dropin=None, control_gid=55)
+        write_file.assert_not_called()
+        remove_file.assert_not_called()
+        self.assertEqual(assignment_path.read_bytes(), b"candidate assignment")
+        self.assertEqual(dropin_path.read_bytes(), b"unexpected concurrent drop-in")
+
+    def test_workspace_configuration_rejects_unrepresentable_path_before_any_atomic_write(self):
+        account = SimpleNamespace(pw_uid=1234, pw_gid=1234, pw_dir=str(self.home))
+        fake_lock = os.open(os.devnull, os.O_RDONLY)
+        with mock.patch.object(workspace.os, "geteuid", return_value=0), \
+                mock.patch.object(workspace.os, "fstat", return_value=SimpleNamespace(
+                    st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1)), \
+                mock.patch.object(workspace.pwd, "getpwuid", return_value=account), \
+                mock.patch.object(workspace.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=55)), \
+                mock.patch.object(workspace.subprocess, "run",
+                                  return_value=SimpleNamespace(returncode=0, stdout="inactive\n")), \
+                mock.patch.object(workspace, "validate_workspace",
+                                  return_value=workspace.Workspace(
+                                      pathlib.Path("/tmp/unrepresentable workspace"), (1, 2), 1234)), \
+                mock.patch.object(workspace, "read_assignment",
+                                  side_effect=workspace.Refused("workspace assignment is missing or malformed")), \
+                mock.patch.object(workspace, "_atomic_root_file") as write_file, \
+                mock.patch.object(workspace.os, "open", return_value=fake_lock):
+            with self.assertRaisesRegex(workspace.Refused, "characters unsupported"):
+                workspace.configure("ignored", self.repo, owner_uid=1234,
+                                    unsafe_recurse=False, reassign=False)
+        write_file.assert_not_called()
+
+    def test_dropin_publication_failure_rolls_back_new_assignment(self):
+        account = SimpleNamespace(pw_uid=1234, pw_gid=1234, pw_dir=str(self.home))
+        assigned = workspace.Workspace(self.safe_project, (1, 2), 1234)
+        assignment_path = self.root / "workspace.json"
+        dropin_path = self.root / "20-workspace.conf"
+        fake_lock = os.open(os.devnull, os.O_RDONLY)
+        published = {}
+        original_open = os.open
+
+        def open_lock(path, flags, *args, **kwargs):
+            if str(path) == "/run/little-mester-vm-workspace-config.lock":
+                return fake_lock
+            return original_open(path, flags, *args, **kwargs)
+
+        def atomic_write(path, payload, **kwargs):
+            if pathlib.Path(path) == assignment_path:
+                pathlib.Path(path).write_bytes(payload)
+                return
+            pathlib.Path(path).write_bytes(payload)
+            raise OSError("injected drop-in publication failure")
+
+        original_lstat = os.lstat
+        original_stat = os.stat
+        original_fstat = os.fstat
+        fstat_calls = 0
+
+        def lstat_as_root(path, *args, **kwargs):
+            path = pathlib.Path(path)
+            if path == assignment_path and assignment_path.exists():
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o640, st_uid=0,
+                                       st_gid=55, st_nlink=1)
+            if path == dropin_path and dropin_path.exists():
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0,
+                                       st_gid=0, st_nlink=1)
+            return original_lstat(path, *args, **kwargs)
+
+        def stat_as_root(path, *args, **kwargs):
+            path = pathlib.Path(path)
+            if path == pathlib.Path(assignment_path.name) and kwargs.get("dir_fd") is not None:
+                actual = original_stat(path, dir_fd=kwargs.get("dir_fd"))
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o640, st_uid=0,
+                                       st_gid=55, st_nlink=1, st_dev=actual.st_dev,
+                                       st_ino=actual.st_ino)
+            if path == pathlib.Path(dropin_path.name) and kwargs.get("dir_fd") is not None:
+                actual = original_stat(path, dir_fd=kwargs.get("dir_fd"))
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0,
+                                       st_gid=0, st_nlink=1, st_dev=actual.st_dev,
+                                       st_ino=actual.st_ino)
+            return original_stat(path, *args, **kwargs)
+
+        def fstat_with_root_lock(fd):
+            nonlocal fstat_calls
+            fstat_calls += 1
+            if fstat_calls == 1:
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1)
+            return original_fstat(fd)
+
+        with mock.patch.object(workspace.os, "geteuid", return_value=0), \
+                mock.patch.object(workspace.os, "open", side_effect=open_lock), \
+                mock.patch.object(workspace.os, "fstat", side_effect=fstat_with_root_lock), \
+                mock.patch.object(workspace.pwd, "getpwuid", return_value=account), \
+                mock.patch.object(workspace.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=55)), \
+                mock.patch.object(workspace.subprocess, "run", side_effect=lambda args, **kwargs:
+                                  SimpleNamespace(returncode=0, stdout="inactive\n")), \
+                mock.patch.object(workspace, "_mountpoints", return_value=()), \
+                mock.patch.object(workspace, "validate_workspace", return_value=assigned), \
+                mock.patch.object(workspace, "read_assignment",
+                                  side_effect=workspace.Refused("workspace assignment is missing or malformed")), \
+                mock.patch.object(workspace.os, "lstat", side_effect=lstat_as_root), \
+                mock.patch.object(workspace.os, "stat", side_effect=stat_as_root), \
+                mock.patch.object(workspace, "_atomic_root_file", side_effect=atomic_write) as write_file, \
+                mock.patch.object(workspace, "ASSIGNMENT", assignment_path), \
+                mock.patch.object(workspace, "DROPIN", dropin_path):
+            with self.assertRaisesRegex(OSError, "injected drop-in"):
+                workspace.configure(str(self.safe_project), self.repo, owner_uid=1234,
+                                    unsafe_recurse=False, reassign=False)
+
+        self.assertEqual(write_file.call_count, 2)
+        self.assertFalse(assignment_path.exists(), "failed drop-in write must remove new assignment")
+        self.assertFalse(dropin_path.exists(), "partially published drop-in must be removed")
+
+    def test_daemon_reload_failure_restores_existing_assignment_and_dropin(self):
+        account = SimpleNamespace(pw_uid=1234, pw_gid=1234, pw_dir=str(self.home))
+        previous = workspace.Workspace(self.home / "previous", (3, 4), 1234)
+        assigned = workspace.Workspace(self.safe_project, (1, 2), 1234)
+        assignment_path = self.root / "workspace.json"
+        dropin_path = self.root / "20-workspace.conf"
+        old_assignment = b"previous assignment\n"
+        old_dropin = b"previous drop-in\n"
+        assignment_path.write_bytes(old_assignment)
+        dropin_path.write_bytes(old_dropin)
+        fake_lock = os.open(os.devnull, os.O_RDONLY)
+        original_open, original_lstat, original_fstat = os.open, os.lstat, os.fstat
+        writes = []
+        systemd_calls = 0
+
+        def open_lock(path, flags, *args, **kwargs):
+            if str(path) == "/run/little-mester-vm-workspace-config.lock":
+                return fake_lock
+            return original_open(path, flags, *args, **kwargs)
+
+        def lstat_root_dropin(path, *args, **kwargs):
+            if pathlib.Path(path) == dropin_path:
+                actual = original_lstat(path, *args, **kwargs)
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_uid=0,
+                                       st_gid=0, st_nlink=1, st_dev=actual.st_dev,
+                                       st_ino=actual.st_ino)
+            return original_lstat(path, *args, **kwargs)
+
+        def fstat_root_lock(fd):
+            if fd == fake_lock:
+                return SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1)
+            return original_fstat(fd)
+
+        def atomic_write(path, payload, **kwargs):
+            pathlib.Path(path).write_bytes(payload)
+            writes.append((pathlib.Path(path), payload))
+
+        def systemd_run(args, **kwargs):
+            nonlocal systemd_calls
+            systemd_calls += 1
+            if args[-1:] == ["daemon-reload"] and systemd_calls == 5:
+                raise subprocess.CalledProcessError(1, args)
+            return SimpleNamespace(returncode=0, stdout="inactive\n")
+
+        with mock.patch.object(workspace.os, "geteuid", return_value=0), \
+                mock.patch.object(workspace.os, "open", side_effect=open_lock), \
+                mock.patch.object(workspace.os, "fstat", side_effect=fstat_root_lock), \
+                mock.patch.object(workspace.os, "lstat", side_effect=lstat_root_dropin), \
+                mock.patch.object(workspace.pwd, "getpwuid", return_value=account), \
+                mock.patch.object(workspace.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=55)), \
+                mock.patch.object(workspace.subprocess, "run", side_effect=systemd_run), \
+                mock.patch.object(workspace, "_mountpoints", return_value=()), \
+                mock.patch.object(workspace, "validate_workspace", return_value=assigned), \
+                mock.patch.object(workspace, "read_assignment", return_value=previous), \
+                mock.patch.object(workspace, "_atomic_root_file", side_effect=atomic_write), \
+                mock.patch.object(workspace, "ASSIGNMENT", assignment_path), \
+                mock.patch.object(workspace, "DROPIN", dropin_path):
+            with self.assertRaises(subprocess.CalledProcessError):
+                workspace.configure(str(self.safe_project), self.repo, owner_uid=1234,
+                                    unsafe_recurse=False, reassign=True)
+
+        self.assertEqual(assignment_path.read_bytes(), old_assignment)
+        self.assertEqual(dropin_path.read_bytes(), old_dropin)
+        self.assertEqual([payload for _path, payload in writes[-2:]],
+                         [old_dropin, old_assignment])
+        self.assertEqual(systemd_calls, 6, "rollback must reload the restored unit files")
 
 
 class QemuWorkspaceArgvTests(unittest.TestCase):

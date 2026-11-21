@@ -412,14 +412,25 @@ def _verify_bind_identity(workspace: Workspace, target: pathlib.Path,
         raise Refused("host workspace bind target differs from the approved source identity")
 def _systemd_bind_path(path: pathlib.Path) -> str:
     raw = str(path)
-    if not raw.startswith("/") or any(character in raw for character in ("\0", "\n", "\r", ":")):
-        raise Refused("workspace path contains a character unsafe for systemd BindPaths")
-    # systemd unit quoting keeps spaces inside the one BindPaths word. Escapes
-    # are intentionally rejected rather than being interpreted differently by
-    # systemd's word and mount-spec parsers.
-    if "\\" in raw or '"' in raw:
-        raise Refused("workspace path contains unsupported systemd quoting characters")
-    return f'[Service]\nBindPaths="{raw.replace("%", "%%")}:{SHARE_DIR}"\n'
+    if not raw.startswith("/"):
+        raise Refused("workspace path must be absolute before generating systemd BindPaths")
+    # BindPaths has its own colon/list parser after unit-file parsing. In the
+    # supported systemd versions, backslash and quote escaping is not preserved
+    # as a literal path in this field (and whole-item quotes duplicate fields).
+    # Emit only a conservative alphabet that needs no parser escaping; reject
+    # everything else before configure() publishes either file.
+    safe = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-")
+    if any(character not in safe for character in raw):
+        raise Refused(
+            "workspace path contains characters unsupported by systemd BindPaths; "
+            "use only ASCII letters, digits, '/', '.', '_' or '-'")
+    return f"[Service]\nBindPaths={raw}:{SHARE_DIR}\n"
+
+
+def effective_bind_paths_match(value: str, source: pathlib.Path | str,
+                               destination: pathlib.Path | str) -> bool:
+    """Accept exactly one effective recursive bind with the requested endpoints."""
+    return value.split(":") == [str(source), str(destination), "rbind"]
 
 
 def verify_host_assignment(uid: int) -> Workspace:
@@ -481,6 +492,81 @@ def _atomic_root_file(path: pathlib.Path, payload: bytes, *, mode: int, group: i
         raise Refused("could not safely write root workspace configuration") from error
 
 
+def _remove_root_file_if_unchanged(path: pathlib.Path, payload: bytes, *, mode: int,
+                                   group: int) -> None:
+    """Remove a newly published config file only if it is still our exact file."""
+    dirfd = -1
+    fd = -1
+    try:
+        dirfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        info = os.stat(path.name, dir_fd=dirfd, follow_symlinks=False)
+        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != 0 or info.st_gid != group
+                or stat.S_IMODE(info.st_mode) != mode or info.st_nlink != 1):
+            raise Refused("preserving changed workspace configuration during rollback")
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dirfd)
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise Refused("workspace configuration changed while rolling back")
+        contents = bytearray()
+        while len(contents) <= len(payload):
+            chunk = os.read(fd, min(4096, len(payload) + 1 - len(contents)))
+            if not chunk:
+                break
+            contents.extend(chunk)
+        if bytes(contents) != payload:
+            raise Refused("preserving changed workspace configuration during rollback")
+        current = os.stat(path.name, dir_fd=dirfd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise Refused("workspace configuration changed before rollback removal")
+        os.unlink(path.name, dir_fd=dirfd)
+        os.fsync(dirfd)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise Refused("could not safely roll back workspace configuration") from error
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if dirfd >= 0:
+            os.close(dirfd)
+
+
+def _restore_workspace_pair(assignment_path: pathlib.Path, dropin_path: pathlib.Path, *,
+                            assignment: bytes, previous_assignment: bytes | None,
+                            dropin: bytes, previous_dropin: bytes | None,
+                            control_gid: int) -> None:
+    """Restore only our published files, and only if both match known states."""
+    def current_bytes(path: pathlib.Path) -> bytes | None:
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise Refused("workspace configuration cannot be inspected during rollback") from error
+
+    current_dropin = current_bytes(dropin_path)
+    current_assignment = current_bytes(assignment_path)
+    if (current_dropin not in (dropin, previous_dropin)
+            or current_assignment not in (assignment, previous_assignment)):
+        raise Refused(
+            "workspace configuration changed during rollback; preserving both files for recovery")
+
+    if current_dropin == dropin:
+        if previous_dropin is None:
+            _remove_root_file_if_unchanged(dropin_path, dropin, mode=0o644, group=0)
+        else:
+            _atomic_root_file(dropin_path, previous_dropin,
+                              mode=0o644, group=0, replace=True)
+    if current_assignment == assignment:
+        if previous_assignment is None:
+            _remove_root_file_if_unchanged(
+                assignment_path, assignment, mode=0o640, group=control_gid)
+        else:
+            _atomic_root_file(assignment_path, previous_assignment,
+                              mode=0o640, group=control_gid, replace=True)
+
+
 def configure(raw_path: str, repository: pathlib.Path, *, owner_uid: int,
               unsafe_recurse: bool, reassign: bool) -> Workspace:
     if os.geteuid() != 0:
@@ -533,11 +619,51 @@ def configure(raw_path: str, repository: pathlib.Path, *, owner_uid: int,
             return workspace
         rendered = _systemd_bind_path(workspace.path).encode("utf-8")
         assignment = (json.dumps(_payload(workspace), sort_keys=True, separators=(",", ":")) + "\n").encode()
-        _atomic_root_file(ASSIGNMENT, assignment, mode=0o640, group=control_gid,
-                          replace=previous is not None)
-        _atomic_root_file(DROPIN, rendered, mode=0o644, group=0, replace=reassign)
-        subprocess.run(["/usr/bin/systemctl", "daemon-reload"], check=True,
-                       stdin=subprocess.DEVNULL)
+        previous_assignment_bytes = ASSIGNMENT.read_bytes() if previous is not None else None
+        if previous is None:
+            try:
+                os.lstat(ASSIGNMENT)
+            except FileNotFoundError:
+                pass
+            else:
+                raise Refused("preserving pre-existing workspace assignment evidence")
+        try:
+            dropin_info = os.lstat(DROPIN)
+        except FileNotFoundError:
+            previous_dropin_bytes = None
+        else:
+            if (not stat.S_ISREG(dropin_info.st_mode) or stat.S_ISLNK(dropin_info.st_mode)
+                    or dropin_info.st_uid != 0 or dropin_info.st_gid != 0
+                    or stat.S_IMODE(dropin_info.st_mode) != 0o644 or dropin_info.st_nlink != 1):
+                raise Refused("preserving pre-existing workspace drop-in with unsafe metadata")
+            previous_dropin_bytes = DROPIN.read_bytes()
+        reload_attempted = False
+        try:
+            _atomic_root_file(ASSIGNMENT, assignment, mode=0o640, group=control_gid,
+                              replace=previous is not None)
+            _atomic_root_file(DROPIN, rendered, mode=0o644, group=0, replace=reassign)
+            reload_attempted = True
+            subprocess.run(["/usr/bin/systemctl", "daemon-reload"], check=True,
+                           stdin=subprocess.DEVNULL)
+        except BaseException as primary_error:
+            # The two files cannot be renamed as one filesystem transaction.
+            # Inspect both before mutating either: a concurrent root writer
+            # must not have its assignment paired with our rollback drop-in.
+            try:
+                _restore_workspace_pair(
+                    ASSIGNMENT, DROPIN, assignment=assignment,
+                    previous_assignment=previous_assignment_bytes,
+                    dropin=rendered, previous_dropin=previous_dropin_bytes,
+                    control_gid=control_gid)
+                if reload_attempted:
+                    subprocess.run(["/usr/bin/systemctl", "daemon-reload"], check=True,
+                                   stdin=subprocess.DEVNULL)
+            except BaseException as rollback_error:
+                raise Refused(
+                    "workspace configuration failed and rollback/reload also failed; "
+                    "preserving both files for recovery"
+                ) from rollback_error
+            raise primary_error
         return workspace
     finally:
         os.close(lock_fd)

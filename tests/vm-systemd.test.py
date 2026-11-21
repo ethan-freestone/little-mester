@@ -407,6 +407,9 @@ class SystemdPolicyTests(unittest.TestCase):
         acceptance_source = (ROOT / "lib/vm/system-acceptance.py").read_text()
         unit_source = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
         self.assertIn('workspace_properties.get("ProtectHome") != "tmpfs"', acceptance_source)
+        self.assertIn("workspace_bind_matches = workspace_policy.effective_bind_paths_match(",
+                      acceptance_source)
+        self.assertIn("or not workspace_bind_matches", acceptance_source)
         self.assertIn("ProtectHome=tmpfs", unit_source)
         self.assertIn("ProtectSystem=strict", unit_source)
 

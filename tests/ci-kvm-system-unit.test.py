@@ -759,6 +759,23 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("require(quoted_reverse[\"_raw_classification\"] == standalone[\"_raw_classification\"]",
                       reproduction)
         self.assertIn("WORKSPACE_MODULE._systemd_bind_path(workspace)", source)
+        self.assertIn("legacy_quoted_dropin = f'[Service]", reproduction)
+        self.assertIn('unquoted_dropin = workspace_dropin', reproduction)
+
+    def test_dependency_exec_expectation_is_derived_from_generated_probe_command(self):
+        template = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
+        generated, _dropin = unit.production_workspace_reproduction_config(
+            template, user="ci-owner", group="ci-group", vm_unit="sample-vm.service",
+            workspace=pathlib.Path("/tmp/ci-workspace"),
+            destination="/run/little-mester-vm-workspace-share")
+        self.assertEqual(unit.unit_executable_from_text(generated, "ExecStart"),
+                         "/usr/bin/python3")
+        self.assertEqual(unit.unit_executable_from_text(generated, "ExecStartPost"),
+                         "/usr/bin/true")
+        reproduction = SCRIPT.read_text()[SCRIPT.read_text().index(
+            "def run_production_dependency_reproduction"):]
+        self.assertIn("unit_executable_from_text(workspace_text, key)", reproduction)
+        self.assertNotIn('("ExecStart", "/usr/bin/sleep")', reproduction)
 
     def test_generated_namespace_probe_is_valid_python_and_quoted_as_one_systemd_argument(self):
         command = unit.workspace_bind_probe_exec(
@@ -1441,12 +1458,12 @@ class HostedSystemUnitTests(unittest.TestCase):
         template = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
         unit_text, dropin_text = unit.production_workspace_reproduction_config(
             template, user="ci-owner", group="ci-group", vm_unit="sample-vm.service",
-            workspace=pathlib.Path("/tmp/ci workspace"),
+            workspace=pathlib.Path("/tmp/ci-workspace"),
             destination="/run/little-mester-vm-workspace-share")
         self.assertIn("ExecStart=/usr/bin/python3 -I -c '", unit_text)
         self.assertNotIn("BindPaths=", unit_text)
         self.assertEqual(dropin_text, unit.WORKSPACE_MODULE._systemd_bind_path(
-            pathlib.Path("/tmp/ci workspace")))
+            pathlib.Path("/tmp/ci-workspace")))
         self.assertIn("BindPaths=", dropin_text)
         merged = ("# /run/systemd/system/sample-vm-workspace.service\n" + unit_text
                   + "# /run/systemd/system/sample-vm-workspace.service.d/20-workspace.conf\n"
@@ -1459,11 +1476,13 @@ class HostedSystemUnitTests(unittest.TestCase):
         template = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
         base, dropin = unit.production_workspace_reproduction_config(
             template, user="ci-owner", group="ci-group", vm_unit="sample-vm.service",
-            workspace=pathlib.Path("/tmp/ci workspace"),
+            workspace=pathlib.Path("/tmp/ci-workspace"),
             destination="/run/little-mester-vm-workspace-share")
-        directive = 'BindPaths="/tmp/ci workspace:/run/little-mester-vm-workspace-share"\n'
+        directive = 'BindPaths=/tmp/ci-workspace:/run/little-mester-vm-workspace-share\n'
         fragment = unit.production_workspace_fragment_config(base, directive)
-        self.assertEqual(dropin, "[Service]\n" + directive)
+        self.assertEqual(dropin, unit.WORKSPACE_MODULE._systemd_bind_path(
+            pathlib.Path("/tmp/ci-workspace")))
+        self.assertEqual(directive, dropin.replace("[Service]\n", "", 1))
         self.assertEqual(fragment.replace(directive, "", 1), base)
         self.assertNotIn("BindPaths=", base)
         self.assertIn(directive, fragment)
@@ -1502,7 +1521,7 @@ class HostedSystemUnitTests(unittest.TestCase):
             "private-tmp": "PrivateTmp", "runtime-directory-preserve": "RuntimeDirectoryPreserve",
         }
         self.assertEqual(set(variants), set(expected))
-        self.assertEqual(bind_dropin, '[Service]\nBindPaths="/tmp/ci-workspace:/run/little-mester-vm-workspace-share"\n')
+        self.assertEqual(bind_dropin, '[Service]\nBindPaths=/tmp/ci-workspace:/run/little-mester-vm-workspace-share\n')
         self.assertNotIn("BindPaths=", base)
         for label, fragment in variants.items():
             directives = [line.split("=", 1)[0] for line in fragment.splitlines()

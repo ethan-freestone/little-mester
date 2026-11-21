@@ -1069,8 +1069,7 @@ def bind_paths_semantically_match(value: str, source: str, destination: str) -> 
     The hosted owner experiment reports SOURCE:DESTINATION:rbind.  Do not accept
     a two-field form until a hosted systemd experiment establishes its meaning.
     """
-    fields = value.split(":")
-    return len(fields) == 3 and fields == [source, destination, "rbind"]
+    return WORKSPACE_MODULE.effective_bind_paths_match(value, source, destination)
 
 
 SYSTEMD_DEPENDENCY_SET_PROPERTIES = frozenset({
@@ -1363,6 +1362,19 @@ def production_workspace_reproduction_config(template: str, *, user: str, group:
     return template, bind_directive
 
 
+def unit_executable_from_text(unit_text: str, property_name: str) -> str:
+    """Return the exact executable selected by one generated systemd command."""
+    matches = re.findall(rf"^{re.escape(property_name)}=(.*)$", unit_text, flags=re.MULTILINE)
+    require(len(matches) == 1, f"generated unit must contain exactly one {property_name}")
+    try:
+        argv = shlex.split(matches[0], posix=True)
+    except ValueError as error:
+        raise RuntimeError(f"generated {property_name} command has invalid quoting") from error
+    require(bool(argv) and argv[0].startswith("/"),
+            f"generated {property_name} executable must be absolute")
+    return argv[0]
+
+
 def workspace_bind_probe_exec(workspace: pathlib.Path, destination: str) -> str:
     """Build a disposable in-namespace probe as one systemd-quoted argv item."""
     home = pwd.getpwuid(os.getuid()).pw_dir
@@ -1550,13 +1562,14 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
     require(workspace_dropin.count("[Service]\n") == 1,
             "generated production BindPaths drop-in has ambiguous service section")
     bind_directive = workspace_dropin.replace("[Service]\n", "", 1)
-    require(not any(character.isspace() for character in f"{workspace}:{destination}"),
-            "quoted/unquoted comparison requires whitespace-free identical path fixtures")
-    require(bind_directive.startswith('BindPaths="') and bind_directive.endswith('"\n'),
-            "production writer did not produce exactly one quoted BindPaths directive")
-    unquoted_bind_directive = bind_directive.replace('BindPaths="', "BindPaths=", 1)[:-2] + "\n"
-    quoted_reverse_dropin = workspace_dropin
-    unquoted_dropin = "[Service]\n" + unquoted_bind_directive
+    require(bind_directive.startswith("BindPaths=") and not bind_directive.startswith('BindPaths="'),
+            "production writer must emit one unquoted BindPaths item")
+    # Preserve a minimal legacy-quoted control so future regressions retain the
+    # causal contrast. Production candidates always use the actual writer.
+    legacy_source = str(workspace).replace("%", "%%")
+    legacy_quoted_dropin = f'[Service]\nBindPaths="{legacy_source}:{destination}"\n'
+    quoted_reverse_dropin = legacy_quoted_dropin
+    unquoted_dropin = workspace_dropin
     fragment_text = production_workspace_fragment_config(workspace_text, bind_directive)
     variants = production_workspace_diagnostic_variants()
     variant_units = {label: f"{prefix}-{label}.service" for label in variants}
@@ -1581,7 +1594,7 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
     for label, name in variant_units.items():
         units[name] = workspace_text
     dropins = {
-        dropin_relative: workspace_dropin,
+        dropin_relative: legacy_quoted_dropin,
         f"{graph_workspace_unit}.d/20-workspace.conf": workspace_dropin,
         f"{unquoted_workspace_unit}.d/20-workspace.conf": unquoted_dropin,
         f"{quoted_reverse_workspace_unit}.d/20-workspace.conf": quoted_reverse_dropin,
@@ -1936,7 +1949,7 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
         # The graph uses a separate, identically rendered workspace unit so
         # failed-state cleanup is not needed between independent attempts.
         standalone = run_case("dropin-standalone", workspace_unit, workspace_unit,
-                              workspace_text, [workspace_dropin])
+                              workspace_text, [legacy_quoted_dropin])
         # run_case returns only after effective configuration, stop, and
         # runtime-baseline checks pass. A reproduced 226 is the expected
         # diagnostic control outcome, not an acceptance pass or matrix abort.
@@ -2024,14 +2037,19 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                       for key, value in expected.items() if workspace_state.get(key) != value}
         for key, value in (("SupplementaryGroups", "lm-vm-control"),
                            ("ExecPaths", "/usr/bin"), ("ReadWritePaths", destination),
-                           ("BindPaths", f"{workspace}:{destination}"),
                            ("PartOf", vm_unit), ("Before", vm_unit),
                            ("After", "local-fs.target")):
             if value not in workspace_state.get(key, ""):
                 mismatches[key] = {"expected_contains": value,
-                                   "actual": workspace_state.get(key)}
-        for key, executable in (("ExecStart", "/usr/bin/sleep"),
-                                ("ExecStartPost", "/usr/bin/true")):
+                                    "actual": workspace_state.get(key)}
+        if not WORKSPACE_MODULE.effective_bind_paths_match(
+                workspace_state.get("BindPaths", ""), workspace, destination):
+            mismatches["BindPaths"] = {
+                "expected_single_recursive_bind": [str(workspace), destination, "rbind"],
+                "actual": workspace_state.get("BindPaths"),
+            }
+        for key in ("ExecStart", "ExecStartPost"):
+            executable = unit_executable_from_text(workspace_text, key)
             if f"path={executable}" not in workspace_state.get(key, ""):
                 mismatches[key] = {"expected_executable": executable,
                                    "actual": workspace_state.get(key)}

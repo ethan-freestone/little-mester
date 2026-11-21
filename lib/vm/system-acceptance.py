@@ -309,6 +309,9 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
                                  == (expected[0], " ".join(expected))
                                  for name, expected in expected_metrics_commands.items())
     workspace_dropin = "/etc/systemd/system/little-mester-vm-workspace.service.d/20-workspace.conf"
+    workspace_bind_matches = workspace_policy.effective_bind_paths_match(
+        workspace_properties.get("BindPaths", ""), assignment.path,
+        workspace_policy.SHARE_DIR)
     if (vm_properties.get("FragmentPath") != "/etc/systemd/system/little-mester-vm.service"
             or proxy_properties.get("FragmentPath") != "/etc/systemd/system/little-mester-vm-proxy.service"
             or vm_properties.get("DropInPaths") not in ("", "-")
@@ -349,6 +352,7 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
                    for path in ("/usr/bin", "/usr/lib", "/usr/libexec", "/lib"))
             or workspace_properties.get("NeedDaemonReload") != "no"
             or not workspace_commands_match
+            or not workspace_bind_matches
             or str(workspace_policy.SHARE_DIR) not in workspace_properties.get("ReadWritePaths", "")
             or metrics_properties.get("User") != "lm-vm"
             or metrics_properties.get("Group") != "lm-vm"
