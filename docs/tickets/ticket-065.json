@@ -8,12 +8,13 @@
   "title": "Attribute slow first boot of the fixed systemd VM",
   "objective": "Use bounded owner-authorized measurements to identify the source of the 480.334s first VM start/readiness interval without changing production deadlines or provisioning semantics speculatively.",
   "created_at": "2026-11-21T20:56:23.013Z",
-  "updated_at": "2026-11-21T21:06:15.169Z",
+  "updated_at": "2026-11-21T21:07:19.150Z",
   "acceptance_criteria": [
     {
       "id": "A1",
       "text": "A source-level trace maps first-boot provisioning, guest cloud-init, package/network operations, systemd dependencies, SSH retries, and readiness predicates with exact evidence references.",
-      "status": "pending"
+      "status": "passing",
+      "evidence": "Delegated read-only trace recorded in ticket tests.created with exact references: systemd/little-mester-vm.service:18-25; lib/vm/system-vm.py:388-406,630-663; lib/vm/guest-bootstrap.py:16-60,118-132; lib/vm/parent-session-contract.py:122-145; systemd/little-mester-vm-proxy.service:3-5; original feat/vm-approach lib/vm/cloud-init.sh; transient CI tests/ci-kvm-stage.sh:579-605,693-744. Conclusion: initial 480.334s interval cause remains unknown; plausible cloud-init package work versus host network-online/proxy, SSH retry and protected readiness alternatives."
     },
     {
       "id": "A2",
