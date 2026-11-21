@@ -8,7 +8,7 @@
   "title": "Restore Docker and VM metrics endpoint parity in the TUI",
   "objective": "PR #20 Phase 1 metrics regression (related to parent #35 and verification ticket #21): host-metrics-tui currently hardcodes the VM metrics address, while the Docker agent uses the Compose service name. Compare with feat/vm-approach and restore working Docker and VM behavior without weakening the VM egress/security architecture.",
   "created_at": "2026-11-21T16:41:08.238Z",
-  "updated_at": "2026-11-21T18:44:49.382Z",
+  "updated_at": "2026-11-21T18:51:25.971Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -54,7 +54,8 @@
       "Delegated security review: inject a fixed, trusted mode-specific endpoint at the launch boundary (Compose Docker agent and protected direct-VM launcher); do not accept workspace-controlled arbitrary URLs. Test both history and metrics fetch paths, malformed/missing config, errors, and assert network invariants (internal Compose service, exact guestfwd/restrict=on, no new host forwarding). No Docker/VM operations were run.",
       "Commit 35cc0b8 (`fix(metrics): select mode-specific TUI endpoint`) was independently reviewed by Sol (GPT-6.1-Sol) against its parent; exact-commit verdict APPROVE, no blockers at individual-commit scope. This is not PR #20 merge or production acceptance.",
       "Post-commit local results: `node --test tests/host-metrics-tui.test.mjs` 3 passed; `python3 tests/vm-parent-qemu.test.py` 8 passed; `python3 tests/vm-systemd.test.py` 39 passed; `python3 tests/vm-opencode-preferences.test.py` 6 passed; `python3 tests/vm-owner-acceptance.test.py` 69 passed (1 skipped); `python3 tests/vm-parent-supervisor.test.py` 57 passed; `python3 tests/ci-kvm-system-unit.test.py` 76 passed; `python3 tests/vm-system-metrics.test.py` 3 passed. TUI JSX, py_compile, bash -n, node --check and diff-check passed. No Docker runtime, /dev/kvm or hosted CI was available; live Docker/VM behavior remains unverified.",
-      "CI test is wired into `.github/workflows/ci.yml`; ticket validation reports index synchronized, no lock/orphans and all 63 criteria/test ledgers present; only pre-existing audit #417 privacy-redaction operation warning remains."
+      "CI test is wired into `.github/workflows/ci.yml`; ticket validation reports index synchronized, no lock/orphans and all 63 criteria/test ledgers present; only pre-existing audit #417 privacy-redaction operation warning remains.",
+      "Sol pre-implementation design review (2026-11-21): APPROVE conditionally for `allow_reuse_address=True` on the actual fixed-loopback ThreadingHTTPServer, only with immediate same-port rebind and active-listener EADDRINUSE regressions, then hosted confirmation. Delegated actual-server reproduction (isolated 127.0.0.1:59077; production endpoint untouched): GET /metrics returned 200; competing second active server failed errno 98 while first remained responsive; after shutdown/close/join no LISTEN remained but /proc/net/tcp showed state 06 TIME_WAIT and immediate rebind failed errno 98. This establishes the local TIME_WAIT mechanism, not yet the hosted production fix. Acceptance marker currently resides in virtiofs `/workspace`; design approved to move it to verified guest-disk-backed state, preserve on failure, and remove only after successful same-disk proof. No KVM/production VM operation."
     ]
   },
   "models_used": []
