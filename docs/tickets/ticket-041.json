@@ -8,7 +8,7 @@
   "title": "VM provisioning and ./lab VM lifecycle",
   "objective": "Make the VM reproducible and controllable from the host: ./lab can provision or connect to the VM per #40, install Docker, transport the workspace, and run VM lifecycle commands idempotently. The host stops running the agent container itself.",
   "created_at": "2026-10-26T20:39:18.836Z",
-  "updated_at": "2026-11-21T23:47:24.181Z",
+  "updated_at": "2026-11-21T23:50:25.243Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -197,7 +197,8 @@
       "Exact implementation approval: Sol reviewed 21eb752c3dc765656418987195c873f8b1d1303f and returned APPROVE with no remaining concrete blockers; approval grants no deployment, hosted-run, rollback, guest-start, or owner action authorization.",
       "Local-only passing evidence on 21eb752: 195 VM-focused tests across six suites, 1 skipped; compile/shell syntax/diff checks passed. Existing fixtures emitted the expected environment-only initial-start FAIL and compatibility INCONCLUSIVE markers.",
       "Read-only trace of all three hosted failures and consumer contracts; Sol design review APPROVED. Proposed corrections are limited to test fixture/verifier contract synchronization; production unit, launcher protection and terminal assertions remain unchanged.",
-      "Test-first evidence: before fixes, added regressions failed on missing lock-fixture helper, verifier rendering seam and the exact six missing protected dependencies. After fixes, namespace/unit contract suite passed 106 tests; parent supervisor suite passed 57 tests, including protected launcher PTY descriptor/terminal checks. Sol design approval preceded implementation; Sol diff review APPROVED with one nonblocking test-coverage suggestion, now covered by partial-setup, held-lock and malformed group-marker regressions. No host/systemd/KVM/owner lifecycle acceptance."
+      "Test-first evidence: before fixes, added regressions failed on missing lock-fixture helper, verifier rendering seam and the exact six missing protected dependencies. After fixes, namespace/unit contract suite passed 106 tests; parent supervisor suite passed 57 tests, including protected launcher PTY descriptor/terminal checks. Sol design approval preceded implementation; Sol diff review APPROVED with one nonblocking test-coverage suggestion, now covered by partial-setup, held-lock and malformed group-marker regressions. No host/systemd/KVM/owner lifecycle acceptance.",
+      "Corrective commit `5703e8f08fb7a97770a9c738ab423b9eb9bdf610` independently reviewed by Sol against its parent and full PR #20 requirements: APPROVE as a corrective source commit; no blocking findings. This does not approve PR merge or authorize hosted execution/deployment/owner VM actions. Final local CI-equivalent run: Node 3 passed; Python workflow suites passed (includes owner acceptance 69, systemd 58, workspace 30, namespace contracts 106, parent supervisor 57); Bats 106 passed; compile, shell syntax, diff check passed. One parent-gate immediate /proc argv observation flaked once (IndexError), then passed alone and in a complete parent-suite rerun. No hosted namespace/systemd/KVM or production acceptance was run; no owner VM actions. Ticket validator retains only known audit #417 invalid `privacy-redaction` operation warning."
     ]
   },
   "priority": "major",
