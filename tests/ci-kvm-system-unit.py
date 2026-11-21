@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import grp
 import importlib.util
 import json
@@ -2725,6 +2726,65 @@ def cleanup_only() -> int:
     return 0
 
 
+def _validate_diagnostic_groupadd() -> None:
+    policy_path = REPO / "lib/vm/executable-policy.py"
+    spec = importlib.util.spec_from_file_location("diagnostic_executable_policy", policy_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("trusted groupadd executable policy is unavailable")
+    policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(policy)
+    try:
+        policy.validate_executable("/usr/sbin/groupadd")
+    except (OSError, ValueError) as error:
+        raise RuntimeError("trusted /usr/sbin/groupadd is unavailable or unsafe") from error
+
+
+def _ensure_diagnostic_control_group() -> None:
+    """Create only the disposable diagnostic's fixed supplementary group."""
+    create_status = None
+    try:
+        group = grp.getgrnam("lm-vm-control")
+    except KeyError:
+        _validate_diagnostic_groupadd()
+        try:
+            result = subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/sbin/groupadd", "--system", "lm-vm-control"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=30, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError("could not create diagnostic control group with noninteractive sudo") from error
+        create_status = result.returncode
+        try:
+            group = grp.getgrnam("lm-vm-control")
+        except KeyError as error:
+            raise RuntimeError(
+                f"diagnostic control group creation failed (status {create_status}); NSS entry is absent"
+            ) from error
+    if group.gr_name != "lm-vm-control" or not isinstance(group.gr_gid, int) or group.gr_gid <= 0:
+        raise RuntimeError("diagnostic control group has unsafe gid or name")
+    try:
+        reverse = grp.getgrgid(group.gr_gid)
+    except KeyError as error:
+        raise RuntimeError("diagnostic control group GID does not resolve through NSS") from error
+    if reverse.gr_name != "lm-vm-control":
+        raise RuntimeError("diagnostic control group NSS name/GID mismatch")
+    # A nonzero groupadd result is accepted only as a concurrent-create race:
+    # the coherent NSS entry just validated is the required evidence.
+
+
+@contextlib.contextmanager
+def _timed_ci_stage(label: str):
+    spec = importlib.util.spec_from_file_location(
+        "ci_system_acceptance_timing", REPO / "lib/vm/system-acceptance.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("shared system acceptance timing helper is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with module.StageTimer().timed_stage(label):
+        yield
+
+
 def namespace_diagnostics_only() -> int:
     """Run exploratory namespace controls on their own disposable CI runner."""
     hosted_runner_guard()
@@ -2735,6 +2795,7 @@ def namespace_diagnostics_only() -> int:
     workspace.mkdir(mode=0o700)
     created = os.lstat(workspace)
     try:
+        _ensure_diagnostic_control_group()
         run_workspace_bind_reproductions(workspace)
     finally:
         current = os.lstat(workspace)
@@ -2808,10 +2869,12 @@ def main() -> int:
         require(stat.S_ISDIR(runtime_info.st_mode) and runtime_info.st_uid == os.getuid()
                 and stat.S_IMODE(runtime_info.st_mode) == 0o700,
                 "runner private runtime path is unsafe")
-        run([str(REPO / "tools/vm-owner-acceptance"), "--install", "--sha", sha,
-             "--prefix", str(CI_INSTALL_PREFIX), "--repo", str(REPO)], timeout=120)
+        with _timed_ci_stage("candidate_install"):
+            run([str(REPO / "tools/vm-owner-acceptance"), "--install", "--sha", sha,
+                 "--prefix", str(CI_INSTALL_PREFIX), "--repo", str(REPO)], timeout=120)
         installed_root = CI_INSTALL_PARENT / sha
-        run(["/usr/bin/sudo", "-n", str(installed_root / "tools/vm-system-install")], timeout=300)
+        with _timed_ci_stage("fresh_provisioning"):
+            run(["/usr/bin/sudo", "-n", str(installed_root / "tools/vm-system-install")], timeout=300)
         verify_installed_files()
         require_fixed_units_loaded()
         unit_identity_checks()
@@ -2830,7 +2893,8 @@ def main() -> int:
         invoke_shared_acceptance(sha)
         verify_workspace_startup_post()
         verify_guest_cannot_read_escape()
-        force_systemd_fallback(installed_root)
+        with _timed_ci_stage("forced_stop_recovery"):
+            force_systemd_fallback(installed_root)
     except BaseException as error:  # noqa: BLE001 - finally below must stop a started unit on cancellation
         failure = error
         print(f"production_unit_result=FAIL error={type(error).__name__}: {error}", file=sys.stderr)
@@ -2839,11 +2903,12 @@ def main() -> int:
     finally:
         if start_attempted and installed_root is not None:
             try:
-                invoke_lab(installed_root, "down", 45)
-                assert_stopped()
-                remove_escape_sentinel(escape_evidence)
-                remove_disposable_workspace()
-                print("production_unit_cleanup=PASS")
+                with _timed_ci_stage("final_cleanup"):
+                    invoke_lab(installed_root, "down", 45)
+                    assert_stopped()
+                    remove_escape_sentinel(escape_evidence)
+                    remove_disposable_workspace()
+                    print("production_unit_cleanup=PASS")
             except BaseException as error:  # noqa: BLE001 - preserve both primary and cleanup failures
                 print(f"production_unit_cleanup=FAIL error={type(error).__name__}: {error}", file=sys.stderr)
                 report_startup_diagnostics()

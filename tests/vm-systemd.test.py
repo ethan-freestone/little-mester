@@ -8,6 +8,7 @@ import json
 import importlib.machinery
 import inspect
 import contextlib
+import datetime
 import io
 import os
 import pathlib
@@ -891,6 +892,106 @@ class SystemdPolicyTests(unittest.TestCase):
             finally:
                 process.kill()
                 process.wait()
+
+
+class StageTimerTests(unittest.TestCase):
+    """Contract tests for the proposed safe, allowlisted stage timer API.
+
+    Assumed API: StageTimer(stream, wall_clock=..., monotonic=...) exposes a
+    ``timed_stage(label)`` context manager. It emits compact JSON records as
+    ``system_vm_stage=<json>`` lines. The source implementation is intentionally
+    not part of this tests-only change.
+    """
+
+    class FlushRecordingStream(io.StringIO):
+        def __init__(self):
+            super().__init__()
+            self.flush_snapshots = []
+
+        def flush(self):
+            self.flush_snapshots.append(self.getvalue())
+            super().flush()
+
+    @staticmethod
+    def fixed_wall_clock():
+        values = iter((
+            datetime.datetime(2026, 11, 21, 12, 0, 0, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2026, 11, 21, 12, 0, 1, 250000, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2026, 11, 21, 12, 0, 2, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2026, 11, 21, 12, 0, 2, 500000, tzinfo=datetime.timezone.utc),
+        ))
+        return lambda: next(values)
+
+    @staticmethod
+    def line(event, label, timestamp, **extra):
+        record = {"event": event, "label": label, "timestamp": timestamp, **extra}
+        return "system_vm_stage=" + json.dumps(record, separators=(",", ":")) + "\n"
+
+    def test_allowlisted_records_are_exact_utc_paired_timed_and_flushed(self):
+        output = self.FlushRecordingStream()
+        timer = acceptance.StageTimer(
+            output, wall_clock=self.fixed_wall_clock(), monotonic=iter((4.0, 4.125, 8.0, 8.010)).__next__)
+
+        with timer.timed_stage("guest_readiness_ssh"):
+            pass
+        with timer.timed_stage("guest_readiness_ssh"):
+            pass
+
+        expected = (
+            self.line("START", "guest_readiness_ssh", "2026-11-21T12:00:00Z")
+            + self.line("END", "guest_readiness_ssh", "2026-11-21T12:00:01.250000Z",
+                        elapsed_ms=125, outcome="PASS")
+            + self.line("START", "guest_readiness_ssh", "2026-11-21T12:00:02Z")
+            + self.line("END", "guest_readiness_ssh", "2026-11-21T12:00:02.500000Z",
+                        elapsed_ms=10, outcome="PASS")
+        )
+        self.assertEqual(output.getvalue(), expected)
+        expected_records = expected.splitlines(keepends=True)
+        self.assertEqual(output.flush_snapshots, [
+            "".join(expected_records[:count]) for count in range(1, len(expected_records) + 1)])
+        records = [json.loads(line.partition("=")[2]) for line in output.getvalue().splitlines()]
+        self.assertEqual([(row["event"], row["label"]) for row in records], [
+            ("START", "guest_readiness_ssh"), ("END", "guest_readiness_ssh"),
+            ("START", "guest_readiness_ssh"), ("END", "guest_readiness_ssh")])
+        self.assertTrue(all(row["timestamp"].endswith("Z") for row in records))
+
+    def test_failure_records_fail_and_reraises_original_baseexception(self):
+        output = io.StringIO()
+        failure = KeyboardInterrupt("secret command and exception detail")
+        timer = acceptance.StageTimer(
+            output,
+            wall_clock=lambda: datetime.datetime(2026, 11, 21, tzinfo=datetime.timezone.utc),
+            monotonic=iter((1.0, 3.5)).__next__)
+        with self.assertRaises(KeyboardInterrupt) as raised:
+            with timer.timed_stage("network_boundaries"):
+                raise failure
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(output.getvalue(),
+                         self.line("START", "network_boundaries", "2026-11-21T00:00:00Z")
+                         + self.line("END", "network_boundaries", "2026-11-21T00:00:00Z",
+                                     elapsed_ms=2500, outcome="FAIL"))
+
+    def test_invalid_label_is_rejected_before_any_output(self):
+        output = io.StringIO()
+        timer = acceptance.StageTimer(output, wall_clock=self.fixed_wall_clock(), monotonic=lambda: 0)
+        with self.assertRaises(ValueError):
+            with timer.timed_stage("run-command-with-secret-token"):
+                self.fail("invalid stage must not enter")
+        self.assertEqual(output.getvalue(), "")
+
+    def test_records_never_include_command_exception_or_secret_values(self):
+        output = io.StringIO()
+        timer = acceptance.StageTimer(
+            output,
+            wall_clock=lambda: datetime.datetime(2026, 11, 21, tzinfo=datetime.timezone.utc),
+            monotonic=iter((0.0, 0.001)).__next__)
+        with self.assertRaisesRegex(RuntimeError, "command-secret-value"):
+            with timer.timed_stage("persistence_fixture"):
+                raise RuntimeError("command-secret-value ghp_1234567890abcdefghijklmnop")
+        rendered = output.getvalue()
+        self.assertIn('"outcome":"FAIL"', rendered)
+        for forbidden in ("command-secret-value", "ghp_1234567890", "RuntimeError", "secret"):
+            self.assertNotIn(forbidden, rendered)
 
 
 if __name__ == "__main__":

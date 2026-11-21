@@ -43,6 +43,181 @@ def workflow_job(workflow: str, name: str) -> str:
 
 
 class HostedSystemUnitTests(unittest.TestCase):
+    DIAGNOSTIC_GROUP = "lm-vm-control"
+    GROUPADD_ARGV = ["/usr/bin/sudo", "-n", "/usr/sbin/groupadd",
+                     "--system", DIAGNOSTIC_GROUP]
+
+    @staticmethod
+    def _group(name="lm-vm-control", gid=987):
+        return SimpleNamespace(gr_name=name, gr_gid=gid)
+
+    def test_diagnostic_control_group_creation_is_validated_and_fixed(self):
+        created = self._group()
+        lookups = []
+
+        def by_name(name):
+            lookups.append(("name", name))
+            if len(lookups) == 1:
+                raise KeyError(name)
+            return created
+
+        with mock.patch.object(unit.grp, "getgrnam", side_effect=by_name), \
+                mock.patch.object(unit.grp, "getgrgid", return_value=created) as by_gid, \
+                mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                    returncode=0, stdout="", stderr="")) as process, \
+                mock.patch.object(unit.os, "setgroups") as setgroups, \
+                mock.patch.object(unit.os, "setgid") as setgid, \
+                mock.patch.object(unit.os, "setuid") as setuid:
+            unit._ensure_diagnostic_control_group()
+
+        argv = process.call_args.args[0]
+        self.assertEqual(argv, self.GROUPADD_ARGV)
+        self.assertEqual(lookups, [("name", self.DIAGNOSTIC_GROUP)] * 2)
+        by_gid.assert_called_once_with(created.gr_gid)
+        setgroups.assert_not_called()
+        setgid.assert_not_called()
+        setuid.assert_not_called()
+
+    def test_diagnostic_control_group_existing_valid_group_needs_no_mutation(self):
+        existing = self._group()
+        with mock.patch.object(unit.grp, "getgrnam", return_value=existing), \
+                mock.patch.object(unit.grp, "getgrgid", return_value=existing), \
+                mock.patch.object(unit.subprocess, "run") as process:
+            unit._ensure_diagnostic_control_group()
+        process.assert_not_called()
+
+    def test_diagnostic_control_group_rejects_root_gid_and_reverse_name_mismatch(self):
+        for group, reverse, message in (
+                (self._group(gid=0), self._group(gid=0), "unsafe.*gid"),
+                (self._group(), self._group(name="different-group"), "name.*mismatch")):
+            with self.subTest(group=group, reverse=reverse), \
+                    mock.patch.object(unit.grp, "getgrnam", return_value=group), \
+                    mock.patch.object(unit.grp, "getgrgid", return_value=reverse), \
+                    mock.patch.object(unit.subprocess, "run") as process, \
+                    self.assertRaisesRegex(RuntimeError, message):
+                unit._ensure_diagnostic_control_group()
+            process.assert_not_called()
+
+    def test_diagnostic_control_group_fails_closed_on_creation_or_nss_failure(self):
+        # A failed groupadd is acceptable only when the subsequent NSS read
+        # proves that a coherent, non-root group now exists.
+        coherent = self._group()
+        scenarios = (
+            ("groupadd failure", [KeyError(self.DIAGNOSTIC_GROUP), coherent], coherent,
+             1, False),
+            ("failed NSS reread", [KeyError(self.DIAGNOSTIC_GROUP),
+                                    KeyError(self.DIAGNOSTIC_GROUP)], None, 0, True),
+            ("groupadd failed without concurrent creation",
+             [KeyError(self.DIAGNOSTIC_GROUP), KeyError(self.DIAGNOSTIC_GROUP)], None,
+             1, True),
+        )
+        for label, names, reverse, returncode, should_fail in scenarios:
+            with self.subTest(label=label):
+                with mock.patch.object(unit.grp, "getgrnam", side_effect=names), \
+                        mock.patch.object(unit.grp, "getgrgid", return_value=reverse), \
+                        mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                            returncode=returncode, stdout="", stderr="groupadd failed")) as process:
+                    if should_fail:
+                        with self.assertRaises(RuntimeError):
+                            unit._ensure_diagnostic_control_group()
+                    else:
+                        unit._ensure_diagnostic_control_group()
+                self.assertEqual(process.call_args.args[0], self.GROUPADD_ARGV)
+
+    def test_diagnostic_control_group_fails_closed_on_unavailable_groupadd_or_sudo(self):
+        # A missing trusted executable and a failed noninteractive sudo call
+        # must both fail closed. The only attempted privileged command remains
+        # the exact fixed groupadd argv; no user/group membership tools run.
+        failures = (
+            ("groupadd unavailable", FileNotFoundError("groupadd unavailable")),
+            ("sudo failure", subprocess.CompletedProcess(
+                self.GROUPADD_ARGV, 1, "", "sudo denied")),
+        )
+        for label, failure in failures:
+            with self.subTest(failure=label), \
+                    mock.patch.object(unit.grp, "getgrnam",
+                                      side_effect=KeyError(self.DIAGNOSTIC_GROUP)), \
+                    mock.patch.object(
+                        unit.subprocess, "run",
+                        side_effect=failure if isinstance(failure, BaseException) else None,
+                        return_value=None if isinstance(failure, BaseException) else failure,
+                    ) as process, \
+                    self.assertRaises(RuntimeError):
+                unit._ensure_diagnostic_control_group()
+            self.assertLessEqual(process.call_count, 1)
+            if process.called:
+                self.assertEqual(process.call_args.args[0], self.GROUPADD_ARGV)
+
+    def test_diagnostic_control_group_rejects_unsafe_groupadd_before_privileged_call(self):
+        with mock.patch.object(unit.grp, "getgrnam",
+                               side_effect=KeyError(self.DIAGNOSTIC_GROUP)), \
+                mock.patch.object(unit, "_validate_diagnostic_groupadd",
+                                  side_effect=RuntimeError("unsafe executable")) as validate, \
+                mock.patch.object(unit.subprocess, "run") as process, \
+                self.assertRaisesRegex(RuntimeError, "unsafe executable"):
+            unit._ensure_diagnostic_control_group()
+        validate.assert_called_once_with()
+        process.assert_not_called()
+
+    def test_standalone_diagnostics_cli_runs_real_dispatch_and_cleans_workspace(self):
+        group = self._group()
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = pathlib.Path(temp) / "diagnostics"
+            group_lookups = []
+
+            def by_name(name):
+                group_lookups.append(name)
+                if len(group_lookups) == 1:
+                    raise KeyError(name)
+                return group
+
+            with mock.patch.object(unit.sys, "argv", [str(SCRIPT), "--namespace-diagnostics"]), \
+                    mock.patch.object(unit, "hosted_runner_guard"), \
+                    mock.patch.object(unit, "production_host_preflight"), \
+                    mock.patch.object(unit, "disposable_workspace_path", return_value=workspace), \
+                    mock.patch.object(unit, "run_workspace_bind_reproductions") as reproduce, \
+                    mock.patch.object(unit.grp, "getgrnam", side_effect=by_name), \
+                    mock.patch.object(unit.grp, "getgrgid", return_value=group), \
+                    mock.patch.object(unit.subprocess, "run", return_value=SimpleNamespace(
+                        returncode=0, stdout="", stderr="")) as process, \
+                    mock.patch("sys.stdout", io.StringIO()):
+                self.assertEqual(unit.main(), 0)
+            reproduce.assert_called_once_with(workspace)
+            self.assertEqual(group_lookups, [self.DIAGNOSTIC_GROUP] * 2)
+            self.assertEqual(process.call_args.args[0], self.GROUPADD_ARGV)
+            self.assertFalse(workspace.exists())
+
+    def test_group_setup_failure_unwinds_real_diagnostics_workspace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = pathlib.Path(temp) / "diagnostics"
+            with mock.patch.object(unit.sys, "argv", [str(SCRIPT), "--namespace-diagnostics"]), \
+                    mock.patch.object(unit, "hosted_runner_guard"), \
+                    mock.patch.object(unit, "production_host_preflight"), \
+                    mock.patch.object(unit, "disposable_workspace_path", return_value=workspace), \
+                    mock.patch.object(unit, "run_workspace_bind_reproductions") as reproduce, \
+                    mock.patch.object(unit.grp, "getgrnam",
+                                      side_effect=KeyError(self.DIAGNOSTIC_GROUP)), \
+                    mock.patch.object(unit.subprocess, "run", side_effect=OSError("unsafe")), \
+                    mock.patch("sys.stderr", io.StringIO()), \
+                    self.assertRaises(RuntimeError):
+                unit.main()
+            reproduce.assert_not_called()
+            self.assertFalse(workspace.exists())
+
+    def test_production_default_and_cleanup_do_not_ensure_diagnostic_group(self):
+        with mock.patch.object(unit, "_ensure_diagnostic_control_group") as ensure, \
+                mock.patch.object(unit, "hosted_kvm_guard", side_effect=RuntimeError("stop")), \
+                mock.patch.object(unit.sys, "argv", [str(SCRIPT)]), \
+                mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(unit.main(), 1)
+        ensure.assert_not_called()
+        with mock.patch.object(unit, "_ensure_diagnostic_control_group") as ensure, \
+                mock.patch.object(unit, "hosted_kvm_guard", side_effect=RuntimeError("stop")), \
+                mock.patch.object(unit.sys, "argv", [str(SCRIPT), "--cleanup"]), \
+                mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(unit.main(), 1)
+        ensure.assert_not_called()
+
     def test_hosted_runner_provenance_guard_does_not_require_kvm(self):
         sha = "a" * 40
         environment = {

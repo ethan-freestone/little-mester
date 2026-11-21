@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import os
+import contextlib
+import datetime
 import pathlib
 import grp
 import importlib.util
 import ipaddress
+import json
 import pwd
 import re
 import shlex
@@ -158,6 +161,55 @@ _URL_CREDENTIALS = re.compile(r"(https?://)[^/@\s]+@", re.IGNORECASE)
 _BEARER_CREDENTIAL = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _GITHUB_TOKEN = re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{10,}\b")
 _GITHUB_FINE_GRAINED_TOKEN = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")
+
+_TIMED_STAGE_LABELS = frozenset({
+    "initial_vm_start_readiness", "acceptance_checks", "clean_vm_shutdown",
+    "same_disk_restart_readiness", "forced_stop_recovery", "final_cleanup",
+    "candidate_install", "fresh_provisioning", "image_download_checksum",
+    "image_conversion_resize", "cloud_seed_generation", "guest_readiness_ssh",
+    "network_boundaries", "persistence_fixture", "host_metrics_transport",
+    "direct_egress_blocked", "opencode_tui",
+})
+
+
+class StageTimer:
+    """Emit bounded, secret-free, flushed stage timing records."""
+
+    def __init__(self, stream=None, *, wall_clock=None, monotonic=None):
+        self.stream = sys.stdout if stream is None else stream
+        self.wall_clock = datetime.datetime.now if wall_clock is None else wall_clock
+        self.monotonic = time.monotonic if monotonic is None else monotonic
+
+    @contextlib.contextmanager
+    def timed_stage(self, label: str):
+        if label not in _TIMED_STAGE_LABELS:
+            raise ValueError("stage label is not allowlisted")
+        started = self.monotonic()
+        self._emit("START", label, self.wall_clock())
+        outcome = "PASS"
+        try:
+            yield
+        except BaseException:
+            outcome = "FAIL"
+            raise
+        finally:
+            elapsed_ms = max(0, round((self.monotonic() - started) * 1000))
+            try:
+                self._emit("END", label, self.wall_clock(),
+                           elapsed_ms=elapsed_ms, outcome=outcome)
+            except BaseException:
+                # Timing must never replace an operation's original failure.
+                if outcome == "PASS":
+                    raise
+
+    def _emit(self, event: str, label: str, timestamp: datetime.datetime, **extra) -> None:
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=datetime.timezone.utc)
+        timestamp = timestamp.astimezone(datetime.timezone.utc)
+        record = {"event": event, "label": label,
+                  "timestamp": timestamp.isoformat().replace("+00:00", "Z"), **extra}
+        self.stream.write("system_vm_stage=" + json.dumps(record, separators=(",", ":")) + "\n")
+        self.stream.flush()
 
 
 def _safe_output(value: bytes | str | None) -> str:
@@ -724,6 +776,7 @@ def _require_normal_stop(timeout: int = 30) -> None:
 
 
 def accept(root: pathlib.Path, progress=None) -> int:
+    timer = StageTimer()
     initial_vm, initial_proxy = verify(root, progress=progress)
     vm_running = _initial_running_state(initial_vm, initial_proxy)
     sys.dont_write_bytecode = True
@@ -742,10 +795,11 @@ def accept(root: pathlib.Path, progress=None) -> int:
     stage = "guest_readiness_ssh"
     operation = "start_initial_vm"
     try:
-        run([str(root / "lab-vm"), "system", "up"], timeout=1005, operation=operation)
-        operation = "wait_for_initial_guest_readiness"
-        first = _wait_active(UNIT, operation=operation)
-        _verify_workspace_daemon_privileges()
+        with timer.timed_stage("initial_vm_start_readiness"):
+            run([str(root / "lab-vm"), "system", "up"], timeout=1005, operation=operation)
+            operation = "wait_for_initial_guest_readiness"
+            first = _wait_active(UNIT, operation=operation)
+            _verify_workspace_daemon_privileges()
         _mark(progress, "guest_readiness_ssh")
         print("system_vm_gate=guest_readiness_ssh:PASS")
         stage = "network_boundaries"
@@ -755,53 +809,61 @@ def accept(root: pathlib.Path, progress=None) -> int:
         if duplicate.get("MainPID") != first.get("MainPID"):
             raise AcceptanceError("duplicate start replaced the active QEMU MainPID")
         operation = "verify_initial_network_boundaries"
-        _network_checks(first)
+        with timer.timed_stage("network_boundaries"):
+            _network_checks(first)
         _mark(progress, "network_boundaries")
         print("system_vm_gate=network_boundaries:PASS")
         stage = "host_metrics_transport"
         operation = "verify_host_metrics_transport"
-        _host_metrics_check()
+        with timer.timed_stage("host_metrics_transport"):
+            _host_metrics_check()
         _mark(progress, "host_metrics_transport")
         print("system_vm_gate=host_metrics_transport:PASS source=host")
         stage = "persistence_fixture"
         operation = "create_and_verify_persistence_marker"
-        _guest_ssh(_guest_persistence_marker_command("create", marker, expected),
-                   operation=operation)
+        with timer.timed_stage("persistence_fixture"):
+            _guest_ssh(_guest_persistence_marker_command("create", marker, expected),
+                       operation=operation)
         stage = "direct_egress_blocked"
         operation = "verify_direct_egress_is_blocked"
-        _guest_ssh("python3 -c 'import socket; s=socket.socket(); s.settimeout(2); "
-                   "r=s.connect_ex((\"1.1.1.1\",443)); s.close(); assert r != 0'",
-                   operation=operation)
+        with timer.timed_stage("direct_egress_blocked"):
+            _guest_ssh("python3 -c 'import socket; s=socket.socket(); s.settimeout(2); "
+                       "r=s.connect_ex((\"1.1.1.1\",443)); s.close(); assert r != 0'",
+                       operation=operation)
         _mark(progress, "direct_egress_blocked")
         print("system_vm_gate=direct_egress_blocked:PASS")
         stage = "opencode_tui"
         operation = "exercise_opencode_tui"
-        _tui_check(root)
+        with timer.timed_stage("opencode_tui"):
+            _tui_check(root)
         _mark(progress, "opencode_tui")
         print("system_vm_gate=opencode_tui:PASS")
         stage = "same_disk_persistence"
-        operation = "stop_vm_cleanly_before_restart"
-        run([str(root / "lab-vm"), "system", "down"], timeout=60, operation=operation)
-        operation = "verify_clean_vm_shutdown"
-        _require_normal_stop()
-        operation = "verify_disk_identity_after_shutdown"
-        if disk_identity() != before_disk:
-            raise AcceptanceError("fixed disk identity changed during shutdown")
-        operation = "restart_vm_on_same_disk"
-        run([str(root / "lab-vm"), "system", "up"], timeout=1005, operation=operation)
-        operation = "wait_for_restarted_guest_readiness"
-        restarted = _wait_active(UNIT, operation=operation)
-        operation = "verify_disk_identity_after_restart"
-        if disk_identity() != before_disk:
-            raise AcceptanceError("fixed disk identity changed across restart")
-        operation = "verify_persistence_marker_after_restart"
-        _guest_ssh(_guest_persistence_marker_command("verify", marker, expected),
-                   operation=operation)
-        operation = "remove_persistence_marker"
-        _guest_ssh(_guest_persistence_marker_command("remove", marker, expected),
-                   operation=operation)
-        operation = "verify_restarted_network_boundaries"
-        _network_checks(restarted)
+        with timer.timed_stage("clean_vm_shutdown"):
+            operation = "stop_vm_cleanly_before_restart"
+            run([str(root / "lab-vm"), "system", "down"], timeout=60, operation=operation)
+            operation = "verify_clean_vm_shutdown"
+            _require_normal_stop()
+            operation = "verify_disk_identity_after_shutdown"
+            if disk_identity() != before_disk:
+                raise AcceptanceError("fixed disk identity changed during shutdown")
+        with timer.timed_stage("same_disk_restart_readiness"):
+            operation = "restart_vm_on_same_disk"
+            run([str(root / "lab-vm"), "system", "up"], timeout=1005, operation=operation)
+            operation = "wait_for_restarted_guest_readiness"
+            restarted = _wait_active(UNIT, operation=operation)
+            operation = "verify_disk_identity_after_restart"
+            if disk_identity() != before_disk:
+                raise AcceptanceError("fixed disk identity changed across restart")
+            operation = "verify_persistence_marker_after_restart"
+            _guest_ssh(_guest_persistence_marker_command("verify", marker, expected),
+                       operation=operation)
+            operation = "remove_persistence_marker"
+            _guest_ssh(_guest_persistence_marker_command("remove", marker, expected),
+                       operation=operation)
+            operation = "verify_restarted_network_boundaries"
+            with timer.timed_stage("network_boundaries"):
+                _network_checks(restarted)
         _mark(progress, "same_disk_persistence")
         _mark(progress, "final_vm_state", final_vm_state=restarted,
               final_proxy_state=service_state(PROXY_UNIT),
