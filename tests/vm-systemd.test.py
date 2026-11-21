@@ -979,6 +979,24 @@ class StageTimerTests(unittest.TestCase):
                 self.fail("invalid stage must not enter")
         self.assertEqual(output.getvalue(), "")
 
+    def test_default_clock_requests_utc_and_naive_injected_clock_is_rejected(self):
+        output = io.StringIO()
+        timestamp = datetime.datetime(2026, 11, 21, tzinfo=datetime.timezone.utc)
+        with mock.patch.object(acceptance.datetime, "datetime") as clock:
+            clock.now.return_value = timestamp
+            timer = acceptance.StageTimer(output, monotonic=iter((0.0, 0.0)).__next__)
+            with timer.timed_stage("network_boundaries"):
+                pass
+            clock.now.assert_called_with(datetime.timezone.utc)
+
+        output = io.StringIO()
+        timer = acceptance.StageTimer(
+            output, wall_clock=lambda: datetime.datetime(2026, 11, 21), monotonic=lambda: 0)
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            with timer.timed_stage("network_boundaries"):
+                pass
+        self.assertEqual(output.getvalue(), "")
+
     def test_records_never_include_command_exception_or_secret_values(self):
         output = io.StringIO()
         timer = acceptance.StageTimer(

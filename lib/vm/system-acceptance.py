@@ -177,7 +177,8 @@ class StageTimer:
 
     def __init__(self, stream=None, *, wall_clock=None, monotonic=None):
         self.stream = sys.stdout if stream is None else stream
-        self.wall_clock = datetime.datetime.now if wall_clock is None else wall_clock
+        self.wall_clock = (wall_clock if wall_clock is not None else
+                           lambda: datetime.datetime.now(datetime.timezone.utc))
         self.monotonic = time.monotonic if monotonic is None else monotonic
 
     @contextlib.contextmanager
@@ -203,8 +204,8 @@ class StageTimer:
                     raise
 
     def _emit(self, event: str, label: str, timestamp: datetime.datetime, **extra) -> None:
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=datetime.timezone.utc)
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError("stage clock must return a timezone-aware timestamp")
         timestamp = timestamp.astimezone(datetime.timezone.utc)
         record = {"event": event, "label": label,
                   "timestamp": timestamp.isoformat().replace("+00:00", "Z"), **extra}
