@@ -453,7 +453,8 @@ class HostedSystemUnitTests(unittest.TestCase):
                        source.index("def remove_disposable_workspace")]
         main = source[source.index("def main()") :]
         self.assertIn("/usr/bin/systemd-run", repro)
-        self.assertIn("RuntimeDirectoryPreserve=yes", repro)
+        self.assertIn("RuntimeDirectoryPreserve=no", repro)
+        self.assertIn("_report_transient_bind_unit(unit_name)", repro)
         self.assertIn("/run/little-mester-vm-workspace-share", repro)
         self.assertIn('(workspace, "home", "yes", False)', repro)
         self.assertIn('(workspace, "home", "tmpfs", True)', repro)
@@ -463,7 +464,13 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("WORKSPACE_BIND_REPRO_IDENTITY", repro)
         self.assertIn("_require_runner_directory(source, source_stat)", repro)
         self.assertIn("controller_euid", repro)
-        self.assertIn("/usr/bin/chown", repro)
+        self.assertIn("tempfile.mkdtemp(", source)
+        self.assertIn('temp_parent = pathlib.Path("/var/tmp")', source)
+        self.assertIn("workspace_bind_checkpoint=", source)
+        self.assertIn("workspace_bind_exception=", source)
+        self.assertIn('"RuntimeDirectory,RuntimeDirectoryMode,RuntimeDirectoryPreserve,"', source)
+        self.assertIn('"BindPaths,ReadWritePaths,ProtectHome,ProtectSystem,PrivateTmp,"', source)
+        self.assertNotIn('outside = runtime / f"lm-vm-bind-control-', source)
         self.assertIn("stat.S_IMODE(info.st_mode) == 0o700", source)
         self.assertIn("workspace_effective_systemd=", source)
         self.assertIn("workspace_production_prestart_paths=", source)
@@ -471,6 +478,27 @@ class HostedSystemUnitTests(unittest.TestCase):
                         main.index("run_workspace_bind_reproductions(workspace_path)"))
         self.assertLess(main.index("run_workspace_bind_reproductions(workspace_path)"),
                         main.index("invoke_shared_acceptance(sha)"))
+
+    def test_bind_reproduction_separates_controller_source_from_systemd_runtime_lifetime(self):
+        source = SCRIPT.read_text()
+        section = source[source.index("def run_workspace_bind_reproductions"):
+                         source.index("def remove_disposable_workspace")]
+        case = source[source.index("def _bind_repro_case"):
+                      source.index("def run_workspace_bind_reproductions")]
+        self.assertIn('temp_parent = pathlib.Path("/var/tmp")', section)
+        self.assertIn("tempfile.mkdtemp(", section)
+        self.assertIn('outside_created = os.lstat(outside)', section)
+        self.assertIn('_require_runner_directory(outside, outside_identity)', section)
+        self.assertIn('"--property=RuntimeDirectoryPreserve=no"', case)
+        self.assertNotIn('"--collect"', case)
+        self.assertIn('"stop-transient-systemd-unit"', case)
+        self.assertIn('"verify-systemd-runtime-directory-cleanup"', case)
+        self.assertIn("primary_error: BaseException | None = None", case)
+        self.assertIn("if cleanup_errors and primary_error is None", case)
+        self.assertIn('"before-case-{kind}-{protect}"', section)
+        self.assertIn('"after-case-{kind}-{protect}"', section)
+        self.assertIn("if primary_error is None:", section)
+        self.assertIn('"remove-exact-harness-owned-control-source"', section)
 
     def test_script_uses_production_fixed_operations_and_bounded_stop_cleanup(self):
         source = SCRIPT.read_text()

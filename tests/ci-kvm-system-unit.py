@@ -15,7 +15,9 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 import time
+import traceback
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 CI_INSTALL_PREFIX = pathlib.Path("/srv/little-mester-ci")
@@ -481,6 +483,59 @@ def _require_runner_directory(path: pathlib.Path, expected: os.stat_result | Non
     return info
 
 
+def _workspace_bind_checkpoint(label: str, paths: tuple[pathlib.Path, ...],
+                               *, operation: str) -> None:
+    credentials = {"uid": os.getuid(), "euid": os.geteuid(),
+                   "gid": os.getgid(), "egid": os.getegid(),
+                   "groups": os.getgroups()}
+    evidence = []
+    for path in paths:
+        evidence.append({
+            "path": _host_path_evidence(path),
+            "access": {"parent_x": os.access(path.parent, os.X_OK, effective_ids=True),
+                       "read": os.access(path, os.R_OK, effective_ids=True),
+                       "write": os.access(path, os.W_OK, effective_ids=True),
+                       "execute": os.access(path, os.X_OK, effective_ids=True)},
+        })
+    print("workspace_bind_checkpoint=" + json.dumps({
+        "label": label, "operation": operation, "credentials": credentials,
+        "paths": evidence,
+    }, sort_keys=True, separators=(",", ":")), flush=True)
+
+
+def _report_workspace_bind_exception(case: str, operation: str, error: BaseException,
+                                     paths: tuple[pathlib.Path, ...]) -> None:
+    detail = {
+        "case": case, "operation": operation,
+        "exception": type(error).__name__,
+        "errno": error.errno if isinstance(error, OSError) else None,
+        "error": str(error)[:500],
+        "credentials": {"uid": os.getuid(), "euid": os.geteuid(),
+                        "gid": os.getgid(), "egid": os.getegid(),
+                        "groups": os.getgroups()},
+        "traceback": traceback.format_exc(limit=6)[-2500:],
+    }
+    print("workspace_bind_exception=" + json.dumps(
+        detail, sort_keys=True, separators=(",", ":")), flush=True)
+    _workspace_bind_checkpoint("exception", paths, operation=operation)
+
+
+def _report_transient_bind_unit(unit_name: str) -> None:
+    properties = (
+        "LoadState,ActiveState,SubState,Result,User,Group,SupplementaryGroups,"
+        "RuntimeDirectory,RuntimeDirectoryMode,RuntimeDirectoryPreserve,"
+        "BindPaths,ReadWritePaths,ProtectHome,ProtectSystem,PrivateTmp,"
+        "RemainAfterExit,KillMode,ExecStop,ExecStopPost"
+    )
+    result = run(["/usr/bin/systemctl", "show", "--no-pager",
+                  f"--property={properties}", unit_name], check=False)
+    details = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    print("workspace_bind_transient_unit=" + json.dumps({
+        "unit": unit_name, "show_exit": result.returncode, "properties": details,
+        "stderr": (result.stderr or "")[-1200:],
+    }, sort_keys=True, separators=(",", ":")), flush=True)
+
+
 def report_workspace_unit_configuration() -> None:
     properties = (
         "FragmentPath,DropInPaths,User,Group,SupplementaryGroups,RuntimeDirectory,"
@@ -499,65 +554,82 @@ def report_workspace_unit_configuration() -> None:
 
 
 def _bind_repro_case(*, source: pathlib.Path, source_kind: str,
-                     protect_home: str, token: str) -> tuple[bool, bool]:
+                     protect_home: str, token: str,
+                     control_source: pathlib.Path) -> tuple[bool, bool]:
     runtime_names = "little-mester-vm-workspace little-mester-vm-workspace-share"
     unit_name = f"lm-vm-bind-repro-{source_kind}-{protect_home}-{token}.service"
     runtime_directories = tuple(pathlib.Path("/run") / name for name in runtime_names.split())
     destination = runtime_directories[1]
-    require(all(not path.exists() and not path.is_symlink() for path in runtime_directories),
-            f"preserving pre-existing bind reproduction RuntimeDirectory: {runtime_directories}")
-    source_stat = os.stat(source, follow_symlinks=False)
-    _require_runner_directory(source, source_stat)
-    marker_name = ".lm-bind-repro-marker"
-    marker_path = source / marker_name
-    marker = f"LM_BIND_REPRO:{token}:{source_kind}:{protect_home}".encode("ascii")
-    marker_fd = os.open(marker_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    paths = (source, control_source, *runtime_directories)
+    operation = "validate-systemd-runtime-directory-absence"
+    primary_error: BaseException | None = None
+    for path in runtime_directories:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        raise RuntimeError(f"preserving pre-existing bind reproduction RuntimeDirectory: {path}")
     try:
-        os.write(marker_fd, marker)
-        os.fsync(marker_fd)
-    finally:
-        os.close(marker_fd)
-    print("workspace_bind_repro_host=" + json.dumps({
-        "case": source_kind, "protect_home": protect_home,
-        "controller": {"uid": os.getuid(), "euid": os.geteuid(),
-                       "gid": os.getgid(), "groups": os.getgroups()},
-        "source": _host_path_evidence(source),
-        "destination_before_start": _host_path_evidence(destination),
-        "destination_lifecycle": "systemd RuntimeDirectory",
-    }, sort_keys=True, separators=(",", ":")), flush=True)
-    code = (
-        "import json,os,pathlib,sys;"
-        "print('WORKSPACE_BIND_REPRO_IDENTITY '+json.dumps({'uid':os.getuid(),'euid':os.geteuid(),'gid':os.getgid(),'groups':os.getgroups()},sort_keys=True),flush=True);"
-        "target=pathlib.Path(sys.argv[1]);"
-        "item=target/sys.argv[2];"
-        "s=os.stat(target,follow_symlinks=False);"
-        "mounts=pathlib.Path('/proc/self/mountinfo').read_text().splitlines();"
-        "exact=any((lambda f: len(f)>4 and f[4].replace('\\\\040',' ')==str(target))(line.split()) for line in mounts);"
-        "e={'device':s.st_dev,'inode':s.st_ino,'uid':s.st_uid,'gid':s.st_gid,"
-        "'mode':s.st_mode&0o777,'exact_mountpoint':exact,'marker_matches':item.read_bytes()==sys.argv[5].encode()};"
-        "print('WORKSPACE_BIND_REPRO_TARGET '+json.dumps(e,sort_keys=True),flush=True);"
-        "raise SystemExit(0 if (s.st_dev,s.st_ino)==(int(sys.argv[3]),int(sys.argv[4])) and e['exact_mountpoint'] and e['marker_matches'] else 43)"
-    )
-    exec_paths = "/usr/bin /usr/lib -/usr/lib64 -/usr/libexec /lib -/lib64"
-    argv = [
-        "/usr/bin/sudo", "-n", "/usr/bin/systemd-run", "--wait", "--pipe", "--collect",
-        f"--unit={unit_name}", "--service-type=exec",
-        f"--property=User={pwd.getpwuid(os.getuid()).pw_name}",
-        f"--property=Group={grp.getgrgid(os.getgid()).gr_name}",
-        f"--property=RuntimeDirectory={runtime_names}", "--property=RuntimeDirectoryMode=0750",
-        "--property=RuntimeDirectoryPreserve=yes", "--property=UMask=0077",
-        f"--property=ProtectHome={protect_home}", "--property=ProtectSystem=strict",
-        "--property=PrivateTmp=yes", "--property=NoNewPrivileges=no",
-        "--property=NoExecPaths=/", f"--property=ExecPaths={exec_paths}",
-        "--property=ProtectControlGroups=yes",
-        "--property=SupplementaryGroups=lm-vm-control",
-        f"--property=ReadWritePaths={' '.join(map(str, runtime_directories))}",
-        f"--property=BindPaths={source}:{destination}",
-        "/usr/bin/python3", "-I", "-c", code, str(destination), marker_name,
-        str(source_stat.st_dev), str(source_stat.st_ino), marker.decode("ascii"),
-    ]
-    try:
+        operation = "validate-private-source-directory"
+        source_stat = os.stat(source, follow_symlinks=False)
+        _require_runner_directory(source, source_stat)
+        _require_runner_directory(control_source)
+        marker_name = ".lm-bind-repro-marker"
+        marker_path = source / marker_name
+        marker = f"LM_BIND_REPRO:{token}:{source_kind}:{protect_home}".encode("ascii")
+        operation = "create-source-marker"
+        marker_fd = os.open(marker_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(marker_fd, marker)
+            os.fsync(marker_fd)
+        finally:
+            os.close(marker_fd)
+        print("workspace_bind_repro_host=" + json.dumps({
+            "case": source_kind, "protect_home": protect_home,
+            "controller": {"uid": os.getuid(), "euid": os.geteuid(),
+                           "gid": os.getgid(), "egid": os.getegid(),
+                           "groups": os.getgroups()},
+            "source": _host_path_evidence(source),
+            "control_source": _host_path_evidence(control_source),
+            "destination_before_start": _host_path_evidence(destination),
+            "destination_lifecycle": "transient systemd RuntimeDirectory; no preserve",
+        }, sort_keys=True, separators=(",", ":")), flush=True)
+        code = (
+            "import json,os,pathlib,sys;"
+            "print('WORKSPACE_BIND_REPRO_IDENTITY '+json.dumps({'uid':os.getuid(),'euid':os.geteuid(),'gid':os.getgid(),'egid':os.getegid(),'groups':os.getgroups()},sort_keys=True),flush=True);"
+            "target=pathlib.Path(sys.argv[1]);"
+            "item=target/sys.argv[2];"
+            "s=os.stat(target,follow_symlinks=False);"
+            "mounts=pathlib.Path('/proc/self/mountinfo').read_text().splitlines();"
+            "exact=any((lambda f: len(f)>4 and f[4].replace('\\\\040',' ')==str(target))(line.split()) for line in mounts);"
+            "e={'device':s.st_dev,'inode':s.st_ino,'uid':s.st_uid,'gid':s.st_gid,"
+            "'mode':s.st_mode&0o777,'exact_mountpoint':exact,'marker_matches':item.read_bytes()==sys.argv[5].encode()};"
+            "print('WORKSPACE_BIND_REPRO_TARGET '+json.dumps(e,sort_keys=True),flush=True);"
+            "raise SystemExit(0 if (s.st_dev,s.st_ino)==(int(sys.argv[3]),int(sys.argv[4])) and e['exact_mountpoint'] and e['marker_matches'] else 43)"
+        )
+        exec_paths = "/usr/bin /usr/lib -/usr/lib64 -/usr/libexec /lib -/lib64"
+        argv = [
+            "/usr/bin/sudo", "-n", "/usr/bin/systemd-run", "--wait", "--pipe",
+            f"--unit={unit_name}", "--service-type=exec",
+            f"--property=User={pwd.getpwuid(os.getuid()).pw_name}",
+            f"--property=Group={grp.getgrgid(os.getgid()).gr_name}",
+            f"--property=RuntimeDirectory={runtime_names}", "--property=RuntimeDirectoryMode=0750",
+            "--property=RuntimeDirectoryPreserve=no",
+            "--property=UMask=0077", f"--property=ProtectHome={protect_home}",
+            "--property=ProtectSystem=strict", "--property=PrivateTmp=yes",
+            "--property=NoNewPrivileges=no", "--property=NoExecPaths=/",
+            f"--property=ExecPaths={exec_paths}", "--property=ProtectControlGroups=yes",
+            "--property=SupplementaryGroups=lm-vm-control",
+            f"--property=ReadWritePaths={' '.join(map(str, runtime_directories))}",
+            f"--property=BindPaths={source}:{destination}",
+            "/usr/bin/python3", "-I", "-c", code, str(destination), marker_name,
+            str(source_stat.st_dev), str(source_stat.st_ino), marker.decode("ascii"),
+        ]
+        _workspace_bind_checkpoint("before-systemd-run", paths, operation=operation)
+        operation = "run-transient-systemd-case"
         result = run(argv, timeout=30, check=False)
+        operation = "inspect-effective-transient-unit"
+        _report_transient_bind_unit(unit_name)
         success = result.returncode == 0 and "WORKSPACE_BIND_REPRO_TARGET " in result.stdout
         namespace_refused = ("226/NAMESPACE" in result.stdout + result.stderr
                             or "Failed to set up mount namespacing" in result.stdout + result.stderr)
@@ -573,54 +645,88 @@ def _bind_repro_case(*, source: pathlib.Path, source_kind: str,
             "destination": _host_path_evidence(destination),
             "source": _host_path_evidence(source),
         }, sort_keys=True, separators=(",", ":")), flush=True)
+        operation = "verify-source-identity-after-systemd-case"
         _require_runner_directory(source, source_stat)
         return success, namespace_refused
+    except BaseException as error:
+        primary_error = error
+        _report_workspace_bind_exception(source_kind, operation, error, paths)
+        raise
     finally:
+        cleanup_errors: list[tuple[str, BaseException]] = []
         try:
+            operation = "stop-transient-systemd-unit"
             run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", unit_name],
                 timeout=15, check=False)
-        finally:
-            try:
-                marker_info = os.lstat(marker_path)
-                require(stat.S_ISREG(marker_info.st_mode) and marker_info.st_uid == os.getuid()
-                        and stat.S_IMODE(marker_info.st_mode) == 0o600 and marker_info.st_nlink == 1,
-                        "preserving changed workspace bind reproduction marker")
-                os.remove(marker_path)
-            finally:
-                for directory in reversed(runtime_directories):
-                    if directory.exists() or directory.is_symlink():
-                        info = os.lstat(directory)
-                        require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
-                                and info.st_uid == os.getuid()
-                                and stat.S_IMODE(info.st_mode) == 0o750
-                                and not any(directory.iterdir()),
-                                "preserving unsafe/nonempty bind reproduction RuntimeDirectory")
-                        directory.rmdir()
+        except BaseException as error:  # noqa: BLE001 - preserve the original systemd operation failure
+            cleanup_errors.append((operation, error))
+        try:
+            if "marker_path" in locals():
+                operation = "remove-harness-owned-source-marker"
+                try:
+                    marker_info = os.lstat(marker_path)
+                except FileNotFoundError:
+                    marker_info = None
+                if marker_info is not None:
+                    require(stat.S_ISREG(marker_info.st_mode)
+                            and marker_info.st_uid == os.getuid()
+                            and stat.S_IMODE(marker_info.st_mode) == 0o600
+                            and marker_info.st_nlink == 1,
+                            "preserving changed workspace bind reproduction marker")
+                    os.remove(marker_path)
+        except BaseException as error:  # noqa: BLE001 - preserve the original systemd operation failure
+            cleanup_errors.append((operation, error))
+        try:
+            operation = "verify-systemd-runtime-directory-cleanup"
+            for directory in reversed(runtime_directories):
+                try:
+                    os.lstat(directory)
+                except FileNotFoundError:
+                    continue
+                raise RuntimeError(
+                    "systemd did not remove its transient RuntimeDirectory after stop; "
+                    f"preserving it for inspection: {_host_path_evidence(directory)}")
+        except BaseException as error:  # noqa: BLE001 - preserve the original systemd operation failure
+            cleanup_errors.append((operation, error))
+        for cleanup_operation, cleanup_error in cleanup_errors:
+            _report_workspace_bind_exception(
+                f"{source_kind}-cleanup", cleanup_operation, cleanup_error, paths)
+        if cleanup_errors and primary_error is None:
+            raise cleanup_errors[0][1]
 
 
 def run_workspace_bind_reproductions(workspace: pathlib.Path) -> None:
     """Compare real transient systemd namespaces for home and non-home sources."""
-    runtime = pathlib.Path("/run")
+    temp_parent = pathlib.Path("/var/tmp")
+    parent_info = os.lstat(temp_parent)
+    require(stat.S_ISDIR(parent_info.st_mode) and not stat.S_ISLNK(parent_info.st_mode)
+            and parent_info.st_uid == 0 and stat.S_IMODE(parent_info.st_mode) & 0o1000,
+            "preserving unsafe /var/tmp control-source parent")
     production_runtime = (pathlib.Path("/run/little-mester-vm-workspace"),
                           pathlib.Path("/run/little-mester-vm-workspace-share"))
-    require(all(not path.exists() and not path.is_symlink() for path in production_runtime),
-            f"preserving pre-existing workspace RuntimeDirectory paths: {production_runtime}")
+    for path in production_runtime:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        raise RuntimeError(f"preserving pre-existing workspace RuntimeDirectory path: {path}")
     token = secrets.token_hex(6)
-    outside = runtime / f"lm-vm-bind-control-{token}"
-    require(not outside.exists() and not outside.is_symlink(),
-            f"preserving pre-existing bind reproduction control source: {outside}")
-    run(["/usr/bin/sudo", "-n", "/usr/bin/install", "-d", "-m", "0700", str(outside)])
-    run(["/usr/bin/sudo", "-n", "/usr/bin/chown", "--",
-         f"{os.getuid()}:{os.getgid()}", str(outside)])
-    run(["/usr/bin/sudo", "-n", "/usr/bin/chmod", "--", "0700", str(outside)])
+    outside = pathlib.Path(tempfile.mkdtemp(
+        prefix=f"lm-vm-bind-control-{token}-", dir=temp_parent))
+    outside_created = os.lstat(outside)
     outside_identity = _require_runner_directory(outside)
+    require((outside_created.st_dev, outside_created.st_ino)
+            == (outside_identity.st_dev, outside_identity.st_ino),
+            "bind control source changed during private directory creation")
     print("workspace_bind_control_source_ready=" + json.dumps({
         "path": str(outside), "uid": outside_identity.st_uid,
         "gid": outside_identity.st_gid, "mode": stat.S_IMODE(outside_identity.st_mode),
         "controller_uid": os.getuid(), "controller_euid": os.geteuid(),
-        "controller_groups": os.getgroups(), "parent_traversable": os.access(runtime, os.X_OK),
+        "controller_groups": os.getgroups(), "parent_traversable": os.access(temp_parent, os.X_OK),
+        "parent_mount": _host_path_evidence(temp_parent).get("mount"),
     }, sort_keys=True, separators=(",", ":")), flush=True)
     cases: list[tuple[pathlib.Path, str, str, bool]] = []
+    primary_error: BaseException | None = None
     try:
         # The original yes mode is included as a negative control; all other
         # cells must successfully bind and verify the exact source inode.
@@ -632,17 +738,61 @@ def run_workspace_bind_reproductions(workspace: pathlib.Path) -> None:
         ]
         outcomes = []
         for source, kind, protect, expected in cases:
-            success, namespace_refused = _bind_repro_case(
-                source=source, source_kind=kind, protect_home=protect, token=token)
-            outcomes.append(success if expected else namespace_refused)
+            checkpoint_paths = (workspace, outside, *production_runtime)
+            case_name = f"{kind}-{protect}"
+            _workspace_bind_checkpoint(f"before-case-{kind}-{protect}", checkpoint_paths,
+                                       operation="prepare-next-reproduction-case")
+            case_error: BaseException | None = None
+            try:
+                success, namespace_refused = _bind_repro_case(
+                    source=source, source_kind=kind, protect_home=protect, token=token,
+                    control_source=outside)
+                outcomes.append(success if expected else namespace_refused)
+            except BaseException as error:
+                case_error = error
+                _report_workspace_bind_exception(
+                    case_name, "case-preparation-or-execution", error,
+                    checkpoint_paths)
+                raise
+            finally:
+                try:
+                    _workspace_bind_checkpoint(
+                        f"after-case-{kind}-{protect}", checkpoint_paths,
+                        operation="case-and-transient-unit-cleanup-complete")
+                except BaseException as checkpoint_error:
+                    _report_workspace_bind_exception(
+                        case_name, "after-case-checkpoint", checkpoint_error,
+                        checkpoint_paths)
+                    if case_error is None:
+                        raise
         require(all(outcomes), "real systemd workspace-bind comparison did not match the expected matrix")
         print("workspace_bind_repro_matrix=PASS home/yes=REFUSED home/tmpfs=PASS "
               "outside-home/yes=PASS outside-home/tmpfs=PASS", flush=True)
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        _require_runner_directory(outside, outside_identity)
-        require(not any(outside.iterdir()),
-                "preserving unexpected bind reproduction control-source evidence")
-        outside.rmdir()
+        cleanup_operation = "verify-private-control-source-before-cleanup"
+        try:
+            _workspace_bind_checkpoint("before-control-source-cleanup", (outside,),
+                                       operation=cleanup_operation)
+            _require_runner_directory(outside, outside_identity)
+            cleanup_operation = "verify-control-source-empty"
+            require(not any(outside.iterdir()),
+                    "preserving unexpected bind reproduction control-source evidence")
+            current = os.lstat(outside)
+            require((current.st_dev, current.st_ino, current.st_uid, current.st_gid,
+                     stat.S_IMODE(current.st_mode))
+                    == (outside_identity.st_dev, outside_identity.st_ino, os.getuid(),
+                        os.getgid(), 0o700),
+                    "preserving changed bind control-source identity")
+            cleanup_operation = "remove-exact-harness-owned-control-source"
+            outside.rmdir()
+        except BaseException as error:
+            _report_workspace_bind_exception("control-source-cleanup", cleanup_operation,
+                                             error, (outside,))
+            if primary_error is None:
+                raise
 
 
 def remove_disposable_workspace() -> None:
