@@ -5,20 +5,15 @@ set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
-desktop_env=()
 terminal_env=()
+desktop_forward=()
+for desktop_name in XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS DISPLAY XAUTHORITY WAYLAND_DISPLAY; do
+  if [[ -v "$desktop_name" ]]; then
+    desktop_forward+=("$desktop_name=${!desktop_name}")
+  fi
+done
 desktop_uid="$(/usr/bin/id -u)"
 desktop_runtime="/run/user/$desktop_uid"
-if [[ "${XDG_RUNTIME_DIR-}" == "$desktop_runtime" \
-   && "${DBUS_SESSION_BUS_ADDRESS-}" == "unix:path=$desktop_runtime/bus" \
-   && -d "$desktop_runtime" && ! -L "$desktop_runtime" \
-   && -S "$desktop_runtime/bus" && ! -L "$desktop_runtime/bus" ]]; then
-  runtime_owner_mode="$(/usr/bin/stat -c '%u:%a' -- "$desktop_runtime" 2>/dev/null || true)"
-  bus_owner="$(/usr/bin/stat -c '%u' -- "$desktop_runtime/bus" 2>/dev/null || true)"
-  if [[ "$runtime_owner_mode" == "$desktop_uid:700" && "$bus_owner" == "$desktop_uid" ]]; then
-    desktop_env+=("XDG_RUNTIME_DIR=$desktop_runtime" "DBUS_SESSION_BUS_ADDRESS=unix:path=$desktop_runtime/bus")
-  fi
-fi
 
 if [[ ( ( "${1-}" == parent && ( "${2-}" == ssh || "${2-}" == auth || "${2-}" == tui || "${2-}" == accept ) ) \
        || ( "${1-}" == system && ( "${2-}" == ssh || "${2-}" == auth || "${2-}" == tui ) ) ) \
@@ -29,23 +24,15 @@ if [[ ( ( "${1-}" == parent && ( "${2-}" == ssh || "${2-}" == auth || "${2-}" ==
 fi
 
 exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/nonexistent LANG=C LC_ALL=C \
-  "${terminal_env[@]}" "${desktop_env[@]}" \
+  "${terminal_env[@]}" "${desktop_forward[@]}" \
   /usr/bin/bash -p /dev/fd/3 "${BASH_SOURCE[0]}" "$@" 3<<'WORKER'
 exec 3<&-
 set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
-# The outer entrypoint already verified this exact per-UID runtime directory
-# and bus socket before preserving them through env -i. Rebuild the allowlist
-# array in this worker shell; Bash arrays do not cross the worker boundary.
+# The outer entrypoint forwards only these named variables through env -i.
+# Rebuild the allowlist after this worker verifies the protected install root.
 desktop_env=()
-desktop_runtime="/run/user/$UID"
-if [[ "${XDG_RUNTIME_DIR-}" == "$desktop_runtime" \
-   && "${DBUS_SESSION_BUS_ADDRESS-}" == "unix:path=$desktop_runtime/bus" \
-   && -d "$desktop_runtime" && ! -L "$desktop_runtime" \
-   && -S "$desktop_runtime/bus" && ! -L "$desktop_runtime/bus" ]]; then
-  desktop_env+=("XDG_RUNTIME_DIR=$desktop_runtime" "DBUS_SESSION_BUS_ADDRESS=unix:path=$desktop_runtime/bus")
-fi
 script_path=$1
 shift
 
@@ -66,6 +53,7 @@ root = entry.parent
 dependencies = [
     entry,
     root / "lib/vm/host-launcher.sh",
+    root / "lib/vm/desktop-session-env.sh",
     root / "lib/vm/cloud-init.sh",
     root / "lib/vm/proxy.py",
     root / "lib/vm/bounded-log.py",
@@ -82,6 +70,11 @@ dependencies = [
     root / "lib/vm/parent-qemu.py",
     root / "lib/vm/parent-provision.py",
     root / "lib/vm/system-vm.py",
+    root / "lib/vm/system-vm-workspace.py",
+    root / "lib/vm/system-vm-metrics.py",
+    root / "lib/vm/parent-metrics.py",
+    root / "lib/vm/parent-metrics-collect.py",
+    root / "lib/vm/guest-opencode-preferences.py",
     root / "lib/vm/system-acceptance.py",
     root / "lib/vm/host-dependencies.py",
     root / "lib/vm/guest-bootstrap.py",
@@ -90,9 +83,13 @@ dependencies = [
     root / "tools/vm-system-install",
     root / "systemd/little-mester-vm.service",
     root / "systemd/little-mester-vm-proxy.service",
+    root / "systemd/little-mester-vm-workspace.service",
+    root / "systemd/little-mester-vm-metrics.service",
     root / "sudoers/little-mester-vm",
     root / "agent/opencode/plugins/little-mester-exit-confirm/package.json",
     root / "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
+    root / "agent/opencode/plugins/host-metrics-tui/package.json",
+    root / "agent/opencode/plugins/host-metrics-tui/tui.tsx",
 ]
 
 # Inspect the original lexical path before resolving anything. A symlink in
@@ -192,6 +189,8 @@ PY
 )"
 
 export VM_HOST_SCRIPT_ROOT="$root"
+source "$root/lib/vm/desktop-session-env.sh"
+vm_collect_desktop_env "$UID" "/run/user/$UID"
 command="${1:-}"
 [[ -n "$command" ]] || {
   printf 'Usage: lab-vm preflight [--workspace PATH] | smoke --workspace PATH --model openai/<model-id> | system up|down|status|ssh|auth|tui | parent up [--capacity-gib N] [--expected-disk-device N --expected-disk-inode N] | parent status [--json] | parent inspect | parent retire | parent factory-reset | parent canary-create|canary-check|canary-remove|network-check|tui-state|history-probe|protection-prepare|protection-check|protection-cleanup|auth-check|tui-key | parent ssh | parent auth | parent tui [--continue] | parent stop | parent accept --milestone M2 --repo PATH --model openai/<model-id> | parent recover [--dry-run|--execute] [--json] | parent reconcile [--dry-run|--execute] [--json]\n' >&2

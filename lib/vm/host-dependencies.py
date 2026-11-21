@@ -41,6 +41,10 @@ PRODUCTION_REQUIREMENTS = (
             ("apt", "qemu-utils"), ("pacman", "qemu-img"))),
         Requirement("QEMU x86_64", "/usr/bin/qemu-system-x86_64", packages=(
             ("apt", "qemu-system-x86"), ("pacman", "qemu-desktop"))),
+        Requirement("virtiofs daemon", capability="virtiofsd", packages=(
+            ("apt", "virtiofsd"), ("pacman", "virtiofsd"))),
+        Requirement("user namespace ID mapping helpers", capability="uidmap", packages=(
+            ("apt", "uidmap"), ("pacman", "shadow"))),
         Requirement("ISO creator", "/usr/bin/genisoimage", packages=(
             ("apt", "genisoimage"), ("pacman", "cdrtools"))),
         Requirement("SSH client", "/usr/bin/ssh", packages=(
@@ -145,6 +149,18 @@ def _capability(requirement: Requirement) -> tuple[bool, str]:
             return okay, "/dev/kvm must be a kvm-group character device with group read/write access"
         except (OSError, KeyError):
             return False, "/dev/kvm must be a kvm-group character device with group read/write access"
+    if requirement.capability == "virtiofsd":
+        for path in ("/usr/bin/virtiofsd", "/usr/libexec/virtiofsd",
+                     "/usr/lib/qemu/virtiofsd", "/usr/lib/virtiofsd"):
+            if _executable(path):
+                return True, path
+        return False, "virtiofsd must exist at one of the fixed supported paths"
+    if requirement.capability == "uidmap":
+        missing_helpers = [path for path in ("/usr/bin/newuidmap", "/usr/bin/newgidmap")
+                           if not _executable(path)]
+        if missing_helpers:
+            return False, "required namespace mapping helpers are unavailable: " + ", ".join(missing_helpers)
+        return True, "/usr/bin/newuidmap and /usr/bin/newgidmap"
     if requirement.capability == "systemd-manager":
         if not pathlib.Path("/run/systemd/system").is_dir() or not _executable("/usr/bin/systemctl"):
             return False, "responsive systemd system manager"

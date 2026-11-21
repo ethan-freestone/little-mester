@@ -9,6 +9,7 @@ import os
 import pathlib
 import shlex
 import tempfile
+import textwrap
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -357,10 +358,13 @@ class HostedSystemUnitTests(unittest.TestCase):
 
     def test_fixed_units_must_be_loaded_before_start(self):
         with mock.patch.object(unit, "service_state", side_effect=[
+                {"LoadState": "loaded"}, {"LoadState": "loaded"},
                 {"LoadState": "loaded"}, {"LoadState": "not-found"}]) as state, \
-                self.assertRaisesRegex(RuntimeError, "not both loaded"):
+                self.assertRaisesRegex(RuntimeError, "not all loaded"):
             unit.require_fixed_units_loaded()
-        self.assertEqual(state.call_args_list, [mock.call(unit.UNIT), mock.call(unit.PROXY_UNIT)])
+        self.assertEqual(state.call_args_list, [mock.call(unit.UNIT), mock.call(unit.PROXY_UNIT),
+                                                mock.call(unit.WORKSPACE_UNIT),
+                                                mock.call(unit.METRICS_UNIT)])
 
     def test_cleanup_requires_this_attempts_durable_start_marker(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.dict(os.environ, {
@@ -403,6 +407,151 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn(f"/tools/vm-owner-acceptance --system-vm accept", command[3])
         self.assertIn("--approve-system-vm-lifecycle", command[3])
 
+    def test_fresh_production_install_configures_disposable_host_source_before_real_unit_start(self):
+        source = SCRIPT.read_text()
+        configure = source.index("def configure_disposable_workspace")
+        configure_body_end = source.index("def remove_disposable_workspace", configure)
+        config_body = source[configure:configure_body_end]
+        main = source[source.index("def main()") :]
+        self.assertIn("disposable_workspace_path()", config_body)
+        self.assertIn('"owner_uid": os.getuid()', config_body)
+        self.assertIn('"unsafe_recurse": False', config_body)
+        self.assertIn('BindPaths="{workspace}:/run/little-mester-vm-workspace-share', config_body)
+        self.assertNotIn(":/workspace", config_body)
+        self.assertLess(main.index("configure_disposable_workspace(installed_root)"),
+                        main.index("invoke_shared_acceptance(sha)"))
+        self.assertIn("/run/little-mester-vm-workspace-share", source)
+
+    def test_hosted_acceptance_requires_real_workspace_exec_start_post_success(self):
+        source = SCRIPT.read_text()
+        checker = source[source.index("def verify_workspace_startup_post"):
+                         source.index("def disposable_workspace_path")]
+        main = source[source.index("def main()") :]
+        self.assertIn('"--property=ExecStartPost"', checker)
+        self.assertIn('"socket-permissions"', checker)
+        self.assertIn('"code=exited"', checker)
+        self.assertIn('"production workspace ExecStartPost did not complete', checker)
+        self.assertLess(main.index("invoke_shared_acceptance(sha)"),
+                        main.index("verify_workspace_startup_post()"))
+        self.assertLess(main.index("verify_workspace_startup_post()"),
+                        main.index("verify_guest_cannot_read_escape()"))
+
+    def test_workspace_service_preserves_home_isolation_while_allowing_explicit_bind(self):
+        unit = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
+        self.assertIn("ProtectHome=tmpfs", unit)
+        self.assertIn("ProtectSystem=strict", unit)
+        self.assertIn("RuntimeDirectory=little-mester-vm-workspace little-mester-vm-workspace-share", unit)
+        self.assertNotIn("ProtectHome=yes", unit)
+        helper = (ROOT / "lib/vm/system-vm-workspace.py").read_text()
+        self.assertIn('"destination_mount": target_mount', helper)
+        self.assertIn('"dropin_matches_assignment": dropin_matches', helper)
+        self.assertIn("WORKSPACE_BIND_DIAGNOSTIC ", helper)
+        self.assertIn("approved host workspace source changed after assignment", helper)
+
+    def test_hosted_ci_runs_real_systemd_bind_matrix_before_production_start(self):
+        source = SCRIPT.read_text()
+        repro = source[source.index("def _bind_repro_case"):
+                       source.index("def remove_disposable_workspace")]
+        main = source[source.index("def main()") :]
+        self.assertIn("/usr/bin/systemd-run", repro)
+        self.assertIn("RuntimeDirectoryPreserve=no", repro)
+        self.assertIn("_run_transient_bind_case(", repro)
+        self.assertIn("_report_transient_bind_unit(unit_name)", source)
+        self.assertIn('"workspace_bind_transient_unit_effective=PASS"', source)
+        self.assertIn("/run/little-mester-vm-workspace-share", repro)
+        self.assertIn('(workspace, "home", "yes", True)', repro)
+        self.assertIn('(workspace, "home", "tmpfs", True)', repro)
+        self.assertIn('(outside, "outside-home", "yes", True)', repro)
+        self.assertIn('(outside, "outside-home", "tmpfs", True)', repro)
+        self.assertIn("WORKSPACE_BIND_REPRO_TARGET", repro)
+        self.assertIn("WORKSPACE_BIND_REPRO_IDENTITY", repro)
+        self.assertIn("unrelated_home_hidden", repro)
+        self.assertIn("identity_matches", repro)
+        self.assertIn("_require_runner_directory(source, source_stat)", repro)
+        self.assertIn("controller_euid", repro)
+        self.assertIn("tempfile.mkdtemp(", source)
+        self.assertIn('temp_parent = pathlib.Path("/var/tmp")', source)
+        self.assertIn("workspace_bind_checkpoint=", source)
+        self.assertIn("workspace_bind_exception=", source)
+        self.assertIn('"RuntimeDirectory,RuntimeDirectoryMode,RuntimeDirectoryPreserve,"', source)
+        self.assertIn('"BindPaths,ReadWritePaths,ProtectHome,ProtectSystem,PrivateTmp,"', source)
+        self.assertNotIn('outside = runtime / f"lm-vm-bind-control-', source)
+        self.assertIn("stat.S_IMODE(info.st_mode) == 0o700", source)
+        self.assertIn("workspace_effective_systemd=", source)
+        self.assertIn("workspace_production_prestart_paths=", source)
+        module = ast.parse(source)
+        bind_case = next(node for node in module.body
+                         if isinstance(node, ast.FunctionDef) and node.name == "_bind_repro_case")
+        code_assignment = next(node for node in ast.walk(bind_case)
+                               if isinstance(node, ast.Assign)
+                               and any(isinstance(target, ast.Name) and target.id == "code"
+                                       for target in node.targets))
+        code = textwrap.dedent(ast.literal_eval(code_assignment.value.args[0]))
+        compile(code, "<workspace-bind-reproduction>", "exec")
+        self.assertLess(main.index("report_workspace_unit_configuration()"),
+                        main.index("run_workspace_bind_reproductions(workspace_path)"))
+        self.assertLess(main.index("run_workspace_bind_reproductions(workspace_path)"),
+                        main.index("invoke_shared_acceptance(sha)"))
+        matrix = source[source.index("def run_workspace_bind_reproductions"):
+                        source.index("def run_production_dependency_reproduction")]
+        self.assertIn("run_production_dependency_reproduction(workspace)", matrix)
+
+    def test_production_dependency_reproduction_uses_exact_bind_and_sandbox_before_vm_start(self):
+        source = SCRIPT.read_text()
+        template = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
+        repro = source[source.index("def run_production_dependency_reproduction"):
+                       source.index("def remove_disposable_workspace")]
+        self.assertIn('systemd/little-mester-vm-workspace.service', repro)
+        self.assertIn('ExecStart=/usr/bin/sleep 90', repro)
+        self.assertIn('ExecStartPost=/usr/bin/true', repro)
+        for directive in (
+            "Type=exec", "RuntimeDirectory=little-mester-vm-workspace little-mester-vm-workspace-share",
+            "ExecStartPost=", "NoExecPaths=/", "ExecPaths=/usr/bin /usr/lib",
+            "PrivateTmp=yes", "ProtectHome=tmpfs", "ProtectSystem=strict",
+            "ProtectControlGroups=yes", "ReadWritePaths=/run/little-mester-vm-workspace-share",
+            "PartOf=little-mester-vm.service", "Before=little-mester-vm.service",
+        ):
+            self.assertIn(directive, template)
+        for directive in ("systemctl", "daemon-reload", "journalctl",
+                          "REPRODUCED_226_NAMESPACE", "NOT_REPRODUCED", "O_EXCL", "O_NOFOLLOW"):
+            self.assertIn(directive, repro)
+        module = ast.parse(source)
+        function = next(node for node in module.body
+                        if isinstance(node, ast.FunctionDef)
+                        and node.name == "run_production_dependency_reproduction")
+        for name in ("writer", "remover"):
+            assignment = next(node for node in ast.walk(function)
+                              if isinstance(node, ast.Assign)
+                              and any(isinstance(target, ast.Name) and target.id == name
+                                      for target in node.targets))
+            code = textwrap.dedent(ast.literal_eval(assignment.value.args[0]))
+            compile(code, f"<{name}>", "exec")
+        for directive in ('BindPaths="{workspace}:{destination}"', "PartOf={vm_unit}",
+                          "Before={vm_unit}", "Requires={proxy_unit}",
+                          "BindsTo={proxy_unit}", "After={proxy_unit}"):
+            self.assertIn(directive, repro)
+
+    def test_bind_reproduction_separates_controller_source_from_systemd_runtime_lifetime(self):
+        source = SCRIPT.read_text()
+        section = source[source.index("def run_workspace_bind_reproductions"):
+                         source.index("def remove_disposable_workspace")]
+        case = source[source.index("def _bind_repro_case"):
+                      source.index("def run_workspace_bind_reproductions")]
+        self.assertIn('temp_parent = pathlib.Path("/var/tmp")', section)
+        self.assertIn("tempfile.mkdtemp(", section)
+        self.assertIn('outside_created = os.lstat(outside)', section)
+        self.assertIn('_require_runner_directory(outside, outside_identity)', section)
+        self.assertIn('"--property=RuntimeDirectoryPreserve=no"', case)
+        self.assertNotIn('"--collect"', case)
+        self.assertIn('"stop-transient-systemd-unit"', case)
+        self.assertIn('"verify-systemd-runtime-directory-cleanup"', case)
+        self.assertIn("primary_error: BaseException | None = None", case)
+        self.assertIn("if cleanup_errors and primary_error is None", case)
+        self.assertIn('"before-case-{kind}-{protect}"', section)
+        self.assertIn('"after-case-{kind}-{protect}"', section)
+        self.assertIn("if primary_error is None:", section)
+        self.assertIn('"remove-exact-harness-owned-control-source"', section)
+
     def test_script_uses_production_fixed_operations_and_bounded_stop_cleanup(self):
         source = SCRIPT.read_text()
         shared = (ROOT / "lib/vm/system-acceptance.py").read_text()
@@ -440,9 +589,12 @@ class HostedSystemUnitTests(unittest.TestCase):
                          'child.sendcontrol("c")', 'same_disk_persistence:PASS',
                          '_proxy_policy_checks()', '_is_allowed_public_destination'):
             self.assertIn(required, shared)
-        for forbidden in ("systemctl enable", "systemctl disable", "unlink(", "shutil.rmtree",
-                          "rm -rf"):
+        for forbidden in ("systemctl enable", "systemctl disable", "shutil.rmtree", "rm -rf"):
             self.assertNotIn(forbidden, source)
+        repro = source[source.index("def run_production_dependency_reproduction"):
+                       source.index("def remove_disposable_workspace")]
+        self.assertIn("actual != text.encode()", repro)
+        self.assertIn("os.unlink(path)", repro)
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         production = workflow.split("  production-systemd-vm-acceptance:", 1)[1].split(
             "  # ── 6.", 1)[0]

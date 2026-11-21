@@ -1,0 +1,28 @@
+[Unit]
+Description=Little Mester owner-scoped virtiofs workspace
+PartOf=little-mester-vm.service
+Before=little-mester-vm.service
+After=local-fs.target
+
+[Service]
+Type=exec
+User=@LM_VM_OWNER@
+Group=@LM_VM_OWNER_GROUP@
+SupplementaryGroups=lm-vm-control
+RuntimeDirectory=little-mester-vm-workspace little-mester-vm-workspace-share
+RuntimeDirectoryMode=0750
+UMask=0077
+ExecStart=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py serve
+ExecStartPost=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py socket-permissions
+Restart=no
+KillMode=control-group
+TimeoutStartSec=20s
+TimeoutStopSec=10s
+NoNewPrivileges=no
+NoExecPaths=/
+ExecPaths=/usr/bin /usr/lib -/usr/lib64 -/usr/libexec /lib -/lib64
+PrivateTmp=yes
+ProtectHome=tmpfs
+ProtectSystem=strict
+ProtectControlGroups=yes
+ReadWritePaths=/run/little-mester-vm-workspace-share /run/little-mester-vm-workspace

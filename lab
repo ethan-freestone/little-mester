@@ -208,7 +208,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       shift
       vm_operation="${1:-}"
       [[ -n "$vm_operation" ]] || {
-        echo "Usage: ./lab vm {up|down|status|ssh|auth|tui|verify|accept|prepare-dependencies} [OPTIONS]" >&2
+        echo "Usage: ./lab vm {up [--dir PATH] [--unsafe-recurse] [--reassign]|down|status|ssh|auth|tui|verify|accept|prepare-dependencies} [OPTIONS]" >&2
         exit 2
       }
       shift

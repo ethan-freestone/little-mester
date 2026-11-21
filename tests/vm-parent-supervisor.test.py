@@ -645,20 +645,29 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
             source_root = pathlib.Path(source_temp)
             fixture_files = [
                 "lab-vm",
-                "lib/vm/host-launcher.sh", "lib/vm/cloud-init.sh", "lib/vm/proxy.py",
+                "lib/vm/host-launcher.sh", "lib/vm/desktop-session-env.sh",
+                "lib/vm/cloud-init.sh", "lib/vm/proxy.py",
                 "lib/vm/bounded-log.py", "lib/vm/executable-policy.py",
                 "lib/vm/browser-auth-session.py", "lib/vm/callback-listener.py", "lib/vm/virtiofs-socket.py",
-                "lib/vm/guest-user-dirs.py", "lib/vm/parent-session-contract.py", "lib/vm/parent-state.py",
+                "lib/vm/guest-user-dirs.py", "lib/vm/guest-opencode-preferences.py",
+                "lib/vm/parent-session-contract.py", "lib/vm/parent-state.py",
                 "lib/vm/parent-launcher.py", "lib/vm/parent-gate.py",
                 "lib/vm/parent-supervisor.py", "lib/vm/parent-qemu.py",
                 "lib/vm/parent-provision.py", "lib/vm/system-vm.py",
+                "lib/vm/system-vm-workspace.py",
+                "lib/vm/system-vm-metrics.py", "lib/vm/parent-metrics.py",
+                "lib/vm/parent-metrics-collect.py",
                 "lib/vm/system-acceptance.py", "lib/vm/host-dependencies.py", "lib/vm/guest-bootstrap.py",
                 "scripts/parent-readonly-safety-gate.py",
                 "tools/vm-owner-acceptance",
                 "tools/vm-system-install", "systemd/little-mester-vm.service",
-                "systemd/little-mester-vm-proxy.service", "sudoers/little-mester-vm",
+                "systemd/little-mester-vm-proxy.service", "systemd/little-mester-vm-workspace.service",
+                "systemd/little-mester-vm-metrics.service",
+                "sudoers/little-mester-vm",
                 "agent/opencode/plugins/little-mester-exit-confirm/package.json",
                 "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
+                "agent/opencode/plugins/host-metrics-tui/package.json",
+                "agent/opencode/plugins/host-metrics-tui/tui.tsx",
             ]
             for relative in fixture_files:
                 destination = source_root / relative
@@ -666,6 +675,9 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 if relative in ("lab-vm", "tools/vm-owner-acceptance"):
                     shutil.copyfile(ROOT / relative, destination)
                     destination.chmod(0o755)
+                elif relative == "lib/vm/desktop-session-env.sh":
+                    shutil.copyfile(ROOT / relative, destination)
+                    destination.chmod(0o644)
                 elif relative == "lib/vm/parent-state.py":
                     destination.write_text(
                         "import os, subprocess, sys\n"
@@ -1309,6 +1321,7 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 runner = protected["/usr/local/libexec/lm-opencode"]["content"]
                 auth_launcher = protected["/usr/local/libexec/lm-opencode-auth"]["content"]
                 guest_helper = protected["/usr/local/libexec/lm-guest-user-dirs.py"]["content"]
+                preferences_helper = protected["/usr/local/libexec/lm-guest-opencode-preferences.py"]["content"]
                 self.assertIn("OPENCODE_DISABLE_PROJECT_CONFIG=1", profile)
                 self.assertIn("little-mester-exit-confirm", profile)
                 self.assertIn("tmux new-session -A -s little-mester-opencode", launcher)
@@ -1322,6 +1335,10 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 self.assertIn("auth login openai --method chatgpt-browser", auth_launcher)
                 self.assertIn("TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux", launcher)
                 self.assertEqual(guest_helper.encode(), (ROOT / "lib/vm/guest-user-dirs.py").read_bytes())
+                self.assertEqual(preferences_helper.encode(),
+                                 (ROOT / "lib/vm/guest-opencode-preferences.py").read_bytes())
+                self.assertIn("lm-guest-opencode-preferences.py config", runner)
+                self.assertIn("lm-guest-opencode-preferences.py model", runner)
                 cli_export = next(line for line in profile.splitlines()
                                   if line.startswith("export OPENCODE_CLI_CONFIG_CONTENT="))
                 cli_content = json.loads(cli_export.split("=", 1)[1].strip("'"))

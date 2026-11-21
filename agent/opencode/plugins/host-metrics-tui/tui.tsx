@@ -6,7 +6,7 @@
 //                 plus CPU/RAM system stats.
 //
 // Slot: append: "sidebar.footer"
-// Polls /metrics every 500ms; uses /history on first poll to seed history.
+// Polls the fixed loopback-forwarded host /metrics endpoint every 500ms.
 //
 // ── OpenTUI text rules (verified against @opentui/core 0.6.x, see docs/DECISIONS.md §J.9) ──
 // 1. A <text> element is a TextRenderable. Its children may only be strings,
@@ -102,6 +102,7 @@ interface State {
   ramUsedGb: number
   ramTotalGb: number
   ramPct: number
+  sourceStatus: string
 }
 
 function initialState(): State {
@@ -122,10 +123,13 @@ function initialState(): State {
     ramUsedGb: 0,
     ramTotalGb: 0,
     ramPct: 0,
+    sourceStatus: "Host metrics unavailable",
   }
 }
 
 interface MetricsPayload {
+  source?: string
+  availability?: Record<string, string>
   cpu?: {
     model?: string
     load_avg_1m?: number
@@ -220,6 +224,7 @@ function MetricsView(props: { state: () => State; theme: Theme; onToggle: () => 
 function CompactView(props: { state: () => State; theme: Theme }) {
   return (
     <box flexDirection="column" gap={0}>
+      <text fg={props.theme.muted}>{props.state().sourceStatus}</text>
       <box flexDirection="row" gap={1}>
         <text>
           <span style={{ fg: props.theme.muted }}>GPU </span>
@@ -246,7 +251,7 @@ function ExpandedView(props: { state: () => State; theme: Theme }) {
         <text fg={props.theme.muted}>
           <strong>▸ System Monitor</strong>
         </text>
-        <text fg={props.theme.muted}>{`${props.state().history.length} samples`}</text>
+      <text fg={props.theme.muted}>{props.state().sourceStatus}</text>
       </box>
       <text fg={props.theme.muted}>{gpuLabel(props.state())}</text>
 
@@ -303,7 +308,7 @@ export default Plugin.define({
 
     /* Poll /history (first time) → seeds the data arrays. */
     function seedHistory() {
-      return fetch("http://metrics:19532/history?n=60")
+      return fetch("http://10.0.2.100:19532/history?n=60")
         .then(r => r.json())
         .then((data: Array<{ gpu_util?: number; vram_pct?: number; gpu_temp?: number }>) => {
           if (isDisposed || !Array.isArray(data) || !data.length) return
@@ -322,7 +327,7 @@ export default Plugin.define({
 
     /* Poll /metrics → push latest data point. */
     function pollMetrics() {
-      fetch("http://metrics:19532/metrics")
+      fetch("http://10.0.2.100:19532/metrics")
         .then(r => r.json())
         .then((d: MetricsPayload) => {
           if (isDisposed) return
@@ -362,10 +367,13 @@ export default Plugin.define({
               ramUsedGb: d.memory?.used_gb ?? prev.ramUsedGb,
               ramTotalGb: d.memory?.total_gb ?? prev.ramTotalGb,
               ramPct: d.memory?.percent ?? prev.ramPct,
+              sourceStatus: d.source === "host"
+                ? `Host metrics · ${Object.values(d.availability ?? {}).some(value => value !== "available") ? "some sensors unavailable" : "live"}`
+                : "Host metrics unavailable",
             }
           })
         })
-        .catch(() => {})
+        .catch(() => setState(prev => ({ ...prev, sourceStatus: "Host metrics unavailable" })))
     }
 
     // Start polling (500ms cadence)

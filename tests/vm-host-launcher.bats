@@ -778,7 +778,9 @@ if len(args) >= 3 and args[1].endswith("virtiofs-socket.py") and args[2] == "aut
 if len(args) >= 2 and args[1].endswith("bounded-log.py"):
     child = args[args.index("--") + 1:]
     socket_path = child[child.index("--control-socket") + 1]
-    pathlib.Path(os.environ["VM_HOST_TEST_AUTH_CAPTURE"]).write_text(socket_path)
+    pathlib.Path(os.environ["VM_HOST_TEST_AUTH_CAPTURE"]).write_text(json.dumps({
+        "socket": socket_path, "stdin": "--stdin" in args,
+    }))
     proof = pathlib.Path(child[child.index("--proof-file") + 1])
     proof.write_text(json.dumps({
         "version": 1, "ssh_stopped": True, "control_socket_absent": True,
@@ -803,10 +805,27 @@ PY
   ' _ "$TEST_ROOT" "$run_dir"
 
   [ "$status" -eq 0 ]
-  [ "$(<"$capture")" = "$control_socket" ]
-  [ "$(python3 -c 'import os,sys; print(len(os.fsencode(sys.argv[1])))' "$(<"$capture")")" -lt 100 ]
-  [[ "$(<"$capture")" != "$run_dir"/* ]]
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["socket"])' "$capture")" = "$control_socket" ]
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["stdin"])' "$capture")" = False ]
+  [ "$(python3 -c 'import os,sys; print(len(os.fsencode(sys.argv[1])))' "$control_socket")" -lt 100 ]
+  [[ "$control_socket" != "$run_dir"/* ]]
   [ ! -e "$control_socket" ]
+
+  local tty_runner="$TEST_TMP/browser-auth-tty-runner.sh"
+  cat >"$tty_runner" <<'SH'
+#!/usr/bin/bash
+source "$TEST_ROOT/lib/vm/host-launcher.sh"
+VM_HOST_SCRIPT_ROOT="$TEST_ROOT"
+vm_host_record_process_identity() { printf 'test identity\n' >"$1"; }
+vm_host_verify_logger_completion() { [[ -s "$2" ]]; }
+vm_host_verify_browser_auth_proof() { [[ -s "$1" ]]; }
+vm_host_browser_auth_session "$TEST_RUN_DIR" 60
+SH
+  chmod 0700 "$tty_runner"
+  run env TEST_ROOT="$TEST_ROOT" TEST_RUN_DIR="$run_dir" PATH="$fake_bin:$PATH" \
+    script -qec "$tty_runner" /dev/null
+  [ "$status" -eq 0 ]
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["stdin"])' "$capture")" = True ]
 }
 
 @test "Phase 1 runbook requires ChatGPT browser login, not an API key" {
@@ -827,10 +846,36 @@ PY
 }
 
 @test "browser auth preserves the validated desktop bus and optional owner TTY through wrappers" {
-  grep -Fq 'desktop_runtime="/run/user/$UID"' "$TEST_ROOT/lab-vm"
-  grep -Fq 'desktop_env+=("XDG_RUNTIME_DIR=$desktop_runtime" "DBUS_SESSION_BUS_ADDRESS=unix:path=$desktop_runtime/bus")' "$TEST_ROOT/lab-vm"
-  grep -Fq 'logger_stdin+=(--stdin)' "$TEST_ROOT/lib/vm/host-launcher.sh"
-  grep -Fq '"${logger_stdin[@]}"' "$TEST_ROOT/lib/vm/host-launcher.sh"
+  local runtime="$TEST_TMP/owner-runtime" auth_file="$TEST_TMP/Xauthority"
+  mkdir -m 0700 "$runtime"
+  printf 'xauthority' >"$auth_file"
+  chmod 0600 "$auth_file"
+  python3 - "$runtime/bus" "$runtime/wayland-0" <<'PY'
+import socket, sys
+for path in sys.argv[1:]:
+    sock = socket.socket(socket.AF_UNIX)
+    sock.bind(path)
+    sock.close()
+PY
+  run env XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" \
+    WAYLAND_DISPLAY=wayland-0 DISPLAY=:2 XAUTHORITY="$auth_file" \
+    bash -c 'source "$1/lib/vm/desktop-session-env.sh"; vm_collect_desktop_env "$(id -u)" "$2"; printf "%s\\n" "${desktop_env[@]}"' \
+    _ "$TEST_ROOT" "$runtime"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"XDG_RUNTIME_DIR=$runtime"* ]]
+  [[ "$output" == *"DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime/bus"* ]]
+  [[ "$output" == *"WAYLAND_DISPLAY=wayland-0"* ]]
+  [[ "$output" == *"XAUTHORITY=$auth_file"* ]]
+  [[ "$output" == *"DISPLAY=:2"* ]]
+
+  run env XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/attacker-bus" \
+    bash -c 'source "$1/lib/vm/desktop-session-env.sh"; vm_collect_desktop_env "$(id -u)" "$2"; printf "%s\\n" "${desktop_env[@]}"' \
+    _ "$TEST_ROOT" "$runtime"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"XDG_RUNTIME_DIR=$runtime"* ]]
+  [[ "$output" != *DBUS_SESSION_BUS_ADDRESS* ]]
+  [[ "$output" != *attacker-bus* ]]
+
 }
 
 @test "runbook ENOSPC boundary logic makes at most one extra byte attempt" {
@@ -1600,7 +1645,7 @@ SH
   local fixture="$TEST_TMP/protected-helper-shape"
   mkdir -p "$fixture/lib/vm"
   cp "$TEST_ROOT/lab-vm" "$fixture/lab-vm"
-  for name in host-launcher.sh cloud-init.sh proxy.py bounded-log.py executable-policy.py browser-auth-session.py callback-listener.py guest-user-dirs.py; do
+  for name in host-launcher.sh desktop-session-env.sh cloud-init.sh proxy.py bounded-log.py executable-policy.py browser-auth-session.py callback-listener.py guest-user-dirs.py; do
     cp "$TEST_ROOT/lib/vm/$name" "$fixture/lib/vm/$name"
   done
   ln -s "$TEST_ROOT/lib/vm/virtiofs-socket.py" "$fixture/lib/vm/virtiofs-socket.py"

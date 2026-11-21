@@ -87,6 +87,9 @@ jobs:
           python3 tests/ci-kvm-qemu-owner.test.py
           python3 tests/vm-owner-acceptance.test.py
           python3 tests/vm-systemd.test.py
+          python3 tests/vm-system-workspace.test.py
+          python3 tests/vm-system-metrics.test.py
+          python3 tests/vm-opencode-preferences.test.py
           python3 tests/vm-host-dependencies.test.py
           python3 tests/ci-kvm-system-unit.test.py
           python3 tests/ci-kvm-host-dependencies.test.py

@@ -46,6 +46,7 @@ PROXY_RUNTIME = pathlib.Path("/run/lm-vm-proxy")
 PROXY_PORT_FILE = PROXY_RUNTIME / "port"
 SSH_PORT = 22222
 PROXY_PORT = 32128
+WORKSPACE_SOCKET = pathlib.Path("/run/little-mester-vm-workspace/virtiofs.sock")
 QMP_STOP_TIMEOUT = 18.0
 SSH_READY_TIMEOUT = 900.0
 IMAGE_SHA256 = "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94"
@@ -110,6 +111,7 @@ def qemu_argv() -> list[str]:
     _require_fixed_file(DISK, uid=uid, mode=0o600)
     _require_fixed_file(SEED, uid=0, mode=0o640, group=SERVICE_USER)
     _validate_runtime_directory()
+    _verify_workspace_share()
     if QMP_SOCKET_PATH.exists() or QMP_SOCKET_PATH.is_symlink():
         raise Refused("preserving pre-existing QMP socket evidence")
     proxy = read_proxy_port()
@@ -123,7 +125,21 @@ def qemu_argv() -> list[str]:
     return module.build_system_qemu_argv(
         executable="/usr/bin/qemu-system-x86_64", disk_path=str(DISK), seed_iso=str(SEED),
         ssh_port=SSH_PORT, proxy_port=proxy, qmp_socket=str(QMP_SOCKET_PATH),
-        vm_name="little-mester-system-vm")
+        vm_name="little-mester-system-vm", virtiofs_socket=str(WORKSPACE_SOCKET))
+
+
+def _verify_workspace_share() -> None:
+    workspace_helper = pathlib.Path(__file__).with_name("system-vm-workspace.py")
+    spec = importlib.util.spec_from_file_location("system_vm_workspace_policy", workspace_helper)
+    if spec is None or spec.loader is None:
+        raise Refused("fixed workspace policy helper is unavailable")
+    workspace = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = workspace
+    spec.loader.exec_module(workspace)
+    try:
+        workspace.verify_service_socket()
+    except (OSError, workspace.Refused) as error:
+        raise Refused("fixed host workspace share is not ready") from error
 
 
 def read_proxy_port() -> int:
@@ -377,7 +393,8 @@ def _ensure_guest_ready() -> None:
         raise Refused("protected parent session contract is unavailable")
     contract = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(contract)
-    command = "cloud-init status --long >/dev/null 2>&1 || exit 41; " + contract.readiness_checks()
+    command = ("cloud-init status --long >/dev/null 2>&1 || exit 41; "
+               + contract.readiness_checks(workspace_path=contract.SYSTEM_WORKSPACE))
     deadline = time.monotonic() + SSH_READY_TIMEOUT
     while time.monotonic() < deadline:
         try:
@@ -389,9 +406,89 @@ def _ensure_guest_ready() -> None:
     raise Refused("cloud-init, SSH, or protected session readiness did not complete before its bound")
 
 
+def _workspace_policy():
+    path = pathlib.Path(__file__).with_name("system-vm-workspace.py")
+    spec = importlib.util.spec_from_file_location("system_vm_workspace_owner", path)
+    if spec is None or spec.loader is None:
+        raise Refused("fixed workspace assignment helper is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _guest_workspace_mount() -> None:
+    command = (
+        "set -eu; test ! -L /workspace; mountpoint -q /workspace; "
+        "test \"$(findmnt -n -o FSTYPE --target /workspace)\" = virtiofs; "
+        "test \"$(findmnt -n -o SOURCE --target /workspace)\" = workspace; "
+        "test -w /workspace")
+    if _guest_ssh(command, timeout=20) != 0:
+        raise Refused("guest did not mount the approved host directory at /workspace")
+
+
+def _read_probe(path: pathlib.Path, uid: int) -> tuple[os.stat_result, bytes]:
+    info = os.lstat(path)
+    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+        raise Refused("workspace read/write probe has unsafe file metadata")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise Refused("workspace probe changed while opening")
+        value = os.read(fd, 257)
+    finally:
+        os.close(fd)
+    return info, value
+
+
+def _remove_probe(path: pathlib.Path, identity: tuple[int, int], uid: int, expected: bytes) -> None:
+    try:
+        info, value = _read_probe(path, uid)
+    except FileNotFoundError:
+        return
+    if ((info.st_dev, info.st_ino) != identity or value != expected):
+        raise Refused("workspace probe changed; preserving unexpected evidence")
+    os.unlink(path)
+
+
+def _probe_workspace() -> None:
+    policy = _workspace_policy()
+    workspace = policy.read_assignment(policy.ASSIGNMENT, uid=os.getuid())
+    policy.verify_identity(workspace)
+    nonce = secrets.token_hex(16)
+    host_path = workspace.path / f".lm-vm-probe-{nonce}"
+    guest_path = workspace.path / f".lm-vm-probe-{nonce}.guest"
+    payload = (nonce + "\n").encode("ascii")
+    fd = os.open(host_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        os.write(fd, payload)
+        os.fsync(fd)
+        host_info = os.fstat(fd)
+    finally:
+        os.close(fd)
+    guest_info = None
+    try:
+        command = (f"test \"$(cat /workspace/.lm-vm-probe-{nonce})\" = {nonce} && "
+                   f"umask 077 && printf '%s\\n' {nonce} > /workspace/.lm-vm-probe-{nonce}.guest")
+        if _guest_ssh(command, timeout=20) != 0:
+            raise Refused("workspace host-to-guest read or guest-to-host write probe failed")
+        if _read_probe(host_path, workspace.uid)[1] != payload:
+            raise Refused("guest read of host workspace probe did not match its nonce")
+        guest_info, guest_payload = _read_probe(guest_path, workspace.uid)
+        if guest_payload != payload:
+            raise Refused("guest write to host workspace did not preserve its nonce")
+    finally:
+        _remove_probe(host_path, (host_info.st_dev, host_info.st_ino), workspace.uid, payload)
+        if guest_info is not None:
+            _remove_probe(guest_path, (guest_info.st_dev, guest_info.st_ino), workspace.uid, payload)
+
+
 def _qemu_guest_ready() -> None:
     _proxy_ready()
     _ensure_guest_ready()
+    _guest_workspace_mount()
 
 
 def _fixed_exec(action: str) -> int:
@@ -412,7 +509,28 @@ def _fixed_exec(action: str) -> int:
         return _browser_auth()
     if action == "tui":
         return _guest_ssh("/usr/local/bin/lm-opencode", tty=True, timeout=24 * 3600)
+    if action == "up":
+        policy = _workspace_policy()
+        try:
+            policy.verify_host_assignment(os.getuid())
+        except policy.Refused as error:
+            raise Refused(f"host workspace preflight failed before VM lifecycle: {error}; "
+                          "configure it with ./lab vm up --dir PATH") from error
+    if action == "status":
+        result = subprocess.run(commands[action], stdin=subprocess.DEVNULL, check=False)
+        if result.returncode == 0:
+            policy = _workspace_policy()
+            try:
+                workspace = policy.read_assignment(policy.ASSIGNMENT, uid=os.getuid())
+                print(f"Workspace: {workspace.path} -> /workspace")
+            except policy.Refused:
+                print("Workspace: not assigned")
+        return result.returncode
     result = subprocess.run(commands[action], stdin=subprocess.DEVNULL, check=False)
+    if action == "up" and result.returncode == 0:
+        # ExecStartPost verifies the guest mount inside QEMU's sandbox. The
+        # host-side probe runs as the owner, not as the isolated QEMU identity.
+        _probe_workspace()
     return result.returncode
 
 
@@ -538,10 +656,11 @@ def _write_protected_seed(control_gid: int, service_uid: int, service_gid: int) 
     host_public = pathlib.Path(str(HOST_KEY) + ".pub").read_text(encoding="ascii").strip()
     user_data = bootstrap.build_foundation(
         name="little-mester-system-vm", uid=1000, ssh_key=control_public,
-        workspace="disk", helper="/usr/local/libexec/lm-guest-user-dirs.py")
+        workspace="virtiofs", helper="/usr/local/libexec/lm-guest-user-dirs.py")
     contract.add_protected_session(user_data, host_private=host_private,
                                    host_public=host_public,
-                                   control_public=control_public)
+                                   control_public=control_public,
+                                   workspace_path=contract.SYSTEM_WORKSPACE)
     user_data_path = STATE / "user-data"
     metadata_path = STATE / "meta-data"
     iso_part = STATE / "seed.iso.part"
