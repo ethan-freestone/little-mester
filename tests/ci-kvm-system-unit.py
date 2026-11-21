@@ -895,6 +895,46 @@ def run_workspace_bind_reproductions(workspace: pathlib.Path) -> None:
                 raise
 
 
+def classify_namespace_reproduction(state: dict[str, str], diagnostics: str,
+                                    *, start_exit: int) -> str:
+    """Classify only explicit 226/NAMESPACE evidence; weak failures stay inconclusive."""
+    if (state.get("ExecMainCode") == "exited" and state.get("ExecMainStatus") == "226"
+            or re.search(r"\bstatus=226/NAMESPACE\b", diagnostics) is not None):
+        return "REPRODUCED_226_NAMESPACE"
+    if (state.get("ExecMainCode") == "exited"
+            and state.get("ExecMainStatus", "").isdigit()
+            and state.get("ExecMainStatus") != "226"):
+        return "NOT_REPRODUCED"
+    if start_exit == 0 and "WORKSPACE_BIND_REPRO_TARGET " in diagnostics:
+        return "NOT_REPRODUCED"
+    return "INCONCLUSIVE"
+
+
+def production_workspace_reproduction_config(template: str, *, user: str, group: str,
+                                               vm_unit: str, workspace: pathlib.Path,
+                                               destination: str) -> tuple[str, str]:
+    """Render the disposable service from production template plus its generated drop-in."""
+    substitutions = (
+        ("@LM_VM_OWNER@", user), ("@LM_VM_OWNER_GROUP@", group),
+        ("PartOf=little-mester-vm.service", f"PartOf={vm_unit}"),
+        ("Before=little-mester-vm.service", f"Before={vm_unit}"),
+        ("ExecStart=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py serve",
+         "ExecStart=/usr/bin/sleep 90"),
+        ("ExecStartPost=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py socket-permissions",
+         "ExecStartPost=/usr/bin/true"),
+    )
+    for original, replacement in substitutions:
+        require(template.count(original) == 1,
+                f"production workspace unit template changed unexpectedly: {original}")
+        template = template.replace(original, replacement)
+    return template, f'[Service]\nBindPaths="{workspace}:{destination}"\n'
+
+
+def merged_workspace_dropin_matches(output: str, exit_code: int, dropin: str) -> bool:
+    """Require successful `systemctl cat` evidence for the exact generated drop-in."""
+    return exit_code == 0 and bool(dropin.strip()) and dropin.strip() in output
+
+
 def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
     """Reproduce the production workspace unit and parent dependency graph with stubs."""
     token = secrets.token_hex(6)
@@ -911,34 +951,31 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                 f"preserving pre-existing disposable RuntimeDirectory: {path}")
     workspace_template = (REPO / "systemd/little-mester-vm-workspace.service").read_text(
         encoding="utf-8")
-    substitutions = (
-        ("@LM_VM_OWNER@", user), ("@LM_VM_OWNER_GROUP@", group),
-        ("PartOf=little-mester-vm.service", f"PartOf={vm_unit}"),
-        ("Before=little-mester-vm.service", f"Before={vm_unit}"),
-        ("ExecStart=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py serve",
-         "ExecStart=/usr/bin/sleep 90"),
-        ("ExecStartPost=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py socket-permissions",
-         "ExecStartPost=/usr/bin/true"),
-    )
-    for original, replacement in substitutions:
-        require(workspace_template.count(original) == 1,
-                f"production workspace unit template changed unexpectedly: {original}")
-        workspace_template = workspace_template.replace(original, replacement)
-    workspace_text = (workspace_template.rstrip() + f'\nBindPaths="{workspace}:{destination}"\n')
+    workspace_text, workspace_dropin = production_workspace_reproduction_config(
+        workspace_template, user=user, group=group, vm_unit=vm_unit,
+        workspace=workspace, destination=destination)
+    dropin_relative = f"{workspace_unit}.d/20-workspace.conf"
+    dropin_directory = pathlib.Path("/run/systemd/system") / f"{workspace_unit}.d"
+    require(not dropin_directory.exists() and not dropin_directory.is_symlink(),
+            f"preserving pre-existing disposable unit drop-in directory: {dropin_directory}")
     units = {
         workspace_unit: workspace_text,
         proxy_unit: f"""[Unit]\nDescription=Disposable production proxy dependency\nAfter=network-online.target\nWants=network-online.target\nBefore={vm_unit}\nPartOf={vm_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
         metrics_unit: f"""[Unit]\nDescription=Disposable production metrics dependency\nBefore={vm_unit}\nPartOf={vm_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
         vm_unit: f"""[Unit]\nDescription=Disposable parent dependency graph\nRequires={proxy_unit} {workspace_unit} {metrics_unit}\nBindsTo={proxy_unit} {workspace_unit} {metrics_unit}\nAfter={proxy_unit} {workspace_unit} {metrics_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nRuntimeDirectory=little-mester-vm\nRuntimeDirectoryMode=0700\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
     }
-    payload = json.dumps(units, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps({"units": units,
+                          "dropins": {dropin_relative: workspace_dropin}},
+                         sort_keys=True, separators=(",", ":"))
     writer = textwrap.dedent("""\
         import json, os, pathlib, sys
         root = pathlib.Path('/run/systemd/system')
-        units = json.loads(sys.stdin.read())
+        payload = json.loads(sys.stdin.read())
+        units, dropins = payload['units'], payload['dropins']
         if not root.is_dir():
             raise SystemExit('system unit directory unavailable')
         created = []
+        created_dirs = []
         try:
             for name, text in units.items():
                 if not name.startswith('lm-vm-workspace-repro-') or '/' in name:
@@ -956,11 +993,46 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                     os.fsync(fd)
                 finally:
                     os.close(fd)
+            for relative, text in dropins.items():
+                parts = pathlib.PurePosixPath(relative).parts
+                if (len(parts) != 2 or not parts[0].startswith('lm-vm-workspace-repro-')
+                        or not parts[0].endswith('.service.d')
+                        or parts[1] != '20-workspace.conf'):
+                    raise SystemExit('invalid disposable unit drop-in path')
+                directory = root / parts[0]
+                directory.mkdir(mode=0o755)
+                created_dirs.append(directory)
+                path = directory / parts[1]
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+                created.append((path, text.encode()))
+                try:
+                    data = memoryview(text.encode())
+                    while data:
+                        written = os.write(fd, data)
+                        if written <= 0:
+                            raise OSError('drop-in write made no progress')
+                        data = data[written:]
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
         except BaseException:
             for path, expected in reversed(created):
                 try:
-                    if path.read_bytes() == expected:
+                    info = os.lstat(path)
+                    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                        continue
+                    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                    try:
+                        actual = os.read(fd, len(expected) + 1)
+                    finally:
+                        os.close(fd)
+                    if actual == expected:
                         path.unlink()
+                except OSError:
+                    pass
+            for directory in reversed(created_dirs):
+                try:
+                    directory.rmdir()
                 except OSError:
                     pass
             raise
@@ -973,7 +1045,8 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
         run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "daemon-reload"], timeout=15)
         start = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", vm_unit],
                     timeout=35, check=False)
-        properties = ("LoadState,ActiveState,SubState,MainPID,Result,Type,User,Group,"
+        properties = ("LoadState,ActiveState,SubState,MainPID,Result,ExecMainCode,ExecMainStatus,"
+                      "Type,User,Group,"
                       "SupplementaryGroups,RuntimeDirectory,RuntimeDirectoryMode,UMask,"
                       "RuntimeDirectoryPreserve,ExecStart,ExecStartPost,Restart,KillMode,"
                       "TimeoutStartUSec,TimeoutStopUSec,"
@@ -988,10 +1061,14 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                                 if "=" in line)
         journal = run(["/usr/bin/sudo", "-n", "/usr/bin/journalctl", "--no-pager",
                        "-n", "40", "-u", workspace_unit], check=False, timeout=10)
+        merged = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "cat", "--no-pager",
+                      workspace_unit], check=False, timeout=10)
         print("workspace_bind_dependency_repro=" + json.dumps({
             "units": states, "start_exit": start.returncode,
             "start_stderr": (start.stderr or "")[-1600:],
             "workspace_journal": (journal.stdout or "")[-5000:],
+            "merged_unit_exit": merged.returncode,
+            "workspace_merged_unit": (merged.stdout or "")[-6000:],
             "source": _host_path_evidence(workspace),
             "runtime_directories": [_host_path_evidence(pathlib.Path(raw)) for raw in runtime_paths],
         }, sort_keys=True, separators=(",", ":")), flush=True)
@@ -1032,12 +1109,13 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                  + json.dumps(mismatches, sort_keys=True, separators=(",", ":"))), flush=True)
         require(not mismatches,
                 "disposable dependency reproduction did not retain the required effective production settings")
+        require(merged_workspace_dropin_matches(
+                    merged.stdout or "", merged.returncode, workspace_dropin),
+                "systemd merged unit does not show the production-shaped BindPaths drop-in")
         diagnostic = (start.stdout or "") + (start.stderr or "") + (journal.stdout or "")
-        reproduced = ("226/NAMESPACE" in diagnostic
-                      or "Failed to set up mount namespacing" in diagnostic
-                      or workspace_state.get("Result") == "resources")
-        print("workspace_bind_dependency_reproduction="
-              f"{'REPRODUCED_226_NAMESPACE' if reproduced else 'NOT_REPRODUCED'}", flush=True)
+        classification = classify_namespace_reproduction(
+            workspace_state, diagnostic, start_exit=start.returncode)
+        print(f"workspace_bind_dependency_reproduction={classification}", flush=True)
     finally:
         run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", vm_unit, workspace_unit,
              proxy_unit, metrics_unit], timeout=30, check=False)
@@ -1052,7 +1130,8 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
         remover = textwrap.dedent("""\
             import json, os, pathlib, stat, sys
             root = pathlib.Path('/run/systemd/system')
-            units = json.loads(sys.stdin.read())
+            payload = json.loads(sys.stdin.read())
+            units, dropins = payload['units'], payload['dropins']
             for name, text in units.items():
                 path = root / name
                 info = os.lstat(path)
@@ -1066,6 +1145,20 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                 if actual != text.encode():
                     raise SystemExit('preserving changed disposable unit file')
                 os.unlink(path)
+            for relative, text in dropins.items():
+                path = root / relative
+                info = os.lstat(path)
+                if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                    raise SystemExit('preserving changed disposable unit drop-in')
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                try:
+                    actual = os.read(fd, len(text.encode()) + 1)
+                finally:
+                    os.close(fd)
+                if actual != text.encode():
+                    raise SystemExit('preserving changed disposable unit drop-in')
+                os.unlink(path)
+                path.parent.rmdir()
             """)
         removed = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c", remover],
                                  input=payload, text=True, capture_output=True,

@@ -499,8 +499,10 @@ class HostedSystemUnitTests(unittest.TestCase):
     def test_production_dependency_reproduction_uses_exact_bind_and_sandbox_before_vm_start(self):
         source = SCRIPT.read_text()
         template = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
-        repro = source[source.index("def run_production_dependency_reproduction"):
-                       source.index("def remove_disposable_workspace")]
+        config = source[source.index("def production_workspace_reproduction_config"):
+                        source.index("def run_production_dependency_reproduction")]
+        repro = config + source[source.index("def run_production_dependency_reproduction"):
+                                source.index("def remove_disposable_workspace")]
         self.assertIn('systemd/little-mester-vm-workspace.service', repro)
         self.assertIn('ExecStart=/usr/bin/sleep 90', repro)
         self.assertIn('ExecStartPost=/usr/bin/true', repro)
@@ -512,8 +514,7 @@ class HostedSystemUnitTests(unittest.TestCase):
             "PartOf=little-mester-vm.service", "Before=little-mester-vm.service",
         ):
             self.assertIn(directive, template)
-        for directive in ("systemctl", "daemon-reload", "journalctl",
-                          "REPRODUCED_226_NAMESPACE", "NOT_REPRODUCED", "O_EXCL", "O_NOFOLLOW"):
+        for directive in ("systemctl", "daemon-reload", "journalctl", "O_EXCL", "O_NOFOLLOW"):
             self.assertIn(directive, repro)
         module = ast.parse(source)
         function = next(node for node in module.body
@@ -526,10 +527,49 @@ class HostedSystemUnitTests(unittest.TestCase):
                                       for target in node.targets))
             code = textwrap.dedent(ast.literal_eval(assignment.value.args[0]))
             compile(code, f"<{name}>", "exec")
-        for directive in ('BindPaths="{workspace}:{destination}"', "PartOf={vm_unit}",
-                          "Before={vm_unit}", "Requires={proxy_unit}",
+        for directive in ("PartOf={vm_unit}", "Before={vm_unit}", "Requires={proxy_unit}",
                           "BindsTo={proxy_unit}", "After={proxy_unit}"):
             self.assertIn(directive, repro)
+        self.assertIn("workspace_dropin", repro)
+        self.assertIn("production_workspace_reproduction_config", repro)
+        self.assertIn('"/usr/bin/systemctl", "cat"', repro)
+        self.assertIn("merged_workspace_dropin_matches", repro)
+
+    def test_namespace_classifier_requires_explicit_226_namespace_evidence(self):
+        classify = unit.classify_namespace_reproduction
+        self.assertEqual(classify({"Result": "resources"}, "", start_exit=1),
+                         "INCONCLUSIVE")
+        self.assertEqual(classify({"Result": "resources", "ExecMainCode": "exited",
+                                   "ExecMainStatus": "1"}, "", start_exit=1),
+                         "NOT_REPRODUCED")
+        self.assertEqual(classify({"Result": "resources", "ExecMainCode": "exited",
+                                   "ExecMainStatus": "226"}, "", start_exit=1),
+                         "REPRODUCED_226_NAMESPACE")
+        self.assertEqual(classify({}, "Main process exited, code=exited, status=226/NAMESPACE",
+                                  start_exit=1), "REPRODUCED_226_NAMESPACE")
+        self.assertEqual(classify({}, "Failed to set up mount namespacing", start_exit=1),
+                         "INCONCLUSIVE")
+        self.assertEqual(classify({}, "WORKSPACE_BIND_REPRO_TARGET {}", start_exit=0),
+                         "NOT_REPRODUCED")
+
+    def test_production_shaped_dependency_reproduction_uses_unit_dropin(self):
+        template = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
+        unit_text, dropin_text = unit.production_workspace_reproduction_config(
+            template, user="ci-owner", group="ci-group", vm_unit="sample-vm.service",
+            workspace=pathlib.Path("/tmp/ci workspace"),
+            destination="/run/little-mester-vm-workspace-share")
+        self.assertIn("ExecStart=/usr/bin/sleep 90", unit_text)
+        self.assertNotIn("BindPaths=", unit_text)
+        self.assertEqual(dropin_text,
+                         '[Service]\nBindPaths="/tmp/ci workspace:'
+                         '/run/little-mester-vm-workspace-share"\n')
+        self.assertIn("BindPaths=", dropin_text)
+        merged = ("# /run/systemd/system/sample-vm-workspace.service\n" + unit_text
+                  + "# /run/systemd/system/sample-vm-workspace.service.d/20-workspace.conf\n"
+                  + dropin_text)
+        self.assertTrue(unit.merged_workspace_dropin_matches(merged, 0, dropin_text))
+        self.assertFalse(unit.merged_workspace_dropin_matches(merged, 1, dropin_text))
+        self.assertFalse(unit.merged_workspace_dropin_matches(unit_text, 0, dropin_text))
 
     def test_bind_reproduction_separates_controller_source_from_systemd_runtime_lifetime(self):
         source = SCRIPT.read_text()
