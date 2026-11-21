@@ -39,12 +39,16 @@ available while the VM, proxy, workspace-share, and metrics services are stopped
 sudo /opt/little-mester/v3/<new-commit>/tools/vm-system-install --update-code-only
 ```
 
-It replaces each existing protected host code, sudoers, and unit asset from the
-versioned candidate using a staged same-filesystem file replacement,
-reloads systemd without starting anything, and checks that the disk, seed,
-identity keys, assignment, and workspace drop-in identities remain unchanged.
-It does not migrate guest state or replace the guest disk. If a file or service
-is unsafe or active, the update refuses; inspect before retrying.
+This is the currently implemented host-only behavior; the compatibility-gated
+snapshot/rollback flags described in
+[`guest-compatibility-update.md`](guest-compatibility-update.md) are planned and
+must not be used until implemented and reviewed. The current updater replaces
+protected host code, sudoers, and unit assets using staged same-filesystem file
+replacements, reloads systemd without starting anything, and checks that the
+disk, seed, identity keys, assignment, and workspace drop-in identities remain
+unchanged. It does not migrate guest state or replace the guest disk. It does
+not yet provide a tested rollback or establish guest compatibility. If a file
+or service is unsafe or active, the update refuses; inspect before retrying.
 
 The protected runtime is installed under `/usr/lib/little-mester-vm`, a path
 available on both Ubuntu and merged-`/usr` distributions such as Arch. The
