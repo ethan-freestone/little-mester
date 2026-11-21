@@ -651,6 +651,37 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertEqual(evidence["reset"]["returncode"], 0)
         self.assertEqual(len([argv for argv in calls if "reset-failed" in argv]), 1)
 
+    def test_reset_failed_rejects_gc_error_without_exact_unit_identity(self):
+        name = "lm-vm-workspace-repro-unattributed.service"
+        outputs = iter(("LoadState=loaded\nActiveState=failed\nSubState=failed\nMainPID=0\n",
+                        "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\n"))
+
+        def command_runner(argv, **kwargs):
+            if "show" in argv:
+                return subprocess.CompletedProcess(argv, 0, next(outputs), "")
+            return subprocess.CompletedProcess(argv, 5, "", "Unit not loaded.\n")
+
+        with self.assertRaisesRegex(RuntimeError, "reset-failed or post-state validation failed"):
+            unit.reset_failed_with_diagnostics(
+                (name,), phase="final-cleanup", command_runner=command_runner,
+                emit=lambda _line: None)
+
+    def test_reset_failed_rejects_duplicate_required_state_properties(self):
+        name = "lm-vm-workspace-repro-duplicate.service"
+        outputs = iter(("LoadState=loaded\nActiveState=failed\nSubState=failed\nMainPID=0\n",
+                        "LoadState=loaded\nLoadState=not-found\nActiveState=inactive\n"
+                        "SubState=dead\nMainPID=0\n"))
+
+        def command_runner(argv, **kwargs):
+            if "show" in argv:
+                return subprocess.CompletedProcess(argv, 0, next(outputs), "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with self.assertRaisesRegex(RuntimeError, "duplicate systemd state property"):
+            unit.reset_failed_with_diagnostics(
+                (name,), phase="final-cleanup", command_runner=command_runner,
+                emit=lambda _line: None)
+
     def test_reset_failed_does_not_match_truncated_non_gc_error_suffix(self):
         name = "lm-vm-workspace-repro-long-error.service"
         outputs = iter(("LoadState=loaded\nActiveState=failed\nSubState=failed\nMainPID=0\n",

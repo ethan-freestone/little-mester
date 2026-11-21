@@ -159,8 +159,13 @@ def reset_failed_with_diagnostics(names: tuple[str, ...], *, phase: str,
                 "--property=LoadState", "--property=ActiveState", "--property=SubState",
                 "--property=MainPID", name]
         result = command_runner(argv, timeout=10, check=False)
-        state = dict(line.split("=", 1) for line in (result.stdout or "").splitlines()
-                     if "=" in line)
+        state: dict[str, str] = {}
+        for line in (result.stdout or "").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            require(key not in state, f"duplicate systemd state property {key}: {name}")
+            state[key] = value
         return {"command": argv, **_bounded_process_evidence(result), "state": state}
 
     for name in names:
@@ -194,7 +199,7 @@ def reset_failed_with_diagnostics(names: tuple[str, ...], *, phase: str,
         else:
             not_loaded_error = re.compile(
                 rf"(?:Failed to reset failed state of unit {re.escape(name)}: )?"
-                rf"Unit(?: {re.escape(name)})? not loaded\.?\s*\Z", re.IGNORECASE)
+                rf"Unit {re.escape(name)} not loaded\.?\s*\Z", re.IGNORECASE)
             exact_not_loaded_error = (
                 result.returncode != 0 and not (result.stdout or "").strip()
                 and not_loaded_error.fullmatch((result.stderr or "").strip()) is not None)
@@ -2030,18 +2035,20 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                 "production-equivalent unquoted BindPaths did not prove identity and isolation")
         standalone = run_case("dropin-standalone", workspace_unit, workspace_unit,
                               workspace_text, [legacy_quoted_dropin],
-                              allowed_setting="BindPaths")
+                              allowed_setting="BindPaths",
+                              expected_negative_quoted_bind=True)
         # run_case returns only after effective configuration, stop, and
         # runtime-baseline checks pass. A reproduced 226 is the expected
         # diagnostic control outcome, not an acceptance pass or matrix abort.
-        if standalone["_classification"] != "REPRODUCED_226_NAMESPACE":
-            require(standalone["_raw_classification"] == "REPRODUCED_226_NAMESPACE"
-                    and set(standalone["_configuration_mismatches"]) == {"BindPaths"},
-                    "standalone quoted control was not explicit 226/NAMESPACE or had unrelated config mismatches")
+        require(standalone["_classification"] == "EXPECTED_NEGATIVE_QUOTED_BIND_226_NAMESPACE"
+                and standalone["_raw_classification"] == "REPRODUCED_226_NAMESPACE"
+                and set(standalone["_configuration_mismatches"]) == {"BindPaths"},
+                "standalone quoted control did not match its explicit malformed-BindPaths negative expectation")
 
         quoted_reverse = run_case("bind-quoted-reverse", quoted_reverse_workspace_unit,
                                   quoted_reverse_workspace_unit, workspace_text,
-                                  [quoted_reverse_dropin], allowed_setting="BindPaths")
+                                  [quoted_reverse_dropin], allowed_setting="BindPaths",
+                                  expected_negative_quoted_bind=True)
         unquoted_worked = (unquoted["_raw_classification"] == "NOT_REPRODUCED"
                            and unquoted["_probe_valid"])
         quote_comparison = {
