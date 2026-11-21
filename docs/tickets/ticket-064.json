@@ -1,0 +1,60 @@
+{
+  "id": 64,
+  "file_path": "/workspace/docs/tickets/ticket-064.json",
+  "number": 64,
+  "area": "observability",
+  "type": "bug",
+  "status": "active",
+  "title": "Restore Docker and VM metrics endpoint parity in the TUI",
+  "objective": "PR #20 Phase 1 metrics regression (related to parent #35 and verification ticket #21): host-metrics-tui currently hardcodes the VM metrics address, while the Docker agent uses the Compose service name. Compare with feat/vm-approach and restore working Docker and VM behavior without weakening the VM egress/security architecture.",
+  "created_at": "2026-11-21T16:41:08.238Z",
+  "updated_at": "2026-11-21T16:57:21.583Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "The shared host-metrics TUI selects a reachable metrics endpoint correctly in Docker-agent and direct-in-VM modes without relying on inaccessible addresses.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Automated regression tests cover endpoint selection and metrics fetching behavior for both Docker and VM modes, including missing/invalid configuration handling.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "VM mode continues to use the approved metrics route and does not add host ports, direct host/LAN access, or weaker egress restrictions.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Existing metrics UI behavior and rendering remain intact; Docker and VM verification commands pass where the environment allows.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Compare current plugin and agent startup/configuration with feat/vm-approach baseline.",
+      "Add regression tests for Docker and VM endpoint selection plus fetch failure handling.",
+      "Run unit/build checks for both modes; run Docker/VM runtime smoke only on authorized available environment.",
+      "Run Docker Compose metrics/TUI smoke and actual VM guest metrics/TUI smoke in authorized capable environment; this container has no Docker daemon or /dev/kvm. Verify both history and metrics display live data and sidebar remains healthy.",
+      "Sol independent review of the focused metrics implementation before its separate commit.",
+      "Sol re-review after prototype-key fix and CI wiring.",
+      "Owner/authorized environment runs Docker Compose and direct-VM live metrics/TUI smoke; verify live /metrics and /history fetches and healthy compact/expanded sidebar rendering."
+    ],
+    "created": [
+      "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js (+ declaration): fixed mode allowlist maps docker→http://metrics:19532 and vm→http://10.0.2.100:19532; only /metrics and /history?n=60 allowed; rejects missing/unknown mode, arbitrary endpoint/path, non-2xx and network errors.",
+      "tests/host-metrics-tui.test.mjs: Node mock-fetch tests both endpoints/resources and missing/invalid config; includes constructor, __proto__, and toString mode names to ensure inherited object properties fail closed. Added to .github/workflows/ci.yml VM unit/contract job.",
+      "tests/vm-parent-qemu.test.py: launch-boundary regression checks Compose Docker mode/internal metrics service/no ports and VM mode/existing guestfwd/restrict=on.",
+      "VM asset propagation updated and covered: lab-vm dependency bundle, system installer and update allowlist, owner acceptance install archive, protected cloud-init asset/digest, system acceptance byte comparison, hosted installer fixture."
+    ],
+    "cases": [
+      "Sol review of focused BindPaths commit 75dbd59 identified Docker regression: TUI plugin hardcodes 10.0.2.100:19532 while Docker metrics service is metrics:19532; metrics is Phase 1 acceptance, not optional.",
+      "Delegated comparison with current HEAD and feat/vm-approach (97af1d83): shared TUI endpoint selector using METRICS_URL with Compose DNS default existed before fd87d22; fd87d22 hardcoded the VM guestfwd address for both TUI fetches. Current Docker agent lacks METRICS_URL and can resolve metrics:19532 only on the internal Compose network. Direct VM endpoint is 10.0.2.100:19532 via existing QEMU guestfwd to loopback metrics listener; retain restrict=on and no host ports.",
+      "Delegated security review: inject a fixed, trusted mode-specific endpoint at the launch boundary (Compose Docker agent and protected direct-VM launcher); do not accept workspace-controlled arbitrary URLs. Test both history and metrics fetch paths, malformed/missing config, errors, and assert network invariants (internal Compose service, exact guestfwd/restrict=on, no new host forwarding). No Docker/VM operations were run.",
+      "Commit 35cc0b8 (`fix(metrics): select mode-specific TUI endpoint`) was independently reviewed by Sol (GPT-6.1-Sol) against its parent; exact-commit verdict APPROVE, no blockers at individual-commit scope. This is not PR #20 merge or production acceptance.",
+      "Post-commit local results: `node --test tests/host-metrics-tui.test.mjs` 3 passed; `python3 tests/vm-parent-qemu.test.py` 8 passed; `python3 tests/vm-systemd.test.py` 39 passed; `python3 tests/vm-opencode-preferences.test.py` 6 passed; `python3 tests/vm-owner-acceptance.test.py` 69 passed (1 skipped); `python3 tests/vm-parent-supervisor.test.py` 57 passed; `python3 tests/ci-kvm-system-unit.test.py` 76 passed; `python3 tests/vm-system-metrics.test.py` 3 passed. TUI JSX, py_compile, bash -n, node --check and diff-check passed. No Docker runtime, /dev/kvm or hosted CI was available; live Docker/VM behavior remains unverified.",
+      "CI test is wired into `.github/workflows/ci.yml`; ticket validation reports index synchronized, no lock/orphans and all 63 criteria/test ledgers present; only pre-existing audit #417 privacy-redaction operation warning remains."
+    ]
+  },
+  "models_used": []
+}
