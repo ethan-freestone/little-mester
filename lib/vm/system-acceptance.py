@@ -26,6 +26,117 @@ WORKSPACE_UNIT = "little-mester-vm-workspace.service"
 METRICS_UNIT = "little-mester-vm-metrics.service"
 SYSTEM_UNITS = (UNIT, PROXY_UNIT, WORKSPACE_UNIT, METRICS_UNIT)
 DISK = "/var/lib/little-mester-vm/disk.qcow2"
+GUEST_PERSISTENCE_STATE = "/home/mester/.local/state"
+GUEST_PERSISTENCE_MARKER_SCRIPT = r'''import os, stat, sys
+ROOT_PATH = "/"
+SYSFS_ROOT = "/sys"
+action, name, expected = sys.argv[1:4]
+if "/" in name or name in ("", ".", ".."):
+    raise SystemExit("invalid persistence marker name")
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+root_fd = os.open(ROOT_PATH, flags)
+fds = [root_fd]
+try:
+    for component in ("home", "mester", ".local", "state"):
+        fd = os.open(component, flags, dir_fd=fds[-1])
+        info = os.fstat(fd)
+        if not stat.S_ISDIR(info.st_mode):
+            raise SystemExit("persistence directory component is not a directory")
+        if component == "home" and stat.S_IMODE(info.st_mode) & 0o022:
+            raise SystemExit("guest home parent is group or world writable")
+        if component == "mester" and info.st_uid != os.getuid():
+            raise SystemExit("guest home owner mismatch")
+        if component == "mester" and stat.S_IMODE(info.st_mode) & 0o022:
+            raise SystemExit("guest home is group or world writable")
+        if component in (".local", "state") and (
+            info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise SystemExit("private guest state ownership or mode mismatch")
+        fds.append(fd)
+    state_fd = fds[-1]
+    root_info = os.fstat(root_fd)
+    state_info = os.fstat(state_fd)
+
+    def mount_id(fd):
+        with open(f"/proc/self/fdinfo/{fd}", encoding="ascii") as stream:
+            for line in stream:
+                if line.startswith("mnt_id:"):
+                    return int(line.split()[1])
+        raise SystemExit("mount identity unavailable")
+
+    root_mount_id = mount_id(root_fd)
+    if mount_id(state_fd) != root_mount_id or state_info.st_dev != root_info.st_dev:
+        raise SystemExit("guest state is not on the root mount")
+    mount_types = {}
+    with open("/proc/self/mountinfo", encoding="ascii") as stream:
+        for line in stream:
+            fields = line.split()
+            dash = fields.index("-")
+            mount_types[int(fields[0])] = fields[dash + 1]
+    if root_mount_id not in mount_types or mount_types[root_mount_id] == "virtiofs":
+        raise SystemExit("guest root mount identity/type unavailable or virtiofs")
+
+    major, minor = os.major(root_info.st_dev), os.minor(root_info.st_dev)
+    block = os.path.realpath(f"{SYSFS_ROOT}/dev/block/{major}:{minor}")
+    if not os.path.exists(block):
+        raise SystemExit("guest root block topology unavailable")
+    if os.path.exists(os.path.join(block, "partition")):
+        block = os.path.dirname(block)
+    driver = os.path.realpath(os.path.join(block, "device", "driver"))
+    if os.path.basename(driver) != "virtio_blk":
+        raise SystemExit("guest root is not backed by virtio_blk")
+
+    if action == "create":
+        marker_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                            0o600, dir_fd=state_fd)
+        try:
+            info = os.fstat(marker_fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_dev != state_info.st_dev
+                    or mount_id(marker_fd) != root_mount_id):
+                raise SystemExit("new persistence marker identity mismatch")
+            data = expected.encode("ascii")
+            if os.write(marker_fd, data) != len(data):
+                raise SystemExit("short persistence marker write")
+            os.fsync(marker_fd)
+        finally:
+            os.close(marker_fd)
+    elif action in ("verify", "remove"):
+        marker_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                            dir_fd=state_fd)
+        try:
+            info = os.fstat(marker_fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_dev != state_info.st_dev
+                    or mount_id(marker_fd) != root_mount_id):
+                raise SystemExit("persistence marker identity mismatch")
+            if os.read(marker_fd, 256) != expected.encode("ascii"):
+                raise SystemExit("persistence marker content mismatch")
+        finally:
+            os.close(marker_fd)
+        if action == "remove":
+            current = os.stat(name, dir_fd=state_fd, follow_symlinks=False)
+            if (current.st_dev != info.st_dev or current.st_ino != info.st_ino
+                    or not stat.S_ISREG(current.st_mode)):
+                raise SystemExit("persistence marker changed before removal")
+            os.unlink(name, dir_fd=state_fd)
+            os.fsync(state_fd)
+    else:
+        raise SystemExit("invalid persistence marker action")
+finally:
+    for fd in reversed(fds):
+        os.close(fd)
+'''
+
+
+def _guest_persistence_marker_command(action: str, marker: str, expected: str) -> str:
+    """Validate guest root storage and operate on one marker via verified dirfds."""
+    if action not in {"create", "verify", "remove"}:
+        raise ValueError("invalid guest persistence marker action")
+    if pathlib.PurePosixPath(marker).name != marker or not marker.startswith(".lm-system-accept-"):
+        raise ValueError("invalid guest persistence marker name")
+    return "python3 -c " + shlex.quote(GUEST_PERSISTENCE_MARKER_SCRIPT) + " " + " ".join(
+        shlex.quote(value) for value in (action, marker, expected))
 
 
 class AcceptanceError(RuntimeError):
@@ -624,7 +735,7 @@ def accept(root: pathlib.Path, progress=None) -> int:
           disk_identity={"device": before_disk[0], "inode": before_disk[1]})
     _mark(progress, "proxy_private_target_policy")
     print("system_vm_gate=proxy_private_target_policy:PASS")
-    marker = f"/workspace/.lm-system-accept-{uuid.uuid4().hex}"
+    marker = f".lm-system-accept-{uuid.uuid4().hex}"
     expected = f"systemd-owner-acceptance-{uuid.uuid4().hex}"
     _mark(progress, "lifecycle_started", lifecycle_started=True,
           restoration_outcome="PENDING")
@@ -654,8 +765,7 @@ def accept(root: pathlib.Path, progress=None) -> int:
         print("system_vm_gate=host_metrics_transport:PASS source=host")
         stage = "persistence_fixture"
         operation = "create_and_verify_persistence_marker"
-        _guest_ssh(f"umask 077; printf '%s' {shlex.quote(expected)} > {shlex.quote(marker)}; "
-                   f"test \"$(cat {shlex.quote(marker)})\" = {shlex.quote(expected)}",
+        _guest_ssh(_guest_persistence_marker_command("create", marker, expected),
                    operation=operation)
         stage = "direct_egress_blocked"
         operation = "verify_direct_egress_is_blocked"
@@ -685,10 +795,11 @@ def accept(root: pathlib.Path, progress=None) -> int:
         if disk_identity() != before_disk:
             raise AcceptanceError("fixed disk identity changed across restart")
         operation = "verify_persistence_marker_after_restart"
-        _guest_ssh(f"test \"$(cat {shlex.quote(marker)})\" = {shlex.quote(expected)}",
+        _guest_ssh(_guest_persistence_marker_command("verify", marker, expected),
                    operation=operation)
         operation = "remove_persistence_marker"
-        _guest_ssh(f"rm -- {shlex.quote(marker)}", operation=operation)
+        _guest_ssh(_guest_persistence_marker_command("remove", marker, expected),
+                   operation=operation)
         operation = "verify_restarted_network_boundaries"
         _network_checks(restarted)
         _mark(progress, "same_disk_persistence")

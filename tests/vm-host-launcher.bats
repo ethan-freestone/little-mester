@@ -347,10 +347,17 @@ stage = pathlib.Path(sys.argv[1])
 text = stage.read_text() + stage.with_name('ci-kvm-stage-operations.sh').read_text()
 workflow = pathlib.Path(sys.argv[1]).parents[1] / '.github/workflows/ci.yml'
 workflow_text = workflow.read_text()
-job = workflow_text.split('  transient-qemu-integration:', 1)[1].split(
-    '  # ── 5. Exact installed production', 1)[0]
-production_job = workflow_text.split('  production-systemd-vm-acceptance:', 1)[1].split(
-    '\n  # ── 6.', 1)[0]
+def workflow_job(name):
+    import re
+    matches = list(re.finditer(r'^  ([A-Za-z0-9_-]+):\s*$', workflow_text, re.MULTILINE))
+    for index, match in enumerate(matches):
+        if match.group(1) == name:
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(workflow_text)
+            return workflow_text[match.end():end]
+    raise AssertionError(f'missing workflow job: {name}')
+job = workflow_job('transient-qemu-integration')
+diagnostics_job = workflow_job('systemd-namespace-diagnostics')
+production_job = workflow_job('production-systemd-vm-acceptance')
 session_contract = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/parent-session-contract.py'
 session_contract_text = session_contract.read_text()
 opencode_readiness_text = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/opencode-readiness.sh'
@@ -383,6 +390,14 @@ assert 'github.event.pull_request.head.sha || github.sha' in production_job
 assert 'pr_merge_commit_second_parent' in production_job and 'source_head_sha=' in production_job
 assert 'timeout-minutes: 90' in job
 assert 'timeout-minutes: 90' in production_job
+assert 'timeout-minutes: 15' in diagnostics_job
+assert 'python3 tests/ci-kvm-system-unit.py --namespace-diagnostics' in diagnostics_job
+assert 'needs:' not in diagnostics_job
+assert '/dev/kvm' not in diagnostics_job and 'accel=kvm' not in diagnostics_job
+assert 'tests/ci-kvm-system-unit.py' not in job
+assert 'tests/ci-kvm-system-unit.py' in production_job
+assert 'workflow_sha=' in production_job and 'source_head_sha=' in production_job
+assert 'pr_merge_commit_second_parent' in production_job
 assert 'Exercise exact pinned production systemd VM unit on disposable hosted KVM' in production_job
 assert 'Require production systemd VM and proxy stopped' in production_job
 assert 'timeout-minutes: 45' in production_job

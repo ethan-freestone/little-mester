@@ -32,15 +32,78 @@ assert PROBE_SPEC.loader is not None
 PROBE_SPEC.loader.exec_module(probe)
 
 
+def workflow_job(workflow: str, name: str) -> str:
+    """Extract one top-level Actions job by its YAML job-key boundaries."""
+    matches = list(re.finditer(r"^  ([A-Za-z0-9_-]+):\s*$", workflow, re.MULTILINE))
+    for index, match in enumerate(matches):
+        if match.group(1) == name:
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(workflow)
+            return workflow[match.end():end]
+    raise AssertionError(f"workflow job not found: {name}")
+
+
 class HostedSystemUnitTests(unittest.TestCase):
+    def test_hosted_runner_provenance_guard_does_not_require_kvm(self):
+        sha = "a" * 40
+        environment = {
+            "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+            "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64",
+            "GITHUB_WORKSPACE": str(ROOT), "GITHUB_SHA": sha,
+        }
+        original_is_char_device = pathlib.Path.is_char_device
+
+        def reject_kvm_probe(path):
+            if path == pathlib.Path("/dev/kvm"):
+                raise AssertionError("provenance guard probed KVM capability")
+            return original_is_char_device(path)
+
+        with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(unit, "run", return_value=SimpleNamespace(stdout=sha + "\n")) as run, \
+                mock.patch.object(pathlib.Path, "is_char_device", reject_kvm_probe), \
+                mock.patch.object(unit.os, "access", side_effect=AssertionError("KVM access probe")):
+            unit.hosted_runner_guard()
+        run.assert_called_once_with(["git", "-C", str(ROOT), "rev-parse", "HEAD"])
+
+    def test_hosted_kvm_guard_keeps_capability_check_after_runner_provenance(self):
+        with mock.patch.object(unit, "hosted_runner_guard") as provenance, \
+                mock.patch.object(pathlib.Path, "is_char_device", return_value=False), \
+                mock.patch.object(unit.os, "access") as access, \
+                self.assertRaisesRegex(RuntimeError, "hosted KVM device is unavailable"):
+            unit.hosted_kvm_guard()
+        provenance.assert_called_once_with()
+        access.assert_not_called()
+
+    def test_namespace_diagnostics_uses_provenance_guard_not_kvm_guard(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = pathlib.Path(temp) / "diagnostics"
+            with mock.patch.object(unit, "hosted_runner_guard") as provenance, \
+                    mock.patch.object(unit, "hosted_kvm_guard",
+                                      side_effect=AssertionError("diagnostics required KVM")) as kvm, \
+                    mock.patch.object(unit, "production_host_preflight"), \
+                    mock.patch.object(unit, "disposable_workspace_path", return_value=workspace), \
+                    mock.patch.object(unit, "run_workspace_bind_reproductions"):
+                self.assertEqual(unit.namespace_diagnostics_only(), 0)
+            provenance.assert_called_once_with()
+            kvm.assert_not_called()
+
+    def test_default_acceptance_and_cleanup_still_enter_kvm_guard(self):
+        with mock.patch.object(unit, "hosted_kvm_guard",
+                               side_effect=RuntimeError("guard reached")) as guard, \
+                self.assertRaisesRegex(RuntimeError, "guard reached"):
+            unit.cleanup_only()
+        guard.assert_called_once_with()
+        with mock.patch.object(unit.sys, "argv", [str(SCRIPT)]), \
+                mock.patch.object(unit, "hosted_kvm_guard",
+                                  side_effect=RuntimeError("guard reached")) as guard, \
+                mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(unit.main(), 1)
+        guard.assert_called_once_with()
+
     def test_workflow_separates_production_acceptance_from_transient_guest_job(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-        transient = workflow.split("  transient-qemu-integration:", 1)[1].split(
-            "  # ── 5. Exploratory systemd namespace", 1)[0]
-        diagnostics = workflow.split("  systemd-namespace-diagnostics:", 1)[1].split(
-            "  # ── 6. Exact installed production", 1)[0]
-        production = workflow.split("  production-systemd-vm-acceptance:", 1)[1].split(
-            "  # ── 7.", 1)[0]
+        transient = workflow_job(workflow, "transient-qemu-integration")
+        diagnostics = workflow_job(workflow, "systemd-namespace-diagnostics")
+        production = workflow_job(workflow, "production-systemd-vm-acceptance")
         self.assertIn("name: Transient QEMU guest integration", transient)
         self.assertIn("name: Production systemd VM acceptance", production)
         self.assertIn("runs-on: ubuntu-24.04", production)
@@ -54,6 +117,13 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-24.04", diagnostics)
         self.assertIn("--namespace-diagnostics", diagnostics)
         self.assertIn("tests/ci-kvm-system-unit.py", diagnostics)
+        self.assertNotIn("/dev/kvm", diagnostics)
+        self.assertNotIn("accel=kvm", diagnostics)
+        self.assertNotIn("production-systemd-vm-acceptance", diagnostics)
+        self.assertIn("Exercise exact pinned production systemd VM unit", production)
+        self.assertIn("python3 tests/ci-kvm-system-unit.py --cleanup", production)
+        self.assertEqual(production.count("if: always()"), 1)
+        self.assertEqual(transient.count("if: always()"), 1)
         self.assertNotIn("needs:", transient + diagnostics + production)
         self.assertNotIn("steps.smoke_cleanup", production)
         self.assertIn("steps.host_dependencies.outcome == 'success'", production)
@@ -1820,7 +1890,7 @@ class HostedSystemUnitTests(unittest.TestCase):
             'KillMode=control-group',
             'SendSIGKILL=yes',
             'production_unit_forced_stop=PASS',
-            'production_unit_cleanup=PASS',
+            'production_unit_stopped=PASS',
             'installed_asset_bytes(dest)',
             '"--system-vm", "down"',
             'invoke_verified_cleanup(sha)',
@@ -1838,8 +1908,7 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("actual != text.encode()", repro)
         self.assertIn("os.unlink(path)", repro)
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-        production = workflow.split("  production-systemd-vm-acceptance:", 1)[1].split(
-            "  # ── 6.", 1)[0]
+        production = workflow_job(workflow, "production-systemd-vm-acceptance")
         host_dependencies = (ROOT / "tests/ci-kvm-host-dependencies.sh").read_text()
         shared_dependencies = (ROOT / "lib/vm/host-dependencies.py").read_text()
         self.assertIn("host-dependencies.py\" ci --list-packages apt", host_dependencies)
@@ -1861,6 +1930,47 @@ class HostedSystemUnitTests(unittest.TestCase):
                     returncode=code, stdout=output)), \
                     self.assertRaisesRegex(RuntimeError, "fixed production disk"):
                 unit.fixed_disk_identity()
+
+    def test_unit_stop_status_is_not_reported_as_overall_cleanup_success(self):
+        stopped = {name: {"ActiveState": "inactive", "MainPID": "0"}
+                   for name in (unit.UNIT, unit.PROXY_UNIT,
+                                unit.WORKSPACE_UNIT, unit.METRICS_UNIT)}
+        output = io.StringIO()
+        with mock.patch.object(unit, "service_state", side_effect=lambda name: stopped[name]), \
+                mock.patch("sys.stdout", output):
+            unit.assert_stopped()
+        self.assertIn("production_unit_stopped=PASS", output.getvalue())
+        self.assertNotIn("production_unit_cleanup=PASS", output.getvalue())
+
+    def test_cleanup_does_not_report_overall_pass_if_later_evidence_removal_fails(self):
+        sha = "c" * 40
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp) / sha
+            root.mkdir()
+            for failing_cleanup in ("remove_escape_sentinel", "remove_disposable_workspace"):
+                with self.subTest(failing_cleanup=failing_cleanup):
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with mock.patch.dict(os.environ, {"GITHUB_SHA": sha}), \
+                            mock.patch.object(unit, "CI_INSTALL_PARENT", pathlib.Path(temp)), \
+                            mock.patch.object(unit, "hosted_kvm_guard"), \
+                            mock.patch.object(unit, "has_valid_start_marker", return_value=True), \
+                            mock.patch.object(unit.os, "lstat", return_value=SimpleNamespace(
+                                st_mode=0o40755, st_uid=0)), \
+                            mock.patch.object(pathlib.Path, "exists", return_value=True), \
+                            mock.patch.object(pathlib.Path, "is_symlink", return_value=False), \
+                            mock.patch.object(unit, "verify_installed_files"), \
+                            mock.patch.object(unit, "service_state", return_value={
+                                "LoadState": "loaded", "ActiveState": "inactive", "MainPID": "0"}), \
+                            mock.patch.object(unit, "invoke_verified_cleanup"), \
+                            mock.patch.object(unit, "assert_stopped") as stop, \
+                            mock.patch.object(unit, failing_cleanup,
+                                              side_effect=RuntimeError("synthetic removal failure")), \
+                            mock.patch.object(unit.sys, "argv", [str(SCRIPT), "--cleanup"]), \
+                            mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+                        self.assertEqual(unit.main(), 1)
+                    stop.assert_called_once_with()
+                    self.assertNotIn("production_unit_cleanup=PASS", stdout.getvalue())
+                    self.assertIn("production_unit_cleanup=FAIL", stderr.getvalue())
 
     def test_system_assets_are_installed_before_pinned_file_verification(self):
         source = SCRIPT.read_text()

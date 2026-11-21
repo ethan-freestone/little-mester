@@ -2,8 +2,10 @@
 """Host metrics HTTP boundary tests with a real loopback listener."""
 
 import importlib.util
+import errno
 import json
 import pathlib
+import socket
 import sys
 import threading
 import urllib.error
@@ -22,12 +24,8 @@ SPEC.loader.exec_module(metrics)
 class MetricsHttpBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.old_port = metrics.PORT
-        metrics.PORT = 0
-        self.server = metrics.LoopbackServer()
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
         self.old_sample = metrics.sample
+        metrics.PORT = 0
         self.sample_payload = {
             "source": "host", "timestamp": "2026-11-20T00:00:00.000Z",
             "cpu": None, "memory": None, "gpu": [],
@@ -36,13 +34,36 @@ class MetricsHttpBoundaryTests(unittest.TestCase):
             "temperatures": None,
         }
         metrics.sample = lambda: self.sample_payload
+        self.server = self.thread = None
+        self.addCleanup(self._restore_globals)
+        self.addCleanup(self._stop_fixture_server)
+        self.server, self.thread = self._start_server()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    @staticmethod
+    def _start_server():
+        server = metrics.LoopbackServer()
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, thread
+
+    @staticmethod
+    def _stop_server(server, thread):
+        if thread.is_alive():
+            server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    def _restore_globals(self):
+        metrics.sample = self.old_sample
+        metrics.PORT = self.old_port
+
+    def _stop_fixture_server(self):
+        if self.server is not None:
+            self._stop_server(self.server, self.thread)
 
     def tearDown(self):
-        metrics.sample = self.old_sample
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=2)
-        metrics.PORT = self.old_port
+        self.doCleanups()
 
     def request(self, path, method="GET", host="10.0.2.100:19532"):
         request = urllib.request.Request(self.base + path, method=method,
@@ -71,6 +92,27 @@ class MetricsHttpBoundaryTests(unittest.TestCase):
         self.assertEqual(status, 405)
         self.assertEqual(data["error"], "method_not_allowed")
         self.assertEqual(self.request("/anything")[0], 404)
+
+    def test_shutdown_releases_port_for_immediate_rebind(self):
+        port = self.server.server_address[1]
+        self.assertEqual(self.request("/metrics")[0], 200)
+        old_server, old_thread = self.server, self.thread
+        self._stop_server(old_server, old_thread)
+        self.server = self.thread = None
+
+        metrics.PORT = port
+        rebound, rebound_thread = self._start_server()
+        self.server, self.thread = rebound, rebound_thread
+        self.base = f"http://127.0.0.1:{port}"
+        self.assertEqual(self.request("/metrics")[0], 200)
+
+    def test_live_listener_rejects_second_bind_and_remains_responsive(self):
+        address = self.server.server_address
+        metrics.PORT = address[1]
+        with self.assertRaises(OSError) as raised:
+            metrics.LoopbackServer()
+        self.assertEqual(raised.exception.errno, errno.EADDRINUSE)
+        self.assertEqual(self.request("/metrics")[0], 200)
 
     def test_canonical_snapshot_is_labeled_and_projected_without_guest_values(self):
         cpu = {"model": "Host CPU", "load_avg_1m": 0.1, "load_avg_5m": 0.2,

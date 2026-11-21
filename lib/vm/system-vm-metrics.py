@@ -166,7 +166,7 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
 
 class LoopbackServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = False
+    allow_reuse_address = True
 
     def __init__(self):
         super().__init__((HOST, PORT), MetricsHandler, bind_and_activate=True)

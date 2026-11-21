@@ -6,10 +6,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import importlib.machinery
+import inspect
 import contextlib
 import io
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import stat
@@ -556,6 +558,165 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertNotIn("parent-v3", str(vm.DISK))
         self.assertNotIn("v3-smoke", str(vm.DISK))
         self.assertNotIn("/workspace", str(vm.DISK))
+
+    def test_acceptance_persistence_marker_is_on_guest_disk_and_verified_before_removal(self):
+        source = inspect.getsource(acceptance.accept)
+        self.assertRegex(
+            source,
+            r'marker\s*=\s*f"\.lm-system-accept-[^" ]*',
+        )
+        self.assertNotIn('marker = f"/workspace/', source)
+        self.assertNotIn('marker = f"/var/lib/', source)
+        self.assertIn('GUEST_PERSISTENCE_STATE = "/home/mester/.local/state"',
+                      inspect.getsource(acceptance))
+
+        tags = list(re.finditer(r'(?m)^\s*operation = "([^"]+)"', source))
+        positions = {match.group(1): match.start() for match in tags}
+
+        def operation_segment(name, stop_name=None):
+            start = positions[name]
+            if stop_name is not None:
+                end = positions[stop_name]
+            else:
+                end = next((match.start() for match in tags if match.start() > start), len(source))
+            return source[start:end]
+
+        create = operation_segment("create_and_verify_persistence_marker")
+        self.assertIn("_guest_persistence_marker_command(", create)
+        self.assertIn('"create"', create)
+        self.assertNotIn("mkdir", create)
+
+        proof = operation_segment("verify_persistence_marker_after_restart")
+        self.assertIn("_guest_ssh(", proof)
+        self.assertIn("_guest_persistence_marker_command(", proof)
+        self.assertIn('"verify"', proof)
+
+        remove_position = positions["remove_persistence_marker"]
+        failure_position = source.index("except BaseException as failure:")
+        self.assertLess(positions["verify_persistence_marker_after_restart"], remove_position)
+        self.assertLess(remove_position, failure_position)
+        remove = operation_segment("remove_persistence_marker")
+        self.assertIn("_guest_ssh(", remove)
+        self.assertIn('"remove"', remove)
+
+    def test_guest_persistence_marker_script_uses_no_follow_dirfds_and_virtio_blk_topology(self):
+        script = acceptance.GUEST_PERSISTENCE_MARKER_SCRIPT
+        for component in ('"home"', '"mester"', '".local"', '"state"'):
+            self.assertIn(component, script)
+        self.assertIn("os.open(component", script)
+        self.assertIn("dir_fd=fds[-1]", script)
+        self.assertIn("os.O_DIRECTORY | os.O_NOFOLLOW", script)
+        self.assertIn("os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW", script)
+        self.assertIn("os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK", script)
+        self.assertIn("os.unlink(name, dir_fd=state_fd)", script)
+        self.assertIn("mnt_id", script)
+        self.assertIn("st_dev", script)
+        self.assertIn("virtiofs", script)
+        self.assertIn("virtio_blk", script)
+        self.assertIn('SYSFS_ROOT = "/sys"', script)
+        self.assertIn("/dev/block", script)
+        self.assertNotIn("/dev/vda", script)
+        self.assertNotIn("mkdir", script)
+
+    def test_guest_persistence_marker_script_accepts_virtio_blk_and_uses_verified_dirfd(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = pathlib.Path(temporary)
+            guest_root = base / "guest"
+            sysfs_root = base / "sys"
+            marker = ".lm-system-accept-testnonce"
+            expected = "systemd-owner-acceptance-testnonce"
+            (guest_root / "home/mester/.local/state").mkdir(parents=True, mode=0o700)
+            (guest_root / "home").chmod(0o755)
+            (guest_root / "home/mester").chmod(0o755)
+            for path in (guest_root / "home/mester/.local", guest_root / "home/mester/.local/state"):
+                path.chmod(0o700)
+            whole_disk = sysfs_root / "devices/pci0000:00/virtio0/block/vdb"
+            (whole_disk / "device").mkdir(parents=True)
+            driver = sysfs_root / "bus/virtio/drivers/virtio_blk"
+            driver.mkdir(parents=True)
+            (whole_disk / "device/driver").symlink_to(driver)
+            root_partition = whole_disk / "vdb1"
+            root_partition.mkdir()
+            (root_partition / "partition").write_text("1\n")
+            device = os.stat(guest_root).st_dev
+            dev_block = sysfs_root / "dev/block"
+            dev_block.mkdir(parents=True)
+            (dev_block / f"{os.major(device)}:{os.minor(device)}").symlink_to(root_partition)
+
+            script = acceptance.GUEST_PERSISTENCE_MARKER_SCRIPT.replace(
+                'ROOT_PATH = "/"', f"ROOT_PATH = {str(guest_root)!r}").replace(
+                'SYSFS_ROOT = "/sys"', f"SYSFS_ROOT = {str(sysfs_root)!r}")
+
+            def invoke(action):
+                return subprocess.run(
+                    ["python3", "-c", script, action, marker, expected],
+                    text=True, capture_output=True, check=False)
+
+            created = invoke("create")
+            self.assertEqual(created.returncode, 0, created.stderr)
+            marker_path = guest_root / "home/mester/.local/state" / marker
+            self.assertEqual(marker_path.read_text(), expected)
+            verified = invoke("verify")
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+            removed = invoke("remove")
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+            self.assertFalse(marker_path.exists())
+
+    def test_guest_persistence_marker_refuses_symlink_at_every_path_component(self):
+        components = ("home", "mester", ".local", "state")
+        with tempfile.TemporaryDirectory() as temporary:
+            base = pathlib.Path(temporary)
+            sysfs_root = base / "sys"
+            script_template = acceptance.GUEST_PERSISTENCE_MARKER_SCRIPT
+            expected = "systemd-owner-acceptance-testnonce"
+            marker = ".lm-system-accept-testnonce"
+            for index, component in enumerate(components):
+                guest_root = base / f"guest-{index}"
+                target = base / f"outside-{index}"
+                target.mkdir()
+                parent = guest_root
+                parent.mkdir()
+                for prior in components[:index]:
+                    parent = parent / prior
+                    parent.mkdir(mode=0o700)
+                (parent / component).symlink_to(target, target_is_directory=True)
+                script = script_template.replace(
+                    'ROOT_PATH = "/"', f"ROOT_PATH = {str(guest_root)!r}").replace(
+                    'SYSFS_ROOT = "/sys"', f"SYSFS_ROOT = {str(sysfs_root)!r}")
+                result = subprocess.run(
+                    ["python3", "-c", script, "create", marker, expected],
+                    text=True, capture_output=True, check=False)
+                self.assertNotEqual(result.returncode, 0, component)
+                self.assertFalse((target / marker).exists(), component)
+
+    def test_guest_persistence_marker_fails_closed_for_non_virtio_blk_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = pathlib.Path(temporary)
+            guest_root = base / "guest"
+            sysfs_root = base / "sys"
+            (guest_root / "home/mester/.local/state").mkdir(parents=True, mode=0o700)
+            (guest_root / "home").chmod(0o755)
+            (guest_root / "home/mester").chmod(0o755)
+            for path in (guest_root / "home/mester/.local", guest_root / "home/mester/.local/state"):
+                path.chmod(0o700)
+            block = sysfs_root / "devices/pci0000:00/block/vdb"
+            (block / "device").mkdir(parents=True)
+            other_driver = sysfs_root / "bus/pci/drivers/other"
+            other_driver.mkdir(parents=True)
+            (block / "device/driver").symlink_to(other_driver)
+            device = os.stat(guest_root).st_dev
+            dev_block = sysfs_root / "dev/block"
+            dev_block.mkdir(parents=True)
+            (dev_block / f"{os.major(device)}:{os.minor(device)}").symlink_to(block)
+            script = acceptance.GUEST_PERSISTENCE_MARKER_SCRIPT.replace(
+                'ROOT_PATH = "/"', f"ROOT_PATH = {str(guest_root)!r}").replace(
+                'SYSFS_ROOT = "/sys"', f"SYSFS_ROOT = {str(sysfs_root)!r}")
+            result = subprocess.run(
+                ["python3", "-c", script, "create", ".lm-system-accept-testnonce",
+                 "systemd-owner-acceptance-testnonce"],
+                text=True, capture_output=True, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((guest_root / "home/mester/.local/state/.lm-system-accept-testnonce").exists())
 
     def test_system_guest_seed_uses_canonical_parent_cloud_init_and_session_contract(self):
         data = bootstrap.build_foundation(

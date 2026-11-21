@@ -252,20 +252,24 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def hosted_kvm_guard() -> None:
+def hosted_runner_guard() -> None:
     require(os.environ.get("GITHUB_ACTIONS") == "true", "not running in GitHub Actions")
     require(os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted",
             "runner is not GitHub-hosted; refusing system installation")
     require(os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64",
             "runner is not the ubuntu-24.04 Linux x64 hosted KVM job")
-    require(pathlib.Path("/dev/kvm").is_char_device(), "hosted KVM device is unavailable")
-    require(os.access("/dev/kvm", os.R_OK | os.W_OK), "hosted KVM device is not accessible")
     require(os.environ.get("GITHUB_WORKSPACE") == str(REPO),
             "checkout path differs from this script's repository")
     sha = os.environ.get("GITHUB_SHA", "")
     require(SHA_RE.fullmatch(sha) is not None, "GITHUB_SHA is not a full exact commit SHA")
     require(run(["git", "-C", str(REPO), "rev-parse", "HEAD"]).stdout.strip() == sha,
             "checkout does not equal workflow GITHUB_SHA")
+
+
+def hosted_kvm_guard() -> None:
+    hosted_runner_guard()
+    require(pathlib.Path("/dev/kvm").is_char_device(), "hosted KVM device is unavailable")
+    require(os.access("/dev/kvm", os.R_OK | os.W_OK), "hosted KVM device is not accessible")
 
 
 def fixed_name_preflight(*, paths: tuple[str, ...] = FIXED_FILES,
@@ -493,7 +497,7 @@ def assert_stopped(*, vm_result: str | None = None) -> None:
     if vm_result is not None:
         require(states[UNIT].get("Result") == vm_result,
                 f"production VM unit result differs from {vm_result}: {states[UNIT]}")
-    print("production_unit_cleanup=PASS")
+    print("production_unit_stopped=PASS")
 
 
 def invoke_lab(root: pathlib.Path, operation: str, timeout: int, *, check: bool = True):
@@ -2717,12 +2721,13 @@ def cleanup_only() -> int:
     remove_escape_sentinel(None)
     remove_disposable_workspace()
     print("production_unit_cleanup_scope=production_systemd_unit")
+    print("production_unit_cleanup=PASS")
     return 0
 
 
 def namespace_diagnostics_only() -> int:
     """Run exploratory namespace controls on their own disposable CI runner."""
-    hosted_kvm_guard()
+    hosted_runner_guard()
     production_host_preflight()
     workspace = disposable_workspace_path()
     require(not workspace.exists() and not workspace.is_symlink(),
@@ -2838,6 +2843,7 @@ def main() -> int:
                 assert_stopped()
                 remove_escape_sentinel(escape_evidence)
                 remove_disposable_workspace()
+                print("production_unit_cleanup=PASS")
             except BaseException as error:  # noqa: BLE001 - preserve both primary and cleanup failures
                 print(f"production_unit_cleanup=FAIL error={type(error).__name__}: {error}", file=sys.stderr)
                 report_startup_diagnostics()
