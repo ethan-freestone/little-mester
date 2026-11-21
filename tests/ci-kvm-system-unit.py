@@ -9,6 +9,7 @@ import os
 import pathlib
 import pwd
 import re
+import secrets
 import select
 import shlex
 import stat
@@ -423,6 +424,198 @@ def configure_disposable_workspace(installed_root: pathlib.Path) -> pathlib.Path
     return workspace
 
 
+def _host_path_evidence(path: pathlib.Path) -> dict:
+    """Capture metadata only; never read directory contents or file payloads."""
+    result = {"path": str(path), "canonical": os.path.realpath(path)}
+    try:
+        info = os.lstat(path)
+        result["lstat"] = {
+            "kind": "symlink" if stat.S_ISLNK(info.st_mode) else
+                    "directory" if stat.S_ISDIR(info.st_mode) else "other",
+            "device": info.st_dev, "inode": info.st_ino,
+            "uid": info.st_uid, "gid": info.st_gid,
+            "mode": stat.S_IMODE(info.st_mode),
+        }
+    except OSError as error:
+        result["lstat_error"] = error.errno
+    try:
+        parent = os.stat(path.parent, follow_symlinks=False)
+        result["parent"] = {"state": "present", "device": parent.st_dev,
+                            "inode": parent.st_ino, "uid": parent.st_uid,
+                            "gid": parent.st_gid, "mode": stat.S_IMODE(parent.st_mode)}
+    except OSError as error:
+        result["parent"] = {"state": "unavailable", "errno": error.errno}
+    try:
+        mounts = pathlib.Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines()
+        match = None
+        for line in mounts:
+            fields = line.split()
+            if len(fields) < 10 or "-" not in fields:
+                continue
+            mountpoint = fields[4]
+            for sequence, character in (("\\040", " "), ("\\011", "\t"),
+                                        ("\\012", "\n"), ("\\134", "\\")):
+                mountpoint = mountpoint.replace(sequence, character)
+            point = pathlib.Path(mountpoint)
+            if ((path == point or point in path.parents)
+                    and (match is None or len(point.parts) > match[0])):
+                match = (len(point.parts), {"mount_id": int(fields[0]),
+                         "mountpoint": str(point), "filesystem": fields[fields.index("-") + 1]})
+        result["mount"] = match[1] if match else {"state": "unavailable"}
+    except (OSError, ValueError) as error:
+        result["mount"] = {"state": "unavailable", "error": type(error).__name__}
+    return result
+
+
+def report_workspace_unit_configuration() -> None:
+    properties = (
+        "FragmentPath,DropInPaths,User,Group,SupplementaryGroups,RuntimeDirectory,"
+        "RuntimeDirectoryMode,RuntimeDirectoryPreserve,TemporaryFileSystem,ProtectHome,"
+        "ProtectSystem,PrivateTmp,BindPaths,ReadWritePaths,ExecStart,ExecStartPost"
+    )
+    result = run(["/usr/bin/systemctl", "show", "--no-pager",
+                  f"--property={properties}", WORKSPACE_UNIT])
+    print("workspace_effective_systemd=" + json.dumps(
+        dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line),
+        sort_keys=True, separators=(",", ":")), flush=True)
+    cat = run(["/usr/bin/systemctl", "cat", "--no-pager", WORKSPACE_UNIT])
+    print("workspace_merged_unit_BEGIN", flush=True)
+    print(cat.stdout[-6000:], flush=True)
+    print("workspace_merged_unit_END", flush=True)
+
+
+def _bind_repro_case(*, source: pathlib.Path, source_kind: str,
+                     protect_home: str, token: str) -> tuple[bool, bool]:
+    runtime_names = "little-mester-vm-workspace little-mester-vm-workspace-share"
+    unit_name = f"lm-vm-bind-repro-{source_kind}-{protect_home}-{token}.service"
+    runtime_directories = tuple(pathlib.Path("/run") / name for name in runtime_names.split())
+    destination = runtime_directories[1]
+    require(all(not path.exists() and not path.is_symlink() for path in runtime_directories),
+            f"preserving pre-existing bind reproduction RuntimeDirectory: {runtime_directories}")
+    source_stat = os.stat(source, follow_symlinks=False)
+    marker_name = ".lm-bind-repro-marker"
+    marker_path = source / marker_name
+    marker = f"LM_BIND_REPRO:{token}:{source_kind}:{protect_home}".encode("ascii")
+    marker_fd = os.open(marker_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(marker_fd, marker)
+        os.fsync(marker_fd)
+    finally:
+        os.close(marker_fd)
+    print("workspace_bind_repro_host=" + json.dumps({
+        "case": source_kind, "protect_home": protect_home,
+        "source": _host_path_evidence(source),
+        "destination_before_start": _host_path_evidence(destination),
+        "destination_lifecycle": "systemd RuntimeDirectory",
+    }, sort_keys=True, separators=(",", ":")), flush=True)
+    code = (
+        "import json,os,pathlib,sys;"
+        "target=pathlib.Path(sys.argv[1]);"
+        "item=target/sys.argv[2];"
+        "s=os.stat(target,follow_symlinks=False);"
+        "mounts=pathlib.Path('/proc/self/mountinfo').read_text().splitlines();"
+        "exact=any((lambda f: len(f)>4 and f[4].replace('\\\\040',' ')==str(target))(line.split()) for line in mounts);"
+        "e={'device':s.st_dev,'inode':s.st_ino,'uid':s.st_uid,'gid':s.st_gid,"
+        "'mode':s.st_mode&0o777,'exact_mountpoint':exact,'marker_matches':item.read_bytes()==sys.argv[5].encode()};"
+        "print('WORKSPACE_BIND_REPRO_TARGET '+json.dumps(e,sort_keys=True),flush=True);"
+        "raise SystemExit(0 if (s.st_dev,s.st_ino)==(int(sys.argv[3]),int(sys.argv[4])) and e['exact_mountpoint'] and e['marker_matches'] else 43)"
+    )
+    exec_paths = "/usr/bin /usr/lib -/usr/lib64 -/usr/libexec /lib -/lib64"
+    argv = [
+        "/usr/bin/sudo", "-n", "/usr/bin/systemd-run", "--wait", "--pipe", "--collect",
+        f"--unit={unit_name}", "--service-type=exec",
+        f"--property=User={pwd.getpwuid(os.getuid()).pw_name}",
+        f"--property=Group={grp.getgrgid(os.getgid()).gr_name}",
+        f"--property=RuntimeDirectory={runtime_names}", "--property=RuntimeDirectoryMode=0750",
+        "--property=RuntimeDirectoryPreserve=yes", "--property=UMask=0077",
+        f"--property=ProtectHome={protect_home}", "--property=ProtectSystem=strict",
+        "--property=PrivateTmp=yes", "--property=NoNewPrivileges=no",
+        "--property=NoExecPaths=/", f"--property=ExecPaths={exec_paths}",
+        "--property=ProtectControlGroups=yes",
+        "--property=SupplementaryGroups=lm-vm-control",
+        f"--property=ReadWritePaths={' '.join(map(str, runtime_directories))}",
+        f"--property=BindPaths={source}:{destination}",
+        "/usr/bin/python3", "-I", "-c", code, str(destination), marker_name,
+        str(source_stat.st_dev), str(source_stat.st_ino), marker.decode("ascii"),
+    ]
+    try:
+        result = run(argv, timeout=30, check=False)
+        success = result.returncode == 0 and "WORKSPACE_BIND_REPRO_TARGET " in result.stdout
+        namespace_refused = ("226/NAMESPACE" in result.stdout + result.stderr
+                            or "Failed to set up mount namespacing" in result.stdout + result.stderr)
+        actual = "PASS" if success else "NAMESPACE_REFUSED" if namespace_refused else "OTHER_FAILURE"
+        print(f"workspace_bind_repro_result case={source_kind} protect_home={protect_home} "
+              f"exit={result.returncode} actual={actual}", flush=True)
+        if result.stdout:
+            print(result.stdout[-2500:], flush=True)
+        if result.stderr:
+            print(result.stderr[-2500:], flush=True)
+        print("workspace_bind_repro_host_after=" + json.dumps({
+            "case": source_kind, "protect_home": protect_home,
+            "destination": _host_path_evidence(destination),
+            "source": _host_path_evidence(source),
+        }, sort_keys=True, separators=(",", ":")), flush=True)
+        return success, namespace_refused
+    finally:
+        try:
+            run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", unit_name],
+                timeout=15, check=False)
+        finally:
+            try:
+                marker_info = os.lstat(marker_path)
+                require(stat.S_ISREG(marker_info.st_mode) and marker_info.st_uid == os.getuid()
+                        and stat.S_IMODE(marker_info.st_mode) == 0o600 and marker_info.st_nlink == 1,
+                        "preserving changed workspace bind reproduction marker")
+                os.remove(marker_path)
+            finally:
+                for directory in reversed(runtime_directories):
+                    if directory.exists() or directory.is_symlink():
+                        info = os.lstat(directory)
+                        require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+                                and info.st_uid == os.getuid()
+                                and stat.S_IMODE(info.st_mode) == 0o750
+                                and not any(directory.iterdir()),
+                                "preserving unsafe/nonempty bind reproduction RuntimeDirectory")
+                        directory.rmdir()
+
+
+def run_workspace_bind_reproductions(workspace: pathlib.Path) -> None:
+    """Compare real transient systemd namespaces for home and non-home sources."""
+    runtime = pathlib.Path("/run")
+    production_runtime = (pathlib.Path("/run/little-mester-vm-workspace"),
+                          pathlib.Path("/run/little-mester-vm-workspace-share"))
+    require(all(not path.exists() and not path.is_symlink() for path in production_runtime),
+            f"preserving pre-existing workspace RuntimeDirectory paths: {production_runtime}")
+    token = secrets.token_hex(6)
+    outside = runtime / f"lm-vm-bind-control-{token}"
+    require(not outside.exists() and not outside.is_symlink(),
+            f"preserving pre-existing bind reproduction control source: {outside}")
+    run(["/usr/bin/sudo", "-n", "/usr/bin/install", "-d", "-m", "0700",
+         "-o", str(os.getuid()), "-g", str(os.getgid()), str(outside)])
+    cases: list[tuple[pathlib.Path, str, str, bool]] = []
+    try:
+        # The original yes mode is included as a negative control; all other
+        # cells must successfully bind and verify the exact source inode.
+        cases = [
+            (workspace, "home", "yes", False),
+            (outside, "outside-home", "yes", True),
+            (workspace, "home", "tmpfs", True),
+            (outside, "outside-home", "tmpfs", True),
+        ]
+        outcomes = []
+        for source, kind, protect, expected in cases:
+            success, namespace_refused = _bind_repro_case(
+                source=source, source_kind=kind, protect_home=protect, token=token)
+            outcomes.append(success if expected else namespace_refused)
+        require(all(outcomes), "real systemd workspace-bind comparison did not match the expected matrix")
+        print("workspace_bind_repro_matrix=PASS home/yes=REFUSED home/tmpfs=PASS "
+              "outside-home/yes=PASS outside-home/tmpfs=PASS", flush=True)
+    finally:
+        require(not any(outside.iterdir()),
+                "preserving unexpected bind reproduction control-source evidence")
+        outside.rmdir()
+
+
 def remove_disposable_workspace() -> None:
     workspace = disposable_workspace_path()
     try:
@@ -820,6 +1013,14 @@ def main() -> int:
         write_start_marker(sha)
         start_attempted = True
         configure_disposable_workspace(installed_root)
+        report_workspace_unit_configuration()
+        share_target = pathlib.Path("/run/little-mester-vm-workspace-share")
+        print("workspace_production_prestart_paths=" + json.dumps({
+            "approved_source": _host_path_evidence(workspace_path),
+            "runtime_directory_target": _host_path_evidence(share_target),
+            "target_creator": "systemd RuntimeDirectory before namespace setup",
+        }, sort_keys=True, separators=(",", ":")), flush=True)
+        run_workspace_bind_reproductions(workspace_path)
         escape_evidence = create_escape_sentinel(workspace_path)
         invoke_shared_acceptance(sha)
         verify_workspace_startup_post()

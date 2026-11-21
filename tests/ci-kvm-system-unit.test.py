@@ -447,6 +447,26 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("WORKSPACE_BIND_DIAGNOSTIC ", helper)
         self.assertIn("approved host workspace source changed after assignment", helper)
 
+    def test_hosted_ci_runs_real_systemd_bind_matrix_before_production_start(self):
+        source = SCRIPT.read_text()
+        repro = source[source.index("def _bind_repro_case"):
+                       source.index("def remove_disposable_workspace")]
+        main = source[source.index("def main()") :]
+        self.assertIn("/usr/bin/systemd-run", repro)
+        self.assertIn("RuntimeDirectoryPreserve=yes", repro)
+        self.assertIn("/run/little-mester-vm-workspace-share", repro)
+        self.assertIn('(workspace, "home", "yes", False)', repro)
+        self.assertIn('(workspace, "home", "tmpfs", True)', repro)
+        self.assertIn('(outside, "outside-home", "yes", True)', repro)
+        self.assertIn('(outside, "outside-home", "tmpfs", True)', repro)
+        self.assertIn("WORKSPACE_BIND_REPRO_TARGET", repro)
+        self.assertIn("workspace_effective_systemd=", source)
+        self.assertIn("workspace_production_prestart_paths=", source)
+        self.assertLess(main.index("report_workspace_unit_configuration()"),
+                        main.index("run_workspace_bind_reproductions(workspace_path)"))
+        self.assertLess(main.index("run_workspace_bind_reproductions(workspace_path)"),
+                        main.index("invoke_shared_acceptance(sha)"))
+
     def test_script_uses_production_fixed_operations_and_bounded_stop_cleanup(self):
         source = SCRIPT.read_text()
         shared = (ROOT / "lib/vm/system-acceptance.py").read_text()
