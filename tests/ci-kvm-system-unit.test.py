@@ -460,6 +460,11 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn('(outside, "outside-home", "yes", True)', repro)
         self.assertIn('(outside, "outside-home", "tmpfs", True)', repro)
         self.assertIn("WORKSPACE_BIND_REPRO_TARGET", repro)
+        self.assertIn("WORKSPACE_BIND_REPRO_IDENTITY", repro)
+        self.assertIn("_require_runner_directory(source, source_stat)", repro)
+        self.assertIn("controller_euid", repro)
+        self.assertIn("/usr/bin/chown", repro)
+        self.assertIn("stat.S_IMODE(info.st_mode) == 0o700", source)
         self.assertIn("workspace_effective_systemd=", source)
         self.assertIn("workspace_production_prestart_paths=", source)
         self.assertLess(main.index("report_workspace_unit_configuration()"),

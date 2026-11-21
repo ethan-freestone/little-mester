@@ -467,6 +467,20 @@ def _host_path_evidence(path: pathlib.Path) -> dict:
     return result
 
 
+def _require_runner_directory(path: pathlib.Path, expected: os.stat_result | None = None) -> os.stat_result:
+    """Enforce the unprivileged harness/service's exact private source identity."""
+    info = os.lstat(path)
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+            and info.st_gid == os.getgid() and stat.S_IMODE(info.st_mode) == 0o700,
+            f"bind source ownership/mode changed: {_host_path_evidence(path)}")
+    require(os.access(path.parent, os.X_OK) and os.access(path, os.R_OK | os.W_OK | os.X_OK),
+            f"runner cannot traverse/read/write bind source: {_host_path_evidence(path)}")
+    if expected is not None:
+        require((info.st_dev, info.st_ino) == (expected.st_dev, expected.st_ino),
+                f"bind source identity changed: {_host_path_evidence(path)}")
+    return info
+
+
 def report_workspace_unit_configuration() -> None:
     properties = (
         "FragmentPath,DropInPaths,User,Group,SupplementaryGroups,RuntimeDirectory,"
@@ -493,6 +507,7 @@ def _bind_repro_case(*, source: pathlib.Path, source_kind: str,
     require(all(not path.exists() and not path.is_symlink() for path in runtime_directories),
             f"preserving pre-existing bind reproduction RuntimeDirectory: {runtime_directories}")
     source_stat = os.stat(source, follow_symlinks=False)
+    _require_runner_directory(source, source_stat)
     marker_name = ".lm-bind-repro-marker"
     marker_path = source / marker_name
     marker = f"LM_BIND_REPRO:{token}:{source_kind}:{protect_home}".encode("ascii")
@@ -504,12 +519,15 @@ def _bind_repro_case(*, source: pathlib.Path, source_kind: str,
         os.close(marker_fd)
     print("workspace_bind_repro_host=" + json.dumps({
         "case": source_kind, "protect_home": protect_home,
+        "controller": {"uid": os.getuid(), "euid": os.geteuid(),
+                       "gid": os.getgid(), "groups": os.getgroups()},
         "source": _host_path_evidence(source),
         "destination_before_start": _host_path_evidence(destination),
         "destination_lifecycle": "systemd RuntimeDirectory",
     }, sort_keys=True, separators=(",", ":")), flush=True)
     code = (
         "import json,os,pathlib,sys;"
+        "print('WORKSPACE_BIND_REPRO_IDENTITY '+json.dumps({'uid':os.getuid(),'euid':os.geteuid(),'gid':os.getgid(),'groups':os.getgroups()},sort_keys=True),flush=True);"
         "target=pathlib.Path(sys.argv[1]);"
         "item=target/sys.argv[2];"
         "s=os.stat(target,follow_symlinks=False);"
@@ -555,6 +573,7 @@ def _bind_repro_case(*, source: pathlib.Path, source_kind: str,
             "destination": _host_path_evidence(destination),
             "source": _host_path_evidence(source),
         }, sort_keys=True, separators=(",", ":")), flush=True)
+        _require_runner_directory(source, source_stat)
         return success, namespace_refused
     finally:
         try:
@@ -590,8 +609,17 @@ def run_workspace_bind_reproductions(workspace: pathlib.Path) -> None:
     outside = runtime / f"lm-vm-bind-control-{token}"
     require(not outside.exists() and not outside.is_symlink(),
             f"preserving pre-existing bind reproduction control source: {outside}")
-    run(["/usr/bin/sudo", "-n", "/usr/bin/install", "-d", "-m", "0700",
-         "-o", str(os.getuid()), "-g", str(os.getgid()), str(outside)])
+    run(["/usr/bin/sudo", "-n", "/usr/bin/install", "-d", "-m", "0700", str(outside)])
+    run(["/usr/bin/sudo", "-n", "/usr/bin/chown", "--",
+         f"{os.getuid()}:{os.getgid()}", str(outside)])
+    run(["/usr/bin/sudo", "-n", "/usr/bin/chmod", "--", "0700", str(outside)])
+    outside_identity = _require_runner_directory(outside)
+    print("workspace_bind_control_source_ready=" + json.dumps({
+        "path": str(outside), "uid": outside_identity.st_uid,
+        "gid": outside_identity.st_gid, "mode": stat.S_IMODE(outside_identity.st_mode),
+        "controller_uid": os.getuid(), "controller_euid": os.geteuid(),
+        "controller_groups": os.getgroups(), "parent_traversable": os.access(runtime, os.X_OK),
+    }, sort_keys=True, separators=(",", ":")), flush=True)
     cases: list[tuple[pathlib.Path, str, str, bool]] = []
     try:
         # The original yes mode is included as a negative control; all other
@@ -611,6 +639,7 @@ def run_workspace_bind_reproductions(workspace: pathlib.Path) -> None:
         print("workspace_bind_repro_matrix=PASS home/yes=REFUSED home/tmpfs=PASS "
               "outside-home/yes=PASS outside-home/tmpfs=PASS", flush=True)
     finally:
+        _require_runner_directory(outside, outside_identity)
         require(not any(outside.iterdir()),
                 "preserving unexpected bind reproduction control-source evidence")
         outside.rmdir()
