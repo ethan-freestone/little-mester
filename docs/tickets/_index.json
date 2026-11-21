@@ -366,7 +366,13 @@
       "file_path": "ticket-062.json",
       "status": "draft",
       "area": "vm"
+    },
+    {
+      "number": 63,
+      "file_path": "ticket-063.json",
+      "status": "draft",
+      "area": "workflow"
     }
   ],
-  "updated_at": "2026-11-18T22:14:05.649Z"
+  "updated_at": "2026-11-21T12:13:33.362Z"
 }

@@ -1,0 +1,47 @@
+{
+  "id": 63,
+  "file_path": "/workspace/docs/tickets/ticket-063.json",
+  "number": 63,
+  "area": "workflow",
+  "type": "improvement",
+  "status": "draft",
+  "title": "Enforce independent review and acceptance evidence for PR workflows",
+  "objective": "Add auditable ticket-linked controls for source-ticket linkage, per-commit cumulative-diff review evidence, independent reviewer identity/approval, and explicit owner acceptance gates before merge; separate follow-up, not part of PR #20.",
+  "created_at": "2026-11-21T11:59:07.926Z",
+  "updated_at": "2026-11-21T11:59:07.926Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Every implementation PR is linked to an active ticket and each commit records its exact diff identity, required tests and independent review disposition; missing or stale evidence blocks merge.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Review evidence identifies an actually invoked independent reviewer, reviewed base/head/diff digest, findings, severity, disposition and unresolved blockers; self-review or test success cannot satisfy the gate.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "PR acceptance criteria map to ticket evidence with distinct CI, runtime, synthetic and owner-observed evidence levels; owner-only gates require explicit owner approval before merge.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Enforcement is tested against missing-ticket, missing-review, stale-diff, self-approval, unresolved-blocker and absent-owner-acceptance cases; adoption does not alter historical ticket records or implement itself in PR #20.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Define source of truth and event schema for commit/diff review identity and ticket linkage.",
+      "Test required/optional review policies and stale review invalidation after new commits.",
+      "Test owner-only acceptance gate and audit evidence across PR merge-check integration.",
+      "Record migration/adoption policy separately from PR #20."
+    ],
+    "created": [],
+    "cases": [
+      "Related narrower deferred ticket #52 covers durable handoff sequencing; this ticket covers review/acceptance enforcement and is separate from PR #20."
+    ]
+  },
+  "models_used": []
+}
