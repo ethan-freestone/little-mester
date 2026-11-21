@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import shlex
+import subprocess
 import tempfile
 import textwrap
 import unittest
@@ -588,6 +589,100 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("            raise\n        remover = textwrap.dedent", reproduction)
         self.assertNotIn('raise RuntimeError("diagnostic reproduction was ambiguous', reproduction)
 
+    def test_reset_failed_diagnostics_capture_command_identity_and_before_after_state(self):
+        calls = []
+        emitted = []
+        states = iter(("LoadState=loaded\nActiveState=failed\nMainPID=0\n",
+                       "LoadState=loaded\nActiveState=inactive\nMainPID=0\n"))
+
+        def command_runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if "show" in argv:
+                return subprocess.CompletedProcess(argv, 0, next(states), "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        result = unit.reset_failed_with_diagnostics(
+            ("lm-test.service",), phase="standalone-control-reuse",
+            command_runner=command_runner, emit=emitted.append)
+        self.assertEqual(result["reset"]["returncode"], 0)
+        self.assertEqual(result["before"]["lm-test.service"]["state"]["ActiveState"], "failed")
+        self.assertEqual(result["after"]["lm-test.service"]["state"]["ActiveState"], "inactive")
+        self.assertEqual(len(calls), 3)
+        reset_argv = calls[1][0]
+        self.assertEqual(reset_argv[:4], ["/usr/bin/sudo", "-n", "/usr/bin/systemctl",
+                                          "reset-failed"])
+        self.assertEqual(emitted[0], "systemd_reset_attempt=" + json.dumps(
+            result, sort_keys=True, separators=(",", ":")))
+        self.assertIn("euid", result["controller"])
+        self.assertIn("egid", result["controller"])
+
+    def test_reset_failed_nonzero_preserves_bounded_command_and_state_evidence(self):
+        calls = []
+        emitted = []
+        state_outputs = iter(("LoadState=loaded\nActiveState=failed\nMainPID=0\n",
+                              "LoadState=loaded\nActiveState=failed\nMainPID=0\n"))
+
+        def command_runner(argv, **kwargs):
+            calls.append(argv)
+            if "show" in argv:
+                return subprocess.CompletedProcess(argv, 0, next(state_outputs), "")
+            return subprocess.CompletedProcess(argv, 1, "reset stdout", "authorization detail")
+
+        with self.assertRaisesRegex(RuntimeError, "authorization detail"):
+            unit.reset_failed_with_diagnostics(
+                ("lm-test.service",), phase="standalone-control-reuse",
+                command_runner=command_runner, emit=emitted.append)
+        self.assertEqual(len(calls), 3)
+        payload = json.loads(emitted[0].removeprefix("systemd_reset_attempt="))
+        self.assertEqual(payload["reset"]["returncode"], 1)
+        self.assertEqual(payload["reset"]["stderr"], "authorization detail")
+        self.assertEqual(payload["reset"]["stdout"], "reset stdout")
+        self.assertEqual(payload["before"]["lm-test.service"]["state"]["ActiveState"], "failed")
+        self.assertEqual(payload["after"]["lm-test.service"]["state"]["ActiveState"], "failed")
+
+    def test_reset_failed_command_output_is_bounded(self):
+        states = iter(("LoadState=loaded\nActiveState=failed\nMainPID=0\n",
+                       "LoadState=loaded\nActiveState=inactive\nMainPID=0\n"))
+
+        def command_runner(argv, **kwargs):
+            if "show" in argv:
+                return subprocess.CompletedProcess(argv, 0, next(states), "")
+            output = "x" * (unit.DIAGNOSTIC_OUTPUT_LIMIT + 32)
+            return subprocess.CompletedProcess(argv, 0, output, output)
+
+        result = unit.reset_failed_with_diagnostics(
+            ("lm-test.service",), phase="final-cleanup", command_runner=command_runner,
+            emit=lambda _line: None)
+        self.assertEqual(len(result["reset"]["stdout"]), unit.DIAGNOSTIC_OUTPUT_LIMIT)
+        self.assertEqual(len(result["reset"]["stderr"]), unit.DIAGNOSTIC_OUTPUT_LIMIT)
+
+    def test_reset_failed_stopped_state_verification_remains_fail_closed(self):
+        states = iter(("LoadState=loaded\nActiveState=failed\nMainPID=0\n",
+                       "LoadState=loaded\nActiveState=activating\nMainPID=123\n"))
+
+        def command_runner(argv, **kwargs):
+            if "show" in argv:
+                return subprocess.CompletedProcess(argv, 0, next(states), "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with self.assertRaisesRegex(RuntimeError, "did not reach stopped state"):
+            unit.reset_failed_with_diagnostics(
+                ("lm-test.service",), phase="final-cleanup",
+                command_runner=command_runner, emit=lambda _line: None)
+
+    def test_namespace_matrix_avoids_redundant_and_per_variant_intermediate_resets(self):
+        source = SCRIPT.read_text()
+        reproduction = source[source.index("def run_production_dependency_reproduction"):
+                              source.index("def remove_disposable_workspace")]
+        run_case = reproduction[reproduction.index("def run_case"):
+                                reproduction.index("# The graph uses a separate")]
+        self.assertNotIn("reset_failed_and_verify(", run_case)
+        self.assertIn('require_reproduced_control(standalone["_classification"])', reproduction)
+        self.assertNotIn("reset-failed", run_case)
+        self.assertIn("graph_workspace_unit =", reproduction)
+        self.assertIn("reset_failed_with_diagnostics(names, phase=\"final-cleanup\")", reproduction)
+        self.assertIn("systemd_reset_attempt=", SCRIPT.read_text())
+
     def test_journal_cursor_and_current_attempt_classification(self):
         cursor = "s=abc123;i=4;b=boot"
         self.assertEqual(unit.parse_journal_cursor(f"-- cursor: {cursor}\n", 0), cursor)
@@ -968,7 +1063,7 @@ class HostedSystemUnitTests(unittest.TestCase):
                     (path,), first_start_healthy=True, stop=replace_identity,
                     restart=lambda: True)
 
-    def test_final_cleanup_orders_loaded_reset_runtime_evidence_and_reload(self):
+    def test_final_cleanup_stops_cleans_runtime_resets_then_removes_evidence_and_reloads(self):
         events = []
         units = ("one.service", "two.service")
         unit.finalize_disposable_units(
@@ -981,19 +1076,44 @@ class HostedSystemUnitTests(unittest.TestCase):
             daemon_reload=lambda: events.append(("reload",)))
         self.assertEqual(events, [
             ("stop", units), ("verify", units[0]), ("verify", units[1]),
-            ("reset", units), ("verify", units[0]), ("verify", units[1]),
-            ("runtime",), ("evidence",), ("reload",),
+            ("runtime",), ("reset", units),
+            ("verify", units[0]), ("verify", units[1]),
+            ("evidence",), ("reload",),
+        ])
+
+    def test_final_reset_failure_keeps_unit_evidence_but_cleans_stopped_runtime_paths(self):
+        events = []
+
+        def reset_failed(names):
+            events.append(("reset", names))
+            raise RuntimeError("reset diagnostics failure")
+
+        with self.assertRaisesRegex(RuntimeError, "reset diagnostics failure"):
+            unit.finalize_disposable_units(
+                units=("failed.service",),
+                stop_units=lambda names: events.append(("stop", names)),
+                verify_stopped=lambda name: events.append(("verify", name)),
+                reset_failed=reset_failed,
+                runtime_cleanup=lambda: events.append(("runtime-cleanup",)),
+                evidence_cleanup=lambda: events.append(("evidence-cleanup",)),
+                daemon_reload=lambda: events.append(("daemon-reload",)))
+        self.assertEqual(events, [
+            ("stop", ("failed.service",)),
+            ("verify", "failed.service"),
+            ("runtime-cleanup",),
+            ("reset", ("failed.service",)),
         ])
 
     def test_final_unit_name_helper_covers_every_file_and_runner_wires_complete_tuple(self):
         variants = {"private-tmp": "repro-private-tmp.service",
                     "protect-home": "repro-protect-home.service"}
-        expected = ("repro-workspace.service", "repro-fragment.service",
+        expected = ("repro-workspace.service", "repro-graph-workspace.service",
+                    "repro-fragment.service",
                     "repro-proxy.service", "repro-metrics.service", "repro-vm.service",
                     *variants.values())
         names = unit.disposable_final_unit_names(
-            "repro-workspace.service", "repro-fragment.service", "repro-proxy.service",
-            "repro-metrics.service", "repro-vm.service", variants)
+            "repro-workspace.service", "repro-fragment.service", "repro-graph-workspace.service",
+            "repro-proxy.service", "repro-metrics.service", "repro-vm.service", variants)
         self.assertEqual(names, expected)
         self.assertEqual(len(names), len(set(names)))
         observed = []
@@ -1008,7 +1128,9 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertEqual(observed[0], ("stop", expected))
         self.assertEqual(observed[1:1 + len(expected)],
                          [("verify", name) for name in expected])
-        reset_index = 1 + len(expected)
+        runtime_index = 1 + len(expected)
+        self.assertEqual(observed[runtime_index], ("runtime",))
+        reset_index = runtime_index + 1
         self.assertEqual(observed[reset_index], ("reset", expected))
         self.assertEqual(observed[reset_index + 1:reset_index + 1 + len(expected)],
                          [("verify", name) for name in expected])
@@ -1237,7 +1359,7 @@ class HostedSystemUnitTests(unittest.TestCase):
                       reproduction)
         self.assertIn('"classification": graph_classification', reproduction)
         self.assertIn("journal_cursor_command()", reproduction)
-        self.assertIn("journal_after_cursor_command(graph_cursor, workspace_unit)", reproduction)
+        self.assertIn("journal_after_cursor_command(graph_cursor, graph_workspace_unit)", reproduction)
 
     def test_workspace_sandbox_variants_change_only_the_named_dropin_setting(self):
         template = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
@@ -1298,7 +1420,7 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("preserving non-empty runtime directory", generated)
         self.assertIn('"lifetime_probe": "NOT_EXERCISED"', reproduction)
         self.assertIn('classification == "NOT_REPRODUCED"', reproduction)
-        self.assertIn("reset_failed_and_verify((start_unit,))", reproduction)
+        self.assertNotIn("reset_failed_and_verify((start_unit,))", reproduction)
 
     def test_journal_cursor_is_global_then_attempt_slice_is_unit_filtered(self):
         self.assertEqual(unit.journal_cursor_command(), [

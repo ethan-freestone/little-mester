@@ -108,6 +108,69 @@ def run(argv: list[str], *, timeout: int = 30, check: bool = True,
     return result
 
 
+def _bounded_process_evidence(result: subprocess.CompletedProcess) -> dict[str, object]:
+    return {
+        "returncode": result.returncode,
+        "stdout": (result.stdout or "")[-DIAGNOSTIC_OUTPUT_LIMIT:],
+        "stderr": (result.stderr or "")[-DIAGNOSTIC_OUTPUT_LIMIT:],
+    }
+
+
+def _controller_identity() -> dict[str, object]:
+    try:
+        username = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        username = None
+    return {
+        "uid": os.getuid(), "euid": os.geteuid(),
+        "gid": os.getgid(), "egid": os.getegid(),
+        "supplementary_gids": sorted(os.getgroups()), "username": username,
+        "privilege_command_prefix": ["/usr/bin/sudo", "-n"],
+    }
+
+
+def reset_failed_with_diagnostics(names: tuple[str, ...], *, phase: str,
+                                  command_runner=None, emit=print) -> dict[str, object]:
+    """Reset failed state with exact bounded command, identity, and state evidence."""
+    command_runner = run if command_runner is None else command_runner
+    before: dict[str, object] = {}
+    after: dict[str, object] = {}
+
+    def observe(name: str) -> dict[str, object]:
+        argv = ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "show", "--no-pager",
+                "--property=LoadState", "--property=ActiveState", "--property=SubState",
+                "--property=MainPID", name]
+        result = command_runner(argv, timeout=10, check=False)
+        state = dict(line.split("=", 1) for line in (result.stdout or "").splitlines()
+                     if "=" in line)
+        return {"command": argv, **_bounded_process_evidence(result), "state": state}
+
+    for name in names:
+        before[name] = observe(name)
+    argv = ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reset-failed", *names]
+    reset_result = command_runner(argv, timeout=10, check=False)
+    for name in names:
+        after[name] = observe(name)
+    evidence: dict[str, object] = {
+        "phase": phase, "controller": _controller_identity(),
+        "reset": {"command": argv, **_bounded_process_evidence(reset_result)},
+        "before": before, "after": after,
+    }
+    serialized = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+    emit("systemd_reset_attempt=" + serialized)
+    if reset_result.returncode != 0:
+        raise RuntimeError(f"systemctl reset-failed failed; evidence={serialized}")
+    for name in names:
+        prior, current = before[name], after[name]
+        require(prior["returncode"] == 0 and prior["state"].get("LoadState") == "loaded",
+                f"could not read loaded unit state before reset; evidence={serialized}")
+        require(current["returncode"] == 0
+                and current["state"].get("ActiveState") in ("inactive", "failed")
+                and current["state"].get("MainPID") == "0",
+                f"unit {name} did not reach stopped state after reset; evidence={serialized}")
+    return evidence
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
@@ -1154,14 +1217,17 @@ def cleanup_runtime_before_evidence(runtime_cleanup, evidence_cleanup) -> None:
 
 def finalize_disposable_units(*, units: tuple[str, ...], stop_units, verify_stopped,
                               reset_failed, runtime_cleanup, evidence_cleanup, daemon_reload) -> None:
-    """Stop/reset loaded units, clean retained runtime paths, then remove evidence."""
+    """Stop units, clean retained paths, reset failed state, then remove evidence."""
     stop_units(units)
     for name in units:
         verify_stopped(name)
+    # Identity-checked runtime cleanup is safe once every unit is stopped and
+    # prevents a failed reset from leaving RuntimeDirectoryPreserve paths behind.
+    runtime_cleanup()
     reset_failed(units)
     for name in units:
         verify_stopped(name)
-    cleanup_runtime_before_evidence(runtime_cleanup, evidence_cleanup)
+    evidence_cleanup()
     daemon_reload()
 
 
@@ -1264,10 +1330,12 @@ def production_workspace_diagnostic_variants() -> dict[str, str]:
 
 
 def disposable_final_unit_names(workspace_unit: str, fragment_unit: str,
-                                proxy_unit: str, metrics_unit: str, vm_unit: str,
+                                graph_workspace_unit: str, proxy_unit: str,
+                                metrics_unit: str, vm_unit: str,
                                 variant_units: dict[str, str]) -> tuple[str, ...]:
     """Return every disposable unit file that final cleanup removes, exactly once."""
-    return (workspace_unit, fragment_unit, proxy_unit, metrics_unit, vm_unit,
+    return (workspace_unit, graph_workspace_unit, fragment_unit, proxy_unit,
+            metrics_unit, vm_unit,
             *tuple(variant_units.values()))
 
 
@@ -1281,6 +1349,7 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
     token = secrets.token_hex(6)
     prefix = f"lm-vm-workspace-repro-{token}"
     workspace_unit = f"{prefix}.service"
+    graph_workspace_unit = f"{prefix}-graph-workspace.service"
     fragment_unit = f"{prefix}-fragment.service"
     proxy_unit = f"{prefix}-proxy.service"
     metrics_unit, vm_unit = f"{prefix}-metrics.service", f"{prefix}-vm.service"
@@ -1302,7 +1371,8 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
     variants = production_workspace_diagnostic_variants()
     variant_units = {label: f"{prefix}-{label}.service" for label in variants}
     final_unit_names = disposable_final_unit_names(
-        workspace_unit, fragment_unit, proxy_unit, metrics_unit, vm_unit, variant_units)
+        workspace_unit, fragment_unit, graph_workspace_unit, proxy_unit, metrics_unit,
+        vm_unit, variant_units)
     variant_dropins = {label: f"[Service]\n{directive}" for label, directive in variants.items()}
     dropin_relative = f"{workspace_unit}.d/20-workspace.conf"
     dropin_directory = pathlib.Path("/run/systemd/system") / f"{workspace_unit}.d"
@@ -1310,14 +1380,18 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
             f"preserving pre-existing disposable unit drop-in directory: {dropin_directory}")
     units = {
         workspace_unit: workspace_text,
+        graph_workspace_unit: workspace_text,
         fragment_unit: fragment_text,
         proxy_unit: f"""[Unit]\nDescription=Disposable production proxy dependency\nAfter=network-online.target\nWants=network-online.target\nBefore={vm_unit}\nPartOf={vm_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
         metrics_unit: f"""[Unit]\nDescription=Disposable production metrics dependency\nBefore={vm_unit}\nPartOf={vm_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
-        vm_unit: f"""[Unit]\nDescription=Disposable parent dependency graph\nRequires={proxy_unit} {workspace_unit} {metrics_unit}\nBindsTo={proxy_unit} {workspace_unit} {metrics_unit}\nAfter={proxy_unit} {workspace_unit} {metrics_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nRuntimeDirectory=little-mester-vm\nRuntimeDirectoryMode=0700\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
+        vm_unit: f"""[Unit]\nDescription=Disposable parent dependency graph\nRequires={proxy_unit} {graph_workspace_unit} {metrics_unit}\nBindsTo={proxy_unit} {graph_workspace_unit} {metrics_unit}\nAfter={proxy_unit} {graph_workspace_unit} {metrics_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nRuntimeDirectory=little-mester-vm\nRuntimeDirectoryMode=0700\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
     }
     for label, name in variant_units.items():
         units[name] = workspace_text
-    dropins = {dropin_relative: workspace_dropin}
+    dropins = {
+        dropin_relative: workspace_dropin,
+        f"{graph_workspace_unit}.d/20-workspace.conf": workspace_dropin,
+    }
     for label, name in variant_units.items():
         dropins[f"{name}.d/20-workspace.conf"] = workspace_dropin
         dropins[f"{name}.d/30-{label}.conf"] = variant_dropins[label]
@@ -1436,14 +1510,6 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
             require(state.get("ActiveState") in ("inactive", "failed")
                     and state.get("MainPID") == "0",
                     f"preserving ambiguous disposable unit state after stop: {name} {state}")
-
-        def reset_failed_and_verify(names: tuple[str, ...]) -> None:
-            reset = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reset-failed",
-                         *names], timeout=10, check=False)
-            require(reset.returncode == 0,
-                    f"systemctl reset-failed failed for {names}; preserving units and evidence")
-            for name in names:
-                verify_stopped(name)
 
         def verify_runtime_baseline(*, retained_allowed: bool = False) -> None:
             for raw in runtime_paths:
@@ -1591,7 +1657,6 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                     "runtime_directories_after_stop": [
                         _host_path_evidence(pathlib.Path(raw)) for raw in runtime_paths[:2]],
                 }, sort_keys=True, separators=(",", ":")), flush=True)
-                reset_failed_and_verify((start_unit,))
                 return {**state, "_lifetime_healthy": "yes"}
 
             stopped = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", start_unit],
@@ -1615,7 +1680,6 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                     }, sort_keys=True, separators=(",", ":")), flush=True)
                     require(effective_matches,
                             f"effective systemd configuration invalid for {label}; preserving units/evidence")
-                    reset_failed_and_verify((start_unit,))
                     return {**state, "_lifetime_healthy": "no"}
             else:
                 if label != "runtime-directory-preserve-restart":
@@ -1629,18 +1693,16 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
             }, sort_keys=True, separators=(",", ":")), flush=True)
             require(effective_matches,
                     f"effective systemd configuration invalid for {label}; preserving units/evidence")
-            reset_failed_and_verify((start_unit,))
             return {**state, "_classification": classification,
                     "_lifetime_healthy": "yes" if lifetime_healthy else "no"}
-        # The baseline is first started without its parent graph, then through
-        # that same graph. The third case changes only BindPaths placement.
+        # The graph uses a separate, identically rendered workspace unit so
+        # failed-state cleanup is not needed between independent attempts.
         standalone = run_case("dropin-standalone", workspace_unit, workspace_unit,
                               workspace_text, [workspace_dropin])
-        # run_case returns only after effective configuration, stop/reset, and
+        # run_case returns only after effective configuration, stop, and
         # runtime-baseline checks pass. A reproduced 226 is the expected
         # diagnostic control outcome, not an acceptance pass or matrix abort.
         require_reproduced_control(standalone["_classification"])
-        reset_failed_and_verify((workspace_unit,))
 
         graph_prestart, graph_cursor, start = run_attempt_with_path_snapshot(
             lambda: {
@@ -1664,11 +1726,11 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                                 if "=" in line)
             require(states[name].get("LoadState") == "loaded",
                     f"parent-graph unit did not load: {name} {states[name]}")
-        journal = run(journal_after_cursor_command(graph_cursor, workspace_unit),
+        journal = run(journal_after_cursor_command(graph_cursor, graph_workspace_unit),
                       check=False, timeout=10)
         merged = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "cat", "--no-pager",
-                      workspace_unit], check=False, timeout=10)
-        workspace_state = states[workspace_unit]
+                      graph_workspace_unit], check=False, timeout=10)
+        workspace_state = states[graph_workspace_unit]
         expected = {
             "Type": "exec", "User": user, "Group": group,
             "RuntimeDirectory": "little-mester-vm-workspace little-mester-vm-workspace-share",
@@ -1694,7 +1756,7 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                 mismatches[key] = {"expected_executable": executable,
                                    "actual": workspace_state.get(key)}
         for key in ("Requires", "BindsTo", "After"):
-            for dependency in (proxy_unit, workspace_unit, metrics_unit):
+            for dependency in (proxy_unit, graph_workspace_unit, metrics_unit):
                 if dependency not in states[vm_unit].get(key, ""):
                     mismatches[f"vm.{key}.{dependency}"] = {
                         "expected_contains": dependency,
@@ -1719,7 +1781,7 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
             graph_classification = "INCONCLUSIVE"
         print("workspace_bind_case=" + json.dumps({
             "case": "dropin-parent-graph", "start_unit": vm_unit,
-            "effective_unit": workspace_unit, "start_exit": start.returncode,
+            "effective_unit": graph_workspace_unit, "start_exit": start.returncode,
             "journal_cursor": graph_cursor,
             "start_stderr": (start.stderr or "")[-1600:],
             "units": states, "properties": workspace_state,
@@ -1743,21 +1805,20 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
             },
         }, sort_keys=True, separators=(",", ":")), flush=True)
         print(f"workspace_bind_case=dropin-parent-graph classification={graph_classification} "
-              f"effective_unit={workspace_unit}", flush=True)
+              f"effective_unit={graph_workspace_unit}", flush=True)
         graph_stop = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", vm_unit,
-                          workspace_unit, proxy_unit, metrics_unit], timeout=30, check=False)
+                          graph_workspace_unit, proxy_unit, metrics_unit], timeout=30, check=False)
         require(graph_stop.returncode == 0 or all(
             unit_state(name).get("ActiveState") in ("inactive", "failed")
-            for name in (vm_unit, workspace_unit, proxy_unit, metrics_unit)),
+            for name in (vm_unit, graph_workspace_unit, proxy_unit, metrics_unit)),
             "ambiguous parent-graph stop; preserving units and evidence")
-        for name in (vm_unit, workspace_unit, proxy_unit, metrics_unit):
+        for name in (vm_unit, graph_workspace_unit, proxy_unit, metrics_unit):
             verify_stopped(name)
         verify_runtime_baseline()
         require(merged_dropin_ok,
                 "systemd merged unit or effective configuration mismatch; preserving units/evidence")
         require(not mismatches,
                 "disposable dependency configuration mismatch; preserving units/evidence")
-        reset_failed_and_verify((vm_unit, workspace_unit, fragment_unit, proxy_unit, metrics_unit))
         run_case(
             "fragment-standalone", fragment_unit, fragment_unit, fragment_text, [],
             fragment_bind_placement=True)
@@ -1887,10 +1948,7 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                     f"preserving disposable systemd units that did not stop: {name} {state}")
 
         def reset_final_failed(names):
-            result = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reset-failed",
-                          *names], timeout=10, check=False)
-            require(result.returncode == 0,
-                    f"systemctl reset-failed failed for loaded units {names}; preserving evidence")
+            reset_failed_with_diagnostics(names, phase="final-cleanup")
 
         finalize_disposable_units(
             units=final_unit_names,
