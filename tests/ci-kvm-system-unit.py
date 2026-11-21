@@ -144,8 +144,12 @@ def _controller_identity() -> dict[str, object]:
 
 def reset_failed_with_diagnostics(names: tuple[str, ...], *, phase: str,
                                   command_runner=None, emit=print) -> dict[str, object]:
-    """Reset failed state with exact bounded command, identity, and state evidence."""
+    """Reset only loaded disposable units; verified-unloaded units are harmless."""
     command_runner = run if command_runner is None else command_runner
+    require(bool(names) and len(names) == len(set(names))
+            and all(re.fullmatch(r"lm-vm-workspace-repro-[A-Za-z0-9_.@:-]+\.service", name)
+                    for name in names),
+            "refusing reset-failed outside uniquely named disposable workspace units")
     before: dict[str, object] = {}
     after: dict[str, object] = {}
 
@@ -160,13 +164,28 @@ def reset_failed_with_diagnostics(names: tuple[str, ...], *, phase: str,
 
     for name in names:
         before[name] = observe(name)
-    argv = ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reset-failed", *names]
-    reset_result = command_runner(argv, timeout=10, check=False)
+    loaded = []
+    for name in names:
+        observed = before[name]
+        require(observed["returncode"] == 0,
+                f"could not read disposable unit state before reset: {name}")
+        state = observed["state"]
+        if state.get("LoadState") == "loaded":
+            loaded.append(name)
+        else:
+            require(state.get("LoadState") == "not-found"
+                    and state.get("ActiveState") == "inactive"
+                    and state.get("MainPID") == "0",
+                    f"unexpected unloaded disposable unit state; evidence={observed}")
+    argv = ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reset-failed", *loaded]
+    reset_result = (command_runner(argv, timeout=10, check=False) if loaded else
+                    subprocess.CompletedProcess(argv, 0, "", ""))
     for name in names:
         after[name] = observe(name)
     evidence: dict[str, object] = {
         "phase": phase, "controller": _controller_identity(),
-        "reset": {"command": argv, **_bounded_process_evidence(reset_result)},
+        "reset": {"command": argv if loaded else None,
+                  **_bounded_process_evidence(reset_result)},
         "before": before, "after": after,
     }
     serialized = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
@@ -175,10 +194,9 @@ def reset_failed_with_diagnostics(names: tuple[str, ...], *, phase: str,
         raise RuntimeError(f"systemctl reset-failed failed; evidence={serialized}")
     for name in names:
         prior, current = before[name], after[name]
-        require(prior["returncode"] == 0 and prior["state"].get("LoadState") == "loaded",
-                f"could not read loaded unit state before reset; evidence={serialized}")
         require(current["returncode"] == 0
-                and current["state"].get("ActiveState") in ("inactive", "failed")
+                and current["state"].get("LoadState") == prior["state"].get("LoadState")
+                and current["state"].get("ActiveState") == "inactive"
                 and current["state"].get("MainPID") == "0",
                 f"unit {name} did not reach stopped state after reset; evidence={serialized}")
     return evidence
@@ -1814,6 +1832,15 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                 bool(config_mismatches) and set(config_mismatches) == {"BindPaths"})
             if raw_classification == "NOT_REPRODUCED" and not probe_valid:
                 classification = "INCONCLUSIVE"
+            expected_outcome = None
+            if label == "exec-paths":
+                # Clearing ExecPaths removes Python from the executable allowlist;
+                # NoExecPaths=/ remains in force, so systemd must deny ExecStart.
+                require(state.get("ExecPaths", "") == ""
+                        and state.get("ExecMainStatus") == "203"
+                        and start.returncode != 0,
+                        "ExecPaths removal did not produce the expected 203/EXEC denial")
+                expected_outcome = "EXPECTED_203_EXEC_NOEXEC_PATHS_REMAINS"
             print("workspace_bind_case=" + json.dumps({
                 "case": label, "start_unit": start_unit, "effective_unit": effective_unit,
                 "start_exit": start.returncode, "start_stderr": (start.stderr or "")[-1600:],
@@ -1830,6 +1857,7 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                                                 else "UNAVAILABLE; generated mount-edge comparison is INCONCLUSIVE"),
                 "classification": classify_namespace_diagnostic(classification, diagnostic),
                 "raw_namespace_evidence_classification": raw_classification,
+                "expected_outcome": expected_outcome,
                 "in_namespace_bind_probe": probe_evidence or {
                     "status": "NOT_REACHED_BEFORE_NAMESPACE_FAILURE_OR_PROBE_UNAVAILABLE"},
                 "in_namespace_bind_probe_valid": probe_valid,
@@ -1952,8 +1980,17 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                     "_lifetime_healthy": "yes" if lifetime_healthy else "no"}
         # The graph uses a separate, identically rendered workspace unit so
         # failed-state cleanup is not needed between independent attempts.
+        # Establish the baseline from the exact writer-produced configuration.
+        # Quoted legacy syntax is an explicit expected-negative regression case,
+        # never the baseline against which production-equivalent cases are judged.
+        unquoted = run_case("bind-unquoted", unquoted_workspace_unit,
+                            unquoted_workspace_unit, workspace_text, [unquoted_dropin])
+        require(unquoted["_raw_classification"] == "NOT_REPRODUCED"
+                and unquoted["_probe_valid"],
+                "production-equivalent unquoted BindPaths did not prove identity and isolation")
         standalone = run_case("dropin-standalone", workspace_unit, workspace_unit,
-                              workspace_text, [legacy_quoted_dropin])
+                              workspace_text, [legacy_quoted_dropin],
+                              allowed_setting="BindPaths")
         # run_case returns only after effective configuration, stop, and
         # runtime-baseline checks pass. A reproduced 226 is the expected
         # diagnostic control outcome, not an acceptance pass or matrix abort.
@@ -1962,9 +1999,6 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                     and set(standalone["_configuration_mismatches"]) == {"BindPaths"},
                     "standalone quoted control was not explicit 226/NAMESPACE or had unrelated config mismatches")
 
-        unquoted = run_case("bind-unquoted", unquoted_workspace_unit,
-                            unquoted_workspace_unit, workspace_text, [unquoted_dropin],
-                            allowed_setting="BindPaths")
         quoted_reverse = run_case("bind-quoted-reverse", quoted_reverse_workspace_unit,
                                   quoted_reverse_workspace_unit, workspace_text,
                                   [quoted_reverse_dropin], allowed_setting="BindPaths")

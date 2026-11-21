@@ -607,11 +607,11 @@ class HostedSystemUnitTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         result = unit.reset_failed_with_diagnostics(
-            ("lm-test.service",), phase="standalone-control-reuse",
+            ("lm-vm-workspace-repro-test.service",), phase="standalone-control-reuse",
             command_runner=command_runner, emit=emitted.append)
         self.assertEqual(result["reset"]["returncode"], 0)
-        self.assertEqual(result["before"]["lm-test.service"]["state"]["ActiveState"], "failed")
-        self.assertEqual(result["after"]["lm-test.service"]["state"]["ActiveState"], "inactive")
+        self.assertEqual(result["before"]["lm-vm-workspace-repro-test.service"]["state"]["ActiveState"], "failed")
+        self.assertEqual(result["after"]["lm-vm-workspace-repro-test.service"]["state"]["ActiveState"], "inactive")
         self.assertEqual(len(calls), 3)
         reset_argv = calls[1][0]
         self.assertEqual(reset_argv[:4], ["/usr/bin/sudo", "-n", "/usr/bin/systemctl",
@@ -620,6 +620,53 @@ class HostedSystemUnitTests(unittest.TestCase):
             result, sort_keys=True, separators=(",", ":")))
         self.assertIn("euid", result["controller"])
         self.assertIn("egid", result["controller"])
+
+    def test_reset_failed_skips_only_verified_unloaded_disposable_units(self):
+        calls = []
+        states = {
+            "lm-vm-workspace-repro-loaded.service": iter((
+                "LoadState=loaded\nActiveState=failed\nMainPID=0\n",
+                "LoadState=loaded\nActiveState=inactive\nMainPID=0\n")),
+            "lm-vm-workspace-repro-unloaded.service": iter((
+                "LoadState=not-found\nActiveState=inactive\nMainPID=0\n",
+                "LoadState=not-found\nActiveState=inactive\nMainPID=0\n")),
+        }
+
+        def command_runner(argv, **kwargs):
+            calls.append(argv)
+            if "show" in argv:
+                return subprocess.CompletedProcess(argv, 0, next(states[argv[-1]]), "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        evidence = unit.reset_failed_with_diagnostics(
+            ("lm-vm-workspace-repro-loaded.service",
+             "lm-vm-workspace-repro-unloaded.service"), phase="final-cleanup",
+            command_runner=command_runner, emit=lambda _line: None)
+        reset = next(argv for argv in calls if "reset-failed" in argv)
+        self.assertEqual(reset[-1], "lm-vm-workspace-repro-loaded.service")
+        self.assertNotIn("lm-vm-workspace-repro-unloaded.service", reset)
+        self.assertEqual(evidence["after"]["lm-vm-workspace-repro-unloaded.service"]["state"]["LoadState"],
+                         "not-found")
+
+    def test_reset_failed_rejects_ambiguous_unloaded_unit_state(self):
+        outputs = iter((
+            "LoadState=masked\nActiveState=inactive\nMainPID=0\n",
+            "LoadState=masked\nActiveState=inactive\nMainPID=0\n"))
+
+        def command_runner(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0, next(outputs), "")
+
+        with self.assertRaisesRegex(RuntimeError, "unexpected unloaded disposable unit state"):
+            unit.reset_failed_with_diagnostics(
+                ("lm-vm-workspace-repro-masked.service",), phase="final-cleanup",
+                command_runner=command_runner, emit=lambda _line: None)
+
+    def test_reset_failed_refuses_names_outside_disposable_scope(self):
+        with self.assertRaisesRegex(RuntimeError, "outside uniquely named disposable"):
+            unit.reset_failed_with_diagnostics(
+                ("little-mester-vm.service",), phase="final-cleanup",
+                command_runner=lambda *_args, **_kwargs: self.fail("must not inspect production units"),
+                emit=lambda _line: None)
 
     def test_reset_failed_nonzero_preserves_bounded_command_and_state_evidence(self):
         calls = []
@@ -635,15 +682,15 @@ class HostedSystemUnitTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "authorization detail"):
             unit.reset_failed_with_diagnostics(
-                ("lm-test.service",), phase="standalone-control-reuse",
+                ("lm-vm-workspace-repro-test.service",), phase="standalone-control-reuse",
                 command_runner=command_runner, emit=emitted.append)
         self.assertEqual(len(calls), 3)
         payload = json.loads(emitted[0].removeprefix("systemd_reset_attempt="))
         self.assertEqual(payload["reset"]["returncode"], 1)
         self.assertEqual(payload["reset"]["stderr"], "authorization detail")
         self.assertEqual(payload["reset"]["stdout"], "reset stdout")
-        self.assertEqual(payload["before"]["lm-test.service"]["state"]["ActiveState"], "failed")
-        self.assertEqual(payload["after"]["lm-test.service"]["state"]["ActiveState"], "failed")
+        self.assertEqual(payload["before"]["lm-vm-workspace-repro-test.service"]["state"]["ActiveState"], "failed")
+        self.assertEqual(payload["after"]["lm-vm-workspace-repro-test.service"]["state"]["ActiveState"], "failed")
 
     def test_reset_failed_command_output_is_bounded(self):
         states = iter(("LoadState=loaded\nActiveState=failed\nMainPID=0\n",
@@ -656,7 +703,7 @@ class HostedSystemUnitTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, output, output)
 
         result = unit.reset_failed_with_diagnostics(
-            ("lm-test.service",), phase="final-cleanup", command_runner=command_runner,
+            ("lm-vm-workspace-repro-test.service",), phase="final-cleanup", command_runner=command_runner,
             emit=lambda _line: None)
         self.assertEqual(len(result["reset"]["stdout"]), unit.DIAGNOSTIC_OUTPUT_LIMIT)
         self.assertEqual(len(result["reset"]["stderr"]), unit.DIAGNOSTIC_OUTPUT_LIMIT)
@@ -672,7 +719,7 @@ class HostedSystemUnitTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "did not reach stopped state"):
             unit.reset_failed_with_diagnostics(
-                ("lm-test.service",), phase="final-cleanup",
+                ("lm-vm-workspace-repro-test.service",), phase="final-cleanup",
                 command_runner=command_runner, emit=lambda _line: None)
 
     def test_namespace_matrix_avoids_redundant_and_per_variant_intermediate_resets(self):
@@ -745,15 +792,28 @@ class HostedSystemUnitTests(unittest.TestCase):
             malformed, dict(malformed, BindPaths="/source:/target:/source:/target:rbind"),
             allowed_setting="BindPaths", expected_bind=("/source", "/target")))
 
+    def test_production_bind_baseline_keeps_quoted_negative_and_sandbox_delta_separate(self):
+        baseline = {"ProtectHome": "tmpfs", "PrivateTmp": "yes",
+                    "BindPaths": "/source:/target:rbind"}
+        quoted = dict(baseline, BindPaths="/source:/target:/source:/target:rbind")
+        self.assertEqual(set(unit.compare_effective_configuration(
+            baseline, quoted, allowed_setting="BindPaths",
+            expected_bind=("/source", "/target"))), {"BindPaths"})
+        sandbox_delta = dict(baseline, PrivateTmp="no")
+        self.assertEqual(unit.compare_effective_configuration(
+            baseline, sandbox_delta, allowed_setting="PrivateTmp",
+            expected_bind=("/source", "/target")), {})
+
     def test_hosted_bind_quote_matrix_runs_quoted_unquoted_then_reverse(self):
         source = SCRIPT.read_text()
         reproduction = source[source.index("def run_production_dependency_reproduction"):
                               source.index("def remove_disposable_workspace")]
-        quoted = reproduction.index('run_case("dropin-standalone"')
         unquoted = reproduction.index('run_case("bind-unquoted"')
+        quoted = reproduction.index('run_case("dropin-standalone"')
         reverse = reproduction.index('run_case("bind-quoted-reverse"')
-        self.assertLess(quoted, unquoted)
-        self.assertLess(unquoted, reverse)
+        self.assertLess(unquoted, quoted)
+        self.assertLess(quoted, reverse)
+        self.assertIn("Establish the baseline from the exact writer-produced configuration", reproduction)
         self.assertIn('unquoted["_raw_classification"] == "NOT_REPRODUCED"', reproduction)
         self.assertIn('and unquoted["_probe_valid"]', reproduction)
         self.assertIn("require(quoted_reverse[\"_raw_classification\"] == standalone[\"_raw_classification\"]",
@@ -761,6 +821,7 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("WORKSPACE_MODULE._systemd_bind_path(workspace)", source)
         self.assertIn("legacy_quoted_dropin = f'[Service]", reproduction)
         self.assertIn('unquoted_dropin = workspace_dropin', reproduction)
+        self.assertIn('EXPECTED_203_EXEC_NOEXEC_PATHS_REMAINS', reproduction)
 
     def test_dependency_exec_expectation_is_derived_from_generated_probe_command(self):
         template = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
