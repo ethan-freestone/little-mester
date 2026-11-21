@@ -33,7 +33,7 @@
 | Metrics | The v3 guest loads a protected display plugin and reads the bounded host snapshot from a loopback-only sidecar over a fixed QEMU guest-forward; the legacy parent keeps its old plugin set. | Real GPU/sensor values and the pinned guest plugin behavior still need hosted-KVM/owner acceptance. |
 | Exit dialog | The plugin declares Esc/N cancellation and Y/Q confirmation in modal mode; pinned-binary CI now drives Esc, N, and Y in a real PTY. | The test has not run locally because pinned OpenCode 2.2.5 is not installed here. |
 | Version | Provisioning and readiness intentionally require `opencode v2.2.5`. | Whether a later pinned version is necessary; no version change is assumed. |
-| Install/update | Fresh install remains explicit and refuses existing state. Explicit `--update-code-only` refuses running services and verifies disk, seed, keys, assignment, and drop-in state fingerprints. | The updater has not been exercised on an installed owner VM; guest-state migration remains separate. |
+| Install/update | Fresh install remains explicit and refuses existing state. The compatibility-gated code-only update snapshots protected host assets, serializes start/update, preserves disk, seed, keys, assignment and guest user data, never starts the VM, and has a matching rollback path. A separately authorized start performs the fixed compatibility gate before normal use. | These implementation paths still need exact-commit review and hosted production-systemd acceptance; neither owner VM has been inspected or operated. Guest mutation remains out of scope. |
 
 ## Workspace architecture decision
 

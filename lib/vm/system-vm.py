@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import fcntl
 import grp
 import importlib.util
 import hashlib
@@ -19,6 +20,7 @@ import pathlib
 import pwd
 import secrets
 import select
+import selectors
 import shutil
 import socket
 import stat
@@ -53,6 +55,9 @@ IMAGE_SHA256 = "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94
 IMAGE_URL = "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img"
 IMAGE_NAME = "base-image.part"
 DISK_PART = "disk.qcow2.part"
+CODE_UPDATE_LOCK = CONFIG / "code-update.lock"
+CODE_UPDATE_MARKER = CONFIG / "code-update.in-progress"
+GUEST_COMPAT_MAX_OUTPUT = 8192
 
 
 class Refused(RuntimeError):
@@ -244,7 +249,8 @@ def _proxy_ready() -> None:
     raise Refused("restricted proxy did not publish the fixed accepting listener")
 
 
-def _guest_ssh(command: str, *, tty: bool = False, timeout: int = 20) -> int:
+def _guest_ssh(command: str, *, tty: bool = False, timeout: int = 20,
+               capture_limit: int | None = None):
     _require_fixed_file(CONTROL_KEY, uid=0, mode=0o640, group=CONTROL_GROUP)
     _require_fixed_file(KNOWN_HOSTS, uid=0, mode=0o644)
     service_uid = pwd.getpwnam(SERVICE_USER).pw_uid
@@ -283,9 +289,49 @@ def _guest_ssh(command: str, *, tty: bool = False, timeout: int = 20) -> int:
            "-o", "ClearAllForwardings=yes", "-o", "RequestTTY=force" if tty else "RequestTTY=no",
            "mester@127.0.0.1", command]
     try:
-        result = subprocess.run(ssh, stdin=None if tty else subprocess.DEVNULL,
-                                 timeout=timeout, check=False)
-        return result.returncode
+        if capture_limit is None:
+            result = subprocess.run(ssh, stdin=None if tty else subprocess.DEVNULL,
+                                     timeout=timeout, check=False)
+            return result.returncode
+        if tty or type(capture_limit) is not int or not 0 < capture_limit <= GUEST_COMPAT_MAX_OUTPUT:
+            raise Refused("bounded guest inspection parameters are invalid")
+        process = subprocess.Popen(ssh, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, close_fds=True)
+        assert process.stdout is not None
+        output = bytearray()
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    process.kill()
+                    process.wait()
+                    raise Refused("fixed guest compatibility inspection timed out")
+                events = selector.select(remaining)
+                if not events and process.poll() is not None:
+                    break
+                for key, _ in events:
+                    chunk = os.read(key.fd, min(4096, capture_limit + 1 - len(output)))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    output.extend(chunk)
+                    if len(output) > capture_limit:
+                        process.kill()
+                        process.wait()
+                        raise Refused("fixed guest compatibility response exceeded its bound")
+            return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            raise
+        finally:
+            selector.close()
+            process.stdout.close()
+        return return_code, bytes(output)
     finally:
         info = os.lstat(key_path)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != uid
@@ -393,8 +439,20 @@ def _ensure_guest_ready() -> None:
         raise Refused("protected parent session contract is unavailable")
     contract = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(contract)
-    command = ("cloud-init status --long >/dev/null 2>&1 || exit 41; "
-               + contract.readiness_checks(workspace_path=contract.SYSTEM_WORKSPACE))
+    cloud_init_command = "cloud-init status --long >/dev/null 2>&1 || exit 41"
+    deadline = time.monotonic() + SSH_READY_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            if _guest_ssh(cloud_init_command, timeout=15) == 0:
+                break
+        except (OSError, subprocess.SubprocessError):
+            pass
+        time.sleep(2)
+    else:
+        raise Refused("cloud-init or SSH did not complete before its bound")
+
+    _check_guest_compatibility()
+    command = contract.readiness_checks(workspace_path=contract.SYSTEM_WORKSPACE)
     deadline = time.monotonic() + SSH_READY_TIMEOUT
     while time.monotonic() < deadline:
         try:
@@ -403,7 +461,36 @@ def _ensure_guest_ready() -> None:
         except (OSError, subprocess.SubprocessError):
             pass
         time.sleep(2)
-    raise Refused("cloud-init, SSH, or protected session readiness did not complete before its bound")
+    raise Refused("protected session readiness did not complete before its bound")
+
+
+def _guest_compatibility_module():
+    path = pathlib.Path(__file__).with_name("guest-compatibility.py")
+    spec = importlib.util.spec_from_file_location("system_guest_compatibility", path)
+    if spec is None or spec.loader is None:
+        raise Refused("fixed guest compatibility checker is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _check_guest_compatibility() -> None:
+    checker = _guest_compatibility_module()
+    command = checker.build_inspection_command(checker.SYSTEM_WORKSPACE)
+    try:
+        result = _guest_ssh(command, timeout=20, capture_limit=GUEST_COMPAT_MAX_OUTPUT)
+    except (OSError, subprocess.SubprocessError, Refused):
+        print("Guest compatibility: INCONCLUSIVE (fixed inspection failed)", file=sys.stderr)
+        raise Refused("guest compatibility is inconclusive; normal VM use is blocked")
+    if not isinstance(result, tuple) or len(result) != 2 or result[0] != 0:
+        print("Guest compatibility: INCONCLUSIVE (fixed inspection unavailable)", file=sys.stderr)
+        raise Refused("guest compatibility is inconclusive; normal VM use is blocked")
+    status, diagnostics = checker.classify_inventory(result[1], checker.expected_inventory())
+    print(f"Guest compatibility: {status}" +
+          (" (" + ", ".join(diagnostics[:16]) + ")" if diagnostics else ""),
+          file=sys.stderr if status != "MATCH" else sys.stdout)
+    if status != "MATCH":
+        raise Refused("guest compatibility is not established; normal VM use is blocked")
 
 
 def _workspace_policy():
@@ -491,7 +578,15 @@ def _qemu_guest_ready() -> None:
     _guest_workspace_mount()
 
 
-def _fixed_exec(action: str) -> int:
+def _system_unit_active() -> bool:
+    result = subprocess.run(["/usr/bin/systemctl", "show", "--property=ActiveState",
+                             "--value", "little-mester-vm.service"],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True, check=False)
+    return result.returncode == 0 and result.stdout.strip() == "active"
+
+
+def _fixed_exec_locked(action: str) -> int:
     commands = {
         "up": ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", "little-mester-vm.service"],
         "down": ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", "little-mester-vm.service"],
@@ -504,10 +599,16 @@ def _fixed_exec(action: str) -> int:
     if action not in commands:
         raise Refused("unsupported fixed VM operation")
     if action == "ssh":
+        if not _system_unit_active():
+            raise Refused("fixed VM service is not active after compatibility-gated startup")
         return _guest_ssh("/bin/bash -l", tty=True, timeout=24 * 3600)
     if action == "auth":
+        if not _system_unit_active():
+            raise Refused("fixed VM service is not active after compatibility-gated startup")
         return _browser_auth()
     if action == "tui":
+        if not _system_unit_active():
+            raise Refused("fixed VM service is not active after compatibility-gated startup")
         return _guest_ssh("/usr/local/bin/lm-opencode", tty=True, timeout=24 * 3600)
     if action == "up":
         policy = _workspace_policy()
@@ -532,6 +633,40 @@ def _fixed_exec(action: str) -> int:
         # host-side probe runs as the owner, not as the isolated QEMU identity.
         _probe_workspace()
     return result.returncode
+
+
+def _fixed_exec(action: str) -> int:
+    """Serialize supported owner routes with protected code update/rollback."""
+    if action == "status":
+        # Host-only status remains available while maintenance blocks use.
+        return _fixed_exec_locked(action)
+    _require_fixed_file(CODE_UPDATE_LOCK, uid=0, mode=0o660, group=CONTROL_GROUP)
+    try:
+        marker_info = os.lstat(CODE_UPDATE_MARKER)
+    except FileNotFoundError:
+        marker_info = None
+    if marker_info is not None:
+        raise Refused("protected code update/rollback is incomplete; fixed VM routes are blocked")
+    fd = os.open(CODE_UPDATE_LOCK, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) != 0o660
+                or info.st_gid != grp.getgrnam(CONTROL_GROUP).gr_gid):
+            raise Refused("fixed code-update lock identity is unsafe")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise Refused("fixed VM operation is blocked by an active code update/rollback") from error
+        # Recheck after lock acquisition so a marker cannot be raced by a route.
+        if CODE_UPDATE_MARKER.exists() or CODE_UPDATE_MARKER.is_symlink():
+            raise Refused("protected code update/rollback is incomplete; fixed VM routes are blocked")
+        return _fixed_exec_locked(action)
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def _provision() -> None:

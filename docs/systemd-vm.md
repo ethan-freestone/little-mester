@@ -32,23 +32,25 @@ and fresh disk with:
 sudo /opt/little-mester/v3/<commit>/tools/vm-system-install
 ```
 
-After a fresh install, a code-only update of the fixed host assets is separately
-available while the VM, proxy, workspace-share, and metrics services are stopped:
+After a fresh install, a protected host-code update path is available while the
+VM, proxy, workspace-share, and metrics services are already stopped:
 
 ```sh
-sudo /opt/little-mester/v3/<new-commit>/tools/vm-system-install --update-code-only
+sudo /opt/little-mester/v3/<new-commit>/tools/vm-system-install \
+  --update-code-only --previous-sha <previous-full-commit>
 ```
 
-This is the currently implemented host-only behavior; the compatibility-gated
-snapshot/rollback flags described in
-[`guest-compatibility-update.md`](guest-compatibility-update.md) are planned and
-must not be used until implemented and reviewed. The current updater replaces
-protected host code, sudoers, and unit assets using staged same-filesystem file
-replacements, reloads systemd without starting anything, and checks that the
+The implementation snapshots the fixed prior protected target inventory,
+interlocks updates and starts, installs fixed start guards, replaces protected
+host assets, reloads systemd without starting anything, and checks that the
 disk, seed, identity keys, assignment, and workspace drop-in identities remain
-unchanged. It does not migrate guest state or replace the guest disk. It does
-not yet provide a tested rollback or establish guest compatibility. If a file
-or service is unsafe or active, the update refuses; inspect before retrying.
+unchanged. It never updates guest files or starts the VM. The matching
+code-only rollback command is documented in
+[`guest-compatibility-update.md`](guest-compatibility-update.md). These commands
+are not owner-supported until the exact implementation commit is reviewed and
+hosted production-systemd acceptance is complete. Actual guest compatibility is
+established only during a separately authorized start; unknown/mismatch blocks
+normal routes. If a file or service is unsafe or active, the updater refuses.
 
 The protected runtime is installed under `/usr/lib/little-mester-vm`, a path
 available on both Ubuntu and merged-`/usr` distributions such as Arch. The

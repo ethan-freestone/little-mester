@@ -70,6 +70,8 @@ INSTALL_FILES = {
     "lib/vm/virtiofs-socket.py": 0o644,
     "lib/vm/guest-user-dirs.py": 0o644,
     "lib/vm/parent-session-contract.py": 0o644,
+    "lib/vm/guest-compatibility.py": 0o644,
+    "lib/vm/code-update-transaction.py": 0o644,
     "lib/vm/parent-state.py": 0o644,
     "lib/vm/parent-launcher.py": 0o644,
     "lib/vm/parent-gate.py": 0o644,
@@ -87,6 +89,10 @@ INSTALL_FILES = {
     "lib/vm/guest-bootstrap.py": 0o644,
     "scripts/parent-readonly-safety-gate.py": 0o644,
     "tools/vm-system-install": 0o755,
+    "systemd/little-mester-vm.service.d/90-code-update-guard.conf": 0o644,
+    "systemd/little-mester-vm-proxy.service.d/90-code-update-guard.conf": 0o644,
+    "systemd/little-mester-vm-workspace.service.d/90-code-update-guard.conf": 0o644,
+    "systemd/little-mester-vm-metrics.service.d/90-code-update-guard.conf": 0o644,
     "systemd/little-mester-vm.service": 0o644,
     "systemd/little-mester-vm-proxy.service": 0o644,
     "systemd/little-mester-vm-workspace.service": 0o644,
@@ -99,6 +105,8 @@ INSTALL_DIRS = {
     "agent/opencode/plugins/little-mester-exit-confirm", "lib", "lib/vm", "scripts", "tools",
     "agent/opencode/plugins/host-metrics-tui",
     "systemd", "sudoers",
+    "systemd/little-mester-vm.service.d", "systemd/little-mester-vm-proxy.service.d",
+    "systemd/little-mester-vm-workspace.service.d", "systemd/little-mester-vm-metrics.service.d",
 }
 M1_ACCEPTED_SHA = "9a98f0c93ff65d38b181ecb9ab91df0633c1d280"
 PARENT_GUEST_ASSETS = (

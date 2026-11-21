@@ -187,7 +187,7 @@ class SystemdPolicyTests(unittest.TestCase):
              mock.patch.object(vm.subprocess, "run") as run, \
              mock.patch.object(vm, "_probe_workspace") as probe:
             run.return_value.returncode = 0
-            self.assertEqual(vm._fixed_exec("up"), 0)
+            self.assertEqual(vm._fixed_exec_locked("up"), 0)
             self.assertEqual(run.call_args.args[0], [
                 "/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", "little-mester-vm.service"])
             probe.assert_called_once_with()
@@ -199,10 +199,10 @@ class SystemdPolicyTests(unittest.TestCase):
         with mock.patch.object(vm, "_workspace_policy", return_value=invalid_policy), \
                 mock.patch.object(vm.subprocess, "run") as run:
             with self.assertRaisesRegex(vm.Refused, "before VM lifecycle.*bad drop-in"):
-                vm._fixed_exec("up")
+                vm._fixed_exec_locked("up")
         run.assert_not_called()
         with self.assertRaises(vm.Refused):
-            vm._fixed_exec("systemctl")
+            vm._fixed_exec_locked("systemctl")
         with mock.patch.object(vm.sys, "argv", ["system-vm.py", "owner", "up"]), \
              mock.patch.object(vm, "_fixed_exec", return_value=0) as dispatch:
             self.assertEqual(vm.main(), 0)
@@ -211,11 +211,12 @@ class SystemdPolicyTests(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     vm.main()
-        with mock.patch.object(vm, "_guest_ssh", return_value=0) as ssh, \
+        with mock.patch.object(vm, "_system_unit_active", return_value=True), \
+             mock.patch.object(vm, "_guest_ssh", return_value=0) as ssh, \
              mock.patch.object(vm, "_browser_auth", return_value=0) as auth:
-            self.assertEqual(vm._fixed_exec("auth"), 0)
+            self.assertEqual(vm._fixed_exec_locked("auth"), 0)
             auth.assert_called_once_with()
-            self.assertEqual(vm._fixed_exec("tui"), 0)
+            self.assertEqual(vm._fixed_exec_locked("tui"), 0)
             self.assertEqual(ssh.call_args.args[0], "/usr/local/bin/lm-opencode")
 
     def test_install_manifest_contains_all_fixed_assets(self):
@@ -232,6 +233,8 @@ class SystemdPolicyTests(unittest.TestCase):
             "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts",
             "systemd/little-mester-vm-proxy.service", "sudoers/little-mester-vm",
             "tools/vm-system-install", "lib/vm/guest-bootstrap.py",
+            "lib/vm/guest-compatibility.py", "lib/vm/code-update-transaction.py",
+            "systemd/little-mester-vm.service.d/90-code-update-guard.conf",
             "lib/vm/desktop-session-env.sh",
         }
         self.assertTrue(required.issubset(owner.INSTALL_FILES))
@@ -258,8 +261,8 @@ class SystemdPolicyTests(unittest.TestCase):
     def test_code_update_is_explicit_stopped_and_state_preserving(self):
         installer = (ROOT / "tools/vm-system-install").read_text()
         for required in (
-            'sys.argv[1:] == ["--update-code-only"]',
-            "def update_code_only(root: pathlib.Path, owner: str)",
+            'args[0] == "--update-code-only" and args[1] == "--previous-sha"',
+            "def update_code_only(root: pathlib.Path, owner: str, previous_sha: str)",
             '"little-mester-vm-workspace.service"',
             "before_state = _state_fingerprint(state_paths)",
             "if _state_fingerprint(state_paths) != before_state:",
@@ -267,6 +270,11 @@ class SystemdPolicyTests(unittest.TestCase):
             "services remain stopped",
             "UPDATE_ADDITIONALS",
             "ensure_dir(pathlib.Path(\"/etc/systemd/system/little-mester-vm-workspace.service.d\")",
+            "txn.publish_snapshot(snapshot_path, target_map, candidate_sha=root.name",
+            "txn.restore_snapshot(snapshot_path, target_map, candidate",
+            "--rollback-code-only",
+            "CODE_UPDATE_LOCK",
+            "CODE_UPDATE_MARKER",
         ):
             self.assertIn(required, installer)
         self.assertIn("--update-code-only", installer)
@@ -275,6 +283,52 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn('preflight(root, owner)', installer)
         self.assertLess(installer.index('preflight(root, owner)'),
                         installer.index('ensure_group("lm-vm")'))
+
+    def test_all_fixed_units_have_maintenance_marker_and_nonblocking_lock_guard(self):
+        units = ("little-mester-vm.service", "little-mester-vm-proxy.service",
+                 "little-mester-vm-workspace.service", "little-mester-vm-metrics.service")
+        for unit in units:
+            path = ROOT / "systemd" / f"{unit}.d/90-code-update-guard.conf"
+            text = path.read_text()
+            self.assertIn("ConditionPathExists=!/etc/little-mester-vm/code-update.in-progress", text)
+            self.assertIn("flock --shared --nonblock /etc/little-mester-vm/code-update.lock", text)
+            self.assertIn("/usr/bin/true", text)
+
+    def test_compatibility_check_precedes_readiness_and_normal_use_requires_active_unit(self):
+        calls = []
+        def ssh_side_effect(command, **_kwargs):
+            calls.append("cloud-init" if command.startswith("cloud-init") else "readiness")
+            return 0
+        with mock.patch.object(vm, "_guest_ssh", side_effect=ssh_side_effect) as guest_ssh, \
+             mock.patch.object(vm, "_check_guest_compatibility",
+                               side_effect=lambda: calls.append("compat")):
+            # Exercise the real readiness orchestration while isolating transport.
+            vm._ensure_guest_ready()
+            self.assertEqual(guest_ssh.call_count, 2)
+        self.assertEqual(calls, ["cloud-init", "compat", "readiness"])
+
+    def test_guest_compatibility_nonmatch_fails_startup_closed(self):
+        checker = type("Checker", (), {
+            "SYSTEM_WORKSPACE": "/workspace",
+            "build_inspection_command": staticmethod(lambda _workspace: "fixed inspect"),
+            "expected_inventory": staticmethod(lambda: {"/workspace": {"kind": "mount"}}),
+            "classify_inventory": staticmethod(lambda *_args, **_kwargs:
+                                                ("INCONCLUSIVE", ("response-invalid",))),
+        })()
+        with mock.patch.object(vm, "_guest_compatibility_module", return_value=checker), \
+             mock.patch.object(vm, "_guest_ssh", return_value=(0, b"{}")):
+            with self.assertRaisesRegex(vm.Refused, "normal VM use is blocked"):
+                vm._check_guest_compatibility()
+
+    def test_normal_guest_routes_refuse_when_startup_gate_is_not_active(self):
+        with mock.patch.object(vm, "_system_unit_active", return_value=False), \
+             mock.patch.object(vm, "_guest_ssh") as ssh, \
+             mock.patch.object(vm, "_browser_auth") as auth:
+            for action in ("ssh", "auth", "tui"):
+                with self.subTest(action=action), self.assertRaisesRegex(vm.Refused, "not active"):
+                    vm._fixed_exec_locked(action)
+        ssh.assert_not_called()
+        auth.assert_not_called()
 
     def test_owner_acceptance_is_only_an_adapter_to_lab_vm(self):
         with mock.patch.object(owner.subprocess, "run") as run:

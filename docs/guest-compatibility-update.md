@@ -3,9 +3,10 @@
 ## Status
 
 This is the reviewed implementation contract for the compatibility/update
-work; the commands marked **planned** are not supported until the implementation
-is complete and reviewed on its exact commit. It does not authorize an owner
-operation. Do not use either existing owner VM for development or tests.
+work. The command shapes below are implemented in the working tree but are not
+owner-supported until implementation review on the exact commit and hosted
+production-systemd acceptance are complete. This document does not authorize an
+owner operation. Do not use either existing owner VM for development or tests.
 
 The source comparison is between base
 `497a70ca131cc622f661c52d08f10baf6ec0e4d2` and candidate
@@ -36,7 +37,7 @@ verifies durable maintenance guards before changing protected assets. If any
 guard or state check is ambiguous, it refuses before mutation and leaves
 recovery evidence intact.
 
-**Planned update command (not yet supported):**
+**Implemented update command shape (not yet owner-supported):**
 
 ```sh
 sudo /opt/little-mester/v3/$CANDIDATE_SHA/tools/vm-system-install \
@@ -51,9 +52,11 @@ candidate SHA and retained for recovery. The old immutable `/opt/.../$PREVIOUS_S
 installation is also retained. The update is **not** a multi-file atomic
 transaction. If interrupted, the durable guard blocks supported VM use and the
 snapshot remains available; do not start the VM or manually edit installed
-files.
+files. The snapshot is stored at
+`/var/lib/little-mester-vm-code-rollback/$CANDIDATE_SHA.json`; it contains only
+the fixed host-code target inventory, not guest credentials or mutable VM data.
 
-**Planned rollback command (not yet supported):**
+**Implemented rollback command shape (not yet owner-supported):**
 
 ```sh
 sudo /opt/little-mester/v3/$CANDIDATE_SHA/tools/vm-system-install \
@@ -108,7 +111,7 @@ do not use normal agent routes. Guest asset repair/update requires a separate
 design review and owner authorization. No cloud-init reseed, disk replacement,
 fresh guest, or automatic migration is part of this path.
 
-## Planned owner sequence
+## Owner sequence (not yet actionable)
 
 The following command shapes become actionable only after implementation,
 focused tests, exact-SHA Sol review, and hosted production systemd acceptance:
@@ -118,11 +121,11 @@ focused tests, exact-SHA Sol review, and hosted production systemd acceptance:
    compatibility.
 2. Obtain explicit approval for protected host-code update before compatibility
    is known. Confirm all four fixed services are already inactive/failed; stop
-   on active/ambiguous state. Run the planned update command above. Verify it
+   on active/ambiguous state. Run the update command above. Verify it
    returns without starting the VM and that disk, seed, keys, workspace
    assignment, and workspace drop-in fingerprints are unchanged.
 3. If update fails or compatibility later fails, keep the VM stopped and use
-   only the planned rollback command after separate owner approval. Do not
+   only the rollback command above after separate owner approval. Do not
    improvise `systemctl`, SSH, or file edits.
 4. Obtain a separate, explicit approval to start the selected VM for
    compatibility-gated acceptance. Use the pinned owner `up` command. `MATCH`
@@ -132,5 +135,5 @@ focused tests, exact-SHA Sol review, and hosted production systemd acceptance:
    persistence, and CachyOS checks in the Phase 1 owner checklist. These remain
    separate acceptance gates.
 
-No implementation, hosted run, deployment, or operation of an owner VM is
-authorized by this design document.
+No hosted run, deployment, or operation of an owner VM is authorized by this
+design document.
