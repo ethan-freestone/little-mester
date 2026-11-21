@@ -898,9 +898,8 @@ def run_workspace_bind_reproductions(workspace: pathlib.Path) -> None:
 def classify_namespace_reproduction(state: dict[str, str], diagnostics: str,
                                     *, start_exit: int,
                                     merged_dropin_matches: bool = False) -> str:
-    """Classify only explicit 226/NAMESPACE evidence; weak failures stay inconclusive."""
-    if (state.get("ExecMainCode") == "1" and state.get("ExecMainStatus") == "226"
-            or re.search(r"\bstatus=226/NAMESPACE\b", diagnostics) is not None):
+    """Classify only explicit namespace evidence from this attempt's journal slice."""
+    if re.search(r"\bstatus=226/NAMESPACE\b", diagnostics) is not None:
         return "REPRODUCED_226_NAMESPACE"
     try:
         main_pid = int(state.get("MainPID", "0"))
@@ -911,6 +910,297 @@ def classify_namespace_reproduction(state: dict[str, str], diagnostics: str,
             and state.get("SubState") == "running" and main_pid > 0):
         return "NOT_REPRODUCED"
     return "INCONCLUSIVE"
+
+
+def parse_journal_cursor(output: str, exit_code: int) -> str:
+    """Require a usable systemd journal cursor before starting a diagnostic attempt."""
+    match = re.search(r"(?m)^-- cursor: (\S+)\s*$", output)
+    require(exit_code == 0 and match is not None,
+            "journal cursor unavailable; refusing diagnostic start")
+    return match.group(1)
+
+
+def journal_cursor_command() -> list[str]:
+    """Capture a global cursor so a never-before-seen unit still has a boundary."""
+    return ["/usr/bin/sudo", "-n", "/usr/bin/journalctl", "--no-pager",
+            "--show-cursor", "-n", "0"]
+
+
+def journal_after_cursor_command(cursor: str, unit: str) -> list[str]:
+    return ["/usr/bin/sudo", "-n", "/usr/bin/journalctl", "--no-pager",
+            f"--after-cursor={cursor}", "-n", "40", "-u", unit]
+
+
+def classify_namespace_diagnostic(classification: str, diagnostics: str) -> str:
+    if classification == "INCONCLUSIVE" and re.search(
+            r"(?i)(execpaths|execution).{0,80}(denied|fail|not permitted)|"
+            r"(denied|fail|not permitted).{0,80}(execpaths|execution)", diagnostics):
+        return "EXECUTION_FAILURE_INCONCLUSIVE"
+    return classification
+
+
+def compare_effective_configuration(baseline: dict[str, str], candidate: dict[str, str],
+                                    *, allowed_setting: str | None = None,
+                                    allow_bind_fragment_placement: bool = False,
+                                    mount_topology: dict[str, str] | None = None) -> dict:
+    """Compare systemd show properties, allowing one deliberate delta only."""
+    ignored = {"FragmentPath", "DropInPaths"} if allow_bind_fragment_placement else set()
+    mismatches = {}
+    for name in sorted(set(baseline) | set(candidate)):
+        if name in ignored or name == allowed_setting:
+            continue
+        before, after = baseline.get(name), candidate.get(name)
+        if name in ("ExecStart", "ExecStartPost"):
+            before = normalize_systemd_exec(before or "")
+            after = normalize_systemd_exec(after or "")
+        if name in SYSTEMD_DEPENDENCY_SET_PROPERTIES or name in SYSTEMD_MOUNT_PATH_PROPERTIES:
+            before = frozenset((before or "").split())
+            after = frozenset((after or "").split())
+            if before != after and allowed_setting == "PrivateTmp" \
+                    and baseline.get("PrivateTmp") == "yes" \
+                    and candidate.get("PrivateTmp") == "no":
+                before, after = private_tmp_dependency_delta(
+                    name, before, after, baseline, mount_topology=mount_topology)
+        if before != after:
+            mismatches[name] = {"baseline": _json_comparable(before),
+                                "candidate": _json_comparable(after)}
+    return mismatches
+
+
+SYSTEMD_DEPENDENCY_SET_PROPERTIES = frozenset({
+    "After", "Before", "Requires", "Wants", "BindsTo", "PartOf", "Conflicts",
+    "Requisite",
+})
+
+SYSTEMD_MOUNT_PATH_PROPERTIES = frozenset({"RequiresMountsFor", "WantsMountsFor"})
+
+PRIVATE_TMP_TMPFILES_UNIT = "systemd-tmpfiles-setup.service"
+PRIVATE_TMP_TMP_MOUNT_UNIT = "tmp.mount"
+
+
+def private_tmp_systemd_profile(baseline_properties: dict[str, str]) -> str | None:
+    """Recognize only the upstream v255 and v257 PrivateTmp dependency shapes."""
+    requires_paths = set((baseline_properties.get("RequiresMountsFor", "") or "").split())
+    wants_paths = set((baseline_properties.get("WantsMountsFor", "") or "").split())
+    private_tmp_paths = {"/tmp", "/var/tmp"}
+    wanted_private_tmp_paths = wants_paths & private_tmp_paths
+    required_private_tmp_paths = requires_paths & private_tmp_paths
+    if wanted_private_tmp_paths == private_tmp_paths and not required_private_tmp_paths:
+        return "v257"
+    if ("/var/tmp" in required_private_tmp_paths
+            and not wanted_private_tmp_paths):
+        return "v255"
+    return None
+
+
+def _json_comparable(value):
+    if isinstance(value, (set, frozenset)):
+        return sorted(value)
+    return value
+
+
+def private_tmp_dependency_delta(name: str, baseline: frozenset[str],
+                                 candidate: frozenset[str],
+                                 baseline_properties: dict[str, str], *,
+                                 mount_topology: dict[str, tuple[str, ...]] | None
+                                 ) -> tuple[frozenset[str], frozenset[str]]:
+    """Permit only v255/v257-specific upstream PrivateTmp-generated removals."""
+    profile = private_tmp_systemd_profile(baseline_properties)
+    if profile is None:
+        return baseline, candidate
+
+    removable: set[str] = set()
+    if name == "After":
+        removable.add(PRIVATE_TMP_TMPFILES_UNIT)
+    if profile == "v255":
+        if name in ("After", "Wants"):
+            # v255 unconditionally adds the tmp.mount dependency for PrivateTmp.
+            removable.add(PRIVATE_TMP_TMP_MOUNT_UNIT)
+        if name == "RequiresMountsFor":
+            removable.add("/var/tmp")
+        if name in ("Requires", "After") and mount_topology is not None:
+            removable.update(mount_topology.get("/var/tmp", ()))
+    else:  # v257
+        if name == "WantsMountsFor":
+            removable.update({"/tmp", "/var/tmp"})
+        if name in ("Wants", "After") and mount_topology is not None:
+            paths = set((baseline_properties.get("WantsMountsFor", "") or "").split())
+            for path in paths:
+                removable.update(mount_topology.get(path, ()))
+    removed = baseline - candidate
+    added = candidate - baseline
+    if not removed <= removable or added:
+        return baseline, candidate
+    return baseline - removed, candidate
+
+
+def private_tmp_mount_topology(mountpoints: set[str]) -> dict[str, tuple[str, ...]]:
+    """Map each PrivateTmp path to all actual mount-unit ancestors, outermost first."""
+    result = {}
+    for path in ("/tmp", "/var/tmp"):
+        ancestors = [point for point in mountpoints
+                     if point == "/" or path == point or path.startswith(point.rstrip("/") + "/")]
+        if not ancestors:
+            continue
+        unit_names = []
+        for mountpoint in sorted(ancestors, key=lambda item: len(pathlib.PurePosixPath(item).parts)):
+            if mountpoint == "/":
+                unit_names.append("-.mount")
+            else:
+                escaped = mountpoint.strip("/").replace("-", "\\x2d").replace("/", "-")
+                unit_names.append(f"{escaped}.mount")
+        result[path] = tuple(unit_names)
+    return result
+
+
+def private_tmp_host_mount_topology() -> dict[str, tuple[str, ...]] | None:
+    """Read actual mountpoints; None explicitly means the comparison is inconclusive."""
+    try:
+        mountpoints = set()
+        for line in pathlib.Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+            fields = line.split()
+            if len(fields) < 6:
+                continue
+            mountpoint = fields[4]
+            for sequence, character in (("\\040", " "), ("\\011", "\t"),
+                                        ("\\012", "\n"), ("\\134", "\\")):
+                mountpoint = mountpoint.replace(sequence, character)
+            mountpoints.add(mountpoint)
+        return private_tmp_mount_topology(mountpoints)
+    except (OSError, UnicodeError):
+        return None
+
+
+def run_fresh_cursor_attempt(capture_cursor, start, *, previous_cursor: str | None = None):
+    """Capture a global journal boundary immediately before each start."""
+    cursor = capture_cursor()
+    require(bool(cursor), "journal cursor unavailable; refusing diagnostic start")
+    if previous_cursor is not None:
+        require(cursor != previous_cursor,
+                "preserved RuntimeDirectory restart did not use a fresh journal cursor")
+    return cursor, start()
+
+
+def normalize_systemd_exec(value: str) -> str:
+    """Remove invocation-dependent fields from systemctl's Exec* serialization."""
+    dynamic = {"start_time", "stop_time", "pid", "code", "status"}
+    parts = []
+    for item in value.split(";"):
+        item = item.strip()
+        key, separator, _value = item.partition("=")
+        if separator and key.strip() in dynamic:
+            continue
+        if item:
+            parts.append(item)
+    return " ; ".join(parts)
+
+
+def runtime_directory_identity(info: os.stat_result) -> dict[str, int]:
+    require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode),
+            "runtime path identity is not a directory")
+    return {"device": info.st_dev, "inode": info.st_ino, "uid": info.st_uid,
+            "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode)}
+
+
+def capture_runtime_identities(paths) -> dict[str, dict[str, int]]:
+    return {str(path): runtime_directory_identity(os.lstat(path)) for path in paths}
+
+
+def verify_runtime_identities(expected: dict[str, dict[str, int]]) -> None:
+    for raw, identity in expected.items():
+        actual = runtime_directory_identity(os.lstat(raw))
+        require(actual == identity,
+                f"preserving changed retained runtime directory identity: {raw}")
+
+
+def run_preserved_runtime_lifecycle(paths, *, first_start_healthy: bool,
+                                    stop, restart) -> str:
+    """Exercise a healthy preserve stop/restart while retaining the first identity baseline."""
+    if not first_start_healthy:
+        return "NOT_EXERCISED"
+    expected = capture_runtime_identities(paths)  # Must precede the first stop.
+    stop()
+    verify_runtime_identities(expected)
+    healthy = restart()  # This callback verifies fresh-cursor start, active/running and config.
+    require(healthy is True, "preserved RuntimeDirectory restart was not verified healthy")
+    verify_runtime_identities(expected)
+    stop()
+    verify_runtime_identities(expected)
+    return "EXERCISED"
+
+
+def cleanup_runtime_before_evidence(runtime_cleanup, evidence_cleanup) -> None:
+    """Do not destroy unit/drop-in diagnostics until retained-path cleanup succeeds."""
+    runtime_cleanup()
+    evidence_cleanup()
+
+
+def finalize_disposable_units(*, units: tuple[str, ...], stop_units, verify_stopped,
+                              reset_failed, runtime_cleanup, evidence_cleanup, daemon_reload) -> None:
+    """Stop/reset loaded units, clean retained runtime paths, then remove evidence."""
+    stop_units(units)
+    for name in units:
+        verify_stopped(name)
+    reset_failed(units)
+    for name in units:
+        verify_stopped(name)
+    cleanup_runtime_before_evidence(runtime_cleanup, evidence_cleanup)
+    daemon_reload()
+
+
+def remove_runtime_directories(expected: dict[str, dict[str, int]]) -> None:
+    """Preflight exact identities and emptiness before removing any retained path."""
+    present = []
+    for raw, identity in expected.items():
+        path = pathlib.Path(raw)
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        actual = runtime_directory_identity(info)
+        require(actual == identity,
+                f"preserving runtime directory identity mismatch: {path}")
+        require(not any(path.iterdir()), f"preserving non-empty runtime directory: {path}")
+        present.append(path)
+    for path in present:
+        path.rmdir()
+
+
+def runtime_cleanup_script(root: pathlib.Path,
+                           expected: dict[str, dict[str, int]], *, remove: bool = True) -> str:
+    """Generate the exact privileged cleanup script; root is an explicit safety boundary."""
+    require(root.is_absolute(), "runtime cleanup root must be absolute")
+    require(all(pathlib.PurePosixPath(name).name == name and name not in ("", ".", "..")
+                for name in expected), "runtime cleanup identities must be direct children of root")
+    payload = json.dumps(expected, sort_keys=True, separators=(",", ":"))
+    return textwrap.dedent("""\
+        import json, os, pathlib, stat
+        root = pathlib.Path(ROOT)
+        expected = json.loads(EXPECTED)
+        remove = []
+        for relative, identity in expected.items():
+            path = root / relative
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError:
+                continue
+            actual = {'device': info.st_dev, 'inode': info.st_ino, 'uid': info.st_uid,
+                      'gid': info.st_gid, 'mode': stat.S_IMODE(info.st_mode)}
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or actual != identity):
+                raise SystemExit('preserving changed or foreign runtime directory identity mismatch')
+            if any(path.iterdir()):
+                raise SystemExit('preserving non-empty runtime directory')
+            remove.append(path)
+        REMOVE_PATHS
+        """).replace("ROOT", repr(str(root))).replace(
+            "EXPECTED", repr(payload)).replace(
+                "REMOVE_PATHS", "for path in remove:\n    path.rmdir()" if remove else "pass")
+
+
+def runtime_directory_preflight_script(root: pathlib.Path,
+                                       expected: dict[str, dict[str, int]]) -> str:
+    return runtime_cleanup_script(root, expected, remove=False)
 
 
 def production_workspace_reproduction_config(template: str, *, user: str, group: str,
@@ -933,6 +1223,37 @@ def production_workspace_reproduction_config(template: str, *, user: str, group:
     return template, f'[Service]\nBindPaths="{workspace}:{destination}"\n'
 
 
+def production_workspace_fragment_config(unit_text: str, bind_directive: str) -> str:
+    """Place the same generated BindPaths in Service instead of a drop-in."""
+    require(unit_text.count("[Service]\n") == 1 and bind_directive.count("BindPaths=") == 1,
+            "workspace fragment comparison input is ambiguous")
+    require("BindPaths=" not in unit_text,
+            "drop-in baseline unexpectedly already contains BindPaths")
+    return unit_text.replace("[Service]\n", "[Service]\n" + bind_directive)
+
+
+def production_workspace_diagnostic_variants() -> dict[str, str]:
+    """Return one-setting drop-in probes; all leave the production BindPaths intact."""
+    return {
+        "no-exec-paths": "NoExecPaths=\n",
+        "exec-paths": "ExecPaths=\n",
+        "protect-control-groups": "ProtectControlGroups=no\n",
+        "protect-home": "ProtectHome=no\n",
+        "protect-system": "ProtectSystem=no\n",
+        "read-write-paths": "ReadWritePaths=\n",
+        "private-tmp": "PrivateTmp=no\n",
+        "runtime-directory-preserve": "RuntimeDirectoryPreserve=yes\n",
+    }
+
+
+def disposable_final_unit_names(workspace_unit: str, fragment_unit: str,
+                                proxy_unit: str, metrics_unit: str, vm_unit: str,
+                                variant_units: dict[str, str]) -> tuple[str, ...]:
+    """Return every disposable unit file that final cleanup removes, exactly once."""
+    return (workspace_unit, fragment_unit, proxy_unit, metrics_unit, vm_unit,
+            *tuple(variant_units.values()))
+
+
 def merged_workspace_dropin_matches(output: str, exit_code: int, dropin: str) -> bool:
     """Require successful `systemctl cat` evidence for the exact generated drop-in."""
     return exit_code == 0 and bool(dropin.strip()) and dropin.strip() in output
@@ -942,7 +1263,9 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
     """Reproduce the production workspace unit and parent dependency graph with stubs."""
     token = secrets.token_hex(6)
     prefix = f"lm-vm-workspace-repro-{token}"
-    workspace_unit, proxy_unit = f"{prefix}.service", f"{prefix}-proxy.service"
+    workspace_unit = f"{prefix}.service"
+    fragment_unit = f"{prefix}-fragment.service"
+    proxy_unit = f"{prefix}-proxy.service"
     metrics_unit, vm_unit = f"{prefix}-metrics.service", f"{prefix}-vm.service"
     destination = "/run/little-mester-vm-workspace-share"
     user = pwd.getpwuid(os.getuid()).pw_name
@@ -957,18 +1280,31 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
     workspace_text, workspace_dropin = production_workspace_reproduction_config(
         workspace_template, user=user, group=group, vm_unit=vm_unit,
         workspace=workspace, destination=destination)
+    bind_directive = f'BindPaths="{workspace}:{destination}"\n'
+    fragment_text = production_workspace_fragment_config(workspace_text, bind_directive)
+    variants = production_workspace_diagnostic_variants()
+    variant_units = {label: f"{prefix}-{label}.service" for label in variants}
+    final_unit_names = disposable_final_unit_names(
+        workspace_unit, fragment_unit, proxy_unit, metrics_unit, vm_unit, variant_units)
+    variant_dropins = {label: f"[Service]\n{directive}" for label, directive in variants.items()}
     dropin_relative = f"{workspace_unit}.d/20-workspace.conf"
     dropin_directory = pathlib.Path("/run/systemd/system") / f"{workspace_unit}.d"
     require(not dropin_directory.exists() and not dropin_directory.is_symlink(),
             f"preserving pre-existing disposable unit drop-in directory: {dropin_directory}")
     units = {
         workspace_unit: workspace_text,
+        fragment_unit: fragment_text,
         proxy_unit: f"""[Unit]\nDescription=Disposable production proxy dependency\nAfter=network-online.target\nWants=network-online.target\nBefore={vm_unit}\nPartOf={vm_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
         metrics_unit: f"""[Unit]\nDescription=Disposable production metrics dependency\nBefore={vm_unit}\nPartOf={vm_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
         vm_unit: f"""[Unit]\nDescription=Disposable parent dependency graph\nRequires={proxy_unit} {workspace_unit} {metrics_unit}\nBindsTo={proxy_unit} {workspace_unit} {metrics_unit}\nAfter={proxy_unit} {workspace_unit} {metrics_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nRuntimeDirectory=little-mester-vm\nRuntimeDirectoryMode=0700\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
     }
-    payload = json.dumps({"units": units,
-                          "dropins": {dropin_relative: workspace_dropin}},
+    for label, name in variant_units.items():
+        units[name] = workspace_text
+    dropins = {dropin_relative: workspace_dropin}
+    for label, name in variant_units.items():
+        dropins[f"{name}.d/20-workspace.conf"] = workspace_dropin
+        dropins[f"{name}.d/30-{label}.conf"] = variant_dropins[label]
+    payload = json.dumps({"units": units, "dropins": dropins},
                          sort_keys=True, separators=(",", ":"))
     writer = textwrap.dedent("""\
         import json, os, pathlib, stat, sys
@@ -1000,11 +1336,13 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                 parts = pathlib.PurePosixPath(relative).parts
                 if (len(parts) != 2 or not parts[0].startswith('lm-vm-workspace-repro-')
                         or not parts[0].endswith('.service.d')
-                        or parts[1] != '20-workspace.conf'):
+                        or not (parts[1] == '20-workspace.conf'
+                                or parts[1].startswith('30-') and parts[1].endswith('.conf'))):
                     raise SystemExit('invalid disposable unit drop-in path')
                 directory = root / parts[0]
-                directory.mkdir(mode=0o755)
-                created_dirs.append(directory)
+                if directory not in created_dirs:
+                    directory.mkdir(mode=0o755)
+                    created_dirs.append(directory)
                 path = directory / parts[1]
                 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
                 created.append((path, text.encode()))
@@ -1044,37 +1382,270 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                             input=payload, text=True, capture_output=True,
                             timeout=10, check=False)
     require(create.returncode == 0, "could not safely install disposable systemd reproduction units")
+    cleanup_authorized = False
     try:
         run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "daemon-reload"], timeout=15)
-        start = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", vm_unit],
-                    timeout=35, check=False)
         properties = ("LoadState,ActiveState,SubState,MainPID,Result,ExecMainCode,ExecMainStatus,"
                       "Type,User,Group,"
                       "SupplementaryGroups,RuntimeDirectory,RuntimeDirectoryMode,UMask,"
                       "RuntimeDirectoryPreserve,ExecStart,ExecStartPost,Restart,KillMode,"
                       "TimeoutStartUSec,TimeoutStopUSec,"
-                      "NoNewPrivileges,NoExecPaths,ExecPaths,PrivateTmp,ProtectHome,"
-                      "ProtectSystem,ProtectControlGroups,ReadWritePaths,BindPaths,PartOf,"
-                      "Before,After,Requires,BindsTo")
+        "NoNewPrivileges,NoExecPaths,ExecPaths,PrivateTmp,ProtectHome,"
+        "ProtectSystem,ProtectControlGroups,ReadWritePaths,BindPaths,PartOf,"
+        "Before,After,Requires,Wants,BindsTo,Conflicts,Requisite,RequiresMountsFor,WantsMountsFor")
+
+        config_fields = ("Type", "User", "Group", "SupplementaryGroups", "RuntimeDirectory",
+                         "RuntimeDirectoryMode", "RuntimeDirectoryPreserve", "UMask", "ExecStart",
+                         "ExecStartPost", "Restart", "KillMode", "TimeoutStartUSec",
+                         "TimeoutStopUSec", "NoNewPrivileges", "NoExecPaths", "ExecPaths",
+                         "PrivateTmp", "ProtectHome", "ProtectSystem", "ProtectControlGroups",
+                         "ReadWritePaths", "BindPaths", "PartOf", "Before", "After", "Requires",
+                          "Wants", "BindsTo", "Conflicts", "Requisite", "RequiresMountsFor",
+                           "WantsMountsFor")
+        private_tmp_topology = private_tmp_host_mount_topology()
+        baseline_config: dict[str, str] | None = None
+        preserve_cursor: str | None = None
+        runtime_baseline = {raw: _host_path_evidence(pathlib.Path(raw)) for raw in runtime_paths}
+        retained_runtime: dict[str, dict[str, int]] = {}
+
+        def unit_state(name: str) -> dict[str, str]:
+            result = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "show", "--no-pager",
+                          "--property=ActiveState", "--property=MainPID", name],
+                         check=False, timeout=10)
+            return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+        def verify_stopped(name: str) -> None:
+            state = unit_state(name)
+            require(state.get("ActiveState") in ("inactive", "failed")
+                    and state.get("MainPID") == "0",
+                    f"preserving ambiguous disposable unit state after stop: {name} {state}")
+
+        def reset_failed_and_verify(names: tuple[str, ...]) -> None:
+            reset = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reset-failed",
+                         *names], timeout=10, check=False)
+            require(reset.returncode == 0,
+                    f"systemctl reset-failed failed for {names}; preserving units and evidence")
+            for name in names:
+                verify_stopped(name)
+
+        def verify_runtime_baseline(*, retained_allowed: bool = False) -> None:
+            for raw in runtime_paths:
+                current = _host_path_evidence(pathlib.Path(raw))
+                if retained_allowed and raw in retained_runtime:
+                    entry = current.get("lstat", {})
+                    actual = {key: entry.get(key) for key in retained_runtime[raw]}
+                    require(actual == retained_runtime[raw],
+                            f"preserving changed retained runtime directory: {current}")
+                else:
+                    require(current == runtime_baseline[raw],
+                            f"runtime path did not return to expected baseline: {current}")
+
+        def run_case(label: str, start_unit: str, effective_unit: str,
+                     expected_unit_text: str, expected_dropins: list[str] | None,
+                     *, allowed_setting: str | None = None,
+                     fragment_bind_placement: bool = False,
+                     allow_retained: bool = False,
+                     keep_active: bool = False) -> dict[str, str]:
+            nonlocal baseline_config, preserve_cursor
+            verify_runtime_baseline(retained_allowed=allow_retained)
+            # Capture both bind endpoints and their parents immediately before each start.
+            prestart = {
+                "source": _host_path_evidence(workspace),
+                "destination": _host_path_evidence(pathlib.Path(destination)),
+                "runtime_directories": [_host_path_evidence(pathlib.Path(raw))
+                                        for raw in runtime_paths],
+            }
+            def capture_cursor() -> str:
+                result = run(journal_cursor_command(), check=False, timeout=10)
+                return parse_journal_cursor(result.stdout or "", result.returncode)
+
+            cursor, start = run_fresh_cursor_attempt(
+                capture_cursor,
+                lambda: run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", start_unit],
+                            timeout=35, check=False),
+                previous_cursor=(preserve_cursor
+                                 if label == "runtime-directory-preserve-restart" else None))
+            if label == "runtime-directory-preserve":
+                preserve_cursor = cursor
+            shown = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "show", "--no-pager",
+                         f"--property={properties}", effective_unit], check=False, timeout=10)
+            require(shown.returncode == 0,
+                    f"effective systemd properties unavailable for {label}; preserving evidence")
+            state = dict(line.split("=", 1) for line in shown.stdout.splitlines() if "=" in line)
+            require(state.get("LoadState") == "loaded",
+                    f"diagnostic unit did not load for {label}; preserving evidence: {state}")
+            journal = run(journal_after_cursor_command(cursor, effective_unit),
+                          check=False, timeout=10)
+            merged = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "cat", "--no-pager",
+                          effective_unit], check=False, timeout=10)
+            merged_text = merged.stdout or ""
+            effective_matches = (merged.returncode == 0
+                                 and expected_unit_text.strip() in merged_text
+                                 and all(dropin.strip() in merged_text
+                                         for dropin in (expected_dropins or [])))
+            require(journal.returncode == 0,
+                    f"current-attempt journal unavailable for {label}; preserving evidence")
+            diagnostic = journal.stdout or ""
+            config = {key: state.get(key, "") for key in config_fields}
+            config_mismatches = {}
+            if baseline_config is not None:
+                config_mismatches = compare_effective_configuration(
+                    baseline_config, config, allowed_setting=allowed_setting,
+                    allow_bind_fragment_placement=fragment_bind_placement,
+                    mount_topology=private_tmp_topology)
+            if baseline_config is None:
+                baseline_config = config
+            effective_matches = effective_matches and not config_mismatches
+            classification = classify_namespace_reproduction(
+                state, diagnostic, start_exit=start.returncode,
+                merged_dropin_matches=effective_matches)
+            if config_mismatches:
+                classification = "INCONCLUSIVE"
+            print("workspace_bind_case=" + json.dumps({
+                "case": label, "start_unit": start_unit, "effective_unit": effective_unit,
+                "start_exit": start.returncode, "start_stderr": (start.stderr or "")[-1600:],
+                "properties_exit": shown.returncode, "properties": state,
+                "journal_cursor": cursor, "journal_exit": journal.returncode,
+                "journal": (journal.stdout or "")[-5000:],
+                "merged_unit_exit": merged.returncode, "merged_unit": merged_text[-6000:],
+                "effective_bind_configuration_matches": effective_matches,
+                "configuration_mismatches": config_mismatches,
+                "configuration_comparison": "INVALID_INCONCLUSIVE" if config_mismatches else "MATCH",
+                "private_tmp_mount_topology": (private_tmp_topology if private_tmp_topology is not None
+                                                else "UNAVAILABLE; generated mount-edge comparison is INCONCLUSIVE"),
+                "classification": classify_namespace_diagnostic(classification, diagnostic),
+                "execution_failure_note": ("ExecPaths execution denial is an execution failure, not a namespace pass"
+                                           if classify_namespace_diagnostic(classification, diagnostic)
+                                           == "EXECUTION_FAILURE_INCONCLUSIVE" else None),
+                "host_before_start": prestart,
+                "namespace_metadata_limit": (
+                    "host path metadata is logged immediately before start; when namespace setup "
+                    "fails before ExecStart, path metadata inside the namespace is unavailable"),
+                "host_after_start": {
+                    "source": _host_path_evidence(workspace),
+                    "destination": _host_path_evidence(pathlib.Path(destination)),
+                    "runtime_directories": [_host_path_evidence(pathlib.Path(raw))
+                                            for raw in runtime_paths],
+                },
+            }, sort_keys=True, separators=(",", ":")), flush=True)
+            lifetime_healthy = (
+                label in ("runtime-directory-preserve", "runtime-directory-preserve-restart")
+                and start.returncode == 0 and effective_matches
+                and classification == "NOT_REPRODUCED"
+                and state.get("ActiveState") == "active"
+                and state.get("SubState") == "running"
+                and int(state.get("MainPID", "0") or "0") > 1)
+            if label == "runtime-directory-preserve" and lifetime_healthy:
+                # Capture the exact first healthy identity before systemd stops the service.
+                for raw in runtime_paths[:2]:
+                    retained_runtime[raw] = runtime_directory_identity(os.lstat(raw))
+            elif label == "runtime-directory-preserve-restart":
+                require(lifetime_healthy,
+                        "preserved RuntimeDirectory restart did not verify active/running and exact config")
+                verify_runtime_identities(retained_runtime)
+
+            if keep_active:
+                require(lifetime_healthy,
+                        "preserved RuntimeDirectory restart did not remain healthy")
+                return {**state, "_lifetime_healthy": "yes"}
+
+            if label == "runtime-directory-preserve" and lifetime_healthy:
+                def stop_preserved_service():
+                    stopped = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", start_unit],
+                                  timeout=15, check=False)
+                    post_stop_state = unit_state(start_unit)
+                    require(stopped.returncode == 0 or post_stop_state.get("ActiveState") in
+                            ("inactive", "failed"),
+                            "ambiguous RuntimeDirectoryPreserve stop; preserving evidence")
+                    verify_stopped(start_unit)
+
+                def restart_preserved_service():
+                    restarted = run_case(
+                        "runtime-directory-preserve-restart", start_unit, effective_unit,
+                        expected_unit_text, expected_dropins,
+                        allowed_setting=allowed_setting, allow_retained=True, keep_active=True)
+                    return restarted.get("_lifetime_healthy") == "yes"
+
+                lifecycle = run_preserved_runtime_lifecycle(
+                    runtime_paths[:2], first_start_healthy=True,
+                    stop=stop_preserved_service, restart=restart_preserved_service)
+                print("workspace_bind_case_lifecycle=" + json.dumps({
+                    "case": label, "lifetime_probe": lifecycle,
+                    "runtime_directories_after_stop": [
+                        _host_path_evidence(pathlib.Path(raw)) for raw in runtime_paths[:2]],
+                }, sort_keys=True, separators=(",", ":")), flush=True)
+                reset_failed_and_verify((start_unit,))
+                return {**state, "_lifetime_healthy": "yes"}
+
+            stopped = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", start_unit],
+                          timeout=15, check=False)
+            post_stop_state = unit_state(start_unit)
+            require(stopped.returncode == 0 or post_stop_state.get("ActiveState") in
+                    ("inactive", "failed"),
+                    f"ambiguous stop result for {label}; preserving units and evidence")
+            verify_stopped(start_unit)
+            if label == "runtime-directory-preserve" and lifetime_healthy:
+                verify_runtime_identities(retained_runtime)
+            elif label == "runtime-directory-preserve-restart":
+                verify_runtime_identities(retained_runtime)
+            after_stop = ([_host_path_evidence(pathlib.Path(raw)) for raw in runtime_paths]
+                          if label != "runtime-directory-preserve" or lifetime_healthy else None)
+            if label == "runtime-directory-preserve":
+                if not lifetime_healthy:
+                    print("workspace_bind_case_lifecycle=" + json.dumps({
+                        "case": label, "lifetime_probe": "NOT_EXERCISED",
+                        "reason": "first start was not verified healthy with runtime directories present",
+                    }, sort_keys=True, separators=(",", ":")), flush=True)
+                    require(effective_matches,
+                            f"effective systemd configuration invalid for {label}; preserving units/evidence")
+                    reset_failed_and_verify((start_unit,))
+                    return {**state, "_lifetime_healthy": "no"}
+            else:
+                if label != "runtime-directory-preserve-restart":
+                    verify_runtime_baseline()
+            print("workspace_bind_case_lifecycle=" + json.dumps({
+                "case": label, "stop_exit": stopped.returncode,
+                "runtime_directories_after_stop": after_stop,
+                "runtime_directory_lifetime_note": (
+                    "RuntimeDirectoryPreserve=yes intentionally retains service runtime paths"
+                    if label == "runtime-directory-preserve" else None),
+            }, sort_keys=True, separators=(",", ":")), flush=True)
+            require(effective_matches,
+                    f"effective systemd configuration invalid for {label}; preserving units/evidence")
+            reset_failed_and_verify((start_unit,))
+            return {**state, "_lifetime_healthy": "yes" if lifetime_healthy else "no"}
+        # The baseline is first started without its parent graph, then through
+        # that same graph. The third case changes only BindPaths placement.
+        run_case("dropin-standalone", workspace_unit, workspace_unit,
+                 workspace_text, [workspace_dropin])
+        reset_failed_and_verify((workspace_unit,))
+
+        graph_cursor, start = run_fresh_cursor_attempt(
+            lambda: parse_journal_cursor(
+                (result := run(journal_cursor_command(), check=False, timeout=10)).stdout or "",
+                result.returncode),
+            lambda: run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", vm_unit],
+                        timeout=35, check=False))
+        graph_prestart = {
+            "source": _host_path_evidence(workspace),
+            "destination": _host_path_evidence(pathlib.Path(destination)),
+            "runtime_directories": [_host_path_evidence(pathlib.Path(raw))
+                                    for raw in runtime_paths],
+        }
         states = {}
         for name in units:
             result = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "show", "--no-pager",
-                          f"--property={properties}", name], check=False)
+                          f"--property={properties}", name], check=False, timeout=10)
+            require(result.returncode == 0,
+                    f"parent-graph systemd properties unavailable for {name}; preserving evidence")
             states[name] = dict(line.split("=", 1) for line in result.stdout.splitlines()
                                 if "=" in line)
-        journal = run(["/usr/bin/sudo", "-n", "/usr/bin/journalctl", "--no-pager",
-                       "-n", "40", "-u", workspace_unit], check=False, timeout=10)
+            require(states[name].get("LoadState") == "loaded",
+                    f"parent-graph unit did not load: {name} {states[name]}")
+        journal = run(journal_after_cursor_command(graph_cursor, workspace_unit),
+                      check=False, timeout=10)
         merged = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "cat", "--no-pager",
                       workspace_unit], check=False, timeout=10)
-        print("workspace_bind_dependency_repro=" + json.dumps({
-            "units": states, "start_exit": start.returncode,
-            "start_stderr": (start.stderr or "")[-1600:],
-            "workspace_journal": (journal.stdout or "")[-5000:],
-            "merged_unit_exit": merged.returncode,
-            "workspace_merged_unit": (merged.stdout or "")[-6000:],
-            "source": _host_path_evidence(workspace),
-            "runtime_directories": [_host_path_evidence(pathlib.Path(raw)) for raw in runtime_paths],
-        }, sort_keys=True, separators=(",", ":")), flush=True)
         workspace_state = states[workspace_unit]
         expected = {
             "Type": "exec", "User": user, "Group": group,
@@ -1110,37 +1681,100 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
         print("workspace_bind_dependency_configuration="
               + ("PASS" if not mismatches else "MISMATCH "
                  + json.dumps(mismatches, sort_keys=True, separators=(",", ":"))), flush=True)
-        require(not mismatches,
-                "disposable dependency reproduction did not retain the required effective production settings")
         merged_dropin_ok = merged_workspace_dropin_matches(
             merged.stdout or "", merged.returncode, workspace_dropin)
-        require(merged_dropin_ok,
-                "systemd merged unit does not show the production-shaped BindPaths drop-in")
-        diagnostic = (start.stdout or "") + (start.stderr or "") + (journal.stdout or "")
-        classification = classify_namespace_reproduction(
-            workspace_state, diagnostic, start_exit=start.returncode,
+        require(journal.returncode == 0,
+                "current-attempt parent-graph journal unavailable; preserving evidence")
+        graph_config = {key: workspace_state.get(key, "") for key in config_fields}
+        graph_config_mismatches = compare_effective_configuration(
+            baseline_config or {}, graph_config, mount_topology=private_tmp_topology)
+        graph_diagnostic = journal.stdout or ""
+        merged_dropin_ok = merged_dropin_ok and not graph_config_mismatches
+        graph_classification = classify_namespace_reproduction(
+            workspace_state, graph_diagnostic, start_exit=start.returncode,
             merged_dropin_matches=merged_dropin_ok)
-        print(f"workspace_bind_dependency_reproduction={classification}", flush=True)
+        if graph_config_mismatches or mismatches:
+            graph_classification = "INCONCLUSIVE"
+        print("workspace_bind_case=" + json.dumps({
+            "case": "dropin-parent-graph", "start_unit": vm_unit,
+            "effective_unit": workspace_unit, "start_exit": start.returncode,
+            "journal_cursor": graph_cursor,
+            "start_stderr": (start.stderr or "")[-1600:],
+            "units": states, "properties": workspace_state,
+            "configuration_mismatches": {**mismatches, **graph_config_mismatches},
+            "configuration_comparison": "INVALID_INCONCLUSIVE"
+            if graph_config_mismatches or mismatches else "MATCH",
+            "private_tmp_mount_topology": (private_tmp_topology if private_tmp_topology is not None
+                                            else "UNAVAILABLE; generated mount-edge comparison is INCONCLUSIVE"),
+            "journal": (journal.stdout or "")[-5000:],
+            "merged_unit_exit": merged.returncode, "merged_unit": (merged.stdout or "")[-6000:],
+            "effective_bind_configuration_matches": merged_dropin_ok,
+            "classification": graph_classification, "host_before_start": graph_prestart,
+            "namespace_metadata_limit": (
+                "host path metadata is logged immediately before start; when namespace setup "
+                "fails before ExecStart, path metadata inside the namespace is unavailable"),
+            "host_after_start": {
+                "source": _host_path_evidence(workspace),
+                "destination": _host_path_evidence(pathlib.Path(destination)),
+                "runtime_directories": [_host_path_evidence(pathlib.Path(raw))
+                                        for raw in runtime_paths],
+            },
+        }, sort_keys=True, separators=(",", ":")), flush=True)
+        print(f"workspace_bind_case=dropin-parent-graph classification={graph_classification} "
+              f"effective_unit={workspace_unit}", flush=True)
+        graph_stop = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", vm_unit,
+                          workspace_unit, proxy_unit, metrics_unit], timeout=30, check=False)
+        require(graph_stop.returncode == 0 or all(
+            unit_state(name).get("ActiveState") in ("inactive", "failed")
+            for name in (vm_unit, workspace_unit, proxy_unit, metrics_unit)),
+            "ambiguous parent-graph stop; preserving units and evidence")
+        for name in (vm_unit, workspace_unit, proxy_unit, metrics_unit):
+            verify_stopped(name)
+        verify_runtime_baseline()
+        require(merged_dropin_ok,
+                "systemd merged unit or effective configuration mismatch; preserving units/evidence")
+        require(not mismatches,
+                "disposable dependency configuration mismatch; preserving units/evidence")
+        reset_failed_and_verify((vm_unit, workspace_unit, fragment_unit, proxy_unit, metrics_unit))
+        run_case(
+            "fragment-standalone", fragment_unit, fragment_unit, fragment_text, [],
+            fragment_bind_placement=True)
+        lifetime_result = {"_lifetime_healthy": "no"}
+        for label, name in variant_units.items():
+            result = run_case(label, name, name, workspace_text,
+                              [workspace_dropin, variant_dropins[label]],
+                              allowed_setting={
+                                  "no-exec-paths": "NoExecPaths", "exec-paths": "ExecPaths",
+                                  "protect-control-groups": "ProtectControlGroups",
+                                  "protect-home": "ProtectHome", "protect-system": "ProtectSystem",
+                                  "read-write-paths": "ReadWritePaths", "private-tmp": "PrivateTmp",
+                                  "runtime-directory-preserve": "RuntimeDirectoryPreserve",
+                              }[label])
+            if label == "runtime-directory-preserve":
+                lifetime_result = result
+        if lifetime_result.get("_lifetime_healthy") != "yes":
+            print("workspace_bind_case_lifecycle=" + json.dumps({
+                "case": "runtime-directory-preserve-restart",
+                "lifetime_probe": "NOT_EXERCISED",
+            }, sort_keys=True, separators=(",", ":")), flush=True)
+        verify_runtime_baseline(retained_allowed=True)
+        cleanup_authorized = True
     finally:
-        run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", vm_unit, workspace_unit,
-             proxy_unit, metrics_unit], timeout=30, check=False)
-        for name in units:
-            stopped = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "show", "--no-pager",
-                           "--property=ActiveState", "--property=MainPID", name], check=False)
-            stopped_state = dict(line.split("=", 1) for line in stopped.stdout.splitlines()
-                                 if "=" in line)
-            require(stopped_state.get("ActiveState") in ("inactive", "failed")
-                    and stopped_state.get("MainPID") == "0",
-                    f"preserving disposable systemd units that did not stop: {name} {stopped_state}")
+        if not cleanup_authorized:
+            print("workspace_bind_reproduction_cleanup=SKIPPED preserving units and evidence",
+                  flush=True)
+            raise RuntimeError("diagnostic reproduction was ambiguous; preserving units and evidence")
         remover = textwrap.dedent("""\
             import json, os, pathlib, stat, sys
             root = pathlib.Path('/run/systemd/system')
             payload = json.loads(sys.stdin.read())
             units, dropins = payload['units'], payload['dropins']
+            remove_files = []
             for name, text in units.items():
                 path = root / name
                 info = os.lstat(path)
-                if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                        or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o644):
                     raise SystemExit('preserving changed disposable unit file')
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
                 try:
@@ -1149,11 +1783,20 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                     os.close(fd)
                 if actual != text.encode():
                     raise SystemExit('preserving changed disposable unit file')
-                os.unlink(path)
+                remove_files.append(path)
+            dropin_dirs = set()
+            expected_by_directory = {}
             for relative, text in dropins.items():
                 path = root / relative
+                directory_info = os.lstat(path.parent)
+                if (not stat.S_ISDIR(directory_info.st_mode) or stat.S_ISLNK(directory_info.st_mode)
+                        or directory_info.st_uid != 0
+                        or stat.S_IMODE(directory_info.st_mode) != 0o755):
+                    raise SystemExit('preserving changed disposable unit drop-in directory')
+                expected_by_directory.setdefault(path.parent, set()).add(path.name)
                 info = os.lstat(path)
-                if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                        or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o644):
                     raise SystemExit('preserving changed disposable unit drop-in')
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
                 try:
@@ -1162,16 +1805,70 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                     os.close(fd)
                 if actual != text.encode():
                     raise SystemExit('preserving changed disposable unit drop-in')
+                remove_files.append(path)
+                dropin_dirs.add(path.parent)
+            for directory, expected_names in expected_by_directory.items():
+                if set(os.listdir(directory)) != expected_names:
+                    raise SystemExit('preserving unexpected disposable unit drop-in evidence')
+            for path in remove_files:
                 os.unlink(path)
-                path.parent.rmdir()
+            for directory in dropin_dirs:
+                directory.rmdir()
             """)
-        removed = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c", remover],
-                                 input=payload, text=True, capture_output=True,
-                                 timeout=10, check=False)
-        require(removed.returncode == 0, "preserving changed or unavailable disposable unit files")
-        run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "daemon-reload"], timeout=15)
-        run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reset-failed", workspace_unit,
-             proxy_unit, metrics_unit, vm_unit], timeout=10, check=False)
+        runtime_relative = {pathlib.Path(raw).name: identity
+                            for raw, identity in retained_runtime.items()}
+
+        def cleanup_runtime():
+            # First preflight every retained directory without deleting anything.
+            preflight = runtime_directory_preflight_script(pathlib.Path("/run"), runtime_relative)
+            checked = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c",
+                                      preflight], text=True, capture_output=True,
+                                     timeout=10, check=False)
+            require(checked.returncode == 0,
+                    "preserving unexpected retained RuntimeDirectory evidence")
+            # The exact destructive helper repeats the complete preflight atomically
+            # before removing any path; unit/drop-in diagnostics still exist here.
+            runtime_cleanup = runtime_cleanup_script(pathlib.Path("/run"), runtime_relative)
+            cleaned = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c",
+                                      runtime_cleanup], text=True, capture_output=True,
+                                     timeout=10, check=False)
+            require(cleaned.returncode == 0,
+                    "preserving unexpected retained RuntimeDirectory evidence")
+
+        def remove_unit_evidence():
+            removed = subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c", remover],
+                input=payload, text=True, capture_output=True, timeout=10, check=False)
+            require(removed.returncode == 0,
+                    "preserving changed or unavailable disposable unit files")
+
+        def stop_final_units(names):
+            result = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", *names],
+                         timeout=30, check=False)
+            require(result.returncode == 0 or all(
+                unit_state(name).get("ActiveState") in ("inactive", "failed")
+                for name in names),
+                "ambiguous final disposable-unit stop; preserving units and evidence")
+
+        def verify_final_stopped(name):
+            state = unit_state(name)
+            require(state.get("ActiveState") in ("inactive", "failed")
+                    and state.get("MainPID") == "0",
+                    f"preserving disposable systemd units that did not stop: {name} {state}")
+
+        def reset_final_failed(names):
+            result = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reset-failed",
+                          *names], timeout=10, check=False)
+            require(result.returncode == 0,
+                    f"systemctl reset-failed failed for loaded units {names}; preserving evidence")
+
+        finalize_disposable_units(
+            units=final_unit_names,
+            stop_units=stop_final_units, verify_stopped=verify_final_stopped,
+            reset_failed=reset_final_failed, runtime_cleanup=cleanup_runtime,
+            evidence_cleanup=remove_unit_evidence,
+            daemon_reload=lambda: run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl",
+                                       "daemon-reload"], timeout=15))
         for raw in runtime_paths:
             path = pathlib.Path(raw)
             require(not path.exists() and not path.is_symlink(),

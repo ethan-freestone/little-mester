@@ -516,7 +516,7 @@ class HostedSystemUnitTests(unittest.TestCase):
             "PartOf=little-mester-vm.service", "Before=little-mester-vm.service",
         ):
             self.assertIn(directive, template)
-        for directive in ("systemctl", "daemon-reload", "journalctl", "O_EXCL", "O_NOFOLLOW"):
+        for directive in ("systemctl", "daemon-reload", "O_EXCL", "O_NOFOLLOW"):
             self.assertIn(directive, repro)
         module = ast.parse(source)
         function = next(node for node in module.body
@@ -543,8 +543,7 @@ class HostedSystemUnitTests(unittest.TestCase):
                          "INCONCLUSIVE")
         # systemctl show represents CLD_EXITED as the numeric enum value 1.
         self.assertEqual(classify({"ExecMainCode": "1", "ExecMainStatus": "226"}, "",
-                                  start_exit=1),
-                         "REPRODUCED_226_NAMESPACE")
+                                  start_exit=1), "INCONCLUSIVE")
         self.assertEqual(classify({}, "Main process exited, code=exited, status=226/NAMESPACE",
                                   start_exit=1), "REPRODUCED_226_NAMESPACE")
         self.assertEqual(classify({}, "Failed to set up mount namespacing", start_exit=1),
@@ -562,6 +561,539 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertEqual(classify(healthy_sleep, "", start_exit=0), "INCONCLUSIVE")
         self.assertEqual(classify(healthy_sleep, "", start_exit=1,
                                   merged_dropin_matches=True), "INCONCLUSIVE")
+
+    def test_journal_cursor_and_current_attempt_classification(self):
+        cursor = "s=abc123;i=4;b=boot"
+        self.assertEqual(unit.parse_journal_cursor(f"-- cursor: {cursor}\n", 0), cursor)
+        for output, code in (("", 0), (f"-- cursor: {cursor}\n", 1),
+                             ("-- cursor: malformed space\n", 0)):
+            with self.assertRaisesRegex(RuntimeError, "journal cursor"):
+                unit.parse_journal_cursor(output, code)
+        stale_226 = {"ExecMainCode": "1", "ExecMainStatus": "226",
+                     "ActiveState": "failed", "SubState": "failed"}
+        self.assertEqual(unit.classify_namespace_reproduction(
+            stale_226, "", start_exit=1, merged_dropin_matches=True), "INCONCLUSIVE")
+        self.assertEqual(unit.classify_namespace_reproduction(
+            stale_226, "new entry: status=226/NAMESPACE", start_exit=1,
+            merged_dropin_matches=True), "REPRODUCED_226_NAMESPACE")
+        execution_failure = unit.classify_namespace_reproduction(
+            {"ActiveState": "failed", "SubState": "failed", "MainPID": "0"},
+            "new entry: ExecPaths execution denied", start_exit=1,
+            merged_dropin_matches=True)
+        self.assertEqual(execution_failure, "INCONCLUSIVE")
+        self.assertIn("EXECUTION_FAILURE", unit.classify_namespace_diagnostic(
+            execution_failure, "new entry: ExecPaths execution denied"))
+
+    def test_effective_configuration_comparison_allows_only_declared_delta(self):
+        baseline = {"ProtectHome": "tmpfs", "PrivateTmp": "yes", "BindPaths": "/a:/b",
+                    "FragmentPath": "/run/a.service", "DropInPaths": "/run/a.d/20.conf"}
+        self.assertEqual(unit.compare_effective_configuration(
+            baseline, dict(baseline, PrivateTmp="no"), allowed_setting="PrivateTmp"), {})
+        self.assertTrue(unit.compare_effective_configuration(
+            baseline, dict(baseline, ProtectHome="no"), allowed_setting="PrivateTmp"))
+        self.assertEqual(unit.compare_effective_configuration(
+            baseline, dict(baseline, FragmentPath="/run/b.service", DropInPaths="",
+                           BindPaths="/a:/b"), allow_bind_fragment_placement=True), {})
+        self.assertTrue(unit.compare_effective_configuration(
+            baseline, dict(baseline, BindPaths="/wrong:/b"),
+            allow_bind_fragment_placement=True))
+
+    def test_effective_comparison_treats_dependency_lists_as_sets_and_limits_private_tmp_delta(self):
+        # v255 unit_add_exec_dependencies adds tmp.mount and tmpfiles edges;
+        # RequiresMountsFor(/var/tmp) additionally walks each real mount prefix.
+        topology = unit.private_tmp_mount_topology({"/", "/tmp", "/var", "/var/tmp"})
+        self.assertEqual(topology, {
+            "/tmp": ("-.mount", "tmp.mount"),
+            "/var/tmp": ("-.mount", "var.mount", "var-tmp.mount"),
+        })
+        self.assertEqual(json.dumps(topology, sort_keys=True, separators=(",", ":")),
+                         '{"/tmp":["-.mount","tmp.mount"],'
+                         '"/var/tmp":["-.mount","var.mount","var-tmp.mount"]}')
+        baseline = {
+            "PrivateTmp": "yes", "RequiresMountsFor": "/var/tmp",
+            "Requires": "network.target -.mount var.mount var-tmp.mount",
+            "After": "network.target -.mount tmp.mount var.mount var-tmp.mount systemd-tmpfiles-setup.service",
+            "Before": "shutdown.target", "Wants": "tmp.mount a.service",
+            "BindsTo": "a.service", "PartOf": "parent.service",
+            "Conflicts": "conflict.service", "Requisite": "required.service",
+        }
+        reordered = dict(baseline, Requires="network.target -.mount var.mount var-tmp.mount",
+                         After="systemd-tmpfiles-setup.service tmp.mount network.target -.mount var.mount var-tmp.mount",
+                         Before="shutdown.target another.target",
+                         Wants="a.service tmp.mount", BindsTo="z.service a.service",
+                         PartOf="parent-b.service parent-a.service",
+                         Conflicts="other-conflict.service conflict.service",
+                         Requisite="second-required.service required.service",
+                         RequiresMountsFor="/var/tmp")
+        baseline["Before"] = "another.target shutdown.target"
+        baseline["BindsTo"] = "a.service z.service"
+        baseline["PartOf"] = "parent-a.service parent-b.service"
+        baseline["Conflicts"] = "conflict.service other-conflict.service"
+        baseline["Requisite"] = "required.service second-required.service"
+        self.assertEqual(unit.compare_effective_configuration(baseline, reordered), {})
+        private_tmp_no = dict(baseline, PrivateTmp="no", RequiresMountsFor="",
+                              Requires="network.target", Wants="a.service",
+                              After="network.target")
+        self.assertEqual(unit.compare_effective_configuration(
+            baseline, private_tmp_no, allowed_setting="PrivateTmp",
+            mount_topology=topology), {})
+
+        # v257 uses WantsMountsFor; every actual ancestor for those paths can
+        # produce Wants/After edges. There is no Requires exception in this profile.
+        v257_baseline = {
+            "PrivateTmp": "yes", "WantsMountsFor": "/tmp /var/tmp",
+            "Requires": "network.target",
+            "After": "network.target tmp.mount var.mount var-tmp.mount systemd-tmpfiles-setup.service",
+            "Wants": "a.service tmp.mount var.mount var-tmp.mount",
+        }
+        v257_candidate = dict(v257_baseline, PrivateTmp="no", WantsMountsFor="",
+                              After="network.target", Wants="a.service")
+        self.assertEqual(unit.compare_effective_configuration(
+            v257_baseline, v257_candidate, allowed_setting="PrivateTmp",
+            mount_topology=topology), {})
+        missing_var_tmp_dependency = dict(v257_baseline, WantsMountsFor="/tmp")
+        rejected_var_tmp_removal = dict(missing_var_tmp_dependency, PrivateTmp="no",
+                                        After="network.target", Wants="a.service",
+                                        WantsMountsFor="")
+        self.assertIn("After", unit.compare_effective_configuration(
+            missing_var_tmp_dependency, rejected_var_tmp_removal,
+            allowed_setting="PrivateTmp", mount_topology=topology))
+        self.assertIn("Wants", unit.compare_effective_configuration(
+            missing_var_tmp_dependency, rejected_var_tmp_removal,
+            allowed_setting="PrivateTmp", mount_topology=topology))
+
+        self.assertEqual(unit.private_tmp_mount_topology({"/", "/tmp"}), {
+            "/tmp": ("-.mount", "tmp.mount"), "/var/tmp": ("-.mount",)})
+        self.assertEqual(unit.private_tmp_mount_topology({"/", "/tmp", "/var", "/var/tmp"}), topology)
+        unexpected = (
+            dict(private_tmp_no, Requires="rogue.service"),
+            dict(private_tmp_no, BindsTo=""),
+            dict(private_tmp_no, PartOf=""),
+            dict(private_tmp_no, Wants=""),
+            dict(private_tmp_no, After="network.target rogue.service"),
+            dict(private_tmp_no, RequiresMountsFor="/tmp"),
+            dict(private_tmp_no, RequiresMountsFor="/other"),
+            dict(private_tmp_no, WantsMountsFor="/other"),
+            # var-tmp.mount is not an unconditional v255 Wants edge.
+            dict(private_tmp_no, Wants="a.service var-tmp.mount"),
+        )
+        for candidate in unexpected:
+            with self.subTest(candidate=candidate):
+                mismatches = unit.compare_effective_configuration(
+                    baseline, candidate, allowed_setting="PrivateTmp")
+                self.assertTrue(mismatches)
+                self.assertEqual(json.loads(json.dumps(mismatches)), mismatches)
+
+        unrelated_baseline = dict(baseline, RequiresMountsFor="/var/tmp /srv/unrelated")
+        unrelated_mount_removal = dict(unrelated_baseline, PrivateTmp="no",
+                                       RequiresMountsFor="/var/tmp",
+                                       After="network.target", Wants="a.service",
+                                       Requires="network.target")
+        self.assertIn("RequiresMountsFor", unit.compare_effective_configuration(
+            unrelated_baseline, unrelated_mount_removal,
+            allowed_setting="PrivateTmp", mount_topology=topology))
+
+        unknown_topology = unit.compare_effective_configuration(
+            v257_baseline, v257_candidate, allowed_setting="PrivateTmp",
+            mount_topology=None)
+        self.assertTrue({"After", "Wants"} & set(unknown_topology),
+                        "unknown runtime topology must remain unsupported/inconclusive")
+
+        unknown_profile = {"PrivateTmp": "yes", "After": "tmp.mount rogue.service",
+                           "Wants": "tmp.mount", "RequiresMountsFor": "/other"}
+        unknown_profile_candidate = dict(unknown_profile, PrivateTmp="no", After="",
+                                         Wants="", RequiresMountsFor="")
+        self.assertTrue(unit.compare_effective_configuration(
+            unknown_profile, unknown_profile_candidate, allowed_setting="PrivateTmp",
+            mount_topology=topology), "unknown systemd profile must fail closed")
+
+        wrong_v257_requires = dict(v257_baseline, Requires="network.target var.mount")
+        self.assertIn("Requires", unit.compare_effective_configuration(
+            v257_baseline, wrong_v257_requires, allowed_setting="PrivateTmp",
+            mount_topology=topology))
+
+        for property_name in ("Requires", "BindsTo", "PartOf", "Requisite", "Conflicts"):
+            with self.subTest(forbidden_mount_unit_property=property_name):
+                before = {"PrivateTmp": "yes", property_name: "tmp.mount app.service"}
+                after = {"PrivateTmp": "no", property_name: "app.service"}
+                self.assertIn(property_name, unit.compare_effective_configuration(
+                    before, after, allowed_setting="PrivateTmp"))
+
+        no_private_tmp_transition = dict(private_tmp_no, PrivateTmp="yes")
+        self.assertIn("Wants", unit.compare_effective_configuration(
+            baseline, no_private_tmp_transition, allowed_setting="PrivateTmp"))
+
+    def test_runner_shaped_private_tmp_profiles_allow_unrelated_runtime_requirements(self):
+        runtime_paths = (
+            "/run/little-mester-vm-workspace "+
+            "/run/little-mester-vm-workspace-share"
+        )
+        topology = unit.private_tmp_mount_topology({"/", "/tmp", "/var", "/var/tmp"})
+        # systemctl show includes both path properties even when one is empty.
+        # Keep the other dependency properties representative of the full runner
+        # query, including unrelated runtime mount requirements.
+        v255 = {
+            "PrivateTmp": "yes", "RequiresMountsFor": f"/var/tmp {runtime_paths}",
+            "WantsMountsFor": "", "Requires": "network.target -.mount var.mount var-tmp.mount",
+            "Wants": "tmp.mount app.service",
+            "After": "network.target -.mount tmp.mount var.mount var-tmp.mount systemd-tmpfiles-setup.service",
+            "Before": "shutdown.target", "BindsTo": "app.service",
+            "PartOf": "parent.service", "Conflicts": "conflict.service",
+            "Requisite": "required.service",
+        }
+        v255_without_private_tmp = dict(
+            v255, PrivateTmp="no", RequiresMountsFor=runtime_paths,
+            Requires="network.target", Wants="app.service", After="network.target")
+        self.assertEqual(unit.private_tmp_systemd_profile(v255), "v255")
+        self.assertEqual(unit.compare_effective_configuration(
+            v255, v255_without_private_tmp, allowed_setting="PrivateTmp",
+            mount_topology=topology), {})
+
+        v257 = {
+            "PrivateTmp": "yes", "RequiresMountsFor": runtime_paths,
+            "WantsMountsFor": "/tmp /var/tmp", "Requires": "network.target",
+            "Wants": "app.service tmp.mount var.mount var-tmp.mount",
+            "After": "network.target tmp.mount var.mount var-tmp.mount systemd-tmpfiles-setup.service",
+            "Before": "shutdown.target", "BindsTo": "app.service",
+            "PartOf": "parent.service", "Conflicts": "conflict.service",
+            "Requisite": "required.service",
+        }
+        v257_without_private_tmp = dict(
+            v257, PrivateTmp="no", WantsMountsFor="", Wants="app.service",
+            After="network.target")
+        self.assertEqual(unit.private_tmp_systemd_profile(v257), "v257")
+        self.assertEqual(unit.compare_effective_configuration(
+            v257, v257_without_private_tmp, allowed_setting="PrivateTmp",
+            mount_topology=topology), {})
+
+    def test_private_tmp_profile_detection_rejects_mixed_or_ambiguous_paths(self):
+        ambiguous = (
+            # Partial WantsMountsFor sets are neither supported upstream shape.
+            {"RequiresMountsFor": "/var/tmp", "WantsMountsFor": "/tmp"},
+            {"RequiresMountsFor": "", "WantsMountsFor": "/var/tmp"},
+            # A private-tmp path in both properties mixes v255 and v257 semantics.
+            {"RequiresMountsFor": "/var/tmp /run/little-mester-vm-workspace",
+             "WantsMountsFor": "/tmp /var/tmp"},
+        )
+        for profile in ambiguous:
+            with self.subTest(profile=profile):
+                self.assertIsNone(unit.private_tmp_systemd_profile(profile))
+                baseline = dict(profile, PrivateTmp="yes", After="tmp.mount rogue.service",
+                                Wants="tmp.mount rogue.service")
+                candidate = dict(baseline, PrivateTmp="no", After="", Wants="")
+                self.assertTrue(unit.compare_effective_configuration(
+                    baseline, candidate, allowed_setting="PrivateTmp",
+                    mount_topology={"/tmp": ("-.mount", "tmp.mount"),
+                                    "/var/tmp": ("-.mount", "var.mount", "var-tmp.mount")}))
+
+    def test_effective_configuration_mismatches_are_json_serializable(self):
+        mismatch = unit.compare_effective_configuration(
+            {"After": "a.service b.service"}, {"After": "a.service c.service"})
+        self.assertEqual(json.loads(json.dumps(mismatch)), {
+            "After": {"baseline": ["a.service", "b.service"],
+                      "candidate": ["a.service", "c.service"]},
+        })
+
+    def test_exec_configuration_normalization_discards_only_dynamic_metadata(self):
+        before = ("{ path=/usr/bin/sleep ; argv[]=/usr/bin/sleep 90 ; ignore_errors=no ; "
+                  "start_time=[Mon 2026-11-02 10:00:00 UTC] ; stop_time=n/a ; pid=123 ; "
+                  "code=(null) ; status=0 }")
+        after = ("{ path=/usr/bin/sleep ; argv[]=/usr/bin/sleep 90 ; ignore_errors=no ; "
+                 "start_time=[Sat 2026-11-21 13:17:42 UTC] ; stop_time=n/a ; pid=987 ; "
+                 "code=exited ; status=0 }")
+        self.assertEqual(unit.normalize_systemd_exec(before), unit.normalize_systemd_exec(after))
+        changed = after.replace("argv[]=/usr/bin/sleep 90", "argv[]=/usr/bin/sleep 91")
+        self.assertNotEqual(unit.normalize_systemd_exec(before), unit.normalize_systemd_exec(changed))
+        changed = after.replace("ignore_errors=no", "ignore_errors=yes")
+        self.assertNotEqual(unit.normalize_systemd_exec(before), unit.normalize_systemd_exec(changed))
+
+    def test_preserved_runtime_lifecycle_captures_healthy_identity_before_stop_and_restarts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "runtime"
+            path.mkdir(mode=0o700)
+            events = []
+
+            def stop():
+                events.append("stop")
+
+            def restart():
+                events.append("start")
+                return True
+
+            result = unit.run_preserved_runtime_lifecycle(
+                (path,), first_start_healthy=True, stop=stop, restart=restart)
+            self.assertEqual(events, ["stop", "start", "stop"])
+            self.assertEqual(result, "EXERCISED")
+            events.clear()
+            self.assertEqual(unit.run_preserved_runtime_lifecycle(
+                (path,), first_start_healthy=False, stop=stop, restart=restart),
+                "NOT_EXERCISED")
+            self.assertEqual(events, [])
+
+    def test_preserved_runtime_lifecycle_rejects_identity_replacement_during_stop_or_restart(self):
+        for replace_during in ("stop", "restart"):
+            with self.subTest(replace_during=replace_during), tempfile.TemporaryDirectory() as temporary:
+                path = pathlib.Path(temporary) / "runtime"
+                path.mkdir(mode=0o700)
+
+                def replace():
+                    replacement = pathlib.Path(temporary) / "replacement"
+                    replacement.mkdir(mode=0o700)
+                    path.rmdir()
+                    replacement.rename(path)
+
+                def stop():
+                    if replace_during == "stop":
+                        replace()
+
+                def restart():
+                    if replace_during == "restart":
+                        replace()
+                    return True
+
+                with self.assertRaisesRegex(RuntimeError, "identity"):
+                    unit.run_preserved_runtime_lifecycle(
+                        (path,), first_start_healthy=True, stop=stop, restart=restart)
+
+    def test_preserved_restart_uses_a_fresh_distinct_journal_cursor(self):
+        cursors = iter(("first-cursor", "restart-cursor"))
+        started = []
+
+        def attempt(previous=None):
+            return unit.run_fresh_cursor_attempt(
+                lambda: next(cursors), lambda: started.append("start") or True,
+                previous_cursor=previous)
+
+        first_cursor, first_result = attempt()
+        restart_cursor, restart_result = attempt(first_cursor)
+        self.assertTrue(first_result and restart_result)
+        self.assertNotEqual(first_cursor, restart_cursor)
+        self.assertEqual(started, ["start", "start"])
+        with self.assertRaisesRegex(RuntimeError, "fresh journal cursor"):
+            unit.run_fresh_cursor_attempt(lambda: first_cursor, lambda: started.append("bad"),
+                                          previous_cursor=first_cursor)
+        self.assertEqual(started, ["start", "start"])
+
+    def test_runner_wires_real_attempt_and_final_cleanup_helpers(self):
+        module = ast.parse(SCRIPT.read_text())
+        reproduction = next(node for node in module.body
+                            if isinstance(node, ast.FunctionDef)
+                            and node.name == "run_production_dependency_reproduction")
+        run_case = next(node for node in ast.walk(reproduction)
+                        if isinstance(node, ast.FunctionDef) and node.name == "run_case")
+        attempt_calls = [node for node in ast.walk(run_case)
+                         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                         and node.func.id == "run_fresh_cursor_attempt"]
+        self.assertEqual(len(attempt_calls), 1)
+        self.assertTrue(any(isinstance(node, ast.Name) and node.id == "preserve_cursor"
+                            for node in ast.walk(attempt_calls[0])))
+        finalizers = [node for node in ast.walk(reproduction)
+                      if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                      and node.func.id == "finalize_disposable_units"]
+        self.assertEqual(len(finalizers), 1)
+
+        cursors = iter(("first", "restart"))
+        started = []
+        first, _ = unit.run_fresh_cursor_attempt(
+            lambda: next(cursors), lambda: started.append("first"), previous_cursor=None)
+        restart, _ = unit.run_fresh_cursor_attempt(
+            lambda: next(cursors), lambda: started.append("restart"), previous_cursor=first)
+        self.assertNotEqual(first, restart)
+        self.assertEqual(started, ["first", "restart"])
+        with self.assertRaisesRegex(RuntimeError, "identity"):
+            with tempfile.TemporaryDirectory() as temporary:
+                path = pathlib.Path(temporary) / "runtime"
+                path.mkdir()
+
+                def replace_identity():
+                    replacement = pathlib.Path(temporary) / "replacement"
+                    replacement.mkdir()
+                    path.rmdir()
+                    replacement.rename(path)
+
+                unit.run_preserved_runtime_lifecycle(
+                    (path,), first_start_healthy=True, stop=replace_identity,
+                    restart=lambda: True)
+
+    def test_final_cleanup_orders_loaded_reset_runtime_evidence_and_reload(self):
+        events = []
+        units = ("one.service", "two.service")
+        unit.finalize_disposable_units(
+            units=units,
+            stop_units=lambda names: events.append(("stop", names)),
+            verify_stopped=lambda name: events.append(("verify", name)),
+            reset_failed=lambda names: events.append(("reset", names)),
+            runtime_cleanup=lambda: events.append(("runtime",)),
+            evidence_cleanup=lambda: events.append(("evidence",)),
+            daemon_reload=lambda: events.append(("reload",)))
+        self.assertEqual(events, [
+            ("stop", units), ("verify", units[0]), ("verify", units[1]),
+            ("reset", units), ("verify", units[0]), ("verify", units[1]),
+            ("runtime",), ("evidence",), ("reload",),
+        ])
+
+    def test_final_unit_name_helper_covers_every_file_and_runner_wires_complete_tuple(self):
+        variants = {"private-tmp": "repro-private-tmp.service",
+                    "protect-home": "repro-protect-home.service"}
+        expected = ("repro-workspace.service", "repro-fragment.service",
+                    "repro-proxy.service", "repro-metrics.service", "repro-vm.service",
+                    *variants.values())
+        names = unit.disposable_final_unit_names(
+            "repro-workspace.service", "repro-fragment.service", "repro-proxy.service",
+            "repro-metrics.service", "repro-vm.service", variants)
+        self.assertEqual(names, expected)
+        self.assertEqual(len(names), len(set(names)))
+        observed = []
+        unit.finalize_disposable_units(
+            units=names,
+            stop_units=lambda selected: observed.append(("stop", selected)),
+            verify_stopped=lambda selected: observed.append(("verify", selected)),
+            reset_failed=lambda selected: observed.append(("reset", selected)),
+            runtime_cleanup=lambda: observed.append(("runtime",)),
+            evidence_cleanup=lambda: observed.append(("evidence",)),
+            daemon_reload=lambda: observed.append(("reload",)))
+        self.assertEqual(observed[0], ("stop", expected))
+        self.assertEqual(observed[1:1 + len(expected)],
+                         [("verify", name) for name in expected])
+        reset_index = 1 + len(expected)
+        self.assertEqual(observed[reset_index], ("reset", expected))
+        self.assertEqual(observed[reset_index + 1:reset_index + 1 + len(expected)],
+                         [("verify", name) for name in expected])
+
+        module = ast.parse(SCRIPT.read_text())
+        reproduction = next(node for node in module.body
+                            if isinstance(node, ast.FunctionDef)
+                            and node.name == "run_production_dependency_reproduction")
+        assignment = next(node for node in ast.walk(reproduction)
+                          if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name)
+                                  and target.id == "final_unit_names" for target in node.targets))
+        self.assertEqual(assignment.value.func.id, "disposable_final_unit_names")
+        finalizer = next(node for node in ast.walk(reproduction)
+                         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                         and node.func.id == "finalize_disposable_units")
+        unit_arg = next(keyword.value for keyword in finalizer.keywords if keyword.arg == "units")
+        self.assertIsInstance(unit_arg, ast.Name)
+        self.assertEqual(unit_arg.id, "final_unit_names")
+        # Every entry in the writer's files payload is represented by the helper's
+        # production call inputs; variants are added as a complete values tuple.
+        self.assertIn("*tuple(variant_units.values())", ast.get_source_segment(
+            SCRIPT.read_text(), next(node for node in ast.walk(module)
+                                     if isinstance(node, ast.FunctionDef)
+                                     and node.name == "disposable_final_unit_names")))
+
+    def test_final_cleanup_runtime_failure_skips_evidence_removal_callback(self):
+        events = []
+
+        def failing_runtime_cleanup():
+            events.append("runtime")
+            raise RuntimeError("runtime cleanup failed")
+
+        with self.assertRaisesRegex(RuntimeError, "runtime cleanup failed"):
+            unit.finalize_disposable_units(
+                units=("variant.service",), stop_units=lambda names: events.append("stop"),
+                verify_stopped=lambda name: events.append(("verify", name)),
+                reset_failed=lambda names: events.append("reset"),
+                runtime_cleanup=failing_runtime_cleanup,
+                evidence_cleanup=lambda: events.append("evidence"),
+                daemon_reload=lambda: events.append("reload"))
+        self.assertIn("runtime", events)
+        self.assertNotIn("evidence", events)
+        self.assertNotIn("reload", events)
+
+    def test_final_cleanup_failures_leave_unit_and_dropin_evidence_untouched(self):
+        for failing_stage in ("preflight", "destructive"):
+            with self.subTest(failing_stage=failing_stage), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                artifact = root / "unit.service"
+                artifact.write_text("unit evidence")
+                dropin = root / "unit.service.d"
+                dropin.mkdir()
+                (dropin / "20-test.conf").write_text("drop-in evidence")
+                events = []
+
+                def runtime_cleanup():
+                    events.append("runtime-preflight")
+                    if failing_stage == "preflight":
+                        raise RuntimeError("runtime preflight failed")
+                    events.append("runtime-destructive")
+                    raise RuntimeError("runtime destructive cleanup failed")
+
+                def evidence_cleanup():
+                    events.append("evidence")
+                    artifact.unlink()
+
+                with self.assertRaisesRegex(RuntimeError, "runtime"):
+                    unit.finalize_disposable_units(
+                        units=("unit.service",), stop_units=lambda names: events.append("stop"),
+                        verify_stopped=lambda name: events.append("verify"),
+                        reset_failed=lambda names: events.append("reset"),
+                        runtime_cleanup=runtime_cleanup, evidence_cleanup=evidence_cleanup,
+                        daemon_reload=lambda: events.append("reload"))
+                self.assertNotIn("evidence", events)
+                self.assertNotIn("reload", events)
+                self.assertEqual(artifact.read_text(), "unit evidence")
+                self.assertEqual((dropin / "20-test.conf").read_text(), "drop-in evidence")
+
+    def test_runtime_cleanup_preflight_failure_preserves_unit_and_dropin_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            artifact = root / "unit.service"
+            artifact.write_text("unit evidence")
+            dropin = root / "unit.service.d"
+            dropin.mkdir()
+            (dropin / "20-test.conf").write_text("drop-in evidence")
+            runtime = root / "runtime"
+            runtime.mkdir()
+            expected = {str(runtime): unit.runtime_directory_identity(os.lstat(runtime))}
+            (runtime / "unexpected").touch()
+            evidence_removed = []
+
+            with self.assertRaisesRegex(RuntimeError, "non-empty"):
+                unit.cleanup_runtime_before_evidence(
+                    lambda: unit.remove_runtime_directories(expected),
+                    lambda: evidence_removed.append(artifact.unlink()))
+            self.assertEqual(evidence_removed, [])
+            self.assertEqual(artifact.read_text(), "unit evidence")
+            self.assertEqual((dropin / "20-test.conf").read_text(), "drop-in evidence")
+
+            (runtime / "unexpected").unlink()
+            replacement = root / "replacement"
+            replacement.mkdir()
+            runtime.rmdir()
+            replacement.rename(runtime)
+            with self.assertRaisesRegex(RuntimeError, "identity"):
+                unit.cleanup_runtime_before_evidence(
+                    lambda: unit.remove_runtime_directories(expected),
+                    lambda: evidence_removed.append(artifact.unlink()))
+            self.assertEqual(evidence_removed, [])
+            self.assertEqual(artifact.read_text(), "unit evidence")
+            self.assertEqual((dropin / "20-test.conf").read_text(), "drop-in evidence")
+            self.assertTrue(runtime.is_dir())
+
+    def test_retained_runtime_cleanup_requires_exact_inode_and_preflights_all(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            first, second = root / "first", root / "second"
+            first.mkdir(mode=0o700)
+            second.mkdir(mode=0o700)
+            expected = {str(path): unit.runtime_directory_identity(os.lstat(path))
+                        for path in (first, second)}
+            (first / "payload").touch()
+            with self.assertRaisesRegex(RuntimeError, "non-empty"):
+                unit.remove_runtime_directories(expected)
+            self.assertTrue(second.is_dir(), "cleanup must preflight all paths before deletion")
+            (first / "payload").unlink()
+            replacement = root / "replacement"
+            replacement.mkdir(mode=0o700)
+            first.rmdir()
+            replacement.rename(first)
+            with self.assertRaisesRegex(RuntimeError, "identity"):
+                unit.remove_runtime_directories({str(first): expected[str(first)]})
+            self.assertTrue(first.is_dir(), "replacement inode must not be removed")
+            first.rmdir()
+            unit.remove_runtime_directories({str(second): expected[str(second)]})
+            self.assertFalse(second.exists())
 
     def test_embedded_privileged_writer_rolls_back_owned_files_and_directories(self):
         source = SCRIPT.read_text()
@@ -620,6 +1152,155 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertTrue(unit.merged_workspace_dropin_matches(merged, 0, dropin_text))
         self.assertFalse(unit.merged_workspace_dropin_matches(merged, 1, dropin_text))
         self.assertFalse(unit.merged_workspace_dropin_matches(unit_text, 0, dropin_text))
+
+    def test_hosted_workspace_matrix_compares_standalone_graph_and_bind_placement(self):
+        template = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
+        base, dropin = unit.production_workspace_reproduction_config(
+            template, user="ci-owner", group="ci-group", vm_unit="sample-vm.service",
+            workspace=pathlib.Path("/tmp/ci workspace"),
+            destination="/run/little-mester-vm-workspace-share")
+        directive = 'BindPaths="/tmp/ci workspace:/run/little-mester-vm-workspace-share"\n'
+        fragment = unit.production_workspace_fragment_config(base, directive)
+        self.assertEqual(dropin, "[Service]\n" + directive)
+        self.assertEqual(fragment.replace(directive, "", 1), base)
+        self.assertNotIn("BindPaths=", base)
+        self.assertIn(directive, fragment)
+
+        source = SCRIPT.read_text()
+        reproduction = source[source.index("def run_production_dependency_reproduction"):
+                              source.index("def remove_disposable_workspace")]
+        self.assertIn('"dropin-standalone"', reproduction)
+        self.assertIn('"dropin-parent-graph"', reproduction)
+        self.assertIn('"fragment-standalone"', reproduction)
+        self.assertIn('"start_unit": vm_unit', reproduction)
+        self.assertIn('"host_before_start": prestart', reproduction)
+        self.assertIn('"host_before_start": graph_prestart', reproduction)
+        self.assertIn('_host_path_evidence(pathlib.Path(destination))', reproduction)
+        self.assertIn('"/usr/bin/systemctl", "show", "--no-pager"', reproduction)
+        self.assertIn('"/usr/bin/systemctl", "cat", "--no-pager"', reproduction)
+        self.assertIn("journal_cursor_command()", reproduction)
+        self.assertIn("journal_after_cursor_command(cursor, effective_unit)", reproduction)
+        self.assertIn('"classification": classify_namespace_diagnostic(classification, diagnostic)',
+                      reproduction)
+        self.assertIn('"classification": graph_classification', reproduction)
+        self.assertIn("journal_cursor_command()", reproduction)
+        self.assertIn("journal_after_cursor_command(graph_cursor, workspace_unit)", reproduction)
+
+    def test_workspace_sandbox_variants_change_only_the_named_dropin_setting(self):
+        template = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
+        base, bind_dropin = unit.production_workspace_reproduction_config(
+            template, user="ci-owner", group="ci-group", vm_unit="sample-vm.service",
+            workspace=pathlib.Path("/tmp/ci-workspace"),
+            destination="/run/little-mester-vm-workspace-share")
+        variants = unit.production_workspace_diagnostic_variants()
+        expected = {
+            "no-exec-paths": "NoExecPaths", "exec-paths": "ExecPaths",
+            "protect-control-groups": "ProtectControlGroups", "protect-home": "ProtectHome",
+            "protect-system": "ProtectSystem", "read-write-paths": "ReadWritePaths",
+            "private-tmp": "PrivateTmp", "runtime-directory-preserve": "RuntimeDirectoryPreserve",
+        }
+        self.assertEqual(set(variants), set(expected))
+        self.assertEqual(bind_dropin, '[Service]\nBindPaths="/tmp/ci-workspace:/run/little-mester-vm-workspace-share"\n')
+        self.assertNotIn("BindPaths=", base)
+        for label, fragment in variants.items():
+            directives = [line.split("=", 1)[0] for line in fragment.splitlines()
+                          if line and not line.startswith("[")]
+            self.assertEqual(directives, [expected[label]], label)
+            self.assertNotIn("BindPaths=", fragment, label)
+            # The variant is a separate drop-in layered onto the exact same unit and
+            # production-shaped BindPaths drop-in, not an inline/template mutation.
+            self.assertEqual(base, unit.production_workspace_reproduction_config(
+                template, user="ci-owner", group="ci-group", vm_unit="sample-vm.service",
+                workspace=pathlib.Path("/tmp/ci-workspace"),
+                destination="/run/little-mester-vm-workspace-share")[0])
+            self.assertEqual(bind_dropin, unit.production_workspace_reproduction_config(
+                template, user="ci-owner", group="ci-group", vm_unit="sample-vm.service",
+                workspace=pathlib.Path("/tmp/ci-workspace"),
+                destination="/run/little-mester-vm-workspace-share")[1])
+
+        source = SCRIPT.read_text()
+        reproduction = source[source.index("def run_production_dependency_reproduction"):
+                              source.index("def remove_disposable_workspace")]
+        self.assertIn('variant_units = {label: f"{prefix}-{label}.service"', reproduction)
+        self.assertIn('f"{name}.d/30-{label}.conf"', reproduction)
+        self.assertIn('[workspace_dropin, variant_dropins[label]]', reproduction)
+        self.assertIn('"properties": state', reproduction)
+        self.assertIn('"classification": classify_namespace_diagnostic(classification, diagnostic)',
+                      reproduction)
+        self.assertIn('"host_before_start": prestart', reproduction)
+        self.assertIn('"host_after_start":', reproduction)
+
+    def test_runtime_directory_lifetime_variant_records_and_cleans_preserved_paths(self):
+        variants = unit.production_workspace_diagnostic_variants()
+        self.assertEqual(variants["runtime-directory-preserve"],
+                         "RuntimeDirectoryPreserve=yes\n")
+        source = SCRIPT.read_text()
+        reproduction = source[source.index("def run_production_dependency_reproduction"):
+                              source.index("def remove_disposable_workspace")]
+        self.assertIn('"runtime_directories_after_stop": after_stop', reproduction)
+        self.assertIn('"RuntimeDirectoryPreserve=yes intentionally retains service runtime paths"',
+                      reproduction)
+        generated = unit.runtime_cleanup_script(pathlib.Path("/tmp/root"), {})
+        self.assertIn("preserving changed or foreign runtime directory identity mismatch", generated)
+        self.assertIn("preserving non-empty runtime directory", generated)
+        self.assertIn('"lifetime_probe": "NOT_EXERCISED"', reproduction)
+        self.assertIn('classification == "NOT_REPRODUCED"', reproduction)
+        self.assertIn("reset_failed_and_verify((start_unit,))", reproduction)
+
+    def test_journal_cursor_is_global_then_attempt_slice_is_unit_filtered(self):
+        self.assertEqual(unit.journal_cursor_command(), [
+            "/usr/bin/sudo", "-n", "/usr/bin/journalctl", "--no-pager",
+            "--show-cursor", "-n", "0",
+        ])
+        cursor = "s=global-cursor"
+        self.assertEqual(unit.journal_after_cursor_command(cursor, "fresh.service"), [
+            "/usr/bin/sudo", "-n", "/usr/bin/journalctl", "--no-pager",
+            f"--after-cursor={cursor}", "-n", "40", "-u", "fresh.service",
+        ])
+        self.assertNotIn("-u", unit.journal_cursor_command())
+
+    def test_generated_privileged_runtime_cleanup_preflights_before_deleting(self):
+        def identity(path):
+            info = os.lstat(path)
+            return {"device": info.st_dev, "inode": info.st_ino, "uid": info.st_uid,
+                    "gid": info.st_gid, "mode": unit.stat.S_IMODE(info.st_mode)}
+
+        def execute(root, expected):
+            script = unit.runtime_cleanup_script(root, expected)
+            return unit.subprocess.run([unit.sys.executable, "-I", "-c", script],
+                                       capture_output=True, text=True, check=False)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            valid = root / "a-valid"
+            replacement = root / "z-replacement"
+            valid.mkdir()
+            replacement.mkdir()
+            expected = {"a-valid": identity(valid), "z-replacement": identity(replacement)}
+            preflight = unit.runtime_directory_preflight_script(root, expected)
+            checked = unit.subprocess.run([unit.sys.executable, "-I", "-c", preflight],
+                                          capture_output=True, text=True, check=False)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            self.assertTrue(valid.is_dir(), "preflight must not remove runtime paths")
+            replacement.rename(root / "z-original-inode")
+            replacement.mkdir()
+            result = execute(root, expected)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(valid.is_dir(), "valid path was deleted before identity preflight completed")
+            self.assertTrue(replacement.is_dir())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            valid = root / "a-valid"
+            nonempty = root / "z-nonempty"
+            valid.mkdir()
+            nonempty.mkdir()
+            (nonempty / "unexpected").write_text("preserve")
+            expected = {"a-valid": identity(valid), "z-nonempty": identity(nonempty)}
+            result = execute(root, expected)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(valid.is_dir(), "valid path was deleted before emptiness preflight completed")
+            self.assertTrue((nonempty / "unexpected").is_file())
 
     def test_bind_reproduction_separates_controller_source_from_systemd_runtime_lifetime(self):
         source = SCRIPT.read_text()
