@@ -36,9 +36,11 @@ class HostedSystemUnitTests(unittest.TestCase):
     def test_workflow_separates_production_acceptance_from_transient_guest_job(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         transient = workflow.split("  transient-qemu-integration:", 1)[1].split(
-            "  # ── 5. Exact installed production", 1)[0]
+            "  # ── 5. Exploratory systemd namespace", 1)[0]
+        diagnostics = workflow.split("  systemd-namespace-diagnostics:", 1)[1].split(
+            "  # ── 6. Exact installed production", 1)[0]
         production = workflow.split("  production-systemd-vm-acceptance:", 1)[1].split(
-            "  # ── 6.", 1)[0]
+            "  # ── 7.", 1)[0]
         self.assertIn("name: Transient QEMU guest integration", transient)
         self.assertIn("name: Production systemd VM acceptance", production)
         self.assertIn("runs-on: ubuntu-24.04", production)
@@ -48,7 +50,11 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 90", production)
         self.assertNotIn("runs-on: self-hosted", production)
         self.assertNotIn("tests/ci-kvm-system-unit.py", transient)
-        self.assertNotIn("needs:", transient + production)
+        self.assertIn("name: Systemd namespace diagnostics", diagnostics)
+        self.assertIn("runs-on: ubuntu-24.04", diagnostics)
+        self.assertIn("--namespace-diagnostics", diagnostics)
+        self.assertIn("tests/ci-kvm-system-unit.py", diagnostics)
+        self.assertNotIn("needs:", transient + diagnostics + production)
         self.assertNotIn("steps.smoke_cleanup", production)
         self.assertIn("steps.host_dependencies.outcome == 'success'", production)
         self.assertIn("LM_CI_SOURCE_HEAD_SHA", production)
@@ -67,6 +73,7 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("production_unit_forced_stop=PASS", SCRIPT.read_text())
         self.assertIn("cancel-in-progress: true", workflow)
         self.assertNotIn("concurrency:", transient)
+        self.assertNotIn("concurrency:", diagnostics)
         self.assertNotIn("concurrency:", production)
     def test_boot_readiness_has_bounded_three_minute_window(self):
         stage = (ROOT / "tests/ci-kvm-stage.sh").read_text()
@@ -453,7 +460,7 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("WORKSPACE_BIND_DIAGNOSTIC ", helper)
         self.assertIn("approved host workspace source changed after assignment", helper)
 
-    def test_hosted_ci_runs_real_systemd_bind_matrix_before_production_start(self):
+    def test_hosted_ci_runs_namespace_diagnostics_separately_from_production(self):
         source = SCRIPT.read_text()
         repro = source[source.index("def _bind_repro_case"):
                        source.index("def remove_disposable_workspace")]
@@ -493,9 +500,12 @@ class HostedSystemUnitTests(unittest.TestCase):
                                        for target in node.targets))
         code = textwrap.dedent(ast.literal_eval(code_assignment.value.args[0]))
         compile(code, "<workspace-bind-reproduction>", "exec")
-        self.assertLess(main.index("report_workspace_unit_configuration()"),
-                        main.index("run_workspace_bind_reproductions(workspace_path)"))
-        self.assertLess(main.index("run_workspace_bind_reproductions(workspace_path)"),
+        self.assertIn('if sys.argv[1:] == ["--namespace-diagnostics"]:', source)
+        diagnostics_entry = source[source.index("def namespace_diagnostics_only"):
+                                   source.index("def main()")]
+        self.assertIn("run_workspace_bind_reproductions(workspace)", diagnostics_entry)
+        self.assertNotIn("run_workspace_bind_reproductions", main)
+        self.assertLess(main.index("configure_disposable_workspace(installed_root)"),
                         main.index("invoke_shared_acceptance(sha)"))
         matrix = source[source.index("def run_workspace_bind_reproductions"):
                         source.index("def run_production_dependency_reproduction")]
@@ -851,7 +861,19 @@ class HostedSystemUnitTests(unittest.TestCase):
             baseline, sandbox_delta, allowed_setting="PrivateTmp",
             expected_bind=("/source", "/target")), {})
 
-    def test_hosted_bind_quote_matrix_runs_quoted_unquoted_then_reverse(self):
+    def test_quoted_bind_negative_label_requires_only_expected_malformed_bind_and_226(self):
+        mismatch = {"BindPaths": {"baseline_semantic_match": True,
+                                  "candidate_semantic_match": False}}
+        classify = unit.expected_quoted_bind_negative_control
+        expected = dict(merged_configuration_matches=True,
+                        raw_classification="REPRODUCED_226_NAMESPACE", start_exit=1)
+        self.assertTrue(classify(mismatch, **expected))
+        self.assertFalse(classify({**mismatch, "PrivateTmp": {**{}}}, **expected))
+        self.assertFalse(classify(mismatch, **{**expected, "merged_configuration_matches": False}))
+        self.assertFalse(classify(mismatch, **{**expected, "raw_classification": "INCONCLUSIVE"}))
+        self.assertFalse(classify(mismatch, **{**expected, "start_exit": 0}))
+
+    def test_hosted_bind_quote_matrix_runs_unquoted_then_quoted_controls(self):
         source = SCRIPT.read_text()
         reproduction = source[source.index("def run_production_dependency_reproduction"):
                               source.index("def remove_disposable_workspace")]
@@ -863,7 +885,10 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("Establish the baseline from the exact writer-produced configuration", reproduction)
         self.assertIn('unquoted["_raw_classification"] == "NOT_REPRODUCED"', reproduction)
         self.assertIn('and unquoted["_probe_valid"]', reproduction)
-        self.assertIn("require(quoted_reverse[\"_raw_classification\"] == standalone[\"_raw_classification\"]",
+        self.assertIn('expected_negative_quoted_bind=True', reproduction)
+        self.assertIn('EXPECTED_NEGATIVE_QUOTED_BIND_226_NAMESPACE', reproduction)
+        self.assertIn('EXPECTED_NEGATIVE_BINDPATHS_MALFORMED', reproduction)
+        self.assertIn('quoted_reverse["_raw_classification"] == standalone["_raw_classification"]',
                       reproduction)
         self.assertIn("WORKSPACE_MODULE._systemd_bind_path(workspace)", source)
         self.assertIn("legacy_quoted_dropin = f'[Service]", reproduction)

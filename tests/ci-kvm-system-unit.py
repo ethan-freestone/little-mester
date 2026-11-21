@@ -1052,6 +1052,20 @@ def classify_namespace_reproduction(state: dict[str, str], diagnostics: str,
     return "INCONCLUSIVE"
 
 
+def expected_quoted_bind_negative_control(config_mismatches: dict, *,
+                                          merged_configuration_matches: bool,
+                                          raw_classification: str,
+                                          start_exit: int) -> bool:
+    """Recognize only the intended malformed-bind, fresh-226 quoted control."""
+    mismatch = config_mismatches.get("BindPaths", {})
+    return (set(config_mismatches) == {"BindPaths"}
+            and mismatch.get("baseline_semantic_match") is True
+            and mismatch.get("candidate_semantic_match") is False
+            and merged_configuration_matches
+            and raw_classification == "REPRODUCED_226_NAMESPACE"
+            and start_exit != 0)
+
+
 def parse_journal_cursor(output: str, exit_code: int) -> str:
     """Require a usable systemd journal cursor before starting a diagnostic attempt."""
     match = re.search(r"(?m)^-- cursor: (\S+)\s*$", output)
@@ -1800,6 +1814,7 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
         def run_case(label: str, start_unit: str, effective_unit: str,
                      expected_unit_text: str, expected_dropins: list[str] | None,
                      *, allowed_setting: str | None = None,
+                     expected_negative_quoted_bind: bool = False,
                      fragment_bind_placement: bool = False,
                      allow_retained: bool = False,
                      keep_active: bool = False) -> dict[str, str]:
@@ -1871,7 +1886,16 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                 state, diagnostic, start_exit=start.returncode,
                 merged_dropin_matches=merged_configuration_matches)
             classification = raw_classification
-            if config_mismatches:
+            expected_negative_control = (
+                expected_negative_quoted_bind
+                and expected_quoted_bind_negative_control(
+                    config_mismatches,
+                    merged_configuration_matches=merged_configuration_matches,
+                    raw_classification=raw_classification,
+                    start_exit=start.returncode))
+            if expected_negative_control:
+                classification = "EXPECTED_NEGATIVE_QUOTED_BIND_226_NAMESPACE"
+            elif config_mismatches:
                 classification = "INCONCLUSIVE"
             bind_semantics_only_unresolved = (
                 bool(config_mismatches) and set(config_mismatches) == {"BindPaths"})
@@ -1897,11 +1921,14 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                 "effective_bind_configuration_matches": effective_matches,
                 "merged_unit_configuration_matches": merged_configuration_matches,
                 "configuration_mismatches": config_mismatches,
-                "configuration_comparison": "INVALID_INCONCLUSIVE" if config_mismatches else "MATCH",
+                "configuration_comparison": (
+                    "EXPECTED_NEGATIVE_BINDPATHS_MALFORMED" if expected_negative_control else
+                    "INVALID_INCONCLUSIVE" if config_mismatches else "MATCH"),
                 "private_tmp_mount_topology": (private_tmp_topology if private_tmp_topology is not None
                                                 else "UNAVAILABLE; generated mount-edge comparison is INCONCLUSIVE"),
                 "classification": classify_namespace_diagnostic(classification, diagnostic),
                 "raw_namespace_evidence_classification": raw_classification,
+                "expected_negative_control": expected_negative_control,
                 "expected_outcome": expected_outcome,
                 "in_namespace_bind_probe": probe_evidence or {
                     "status": "NOT_REACHED_BEFORE_NAMESPACE_FAILURE_OR_PROBE_UNAVAILABLE"},
@@ -2068,7 +2095,10 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
         if unquoted_worked:
             require(unquoted["_probe_valid"],
                     "unquoted active service did not prove actual bind identity, mountpoint and home isolation")
-            require(quoted_reverse["_raw_classification"] == standalone["_raw_classification"],
+            require(quoted_reverse["_classification"]
+                    == "EXPECTED_NEGATIVE_QUOTED_BIND_226_NAMESPACE"
+                    and quoted_reverse["_raw_classification"] == standalone["_raw_classification"]
+                    and set(quoted_reverse["_configuration_mismatches"]) == {"BindPaths"},
                     "quoted reverse comparison did not reproduce initial quoted outcome")
 
         graph_prestart, graph_cursor, start = run_attempt_with_path_snapshot(
@@ -2690,7 +2720,33 @@ def cleanup_only() -> int:
     return 0
 
 
+def namespace_diagnostics_only() -> int:
+    """Run exploratory namespace controls on their own disposable CI runner."""
+    hosted_kvm_guard()
+    production_host_preflight()
+    workspace = disposable_workspace_path()
+    require(not workspace.exists() and not workspace.is_symlink(),
+            f"preserving pre-existing namespace-diagnostic workspace: {workspace}")
+    workspace.mkdir(mode=0o700)
+    created = os.lstat(workspace)
+    try:
+        run_workspace_bind_reproductions(workspace)
+    finally:
+        current = os.lstat(workspace)
+        require(stat.S_ISDIR(current.st_mode) and not stat.S_ISLNK(current.st_mode)
+                and (current.st_dev, current.st_ino, current.st_uid,
+                     stat.S_IMODE(current.st_mode))
+                == (created.st_dev, created.st_ino, os.getuid(), 0o700)
+                and not any(workspace.iterdir()),
+                "preserving changed or non-empty namespace-diagnostic workspace")
+        workspace.rmdir()
+    print("systemd_namespace_diagnostics=PASS")
+    return 0
+
+
 def main() -> int:
+    if sys.argv[1:] == ["--namespace-diagnostics"]:
+        return namespace_diagnostics_only()
     if sys.argv[1:] == ["--guest-workspace-boundary"]:
         hosted_kvm_guard()
         root = CI_INSTALL_PARENT / os.environ["GITHUB_SHA"]
@@ -2765,7 +2821,6 @@ def main() -> int:
             "runtime_directory_target": _host_path_evidence(share_target),
             "target_creator": "systemd RuntimeDirectory before namespace setup",
         }, sort_keys=True, separators=(",", ":")), flush=True)
-        run_workspace_bind_reproductions(workspace_path)
         escape_evidence = create_escape_sentinel(workspace_path)
         invoke_shared_acceptance(sha)
         verify_workspace_startup_post()
