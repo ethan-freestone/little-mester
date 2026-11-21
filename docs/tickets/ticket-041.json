@@ -8,7 +8,7 @@
   "title": "VM provisioning and ./lab VM lifecycle",
   "objective": "Make the VM reproducible and controllable from the host: ./lab can provision or connect to the VM per #40, install Docker, transport the workspace, and run VM lifecycle commands idempotently. The host stops running the agent container itself.",
   "created_at": "2026-10-26T20:39:18.836Z",
-  "updated_at": "2026-11-21T16:56:30.132Z",
+  "updated_at": "2026-11-21T18:04:10.087Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -88,7 +88,10 @@
       "Add state-based conflict regression: change the assignment or drop-in after candidate publication but before rollback inspection; verify rollback preserves both files and reports recovery conflict.",
       "Sol independently reviews the final implementation commit against full PR #20 scope before commit; then owner runs the corrected hosted systemd/production acceptance on the exact commit.",
       "Resolve or explicitly disposition the pre-existing Docker-mode host-metrics TUI endpoint regression identified by Sol before PR #20 full acceptance.",
-      "Owner runs corrected systemd 255 production workspace/QEMU acceptance on exact reviewed commit; verify virtiofsd/socket, boot, guest workspace read/write/isolation, metrics/TUI, OAuth/model, persistence, and owner acceptance."
+      "Owner runs corrected systemd 255 production workspace/QEMU acceptance on exact reviewed commit; verify virtiofsd/socket, boot, guest workspace read/write/isolation, metrics/TUI, OAuth/model, persistence, and owner acceptance.",
+      "Reproduce hosted run 44930208126 cleanup ordering: 16 loaded before reset, only 3 failed, all 16 inactive/dead with MainPID=0 after; reset only failed named units, allow only a fully attributable Unit-not-loaded GC race with safe post-state, and fail closed on genuine errors/post-state anomalies.",
+      "Run the exploratory systemd namespace matrix and production VM acceptance as independent hosted jobs/runners; confirm diagnostic failure cannot dependency-skip production acceptance and keep both checks required for merge acceptance.",
+      "Commit cleanup, expected-negative quoted-control classification, and CI job separation in scoped changes; obtain independent Sol review of each exact commit SHA against full PR #20 acceptance/security scope; update this ticket with review and hosted evidence."
     ],
     "created": [
       "tests/ci-kvm-system-unit.test.py: classifier regression coverage for explicit 226 vs generic Result=resources and drop-in/merged-unit evidence; tests/ci-kvm-system-unit.py diagnostic-only production-shaped drop-in reproduction.",
@@ -137,7 +140,8 @@
       "Focused BindPaths generation now restricts absolute paths to ASCII [A-Za-z0-9/._-] and rejects unsupported characters before assignment/drop-in publication. The effective unit property must be exactly SOURCE:DESTINATION:rbind. Rollback handles partial publication/reload failure and refuses to overwrite detected conflicting state.",
       "Nonblocking recovery caveat from Sol: existing legacy-quoted drop-ins are not migrated automatically; same-workspace configuration refuses the mismatch even with --reassign. Requires an explicit recovery path.",
       "Full PR #20 remains blocked: corrected hosted production/QEMU/guest acceptance, existing-guest upgrade/persistence, Docker/VM metrics parity, live metrics/TUI, OAuth/model, workspace handover/isolation, and owner gates are not all accepted. No hosted rerun, VM operation, push, or merge was performed.",
-      "Metrics sub-phase implementation committed separately as 35cc0b8. Sol independently approved that exact commit against its parent for individual retention only. Docker selects internal metrics DNS; direct VM uses its fixed guestfwd endpoint; no new host ports or network-policy relaxation. Mock tests and package/acceptance checks pass. Real Docker and VM metrics/TUI runtime acceptance was not run here; PR #20 remains blocked."
+      "Metrics sub-phase implementation committed separately as 35cc0b8. Sol independently approved that exact commit against its parent for individual retention only. Docker selects internal metrics DNS; direct VM uses its fixed guestfwd endpoint; no new host ports or network-policy relaxation. Mock tests and package/acceptance checks pass. Real Docker and VM metrics/TUI runtime acceptance was not run here; PR #20 remains blocked.",
+      "Owner reported actual hosted CI run 44930208126 on 3d13ab435709a41b96c79906cd552424d6035ad7: all 16 units loaded before reset, 3 failed, old batch included 16, 9 returned Unit not loaded, and all 16 were inactive/dead with MainPID=0 after; harness aborted at line 382. Corrected implementation and isolated diagnostic job are pending commit, exact-commit review and hosted rerun. No production VM acceptance evidence from this failure."
     ]
   },
   "priority": "major",

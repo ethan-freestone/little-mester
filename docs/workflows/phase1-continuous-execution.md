@@ -1,9 +1,36 @@
 # Phase 1 continuous execution workflow
 
-**Scope:** tickets #53–#57 and their approved Phase 1 work. This is the operating
-workflow for those tickets; it preserves approved functional objectives, security
-architecture, acceptance criteria and owner authority. The owner-approved trajectory
-correction below prioritizes working integration and review efficiency, not weaker controls.
+**Scope:** tickets #53–#57 and their approved Phase 1 work. For PR #20 and subsequent
+development, the owner-mandated process below also applies alongside the ticket-specific
+workflow; it preserves approved functional objectives, security architecture, acceptance
+criteria and owner authority. The owner-approved trajectory correction below prioritizes
+working integration and review efficiency, not weaker controls.
+
+## Owner-mandated PR #20 and follow-on process
+
+- **Luna High is the orchestrator.** Luna coordinates, makes architectural decisions,
+  integrates and reports. Delegate mechanical implementation, investigation, evidence
+  gathering and test execution to appropriate subagents; preserve Sol's context and compute
+  for independent review and genuinely difficult reasoning. Do not have Luna perform every
+  task directly.
+- Track every sub-phase through the ticket engine CLI/MCP, using an existing ticket or a
+  suitable subticket/comment. Ticket storage is engine-only: never edit ticket JSON directly.
+  Keep the ticket, documentation, implementation and evidence synchronized. Ticket #63 owns
+  future programmatic enforcement; this manual process does not expand PR #20 into that work.
+- Follow **documentation → tests → implementation → commit**. Make coherent, appropriately
+  scoped commits throughout development; do not accumulate a whole implementation before
+  committing. Run the relevant local checks and ticket validation, and do not hand off with
+  unexplained uncommitted changes.
+- **Every commit gets an independent Sol review of that exact commit SHA**, considering its
+  own diff and cumulative implications for PR #20, architecture, security and the complete
+  acceptance scope. A review of an uncommitted diff is not commit review. Address blocking
+  findings in a corrective commit and independently review that exact corrective SHA. Do not
+  create review-only commits merely to record approval; the final handoff may record approval
+  of the final evidence commit.
+- Local tests, mocks, transient guests and code review are not production integration or owner
+  acceptance. Do not push, merge, deploy, operate an owner VM, or expand security policy
+  without owner authorization. Record remaining gates and exact authorization needed at each
+  handoff. Programmatic enforcement remains separate under #63.
 
 ## Roles and execution loop
 
@@ -13,19 +40,19 @@ correction below prioritizes working integration and review efficiency, not weak
   update.
 - **Luna Low/Explore** gathers targeted, read-only source and test evidence when discovery
   is useful. It does not make implementation or security decisions.
-- **Sol Medium** supplies a focused technical plan when a material design choice warrants
-  one and independently reviews meaningful correctness, maintainability, reuse,
-  complexity, and security boundaries. Sol's PASS/JUSTIFIED verdicts mean continue;
-  actionable SIMPLIFY findings are resolved within scope. A BLOCKED finding is assessed
-  for a safe in-scope correction before escalation.
+- **Sol** supplies a focused technical plan when a material design choice warrants one and
+  independently reviews every exact commit under the owner-mandated process above, including
+  correctness, maintainability, reuse, complexity, full PR scope and security boundaries.
+  Actionable findings are resolved in scope and corrective commits receive a fresh review.
 
-For each coherent block: identify its ticket requirements and existing reuse points, make
-the smallest implementation, run focused REAL_PROCESS/mock/regression tests appropriate to
-the claims, commit tested source, obtain any required independent review, resolve actionable
-findings, and update the ticket through MCP. Commit ticket evidence separately when useful.
-The ticket CLI is reserved for appending comments/handoff discussion; use MCP for ordinary
-ticket fields and criteria. Keep test ledgers factual and concise; record review discussion
-as ticket comments. Preserve pending criteria until their stated evidence exists.
+For each coherent block: update the relevant ticket/docs first, identify requirements and
+reuse points, add regression tests before implementation, make the smallest implementation,
+run focused REAL_PROCESS/mock/regression tests appropriate to the claims, commit the tested
+source, obtain exact-SHA Sol review, resolve findings, then synchronize ticket evidence
+through MCP. Commit ticket evidence with the relevant sub-phase; avoid review-only churn. The
+ticket CLI is reserved for appending comments/handoff discussion; use MCP for ordinary ticket
+fields and criteria. Keep test ledgers factual and concise; preserve pending criteria until
+their stated evidence exists.
 
 **Temporary owner authorization (2026-11-15):** until the MCP is fixed after Phase 1,
 the repository ticket CLI's documented `update <number> --comment <text>` operation is
@@ -34,15 +61,13 @@ replacing historical comments, then validate the ticket store. This exception do
 authorize CLI edits to fields, criteria, test ledgers, audit history, or other ticket data;
 all ordinary ticket mutations continue through MCP.
 
-At a security-sensitive boundary, review the exact source SHA. A material change after
-review receives an appropriately scoped delta review. Sol reviews assess whether code is
-necessary and reachable, not only locally correct: report the acceptance behavior or verified
-risk advanced, CLI/smoke/milestone reachability, duplication/complexity, security impact, code
-growth by production/tests/docs, and one verdict: PASS, FIX, SIMPLIFY, DEFER, or BLOCKED.
+Sol reviews assess whether code is necessary and reachable, not only locally correct: report
+the acceptance behavior or verified risk advanced, CLI/smoke/milestone reachability,
+duplication/complexity, security impact, code growth by production/tests/docs, cumulative PR
+acceptance/security implications, and one verdict: PASS, FIX, SIMPLIFY, DEFER, or BLOCKED.
 SIMPLIFY requires actual justified consolidation while preserving trust-boundary checks; do
-not answer it with more defensive scaffolding. Review integrated boundaries rather than every
-small commit. Keep independent combined quality/security review for changed trust boundaries
-and the final holistic review on #57.
+not answer it with more defensive scaffolding. Every commit is independently reviewed; the
+final holistic review on #57 remains an additional gate, not a substitute.
 
 ## Phase 1 progression and stopping conditions
 
