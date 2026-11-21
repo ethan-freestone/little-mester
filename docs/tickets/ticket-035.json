@@ -8,7 +8,7 @@
   "title": "Epic: VM-based Docker agent environment (all-in-one, model-agnostic harness)",
   "objective": "Deliver an all-in-one, model-agnostic harness: point Little Mester at a directory and run an agent there, with real Docker capability for the workspace's dependencies, while keeping the agent's blast radius inside a disposable VM. The agent runs in a Docker container inside a full Linux VM (not on the host), with a Docker CLI that can run the workspace's compose files; ./lab on the host orchestrates VM lifecycle, workspace transport, the agent container and teardown. Works with local models and no subscription, and can use cloud providers (Kimi, Claude, OpenAI) when available. Includes documentation, egress and decision-log housekeeping.",
   "created_at": "2026-10-26T17:39:37.714Z",
-  "updated_at": "2026-11-21T15:37:38.461Z",
+  "updated_at": "2026-11-21T15:39:37.709Z",
   "priority": "critical",
   "comments": [
     {
@@ -188,7 +188,8 @@
       "PR #20 hosted run 44915932205 owner-reported: production-shaped variants still reproduce 226/NAMESPACE. BindPaths effective output differs (transient SOURCE:DESTINATION:rbind; file-backed SOURCE:DESTINATION:SOURCE:DESTINATION:rbind), but quoted/unquoted controlled comparison, reverse confirmation, actual mount identity and isolation evidence remain outstanding. Production cause/correction unproven. See #41.",
       "PR #20 local bind/runtime follow-up: production writer is now exercised; harness adds quoted/unquoted/reverse disposable units and in-namespace mount identity/mountpoint/home isolation probe; malformed-equal effective BindPaths cannot MATCH. Runtime-preserve fixture checks expected owner/group/mode 0750. Local system-unit suite 73, workspace suite 25, systemd suite 39 passed; py_compile, diff-check, and static systemd-analyze verify passed. No hosted real-systemd rerun, no production change; cause remains unproven. See #41.",
       "Future GitHub grant backlog found as existing ticket #62. Its prior criteria lacked explicit separate injected SSH identity, host-SSH isolation, stated run/restart/session lifetime, and mandatory revocation on session end/workspace change. Added #62 A8-A9 and tests-needed via ticket engine; no access capability implemented and no duplicate ticket created.",
-      "#41 Sol re-review after probe fixes: no remaining concrete code blocker. ProtectHome=no now expects visible home; quoted/unquoted/reverse controls retain hidden-home checks. Fresh-cursor journal polling and post-probe state refresh prevent timing-based false NOT_REPRODUCED. Local tests 75/25/39 pass; no hosted systemd comparison or root cause confirmation. See #41."
+      "#41 Sol re-review after probe fixes: no remaining concrete code blocker. ProtectHome=no now expects visible home; quoted/unquoted/reverse controls retain hidden-home checks. Fresh-cursor journal polling and post-probe state refresh prevent timing-based false NOT_REPRODUCED. Local tests 75/25/39 pass; no hosted systemd comparison or root cause confirmation. See #41.",
+      "#41 commit 6c6db0b70969ae8f5a4e8d4adf4d8844393f2207 independently APPROVED by Sol for the diagnostic delta only; no merge/deployment acceptance. Hosted quoted/unquoted/reverse experiment remains NOT_RUN, root cause unproven, production unchanged. See #41."
     ]
   },
   "is_epic": true
