@@ -13,6 +13,14 @@ working integration and review efficiency, not weaker controls.
   gathering and test execution to appropriate subagents; preserve Sol's context and compute
   for independent review and genuinely difficult reasoning. Do not have Luna perform every
   task directly.
+- **Sol is the independent design and code reviewer, not an investigator or worker.** Do not
+  use Sol for repository searches, routine source inspection, CI/log/Git retrieval, test or
+  build execution, edits, or ticket administration. Delegate those evidence-gathering and
+  mechanical tasks to cheaper agents. Luna prepares concise, evidence-backed review packets
+  with paths/lines and relevant excerpts, problem facts, proposed approach and alternatives,
+  affected production behavior/security invariants, regression risks, and test strategy. Sol
+  may challenge assumptions and request additional evidence; delegate that evidence gathering
+  and return it to Sol rather than spending Sol's compute on retrieval.
 - Track every sub-phase through the ticket engine, using an existing ticket or a suitable
   subticket/comment. Use MCP for all ticket fields, criteria, test-ledger changes and other
   mutations. While the known MCP comment-write gap remains, the ticket CLI may append comments
@@ -23,6 +31,15 @@ working integration and review efficiency, not weaker controls.
   scoped commits throughout development; do not accumulate a whole implementation before
   committing. Run the relevant local checks and ticket validation, and do not hand off with
   unexplained uncommitted changes.
+- **Mandatory pre-implementation design review:** track the sub-phase; delegate investigation
+  and evidence gathering; Luna proposes the technical approach and regression strategy; Sol
+  independently reviews that proposal before implementation. Resolve blocking design findings
+  first. A material deviation from an approved design requires renewed Sol review before the
+  deviating implementation. Do not request redundant design reviews for mechanical steps
+  already covered by one approved approach; group related decisions into a coherent packet.
+  Then follow documentation → tests → code → verification → commit. Design verdicts are
+  APPROVE, FIX, BLOCK, or NEEDS EVIDENCE; if evidence is requested, gather it through a
+  delegated investigator before asking Sol to reconsider.
 - **Every commit gets an independent Sol review of that exact commit SHA**, considering its
   own diff and cumulative implications for PR #20, architecture, security and the complete
   acceptance scope. A review of an uncommitted diff is not commit review. Address blocking
@@ -40,19 +57,23 @@ working integration and review efficiency, not weaker controls.
   updates, and truthful reporting. It continues across approved tickets and implementation
   slices instead of stopping after a successful test, commit, review, or routine ticket
   update.
-- **Luna Low/Explore** gathers targeted, read-only source and test evidence when discovery
-  is useful. It does not make implementation or security decisions.
-- **Sol** supplies a focused technical plan when a material design choice warrants one and
-  independently reviews every exact commit under the owner-mandated process above, including
-  correctness, maintainability, reuse, complexity, full PR scope and security boundaries.
-  Actionable findings are resolved in scope and corrective commits receive a fresh review.
+- **Luna Low/Explore and other delegated agents** gather targeted source, test, CI and log
+  evidence and execute mechanical checks. They do not make implementation or security
+  decisions.
+- **Sol** reviews the pre-implementation design and independently reviews every exact commit
+  under the owner-mandated process above, including correctness, maintainability, reuse,
+  complexity, full PR scope and security boundaries. Sol is not assigned implementation,
+  investigation, evidence retrieval, test execution, or ticket work. Actionable findings are
+  resolved in scope and corrective commits receive a fresh review.
 
-For each coherent block: update the relevant ticket/docs first, identify requirements and
-reuse points, add regression tests before implementation, make the smallest implementation,
-run focused REAL_PROCESS/mock/regression tests appropriate to the claims, commit the tested
-source, obtain exact-SHA Sol review, resolve findings, then synchronize ticket evidence
-through MCP. Commit ticket evidence with the relevant sub-phase; avoid review-only churn. Keep
-test ledgers factual and concise; preserve pending criteria until their stated evidence exists.
+For each coherent block: record the ticket/sub-phase; delegate investigation and evidence
+gathering; prepare the proposal and regression plan; obtain Sol's pre-implementation design
+verdict; resolve blockers; then update docs/ticket context, add regression tests, implement,
+and run focused REAL_PROCESS/mock/regression checks. Commit tested source and obtain exact-SHA
+Sol review; correct blockers in a newly reviewed commit; then synchronize factual ticket
+evidence through MCP. Commit ticket evidence with the relevant sub-phase; avoid review-only
+churn. Keep test ledgers concise and preserve pending criteria until their stated evidence
+exists.
 
 **Temporary owner authorization (2026-11-15):** until the MCP comment-write gap is fixed,
 the repository ticket CLI's documented `update <number> --comment <text>` operation may

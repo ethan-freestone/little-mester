@@ -8,7 +8,7 @@
   "title": "Restore Docker and VM metrics endpoint parity in the TUI",
   "objective": "PR #20 Phase 1 metrics regression (related to parent #35 and verification ticket #21): host-metrics-tui currently hardcodes the VM metrics address, while the Docker agent uses the Compose service name. Compare with feat/vm-approach and restore working Docker and VM behavior without weakening the VM egress/security architecture.",
   "created_at": "2026-11-21T16:41:08.238Z",
-  "updated_at": "2026-11-21T16:57:21.583Z",
+  "updated_at": "2026-11-21T18:44:49.382Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -39,7 +39,8 @@
       "Run Docker Compose metrics/TUI smoke and actual VM guest metrics/TUI smoke in authorized capable environment; this container has no Docker daemon or /dev/kvm. Verify both history and metrics display live data and sidebar remains healthy.",
       "Sol independent review of the focused metrics implementation before its separate commit.",
       "Sol re-review after prototype-key fix and CI wiring.",
-      "Owner/authorized environment runs Docker Compose and direct-VM live metrics/TUI smoke; verify live /metrics and /history fetches and healthy compact/expanded sidebar rendering."
+      "Owner/authorized environment runs Docker Compose and direct-VM live metrics/TUI smoke; verify live /metrics and /history fetches and healthy compact/expanded sidebar rendering.",
+      "Investigate CI-44935595188 same-disk restart: reproduce actual LoopbackServer immediate shutdown/rebind on an isolated loopback port without KVM; prove legitimate immediate restart works while a competing active listener is rejected; preserve fixed production 127.0.0.1:32129 endpoint and no sleeps/random ports/process killing. Inspect systemd ordering and feat/vm-approach history, distinguishing facts from hypotheses. Repair same-disk persistence evidence so its marker is stored on guest-disk-backed state, not virtiofs /workspace, and assert mount/filesystem placement."
     ],
     "created": [
       "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js (+ declaration): fixed mode allowlist maps docker→http://metrics:19532 and vm→http://10.0.2.100:19532; only /metrics and /history?n=60 allowed; rejects missing/unknown mode, arbitrary endpoint/path, non-2xx and network errors.",

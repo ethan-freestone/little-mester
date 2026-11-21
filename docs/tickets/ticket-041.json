@@ -8,7 +8,7 @@
   "title": "VM provisioning and ./lab VM lifecycle",
   "objective": "Make the VM reproducible and controllable from the host: ./lab can provision or connect to the VM per #40, install Docker, transport the workspace, and run VM lifecycle commands idempotently. The host stops running the agent container itself.",
   "created_at": "2026-10-26T20:39:18.836Z",
-  "updated_at": "2026-11-21T18:22:41.459Z",
+  "updated_at": "2026-11-21T18:44:49.379Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -93,7 +93,8 @@
       "Run the exploratory systemd namespace matrix and production VM acceptance as independent hosted jobs/runners; confirm diagnostic failure cannot dependency-skip production acceptance and keep both checks required for merge acceptance.",
       "Commit cleanup, expected-negative quoted-control classification, and CI job separation in scoped changes; obtain independent Sol review of each exact commit SHA against full PR #20 acceptance/security scope; update this ticket with review and hosted evidence.",
       "Cleanup review corrections: require the reset-failed error to identify the exact unit name, reject generic unattributed Unit-not-loaded output, and reject duplicate/conflicting systemd state properties in both before and after observations; then rerun focused local regressions and exact-SHA Sol review.",
-      "Quoted-control/CI separation: recognize an expected negative only when the sole mismatch is the malformed quoted BindPaths semantic mismatch, merged unit configuration matches, systemd explicitly reports 226/NAMESPACE, and start failed. Run this exploratory matrix on its own hosted job/runner, independently from production acceptance; neither job may `needs` the other. Keep both as merge acceptance checks; branch-protection enforcement must be reported separately if unverified."
+      "Quoted-control/CI separation: recognize an expected negative only when the sole mismatch is the malformed quoted BindPaths semantic mismatch, merged unit configuration matches, systemd explicitly reports 226/NAMESPACE, and start failed. Run this exploratory matrix on its own hosted job/runner, independently from production acceptance; neither job may `needs` the other. Keep both as merge acceptance checks; branch-protection enforcement must be reported separately if unverified.",
+      "Run CI-44935595188 follow-up sub-phase: establish whether namespace diagnostics use KVM, split hosted-runner provenance safety from KVM capability only if evidence supports it, retain production's strict KVM requirement; fix the stale Bats workflow-section extraction without weakening its semantic assertions; reconcile expected acceptance marker/evidence cleanup and truthful status reporting. Require Sol pre-implementation design review plus exact-SHA review for commits; full Bats, focused Python, workflow checks, hosted rerun after owner authorization."
     ],
     "created": [
       "tests/ci-kvm-system-unit.test.py: classifier regression coverage for explicit 226 vs generic Result=resources and drop-in/merged-unit evidence; tests/ci-kvm-system-unit.py diagnostic-only production-shaped drop-in reproduction.",
