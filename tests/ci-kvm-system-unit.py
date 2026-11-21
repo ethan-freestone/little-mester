@@ -1081,6 +1081,15 @@ def run_fresh_cursor_attempt(capture_cursor, start, *, previous_cursor: str | No
     return cursor, start()
 
 
+def run_attempt_with_path_snapshot(capture_paths, capture_cursor, start,
+                                   *, previous_cursor: str | None = None):
+    """Capture host paths before the cursor/start pair for one systemd attempt."""
+    paths = capture_paths()
+    cursor, result = run_fresh_cursor_attempt(
+        capture_cursor, start, previous_cursor=previous_cursor)
+    return paths, cursor, result
+
+
 def normalize_systemd_exec(value: str) -> str:
     """Remove invocation-dependent fields from systemctl's Exec* serialization."""
     dynamic = {"start_time", "stop_time", "pid", "code", "status"}
@@ -1620,18 +1629,18 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                  workspace_text, [workspace_dropin])
         reset_failed_and_verify((workspace_unit,))
 
-        graph_cursor, start = run_fresh_cursor_attempt(
+        graph_prestart, graph_cursor, start = run_attempt_with_path_snapshot(
+            lambda: {
+                "source": _host_path_evidence(workspace),
+                "destination": _host_path_evidence(pathlib.Path(destination)),
+                "runtime_directories": [_host_path_evidence(pathlib.Path(raw))
+                                        for raw in runtime_paths],
+            },
             lambda: parse_journal_cursor(
                 (result := run(journal_cursor_command(), check=False, timeout=10)).stdout or "",
                 result.returncode),
             lambda: run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", vm_unit],
                         timeout=35, check=False))
-        graph_prestart = {
-            "source": _host_path_evidence(workspace),
-            "destination": _host_path_evidence(pathlib.Path(destination)),
-            "runtime_directories": [_host_path_evidence(pathlib.Path(raw))
-                                    for raw in runtime_paths],
-        }
         states = {}
         for name in units:
             result = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "show", "--no-pager",

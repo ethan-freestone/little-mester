@@ -874,6 +874,33 @@ class HostedSystemUnitTests(unittest.TestCase):
                                           previous_cursor=first_cursor)
         self.assertEqual(started, ["start", "start"])
 
+    def test_parent_graph_captures_paths_before_cursor_and_start(self):
+        events = []
+        paths, cursor, result = unit.run_attempt_with_path_snapshot(
+            lambda: events.append("paths") or {"runtime": "before"},
+            lambda: events.append("cursor") or "fresh-cursor",
+            lambda: events.append("start") or "started")
+        self.assertEqual(paths, {"runtime": "before"})
+        self.assertEqual((cursor, result), ("fresh-cursor", "started"))
+        self.assertEqual(events, ["paths", "cursor", "start"])
+
+        module = ast.parse(SCRIPT.read_text())
+        reproduction = next(node for node in module.body
+                            if isinstance(node, ast.FunctionDef)
+                            and node.name == "run_production_dependency_reproduction")
+        graph_attempts = [node for node in ast.walk(reproduction)
+                          if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                          and node.func.id == "run_attempt_with_path_snapshot"]
+        self.assertEqual(len(graph_attempts), 1)
+        graph_snapshot_assignment = next(node for node in ast.walk(reproduction)
+                                         if isinstance(node, ast.Assign)
+                                         and any(isinstance(target, ast.Tuple)
+                                                 and any(isinstance(item, ast.Name)
+                                                         and item.id == "graph_prestart"
+                                                         for item in target.elts)
+                                                 for target in node.targets))
+        self.assertIs(graph_snapshot_assignment.value, graph_attempts[0])
+
     def test_runner_wires_real_attempt_and_final_cleanup_helpers(self):
         module = ast.parse(SCRIPT.read_text())
         reproduction = next(node for node in module.body
