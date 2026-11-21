@@ -57,6 +57,8 @@ INSTALL_FILES = {
     "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx": 0o644,
     "agent/opencode/plugins/host-metrics-tui/package.json": 0o644,
     "agent/opencode/plugins/host-metrics-tui/tui.tsx": 0o644,
+    "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js": 0o644,
+    "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts": 0o644,
     "lib/vm/host-launcher.sh": 0o644,
     "lib/vm/desktop-session-env.sh": 0o644,
     "lib/vm/cloud-init.sh": 0o644,

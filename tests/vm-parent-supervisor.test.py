@@ -668,6 +668,8 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
                 "agent/opencode/plugins/host-metrics-tui/package.json",
                 "agent/opencode/plugins/host-metrics-tui/tui.tsx",
+                "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js",
+                "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts",
             ]
             for relative in fixture_files:
                 destination = source_root / relative

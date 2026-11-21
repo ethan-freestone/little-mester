@@ -53,7 +53,7 @@ else
   OPENCODE_CLI_CONFIG_CONTENT=$(/usr/bin/python3 -I /usr/local/libexec/lm-guest-opencode-preferences.py config)
 fi
 export OPENCODE_CONFIG OPENCODE_CLI_CONFIG_CONTENT
-export OPENCODE_CLI_CONFIG_CONTENT
+export METRICS_MODE=vm
 export HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128
 export http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128
 export OPENCODE_DISABLE_PROJECT_CONFIG=1
@@ -101,7 +101,7 @@ PROTECTED_PLUGIN_ASSETS = {
 METRICS_PLUGIN_ASSETS = {
     f"/etc/opencode/plugins/little-mester-host-metrics-tui/{name}":
         (METRICS_PLUGIN_ROOT / name).read_bytes()
-    for name in ("package.json", "tui.tsx")
+    for name in ("package.json", "tui.tsx", "metrics-endpoint.js", "metrics-endpoint.d.ts")
 }
 PROTECTED_CONFIG_MODEL = json.dumps({
     "autoupdate": False,
@@ -186,6 +186,8 @@ def add_protected_session(data: dict, *, host_private: str, host_public: str,
         plugin_destinations.extend((
             ("package.json", "/etc/opencode/plugins/little-mester-host-metrics-tui/package.json"),
             ("tui.tsx", "/etc/opencode/plugins/little-mester-host-metrics-tui/tui.tsx"),
+            ("metrics-endpoint.js", "/etc/opencode/plugins/little-mester-host-metrics-tui/metrics-endpoint.js"),
+            ("metrics-endpoint.d.ts", "/etc/opencode/plugins/little-mester-host-metrics-tui/metrics-endpoint.d.ts"),
         ))
     for name, destination in plugin_destinations:
         source_root = (METRICS_PLUGIN_ROOT if "host-metrics-tui" in destination else PLUGIN_ROOT)

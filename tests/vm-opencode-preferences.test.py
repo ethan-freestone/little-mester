@@ -61,6 +61,7 @@ class PreferenceValidationTests(unittest.TestCase):
         runner = contract.split("OPENCODE_RUNNER = b\"\"\"", 1)[1].split('"""', 1)[0]
         self.assertIn("lm-guest-opencode-preferences.py model", runner)
         self.assertIn("LM_OPENCODE_MODEL=", runner)
+        self.assertIn("export METRICS_MODE=vm", runner)
         self.assertNotIn("config.update(safe)", (ROOT / "lib/vm/guest-opencode-preferences.py").read_text())
 
     def test_atomic_preferences_round_trip_and_refuse_unsafe_file_metadata(self):

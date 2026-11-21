@@ -14,6 +14,30 @@ SPEC.loader.exec_module(parent_qemu)
 
 
 class ParentQemuArgvTests(unittest.TestCase):
+    def test_metrics_mode_is_fixed_at_each_trusted_launch_boundary(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        agent = compose.split("\n  agent:\n", 1)[1].split("\n  # ───", 1)[0]
+        metrics = compose.split("\n  metrics:\n", 1)[1].split("\n  # ───", 1)[0]
+        self.assertIn("METRICS_MODE: docker", agent)
+        self.assertNotIn("ports:", metrics)
+        self.assertIn("networks: [internal]", metrics)
+
+        contract = (ROOT / "lib/vm/parent-session-contract.py").read_text()
+        runner = contract.split('OPENCODE_RUNNER = b"""', 1)[1].split('"""', 1)[0]
+        self.assertIn("export METRICS_MODE=vm", runner)
+
+        argv = parent_qemu.build_system_qemu_argv(
+            executable="/usr/bin/qemu-system-x86_64",
+            disk_path="/var/lib/little-mester-vm/disk.qcow2",
+            seed_iso="/var/lib/little-mester-vm/seed.iso", ssh_port=22222,
+            proxy_port=32128, qmp_socket="/run/little-mester-vm/qmp.sock",
+            vm_name="little-mester-system-vm",
+            virtiofs_socket="/run/little-mester-vm-workspace/virtiofs.sock")
+        netdev = argv[argv.index("-netdev") + 1]
+        self.assertIn("guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:32129", netdev)
+        self.assertIn("restrict=on", netdev)
+        self.assertNotIn("hostfwd=tcp:0.0.0.0", netdev)
+
     def test_shared_network_builder_covers_parent_smoke_and_ci_modes(self):
         self.assertEqual(
             parent_qemu.build_user_netdev(ssh_port=22222, restricted=True, proxy_port=23456),

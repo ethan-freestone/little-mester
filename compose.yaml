@@ -128,6 +128,7 @@ services:
     pids_limit: 512
     environment:
       HOME: /home/agent
+      METRICS_MODE: docker
       OLLAMA_API_BASE: http://ollama:11434
       LLAMACPP_API_BASE: http://llamacpp:11434
       # Default model (overridden by opencode.json)

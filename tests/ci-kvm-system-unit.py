@@ -63,6 +63,10 @@ PINNED_INSTALL_ASSETS = {
         ("agent/opencode/plugins/host-metrics-tui/package.json", 0o644),
     "/usr/lib/little-mester-vm/host-metrics-tui/tui.tsx":
         ("agent/opencode/plugins/host-metrics-tui/tui.tsx", 0o644),
+    "/usr/lib/little-mester-vm/host-metrics-tui/metrics-endpoint.js":
+        ("agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js", 0o644),
+    "/usr/lib/little-mester-vm/host-metrics-tui/metrics-endpoint.d.ts":
+        ("agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts", 0o644),
     "/etc/sudoers.d/little-mester-vm": ("sudoers/little-mester-vm", 0o440),
 }
 PINNED_SOURCE_PATHS = frozenset(source for source, _mode in PINNED_INSTALL_ASSETS.values())

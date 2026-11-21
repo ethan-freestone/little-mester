@@ -22,6 +22,7 @@
 
 import { Plugin } from "@opencode/plugin/tui"
 import { createSignal, Show } from "solid-js"
+import { fetchMetricsJson, metricsBaseForMode } from "./metrics-endpoint.js"
 
 /* ------------------------------------------------------------------ */
 /* Sparkline helpers — ASCII chars ▁▂▃▄▅▆█, scaled to data range       */
@@ -306,10 +307,14 @@ export default Plugin.define({
       setState(prev => ({ ...prev, mode: prev.mode === "compact" ? "expanded" : "compact" }))
     }
 
+    const metricsMode = process.env.METRICS_MODE
+    const metricsBase = metricsBaseForMode(metricsMode)
+
     /* Poll /history (first time) → seeds the data arrays. */
     function seedHistory() {
-      return fetch("http://10.0.2.100:19532/history?n=60")
-        .then(r => r.json())
+      if (!metricsBase) return Promise.resolve()
+      return fetchMetricsJson<Array<{ gpu_util?: number; vram_pct?: number; gpu_temp?: number }>>(
+        metricsMode, "/history?n=60")
         .then((data: Array<{ gpu_util?: number; vram_pct?: number; gpu_temp?: number }>) => {
           if (isDisposed || !Array.isArray(data) || !data.length) return
           setState(prev => ({
@@ -327,8 +332,11 @@ export default Plugin.define({
 
     /* Poll /metrics → push latest data point. */
     function pollMetrics() {
-      fetch("http://10.0.2.100:19532/metrics")
-        .then(r => r.json())
+      if (!metricsBase) {
+        setState(prev => ({ ...prev, sourceStatus: "Host metrics unavailable · mode not configured" }))
+        return
+      }
+      fetchMetricsJson<MetricsPayload>(metricsMode, "/metrics")
         .then((d: MetricsPayload) => {
           if (isDisposed) return
           const g = d.gpu?.[0]

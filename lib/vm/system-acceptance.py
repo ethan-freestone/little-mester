@@ -219,7 +219,7 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
                 or stat.S_IMODE(info.st_mode) != 0o644 or target.read_bytes() != source.read_bytes()):
             raise AcceptanceError(f"deployed OpenCode plugin differs from candidate: {name}")
-    for name in ("package.json", "tui.tsx"):
+    for name in ("package.json", "tui.tsx", "metrics-endpoint.js", "metrics-endpoint.d.ts"):
         source = root / "agent/opencode/plugins/host-metrics-tui" / name
         target = runtime / "host-metrics-tui" / name
         info = os.lstat(target)
