@@ -144,7 +144,7 @@ def _controller_identity() -> dict[str, object]:
 
 def reset_failed_with_diagnostics(names: tuple[str, ...], *, phase: str,
                                   command_runner=None, emit=print) -> dict[str, object]:
-    """Reset only loaded disposable units; verified-unloaded units are harmless."""
+    """Reset only failed disposable units and account for systemd GC races."""
     command_runner = run if command_runner is None else command_runner
     require(bool(names) and len(names) == len(set(names))
             and all(re.fullmatch(r"lm-vm-workspace-repro-[A-Za-z0-9_.@:-]+\.service", name)
@@ -152,6 +152,7 @@ def reset_failed_with_diagnostics(names: tuple[str, ...], *, phase: str,
             "refusing reset-failed outside uniquely named disposable workspace units")
     before: dict[str, object] = {}
     after: dict[str, object] = {}
+    reset_attempts: list[dict[str, object]] = []
 
     def observe(name: str) -> dict[str, object]:
         argv = ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "show", "--no-pager",
@@ -164,41 +165,80 @@ def reset_failed_with_diagnostics(names: tuple[str, ...], *, phase: str,
 
     for name in names:
         before[name] = observe(name)
-    loaded = []
-    for name in names:
-        observed = before[name]
+    failed = []
+    for name, observed in before.items():
         require(observed["returncode"] == 0,
-                f"could not read disposable unit state before reset: {name}")
+                f"could not read disposable unit state before reset: {name}; evidence={observed}")
         state = observed["state"]
-        if state.get("LoadState") == "loaded":
-            loaded.append(name)
+        load_state, active_state = state.get("LoadState"), state.get("ActiveState")
+        sub_state, main_pid = state.get("SubState"), state.get("MainPID")
+        require(main_pid == "0" and
+                ((load_state == "loaded" and active_state in ("inactive", "failed")
+                  and sub_state in ("dead", "failed"))
+                 or (load_state == "not-found" and active_state == "inactive"
+                     and sub_state == "dead")),
+                f"unexpected pre-reset disposable unit state; evidence={observed}")
+        if load_state == "loaded" and active_state == "failed":
+            failed.append(name)
+
+    # A single named unit per invocation makes a GC race attributable. Never
+    # call reset-failed without an explicit failed disposable unit name.
+    for name in failed:
+        argv = ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reset-failed", name]
+        try:
+            result = command_runner(argv, timeout=10, check=False)
+        except (OSError, subprocess.SubprocessError) as error:
+            reset_attempts.append({"unit": name, "command": argv, "returncode": -1,
+                                   "stdout": "", "stderr": f"{type(error).__name__}: {error}",
+                                   "exact_not_loaded_error": False})
         else:
-            require(state.get("LoadState") == "not-found"
-                    and state.get("ActiveState") == "inactive"
-                    and state.get("MainPID") == "0",
-                    f"unexpected unloaded disposable unit state; evidence={observed}")
-    argv = ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reset-failed", *loaded]
-    reset_result = (command_runner(argv, timeout=10, check=False) if loaded else
-                    subprocess.CompletedProcess(argv, 0, "", ""))
+            not_loaded_error = re.compile(
+                rf"(?:Failed to reset failed state of unit {re.escape(name)}: )?"
+                rf"Unit(?: {re.escape(name)})? not loaded\.?\s*\Z", re.IGNORECASE)
+            exact_not_loaded_error = (
+                result.returncode != 0 and not (result.stdout or "").strip()
+                and not_loaded_error.fullmatch((result.stderr or "").strip()) is not None)
+            reset_attempts.append({"unit": name, "command": argv,
+                                   **_bounded_process_evidence(result),
+                                   "exact_not_loaded_error": exact_not_loaded_error})
     for name in names:
         after[name] = observe(name)
+    invalid_after = {}
+    for name, observed in after.items():
+        state = observed["state"]
+        if not (observed["returncode"] == 0
+                and state.get("LoadState") in ("loaded", "not-found")
+                and state.get("ActiveState") == "inactive"
+                and state.get("SubState") == "dead"
+                and state.get("MainPID") == "0"):
+            invalid_after[name] = observed
+
+    def is_gc_race(attempt: dict[str, object]) -> bool:
+        name = attempt["unit"]
+        observed = after[name]
+        state = observed["state"]
+        return (attempt["returncode"] != 0 and attempt["exact_not_loaded_error"]
+                and observed["returncode"] == 0
+                and state.get("LoadState") in ("loaded", "not-found")
+                and state.get("ActiveState") == "inactive"
+                and state.get("SubState") == "dead"
+                and state.get("MainPID") == "0")
+
+    invalid_attempts = [attempt for attempt in reset_attempts
+                        if attempt["returncode"] != 0 and not is_gc_race(attempt)]
+    aggregate_returncode = 1 if invalid_attempts or invalid_after else 0
     evidence: dict[str, object] = {
         "phase": phase, "controller": _controller_identity(),
-        "reset": {"command": argv if loaded else None,
-                  **_bounded_process_evidence(reset_result)},
-        "before": before, "after": after,
+        "reset": {"commands": reset_attempts,
+                  "returncode": aggregate_returncode,
+                  "gc_races_accepted": [attempt["unit"] for attempt in reset_attempts
+                                        if attempt["returncode"] != 0 and is_gc_race(attempt)]},
+        "before": before, "after": after, "post_state_errors": invalid_after,
     }
     serialized = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
     emit("systemd_reset_attempt=" + serialized)
-    if reset_result.returncode != 0:
-        raise RuntimeError(f"systemctl reset-failed failed; evidence={serialized}")
-    for name in names:
-        prior, current = before[name], after[name]
-        require(current["returncode"] == 0
-                and current["state"].get("LoadState") == prior["state"].get("LoadState")
-                and current["state"].get("ActiveState") == "inactive"
-                and current["state"].get("MainPID") == "0",
-                f"unit {name} did not reach stopped state after reset; evidence={serialized}")
+    if invalid_attempts or invalid_after:
+        raise RuntimeError(f"systemctl reset-failed or post-state validation failed; evidence={serialized}")
     return evidence
 
 

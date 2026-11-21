@@ -594,72 +594,130 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("            raise\n        remover = textwrap.dedent", reproduction)
         self.assertNotIn('raise RuntimeError("diagnostic reproduction was ambiguous', reproduction)
 
-    def test_reset_failed_diagnostics_capture_command_identity_and_before_after_state(self):
-        calls = []
-        emitted = []
-        states = iter(("LoadState=loaded\nActiveState=failed\nMainPID=0\n",
-                       "LoadState=loaded\nActiveState=inactive\nMainPID=0\n"))
-
-        def command_runner(argv, **kwargs):
-            calls.append((argv, kwargs))
-            if "show" in argv:
-                return subprocess.CompletedProcess(argv, 0, next(states), "")
-            return subprocess.CompletedProcess(argv, 0, "", "")
-
-        result = unit.reset_failed_with_diagnostics(
-            ("lm-vm-workspace-repro-test.service",), phase="standalone-control-reuse",
-            command_runner=command_runner, emit=emitted.append)
-        self.assertEqual(result["reset"]["returncode"], 0)
-        self.assertEqual(result["before"]["lm-vm-workspace-repro-test.service"]["state"]["ActiveState"], "failed")
-        self.assertEqual(result["after"]["lm-vm-workspace-repro-test.service"]["state"]["ActiveState"], "inactive")
-        self.assertEqual(len(calls), 3)
-        reset_argv = calls[1][0]
-        self.assertEqual(reset_argv[:4], ["/usr/bin/sudo", "-n", "/usr/bin/systemctl",
-                                          "reset-failed"])
-        self.assertEqual(emitted[0], "systemd_reset_attempt=" + json.dumps(
-            result, sort_keys=True, separators=(",", ":")))
-        self.assertIn("euid", result["controller"])
-        self.assertIn("egid", result["controller"])
-
-    def test_reset_failed_skips_only_verified_unloaded_disposable_units(self):
-        calls = []
-        states = {
-            "lm-vm-workspace-repro-loaded.service": iter((
-                "LoadState=loaded\nActiveState=failed\nMainPID=0\n",
-                "LoadState=loaded\nActiveState=inactive\nMainPID=0\n")),
-            "lm-vm-workspace-repro-unloaded.service": iter((
-                "LoadState=not-found\nActiveState=inactive\nMainPID=0\n",
-                "LoadState=not-found\nActiveState=inactive\nMainPID=0\n")),
-        }
+    def test_reset_failed_reproduces_hosted_16_unit_inspect_reset_after_sequence(self):
+        names = tuple(f"lm-vm-workspace-repro-unit-{index}.service" for index in range(16))
+        failed = set(names[:3])
+        calls, emitted = [], []
+        states = {name: iter((
+            "LoadState=loaded\nActiveState={}\nSubState={}\nMainPID=0\n".format(
+                "failed" if name in failed else "inactive",
+                "failed" if name in failed else "dead"),
+            "LoadState={}\nActiveState=inactive\nSubState=dead\nMainPID=0\n".format(
+                "not-found" if name in names[3:12] else "loaded"))) for name in names}
 
         def command_runner(argv, **kwargs):
             calls.append(argv)
             if "show" in argv:
                 return subprocess.CompletedProcess(argv, 0, next(states[argv[-1]]), "")
+            self.assertEqual(argv[:5], ["/usr/bin/sudo", "-n", "/usr/bin/systemctl",
+                                        "reset-failed", argv[4]])
+            self.assertEqual(argv[4], names[len([item for item in calls
+                                                if "reset-failed" in item]) - 1])
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         evidence = unit.reset_failed_with_diagnostics(
-            ("lm-vm-workspace-repro-loaded.service",
-             "lm-vm-workspace-repro-unloaded.service"), phase="final-cleanup",
-            command_runner=command_runner, emit=lambda _line: None)
-        reset = next(argv for argv in calls if "reset-failed" in argv)
-        self.assertEqual(reset[-1], "lm-vm-workspace-repro-loaded.service")
-        self.assertNotIn("lm-vm-workspace-repro-unloaded.service", reset)
-        self.assertEqual(evidence["after"]["lm-vm-workspace-repro-unloaded.service"]["state"]["LoadState"],
-                         "not-found")
+            names, phase="final-cleanup", command_runner=command_runner, emit=emitted.append)
+        self.assertEqual([item["unit"] for item in evidence["reset"]["commands"]], list(names[:3]))
+        self.assertEqual(len([call for call in calls if "reset-failed" in call]), 3)
+        self.assertTrue(all(evidence["before"][name]["state"]["LoadState"] == "loaded"
+                            for name in names))
+        self.assertTrue(all(evidence["after"][name]["state"]["ActiveState"] == "inactive"
+                            and evidence["after"][name]["state"]["SubState"] == "dead"
+                            and evidence["after"][name]["state"]["MainPID"] == "0"
+                            for name in names))
+        self.assertEqual(evidence["after"][names[4]]["state"]["LoadState"], "not-found")
+        self.assertEqual(evidence["reset"]["returncode"], 0)
+        self.assertEqual(emitted[0], "systemd_reset_attempt=" + json.dumps(
+            evidence, sort_keys=True, separators=(",", ":")))
+        self.assertIn("euid", evidence["controller"])
+        self.assertIn("egid", evidence["controller"])
 
-    def test_reset_failed_rejects_ambiguous_unloaded_unit_state(self):
-        outputs = iter((
-            "LoadState=masked\nActiveState=inactive\nMainPID=0\n",
-            "LoadState=masked\nActiveState=inactive\nMainPID=0\n"))
+    def test_reset_failed_accepts_exact_gc_error_when_show_reloads_inactive_unit(self):
+        name = "lm-vm-workspace-repro-gc.service"
+        outputs = iter(("LoadState=loaded\nActiveState=failed\nSubState=failed\nMainPID=0\n",
+                        "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\n"))
+        calls = []
 
         def command_runner(argv, **kwargs):
+            calls.append(argv)
+            if "show" in argv:
+                return subprocess.CompletedProcess(argv, 0, next(outputs), "")
+            return subprocess.CompletedProcess(argv, 5, "", f"Unit {name} not loaded.\n")
+
+        evidence = unit.reset_failed_with_diagnostics(
+            (name,), phase="final-cleanup", command_runner=command_runner,
+            emit=lambda _line: None)
+        self.assertEqual(evidence["reset"]["gc_races_accepted"], [name])
+        self.assertEqual(evidence["reset"]["returncode"], 0)
+        self.assertEqual(len([argv for argv in calls if "reset-failed" in argv]), 1)
+
+    def test_reset_failed_does_not_match_truncated_non_gc_error_suffix(self):
+        name = "lm-vm-workspace-repro-long-error.service"
+        outputs = iter(("LoadState=loaded\nActiveState=failed\nSubState=failed\nMainPID=0\n",
+                        "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\n"))
+
+        def command_runner(argv, **kwargs):
+            if "show" in argv:
+                return subprocess.CompletedProcess(argv, 0, next(outputs), "")
+            stderr = ("authorization failure; "
+                      * (unit.DIAGNOSTIC_OUTPUT_LIMIT // 24)) + f"Unit {name} not loaded."
+            return subprocess.CompletedProcess(argv, 5, "", stderr)
+
+        with self.assertRaisesRegex(RuntimeError, "reset-failed or post-state validation failed"):
+            unit.reset_failed_with_diagnostics(
+                (name,), phase="final-cleanup", command_runner=command_runner,
+                emit=lambda _line: None)
+
+    def test_reset_failed_does_not_hide_authorization_error_with_safe_after_state(self):
+        name = "lm-vm-workspace-repro-auth.service"
+        outputs = iter(("LoadState=loaded\nActiveState=failed\nSubState=failed\nMainPID=0\n",
+                        "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\n"))
+        emitted = []
+
+        def command_runner(argv, **kwargs):
+            if "show" in argv:
+                return subprocess.CompletedProcess(argv, 0, next(outputs), "")
+            return subprocess.CompletedProcess(argv, 1, "", "authorization failure")
+
+        with self.assertRaisesRegex(RuntimeError, "reset-failed or post-state validation failed"):
+            unit.reset_failed_with_diagnostics(
+                (name,), phase="final-cleanup", command_runner=command_runner,
+                emit=emitted.append)
+        result = json.loads(emitted[0].removeprefix("systemd_reset_attempt="))
+        self.assertEqual(result["reset"]["commands"][0]["stderr"], "authorization failure")
+        self.assertEqual(result["after"][name]["state"]["ActiveState"], "inactive")
+
+    def test_reset_failed_success_must_still_leave_unit_inactive_dead_without_pid(self):
+        name = "lm-vm-workspace-repro-still-failed.service"
+        outputs = iter(("LoadState=loaded\nActiveState=failed\nSubState=failed\nMainPID=0\n",
+                        "LoadState=loaded\nActiveState=failed\nSubState=failed\nMainPID=0\n"))
+
+        def command_runner(argv, **kwargs):
+            if "show" in argv:
+                return subprocess.CompletedProcess(argv, 0, next(outputs), "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with self.assertRaisesRegex(RuntimeError, "post-state validation failed"):
+            unit.reset_failed_with_diagnostics(
+                (name,), phase="final-cleanup", command_runner=command_runner,
+                emit=lambda _line: None)
+
+    def test_reset_failed_does_nothing_when_no_unit_is_failed(self):
+        name = "lm-vm-workspace-repro-inactive.service"
+        outputs = iter(("LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\n",
+                        "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\n"))
+        calls = []
+
+        def command_runner(argv, **kwargs):
+            calls.append(argv)
+            self.assertIn("show", argv)
             return subprocess.CompletedProcess(argv, 0, next(outputs), "")
 
-        with self.assertRaisesRegex(RuntimeError, "unexpected unloaded disposable unit state"):
-            unit.reset_failed_with_diagnostics(
-                ("lm-vm-workspace-repro-masked.service",), phase="final-cleanup",
-                command_runner=command_runner, emit=lambda _line: None)
+        evidence = unit.reset_failed_with_diagnostics(
+            (name,), phase="final-cleanup", command_runner=command_runner,
+            emit=lambda _line: None)
+        self.assertEqual(evidence["reset"]["commands"], [])
+        self.assertFalse(any("reset-failed" in argv for argv in calls))
 
     def test_reset_failed_refuses_names_outside_disposable_scope(self):
         with self.assertRaisesRegex(RuntimeError, "outside uniquely named disposable"):
@@ -668,59 +726,17 @@ class HostedSystemUnitTests(unittest.TestCase):
                 command_runner=lambda *_args, **_kwargs: self.fail("must not inspect production units"),
                 emit=lambda _line: None)
 
-    def test_reset_failed_nonzero_preserves_bounded_command_and_state_evidence(self):
-        calls = []
-        emitted = []
-        state_outputs = iter(("LoadState=loaded\nActiveState=failed\nMainPID=0\n",
-                              "LoadState=loaded\nActiveState=failed\nMainPID=0\n"))
+    def test_reset_failed_rejects_ambiguous_unloaded_disposable_before_reset(self):
+        name = "lm-vm-workspace-repro-masked.service"
+        output = "LoadState=masked\nActiveState=inactive\nSubState=dead\nMainPID=0\n"
 
         def command_runner(argv, **kwargs):
-            calls.append(argv)
-            if "show" in argv:
-                return subprocess.CompletedProcess(argv, 0, next(state_outputs), "")
-            return subprocess.CompletedProcess(argv, 1, "reset stdout", "authorization detail")
+            return subprocess.CompletedProcess(argv, 0, output, "")
 
-        with self.assertRaisesRegex(RuntimeError, "authorization detail"):
+        with self.assertRaisesRegex(RuntimeError, "unexpected pre-reset disposable unit state"):
             unit.reset_failed_with_diagnostics(
-                ("lm-vm-workspace-repro-test.service",), phase="standalone-control-reuse",
-                command_runner=command_runner, emit=emitted.append)
-        self.assertEqual(len(calls), 3)
-        payload = json.loads(emitted[0].removeprefix("systemd_reset_attempt="))
-        self.assertEqual(payload["reset"]["returncode"], 1)
-        self.assertEqual(payload["reset"]["stderr"], "authorization detail")
-        self.assertEqual(payload["reset"]["stdout"], "reset stdout")
-        self.assertEqual(payload["before"]["lm-vm-workspace-repro-test.service"]["state"]["ActiveState"], "failed")
-        self.assertEqual(payload["after"]["lm-vm-workspace-repro-test.service"]["state"]["ActiveState"], "failed")
-
-    def test_reset_failed_command_output_is_bounded(self):
-        states = iter(("LoadState=loaded\nActiveState=failed\nMainPID=0\n",
-                       "LoadState=loaded\nActiveState=inactive\nMainPID=0\n"))
-
-        def command_runner(argv, **kwargs):
-            if "show" in argv:
-                return subprocess.CompletedProcess(argv, 0, next(states), "")
-            output = "x" * (unit.DIAGNOSTIC_OUTPUT_LIMIT + 32)
-            return subprocess.CompletedProcess(argv, 0, output, output)
-
-        result = unit.reset_failed_with_diagnostics(
-            ("lm-vm-workspace-repro-test.service",), phase="final-cleanup", command_runner=command_runner,
-            emit=lambda _line: None)
-        self.assertEqual(len(result["reset"]["stdout"]), unit.DIAGNOSTIC_OUTPUT_LIMIT)
-        self.assertEqual(len(result["reset"]["stderr"]), unit.DIAGNOSTIC_OUTPUT_LIMIT)
-
-    def test_reset_failed_stopped_state_verification_remains_fail_closed(self):
-        states = iter(("LoadState=loaded\nActiveState=failed\nMainPID=0\n",
-                       "LoadState=loaded\nActiveState=activating\nMainPID=123\n"))
-
-        def command_runner(argv, **kwargs):
-            if "show" in argv:
-                return subprocess.CompletedProcess(argv, 0, next(states), "")
-            return subprocess.CompletedProcess(argv, 0, "", "")
-
-        with self.assertRaisesRegex(RuntimeError, "did not reach stopped state"):
-            unit.reset_failed_with_diagnostics(
-                ("lm-vm-workspace-repro-test.service",), phase="final-cleanup",
-                command_runner=command_runner, emit=lambda _line: None)
+                (name,), phase="final-cleanup", command_runner=command_runner,
+                emit=lambda _line: None)
 
     def test_namespace_matrix_avoids_redundant_and_per_variant_intermediate_resets(self):
         source = SCRIPT.read_text()
