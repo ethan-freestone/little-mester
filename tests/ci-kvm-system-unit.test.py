@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import ast
+import base64
 import importlib.util
 import io
 import json
 import os
 import pathlib
+import re
 import shlex
 import subprocess
 import tempfile
@@ -419,7 +421,7 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("disposable_workspace_path()", config_body)
         self.assertIn('"owner_uid": os.getuid()', config_body)
         self.assertIn('"unsafe_recurse": False', config_body)
-        self.assertIn('BindPaths="{workspace}:/run/little-mester-vm-workspace-share', config_body)
+        self.assertIn("expected_bind = WORKSPACE_MODULE._systemd_bind_path(workspace)", config_body)
         self.assertNotIn(":/workspace", config_body)
         self.assertLess(main.index("configure_disposable_workspace(installed_root)"),
                         main.index("invoke_shared_acceptance(sha)"))
@@ -507,7 +509,10 @@ class HostedSystemUnitTests(unittest.TestCase):
         repro = config + source[source.index("def run_production_dependency_reproduction"):
                                 source.index("def remove_disposable_workspace")]
         self.assertIn('systemd/little-mester-vm-workspace.service', repro)
-        self.assertIn('ExecStart=/usr/bin/sleep 90', repro)
+        self.assertIn('ExecStart={workspace_bind_probe_exec(workspace, destination)}', repro)
+        self.assertIn("WORKSPACE_FILE_BIND_PROBE", repro)
+        self.assertIn("exact_destination_mountpoint", repro)
+        self.assertIn("unrelated_home_hidden", repro)
         self.assertIn('ExecStartPost=/usr/bin/true', repro)
         for directive in (
             "Type=exec", "RuntimeDirectory=little-mester-vm-workspace little-mester-vm-workspace-share",
@@ -576,14 +581,14 @@ class HostedSystemUnitTests(unittest.TestCase):
         reproduction = source[source.index("def run_production_dependency_reproduction"):
                               source.index("def remove_disposable_workspace")]
         self.assertIn('standalone = run_case("dropin-standalone"', reproduction)
-        self.assertIn('require_reproduced_control(standalone["_classification"])', reproduction)
+        self.assertIn('standalone["_raw_classification"] == "REPRODUCED_226_NAMESPACE"',
+                      reproduction)
+        self.assertIn('set(standalone["_configuration_mismatches"]) == {"BindPaths"}',
+                      reproduction)
         # The outcome is returned only after stop/state/runtime/config/reset gates.
-        self.assertLess(reproduction.index("verify_stopped(start_unit)"),
-                        reproduction.index('"_classification": classification'))
-        self.assertLess(reproduction.index("verify_runtime_baseline()"),
-                        reproduction.index('"_classification": classification'))
-        self.assertLess(reproduction.index("require(effective_matches"),
-                        reproduction.index('"_classification": classification'))
+        self.assertIn("verify_stopped(start_unit)", reproduction)
+        self.assertIn("verify_runtime_baseline()", reproduction)
+        self.assertIn("require(effective_matches", reproduction)
         self.assertIn('original_error={type(error).__name__}: {error}', reproduction)
         self.assertIn("if sys.exc_info()[0] is None:\n                raise RuntimeError(", reproduction)
         self.assertIn("            raise\n        remover = textwrap.dedent", reproduction)
@@ -677,7 +682,8 @@ class HostedSystemUnitTests(unittest.TestCase):
         run_case = reproduction[reproduction.index("def run_case"):
                                 reproduction.index("# The graph uses a separate")]
         self.assertNotIn("reset_failed_and_verify(", run_case)
-        self.assertIn('require_reproduced_control(standalone["_classification"])', reproduction)
+        self.assertIn('standalone["_raw_classification"] == "REPRODUCED_226_NAMESPACE"',
+                      reproduction)
         self.assertNotIn("reset-failed", run_case)
         self.assertIn("graph_workspace_unit =", reproduction)
         self.assertIn("reset_failed_with_diagnostics(names, phase=\"final-cleanup\")", reproduction)
@@ -718,6 +724,126 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertTrue(unit.compare_effective_configuration(
             baseline, dict(baseline, BindPaths="/wrong:/b"),
             allow_bind_fragment_placement=True))
+
+    def test_bind_semantic_comparison_rejects_equal_but_duplicated_malformed_values(self):
+        self.assertTrue(unit.bind_paths_semantically_match("/source:/target:rbind",
+                                                           "/source", "/target"))
+        self.assertFalse(unit.bind_paths_semantically_match(
+            "/source:/target:/source:/target:rbind", "/source", "/target"))
+        malformed = {"BindPaths": "/source:/target:/source:/target:rbind",
+                     "ProtectHome": "tmpfs"}
+        mismatches = unit.compare_effective_configuration(
+            malformed, dict(malformed), expected_bind=("/source", "/target"))
+        self.assertEqual(mismatches["BindPaths"]["baseline_semantic_match"], False)
+        self.assertEqual(mismatches["BindPaths"]["candidate_semantic_match"], False)
+        self.assertEqual(mismatches["BindPaths"]["baseline"], malformed["BindPaths"])
+        self.assertEqual(mismatches["BindPaths"]["candidate"], malformed["BindPaths"])
+        self.assertEqual(unit.compare_effective_configuration(
+            malformed, dict(malformed, BindPaths="/source:/target:rbind"),
+            allowed_setting="BindPaths", expected_bind=("/source", "/target")), {})
+        self.assertTrue(unit.compare_effective_configuration(
+            malformed, dict(malformed, BindPaths="/source:/target:/source:/target:rbind"),
+            allowed_setting="BindPaths", expected_bind=("/source", "/target")))
+
+    def test_hosted_bind_quote_matrix_runs_quoted_unquoted_then_reverse(self):
+        source = SCRIPT.read_text()
+        reproduction = source[source.index("def run_production_dependency_reproduction"):
+                              source.index("def remove_disposable_workspace")]
+        quoted = reproduction.index('run_case("dropin-standalone"')
+        unquoted = reproduction.index('run_case("bind-unquoted"')
+        reverse = reproduction.index('run_case("bind-quoted-reverse"')
+        self.assertLess(quoted, unquoted)
+        self.assertLess(unquoted, reverse)
+        self.assertIn('unquoted["_raw_classification"] == "NOT_REPRODUCED"', reproduction)
+        self.assertIn('and unquoted["_probe_valid"]', reproduction)
+        self.assertIn("require(quoted_reverse[\"_raw_classification\"] == standalone[\"_raw_classification\"]",
+                      reproduction)
+        self.assertIn("WORKSPACE_MODULE._systemd_bind_path(workspace)", source)
+
+    def test_generated_namespace_probe_is_valid_python_and_quoted_as_one_systemd_argument(self):
+        command = unit.workspace_bind_probe_exec(
+            pathlib.Path("/var/tmp/source workspace"),
+            "/run/little-mester-vm-workspace-share")
+        match = re.fullmatch(
+            r"/usr/bin/python3 -I -c 'import base64;exec\(base64\.b64decode\(\"([A-Za-z0-9+/=]+)\"\)\)'",
+            command)
+        self.assertIsNotNone(match)
+        probe_code = base64.b64decode(match.group(1)).decode("utf-8")
+        compile(probe_code, "<workspace-bind-probe>", "exec")
+        self.assertIn("exact_destination_mountpoint", probe_code)
+        self.assertIn("unrelated_home_hidden", probe_code)
+        self.assertIn("service_identity_matches", probe_code)
+        probe_gate = probe_code.split("valid = all(", 1)[1].split("if not valid:", 1)[0]
+        self.assertNotIn("unrelated_home_hidden", probe_gate)
+        self.assertIn("target_matches_prestart_source", SCRIPT.read_text())
+
+    def test_namespace_probe_mount_identity_uses_prestart_host_source_snapshot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source_path = pathlib.Path(temporary) / "source"
+            source_path.mkdir()
+            source = unit._host_path_evidence(source_path)
+            source["lstat"]["device"] = 8
+            source["lstat"]["inode"] = 42
+        probe = {"identity": {}, "evidence": {
+            "target": {"device": 8, "inode": 42},
+            "exact_destination_mountpoint": True,
+            "unrelated_home_hidden": True,
+            "service_identity_matches": True,
+        }}
+        enriched, valid = unit.validate_workspace_bind_probe(probe, source)
+        self.assertTrue(valid)
+        self.assertTrue(enriched["host_comparison"]["target_matches_prestart_source"])
+        changed = {**probe, "evidence": {**probe["evidence"],
+                                          "target": {"device": 8, "inode": 43}}}
+        _evidence, valid = unit.validate_workspace_bind_probe(changed, source)
+        self.assertFalse(valid)
+
+    def test_namespace_probe_accepts_expected_home_visibility_for_protect_home_variant(self):
+        source = {"lstat": {"kind": "directory", "device": 8, "inode": 42}}
+        probe = {"evidence": {"target": {"device": 8, "inode": 42},
+                              "exact_destination_mountpoint": True,
+                              "unrelated_home_hidden": False,
+                              "service_identity_matches": True}}
+        _evidence, valid = unit.validate_workspace_bind_probe(
+            probe, source, expected_home_hidden=False)
+        self.assertTrue(valid)
+        _evidence, valid = unit.validate_workspace_bind_probe(probe, source)
+        self.assertFalse(valid, "quoted controls must still require unrelated-home isolation")
+
+    def test_namespace_probe_collection_waits_for_record_and_stops_at_known_failure_or_deadline(self):
+        now = [0.0]
+        journals = iter((
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "WORKSPACE_FILE_BIND_PROBE {}\n", ""),
+        ))
+        result, status = unit.wait_for_workspace_bind_probe(
+            lambda: next(journals), lambda: {"ActiveState": "active", "MainPID": "10"},
+            timeout=1.0, interval=0.1, clock=lambda: now[0],
+            sleep=lambda duration: now.__setitem__(0, now[0] + duration))
+        self.assertEqual(status, "PROBE_OBSERVED")
+        self.assertIn("WORKSPACE_FILE_BIND_PROBE", result.stdout)
+
+        result, status = unit.wait_for_workspace_bind_probe(
+            lambda: subprocess.CompletedProcess([], 0, "226/NAMESPACE", ""),
+            lambda: {"ActiveState": "failed", "MainPID": "0"})
+        self.assertEqual(status, "NAMESPACE_FAILURE_BEFORE_PROBE")
+
+        now[0] = 0.0
+        result, status = unit.wait_for_workspace_bind_probe(
+            lambda: subprocess.CompletedProcess([], 0, "", ""),
+            lambda: {"ActiveState": "active", "MainPID": "10"},
+            timeout=0.25, interval=0.1, clock=lambda: now[0],
+            sleep=lambda duration: now.__setitem__(0, now[0] + duration))
+        self.assertEqual(status, "PROBE_DEADLINE_EXPIRED")
+
+        result, status = unit.wait_for_workspace_bind_probe(
+            lambda: subprocess.CompletedProcess([], 0, "", ""),
+            lambda: {"ActiveState": "failed", "MainPID": "0"})
+        self.assertEqual(status, "UNIT_STOPPED_BEFORE_PROBE")
+        result, status = unit.wait_for_workspace_bind_probe(
+            lambda: subprocess.CompletedProcess([], 1, "", "journal unavailable"),
+            lambda: self.fail("state must not be queried when journal fails"))
+        self.assertEqual(status, "JOURNAL_UNAVAILABLE")
 
     def test_effective_comparison_treats_dependency_lists_as_sets_and_limits_private_tmp_delta(self):
         # v255 unit_add_exec_dependencies adds tmp.mount and tmpfiles edges;
@@ -1107,13 +1233,15 @@ class HostedSystemUnitTests(unittest.TestCase):
     def test_final_unit_name_helper_covers_every_file_and_runner_wires_complete_tuple(self):
         variants = {"private-tmp": "repro-private-tmp.service",
                     "protect-home": "repro-protect-home.service"}
+        quote_units = ("repro-unquoted.service", "repro-quoted-reverse.service")
         expected = ("repro-workspace.service", "repro-graph-workspace.service",
                     "repro-fragment.service",
                     "repro-proxy.service", "repro-metrics.service", "repro-vm.service",
-                    *variants.values())
+                    *quote_units, *variants.values())
         names = unit.disposable_final_unit_names(
             "repro-workspace.service", "repro-fragment.service", "repro-graph-workspace.service",
-            "repro-proxy.service", "repro-metrics.service", "repro-vm.service", variants)
+            "repro-proxy.service", "repro-metrics.service", "repro-vm.service",
+            quote_units, variants)
         self.assertEqual(names, expected)
         self.assertEqual(len(names), len(set(names)))
         observed = []
@@ -1315,11 +1443,10 @@ class HostedSystemUnitTests(unittest.TestCase):
             template, user="ci-owner", group="ci-group", vm_unit="sample-vm.service",
             workspace=pathlib.Path("/tmp/ci workspace"),
             destination="/run/little-mester-vm-workspace-share")
-        self.assertIn("ExecStart=/usr/bin/sleep 90", unit_text)
+        self.assertIn("ExecStart=/usr/bin/python3 -I -c '", unit_text)
         self.assertNotIn("BindPaths=", unit_text)
-        self.assertEqual(dropin_text,
-                         '[Service]\nBindPaths="/tmp/ci workspace:'
-                         '/run/little-mester-vm-workspace-share"\n')
+        self.assertEqual(dropin_text, unit.WORKSPACE_MODULE._systemd_bind_path(
+            pathlib.Path("/tmp/ci workspace")))
         self.assertIn("BindPaths=", dropin_text)
         merged = ("# /run/systemd/system/sample-vm-workspace.service\n" + unit_text
                   + "# /run/systemd/system/sample-vm-workspace.service.d/20-workspace.conf\n"
@@ -1421,6 +1548,23 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn('"lifetime_probe": "NOT_EXERCISED"', reproduction)
         self.assertIn('classification == "NOT_REPRODUCED"', reproduction)
         self.assertNotIn("reset_failed_and_verify((start_unit,))", reproduction)
+
+    def test_preserved_runtime_fixture_requires_expected_service_owner_group_and_mode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "runtime"
+            path.mkdir(mode=0o750)
+            info = os.lstat(path)
+            identity = unit.runtime_directory_identity(
+                info, expected_uid=os.getuid(), expected_gid=os.getgid(), expected_mode=0o750)
+            self.assertEqual(identity["uid"], os.getuid())
+            self.assertEqual(identity["gid"], os.getgid())
+            self.assertEqual(identity["mode"], 0o750)
+            for expected in ({"expected_uid": os.getuid() + 1},
+                             {"expected_gid": os.getgid() + 1},
+                             {"expected_mode": 0o700}):
+                with self.subTest(expected=expected), self.assertRaisesRegex(RuntimeError,
+                                                                            "expected service"):
+                    unit.runtime_directory_identity(info, **expected)
 
     def test_journal_cursor_is_global_then_attempt_slice_is_unit_filtered(self):
         self.assertEqual(unit.journal_cursor_command(), [

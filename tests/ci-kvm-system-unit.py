@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import base64
 import grp
+import importlib.util
 import json
 import os
 import pathlib
@@ -21,6 +23,13 @@ import time
 import traceback
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
+_WORKSPACE_MODULE_SPEC = importlib.util.spec_from_file_location(
+    "system_vm_workspace", REPO / "lib/vm/system-vm-workspace.py")
+if _WORKSPACE_MODULE_SPEC is None or _WORKSPACE_MODULE_SPEC.loader is None:
+    raise RuntimeError("could not load the production workspace BindPaths writer")
+WORKSPACE_MODULE = importlib.util.module_from_spec(_WORKSPACE_MODULE_SPEC)
+sys.modules[_WORKSPACE_MODULE_SPEC.name] = WORKSPACE_MODULE
+_WORKSPACE_MODULE_SPEC.loader.exec_module(WORKSPACE_MODULE)
 CI_INSTALL_PREFIX = pathlib.Path("/srv/little-mester-ci")
 CI_INSTALL_PARENT = CI_INSTALL_PREFIX / "v3"
 UNIT = "little-mester-vm.service"
@@ -484,7 +493,7 @@ def configure_disposable_workspace(installed_root: pathlib.Path) -> pathlib.Path
     require(result.returncode == 0,
             f"disposable workspace configurator failed safely (exit={result.returncode})")
     dropin = pathlib.Path("/etc/systemd/system/little-mester-vm-workspace.service.d/20-workspace.conf")
-    expected_bind = f'[Service]\nBindPaths="{workspace}:/run/little-mester-vm-workspace-share"\n'
+    expected_bind = WORKSPACE_MODULE._systemd_bind_path(workspace)
     require(dropin.read_text(encoding="utf-8") == expected_bind,
             "fresh production unit assignment did not render the explicit disposable host path to its runtime target")
     return workspace
@@ -635,7 +644,8 @@ def _run_transient_bind_case(argv: list[str], *, unit_name: str, source: pathlib
                     require(observed.get(name) == value,
                             f"transient systemd property mismatch for {name}: {observed.get(name)!r}")
                 bind_paths = observed.get("BindPaths", "")
-                require(str(source) in bind_paths and str(destination) in bind_paths,
+                require(bind_paths_semantically_match(
+                    bind_paths, str(source), str(destination)),
                         "effective transient BindPaths do not contain the exact source/destination: "
                         f"{bind_paths!r}")
                 rw_paths = observed.get("ReadWritePaths", "")
@@ -1013,10 +1023,25 @@ def require_reproduced_control(classification: str) -> None:
 def compare_effective_configuration(baseline: dict[str, str], candidate: dict[str, str],
                                     *, allowed_setting: str | None = None,
                                     allow_bind_fragment_placement: bool = False,
-                                    mount_topology: dict[str, str] | None = None) -> dict:
+                                    mount_topology: dict[str, str] | None = None,
+                                    expected_bind: tuple[str, str] | None = None) -> dict:
     """Compare systemd show properties, allowing one deliberate delta only."""
     ignored = {"FragmentPath", "DropInPaths"} if allow_bind_fragment_placement else set()
     mismatches = {}
+    if expected_bind is not None:
+        source, destination = expected_bind
+        baseline_bind = baseline.get("BindPaths", "")
+        candidate_bind = candidate.get("BindPaths", "")
+        baseline_valid = bind_paths_semantically_match(
+            baseline_bind, source, destination)
+        candidate_valid = bind_paths_semantically_match(
+            candidate_bind, source, destination)
+        if not candidate_valid or (not baseline_valid and allowed_setting != "BindPaths"):
+            mismatches["BindPaths"] = {
+                "baseline": baseline_bind, "candidate": candidate_bind,
+                "baseline_semantic_match": baseline_valid,
+                "candidate_semantic_match": candidate_valid,
+            }
     for name in sorted(set(baseline) | set(candidate)):
         if name in ignored or name == allowed_setting:
             continue
@@ -1036,6 +1061,16 @@ def compare_effective_configuration(baseline: dict[str, str], candidate: dict[st
             mismatches[name] = {"baseline": _json_comparable(before),
                                 "candidate": _json_comparable(after)}
     return mismatches
+
+
+def bind_paths_semantically_match(value: str, source: str, destination: str) -> bool:
+    """Accept only the observed one-bind, recursive effective systemd serialization.
+
+    The hosted owner experiment reports SOURCE:DESTINATION:rbind.  Do not accept
+    a two-field form until a hosted systemd experiment establishes its meaning.
+    """
+    fields = value.split(":")
+    return len(fields) == 3 and fields == [source, destination, "rbind"]
 
 
 SYSTEMD_DEPENDENCY_SET_PROPERTIES = frozenset({
@@ -1175,15 +1210,27 @@ def normalize_systemd_exec(value: str) -> str:
     return " ; ".join(parts)
 
 
-def runtime_directory_identity(info: os.stat_result) -> dict[str, int]:
+def runtime_directory_identity(info: os.stat_result, *, expected_uid: int | None = None,
+                               expected_gid: int | None = None,
+                               expected_mode: int | None = None) -> dict[str, int]:
     require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode),
             "runtime path identity is not a directory")
-    return {"device": info.st_dev, "inode": info.st_ino, "uid": info.st_uid,
-            "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode)}
+    identity = {"device": info.st_dev, "inode": info.st_ino, "uid": info.st_uid,
+                "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode)}
+    expected = (("uid", expected_uid), ("gid", expected_gid), ("mode", expected_mode))
+    for name, value in expected:
+        if value is not None:
+            require(identity[name] == value,
+                    f"runtime directory identity does not have expected service {name}: {identity}")
+    return identity
 
 
-def capture_runtime_identities(paths) -> dict[str, dict[str, int]]:
-    return {str(path): runtime_directory_identity(os.lstat(path)) for path in paths}
+def capture_runtime_identities(paths, *, expected_uid: int | None = None,
+                               expected_gid: int | None = None,
+                               expected_mode: int | None = None) -> dict[str, dict[str, int]]:
+    return {str(path): runtime_directory_identity(
+        os.lstat(path), expected_uid=expected_uid, expected_gid=expected_gid,
+        expected_mode=expected_mode) for path in paths}
 
 
 def verify_runtime_identities(expected: dict[str, dict[str, int]]) -> None:
@@ -1194,11 +1241,15 @@ def verify_runtime_identities(expected: dict[str, dict[str, int]]) -> None:
 
 
 def run_preserved_runtime_lifecycle(paths, *, first_start_healthy: bool,
-                                    stop, restart) -> str:
+                                    stop, restart, expected_uid: int | None = None,
+                                    expected_gid: int | None = None,
+                                    expected_mode: int | None = None) -> str:
     """Exercise a healthy preserve stop/restart while retaining the first identity baseline."""
     if not first_start_healthy:
         return "NOT_EXERCISED"
-    expected = capture_runtime_identities(paths)  # Must precede the first stop.
+    expected = capture_runtime_identities(
+        paths, expected_uid=expected_uid, expected_gid=expected_gid,
+        expected_mode=expected_mode)  # Must precede the first stop.
     stop()
     verify_runtime_identities(expected)
     healthy = restart()  # This callback verifies fresh-cursor start, active/running and config.
@@ -1295,7 +1346,7 @@ def production_workspace_reproduction_config(template: str, *, user: str, group:
         ("PartOf=little-mester-vm.service", f"PartOf={vm_unit}"),
         ("Before=little-mester-vm.service", f"Before={vm_unit}"),
         ("ExecStart=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py serve",
-         "ExecStart=/usr/bin/sleep 90"),
+         f"ExecStart={workspace_bind_probe_exec(workspace, destination)}"),
         ("ExecStartPost=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py socket-permissions",
          "ExecStartPost=/usr/bin/true"),
     )
@@ -1303,7 +1354,132 @@ def production_workspace_reproduction_config(template: str, *, user: str, group:
         require(template.count(original) == 1,
                 f"production workspace unit template changed unexpectedly: {original}")
         template = template.replace(original, replacement)
-    return template, f'[Service]\nBindPaths="{workspace}:{destination}"\n'
+    bind_directive = WORKSPACE_MODULE._systemd_bind_path(workspace)
+    production_destination = str(WORKSPACE_MODULE.SHARE_DIR)
+    if destination != production_destination:
+        require(bind_directive.count(production_destination) == 1,
+                "production BindPaths writer output has ambiguous destination")
+        bind_directive = bind_directive.replace(production_destination, destination, 1)
+    return template, bind_directive
+
+
+def workspace_bind_probe_exec(workspace: pathlib.Path, destination: str) -> str:
+    """Build a disposable in-namespace probe as one systemd-quoted argv item."""
+    home = pwd.getpwuid(os.getuid()).pw_dir
+    try:
+        group_gid = grp.getgrnam("lm-vm-control").gr_gid
+    except KeyError:
+        # Local unit tests do not install the CI-only control group. The hosted
+        # reproduction requires it through the production unit properties.
+        group_gid = os.getgid()
+    probe = textwrap.dedent(f"""\
+        import errno, json, os, pathlib, sys, time
+        target = pathlib.Path({destination!r})
+        unrelated_home = pathlib.Path({home!r})
+        expected_uid, expected_gid, expected_group = {os.getuid()}, {os.getgid()}, {group_gid}
+        target_info = os.stat(target, follow_symlinks=False)
+        mounts = pathlib.Path('/proc/self/mountinfo').read_text().splitlines()
+        mountpoints = set()
+        for line in mounts:
+            fields = line.split()
+            if len(fields) > 4:
+                point = fields[4]
+                for sequence, character in ((chr(92) + '040', ' '),
+                                            (chr(92) + '011', chr(9)),
+                                            (chr(92) + '012', chr(10)),
+                                            (chr(92) + '134', chr(92))):
+                    point = point.replace(sequence, character)
+                mountpoints.add(point)
+        try:
+            os.stat(unrelated_home)
+            home_hidden = False
+        except OSError as error:
+            home_hidden = error.errno in (errno.EACCES, errno.EPERM, errno.ENOENT)
+        identity = {{'uid': os.getuid(), 'euid': os.geteuid(), 'gid': os.getgid(),
+                    'egid': os.getegid(), 'groups': os.getgroups()}}
+        evidence = {{
+            'source': {{'path': {str(workspace)!r}}},
+            'target': {{'device': target_info.st_dev, 'inode': target_info.st_ino,
+                        'uid': target_info.st_uid, 'gid': target_info.st_gid}},
+            'exact_destination_mountpoint': str(target) in mountpoints,
+            'unrelated_home_hidden': home_hidden,
+            'service_identity_matches': identity['euid'] == expected_uid
+                and identity['egid'] == expected_gid and expected_group in identity['groups'],
+        }}
+        print('WORKSPACE_FILE_BIND_PROBE ' + json.dumps(
+            {{'identity': identity, 'evidence': evidence}}, sort_keys=True), flush=True)
+        # Home visibility is policy-dependent: production/quote controls require
+        # it hidden, while the one-variable ProtectHome=no case expects visible.
+        valid = all((evidence['exact_destination_mountpoint'],
+                     evidence['service_identity_matches']))
+        if not valid:
+            raise SystemExit(43)
+        time.sleep(90)
+    """)
+    encoded = base64.b64encode(probe.encode("utf-8")).decode("ascii")
+    return f"/usr/bin/python3 -I -c 'import base64;exec(base64.b64decode(\"{encoded}\"))'"
+
+
+def workspace_bind_probe_evidence(journal: str) -> dict | None:
+    marker = "WORKSPACE_FILE_BIND_PROBE "
+    for line in journal.splitlines():
+        index = line.find(marker)
+        if index >= 0:
+            try:
+                return json.loads(line[index + len(marker):])
+            except json.JSONDecodeError:
+                return {"invalid_json": line[index + len(marker):]}
+    return None
+
+
+def wait_for_workspace_bind_probe(capture_journal, capture_state, *, timeout: float = 6.0,
+                                 interval: float = 0.1, clock=time.monotonic,
+                                 sleep=time.sleep) -> tuple[subprocess.CompletedProcess, str]:
+    """Poll a fresh-cursor journal until the probe, namespace failure, stop, or deadline."""
+    deadline = clock() + timeout
+    while True:
+        result = capture_journal()
+        if result.returncode != 0:
+            return result, "JOURNAL_UNAVAILABLE"
+        output = result.stdout or ""
+        if workspace_bind_probe_evidence(output) is not None:
+            return result, "PROBE_OBSERVED"
+        if ("226/NAMESPACE" in output
+                or "Failed to set up mount namespacing" in output):
+            return result, "NAMESPACE_FAILURE_BEFORE_PROBE"
+        state = capture_state()
+        if (state.get("ActiveState") in ("inactive", "failed")
+                and state.get("MainPID") == "0"):
+            return result, "UNIT_STOPPED_BEFORE_PROBE"
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return result, "PROBE_DEADLINE_EXPIRED"
+        sleep(min(interval, remaining))
+
+
+def validate_workspace_bind_probe(probe: dict | None, source_before: dict, *,
+                                  expected_home_hidden: bool = True) -> tuple[dict | None, bool]:
+    """Compare namespace target identity with the host source snapshot captured before start."""
+    if not probe or not isinstance(probe.get("evidence"), dict):
+        return probe, False
+    evidence = probe["evidence"]
+    source_identity = source_before.get("lstat", {})
+    target = evidence.get("target", {})
+    identity_matches = (
+        source_identity.get("kind") == "directory"
+        and target.get("device") == source_identity.get("device")
+        and target.get("inode") == source_identity.get("inode"))
+    result = {**probe, "host_comparison": {
+        "source_device": source_identity.get("device"),
+        "source_inode": source_identity.get("inode"),
+        "target_matches_prestart_source": identity_matches,
+        "expected_unrelated_home_hidden": expected_home_hidden,
+    }}
+    valid = (identity_matches
+             and evidence.get("exact_destination_mountpoint") is True
+             and evidence.get("unrelated_home_hidden") is expected_home_hidden
+             and evidence.get("service_identity_matches") is True)
+    return result, valid
 
 
 def production_workspace_fragment_config(unit_text: str, bind_directive: str) -> str:
@@ -1332,10 +1508,12 @@ def production_workspace_diagnostic_variants() -> dict[str, str]:
 def disposable_final_unit_names(workspace_unit: str, fragment_unit: str,
                                 graph_workspace_unit: str, proxy_unit: str,
                                 metrics_unit: str, vm_unit: str,
+                                quote_comparison_units: tuple[str, ...],
                                 variant_units: dict[str, str]) -> tuple[str, ...]:
     """Return every disposable unit file that final cleanup removes, exactly once."""
     return (workspace_unit, graph_workspace_unit, fragment_unit, proxy_unit,
             metrics_unit, vm_unit,
+            *quote_comparison_units,
             *tuple(variant_units.values()))
 
 
@@ -1350,6 +1528,9 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
     prefix = f"lm-vm-workspace-repro-{token}"
     workspace_unit = f"{prefix}.service"
     graph_workspace_unit = f"{prefix}-graph-workspace.service"
+    unquoted_workspace_unit = f"{prefix}-unquoted.service"
+    quoted_reverse_workspace_unit = f"{prefix}-quoted-reverse.service"
+    quote_comparison_units = (unquoted_workspace_unit, quoted_reverse_workspace_unit)
     fragment_unit = f"{prefix}-fragment.service"
     proxy_unit = f"{prefix}-proxy.service"
     metrics_unit, vm_unit = f"{prefix}-metrics.service", f"{prefix}-vm.service"
@@ -1366,13 +1547,22 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
     workspace_text, workspace_dropin = production_workspace_reproduction_config(
         workspace_template, user=user, group=group, vm_unit=vm_unit,
         workspace=workspace, destination=destination)
-    bind_directive = f'BindPaths="{workspace}:{destination}"\n'
+    require(workspace_dropin.count("[Service]\n") == 1,
+            "generated production BindPaths drop-in has ambiguous service section")
+    bind_directive = workspace_dropin.replace("[Service]\n", "", 1)
+    require(not any(character.isspace() for character in f"{workspace}:{destination}"),
+            "quoted/unquoted comparison requires whitespace-free identical path fixtures")
+    require(bind_directive.startswith('BindPaths="') and bind_directive.endswith('"\n'),
+            "production writer did not produce exactly one quoted BindPaths directive")
+    unquoted_bind_directive = bind_directive.replace('BindPaths="', "BindPaths=", 1)[:-2] + "\n"
+    quoted_reverse_dropin = workspace_dropin
+    unquoted_dropin = "[Service]\n" + unquoted_bind_directive
     fragment_text = production_workspace_fragment_config(workspace_text, bind_directive)
     variants = production_workspace_diagnostic_variants()
     variant_units = {label: f"{prefix}-{label}.service" for label in variants}
     final_unit_names = disposable_final_unit_names(
         workspace_unit, fragment_unit, graph_workspace_unit, proxy_unit, metrics_unit,
-        vm_unit, variant_units)
+        vm_unit, quote_comparison_units, variant_units)
     variant_dropins = {label: f"[Service]\n{directive}" for label, directive in variants.items()}
     dropin_relative = f"{workspace_unit}.d/20-workspace.conf"
     dropin_directory = pathlib.Path("/run/systemd/system") / f"{workspace_unit}.d"
@@ -1381,6 +1571,8 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
     units = {
         workspace_unit: workspace_text,
         graph_workspace_unit: workspace_text,
+        unquoted_workspace_unit: workspace_text,
+        quoted_reverse_workspace_unit: workspace_text,
         fragment_unit: fragment_text,
         proxy_unit: f"""[Unit]\nDescription=Disposable production proxy dependency\nAfter=network-online.target\nWants=network-online.target\nBefore={vm_unit}\nPartOf={vm_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
         metrics_unit: f"""[Unit]\nDescription=Disposable production metrics dependency\nBefore={vm_unit}\nPartOf={vm_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
@@ -1391,6 +1583,8 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
     dropins = {
         dropin_relative: workspace_dropin,
         f"{graph_workspace_unit}.d/20-workspace.conf": workspace_dropin,
+        f"{unquoted_workspace_unit}.d/20-workspace.conf": unquoted_dropin,
+        f"{quoted_reverse_workspace_unit}.d/20-workspace.conf": quoted_reverse_dropin,
     }
     for label, name in variant_units.items():
         dropins[f"{name}.d/20-workspace.conf"] = workspace_dropin
@@ -1557,8 +1751,18 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
             state = dict(line.split("=", 1) for line in shown.stdout.splitlines() if "=" in line)
             require(state.get("LoadState") == "loaded",
                     f"diagnostic unit did not load for {label}; preserving evidence: {state}")
-            journal = run(journal_after_cursor_command(cursor, effective_unit),
-                          check=False, timeout=10)
+            journal, probe_collection_status = wait_for_workspace_bind_probe(
+                lambda: run(journal_after_cursor_command(cursor, effective_unit),
+                            check=False, timeout=10),
+                lambda: unit_state(effective_unit))
+            refreshed = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "show", "--no-pager",
+                             f"--property={properties}", effective_unit],
+                            check=False, timeout=10)
+            require(refreshed.returncode == 0,
+                    f"post-probe systemd properties unavailable for {label}; preserving evidence")
+            state = dict(line.split("=", 1) for line in refreshed.stdout.splitlines() if "=" in line)
+            require(state.get("LoadState") == "loaded",
+                    f"diagnostic unit disappeared after probe collection for {label}: {state}")
             merged = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "cat", "--no-pager",
                           effective_unit], check=False, timeout=10)
             merged_text = merged.stdout or ""
@@ -1569,20 +1773,29 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
             require(journal.returncode == 0,
                     f"current-attempt journal unavailable for {label}; preserving evidence")
             diagnostic = journal.stdout or ""
+            probe_evidence, probe_valid = validate_workspace_bind_probe(
+                workspace_bind_probe_evidence(diagnostic), prestart["source"],
+                expected_home_hidden=state.get("ProtectHome") != "no")
             config = {key: state.get(key, "") for key in config_fields}
-            config_mismatches = {}
-            if baseline_config is not None:
-                config_mismatches = compare_effective_configuration(
-                    baseline_config, config, allowed_setting=allowed_setting,
-                    allow_bind_fragment_placement=fragment_bind_placement,
-                    mount_topology=private_tmp_topology)
+            config_mismatches = compare_effective_configuration(
+                baseline_config if baseline_config is not None else config, config,
+                allowed_setting=allowed_setting,
+                allow_bind_fragment_placement=fragment_bind_placement,
+                mount_topology=private_tmp_topology,
+                expected_bind=(str(workspace), destination))
             if baseline_config is None:
                 baseline_config = config
+            merged_configuration_matches = effective_matches
             effective_matches = effective_matches and not config_mismatches
-            classification = classify_namespace_reproduction(
+            raw_classification = classify_namespace_reproduction(
                 state, diagnostic, start_exit=start.returncode,
-                merged_dropin_matches=effective_matches)
+                merged_dropin_matches=merged_configuration_matches)
+            classification = raw_classification
             if config_mismatches:
+                classification = "INCONCLUSIVE"
+            bind_semantics_only_unresolved = (
+                bool(config_mismatches) and set(config_mismatches) == {"BindPaths"})
+            if raw_classification == "NOT_REPRODUCED" and not probe_valid:
                 classification = "INCONCLUSIVE"
             print("workspace_bind_case=" + json.dumps({
                 "case": label, "start_unit": start_unit, "effective_unit": effective_unit,
@@ -1590,13 +1803,19 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                 "properties_exit": shown.returncode, "properties": state,
                 "journal_cursor": cursor, "journal_exit": journal.returncode,
                 "journal": (journal.stdout or "")[-5000:],
+                "bind_probe_collection": probe_collection_status,
                 "merged_unit_exit": merged.returncode, "merged_unit": merged_text[-6000:],
                 "effective_bind_configuration_matches": effective_matches,
+                "merged_unit_configuration_matches": merged_configuration_matches,
                 "configuration_mismatches": config_mismatches,
                 "configuration_comparison": "INVALID_INCONCLUSIVE" if config_mismatches else "MATCH",
                 "private_tmp_mount_topology": (private_tmp_topology if private_tmp_topology is not None
                                                 else "UNAVAILABLE; generated mount-edge comparison is INCONCLUSIVE"),
                 "classification": classify_namespace_diagnostic(classification, diagnostic),
+                "raw_namespace_evidence_classification": raw_classification,
+                "in_namespace_bind_probe": probe_evidence or {
+                    "status": "NOT_REACHED_BEFORE_NAMESPACE_FAILURE_OR_PROBE_UNAVAILABLE"},
+                "in_namespace_bind_probe_valid": probe_valid,
                 "execution_failure_note": ("ExecPaths execution denial is an execution failure, not a namespace pass"
                                            if classify_namespace_diagnostic(classification, diagnostic)
                                            == "EXECUTION_FAILURE_INCONCLUSIVE" else None),
@@ -1613,15 +1832,18 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
             }, sort_keys=True, separators=(",", ":")), flush=True)
             lifetime_healthy = (
                 label in ("runtime-directory-preserve", "runtime-directory-preserve-restart")
-                and start.returncode == 0 and effective_matches
-                and classification == "NOT_REPRODUCED"
+                and start.returncode == 0 and merged_configuration_matches
+                and (not config_mismatches or bind_semantics_only_unresolved)
+                and raw_classification == "NOT_REPRODUCED" and probe_valid
                 and state.get("ActiveState") == "active"
                 and state.get("SubState") == "running"
                 and int(state.get("MainPID", "0") or "0") > 1)
             if label == "runtime-directory-preserve" and lifetime_healthy:
                 # Capture the exact first healthy identity before systemd stops the service.
                 for raw in runtime_paths[:2]:
-                    retained_runtime[raw] = runtime_directory_identity(os.lstat(raw))
+                    retained_runtime[raw] = runtime_directory_identity(
+                        os.lstat(raw), expected_uid=os.getuid(), expected_gid=os.getgid(),
+                        expected_mode=0o750)
             elif label == "runtime-directory-preserve-restart":
                 require(lifetime_healthy,
                         "preserved RuntimeDirectory restart did not verify active/running and exact config")
@@ -1630,7 +1852,11 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
             if keep_active:
                 require(lifetime_healthy,
                         "preserved RuntimeDirectory restart did not remain healthy")
-                return {**state, "_lifetime_healthy": "yes"}
+                return {**state, "_classification": classification,
+                        "_raw_classification": raw_classification,
+                        "_configuration_mismatches": config_mismatches,
+                        "_probe_evidence": probe_evidence,
+                        "_probe_valid": probe_valid, "_lifetime_healthy": "yes"}
 
             if label == "runtime-directory-preserve" and lifetime_healthy:
                 def stop_preserved_service():
@@ -1651,7 +1877,9 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
 
                 lifecycle = run_preserved_runtime_lifecycle(
                     runtime_paths[:2], first_start_healthy=True,
-                    stop=stop_preserved_service, restart=restart_preserved_service)
+                    stop=stop_preserved_service, restart=restart_preserved_service,
+                    expected_uid=os.getuid(), expected_gid=os.getgid(),
+                    expected_mode=0o750)
                 print("workspace_bind_case_lifecycle=" + json.dumps({
                     "case": label, "lifetime_probe": lifecycle,
                     "runtime_directories_after_stop": [
@@ -1678,9 +1906,14 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                         "case": label, "lifetime_probe": "NOT_EXERCISED",
                         "reason": "first start was not verified healthy with runtime directories present",
                     }, sort_keys=True, separators=(",", ":")), flush=True)
-                    require(effective_matches,
+                    require(effective_matches or (merged_configuration_matches
+                                                  and bind_semantics_only_unresolved),
                             f"effective systemd configuration invalid for {label}; preserving units/evidence")
-                    return {**state, "_lifetime_healthy": "no"}
+                    return {**state, "_classification": classification,
+                            "_raw_classification": raw_classification,
+                            "_configuration_mismatches": config_mismatches,
+                            "_probe_evidence": probe_evidence,
+                            "_probe_valid": probe_valid, "_lifetime_healthy": "no"}
             else:
                 if label != "runtime-directory-preserve-restart":
                     verify_runtime_baseline()
@@ -1691,9 +1924,14 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                     "RuntimeDirectoryPreserve=yes intentionally retains service runtime paths"
                     if label == "runtime-directory-preserve" else None),
             }, sort_keys=True, separators=(",", ":")), flush=True)
-            require(effective_matches,
+            require(effective_matches or (merged_configuration_matches
+                                          and bind_semantics_only_unresolved),
                     f"effective systemd configuration invalid for {label}; preserving units/evidence")
             return {**state, "_classification": classification,
+                    "_raw_classification": raw_classification,
+                    "_configuration_mismatches": config_mismatches,
+                    "_probe_evidence": probe_evidence,
+                    "_probe_valid": probe_valid,
                     "_lifetime_healthy": "yes" if lifetime_healthy else "no"}
         # The graph uses a separate, identically rendered workspace unit so
         # failed-state cleanup is not needed between independent attempts.
@@ -1702,7 +1940,38 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
         # run_case returns only after effective configuration, stop, and
         # runtime-baseline checks pass. A reproduced 226 is the expected
         # diagnostic control outcome, not an acceptance pass or matrix abort.
-        require_reproduced_control(standalone["_classification"])
+        if standalone["_classification"] != "REPRODUCED_226_NAMESPACE":
+            require(standalone["_raw_classification"] == "REPRODUCED_226_NAMESPACE"
+                    and set(standalone["_configuration_mismatches"]) == {"BindPaths"},
+                    "standalone quoted control was not explicit 226/NAMESPACE or had unrelated config mismatches")
+
+        unquoted = run_case("bind-unquoted", unquoted_workspace_unit,
+                            unquoted_workspace_unit, workspace_text, [unquoted_dropin],
+                            allowed_setting="BindPaths")
+        quoted_reverse = run_case("bind-quoted-reverse", quoted_reverse_workspace_unit,
+                                  quoted_reverse_workspace_unit, workspace_text,
+                                  [quoted_reverse_dropin], allowed_setting="BindPaths")
+        unquoted_worked = (unquoted["_raw_classification"] == "NOT_REPRODUCED"
+                           and unquoted["_probe_valid"])
+        quote_comparison = {
+            "quoted_initial": standalone["_classification"],
+            "quoted_initial_raw_namespace_evidence": standalone["_raw_classification"],
+            "unquoted": unquoted["_classification"],
+            "unquoted_raw_namespace_evidence": unquoted["_raw_classification"],
+            "unquoted_in_namespace_bind_probe": unquoted["_probe_evidence"],
+            "unquoted_in_namespace_bind_probe_valid": unquoted["_probe_valid"],
+            "quoted_reverse": quoted_reverse["_classification"],
+            "quoted_reverse_raw_namespace_evidence": quoted_reverse["_raw_classification"],
+            "same_existing_source_destination_and_service_identity": True,
+            "reverse_confirmation_required": unquoted_worked,
+        }
+        print("workspace_bind_quote_comparison=" + json.dumps(
+            quote_comparison, sort_keys=True, separators=(",", ":")), flush=True)
+        if unquoted_worked:
+            require(unquoted["_probe_valid"],
+                    "unquoted active service did not prove actual bind identity, mountpoint and home isolation")
+            require(quoted_reverse["_raw_classification"] == standalone["_raw_classification"],
+                    "quoted reverse comparison did not reproduce initial quoted outcome")
 
         graph_prestart, graph_cursor, start = run_attempt_with_path_snapshot(
             lambda: {
@@ -1726,8 +1995,19 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                                 if "=" in line)
             require(states[name].get("LoadState") == "loaded",
                     f"parent-graph unit did not load: {name} {states[name]}")
-        journal = run(journal_after_cursor_command(graph_cursor, graph_workspace_unit),
-                      check=False, timeout=10)
+        journal, graph_probe_collection_status = wait_for_workspace_bind_probe(
+            lambda: run(journal_after_cursor_command(graph_cursor, graph_workspace_unit),
+                        check=False, timeout=10),
+            lambda: unit_state(graph_workspace_unit))
+        graph_refreshed = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "show", "--no-pager",
+                               f"--property={properties}", graph_workspace_unit],
+                              check=False, timeout=10)
+        require(graph_refreshed.returncode == 0,
+                "post-probe parent-graph properties unavailable; preserving evidence")
+        states[graph_workspace_unit] = dict(
+            line.split("=", 1) for line in graph_refreshed.stdout.splitlines() if "=" in line)
+        require(states[graph_workspace_unit].get("LoadState") == "loaded",
+                "parent-graph workspace unit disappeared after probe collection; preserving evidence")
         merged = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "cat", "--no-pager",
                       graph_workspace_unit], check=False, timeout=10)
         workspace_state = states[graph_workspace_unit]
@@ -1771,14 +2051,21 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                 "current-attempt parent-graph journal unavailable; preserving evidence")
         graph_config = {key: workspace_state.get(key, "") for key in config_fields}
         graph_config_mismatches = compare_effective_configuration(
-            baseline_config or {}, graph_config, mount_topology=private_tmp_topology)
+            baseline_config or {}, graph_config, mount_topology=private_tmp_topology,
+            expected_bind=(str(workspace), destination))
         graph_diagnostic = journal.stdout or ""
-        merged_dropin_ok = merged_dropin_ok and not graph_config_mismatches
-        graph_classification = classify_namespace_reproduction(
+        graph_merged_unit_matches = merged_dropin_ok
+        graph_probe_evidence, graph_probe_valid = validate_workspace_bind_probe(
+            workspace_bind_probe_evidence(graph_diagnostic), graph_prestart["source"])
+        graph_raw_classification = classify_namespace_reproduction(
             workspace_state, graph_diagnostic, start_exit=start.returncode,
-            merged_dropin_matches=merged_dropin_ok)
+            merged_dropin_matches=graph_merged_unit_matches)
+        graph_classification = graph_raw_classification
         if graph_config_mismatches or mismatches:
             graph_classification = "INCONCLUSIVE"
+        if graph_raw_classification == "NOT_REPRODUCED" and not graph_probe_valid:
+            graph_classification = "INCONCLUSIVE"
+        merged_dropin_ok = graph_merged_unit_matches and not graph_config_mismatches
         print("workspace_bind_case=" + json.dumps({
             "case": "dropin-parent-graph", "start_unit": vm_unit,
             "effective_unit": graph_workspace_unit, "start_exit": start.returncode,
@@ -1791,8 +2078,14 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
             "private_tmp_mount_topology": (private_tmp_topology if private_tmp_topology is not None
                                             else "UNAVAILABLE; generated mount-edge comparison is INCONCLUSIVE"),
             "journal": (journal.stdout or "")[-5000:],
+            "bind_probe_collection": graph_probe_collection_status,
             "merged_unit_exit": merged.returncode, "merged_unit": (merged.stdout or "")[-6000:],
             "effective_bind_configuration_matches": merged_dropin_ok,
+            "merged_unit_configuration_matches": graph_merged_unit_matches,
+            "raw_namespace_evidence_classification": graph_raw_classification,
+            "in_namespace_bind_probe": graph_probe_evidence or {
+                "status": "NOT_REACHED_BEFORE_NAMESPACE_FAILURE_OR_PROBE_UNAVAILABLE"},
+            "in_namespace_bind_probe_valid": graph_probe_valid,
             "classification": graph_classification, "host_before_start": graph_prestart,
             "namespace_metadata_limit": (
                 "host path metadata is logged immediately before start; when namespace setup "
@@ -1815,8 +2108,10 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
         for name in (vm_unit, graph_workspace_unit, proxy_unit, metrics_unit):
             verify_stopped(name)
         verify_runtime_baseline()
-        require(merged_dropin_ok,
-                "systemd merged unit or effective configuration mismatch; preserving units/evidence")
+        require(graph_merged_unit_matches,
+                "systemd merged unit mismatch; preserving units/evidence")
+        require(not (set(graph_config_mismatches) - {"BindPaths"}),
+                "parent-graph systemd properties have unrelated configuration mismatches")
         require(not mismatches,
                 "disposable dependency configuration mismatch; preserving units/evidence")
         run_case(

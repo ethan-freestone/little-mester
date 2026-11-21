@@ -8,7 +8,7 @@
   "title": "Per-run GitHub reachability and credentials",
   "objective": "Future GitHub access must be controlled per individual Little Mester run, not by a permanently privileged VM or Unix account. Default runs should not reach GitHub and receive no GitHub credentials, especially no SSH agent/key. Ordinary public internet access may remain allowed; controlling GitHub reachability is distinct from controlling authentication. This is backlog capture only; do not implement as part of Stage A or Phase 1 cleanup.",
   "created_at": "2026-11-18T21:00:34.833Z",
-  "updated_at": "2026-11-18T22:14:05.644Z",
+  "updated_at": "2026-11-21T15:30:24.266Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -44,12 +44,27 @@
       "id": "A7",
       "text": "A selected run can separately opt in to bounded GitHub network reachability and to narrowly scoped, short-lived GitHub credentials; both permissions apply only to that run.",
       "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "Every temporary access grant is explicitly owner-controlled and injects a separate, narrowly scoped SSH identity; it never uses or forwards the host SSH identity, agent, keys, credential helper, or persistent account credential.",
+      "status": "pending"
+    },
+    {
+      "id": "A9",
+      "text": "The owner grant defines the exact VM-run/restart/session lifetime and expiry; access is revoked at session termination and must be revoked if the approved workspace changes. A VM restart cannot silently extend a grant; any allowed restart behavior is explicit and requires a fresh valid owner grant. No credential survives in persisted guest state.",
+      "status": "pending"
     }
   ],
   "tests": {
-    "needed": [],
+    "needed": [
+      "Verify owner-controlled grant and separate injected SSH identity, independent of host SSH agent/identity.",
+      "Verify grant lifetime across run, VM restart, and session termination; revoke on session end and immediately on approved-workspace change; verify no credential survives persistence or reuse."
+    ],
     "created": [],
-    "cases": []
+    "cases": [
+      "Scope review requested under #41: added A8-A9 requiring explicit owner-controlled temporary grant with a separate narrowly scoped injected SSH identity (never host SSH/agent/key), an explicit run/VM restart/session lifetime, revocation on session termination and workspace change, and no persistence across guest restart. Capability remains future/backlog only; no implementation or GitHub access occurred."
+    ]
   },
   "priority": "major",
   "models_used": []

@@ -8,7 +8,7 @@
   "title": "Epic: VM-based Docker agent environment (all-in-one, model-agnostic harness)",
   "objective": "Deliver an all-in-one, model-agnostic harness: point Little Mester at a directory and run an agent there, with real Docker capability for the workspace's dependencies, while keeping the agent's blast radius inside a disposable VM. The agent runs in a Docker container inside a full Linux VM (not on the host), with a Docker CLI that can run the workspace's compose files; ./lab on the host orchestrates VM lifecycle, workspace transport, the agent container and teardown. Works with local models and no subscription, and can use cloud providers (Kimi, Claude, OpenAI) when available. Includes documentation, egress and decision-log housekeeping.",
   "created_at": "2026-10-26T17:39:37.714Z",
-  "updated_at": "2026-11-21T14:47:36.667Z",
+  "updated_at": "2026-11-21T15:37:38.461Z",
   "priority": "critical",
   "comments": [
     {
@@ -169,7 +169,8 @@
       "negative-case suite",
       "teardown/residue check",
       "repo-integrity check",
-      "VM CI run recorded on ticket"
+      "VM CI run recorded on ticket",
+      "#41 PR #20: systemd quoted/unquoted BindPaths semantic comparison and independent expected-owner/mode validation for retained RuntimeDirectoryPreserve fixtures; no production policy correction without confirmed differential evidence."
     ],
     "created": [
       "docs/DECISIONS.md §C.6 topology decision"
@@ -183,7 +184,11 @@
       "PR #20 hosted run 44913806274: reproduced production-shaped 226 and four basic bind passes, then reported reset-failed gate failure. Return code/output, invocation phase, controller identity, and unit state are unavailable; raw GitHub logs return HTTP 403. Source has an apparently redundant reset immediately after run_case (which already resets), plus reset for same-name standalone/graph reuse and final cleanup. Do not infer privilege cause. Targeted diagnostics and safe lifecycle simplification are under investigation; production sandbox unchanged.",
       "PR #20 reset-gate follow-up: remove unnecessary reset-failed calls between uniquely named stopped cases; use a distinct production-equivalent graph workspace unit to avoid failed-state reuse, with final reset still fail-closed. Final cleanup reset now emits bounded command, privilege/controller identity, and per-unit pre/post state evidence. Local unit suite 67 passed; py_compile and diff-check passed; no real systemd/KVM rerun. Sol approved diagnostic diff; original hosted reset return code/stderr/cause and full differential matrix remain unknown/unverified. See #41.",
       "PR #20 reset-gate commit 830b9b7484b24ad60fcc9f8efd07f113f98688f1 committed and independently APPROVED by Sol for the diagnostic delta only. Inter-case resets removed using separately named equivalent control/graph units; final reset remains fail-closed with precise diagnostics. Local system-unit suite 68 passed, compilation/diff-check passed; no hosted rerun. Exact prior reset error cause and namespace root cause remain unknown, and causal matrix is incomplete. See #41.",
-      "Correction for #41 reset-gate commit 830b9b7: final ordering is stop/verify → identity-checked runtime cleanup → fail-closed diagnostic reset → verify → guarded unit/drop-in removal → daemon-reload. If reset fails, runtime paths are already safely removed and unit/drop-in evidence remains. Hosted reset cause still unknown; no hosted rerun."
+      "Correction for #41 reset-gate commit 830b9b7: final ordering is stop/verify → identity-checked runtime cleanup → fail-closed diagnostic reset → verify → guarded unit/drop-in removal → daemon-reload. If reset fails, runtime paths are already safely removed and unit/drop-in evidence remains. Hosted reset cause still unknown; no hosted rerun.",
+      "PR #20 hosted run 44915932205 owner-reported: production-shaped variants still reproduce 226/NAMESPACE. BindPaths effective output differs (transient SOURCE:DESTINATION:rbind; file-backed SOURCE:DESTINATION:SOURCE:DESTINATION:rbind), but quoted/unquoted controlled comparison, reverse confirmation, actual mount identity and isolation evidence remain outstanding. Production cause/correction unproven. See #41.",
+      "PR #20 local bind/runtime follow-up: production writer is now exercised; harness adds quoted/unquoted/reverse disposable units and in-namespace mount identity/mountpoint/home isolation probe; malformed-equal effective BindPaths cannot MATCH. Runtime-preserve fixture checks expected owner/group/mode 0750. Local system-unit suite 73, workspace suite 25, systemd suite 39 passed; py_compile, diff-check, and static systemd-analyze verify passed. No hosted real-systemd rerun, no production change; cause remains unproven. See #41.",
+      "Future GitHub grant backlog found as existing ticket #62. Its prior criteria lacked explicit separate injected SSH identity, host-SSH isolation, stated run/restart/session lifetime, and mandatory revocation on session end/workspace change. Added #62 A8-A9 and tests-needed via ticket engine; no access capability implemented and no duplicate ticket created.",
+      "#41 Sol re-review after probe fixes: no remaining concrete code blocker. ProtectHome=no now expects visible home; quoted/unquoted/reverse controls retain hidden-home checks. Fresh-cursor journal polling and post-probe state refresh prevent timing-based false NOT_REPRODUCED. Local tests 75/25/39 pass; no hosted systemd comparison or root cause confirmation. See #41."
     ]
   },
   "is_epic": true

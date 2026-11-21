@@ -141,6 +141,18 @@ class WorkspaceValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(workspace.Refused, "unsafe for systemd"):
             workspace._systemd_bind_path(pathlib.Path("/tmp/work:other"))
 
+    def test_systemd_bind_writer_encodes_accepted_whitespace_and_percent_literals(self):
+        path = self.home / "white space\tand%literal's"
+        self.assertEqual(
+            workspace._systemd_bind_path(path),
+            f'[Service]\nBindPaths="{str(path).replace("%", "%%")}:{workspace.SHARE_DIR}"\n')
+
+    def test_systemd_bind_writer_refuses_unrepresentable_characters(self):
+        for raw in ("/tmp/a\\b", '/tmp/a"b', "/tmp/a\nb", "/tmp/a\rb", "/tmp/a\x00b",
+                    "/tmp/a:b"):
+            with self.subTest(raw=raw), self.assertRaises(workspace.Refused):
+                workspace._systemd_bind_path(pathlib.Path(raw))
+
 
 class QemuWorkspaceArgvTests(unittest.TestCase):
     def test_system_qemu_requires_exact_vhost_user_socket(self):
