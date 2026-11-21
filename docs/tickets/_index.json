@@ -378,7 +378,13 @@
       "file_path": "ticket-064.json",
       "status": "active",
       "area": "observability"
+    },
+    {
+      "number": 65,
+      "file_path": "ticket-065.json",
+      "status": "draft",
+      "area": "infra"
     }
   ],
-  "updated_at": "2026-11-21T20:34:19.304Z"
+  "updated_at": "2026-11-21T21:06:15.172Z"
 }

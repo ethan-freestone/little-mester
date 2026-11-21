@@ -1,0 +1,51 @@
+{
+  "id": 65,
+  "file_path": "/workspace/docs/tickets/ticket-065.json",
+  "number": 65,
+  "area": "infra",
+  "type": "spike",
+  "status": "draft",
+  "title": "Attribute slow first boot of the fixed systemd VM",
+  "objective": "Use bounded owner-authorized measurements to identify the source of the 480.334s first VM start/readiness interval without changing production deadlines or provisioning semantics speculatively.",
+  "created_at": "2026-11-21T20:56:23.013Z",
+  "updated_at": "2026-11-21T21:06:15.169Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "A source-level trace maps first-boot provisioning, guest cloud-init, package/network operations, systemd dependencies, SSH retries, and readiness predicates with exact evidence references.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "An owner-authorized hosted run captures enough bounded timestamps/log markers to distinguish host-unit startup, QEMU/guest boot, cloud-init/package work, SSH transport, and protected readiness checks; secrets are excluded.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "The measured cause and uncertainty are recorded; any proposed behavior change receives separate Sol design review and preserves deadlines, fresh-provision acceptance, security, and coverage unless an owner-approved evidence-based change says otherwise.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "If no actionable defect or unnecessary delay is demonstrated, document the result and leave performance optimization deferred without speculative changes.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Source comparison: fixed production systemd VM against original feat/vm-approach and faster transient guest CI bootstrap.",
+      "Owner-authorized hosted timing capture for host unit activation, QEMU start, guest cloud-init completion, package steps, SSH/readiness attempts and final readiness; preserve bounded redacted logs.",
+      "If a concrete fix is identified, add a focused regression reproducing it and obtain Sol design review before implementation."
+    ],
+    "created": [
+      "Delegated first-boot source trace: systemd/little-mester-vm.service:18-25; lib/vm/system-vm.py:388-406, 630-663; lib/vm/guest-bootstrap.py:16-60, 118-132; lib/vm/parent-session-contract.py:122-145; systemd/little-mester-vm-proxy.service:3-5; original feat/vm-approach lib/vm/cloud-init.sh; transient CI tests/ci-kvm-stage.sh:579-605,693-744."
+    ],
+    "cases": [
+      "Owner reports run 44947379075 first initial VM start/readiness 480.334s, same-disk restart/readiness 18.275s, fresh provisioning 15.945s, candidate install 1.473s, forced-stop recovery 35.717s, final cleanup 18.733s, TUI 2.754s. Timings localize the delay to first start/readiness but do not attribute it.",
+      "Delegated source trace found cloud-init readiness waits for guest runcmd, which includes two apt updates/package installs, Docker repository/package setup, rootless Docker configuration and global npm OpenCode install. Host proxy/network-online dependencies and SSH polling remain possible contributors. No actual first-boot bug established; no timing bounds changed.",
+      "Source investigation distinguishes a first-only plausible cloud-init runcmd cost (apt/base packages, Docker repo and second apt, Docker packages, rootless setup, npm OpenCode) from possible host network-online/proxy delay, SSH poll time and protected readiness checks. No per-command guest timestamps exist; 480.334s first readiness cannot be attributed from current evidence. Same-disk 18.275s restart does not prove initial cause. Original bootstrap is materially similar; transient CI is smaller/non-comparable. No proven bug or justified timeout/coverage modification.",
+      "Sol APPROVED the consolidated acceptance gap analysis and owner runbook only. First-boot classification is accepted as cause UNKNOWN; measure on a genuinely fresh, separately owner-authorized disposable target with bounded host unit/QEMU/cloud-init/apt-dpkg/SSH-readiness timestamps. A same-disk rerun may not reproduce cloud-init first-boot costs. No action is authorized on either existing owner VM. If later evidence identifies a defect, obtain a separate Sol design review before implementation."
+    ]
+  },
+  "models_used": []
+}
