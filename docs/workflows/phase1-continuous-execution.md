@@ -13,10 +13,11 @@ working integration and review efficiency, not weaker controls.
   gathering and test execution to appropriate subagents; preserve Sol's context and compute
   for independent review and genuinely difficult reasoning. Do not have Luna perform every
   task directly.
-- Track every sub-phase through the ticket engine CLI/MCP, using an existing ticket or a
-  suitable subticket/comment. Ticket storage is engine-only: never edit ticket JSON directly.
-  Keep the ticket, documentation, implementation and evidence synchronized. Ticket #63 owns
-  future programmatic enforcement; this manual process does not expand PR #20 into that work.
+- Track every sub-phase through the ticket engine MCP tools, using an existing ticket or a
+  suitable subticket/comment. All ticket mutations, including comments, use MCP; never edit
+  ticket JSON directly or use the ticket CLI to write. Keep the ticket, documentation,
+  implementation and evidence synchronized. Ticket #63 owns future programmatic enforcement;
+  this manual process does not expand PR #20 into that work.
 - Follow **documentation → tests → implementation → commit**. Make coherent, appropriately
   scoped commits throughout development; do not accumulate a whole implementation before
   committing. Run the relevant local checks and ticket validation, and do not hand off with
@@ -49,17 +50,10 @@ For each coherent block: update the relevant ticket/docs first, identify require
 reuse points, add regression tests before implementation, make the smallest implementation,
 run focused REAL_PROCESS/mock/regression tests appropriate to the claims, commit the tested
 source, obtain exact-SHA Sol review, resolve findings, then synchronize ticket evidence
-through MCP. Commit ticket evidence with the relevant sub-phase; avoid review-only churn. The
-ticket CLI is reserved for appending comments/handoff discussion; use MCP for ordinary ticket
-fields and criteria. Keep test ledgers factual and concise; preserve pending criteria until
-their stated evidence exists.
-
-**Temporary owner authorization (2026-11-15):** until the MCP is fixed after Phase 1,
-the repository ticket CLI's documented `update <number> --comment <text>` operation is
-authorized solely to append comments. Inspect the current ticket first, append without
-replacing historical comments, then validate the ticket store. This exception does not
-authorize CLI edits to fields, criteria, test ledgers, audit history, or other ticket data;
-all ordinary ticket mutations continue through MCP.
+through MCP. Commit ticket evidence with the relevant sub-phase; avoid review-only churn. Keep
+test ledgers factual and concise; preserve pending criteria until their stated evidence exists.
+The temporary 2026-11-15 ticket-CLI comment-write exception is superseded for this work by the
+MCP-only mutation rule above.
 
 Sol reviews assess whether code is necessary and reachable, not only locally correct: report
 the acceptance behavior or verified risk advanced, CLI/smoke/milestone reachability,
