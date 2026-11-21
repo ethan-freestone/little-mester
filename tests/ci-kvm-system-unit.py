@@ -659,6 +659,8 @@ def _bind_repro_case(*, source: pathlib.Path, source_kind: str,
             run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", unit_name],
                 timeout=15, check=False)
         except BaseException as error:  # noqa: BLE001 - preserve the original systemd operation failure
+            _report_workspace_bind_exception(
+                f"{source_kind}-cleanup", operation, error, paths)
             cleanup_errors.append((operation, error))
         try:
             if "marker_path" in locals():
@@ -675,6 +677,8 @@ def _bind_repro_case(*, source: pathlib.Path, source_kind: str,
                             "preserving changed workspace bind reproduction marker")
                     os.remove(marker_path)
         except BaseException as error:  # noqa: BLE001 - preserve the original systemd operation failure
+            _report_workspace_bind_exception(
+                f"{source_kind}-cleanup", operation, error, paths)
             cleanup_errors.append((operation, error))
         try:
             operation = "verify-systemd-runtime-directory-cleanup"
@@ -687,10 +691,9 @@ def _bind_repro_case(*, source: pathlib.Path, source_kind: str,
                     "systemd did not remove its transient RuntimeDirectory after stop; "
                     f"preserving it for inspection: {_host_path_evidence(directory)}")
         except BaseException as error:  # noqa: BLE001 - preserve the original systemd operation failure
-            cleanup_errors.append((operation, error))
-        for cleanup_operation, cleanup_error in cleanup_errors:
             _report_workspace_bind_exception(
-                f"{source_kind}-cleanup", cleanup_operation, cleanup_error, paths)
+                f"{source_kind}-cleanup", operation, error, paths)
+            cleanup_errors.append((operation, error))
         if cleanup_errors and primary_error is None:
             raise cleanup_errors[0][1]
 
