@@ -896,16 +896,19 @@ def run_workspace_bind_reproductions(workspace: pathlib.Path) -> None:
 
 
 def classify_namespace_reproduction(state: dict[str, str], diagnostics: str,
-                                    *, start_exit: int) -> str:
+                                    *, start_exit: int,
+                                    merged_dropin_matches: bool = False) -> str:
     """Classify only explicit 226/NAMESPACE evidence; weak failures stay inconclusive."""
-    if (state.get("ExecMainCode") == "exited" and state.get("ExecMainStatus") == "226"
+    if (state.get("ExecMainCode") == "1" and state.get("ExecMainStatus") == "226"
             or re.search(r"\bstatus=226/NAMESPACE\b", diagnostics) is not None):
         return "REPRODUCED_226_NAMESPACE"
-    if (state.get("ExecMainCode") == "exited"
-            and state.get("ExecMainStatus", "").isdigit()
-            and state.get("ExecMainStatus") != "226"):
-        return "NOT_REPRODUCED"
-    if start_exit == 0 and "WORKSPACE_BIND_REPRO_TARGET " in diagnostics:
+    try:
+        main_pid = int(state.get("MainPID", "0"))
+    except ValueError:
+        main_pid = 0
+    if (start_exit == 0 and merged_dropin_matches
+            and state.get("ActiveState") == "active"
+            and state.get("SubState") == "running" and main_pid > 0):
         return "NOT_REPRODUCED"
     return "INCONCLUSIVE"
 
@@ -968,7 +971,7 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                           "dropins": {dropin_relative: workspace_dropin}},
                          sort_keys=True, separators=(",", ":"))
     writer = textwrap.dedent("""\
-        import json, os, pathlib, sys
+        import json, os, pathlib, stat, sys
         root = pathlib.Path('/run/systemd/system')
         payload = json.loads(sys.stdin.read())
         units, dropins = payload['units'], payload['dropins']
@@ -1109,12 +1112,14 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
                  + json.dumps(mismatches, sort_keys=True, separators=(",", ":"))), flush=True)
         require(not mismatches,
                 "disposable dependency reproduction did not retain the required effective production settings")
-        require(merged_workspace_dropin_matches(
-                    merged.stdout or "", merged.returncode, workspace_dropin),
+        merged_dropin_ok = merged_workspace_dropin_matches(
+            merged.stdout or "", merged.returncode, workspace_dropin)
+        require(merged_dropin_ok,
                 "systemd merged unit does not show the production-shaped BindPaths drop-in")
         diagnostic = (start.stdout or "") + (start.stderr or "") + (journal.stdout or "")
         classification = classify_namespace_reproduction(
-            workspace_state, diagnostic, start_exit=start.returncode)
+            workspace_state, diagnostic, start_exit=start.returncode,
+            merged_dropin_matches=merged_dropin_ok)
         print(f"workspace_bind_dependency_reproduction={classification}", flush=True)
     finally:
         run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", vm_unit, workspace_unit,

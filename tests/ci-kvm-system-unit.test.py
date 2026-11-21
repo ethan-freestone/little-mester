@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import io
+import json
 import os
 import pathlib
 import shlex
@@ -535,22 +537,70 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn('"/usr/bin/systemctl", "cat"', repro)
         self.assertIn("merged_workspace_dropin_matches", repro)
 
-    def test_namespace_classifier_requires_explicit_226_namespace_evidence(self):
+    def test_namespace_classifier_requires_explicit_226_or_healthy_active_service(self):
         classify = unit.classify_namespace_reproduction
         self.assertEqual(classify({"Result": "resources"}, "", start_exit=1),
                          "INCONCLUSIVE")
-        self.assertEqual(classify({"Result": "resources", "ExecMainCode": "exited",
-                                   "ExecMainStatus": "1"}, "", start_exit=1),
-                         "NOT_REPRODUCED")
-        self.assertEqual(classify({"Result": "resources", "ExecMainCode": "exited",
-                                   "ExecMainStatus": "226"}, "", start_exit=1),
+        # systemctl show represents CLD_EXITED as the numeric enum value 1.
+        self.assertEqual(classify({"ExecMainCode": "1", "ExecMainStatus": "226"}, "",
+                                  start_exit=1),
                          "REPRODUCED_226_NAMESPACE")
         self.assertEqual(classify({}, "Main process exited, code=exited, status=226/NAMESPACE",
                                   start_exit=1), "REPRODUCED_226_NAMESPACE")
         self.assertEqual(classify({}, "Failed to set up mount namespacing", start_exit=1),
                          "INCONCLUSIVE")
-        self.assertEqual(classify({}, "WORKSPACE_BIND_REPRO_TARGET {}", start_exit=0),
+        self.assertEqual(classify({"ExecMainCode": "1", "ExecMainStatus": "1",
+                                   "ActiveState": "failed", "SubState": "failed"}, "",
+                                  start_exit=1), "INCONCLUSIVE")
+        self.assertEqual(classify({"ExecMainCode": "2", "ExecMainStatus": "2",
+                                   "ActiveState": "failed", "SubState": "failed"}, "",
+                                  start_exit=1), "INCONCLUSIVE")
+        healthy_sleep = {"ActiveState": "active", "SubState": "running", "MainPID": "4242"}
+        self.assertEqual(classify(healthy_sleep, "", start_exit=0,
+                                  merged_dropin_matches=True),
                          "NOT_REPRODUCED")
+        self.assertEqual(classify(healthy_sleep, "", start_exit=0), "INCONCLUSIVE")
+        self.assertEqual(classify(healthy_sleep, "", start_exit=1,
+                                  merged_dropin_matches=True), "INCONCLUSIVE")
+
+    def test_embedded_privileged_writer_rolls_back_owned_files_and_directories(self):
+        source = SCRIPT.read_text()
+        module = ast.parse(source)
+        function = next(node for node in module.body
+                        if isinstance(node, ast.FunctionDef)
+                        and node.name == "run_production_dependency_reproduction")
+        assignment = next(node for node in ast.walk(function)
+                          if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == "writer"
+                                  for target in node.targets))
+        writer = textwrap.dedent(ast.literal_eval(assignment.value.args[0]))
+        self.assertIn("import json, os, pathlib, stat, sys", writer)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            writer = writer.replace("root = pathlib.Path('/run/systemd/system')",
+                                    f"root = pathlib.Path({str(root)!r})")
+            payload = {
+                "units": {
+                    "lm-vm-workspace-repro-test.service": "unit content",
+                },
+                "dropins": {
+                    "lm-vm-workspace-repro-test.service.d/20-workspace.conf": "drop-in",
+                },
+            }
+            failure = OSError("injected drop-in create failure")
+            original_open = os.open
+
+            def fail_dropin_open(path, *args, **kwargs):
+                if str(path).endswith("20-workspace.conf"):
+                    raise failure
+                return original_open(path, *args, **kwargs)
+
+            with mock.patch.object(unit.sys, "stdin", io.StringIO(json.dumps(payload))), \
+                    mock.patch.object(unit.os, "open", side_effect=fail_dropin_open):
+                with self.assertRaises(OSError) as raised:
+                    exec(compile(writer, "<privileged-writer>", "exec"), {})
+            self.assertIs(raised.exception, failure)
+            self.assertEqual(list(root.iterdir()), [])
 
     def test_production_shaped_dependency_reproduction_uses_unit_dropin(self):
         template = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
