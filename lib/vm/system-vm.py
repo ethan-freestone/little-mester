@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Fixed systemd-owned VM runtime and owner command implementation.
 
-The QEMU argv is assembled by the shared parent builder and directly specified
-as this service's ExecStart, so systemd tracks QEMU as MainPID. No operation
-accepts a unit, path, QEMU option, or remote command from its caller.
+The privileged fixed-service launcher holds a shared update lock, drops to the
+unit's fixed identity, and execs the candidate-built service command. QEMU
+therefore remains systemd's MainPID while the lock lives for the service
+lifetime. No operation accepts a unit, path, QEMU option, or remote command
+from its caller.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import json
 import os
 import pathlib
 import pwd
+import re
 import secrets
 import select
 import selectors
@@ -96,6 +99,61 @@ def _verify_kvm_access() -> None:
         raise Refused("/dev/kvm must be group-owned by kvm and accessible through the service's exact supplementary group")
     if not os.access("/dev/kvm", os.R_OK | os.W_OK, effective_ids=True):
         raise Refused("service identity lacks DAC read/write access to /dev/kvm")
+
+
+def _locked_service_exec(kind: str, owner: str | None = None) -> None:
+    """Take a root-opened shared lock, drop to a fixed unit identity, then exec."""
+    if os.geteuid() != 0:
+        raise Refused("locked service launcher must be invoked by its fixed systemd unit")
+    if kind not in ("qemu", "proxy", "workspace", "metrics"):
+        raise Refused("unsupported fixed locked service role")
+    if kind == "workspace":
+        if not isinstance(owner, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", owner):
+            raise Refused("fixed workspace unit owner is invalid")
+        service_name = owner
+    else:
+        if owner is not None:
+            raise Refused("unexpected owner for fixed service role")
+        service_name = {"qemu": SERVICE_USER, "proxy": PROXY_USER,
+                        "metrics": SERVICE_USER}[kind]
+    try:
+        service = pwd.getpwnam(service_name)
+        control_gid = grp.getgrnam(CONTROL_GROUP).gr_gid
+        kvm_gid = grp.getgrnam(KVM_GROUP).gr_gid if kind == "qemu" else None
+    except KeyError as error:
+        raise Refused("fixed locked service identity is unavailable") from error
+    fd = os.open(CODE_UPDATE_LOCK, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 0
+                or info.st_gid != control_gid or stat.S_IMODE(info.st_mode) != 0o660):
+            raise Refused("fixed code-update lock identity is unsafe")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise Refused("fixed service start is blocked by code update/rollback") from error
+        if CODE_UPDATE_MARKER.exists() or CODE_UPDATE_MARKER.is_symlink():
+            raise Refused("fixed service start is blocked by incomplete code update/rollback")
+        groups = [control_gid] if kind in ("qemu", "workspace") else []
+        if kvm_gid is not None:
+            groups.append(kvm_gid)
+        os.setgroups(sorted(set(groups)))
+        os.setgid(service.pw_gid)
+        os.setuid(service.pw_uid)
+        if kind == "qemu":
+            argv = qemu_argv()
+        elif kind == "proxy":
+            argv = ["/usr/bin/python3", "-I", str(pathlib.Path(__file__).with_name("proxy.py")),
+                    "--port-file", str(PROXY_PORT_FILE), "--port", str(PROXY_PORT)]
+        elif kind == "workspace":
+            argv = ["/usr/bin/python3", "-I", str(pathlib.Path(__file__).with_name("system-vm-workspace.py")),
+                    "serve"]
+        else:
+            argv = ["/usr/bin/python3", "-I", str(pathlib.Path(__file__).with_name("system-vm-metrics.py"))]
+        os.set_inheritable(fd, True)
+        os.execv(argv[0], argv)
+    finally:
+        os.close(fd)
 
 
 def _validate_runtime_directory() -> None:
@@ -849,6 +907,9 @@ def main() -> int:
     sub.add_parser("check")
     sub.add_parser("guest-ready")
     sub.add_parser("provision")
+    locked = sub.add_parser("locked-service")
+    locked.add_argument("role", choices=("qemu", "proxy", "workspace", "metrics"))
+    locked.add_argument("--owner")
     owner = sub.add_parser("owner")
     owner.add_argument("operation", choices=("up", "down", "status", "ssh", "auth", "tui"))
     args = parser.parse_args()
@@ -868,6 +929,9 @@ def main() -> int:
         if args.action == "provision":
             _provision()
             return 0
+        if args.action == "locked-service":
+            _locked_service_exec(args.role, args.owner)
+            return 2
         if args.action == "owner":
             return _fixed_exec(args.operation)
     except (OSError, Refused, subprocess.SubprocessError, ValueError) as error:

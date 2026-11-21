@@ -30,12 +30,14 @@ checks the current host state with the previous pinned runtime, and separately
 authorizes the host-code update while guest compatibility is still unknown. The
 update refuses active or ambiguous services; it never stops them. One shared
 exclusive update lock serializes update/rollback with the supported lifecycle
-and interactive routes. Fixed systemd start guards reject starts during the
-update. The one-time legacy transition first blocks all four fixed units (VM,
-proxy, workspace and metrics), verifies they are stopped, then publishes and
-verifies durable maintenance guards before changing protected assets. If any
-guard or state check is ambiguous, it refuses before mutation and leaves
-recovery evidence intact.
+and interactive routes. The four fixed `/etc` systemd drop-ins are installed and
+verified before protected runtime replacement; their nonblocking shared-lock
+pre-start checks reject starts while the updater owns the exclusive lock. The
+updated service launchers retain a shared lock for the process lifetime. The
+durable maintenance marker blocks starts across interruption and rollback. The
+updater verifies all units are inactive and have no pending jobs after guard
+reload and before runtime replacement. If any guard or state check is
+ambiguous, it refuses and leaves recovery evidence intact.
 
 **Implemented update command shape (not yet owner-supported):**
 
@@ -67,7 +69,12 @@ Rollback requires all fixed services inactive/failed and the exclusive update
 lock. It validates the protected snapshot and target inventory, accepts only
 known pre-update or candidate bytes (including a safe interrupted-update state),
 and refuses unknown drift without deleting evidence. It restores the prior
-inventory and metadata, removes only recorded candidate-added regular files
+inventory and metadata, except that it retains the candidate's fixed service
+units, start guards, locked-service/compatibility runtime and their direct
+runtime dependencies as permanent safety infrastructure. This small host
+control layer is necessary so rollback cannot restore a pre-lock service and
+reopen the start/update race. The old immutable host installation and complete
+pre-update snapshot remain available. It removes only recorded candidate-added regular files
 with expected bytes, and removes a candidate-created directory only when it is
 still safely owned and empty. It verifies the restored inventory and unchanged
 disk/seed/key/assignment/workspace fingerprints, reloads systemd, never starts

@@ -12,7 +12,7 @@ SupplementaryGroups=lm-vm-control
 RuntimeDirectory=little-mester-vm-workspace little-mester-vm-workspace-share
 RuntimeDirectoryMode=0750
 UMask=0077
-ExecStart=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py serve
+ExecStart=+/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py locked-service workspace --owner=%u
 ExecStartPost=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py socket-permissions
 Restart=no
 KillMode=control-group
@@ -25,4 +25,4 @@ PrivateTmp=yes
 ProtectHome=tmpfs
 ProtectSystem=strict
 ProtectControlGroups=yes
-ReadWritePaths=/run/little-mester-vm-workspace-share /run/little-mester-vm-workspace
+ReadWritePaths=/run/little-mester-vm-workspace-share /run/little-mester-vm-workspace /etc/little-mester-vm/code-update.lock

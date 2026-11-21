@@ -8,6 +8,7 @@ This is deliberately not a general backup or migration facility.
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
 import json
 import os
@@ -159,8 +160,10 @@ def publish_snapshot(snapshot_path: pathlib.Path, target_map: dict[str, pathlib.
         "schema": 1,
         "candidate_sha": candidate_sha,
         "previous_sha": previous_sha,
+        "phase": "prepared",
         "targets": _target_entries(target_map),
         "directories": _directory_entries(managed_dirs),
+        "stages": [],
     }
     payload = {**data, "sha256": hashlib.sha256(_canonical(data)).hexdigest()}
     encoded = _canonical(payload)
@@ -169,6 +172,7 @@ def publish_snapshot(snapshot_path: pathlib.Path, target_map: dict[str, pathlib.
 
     temporary = parent / f".{snapshot_path.name}.tmp-{secrets.token_hex(8)}"
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    created = os.fstat(fd)
     try:
         view = memoryview(encoded)
         while view:
@@ -180,7 +184,15 @@ def publish_snapshot(snapshot_path: pathlib.Path, target_map: dict[str, pathlib.
     except BaseException:
         os.close(fd)
         try:
-            os.unlink(temporary)
+            current = os.lstat(temporary)
+            if ((current.st_dev, current.st_ino) == (created.st_dev, created.st_ino)
+                    and stat.S_ISREG(current.st_mode) and current.st_nlink == 1):
+                os.unlink(temporary)
+                parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(parent_fd)
+                finally:
+                    os.close(parent_fd)
         except OSError:
             pass
         raise
@@ -221,7 +233,8 @@ def _load_snapshot(snapshot_path: pathlib.Path) -> dict:
     except (UnicodeError, json.JSONDecodeError, ValueError) as error:
         raise Refused("rollback snapshot is malformed") from error
     if (not isinstance(snapshot, dict)
-            or set(snapshot) != {"schema", "candidate_sha", "previous_sha", "targets", "directories", "sha256"}
+            or set(snapshot) != {"schema", "candidate_sha", "previous_sha", "phase",
+                                "targets", "directories", "stages", "sha256"}
             or snapshot.get("schema") != 1 or type(snapshot.get("schema")) is not int):
         raise Refused("rollback snapshot schema is unsupported")
     checksum = snapshot.pop("sha256")
@@ -230,10 +243,195 @@ def _load_snapshot(snapshot_path: pathlib.Path) -> dict:
         raise Refused("rollback snapshot integrity check failed")
     _sha(snapshot.get("candidate_sha"))
     _sha(snapshot.get("previous_sha"))
-    if not isinstance(snapshot.get("targets"), list) or not isinstance(snapshot.get("directories"), list):
+    if snapshot.get("phase") not in ("prepared", "verified-update", "verified-rollback"):
+        raise Refused("rollback snapshot phase is unsupported")
+    if (not isinstance(snapshot.get("targets"), list)
+            or not isinstance(snapshot.get("directories"), list)
+            or not isinstance(snapshot.get("stages"), list)):
         raise Refused("rollback snapshot inventory is malformed")
     snapshot["sha256"] = checksum
     return snapshot
+
+
+def set_snapshot_phase(snapshot_path: pathlib.Path, *, candidate_sha: str, phase: str) -> None:
+    """Durably record verified completion before the maintenance marker is removed."""
+    _sha(candidate_sha)
+    if phase not in ("verified-update", "verified-rollback"):
+        raise Refused("unsupported code transaction completion phase")
+    snapshot = _load_snapshot(snapshot_path)
+    if snapshot["candidate_sha"] != candidate_sha:
+        raise Refused("completion journal belongs to another candidate")
+    if snapshot["stages"]:
+        raise Refused("cannot complete a code transaction with staged files outstanding")
+    if snapshot["phase"] == "verified-rollback" and phase != "verified-rollback":
+        raise Refused("completed rollback phase cannot move backwards")
+    snapshot.pop("sha256")
+    snapshot["phase"] = phase
+    snapshot["sha256"] = hashlib.sha256(_canonical(snapshot)).hexdigest()
+    _atomic_write_snapshot(snapshot_path, snapshot)
+
+
+def _atomic_write_snapshot(snapshot_path: pathlib.Path, snapshot: dict) -> None:
+    body = {key: value for key, value in snapshot.items() if key != "sha256"}
+    body["sha256"] = hashlib.sha256(_canonical(body)).hexdigest()
+    payload = _canonical(body)
+    if len(payload) > MAX_SNAPSHOT_BYTES:
+        raise Refused("transaction journal exceeds its size bound")
+    exists, info = _path_chain(snapshot_path)
+    if (not exists or info is None or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+        raise Refused("transaction journal identity is unsafe")
+    temporary = snapshot_path.parent / f".{snapshot_path.name}.journal-{secrets.token_hex(8)}"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        view = memoryview(payload)
+        while view:
+            count = os.write(fd, view)
+            if count <= 0:
+                raise Refused("transaction journal write made no progress")
+            view = view[count:]
+        os.fchown(fd, os.geteuid(), os.getegid())
+        os.fchmod(fd, 0o600)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(temporary, snapshot_path)
+    parent_fd = os.open(snapshot_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def stage_candidate(snapshot_path: pathlib.Path, target_map: dict[str, pathlib.Path], *,
+                    logical_target: str, candidate_sha: str, index: int,
+                    payload: bytes, mode: int, uid: int = 0, gid: int = 0) -> pathlib.Path:
+    """Create a complete unnamed file, journal its inode, then atomically link it."""
+    _sha(candidate_sha)
+    if (logical_target not in target_map or type(index) is not int or index < 0
+            or not isinstance(payload, bytes) or len(payload) > MAX_TARGET_BYTES
+            or any(type(value) is not int for value in (mode, uid, gid))):
+        raise Refused("candidate staging request is outside fixed installer policy")
+    target = target_map[logical_target]
+    parent = target.parent
+    name = f".{target.name}.lm-update-{candidate_sha}-{index}.tmp"
+    staged_path = parent / name
+    if os.path.lexists(staged_path):
+        raise Refused("candidate staging target already exists; preserving evidence")
+    snapshot = _load_snapshot(snapshot_path)
+    if snapshot["candidate_sha"] != candidate_sha or snapshot["phase"] != "prepared":
+        raise Refused("candidate staging journal identity or phase is invalid")
+    if any(item.get("temp") == str(staged_path) for item in snapshot["stages"]):
+        raise Refused("candidate staging path is already journaled")
+    if not hasattr(os, "O_TMPFILE"):
+        raise Refused("filesystem does not support anonymous protected staging")
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            fd = os.open(parent, os.O_TMPFILE | os.O_WRONLY | os.O_CLOEXEC, 0o600)
+        except OSError as error:
+            raise Refused("filesystem cannot create anonymous protected staging") from error
+        try:
+            view = memoryview(payload)
+            while view:
+                count = os.write(fd, view)
+                if count <= 0:
+                    raise Refused("candidate staging write made no progress")
+                view = view[count:]
+            if os.geteuid() != uid or os.getegid() != gid:
+                os.fchown(fd, uid, gid)
+            os.fchmod(fd, mode)
+            os.fsync(fd)
+            info = os.fstat(fd)
+            entry = {"target": logical_target, "temp": str(staged_path),
+                     "dev": info.st_dev, "ino": info.st_ino,
+                     "uid": info.st_uid, "gid": info.st_gid,
+                     "mode": stat.S_IMODE(info.st_mode), "size": len(payload),
+                     "sha256": hashlib.sha256(payload).hexdigest()}
+            snapshot["stages"].append(entry)
+            _atomic_write_snapshot(snapshot_path, snapshot)
+            libc = ctypes.CDLL(None, use_errno=True)
+            linkat = libc.linkat
+            linkat.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                               ctypes.c_char_p, ctypes.c_int)
+            linkat.restype = ctypes.c_int
+            # Some supported filesystems reject AT_EMPTY_PATH for O_TMPFILE.
+            # Resolve the still-open anonymous inode through procfs instead;
+            # AT_SYMLINK_FOLLOW links the inode, not the procfs symlink.
+            proc_fd = f"/proc/self/fd/{fd}".encode()
+            if linkat(-100, proc_fd, parent_fd, os.fsencode(name), 0x400) != 0:
+                error_number = ctypes.get_errno()
+                raise OSError(error_number, os.strerror(error_number))
+            linked = os.stat(staged_path, follow_symlinks=False)
+            if ((linked.st_dev, linked.st_ino) != (info.st_dev, info.st_ino)
+                    or not stat.S_ISREG(linked.st_mode) or linked.st_nlink != 1):
+                raise Refused("candidate staging inode changed during publication")
+        finally:
+            os.close(fd)
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+    return staged_path
+
+
+def clear_stage(snapshot_path: pathlib.Path, *, candidate_sha: str, temp_path: pathlib.Path) -> None:
+    snapshot = _load_snapshot(snapshot_path)
+    if snapshot["candidate_sha"] != candidate_sha:
+        raise Refused("staging journal belongs to another candidate")
+    matches = [item for item in snapshot["stages"] if item.get("temp") == str(temp_path)]
+    if len(matches) > 1:
+        raise Refused("staging journal has duplicate target records")
+    snapshot["stages"] = [item for item in snapshot["stages"] if item.get("temp") != str(temp_path)]
+    _atomic_write_snapshot(snapshot_path, snapshot)
+
+
+def _remove_journaled_stages(snapshot_path: pathlib.Path, target_map, expected_candidate,
+                             candidate_sha: str) -> None:
+    snapshot = _load_snapshot(snapshot_path)
+    if snapshot["candidate_sha"] != candidate_sha:
+        raise Refused("staging journal belongs to another candidate")
+    recorded = {entry.get("temp") for entry in snapshot["stages"] if isinstance(entry, dict)}
+    for entry in list(snapshot["stages"]):
+        if (not isinstance(entry, dict)
+                or set(entry) != {"target", "temp", "dev", "ino", "uid", "gid", "mode", "size", "sha256"}
+                or entry.get("target") not in target_map
+                or any(type(entry.get(key)) is not int for key in
+                       ("dev", "ino", "uid", "gid", "mode", "size"))):
+            raise Refused("staging journal entry is malformed")
+        target = target_map[entry["target"]]
+        temp = pathlib.Path(entry["temp"])
+        expected_name = f".{target.name}.lm-update-{candidate_sha}-"
+        if temp.parent != target.parent or not temp.name.startswith(expected_name) or not temp.name.endswith(".tmp"):
+            raise Refused("staging journal path is outside the fixed target policy")
+        wanted = expected_candidate[entry["target"]]
+        if (entry["size"] != len(wanted[0])
+                or entry["sha256"] != hashlib.sha256(wanted[0]).hexdigest()
+                or (entry["mode"], entry["uid"], entry["gid"])
+                   != (wanted[1], wanted[2], wanted[3])):
+            raise Refused("staging journal content differs from the candidate policy")
+        exists, info = _path_chain(temp)
+        if exists:
+            if (info is None or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or (info.st_dev, info.st_ino) != (entry["dev"], entry["ino"])
+                    or info.st_uid != entry["uid"] or info.st_gid != entry["gid"]
+                    or stat.S_IMODE(info.st_mode) != entry["mode"]):
+                raise Refused("journaled staging inode changed; preserving evidence")
+            content = _read_regular(temp)
+            if content is None or content[0] != wanted[0]:
+                raise Refused("journaled staging bytes changed; preserving evidence")
+            os.unlink(temp)
+            parent_fd = os.open(temp.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+        clear_stage(snapshot_path, candidate_sha=candidate_sha, temp_path=temp)
+    for _logical, target in target_map.items():
+        pattern = re.compile(r"^\." + re.escape(target.name) +
+                             r"\.lm-update-" + re.escape(candidate_sha) + r"-[0-9]+\.tmp$")
+        for path in target.parent.glob(f".{target.name}.lm-update-{candidate_sha}-*.tmp"):
+            if pattern.fullmatch(path.name) and str(path) not in recorded:
+                raise Refused("unrecorded candidate staging artifact; preserving evidence")
 
 
 def _reject_duplicate_keys(pairs):
@@ -307,7 +505,20 @@ def _stage_file(path: pathlib.Path, data: bytes, mode: int, uid: int, gid: int,
         staged_data, staged_info = existing
         if (staged_data != data or stat.S_IMODE(staged_info.st_mode) != mode
                 or staged_info.st_uid != uid or staged_info.st_gid != gid):
-            raise Refused("stale rollback staging file differs from the snapshot")
+            incomplete_owner = staged_info.st_uid == os.geteuid()
+            incomplete_group = staged_info.st_gid in (os.getegid(), gid)
+            incomplete_mode = (stat.S_IMODE(staged_info.st_mode) == 0o600
+                              or stat.S_IMODE(staged_info.st_mode) | mode == mode)
+            if (not incomplete_owner or not incomplete_group or not incomplete_mode
+                    or len(staged_data) > len(data) or not data.startswith(staged_data)):
+                raise Refused("stale rollback staging file differs from the snapshot")
+            os.unlink(temporary)
+            parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+            return _stage_file(path, data, mode, uid, gid, candidate_sha, index)
         return temporary
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
@@ -366,30 +577,11 @@ def _validate_dir_entry(entry: dict, path: pathlib.Path) -> tuple[bool, os.stat_
     return exists, info
 
 
-def _remove_candidate_staging_files(target_map, expected_candidate) -> None:
-    """Remove only exact, bounded temp files created by the interrupted updater."""
-    for logical, target in sorted(target_map.items()):
-        pattern = re.compile(r"^\." + re.escape(target.name) + r"\.[0-9]+\.[0-9a-f]{16}\.tmp$")
-        for path in target.parent.glob(f".{target.name}.*.tmp"):
-            if not pattern.fullmatch(path.name):
-                continue
-            current = _current_state(path)
-            if current is None:
-                continue
-            if current != expected_candidate[logical]:
-                raise Refused("interrupted candidate staging file has unexpected content or metadata")
-            os.unlink(path)
-            parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                os.fsync(parent_fd)
-            finally:
-                os.close(parent_fd)
-
-
 def restore_snapshot(snapshot_path: pathlib.Path, target_map: dict[str, pathlib.Path],
                      expected_candidate: dict[str, tuple[bytes, int, int, int]], *,
                      candidate_sha: str,
-                     managed_dirs: dict[str, tuple[pathlib.Path, int, int, int]] | None = None) -> None:
+                     managed_dirs: dict[str, tuple[pathlib.Path, int, int, int]] | None = None,
+                     preserve_candidate_paths: frozenset[str] = frozenset()) -> None:
     """Restore the exact snapshot; safe to retry after an interrupted restore."""
     _sha(candidate_sha)
     managed_dirs = {} if managed_dirs is None else managed_dirs
@@ -404,6 +596,7 @@ def restore_snapshot(snapshot_path: pathlib.Path, target_map: dict[str, pathlib.
             or {entry.get("path") for entry in dir_entries} != set(managed_dirs)
             or len(dir_entries) != len(managed_dirs)):
         raise Refused("rollback snapshot inventory does not match fixed installer policy")
+    _remove_journaled_stages(snapshot_path, target_map, candidate, candidate_sha)
 
     old_by_path = {entry["path"]: entry for entry in old_entries}
     current_by_path: dict[str, tuple[bytes, int, int, int] | None] = {}
@@ -416,6 +609,8 @@ def restore_snapshot(snapshot_path: pathlib.Path, target_map: dict[str, pathlib.
         candidate_match = current == wanted
         if not old_match and not candidate_match:
             raise Refused("protected target drifted from both snapshot and candidate")
+        if logical in preserve_candidate_paths and not (old_match or candidate_match):
+            raise Refused("permanent guard target is neither prior nor candidate state")
 
     dir_by_path = {entry["path"]: entry for entry in dir_entries}
     dir_states = {}
@@ -430,6 +625,8 @@ def restore_snapshot(snapshot_path: pathlib.Path, target_map: dict[str, pathlib.
         for index, (logical, path) in enumerate(sorted(target_map.items())):
             entry = old_by_path[logical]
             old_data = _entry_data(entry)
+            if logical in preserve_candidate_paths and current_by_path[logical] == candidate[logical]:
+                continue
             if old_data is None or _matches_old(entry, current_by_path[logical]):
                 continue
             temporary = _stage_file(path, old_data, entry["mode"], entry["uid"],
@@ -443,13 +640,13 @@ def restore_snapshot(snapshot_path: pathlib.Path, target_map: dict[str, pathlib.
             finally:
                 os.close(parent_fd)
 
-        _remove_candidate_staging_files(target_map, candidate)
-
         # Remove candidate-only files only when bytes and metadata exactly match
         # the candidate. If already absent, the operation is an idempotent retry.
         for index, (logical, path) in enumerate(sorted(target_map.items(), reverse=True)):
             entry = old_by_path[logical]
             if entry.get("state") != "absent":
+                continue
+            if logical in preserve_candidate_paths and current_by_path[logical] == candidate[logical]:
                 continue
             current = _current_state(path)
             if current is None:
@@ -470,6 +667,9 @@ def restore_snapshot(snapshot_path: pathlib.Path, target_map: dict[str, pathlib.
             if entry.get("state") != "absent":
                 continue
             path, candidate_mode, candidate_uid, candidate_gid = spec
+            if any(item in preserve_candidate_paths and target_map[item].parent == path
+                   for item in target_map):
+                continue
             exists, info = _path_chain(path)
             if not exists:
                 continue
@@ -486,7 +686,11 @@ def restore_snapshot(snapshot_path: pathlib.Path, target_map: dict[str, pathlib.
 
         # Verify the complete restored file inventory and directory identity.
         for logical, path in target_map.items():
-            if not _matches_old(old_by_path[logical], _current_state(path)):
+            entry = old_by_path[logical]
+            current = _current_state(path)
+            if logical in preserve_candidate_paths and current == candidate[logical]:
+                continue
+            if not _matches_old(entry, current):
                 raise Refused("rollback target verification failed")
         for logical, spec in managed_dirs.items():
             _validate_dir_entry(dir_by_path[logical], spec[0])

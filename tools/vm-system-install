@@ -106,6 +106,35 @@ UPDATE_ADDITIONALS = frozenset({
     "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js",
     "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts",
 })
+PERMANENT_INTERLOCK_RELATIVES = frozenset({
+    "systemd/little-mester-vm.service.d/90-code-update-guard.conf",
+    "systemd/little-mester-vm-proxy.service.d/90-code-update-guard.conf",
+    "systemd/little-mester-vm-workspace.service.d/90-code-update-guard.conf",
+    "systemd/little-mester-vm-metrics.service.d/90-code-update-guard.conf",
+    "systemd/little-mester-vm.service",
+    "systemd/little-mester-vm-proxy.service",
+    "systemd/little-mester-vm-workspace.service",
+    "systemd/little-mester-vm-metrics.service",
+    "sudoers/little-mester-vm",
+    "lib/vm/system-vm.py",
+    "lib/vm/system-vm-workspace.py",
+    "lib/vm/system-vm-metrics.py",
+    "lib/vm/parent-metrics.py",
+    "lib/vm/parent-metrics-collect.py",
+    "lib/vm/parent-qemu.py",
+    "lib/vm/parent-session-contract.py",
+    "lib/vm/guest-compatibility.py",
+    "lib/vm/guest-opencode-preferences.py",
+    "lib/vm/proxy.py",
+    "lib/vm/browser-auth-session.py",
+    "lib/vm/callback-listener.py",
+    "agent/opencode/plugins/little-mester-exit-confirm/package.json",
+    "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
+    "agent/opencode/plugins/host-metrics-tui/package.json",
+    "agent/opencode/plugins/host-metrics-tui/tui.tsx",
+    "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js",
+    "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts",
+})
 PROTECTED_PARENTS = (
     "/usr/lib", "/etc/systemd/system", "/etc/sudoers.d", "/etc", "/var/lib",
 )
@@ -501,52 +530,135 @@ def _require_system_units_stopped() -> None:
         state = _unit_state(unit)
         if state not in ("inactive", "failed", "not-installed"):
             refuse(f"code update/rollback requires all fixed services already stopped ({unit})")
+    jobs = subprocess.run(["/usr/bin/systemctl", "list-jobs", "--no-legend", "--no-pager"],
+                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, text=True, check=False)
+    if jobs.returncode:
+        refuse("could not verify pending fixed systemd jobs")
+    if any(unit in line.split() for line in jobs.stdout.splitlines() for unit in SYSTEM_UNITS):
+        refuse("a fixed systemd service has a pending start/stop job")
 
 
-def _mask_runtime_units(*, allow_existing: bool) -> set[str]:
-    runtime = pathlib.Path("/run/systemd/system")
-    created: set[str] = set()
-    for unit in SYSTEM_UNITS:
-        path = runtime / unit
-        if path.exists() or path.is_symlink():
-            info = os.lstat(path)
-            if (not allow_existing or not stat.S_ISLNK(info.st_mode)
-                    or os.readlink(path) != "/dev/null" or info.st_uid != 0):
-                refuse(f"fixed unit has an unexpected runtime mask: {unit}")
-            if not CODE_UPDATE_MARKER.exists():
-                refuse(f"fixed unit is already runtime-masked outside an update recovery: {unit}")
-            continue
-        result = subprocess.run(["/usr/bin/systemctl", "mask", "--runtime", unit],
-                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, check=False)
+def _verify_effective_unit_guard(unit: str, owner: str) -> None:
+    expected_dropin = f"/etc/systemd/system/{unit}.d/90-code-update-guard.conf"
+    properties = {}
+    for name in ("DropInPaths", "ExecStart", "ExecStartPre", "ConditionPathExists"):
+        result = subprocess.run(["/usr/bin/systemctl", "show", f"--property={name}",
+                                 "--value", unit], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, check=False)
         if result.returncode:
-            raise RuntimeError(f"could not temporarily mask fixed unit: {unit}")
-        info = os.lstat(path)
-        if not stat.S_ISLNK(info.st_mode) or os.readlink(path) != "/dev/null" or info.st_uid != 0:
-            refuse(f"systemd did not create the expected temporary mask: {unit}")
-        created.add(unit)
-    subprocess.run(["/usr/bin/systemctl", "daemon-reload"],
-                   stdin=subprocess.DEVNULL, check=True)
-    _require_system_units_stopped()
-    return created
+            refuse(f"could not verify effective start guard for {unit}")
+        properties[name] = result.stdout.strip()
+    if expected_dropin not in properties["DropInPaths"].split():
+        refuse(f"fixed systemd unit did not load its protected start guard: {unit}")
+    command_pattern = re.compile(
+        r"\{\s*path=([^ ;]+)\s*;\s*argv\[\]=(.*?)\s*;\s*ignore_errors=.*?\}")
+    found = tuple(command_pattern.finditer(properties["ExecStartPre"]))
+    raw_commands = properties["ExecStartPre"]
+    if (not found or raw_commands.count("{ path=") != len(found)
+            or raw_commands.count("; argv[]=") != len(found)
+            or raw_commands.count("; ignore_errors=") != len(found)):
+        refuse(f"effective start-lock command list is malformed: {unit}")
+    observed = []
+    previous_end = 0
+    for command in found:
+        if raw_commands[previous_end:command.start()].strip() not in ("", ";"):
+            refuse(f"effective start-lock command list has extra data: {unit}")
+        observed.append((command.group(1), command.group(2)))
+        previous_end = command.end()
+    if raw_commands[previous_end:].strip():
+        refuse(f"effective start-lock command list has trailing data: {unit}")
+    guard = ["/usr/bin/flock", "--shared", "--nonblock", str(CODE_UPDATE_LOCK), "/usr/bin/true"]
+    expected = []
+    if unit == "little-mester-vm.service":
+        expected.append(("/usr/bin/python3",
+                         "/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py check"))
+    expected.append((guard[0], " ".join(guard)))
+    if tuple(observed) != tuple(expected):
+        refuse(f"effective start-lock guard is missing or overridden: {unit}")
+    start_value = properties["ExecStart"]
+    start_match = re.fullmatch(
+        r"\{\s*path=([^ ;]+)\s*;\s*argv\[\]=(.*?)\s*;\s*ignore_errors=.*\}",
+        start_value)
+    expected_owner = pwd.getpwnam(owner).pw_name
+    role = {
+        "little-mester-vm.service": ["qemu"],
+        "little-mester-vm-proxy.service": ["proxy"],
+        "little-mester-vm-workspace.service": ["workspace", f"--owner={expected_owner}"],
+        "little-mester-vm-metrics.service": ["metrics"],
+    }.get(unit)
+    expected_start = ("/usr/bin/python3",
+                      "/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py locked-service "
+                      + " ".join(role or ()))
+    if (start_match is None or (start_match.group(1), start_match.group(2)) != expected_start):
+        refuse(f"effective locked-service launcher is missing or overridden: {unit}")
+    if f"!{CODE_UPDATE_MARKER}" not in properties["ConditionPathExists"]:
+        refuse(f"effective maintenance-marker guard is missing or overridden: {unit}")
 
 
-def _unmask_runtime_units() -> None:
-    runtime = pathlib.Path("/run/systemd/system")
-    for unit in SYSTEM_UNITS:
-        path = runtime / unit
-        if not (path.exists() or path.is_symlink()):
+def _install_transaction_guards(root: pathlib.Path, owner: str, managed_dirs, *,
+                                txn, snapshot_path: pathlib.Path, target_map,
+                                expected_candidate, candidate_sha: str) -> None:
+    guard_entries = []
+    for relative, (raw_target, mode) in FILES.items():
+        if not relative.endswith("90-code-update-guard.conf"):
             continue
-        info = os.lstat(path)
-        if not stat.S_ISLNK(info.st_mode) or os.readlink(path) != "/dev/null" or info.st_uid != 0:
-            refuse(f"refusing to remove unexpected runtime unit mask: {unit}")
-        result = subprocess.run(["/usr/bin/systemctl", "unmask", "--runtime", unit],
-                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, check=False)
-        if result.returncode or path.exists() or path.is_symlink():
-            raise RuntimeError(f"could not remove verified temporary unit mask: {unit}")
+        guard_entries.append((root / relative, pathlib.Path(raw_target),
+                              source_payload(root, relative, owner), mode))
+    snapshot = txn._load_snapshot(snapshot_path)
+    prior = {entry["path"]: entry for entry in snapshot["targets"]}
+    for _source, destination, _payload, _mode in guard_entries:
+        logical = str(destination)
+        entry = prior[logical]
+        current = txn._current_state(destination)
+        old_data = txn._entry_data(entry)
+        old_match = (current is None if old_data is None else
+                     current == (old_data, entry["mode"], entry["uid"], entry["gid"]))
+        candidate_match = current == expected_candidate[logical]
+        if not old_match and not candidate_match:
+            refuse("start guard drifted from both snapshot and candidate; preserving evidence")
+    _install_directories(managed_dirs)
+    if not _guard_targets_match(root, owner):
+        _write_candidate_files(guard_entries, txn=txn, snapshot_path=snapshot_path,
+                               target_map=target_map, candidate_sha=candidate_sha)
     subprocess.run(["/usr/bin/systemctl", "daemon-reload"],
                    stdin=subprocess.DEVNULL, check=True)
+    for unit in SYSTEM_UNITS:
+        if _unit_state(unit) not in ("inactive", "failed", "not-installed"):
+            refuse(f"fixed service became active while installing transaction guards: {unit}")
+        if unit in ("little-mester-vm-workspace.service", "little-mester-vm-metrics.service") \
+                and not (pathlib.Path("/etc/systemd/system") / unit).exists():
+            continue
+        _verify_effective_unit_guard(unit, owner)
+
+
+def _install_permanent_interlock_assets(root: pathlib.Path, owner: str, txn,
+                                        snapshot_path: pathlib.Path, target_map,
+                                        expected_candidate, candidate_sha: str) -> None:
+    snapshot = txn._load_snapshot(snapshot_path)
+    prior = {entry["path"]: entry for entry in snapshot["targets"]}
+    pending = []
+    for relative in sorted(PERMANENT_INTERLOCK_RELATIVES):
+        if relative not in FILES:
+            refuse("permanent interlock manifest references an unknown protected asset")
+        raw_target, mode = FILES[relative]
+        destination = pathlib.Path(raw_target)
+        logical = str(destination)
+        current = txn._current_state(destination)
+        entry = prior[logical]
+        old_data = txn._entry_data(entry)
+        old_match = (current is None if old_data is None else
+                     current == (old_data, entry["mode"], entry["uid"], entry["gid"]))
+        candidate_match = current == expected_candidate[logical]
+        if not old_match and not candidate_match:
+            refuse("permanent interlock asset drifted from snapshot and candidate")
+        if not candidate_match:
+            pending.append((root / relative, destination,
+                            source_payload(root, relative, owner), mode))
+    if pending:
+        _write_candidate_files(pending, txn=txn, snapshot_path=snapshot_path,
+                               target_map=target_map, candidate_sha=candidate_sha)
 
 
 def _rollback_snapshot_path(candidate_sha: str) -> pathlib.Path:
@@ -653,49 +765,36 @@ def _install_directories(managed_dirs) -> None:
         ensure_dir(path, group=group, mode=mode)
 
 
-def _write_candidate_files(pending: list[tuple[pathlib.Path, pathlib.Path, bytes, int]]) -> None:
-    temps: list[tuple[pathlib.Path, pathlib.Path]] = []
-    try:
-        for _source, destination, payload, mode in pending:
-            current = pathlib.Path(destination.anchor)
-            for component in destination.parent.parts[1:]:
-                current /= component
-                ancestor = os.lstat(current)
-                if (not stat.S_ISDIR(ancestor.st_mode) or stat.S_ISLNK(ancestor.st_mode)
-                        or ancestor.st_uid != 0 or ancestor.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
-                    refuse("protected update target ancestry is unsafe")
-            temp = destination.parent / f".{destination.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
-            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
-            temps.append((temp, destination))
-            try:
-                view = memoryview(payload)
-                while view:
-                    count = os.write(fd, view)
-                    if count <= 0:
-                        refuse("protected update write made no progress")
-                    view = view[count:]
-                os.fchown(fd, 0, 0)
-                os.fchmod(fd, mode)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        for temp, destination in temps:
-            os.replace(temp, destination)
-            directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-    finally:
-        for temp, _destination in temps:
-            try:
-                temp.unlink()
-            except FileNotFoundError:
-                pass
+def _write_candidate_files(pending: list[tuple[pathlib.Path, pathlib.Path, bytes, int]], *,
+                           txn, snapshot_path: pathlib.Path, target_map, candidate_sha: str) -> None:
+    staged: list[tuple[pathlib.Path, pathlib.Path]] = []
+    for index, (_source, destination, payload, mode) in enumerate(pending):
+        logical_target = str(destination)
+        current = pathlib.Path(destination.anchor)
+        for component in destination.parent.parts[1:]:
+            current /= component
+            ancestor = os.lstat(current)
+            if (not stat.S_ISDIR(ancestor.st_mode) or stat.S_ISLNK(ancestor.st_mode)
+                    or ancestor.st_uid != 0 or ancestor.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+                refuse("protected update target ancestry is unsafe")
+        temp = txn.stage_candidate(snapshot_path, target_map,
+                                   logical_target=logical_target,
+                                   candidate_sha=candidate_sha, index=index,
+                                   payload=payload, mode=mode, uid=0, gid=0)
+        staged.append((temp, destination))
+    for temp, destination in staged:
+        os.replace(temp, destination)
+        directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        txn.clear_stage(snapshot_path, candidate_sha=candidate_sha, temp_path=temp)
 
 
 def _finish_code_operation(root: pathlib.Path, owner: str, before_state: dict,
-                           state_paths: tuple[pathlib.Path, ...], *, rollback: bool) -> None:
+                           state_paths: tuple[pathlib.Path, ...], *, txn,
+                           snapshot_path: pathlib.Path, phase: str) -> None:
     subprocess.run(["/usr/sbin/visudo", "-cf", "/etc/sudoers.d/little-mester-vm"],
                    stdin=subprocess.DEVNULL, check=True)
     subprocess.run(["/usr/bin/systemctl", "daemon-reload"],
@@ -703,14 +802,17 @@ def _finish_code_operation(root: pathlib.Path, owner: str, before_state: dict,
     if _state_fingerprint(state_paths) != before_state:
         raise RuntimeError("protected VM state changed during code-only operation; preserving maintenance guard")
     _require_system_units_stopped()
-    if not rollback and not _guard_targets_match(root, owner):
-        raise RuntimeError("durable start guards are not the expected candidate assets")
-    # Remove the marker while legacy runtime masks still block direct starts.
-    # The shared/exclusive lock remains held until after unmasking.
+    if not _guard_targets_match(root, owner):
+        raise RuntimeError("permanent start guards are not the expected candidate assets")
+    for unit in SYSTEM_UNITS:
+        path = pathlib.Path("/etc/systemd/system") / unit
+        if path.exists() or path.is_symlink():
+            _verify_effective_unit_guard(unit, owner)
+    txn.set_snapshot_phase(snapshot_path, candidate_sha=root.name, phase=phase)
+    # This is the final mutation. Its unlink is atomic and durable; all protected
+    # runtime files, systemd state, unit guards, and guest-state fingerprints
+    # have been verified while the exclusive lock is still held.
     _remove_marker()
-    subprocess.run(["/usr/bin/systemctl", "daemon-reload"],
-                   stdin=subprocess.DEVNULL, check=True)
-    _unmask_runtime_units()
 
 
 def _state_paths() -> tuple[pathlib.Path, ...]:
@@ -764,19 +866,28 @@ def update_code_only(root: pathlib.Path, owner: str, previous_sha: str) -> None:
         snapshot_path = _rollback_snapshot_path(root.name)
         txn.publish_snapshot(snapshot_path, target_map, candidate_sha=root.name,
                              previous_sha=previous_sha, managed_dirs=managed)
-        # Runtime masks close the first-upgrade window for older fixed units.
-        _write_marker()
-        _mask_runtime_units(allow_existing=True)
+        # Install higher-priority /etc drop-ins first. Their short shared-lock
+        # pre-start guard rejects starts after this exclusive lock is acquired;
+        # the post-reload unit-state/job check catches a legacy start already in
+        # flight before those guards became effective.
+        _install_transaction_guards(root, owner, managed, txn=txn,
+                                    snapshot_path=snapshot_path, target_map=target_map,
+                                    expected_candidate=candidate,
+                                    candidate_sha=root.name)
         _require_system_units_stopped()
+        _write_marker()
         pending = []
         for relative, (raw_target, mode) in FILES.items():
+            if relative.endswith("90-code-update-guard.conf"):
+                continue
             pending.append((root / relative, pathlib.Path(raw_target),
                             source_payload(root, relative, owner), mode))
-        _install_directories(managed)
-        _write_candidate_files(pending)
-        _finish_code_operation(root, owner, before_state, state_paths, rollback=False)
+        _write_candidate_files(pending, txn=txn, snapshot_path=snapshot_path,
+                               target_map=target_map, candidate_sha=root.name)
+        _finish_code_operation(root, owner, before_state, state_paths, txn=txn,
+                                snapshot_path=snapshot_path, phase="verified-update")
     except BaseException:
-        # On any incomplete operation, leave marker and any remaining masks in
+        # On any incomplete operation, leave marker and the permanent guards in
         # place. The snapshot is the recovery record; no automatic rollback.
         raise
     finally:
@@ -793,131 +904,34 @@ def rollback_code_only(root: pathlib.Path, owner: str, candidate_sha: str) -> No
     lock_fd = _ensure_code_update_lock(control_gid)
     try:
         _require_system_units_stopped()
-        marker_present = _validate_marker_if_present()
-        if not marker_present:
-            for unit in SYSTEM_UNITS:
-                runtime_mask = pathlib.Path("/run/systemd/system") / unit
-                if runtime_mask.exists() or runtime_mask.is_symlink():
-                    refuse(f"fixed systemd unit already has a runtime mask; preserving it: {unit}")
+        _validate_marker_if_present()
         _ensure_rollback_root()
-        if not CODE_UPDATE_MARKER.exists():
-            _write_marker()
-        _mask_runtime_units(allow_existing=True)
-        _require_system_units_stopped()
-        state_paths = _state_paths()
-        before_state = _state_fingerprint(state_paths)
         target_map, candidate, managed = _update_maps(root, owner, control_gid)
         txn = _code_update_transaction(root)
         snapshot_path = _rollback_snapshot_path(candidate_sha)
-        txn.restore_snapshot(snapshot_path, target_map, candidate,
-                             candidate_sha=candidate_sha, managed_dirs=managed)
+        snapshot = txn._load_snapshot(snapshot_path)
+        if snapshot["candidate_sha"] != candidate_sha:
+            refuse("rollback snapshot candidate identity differs")
+        _install_transaction_guards(root, owner, managed, txn=txn,
+                                    snapshot_path=snapshot_path, target_map=target_map,
+                                    expected_candidate=candidate,
+                                    candidate_sha=candidate_sha)
+        if not CODE_UPDATE_MARKER.exists():
+            _write_marker()
         _require_system_units_stopped()
-        _finish_code_operation(root, owner, before_state, state_paths, rollback=True)
+        state_paths = _state_paths()
+        before_state = _state_fingerprint(state_paths)
+        _install_permanent_interlock_assets(root, owner, txn, snapshot_path,
+                                            target_map, candidate, candidate_sha)
+        txn.restore_snapshot(snapshot_path, target_map, candidate,
+                             candidate_sha=candidate_sha, managed_dirs=managed,
+                             preserve_candidate_paths=frozenset(
+                                 FILES[relative][0] for relative in PERMANENT_INTERLOCK_RELATIVES))
+        _require_system_units_stopped()
+        _finish_code_operation(root, owner, before_state, state_paths, txn=txn,
+                                snapshot_path=snapshot_path, phase="verified-rollback")
     finally:
         _release_code_update_lock(lock_fd)
-
-
-def update_code_only(root: pathlib.Path, owner: str) -> None:
-    """Atomically replace only existing protected host code; preserve VM state."""
-    if os.geteuid() != 0:
-        refuse("code-only update requires explicit root through sudo")
-    try:
-        owner_info = pwd.getpwnam(owner)
-        control_gid = grp.getgrnam("lm-vm-control").gr_gid
-    except KeyError as error:
-        raise RuntimeError("intended workspace owner or control group is unavailable") from error
-    if owner == "root" or owner_info.pw_uid == 0:
-        refuse("root cannot be the fixed VM owner")
-    state_units = ("little-mester-vm.service", "little-mester-vm-proxy.service",
-                   "little-mester-vm-workspace.service", "little-mester-vm-metrics.service")
-    for unit in state_units:
-        state = subprocess.run(["/usr/bin/systemctl", "show", "--property=ActiveState",
-                                "--value", unit], stdin=subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               text=True, check=False)
-        if (state.returncode and unit == "little-mester-vm-workspace.service"
-                and not pathlib.Path("/etc/systemd/system/little-mester-vm-workspace.service").exists()):
-            continue
-        if (state.returncode and unit == "little-mester-vm-metrics.service"
-                and not pathlib.Path("/etc/systemd/system/little-mester-vm-metrics.service").exists()):
-            continue
-        if state.returncode or state.stdout.strip() not in ("inactive", "failed"):
-            refuse(f"code-only update requires all fixed services stopped ({unit})")
-    state_paths = tuple(pathlib.Path(path) for path in (
-        "/var/lib/little-mester-vm/disk.qcow2", "/var/lib/little-mester-vm/seed.iso",
-        "/etc/little-mester-vm/control_ed25519", "/etc/little-mester-vm/ssh_host_ed25519_key",
-        "/etc/little-mester-vm/control_ed25519.pub",
-        "/etc/little-mester-vm/ssh_host_ed25519_key.pub",
-        "/etc/little-mester-vm/known_hosts", "/etc/little-mester-vm/workspace.json",
-        "/etc/systemd/system/little-mester-vm-workspace.service.d/20-workspace.conf"))
-    before_state = _state_fingerprint(state_paths)
-    pending: list[tuple[pathlib.Path, pathlib.Path, bytes, int]] = []
-    for relative, (raw_target, mode) in FILES.items():
-        target = pathlib.Path(raw_target)
-        try:
-            info = os.lstat(target)
-        except FileNotFoundError:
-            if relative not in UPDATE_ADDITIONALS:
-                raise RuntimeError(f"code-only update requires existing protected asset: {target}")
-            pending.append((root / relative, target, source_payload(root, relative, owner), mode))
-            continue
-        except OSError as error:
-            raise RuntimeError(f"code-only update cannot inspect protected install asset: {target}") from error
-        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
-                or info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != mode
-                or info.st_nlink != 1):
-            refuse(f"protected install asset has unsafe metadata; preserving it: {target}")
-        pending.append((root / relative, target, source_payload(root, relative, owner), mode))
-    # Validate all sources, destinations, and the candidate before changing a byte.
-    verify_source(root)
-    ensure_dir(pathlib.Path("/usr/lib/little-mester-vm/host-metrics-tui"),
-               group="root", mode=0o755)
-    ensure_dir(pathlib.Path("/etc/systemd/system/little-mester-vm-workspace.service.d"),
-               group="root", mode=0o755)
-    temps: list[tuple[pathlib.Path, pathlib.Path]] = []
-    try:
-        for source, destination, payload, mode in pending:
-            current = pathlib.Path(destination.anchor)
-            for component in destination.parent.parts[1:]:
-                current /= component
-                ancestor = os.lstat(current)
-                if (not stat.S_ISDIR(ancestor.st_mode) or stat.S_ISLNK(ancestor.st_mode)
-                        or ancestor.st_uid != 0 or ancestor.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
-                    refuse("protected update target ancestry is unsafe")
-            temp = destination.parent / f".{destination.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
-            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
-            temps.append((temp, destination))
-            try:
-                view = memoryview(payload)
-                while view:
-                    count = os.write(fd, view)
-                    if count <= 0:
-                        refuse("protected update write made no progress")
-                    view = view[count:]
-                os.fchown(fd, 0, 0)
-                os.fchmod(fd, mode)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        for temp, destination in temps:
-            os.replace(temp, destination)
-            directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        subprocess.run(["/usr/sbin/visudo", "-cf", "/etc/sudoers.d/little-mester-vm"],
-                       stdin=subprocess.DEVNULL, check=True)
-        subprocess.run(["/usr/bin/systemctl", "daemon-reload"],
-                       stdin=subprocess.DEVNULL, check=True)
-        if _state_fingerprint(state_paths) != before_state:
-            raise RuntimeError("protected VM state changed during code-only update; inspect before retry")
-    finally:
-        for temp, _destination in temps:
-            try:
-                temp.unlink()
-            except FileNotFoundError:
-                pass
 
 
 def main() -> int:

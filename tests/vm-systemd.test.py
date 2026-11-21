@@ -98,12 +98,75 @@ class SystemdPolicyTests(unittest.TestCase):
              self.assertRaisesRegex(RuntimeError, "ancestry must be root-owned"):
             system_installer.source_root()
 
+    def test_installer_cli_dispatches_exact_update_and_rollback_arguments(self):
+        root = pathlib.Path("/opt/little-mester/v3/") / ("a" * 40)
+        with mock.patch.object(system_installer.os, "geteuid", return_value=0), \
+             mock.patch.object(system_installer, "source_root", return_value=root), \
+             mock.patch.object(system_installer, "verify_source"), \
+             mock.patch.object(system_installer.pwd, "getpwnam"), \
+             mock.patch.dict(system_installer.os.environ, {"SUDO_USER": "owner"}), \
+             mock.patch.object(system_installer.sys, "argv", [
+                 str(ROOT / "tools/vm-system-install"), "--update-code-only",
+                 "--previous-sha", "b" * 40]), \
+             mock.patch.object(system_installer, "update_code_only") as update, \
+             mock.patch.object(system_installer, "rollback_code_only") as rollback, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(system_installer.main(), 0)
+        update.assert_called_once_with(root, "owner", "b" * 40)
+        rollback.assert_not_called()
+
+        with mock.patch.object(system_installer.os, "geteuid", return_value=0), \
+             mock.patch.object(system_installer, "source_root", return_value=root), \
+             mock.patch.object(system_installer, "verify_source"), \
+             mock.patch.object(system_installer.pwd, "getpwnam"), \
+             mock.patch.dict(system_installer.os.environ, {"SUDO_USER": "owner"}), \
+             mock.patch.object(system_installer.sys, "argv", [
+                 str(ROOT / "tools/vm-system-install"), "--rollback-code-only",
+                 "--candidate-sha", "a" * 40]), \
+             mock.patch.object(system_installer, "update_code_only") as update, \
+             mock.patch.object(system_installer, "rollback_code_only") as rollback, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(system_installer.main(), 0)
+        rollback.assert_called_once_with(root, "owner", "a" * 40)
+        update.assert_not_called()
+
+    def test_update_gate_verifies_effective_locked_execstart_and_guard(self):
+        unit = "little-mester-vm.service"
+        values = {
+            "DropInPaths": f"/etc/systemd/system/{unit}.d/90-code-update-guard.conf",
+            "ExecStart": ("{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I "
+                          "/usr/lib/little-mester-vm/system-vm.py locked-service qemu ; "
+                          "ignore_errors=no ; start_time=[n/a] }"),
+            "ExecStartPre": (
+                "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I "
+                "/usr/lib/little-mester-vm/system-vm.py check ; ignore_errors=no ; start_time=[n/a] } ; "
+                "{ path=/usr/bin/flock ; argv[]=/usr/bin/flock --shared --nonblock "
+                "/etc/little-mester-vm/code-update.lock /usr/bin/true ; "
+                "ignore_errors=no ; start_time=[n/a] }"),
+            "ConditionPathExists": "!/etc/little-mester-vm/code-update.in-progress",
+        }
+
+        def show(command, **_kwargs):
+            property_name = next(arg.split("=", 1)[1] for arg in command
+                                 if arg.startswith("--property="))
+            return subprocess.CompletedProcess(command, 0, stdout=values[property_name], stderr="")
+
+        with mock.patch.object(system_installer.subprocess, "run", side_effect=show), \
+             mock.patch.object(system_installer.pwd, "getpwnam",
+                               return_value=type("Account", (), {"pw_name": "owner"})()):
+            system_installer._verify_effective_unit_guard(unit, "owner")
+            values["ExecStart"] = "{ path=/usr/bin/qemu-system-x86_64 ; argv[]=/usr/bin/qemu-system-x86_64 ; ignore_errors=no }"
+            with self.assertRaisesRegex(RuntimeError, "locked-service launcher"):
+                system_installer._verify_effective_unit_guard(unit, "owner")
+
     def test_qemu_is_main_process_and_service_policy_has_bounded_cgroup_fallback(self):
         unit = (ROOT / "systemd/little-mester-vm.service").read_text()
         self.assertIn("Type=exec", unit)
         exec_line = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
-        self.assertTrue(exec_line.startswith("ExecStart=/usr/bin/qemu-system-x86_64 "))
-        self.assertNotIn("system-vm.py qemu", exec_line)
+        self.assertEqual(shlex.split(exec_line[len("ExecStart="):]), [
+            "+/usr/bin/python3", "-I", "/usr/lib/little-mester-vm/system-vm.py",
+            "locked-service", "qemu"])
+        self.assertIn("def _locked_service_exec", (ROOT / "lib/vm/system-vm.py").read_text())
         self.assertIn("Restart=no", unit)
         self.assertIn("KillMode=control-group", unit)
         self.assertIn("TimeoutStopSec=25s", unit)
@@ -113,15 +176,52 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn("SupplementaryGroups=kvm lm-vm-control", unit)
         self.assertIn("ReadWritePaths=/var/lib/little-mester-vm/disk.qcow2 /run/little-mester-vm", unit)
         self.assertNotIn("parent-supervisor", unit)
-        self.assertIn("-blockdev", exec_line)
-        self.assertIn("locking=on", exec_line)
         with mock.patch.object(vm, "_verify_kvm_access"), \
              mock.patch.object(vm, "_require_fixed_file"), \
              mock.patch.object(vm, "_validate_runtime_directory"), \
              mock.patch.object(vm, "_verify_workspace_share"), \
              mock.patch.object(vm, "read_proxy_port", return_value=vm.PROXY_PORT):
             expected = vm.qemu_argv()
-        self.assertEqual(shlex.split(exec_line[len("ExecStart="):]), expected)
+        self.assertTrue(expected[0].endswith("qemu-system-x86_64"))
+        self.assertIn("-blockdev", expected)
+
+    def test_fixed_service_launcher_holds_shared_lock_across_exec(self):
+        class ExecReached(Exception):
+            pass
+
+        control_gid, kvm_gid = 5150, 5151
+        lock_stat = type("Stat", (), {
+            "st_mode": stat.S_IFREG | 0o660, "st_nlink": 1, "st_uid": 0,
+            "st_gid": control_gid,
+        })()
+        group_ids = {"lm-vm-control": control_gid, "kvm": kvm_gid}
+        account = type("Account", (), {"pw_uid": 1101, "pw_gid": 1101})()
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = pathlib.Path(tmp) / "update-marker"
+            with mock.patch.object(vm, "CODE_UPDATE_MARKER", marker), \
+                 mock.patch.object(vm.os, "geteuid", return_value=0), \
+                 mock.patch.object(vm.os, "open", return_value=41), \
+                 mock.patch.object(vm.os, "fstat", return_value=lock_stat), \
+                 mock.patch.object(vm.grp, "getgrnam",
+                                   side_effect=lambda name: type("Group", (), {
+                                       "gr_gid": group_ids[name]})()), \
+                 mock.patch.object(vm.pwd, "getpwnam", return_value=account), \
+                 mock.patch.object(vm.fcntl, "flock") as flock, \
+                 mock.patch.object(vm.os, "setgroups") as setgroups, \
+                 mock.patch.object(vm.os, "setgid") as setgid, \
+                 mock.patch.object(vm.os, "setuid") as setuid, \
+                 mock.patch.object(vm.os, "set_inheritable") as inheritable, \
+                 mock.patch.object(vm.os, "execv", side_effect=ExecReached), \
+                 mock.patch.object(vm.os, "close") as close, \
+                 mock.patch.object(vm, "qemu_argv", return_value=["/usr/bin/qemu"]):
+                with self.assertRaises(ExecReached):
+                    vm._locked_service_exec("qemu")
+        flock.assert_called_once_with(41, vm.fcntl.LOCK_SH | vm.fcntl.LOCK_NB)
+        setgroups.assert_called_once_with([control_gid, kvm_gid])
+        setgid.assert_called_once_with(account.pw_gid)
+        setuid.assert_called_once_with(account.pw_uid)
+        inheritable.assert_called_once_with(41, True)
+        close.assert_called_once_with(41)
 
     def test_proxy_is_separate_and_qemu_requires_successful_proxy_probe(self):
         vm_unit = (ROOT / "systemd/little-mester-vm.service").read_text()
@@ -132,7 +232,8 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn("ExecStartPost=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py proxy-ready", proxy)
         self.assertIn("User=lm-vm-proxy", proxy)
         self.assertIn("PartOf=little-mester-vm.service", proxy)
-        self.assertIn("--port 32128", proxy)
+        self.assertIn("locked-service proxy", proxy)
+        self.assertIn('"--port", str(PROXY_PORT)', (ROOT / "lib/vm/system-vm.py").read_text())
         self.assertIn("def _verify_kvm_access", (ROOT / "lib/vm/system-vm.py").read_text())
 
     def test_kvm_device_group_dac_is_checked_in_addition_to_deviceallow(self):
@@ -275,6 +376,10 @@ class SystemdPolicyTests(unittest.TestCase):
             "--rollback-code-only",
             "CODE_UPDATE_LOCK",
             "CODE_UPDATE_MARKER",
+            '"systemd/little-mester-vm.service"',
+            '"lib/vm/system-vm.py"',
+            "_install_permanent_interlock_assets",
+            "preserve_candidate_paths=frozenset(",
         ):
             self.assertIn(required, installer)
         self.assertIn("--update-code-only", installer)
@@ -533,6 +638,14 @@ class SystemdPolicyTests(unittest.TestCase):
         multiple = value + ' { path=/usr/bin/false ; argv[]=/usr/bin/false ; ignore_errors=no }'
         with self.assertRaisesRegex(acceptance.AcceptanceError, "multiple effective commands"):
             acceptance._effective_argv(multiple)
+        first = value.replace("start_time=[x]", "start_time=[x]")
+        second = ('{ path=/usr/bin/true ; argv[]=/usr/bin/true ; '
+                  'ignore_errors=no ; start_time=[y] }')
+        self.assertEqual(acceptance._effective_argvs(first + " ; " + second), (
+            ("/usr/bin/python3", "/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py qmp-stop $MAINPID"),
+            ("/usr/bin/true", "/usr/bin/true")))
+        with self.assertRaisesRegex(acceptance.AcceptanceError, "extra effective"):
+            acceptance._effective_argvs(first + " ; injected ; " + second)
 
     def test_system_acceptance_report_contains_protected_lifecycle_gates(self):
         report = owner.report_template("a" * 40, "system_vm_accept", pathlib.Path("attempt"))

@@ -92,6 +92,11 @@ class CodeUpdateTransactionTests(unittest.TestCase):
             managed_dirs=self.managed,
         )
 
+    def restore_preserving(self, paths):
+        transaction.restore_snapshot(
+            self.snapshot, self.targets, self.expected, candidate_sha=CANDIDATE_SHA,
+            managed_dirs=self.managed, preserve_candidate_paths=frozenset(paths))
+
     def test_update_then_rollback_restores_bytes_mode_owner_and_inventory(self):
         old = {path: (target.read_bytes(), _identity(target)) for path, target in
                ((TARGET_A, self.a), (TARGET_B, self.b))}
@@ -123,21 +128,66 @@ class CodeUpdateTransactionTests(unittest.TestCase):
         self.assertFalse(self.new.exists())
         self.assertFalse(self.new_dir.exists())
 
-    def test_rollback_removes_only_exact_interrupted_update_staging_files(self):
+    def test_rollback_removes_inode_journaled_candidate_staging_files(self):
         self.publish()
         self.update_to_candidate()
-        staged = self.a.parent / f".{self.a.name}.1234.0123456789abcdef.tmp"
-        staged.write_bytes(self.expected[TARGET_A][0])
-        os.chmod(staged, self.expected[TARGET_A][1])
+        staged = transaction.stage_candidate(
+            self.snapshot, self.targets, logical_target=TARGET_A,
+            candidate_sha=CANDIDATE_SHA, index=0,
+            payload=self.expected[TARGET_A][0], mode=self.expected[TARGET_A][1],
+            uid=self.expected[TARGET_A][2], gid=self.expected[TARGET_A][3])
         self.restore()
         self.assertFalse(staged.exists())
         self.assertEqual(self.a.read_bytes(), b"old config\x00\n")
 
+    def test_incomplete_known_rollback_stage_is_rebuilt_from_snapshot(self):
+        self.publish()
+        self.update_to_candidate()
+        staged = self.a.parent / f".lm-code-rollback-{CANDIDATE_SHA}-0"
+        staged.write_bytes(b"old con")
+        os.chmod(staged, 0o600)
+        self.restore()
+        self.assertEqual(self.a.read_bytes(), b"old config\x00\n")
+        self.assertFalse(staged.exists())
+
+    def test_rollback_preserves_permanent_guard_target_and_its_directory(self):
+        guard_target = self.new_dir / "guard.conf"
+        self.targets[TARGET_NEW] = guard_target
+        self.publish()
+        self.update_to_candidate()
+        self.new_dir.mkdir(mode=0o700)
+        os.chmod(self.new_dir, self.managed[DIR_NEW][1])
+        guard_target.write_bytes(self.expected[TARGET_NEW][0])
+        os.chmod(guard_target, self.expected[TARGET_NEW][1])
+        self.restore_preserving({TARGET_NEW})
+        self.assertTrue(guard_target.exists())
+        self.assertTrue(self.new_dir.exists())
+        self.assertEqual(self.a.read_bytes(), b"old config\x00\n")
+
+    def test_rollback_keeps_candidate_guard_even_when_old_inventory_had_a_file(self):
+        self.publish()
+        self.update_to_candidate()
+        self.restore_preserving({TARGET_A})
+        self.assertEqual(self.a.read_bytes(), self.expected[TARGET_A][0])
+        self.assertEqual(_identity(self.a), self.expected[TARGET_A][1:])
+        self.assertEqual(self.b.read_bytes(), b"old plugin\n")
+
     def test_rollback_refuses_unexpected_interrupted_update_staging_file(self):
         self.publish()
         self.update_to_candidate()
-        staged = self.a.parent / f".{self.a.name}.1234.0123456789abcdef.tmp"
+        staged = self.a.parent / f".{self.a.name}.lm-update-{CANDIDATE_SHA}-0.tmp"
         staged.write_bytes(b"unknown staging data")
+        os.chmod(staged, 0o600)
+        with self.assertRaises(Exception):
+            self.restore()
+        self.assertTrue(staged.exists())
+        self.assertTrue(self.snapshot.exists())
+
+    def test_unrecorded_staging_inode_is_preserved_and_blocks_rollback(self):
+        self.publish()
+        self.update_to_candidate()
+        staged = self.a.parent / f".{self.a.name}.lm-update-{CANDIDATE_SHA}-0.tmp"
+        staged.write_bytes(self.expected[TARGET_A][0][:7])
         os.chmod(staged, 0o600)
         with self.assertRaises(Exception):
             self.restore()
@@ -236,6 +286,19 @@ class CodeUpdateTransactionTests(unittest.TestCase):
                 previous_sha="z" * 40,
                 managed_dirs=self.managed,
             )
+
+    def test_verified_completion_phase_is_durable_and_cannot_move_backwards(self):
+        self.publish()
+        transaction.set_snapshot_phase(
+            self.snapshot, candidate_sha=CANDIDATE_SHA, phase="verified-update")
+        document = transaction._load_snapshot(self.snapshot)
+        self.assertEqual(document["phase"], "verified-update")
+        transaction.set_snapshot_phase(
+            self.snapshot, candidate_sha=CANDIDATE_SHA, phase="verified-rollback")
+        self.assertEqual(transaction._load_snapshot(self.snapshot)["phase"], "verified-rollback")
+        with self.assertRaises(transaction.Refused):
+            transaction.set_snapshot_phase(
+                self.snapshot, candidate_sha=CANDIDATE_SHA, phase="verified-update")
 
     def test_managed_directory_with_unexpected_contents_is_never_recursively_removed(self):
         self.publish()

@@ -28,6 +28,7 @@ PROXY_UNIT = "little-mester-vm-proxy.service"
 WORKSPACE_UNIT = "little-mester-vm-workspace.service"
 METRICS_UNIT = "little-mester-vm-metrics.service"
 SYSTEM_UNITS = (UNIT, PROXY_UNIT, WORKSPACE_UNIT, METRICS_UNIT)
+CONFIG = pathlib.Path("/etc/little-mester-vm")
 DISK = "/var/lib/little-mester-vm/disk.qcow2"
 GUEST_PERSISTENCE_STATE = "/home/mester/.local/state"
 GUEST_PERSISTENCE_MARKER_SCRIPT = r'''import os, stat, sys
@@ -296,6 +297,27 @@ def _effective_argv(value: str) -> tuple[str, str]:
     return match.group(1), raw_argv
 
 
+def _effective_argvs(value: str) -> tuple[tuple[str, str], ...]:
+    """Parse the complete ordered systemd command list for multi-command properties."""
+    pattern = re.compile(
+        r"\{\s*path=([^ ;]+)\s*;\s*argv\[\]=(.*?)\s*;\s*ignore_errors=.*?\}")
+    found = tuple(pattern.finditer(value))
+    if (not found or value.count("{ path=") != len(found)
+            or value.count("; argv[]=") != len(found)
+            or value.count("; ignore_errors=") != len(found)):
+        raise AcceptanceError("systemd returned malformed effective command-list evidence")
+    previous_end = 0
+    for match in found:
+        if value[previous_end:match.start()].strip() not in ("", ";"):
+            raise AcceptanceError("systemd returned extra effective command-list data")
+        if not match.group(2).startswith(match.group(1)):
+            raise AcceptanceError("effective systemd executable differs from its argv")
+        previous_end = match.end()
+    if value[previous_end:].strip():
+        raise AcceptanceError("systemd returned trailing effective command-list data")
+    return tuple((match.group(1), match.group(2)) for match in found)
+
+
 def disk_identity() -> tuple[int, int]:
     result = run(["/usr/bin/sudo", "-n", "/usr/bin/stat", "--format=%f:%d:%i", "--", DISK])
     match = re.fullmatch(rb"([0-9a-fA-F]+):([0-9]+):([0-9]+)\n", result.stdout)
@@ -328,7 +350,7 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
         raise AcceptanceError("all fixed production systemd units must already be loaded")
     # Validate the immutable installed runtime and protected disk identity without mutation.
     runtime = pathlib.Path("/usr/lib/little-mester-vm")
-    for name in ("system-vm.py", "system-vm-workspace.py", "system-vm-metrics.py",
+    for name in ("system-vm.py", "guest-compatibility.py", "system-vm-workspace.py", "system-vm-metrics.py",
                  "parent-metrics.py", "parent-metrics-collect.py", "guest-opencode-preferences.py",
                  "guest-bootstrap.py", "parent-qemu.py", "parent-provision.py",
                  "parent-session-contract.py", "guest-user-dirs.py", "proxy.py",
@@ -343,8 +365,12 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
     for source, destination, mode in (
              ("systemd/little-mester-vm.service", "/etc/systemd/system/little-mester-vm.service", 0o644),
              ("systemd/little-mester-vm-proxy.service", "/etc/systemd/system/little-mester-vm-proxy.service", 0o644),
-             ("systemd/little-mester-vm-workspace.service", "/etc/systemd/system/little-mester-vm-workspace.service", 0o644),
-             ("systemd/little-mester-vm-metrics.service", "/etc/systemd/system/little-mester-vm-metrics.service", 0o644),
+              ("systemd/little-mester-vm-workspace.service", "/etc/systemd/system/little-mester-vm-workspace.service", 0o644),
+              ("systemd/little-mester-vm-metrics.service", "/etc/systemd/system/little-mester-vm-metrics.service", 0o644),
+              ("systemd/little-mester-vm.service.d/90-code-update-guard.conf", "/etc/systemd/system/little-mester-vm.service.d/90-code-update-guard.conf", 0o644),
+              ("systemd/little-mester-vm-proxy.service.d/90-code-update-guard.conf", "/etc/systemd/system/little-mester-vm-proxy.service.d/90-code-update-guard.conf", 0o644),
+              ("systemd/little-mester-vm-workspace.service.d/90-code-update-guard.conf", "/etc/systemd/system/little-mester-vm-workspace.service.d/90-code-update-guard.conf", 0o644),
+              ("systemd/little-mester-vm-metrics.service.d/90-code-update-guard.conf", "/etc/systemd/system/little-mester-vm-metrics.service.d/90-code-update-guard.conf", 0o644),
              ("sudoers/little-mester-vm", "/etc/sudoers.d/little-mester-vm", 0o440)):
         target = pathlib.Path(destination)
         if destination.endswith("sudoers.d/little-mester-vm"):
@@ -402,6 +428,7 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
     for unit in SYSTEM_UNITS:
         output = run(["/usr/bin/systemctl", "show", "--no-pager",
                       "--property=FragmentPath", "--property=DropInPaths",
+            "--property=ConditionPathExists",
             "--property=User", "--property=Group", "--property=ProtectSystem",
                       "--property=NoNewPrivileges", "--property=DevicePolicy",
                       "--property=NeedDaemonReload", "--property=ExecStart",
@@ -438,58 +465,77 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
         proxy_port=32128, qmp_socket="/run/little-mester-vm/qmp.sock",
         vm_name="little-mester-system-vm",
         virtiofs_socket="/run/little-mester-vm-workspace/virtiofs.sock")
-    expected_proxy = ["/usr/bin/python3", "-I", "/usr/lib/little-mester-vm/proxy.py",
-                      "--port-file", "/run/lm-vm-proxy/port", "--port", "32128"]
-    expected_workspace = ["/usr/bin/python3", "-I",
-                         "/usr/lib/little-mester-vm/system-vm-workspace.py", "serve"]
-    expected_metrics = ["/usr/bin/python3", "-I",
-                        "/usr/lib/little-mester-vm/system-vm-metrics.py"]
+    helper = ["/usr/bin/python3", "-I", "/usr/lib/little-mester-vm/system-vm.py",
+              "locked-service"]
+    expected_qemu_command = [*helper, "qemu"]
+    expected_proxy = [*helper, "proxy"]
+    owner_account = pwd.getpwuid(assignment.uid)
+    owner_name = owner_account.pw_name
+    expected_workspace = [*helper, "workspace", f"--owner={owner_name}"]
+    expected_metrics = [*helper, "metrics"]
+    guard_command = ["/usr/bin/flock", "--shared", "--nonblock",
+                     "/etc/little-mester-vm/code-update.lock", "/usr/bin/true"]
     expected_unit_commands = {
-        "ExecStart": expected_qemu,
-        "ExecStartPre": ["/usr/bin/python3", "-I", "/usr/lib/little-mester-vm/system-vm.py", "check"],
+        "ExecStart": expected_qemu_command,
+        "ExecStartPre": (["/usr/bin/python3", "-I", "/usr/lib/little-mester-vm/system-vm.py", "check"],
+                          guard_command),
         "ExecStartPost": ["/usr/bin/python3", "-I", "/usr/lib/little-mester-vm/system-vm.py", "guest-ready"],
         "ExecStop": ["/usr/bin/python3", "-I", "/usr/lib/little-mester-vm/system-vm.py", "qmp-stop", "$MAINPID"],
     }
     expected_proxy_commands = {
         "ExecStart": expected_proxy,
+        "ExecStartPre": (guard_command,),
         "ExecStartPost": ["/usr/bin/python3", "-I", "/usr/lib/little-mester-vm/system-vm.py", "proxy-ready"],
     }
     expected_workspace_commands = {
         "ExecStart": expected_workspace,
+        "ExecStartPre": (guard_command,),
         "ExecStartPost": ["/usr/bin/python3", "-I",
                           "/usr/lib/little-mester-vm/system-vm-workspace.py", "socket-permissions"],
     }
-    expected_metrics_commands = {"ExecStart": expected_metrics}
-    commands_match = all(_effective_argv(vm_properties.get(name, ""))
-                         == (expected[0], " ".join(expected))
-                         for name, expected in expected_unit_commands.items())
-    proxy_commands_match = all(_effective_argv(proxy_properties.get(name, ""))
-                               == (expected[0], " ".join(expected))
-                               for name, expected in expected_proxy_commands.items())
-    workspace_commands_match = all(_effective_argv(workspace_properties.get(name, ""))
-                                   == (expected[0], " ".join(expected))
-                                   for name, expected in expected_workspace_commands.items())
-    metrics_commands_match = all(_effective_argv(metrics_properties.get(name, ""))
-                                 == (expected[0], " ".join(expected))
-                                 for name, expected in expected_metrics_commands.items())
+    expected_metrics_commands = {"ExecStart": expected_metrics, "ExecStartPre": (guard_command,)}
+
+    def commands_match(unit_properties, expected_commands):
+        for name, expected in expected_commands.items():
+            commands = expected if name == "ExecStartPre" else (expected,)
+            wanted = tuple((command[0], " ".join(command)) for command in commands)
+            if _effective_argvs(unit_properties.get(name, "")) != wanted:
+                return False
+        return True
+
+    commands_match_vm = commands_match(vm_properties, expected_unit_commands)
+    proxy_commands_match = commands_match(proxy_properties, expected_proxy_commands)
+    workspace_commands_match = commands_match(workspace_properties, expected_workspace_commands)
+    metrics_commands_match = commands_match(metrics_properties, expected_metrics_commands)
+    expected_dropins = {
+        UNIT: "/etc/systemd/system/little-mester-vm.service.d/90-code-update-guard.conf",
+        PROXY_UNIT: "/etc/systemd/system/little-mester-vm-proxy.service.d/90-code-update-guard.conf",
+        WORKSPACE_UNIT: "/etc/systemd/system/little-mester-vm-workspace.service.d/90-code-update-guard.conf",
+        METRICS_UNIT: "/etc/systemd/system/little-mester-vm-metrics.service.d/90-code-update-guard.conf",
+    }
+    dropins_match = all(
+        expected_dropins[unit] in unit_properties.get("DropInPaths", "").split()
+        and f"!{CONFIG}/code-update.in-progress" in unit_properties.get("ConditionPathExists", "")
+        for unit, unit_properties in ((UNIT, vm_properties), (PROXY_UNIT, proxy_properties),
+                                     (WORKSPACE_UNIT, workspace_properties),
+                                     (METRICS_UNIT, metrics_properties))
+    )
     workspace_dropin = "/etc/systemd/system/little-mester-vm-workspace.service.d/20-workspace.conf"
     workspace_bind_matches = workspace_policy.effective_bind_paths_match(
         workspace_properties.get("BindPaths", ""), assignment.path,
         workspace_policy.SHARE_DIR)
     if (vm_properties.get("FragmentPath") != "/etc/systemd/system/little-mester-vm.service"
             or proxy_properties.get("FragmentPath") != "/etc/systemd/system/little-mester-vm-proxy.service"
-            or vm_properties.get("DropInPaths") not in ("", "-")
-            or proxy_properties.get("DropInPaths") not in ("", "-")
             or workspace_properties.get("FragmentPath") != "/etc/systemd/system/little-mester-vm-workspace.service"
-            or workspace_properties.get("DropInPaths") != workspace_dropin
+            or set(workspace_properties.get("DropInPaths", "").split())
+               != {workspace_dropin, expected_dropins[WORKSPACE_UNIT]}
             or metrics_properties.get("FragmentPath") != "/etc/systemd/system/little-mester-vm-metrics.service"
-            or metrics_properties.get("DropInPaths") not in ("", "-")
             or vm_properties.get("User") != "lm-vm" or vm_properties.get("Group") != "lm-vm"
             or vm_properties.get("ProtectSystem") != "strict"
             or vm_properties.get("NoNewPrivileges") != "yes"
             or vm_properties.get("DevicePolicy") != "closed"
             or vm_properties.get("NeedDaemonReload") != "no"
-            or not commands_match
+            or not commands_match_vm or not dropins_match
              or any(name not in vm_properties.get("Requires", "") for name in
                     (PROXY_UNIT, WORKSPACE_UNIT, METRICS_UNIT))
              or any(name not in vm_properties.get("BindsTo", "") for name in
@@ -501,12 +547,11 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
             or proxy_properties.get("ProtectSystem") != "strict"
             or proxy_properties.get("NeedDaemonReload") != "no"
             or not proxy_commands_match
-            or proxy_properties.get("ExecStartPre", "") not in ("", "-")
-            or proxy_properties.get("ExecStop", "") not in ("", "-")
+             or proxy_properties.get("ExecStop", "") not in ("", "-")
             or proxy_properties.get("ExecStopPost", "") not in ("", "-")):
         raise AcceptanceError("effective loaded systemd VM properties differ from the protected unit policy")
-    if (workspace_properties.get("User") != pwd.getpwuid(os.getuid()).pw_name
-            or workspace_properties.get("Group") != grp.getgrgid(pwd.getpwuid(os.getuid()).pw_gid).gr_name
+    if (workspace_properties.get("User") != owner_name
+            or workspace_properties.get("Group") != grp.getgrgid(owner_account.pw_gid).gr_name
             or "lm-vm-control" not in workspace_properties.get("SupplementaryGroups", "")
             or workspace_properties.get("ProtectHome") != "tmpfs"
             or workspace_properties.get("ProtectSystem") != "strict"
