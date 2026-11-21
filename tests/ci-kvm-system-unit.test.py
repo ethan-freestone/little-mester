@@ -9,6 +9,7 @@ import os
 import pathlib
 import shlex
 import tempfile
+import textwrap
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -454,14 +455,18 @@ class HostedSystemUnitTests(unittest.TestCase):
         main = source[source.index("def main()") :]
         self.assertIn("/usr/bin/systemd-run", repro)
         self.assertIn("RuntimeDirectoryPreserve=no", repro)
-        self.assertIn("_report_transient_bind_unit(unit_name)", repro)
+        self.assertIn("_run_transient_bind_case(", repro)
+        self.assertIn("_report_transient_bind_unit(unit_name)", source)
+        self.assertIn('"workspace_bind_transient_unit_effective=PASS"', source)
         self.assertIn("/run/little-mester-vm-workspace-share", repro)
-        self.assertIn('(workspace, "home", "yes", False)', repro)
+        self.assertIn('(workspace, "home", "yes", True)', repro)
         self.assertIn('(workspace, "home", "tmpfs", True)', repro)
         self.assertIn('(outside, "outside-home", "yes", True)', repro)
         self.assertIn('(outside, "outside-home", "tmpfs", True)', repro)
         self.assertIn("WORKSPACE_BIND_REPRO_TARGET", repro)
         self.assertIn("WORKSPACE_BIND_REPRO_IDENTITY", repro)
+        self.assertIn("unrelated_home_hidden", repro)
+        self.assertIn("identity_matches", repro)
         self.assertIn("_require_runner_directory(source, source_stat)", repro)
         self.assertIn("controller_euid", repro)
         self.assertIn("tempfile.mkdtemp(", source)
@@ -474,6 +479,15 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("stat.S_IMODE(info.st_mode) == 0o700", source)
         self.assertIn("workspace_effective_systemd=", source)
         self.assertIn("workspace_production_prestart_paths=", source)
+        module = ast.parse(source)
+        bind_case = next(node for node in module.body
+                         if isinstance(node, ast.FunctionDef) and node.name == "_bind_repro_case")
+        code_assignment = next(node for node in ast.walk(bind_case)
+                               if isinstance(node, ast.Assign)
+                               and any(isinstance(target, ast.Name) and target.id == "code"
+                                       for target in node.targets))
+        code = textwrap.dedent(ast.literal_eval(code_assignment.value.args[0]))
+        compile(code, "<workspace-bind-reproduction>", "exec")
         self.assertLess(main.index("report_workspace_unit_configuration()"),
                         main.index("run_workspace_bind_reproductions(workspace_path)"))
         self.assertLess(main.index("run_workspace_bind_reproductions(workspace_path)"),

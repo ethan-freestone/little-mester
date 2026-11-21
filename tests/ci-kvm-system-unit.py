@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import traceback
 
@@ -520,9 +521,9 @@ def _report_workspace_bind_exception(case: str, operation: str, error: BaseExcep
     _workspace_bind_checkpoint("exception", paths, operation=operation)
 
 
-def _report_transient_bind_unit(unit_name: str) -> None:
+def _report_transient_bind_unit(unit_name: str, *, emit: bool = True) -> dict[str, str]:
     properties = (
-        "LoadState,ActiveState,SubState,Result,User,Group,SupplementaryGroups,"
+        "LoadState,ActiveState,SubState,Result,MainPID,User,Group,SupplementaryGroups,"
         "RuntimeDirectory,RuntimeDirectoryMode,RuntimeDirectoryPreserve,"
         "BindPaths,ReadWritePaths,ProtectHome,ProtectSystem,PrivateTmp,"
         "RemainAfterExit,KillMode,ExecStop,ExecStopPost"
@@ -530,10 +531,76 @@ def _report_transient_bind_unit(unit_name: str) -> None:
     result = run(["/usr/bin/systemctl", "show", "--no-pager",
                   f"--property={properties}", unit_name], check=False)
     details = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-    print("workspace_bind_transient_unit=" + json.dumps({
-        "unit": unit_name, "show_exit": result.returncode, "properties": details,
-        "stderr": (result.stderr or "")[-1200:],
-    }, sort_keys=True, separators=(",", ":")), flush=True)
+    if emit:
+        print("workspace_bind_transient_unit=" + json.dumps({
+            "unit": unit_name, "show_exit": result.returncode, "properties": details,
+            "stderr": (result.stderr or "")[-1200:],
+        }, sort_keys=True, separators=(",", ":")), flush=True)
+    return details
+
+
+def _run_transient_bind_case(argv: list[str], *, unit_name: str, source: pathlib.Path,
+                             destination: pathlib.Path, protect_home: str) -> subprocess.CompletedProcess:
+    """Hold the service briefly so systemctl can report its loaded properties."""
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + 12
+    observed: dict[str, str] = {}
+    property_error: BaseException | None = None
+    observed_active = False
+    while time.monotonic() < deadline and process.poll() is None:
+        observed = _report_transient_bind_unit(unit_name, emit=False)
+        if observed.get("ActiveState") == "active" and int(observed.get("MainPID", "0")) > 1:
+            observed_active = True
+            _report_transient_bind_unit(unit_name)
+            try:
+                expected = {
+                    "LoadState": "loaded",
+                    "User": pwd.getpwuid(os.getuid()).pw_name,
+                    "Group": grp.getgrgid(os.getgid()).gr_name,
+                    "SupplementaryGroups": "lm-vm-control",
+                    "RuntimeDirectory": "little-mester-vm-workspace little-mester-vm-workspace-share",
+                    "RuntimeDirectoryMode": "0750",
+                    "RuntimeDirectoryPreserve": "no",
+                    "ProtectHome": protect_home,
+                    "ProtectSystem": "strict",
+                    "PrivateTmp": "yes",
+                    "RemainAfterExit": "no",
+                    "KillMode": "control-group",
+                }
+                for name, value in expected.items():
+                    require(observed.get(name) == value,
+                            f"transient systemd property mismatch for {name}: {observed.get(name)!r}")
+                bind_paths = observed.get("BindPaths", "")
+                require(str(source) in bind_paths and str(destination) in bind_paths,
+                        "effective transient BindPaths do not contain the exact source/destination: "
+                        f"{bind_paths!r}")
+                rw_paths = observed.get("ReadWritePaths", "")
+                require("/run/little-mester-vm-workspace" in rw_paths
+                        and str(destination) in rw_paths,
+                        f"effective transient ReadWritePaths mismatch: {rw_paths!r}")
+                print("workspace_bind_transient_unit_effective=PASS", flush=True)
+            except Exception as error:  # noqa: BLE001 - retain configuration mismatch while draining child
+                property_error = error
+            break
+        time.sleep(0.05)
+    try:
+        stdout, stderr = process.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", unit_name],
+            timeout=15, check=False)
+        process.kill()
+        stdout, stderr = process.communicate()
+        raise RuntimeError(f"transient systemd case timed out; stdout={stdout[-1000:]!r} "
+                           f"stderr={stderr[-1000:]!r}")
+    if not observed_active:
+        # Preserve failure diagnostics even when systemd rejected the unit
+        # before ExecStart could hold it open for property inspection.
+        _report_transient_bind_unit(unit_name)
+        raise RuntimeError("transient systemd unit was never observed active with a MainPID")
+    if property_error is not None:
+        raise property_error
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
 def report_workspace_unit_configuration() -> None:
@@ -594,19 +661,41 @@ def _bind_repro_case(*, source: pathlib.Path, source_kind: str,
             "destination_before_start": _host_path_evidence(destination),
             "destination_lifecycle": "transient systemd RuntimeDirectory; no preserve",
         }, sort_keys=True, separators=(",", ":")), flush=True)
-        code = (
-            "import json,os,pathlib,sys;"
-            "print('WORKSPACE_BIND_REPRO_IDENTITY '+json.dumps({'uid':os.getuid(),'euid':os.geteuid(),'gid':os.getgid(),'egid':os.getegid(),'groups':os.getgroups()},sort_keys=True),flush=True);"
-            "target=pathlib.Path(sys.argv[1]);"
-            "item=target/sys.argv[2];"
-            "s=os.stat(target,follow_symlinks=False);"
-            "mounts=pathlib.Path('/proc/self/mountinfo').read_text().splitlines();"
-            "exact=any((lambda f: len(f)>4 and f[4].replace('\\\\040',' ')==str(target))(line.split()) for line in mounts);"
-            "e={'device':s.st_dev,'inode':s.st_ino,'uid':s.st_uid,'gid':s.st_gid,"
-            "'mode':s.st_mode&0o777,'exact_mountpoint':exact,'marker_matches':item.read_bytes()==sys.argv[5].encode()};"
-            "print('WORKSPACE_BIND_REPRO_TARGET '+json.dumps(e,sort_keys=True),flush=True);"
-            "raise SystemExit(0 if (s.st_dev,s.st_ino)==(int(sys.argv[3]),int(sys.argv[4])) and e['exact_mountpoint'] and e['marker_matches'] else 43)"
-        )
+        code = textwrap.dedent("""\
+            import errno, json, os, pathlib, sys, time
+            identity = {'uid': os.getuid(), 'euid': os.geteuid(), 'gid': os.getgid(),
+                        'egid': os.getegid(), 'groups': os.getgroups()}
+            try:
+                os.stat(sys.argv[6])
+                home_hidden = False
+            except OSError as error:
+                home_hidden = error.errno in (errno.EACCES, errno.EPERM, errno.ENOENT)
+            target = pathlib.Path(sys.argv[1])
+            item = target / sys.argv[2]
+            source_stat = os.stat(target, follow_symlinks=False)
+            mounts = pathlib.Path('/proc/self/mountinfo').read_text().splitlines()
+            exact = any((lambda fields: len(fields) > 4 and
+                         fields[4].replace('\\\\040', ' ') == str(target))(line.split())
+                        for line in mounts)
+            evidence = {
+                'device': source_stat.st_dev, 'inode': source_stat.st_ino,
+                'uid': source_stat.st_uid, 'gid': source_stat.st_gid,
+                'mode': source_stat.st_mode & 0o777, 'exact_mountpoint': exact,
+                'marker_matches': item.read_bytes() == sys.argv[5].encode(),
+                'unrelated_home_hidden': home_hidden,
+                'identity_matches': identity['euid'] == int(sys.argv[7])
+                    and identity['egid'] == int(sys.argv[8])
+                    and int(sys.argv[9]) in identity['groups'],
+            }
+            print('WORKSPACE_BIND_REPRO_IDENTITY ' + json.dumps(identity, sort_keys=True), flush=True)
+            print('WORKSPACE_BIND_REPRO_TARGET ' + json.dumps(evidence, sort_keys=True), flush=True)
+            time.sleep(1.5)
+            valid = ((source_stat.st_dev, source_stat.st_ino) ==
+                     (int(sys.argv[3]), int(sys.argv[4])) and exact
+                     and evidence['marker_matches'] and home_hidden
+                     and evidence['identity_matches'])
+            raise SystemExit(0 if valid else 43)
+            """)
         exec_paths = "/usr/bin /usr/lib -/usr/lib64 -/usr/libexec /lib -/lib64"
         argv = [
             "/usr/bin/sudo", "-n", "/usr/bin/systemd-run", "--wait", "--pipe",
@@ -624,12 +713,15 @@ def _bind_repro_case(*, source: pathlib.Path, source_kind: str,
             f"--property=BindPaths={source}:{destination}",
             "/usr/bin/python3", "-I", "-c", code, str(destination), marker_name,
             str(source_stat.st_dev), str(source_stat.st_ino), marker.decode("ascii"),
+            pwd.getpwuid(os.getuid()).pw_dir, str(os.getuid()), str(os.getgid()),
+            str(grp.getgrnam("lm-vm-control").gr_gid),
         ]
         _workspace_bind_checkpoint("before-systemd-run", paths, operation=operation)
         operation = "run-transient-systemd-case"
-        result = run(argv, timeout=30, check=False)
+        result = _run_transient_bind_case(
+            argv, unit_name=unit_name, source=source, destination=destination,
+            protect_home=protect_home)
         operation = "inspect-effective-transient-unit"
-        _report_transient_bind_unit(unit_name)
         success = result.returncode == 0 and "WORKSPACE_BIND_REPRO_TARGET " in result.stdout
         namespace_refused = ("226/NAMESPACE" in result.stdout + result.stderr
                             or "Failed to set up mount namespacing" in result.stdout + result.stderr)
@@ -731,10 +823,12 @@ def run_workspace_bind_reproductions(workspace: pathlib.Path) -> None:
     cases: list[tuple[pathlib.Path, str, str, bool]] = []
     primary_error: BaseException | None = None
     try:
-        # The original yes mode is included as a negative control; all other
-        # cells must successfully bind and verify the exact source inode.
+        # All four source/protection combinations must bind at the /run
+        # destination. Each service also proves an unrelated home is hidden,
+        # the selected source inode is mounted exactly, and the owner identity
+        # is correct. ProtectHome constrains paths it hides, not this /run target.
         cases = [
-            (workspace, "home", "yes", False),
+            (workspace, "home", "yes", True),
             (outside, "outside-home", "yes", True),
             (workspace, "home", "tmpfs", True),
             (outside, "outside-home", "tmpfs", True),
@@ -769,8 +863,8 @@ def run_workspace_bind_reproductions(workspace: pathlib.Path) -> None:
                     if case_error is None:
                         raise
         require(all(outcomes), "real systemd workspace-bind comparison did not match the expected matrix")
-        print("workspace_bind_repro_matrix=PASS home/yes=REFUSED home/tmpfs=PASS "
-              "outside-home/yes=PASS outside-home/tmpfs=PASS", flush=True)
+        print("workspace_bind_repro_matrix=PASS home/yes=PASS home/tmpfs=PASS "
+              "outside-home/yes=PASS outside-home/tmpfs=PASS unrelated_home=HIDDEN", flush=True)
     except BaseException as error:
         primary_error = error
         raise
