@@ -562,6 +562,32 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertEqual(classify(healthy_sleep, "", start_exit=1,
                                   merged_dropin_matches=True), "INCONCLUSIVE")
 
+    def test_reproduced_standalone_control_is_recorded_and_only_explicit_226_advances(self):
+        require_control = unit.require_reproduced_control
+        require_control("REPRODUCED_226_NAMESPACE")
+        for classification in ("INCONCLUSIVE", "NOT_REPRODUCED",
+                               "EXECUTION_FAILURE_INCONCLUSIVE"):
+            with self.subTest(classification=classification):
+                with self.assertRaisesRegex(RuntimeError, classification):
+                    require_control(classification)
+
+        source = SCRIPT.read_text()
+        reproduction = source[source.index("def run_production_dependency_reproduction"):
+                              source.index("def remove_disposable_workspace")]
+        self.assertIn('standalone = run_case("dropin-standalone"', reproduction)
+        self.assertIn('require_reproduced_control(standalone["_classification"])', reproduction)
+        # The outcome is returned only after stop/state/runtime/config/reset gates.
+        self.assertLess(reproduction.index("verify_stopped(start_unit)"),
+                        reproduction.index('"_classification": classification'))
+        self.assertLess(reproduction.index("verify_runtime_baseline()"),
+                        reproduction.index('"_classification": classification'))
+        self.assertLess(reproduction.index("require(effective_matches"),
+                        reproduction.index('"_classification": classification'))
+        self.assertIn('original_error={type(error).__name__}: {error}', reproduction)
+        self.assertIn("if sys.exc_info()[0] is None:\n                raise RuntimeError(", reproduction)
+        self.assertIn("            raise\n        remover = textwrap.dedent", reproduction)
+        self.assertNotIn('raise RuntimeError("diagnostic reproduction was ambiguous', reproduction)
+
     def test_journal_cursor_and_current_attempt_classification(self):
         cursor = "s=abc123;i=4;b=boot"
         self.assertEqual(unit.parse_journal_cursor(f"-- cursor: {cursor}\n", 0), cursor)

@@ -939,6 +939,14 @@ def classify_namespace_diagnostic(classification: str, diagnostics: str) -> str:
     return classification
 
 
+def require_reproduced_control(classification: str) -> None:
+    """Only advance from the standalone control after its expected 226 is proven."""
+    if classification != "REPRODUCED_226_NAMESPACE":
+        raise RuntimeError(
+            "standalone production-template control was not an explicit, "
+            f"configuration-matched 226/NAMESPACE: {classification}")
+
+
 def compare_effective_configuration(baseline: dict[str, str], candidate: dict[str, str],
                                     *, allowed_setting: str | None = None,
                                     allow_bind_fragment_placement: bool = False,
@@ -1622,11 +1630,16 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
             require(effective_matches,
                     f"effective systemd configuration invalid for {label}; preserving units/evidence")
             reset_failed_and_verify((start_unit,))
-            return {**state, "_lifetime_healthy": "yes" if lifetime_healthy else "no"}
+            return {**state, "_classification": classification,
+                    "_lifetime_healthy": "yes" if lifetime_healthy else "no"}
         # The baseline is first started without its parent graph, then through
         # that same graph. The third case changes only BindPaths placement.
-        run_case("dropin-standalone", workspace_unit, workspace_unit,
-                 workspace_text, [workspace_dropin])
+        standalone = run_case("dropin-standalone", workspace_unit, workspace_unit,
+                              workspace_text, [workspace_dropin])
+        # run_case returns only after effective configuration, stop/reset, and
+        # runtime-baseline checks pass. A reproduced 226 is the expected
+        # diagnostic control outcome, not an acceptance pass or matrix abort.
+        require_reproduced_control(standalone["_classification"])
         reset_failed_and_verify((workspace_unit,))
 
         graph_prestart, graph_cursor, start = run_attempt_with_path_snapshot(
@@ -1768,11 +1781,19 @@ def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
             }, sort_keys=True, separators=(",", ":")), flush=True)
         verify_runtime_baseline(retained_allowed=True)
         cleanup_authorized = True
+    except BaseException as error:
+        if not cleanup_authorized:
+            print("workspace_bind_reproduction_cleanup=SKIPPED preserving units and evidence; "
+                  f"original_error={type(error).__name__}: {error}", flush=True)
+        raise
     finally:
         if not cleanup_authorized:
-            print("workspace_bind_reproduction_cleanup=SKIPPED preserving units and evidence",
-                  flush=True)
-            raise RuntimeError("diagnostic reproduction was ambiguous; preserving units and evidence")
+            # Preserve diagnostics on an incomplete matrix. Re-raise an
+            # active failure unchanged; use the generic guard only if the
+            # matrix ended without an exception for an unexpected reason.
+            if sys.exc_info()[0] is None:
+                raise RuntimeError("diagnostic reproduction incomplete; preserving units and evidence")
+            raise
         remover = textwrap.dedent("""\
             import json, os, pathlib, stat, sys
             root = pathlib.Path('/run/systemd/system')
