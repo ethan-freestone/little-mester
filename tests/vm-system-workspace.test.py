@@ -515,7 +515,7 @@ class ServiceBoundaryTests(unittest.TestCase):
         unit = unit_path.read_text()
         self.assertIn("Type=exec", unit)
         self.assertNotIn("ExecStartPre=", unit)
-        self.assertIn("ExecStart=+/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py locked-service workspace --owner=%u", unit)
+        self.assertIn("ExecStart=+/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py locked-service workspace --owner=@LM_VM_OWNER@", unit)
         self.assertIn("code-update.lock", unit)
         helper = (ROOT / "lib/vm/system-vm-workspace.py").read_text()
         self.assertIn('"--shared-dir", str(SHARE_DIR)', helper)

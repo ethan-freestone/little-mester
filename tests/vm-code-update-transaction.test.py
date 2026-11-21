@@ -140,6 +140,25 @@ class CodeUpdateTransactionTests(unittest.TestCase):
         self.assertFalse(staged.exists())
         self.assertEqual(self.a.read_bytes(), b"old config\x00\n")
 
+    def test_candidate_stage_recovery_runs_before_retrying_permanent_asset_write(self):
+        self.publish()
+        self.update_to_candidate()
+        staged = transaction.stage_candidate(
+            self.snapshot, self.targets, logical_target=TARGET_A,
+            candidate_sha=CANDIDATE_SHA, index=0,
+            payload=self.expected[TARGET_A][0], mode=self.expected[TARGET_A][1],
+            uid=self.expected[TARGET_A][2], gid=self.expected[TARGET_A][3])
+        transaction.recover_candidate_stages(
+            self.snapshot, self.targets, self.expected, candidate_sha=CANDIDATE_SHA)
+        self.assertFalse(staged.exists())
+        self.assertEqual(transaction._load_snapshot(self.snapshot)["stages"], [])
+        retried = transaction.stage_candidate(
+            self.snapshot, self.targets, logical_target=TARGET_A,
+            candidate_sha=CANDIDATE_SHA, index=0,
+            payload=self.expected[TARGET_A][0], mode=self.expected[TARGET_A][1],
+            uid=self.expected[TARGET_A][2], gid=self.expected[TARGET_A][3])
+        self.assertTrue(retried.exists())
+
     def test_incomplete_known_rollback_stage_is_rebuilt_from_snapshot(self):
         self.publish()
         self.update_to_candidate()

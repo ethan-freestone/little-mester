@@ -156,8 +156,8 @@ def source_payload(root: pathlib.Path, relative: str, owner: str) -> bytes:
     if relative == "systemd/little-mester-vm-workspace.service":
         owner_marker = b"@LM_VM_OWNER@"
         group_marker = b"@LM_VM_OWNER_GROUP@"
-        if payload.count(owner_marker) != 1 or payload.count(group_marker) != 1:
-            refuse("workspace unit must contain exactly one owner and primary group identity marker")
+        if payload.count(owner_marker) != 2 or payload.count(group_marker) != 1:
+            refuse("workspace unit must bind both launcher and User to one fixed owner")
         owner_info = pwd.getpwnam(owner)
         owner_group = grp.getgrgid(owner_info.pw_gid).gr_name
         payload = payload.replace(owner_marker, owner.encode("ascii"))
@@ -539,7 +539,8 @@ def _require_system_units_stopped() -> None:
         refuse("a fixed systemd service has a pending start/stop job")
 
 
-def _verify_effective_unit_guard(unit: str, owner: str) -> None:
+def _verify_effective_unit_guard(unit: str, owner: str, *,
+                                require_locked_launcher: bool = False) -> None:
     expected_dropin = f"/etc/systemd/system/{unit}.d/90-code-update-guard.conf"
     properties = {}
     for name in ("DropInPaths", "ExecStart", "ExecStartPre", "ConditionPathExists"):
@@ -577,22 +578,23 @@ def _verify_effective_unit_guard(unit: str, owner: str) -> None:
     expected.append((guard[0], " ".join(guard)))
     if tuple(observed) != tuple(expected):
         refuse(f"effective start-lock guard is missing or overridden: {unit}")
-    start_value = properties["ExecStart"]
-    start_match = re.fullmatch(
-        r"\{\s*path=([^ ;]+)\s*;\s*argv\[\]=(.*?)\s*;\s*ignore_errors=.*\}",
-        start_value)
-    expected_owner = pwd.getpwnam(owner).pw_name
-    role = {
-        "little-mester-vm.service": ["qemu"],
-        "little-mester-vm-proxy.service": ["proxy"],
-        "little-mester-vm-workspace.service": ["workspace", f"--owner={expected_owner}"],
-        "little-mester-vm-metrics.service": ["metrics"],
-    }.get(unit)
-    expected_start = ("/usr/bin/python3",
-                      "/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py locked-service "
-                      + " ".join(role or ()))
-    if (start_match is None or (start_match.group(1), start_match.group(2)) != expected_start):
-        refuse(f"effective locked-service launcher is missing or overridden: {unit}")
+    if require_locked_launcher:
+        start_value = properties["ExecStart"]
+        start_match = re.fullmatch(
+            r"\{\s*path=([^ ;]+)\s*;\s*argv\[\]=(.*?)\s*;\s*ignore_errors=.*\}",
+            start_value)
+        expected_owner = pwd.getpwnam(owner).pw_name
+        role = {
+            "little-mester-vm.service": ["qemu"],
+            "little-mester-vm-proxy.service": ["proxy"],
+            "little-mester-vm-workspace.service": ["workspace", f"--owner={expected_owner}"],
+            "little-mester-vm-metrics.service": ["metrics"],
+        }.get(unit)
+        expected_start = ("/usr/bin/python3",
+                          "/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py locked-service "
+                          + " ".join(role or ()))
+        if (start_match is None or (start_match.group(1), start_match.group(2)) != expected_start):
+            refuse(f"effective locked-service launcher is missing or overridden: {unit}")
     if f"!{CODE_UPDATE_MARKER}" not in properties["ConditionPathExists"]:
         refuse(f"effective maintenance-marker guard is missing or overridden: {unit}")
 
@@ -621,7 +623,8 @@ def _install_transaction_guards(root: pathlib.Path, owner: str, managed_dirs, *,
     _install_directories(managed_dirs)
     if not _guard_targets_match(root, owner):
         _write_candidate_files(guard_entries, txn=txn, snapshot_path=snapshot_path,
-                               target_map=target_map, candidate_sha=candidate_sha)
+                               target_map=target_map, expected_candidate=expected_candidate,
+                               candidate_sha=candidate_sha)
     subprocess.run(["/usr/bin/systemctl", "daemon-reload"],
                    stdin=subprocess.DEVNULL, check=True)
     for unit in SYSTEM_UNITS:
@@ -658,7 +661,8 @@ def _install_permanent_interlock_assets(root: pathlib.Path, owner: str, txn,
                             source_payload(root, relative, owner), mode))
     if pending:
         _write_candidate_files(pending, txn=txn, snapshot_path=snapshot_path,
-                               target_map=target_map, candidate_sha=candidate_sha)
+                               target_map=target_map, expected_candidate=expected_candidate,
+                               candidate_sha=candidate_sha)
 
 
 def _rollback_snapshot_path(candidate_sha: str) -> pathlib.Path:
@@ -766,7 +770,10 @@ def _install_directories(managed_dirs) -> None:
 
 
 def _write_candidate_files(pending: list[tuple[pathlib.Path, pathlib.Path, bytes, int]], *,
-                           txn, snapshot_path: pathlib.Path, target_map, candidate_sha: str) -> None:
+                           txn, snapshot_path: pathlib.Path, target_map,
+                           expected_candidate, candidate_sha: str) -> None:
+    txn.recover_candidate_stages(snapshot_path, target_map, expected_candidate,
+                                 candidate_sha=candidate_sha)
     staged: list[tuple[pathlib.Path, pathlib.Path]] = []
     for index, (_source, destination, payload, mode) in enumerate(pending):
         logical_target = str(destination)
@@ -807,7 +814,7 @@ def _finish_code_operation(root: pathlib.Path, owner: str, before_state: dict,
     for unit in SYSTEM_UNITS:
         path = pathlib.Path("/etc/systemd/system") / unit
         if path.exists() or path.is_symlink():
-            _verify_effective_unit_guard(unit, owner)
+            _verify_effective_unit_guard(unit, owner, require_locked_launcher=True)
     txn.set_snapshot_phase(snapshot_path, candidate_sha=root.name, phase=phase)
     # This is the final mutation. Its unlink is atomic and durable; all protected
     # runtime files, systemd state, unit guards, and guest-state fingerprints
@@ -883,7 +890,8 @@ def update_code_only(root: pathlib.Path, owner: str, previous_sha: str) -> None:
             pending.append((root / relative, pathlib.Path(raw_target),
                             source_payload(root, relative, owner), mode))
         _write_candidate_files(pending, txn=txn, snapshot_path=snapshot_path,
-                               target_map=target_map, candidate_sha=root.name)
+                               target_map=target_map, expected_candidate=candidate,
+                               candidate_sha=root.name)
         _finish_code_operation(root, owner, before_state, state_paths, txn=txn,
                                 snapshot_path=snapshot_path, phase="verified-update")
     except BaseException:

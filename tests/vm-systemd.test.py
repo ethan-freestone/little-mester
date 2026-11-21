@@ -130,6 +130,18 @@ class SystemdPolicyTests(unittest.TestCase):
         rollback.assert_called_once_with(root, "owner", "a" * 40)
         update.assert_not_called()
 
+    def test_workspace_unit_owner_is_substituted_into_launcher_and_user(self):
+        relative = "systemd/little-mester-vm-workspace.service"
+        with mock.patch.object(system_installer.pwd, "getpwnam",
+                               return_value=type("Account", (), {"pw_gid": 42})()), \
+             mock.patch.object(system_installer.grp, "getgrgid",
+                               return_value=type("Group", (), {"gr_name": "owner-group"})()):
+            payload = system_installer.source_payload(ROOT, relative, "owner").decode()
+        self.assertIn("User=owner\n", payload)
+        self.assertIn("Group=owner-group\n", payload)
+        self.assertIn("locked-service workspace --owner=owner\n", payload)
+        self.assertNotIn("@LM_VM_OWNER", payload)
+
     def test_update_gate_verifies_effective_locked_execstart_and_guard(self):
         unit = "little-mester-vm.service"
         values = {
@@ -154,10 +166,13 @@ class SystemdPolicyTests(unittest.TestCase):
         with mock.patch.object(system_installer.subprocess, "run", side_effect=show), \
              mock.patch.object(system_installer.pwd, "getpwnam",
                                return_value=type("Account", (), {"pw_name": "owner"})()):
-            system_installer._verify_effective_unit_guard(unit, "owner")
+            system_installer._verify_effective_unit_guard(unit, "owner", require_locked_launcher=True)
             values["ExecStart"] = "{ path=/usr/bin/qemu-system-x86_64 ; argv[]=/usr/bin/qemu-system-x86_64 ; ignore_errors=no }"
+            # A legacy direct-exec unit is allowed during pre-replacement
+            # guard installation, but not at successful completion.
+            system_installer._verify_effective_unit_guard(unit, "owner")
             with self.assertRaisesRegex(RuntimeError, "locked-service launcher"):
-                system_installer._verify_effective_unit_guard(unit, "owner")
+                system_installer._verify_effective_unit_guard(unit, "owner", require_locked_launcher=True)
 
     def test_qemu_is_main_process_and_service_policy_has_bounded_cgroup_fallback(self):
         unit = (ROOT / "systemd/little-mester-vm.service").read_text()
@@ -222,6 +237,13 @@ class SystemdPolicyTests(unittest.TestCase):
         setuid.assert_called_once_with(account.pw_uid)
         inheritable.assert_called_once_with(41, True)
         close.assert_called_once_with(41)
+
+    def test_workspace_locked_launcher_refuses_root_owner(self):
+        root_account = type("Account", (), {"pw_uid": 0, "pw_gid": 0})()
+        with mock.patch.object(vm.os, "geteuid", return_value=0), \
+             mock.patch.object(vm.pwd, "getpwnam", return_value=root_account), \
+             self.assertRaisesRegex(vm.Refused, "root cannot be a fixed service identity"):
+            vm._locked_service_exec("workspace", "root")
 
     def test_proxy_is_separate_and_qemu_requires_successful_proxy_probe(self):
         vm_unit = (ROOT / "systemd/little-mester-vm.service").read_text()

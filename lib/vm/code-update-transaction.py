@@ -434,6 +434,13 @@ def _remove_journaled_stages(snapshot_path: pathlib.Path, target_map, expected_c
                 raise Refused("unrecorded candidate staging artifact; preserving evidence")
 
 
+def recover_candidate_stages(snapshot_path: pathlib.Path, target_map,
+                             expected_candidate, *, candidate_sha: str) -> None:
+    """Recover only journaled, inode-verified candidate staging before retrying writes."""
+    _sha(candidate_sha)
+    _remove_journaled_stages(snapshot_path, target_map, expected_candidate, candidate_sha)
+
+
 def _reject_duplicate_keys(pairs):
     result = {}
     for key, value in pairs:

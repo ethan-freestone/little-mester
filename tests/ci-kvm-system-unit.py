@@ -1427,11 +1427,11 @@ def production_workspace_reproduction_config(template: str, *, user: str, group:
                                                destination: str) -> tuple[str, str]:
     """Render the disposable service from production template plus its generated drop-in."""
     substitutions = (
+        ("ExecStart=+/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py locked-service workspace --owner=@LM_VM_OWNER@",
+         f"ExecStart={workspace_bind_probe_exec(workspace, destination)}"),
         ("@LM_VM_OWNER@", user), ("@LM_VM_OWNER_GROUP@", group),
         ("PartOf=little-mester-vm.service", f"PartOf={vm_unit}"),
         ("Before=little-mester-vm.service", f"Before={vm_unit}"),
-        ("ExecStart=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py serve",
-         f"ExecStart={workspace_bind_probe_exec(workspace, destination)}"),
         ("ExecStartPost=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py socket-permissions",
          "ExecStartPost=/usr/bin/true"),
     )
@@ -2506,9 +2506,10 @@ def expected_installed_bytes(sha: str, source: str) -> bytes:
     payload = git_object_bytes(sha, source)
     if source == "systemd/little-mester-vm-workspace.service":
         owner = pwd.getpwuid(os.getuid())
-        for marker, value in ((b"@LM_VM_OWNER@", owner.pw_name),
-                              (b"@LM_VM_OWNER_GROUP@", grp.getgrgid(owner.pw_gid).gr_name)):
-            require(payload.count(marker) == 1, "pinned workspace unit identity marker is ambiguous")
+        for marker, value, count in ((b"@LM_VM_OWNER@", owner.pw_name, 2),
+                                     (b"@LM_VM_OWNER_GROUP@", grp.getgrgid(owner.pw_gid).gr_name, 1)):
+            require(payload.count(marker) == count,
+                    "pinned workspace unit identity marker is ambiguous")
             payload = payload.replace(marker, value.encode("ascii"))
     return payload
 

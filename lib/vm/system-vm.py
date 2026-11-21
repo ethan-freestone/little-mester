@@ -118,6 +118,8 @@ def _locked_service_exec(kind: str, owner: str | None = None) -> None:
                         "metrics": SERVICE_USER}[kind]
     try:
         service = pwd.getpwnam(service_name)
+        if service.pw_uid == 0:
+            raise Refused("root cannot be a fixed service identity")
         control_gid = grp.getgrnam(CONTROL_GROUP).gr_gid
         kvm_gid = grp.getgrnam(KVM_GROUP).gr_gid if kind == "qemu" else None
     except KeyError as error:
