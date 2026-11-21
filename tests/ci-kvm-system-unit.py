@@ -605,9 +605,11 @@ def _run_transient_bind_case(argv: list[str], *, unit_name: str, source: pathlib
 
 def report_workspace_unit_configuration() -> None:
     properties = (
-        "FragmentPath,DropInPaths,User,Group,SupplementaryGroups,RuntimeDirectory,"
-        "RuntimeDirectoryMode,RuntimeDirectoryPreserve,TemporaryFileSystem,ProtectHome,"
-        "ProtectSystem,PrivateTmp,BindPaths,ReadWritePaths,ExecStart,ExecStartPost"
+        "FragmentPath,DropInPaths,Type,User,Group,SupplementaryGroups,RuntimeDirectory,"
+        "RuntimeDirectoryMode,RuntimeDirectoryPreserve,UMask,ExecStart,ExecStartPost,Restart,"
+        "KillMode,TimeoutStartUSec,TimeoutStopUSec,NoNewPrivileges,NoExecPaths,ExecPaths,"
+        "PrivateTmp,ProtectHome,ProtectSystem,ProtectControlGroups,BindPaths,ReadWritePaths,"
+        "PartOf,Before,After,Requires,BindsTo"
     )
     result = run(["/usr/bin/systemctl", "show", "--no-pager",
                   f"--property={properties}", WORKSPACE_UNIT])
@@ -865,6 +867,7 @@ def run_workspace_bind_reproductions(workspace: pathlib.Path) -> None:
         require(all(outcomes), "real systemd workspace-bind comparison did not match the expected matrix")
         print("workspace_bind_repro_matrix=PASS home/yes=PASS home/tmpfs=PASS "
               "outside-home/yes=PASS outside-home/tmpfs=PASS unrelated_home=HIDDEN", flush=True)
+        run_production_dependency_reproduction(workspace)
     except BaseException as error:
         primary_error = error
         raise
@@ -890,6 +893,191 @@ def run_workspace_bind_reproductions(workspace: pathlib.Path) -> None:
                                              error, (outside,))
             if primary_error is None:
                 raise
+
+
+def run_production_dependency_reproduction(workspace: pathlib.Path) -> None:
+    """Reproduce the production workspace unit and parent dependency graph with stubs."""
+    token = secrets.token_hex(6)
+    prefix = f"lm-vm-workspace-repro-{token}"
+    workspace_unit, proxy_unit = f"{prefix}.service", f"{prefix}-proxy.service"
+    metrics_unit, vm_unit = f"{prefix}-metrics.service", f"{prefix}-vm.service"
+    destination = "/run/little-mester-vm-workspace-share"
+    user = pwd.getpwuid(os.getuid()).pw_name
+    group = grp.getgrgid(os.getgid()).gr_name
+    runtime_paths = ("/run/little-mester-vm-workspace", destination, "/run/little-mester-vm")
+    for raw in runtime_paths:
+        path = pathlib.Path(raw)
+        require(not path.exists() and not path.is_symlink(),
+                f"preserving pre-existing disposable RuntimeDirectory: {path}")
+    workspace_template = (REPO / "systemd/little-mester-vm-workspace.service").read_text(
+        encoding="utf-8")
+    substitutions = (
+        ("@LM_VM_OWNER@", user), ("@LM_VM_OWNER_GROUP@", group),
+        ("PartOf=little-mester-vm.service", f"PartOf={vm_unit}"),
+        ("Before=little-mester-vm.service", f"Before={vm_unit}"),
+        ("ExecStart=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py serve",
+         "ExecStart=/usr/bin/sleep 90"),
+        ("ExecStartPost=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py socket-permissions",
+         "ExecStartPost=/usr/bin/true"),
+    )
+    for original, replacement in substitutions:
+        require(workspace_template.count(original) == 1,
+                f"production workspace unit template changed unexpectedly: {original}")
+        workspace_template = workspace_template.replace(original, replacement)
+    workspace_text = (workspace_template.rstrip() + f'\nBindPaths="{workspace}:{destination}"\n')
+    units = {
+        workspace_unit: workspace_text,
+        proxy_unit: f"""[Unit]\nDescription=Disposable production proxy dependency\nAfter=network-online.target\nWants=network-online.target\nBefore={vm_unit}\nPartOf={vm_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
+        metrics_unit: f"""[Unit]\nDescription=Disposable production metrics dependency\nBefore={vm_unit}\nPartOf={vm_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
+        vm_unit: f"""[Unit]\nDescription=Disposable parent dependency graph\nRequires={proxy_unit} {workspace_unit} {metrics_unit}\nBindsTo={proxy_unit} {workspace_unit} {metrics_unit}\nAfter={proxy_unit} {workspace_unit} {metrics_unit}\n\n[Service]\nType=exec\nUser={user}\nGroup={group}\nRuntimeDirectory=little-mester-vm\nRuntimeDirectoryMode=0700\nExecStart=/usr/bin/sleep 90\nRestart=no\n""",
+    }
+    payload = json.dumps(units, sort_keys=True, separators=(",", ":"))
+    writer = textwrap.dedent("""\
+        import json, os, pathlib, sys
+        root = pathlib.Path('/run/systemd/system')
+        units = json.loads(sys.stdin.read())
+        if not root.is_dir():
+            raise SystemExit('system unit directory unavailable')
+        created = []
+        try:
+            for name, text in units.items():
+                if not name.startswith('lm-vm-workspace-repro-') or '/' in name:
+                    raise SystemExit('invalid disposable unit name')
+                path = root / name
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+                created.append((path, text.encode()))
+                try:
+                    data = memoryview(text.encode())
+                    while data:
+                        written = os.write(fd, data)
+                        if written <= 0:
+                            raise OSError('unit file write made no progress')
+                        data = data[written:]
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+        except BaseException:
+            for path, expected in reversed(created):
+                try:
+                    if path.read_bytes() == expected:
+                        path.unlink()
+                except OSError:
+                    pass
+            raise
+        """)
+    create = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c", writer],
+                            input=payload, text=True, capture_output=True,
+                            timeout=10, check=False)
+    require(create.returncode == 0, "could not safely install disposable systemd reproduction units")
+    try:
+        run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "daemon-reload"], timeout=15)
+        start = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", vm_unit],
+                    timeout=35, check=False)
+        properties = ("LoadState,ActiveState,SubState,MainPID,Result,Type,User,Group,"
+                      "SupplementaryGroups,RuntimeDirectory,RuntimeDirectoryMode,UMask,"
+                      "RuntimeDirectoryPreserve,ExecStart,ExecStartPost,Restart,KillMode,"
+                      "TimeoutStartUSec,TimeoutStopUSec,"
+                      "NoNewPrivileges,NoExecPaths,ExecPaths,PrivateTmp,ProtectHome,"
+                      "ProtectSystem,ProtectControlGroups,ReadWritePaths,BindPaths,PartOf,"
+                      "Before,After,Requires,BindsTo")
+        states = {}
+        for name in units:
+            result = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "show", "--no-pager",
+                          f"--property={properties}", name], check=False)
+            states[name] = dict(line.split("=", 1) for line in result.stdout.splitlines()
+                                if "=" in line)
+        journal = run(["/usr/bin/sudo", "-n", "/usr/bin/journalctl", "--no-pager",
+                       "-n", "40", "-u", workspace_unit], check=False, timeout=10)
+        print("workspace_bind_dependency_repro=" + json.dumps({
+            "units": states, "start_exit": start.returncode,
+            "start_stderr": (start.stderr or "")[-1600:],
+            "workspace_journal": (journal.stdout or "")[-5000:],
+            "source": _host_path_evidence(workspace),
+            "runtime_directories": [_host_path_evidence(pathlib.Path(raw)) for raw in runtime_paths],
+        }, sort_keys=True, separators=(",", ":")), flush=True)
+        workspace_state = states[workspace_unit]
+        expected = {
+            "Type": "exec", "User": user, "Group": group,
+            "RuntimeDirectory": "little-mester-vm-workspace little-mester-vm-workspace-share",
+            "RuntimeDirectoryMode": "0750", "RuntimeDirectoryPreserve": "no",
+            "UMask": "0077", "Restart": "no",
+            "KillMode": "control-group", "TimeoutStartUSec": "20s", "TimeoutStopUSec": "10s",
+            "NoNewPrivileges": "no", "NoExecPaths": "/", "PrivateTmp": "yes",
+            "ProtectHome": "tmpfs", "ProtectSystem": "strict", "ProtectControlGroups": "yes",
+        }
+        mismatches = {key: {"expected": value, "actual": workspace_state.get(key)}
+                      for key, value in expected.items() if workspace_state.get(key) != value}
+        for key, value in (("SupplementaryGroups", "lm-vm-control"),
+                           ("ExecPaths", "/usr/bin"), ("ReadWritePaths", destination),
+                           ("BindPaths", f"{workspace}:{destination}"),
+                           ("PartOf", vm_unit), ("Before", vm_unit),
+                           ("After", "local-fs.target")):
+            if value not in workspace_state.get(key, ""):
+                mismatches[key] = {"expected_contains": value,
+                                   "actual": workspace_state.get(key)}
+        for key, executable in (("ExecStart", "/usr/bin/sleep"),
+                                ("ExecStartPost", "/usr/bin/true")):
+            if f"path={executable}" not in workspace_state.get(key, ""):
+                mismatches[key] = {"expected_executable": executable,
+                                   "actual": workspace_state.get(key)}
+        for key in ("Requires", "BindsTo", "After"):
+            for dependency in (proxy_unit, workspace_unit, metrics_unit):
+                if dependency not in states[vm_unit].get(key, ""):
+                    mismatches[f"vm.{key}.{dependency}"] = {
+                        "expected_contains": dependency,
+                        "actual": states[vm_unit].get(key),
+                    }
+        print("workspace_bind_dependency_configuration="
+              + ("PASS" if not mismatches else "MISMATCH "
+                 + json.dumps(mismatches, sort_keys=True, separators=(",", ":"))), flush=True)
+        require(not mismatches,
+                "disposable dependency reproduction did not retain the required effective production settings")
+        diagnostic = (start.stdout or "") + (start.stderr or "") + (journal.stdout or "")
+        reproduced = ("226/NAMESPACE" in diagnostic
+                      or "Failed to set up mount namespacing" in diagnostic
+                      or workspace_state.get("Result") == "resources")
+        print("workspace_bind_dependency_reproduction="
+              f"{'REPRODUCED_226_NAMESPACE' if reproduced else 'NOT_REPRODUCED'}", flush=True)
+    finally:
+        run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", vm_unit, workspace_unit,
+             proxy_unit, metrics_unit], timeout=30, check=False)
+        for name in units:
+            stopped = run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "show", "--no-pager",
+                           "--property=ActiveState", "--property=MainPID", name], check=False)
+            stopped_state = dict(line.split("=", 1) for line in stopped.stdout.splitlines()
+                                 if "=" in line)
+            require(stopped_state.get("ActiveState") in ("inactive", "failed")
+                    and stopped_state.get("MainPID") == "0",
+                    f"preserving disposable systemd units that did not stop: {name} {stopped_state}")
+        remover = textwrap.dedent("""\
+            import json, os, pathlib, stat, sys
+            root = pathlib.Path('/run/systemd/system')
+            units = json.loads(sys.stdin.read())
+            for name, text in units.items():
+                path = root / name
+                info = os.lstat(path)
+                if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                    raise SystemExit('preserving changed disposable unit file')
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                try:
+                    actual = os.read(fd, len(text.encode()) + 1)
+                finally:
+                    os.close(fd)
+                if actual != text.encode():
+                    raise SystemExit('preserving changed disposable unit file')
+                os.unlink(path)
+            """)
+        removed = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-c", remover],
+                                 input=payload, text=True, capture_output=True,
+                                 timeout=10, check=False)
+        require(removed.returncode == 0, "preserving changed or unavailable disposable unit files")
+        run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "daemon-reload"], timeout=15)
+        run(["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reset-failed", workspace_unit,
+             proxy_unit, metrics_unit, vm_unit], timeout=10, check=False)
+        for raw in runtime_paths:
+            path = pathlib.Path(raw)
+            require(not path.exists() and not path.is_symlink(),
+                    f"systemd did not clean disposable RuntimeDirectory: {path}")
 
 
 def remove_disposable_workspace() -> None:

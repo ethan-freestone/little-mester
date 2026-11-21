@@ -311,6 +311,26 @@ class SystemdPolicyTests(unittest.TestCase):
             "/opt/candidate/lab-vm", "system", "up"])
         self.assertEqual(run.call_args.kwargs["timeout"], 1005)
 
+    def test_acceptance_restoration_waits_for_dependency_shutdown_to_settle(self):
+        stopped = {"ActiveState": "inactive", "MainPID": "0", "Result": "success"}
+        stopping = {"ActiveState": "deactivating", "MainPID": "987", "Result": "success"}
+        states = [stopping, stopped, stopped, stopped] + [stopped] * 12
+        with mock.patch.object(acceptance, "run"), \
+                mock.patch.object(acceptance, "service_state", side_effect=states) as state, \
+                mock.patch.object(acceptance.time, "sleep") as sleep:
+            acceptance._restore_initial_state(pathlib.Path("/opt/candidate"), False)
+        self.assertEqual(state.call_count, 16)
+        self.assertEqual(sleep.call_count, 3)
+
+    def test_acceptance_restoration_fails_closed_when_services_do_not_settle(self):
+        stopping = {"ActiveState": "deactivating", "MainPID": "987", "Result": "success"}
+        with mock.patch.object(acceptance, "run"), \
+                mock.patch.object(acceptance, "service_state", return_value=stopping), \
+                mock.patch.object(acceptance.time, "monotonic", side_effect=[0, 0, 0, 0, 2]), \
+                mock.patch.object(acceptance.time, "sleep"), \
+                self.assertRaisesRegex(acceptance.AcceptanceError, "did not settle"):
+            acceptance._restore_initial_state(pathlib.Path("/opt/candidate"), False, timeout=1)
+
     def test_acceptance_requires_effective_control_group_before_lifecycle_preflight(self):
         fake_pexpect = type("Pexpect", (), {})()
         runtime_dir = type("Info", (), {

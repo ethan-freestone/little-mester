@@ -492,6 +492,44 @@ class HostedSystemUnitTests(unittest.TestCase):
                         main.index("run_workspace_bind_reproductions(workspace_path)"))
         self.assertLess(main.index("run_workspace_bind_reproductions(workspace_path)"),
                         main.index("invoke_shared_acceptance(sha)"))
+        matrix = source[source.index("def run_workspace_bind_reproductions"):
+                        source.index("def run_production_dependency_reproduction")]
+        self.assertIn("run_production_dependency_reproduction(workspace)", matrix)
+
+    def test_production_dependency_reproduction_uses_exact_bind_and_sandbox_before_vm_start(self):
+        source = SCRIPT.read_text()
+        template = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
+        repro = source[source.index("def run_production_dependency_reproduction"):
+                       source.index("def remove_disposable_workspace")]
+        self.assertIn('systemd/little-mester-vm-workspace.service', repro)
+        self.assertIn('ExecStart=/usr/bin/sleep 90', repro)
+        self.assertIn('ExecStartPost=/usr/bin/true', repro)
+        for directive in (
+            "Type=exec", "RuntimeDirectory=little-mester-vm-workspace little-mester-vm-workspace-share",
+            "ExecStartPost=", "NoExecPaths=/", "ExecPaths=/usr/bin /usr/lib",
+            "PrivateTmp=yes", "ProtectHome=tmpfs", "ProtectSystem=strict",
+            "ProtectControlGroups=yes", "ReadWritePaths=/run/little-mester-vm-workspace-share",
+            "PartOf=little-mester-vm.service", "Before=little-mester-vm.service",
+        ):
+            self.assertIn(directive, template)
+        for directive in ("systemctl", "daemon-reload", "journalctl",
+                          "REPRODUCED_226_NAMESPACE", "NOT_REPRODUCED", "O_EXCL", "O_NOFOLLOW"):
+            self.assertIn(directive, repro)
+        module = ast.parse(source)
+        function = next(node for node in module.body
+                        if isinstance(node, ast.FunctionDef)
+                        and node.name == "run_production_dependency_reproduction")
+        for name in ("writer", "remover"):
+            assignment = next(node for node in ast.walk(function)
+                              if isinstance(node, ast.Assign)
+                              and any(isinstance(target, ast.Name) and target.id == name
+                                      for target in node.targets))
+            code = textwrap.dedent(ast.literal_eval(assignment.value.args[0]))
+            compile(code, f"<{name}>", "exec")
+        for directive in ('BindPaths="{workspace}:{destination}"', "PartOf={vm_unit}",
+                          "Before={vm_unit}", "Requires={proxy_unit}",
+                          "BindsTo={proxy_unit}", "After={proxy_unit}"):
+            self.assertIn(directive, repro)
 
     def test_bind_reproduction_separates_controller_source_from_systemd_runtime_lifetime(self):
         source = SCRIPT.read_text()
@@ -551,9 +589,12 @@ class HostedSystemUnitTests(unittest.TestCase):
                          'child.sendcontrol("c")', 'same_disk_persistence:PASS',
                          '_proxy_policy_checks()', '_is_allowed_public_destination'):
             self.assertIn(required, shared)
-        for forbidden in ("systemctl enable", "systemctl disable", "unlink(", "shutil.rmtree",
-                          "rm -rf"):
+        for forbidden in ("systemctl enable", "systemctl disable", "shutil.rmtree", "rm -rf"):
             self.assertNotIn(forbidden, source)
+        repro = source[source.index("def run_production_dependency_reproduction"):
+                       source.index("def remove_disposable_workspace")]
+        self.assertIn("actual != text.encode()", repro)
+        self.assertIn("os.unlink(path)", repro)
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         production = workflow.split("  production-systemd-vm-acceptance:", 1)[1].split(
             "  # ── 6.", 1)[0]

@@ -532,20 +532,39 @@ def _initial_running_state(vm: dict[str, str], proxy: dict[str, str]) -> bool:
     return running[0]
 
 
-def _restore_initial_state(root: pathlib.Path, was_running: bool) -> tuple[dict[str, str], dict[str, str]]:
+def _restore_initial_state(root: pathlib.Path, was_running: bool, *,
+                           timeout: int = 45) -> tuple[dict[str, str], dict[str, str]]:
     operation = "up" if was_running else "down"
     run([str(root / "lab-vm"), "system", operation], timeout=1005 if was_running else 60,
         operation=f"restore_initial_vm_state_{operation}")
-    states = tuple(service_state(unit) for unit in SYSTEM_UNITS)
-    if was_running:
-        restored = all(state.get("ActiveState") == "active" and int(state.get("MainPID", "0")) > 1
-                       for state in states)
-    else:
-        restored = all(state.get("ActiveState") in ("inactive", "failed")
-                       and state.get("MainPID") == "0" for state in states)
-    if not restored:
-        raise AcceptanceError(f"initial lifecycle state was not restored: {states}")
-    return states[0], states[1]
+    deadline = time.monotonic() + timeout
+    previous: tuple[tuple[str | None, str | None, str | None], ...] | None = None
+    stable_samples = 0
+    states: tuple[dict[str, str], ...] = ()
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        states = tuple(service_state(unit, timeout=remaining) for unit in SYSTEM_UNITS)
+        if was_running:
+            restored = all(state.get("ActiveState") == "active"
+                           and int(state.get("MainPID", "0")) > 1 for state in states)
+        else:
+            restored = all(state.get("ActiveState") in ("inactive", "failed")
+                           and state.get("MainPID") == "0" for state in states)
+        signature = tuple((state.get("ActiveState"), state.get("MainPID"), state.get("Result"))
+                          for state in states)
+        if restored and signature == previous:
+            stable_samples += 1
+            if stable_samples >= 2:
+                return states[0], states[1]
+        else:
+            stable_samples = 0
+        previous = signature
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.1, remaining))
+    raise AcceptanceError(
+        f"initial lifecycle state did not settle within {timeout}s "
+        f"(initially_running={was_running}): {states}")
 
 
 def _require_normal_stop(timeout: int = 30) -> None:
