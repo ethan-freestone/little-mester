@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
-import importlib.util
-import json
-import importlib.machinery
-import inspect
 import contextlib
 import datetime
-import errno
+import importlib.machinery
+import importlib.util
+import inspect
 import io
+import json
 import os
 import pathlib
 import re
@@ -42,12 +41,6 @@ system_installer = load("vm_system_install", ROOT / "tools/vm-system-install")
 contract = load("parent_session_contract", ROOT / "lib/vm/parent-session-contract.py")
 bootstrap = load("guest_bootstrap", ROOT / "lib/vm/guest-bootstrap.py")
 acceptance = load("system_acceptance", ROOT / "lib/vm/system-acceptance.py")
-
-
-def getunit_diagnostic_records(stream: str) -> list[dict]:
-    prefix = acceptance._GETUNIT_DIAGNOSTIC_PREFIX
-    return [json.loads(line[len(prefix):]) for line in stream.splitlines()
-            if line.startswith(prefix)]
 
 
 class SystemdPolicyTests(unittest.TestCase):
@@ -839,7 +832,8 @@ class SystemdPolicyTests(unittest.TestCase):
     def test_conditions_observation_exposes_only_safe_state_labels(self):
         raw_payload = f"{acceptance.CONFIG}/code-update.in-progress"
         for label in ("present", "missing", "conflicting", "lookup-failed",
-                      "unavailable", "malformed/unsupported"):
+                      "unavailable", "malformed/unsupported", "identity-mismatch",
+                      "load-state-mismatch"):
             with self.subTest(label=label):
                 self.assertEqual(acceptance._safe_effective_observation("Conditions", label), label)
         for value in (raw_payload, f"a(sbbsi) 1 ConditionPathExists {raw_payload}",
@@ -853,6 +847,10 @@ class SystemdPolicyTests(unittest.TestCase):
         output = 'o "/org/freedesktop/systemd1/unit/dbus_2eservice"'
         self.assertEqual(acceptance._parse_systemd_unit_object_path(output),
                          "/org/freedesktop/systemd1/unit/dbus_2eservice")
+        self.assertEqual(acceptance._expected_systemd_unit_object_path("debug-shell.service"),
+                         "/org/freedesktop/systemd1/unit/debug_2dshell_2eservice")
+        with self.assertRaises(acceptance.AcceptanceError):
+            acceptance._expected_systemd_unit_object_path("../debug-shell.service")
         for malformed in (
             "", 'o "not-an-object-path"',
             'o "/org/freedesktop/systemd1/unit/dbus_2eservice" extra',
@@ -913,6 +911,24 @@ class SystemdPolicyTests(unittest.TestCase):
             acceptance._parse_effective_conditions_json(
                 json.dumps({"type": "a(sbbsi)", "data": records}).encode())
 
+    def test_systemd_string_property_json_is_typed_bounded_and_unambiguous(self):
+        self.assertEqual(acceptance._parse_systemd_string_property_json(
+            b'{"type":"s","data":"loaded"}'), "loaded")
+        malformed = (
+            b'{"type":"s","data":"loaded"} trailing',
+            b'{"type":"s","data":"loaded","extra":0}',
+            b'{"type":"s","type":"s","data":"loaded"}',
+            b'{"type":"u","data":"loaded"}',
+            b'{"type":"s","data":1}',
+            b'{"type":"s","data":null}',
+            b'{"type":"s","data":NaN}',
+            b'\xff',
+            b" " * 4097,
+        )
+        for output in malformed:
+            with self.subTest(output=output), self.assertRaises(acceptance.AcceptanceError):
+                acceptance._parse_systemd_string_property_json(output)
+
     def test_maintenance_condition_state_requires_one_exact_negated_marker(self):
         marker = "/etc/little-mester-vm/code-update.in-progress"
         expected = ("ConditionPathExists", False, True, marker, 1)
@@ -951,39 +967,50 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertEqual(acceptance._maintenance_condition_state((unrelated, expected), marker),
                          "present")
 
-    def test_effective_maintenance_condition_uses_fixed_json_dbus_calls_and_fails_closed(self):
+    def test_effective_maintenance_condition_loads_then_checks_identity_state_and_policy(self):
         fixed_unit = "little-mester-vm.service"
         object_path = "/org/freedesktop/systemd1/unit/little_2dmester_2dvm_2eservice"
         marker = f"{acceptance.CONFIG}/code-update.in-progress"
-        first_call = ["/usr/bin/busctl", "--system", "call", "org.freedesktop.systemd1",
-                      "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
-                      "GetUnit", "s", fixed_unit]
-        second_call = ["/usr/bin/busctl", "--system", "--json=short", "get-property",
-                       "org.freedesktop.systemd1", object_path,
-                       "org.freedesktop.systemd1.Unit", "Conditions"]
+        load_call = ["/usr/bin/busctl", "--system", "call", "org.freedesktop.systemd1",
+                     "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+                     "LoadUnit", "s", fixed_unit]
+        identity_call = ["/usr/bin/busctl", "--system", "--json=short", "get-property",
+                         "org.freedesktop.systemd1", object_path,
+                         "org.freedesktop.systemd1.Unit", "Id"]
+        load_state_call = ["/usr/bin/busctl", "--system", "--json=short", "get-property",
+                           "org.freedesktop.systemd1", object_path,
+                           "org.freedesktop.systemd1.Unit", "LoadState"]
+        conditions_call = ["/usr/bin/busctl", "--system", "--json=short", "get-property",
+                           "org.freedesktop.systemd1", object_path,
+                           "org.freedesktop.systemd1.Unit", "Conditions"]
+
+        def string_reply(command, value):
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"type": "s", "data": value}).encode(), b"")
+
         replies = [
-            subprocess.CompletedProcess(first_call, 0,
+            subprocess.CompletedProcess(load_call, 0,
                                         f'o "{object_path}"'.encode(), b""),
-            subprocess.CompletedProcess(second_call, 0,
-                                        json.dumps({"type": "a(sbbsi)", "data": [
-                                            ["ConditionPathExists", False, True, marker, 1],
-                                        ]}).encode(), b""),
+            string_reply(identity_call, fixed_unit),
+            string_reply(load_state_call, "loaded"),
+            subprocess.CompletedProcess(conditions_call, 0, json.dumps({
+                "type": "a(sbbsi)", "data": [
+                    ["ConditionPathExists", False, True, marker, 1],
+                ]}).encode(), b""),
         ]
         with mock.patch.object(acceptance, "run", side_effect=replies) as run:
             self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit), "present")
         self.assertEqual(run.call_args_list, [
-            mock.call(first_call, operation="read effective systemd Conditions"),
-            mock.call(second_call, operation="read effective systemd Conditions"),
+            mock.call(load_call, operation="load effective systemd unit"),
+            mock.call(identity_call, operation="read systemd unit Id"),
+            mock.call(load_state_call, operation="read systemd unit LoadState"),
+            mock.call(conditions_call, operation="read effective systemd Conditions"),
         ])
 
-        for failed_call, expected_label in ((0, "lookup-failed"), (1, "unavailable")):
+        for failed_call, expected_label in enumerate(
+                ("lookup-failed", "unavailable", "unavailable", "unavailable")):
             with self.subTest(failed_call=failed_call):
-                outcomes = [
-                    subprocess.CompletedProcess(first_call, 0,
-                                                f'o "{object_path}"'.encode(), b""),
-                    subprocess.CompletedProcess(second_call, 0,
-                                                b'{"type":"a(sbbsi)","data":[]}', b""),
-                ]
+                outcomes = list(replies)
                 outcomes[failed_call] = acceptance.AcceptanceError("busctl failed")
                 with mock.patch.object(acceptance, "run", side_effect=outcomes) as run:
                     self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit),
@@ -998,116 +1025,80 @@ class SystemdPolicyTests(unittest.TestCase):
                                (b'\xff', "malformed/unsupported"),
                                (b'{"type":"a(sbbsi)","data":null}', "malformed/unsupported")):
             with self.subTest(label=label):
-                replies[1] = subprocess.CompletedProcess(second_call, 0, payload, b"")
+                replies[3] = subprocess.CompletedProcess(conditions_call, 0, payload, b"")
                 with mock.patch.object(acceptance, "run", side_effect=replies):
                     result = acceptance._effective_maintenance_condition(fixed_unit)
                 self.assertEqual(result, label)
 
-    def test_getunit_launch_failure_reports_fixed_argv_type_and_errno(self):
-        fixed_unit = acceptance.UNIT
-        output = io.StringIO()
-        launch_error = FileNotFoundError(errno.ENOENT, "missing executable", "/private/busctl")
-        with mock.patch.object(acceptance.subprocess, "run", side_effect=launch_error), \
-                contextlib.redirect_stderr(output):
-            self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit),
-                             "lookup-failed")
+    def test_effective_maintenance_condition_rejects_wrong_path_identity_and_load_state(self):
+        unit = acceptance.UNIT
+        object_path = acceptance._expected_systemd_unit_object_path(unit)
+        load = subprocess.CompletedProcess([], 0, f'o "{object_path}"'.encode(), b"")
 
-        [event] = getunit_diagnostic_records(output.getvalue())
-        self.assertEqual(event["unit"], fixed_unit)
-        self.assertEqual(event["argv"], [
-            "/usr/bin/busctl", "--system", "call", "org.freedesktop.systemd1",
-            "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
-            "GetUnit", "s", fixed_unit,
-        ])
-        self.assertEqual(event["category"], "launch-failure")
-        self.assertEqual(event["exception_type"], "FileNotFoundError")
-        self.assertEqual(event["errno"], errno.ENOENT)
-        self.assertNotIn("/private/busctl", output.getvalue())
-        self.assertLessEqual(len(output.getvalue().encode()),
-                             acceptance._GETUNIT_DIAGNOSTIC_LIMIT + 1)
+        def string_reply(value):
+            return subprocess.CompletedProcess([], 0, json.dumps(
+                {"type": "s", "data": value}).encode(), b"")
 
-    def test_getunit_timeout_reports_timeout_elapsed_bucket_and_sanitized_stderr(self):
-        fixed_unit = acceptance.PROXY_UNIT
-        failure = subprocess.TimeoutExpired(
-            ["/usr/bin/busctl"], 30,
-            stderr=b"org.freedesktop.DBus.Error.NoReply: request timed out\n"
-                   b"password=do-not-log\n")
-        output = io.StringIO()
-        with mock.patch.object(acceptance.subprocess, "run", side_effect=failure), \
-                mock.patch.object(acceptance.time, "monotonic", side_effect=[10.0, 12.25]), \
-                contextlib.redirect_stderr(output):
-            self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit),
-                             "lookup-failed")
-
-        [event] = getunit_diagnostic_records(output.getvalue())
-        self.assertEqual(event["category"], "timeout")
-        self.assertEqual(event["exception_type"], "TimeoutExpired")
-        self.assertEqual(event["timeout_seconds"], 30)
-        self.assertEqual(event["elapsed_ms"], 2250)
-        self.assertEqual(event["elapsed_bucket"], "1-5s")
-        self.assertIn("NoReply", event["stderr"])
-        self.assertNotIn("do-not-log", output.getvalue())
-
-    def test_getunit_nonzero_exit_reports_status_and_redacted_bounded_stderr(self):
-        fixed_unit = acceptance.WORKSPACE_UNIT
-        stderr = (b"org.freedesktop.systemd1.NoSuchUnit: unit lookup failed\n"
-                  b"password=do-not-log\n" + b"safe detail " * 100)
-        result = subprocess.CompletedProcess(["/usr/bin/busctl"], 7, b"", stderr)
-        output = io.StringIO()
-        with mock.patch.object(acceptance.subprocess, "run", return_value=result), \
-                contextlib.redirect_stderr(output):
-            self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit),
-                             "lookup-failed")
-
-        [event] = getunit_diagnostic_records(output.getvalue())
-        self.assertEqual(event["category"], "nonzero-exit")
-        self.assertEqual(event["exit_status"], 7)
-        self.assertIn("NoSuchUnit", event["stderr"])
-        self.assertNotIn("do-not-log", output.getvalue())
-        self.assertLessEqual(len(event["stderr"]), acceptance._GETUNIT_STDERR_LIMIT + 20)
-        self.assertLessEqual(len(output.getvalue().encode()),
-                             acceptance._GETUNIT_DIAGNOSTIC_LIMIT + 1)
-
-    def test_getunit_success_reports_only_validated_object_path(self):
-        fixed_unit = acceptance.METRICS_UNIT
-        object_path = "/org/freedesktop/systemd1/unit/little_2dmester_2dvm_2dmetrics_2eservice"
-        first = subprocess.CompletedProcess([], 0, f'o "{object_path}"'.encode(), b"")
-        second = subprocess.CompletedProcess([], 0,
-            json.dumps({"type": "a(sbbsi)", "data": []}).encode(), b"")
-        output = io.StringIO()
-        with mock.patch.object(acceptance.subprocess, "run", side_effect=[first, second]), \
-                contextlib.redirect_stderr(output):
-            self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit), "missing")
-
-        [event] = getunit_diagnostic_records(output.getvalue())
-        self.assertEqual(event["category"], "success")
-        self.assertEqual(event["unit"], fixed_unit)
-        self.assertTrue(event["object_path_valid"])
-        self.assertEqual(event["object_path"], object_path)
-        self.assertEqual(event["argv"][-1], fixed_unit)
-
-    def test_getunit_invalid_object_path_is_redacted_and_remains_fail_closed(self):
-        fixed_unit = acceptance.UNIT
-        raw = b'not-an-object-path private-output-must-not-appear\n'
-        result = subprocess.CompletedProcess([], 0, raw, b"")
-        output = io.StringIO()
-        with mock.patch.object(acceptance.subprocess, "run", return_value=result), \
-                contextlib.redirect_stderr(output):
-            self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit),
+        wrong_path = subprocess.CompletedProcess([], 0,
+            b'o "/org/freedesktop/systemd1/unit/not-the-requested-unit"', b"")
+        with mock.patch.object(acceptance, "run", return_value=wrong_path) as run:
+            self.assertEqual(acceptance._effective_maintenance_condition(unit),
                              "malformed/unsupported")
+        run.assert_called_once()
 
-        [event] = getunit_diagnostic_records(output.getvalue())
-        self.assertEqual(event["category"], "invalid-object-path")
-        self.assertFalse(event["object_path_valid"])
-        self.assertNotIn("private-output-must-not-appear", output.getvalue())
+        with mock.patch.object(acceptance, "run", side_effect=[load, string_reply("other.service")]) as run:
+            self.assertEqual(acceptance._effective_maintenance_condition(unit), "identity-mismatch")
+        self.assertEqual(run.call_count, 2)
 
-    def test_getunit_diagnostic_emitter_failure_does_not_mask_fail_closed_result(self):
-        result = subprocess.CompletedProcess(["/usr/bin/busctl"], 1, b"", b"failed")
-        with mock.patch.object(acceptance.subprocess, "run", return_value=result), \
-                mock.patch.object(acceptance, "_emit_systemd_getunit_diagnostic",
-                                  side_effect=OSError("diagnostic stream unavailable")):
-            self.assertEqual(acceptance._effective_maintenance_condition(acceptance.UNIT),
-                             "lookup-failed")
+        for state in ("not-found", "masked", "error"):
+            with self.subTest(load_state=state), mock.patch.object(
+                    acceptance, "run", side_effect=[load, string_reply(unit), string_reply(state)]) as run:
+                self.assertEqual(acceptance._effective_maintenance_condition(unit),
+                                 "load-state-mismatch")
+            self.assertEqual(run.call_count, 3)
+
+        malformed_identity = subprocess.CompletedProcess([], 0,
+            b'{"type":"u","data":"little-mester-vm.service"}', b"")
+        with mock.patch.object(acceptance, "run", side_effect=[load, malformed_identity]) as run:
+            self.assertEqual(acceptance._effective_maintenance_condition(unit),
+                             "malformed/unsupported")
+        self.assertEqual(run.call_count, 2)
+
+    @unittest.skipUnless(os.environ.get("LM_RUN_REAL_SYSTEMD_UNIT_TEST") == "1",
+                         "opt-in: loads one installed unit definition without starting it")
+    def test_live_unloaded_systemd_unit_loads_without_starting(self):
+        unit = "debug-shell.service"
+        unit_file = pathlib.Path("/usr/lib/systemd/system/debug-shell.service")
+        if not unit_file.is_file():
+            self.skipTest("debug-shell.service is not installed")
+
+        get_unit = ["/usr/bin/busctl", "--system", "call", "org.freedesktop.systemd1",
+                    "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+                    "GetUnit", "s", unit]
+        before = subprocess.run(get_unit, stdin=subprocess.DEVNULL,
+                                capture_output=True, check=False,
+                                env={**os.environ, "LC_ALL": "C"})
+        if before.returncode == 0:
+            self.skipTest("debug-shell.service is already resident; unloaded precondition unavailable")
+        self.assertIn(b"Unit debug-shell.service not loaded", before.stderr)
+
+        result = acceptance._effective_maintenance_condition(unit)
+        self.assertIn(result, {"present", "missing", "conflicting"})
+
+        object_path = acceptance._expected_systemd_unit_object_path(unit)
+        values = {}
+        for property_name in ("Id", "LoadState", "ActiveState"):
+            command = ["/usr/bin/busctl", "--system", "--json=short", "get-property",
+                       "org.freedesktop.systemd1", object_path,
+                       "org.freedesktop.systemd1.Unit", property_name]
+            response = subprocess.run(command, stdin=subprocess.DEVNULL,
+                                      capture_output=True, check=False,
+                                      env={**os.environ, "LC_ALL": "C"})
+            self.assertEqual(response.returncode, 0, response.stderr.decode("utf-8", "replace"))
+            values[property_name] = acceptance._parse_systemd_string_property_json(response.stdout)
+        self.assertEqual(values, {
+            "Id": unit, "LoadState": "loaded", "ActiveState": "inactive",
+        })
 
     def test_system_acceptance_report_contains_protected_lifecycle_gates(self):
         report = owner.report_template("a" * 40, "system_vm_accept", pathlib.Path("attempt"))

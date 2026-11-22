@@ -318,45 +318,13 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("LM_CI_SOURCE_HEAD_SHA", production)
         self.assertIn("pr_merge_commit_second_parent", production)
         self.assertIn("LM_CI_PR_MERGE_PARENT_SHA", production)
-        self.assertIn("workflow_dispatch:", workflow)
-        self.assertIn("getunit_diagnostic_only:", workflow)
-        self.assertIn("type: boolean", workflow)
-        self.assertIn("default: false", workflow)
-        diagnostic_mode = "(github.event_name == 'workflow_dispatch' && inputs.getunit_diagnostic_only == true) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'getunit-diagnostic-only'))"
-        self.assertIn("types: [opened, synchronize, reopened, labeled]", workflow)
-        self.assertIn(diagnostic_mode, transient)
-        self.assertIn(diagnostic_mode, diagnostics)
-        self.assertIn("github.event.action != 'labeled'", transient)
-        self.assertIn("github.event.action != 'labeled'", diagnostics)
-        self.assertIn("github.event.action != 'labeled' || contains(github.event.pull_request.labels.*.name, 'getunit-diagnostic-only')", production)
-        self.assertIn("GETUNIT_DIAGNOSTIC_ONLY", production)
-        self.assertIn(f"GETUNIT_DIAGNOSTIC_ONLY: ${{{{ {diagnostic_mode} }}}}", production)
-        self.assertIn('if [[ "$GETUNIT_DIAGNOSTIC_ONLY" == "true" ]]; then', production)
-        self.assertIn("python3 tests/ci-kvm-system-unit.py --diagnostic-only", production)
-        self.assertIn("python3 tests/ci-kvm-system-unit.py\n", production)
+        self.assertIn("types: [opened, synchronize, reopened]", workflow)
+        self.assertNotIn("workflow_dispatch:", workflow)
+        self.assertNotIn("labeled", workflow)
+        self.assertNotIn("diagnostic-only", workflow)
+        self.assertIn("run: python3 tests/ci-kvm-system-unit.py", production)
         self.assertIn("Install disposable-VM host dependencies", production)
         self.assertEqual(production.count("if: always()"), 1)
-        # Routing truth table: production runs normally for all existing events;
-        # opt-in PRs select diagnostics and suppress both exploratory jobs.
-        def routes(event, action=None, dispatch=False, labels=()):
-            opt_in = dispatch if event == "workflow_dispatch" else (
-                event == "pull_request" and "getunit-diagnostic-only" in labels)
-            production_runs = action != "labeled" or "getunit-diagnostic-only" in labels
-            exploration_runs = action != "labeled" and not opt_in
-            return production_runs, opt_in and production_runs, exploration_runs
-
-        for args, expected in (
-                (("workflow_dispatch", None, False, ()), (True, False, True)),
-                (("workflow_dispatch", None, True, ()), (True, True, False)),
-                (("push",), (True, False, True)),
-                (("pull_request", "synchronize", False, ()), (True, False, True)),
-                (("pull_request", "synchronize", False, ("getunit-diagnostic-only",)), (True, True, False)),
-                (("pull_request", "labeled", False, ("getunit-diagnostic-only",)), (True, True, False)),
-                (("pull_request", "labeled", False, ("unrelated",)), (False, False, False)),
-                (("pull_request", "labeled", False, ("getunit-diagnostic-only", "unrelated")), (True, True, False)),
-        ):
-            with self.subTest(route=args):
-                self.assertEqual(routes(*args), expected)
         self.assertIn("workflow_sha={sha} source_head_sha={source_sha}", SCRIPT.read_text())
         self.assertIn("pr_merge_commit_second_parent={merge_parent}", SCRIPT.read_text())
         self.assertIn("LM_CI_SOURCE_HEAD_SHA", SCRIPT.read_text())
@@ -576,42 +544,29 @@ class HostedSystemUnitTests(unittest.TestCase):
     def test_ci_invokes_exact_installed_owner_acceptance_command(self):
         source = SCRIPT.read_text()
         self.assertIn('installed = CI_INSTALL_PARENT / sha / "tools/vm-owner-acceptance"', source)
-        self.assertIn('"--system-vm", "verify" if diagnostic_only else "accept"', source)
-        self.assertIn('args.append("--approve-system-vm-lifecycle")', source)
+        self.assertIn('"--system-vm", "accept", "--approve-system-vm-lifecycle"', source)
         self.assertIn("invoke_shared_acceptance(sha)", source)
         self.assertNotIn('invoke_lab(installed_root, "up", 16 * 60 + 45)', source)
 
-    def test_getunit_diagnostic_only_routes_to_verify_without_changing_default(self):
+    def test_hosted_acceptance_has_no_getunit_diagnostic_only_route(self):
         sha = "a" * 40
         with mock.patch.object(unit, "run") as run:
-            unit.invoke_shared_acceptance(sha, diagnostic_only=True)
+            unit.invoke_shared_acceptance(sha)
         command = shlex.split(run.call_args.args[0][3])
         self.assertEqual(run.call_args.args[0][:3], ["/usr/bin/sg", "lm-vm-control", "-c"])
-        self.assertEqual(command[1:3], ["--system-vm", "verify"])
-        self.assertNotIn("accept", command)
-        self.assertNotIn("--approve-system-vm-lifecycle", command)
+        self.assertEqual(command[1:4], ["--system-vm", "accept",
+                                      "--approve-system-vm-lifecycle"])
         self.assertEqual(run.call_args.kwargs["capture"], False)
         self.assertEqual(run.call_args.kwargs["timeout"], 45 * 60)
 
         source = SCRIPT.read_text()
         main = source[source.index("def main()") :]
-        self.assertIn('diagnostic_only = sys.argv[1:] == ["--diagnostic-only"]', main)
-        self.assertIn("invoke_shared_acceptance(sha, diagnostic_only=True)", main)
-        diagnostic_branch = main.split("if diagnostic_only:", 1)[1].split(
-            "workspace_path = disposable_workspace_path()", 1)[0]
-        self.assertIn("return 0", diagnostic_branch)
-        self.assertLess(main.index("invoke_shared_acceptance(sha, diagnostic_only=True)"),
-                        main.index("workspace_path = disposable_workspace_path()"))
-
-        with mock.patch.object(unit, "run") as run:
-            unit.invoke_shared_acceptance(sha)
-        command = shlex.split(run.call_args.args[0][3])
-        self.assertEqual(command[1:4], ["--system-vm", "accept",
-                                      "--approve-system-vm-lifecycle"])
+        self.assertNotIn("--diagnostic-only", main)
+        self.assertNotIn("diagnostic_only", main)
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         production = workflow_job(workflow, "production-systemd-vm-acceptance")
         self.assertIn("tests/ci-kvm-system-unit.py", production)
-        self.assertIn("--diagnostic-only", production)
+        self.assertNotIn("--diagnostic-only", production)
 
     def test_git_object_fetch_uses_exact_sha_path_and_raw_bytes(self):
         sha = "c" * 40
