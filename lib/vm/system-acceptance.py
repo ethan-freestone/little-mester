@@ -318,6 +318,22 @@ def _effective_argvs(value: str) -> tuple[tuple[str, str], ...]:
     return tuple((match.group(1), match.group(2)) for match in found)
 
 
+def _parse_effective_properties(output: str) -> dict[str, str]:
+    """Parse systemctl show output, retaining the ordered repeatable pre-start list."""
+    values = {}
+    for line in output.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key in values:
+            if key != "ExecStartPre":
+                raise AcceptanceError("systemd returned duplicate effective property evidence")
+            values[key] += " ; " + value
+        else:
+            values[key] = value
+    return values
+
+
 def disk_identity() -> tuple[int, int]:
     result = run(["/usr/bin/sudo", "-n", "/usr/bin/stat", "--format=%f:%d:%i", "--", DISK])
     match = re.fullmatch(rb"([0-9a-fA-F]+):([0-9]+):([0-9]+)\n", result.stdout)
@@ -453,15 +469,7 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
                        "--property=SupplementaryGroups",
                        "--property=NoExecPaths", "--property=ExecPaths",
                       unit]).stdout.decode()
-        values = {}
-        for line in output.splitlines():
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            if key in values:
-                raise AcceptanceError("systemd returned duplicate effective property evidence")
-            values[key] = value
-        properties[unit] = values
+        properties[unit] = _parse_effective_properties(output)
     vm_properties = properties[UNIT]
     proxy_properties = properties[PROXY_UNIT]
     workspace_properties = properties[WORKSPACE_UNIT]

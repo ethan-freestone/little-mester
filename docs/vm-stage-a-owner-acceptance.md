@@ -92,6 +92,16 @@ the system executable/library trees needed by Python, virtiofsd, its loader, and
 helpers; these trees must remain root-controlled.
 Pass the explicit virtiofsd namespace sandbox option; do not enable submount announcing.
 
+The fixed `ExecStart=+` prefix is used only so the launcher can open and validate the
+root-owned code-update lock before dropping to the fixed service identity. Because `+`
+also bypasses systemd's per-command `NoNewPrivileges=` setting, the locked launcher
+explicitly sets `PR_SET_NO_NEW_PRIVS` after dropping identity for QEMU, proxy, and metrics
+services. Workspace is the deliberate exception: it preserves the documented
+virtiofsd 1.10 `newuidmap`/`newgidmap` privilege-transition requirement above. Whether
+every supported installed virtiofsd actually invokes those helpers, and how those helpers
+are configured on a host, is not verified by source inspection or the dependency-presence
+check; do not treat workspace as having the same no-new-privileges boundary.
+
 The root installer creates a dedicated runtime socket directory owned by the workspace
 owner and group `lm-vm-control`, with mode `0750`; the workspace service starts with the
 owner's primary group so virtiofsd's supported user-namespace ID maps work. virtiofsd is

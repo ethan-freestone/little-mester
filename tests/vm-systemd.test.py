@@ -204,6 +204,13 @@ class SystemdPolicyTests(unittest.TestCase):
         class ExecReached(Exception):
             pass
 
+        def record_exec(*args):
+            events.append("exec")
+            raise ExecReached
+
+        def record_event(event):
+            return lambda *args: events.append(event)
+
         control_gid, kvm_gid = 5150, 5151
         lock_stat = type("Stat", (), {
             "st_mode": stat.S_IFREG | 0o660, "st_nlink": 1, "st_uid": 0,
@@ -211,6 +218,7 @@ class SystemdPolicyTests(unittest.TestCase):
         })()
         group_ids = {"lm-vm-control": control_gid, "kvm": kvm_gid}
         account = type("Account", (), {"pw_uid": 1101, "pw_gid": 1101})()
+        events = []
         with tempfile.TemporaryDirectory() as tmp:
             marker = pathlib.Path(tmp) / "update-marker"
             with mock.patch.object(vm, "CODE_UPDATE_MARKER", marker), \
@@ -222,11 +230,12 @@ class SystemdPolicyTests(unittest.TestCase):
                                        "gr_gid": group_ids[name]})()), \
                  mock.patch.object(vm.pwd, "getpwnam", return_value=account), \
                  mock.patch.object(vm.fcntl, "flock") as flock, \
-                 mock.patch.object(vm.os, "setgroups") as setgroups, \
-                 mock.patch.object(vm.os, "setgid") as setgid, \
-                 mock.patch.object(vm.os, "setuid") as setuid, \
-                 mock.patch.object(vm.os, "set_inheritable") as inheritable, \
-                 mock.patch.object(vm.os, "execv", side_effect=ExecReached), \
+                 mock.patch.object(vm.os, "setgroups", side_effect=record_event("setgroups")) as setgroups, \
+                 mock.patch.object(vm.os, "setgid", side_effect=record_event("setgid")) as setgid, \
+                 mock.patch.object(vm.os, "setuid", side_effect=record_event("setuid")) as setuid, \
+                 mock.patch.object(vm, "_set_no_new_privs", side_effect=record_event("nnp")) as set_no_new_privs, \
+                 mock.patch.object(vm.os, "set_inheritable", side_effect=record_event("inheritable")) as inheritable, \
+                 mock.patch.object(vm.os, "execv", side_effect=record_exec), \
                  mock.patch.object(vm.os, "close") as close, \
                  mock.patch.object(vm, "qemu_argv", return_value=["/usr/bin/qemu"]):
                 with self.assertRaises(ExecReached):
@@ -235,8 +244,60 @@ class SystemdPolicyTests(unittest.TestCase):
         setgroups.assert_called_once_with([control_gid, kvm_gid])
         setgid.assert_called_once_with(account.pw_gid)
         setuid.assert_called_once_with(account.pw_uid)
+        set_no_new_privs.assert_called_once_with()
         inheritable.assert_called_once_with(41, True)
         close.assert_called_once_with(41)
+        self.assertLess(events.index("setgroups"), events.index("setgid"))
+        self.assertLess(events.index("setgid"), events.index("setuid"))
+        self.assertLess(events.index("setuid"), events.index("nnp"))
+        self.assertLess(events.index("nnp"), events.index("inheritable"))
+        self.assertLess(events.index("inheritable"), events.index("exec"))
+
+    def test_locked_launcher_enforces_no_new_privs_for_roles_except_workspace(self):
+        self.assertEqual(vm.NNP_REQUIRED_ROLES, frozenset({"qemu", "proxy", "metrics"}))
+        account = type("Account", (), {"pw_uid": 1101, "pw_gid": 1101})()
+        lock_stat = type("Stat", (), {
+            "st_mode": stat.S_IFREG | 0o660, "st_nlink": 1, "st_uid": 0,
+            "st_gid": 5150,
+        })()
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = pathlib.Path(tmp) / "update-marker"
+            with mock.patch.object(vm, "CODE_UPDATE_MARKER", marker), \
+                 mock.patch.object(vm.os, "geteuid", return_value=0), \
+                 mock.patch.object(vm.os, "open", return_value=41), \
+                 mock.patch.object(vm.os, "fstat", return_value=lock_stat), \
+                 mock.patch.object(vm.grp, "getgrnam", return_value=type("Group", (), {"gr_gid": 5150})()), \
+                 mock.patch.object(vm.pwd, "getpwnam", return_value=account), \
+                 mock.patch.object(vm.fcntl, "flock"), \
+                 mock.patch.object(vm.os, "setgroups"), \
+                 mock.patch.object(vm.os, "setgid"), \
+                 mock.patch.object(vm.os, "setuid"), \
+                 mock.patch.object(vm, "_set_no_new_privs", side_effect=vm.Refused("prctl failed")), \
+                 mock.patch.object(vm.os, "set_inheritable"), \
+                 mock.patch.object(vm.os, "execv") as execv, \
+                 mock.patch.object(vm.os, "close"):
+                with self.assertRaisesRegex(vm.Refused, "prctl failed"):
+                    vm._locked_service_exec("proxy")
+        execv.assert_not_called()
+
+    def test_set_no_new_privs_uses_checked_prctl_call(self):
+        libc = mock.Mock()
+        libc.prctl.return_value = 0
+        with mock.patch.object(vm.ctypes, "CDLL", return_value=libc):
+            vm._set_no_new_privs()
+        libc.prctl.assert_called_once_with(vm.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+        self.assertEqual(libc.prctl.argtypes, [
+            vm.ctypes.c_int, vm.ctypes.c_ulong, vm.ctypes.c_ulong,
+            vm.ctypes.c_ulong, vm.ctypes.c_ulong,
+        ])
+        self.assertIs(libc.prctl.restype, vm.ctypes.c_int)
+
+        libc.prctl.reset_mock()
+        libc.prctl.return_value = -1
+        with mock.patch.object(vm.ctypes, "CDLL", return_value=libc), \
+             mock.patch.object(vm.ctypes, "get_errno", return_value=1), \
+             self.assertRaisesRegex(vm.Refused, "could not set no_new_privs"):
+            vm._set_no_new_privs()
 
     def test_workspace_locked_launcher_refuses_root_owner(self):
         root_account = type("Account", (), {"pw_uid": 0, "pw_gid": 0})()
@@ -668,6 +729,44 @@ class SystemdPolicyTests(unittest.TestCase):
             ("/usr/bin/true", "/usr/bin/true")))
         with self.assertRaisesRegex(acceptance.AcceptanceError, "extra effective"):
             acceptance._effective_argvs(first + " ; injected ; " + second)
+
+    def test_effective_properties_preserve_only_repeated_exec_start_pre(self):
+        check = ("{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -I "
+                 "/usr/lib/little-mester-vm/system-vm.py check ; ignore_errors=no }")
+        guard = ("{ path=/usr/bin/flock ; argv[]=/usr/bin/flock --shared --nonblock "
+                 "/etc/little-mester-vm/code-update.lock /usr/bin/true ; ignore_errors=no }")
+        unexpected = "{ path=/usr/bin/false ; argv[]=/usr/bin/false ; ignore_errors=no }"
+        output = f"User=lm-vm\nExecStartPre={check}\nExecStartPre={guard}\n"
+        properties = acceptance._parse_effective_properties(output)
+        self.assertEqual(acceptance._effective_argvs(properties["ExecStartPre"]), (
+            ("/usr/bin/python3", "/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py check"),
+            ("/usr/bin/flock", "/usr/bin/flock --shared --nonblock "
+             "/etc/little-mester-vm/code-update.lock /usr/bin/true"),
+        ))
+        expected = acceptance._effective_argvs(properties["ExecStartPre"])
+        def require_exact_pre(output):
+            parsed = acceptance._parse_effective_properties(output)
+            commands = acceptance._effective_argvs(parsed["ExecStartPre"])
+            if commands != expected:
+                raise acceptance.AcceptanceError("effective command-list mismatch")
+            return commands
+
+        for malformed in (f"User=lm-vm\nExecStartPre={guard}\nExecStartPre={check}\n",
+                           f"User=lm-vm\nExecStartPre={check}\n",
+                           f"User=lm-vm\nExecStartPre={check}\nExecStartPre={guard}\nExecStartPre={guard}\n",
+                           f"User=lm-vm\nExecStartPre={check}\nExecStartPre={guard}\nExecStartPre={unexpected}\n"):
+            with self.subTest(output=malformed), self.assertRaises(acceptance.AcceptanceError):
+                require_exact_pre(malformed)
+        extra_property = acceptance._parse_effective_properties(
+            f"ExecStartPre={check}\nExecStartPre={guard}\nExecStart=/usr/bin/false\n")
+        with self.assertRaises(acceptance.AcceptanceError):
+            acceptance._effective_argv(extra_property["ExecStart"])
+
+    def test_effective_properties_still_reject_duplicate_scalar_and_other_keys(self):
+        for output in ("User=lm-vm\nUser=other\n", "ExecStartPost=one\nExecStartPost=two\n"):
+            with self.subTest(output=output), self.assertRaisesRegex(
+                    acceptance.AcceptanceError, "duplicate effective property"):
+                acceptance._parse_effective_properties(output)
 
     def test_system_acceptance_report_contains_protected_lifecycle_gates(self):
         report = owner.report_template("a" * 40, "system_vm_accept", pathlib.Path("attempt"))

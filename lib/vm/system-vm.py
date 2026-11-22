@@ -11,6 +11,7 @@ from its caller.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import errno
 import fcntl
 import grp
@@ -38,6 +39,8 @@ SERVICE_USER = "lm-vm"
 PROXY_USER = "lm-vm-proxy"
 CONTROL_GROUP = "lm-vm-control"
 KVM_GROUP = "kvm"
+PR_SET_NO_NEW_PRIVS = 38
+NNP_REQUIRED_ROLES = frozenset({"qemu", "proxy", "metrics"})
 STATE = pathlib.Path("/var/lib/little-mester-vm")
 CONFIG = pathlib.Path("/etc/little-mester-vm")
 DISK = STATE / "disk.qcow2"
@@ -101,6 +104,19 @@ def _verify_kvm_access() -> None:
         raise Refused("service identity lacks DAC read/write access to /dev/kvm")
 
 
+def _set_no_new_privs() -> None:
+    """Make the post-drop service exec non-escalating despite systemd's '+' prefix."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    prctl = libc.prctl
+    prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+                      ctypes.c_ulong, ctypes.c_ulong]
+    prctl.restype = ctypes.c_int
+    if prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        detail = os.strerror(error) if error else "unknown prctl error"
+        raise Refused(f"could not set no_new_privs for locked service: {detail}")
+
+
 def _locked_service_exec(kind: str, owner: str | None = None) -> None:
     """Take a root-opened shared lock, drop to a fixed unit identity, then exec."""
     if os.geteuid() != 0:
@@ -142,6 +158,10 @@ def _locked_service_exec(kind: str, owner: str | None = None) -> None:
         os.setgroups(sorted(set(groups)))
         os.setgid(service.pw_gid)
         os.setuid(service.pw_uid)
+        if kind in NNP_REQUIRED_ROLES:
+            _set_no_new_privs()
+        elif kind != "workspace":
+            raise Refused("locked service role has no explicit no_new_privs policy")
         if kind == "qemu":
             argv = qemu_argv()
         elif kind == "proxy":
