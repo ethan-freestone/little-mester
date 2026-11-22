@@ -211,7 +211,9 @@ def _safe_effective_observation(property_name: str, value: str) -> str:
         other = len(paths - set(_FIXED_GUARD_PATHS.values()) - {_WORKSPACE_DROPIN_PATH})
         return f"guard-paths={guard};workspace-path={workspace};other-paths={other}"
     if property_name == "Conditions":
-        return value if value in ("present", "missing", "conflicting") else "conflicting"
+        allowed = {"present", "missing", "conflicting", "lookup-failed",
+                   "unavailable", "malformed/unsupported"}
+        return value if value in allowed else "malformed/unsupported"
     if property_name == "effective-properties":
         return "malformed or duplicate property output"
     if property_name == "ExecStopPost":
@@ -245,75 +247,43 @@ def _parse_systemd_unit_object_path(output: str) -> str:
         raise AcceptanceError("systemd returned malformed unit object path") from error
 
 
-def _parse_effective_conditions(output: str) -> tuple[tuple[str, bool, bool, str, int], ...]:
-    """Parse busctl's exact a(sbbsi) text representation, rejecting partial data."""
+def _parse_effective_conditions_json(output: bytes) -> tuple[tuple[str, bool, bool, str, int], ...]:
+    """Parse bounded busctl JSON Conditions output without accepting schema drift."""
     try:
-        if not isinstance(output, str) or len(output.encode("utf-8", "strict")) > 16384:
+        if not isinstance(output, bytes) or len(output) > 16384:
             raise ValueError
-        # Capture lexical token boundaries before shlex discards quote/type data.
-        # Tokens are whitespace separated, with double quotes and backslash escapes.
-        lexemes = []
-        position = 0
-        length = len(output)
-        while position < length:
-            while position < length and output[position].isspace():
-                position += 1
-            if position == length:
-                break
-            start = position
-            quoted = output[position] == '"'
-            if quoted:
-                position += 1
-                escaped = False
-                while position < length:
-                    char = output[position]
-                    position += 1
-                    if escaped:
-                        escaped = False
-                    elif char == "\\":
-                        escaped = True
-                    elif char == '"':
-                        break
-                else:
+        text = output.decode("utf-8", "strict")
+
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
                     raise ValueError
-                if escaped or (position < length and not output[position].isspace()):
-                    raise ValueError
-            else:
-                while position < length and not output[position].isspace():
-                    if output[position] in "'\"\\":
-                        raise ValueError
-                    position += 1
-            lexemes.append((output[start:position], quoted))
-            if len(lexemes) > 642:
-                raise ValueError
-        if len(lexemes) < 2 or lexemes[0] != ("a(sbbsi)", False):
+                result[key] = value
+            return result
+
+        def reject_constant(_value):
             raise ValueError
-        if lexemes[1][1]:
-            raise ValueError
-        tokens = shlex.split(output, posix=True)
-        if len(tokens) != len(lexemes) or not re.fullmatch(r"(?:0|[1-9][0-9]*)", tokens[1]):
-            raise ValueError
-        count = int(tokens[1], 10)
-        if not 0 <= count <= 128 or len(lexemes) != 2 + count * 5:
+
+        document = json.loads(text, object_pairs_hook=unique_object,
+                              parse_constant=reject_constant)
+        if (not isinstance(document, dict) or set(document) != {"type", "data"}
+                or document["type"] != "a(sbbsi)"
+                or not isinstance(document["data"], list)
+                or len(document["data"]) > 128):
             raise ValueError
         records = []
-        for index in range(count):
-            offset = 2 + index * 5
-            fields = lexemes[offset:offset + 5]
-            kind, trigger, negate, parameter, result = tokens[offset:offset + 5]
-            if (not fields[0][1] or fields[1][1] or fields[2][1]
-                    or not fields[3][1] or fields[4][1]):
+        for fields in document["data"]:
+            if not isinstance(fields, list) or len(fields) != 5:
                 raise ValueError
-            if trigger not in ("true", "false") or negate not in ("true", "false"):
+            kind, trigger, negate, parameter, result = fields
+            if (not isinstance(kind, str) or type(trigger) is not bool
+                    or type(negate) is not bool or not isinstance(parameter, str)
+                    or type(result) is not int or not -(2**31) <= result < 2**31):
                 raise ValueError
-            if not re.fullmatch(r"-?(?:0|[1-9][0-9]*)", result):
-                raise ValueError
-            number = int(result, 10)
-            if not -(2**31) <= number < 2**31:
-                raise ValueError
-            records.append((kind, trigger == "true", negate == "true", parameter, number))
+            records.append((kind, trigger, negate, parameter, result))
         return tuple(records)
-    except (ValueError, UnicodeError, TypeError) as error:
+    except (ValueError, UnicodeError, TypeError, json.JSONDecodeError, RecursionError) as error:
         raise AcceptanceError("systemd returned malformed effective Conditions") from error
 
 
@@ -327,20 +297,34 @@ def _maintenance_condition_state(conditions, marker: str) -> str:
 
 
 def _effective_maintenance_condition(unit: str) -> str:
-    path_output = run(
-        ["/usr/bin/busctl", "--system", "call", "org.freedesktop.systemd1",
-         "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
-         "GetUnit", "s", unit],
-        operation="read effective systemd Conditions",
-    ).stdout.decode("utf-8", "strict")
-    object_path = _parse_systemd_unit_object_path(path_output)
-    output = run(
-        ["/usr/bin/busctl", "--system", "get-property", "org.freedesktop.systemd1",
-         object_path, "org.freedesktop.systemd1.Unit", "Conditions"],
-        operation="read effective systemd Conditions",
-    ).stdout.decode("utf-8", "strict")
-    return _maintenance_condition_state(_parse_effective_conditions(output),
-                                        f"{CONFIG}/code-update.in-progress")
+    try:
+        path_bytes = run(
+            ["/usr/bin/busctl", "--system", "call", "org.freedesktop.systemd1",
+             "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+             "GetUnit", "s", unit],
+            operation="read effective systemd Conditions",
+        ).stdout
+    except AcceptanceError:
+        return "lookup-failed"
+    try:
+        path_output = path_bytes.decode("utf-8", "strict")
+        object_path = _parse_systemd_unit_object_path(path_output)
+    except (AcceptanceError, UnicodeError):
+        return "malformed/unsupported"
+    try:
+        output = run(
+            ["/usr/bin/busctl", "--system", "--json=short", "get-property",
+             "org.freedesktop.systemd1", object_path,
+             "org.freedesktop.systemd1.Unit", "Conditions"],
+            operation="read effective systemd Conditions",
+        ).stdout
+    except AcceptanceError:
+        return "unavailable"
+    try:
+        conditions = _parse_effective_conditions_json(output)
+        return _maintenance_condition_state(conditions, f"{CONFIG}/code-update.in-progress")
+    except AcceptanceError:
+        return "malformed/unsupported"
 
 
 def _render_effective_policy_mismatches(mismatches: list[dict[str, str]]) -> str:
@@ -777,8 +761,8 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
     for unit in SYSTEM_UNITS:
         try:
             condition_states[unit] = _effective_maintenance_condition(unit)
-        except (AcceptanceError, ValueError, UnicodeError):
-            condition_states[unit] = "conflicting"
+        except (AcceptanceError, ValueError, UnicodeError, TypeError):
+            condition_states[unit] = "malformed/unsupported"
 
     def compare(unit, property_name, expected, observed, matches):
         if not matches:

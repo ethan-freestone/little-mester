@@ -831,13 +831,15 @@ class SystemdPolicyTests(unittest.TestCase):
 
     def test_conditions_observation_exposes_only_safe_state_labels(self):
         raw_payload = f"{acceptance.CONFIG}/code-update.in-progress"
-        for label in ("present", "missing", "conflicting"):
+        for label in ("present", "missing", "conflicting", "lookup-failed",
+                      "unavailable", "malformed/unsupported"):
             with self.subTest(label=label):
                 self.assertEqual(acceptance._safe_effective_observation("Conditions", label), label)
-        for value in (raw_payload, f"a(sbbsi) 1 ConditionPathExists {raw_payload}", "secret payload"):
+        for value in (raw_payload, f"a(sbbsi) 1 ConditionPathExists {raw_payload}",
+                      "secret payload", "unexpected-label"):
             with self.subTest(value=value):
                 observed = acceptance._safe_effective_observation("Conditions", value)
-                self.assertEqual(observed, "conflicting")
+                self.assertEqual(observed, "malformed/unsupported")
                 self.assertNotIn(value, observed)
 
     def test_systemd_dbus_unit_object_path_parser_accepts_captured_output(self):
@@ -853,41 +855,63 @@ class SystemdPolicyTests(unittest.TestCase):
             with self.subTest(output=malformed), self.assertRaises(acceptance.AcceptanceError):
                 acceptance._parse_systemd_unit_object_path(malformed)
 
-    def test_effective_conditions_parser_accepts_captured_systemd_255_output(self):
-        # Captured from busctl on systemd 255.4; retain the real wire rendering.
-        output = ('a(sbbsi) 1 "ConditionPathExists" false true '
-                  '"/etc/ssh/sshd_not_to_be_run" 1')
-        self.assertEqual(acceptance._parse_effective_conditions(output), (
-            ("ConditionPathExists", False, True, "/etc/ssh/sshd_not_to_be_run", 1),
-        ))
+    def test_effective_conditions_json_parser_accepts_captured_systemd_255_output(self):
+        # Captured from busctl --system --json=short on systemd 255.4.
+        output = (b'{"type":"a(sbbsi)","data":[["ConditionPathExists",false,true,'
+                  b'"/etc/ssh/sshd_not_to_be_run",1]]}')
+        parsed = acceptance._parse_effective_conditions_json(output)
+        self.assertEqual(parsed, (("ConditionPathExists", False, True,
+                                   "/etc/ssh/sshd_not_to_be_run", 1),))
 
-    def test_effective_conditions_parser_fails_closed_on_malformed_payloads(self):
-        malformed_outputs = (
-            'a(ssbbi) 1 "ConditionPathExists" false true "/marker" 1',
-            'a(sbbsi) 2 "ConditionPathExists" false true "/marker" 1',
-            'a(sbbsi) 1 "ConditionPathExists" false maybe "/marker" 1',
-            'a(sbbsi) 1 "ConditionPathExists" false true 42 1',
-            'a(sbbsi) 1 "ConditionPathExists" false true /marker 1',
-            'a(sbbsi) 1 ConditionPathExists false true "/marker" 1',
-            'a(sbbsi) 1 "ConditionPathExists" "false" true "/marker" 1',
-            'a(sbbsi) 1 "ConditionPathExists" false true "/marker" "1"',
-            'a(sbbsi) 1 "ConditionPathExists" false true "/marker" nope',
-            'a(sbbsi) 1 "ConditionPathExists" false true "/marker" 1 trailing',
-            'a(sbbsi) 1 "ConditionPathExists" false true "/marker"',
-            'a(sbbsi) 0 trailing',
-            'a(sbbsi) -1',
-            "a(sbbsi) '1' \"ConditionPathExists\" false true \"/marker\" 1",
-            "a(sbbsi) 1 \"ConditionPathExists\" 'false' true \"/marker\" 1",
-            "a(sbbsi) 1 \"ConditionPathExists\" false true \"/marker\" '1'",
-        )
-        for output in malformed_outputs:
+    def test_effective_conditions_json_rejects_unsupported_or_malformed_data(self):
+        malformed = [
+            b'{"type":"a(sbbsi)","data":[]} trailing',
+            b'{"type":"a(sbbsi)","data":[],"result":true}',
+            b'{"type":"a(sbbsi)"}',
+            b'{"type":"a(sbbsi)","data":[],"extra":0}',
+            b'{"type":"a(sbbsi)","type":"a(sbbsi)","data":[]}',
+            b'{"type":"a(ssbbi)","data":[]}',
+            b'{"type":"a(sbbsi)","data":null}',
+            b'{"type":"z","data":[]}',
+            b'{"type":"a(sbbsi)","data":[[]]}',
+            b'{"type":"a(sbbsi)","data":[["ConditionPathExists",false,true,"/marker"]]}',
+            b'{"type":"a(sbbsi)","data":[["ConditionPathExists",false,true,"/marker",1,2]]}',
+            b'{"type":"a(sbbsi)","data":[["ConditionPathExists",0,true,"/marker",1]]}',
+            b'{"type":"a(sbbsi)","data":[["ConditionPathExists",false,true,"/marker",true]]}',
+            b'{"type":"a(sbbsi)","data":[["ConditionPathExists",false,true,"/marker",2147483648]]}',
+            b'{"type":"a(sbbsi)","data":[["ConditionPathExists",false,true,"/marker",-2147483649]]}',
+            b'{"type":"a(sbbsi)","data":[["ConditionPathExists",false,true,"/marker",NaN]]}',
+        ]
+        for output in malformed:
             with self.subTest(output=output), self.assertRaises(acceptance.AcceptanceError):
-                acceptance._parse_effective_conditions(output)
+                acceptance._parse_effective_conditions_json(output)
+        with self.assertRaises(acceptance.AcceptanceError):
+            acceptance._parse_effective_conditions_json(b" " * 65537)
+
+        valid_record = ["other", False, True, "/unrelated", 1]
+        exact_limit = json.dumps({"type": "a(sbbsi)", "data": [valid_record]},
+                                 separators=(",", ":" )).encode()
+        padded = exact_limit + b" " * (16384 - len(exact_limit))
+        self.assertEqual(len(padded), 16384)
+        self.assertEqual(len(acceptance._parse_effective_conditions_json(padded)), 1)
+        with self.assertRaises(acceptance.AcceptanceError):
+            acceptance._parse_effective_conditions_json(padded + b" ")
+
+        records = [["other", False, True, f"/unrelated/{index}", 1] for index in range(128)]
+        self.assertEqual(len(acceptance._parse_effective_conditions_json(
+            json.dumps({"type": "a(sbbsi)", "data": records}).encode())), 128)
+
+        records = [["other", False, True, f"/unrelated/{index}", 1] for index in range(129)]
+        with self.assertRaises(acceptance.AcceptanceError):
+            acceptance._parse_effective_conditions_json(
+                json.dumps({"type": "a(sbbsi)", "data": records}).encode())
 
     def test_maintenance_condition_state_requires_one_exact_negated_marker(self):
         marker = "/etc/little-mester-vm/code-update.in-progress"
         expected = ("ConditionPathExists", False, True, marker, 1)
         self.assertEqual(acceptance._maintenance_condition_state((expected,), marker), "present")
+        self.assertEqual(acceptance._maintenance_condition_state(
+            (("ConditionPathExists", False, True, marker, 0),), marker), "present")
         self.assertEqual(acceptance._maintenance_condition_state((), marker), "missing")
 
         wrong_marker_tuples = (
@@ -920,22 +944,23 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertEqual(acceptance._maintenance_condition_state((unrelated, expected), marker),
                          "present")
 
-    def test_effective_maintenance_condition_uses_exact_dbus_calls_and_fails_closed(self):
+    def test_effective_maintenance_condition_uses_fixed_json_dbus_calls_and_fails_closed(self):
         fixed_unit = "little-mester-vm.service"
         object_path = "/org/freedesktop/systemd1/unit/little_2dmester_2dvm_2eservice"
         marker = f"{acceptance.CONFIG}/code-update.in-progress"
         first_call = ["/usr/bin/busctl", "--system", "call", "org.freedesktop.systemd1",
                       "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
                       "GetUnit", "s", fixed_unit]
-        second_call = ["/usr/bin/busctl", "--system", "get-property",
+        second_call = ["/usr/bin/busctl", "--system", "--json=short", "get-property",
                        "org.freedesktop.systemd1", object_path,
                        "org.freedesktop.systemd1.Unit", "Conditions"]
         replies = [
             subprocess.CompletedProcess(first_call, 0,
                                         f'o "{object_path}"'.encode(), b""),
             subprocess.CompletedProcess(second_call, 0,
-                                        (f'a(sbbsi) 1 "ConditionPathExists" false true '
-                                         f'"{marker}" 1').encode(), b""),
+                                        json.dumps({"type": "a(sbbsi)", "data": [
+                                            ["ConditionPathExists", False, True, marker, 1],
+                                        ]}).encode(), b""),
         ]
         with mock.patch.object(acceptance, "run", side_effect=replies) as run:
             self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit), "present")
@@ -944,18 +969,32 @@ class SystemdPolicyTests(unittest.TestCase):
             mock.call(second_call, operation="read effective systemd Conditions"),
         ])
 
-        for failed_call in (0, 1):
+        for failed_call, expected_label in ((0, "lookup-failed"), (1, "unavailable")):
             with self.subTest(failed_call=failed_call):
                 outcomes = [
                     subprocess.CompletedProcess(first_call, 0,
                                                 f'o "{object_path}"'.encode(), b""),
-                    subprocess.CompletedProcess(second_call, 0, b'a(sbbsi) 0', b""),
+                    subprocess.CompletedProcess(second_call, 0,
+                                                b'{"type":"a(sbbsi)","data":[]}', b""),
                 ]
                 outcomes[failed_call] = acceptance.AcceptanceError("busctl failed")
                 with mock.patch.object(acceptance, "run", side_effect=outcomes) as run:
-                    with self.assertRaises(acceptance.AcceptanceError):
-                        acceptance._effective_maintenance_condition(fixed_unit)
+                    self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit),
+                                     expected_label)
                 self.assertEqual(run.call_count, failed_call + 1)
+
+        for payload, label in ((b'{"type":"a(sbbsi)","data":[]}', "missing"),
+                               (json.dumps({"type": "a(sbbsi)", "data": [
+                                   ["ConditionPathExists", True, True, marker, 1],
+                               ]}).encode(), "conflicting"),
+                               (b'{bad json', "malformed/unsupported"),
+                               (b'\xff', "malformed/unsupported"),
+                               (b'{"type":"a(sbbsi)","data":null}', "malformed/unsupported")):
+            with self.subTest(label=label):
+                replies[1] = subprocess.CompletedProcess(second_call, 0, payload, b"")
+                with mock.patch.object(acceptance, "run", side_effect=replies):
+                    result = acceptance._effective_maintenance_condition(fixed_unit)
+                self.assertEqual(result, label)
 
     def test_system_acceptance_report_contains_protected_lifecycle_gates(self):
         report = owner.report_template("a" * 40, "system_vm_accept", pathlib.Path("attempt"))
