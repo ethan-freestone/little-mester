@@ -1040,7 +1040,7 @@ class SystemdPolicyTests(unittest.TestCase):
                 {"type": "s", "data": value}).encode(), b"")
 
         wrong_path = subprocess.CompletedProcess([], 0,
-            b'o "/org/freedesktop/systemd1/unit/not-the-requested-unit"', b"")
+            b'o "/org/freedesktop/systemd1/unit/other_2eservice"', b"")
         with mock.patch.object(acceptance, "run", return_value=wrong_path) as run:
             self.assertEqual(acceptance._effective_maintenance_condition(unit),
                              "malformed/unsupported")
