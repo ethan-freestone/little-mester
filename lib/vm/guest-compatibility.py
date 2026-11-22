@@ -21,7 +21,10 @@ OPENCODE_VERSION = "2.2.5"
 OPENCODE_PACKAGE_JSON = "/usr/local/lib/node_modules/@opencode/cli/package.json"
 MAX_ASSET_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 8192
+MAX_FAILURE_EVIDENCE_BYTES = 1024
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SAFE_VERSION = re.compile(r"^[0-9A-Za-z.+-]{1,64}$")
+_SAFE_FSTYPE = re.compile(r"^[A-Za-z0-9._+-]{1,32}$")
 
 
 def _contract_module():
@@ -273,3 +276,145 @@ def classify_inventory(stdout: bytes, expected: dict[str, dict], *,
     if diagnostics:
         return "MISMATCH", tuple(diagnostics[:32])
     return "MATCH", ()
+
+
+def _evidence_number(value, *, maximum: int, mode: bool = False) -> str:
+    if type(value) is not int or value < 0 or value > maximum:
+        return "unknown"
+    return f"{value:04o}" if mode else str(value)
+
+
+def _evidence_version(value) -> str:
+    if isinstance(value, str) and _SAFE_VERSION.fullmatch(value):
+        return value
+    return "unknown"
+
+
+def _evidence_package(inventory: dict, wanted: dict) -> str:
+    observed = inventory.get(OPENCODE_PACKAGE_JSON)
+    if OPENCODE_PACKAGE_JSON not in inventory:
+        return "present=unknown,regular=unknown,version=unknown,mode=unknown,uid=unknown,gid=unknown,category=not-reported"
+    if not isinstance(observed, dict) or not isinstance(observed.get("kind"), str):
+        return "present=unknown,regular=unknown,version=unknown,mode=unknown,uid=unknown,gid=unknown,category=invalid-observation"
+
+    kind = observed["kind"]
+    if kind == "missing":
+        return "present=no,regular=no,version=unknown,mode=unknown,uid=unknown,gid=unknown,category=missing"
+    if kind == "special":
+        return "present=yes,regular=no,version=unknown,mode=unknown,uid=unknown,gid=unknown,category=special"
+    if kind == "unavailable":
+        return "present=unknown,regular=unknown,version=unknown,mode=unknown,uid=unknown,gid=unknown,category=unavailable"
+    if kind == "oversize":
+        return "present=yes,regular=yes,version=unknown,mode=unknown,uid=unknown,gid=unknown,category=oversize"
+    if kind == "invalid-version":
+        return "present=yes,regular=yes,version=unknown,mode=unknown,uid=unknown,gid=unknown,category=invalid-version"
+    if kind != "version-json" or set(observed) != {"kind", "mode", "uid", "gid", "version"}:
+        return "present=unknown,regular=unknown,version=unknown,mode=unknown,uid=unknown,gid=unknown,category=invalid-observation"
+
+    version = _evidence_version(observed["version"])
+    mode = _evidence_number(observed["mode"], maximum=0o7777, mode=True)
+    uid = _evidence_number(observed["uid"], maximum=0xFFFFFFFF)
+    gid = _evidence_number(observed["gid"], maximum=0xFFFFFFFF)
+    fields_valid = (version != "unknown" and mode != "unknown"
+                    and uid != "unknown" and gid != "unknown")
+    category = "invalid-observation" if not fields_valid else (
+        "valid" if all(observed.get(key) == wanted.get(key)
+                       for key in ("version", "mode", "uid", "gid")) else "mismatch")
+    return (f"present=yes,regular=yes,version={version},mode={mode},uid={uid},gid={gid},"
+            f"category={category}")
+
+
+def _evidence_mount(mount: dict, wanted: dict) -> str:
+    if not isinstance(mount, dict) or set(mount) != {"path", "fstype", "source"}:
+        return "record=unknown,fstype=unknown,source=unknown,category=invalid-observation"
+
+    path, fstype, source = mount["path"], mount["fstype"], mount["source"]
+    if not all(isinstance(value, str) for value in (path, fstype, source)):
+        return "record=unknown,fstype=unknown,source=unknown,category=invalid-observation"
+
+    if fstype == "unavailable":
+        return "record=unknown,fstype=unavailable,source=unknown,category=unavailable"
+    if fstype == "missing":
+        record = "no" if path == SYSTEM_WORKSPACE else "unknown"
+        source_label = "empty" if source == "" else "other"
+        category = "missing" if record == "no" else "invalid-observation"
+        return f"record={record},fstype=missing,source={source_label},category={category}"
+
+    safe_fstype = fstype if _SAFE_FSTYPE.fullmatch(fstype) else "other"
+    if source == wanted.get("source") == "workspace":
+        safe_source = "workspace"
+    elif source == "":
+        safe_source = "empty"
+    else:
+        safe_source = "other"
+    record = "yes" if path == SYSTEM_WORKSPACE else "no"
+    valid_fields = bool(_SAFE_FSTYPE.fullmatch(fstype))
+    matches = (record == "yes" and valid_fields
+               and fstype == wanted.get("fstype")
+               and source == wanted.get("source"))
+    category = "match" if matches else ("mismatch" if valid_fields else "invalid-observation")
+    return f"record={record},fstype={safe_fstype},source={safe_source},category={category}"
+
+
+def format_failure_evidence(stdout: bytes, expected: dict[str, dict], *,
+                            cloud_init_ready_wait_ms: int | None = None) -> str:
+    """Format a bounded, allowlisted summary; never include raw guest response data."""
+    asset_paths = sorted(path for path, item in expected.items() if item.get("kind") != "mount")
+    try:
+        asset_label = f"asset-{asset_paths.index(OPENCODE_PACKAGE_JSON) + 1}"
+    except ValueError:
+        asset_label = "asset-unknown"
+    wanted_package = expected.get(OPENCODE_PACKAGE_JSON, {})
+    expected_package = (
+        f"present={'yes' if wanted_package.get('kind') == 'version-json' else 'unknown'},"
+        f"regular={'yes' if wanted_package.get('kind') == 'version-json' else 'unknown'},"
+        f"version={_evidence_version(wanted_package.get('version'))},"
+        f"mode={_evidence_number(wanted_package.get('mode'), maximum=0o7777, mode=True)},"
+        f"uid={_evidence_number(wanted_package.get('uid'), maximum=0xFFFFFFFF)},"
+        f"gid={_evidence_number(wanted_package.get('gid'), maximum=0xFFFFFFFF)}")
+    wanted_mount = expected.get(SYSTEM_WORKSPACE, {})
+    expected_mount = (
+        f"record={'yes' if wanted_mount.get('kind') == 'mount' else 'unknown'},"
+        f"fstype={wanted_mount.get('fstype') if wanted_mount.get('fstype') == 'virtiofs' else 'unknown'},"
+        f"source={wanted_mount.get('source') if wanted_mount.get('source') == 'workspace' else 'unknown'}")
+
+    response_category = ""
+    document = None
+    if not isinstance(stdout, bytes) or not stdout:
+        response_category = "response-size-or-type"
+    elif len(stdout) > MAX_RESPONSE_BYTES:
+        response_category = "response-too-large"
+    else:
+        try:
+            candidate = json.loads(stdout.decode("utf-8"), object_pairs_hook=_duplicate_rejector)
+        except (UnicodeError, json.JSONDecodeError, ValueError, TypeError, RecursionError):
+            response_category = "response-invalid"
+        else:
+            if (isinstance(candidate, dict) and candidate.get("schema") == 1
+                    and type(candidate.get("schema")) is int
+                    and isinstance(candidate.get("inventory"), dict)
+                    and isinstance(candidate.get("mount"), dict)):
+                document = candidate
+            else:
+                response_category = "response-schema"
+
+    if document is None:
+        observed_package = ("present=unknown,regular=unknown,version=unknown,mode=unknown,"
+                            f"uid=unknown,gid=unknown,category={response_category}")
+        observed_mount = ("record=unknown,fstype=unknown,source=unknown,"
+                          f"category={response_category}")
+    else:
+        observed_package = _evidence_package(document["inventory"], wanted_package)
+        observed_mount = _evidence_mount(document["mount"], wanted_mount)
+
+    parts = [
+        f"Guest compatibility evidence: {asset_label} expected{{{expected_package}}} "
+        f"observed{{{observed_package}}}; workspace-mount expected{{{expected_mount}}} "
+        f"observed{{{observed_mount}}}"
+    ]
+    if (type(cloud_init_ready_wait_ms) is int and 0 <= cloud_init_ready_wait_ms <= 900_000):
+        parts.append(f"cloud-init-check=success readiness-wait-ms={cloud_init_ready_wait_ms}")
+    line = "; ".join(parts)
+    if len(line.encode("utf-8")) > MAX_FAILURE_EVIDENCE_BYTES:
+        return "Guest compatibility evidence: unavailable (evidence-size-bound)"
+    return line

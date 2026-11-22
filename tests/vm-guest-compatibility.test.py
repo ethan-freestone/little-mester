@@ -59,6 +59,24 @@ def _classify(document, expected=None, *, max_bytes=8192):
     )
 
 
+def _candidate_response():
+    expected = compatibility.expected_inventory()
+    inventory = {}
+    for path, item in expected.items():
+        if item["kind"] == "file":
+            inventory[path] = {
+                "kind": "file", "sha256": item["sha256"], "mode": item["mode"],
+                "uid": item["uid"], "gid": item["gid"],
+            }
+        elif item["kind"] == "version-json":
+            inventory[path] = {
+                "kind": "version-json", "version": item["version"], "mode": item["mode"],
+                "uid": item["uid"], "gid": item["gid"],
+            }
+    return expected, {"schema": 1, "inventory": inventory,
+                      "mount": {"path": "/workspace", "fstype": "virtiofs", "source": "workspace"}}
+
+
 class GuestCompatibilityInventoryTests(unittest.TestCase):
     def test_exact_complete_inventory_matches(self):
         status, diagnostics = _classify(_response())
@@ -175,6 +193,110 @@ class GuestCompatibilityInventoryTests(unittest.TestCase):
         size_bound_tokens = ("max_file_bytes", "max_asset_bytes", "file_size_limit")
         self.assertTrue(any(token in lowered for token in no_follow_tokens))
         self.assertTrue(any(token in lowered for token in size_bound_tokens))
+
+    def test_failure_evidence_reports_only_expected_and_observed_target_fields(self):
+        expected, document = _candidate_response()
+        package = document["inventory"][compatibility.OPENCODE_PACKAGE_JSON]
+        package.update({"version": "2.2.4", "mode": 0o600, "uid": 1000, "gid": 1000})
+        document["mount"].update({"fstype": "9p", "source": "/run/private/secret-token"})
+        document["inventory"]["/home/mester/.local/share/opencode/auth.json"] = {
+            "kind": "file", "sha256": "auth-content-sentinel", "mode": 0o600,
+            "uid": 1000, "gid": 1000,
+        }
+
+        line = compatibility.format_failure_evidence(
+            json.dumps(document, separators=(",", ":")).encode(), expected,
+            cloud_init_ready_wait_ms=42)
+
+        self.assertIn(
+            "asset-14 expected{present=yes,regular=yes,version=2.2.5,mode=0644,uid=0,gid=0}", line)
+        self.assertIn(
+            "observed{present=yes,regular=yes,version=2.2.4,mode=0600,uid=1000,gid=1000,category=mismatch}",
+            line)
+        self.assertIn(
+            "workspace-mount expected{record=yes,fstype=virtiofs,source=workspace}", line)
+        self.assertIn("observed{record=yes,fstype=9p,source=other,category=mismatch}", line)
+        self.assertIn("cloud-init-check=success readiness-wait-ms=42", line)
+        self.assertNotIn("/run/private/secret-token", line)
+        self.assertNotIn("auth.json", line)
+        self.assertNotIn("auth-content-sentinel", line)
+        self.assertNotIn("sha256", line)
+        self.assertLessEqual(len(line.encode()), compatibility.MAX_FAILURE_EVIDENCE_BYTES)
+
+    def test_failure_evidence_reports_package_read_categories_without_inference(self):
+        expected, base = _candidate_response()
+        cases = (
+            ({"kind": "missing"}, "present=no,regular=no", "category=missing"),
+            ({"kind": "special"}, "present=yes,regular=no", "category=special"),
+            ({"kind": "unavailable"}, "present=unknown,regular=unknown", "category=unavailable"),
+            ({"kind": "oversize"}, "present=yes,regular=yes", "category=oversize"),
+            ({"kind": "invalid-version"}, "present=yes,regular=yes", "category=invalid-version"),
+        )
+        for observation, presence, category in cases:
+            with self.subTest(observation=observation):
+                document = json.loads(json.dumps(base))
+                document["inventory"][compatibility.OPENCODE_PACKAGE_JSON] = observation
+                line = compatibility.format_failure_evidence(
+                    json.dumps(document, separators=(",", ":")).encode(), expected)
+                self.assertIn(presence, line)
+                self.assertIn(category, line)
+
+        document = json.loads(json.dumps(base))
+        del document["inventory"][compatibility.OPENCODE_PACKAGE_JSON]
+        line = compatibility.format_failure_evidence(
+            json.dumps(document, separators=(",", ":")).encode(), expected)
+        self.assertIn("present=unknown,regular=unknown", line)
+        self.assertIn("category=not-reported", line)
+
+    def test_failure_evidence_bounds_malformed_responses_and_cloud_init_timing(self):
+        expected, _document = _candidate_response()
+        invalid = compatibility.format_failure_evidence(b'{"secret":"raw-response"}', expected)
+        self.assertIn("category=response-schema", invalid)
+        self.assertNotIn("raw-response", invalid)
+        oversized = compatibility.format_failure_evidence(
+            b"x" * (compatibility.MAX_RESPONSE_BYTES + 1), expected)
+        self.assertIn("category=response-too-large", oversized)
+        self.assertNotIn("x" * 32, oversized)
+
+        document = {"schema": 1, "inventory": {},
+                    "mount": {"path": "/workspace", "fstype": "virtiofs", "source": "workspace"}}
+        no_timing = compatibility.format_failure_evidence(
+            json.dumps(document).encode(), expected)
+        invalid_timing = compatibility.format_failure_evidence(
+            json.dumps(document).encode(), expected, cloud_init_ready_wait_ms=True)
+        self.assertNotIn("cloud-init-check", no_timing)
+        self.assertNotIn("cloud-init-check", invalid_timing)
+
+    def test_failure_evidence_bounds_mount_categories_and_untrusted_fields(self):
+        expected, base = _candidate_response()
+        cases = (
+            ({"path": "/workspace", "fstype": "missing", "source": ""},
+             "record=no,fstype=missing,source=empty,category=missing"),
+            ({"path": "/workspace", "fstype": "unavailable", "source": ""},
+             "record=unknown,fstype=unavailable,source=unknown,category=unavailable"),
+            ({"path": "/private/secret", "fstype": "virtiofs", "source": "workspace"},
+             "record=no,fstype=virtiofs,source=workspace,category=mismatch"),
+        )
+        for mount, expected_text in cases:
+            with self.subTest(mount=mount):
+                document = json.loads(json.dumps(base))
+                document["mount"] = mount
+                line = compatibility.format_failure_evidence(
+                    json.dumps(document, separators=(",", ":")).encode(), expected)
+                self.assertIn(expected_text, line)
+                self.assertNotIn("/private/secret", line)
+
+        document = json.loads(json.dumps(base))
+        document["mount"]["source"] = "source\nwith-secret"
+        document["mount"]["fstype"] = "bad/type"
+        document["inventory"][compatibility.OPENCODE_PACKAGE_JSON]["version"] = "2.2.4\nsecret"
+        line = compatibility.format_failure_evidence(
+            json.dumps(document, separators=(",", ":")).encode(), expected)
+        self.assertIn("version=unknown", line)
+        self.assertIn("fstype=other,source=other,category=invalid-observation", line)
+        self.assertNotIn("with-secret", line)
+        self.assertNotIn("bad/type", line)
+        self.assertNotIn("2.2.4", line)
 
 
 if __name__ == "__main__":

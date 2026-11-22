@@ -484,16 +484,21 @@ class SystemdPolicyTests(unittest.TestCase):
 
     def test_compatibility_check_precedes_readiness_and_normal_use_requires_active_unit(self):
         calls = []
+        compatibility_context = []
         def ssh_side_effect(command, **_kwargs):
             calls.append("cloud-init" if command.startswith("cloud-init") else "readiness")
             return 0
         with mock.patch.object(vm, "_guest_ssh", side_effect=ssh_side_effect) as guest_ssh, \
              mock.patch.object(vm, "_check_guest_compatibility",
-                               side_effect=lambda: calls.append("compat")):
+                               side_effect=lambda **kwargs: (calls.append("compat"),
+                                                            compatibility_context.append(kwargs))):
             # Exercise the real readiness orchestration while isolating transport.
             vm._ensure_guest_ready()
             self.assertEqual(guest_ssh.call_count, 2)
         self.assertEqual(calls, ["cloud-init", "compat", "readiness"])
+        self.assertEqual(set(compatibility_context[0]), {"cloud_init_ready_wait_ms"})
+        self.assertIsInstance(compatibility_context[0]["cloud_init_ready_wait_ms"], int)
+        self.assertGreaterEqual(compatibility_context[0]["cloud_init_ready_wait_ms"], 0)
 
     def test_guest_compatibility_nonmatch_fails_startup_closed(self):
         checker = type("Checker", (), {
@@ -502,11 +507,56 @@ class SystemdPolicyTests(unittest.TestCase):
             "expected_inventory": staticmethod(lambda: {"/workspace": {"kind": "mount"}}),
             "classify_inventory": staticmethod(lambda *_args, **_kwargs:
                                                 ("INCONCLUSIVE", ("response-invalid",))),
+            "format_failure_evidence": staticmethod(lambda *_args, **_kwargs:
+                                                      "Guest compatibility evidence: bounded"),
+        })()
+        with mock.patch.object(vm, "_guest_compatibility_module", return_value=checker), \
+             mock.patch.object(vm, "_guest_ssh", return_value=(0, b"{}")) as ssh:
+            error_output = io.StringIO()
+            with contextlib.redirect_stderr(error_output):
+                with self.assertRaisesRegex(vm.Refused, "normal VM use is blocked"):
+                    vm._check_guest_compatibility(cloud_init_ready_wait_ms=17)
+        ssh.assert_called_once()
+        self.assertIn("Guest compatibility: INCONCLUSIVE", error_output.getvalue())
+        self.assertIn("Guest compatibility evidence: bounded", error_output.getvalue())
+
+    def test_compatibility_match_does_not_emit_failure_evidence(self):
+        evidence = mock.Mock(return_value="Guest compatibility evidence: unexpected")
+        checker = type("Checker", (), {
+            "SYSTEM_WORKSPACE": "/workspace",
+            "build_inspection_command": staticmethod(lambda _workspace: "fixed inspect"),
+            "expected_inventory": staticmethod(lambda: {"/workspace": {"kind": "mount"}}),
+            "classify_inventory": staticmethod(lambda *_args, **_kwargs: ("MATCH", ())),
+            "format_failure_evidence": evidence,
+        })()
+        with mock.patch.object(vm, "_guest_compatibility_module", return_value=checker), \
+             mock.patch.object(vm, "_guest_ssh", return_value=(0, b"inventory")) as ssh:
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                vm._check_guest_compatibility()
+        self.assertEqual(stdout.getvalue(), "Guest compatibility: MATCH\n")
+        self.assertEqual(stderr.getvalue(), "")
+        evidence.assert_not_called()
+        ssh.assert_called_once()
+
+    def test_compatibility_failure_diagnostic_errors_do_not_bypass_refusal(self):
+        checker = type("Checker", (), {
+            "SYSTEM_WORKSPACE": "/workspace",
+            "build_inspection_command": staticmethod(lambda _workspace: "fixed inspect"),
+            "expected_inventory": staticmethod(lambda: {"/workspace": {"kind": "mount"}}),
+            "classify_inventory": staticmethod(lambda *_args, **_kwargs:
+                                                ("MISMATCH", ("workspace-mount:mismatch",))),
+            "format_failure_evidence": staticmethod(lambda *_args, **_kwargs:
+                (_ for _ in ()).throw(RuntimeError("untrusted diagnostic detail"))),
         })()
         with mock.patch.object(vm, "_guest_compatibility_module", return_value=checker), \
              mock.patch.object(vm, "_guest_ssh", return_value=(0, b"{}")):
-            with self.assertRaisesRegex(vm.Refused, "normal VM use is blocked"):
-                vm._check_guest_compatibility()
+            error_output = io.StringIO()
+            with contextlib.redirect_stderr(error_output):
+                with self.assertRaisesRegex(vm.Refused, "normal VM use is blocked"):
+                    vm._check_guest_compatibility()
+        self.assertIn("unavailable (diagnostic-error)", error_output.getvalue())
+        self.assertNotIn("untrusted diagnostic detail", error_output.getvalue())
 
     def test_normal_guest_routes_refuse_when_startup_gate_is_not_active(self):
         with mock.patch.object(vm, "_system_unit_active", return_value=False), \

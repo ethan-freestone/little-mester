@@ -520,10 +520,13 @@ def _ensure_guest_ready() -> None:
     contract = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(contract)
     cloud_init_command = "cloud-init status --long >/dev/null 2>&1 || exit 41"
-    deadline = time.monotonic() + SSH_READY_TIMEOUT
+    cloud_init_wait_started = time.monotonic()
+    deadline = cloud_init_wait_started + SSH_READY_TIMEOUT
     while time.monotonic() < deadline:
         try:
             if _guest_ssh(cloud_init_command, timeout=15) == 0:
+                cloud_init_ready_wait_ms = max(
+                    0, int((time.monotonic() - cloud_init_wait_started) * 1000))
                 break
         except (OSError, subprocess.SubprocessError):
             pass
@@ -531,7 +534,7 @@ def _ensure_guest_ready() -> None:
     else:
         raise Refused("cloud-init or SSH did not complete before its bound")
 
-    _check_guest_compatibility()
+    _check_guest_compatibility(cloud_init_ready_wait_ms=cloud_init_ready_wait_ms)
     command = contract.readiness_checks(workspace_path=contract.SYSTEM_WORKSPACE)
     deadline = time.monotonic() + SSH_READY_TIMEOUT
     while time.monotonic() < deadline:
@@ -554,7 +557,7 @@ def _guest_compatibility_module():
     return module
 
 
-def _check_guest_compatibility() -> None:
+def _check_guest_compatibility(*, cloud_init_ready_wait_ms: int | None = None) -> None:
     checker = _guest_compatibility_module()
     command = checker.build_inspection_command(checker.SYSTEM_WORKSPACE)
     try:
@@ -565,11 +568,22 @@ def _check_guest_compatibility() -> None:
     if not isinstance(result, tuple) or len(result) != 2 or result[0] != 0:
         print("Guest compatibility: INCONCLUSIVE (fixed inspection unavailable)", file=sys.stderr)
         raise Refused("guest compatibility is inconclusive; normal VM use is blocked")
-    status, diagnostics = checker.classify_inventory(result[1], checker.expected_inventory())
+    expected = checker.expected_inventory()
+    status, diagnostics = checker.classify_inventory(result[1], expected)
     print(f"Guest compatibility: {status}" +
           (" (" + ", ".join(diagnostics[:16]) + ")" if diagnostics else ""),
           file=sys.stderr if status != "MATCH" else sys.stdout)
     if status != "MATCH":
+        try:
+            evidence = checker.format_failure_evidence(
+                result[1], expected, cloud_init_ready_wait_ms=cloud_init_ready_wait_ms)
+            if (not isinstance(evidence, str)
+                    or not evidence.startswith("Guest compatibility evidence:")
+                    or len(evidence.encode("utf-8")) > 1024):
+                raise ValueError("compatibility evidence is outside its fixed output contract")
+        except Exception:
+            evidence = "Guest compatibility evidence: unavailable (diagnostic-error)"
+        print(evidence, file=sys.stderr)
         raise Refused("guest compatibility is not established; normal VM use is blocked")
 
 
