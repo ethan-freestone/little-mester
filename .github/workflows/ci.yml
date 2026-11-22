@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main, feat/vm-approach-3]
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       getunit_diagnostic_only:
@@ -111,7 +111,7 @@ jobs:
 
   # ── 4. Transient hosted QEMU guest integration; no TCG fallback ───
   transient-qemu-integration:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.getunit_diagnostic_only != true }}
+    if: ${{ github.event.action != 'labeled' && !((github.event_name == 'workflow_dispatch' && inputs.getunit_diagnostic_only == true) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'getunit-diagnostic-only'))) }}
     name: Transient QEMU guest integration
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -211,7 +211,7 @@ jobs:
 
   # ── 5. Exploratory systemd namespace controls on a separate runner ──
   systemd-namespace-diagnostics:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.getunit_diagnostic_only != true }}
+    if: ${{ github.event.action != 'labeled' && !((github.event_name == 'workflow_dispatch' && inputs.getunit_diagnostic_only == true) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'getunit-diagnostic-only'))) }}
     name: Systemd namespace diagnostics
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -226,6 +226,7 @@ jobs:
 
   # ── 6. Exact installed production acceptance on its own hosted KVM runner ──
   production-systemd-vm-acceptance:
+    if: ${{ github.event.action != 'labeled' || contains(github.event.pull_request.labels.*.name, 'getunit-diagnostic-only') }}
     name: Production systemd VM acceptance
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -295,7 +296,7 @@ jobs:
         if: ${{ !cancelled() && steps.host_dependencies.outcome == 'success' }}
         timeout-minutes: 45
         env:
-          GETUNIT_DIAGNOSTIC_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.getunit_diagnostic_only }}
+          GETUNIT_DIAGNOSTIC_ONLY: ${{ (github.event_name == 'workflow_dispatch' && inputs.getunit_diagnostic_only == true) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'getunit-diagnostic-only')) }}
         run: |
           if [[ "$GETUNIT_DIAGNOSTIC_ONLY" == "true" ]]; then
             python3 tests/ci-kvm-system-unit.py --diagnostic-only
