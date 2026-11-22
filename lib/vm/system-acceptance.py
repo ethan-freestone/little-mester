@@ -280,7 +280,7 @@ def _parse_effective_conditions(output: str) -> tuple[tuple[str, bool, bool, str
                     raise ValueError
             else:
                 while position < length and not output[position].isspace():
-                    if output[position] in '"\\':
+                    if output[position] in "'\"\\":
                         raise ValueError
                     position += 1
             lexemes.append((output[start:position], quoted))

@@ -876,6 +876,9 @@ class SystemdPolicyTests(unittest.TestCase):
             'a(sbbsi) 1 "ConditionPathExists" false true "/marker"',
             'a(sbbsi) 0 trailing',
             'a(sbbsi) -1',
+            "a(sbbsi) '1' \"ConditionPathExists\" false true \"/marker\" 1",
+            "a(sbbsi) 1 \"ConditionPathExists\" 'false' true \"/marker\" 1",
+            "a(sbbsi) 1 \"ConditionPathExists\" false true \"/marker\" '1'",
         )
         for output in malformed_outputs:
             with self.subTest(output=output), self.assertRaises(acceptance.AcceptanceError):
