@@ -829,10 +829,130 @@ class SystemdPolicyTests(unittest.TestCase):
             self.assertEqual(boundary_data["omitted_count"],
                              boundary_data["mismatch_count"] - len(boundary_data["mismatches"]))
 
-    def test_condition_path_observation_uses_original_substring_predicate(self):
-        observed = f"unrelated-token!{acceptance.CONFIG}/code-update.in-progress-suffix"
-        self.assertIn("maintenance-marker", acceptance._safe_effective_observation(
-            "ConditionPathExists", observed))
+    def test_conditions_observation_exposes_only_safe_state_labels(self):
+        raw_payload = f"{acceptance.CONFIG}/code-update.in-progress"
+        for label in ("present", "missing", "conflicting"):
+            with self.subTest(label=label):
+                self.assertEqual(acceptance._safe_effective_observation("Conditions", label), label)
+        for value in (raw_payload, f"a(sbbsi) 1 ConditionPathExists {raw_payload}", "secret payload"):
+            with self.subTest(value=value):
+                observed = acceptance._safe_effective_observation("Conditions", value)
+                self.assertEqual(observed, "conflicting")
+                self.assertNotIn(value, observed)
+
+    def test_systemd_dbus_unit_object_path_parser_accepts_captured_output(self):
+        output = 'o "/org/freedesktop/systemd1/unit/dbus_2eservice"'
+        self.assertEqual(acceptance._parse_systemd_unit_object_path(output),
+                         "/org/freedesktop/systemd1/unit/dbus_2eservice")
+        for malformed in (
+            "", 'o "not-an-object-path"',
+            'o "/org/freedesktop/systemd1/unit/dbus_2eservice" extra',
+            's "/org/freedesktop/systemd1/unit/dbus_2eservice"',
+            'o /org/freedesktop/systemd1/unit/dbus_2eservice',
+        ):
+            with self.subTest(output=malformed), self.assertRaises(acceptance.AcceptanceError):
+                acceptance._parse_systemd_unit_object_path(malformed)
+
+    def test_effective_conditions_parser_accepts_captured_systemd_255_output(self):
+        # Captured from busctl on systemd 255.4; retain the real wire rendering.
+        output = ('a(sbbsi) 1 "ConditionPathExists" false true '
+                  '"/etc/ssh/sshd_not_to_be_run" 1')
+        self.assertEqual(acceptance._parse_effective_conditions(output), (
+            ("ConditionPathExists", False, True, "/etc/ssh/sshd_not_to_be_run", 1),
+        ))
+
+    def test_effective_conditions_parser_fails_closed_on_malformed_payloads(self):
+        malformed_outputs = (
+            'a(ssbbi) 1 "ConditionPathExists" false true "/marker" 1',
+            'a(sbbsi) 2 "ConditionPathExists" false true "/marker" 1',
+            'a(sbbsi) 1 "ConditionPathExists" false maybe "/marker" 1',
+            'a(sbbsi) 1 "ConditionPathExists" false true 42 1',
+            'a(sbbsi) 1 "ConditionPathExists" false true /marker 1',
+            'a(sbbsi) 1 ConditionPathExists false true "/marker" 1',
+            'a(sbbsi) 1 "ConditionPathExists" "false" true "/marker" 1',
+            'a(sbbsi) 1 "ConditionPathExists" false true "/marker" "1"',
+            'a(sbbsi) 1 "ConditionPathExists" false true "/marker" nope',
+            'a(sbbsi) 1 "ConditionPathExists" false true "/marker" 1 trailing',
+            'a(sbbsi) 1 "ConditionPathExists" false true "/marker"',
+            'a(sbbsi) 0 trailing',
+            'a(sbbsi) -1',
+        )
+        for output in malformed_outputs:
+            with self.subTest(output=output), self.assertRaises(acceptance.AcceptanceError):
+                acceptance._parse_effective_conditions(output)
+
+    def test_maintenance_condition_state_requires_one_exact_negated_marker(self):
+        marker = "/etc/little-mester-vm/code-update.in-progress"
+        expected = ("ConditionPathExists", False, True, marker, 1)
+        self.assertEqual(acceptance._maintenance_condition_state((expected,), marker), "present")
+        self.assertEqual(acceptance._maintenance_condition_state((), marker), "missing")
+
+        wrong_marker_tuples = (
+            ("ConditionFileNotEmpty", False, True, marker, 1),
+            ("ConditionPathExists", True, True, marker, 1),
+            ("ConditionPathExists", False, False, marker, 1),
+        )
+        for condition in wrong_marker_tuples:
+            with self.subTest(condition=condition):
+                self.assertEqual(acceptance._maintenance_condition_state((condition,), marker),
+                                 "conflicting")
+
+        for condition in (
+            ("ConditionPathExists", False, True, "/etc/other-marker", 1),
+            ("ConditionPathExists", False, True, f"!{marker}", 1),
+        ):
+            with self.subTest(condition=condition):
+                self.assertEqual(acceptance._maintenance_condition_state((condition,), marker),
+                                 "missing")
+
+        for conditions in (
+            (expected, expected),
+            (expected, ("ConditionPathExists", False, False, marker, 0)),
+        ):
+            with self.subTest(conditions=conditions):
+                self.assertEqual(acceptance._maintenance_condition_state(conditions, marker),
+                                 "conflicting")
+
+        unrelated = ("ConditionPathExists", False, False, "/etc/optional", 0)
+        self.assertEqual(acceptance._maintenance_condition_state((unrelated, expected), marker),
+                         "present")
+
+    def test_effective_maintenance_condition_uses_exact_dbus_calls_and_fails_closed(self):
+        fixed_unit = "little-mester-vm.service"
+        object_path = "/org/freedesktop/systemd1/unit/little_2dmester_2dvm_2eservice"
+        marker = f"{acceptance.CONFIG}/code-update.in-progress"
+        first_call = ["/usr/bin/busctl", "--system", "call", "org.freedesktop.systemd1",
+                      "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+                      "GetUnit", "s", fixed_unit]
+        second_call = ["/usr/bin/busctl", "--system", "get-property",
+                       "org.freedesktop.systemd1", object_path,
+                       "org.freedesktop.systemd1.Unit", "Conditions"]
+        replies = [
+            subprocess.CompletedProcess(first_call, 0,
+                                        f'o "{object_path}"'.encode(), b""),
+            subprocess.CompletedProcess(second_call, 0,
+                                        (f'a(sbbsi) 1 "ConditionPathExists" false true '
+                                         f'"{marker}" 1').encode(), b""),
+        ]
+        with mock.patch.object(acceptance, "run", side_effect=replies) as run:
+            self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit), "present")
+        self.assertEqual(run.call_args_list, [
+            mock.call(first_call, operation="read effective systemd Conditions"),
+            mock.call(second_call, operation="read effective systemd Conditions"),
+        ])
+
+        for failed_call in (0, 1):
+            with self.subTest(failed_call=failed_call):
+                outcomes = [
+                    subprocess.CompletedProcess(first_call, 0,
+                                                f'o "{object_path}"'.encode(), b""),
+                    subprocess.CompletedProcess(second_call, 0, b'a(sbbsi) 0', b""),
+                ]
+                outcomes[failed_call] = acceptance.AcceptanceError("busctl failed")
+                with mock.patch.object(acceptance, "run", side_effect=outcomes) as run:
+                    with self.assertRaises(acceptance.AcceptanceError):
+                        acceptance._effective_maintenance_condition(fixed_unit)
+                self.assertEqual(run.call_count, failed_call + 1)
 
     def test_system_acceptance_report_contains_protected_lifecycle_gates(self):
         report = owner.report_template("a" * 40, "system_vm_accept", pathlib.Path("attempt"))

@@ -141,6 +141,13 @@ property, with bounded expected and safe observed labels; it does not print raw
 diagnostics explain a rejection; they do not by themselves make the effective
 policy comparison exhaustive or authorize an owner VM operation.
 
+For the fixed maintenance guard, verification resolves the fixed unit name with
+the system D-Bus Manager `GetUnit` method and reads its effective
+`Unit.Conditions`. It validates the negated condition's type, trigger flag, and
+fixed maintenance-marker path; missing, conflicting, malformed, or unavailable
+evidence fails closed. This targeted check is not an exhaustive validation of
+all effective systemd policy.
+
 Inside the guest shell (`./lab vm ssh`), safe per-user model/theme settings are
 available without editing protected OpenCode configuration:
 

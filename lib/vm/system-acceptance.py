@@ -33,7 +33,7 @@ _EFFECTIVE_COMMAND_PROPERTIES = frozenset({
     "ExecStart", "ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost",
 })
 _EFFECTIVE_DIAGNOSTIC_PROPERTIES = frozenset({
-    "effective-properties", "FragmentPath", "DropInPaths", "ConditionPathExists",
+    "effective-properties", "FragmentPath", "DropInPaths", "Conditions",
     "User", "Group", "ProtectSystem", "NoNewPrivileges", "DevicePolicy",
     "NeedDaemonReload", "ExecStart", "ExecStartPre", "ExecStartPost", "ExecStop",
     "ExecStopPost", "Requires", "BindsTo", "SupplementaryGroups", "ProtectHome",
@@ -210,10 +210,8 @@ def _safe_effective_observation(property_name: str, value: str) -> str:
         workspace = int(_WORKSPACE_DROPIN_PATH in paths)
         other = len(paths - set(_FIXED_GUARD_PATHS.values()) - {_WORKSPACE_DROPIN_PATH})
         return f"guard-paths={guard};workspace-path={workspace};other-paths={other}"
-    if property_name == "ConditionPathExists":
-        return ("maintenance-marker=present" if
-                f"!{CONFIG}/code-update.in-progress" in value
-                else "maintenance-marker=missing")
+    if property_name == "Conditions":
+        return value if value in ("present", "missing", "conflicting") else "conflicting"
     if property_name == "effective-properties":
         return "malformed or duplicate property output"
     if property_name == "ExecStopPost":
@@ -230,6 +228,119 @@ def _safe_effective_observation(property_name: str, value: str) -> str:
     if property_name == "BindPaths":
         return f"bind-list mismatch;fields={len(value.split(':'))}"
     return "<unrecognized>"
+
+
+def _parse_systemd_unit_object_path(output: str) -> str:
+    """Validate the single object path returned by Manager.GetUnit."""
+    try:
+        if not isinstance(output, str) or len(output.encode("utf-8", "strict")) > 512:
+            raise ValueError
+        body = output[:-1] if output.endswith("\n") else output
+        match = re.fullmatch(
+            r'o "/org/freedesktop/systemd1/unit/[A-Za-z0-9_]+"', body)
+        if not match:
+            raise ValueError
+        return body[3:-1]
+    except (ValueError, UnicodeError, TypeError) as error:
+        raise AcceptanceError("systemd returned malformed unit object path") from error
+
+
+def _parse_effective_conditions(output: str) -> tuple[tuple[str, bool, bool, str, int], ...]:
+    """Parse busctl's exact a(sbbsi) text representation, rejecting partial data."""
+    try:
+        if not isinstance(output, str) or len(output.encode("utf-8", "strict")) > 16384:
+            raise ValueError
+        # Capture lexical token boundaries before shlex discards quote/type data.
+        # Tokens are whitespace separated, with double quotes and backslash escapes.
+        lexemes = []
+        position = 0
+        length = len(output)
+        while position < length:
+            while position < length and output[position].isspace():
+                position += 1
+            if position == length:
+                break
+            start = position
+            quoted = output[position] == '"'
+            if quoted:
+                position += 1
+                escaped = False
+                while position < length:
+                    char = output[position]
+                    position += 1
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        break
+                else:
+                    raise ValueError
+                if escaped or (position < length and not output[position].isspace()):
+                    raise ValueError
+            else:
+                while position < length and not output[position].isspace():
+                    if output[position] in '"\\':
+                        raise ValueError
+                    position += 1
+            lexemes.append((output[start:position], quoted))
+            if len(lexemes) > 642:
+                raise ValueError
+        if len(lexemes) < 2 or lexemes[0] != ("a(sbbsi)", False):
+            raise ValueError
+        if lexemes[1][1]:
+            raise ValueError
+        tokens = shlex.split(output, posix=True)
+        if len(tokens) != len(lexemes) or not re.fullmatch(r"(?:0|[1-9][0-9]*)", tokens[1]):
+            raise ValueError
+        count = int(tokens[1], 10)
+        if not 0 <= count <= 128 or len(lexemes) != 2 + count * 5:
+            raise ValueError
+        records = []
+        for index in range(count):
+            offset = 2 + index * 5
+            fields = lexemes[offset:offset + 5]
+            kind, trigger, negate, parameter, result = tokens[offset:offset + 5]
+            if (not fields[0][1] or fields[1][1] or fields[2][1]
+                    or not fields[3][1] or fields[4][1]):
+                raise ValueError
+            if trigger not in ("true", "false") or negate not in ("true", "false"):
+                raise ValueError
+            if not re.fullmatch(r"-?(?:0|[1-9][0-9]*)", result):
+                raise ValueError
+            number = int(result, 10)
+            if not -(2**31) <= number < 2**31:
+                raise ValueError
+            records.append((kind, trigger == "true", negate == "true", parameter, number))
+        return tuple(records)
+    except (ValueError, UnicodeError, TypeError) as error:
+        raise AcceptanceError("systemd returned malformed effective Conditions") from error
+
+
+def _maintenance_condition_state(conditions, marker: str) -> str:
+    matches = [record for record in conditions if record[3] == marker]
+    if not matches:
+        return "missing"
+    if len(matches) != 1 or matches[0][:3] != ("ConditionPathExists", False, True):
+        return "conflicting"
+    return "present"
+
+
+def _effective_maintenance_condition(unit: str) -> str:
+    path_output = run(
+        ["/usr/bin/busctl", "--system", "call", "org.freedesktop.systemd1",
+         "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+         "GetUnit", "s", unit],
+        operation="read effective systemd Conditions",
+    ).stdout.decode("utf-8", "strict")
+    object_path = _parse_systemd_unit_object_path(path_output)
+    output = run(
+        ["/usr/bin/busctl", "--system", "get-property", "org.freedesktop.systemd1",
+         object_path, "org.freedesktop.systemd1.Unit", "Conditions"],
+        operation="read effective systemd Conditions",
+    ).stdout.decode("utf-8", "strict")
+    return _maintenance_condition_state(_parse_effective_conditions(output),
+                                        f"{CONFIG}/code-update.in-progress")
 
 
 def _render_effective_policy_mismatches(mismatches: list[dict[str, str]]) -> str:
@@ -592,8 +703,7 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
     for unit in SYSTEM_UNITS:
         output = run(["/usr/bin/systemctl", "show", "--no-pager",
                       "--property=FragmentPath", "--property=DropInPaths",
-            "--property=ConditionPathExists",
-            "--property=User", "--property=Group", "--property=ProtectSystem",
+                      "--property=User", "--property=Group", "--property=ProtectSystem",
                       "--property=NoNewPrivileges", "--property=DevicePolicy",
                       "--property=NeedDaemonReload", "--property=ExecStart",
                        "--property=ExecStartPre", "--property=ExecStartPost", "--property=ExecStop",
@@ -663,6 +773,12 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
     }
     workspace_dropin = "/etc/systemd/system/little-mester-vm-workspace.service.d/20-workspace.conf"
     mismatches = []
+    condition_states = {}
+    for unit in SYSTEM_UNITS:
+        try:
+            condition_states[unit] = _effective_maintenance_condition(unit)
+        except (AcceptanceError, ValueError, UnicodeError):
+            condition_states[unit] = "conflicting"
 
     def compare(unit, property_name, expected, observed, matches):
         if not matches:
@@ -691,9 +807,8 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
             compare(unit, "DropInPaths", "contains fixed guard drop-in",
                     unit_values.get("DropInPaths", ""),
                     expected_dropins[unit] in unit_values.get("DropInPaths", "").split())
-        compare(unit, "ConditionPathExists", "contains maintenance-marker guard",
-                unit_values.get("ConditionPathExists", ""),
-                f"!{CONFIG}/code-update.in-progress" in unit_values.get("ConditionPathExists", ""))
+        compare(unit, "Conditions", "effective negated maintenance-marker condition",
+                condition_states[unit], condition_states[unit] == "present")
         compare(unit, "NeedDaemonReload", "no", unit_values.get("NeedDaemonReload", ""),
                 unit_values.get("NeedDaemonReload") == "no")
 
