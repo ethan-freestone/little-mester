@@ -654,10 +654,10 @@ class SystemdPolicyTests(unittest.TestCase):
     def test_workspace_acceptance_requires_bind_compatible_home_isolation(self):
         acceptance_source = (ROOT / "lib/vm/system-acceptance.py").read_text()
         unit_source = (ROOT / "systemd/little-mester-vm-workspace.service").read_text()
-        self.assertIn('workspace_properties.get("ProtectHome") != "tmpfs"', acceptance_source)
-        self.assertIn("workspace_bind_matches = workspace_policy.effective_bind_paths_match(",
+        self.assertIn('workspace_properties.get("ProtectHome") == "tmpfs"', acceptance_source)
+        self.assertIn("bind_matches = workspace_policy.effective_bind_paths_match(",
                       acceptance_source)
-        self.assertIn("or not workspace_bind_matches", acceptance_source)
+        self.assertIn('compare(WORKSPACE_UNIT, "BindPaths",', acceptance_source)
         self.assertIn("ProtectHome=tmpfs", unit_source)
         self.assertIn("ProtectSystem=strict", unit_source)
 
@@ -767,6 +767,72 @@ class SystemdPolicyTests(unittest.TestCase):
             with self.subTest(output=output), self.assertRaisesRegex(
                     acceptance.AcceptanceError, "duplicate effective property"):
                 acceptance._parse_effective_properties(output)
+
+    def test_duplicate_effective_property_preserves_other_observations(self):
+        with self.assertRaises(acceptance.EffectivePropertiesError) as raised:
+            acceptance._parse_effective_properties(
+                "User=lm-vm\nUser=other\nNoNewPrivileges=yes\n")
+        self.assertEqual(raised.exception.property_names, ("User",))
+        self.assertEqual(raised.exception.properties["User"], "lm-vm")
+        self.assertEqual(raised.exception.properties["NoNewPrivileges"], "yes")
+
+    def test_effective_property_parser_accepts_captured_systemd_255_show_output(self):
+        # Captured verbatim from systemctl show on systemd 255.4-1ubuntu8.18;
+        # dynamic ExecStart fields are real output, not verifier-generated input.
+        output = (
+            "ExecStart={ path=systemd-tmpfiles ; argv[]=systemd-tmpfiles "
+            "--create --remove --boot --exclude-prefix=/dev ; ignore_errors=no ; "
+            "start_time=[Sat 2026-11-21 09:50:36 UTC] ; "
+            "stop_time=[Sat 2026-11-21 09:50:36 UTC] ; pid=498 ; code=exited ; status=0 }\n"
+            "User=\nLoadState=loaded\n"
+            "FragmentPath=/usr/lib/systemd/system/systemd-tmpfiles-setup.service\n"
+        )
+        properties = acceptance._parse_effective_properties(output)
+        self.assertEqual(properties["LoadState"], "loaded")
+        self.assertEqual(acceptance._effective_argv(properties["ExecStart"]), (
+            "systemd-tmpfiles",
+            "systemd-tmpfiles --create --remove --boot --exclude-prefix=/dev",
+        ))
+
+    def test_effective_policy_diagnostics_are_safe_stable_and_bounded(self):
+        self.assertEqual(acceptance._safe_effective_observation("NoNewPrivileges", "maybe"),
+                         "<unrecognized>")
+        self.assertEqual(acceptance._safe_effective_observation("User", "Bearer ghp_secret"),
+                         "<unexpected identity>")
+        self.assertEqual(acceptance._safe_effective_observation(
+            "ExecStart", "--token=ghp_secret\n\x1b[31mforged"),
+            "MISMATCH (command details omitted)")
+        records = [
+            {"unit": unit, "property": "NoNewPrivileges", "expected": "yes",
+             "observed": acceptance._safe_effective_observation("NoNewPrivileges", "maybe")}
+            for unit in reversed(acceptance.SYSTEM_UNITS)
+        ]
+        rendered = acceptance._render_effective_policy_mismatches(records)
+        self.assertLessEqual(len(rendered.encode("utf-8")), acceptance._POLICY_DIAGNOSTIC_LIMIT)
+        decoded = json.loads(rendered.removeprefix("systemd_effective_mismatches="))
+        self.assertEqual([item["unit"] for item in decoded["mismatches"]],
+                         list(acceptance.SYSTEM_UNITS))
+        self.assertEqual(decoded["mismatch_count"], len(acceptance.SYSTEM_UNITS))
+
+        many = records * 100
+        truncated = acceptance._render_effective_policy_mismatches(many)
+        self.assertLessEqual(len(truncated.encode("utf-8")), acceptance._POLICY_DIAGNOSTIC_LIMIT)
+        truncated_data = json.loads(truncated.removeprefix("systemd_effective_mismatches="))
+        self.assertGreater(truncated_data["omitted_count"], 0)
+        self.assertEqual(truncated_data["mismatch_count"], len(many))
+        self.assertNotIn("ghp_secret", rendered + truncated)
+
+        with mock.patch.object(acceptance, "_POLICY_DIAGNOSTIC_LIMIT", 700):
+            boundary = acceptance._render_effective_policy_mismatches(records * 1000)
+            self.assertLessEqual(len(boundary.encode("utf-8")), 700)
+            boundary_data = json.loads(boundary.removeprefix("systemd_effective_mismatches="))
+            self.assertEqual(boundary_data["omitted_count"],
+                             boundary_data["mismatch_count"] - len(boundary_data["mismatches"]))
+
+    def test_condition_path_observation_uses_original_substring_predicate(self):
+        observed = f"unrelated-token!{acceptance.CONFIG}/code-update.in-progress-suffix"
+        self.assertIn("maintenance-marker", acceptance._safe_effective_observation(
+            "ConditionPathExists", observed))
 
     def test_system_acceptance_report_contains_protected_lifecycle_gates(self):
         report = owner.report_template("a" * 40, "system_vm_accept", pathlib.Path("attempt"))

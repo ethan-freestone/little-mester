@@ -28,6 +28,29 @@ PROXY_UNIT = "little-mester-vm-proxy.service"
 WORKSPACE_UNIT = "little-mester-vm-workspace.service"
 METRICS_UNIT = "little-mester-vm-metrics.service"
 SYSTEM_UNITS = (UNIT, PROXY_UNIT, WORKSPACE_UNIT, METRICS_UNIT)
+_POLICY_DIAGNOSTIC_LIMIT = 4096
+_EFFECTIVE_COMMAND_PROPERTIES = frozenset({
+    "ExecStart", "ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost",
+})
+_EFFECTIVE_DIAGNOSTIC_PROPERTIES = frozenset({
+    "effective-properties", "FragmentPath", "DropInPaths", "ConditionPathExists",
+    "User", "Group", "ProtectSystem", "NoNewPrivileges", "DevicePolicy",
+    "NeedDaemonReload", "ExecStart", "ExecStartPre", "ExecStartPost", "ExecStop",
+    "ExecStopPost", "Requires", "BindsTo", "SupplementaryGroups", "ProtectHome",
+    "NoExecPaths", "ExecPaths", "ReadWritePaths", "BindPaths",
+    "RestrictAddressFamilies",
+})
+_FIXED_FRAGMENT_PATHS = {
+    UNIT: "/etc/systemd/system/little-mester-vm.service",
+    PROXY_UNIT: "/etc/systemd/system/little-mester-vm-proxy.service",
+    WORKSPACE_UNIT: "/etc/systemd/system/little-mester-vm-workspace.service",
+    METRICS_UNIT: "/etc/systemd/system/little-mester-vm-metrics.service",
+}
+_FIXED_GUARD_PATHS = {
+    unit: f"/etc/systemd/system/{unit}.d/90-code-update-guard.conf"
+    for unit in SYSTEM_UNITS
+}
+_WORKSPACE_DROPIN_PATH = "/etc/systemd/system/little-mester-vm-workspace.service.d/20-workspace.conf"
 CONFIG = pathlib.Path("/etc/little-mester-vm")
 DISK = "/var/lib/little-mester-vm/disk.qcow2"
 GUEST_PERSISTENCE_STATE = "/home/mester/.local/state"
@@ -145,6 +168,113 @@ def _guest_persistence_marker_command(action: str, marker: str, expected: str) -
 
 class AcceptanceError(RuntimeError):
     safe_report_message = True
+
+
+class EffectivePropertiesError(AcceptanceError):
+    def __init__(self, property_names: tuple[str, ...], properties: dict[str, str]):
+        self.property_names = tuple(
+            name if name in _EFFECTIVE_DIAGNOSTIC_PROPERTIES else "effective-properties"
+            for name in property_names
+        )
+        self.properties = properties
+        super().__init__("systemd returned duplicate effective property evidence")
+
+
+def _safe_effective_observation(property_name: str, value: str) -> str:
+    """Render only known values or fixed mismatch labels; never echo free-form config."""
+    if property_name in _EFFECTIVE_COMMAND_PROPERTIES:
+        return "MISMATCH (command details omitted)"
+    if property_name in ("User", "Group"):
+        if not value:
+            return "<unset>"
+        if re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", value):
+            return value
+        return "<unexpected identity>"
+    allowed = {
+        "ProtectSystem": {"no", "yes", "full", "strict"},
+        "ProtectHome": {"no", "yes", "read-only", "tmpfs"},
+        "NoNewPrivileges": {"yes", "no"},
+        "DevicePolicy": {"auto", "closed", "strict"},
+        "NeedDaemonReload": {"yes", "no"},
+        "RestrictAddressFamilies": {"AF_INET", "AF_INET6", "AF_UNIX"},
+    }.get(property_name)
+    if allowed is not None:
+        return value if value in allowed else "<unrecognized>"
+    if property_name == "FragmentPath":
+        if not value:
+            return "<unset>"
+        return value if value in _FIXED_FRAGMENT_PATHS.values() else "<unexpected fragment path>"
+    if property_name == "DropInPaths":
+        paths = set(value.split())
+        guard = sum(path in paths for path in _FIXED_GUARD_PATHS.values())
+        workspace = int(_WORKSPACE_DROPIN_PATH in paths)
+        other = len(paths - set(_FIXED_GUARD_PATHS.values()) - {_WORKSPACE_DROPIN_PATH})
+        return f"guard-paths={guard};workspace-path={workspace};other-paths={other}"
+    if property_name == "ConditionPathExists":
+        return ("maintenance-marker=present" if
+                f"!{CONFIG}/code-update.in-progress" in value
+                else "maintenance-marker=missing")
+    if property_name == "effective-properties":
+        return "malformed or duplicate property output"
+    if property_name == "ExecStopPost":
+        return value if value in ("", "-") else "MISMATCH (command details omitted)"
+    if property_name == "NoExecPaths":
+        return "/" if value == "/" else "MISMATCH (path details omitted)"
+    if property_name == "SupplementaryGroups":
+        return (f"control-group={'present' if 'lm-vm-control' in value.split() else 'missing'};"
+                f"entries={len(value.split())}")
+    if property_name in ("Requires", "BindsTo"):
+        return f"dependency-list mismatch;entries={len(value.split())}"
+    if property_name in ("ExecPaths", "ReadWritePaths"):
+        return f"path-list mismatch;entries={len(value.split())}"
+    if property_name == "BindPaths":
+        return f"bind-list mismatch;fields={len(value.split(':'))}"
+    return "<unrecognized>"
+
+
+def _render_effective_policy_mismatches(mismatches: list[dict[str, str]]) -> str:
+    """Render deterministic, bounded records containing no arbitrary property text."""
+    ordered = sorted(
+        mismatches,
+        key=lambda item: (SYSTEM_UNITS.index(item["unit"]), item["property"], item["expected"]),
+    )
+    safe = []
+    for item in ordered:
+        unit = item["unit"] if item["unit"] in SYSTEM_UNITS else "unknown-unit"
+        prop = item["property"] if item["property"] in _EFFECTIVE_DIAGNOSTIC_PROPERTIES else "effective-properties"
+        expected = item["expected"]
+        if not re.fullmatch(r"[A-Za-z0-9_./:= <>-]{1,96}", expected):
+            expected = "fixed policy value"
+        safe.append({
+            "unit": unit,
+            "property": prop,
+            "expected": expected,
+            "observed": _safe_effective_observation(prop, item["observed"]),
+        })
+
+    included = []
+
+    def serialize(omitted_count):
+        payload = {"mismatch_count": len(safe), "omitted_count": 0,
+                   "mismatches": included}
+        payload["omitted_count"] = omitted_count
+        rendered = "systemd_effective_mismatches=" + json.dumps(
+            payload, sort_keys=True, separators=(",", ":"))
+        return rendered
+
+    for entry in safe:
+        included.append(entry)
+        rendered = serialize(len(safe) - len(included))
+        if len(rendered.encode("utf-8")) > _POLICY_DIAGNOSTIC_LIMIT:
+            included.pop()
+            rendered = serialize(len(safe) - len(included))
+            while len(rendered.encode("utf-8")) > _POLICY_DIAGNOSTIC_LIMIT and included:
+                included.pop()
+                rendered = serialize(len(safe) - len(included))
+            return rendered
+    else:
+        rendered = serialize(0)
+    return rendered
 
 
 _DIAGNOSTIC_OUTPUT_LIMIT = 1200
@@ -321,16 +451,20 @@ def _effective_argvs(value: str) -> tuple[tuple[str, str], ...]:
 def _parse_effective_properties(output: str) -> dict[str, str]:
     """Parse systemctl show output, retaining the ordered repeatable pre-start list."""
     values = {}
+    duplicates = []
     for line in output.splitlines():
         if "=" not in line:
             continue
         key, value = line.split("=", 1)
         if key in values:
             if key != "ExecStartPre":
-                raise AcceptanceError("systemd returned duplicate effective property evidence")
-            values[key] += " ; " + value
+                duplicates.append(key)
+            else:
+                values[key] += " ; " + value
         else:
             values[key] = value
+    if duplicates:
+        raise EffectivePropertiesError(tuple(duplicates), values)
     return values
 
 
@@ -454,6 +588,7 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
     workspace_spec.loader.exec_module(workspace_policy)
     assignment = workspace_policy.read_assignment(workspace_policy.ASSIGNMENT, uid=os.getuid())
     properties = {}
+    property_errors = {}
     for unit in SYSTEM_UNITS:
         output = run(["/usr/bin/systemctl", "show", "--no-pager",
                       "--property=FragmentPath", "--property=DropInPaths",
@@ -469,7 +604,11 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
                        "--property=SupplementaryGroups",
                        "--property=NoExecPaths", "--property=ExecPaths",
                       unit]).stdout.decode()
-        properties[unit] = _parse_effective_properties(output)
+        try:
+            properties[unit] = _parse_effective_properties(output)
+        except EffectivePropertiesError as error:
+            properties[unit] = error.properties
+            property_errors[unit] = error
     vm_properties = properties[UNIT]
     proxy_properties = properties[PROXY_UNIT]
     workspace_properties = properties[WORKSPACE_UNIT]
@@ -516,90 +655,145 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
     }
     expected_metrics_commands = {"ExecStart": expected_metrics, "ExecStartPre": (guard_command,)}
 
-    def commands_match(unit_properties, expected_commands):
-        for name, expected in expected_commands.items():
-            commands = expected if name == "ExecStartPre" else (expected,)
-            wanted = tuple((command[0], " ".join(command)) for command in commands)
-            if _effective_argvs(unit_properties.get(name, "")) != wanted:
-                return False
-        return True
-
-    commands_match_vm = commands_match(vm_properties, expected_unit_commands)
-    proxy_commands_match = commands_match(proxy_properties, expected_proxy_commands)
-    workspace_commands_match = commands_match(workspace_properties, expected_workspace_commands)
-    metrics_commands_match = commands_match(metrics_properties, expected_metrics_commands)
     expected_dropins = {
         UNIT: "/etc/systemd/system/little-mester-vm.service.d/90-code-update-guard.conf",
         PROXY_UNIT: "/etc/systemd/system/little-mester-vm-proxy.service.d/90-code-update-guard.conf",
         WORKSPACE_UNIT: "/etc/systemd/system/little-mester-vm-workspace.service.d/90-code-update-guard.conf",
         METRICS_UNIT: "/etc/systemd/system/little-mester-vm-metrics.service.d/90-code-update-guard.conf",
     }
-    dropins_match = all(
-        expected_dropins[unit] in unit_properties.get("DropInPaths", "").split()
-        and f"!{CONFIG}/code-update.in-progress" in unit_properties.get("ConditionPathExists", "")
-        for unit, unit_properties in ((UNIT, vm_properties), (PROXY_UNIT, proxy_properties),
-                                     (WORKSPACE_UNIT, workspace_properties),
-                                     (METRICS_UNIT, metrics_properties))
-    )
     workspace_dropin = "/etc/systemd/system/little-mester-vm-workspace.service.d/20-workspace.conf"
-    workspace_bind_matches = workspace_policy.effective_bind_paths_match(
-        workspace_properties.get("BindPaths", ""), assignment.path,
-        workspace_policy.SHARE_DIR)
-    if (vm_properties.get("FragmentPath") != "/etc/systemd/system/little-mester-vm.service"
-            or proxy_properties.get("FragmentPath") != "/etc/systemd/system/little-mester-vm-proxy.service"
-            or workspace_properties.get("FragmentPath") != "/etc/systemd/system/little-mester-vm-workspace.service"
-            or set(workspace_properties.get("DropInPaths", "").split())
-               != {workspace_dropin, expected_dropins[WORKSPACE_UNIT]}
-            or metrics_properties.get("FragmentPath") != "/etc/systemd/system/little-mester-vm-metrics.service"
-            or vm_properties.get("User") != "lm-vm" or vm_properties.get("Group") != "lm-vm"
-            or vm_properties.get("ProtectSystem") != "strict"
-            or vm_properties.get("NoNewPrivileges") != "yes"
-            or vm_properties.get("DevicePolicy") != "closed"
-            or vm_properties.get("NeedDaemonReload") != "no"
-            or not commands_match_vm or not dropins_match
-             or any(name not in vm_properties.get("Requires", "") for name in
-                    (PROXY_UNIT, WORKSPACE_UNIT, METRICS_UNIT))
-             or any(name not in vm_properties.get("BindsTo", "") for name in
-                    (PROXY_UNIT, WORKSPACE_UNIT, METRICS_UNIT))
-            or vm_properties.get("ExecStopPost", "") not in ("", "-")
-            or proxy_properties.get("User") != "lm-vm-proxy"
-            or proxy_properties.get("Group") != "lm-vm-proxy"
-            or proxy_properties.get("NoNewPrivileges") != "yes"
-            or proxy_properties.get("ProtectSystem") != "strict"
-            or proxy_properties.get("NeedDaemonReload") != "no"
-            or not proxy_commands_match
-             or proxy_properties.get("ExecStop", "") not in ("", "-")
-            or proxy_properties.get("ExecStopPost", "") not in ("", "-")):
-        raise AcceptanceError("effective loaded systemd VM properties differ from the protected unit policy")
-    if (workspace_properties.get("User") != owner_name
-            or workspace_properties.get("Group") != grp.getgrgid(owner_account.pw_gid).gr_name
-            or "lm-vm-control" not in workspace_properties.get("SupplementaryGroups", "")
-            or workspace_properties.get("ProtectHome") != "tmpfs"
-            or workspace_properties.get("ProtectSystem") != "strict"
-            or workspace_properties.get("NoNewPrivileges") != "no"
-            or workspace_properties.get("NoExecPaths") != "/"
-            or any(path not in workspace_properties.get("ExecPaths", "")
-                   for path in ("/usr/bin", "/usr/lib", "/usr/libexec", "/lib"))
-            or workspace_properties.get("NeedDaemonReload") != "no"
-            or not workspace_commands_match
-            or not workspace_bind_matches
-            or str(workspace_policy.SHARE_DIR) not in workspace_properties.get("ReadWritePaths", "")
-            or metrics_properties.get("User") != "lm-vm"
-            or metrics_properties.get("Group") != "lm-vm"
-            or metrics_properties.get("ProtectSystem") != "strict"
-            or metrics_properties.get("NoNewPrivileges") != "yes"
-            or metrics_properties.get("DevicePolicy") != "closed"
-            or metrics_properties.get("RestrictAddressFamilies") != "AF_INET"
-            or metrics_properties.get("NeedDaemonReload") != "no"
-            or not metrics_commands_match):
-        raise AcceptanceError("effective workspace or metrics systemd policy differs from the fixed owner boundary")
+    mismatches = []
+
+    def compare(unit, property_name, expected, observed, matches):
+        if not matches:
+            mismatches.append({"unit": unit, "property": property_name,
+                               "expected": expected, "observed": observed})
+
+    for unit, error in property_errors.items():
+        for property_name in error.property_names:
+            compare(unit, property_name, "unique effective property",
+                    "duplicate property records", False)
+
+    unit_properties = {
+        UNIT: vm_properties, PROXY_UNIT: proxy_properties,
+        WORKSPACE_UNIT: workspace_properties, METRICS_UNIT: metrics_properties,
+    }
+    for unit, unit_values in unit_properties.items():
+        compare(unit, "FragmentPath", "fixed fragment path",
+                unit_values.get("FragmentPath", ""),
+                unit_values.get("FragmentPath") == _FIXED_FRAGMENT_PATHS[unit])
+        if unit == WORKSPACE_UNIT:
+            expected_workspace_dropins = {workspace_dropin, expected_dropins[unit]}
+            compare(unit, "DropInPaths", "exact assignment and guard drop-ins",
+                    unit_values.get("DropInPaths", ""),
+                    set(unit_values.get("DropInPaths", "").split()) == expected_workspace_dropins)
+        else:
+            compare(unit, "DropInPaths", "contains fixed guard drop-in",
+                    unit_values.get("DropInPaths", ""),
+                    expected_dropins[unit] in unit_values.get("DropInPaths", "").split())
+        compare(unit, "ConditionPathExists", "contains maintenance-marker guard",
+                unit_values.get("ConditionPathExists", ""),
+                f"!{CONFIG}/code-update.in-progress" in unit_values.get("ConditionPathExists", ""))
+        compare(unit, "NeedDaemonReload", "no", unit_values.get("NeedDaemonReload", ""),
+                unit_values.get("NeedDaemonReload") == "no")
+
+    expected_commands = {
+        UNIT: expected_unit_commands,
+        PROXY_UNIT: expected_proxy_commands,
+        WORKSPACE_UNIT: expected_workspace_commands,
+        METRICS_UNIT: expected_metrics_commands,
+    }
+    expected_command_labels = {
+        "ExecStart": "fixed locked-service command",
+        "ExecStartPre": "exact ordered pre-start commands",
+        "ExecStartPost": "fixed post-start command",
+        "ExecStop": "fixed stop command",
+    }
+    for unit, command_properties in expected_commands.items():
+        for name, expected in command_properties.items():
+            commands = expected if name == "ExecStartPre" else (expected,)
+            wanted = tuple((command[0], " ".join(command)) for command in commands)
+            try:
+                matches = _effective_argvs(unit_properties[unit].get(name, "")) == wanted
+            except AcceptanceError:
+                matches = False
+            compare(unit, name, expected_command_labels[name],
+                    unit_properties[unit].get(name, ""), matches)
+
+    if UNIT in unit_properties:
+        for name, expected in (("User", "lm-vm"), ("Group", "lm-vm"),
+                               ("ProtectSystem", "strict"), ("NoNewPrivileges", "yes"),
+                               ("DevicePolicy", "closed")):
+            observed = vm_properties.get(name, "")
+            compare(UNIT, name, expected, observed, observed == expected)
+        for property_name in ("Requires", "BindsTo"):
+            observed = vm_properties.get(property_name, "")
+            matches = all(name in observed for name in (PROXY_UNIT, WORKSPACE_UNIT, METRICS_UNIT))
+            compare(UNIT, property_name, "includes proxy/workspace/metrics", observed, matches)
+        observed = vm_properties.get("ExecStopPost", "")
+        compare(UNIT, "ExecStopPost", "empty or -", observed, observed in ("", "-"))
+
+    if PROXY_UNIT in unit_properties:
+        for name, expected in (("User", "lm-vm-proxy"), ("Group", "lm-vm-proxy"),
+                               ("NoNewPrivileges", "yes"), ("ProtectSystem", "strict")):
+            observed = proxy_properties.get(name, "")
+            compare(PROXY_UNIT, name, expected, observed, observed == expected)
+        for name in ("ExecStop", "ExecStopPost"):
+            observed = proxy_properties.get(name, "")
+            compare(PROXY_UNIT, name, "empty or -", observed, observed in ("", "-"))
+
+    if WORKSPACE_UNIT in unit_properties:
+        workspace_group = grp.getgrgid(owner_account.pw_gid).gr_name
+        workspace_checks = (
+            ("User", owner_name, workspace_properties.get("User", "") == owner_name),
+            ("Group", workspace_group, workspace_properties.get("Group", "") == workspace_group),
+            ("SupplementaryGroups", "includes lm-vm-control",
+             "lm-vm-control" in workspace_properties.get("SupplementaryGroups", "")),
+            ("ProtectHome", "tmpfs", workspace_properties.get("ProtectHome") == "tmpfs"),
+            ("ProtectSystem", "strict", workspace_properties.get("ProtectSystem") == "strict"),
+            ("NoNewPrivileges", "no", workspace_properties.get("NoNewPrivileges") == "no"),
+            ("NoExecPaths", "/", workspace_properties.get("NoExecPaths") == "/"),
+            ("ExecPaths", "includes fixed executable paths",
+             all(path in workspace_properties.get("ExecPaths", "")
+                 for path in ("/usr/bin", "/usr/lib", "/usr/libexec", "/lib"))),
+            ("ReadWritePaths", "includes workspace share",
+             str(workspace_policy.SHARE_DIR) in workspace_properties.get("ReadWritePaths", "")),
+        )
+        for property_name, expected, matches in workspace_checks:
+            compare(WORKSPACE_UNIT, property_name, expected,
+                    workspace_properties.get(property_name, ""), matches)
+        bind_value = workspace_properties.get("BindPaths", "")
+        bind_matches = workspace_policy.effective_bind_paths_match(
+            bind_value, assignment.path, workspace_policy.SHARE_DIR)
+        compare(WORKSPACE_UNIT, "BindPaths", "assigned source to fixed share (rbind)",
+                bind_value, bind_matches)
+
+    if METRICS_UNIT in unit_properties:
+        for name, expected in (("User", "lm-vm"), ("Group", "lm-vm"),
+                               ("ProtectSystem", "strict"), ("NoNewPrivileges", "yes"),
+                               ("DevicePolicy", "closed"),
+                               ("RestrictAddressFamilies", "AF_INET")):
+            observed = metrics_properties.get(name, "")
+            compare(METRICS_UNIT, name, expected, observed, observed == expected)
+
     dropin = pathlib.Path(workspace_dropin)
-    dropin_info = os.lstat(dropin)
-    if (not stat.S_ISREG(dropin_info.st_mode) or stat.S_ISLNK(dropin_info.st_mode)
-            or dropin_info.st_uid != 0 or stat.S_IMODE(dropin_info.st_mode) != 0o644
-            or dropin_info.st_nlink != 1
-            or dropin.read_bytes() != workspace_policy._systemd_bind_path(assignment.path).encode("utf-8")):
-        raise AcceptanceError("workspace systemd drop-in differs from the validated owner assignment")
+    try:
+        dropin_info = os.lstat(dropin)
+        dropin_matches = (stat.S_ISREG(dropin_info.st_mode) and not stat.S_ISLNK(dropin_info.st_mode)
+                          and dropin_info.st_uid == 0 and stat.S_IMODE(dropin_info.st_mode) == 0o644
+                          and dropin_info.st_nlink == 1
+                          and dropin.read_bytes()
+                          == workspace_policy._systemd_bind_path(assignment.path).encode("utf-8"))
+    except OSError:
+        dropin_matches = False
+    if not dropin_matches:
+        compare(WORKSPACE_UNIT, "BindPaths", "exact protected assignment drop-in",
+                "unavailable or differs from assigned bind", False)
+
+    if mismatches:
+        raise AcceptanceError(
+            "effective loaded systemd VM properties differ from the protected unit policy; "
+            + _render_effective_policy_mismatches(mismatches))
     metrics_service = service_state(METRICS_UNIT)
     if metrics_service.get("ActiveState") == "active":
         _metrics_loopback_check()

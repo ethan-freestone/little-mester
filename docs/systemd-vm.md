@@ -129,6 +129,18 @@ requires `--unsafe-recurse`, and changing an assignment requires `--reassign`
 while the fixed VM is stopped. `auth` uses the existing bounded browser
 callback bridge.
 
+### Deployed unit verification diagnostics
+
+The fixed candidate verifier compares allowlisted effective properties for the
+QEMU, proxy, workspace, and metrics services in addition to verifying the
+candidate unit/drop-in files. On a mismatch it remains fail-closed. Its
+diagnostic identifies each failed existing comparison by fixed service and
+property, with bounded expected and safe observed labels; it does not print raw
+`systemctl show`, unit contents, environment, or journal output. Ordered
+`ExecStartPre` and exact locked-service command checks remain strict. These
+diagnostics explain a rejection; they do not by themselves make the effective
+policy comparison exhaustive or authorize an owner VM operation.
+
 Inside the guest shell (`./lab vm ssh`), safe per-user model/theme settings are
 available without editing protected OpenCode configuration:
 
