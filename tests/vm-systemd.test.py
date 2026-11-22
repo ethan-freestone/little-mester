@@ -9,6 +9,7 @@ import importlib.machinery
 import inspect
 import contextlib
 import datetime
+import errno
 import io
 import os
 import pathlib
@@ -41,6 +42,12 @@ system_installer = load("vm_system_install", ROOT / "tools/vm-system-install")
 contract = load("parent_session_contract", ROOT / "lib/vm/parent-session-contract.py")
 bootstrap = load("guest_bootstrap", ROOT / "lib/vm/guest-bootstrap.py")
 acceptance = load("system_acceptance", ROOT / "lib/vm/system-acceptance.py")
+
+
+def getunit_diagnostic_records(stream: str) -> list[dict]:
+    prefix = acceptance._GETUNIT_DIAGNOSTIC_PREFIX
+    return [json.loads(line[len(prefix):]) for line in stream.splitlines()
+            if line.startswith(prefix)]
 
 
 class SystemdPolicyTests(unittest.TestCase):
@@ -995,6 +1002,112 @@ class SystemdPolicyTests(unittest.TestCase):
                 with mock.patch.object(acceptance, "run", side_effect=replies):
                     result = acceptance._effective_maintenance_condition(fixed_unit)
                 self.assertEqual(result, label)
+
+    def test_getunit_launch_failure_reports_fixed_argv_type_and_errno(self):
+        fixed_unit = acceptance.UNIT
+        output = io.StringIO()
+        launch_error = FileNotFoundError(errno.ENOENT, "missing executable", "/private/busctl")
+        with mock.patch.object(acceptance.subprocess, "run", side_effect=launch_error), \
+                contextlib.redirect_stderr(output):
+            self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit),
+                             "lookup-failed")
+
+        [event] = getunit_diagnostic_records(output.getvalue())
+        self.assertEqual(event["unit"], fixed_unit)
+        self.assertEqual(event["argv"], [
+            "/usr/bin/busctl", "--system", "call", "org.freedesktop.systemd1",
+            "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+            "GetUnit", "s", fixed_unit,
+        ])
+        self.assertEqual(event["category"], "launch-failure")
+        self.assertEqual(event["exception_type"], "FileNotFoundError")
+        self.assertEqual(event["errno"], errno.ENOENT)
+        self.assertNotIn("/private/busctl", output.getvalue())
+        self.assertLessEqual(len(output.getvalue().encode()),
+                             acceptance._GETUNIT_DIAGNOSTIC_LIMIT + 1)
+
+    def test_getunit_timeout_reports_timeout_elapsed_bucket_and_sanitized_stderr(self):
+        fixed_unit = acceptance.PROXY_UNIT
+        failure = subprocess.TimeoutExpired(
+            ["/usr/bin/busctl"], 30,
+            stderr=b"org.freedesktop.DBus.Error.NoReply: request timed out\n"
+                   b"password=do-not-log\n")
+        output = io.StringIO()
+        with mock.patch.object(acceptance.subprocess, "run", side_effect=failure), \
+                mock.patch.object(acceptance.time, "monotonic", side_effect=[10.0, 12.25]), \
+                contextlib.redirect_stderr(output):
+            self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit),
+                             "lookup-failed")
+
+        [event] = getunit_diagnostic_records(output.getvalue())
+        self.assertEqual(event["category"], "timeout")
+        self.assertEqual(event["exception_type"], "TimeoutExpired")
+        self.assertEqual(event["timeout_seconds"], 30)
+        self.assertEqual(event["elapsed_ms"], 2250)
+        self.assertEqual(event["elapsed_bucket"], "1-5s")
+        self.assertIn("NoReply", event["stderr"])
+        self.assertNotIn("do-not-log", output.getvalue())
+
+    def test_getunit_nonzero_exit_reports_status_and_redacted_bounded_stderr(self):
+        fixed_unit = acceptance.WORKSPACE_UNIT
+        stderr = (b"org.freedesktop.systemd1.NoSuchUnit: unit lookup failed\n"
+                  b"password=do-not-log\n" + b"safe detail " * 100)
+        result = subprocess.CompletedProcess(["/usr/bin/busctl"], 7, b"", stderr)
+        output = io.StringIO()
+        with mock.patch.object(acceptance.subprocess, "run", return_value=result), \
+                contextlib.redirect_stderr(output):
+            self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit),
+                             "lookup-failed")
+
+        [event] = getunit_diagnostic_records(output.getvalue())
+        self.assertEqual(event["category"], "nonzero-exit")
+        self.assertEqual(event["exit_status"], 7)
+        self.assertIn("NoSuchUnit", event["stderr"])
+        self.assertNotIn("do-not-log", output.getvalue())
+        self.assertLessEqual(len(event["stderr"]), acceptance._GETUNIT_STDERR_LIMIT + 20)
+        self.assertLessEqual(len(output.getvalue().encode()),
+                             acceptance._GETUNIT_DIAGNOSTIC_LIMIT + 1)
+
+    def test_getunit_success_reports_only_validated_object_path(self):
+        fixed_unit = acceptance.METRICS_UNIT
+        object_path = "/org/freedesktop/systemd1/unit/little_2dmester_2dvm_2dmetrics_2eservice"
+        first = subprocess.CompletedProcess([], 0, f'o "{object_path}"'.encode(), b"")
+        second = subprocess.CompletedProcess([], 0,
+            json.dumps({"type": "a(sbbsi)", "data": []}).encode(), b"")
+        output = io.StringIO()
+        with mock.patch.object(acceptance.subprocess, "run", side_effect=[first, second]), \
+                contextlib.redirect_stderr(output):
+            self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit), "missing")
+
+        [event] = getunit_diagnostic_records(output.getvalue())
+        self.assertEqual(event["category"], "success")
+        self.assertEqual(event["unit"], fixed_unit)
+        self.assertTrue(event["object_path_valid"])
+        self.assertEqual(event["object_path"], object_path)
+        self.assertEqual(event["argv"][-1], fixed_unit)
+
+    def test_getunit_invalid_object_path_is_redacted_and_remains_fail_closed(self):
+        fixed_unit = acceptance.UNIT
+        raw = b'not-an-object-path private-output-must-not-appear\n'
+        result = subprocess.CompletedProcess([], 0, raw, b"")
+        output = io.StringIO()
+        with mock.patch.object(acceptance.subprocess, "run", return_value=result), \
+                contextlib.redirect_stderr(output):
+            self.assertEqual(acceptance._effective_maintenance_condition(fixed_unit),
+                             "malformed/unsupported")
+
+        [event] = getunit_diagnostic_records(output.getvalue())
+        self.assertEqual(event["category"], "invalid-object-path")
+        self.assertFalse(event["object_path_valid"])
+        self.assertNotIn("private-output-must-not-appear", output.getvalue())
+
+    def test_getunit_diagnostic_emitter_failure_does_not_mask_fail_closed_result(self):
+        result = subprocess.CompletedProcess(["/usr/bin/busctl"], 1, b"", b"failed")
+        with mock.patch.object(acceptance.subprocess, "run", return_value=result), \
+                mock.patch.object(acceptance, "_emit_systemd_getunit_diagnostic",
+                                  side_effect=OSError("diagnostic stream unavailable")):
+            self.assertEqual(acceptance._effective_maintenance_condition(acceptance.UNIT),
+                             "lookup-failed")
 
     def test_system_acceptance_report_contains_protected_lifecycle_gates(self):
         report = owner.report_template("a" * 40, "system_vm_accept", pathlib.Path("attempt"))

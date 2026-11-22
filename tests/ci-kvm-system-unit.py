@@ -516,11 +516,13 @@ def invoke_verified_cleanup(sha: str) -> None:
     run(["/usr/bin/sg", "lm-vm-control", "-c", command], timeout=90, capture=False)
 
 
-def invoke_shared_acceptance(sha: str) -> None:
-    """Run the exact installed owner-facing acceptance implementation."""
+def invoke_shared_acceptance(sha: str, *, diagnostic_only: bool = False) -> None:
+    """Run the exact installed owner-facing verifier or acceptance command."""
     installed = CI_INSTALL_PARENT / sha / "tools/vm-owner-acceptance"
-    args = [str(installed), "--system-vm", "accept", "--approve-system-vm-lifecycle",
-            "--sha", sha, "--repo", str(REPO), "--prefix", str(CI_INSTALL_PREFIX)]
+    args = [str(installed), "--system-vm", "verify" if diagnostic_only else "accept"]
+    if not diagnostic_only:
+        args.append("--approve-system-vm-lifecycle")
+    args.extend(["--sha", sha, "--repo", str(REPO), "--prefix", str(CI_INSTALL_PREFIX)])
     command = " ".join(shlex.quote(value) for value in args)
     run(["/usr/bin/sg", "lm-vm-control", "-c", command], timeout=45 * 60, capture=False)
 
@@ -2999,7 +3001,8 @@ def main() -> int:
         except BaseException as error:  # noqa: BLE001 - always report cleanup failure, including cancellation
             print(f"production_unit_cleanup=FAIL error={type(error).__name__}: {error}", file=sys.stderr)
             return 1
-    require(not sys.argv[1:], "unsupported argument")
+    diagnostic_only = sys.argv[1:] == ["--diagnostic-only"]
+    require(not sys.argv[1:] or diagnostic_only, "unsupported argument")
     installed_root: pathlib.Path | None = None
     workspace_path: pathlib.Path | None = None
     escape_evidence = None
@@ -3044,6 +3047,12 @@ def main() -> int:
         verify_installed_files()
         require_fixed_units_loaded()
         unit_identity_checks()
+        if diagnostic_only:
+            # Keep the existing hosted install/provision context, but enter
+            # verifier-only mode before workspace setup or any VM lifecycle.
+            invoke_shared_acceptance(sha, diagnostic_only=True)
+            print("getunit_diagnostic_only=PASS verifier=verify qemu=not-started")
+            return 0
         workspace_path = disposable_workspace_path()
         write_start_marker(sha)
         start_attempted = True

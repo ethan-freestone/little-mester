@@ -169,6 +169,10 @@ def _guest_persistence_marker_command(action: str, marker: str, expected: str) -
 class AcceptanceError(RuntimeError):
     safe_report_message = True
 
+    def __init__(self, message: str, *, command_failure: dict | None = None):
+        self.command_failure = command_failure
+        super().__init__(message)
+
 
 class EffectivePropertiesError(AcceptanceError):
     def __init__(self, property_names: tuple[str, ...], properties: dict[str, str]):
@@ -297,20 +301,28 @@ def _maintenance_condition_state(conditions, marker: str) -> str:
 
 
 def _effective_maintenance_condition(unit: str) -> str:
+    argv = ["/usr/bin/busctl", "--system", "call", "org.freedesktop.systemd1",
+            "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+            "GetUnit", "s", unit]
     try:
-        path_bytes = run(
-            ["/usr/bin/busctl", "--system", "call", "org.freedesktop.systemd1",
-             "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
-             "GetUnit", "s", unit],
-            operation="read effective systemd Conditions",
-        ).stdout
-    except AcceptanceError:
+        path_bytes = run(argv, operation="read effective systemd Conditions").stdout
+    except AcceptanceError as error:
+        failure = error.command_failure
+        if isinstance(failure, dict):
+            fields = failure.get("fields", {})
+            if isinstance(fields, dict):
+                _best_effort_systemd_getunit_diagnostic(
+                    unit, failure.get("category", "command-failed"), **fields)
         return "lookup-failed"
     try:
         path_output = path_bytes.decode("utf-8", "strict")
         object_path = _parse_systemd_unit_object_path(path_output)
     except (AcceptanceError, UnicodeError):
+        _best_effort_systemd_getunit_diagnostic(
+            unit, "invalid-object-path", object_path_valid=False)
         return "malformed/unsupported"
+    _best_effort_systemd_getunit_diagnostic(
+        unit, "success", object_path_valid=True, object_path=object_path)
     try:
         output = run(
             ["/usr/bin/busctl", "--system", "--json=short", "get-property",
@@ -325,6 +337,81 @@ def _effective_maintenance_condition(unit: str) -> str:
         return _maintenance_condition_state(conditions, f"{CONFIG}/code-update.in-progress")
     except AcceptanceError:
         return "malformed/unsupported"
+
+
+_GETUNIT_DIAGNOSTIC_PREFIX = "systemd_getunit_diagnostic="
+_GETUNIT_DIAGNOSTIC_LIMIT = 2048
+_GETUNIT_STDERR_LIMIT = 256
+
+
+def _elapsed_time_bucket(elapsed_ms: int) -> str:
+    if elapsed_ms < 1000:
+        return "under-1s"
+    if elapsed_ms < 5000:
+        return "1-5s"
+    if elapsed_ms < 30000:
+        return "5-30s"
+    return "30s-or-more"
+
+
+def _emit_systemd_getunit_diagnostic(
+        unit: str, category: str, *, exception_type: str | None = None,
+        errno: int | None = None, timeout_seconds: int | float | None = None,
+        elapsed_ms: int | None = None, exit_status: int | None = None,
+        stderr: bytes | str | None = None, object_path_valid: bool | None = None,
+        object_path: str | None = None) -> None:
+    """Best-effort, bounded GetUnit evidence; never emit raw command output."""
+    safe_unit = unit if unit in SYSTEM_UNITS else "<unrecognized-unit>"
+    event = {
+        "unit": safe_unit,
+        "argv": ["/usr/bin/busctl", "--system", "call", "org.freedesktop.systemd1",
+                 "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+                 "GetUnit", "s", safe_unit],
+        "category": category if category in {
+            "launch-failure", "timeout", "nonzero-exit", "command-failed",
+            "invalid-object-path", "success"} else "command-failed",
+    }
+    if exception_type is not None:
+        event["exception_type"] = (
+            exception_type if re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", exception_type)
+            else "unknown")
+    if category == "launch-failure" or errno is not None:
+        event["errno"] = errno if type(errno) is int else None
+    if timeout_seconds is not None:
+        if (type(timeout_seconds) in (int, float) and
+                0 <= timeout_seconds <= 3600):
+            event["timeout_seconds"] = timeout_seconds
+    if elapsed_ms is not None and type(elapsed_ms) is int and elapsed_ms >= 0:
+        event["elapsed_ms"] = elapsed_ms
+        event["elapsed_bucket"] = _elapsed_time_bucket(elapsed_ms)
+    if exit_status is not None and type(exit_status) is int:
+        event["exit_status"] = exit_status
+    if stderr is not None:
+        event["stderr"] = _safe_getunit_stderr(stderr)
+    if object_path_valid is not None:
+        event["object_path_valid"] = object_path_valid is True
+    if object_path_valid is True and object_path is not None:
+        if re.fullmatch(r"/org/freedesktop/systemd1/unit/[A-Za-z0-9_]+", object_path):
+            event["object_path"] = object_path
+        else:
+            event["object_path_valid"] = False
+
+    try:
+        rendered = _GETUNIT_DIAGNOSTIC_PREFIX + json.dumps(
+            event, sort_keys=True, separators=(",", ":"))
+        if len(rendered.encode("utf-8")) <= _GETUNIT_DIAGNOSTIC_LIMIT:
+            print(rendered, file=sys.stderr, flush=True)
+    except Exception:
+        # Diagnostic output must not alter the verifier's fail-closed result.
+        pass
+
+
+def _best_effort_systemd_getunit_diagnostic(unit: str, category: str, **fields) -> None:
+    try:
+        _emit_systemd_getunit_diagnostic(unit, category, **fields)
+    except Exception:
+        # Cover unexpected serialization and stream errors too.
+        pass
 
 
 def _render_effective_policy_mismatches(mismatches: list[dict[str, str]]) -> str:
@@ -457,8 +544,16 @@ def _safe_output(value: bytes | str | None) -> str:
         "…[truncated]" if len(joined) > _DIAGNOSTIC_OUTPUT_LIMIT else "")
 
 
+def _safe_getunit_stderr(value: bytes | str | None) -> str:
+    safe = _safe_output(value)
+    if len(safe) > _GETUNIT_STDERR_LIMIT:
+        return safe[:_GETUNIT_STDERR_LIMIT] + "…[truncated]"
+    return safe
+
+
 def run(argv: list[str], *, timeout: float = 30, capture: bool = True,
         operation: str = "fixed acceptance command") -> subprocess.CompletedProcess:
+    started = time.monotonic()
     try:
         result = subprocess.run(argv, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE if capture else None,
@@ -468,14 +563,44 @@ def run(argv: list[str], *, timeout: float = 30, capture: bool = True,
     except subprocess.TimeoutExpired as error:
         output = _safe_output(error.stderr)
         detail = f"; stderr={output}" if output else ""
-        raise AcceptanceError(f"{operation} timed out after {timeout}s{detail}") from error
+        elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+        raise AcceptanceError(
+            f"{operation} timed out after {timeout}s{detail}",
+            command_failure={
+                "category": "timeout",
+                "fields": {
+                    "exception_type": type(error).__name__,
+                    "timeout_seconds": timeout,
+                    "elapsed_ms": elapsed_ms,
+                    "stderr": _safe_getunit_stderr(error.stderr),
+                },
+            },
+        ) from error
     except OSError as error:
         reason = error.strerror or type(error).__name__
-        raise AcceptanceError(f"{operation} failed ({type(error).__name__}: {reason})") from error
+        raise AcceptanceError(
+            f"{operation} failed ({type(error).__name__}: {reason})",
+            command_failure={
+                "category": "launch-failure",
+                "fields": {
+                    "exception_type": type(error).__name__,
+                    "errno": error.errno if type(error.errno) is int else None,
+                },
+            },
+        ) from error
     if result.returncode:
         output = _safe_output(result.stderr)
         detail = f"; stderr={output}" if output else ""
-        raise AcceptanceError(f"{operation} failed (exit={result.returncode}){detail}")
+        raise AcceptanceError(
+            f"{operation} failed (exit={result.returncode}){detail}",
+            command_failure={
+                "category": "nonzero-exit",
+                "fields": {
+                    "exit_status": result.returncode,
+                    "stderr": _safe_getunit_stderr(result.stderr),
+                },
+            },
+        )
     return result
 
 

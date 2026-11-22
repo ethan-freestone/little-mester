@@ -318,7 +318,13 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("LM_CI_SOURCE_HEAD_SHA", production)
         self.assertIn("pr_merge_commit_second_parent", production)
         self.assertIn("LM_CI_PR_MERGE_PARENT_SHA", production)
-        self.assertNotIn("workflow_dispatch:", workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("getunit_diagnostic_only:", workflow)
+        self.assertIn("type: boolean", workflow)
+        self.assertIn("default: false", workflow)
+        self.assertIn("inputs.getunit_diagnostic_only != true", transient)
+        self.assertIn("inputs.getunit_diagnostic_only != true", diagnostics)
+        self.assertIn("GETUNIT_DIAGNOSTIC_ONLY", production)
         self.assertIn("workflow_sha={sha} source_head_sha={source_sha}", SCRIPT.read_text())
         self.assertIn("pr_merge_commit_second_parent={merge_parent}", SCRIPT.read_text())
         self.assertIn("LM_CI_SOURCE_HEAD_SHA", SCRIPT.read_text())
@@ -538,9 +544,42 @@ class HostedSystemUnitTests(unittest.TestCase):
     def test_ci_invokes_exact_installed_owner_acceptance_command(self):
         source = SCRIPT.read_text()
         self.assertIn('installed = CI_INSTALL_PARENT / sha / "tools/vm-owner-acceptance"', source)
-        self.assertIn('"--system-vm", "accept", "--approve-system-vm-lifecycle"', source)
+        self.assertIn('"--system-vm", "verify" if diagnostic_only else "accept"', source)
+        self.assertIn('args.append("--approve-system-vm-lifecycle")', source)
         self.assertIn("invoke_shared_acceptance(sha)", source)
         self.assertNotIn('invoke_lab(installed_root, "up", 16 * 60 + 45)', source)
+
+    def test_getunit_diagnostic_only_routes_to_verify_without_changing_default(self):
+        sha = "a" * 40
+        with mock.patch.object(unit, "run") as run:
+            unit.invoke_shared_acceptance(sha, diagnostic_only=True)
+        command = shlex.split(run.call_args.args[0][3])
+        self.assertEqual(run.call_args.args[0][:3], ["/usr/bin/sg", "lm-vm-control", "-c"])
+        self.assertEqual(command[1:3], ["--system-vm", "verify"])
+        self.assertNotIn("accept", command)
+        self.assertNotIn("--approve-system-vm-lifecycle", command)
+        self.assertEqual(run.call_args.kwargs["capture"], False)
+        self.assertEqual(run.call_args.kwargs["timeout"], 45 * 60)
+
+        source = SCRIPT.read_text()
+        main = source[source.index("def main()") :]
+        self.assertIn('diagnostic_only = sys.argv[1:] == ["--diagnostic-only"]', main)
+        self.assertIn("invoke_shared_acceptance(sha, diagnostic_only=True)", main)
+        diagnostic_branch = main.split("if diagnostic_only:", 1)[1].split(
+            "workspace_path = disposable_workspace_path()", 1)[0]
+        self.assertIn("return 0", diagnostic_branch)
+        self.assertLess(main.index("invoke_shared_acceptance(sha, diagnostic_only=True)"),
+                        main.index("workspace_path = disposable_workspace_path()"))
+
+        with mock.patch.object(unit, "run") as run:
+            unit.invoke_shared_acceptance(sha)
+        command = shlex.split(run.call_args.args[0][3])
+        self.assertEqual(command[1:4], ["--system-vm", "accept",
+                                      "--approve-system-vm-lifecycle"])
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        production = workflow_job(workflow, "production-systemd-vm-acceptance")
+        self.assertIn("tests/ci-kvm-system-unit.py", production)
+        self.assertIn("--diagnostic-only", production)
 
     def test_git_object_fetch_uses_exact_sha_path_and_raw_bytes(self):
         sha = "c" * 40

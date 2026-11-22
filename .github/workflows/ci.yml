@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main, feat/vm-approach-3]
     types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      getunit_diagnostic_only:
+        description: Run production install and verifier-only D-Bus diagnostics; do not start the VM
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -104,6 +111,7 @@ jobs:
 
   # ── 4. Transient hosted QEMU guest integration; no TCG fallback ───
   transient-qemu-integration:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.getunit_diagnostic_only != true }}
     name: Transient QEMU guest integration
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -203,6 +211,7 @@ jobs:
 
   # ── 5. Exploratory systemd namespace controls on a separate runner ──
   systemd-namespace-diagnostics:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.getunit_diagnostic_only != true }}
     name: Systemd namespace diagnostics
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -285,7 +294,14 @@ jobs:
       - name: Exercise exact pinned production systemd VM unit on disposable hosted KVM
         if: ${{ !cancelled() && steps.host_dependencies.outcome == 'success' }}
         timeout-minutes: 45
-        run: python3 tests/ci-kvm-system-unit.py
+        env:
+          GETUNIT_DIAGNOSTIC_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.getunit_diagnostic_only }}
+        run: |
+          if [[ "$GETUNIT_DIAGNOSTIC_ONLY" == "true" ]]; then
+            python3 tests/ci-kvm-system-unit.py --diagnostic-only
+          else
+            python3 tests/ci-kvm-system-unit.py
+          fi
       - name: Require production systemd VM and proxy stopped
         if: always()
         timeout-minutes: 2
