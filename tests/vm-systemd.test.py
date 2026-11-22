@@ -43,6 +43,16 @@ bootstrap = load("guest_bootstrap", ROOT / "lib/vm/guest-bootstrap.py")
 acceptance = load("system_acceptance", ROOT / "lib/vm/system-acceptance.py")
 
 
+def cloud_init_result(status, *, return_code=0, extended_status=None,
+                      errors=None, recoverable_errors=None):
+    return return_code, json.dumps({
+        "status": status,
+        "extended_status": status if extended_status is None else extended_status,
+        "errors": [] if errors is None else errors,
+        "recoverable_errors": {} if recoverable_errors is None else recoverable_errors,
+    }).encode()
+
+
 class SystemdPolicyTests(unittest.TestCase):
     def test_workspace_daemon_acceptance_checks_kernel_nnp_not_unit_property(self):
         active = {"ActiveState": "active", "MainPID": "123"}
@@ -181,7 +191,14 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertEqual(shlex.split(exec_line[len("ExecStart="):]), [
             "+/usr/bin/python3", "-I", "/usr/lib/little-mester-vm/system-vm.py",
             "locked-service", "qemu"])
+        post_line = next(line for line in unit.splitlines() if line.startswith("ExecStartPost="))
+        self.assertEqual(shlex.split(post_line[len("ExecStartPost="):]), [
+            "/usr/bin/python3", "-I", "/usr/lib/little-mester-vm/system-vm.py", "guest-ready"])
+        self.assertEqual(system_installer.FILES["lib/vm/system-vm.py"],
+                         ("/usr/lib/little-mester-vm/system-vm.py", 0o644))
         self.assertIn("def _locked_service_exec", (ROOT / "lib/vm/system-vm.py").read_text())
+        self.assertIn('if args.action == "guest-ready":\n            _qemu_guest_ready()',
+                      (ROOT / "lib/vm/system-vm.py").read_text())
         self.assertIn("Restart=no", unit)
         self.assertIn("KillMode=control-group", unit)
         self.assertIn("TimeoutStopSec=25s", unit)
@@ -485,20 +502,129 @@ class SystemdPolicyTests(unittest.TestCase):
     def test_compatibility_check_precedes_readiness_and_normal_use_requires_active_unit(self):
         calls = []
         compatibility_context = []
+        status_results = [cloud_init_result("running"), cloud_init_result("done"), 0, 0]
+
         def ssh_side_effect(command, **_kwargs):
-            calls.append("cloud-init" if command.startswith("cloud-init") else "readiness")
-            return 0
+            if command == vm.CLOUD_INIT_STATUS_COMMAND:
+                calls.append("cloud-init-running" if len(calls) == 0 else "cloud-init-done")
+                return status_results.pop(0)
+            if command == vm.GUEST_PROVISIONED_COMMAND:
+                calls.append("provision-marker")
+                return status_results.pop(0)
+            calls.append("readiness")
+            return status_results.pop(0)
+
         with mock.patch.object(vm, "_guest_ssh", side_effect=ssh_side_effect) as guest_ssh, \
+             mock.patch.object(vm.time, "sleep"), \
              mock.patch.object(vm, "_check_guest_compatibility",
                                side_effect=lambda **kwargs: (calls.append("compat"),
                                                             compatibility_context.append(kwargs))):
             # Exercise the real readiness orchestration while isolating transport.
             vm._ensure_guest_ready()
-            self.assertEqual(guest_ssh.call_count, 2)
-        self.assertEqual(calls, ["cloud-init", "compat", "readiness"])
+            self.assertEqual(guest_ssh.call_count, 4)
+        self.assertEqual(calls, ["cloud-init-running", "cloud-init-done", "provision-marker",
+                                 "compat", "readiness"])
         self.assertEqual(set(compatibility_context[0]), {"cloud_init_ready_wait_ms"})
         self.assertIsInstance(compatibility_context[0]["cloud_init_ready_wait_ms"], int)
         self.assertGreaterEqual(compatibility_context[0]["cloud_init_ready_wait_ms"], 0)
+        status_calls = [call for call in guest_ssh.call_args_list
+                        if call.args[0] == vm.CLOUD_INIT_STATUS_COMMAND]
+        self.assertEqual(len(status_calls), 2)
+        for call in status_calls:
+            self.assertEqual(call.kwargs["capture_limit"], vm.GUEST_COMPAT_MAX_OUTPUT)
+            self.assertLessEqual(call.kwargs["timeout"], 15)
+        self.assertIn("test ! -L /var/lib/mester-v3-provisioned", vm.GUEST_PROVISIONED_COMMAND)
+
+    def test_cloud_init_status_classifier_requires_consistent_clean_completion(self):
+        cases = (
+            (cloud_init_result("not started"), "RUNNING"),
+            (cloud_init_result("running"), "RUNNING"),
+            (cloud_init_result("done"), "DONE"),
+            (cloud_init_result("running", return_code=2,
+                               extended_status="degraded running"), "ERROR"),
+            (cloud_init_result("done", return_code=2,
+                               extended_status="degraded done"), "ERROR"),
+            (cloud_init_result("done", errors=["provisioning failed"]), "ERROR"),
+            (cloud_init_result("done", recoverable_errors={"WARNING": ["degraded"]}), "ERROR"),
+            (cloud_init_result("error", return_code=1,
+                               extended_status="error - done"), "ERROR"),
+            (cloud_init_result("disabled"), "ERROR"),
+            (cloud_init_result("running", extended_status="done"), "INCONCLUSIVE"),
+            ((0, b"not-json"), "INCONCLUSIVE"),
+            ((0, b'{"status":"running","status":"done"}'), "INCONCLUSIVE"),
+            ((0, b"x" * (vm.GUEST_COMPAT_MAX_OUTPUT + 1)), "INCONCLUSIVE"),
+        )
+        for result, expected in cases:
+            with self.subTest(result=result[0]):
+                self.assertEqual(vm._cloud_init_status_state(*result), expected)
+
+    def test_running_cloud_init_never_reaches_compatibility_before_deadline(self):
+        class Clock:
+            now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.now += seconds
+
+        clock = Clock()
+        with mock.patch.object(vm, "SSH_READY_TIMEOUT", 2.5), \
+             mock.patch.object(vm.time, "monotonic", side_effect=clock.monotonic), \
+             mock.patch.object(vm.time, "sleep", side_effect=clock.sleep), \
+             mock.patch.object(vm, "_guest_ssh", return_value=cloud_init_result("running")) as ssh, \
+             mock.patch.object(vm, "_check_guest_compatibility") as compatibility_check:
+            with self.assertRaisesRegex(vm.Refused, "did not complete before its bound"):
+                vm._ensure_guest_ready()
+        self.assertEqual(ssh.call_count, 2)
+        compatibility_check.assert_not_called()
+
+    def test_ssh_transport_recovery_stays_within_provisioning_gate(self):
+        results = [(255, b""), vm.GuestSSHTimeout("bounded request timeout"),
+                   cloud_init_result("running"), cloud_init_result("done"), 0]
+        with mock.patch.object(vm, "_guest_ssh", side_effect=results) as ssh, \
+             mock.patch.object(vm.time, "sleep"):
+            vm._wait_for_guest_provisioning()
+        self.assertEqual(ssh.call_count, 5)
+        self.assertEqual(ssh.call_args_list[-1].args[0], vm.GUEST_PROVISIONED_COMMAND)
+
+    def test_status_response_overflow_fails_closed_without_compatibility(self):
+        with mock.patch.object(vm, "_guest_ssh",
+                               side_effect=vm.Refused("fixed guest compatibility response exceeded its bound")) as ssh, \
+             mock.patch.object(vm, "_check_guest_compatibility") as compatibility_check:
+            with self.assertRaisesRegex(vm.Refused, "response exceeded its bound"):
+                vm._ensure_guest_ready()
+        ssh.assert_called_once_with(
+            vm.CLOUD_INIT_STATUS_COMMAND, timeout=15.0,
+            capture_limit=vm.GUEST_COMPAT_MAX_OUTPUT)
+        compatibility_check.assert_not_called()
+
+    def test_cloud_init_error_and_missing_provision_marker_block_compatibility(self):
+        cases = (
+            ([cloud_init_result("done", return_code=2,
+                                extended_status="degraded done")],
+             "unsuccessful or degraded completion"),
+            ([cloud_init_result("done"), 1], "completion marker is missing or unsafe"),
+        )
+        for results, error in cases:
+            with self.subTest(error=error):
+                calls = []
+
+                def ssh_side_effect(command, **_kwargs):
+                    calls.append(command)
+                    return results.pop(0)
+
+                with mock.patch.object(vm, "_guest_ssh", side_effect=ssh_side_effect), \
+                     mock.patch.object(vm.time, "sleep"), \
+                     mock.patch.object(vm, "_check_guest_compatibility") as compatibility_check:
+                    with self.assertRaisesRegex(vm.Refused, error):
+                        vm._ensure_guest_ready()
+                compatibility_check.assert_not_called()
+                if error.startswith("unsuccessful"):
+                    self.assertEqual(calls, [vm.CLOUD_INIT_STATUS_COMMAND])
+                else:
+                    self.assertEqual(calls, [vm.CLOUD_INIT_STATUS_COMMAND,
+                                             vm.GUEST_PROVISIONED_COMMAND])
 
     def test_guest_compatibility_nonmatch_fails_startup_closed(self):
         checker = type("Checker", (), {

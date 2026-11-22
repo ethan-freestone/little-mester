@@ -64,10 +64,18 @@ DISK_PART = "disk.qcow2.part"
 CODE_UPDATE_LOCK = CONFIG / "code-update.lock"
 CODE_UPDATE_MARKER = CONFIG / "code-update.in-progress"
 GUEST_COMPAT_MAX_OUTPUT = 8192
+CLOUD_INIT_STATUS_COMMAND = "cloud-init status --format=json"
+GUEST_PROVISIONED_COMMAND = (
+    "test -f /var/lib/mester-v3-provisioned && "
+    "test ! -L /var/lib/mester-v3-provisioned")
 
 
 class Refused(RuntimeError):
     pass
+
+
+class GuestSSHTimeout(Refused):
+    """A bounded captured guest command timed out; callers may retry by policy."""
 
 
 def _require_fixed_file(path: pathlib.Path, *, uid: int, mode: int,
@@ -388,7 +396,7 @@ def _guest_ssh(command: str, *, tty: bool = False, timeout: int = 20,
                 if remaining <= 0:
                     process.kill()
                     process.wait()
-                    raise Refused("fixed guest compatibility inspection timed out")
+                    raise GuestSSHTimeout("bounded captured guest SSH request timed out")
                 events = selector.select(remaining)
                 if not events and process.poll() is not None:
                     break
@@ -511,6 +519,95 @@ def _browser_auth() -> int:
     return result
 
 
+def _reject_duplicate_json_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate status key")
+        result[key] = value
+    return result
+
+
+def _cloud_init_status_state(return_code: int, stdout: bytes) -> str:
+    """Classify the bounded machine-readable status without exposing its contents."""
+    if type(return_code) is not int or return_code not in (0, 1, 2):
+        return "INCONCLUSIVE"
+    if return_code in (1, 2):
+        return "ERROR"
+    if not isinstance(stdout, bytes) or not stdout or len(stdout) > GUEST_COMPAT_MAX_OUTPUT:
+        return "INCONCLUSIVE"
+    try:
+        document = json.loads(stdout.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_pairs)
+    except (UnicodeError, json.JSONDecodeError, ValueError, TypeError, RecursionError):
+        return "INCONCLUSIVE"
+    if not isinstance(document, dict):
+        return "INCONCLUSIVE"
+    status, extended = document.get("status"), document.get("extended_status")
+    errors, recoverable_errors = document.get("errors"), document.get("recoverable_errors")
+    if (not isinstance(status, str) or not isinstance(extended, str)
+            or type(errors) is not list or type(recoverable_errors) is not dict):
+        return "INCONCLUSIVE"
+    if errors or recoverable_errors:
+        return "ERROR"
+    if status in ("error", "disabled") or extended.startswith(("error", "degraded")):
+        return "ERROR"
+    if status in ("not started", "running"):
+        return "RUNNING" if extended == status else "INCONCLUSIVE"
+    if status == "done":
+        return "DONE" if extended == "done" else "INCONCLUSIVE"
+    return "INCONCLUSIVE"
+
+
+def _wait_for_guest_provisioning() -> int:
+    """Wait for a clean cloud-init final state and its existing provision marker."""
+    started = time.monotonic()
+    deadline = started + SSH_READY_TIMEOUT
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            result = _guest_ssh(
+                CLOUD_INIT_STATUS_COMMAND, timeout=min(15.0, remaining),
+                capture_limit=GUEST_COMPAT_MAX_OUTPUT)
+        except (OSError, subprocess.SubprocessError, GuestSSHTimeout):
+            result = None
+        if result is not None:
+            if not isinstance(result, tuple) or len(result) != 2:
+                raise Refused("cloud-init status response is inconclusive")
+            return_code, stdout = result
+            if type(return_code) is int and return_code == 255:
+                state = "TRANSPORT"  # SSH is not ready yet; keep polling within the shared bound.
+            else:
+                state = _cloud_init_status_state(return_code, stdout)
+            if state == "ERROR":
+                raise Refused("cloud-init reported unsuccessful or degraded completion")
+            if state == "INCONCLUSIVE":
+                raise Refused("cloud-init status is inconclusive; provisioning is not established")
+            if state == "DONE":
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    marker_status = _guest_ssh(
+                        GUEST_PROVISIONED_COMMAND, timeout=min(15.0, remaining))
+                except (OSError, subprocess.SubprocessError):
+                    marker_status = 255
+                if marker_status == 0:
+                    elapsed = time.monotonic() - started
+                    if elapsed <= SSH_READY_TIMEOUT:
+                        return max(0, int(elapsed * 1000))
+                    break
+                if marker_status != 255:
+                    raise Refused("guest provisioning completion marker is missing or unsafe")
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(2.0, remaining))
+    raise Refused("cloud-init or SSH did not complete before its bound")
+
+
 def _ensure_guest_ready() -> None:
     import importlib.util
     spec = importlib.util.spec_from_file_location(
@@ -519,20 +616,7 @@ def _ensure_guest_ready() -> None:
         raise Refused("protected parent session contract is unavailable")
     contract = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(contract)
-    cloud_init_command = "cloud-init status --long >/dev/null 2>&1 || exit 41"
-    cloud_init_wait_started = time.monotonic()
-    deadline = cloud_init_wait_started + SSH_READY_TIMEOUT
-    while time.monotonic() < deadline:
-        try:
-            if _guest_ssh(cloud_init_command, timeout=15) == 0:
-                cloud_init_ready_wait_ms = max(
-                    0, int((time.monotonic() - cloud_init_wait_started) * 1000))
-                break
-        except (OSError, subprocess.SubprocessError):
-            pass
-        time.sleep(2)
-    else:
-        raise Refused("cloud-init or SSH did not complete before its bound")
+    cloud_init_ready_wait_ms = _wait_for_guest_provisioning()
 
     _check_guest_compatibility(cloud_init_ready_wait_ms=cloud_init_ready_wait_ms)
     command = contract.readiness_checks(workspace_path=contract.SYSTEM_WORKSPACE)
