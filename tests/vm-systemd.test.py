@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import datetime
+import hashlib
 import importlib.machinery
 import importlib.util
 import inspect
@@ -17,12 +19,12 @@ import shlex
 import shutil
 import stat
 import subprocess
+import tarfile
 import tempfile
 import textwrap
 import time
 import unittest
 from unittest import mock
-
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -1541,6 +1543,16 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn("prepare 1000", provision)
         self.assertIn("prepare 1000", provision)
         self.assertIn("@opencode/cli@2.2.5", provision)
+        self.assertIn("apt-get install -y --no-install-recommends nodejs libnode-dev build-essential",
+                      provision)
+        self.assertNotIn("nodejs npm", provision)
+        self.assertIn("python3 -I /usr/local/libexec/mester-vm-guest-bootstrap.py install-npm",
+                      provision)
+        embedded_bootstrap = files[bootstrap.NPM_GUEST_HELPER]
+        self.assertEqual(base64.b64decode(embedded_bootstrap["content"]),
+                         (ROOT / "lib/vm/guest-bootstrap.py").read_bytes())
+        self.assertEqual(embedded_bootstrap["owner"], "root:root")
+        self.assertEqual(embedded_bootstrap["permissions"], "0755")
         self.assertIn("prepare-auth", files["/usr/local/bin/lm-opencode"]["content"])
         self.assertIn("cd /workspace", files["/usr/local/bin/lm-opencode"]["content"])
         self.assertIn("lm-guest-opencode-preferences.py model", files["/usr/local/libexec/lm-opencode"]["content"])
@@ -1587,6 +1599,94 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn("NO_PROXY=localhost,127.0.0.1,10.0.2.100", smoke_yaml)
         self.assertIn("disable_root: true", smoke_yaml)
         self.assertIn("docker-ce-rootless-extras", smoke_yaml)
+        self.assertIn("nodejs libnode-dev build-essential", smoke_yaml)
+        self.assertNotIn("apt-get install -y ca-certificates curl uidmap dbus-user-session slirp4netns fuse-overlayfs kmod iptables nodejs npm",
+                         smoke_yaml)
+        bootstrap_start = smoke_yaml.index(
+            "  - path: /usr/local/libexec/mester-vm-guest-bootstrap.py\n")
+        bootstrap_end = smoke_yaml.find("\n  - path:", bootstrap_start + 1)
+        bootstrap_block = smoke_yaml[bootstrap_start:bootstrap_end]
+        bootstrap_match = re.search(
+            r"(?m)^    content: ([A-Za-z0-9+/=]+)$", bootstrap_block)
+        self.assertIsNotNone(bootstrap_match)
+        embedded_source = base64.b64decode(bootstrap_match.group(1)).decode("utf-8")
+        self.assertIn('NPM_CHANNEL_URL = "https://registry.npmjs.org/npm/next-10"',
+                      embedded_source)
+        generated = bootstrap.build_foundation(
+            name="system-test", uid=1000, ssh_key="ssh-ed25519 AAAA test",
+            workspace="disk", helper="/usr/local/libexec/lm-guest-user-dirs.py")
+        self.assertEqual(
+            base64.b64decode(next(item for item in generated["write_files"]
+                                  if item["path"] == bootstrap.NPM_GUEST_HELPER)["content"]),
+            (ROOT / "lib/vm/guest-bootstrap.py").read_bytes())
+
+    def test_npm_channel_metadata_and_sha512_are_strictly_validated(self):
+        artifact = b"npm fixture artifact"
+        integrity = "sha512-" + base64.b64encode(hashlib.sha512(artifact).digest()).decode("ascii")
+        metadata = {
+            "name": "npm",
+            "version": "10.9.11",
+            "engines": {"node": "^18.17.0 || >=20.5.0"},
+            "dist": {
+                "tarball": "https://registry.npmjs.org/npm/-/npm-10.9.11.tgz",
+                "integrity": integrity,
+                "unpackedSize": 123,
+            },
+        }
+        resolved = bootstrap.validate_npm_metadata(metadata)
+        self.assertEqual(resolved["version"], "10.9.11")
+        self.assertEqual(resolved["node_range"], "^18.17.0 || >=20.5.0")
+        bootstrap.verify_npm_integrity(artifact, integrity)
+        with self.assertRaises(bootstrap.NpmBootstrapError):
+            bootstrap.verify_npm_integrity(artifact + b"tampered", integrity)
+        for update in (
+            {"version": "11.0.0"},
+            {"version": "10.9.11-rc.1"},
+            {"dist": {**metadata["dist"], "tarball": "https://attacker.invalid/npm.tgz"}},
+            {"dist": {**metadata["dist"], "integrity": "sha1-deadbeef"}},
+            {"engines": {}},
+        ):
+            invalid = {**metadata, **update}
+            with self.subTest(update=update), self.assertRaises(bootstrap.NpmBootstrapError):
+                bootstrap.validate_npm_metadata(invalid)
+
+    def test_npm_global_prefix_setup_preserves_other_and_user_configuration(self):
+        with tempfile.TemporaryDirectory(prefix="lm-npm-global-config-") as temporary:
+            root = pathlib.Path(temporary)
+            config = root / "usr/etc/npmrc"
+            bootstrap._ensure_global_prefix_config(config)
+            self.assertEqual(config.read_text(), "prefix=/usr/local\n")
+
+            config.write_text("cache=/tmp/npm-cache\n")
+            bootstrap._ensure_global_prefix_config(config)
+            self.assertEqual(config.read_text(),
+                             "cache=/tmp/npm-cache\nprefix=/usr/local\n")
+
+            custom = root / "custom.npmrc"
+            custom.write_text("prefix=/custom/global\ncache=/tmp/npm-cache\n")
+            custom.chmod(0o644)
+            before = custom.read_bytes()
+            bootstrap._ensure_global_prefix_config(custom)
+            self.assertEqual(custom.read_bytes(), before)
+
+            target = root / "target.npmrc"
+            target.write_text("prefix=/usr/local\n")
+            linked = root / "linked.npmrc"
+            linked.symlink_to(target)
+            with self.assertRaises(bootstrap.NpmBootstrapError):
+                bootstrap._ensure_global_prefix_config(linked)
+
+    def test_npm_tarball_extraction_refuses_paths_outside_package(self):
+        with tempfile.TemporaryDirectory(prefix="lm-npm-tar-safety-") as temporary:
+            root = pathlib.Path(temporary)
+            archive_path = root / "unsafe.tgz"
+            with tarfile.open(archive_path, "w:gz") as archive:
+                entry = tarfile.TarInfo("package/../../outside")
+                entry.size = 1
+                archive.addfile(entry, io.BytesIO(b"x"))
+            with self.assertRaises(bootstrap.NpmBootstrapError):
+                bootstrap._safe_extract_npm(archive_path, root / "extract")
+            self.assertFalse((root / "outside").exists())
 
     def test_installed_session_contract_resolves_colocated_plugin_assets(self):
         with tempfile.TemporaryDirectory(prefix="lm-session-install-layout-") as temporary:

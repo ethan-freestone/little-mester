@@ -10,6 +10,17 @@
   current contract does not persist a separate binary digest; a future version
   promotion must record and verify the package/artifact digest as part of its
   reviewed evidence rather than treating a version string as byte identity.
+- **Package manager and development tools:** install Ubuntu's unversioned
+  `nodejs`, `libnode-dev`, and `build-essential` packages without recommendations;
+  leave the existing rootless-Docker prerequisite recommendations unchanged.
+  Bootstrap npm from the moving registry `next-10` channel, accepting only a
+  stable `10.x.y` release whose Node engine range matches the installed Node
+  runtime. Require the canonical npm-registry tarball URL and verify its
+  SHA-512 SRI before safe extraction; fail closed without a fallback if any
+  check fails. The bundled `npm`, `npx`, and `node-gyp` commands retain global
+  installation and native-addon development. This is a moving npm 10 channel,
+  not a claim that npm 10 is upstream latest; reassess its major constraint
+  when migrating the guest to a newer Ubuntu LTS. No exact npm patch is pinned.
 - **Protected launch:** use the canonical launch assets in
   `lib/vm/parent-session-contract.py`. The TUI is started through the protected
   tmux launcher with a clean environment, fixed `HOME`, `PATH`, `TERM`, global
