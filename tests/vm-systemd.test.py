@@ -1587,6 +1587,14 @@ class SystemdPolicyTests(unittest.TestCase):
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7zJmK1W1h3V4eA7qQKX8U4n9x0z8m1c2b3d4e5f6g7 test")
         system_script = bootstrap.provision_script(
             1000, "virtiofs", "/usr/local/libexec/lm-guest-user-dirs.py")
+        package_json_normalization = (
+            "python3 -I /usr/local/libexec/mester-vm-guest-bootstrap.py "
+            "normalize-opencode-package-json")
+        for provision in (smoke_script, system_script):
+            with self.subTest(provision="shared npm install"):
+                self.assertLess(
+                    provision.index("npm install --global @opencode/cli@2.2.5"),
+                    provision.index(package_json_normalization))
         self.assertIn("guest-bootstrap.py\" smoke-cloud-init", (ROOT / "lib/vm/cloud-init.sh").read_text())
         self.assertIn("apt-get install -y docker-ce docker-ce-cli containerd.io", smoke_script)
         self.assertIn("apt-get install -y docker-ce docker-ce-cli containerd.io", system_script)
@@ -1619,6 +1627,54 @@ class SystemdPolicyTests(unittest.TestCase):
             base64.b64decode(next(item for item in generated["write_files"]
                                   if item["path"] == bootstrap.NPM_GUEST_HELPER)["content"]),
             (ROOT / "lib/vm/guest-bootstrap.py").read_bytes())
+
+    def test_opencode_package_json_normalization_sets_0644_idempotently(self):
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="vm-opencode-package-") as temporary:
+            target = pathlib.Path(temporary) / "package.json"
+            target.write_text('{"version":"2.2.5"}\n', encoding="utf-8")
+            target.chmod(0o755)
+            inspected = [
+                mock.Mock(st_mode=stat.S_IFREG | 0o755, st_uid=0, st_gid=0),
+                mock.Mock(st_mode=stat.S_IFREG | 0o644, st_uid=0, st_gid=0),
+                mock.Mock(st_mode=stat.S_IFREG | 0o644, st_uid=0, st_gid=0),
+                mock.Mock(st_mode=stat.S_IFREG | 0o644, st_uid=0, st_gid=0),
+            ]
+            with mock.patch.object(
+                    bootstrap.os, "fstat", side_effect=inspected) as fstat:
+                bootstrap.normalize_opencode_package_json(target)
+                bootstrap.normalize_opencode_package_json(target)
+            self.assertEqual(fstat.call_count, 4)
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
+
+    def test_opencode_package_json_normalization_refuses_invalid_targets_without_chmod(self):
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="vm-opencode-package-") as temporary:
+            root = pathlib.Path(temporary)
+            target = root / "package.json"
+            target.write_text('{"version":"2.2.5"}\n', encoding="utf-8")
+            target.chmod(0o755)
+
+            symlink = root / "package-link.json"
+            symlink.symlink_to(target)
+            with self.assertRaises(bootstrap.NpmBootstrapError):
+                bootstrap.normalize_opencode_package_json(symlink)
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+
+            directory = root / "package-directory"
+            directory.mkdir(mode=0o755)
+            with self.assertRaises(bootstrap.NpmBootstrapError):
+                bootstrap.normalize_opencode_package_json(directory)
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o755)
+
+            for uid, gid in ((1000, 0), (0, 1000)):
+                with self.subTest(uid=uid, gid=gid):
+                    synthetic_info = mock.Mock(
+                        st_mode=stat.S_IFREG | 0o755, st_uid=uid, st_gid=gid)
+                    with mock.patch.object(
+                            bootstrap.os, "fstat", return_value=synthetic_info):
+                        with self.assertRaisesRegex(
+                                bootstrap.NpmBootstrapError, "root:root"):
+                            bootstrap.normalize_opencode_package_json(target)
+                    self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
 
     def test_npm_channel_metadata_and_sha512_are_strictly_validated(self):
         artifact = b"npm fixture artifact"

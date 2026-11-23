@@ -30,6 +30,8 @@ NPM_INSTALL_ROOT = "/usr/local/lib/node_modules"
 NPM_BIN_DIR = "/usr/local/bin"
 NPM_PREFIX = "/usr/local"
 NPM_GUEST_HELPER = "/usr/local/libexec/mester-vm-guest-bootstrap.py"
+OPENCODE_PACKAGE_JSON = pathlib.Path(
+    "/usr/local/lib/node_modules/@opencode/cli/package.json")
 
 
 class NpmBootstrapError(RuntimeError):
@@ -303,6 +305,36 @@ def _atomic_symlink(target: pathlib.Path, directory: pathlib.Path, name: str) ->
             pass
 
 
+def normalize_opencode_package_json(
+        path: pathlib.Path = OPENCODE_PACKAGE_JSON) -> None:
+    """Set the fixed package metadata file to 0644 without following links."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+    try:
+        fd = os.open(path, flags)
+    except OSError as error:
+        raise NpmBootstrapError(
+            "OpenCode package metadata could not be opened without following links") from error
+
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise NpmBootstrapError("OpenCode package metadata is not a regular file")
+        if before.st_uid != 0 or before.st_gid != 0:
+            raise NpmBootstrapError("OpenCode package metadata is not owned by root:root")
+        try:
+            os.fchmod(fd, 0o644)
+            after = os.fstat(fd)
+        except OSError as error:
+            raise NpmBootstrapError(
+                "OpenCode package metadata mode normalization failed") from error
+        if (not stat.S_ISREG(after.st_mode) or after.st_uid != 0 or after.st_gid != 0
+                or stat.S_IMODE(after.st_mode) != 0o644):
+            raise NpmBootstrapError(
+                "OpenCode package metadata did not retain root:root mode 0644")
+    finally:
+        os.close(fd)
+
+
 def _run_npm(node: str, npm_cli: pathlib.Path, *arguments: str, env=None) -> str:
     try:
         result = subprocess.run([node, str(npm_cli), *arguments], text=True,
@@ -503,6 +535,8 @@ runuser -u mester -- env HOME=/home/mester XDG_RUNTIME_DIR=/run/user/@UID@ DBUS_
 runuser -u mester -- env HOME=/home/mester XDG_RUNTIME_DIR=/run/user/@UID@ DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/@UID@/bus dockerd-rootless-setuptool.sh install
 runuser -u mester -- env HOME=/home/mester XDG_RUNTIME_DIR=/run/user/@UID@ DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/@UID@/bus systemctl --user enable --now docker
 npm install --global @opencode/cli@2.2.5
+# npm package metadata is data; normalize only a verified root-owned regular file.
+python3 -I @NPM_BOOTSTRAP@ normalize-opencode-package-json
 command -v opencode
 chown root:root /usr/local/bin/opencode
 chmod 0755 /usr/local/bin/opencode
@@ -687,12 +721,17 @@ def main() -> int:
     script.add_argument("--workspace", choices=("virtiofs", "disk"), required=True)
     script.add_argument("--helper", choices=("/usr/local/sbin/mester-v3-user-dirs.py", "/usr/local/libexec/lm-guest-user-dirs.py"), required=True)
     sub.add_parser("install-npm")
+    sub.add_parser("normalize-opencode-package-json")
     args = parser.parse_args()
     try:
         if args.action == "smoke-cloud-init":
             sys.stdout.write(render_smoke_cloud_init(args.name, args.uid, args.ssh_key))
         elif args.action == "provision-script":
             sys.stdout.write(provision_script(args.uid, args.workspace, args.helper))
+        elif args.action == "normalize-opencode-package-json":
+            if os.geteuid() != 0:
+                raise NpmBootstrapError("OpenCode package metadata normalization requires root")
+            normalize_opencode_package_json()
         else:
             if os.geteuid() != 0:
                 raise NpmBootstrapError("npm bootstrap requires root")

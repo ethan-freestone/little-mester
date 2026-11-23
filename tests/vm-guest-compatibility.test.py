@@ -148,6 +148,25 @@ class GuestCompatibilityInventoryTests(unittest.TestCase):
         self.assertNotIn("/home/mester/.local/share/opencode/sessions", serialized)
         self.assertNotIn("/workspace/", serialized)
 
+    def test_opencode_package_json_contract_matches_and_fails_closed(self):
+        expected, document = _candidate_response()
+        package_path = compatibility.OPENCODE_PACKAGE_JSON
+        status, diagnostics = _classify(document, expected)
+        self.assertEqual((status, diagnostics), ("MATCH", ()))
+
+        for field, wrong in (
+            ("mode", 0o755),
+            ("version", "2.2.4"),
+            ("uid", 1000),
+            ("gid", 1000),
+        ):
+            with self.subTest(field=field):
+                altered = json.loads(json.dumps(document))
+                altered["inventory"][package_path][field] = wrong
+                status, diagnostics = _classify(altered, expected)
+                self.assertEqual(status, "MISMATCH")
+                self.assertIn("asset-14:mismatch", diagnostics)
+
     def test_expected_digests_are_candidate_derived_and_metadata_complete(self):
         expected = compatibility.expected_inventory("/workspace")
 

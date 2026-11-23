@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from unittest import mock
@@ -36,6 +37,197 @@ DIAG_SPEC = importlib.util.spec_from_file_location(
     "parent_ssh_endpoint_diagnostic", ROOT / "scripts/parent-ssh-endpoint-diagnostic.py")
 diagnostic = importlib.util.module_from_spec(DIAG_SPEC)
 DIAG_SPEC.loader.exec_module(diagnostic)
+
+
+SAFE_SCANNER_REFUSALS = frozenset({
+    "insufficient_privilege_or_invalid_identity", "invalid_caller_fd_exemption",
+    "procfs_unavailable", "procfs_restricted", "pid_namespace_restricted",
+    "user_namespace_restricted", "procfs_visibility_failed", "procfs_incomplete",
+    "procfs_enumeration_failed", "malformed_process_identity",
+    "incomplete_task_enumeration", "incomplete_fd_enumeration",
+    "unreadable_process_stat", "unreadable_task_enumeration",
+    "unreadable_fd_enumeration", "unreadable_fd_target_stat",
+    "descriptor_changed_during_observation", "unreadable_task_maps",
+    "incomplete_mapping_observation", "malformed_mapping_identity",
+    "malformed_mapping_observation", "incomplete_procfs_scan",
+    "task_enumeration_limit_exceeded", "descriptor_enumeration_limit_exceeded",
+    "mapping_output_limit_exceeded", "process_changed_during_scan",
+    "incomplete_live_process_observation", "unreadable_live_process",
+    "unreadable_process_post_stat", "caller_changed_during_scan",
+    "protected_helper_unavailable", "protected_helper_path_untrusted",
+})
+SAFE_RETRY_DIAGNOSTIC = re.compile(
+    r"DIAGNOSTIC: phase=fd_target_retry classification=fd_slot_reappeared "
+    r"retry_identity=(matches_requested|differs_from_requested)")
+SAFE_CHILD_STATES = frozenset({"yes", "no", "unknown"})
+SAFE_EXECUTION_STATES = frozenset({"not_started", "completed", "timed_out", "launch_failed"})
+SAFE_PRIVILEGE_STATES = frozenset({"not_started", "confirmed", "unconfirmed"})
+SAFE_RESULT_CATEGORIES = frozenset({
+    "map_holder_for_child", "map_holder_missing", "scanner_refused",
+    "scanner_result_malformed", "scanner_result_incomplete", "scanner_output_oversized",
+    "scanner_stderr", "scan_timed_out", "scan_launch_failed", "fixture_precondition_failed",
+})
+
+
+def _safe_scanner_stderr(stderr):
+    """Keep only scanner refusal and fixed diagnostic enums; redact everything else."""
+    if isinstance(stderr, bytes):
+        text = stderr[:4096].decode("utf-8", "replace")
+    elif isinstance(stderr, str):
+        text = stderr[:4096]
+    else:
+        text = ""
+    safe_lines = []
+    for line in text.splitlines():
+        if line.startswith("REFUSED: "):
+            reason = line.removeprefix("REFUSED: ")
+            if reason in SAFE_SCANNER_REFUSALS:
+                safe_lines.append(f"REFUSED: {reason}")
+        elif SAFE_RETRY_DIAGNOSTIC.fullmatch(line):
+            safe_lines.append(line)
+    return " | ".join(safe_lines)[:256] or "redacted_or_unrecognized"
+
+
+def _safe_scanner_reason(stderr):
+    summary = _safe_scanner_stderr(stderr)
+    for item in summary.split(" | "):
+        if item.startswith("REFUSED: "):
+            return item.removeprefix("REFUSED: ")
+    return "none_or_redacted"
+
+
+def _mapping_scan_failure_context(*, execution, privilege, return_code, stderr, elapsed_ms,
+                                  before, after, expected, observed, assertion):
+    """Build bounded test diagnostics from allowlisted states only."""
+    execution = execution if execution in SAFE_EXECUTION_STATES else "not_started"
+    privilege = privilege if privilege in SAFE_PRIVILEGE_STATES else "unconfirmed"
+    expected = expected if expected in SAFE_RESULT_CATEGORIES else "other"
+    observed = observed if observed in SAFE_RESULT_CATEGORIES else "other"
+    assertion = (assertion if assertion in {
+        "assertEqual(observed,map_holder_for_child)",
+        "fixture map present and original fd closed"}
+                 else "test assertion failed")
+    def child_state(value):
+        return value if value in SAFE_CHILD_STATES else "unknown"
+
+    def descriptor_state(value):
+        return value if value in {"closed", "open", "unknown"} else "unknown"
+
+    code = str(return_code) if type(return_code) is int else "none"
+    elapsed = max(0, min(60000, int(elapsed_ms)))
+    report = (
+        "operation=sudo_noninteractive_protected_scanner_scan_inode "
+        f"privileged_execution={privilege} execution={execution} "
+        f"reason={_safe_scanner_reason(stderr)} return_code={code} elapsed_ms={elapsed} "
+        f"child_before[alive={child_state(before.get('alive'))},"
+        f"mapping={child_state(before.get('mapping'))},"
+        f"original_fd={descriptor_state(before.get('original_fd'))}] "
+        f"child_after[alive={child_state(after.get('alive'))},"
+        f"mapping={child_state(after.get('mapping'))},"
+        f"original_fd={descriptor_state(after.get('original_fd'))}] "
+        f"expected={expected} observed={observed} assertion={assertion} "
+        f"stderr={_safe_scanner_stderr(stderr)}")
+    return report[:1024]
+
+
+class ScannerFailureDiagnosticUnitTests(unittest.TestCase):
+    def test_simulated_descriptor_refusal_reports_only_allowlisted_retry_classification(self):
+        for matches, retry_identity in ((True, "matches_requested"),
+                                        (False, "differs_from_requested")):
+            with self.subTest(retry_identity=retry_identity):
+                error = gate.DescriptorChangedDuringObservation(matches)
+                output, errors = io.StringIO(), io.StringIO()
+                with (mock.patch.object(sys, "argv", ["scanner", "--scan-inode",
+                                                        "11", "22", "0", "-1"]),
+                      mock.patch.object(gate, "_scan_proc_inode", side_effect=error),
+                      contextlib.redirect_stdout(output),
+                      contextlib.redirect_stderr(errors)):
+                    code = gate.main()
+                self.assertEqual(code, 2)
+                self.assertEqual(output.getvalue(), "")
+                expected = (
+                    "REFUSED: descriptor_changed_during_observation\n"
+                    "DIAGNOSTIC: phase=fd_target_retry classification=fd_slot_reappeared "
+                    f"retry_identity={retry_identity}\n"
+                    "SAFETY GATE: FAIL — no disk attachment authorized\n")
+                self.assertEqual(errors.getvalue(), expected)
+
+    def test_simulated_failure_context_redacts_unallowlisted_stderr(self):
+        stderr = (
+            b"REFUSED: descriptor_changed_during_observation\n"
+            b"DIAGNOSTIC: phase=fd_target_retry classification=fd_slot_reappeared "
+            b"retry_identity=matches_requested\n"
+            b"/private/path SUDO_UID=314159 credential=secret pid=2718 fd=23 "
+            b"device=88 inode=9911\n")
+        before = {"alive": "yes", "mapping": "yes", "original_fd": "closed"}
+        after = {"alive": "yes", "mapping": "yes", "original_fd": "closed"}
+        context = _mapping_scan_failure_context(
+            execution="completed", privilege="confirmed", return_code=2,
+            stderr=stderr, elapsed_ms=41, before=before, after=after,
+            expected="map_holder_for_child", observed="scanner_refused",
+            assertion="assertEqual(observed,map_holder_for_child)")
+        self.assertIn("reason=descriptor_changed_during_observation", context)
+        self.assertIn("retry_identity=matches_requested", context)
+        self.assertIn("return_code=2 elapsed_ms=41", context)
+        self.assertIn("child_before[alive=yes,mapping=yes,original_fd=closed]", context)
+        self.assertIn("child_after[alive=yes,mapping=yes,original_fd=closed]", context)
+        self.assertIn("expected=map_holder_for_child observed=scanner_refused", context)
+        for secret in ("/private/path", "SUDO_UID", "credential", "secret", "2718",
+                       "314159", "device=88", "inode=9911", "fd=23"):
+            self.assertNotIn(secret, context)
+        self.assertLessEqual(len(context), 1024)
+
+    def test_unprivileged_scanner_refuses_before_procfs_observation(self):
+        with mock.patch.object(gate.os, "geteuid", return_value=1000):
+            with self.assertRaisesRegex(
+                    gate.GateRefused, "insufficient_privilege_or_invalid_identity"):
+                gate._scan_proc_inode(1, 1)
+
+    def test_failure_context_does_not_misreport_unprivileged_scanner_as_root(self):
+        run = {"execution": "completed", "return_code": 2,
+               "stderr": b"REFUSED: insufficient_privilege_or_invalid_identity\n"}
+        self.assertEqual(ProcessScanTests._privilege_status(run, "scanner_refused"),
+                         "unconfirmed")
+        run["stderr"] = b"REFUSED: descriptor_changed_during_observation\n"
+        self.assertEqual(ProcessScanTests._privilege_status(run, "scanner_refused"),
+                         "confirmed")
+
+    def test_target_snapshot_reports_only_alive_mapping_and_closed_states(self):
+        with tempfile.NamedTemporaryFile() as held:
+            held.write(b"x" * 4096)
+            held.flush()
+            info = os.fstat(held.fileno())
+            code = (
+                "import mmap,os,signal,sys\n"
+                "f=os.open(sys.argv[1],os.O_RDONLY)\n"
+                "m=mmap.mmap(f,0,access=mmap.ACCESS_READ)\n"
+                "os.close(f)\n"
+                "try:\n    os.fstat(f)\n"
+                "except OSError:\n    pass\n"
+                "else:\n    raise AssertionError('original mapping fd remained open')\n"
+                "print('READY',f,flush=True)\n"
+                "signal.pause()\n")
+            child = subprocess.Popen([sys.executable, "-c", code, held.name],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, start_new_session=True)
+            try:
+                ready = child.stdout.readline().split()
+                self.assertEqual(len(ready), 2)
+                self.assertEqual(ready[0], "READY")
+                original_fd = int(ready[1])
+                before = ProcessScanTests._target_child_state(child.pid, original_fd, info)
+                after = ProcessScanTests._target_child_state(child.pid, original_fd, info)
+                expected = {"alive": "yes", "mapping": "yes", "original_fd": "closed"}
+                self.assertEqual(before, expected)
+                self.assertEqual(after, expected)
+            finally:
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                child.wait(timeout=5)
+                child.stdout.close()
+                child.stderr.close()
 
 
 class ScannerPermissionCategoryUnitTests(unittest.TestCase):
@@ -403,15 +595,14 @@ class ProcessScanTests(unittest.TestCase):
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        timeout=10, check=False)
         if authorization.returncode:
-            detail = authorization.stderr.decode("utf-8", "replace").strip()
             if (os.environ.get("CI", "").lower() == "true"
                     or os.environ.get("GITHUB_ACTIONS", "").lower() == "true"):
                 raise AssertionError(
                     "CI requires noninteractive sudo for privileged scanner tests; "
-                    f"authorization failed: {detail}")
+                    "authorization unavailable")
             raise unittest.SkipTest(
                 "NOT RUN: privileged scanner tests require noninteractive sudo; "
-                f"authorization failed: {detail}")
+                "authorization unavailable")
         resolved = owner_acceptance.git(ROOT, "rev-parse", "--verify", "HEAD^{commit}")
         if resolved.returncode:
             raise AssertionError("could not resolve exact source candidate for trusted fixture")
@@ -479,6 +670,29 @@ class ProcessScanTests(unittest.TestCase):
     def tearDownClass(cls):
         cls._remove_install_fixture()
 
+    def _invoke_privileged_scan(self, info, allowed_pid=0, allowed_fd=-1):
+        if not pathlib.Path("/usr/bin/sudo").exists():
+            return {"execution": "not_started", "return_code": None, "stdout": b"",
+                    "stderr": b"", "elapsed_ms": 0}
+        started = time.monotonic()
+        try:
+            result = subprocess.run(
+                ["/usr/bin/sudo", "-n", "/usr/bin/python3", "-I", "-B",
+                 str(self.protected_helper), "--scan-inode",
+                 str(info.st_dev), str(info.st_ino), str(allowed_pid), str(allowed_fd)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=40, check=False)
+        except subprocess.TimeoutExpired as error:
+            return {"execution": "timed_out", "return_code": getattr(error, "returncode", None),
+                    "stdout": error.output or b"", "stderr": error.stderr or b"",
+                    "elapsed_ms": min(60000, int((time.monotonic() - started) * 1000))}
+        except OSError:
+            return {"execution": "launch_failed", "return_code": None, "stdout": b"",
+                    "stderr": b"", "elapsed_ms": min(60000, int((time.monotonic() - started) * 1000))}
+        return {"execution": "completed", "return_code": result.returncode,
+                "stdout": result.stdout, "stderr": result.stderr,
+                "elapsed_ms": min(60000, int((time.monotonic() - started) * 1000))}
+
     def _privileged_scan(self, info, allowed_pid=0, allowed_fd=-1):
         if not pathlib.Path("/usr/bin/sudo").exists():
             self.fail("CI requires sudo for the real protected scanner integration")
@@ -495,8 +709,86 @@ class ProcessScanTests(unittest.TestCase):
         self.assertEqual(value["coverage"], {"procfs": True,
                                              "pid_namespace": "init-shared",
                                              "user_namespace": "init-shared",
-                                             "descriptors": True, "file_mappings": True})
+                                              "descriptors": True, "file_mappings": True})
         return value["holders"]
+
+    @staticmethod
+    def _target_child_state(child_pid, original_fd, info):
+        state = {"alive": "unknown", "mapping": "unknown", "original_fd": "unknown"}
+        try:
+            process_fields = (pathlib.Path("/proc") / str(child_pid) / "stat").read_text()
+            process_fields = process_fields.rsplit(")", 1)[1].split()
+            state["alive"] = ("yes" if process_fields and process_fields[0] not in {"Z", "X"}
+                               else "no")
+        except FileNotFoundError:
+            state["alive"] = "no"
+        except (OSError, IndexError):
+            pass
+        try:
+            maps = (pathlib.Path("/proc") / str(child_pid) / "maps").read_text()
+            wanted = (os.major(info.st_dev), os.minor(info.st_dev), info.st_ino)
+            found = False
+            for line in maps.splitlines():
+                columns = line.split(None, 5)
+                if len(columns) < 5:
+                    continue
+                major_text, minor_text = columns[3].split(":", 1)
+                if (int(major_text, 16), int(minor_text, 16), int(columns[4])) == wanted:
+                    found = True
+                    break
+            state["mapping"] = "yes" if found else "no"
+        except (OSError, ValueError, IndexError):
+            state["mapping"] = "unknown"
+        try:
+            os.stat(f"/proc/{child_pid}/fd/{original_fd}")
+        except FileNotFoundError:
+            state["original_fd"] = "closed"
+        except OSError:
+            state["original_fd"] = "unknown"
+        else:
+            state["original_fd"] = "open"
+        return state
+
+    @staticmethod
+    def _mapping_scan_category(run, child_pid):
+        if run["execution"] == "timed_out":
+            return "scan_timed_out"
+        if run["execution"] != "completed":
+            return "scan_launch_failed"
+        if run["return_code"] != 0:
+            return "scanner_refused"
+        if run["stderr"]:
+            return "scanner_stderr"
+        if len(run["stdout"]) > 65536:
+            return "scanner_output_oversized"
+        try:
+            value = json.loads(run["stdout"])
+        except (ValueError, UnicodeError):
+            return "scanner_result_malformed"
+        if (not isinstance(value, dict) or value.get("complete") is not True
+                or type(value.get("processes_scanned")) is not int
+                or value["processes_scanned"] < 1
+                or value.get("coverage") != {"procfs": True, "pid_namespace": "init-shared",
+                                               "user_namespace": "init-shared",
+                                               "descriptors": True, "file_mappings": True}
+                or not isinstance(value.get("holders"), list)):
+            return "scanner_result_incomplete"
+        if any(item == [child_pid, "map", 0] for item in value["holders"]):
+            return "map_holder_for_child"
+        return "map_holder_missing"
+
+    @staticmethod
+    def _privilege_status(run, observed):
+        if run["execution"] == "not_started":
+            return "not_started"
+        if run["execution"] == "completed":
+            reason = _safe_scanner_reason(run["stderr"])
+            if reason == "insufficient_privilege_or_invalid_identity":
+                return "unconfirmed"
+            if (reason != "none_or_redacted"
+                    or observed in {"map_holder_for_child", "map_holder_missing"}):
+                return "confirmed"
+        return "unconfirmed"
 
     def test_real_privileged_scanner_finds_invoking_users_scratch_fd(self):
         with tempfile.NamedTemporaryFile() as held:
@@ -587,19 +879,93 @@ class ProcessScanTests(unittest.TestCase):
             info = os.fstat(held.fileno())
             child = subprocess.Popen(
                 [sys.executable, "-c",
-                 "import mmap,os,sys,time; f=os.open(sys.argv[1],os.O_RDONLY); m=mmap.mmap(f,0,access=mmap.ACCESS_READ); os.close(f); print('READY',flush=True); time.sleep(20)",
+                 "import mmap,os,signal,sys\n"
+                 "f=os.open(sys.argv[1],os.O_RDONLY)\n"
+                 "m=mmap.mmap(f,0,access=mmap.ACCESS_READ)\n"
+                 "os.close(f)\n"
+                 "try:\n    os.fstat(f)\n"
+                 "except OSError:\n    pass\n"
+                 "else:\n    raise AssertionError('original mapping fd remained open')\n"
+                 "print('READY',f,flush=True)\n"
+                 "signal.pause()\n",
                  held.name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 start_new_session=True)
+            unknown = {"alive": "unknown", "mapping": "unknown", "original_fd": "unknown"}
+            before = dict(unknown)
+            after = dict(unknown)
+            run = {"execution": "not_started", "return_code": None, "stdout": b"",
+                   "stderr": b"", "elapsed_ms": 0}
             try:
-                self.assertEqual(child.stdout.readline().strip(), "READY")
-                holders = self._privileged_scan(info, os.getpid(), held.fileno())
-                self.assertTrue(any(item[0] == child.pid and item[1] == "map" for item in holders),
-                                holders)
+                ready = child.stdout.readline().split()
+                if len(ready) != 2 or ready[0] != "READY":
+                    context = _mapping_scan_failure_context(
+                        execution="not_started", privilege="not_started", return_code=None,
+                        stderr=b"", elapsed_ms=0, before=before, after=after,
+                        expected="map_holder_for_child", observed="fixture_precondition_failed",
+                        assertion="fixture map present and original fd closed")
+                    self.fail(context)
+                try:
+                    original_fd = int(ready[1])
+                except ValueError:
+                    context = _mapping_scan_failure_context(
+                        execution="not_started", privilege="not_started", return_code=None,
+                        stderr=b"", elapsed_ms=0, before=before, after=after,
+                        expected="map_holder_for_child", observed="fixture_precondition_failed",
+                        assertion="fixture map present and original fd closed")
+                    self.fail(context)
+                before = self._target_child_state(child.pid, original_fd, info)
+                if (before["alive"] != "yes" or before["mapping"] != "yes"
+                        or before["original_fd"] != "closed"):
+                    context = _mapping_scan_failure_context(
+                        execution="not_started", privilege="not_started", return_code=None,
+                        stderr=b"", elapsed_ms=0, before=before, after=after,
+                        expected="map_holder_for_child", observed="fixture_precondition_failed",
+                        assertion="fixture map present and original fd closed")
+                    self.fail(context)
+
+                run = self._invoke_privileged_scan(info, os.getpid(), held.fileno())
+                after = self._target_child_state(child.pid, original_fd, info)
+                observed = self._mapping_scan_category(run, child.pid)
+                context = _mapping_scan_failure_context(
+                    execution=run["execution"], privilege=self._privilege_status(run, observed),
+                    return_code=run["return_code"], stderr=run["stderr"],
+                    elapsed_ms=run["elapsed_ms"], before=before, after=after,
+                    expected="map_holder_for_child", observed=observed,
+                    assertion="assertEqual(observed,map_holder_for_child)")
+                self.assertEqual(observed, "map_holder_for_child", context)
             finally:
-                os.killpg(child.pid, signal.SIGTERM)
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 child.wait(timeout=5)
                 child.stdout.close()
                 child.stderr.close()
+
+class PrivilegedPrerequisiteBranchTests(unittest.TestCase):
+    @staticmethod
+    def _failed_authorization():
+        return subprocess.CompletedProcess(
+            args=["sudo", "-n", "-v"], returncode=1, stdout=b"",
+            stderr=b"sudo: a password is required")
+
+    def test_local_missing_privileged_prerequisite_remains_skip(self):
+        with (mock.patch.object(subprocess, "run", return_value=self._failed_authorization()),
+              mock.patch.dict(os.environ, {"CI": "false", "GITHUB_ACTIONS": "false"})):
+            with self.assertRaises(unittest.SkipTest):
+                ProcessScanTests.setUpClass()
+
+    def test_ci_missing_privileged_prerequisite_fails_instead_of_skipping(self):
+        for environment in ({"CI": "true", "GITHUB_ACTIONS": "false"},
+                            {"CI": "false", "GITHUB_ACTIONS": "true"}):
+            with self.subTest(environment=environment):
+                with (mock.patch.object(subprocess, "run",
+                                        return_value=self._failed_authorization()),
+                      mock.patch.dict(os.environ, environment)):
+                    with self.assertRaisesRegex(
+                            AssertionError, "CI requires noninteractive sudo"):
+                        ProcessScanTests.setUpClass()
+
 
 class SafetyGateCliIntegrationTests(unittest.TestCase):
     def setUp(self):
