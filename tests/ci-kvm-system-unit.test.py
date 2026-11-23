@@ -339,15 +339,72 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertNotIn("concurrency:", transient)
         self.assertNotIn("concurrency:", diagnostics)
         self.assertNotIn("concurrency:", production)
-    def test_boot_readiness_has_bounded_three_minute_window(self):
+    def test_boot_readiness_has_nested_bounds_and_unchanged_strict_predicates(self):
         stage = (ROOT / "tests/ci-kvm-stage.sh").read_text()
         boot = stage.split('if [[ "$requested_stage" == boot ]]; then', 1)[1].split(
             'if [[ "$requested_stage" == "restricted-reboot-egress-persistence" ]]; then', 1
         )[0]
-        self.assertIn("stage_start boot 180", boot)
-        self.assertIn("readiness_deadline=$((qemu_started + 180))", boot)
-        self.assertIn("readiness_limit=180s integration_limit=300s", boot)
-        self.assertIn("readiness within 180s", boot)
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("stage_start boot 960", boot)
+        self.assertIn("readiness_deadline=$((qemu_started + 900))", boot)
+        self.assertIn("readiness within 900s", boot)
+        self.assertIn("readiness_deadline > qemu_deadline", boot)
+        self.assertIn("--overall-seconds 2400", stage)
+        self.assertNotIn("qemu_deadline=$((qemu_started + 300))", boot)
+        self.assertIn("name: Provision transient cloud-init guest and prove SSH readiness\n        timeout-minutes: 18", workflow)
+        for predicate in (
+            "Cloud-init v\\..* finished at", "pin_guest_host_key_from_serial",
+            "systemctl is-active --quiet ssh.service", 'cloud-init status --long',
+            'grep -Eq "^(status|extended_status): error"',
+            "/var/lib/cloud/instance/boot-finished",
+            '/var/tmp/lm-kvm-trial-ready',
+        ):
+            self.assertIn(predicate, boot)
+
+    def test_transient_guest_substage_markers_and_progress_are_bounded(self):
+        stage = (ROOT / "tests/ci-kvm-stage.sh").read_text()
+        install = stage.split("install_command = r'''", 1)[1].split("'''", 1)[0]
+        self.assertIn("event=START name=%s", install)
+        self.assertIn("event=END name=%s", install)
+        self.assertIn("event=FAIL name=%s", install)
+        self.assertIn('apt-get update ||', install)
+        self.assertNotIn('apt-get update -qq', install)
+        self.assertIn('npm install --global @opencode/cli@2.2.5', install)
+        self.assertIn('guest_stage apt-update apt-get update || exit $?', install)
+        self.assertIn('guest_stage apt-install apt-get install -y --no-install-recommends', install)
+        self.assertIn('guest_stage opencode-install npm install --global @opencode/cli@2.2.5', install)
+        self.assertIn('guest_stage workspace-user-dirs install -d -o mester -g mester -m 0700 /home/mester/workspace || exit $?', install)
+        self.assertIn('guest_stage opencode-user-dirs /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-opencode 1000 || exit $?', install)
+        self.assertIn("printf 'KVM_GUEST_PROVISION_FAIL stage=%s exit=%s\\n' \"$stage\" \"$rc\"", install)
+        self.assertNotIn('storage_report apt-update-failed', install)
+        self.assertNotIn('storage_report apt-install-failed', install)
+        self.assertNotIn('storage_report opencode-install-failed', install)
+        self.assertIn('next_progress=$((now + 15))', stage)
+        self.assertIn('next_serial_tail=$((now + 30))', stage)
+        self.assertIn('KVM_PROGRESS phase=%s', stage)
+        start = install.index('event=START name=%s')
+        end = install.index('event=END name=%s')
+        fail = install.index('event=FAIL name=%s')
+        self.assertLess(start, end)
+        self.assertLess(start, fail)
+        self.assertIn('if (( rc != 0 )); then', install)
+        self.assertLess(install.index('if (( rc != 0 )); then'), end)
+        function = install[install.index('guest_stage() {'):
+                           install.index('\nstorage_report before-packages')]
+        failed = subprocess.run(
+            ["bash", "-c", 'set -Eeuo pipefail\n'
+             'storage_report() { printf "storage %s\\n" "$1"; }\n'
+             + function + '\ncurrent_provision_stage=""\n'
+             'guest_stage simulated-failure false || exit $?'],
+            check=False, capture_output=True, text=True, timeout=5,
+        )
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn('event=START name=simulated-failure', failed.stdout)
+        self.assertIn('event=FAIL name=simulated-failure', failed.stderr)
+        self.assertNotIn('event=END name=simulated-failure', failed.stdout)
+        self.assertEqual(failed.stderr.count('event=FAIL name=simulated-failure'), 1)
+        self.assertEqual(failed.stderr.count('KVM_GUEST_PROVISION_FAIL stage=simulated-failure'), 1)
+        self.assertEqual(failed.stdout.count('storage simulated-failure-failed'), 1)
 
     def test_preflight_refuses_existing_fixed_path_account_group_and_install(self):
         sha = "a" * 40

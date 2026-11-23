@@ -178,8 +178,8 @@ jobs:
       - name: Probe shared QEMU builder with bounded disposable KVM launch
         timeout-minutes: 2
         run: python3 tests/ci-kvm-shared-launch-probe.py --run-dir "$LM_CI_STATE_DIR"
-      - name: Start real KVM guest and prove strict SSH readiness
-        timeout-minutes: 5
+      - name: Provision transient cloud-init guest and prove SSH readiness
+        timeout-minutes: 18
         run: bash tests/ci-kvm-stage.sh --stage boot --run-dir "$LM_CI_STATE_DIR"
       - name: Verify protected OpenCode config, TUI, and tmux
         timeout-minutes: 5

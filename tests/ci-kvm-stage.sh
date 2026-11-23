@@ -55,6 +55,7 @@ readonly guest_disk_bytes=$((guest_disk_gib * 1024 * 1024 * 1024))
 
 fail() {
   printf 'KVM_TRIAL_FAIL: %s\n' "$1" >&2
+  [[ -z "${stage_name:-}" ]] || printf 'KVM_TRIAL_FAILURE_DETAIL stage=%s\n' "$stage_name" >&2
   if [[ -n "${tmp:-}" && -s "$tmp/readiness.log" ]]; then
     printf '%s\n' '--- last bounded guest SSH/readiness probe ---' >&2
     tail -n 12 "$tmp/readiness.log" >&2 || true
@@ -404,7 +405,7 @@ fi
 tmp_root="${RUNNER_TEMP:-/tmp/opencode}"
 mkdir -p "$tmp_root"
 if [[ "$requested_stage" == prepare ]]; then
-  python3 -I "$state_helper" init "${state_args[@]}" --overall-seconds 1080 \
+  python3 -I "$state_helper" init "${state_args[@]}" --overall-seconds 2400 \
     || fail 'could not create private stage handoff state'
   tmp="$state_dir/work"
   port="$(python3 - <<'PY'
@@ -560,11 +561,30 @@ ssh_diagnostic() {
     | grep -Ei 'error|fail|listen|starting|started|host key|sshd' \
     | tail -n 8 | cut -c1-220 | tr -cd '\11\12\15\40-\176' || true
 }
+guest_stage() {
+  stage=$1; shift
+  current_provision_stage=$stage
+  started=$SECONDS
+  printf 'KVM_GUEST_PROVISION_STAGE event=START name=%s elapsed_s=0\n' "$stage"
+  rc=0
+  "$@" || rc=$?
+  elapsed=$((SECONDS - started))
+  if (( rc != 0 )); then
+    printf 'KVM_GUEST_PROVISION_STAGE event=FAIL name=%s elapsed_s=%s exit=%s\n' "$stage" "$elapsed" "$rc" >&2
+    storage_report "$stage-failed" || true
+    printf 'KVM_GUEST_PROVISION_FAIL stage=%s exit=%s\n' "$stage" "$rc" >&2
+    return "$rc"
+  fi
+  printf 'KVM_GUEST_PROVISION_STAGE event=END name=%s elapsed_s=%s\n' "$stage" "$elapsed"
+  current_provision_stage=''
+}
 provision_error() {
   rc=$?
   trap - ERR
-  printf 'KVM_GUEST_PROVISION_FAIL stage=unexpected exit=%s\n' "$rc" >&2
-  storage_report unexpected-failure || true
+  failed_stage=${current_provision_stage:-unexpected}
+  [[ "$failed_stage" == unexpected ]] || printf 'KVM_GUEST_PROVISION_STAGE event=FAIL name=%s elapsed_s=unknown exit=%s\n' "$failed_stage" "$rc" >&2
+  printf 'KVM_GUEST_PROVISION_FAIL stage=%s exit=%s\n' "$failed_stage" "$rc" >&2
+  storage_report "$failed_stage-failed" || true
   exit "$rc"
 }
 trap provision_error ERR
@@ -577,19 +597,25 @@ if (( block_total < min_root_total_bytes || block_available < min_root_bytes || 
   exit 70
 fi
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq || { rc=$?; storage_report apt-update-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=apt-update exit=%s\n' "$rc" >&2; exit "$rc"; }
-apt-get install -y --no-install-recommends tmux nodejs npm ca-certificates || { rc=$?; storage_report apt-install-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=apt-install exit=%s\n' "$rc" >&2; exit "$rc"; }
-npm install --global @opencode/cli@2.2.5 || { rc=$?; storage_report opencode-install-failed; printf 'KVM_GUEST_PROVISION_FAIL stage=opencode-install exit=%s\n' "$rc" >&2; exit "$rc"; }
-install -d -o mester -g mester -m 0700 /home/mester/workspace
-/usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-opencode 1000
+guest_stage apt-update apt-get update || exit $?
+guest_stage apt-install apt-get install -y --no-install-recommends tmux nodejs npm ca-certificates || exit $?
+guest_stage opencode-install npm install --global @opencode/cli@2.2.5 || exit $?
+guest_stage workspace-user-dirs install -d -o mester -g mester -m 0700 /home/mester/workspace || exit $?
+guest_stage opencode-user-dirs /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-opencode 1000 || exit $?
 # cloud-init's ssh module generates keys in its init stage, before runcmd.
 # Keep early socket failures recoverable and report only key metadata.
+current_provision_stage=ssh-service-listener-setup
+ssh_stage_started=$SECONDS
+printf 'KVM_GUEST_PROVISION_STAGE event=START name=ssh-service-listener-setup elapsed_s=0\n'
 ssh_diagnostic before-ensure
-systemctl reset-failed ssh.service || { ssh_diagnostic reset-failed-error; printf 'KVM_GUEST_SSH_SERVICE_FAIL stage=reset-failed\n' >&2; exit 78; }
+systemctl reset-failed ssh.service || { ssh_diagnostic reset-failed-error; printf 'KVM_GUEST_SSH_SERVICE_FAIL stage=reset-failed\n' >&2; printf 'KVM_GUEST_PROVISION_STAGE event=FAIL name=ssh-service-listener-setup elapsed_s=%s exit=78\n' "$((SECONDS - ssh_stage_started))" >&2; storage_report ssh-setup-failed || true; printf 'KVM_GUEST_PROVISION_FAIL stage=ssh-service-listener-setup exit=78\n' >&2; exit 78; }
 if ! systemctl is-active --quiet ssh.socket; then
   if ! systemctl enable --now ssh.socket >/dev/null 2>&1; then
     ssh_diagnostic socket-start-failed
     printf 'KVM_GUEST_SSH_SERVICE_FAIL stage=ssh-socket\n' >&2
+    printf 'KVM_GUEST_PROVISION_STAGE event=FAIL name=ssh-service-listener-setup elapsed_s=%s exit=79\n' "$((SECONDS - ssh_stage_started))" >&2
+    storage_report ssh-setup-failed || true
+    printf 'KVM_GUEST_PROVISION_FAIL stage=ssh-service-listener-setup exit=79\n' >&2
     exit 79
   fi
 fi
@@ -597,9 +623,14 @@ ssh_diagnostic after-user-script
 if ! ss -H -lnt4 'sport = :22' | awk '$4 == "0.0.0.0:22" || ($4 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:22$/ && $4 !~ /^127\./) { found=1 } END { exit !found }'; then
   printf 'KVM_GUEST_SSH_SOCKET_FAIL reason=no-nonloopback-ipv4-listener port=22\n' >&2
   ssh_diagnostic socket-listener-missing
+  printf 'KVM_GUEST_PROVISION_STAGE event=FAIL name=ssh-service-listener-setup elapsed_s=%s exit=74\n' "$((SECONDS - ssh_stage_started))" >&2
+  storage_report ssh-setup-failed || true
+  printf 'KVM_GUEST_PROVISION_FAIL stage=ssh-service-listener-setup exit=74\n' >&2
   exit 74
 fi
 printf 'KVM_GUEST_SSH_SOCKET state=ready address=nonloopback-ipv4 port=22\n'
+printf 'KVM_GUEST_PROVISION_STAGE event=END name=ssh-service-listener-setup elapsed_s=%s\n' "$((SECONDS - ssh_stage_started))"
+current_provision_stage=''
 storage_report after-packages
 printf ready > /var/tmp/lm-kvm-trial-ready
 printf 'KVM_GUEST_PROVISION_DONE exit=0\n'
@@ -657,14 +688,13 @@ exit 0
 fi
 
 if [[ "$requested_stage" == boot ]]; then
-stage_start boot 180
+stage_start boot 960
 printf 'KVM_TRIAL: starting pinned guest with accel=kvm (no TCG fallback)\n'
 qemu_started=$SECONDS
-qemu_deadline=$((qemu_started + 300))
 owner_call start-initial >/dev/null || fail 'lifecycle owner could not start initial QEMU guest'
 expected_qemu_mode=initial
 capture_qemu_identity || fail 'could not prove ownership of the launched QEMU process'
-printf 'KVM_PROGRESS phase=qemu-started readiness_limit=180s integration_limit=300s\n'
+printf 'KVM_PROGRESS phase=qemu-started readiness_limit=900s stage_limit=960s\n'
 
 pin_guest_host_key_from_serial() {
   local public_key fingerprint known_hosts_tmp public_key_file
@@ -684,9 +714,10 @@ pin_guest_host_key_from_serial() {
 
 ready=0
 qemu_started=$SECONDS
-readiness_deadline=$((qemu_started + 180))
+readiness_deadline=$((qemu_started + 900))
 stage_remaining=$((stage_deadline - SECONDS))
 (( readiness_deadline - SECONDS > stage_remaining )) && readiness_deadline=$((SECONDS + stage_remaining))
+(( readiness_deadline > qemu_deadline )) && readiness_deadline=$qemu_deadline
 next_progress=$((SECONDS + 15))
 next_serial_tail=$((SECONDS + 30))
 last_ssh_rc=not-attempted
@@ -741,7 +772,7 @@ while (( SECONDS < readiness_deadline && SECONDS < qemu_deadline )); do
   remaining=$((readiness_deadline - SECONDS))
   (( remaining > 0 )) && sleep 1
 done
-[[ "$ready" == 1 ]] || fail "guest did not reach cloud-init/SSH readiness within 180s (last ssh status: $last_ssh_rc)"
+[[ "$ready" == 1 ]] || fail "guest did not reach cloud-init/SSH readiness within 900s (last ssh status: $last_ssh_rc)"
 guest_boot_id="$(ssh_guest 'cat /proc/sys/kernel/random/boot_id')"
 [[ "$guest_boot_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
   || fail 'initial guest boot identity was not a valid kernel boot ID'

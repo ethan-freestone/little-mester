@@ -103,6 +103,15 @@ class StateTests(unittest.TestCase):
         with self.assertRaisesRegex(STATE.StateError, "prerequisite prepare"):
             STATE.validate_context(state, self.args)
 
+    def test_initialization_accepts_approved_budget_and_rejects_overbound(self):
+        self.args.overall_seconds = 2400
+        STATE.init(self.args)
+        self.assertEqual(STATE.read_state(self.run_dir)["overall_seconds"], 2400)
+        rejected = SimpleNamespace(**{**vars(self.args), "run_dir": str(self.parent / "too-large"),
+                                      "overall_seconds": 3001})
+        with self.assertRaisesRegex(STATE.StateError, "supported bound"):
+            STATE.init(rejected)
+
     def test_prepare_initialization_allows_private_path_registration_and_partial_cleanup(self):
         STATE.init(self.args)
         command = [
