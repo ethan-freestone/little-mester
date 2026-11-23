@@ -12,7 +12,7 @@ Group=lm-vm-proxy
 RuntimeDirectory=lm-vm-proxy
 RuntimeDirectoryMode=0700
 UMask=0077
-ExecStart=/usr/bin/python3 -I /usr/lib/little-mester-vm/proxy.py --port-file /run/lm-vm-proxy/port --port 32128
+ExecStart=+/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py locked-service proxy
 ExecStartPost=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py proxy-ready
 Restart=no
 KillMode=control-group
@@ -28,7 +28,7 @@ ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/run/lm-vm-proxy
+ReadWritePaths=/run/lm-vm-proxy /etc/little-mester-vm/code-update.lock
 
 [Install]
 WantedBy=multi-user.target

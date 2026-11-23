@@ -1,0 +1,36 @@
+[Unit]
+Description=Little Mester loopback-only host metrics endpoint
+PartOf=little-mester-vm.service
+Before=little-mester-vm.service
+
+[Service]
+Type=exec
+User=lm-vm
+Group=lm-vm
+UMask=0077
+ExecStart=+/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py locked-service metrics
+Restart=no
+KillMode=control-group
+TimeoutStopSec=5s
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=no
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET
+ReadWritePaths=/etc/little-mester-vm/code-update.lock
+DevicePolicy=closed
+DeviceAllow=/dev/nvidiactl rw
+DeviceAllow=/dev/nvidia0 rw
+DeviceAllow=/dev/nvidia1 rw
+DeviceAllow=/dev/nvidia2 rw
+DeviceAllow=/dev/nvidia3 rw
+DeviceAllow=/dev/nvidia4 rw
+DeviceAllow=/dev/nvidia5 rw
+DeviceAllow=/dev/nvidia6 rw
+DeviceAllow=/dev/nvidia7 rw

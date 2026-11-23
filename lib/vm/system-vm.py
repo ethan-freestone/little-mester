@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Fixed systemd-owned VM runtime and owner command implementation.
 
-The QEMU argv is assembled by the shared parent builder and directly specified
-as this service's ExecStart, so systemd tracks QEMU as MainPID. No operation
-accepts a unit, path, QEMU option, or remote command from its caller.
+The privileged fixed-service launcher holds a shared update lock, drops to the
+unit's fixed identity, and execs the candidate-built service command. QEMU
+therefore remains systemd's MainPID while the lock lives for the service
+lifetime. No operation accepts a unit, path, QEMU option, or remote command
+from its caller.
 """
 
 from __future__ import annotations
 
 import argparse
+import ctypes
 import errno
+import fcntl
 import grp
 import importlib.util
 import hashlib
@@ -17,8 +21,10 @@ import json
 import os
 import pathlib
 import pwd
+import re
 import secrets
 import select
+import selectors
 import shutil
 import socket
 import stat
@@ -33,6 +39,8 @@ SERVICE_USER = "lm-vm"
 PROXY_USER = "lm-vm-proxy"
 CONTROL_GROUP = "lm-vm-control"
 KVM_GROUP = "kvm"
+PR_SET_NO_NEW_PRIVS = 38
+NNP_REQUIRED_ROLES = frozenset({"qemu", "proxy", "metrics"})
 STATE = pathlib.Path("/var/lib/little-mester-vm")
 CONFIG = pathlib.Path("/etc/little-mester-vm")
 DISK = STATE / "disk.qcow2"
@@ -46,16 +54,28 @@ PROXY_RUNTIME = pathlib.Path("/run/lm-vm-proxy")
 PROXY_PORT_FILE = PROXY_RUNTIME / "port"
 SSH_PORT = 22222
 PROXY_PORT = 32128
+WORKSPACE_SOCKET = pathlib.Path("/run/little-mester-vm-workspace/virtiofs.sock")
 QMP_STOP_TIMEOUT = 18.0
 SSH_READY_TIMEOUT = 900.0
 IMAGE_SHA256 = "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94"
 IMAGE_URL = "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img"
 IMAGE_NAME = "base-image.part"
 DISK_PART = "disk.qcow2.part"
+CODE_UPDATE_LOCK = CONFIG / "code-update.lock"
+CODE_UPDATE_MARKER = CONFIG / "code-update.in-progress"
+GUEST_COMPAT_MAX_OUTPUT = 8192
+CLOUD_INIT_STATUS_COMMAND = "cloud-init status --format=json"
+GUEST_PROVISIONED_COMMAND = (
+    "test -f /var/lib/mester-v3-provisioned && "
+    "test ! -L /var/lib/mester-v3-provisioned")
 
 
 class Refused(RuntimeError):
     pass
+
+
+class GuestSSHTimeout(Refused):
+    """A bounded captured guest command timed out; callers may retry by policy."""
 
 
 def _require_fixed_file(path: pathlib.Path, *, uid: int, mode: int,
@@ -92,6 +112,80 @@ def _verify_kvm_access() -> None:
         raise Refused("service identity lacks DAC read/write access to /dev/kvm")
 
 
+def _set_no_new_privs() -> None:
+    """Make the post-drop service exec non-escalating despite systemd's '+' prefix."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    prctl = libc.prctl
+    prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+                      ctypes.c_ulong, ctypes.c_ulong]
+    prctl.restype = ctypes.c_int
+    if prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        detail = os.strerror(error) if error else "unknown prctl error"
+        raise Refused(f"could not set no_new_privs for locked service: {detail}")
+
+
+def _locked_service_exec(kind: str, owner: str | None = None) -> None:
+    """Take a root-opened shared lock, drop to a fixed unit identity, then exec."""
+    if os.geteuid() != 0:
+        raise Refused("locked service launcher must be invoked by its fixed systemd unit")
+    if kind not in ("qemu", "proxy", "workspace", "metrics"):
+        raise Refused("unsupported fixed locked service role")
+    if kind == "workspace":
+        if not isinstance(owner, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", owner):
+            raise Refused("fixed workspace unit owner is invalid")
+        service_name = owner
+    else:
+        if owner is not None:
+            raise Refused("unexpected owner for fixed service role")
+        service_name = {"qemu": SERVICE_USER, "proxy": PROXY_USER,
+                        "metrics": SERVICE_USER}[kind]
+    try:
+        service = pwd.getpwnam(service_name)
+        if service.pw_uid == 0:
+            raise Refused("root cannot be a fixed service identity")
+        control_gid = grp.getgrnam(CONTROL_GROUP).gr_gid
+        kvm_gid = grp.getgrnam(KVM_GROUP).gr_gid if kind == "qemu" else None
+    except KeyError as error:
+        raise Refused("fixed locked service identity is unavailable") from error
+    fd = os.open(CODE_UPDATE_LOCK, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 0
+                or info.st_gid != control_gid or stat.S_IMODE(info.st_mode) != 0o660):
+            raise Refused("fixed code-update lock identity is unsafe")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise Refused("fixed service start is blocked by code update/rollback") from error
+        if CODE_UPDATE_MARKER.exists() or CODE_UPDATE_MARKER.is_symlink():
+            raise Refused("fixed service start is blocked by incomplete code update/rollback")
+        groups = [control_gid] if kind in ("qemu", "workspace") else []
+        if kvm_gid is not None:
+            groups.append(kvm_gid)
+        os.setgroups(sorted(set(groups)))
+        os.setgid(service.pw_gid)
+        os.setuid(service.pw_uid)
+        if kind in NNP_REQUIRED_ROLES:
+            _set_no_new_privs()
+        elif kind != "workspace":
+            raise Refused("locked service role has no explicit no_new_privs policy")
+        if kind == "qemu":
+            argv = qemu_argv()
+        elif kind == "proxy":
+            argv = ["/usr/bin/python3", "-I", str(pathlib.Path(__file__).with_name("proxy.py")),
+                    "--port-file", str(PROXY_PORT_FILE), "--port", str(PROXY_PORT)]
+        elif kind == "workspace":
+            argv = ["/usr/bin/python3", "-I", str(pathlib.Path(__file__).with_name("system-vm-workspace.py")),
+                    "serve"]
+        else:
+            argv = ["/usr/bin/python3", "-I", str(pathlib.Path(__file__).with_name("system-vm-metrics.py"))]
+        os.set_inheritable(fd, True)
+        os.execv(argv[0], argv)
+    finally:
+        os.close(fd)
+
+
 def _validate_runtime_directory() -> None:
     try:
         info = os.lstat(QMP_RUNTIME)
@@ -110,6 +204,7 @@ def qemu_argv() -> list[str]:
     _require_fixed_file(DISK, uid=uid, mode=0o600)
     _require_fixed_file(SEED, uid=0, mode=0o640, group=SERVICE_USER)
     _validate_runtime_directory()
+    _verify_workspace_share()
     if QMP_SOCKET_PATH.exists() or QMP_SOCKET_PATH.is_symlink():
         raise Refused("preserving pre-existing QMP socket evidence")
     proxy = read_proxy_port()
@@ -123,7 +218,21 @@ def qemu_argv() -> list[str]:
     return module.build_system_qemu_argv(
         executable="/usr/bin/qemu-system-x86_64", disk_path=str(DISK), seed_iso=str(SEED),
         ssh_port=SSH_PORT, proxy_port=proxy, qmp_socket=str(QMP_SOCKET_PATH),
-        vm_name="little-mester-system-vm")
+        vm_name="little-mester-system-vm", virtiofs_socket=str(WORKSPACE_SOCKET))
+
+
+def _verify_workspace_share() -> None:
+    workspace_helper = pathlib.Path(__file__).with_name("system-vm-workspace.py")
+    spec = importlib.util.spec_from_file_location("system_vm_workspace_policy", workspace_helper)
+    if spec is None or spec.loader is None:
+        raise Refused("fixed workspace policy helper is unavailable")
+    workspace = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = workspace
+    spec.loader.exec_module(workspace)
+    try:
+        workspace.verify_service_socket()
+    except (OSError, workspace.Refused) as error:
+        raise Refused("fixed host workspace share is not ready") from error
 
 
 def read_proxy_port() -> int:
@@ -228,7 +337,8 @@ def _proxy_ready() -> None:
     raise Refused("restricted proxy did not publish the fixed accepting listener")
 
 
-def _guest_ssh(command: str, *, tty: bool = False, timeout: int = 20) -> int:
+def _guest_ssh(command: str, *, tty: bool = False, timeout: int = 20,
+               capture_limit: int | None = None):
     _require_fixed_file(CONTROL_KEY, uid=0, mode=0o640, group=CONTROL_GROUP)
     _require_fixed_file(KNOWN_HOSTS, uid=0, mode=0o644)
     service_uid = pwd.getpwnam(SERVICE_USER).pw_uid
@@ -267,9 +377,49 @@ def _guest_ssh(command: str, *, tty: bool = False, timeout: int = 20) -> int:
            "-o", "ClearAllForwardings=yes", "-o", "RequestTTY=force" if tty else "RequestTTY=no",
            "mester@127.0.0.1", command]
     try:
-        result = subprocess.run(ssh, stdin=None if tty else subprocess.DEVNULL,
-                                 timeout=timeout, check=False)
-        return result.returncode
+        if capture_limit is None:
+            result = subprocess.run(ssh, stdin=None if tty else subprocess.DEVNULL,
+                                     timeout=timeout, check=False)
+            return result.returncode
+        if tty or type(capture_limit) is not int or not 0 < capture_limit <= GUEST_COMPAT_MAX_OUTPUT:
+            raise Refused("bounded guest inspection parameters are invalid")
+        process = subprocess.Popen(ssh, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, close_fds=True)
+        assert process.stdout is not None
+        output = bytearray()
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    process.kill()
+                    process.wait()
+                    raise GuestSSHTimeout("bounded captured guest SSH request timed out")
+                events = selector.select(remaining)
+                if not events and process.poll() is not None:
+                    break
+                for key, _ in events:
+                    chunk = os.read(key.fd, min(4096, capture_limit + 1 - len(output)))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    output.extend(chunk)
+                    if len(output) > capture_limit:
+                        process.kill()
+                        process.wait()
+                        raise Refused("fixed guest compatibility response exceeded its bound")
+            return_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            raise
+        finally:
+            selector.close()
+            process.stdout.close()
+        return return_code, bytes(output)
     finally:
         info = os.lstat(key_path)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != uid
@@ -369,6 +519,95 @@ def _browser_auth() -> int:
     return result
 
 
+def _reject_duplicate_json_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate status key")
+        result[key] = value
+    return result
+
+
+def _cloud_init_status_state(return_code: int, stdout: bytes) -> str:
+    """Classify the bounded machine-readable status without exposing its contents."""
+    if type(return_code) is not int or return_code not in (0, 1, 2):
+        return "INCONCLUSIVE"
+    if return_code in (1, 2):
+        return "ERROR"
+    if not isinstance(stdout, bytes) or not stdout or len(stdout) > GUEST_COMPAT_MAX_OUTPUT:
+        return "INCONCLUSIVE"
+    try:
+        document = json.loads(stdout.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_pairs)
+    except (UnicodeError, json.JSONDecodeError, ValueError, TypeError, RecursionError):
+        return "INCONCLUSIVE"
+    if not isinstance(document, dict):
+        return "INCONCLUSIVE"
+    status, extended = document.get("status"), document.get("extended_status")
+    errors, recoverable_errors = document.get("errors"), document.get("recoverable_errors")
+    if (not isinstance(status, str) or not isinstance(extended, str)
+            or type(errors) is not list or type(recoverable_errors) is not dict):
+        return "INCONCLUSIVE"
+    if errors or recoverable_errors:
+        return "ERROR"
+    if status in ("error", "disabled") or extended.startswith(("error", "degraded")):
+        return "ERROR"
+    if status in ("not started", "running"):
+        return "RUNNING" if extended == status else "INCONCLUSIVE"
+    if status == "done":
+        return "DONE" if extended == "done" else "INCONCLUSIVE"
+    return "INCONCLUSIVE"
+
+
+def _wait_for_guest_provisioning() -> int:
+    """Wait for a clean cloud-init final state and its existing provision marker."""
+    started = time.monotonic()
+    deadline = started + SSH_READY_TIMEOUT
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            result = _guest_ssh(
+                CLOUD_INIT_STATUS_COMMAND, timeout=min(15.0, remaining),
+                capture_limit=GUEST_COMPAT_MAX_OUTPUT)
+        except (OSError, subprocess.SubprocessError, GuestSSHTimeout):
+            result = None
+        if result is not None:
+            if not isinstance(result, tuple) or len(result) != 2:
+                raise Refused("cloud-init status response is inconclusive")
+            return_code, stdout = result
+            if type(return_code) is int and return_code == 255:
+                state = "TRANSPORT"  # SSH is not ready yet; keep polling within the shared bound.
+            else:
+                state = _cloud_init_status_state(return_code, stdout)
+            if state == "ERROR":
+                raise Refused("cloud-init reported unsuccessful or degraded completion")
+            if state == "INCONCLUSIVE":
+                raise Refused("cloud-init status is inconclusive; provisioning is not established")
+            if state == "DONE":
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    marker_status = _guest_ssh(
+                        GUEST_PROVISIONED_COMMAND, timeout=min(15.0, remaining))
+                except (OSError, subprocess.SubprocessError):
+                    marker_status = 255
+                if marker_status == 0:
+                    elapsed = time.monotonic() - started
+                    if elapsed <= SSH_READY_TIMEOUT:
+                        return max(0, int(elapsed * 1000))
+                    break
+                if marker_status != 255:
+                    raise Refused("guest provisioning completion marker is missing or unsafe")
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(2.0, remaining))
+    raise Refused("cloud-init or SSH did not complete before its bound")
+
+
 def _ensure_guest_ready() -> None:
     import importlib.util
     spec = importlib.util.spec_from_file_location(
@@ -377,7 +616,10 @@ def _ensure_guest_ready() -> None:
         raise Refused("protected parent session contract is unavailable")
     contract = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(contract)
-    command = "cloud-init status --long >/dev/null 2>&1 || exit 41; " + contract.readiness_checks()
+    cloud_init_ready_wait_ms = _wait_for_guest_provisioning()
+
+    _check_guest_compatibility(cloud_init_ready_wait_ms=cloud_init_ready_wait_ms)
+    command = contract.readiness_checks(workspace_path=contract.SYSTEM_WORKSPACE)
     deadline = time.monotonic() + SSH_READY_TIMEOUT
     while time.monotonic() < deadline:
         try:
@@ -386,15 +628,143 @@ def _ensure_guest_ready() -> None:
         except (OSError, subprocess.SubprocessError):
             pass
         time.sleep(2)
-    raise Refused("cloud-init, SSH, or protected session readiness did not complete before its bound")
+    raise Refused("protected session readiness did not complete before its bound")
+
+
+def _guest_compatibility_module():
+    path = pathlib.Path(__file__).with_name("guest-compatibility.py")
+    spec = importlib.util.spec_from_file_location("system_guest_compatibility", path)
+    if spec is None or spec.loader is None:
+        raise Refused("fixed guest compatibility checker is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _check_guest_compatibility(*, cloud_init_ready_wait_ms: int | None = None) -> None:
+    checker = _guest_compatibility_module()
+    command = checker.build_inspection_command(checker.SYSTEM_WORKSPACE)
+    try:
+        result = _guest_ssh(command, timeout=20, capture_limit=GUEST_COMPAT_MAX_OUTPUT)
+    except (OSError, subprocess.SubprocessError, Refused):
+        print("Guest compatibility: INCONCLUSIVE (fixed inspection failed)", file=sys.stderr)
+        raise Refused("guest compatibility is inconclusive; normal VM use is blocked")
+    if not isinstance(result, tuple) or len(result) != 2 or result[0] != 0:
+        print("Guest compatibility: INCONCLUSIVE (fixed inspection unavailable)", file=sys.stderr)
+        raise Refused("guest compatibility is inconclusive; normal VM use is blocked")
+    expected = checker.expected_inventory()
+    status, diagnostics = checker.classify_inventory(result[1], expected)
+    print(f"Guest compatibility: {status}" +
+          (" (" + ", ".join(diagnostics[:16]) + ")" if diagnostics else ""),
+          file=sys.stderr if status != "MATCH" else sys.stdout)
+    if status != "MATCH":
+        try:
+            evidence = checker.format_failure_evidence(
+                result[1], expected, cloud_init_ready_wait_ms=cloud_init_ready_wait_ms)
+            if (not isinstance(evidence, str)
+                    or not evidence.startswith("Guest compatibility evidence:")
+                    or len(evidence.encode("utf-8")) > 1024):
+                raise ValueError("compatibility evidence is outside its fixed output contract")
+        except Exception:
+            evidence = "Guest compatibility evidence: unavailable (diagnostic-error)"
+        print(evidence, file=sys.stderr)
+        raise Refused("guest compatibility is not established; normal VM use is blocked")
+
+
+def _workspace_policy():
+    path = pathlib.Path(__file__).with_name("system-vm-workspace.py")
+    spec = importlib.util.spec_from_file_location("system_vm_workspace_owner", path)
+    if spec is None or spec.loader is None:
+        raise Refused("fixed workspace assignment helper is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _guest_workspace_mount() -> None:
+    command = (
+        "set -eu; test ! -L /workspace; mountpoint -q /workspace; "
+        "test \"$(findmnt -n -o FSTYPE --target /workspace)\" = virtiofs; "
+        "test \"$(findmnt -n -o SOURCE --target /workspace)\" = workspace; "
+        "test -w /workspace")
+    if _guest_ssh(command, timeout=20) != 0:
+        raise Refused("guest did not mount the approved host directory at /workspace")
+
+
+def _read_probe(path: pathlib.Path, uid: int) -> tuple[os.stat_result, bytes]:
+    info = os.lstat(path)
+    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+        raise Refused("workspace read/write probe has unsafe file metadata")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise Refused("workspace probe changed while opening")
+        value = os.read(fd, 257)
+    finally:
+        os.close(fd)
+    return info, value
+
+
+def _remove_probe(path: pathlib.Path, identity: tuple[int, int], uid: int, expected: bytes) -> None:
+    try:
+        info, value = _read_probe(path, uid)
+    except FileNotFoundError:
+        return
+    if ((info.st_dev, info.st_ino) != identity or value != expected):
+        raise Refused("workspace probe changed; preserving unexpected evidence")
+    os.unlink(path)
+
+
+def _probe_workspace() -> None:
+    policy = _workspace_policy()
+    workspace = policy.read_assignment(policy.ASSIGNMENT, uid=os.getuid())
+    policy.verify_identity(workspace)
+    nonce = secrets.token_hex(16)
+    host_path = workspace.path / f".lm-vm-probe-{nonce}"
+    guest_path = workspace.path / f".lm-vm-probe-{nonce}.guest"
+    payload = (nonce + "\n").encode("ascii")
+    fd = os.open(host_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        os.write(fd, payload)
+        os.fsync(fd)
+        host_info = os.fstat(fd)
+    finally:
+        os.close(fd)
+    guest_info = None
+    try:
+        command = (f"test \"$(cat /workspace/.lm-vm-probe-{nonce})\" = {nonce} && "
+                   f"umask 077 && printf '%s\\n' {nonce} > /workspace/.lm-vm-probe-{nonce}.guest")
+        if _guest_ssh(command, timeout=20) != 0:
+            raise Refused("workspace host-to-guest read or guest-to-host write probe failed")
+        if _read_probe(host_path, workspace.uid)[1] != payload:
+            raise Refused("guest read of host workspace probe did not match its nonce")
+        guest_info, guest_payload = _read_probe(guest_path, workspace.uid)
+        if guest_payload != payload:
+            raise Refused("guest write to host workspace did not preserve its nonce")
+    finally:
+        _remove_probe(host_path, (host_info.st_dev, host_info.st_ino), workspace.uid, payload)
+        if guest_info is not None:
+            _remove_probe(guest_path, (guest_info.st_dev, guest_info.st_ino), workspace.uid, payload)
 
 
 def _qemu_guest_ready() -> None:
     _proxy_ready()
     _ensure_guest_ready()
+    _guest_workspace_mount()
 
 
-def _fixed_exec(action: str) -> int:
+def _system_unit_active() -> bool:
+    result = subprocess.run(["/usr/bin/systemctl", "show", "--property=ActiveState",
+                             "--value", "little-mester-vm.service"],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True, check=False)
+    return result.returncode == 0 and result.stdout.strip() == "active"
+
+
+def _fixed_exec_locked(action: str) -> int:
     commands = {
         "up": ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", "little-mester-vm.service"],
         "down": ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "stop", "little-mester-vm.service"],
@@ -407,13 +777,74 @@ def _fixed_exec(action: str) -> int:
     if action not in commands:
         raise Refused("unsupported fixed VM operation")
     if action == "ssh":
+        if not _system_unit_active():
+            raise Refused("fixed VM service is not active after compatibility-gated startup")
         return _guest_ssh("/bin/bash -l", tty=True, timeout=24 * 3600)
     if action == "auth":
+        if not _system_unit_active():
+            raise Refused("fixed VM service is not active after compatibility-gated startup")
         return _browser_auth()
     if action == "tui":
+        if not _system_unit_active():
+            raise Refused("fixed VM service is not active after compatibility-gated startup")
         return _guest_ssh("/usr/local/bin/lm-opencode", tty=True, timeout=24 * 3600)
+    if action == "up":
+        policy = _workspace_policy()
+        try:
+            policy.verify_host_assignment(os.getuid())
+        except policy.Refused as error:
+            raise Refused(f"host workspace preflight failed before VM lifecycle: {error}; "
+                          "configure it with ./lab vm up --dir PATH") from error
+    if action == "status":
+        result = subprocess.run(commands[action], stdin=subprocess.DEVNULL, check=False)
+        if result.returncode == 0:
+            policy = _workspace_policy()
+            try:
+                workspace = policy.read_assignment(policy.ASSIGNMENT, uid=os.getuid())
+                print(f"Workspace: {workspace.path} -> /workspace")
+            except policy.Refused:
+                print("Workspace: not assigned")
+        return result.returncode
     result = subprocess.run(commands[action], stdin=subprocess.DEVNULL, check=False)
+    if action == "up" and result.returncode == 0:
+        # ExecStartPost verifies the guest mount inside QEMU's sandbox. The
+        # host-side probe runs as the owner, not as the isolated QEMU identity.
+        _probe_workspace()
     return result.returncode
+
+
+def _fixed_exec(action: str) -> int:
+    """Serialize supported owner routes with protected code update/rollback."""
+    if action == "status":
+        # Host-only status remains available while maintenance blocks use.
+        return _fixed_exec_locked(action)
+    _require_fixed_file(CODE_UPDATE_LOCK, uid=0, mode=0o660, group=CONTROL_GROUP)
+    try:
+        marker_info = os.lstat(CODE_UPDATE_MARKER)
+    except FileNotFoundError:
+        marker_info = None
+    if marker_info is not None:
+        raise Refused("protected code update/rollback is incomplete; fixed VM routes are blocked")
+    fd = os.open(CODE_UPDATE_LOCK, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) != 0o660
+                or info.st_gid != grp.getgrnam(CONTROL_GROUP).gr_gid):
+            raise Refused("fixed code-update lock identity is unsafe")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise Refused("fixed VM operation is blocked by an active code update/rollback") from error
+        # Recheck after lock acquisition so a marker cannot be raced by a route.
+        if CODE_UPDATE_MARKER.exists() or CODE_UPDATE_MARKER.is_symlink():
+            raise Refused("protected code update/rollback is incomplete; fixed VM routes are blocked")
+        return _fixed_exec_locked(action)
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def _provision() -> None:
@@ -538,10 +969,11 @@ def _write_protected_seed(control_gid: int, service_uid: int, service_gid: int) 
     host_public = pathlib.Path(str(HOST_KEY) + ".pub").read_text(encoding="ascii").strip()
     user_data = bootstrap.build_foundation(
         name="little-mester-system-vm", uid=1000, ssh_key=control_public,
-        workspace="disk", helper="/usr/local/libexec/lm-guest-user-dirs.py")
+        workspace="virtiofs", helper="/usr/local/libexec/lm-guest-user-dirs.py")
     contract.add_protected_session(user_data, host_private=host_private,
                                    host_public=host_public,
-                                   control_public=control_public)
+                                   control_public=control_public,
+                                   workspace_path=contract.SYSTEM_WORKSPACE)
     user_data_path = STATE / "user-data"
     metadata_path = STATE / "meta-data"
     iso_part = STATE / "seed.iso.part"
@@ -595,6 +1027,9 @@ def main() -> int:
     sub.add_parser("check")
     sub.add_parser("guest-ready")
     sub.add_parser("provision")
+    locked = sub.add_parser("locked-service")
+    locked.add_argument("role", choices=("qemu", "proxy", "workspace", "metrics"))
+    locked.add_argument("--owner")
     owner = sub.add_parser("owner")
     owner.add_argument("operation", choices=("up", "down", "status", "ssh", "auth", "tui"))
     args = parser.parse_args()
@@ -614,6 +1049,9 @@ def main() -> int:
         if args.action == "provision":
             _provision()
             return 0
+        if args.action == "locked-service":
+            _locked_service_exec(args.role, args.owner)
+            return 2
         if args.action == "owner":
             return _fixed_exec(args.operation)
     except (OSError, Refused, subprocess.SubprocessError, ValueError) as error:

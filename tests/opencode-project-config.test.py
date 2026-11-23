@@ -50,6 +50,12 @@ class ProjectConfigIsolationTests(unittest.TestCase):
             "autoupdate": False,
             "share": "disabled",
         }), encoding="utf-8")
+        self.model_config = self.home / "protected-model.json"
+        self.model_config.write_text(json.dumps({
+            "autoupdate": False, "share": "disabled",
+            "permission": {"edit": "ask", "bash": "ask"},
+            "model": "{env:LM_OPENCODE_MODEL}",
+        }), encoding="utf-8")
         (self.workspace / "opencode.json").write_text(json.dumps({
             "$schema": "https://opencode.ai/config.json",
             "autoupdate": True,
@@ -224,6 +230,7 @@ class ProjectConfigIsolationTests(unittest.TestCase):
             "--home", str(self.home),
             "--protected-config", str(self.home / "protected.json"),
             "--protected-plugin", "/tmp/lm-ci-protected-plugin-fixture",
+            "--model-config", str(self.model_config), "--model", "openai/gpt-5",
         ]
         # Reproduce the parent-python fixture failure: a non-writable XDG root
         # with no `opencode/` child fails its mkdir before OpenCode can inspect
@@ -293,7 +300,7 @@ class ProjectConfigIsolationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr[:400])
         self.assertEqual(
             result.stdout.strip(),
-            "KVM_M2_CONFIG_PASS operation=opencode-debug-config",
+            "KVM_M2_CONFIG_PASS operation=opencode-model-config",
         )
 
     def test_failure_diagnostic_uses_fixed_allowlisted_cause(self):
@@ -414,6 +421,54 @@ class ProjectConfigIsolationTests(unittest.TestCase):
             self.assertTrue(child.isalive(), "standalone TUI exited before plugin observation")
             self.assertTrue(marker.exists(),
                             "real OpenCode did not execute the writable XDG global plugin fixture")
+        finally:
+            child.close(force=child.isalive())
+
+    @unittest.skipIf(pexpect is None, "pexpect is required for protected exit-key acceptance")
+    def test_protected_exit_plugin_esc_and_n_cancel_in_real_pty(self):
+        plugin = self.root / "protected-exit-plugin"
+        plugin.mkdir(mode=0o700)
+        source = pathlib.Path(__file__).resolve().parent.parent / "agent/opencode/plugins/little-mester-exit-confirm"
+        shutil.copyfile(source / "package.json", plugin / "package.json")
+        shutil.copyfile(source / "tui.tsx", plugin / "tui.tsx")
+        for file in plugin.iterdir():
+            file.chmod(0o444)
+        plugin.chmod(0o555)
+        (self.workspace / "opencode.json").unlink(missing_ok=True)
+        (self.workspace / ".opencode/opencode.json").unlink(missing_ok=True)
+        env = dict(self.env)
+        env.update({
+            "TERM": "xterm-256color", "LANG": "C.UTF-8",
+            "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+            "OPENCODE_CLI_CONFIG_CONTENT": json.dumps({
+                "plugins": [str(plugin)],
+                "theme": {"name": "dark"},
+                "keybinds": {"app.exit": "none", "prompt.clear": "none"},
+            }, separators=(",", ":")),
+        })
+        for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+            pathlib.Path(env[name]).mkdir(parents=True, mode=0o700, exist_ok=True)
+        child = pexpect.spawn(
+            self.binary, ["--standalone", str(self.workspace)], cwd=str(self.workspace),
+            env=env, encoding="utf-8", codec_errors="replace", dimensions=(32, 100), timeout=10)
+        try:
+            child.expect("Ask anything", timeout=20)
+            child.sendcontrol("c")
+            child.expect("Close Little Mester\\?", timeout=10)
+            child.send("\x1b")
+            child.expect("Ask anything", timeout=10)
+            self.assertTrue(child.isalive(), "Escape cancelled the dialog but exited the TUI")
+
+            child.sendcontrol("c")
+            child.expect("Close Little Mester\\?", timeout=10)
+            child.send("n")
+            child.expect("Ask anything", timeout=10)
+            self.assertTrue(child.isalive(), "N cancelled the dialog but exited the TUI")
+
+            child.sendcontrol("c")
+            child.expect("Close Little Mester\\?", timeout=10)
+            child.send("y")
+            child.expect(pexpect.EOF, timeout=10)
         finally:
             child.close(force=child.isalive())
 

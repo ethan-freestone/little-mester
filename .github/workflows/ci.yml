@@ -77,6 +77,7 @@ jobs:
           test "$(opencode --version)" = 'opencode v2.2.5'
       - name: Run parent suites
         run: |
+          node --test tests/host-metrics-tui.test.mjs
           python3 tests/opencode-project-config.test.py
           python3 tests/ci-tui-diagnostic.test.py
           python3 tests/ci-tui-capture.test.py
@@ -87,6 +88,9 @@ jobs:
           python3 tests/ci-kvm-qemu-owner.test.py
           python3 tests/vm-owner-acceptance.test.py
           python3 tests/vm-systemd.test.py
+          python3 tests/vm-system-workspace.test.py
+          python3 tests/vm-system-metrics.test.py
+          python3 tests/vm-opencode-preferences.test.py
           python3 tests/vm-host-dependencies.test.py
           python3 tests/ci-kvm-system-unit.test.py
           python3 tests/ci-kvm-host-dependencies.test.py
@@ -174,8 +178,8 @@ jobs:
       - name: Probe shared QEMU builder with bounded disposable KVM launch
         timeout-minutes: 2
         run: python3 tests/ci-kvm-shared-launch-probe.py --run-dir "$LM_CI_STATE_DIR"
-      - name: Start real KVM guest and prove strict SSH readiness
-        timeout-minutes: 5
+      - name: Provision transient cloud-init guest and prove SSH readiness
+        timeout-minutes: 18
         run: bash tests/ci-kvm-stage.sh --stage boot --run-dir "$LM_CI_STATE_DIR"
       - name: Verify protected OpenCode config, TUI, and tmux
         timeout-minutes: 5
@@ -197,7 +201,21 @@ jobs:
         timeout-minutes: 3
         run: bash tests/ci-kvm-stage.sh --stage cleanup --run-dir "$LM_CI_STATE_DIR"
 
-  # ── 5. Exact installed production acceptance on its own hosted KVM runner ──
+  # ── 5. Exploratory systemd namespace controls on a separate runner ──
+  systemd-namespace-diagnostics:
+    name: Systemd namespace diagnostics
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Run exploratory namespace and quoted-control diagnostics
+        timeout-minutes: 12
+        run: python3 tests/ci-kvm-system-unit.py --namespace-diagnostics
+
+  # ── 6. Exact installed production acceptance on its own hosted KVM runner ──
   production-systemd-vm-acceptance:
     name: Production systemd VM acceptance
     runs-on: ubuntu-24.04
@@ -273,7 +291,7 @@ jobs:
         timeout-minutes: 2
         run: python3 tests/ci-kvm-system-unit.py --cleanup
 
-  # ── 6. Hygiene — ShellCheck, Python compile, ruff lint ───────────
+  # ── 7. Hygiene — ShellCheck, Python compile, ruff lint ───────────
   hygiene:
     name: Hygiene (shellcheck, py_compile, ruff)
     runs-on: ubuntu-24.04
@@ -292,7 +310,7 @@ jobs:
       - name: Validate GitHub Actions workflows
         run: scripts/check-workflows.sh
 
-  # ── 7. Ticket store ─────────────────────────────────────────────
+  # ── 8. Ticket store ─────────────────────────────────────────────
   ticket-store:
     name: Ticket store validation
     runs-on: ubuntu-24.04

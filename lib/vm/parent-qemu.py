@@ -41,23 +41,34 @@ def _virtio_qcow2_drive(disk_path: str) -> list[str]:
 
 
 def _network_args(*, ssh_port: int, restricted: bool,
-                  proxy_port: int | None = None) -> list[str]:
+                  proxy_port: int | None = None, metrics: bool = False) -> list[str]:
     return ["-netdev", build_user_netdev(ssh_port=ssh_port, restricted=restricted,
-                                         proxy_port=proxy_port),
+                                         proxy_port=proxy_port, metrics=metrics),
             "-device", "virtio-net-pci,netdev=net0"]
 
 
-def build_user_netdev(*, ssh_port: int, restricted: bool, proxy_port: int | None = None) -> str:
+def build_user_netdev(*, ssh_port: int, restricted: bool, proxy_port: int | None = None,
+                      metrics: bool = False) -> str:
     """Build the reviewed user-mode networking policy used by all launch paths."""
     _port(ssh_port, "SSH port")
     if type(restricted) is not bool:
         raise ValueError("restricted networking selector must be boolean")
+    if type(metrics) is not bool:
+        raise ValueError("host metrics network selector must be boolean")
+    if metrics and (not restricted or proxy_port is None):
+        raise ValueError("host metrics forwarding requires the fixed restricted proxy network")
     if restricted:
         if proxy_port is None:
+            if metrics:
+                raise ValueError("host metrics forwarding requires the fixed restricted proxy network")
             return f"user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:{ssh_port}-:22"
         _port(proxy_port, "proxy port")
+        metrics_forward = (
+            ",guestfwd=tcp:10.0.2.100:19532-cmd:socat - TCP:127.0.0.1:32129"
+            if metrics else "")
         return (f"user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22,"
-                f"guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:{proxy_port},restrict=on")
+                f"guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:{proxy_port}"
+                f"{metrics_forward},restrict=on")
     if proxy_port is not None:
         raise ValueError("unrestricted networking does not accept a proxy port")
     return f"user,id=net0,hostfwd=tcp:127.0.0.1:{ssh_port}-:22"
@@ -98,7 +109,7 @@ def build_qemu_argv(*, executable: str, seed_iso: str, ssh_port: int, proxy_port
 
 def build_system_qemu_argv(*, executable: str, disk_path: str, seed_iso: str,
                            ssh_port: int, proxy_port: int, qmp_socket: str,
-                           vm_name: str) -> list[str]:
+                           vm_name: str, virtiofs_socket: str | None = None) -> list[str]:
     """Build direct ExecStart argv for the fixed system unit's new disk path."""
     if (not isinstance(executable, str) or not executable.startswith("/")
             or os.path.realpath(executable) != executable):
@@ -111,17 +122,32 @@ def build_system_qemu_argv(*, executable: str, disk_path: str, seed_iso: str,
             or any(character in qmp_socket for character in "\0\n,\r")
             or len(os.fsencode(qmp_socket)) > 100):
         raise ValueError("private QMP socket path is not safe for Unix-socket option encoding")
+    if virtiofs_socket is not None and (
+            not isinstance(virtiofs_socket, str) or not virtiofs_socket.startswith("/")
+            or any(character in virtiofs_socket for character in ("\0", "\n", "\r", ","))
+            or len(os.fsencode(virtiofs_socket)) > 100):
+        raise ValueError("private virtiofs socket path is not safe for QEMU option encoding")
     _port(ssh_port, "SSH port")
     _port(proxy_port, "proxy port")
+    shared_memory = ([] if virtiofs_socket is None else [
+        "-object", "memory-backend-memfd,id=workspace-mem,size=4096M,share=on",
+        "-numa", "node,memdev=workspace-mem",
+    ])
+    machine_memory = _machine_memory(name=vm_name, cpus=2, memory_mib=4096)
     return [
         executable,
-        *_machine_memory(name=vm_name, cpus=2, memory_mib=4096),
+        *machine_memory,
+        *shared_memory,
         "-enable-kvm",
         "-blockdev", f"driver=file,node-name=system-file,filename={disk_path},locking=on,auto-read-only=off",
         "-blockdev", "driver=qcow2,node-name=system-qcow2,file=system-file,auto-read-only=off",
         "-device", "virtio-blk-pci,drive=system-qcow2",
         *_virtio_scsi_seed(seed_iso),
-        *_network_args(ssh_port=ssh_port, restricted=True, proxy_port=proxy_port),
+        *([] if virtiofs_socket is None else [
+            "-chardev", f"socket,id=workspace,path={virtiofs_socket}",
+            "-device", "vhost-user-fs-pci,chardev=workspace,tag=workspace"]),
+        *_network_args(ssh_port=ssh_port, restricted=True, proxy_port=proxy_port,
+                       metrics=virtiofs_socket is not None),
         "-display", "none",
         "-serial", "stdio",
         "-monitor", "none",

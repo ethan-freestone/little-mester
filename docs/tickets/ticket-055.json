@@ -8,7 +8,7 @@
   "title": "P1-03 — OpenCode 2.2.5 TUI and exit-confirm compatibility",
   "objective": "P1-03 TUI compatibility and exit confirmation. Successor to #49/#51; starts after P1-01 ticket #53; compatibility findings inform P1-02 ticket #54, while guest integration/acceptance depends on #54. Timebox investigation before any port. Operating policy: docs/workflows/phase1-continuous-execution.md; M1→M2→M3 is a priority order, not a blocker to independent offline M2 implementation. Reuse settled pinned 2.2.5 probes; continue protected config, plugin and tmux integration without claiming live guest behavior or repeating compatibility tests absent contradictory evidence.",
   "created_at": "2026-11-10T21:46:28.225Z",
-  "updated_at": "2026-11-18T13:08:51.340Z",
+  "updated_at": "2026-11-23T10:16:25.082Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -41,7 +41,8 @@
       "Timeboxed OpenCode 2.2.5 TUI/plugin/keybinding/config-precedence probe in an isolated disposable environment.",
       "PTy key-sequence matrix and harmless OSC-52 clipboard canary on each owner-approved terminal profile.",
       "Hostile project config/plugin sentinel and egress/update/model-list checks without real credentials.",
-      "Owner verifies the propagated host TERM exists in guest terminfo and clear works; live OpenCode TUI key/resize and M2 terminal acceptance remain required."
+      "Owner verifies the propagated host TERM exists in guest terminfo and clear works; live OpenCode TUI key/resize and M2 terminal acceptance remain required.",
+      "Owner direction 2026-11-23: retain exact OpenCode 2.2.5 acceptance for PR #20. After its separately approved merge, perform a distinct, Sol-reviewed Phase 1 promotion to one verified stable exact 2.3.x patch if feasible before final Phase 1 merge. Centralize one authoritative exact-version config shared by provisioning, compatibility checks and acceptance tests; no floating latest. Rerun actual 2.3.x authentication, TUI and persistence acceptance; do not reuse 2.2.5 evidence. Preserve the existing feat/vm-approach VM on 2.2.5 and do not operate it without per-action owner approval."
     ],
     "created": [
       "Local pinned-binary PTY verification: scripts/verify-exit-confirm.py now rejects any opencode version other than 2.2.5 and uses a temporary HOME, empty workspace, private minimal server config, and sanitized environment; no inherited auth/session/config. On 2.2.5, all 10 checks pass: Ctrl+D inert, yq types while closed, Ctrl+C opens, Esc/N/Ctrl+C cancel, uppercase Y and Q confirm. `bats tests/exit-confirm.bats`: 6/6. No guest/owner-terminal clipboard canary, hostile project config test, guest provenance, egress test, or owner acceptance; criteria remain pending. Source checkpoint 01197bd plus verifier version-enforcement follow-up 3a30f2c.",

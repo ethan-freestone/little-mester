@@ -347,10 +347,17 @@ stage = pathlib.Path(sys.argv[1])
 text = stage.read_text() + stage.with_name('ci-kvm-stage-operations.sh').read_text()
 workflow = pathlib.Path(sys.argv[1]).parents[1] / '.github/workflows/ci.yml'
 workflow_text = workflow.read_text()
-job = workflow_text.split('  transient-qemu-integration:', 1)[1].split(
-    '  # ── 5. Exact installed production', 1)[0]
-production_job = workflow_text.split('  production-systemd-vm-acceptance:', 1)[1].split(
-    '\n  # ── 6.', 1)[0]
+def workflow_job(name):
+    import re
+    matches = list(re.finditer(r'^  ([A-Za-z0-9_-]+):\s*$', workflow_text, re.MULTILINE))
+    for index, match in enumerate(matches):
+        if match.group(1) == name:
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(workflow_text)
+            return workflow_text[match.end():end]
+    raise AssertionError(f'missing workflow job: {name}')
+job = workflow_job('transient-qemu-integration')
+diagnostics_job = workflow_job('systemd-namespace-diagnostics')
+production_job = workflow_job('production-systemd-vm-acceptance')
 session_contract = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/parent-session-contract.py'
 session_contract_text = session_contract.read_text()
 opencode_readiness_text = pathlib.Path(sys.argv[1]).parents[1] / 'lib/vm/opencode-readiness.sh'
@@ -383,18 +390,26 @@ assert 'github.event.pull_request.head.sha || github.sha' in production_job
 assert 'pr_merge_commit_second_parent' in production_job and 'source_head_sha=' in production_job
 assert 'timeout-minutes: 90' in job
 assert 'timeout-minutes: 90' in production_job
+assert 'timeout-minutes: 15' in diagnostics_job
+assert 'python3 tests/ci-kvm-system-unit.py --namespace-diagnostics' in diagnostics_job
+assert 'needs:' not in diagnostics_job
+assert '/dev/kvm' not in diagnostics_job and 'accel=kvm' not in diagnostics_job
+assert 'tests/ci-kvm-system-unit.py' not in job
+assert 'tests/ci-kvm-system-unit.py' in production_job
+assert 'workflow_sha=' in production_job and 'source_head_sha=' in production_job
+assert 'pr_merge_commit_second_parent' in production_job
 assert 'Exercise exact pinned production systemd VM unit on disposable hosted KVM' in production_job
 assert 'Require production systemd VM and proxy stopped' in production_job
 assert 'timeout-minutes: 45' in production_job
-staged_steps = [
-    'Prepare disposable guest and pinned inputs',
-    'Start real KVM guest and prove strict SSH readiness',
-    'Verify protected OpenCode config, TUI, and tmux',
-    'Verify restricted reboot, persistence, and egress',
-    'Exercise synthetic OAuth and browser-auth regressions',
-    'Prove final identity-safe cleanup',
+staged_invocations = [
+    'bash tests/ci-kvm-stage.sh --stage prepare --run-dir "$LM_CI_STATE_DIR"',
+    'bash tests/ci-kvm-stage.sh --stage boot --run-dir "$LM_CI_STATE_DIR"',
+    'bash tests/ci-kvm-stage.sh --stage config-tmux --run-dir "$LM_CI_STATE_DIR"',
+    'bash tests/ci-kvm-stage.sh --stage restricted-reboot-egress-persistence --run-dir "$LM_CI_STATE_DIR"',
+    'bash tests/ci-kvm-stage.sh --stage synthetic-oauth --run-dir "$LM_CI_STATE_DIR"',
+    'bash tests/ci-kvm-stage.sh --stage cleanup --run-dir "$LM_CI_STATE_DIR"',
 ]
-positions = [job.index(name) for name in staged_steps]
+positions = [job.index(invocation) for invocation in staged_invocations]
 assert positions == sorted(positions)
 assert 'if: always()' in job
 assert job.index('Exercise live OAuth harness cancellation cleanup') < job.index('Prove final identity-safe cleanup')
@@ -501,10 +516,12 @@ assert 'ci_kvm_stage_runtime_seconds' in text
 assert 'ssh-keyscan' not in text
 assert 'ci-qemu-oauth-bridge.py' in text and 'LM_CI_PUBLIC_KEY' in text
 assert 'synthetic-fixture' in text and 'token exchange and real model access are NOT_RUN' in text
-assert 'readiness_deadline=$((qemu_started + 180))' in text
+assert 'readiness_deadline=$((qemu_started + 900))' in text
 assert 'readiness_deadline=$((SECONDS + 60))' in text
 assert 'SECONDS < readiness_deadline && SECONDS < qemu_deadline' in text
-assert 'qemu_deadline=$((qemu_started + 300))' in text
+assert '(( readiness_deadline > qemu_deadline )) && readiness_deadline=$qemu_deadline' in text
+assert '--overall-seconds 2400' in text
+assert 'qemu_deadline=$((SECONDS + overall_remaining))' in text
 assert 'capture_qemu_identity || fail' in text
 assert 'process_starttime' in text and 'qemu_identity_matches' in text
 assert 'stop_owned_qemu || fail' in text
@@ -778,7 +795,9 @@ if len(args) >= 3 and args[1].endswith("virtiofs-socket.py") and args[2] == "aut
 if len(args) >= 2 and args[1].endswith("bounded-log.py"):
     child = args[args.index("--") + 1:]
     socket_path = child[child.index("--control-socket") + 1]
-    pathlib.Path(os.environ["VM_HOST_TEST_AUTH_CAPTURE"]).write_text(socket_path)
+    pathlib.Path(os.environ["VM_HOST_TEST_AUTH_CAPTURE"]).write_text(json.dumps({
+        "socket": socket_path, "stdin": "--stdin" in args,
+    }))
     proof = pathlib.Path(child[child.index("--proof-file") + 1])
     proof.write_text(json.dumps({
         "version": 1, "ssh_stopped": True, "control_socket_absent": True,
@@ -803,10 +822,27 @@ PY
   ' _ "$TEST_ROOT" "$run_dir"
 
   [ "$status" -eq 0 ]
-  [ "$(<"$capture")" = "$control_socket" ]
-  [ "$(python3 -c 'import os,sys; print(len(os.fsencode(sys.argv[1])))' "$(<"$capture")")" -lt 100 ]
-  [[ "$(<"$capture")" != "$run_dir"/* ]]
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["socket"])' "$capture")" = "$control_socket" ]
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["stdin"])' "$capture")" = False ]
+  [ "$(python3 -c 'import os,sys; print(len(os.fsencode(sys.argv[1])))' "$control_socket")" -lt 100 ]
+  [[ "$control_socket" != "$run_dir"/* ]]
   [ ! -e "$control_socket" ]
+
+  local tty_runner="$TEST_TMP/browser-auth-tty-runner.sh"
+  cat >"$tty_runner" <<'SH'
+#!/usr/bin/bash
+source "$TEST_ROOT/lib/vm/host-launcher.sh"
+VM_HOST_SCRIPT_ROOT="$TEST_ROOT"
+vm_host_record_process_identity() { printf 'test identity\n' >"$1"; }
+vm_host_verify_logger_completion() { [[ -s "$2" ]]; }
+vm_host_verify_browser_auth_proof() { [[ -s "$1" ]]; }
+vm_host_browser_auth_session "$TEST_RUN_DIR" 60
+SH
+  chmod 0700 "$tty_runner"
+  run env TEST_ROOT="$TEST_ROOT" TEST_RUN_DIR="$run_dir" PATH="$fake_bin:$PATH" \
+    script -qec "$tty_runner" /dev/null
+  [ "$status" -eq 0 ]
+  [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["stdin"])' "$capture")" = True ]
 }
 
 @test "Phase 1 runbook requires ChatGPT browser login, not an API key" {
@@ -827,10 +863,36 @@ PY
 }
 
 @test "browser auth preserves the validated desktop bus and optional owner TTY through wrappers" {
-  grep -Fq 'desktop_runtime="/run/user/$UID"' "$TEST_ROOT/lab-vm"
-  grep -Fq 'desktop_env+=("XDG_RUNTIME_DIR=$desktop_runtime" "DBUS_SESSION_BUS_ADDRESS=unix:path=$desktop_runtime/bus")' "$TEST_ROOT/lab-vm"
-  grep -Fq 'logger_stdin+=(--stdin)' "$TEST_ROOT/lib/vm/host-launcher.sh"
-  grep -Fq '"${logger_stdin[@]}"' "$TEST_ROOT/lib/vm/host-launcher.sh"
+  local runtime="$TEST_TMP/owner-runtime" auth_file="$TEST_TMP/Xauthority"
+  mkdir -m 0700 "$runtime"
+  printf 'xauthority' >"$auth_file"
+  chmod 0600 "$auth_file"
+  python3 - "$runtime/bus" "$runtime/wayland-0" <<'PY'
+import socket, sys
+for path in sys.argv[1:]:
+    sock = socket.socket(socket.AF_UNIX)
+    sock.bind(path)
+    sock.close()
+PY
+  run env XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" \
+    WAYLAND_DISPLAY=wayland-0 DISPLAY=:2 XAUTHORITY="$auth_file" \
+    bash -c 'source "$1/lib/vm/desktop-session-env.sh"; vm_collect_desktop_env "$(id -u)" "$2"; printf "%s\\n" "${desktop_env[@]}"' \
+    _ "$TEST_ROOT" "$runtime"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"XDG_RUNTIME_DIR=$runtime"* ]]
+  [[ "$output" == *"DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime/bus"* ]]
+  [[ "$output" == *"WAYLAND_DISPLAY=wayland-0"* ]]
+  [[ "$output" == *"XAUTHORITY=$auth_file"* ]]
+  [[ "$output" == *"DISPLAY=:2"* ]]
+
+  run env XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/attacker-bus" \
+    bash -c 'source "$1/lib/vm/desktop-session-env.sh"; vm_collect_desktop_env "$(id -u)" "$2"; printf "%s\\n" "${desktop_env[@]}"' \
+    _ "$TEST_ROOT" "$runtime"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"XDG_RUNTIME_DIR=$runtime"* ]]
+  [[ "$output" != *DBUS_SESSION_BUS_ADDRESS* ]]
+  [[ "$output" != *attacker-bus* ]]
+
 }
 
 @test "runbook ENOSPC boundary logic makes at most one extra byte attempt" {
@@ -1600,7 +1662,7 @@ SH
   local fixture="$TEST_TMP/protected-helper-shape"
   mkdir -p "$fixture/lib/vm"
   cp "$TEST_ROOT/lab-vm" "$fixture/lab-vm"
-  for name in host-launcher.sh cloud-init.sh proxy.py bounded-log.py executable-policy.py browser-auth-session.py callback-listener.py guest-user-dirs.py; do
+  for name in host-launcher.sh desktop-session-env.sh cloud-init.sh proxy.py bounded-log.py executable-policy.py browser-auth-session.py callback-listener.py guest-user-dirs.py; do
     cp "$TEST_ROOT/lib/vm/$name" "$fixture/lib/vm/$name"
   done
   ln -s "$TEST_ROOT/lib/vm/virtiofs-socket.py" "$fixture/lib/vm/virtiofs-socket.py"

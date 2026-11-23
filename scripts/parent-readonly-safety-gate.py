@@ -19,6 +19,14 @@ class GateRefused(RuntimeError):
     pass
 
 
+class DescriptorChangedDuringObservation(GateRefused):
+    """Fail-closed descriptor race with a sanitized retry identity classification."""
+
+    def __init__(self, retry_matches_requested_identity: bool):
+        super().__init__("descriptor_changed_during_observation")
+        self.retry_matches_requested_identity = retry_matches_requested_identity
+
+
 def _stat_fd_target(path: os.PathLike | str) -> os.stat_result:
     """Identify a proc FD target, pinning it with O_PATH if path stat is denied."""
     try:
@@ -189,13 +197,14 @@ def _scan_proc_inode(device: int, inode: int, allowed_pid: int = 0,
                             # that the same slot has disappeared before treating it as
                             # a harmless close race.
                             try:
-                                _stat_fd_target(entry.path)
+                                retry_info = _stat_fd_target(entry.path)
                             except FileNotFoundError:
                                 continue
                             except PermissionError as error:
                                 raise GateRefused("unreadable_fd_target_stat") from error
                             else:
-                                raise GateRefused("descriptor_changed_during_observation")
+                                raise DescriptorChangedDuringObservation(
+                                    (retry_info.st_dev, retry_info.st_ino) == (device, inode))
                         if (info.st_dev, info.st_ino) == (device, inode):
                             pid_value = int(pid_text)
                             if pid_value != allowed_pid or int(entry.name) != allowed_fd:
@@ -482,6 +491,11 @@ def main() -> int:
         run_gate(args.install_root.resolve(), args.state_dir.resolve())
     except (GateRefused, OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"REFUSED: {error}", file=sys.stderr)
+        if isinstance(error, DescriptorChangedDuringObservation):
+            retry_identity = ("matches_requested" if error.retry_matches_requested_identity
+                              else "differs_from_requested")
+            print("DIAGNOSTIC: phase=fd_target_retry classification=fd_slot_reappeared "
+                  f"retry_identity={retry_identity}", file=sys.stderr)
         print("SAFETY GATE: FAIL — no disk attachment authorized", file=sys.stderr)
         return 2
     except Exception as error:  # noqa: BLE001 — unexpected failures must fail closed before disk attachment

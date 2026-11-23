@@ -55,7 +55,12 @@ INSTALL_FILES = {
     "tools/vm-owner-acceptance": 0o755,
     "agent/opencode/plugins/little-mester-exit-confirm/package.json": 0o644,
     "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx": 0o644,
+    "agent/opencode/plugins/host-metrics-tui/package.json": 0o644,
+    "agent/opencode/plugins/host-metrics-tui/tui.tsx": 0o644,
+    "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js": 0o644,
+    "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts": 0o644,
     "lib/vm/host-launcher.sh": 0o644,
+    "lib/vm/desktop-session-env.sh": 0o644,
     "lib/vm/cloud-init.sh": 0o644,
     "lib/vm/proxy.py": 0o644,
     "lib/vm/bounded-log.py": 0o644,
@@ -65,6 +70,8 @@ INSTALL_FILES = {
     "lib/vm/virtiofs-socket.py": 0o644,
     "lib/vm/guest-user-dirs.py": 0o644,
     "lib/vm/parent-session-contract.py": 0o644,
+    "lib/vm/guest-compatibility.py": 0o644,
+    "lib/vm/code-update-transaction.py": 0o644,
     "lib/vm/parent-state.py": 0o644,
     "lib/vm/parent-launcher.py": 0o644,
     "lib/vm/parent-gate.py": 0o644,
@@ -72,20 +79,34 @@ INSTALL_FILES = {
     "lib/vm/parent-qemu.py": 0o644,
     "lib/vm/parent-provision.py": 0o644,
     "lib/vm/system-vm.py": 0o644,
+    "lib/vm/system-vm-workspace.py": 0o644,
+    "lib/vm/system-vm-metrics.py": 0o644,
+    "lib/vm/parent-metrics.py": 0o644,
+    "lib/vm/parent-metrics-collect.py": 0o644,
+    "lib/vm/guest-opencode-preferences.py": 0o644,
     "lib/vm/system-acceptance.py": 0o644,
     "lib/vm/host-dependencies.py": 0o644,
     "lib/vm/guest-bootstrap.py": 0o644,
     "scripts/parent-readonly-safety-gate.py": 0o644,
     "tools/vm-system-install": 0o755,
+    "systemd/little-mester-vm.service.d/90-code-update-guard.conf": 0o644,
+    "systemd/little-mester-vm-proxy.service.d/90-code-update-guard.conf": 0o644,
+    "systemd/little-mester-vm-workspace.service.d/90-code-update-guard.conf": 0o644,
+    "systemd/little-mester-vm-metrics.service.d/90-code-update-guard.conf": 0o644,
     "systemd/little-mester-vm.service": 0o644,
     "systemd/little-mester-vm-proxy.service": 0o644,
+    "systemd/little-mester-vm-workspace.service": 0o644,
+    "systemd/little-mester-vm-metrics.service": 0o644,
     # Candidate source is public deployment policy; deployed sudoers remains 0440.
     "sudoers/little-mester-vm": 0o444,
 }
 INSTALL_DIRS = {
     "agent", "agent/opencode", "agent/opencode/plugins",
     "agent/opencode/plugins/little-mester-exit-confirm", "lib", "lib/vm", "scripts", "tools",
+    "agent/opencode/plugins/host-metrics-tui",
     "systemd", "sudoers",
+    "systemd/little-mester-vm.service.d", "systemd/little-mester-vm-proxy.service.d",
+    "systemd/little-mester-vm-workspace.service.d", "systemd/little-mester-vm-metrics.service.d",
 }
 M1_ACCEPTED_SHA = "9a98f0c93ff65d38b181ecb9ab91df0633c1d280"
 PARENT_GUEST_ASSETS = (
@@ -132,6 +153,29 @@ def clean_env(*, desktop_session: bool = False) -> dict[str, str]:
                 env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
         except OSError:
             pass
+        display = os.environ.get("DISPLAY", "")
+        if re.fullmatch(r"(?:[A-Za-z0-9._/-]+)?:[0-9]{1,5}(?:\.[0-9]{1,3})?", display):
+            env["DISPLAY"] = display
+        wayland = os.environ.get("WAYLAND_DISPLAY", "")
+        if re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", wayland):
+            socket_path = runtime / wayland
+            try:
+                socket_info = os.lstat(socket_path)
+                if (stat.S_ISSOCK(socket_info.st_mode) and socket_info.st_uid == uid
+                        and not stat.S_ISLNK(socket_info.st_mode)):
+                    env["WAYLAND_DISPLAY"] = wayland
+            except OSError:
+                pass
+        xauthority = os.environ.get("XAUTHORITY", "")
+        if xauthority.startswith("/"):
+            try:
+                info = os.lstat(xauthority)
+                if (stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+                        and info.st_uid == os.getuid() and info.st_nlink == 1
+                        and stat.S_IMODE(info.st_mode) & 0o077 == 0):
+                    env["XAUTHORITY"] = xauthority
+            except OSError:
+                pass
     term = os.environ.get("TERM", "")
     if (os.environ.get("LM_VM_TERM_VALIDATED") == "1"
             and re.fullmatch(r"[A-Za-z0-9_.+-]{1,64}", term)):
@@ -141,7 +185,9 @@ def clean_env(*, desktop_session: bool = False) -> dict[str, str]:
 
 
 def owner_system_vm(root: pathlib.Path, operation: str, *, approve_lifecycle: bool = False,
-                    progress=None) -> int:
+                    progress=None, repository: pathlib.Path | None = None,
+                    workspace_dir: str | None = None, unsafe_recurse: bool = False,
+                    reassign: bool = False) -> int:
     """Dispatch fixed VM operations and the shared installed acceptance command."""
     if operation in ("verify", "accept"):
         if operation == "accept" and not approve_lifecycle:
@@ -162,6 +208,19 @@ def owner_system_vm(root: pathlib.Path, operation: str, *, approve_lifecycle: bo
         return module.accept(root, progress=progress)
     if operation not in ("up", "down", "status", "ssh", "auth", "tui"):
         raise GateError("BLOCKED", "unsupported fixed system VM operation")
+    if workspace_dir is not None:
+        if operation != "up" or repository is None:
+            raise GateError("BLOCKED", "workspace assignment is supported only with up and a pinned repository")
+        configure = subprocess.run(
+            [SUDO, "-n", PYTHON, "-I", "/usr/lib/little-mester-vm/system-vm-workspace.py", "configure"],
+            input=json.dumps({"dir": workspace_dir, "repository": str(repository),
+                "owner_uid": os.getuid(), "unsafe_recurse": unsafe_recurse,
+                "reassign": reassign}), text=True,
+            env=clean_env(), check=False)
+        if configure.returncode:
+            raise GateError("BLOCKED", "workspace assignment was refused; the VM was not started")
+    elif unsafe_recurse or reassign:
+        raise GateError("BLOCKED", "--unsafe-recurse and --reassign require --dir with up")
     env = clean_env(desktop_session=operation == "auth")
     term = os.environ.get("TERM", "")
     if operation in ("ssh", "auth", "tui") and re.fullmatch(r"[A-Za-z0-9_.+-]{1,64}", term):
@@ -1357,7 +1416,7 @@ def report_template(sha: str, mode: str, report_dir: pathlib.Path) -> dict:
         gates = ["candidate", "deployed_candidate_verification"]
         if mode == "system_vm_accept":
             gates += ["preflight", "proxy_private_target_policy", "guest_readiness_ssh",
-                      "network_boundaries", "direct_egress_blocked", "opencode_tui",
+                      "network_boundaries", "host_metrics_transport", "direct_egress_blocked", "opencode_tui",
                       "same_disk_persistence", "final_vm_state"]
         return {
             "version": 1,
@@ -2312,6 +2371,11 @@ def parser() -> argparse.ArgumentParser:
                    help="check host requirements and, with separate approval, install supported missing packages")
     p.add_argument("--approve-system-vm-lifecycle", action="store_true",
                    help="explicitly authorize system VM lifecycle acceptance")
+    p.add_argument("--dir", dest="workspace_dir", help="explicit host workspace directory for --system-vm up")
+    p.add_argument("--unsafe-recurse", action="store_true",
+                   help="explicitly allow sharing this Little Mester repository")
+    p.add_argument("--reassign", action="store_true",
+                   help="explicitly replace the stopped fixed VM workspace assignment")
     p.add_argument("--milestone", choices=("M2",), help="owner acceptance milestone")
     p.add_argument("--sha", type=full_sha, help="full lowercase 40-character candidate commit SHA")
     p.add_argument("--prefix", type=install_prefix,
@@ -2346,6 +2410,7 @@ def main(argv: list[str] | None = None) -> int:
     workflow_modes = ("preflight", "install", "storage_proof", "run", "verify_cleanup", "all", "parent_accept")
     if args.prepare_dependencies and (
             args.system_vm or args.approve_system_vm_lifecycle or args.sha or args.repo
+            or args.workspace_dir or args.unsafe_recurse or args.reassign
             or any(getattr(args, name) for name in workflow_modes)):
         parser().error("--prepare-dependencies must be used on its own")
     if args.prepare_dependencies:
@@ -2362,6 +2427,10 @@ def main(argv: list[str] | None = None) -> int:
         parser().error("--sha is required for acceptance and VM operations")
     if args.approve_system_vm_lifecycle and args.system_vm != "accept":
         parser().error("--approve-system-vm-lifecycle is valid only with --system-vm accept")
+    if (args.workspace_dir or args.unsafe_recurse or args.reassign) and args.system_vm != "up":
+        parser().error("--dir, --unsafe-recurse, and --reassign are valid only with --system-vm up")
+    if (args.unsafe_recurse or args.reassign) and not args.workspace_dir:
+        parser().error("--unsafe-recurse and --reassign require --dir")
     if args.system_vm:
         if not args.repo:
             parser().error("--system-vm requires --repo PATH for the candidate source repository")
@@ -2372,7 +2441,9 @@ def main(argv: list[str] | None = None) -> int:
                 repo = pathlib.Path(args.repo).resolve(strict=True)
                 candidate_commit(repo, args.sha)
                 root = verify_install(repo, args.sha, args.prefix)
-                return owner_system_vm(root, args.system_vm)
+                return owner_system_vm(root, args.system_vm, repository=repo,
+                    workspace_dir=args.workspace_dir, unsafe_recurse=args.unsafe_recurse,
+                    reassign=args.reassign)
             except (GateError, OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
                 print(f"BLOCKED: system VM owner command refused ({error})", file=sys.stderr)
                 return 3

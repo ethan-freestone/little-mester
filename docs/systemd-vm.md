@@ -10,11 +10,19 @@ remains available as an owner-facing compatibility path.
 Smoke and system guests use the shared `lib/vm/guest-bootstrap.py` foundation
 for the pinned proxy configuration, rootless Docker, user-directory checks,
 and OpenCode provisioning. Smoke selects its existing virtiofs workspace;
-the persistent system VM selects a guest-disk workspace and layers the
-protected parent session assets/readiness contract on top. Hosted KVM CI and
+the persistent system VM requires an explicitly assigned host directory,
+exported read/write at guest `/workspace` by an owner-scoped `virtiofsd`
+service. Hosted KVM CI and
 smoke also obtain their QEMU machine, block, and network arguments from the
 same protected `parent-qemu.py` builder; CI retains its separate disposable
 lifecycle owner.
+
+The v3 guest's protected metrics display uses a fixed read-only host service:
+the systemd-owned sidecar listens only on `127.0.0.1:32129`, and the fixed
+QEMU user network forwards only guest `10.0.2.100:19532` to that loopback
+listener. The endpoint accepts only `GET /metrics` and bounded
+`GET /history?n=1..60`; it has no write routes and is not part of the egress
+proxy. The legacy parent does not load this v3-only plugin or mapping.
 
 After the exact candidate is installed under `/opt/little-mester/v3/<commit>`,
 an owner may explicitly install the fixed account, units, sudoers file, config,
@@ -23,6 +31,26 @@ and fresh disk with:
 ```sh
 sudo /opt/little-mester/v3/<commit>/tools/vm-system-install
 ```
+
+After a fresh install, a protected host-code update path is available while the
+VM, proxy, workspace-share, and metrics services are already stopped:
+
+```sh
+sudo /opt/little-mester/v3/<new-commit>/tools/vm-system-install \
+  --update-code-only --previous-sha <previous-full-commit>
+```
+
+The implementation snapshots the fixed prior protected target inventory,
+interlocks updates and starts, installs fixed start guards, replaces protected
+host assets, reloads systemd without starting anything, and checks that the
+disk, seed, identity keys, assignment, and workspace drop-in identities remain
+unchanged. It never updates guest files or starts the VM. The matching
+code-only rollback command is documented in
+[`guest-compatibility-update.md`](guest-compatibility-update.md). These commands
+are not owner-supported until the exact implementation commit is reviewed and
+hosted production-systemd acceptance is complete. Actual guest compatibility is
+established only during a separately authorized start; unknown/mismatch blocks
+normal routes. If a file or service is unsafe or active, the updater refuses.
 
 The protected runtime is installed under `/usr/lib/little-mester-vm`, a path
 available on both Ubuntu and merged-`/usr` distributions such as Arch. The
@@ -50,7 +78,8 @@ checkout's full Git commit and forwards operations to the existing owner
 acceptance/runtime path; it does not implement a second VM controller:
 
 ```sh
-./lab vm up|down|status|ssh|auth|tui|verify|accept
+./lab vm up --dir PATH [--unsafe-recurse] [--reassign]
+./lab vm down|status|ssh|auth|tui|verify|accept
 ./lab vm prepare-dependencies production|acceptance|system-install
 ```
 
@@ -92,9 +121,44 @@ then leaves the VM running. Hosted CI invokes this same installed command, then
 runs CI-only forced-stop fault injection and disposable cleanup. Neither this
 command nor the fixed owner interface accepts a unit, disk path, QEMU option,
 arbitrary systemd property, or remote command. `up` waits for cloud-init, SSH,
-and the existing protected parent
-session-contract readiness checks. `auth` uses the existing bounded browser
+and the protected session-contract readiness checks, mounts the assigned
+workspace at `/workspace`, and proves host↔guest read/write access. `status`
+prints the assigned canonical directory. The first `up` must provide `--dir`;
+later starts reuse the protected assignment. Repository self-development
+requires `--unsafe-recurse`, and changing an assignment requires `--reassign`
+while the fixed VM is stopped. `auth` uses the existing bounded browser
 callback bridge.
+
+### Deployed unit verification diagnostics
+
+The fixed candidate verifier compares allowlisted effective properties for the
+QEMU, proxy, workspace, and metrics services in addition to verifying the
+candidate unit/drop-in files. On a mismatch it remains fail-closed. Its
+diagnostic identifies each failed existing comparison by fixed service and
+property, with bounded expected and safe observed labels; it does not print raw
+`systemctl show`, unit contents, environment, or journal output. Ordered
+`ExecStartPre` and exact locked-service command checks remain strict. These
+diagnostics explain a rejection; they do not by themselves make the effective
+policy comparison exhaustive or authorize an owner VM operation.
+
+For the fixed maintenance guard, verification resolves the fixed unit name with
+the system D-Bus Manager `GetUnit` method and reads its effective
+`Unit.Conditions` using the fixed system-D-Bus JSON output format. It validates
+the negated condition's type, trigger flag, and fixed maintenance-marker path;
+missing, conflicting, malformed, unsupported, or unavailable evidence fails
+closed. These observations do not establish a root cause for a mismatch and
+are not an exhaustive validation of all effective systemd policy.
+
+Inside the guest shell (`./lab vm ssh`), safe per-user model/theme settings are
+available without editing protected OpenCode configuration:
+
+```sh
+python3 -I /usr/local/libexec/lm-guest-opencode-preferences.py set \
+  --model openai/<model-id> --theme dark
+```
+
+Only `model` and `theme` are accepted. Restart the OpenCode TUI to apply them;
+permissions, plugins, networking, and project-config policy remain protected.
 
 The proxy is a separate `lm-vm-proxy` service. Its bounded TCP readiness probe
 must pass before QEMU starts; losing the proxy stops the VM unit. QEMU shutdown

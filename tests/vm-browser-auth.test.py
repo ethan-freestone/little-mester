@@ -360,6 +360,39 @@ class AuthorizationValidationTests(unittest.TestCase):
             session._portal_or_manual(authorization_url())
         self.assertEqual(error.exception.status, 76)
 
+    def test_validated_url_uses_fixed_wayland_clipboard_command(self):
+        session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
+        url = authorization_url()
+        with mock.patch.object(auth.os.path, "isfile", side_effect=lambda path: path.endswith("wl-copy")), \
+             mock.patch.object(auth.os, "access", return_value=True), \
+             mock.patch.object(auth.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
+            self.assertTrue(session._copy_url_to_clipboard(url))
+        self.assertEqual(run.call_args.args[0], ["/usr/bin/wl-copy"])
+        self.assertEqual(run.call_args.kwargs["input"], url.encode("ascii"))
+        self.assertEqual(run.call_args.kwargs["timeout"], 2)
+        with mock.patch.object(auth.subprocess, "run") as run:
+            self.assertFalse(session._copy_url_to_clipboard("https://evil.example/token"))
+            run.assert_not_called()
+
+    def test_manual_fallback_reports_clipboard_success_without_changing_url_validation(self):
+        session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
+        session.tty_fd = 1
+        session.callback_port = 1455
+        session.deadline = None
+        session.signal_received = None
+        session.auth_process_completed = False
+        session.portal_cleanup_failed = False
+        session._loopback_forward_ready = lambda _port: True
+        session._open_portal = lambda *_args: False
+        session._copy_url_to_clipboard = lambda _url: True
+        output = []
+        session._write_tty = output.append
+        url = authorization_url()
+        session._portal_or_manual(url)
+        joined = b"".join(output)
+        self.assertIn(url.encode("ascii"), joined)
+        self.assertIn(b"copied to the host clipboard", joined)
+
     def test_portal_failure_after_cancellation_never_discloses_manual_url(self):
         session = auth.BrowserAuthSession.__new__(auth.BrowserAuthSession)
         session.tty_fd = 1

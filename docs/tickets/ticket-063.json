@@ -1,0 +1,54 @@
+{
+  "id": 63,
+  "file_path": "/workspace/docs/tickets/ticket-063.json",
+  "number": 63,
+  "area": "workflow",
+  "type": "improvement",
+  "status": "draft",
+  "title": "Enforce independent review and acceptance evidence for PR workflows",
+  "objective": "Add auditable ticket-linked controls for source-ticket linkage, per-commit cumulative-diff review evidence, independent reviewer identity/approval, and explicit owner acceptance gates before merge; separate follow-up, not part of PR #20.",
+  "created_at": "2026-11-21T11:59:07.926Z",
+  "updated_at": "2026-11-21T18:44:49.385Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Every implementation PR is linked to an active ticket and each commit records its exact diff identity, required tests and independent review disposition; missing or stale evidence blocks merge.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Review evidence identifies an actually invoked independent reviewer, reviewed base/head/diff digest, findings, severity, disposition and unresolved blockers; self-review or test success cannot satisfy the gate.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "PR acceptance criteria map to ticket evidence with distinct CI, runtime, synthetic and owner-observed evidence levels; owner-only gates require explicit owner approval before merge.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Enforcement is tested against missing-ticket, missing-review, stale-diff, self-approval, unresolved-blocker and absent-owner-acceptance cases; adoption does not alter historical ticket records or implement itself in PR #20.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Define source of truth and event schema for commit/diff review identity and ticket linkage.",
+      "Test required/optional review policies and stale review invalidation after new commits.",
+      "Test owner-only acceptance gate and audit evidence across PR merge-check integration.",
+      "Record migration/adoption policy separately from PR #20.",
+      "Programmatically enforce the owner-mandated Luna High orchestration, delegated mechanical execution, documentation→tests→implementation→commit sequence, exact-SHA Sol review for every commit, ticket synchronization and clean handoff. Keep enforcement separate from PR #20 implementation.",
+      "Add manual pre-implementation design gate: delegate investigations/evidence gathering to non-Sol agents; Luna submits a concise evidence-backed proposal and test strategy; Sol independently reviews before implementation; resolve blockers and renew review on material design deviation. Sol is design/code reviewer only, not investigator, test runner, Git/log retriever, editor or ticket administrator. Preserve exact-SHA Sol review of every commit and corrective commit; programmatic enforcement remains future #63 scope, outside PR #20."
+    ],
+    "created": [],
+    "cases": [
+      "Related narrower deferred ticket #52 covers durable handoff sequencing; this ticket covers review/acceptance enforcement and is separate from PR #20.",
+      "Owner mandate for PR #20 and follow-on development: Luna High orchestrates/decides; delegate mechanical work/evidence/tests; every sub-phase tracked through ticket engine; docs→tests→implementation→commit; Sol reviews each exact commit SHA against cumulative PR/security/acceptance scope; correction commits get independent re-review; synchronize ticket/docs/evidence; never push or merge without approval. This procedural policy is to be applied manually now; programmatic enforcement remains this ticket's separate scope.",
+      "Superseding clarification: the 2026-11-15 temporary ticket-CLI comment exception is not used for this work. All ticket mutations, including comments, go through little-mester MCP tools; programmatic enforcement remains separate under #63.",
+      "Owner clarification supersedes the prior MCP-only-comments wording: while the known MCP comment-write gap remains, the ticket CLI may append comments only. All ticket fields, criteria, test-ledger changes and other ticket mutations must use MCP; no direct ticket-file edits. Implementing the missing MCP comment capability remains future work under #63.",
+      "PR #20 procedural compliance evidence (2026-11-21): exact commit reviews are required for every commit. `4aeacf3a348548904d07c8b08918cbcba5987a01` received Sol FIX for conflicting CLI comment-policy wording; `989f6b0b7f060b9c44188395f53acdda297809a5` received Sol FIX for a remaining historical CLI exception; owner clarified CLI comments are permitted while MCP comment-write is unavailable, all other mutations remain MCP-only; corrective `ddf8e5ae4da4b2261fd054dd53dc5c9d001bd674` received Sol PASS. Cleanup `206b8cc` received Sol FIX, corrected by `f7bcfd33cd1bd8870fc86ee592dede423811d82a` Sol APPROVE; CI/diagnostic `af9a0530ee4a6945e1c10094089d5a5ac0cf67f0` Sol APPROVE. Every review was independently invoked against its exact commit SHA and cumulative PR #20 scope. Programmatic enforcement remains future #63 scope; no PR #20 acceptance claims implied.",
+      "SHA precision correction for the procedural review record: cleanup commit abbreviated as `206b8cc` is full SHA `206b8cc61d81c7f7322d09cc531c671ad1afca2d`; Sol verdict FIX, corrected exact SHA f7bcfd33cd1bd8870fc86ee592dede423811d82a APPROVE."
+    ]
+  },
+  "models_used": []
+}

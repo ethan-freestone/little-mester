@@ -1,0 +1,64 @@
+{
+  "id": 65,
+  "file_path": "/workspace/docs/tickets/ticket-065.json",
+  "number": 65,
+  "area": "infra",
+  "type": "spike",
+  "status": "draft",
+  "title": "Attribute slow first boot of the fixed systemd VM",
+  "objective": "Use bounded owner-authorized measurements to identify the source of the 480.334s first VM start/readiness interval without changing production deadlines or provisioning semantics speculatively.",
+  "created_at": "2026-11-21T20:56:23.013Z",
+  "updated_at": "2026-11-23T12:29:29.997Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "A source-level trace maps first-boot provisioning, guest cloud-init, package/network operations, systemd dependencies, SSH retries, and readiness predicates with exact evidence references.",
+      "status": "passing",
+      "evidence": "Delegated read-only trace recorded in ticket tests.created with exact references: systemd/little-mester-vm.service:18-25; lib/vm/system-vm.py:388-406,630-663; lib/vm/guest-bootstrap.py:16-60,118-132; lib/vm/parent-session-contract.py:122-145; systemd/little-mester-vm-proxy.service:3-5; original feat/vm-approach lib/vm/cloud-init.sh; transient CI tests/ci-kvm-stage.sh:579-605,693-744. Conclusion: initial 480.334s interval cause remains unknown; plausible cloud-init package work versus host network-online/proxy, SSH retry and protected readiness alternatives."
+    },
+    {
+      "id": "A2",
+      "text": "An owner-authorized hosted run captures enough bounded timestamps/log markers to distinguish host-unit startup, QEMU/guest boot, cloud-init/package work, SSH transport, and protected readiness checks; secrets are excluded.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "The measured cause and uncertainty are recorded; any proposed behavior change receives separate Sol design review and preserves deadlines, fresh-provision acceptance, security, and coverage unless an owner-approved evidence-based change says otherwise.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "If no actionable defect or unnecessary delay is demonstrated, document the result and leave performance optimization deferred without speculative changes.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Source comparison: fixed production systemd VM against original feat/vm-approach and faster transient guest CI bootstrap.",
+      "Owner-authorized hosted timing capture for host unit activation, QEMU start, guest cloud-init completion, package steps, SSH/readiness attempts and final readiness; preserve bounded redacted logs.",
+      "If a concrete fix is identified, add a focused regression reproducing it and obtain Sol design review before implementation.",
+      "After GitHub write access/network is restored, push the Sol-reviewed shared-bootstrap npm dependency correction and run one exact-SHA disposable hosted production acceptance; inspect any residual failure without repeating unchanged code. Current owner timing logs do not provide per-stage attribution.",
+      "Owner pushes the exact Sol-reviewed candidate and authorizes an exact-SHA hosted production acceptance; capture bounded fixed-label host/QEMU/cloud-init/guest APT/SSH/readiness timings. Transient CI timing and local proxy tests do not satisfy this production measurement.",
+      "On an owner-authorized hosted production systemd rerun, correlate bounded redacted per-request proxy records with APT output and capture the response status line/source. If first-byte delay remains, instrumentation/evidence must separate connect completion, request forwarding, first upstream read and client relay; current fields do not separate those post-connect phases."
+    ],
+    "created": [
+      "Delegated first-boot source trace: systemd/little-mester-vm.service:18-25; lib/vm/system-vm.py:388-406, 630-663; lib/vm/guest-bootstrap.py:16-60, 118-132; lib/vm/parent-session-contract.py:122-145; systemd/little-mester-vm-proxy.service:3-5; original feat/vm-approach lib/vm/cloud-init.sh; transient CI tests/ci-kvm-stage.sh:579-605,693-744.",
+      "APT resolver comparison on Noble with empty package status: nodejs+npm planned 737 packages with recommendations, 403 without; nodejs+libnode-dev+build-essential planned 89 without. These are relative resolver plans, not exact fresh-guest package counts. Verified current npm next-10 metadata/artifact (stable 10.9.11, canonical URL, Node engine, SHA-512) and executed the verified CLI against Node 18.19.1; compiled/loaded a minimal native addon and installed exact OpenCode 2.2.5 in temporary directories. Sol exact-commit review PASS for commit 710bbf67. Push/hosted rerun remain blocked/not run; no guest network throughput was measured.",
+      "CI run 45155780845 source SHA 710bbf67f52a11826a3e7bc2e5da8f1c8b9923cf: production systemd job 137628207635 failed while guest APT was still at Ubuntu repository-index Get:29 after 15 minutes per owner-provided excerpt; raw job logs return 403, and exact request timing/layer is unavailable. Host APT's 14-second update is not comparable because it bypasses the guest QEMU guestfwd/socat -> host proxy route. Source shows prior proxy serial 20-second per-address dialing, per-request Connection: close/no reuse, and 60-second relay idle timeout; these make repeated gaps plausible but do not establish the CI root cause. A bounded staggered 20-second-total dial plus redacted phase diagnostics was implemented as a source-level resilience measure; tests/vm-proxy.test.py 22 passed, but there is no hosted evidence of improved APT completion. The transient CI timing/progress changes are not production measurement and do not satisfy owner-authorized production timing acceptance.",
+      "Follow-up local regression after review: proxy limits each pending candidate to 3s, advances through later same-family DNS answers while retaining max two active and a 20s overall dial deadline; loser status exceptions do not discard another ready connection; upstream EOF-before-response has a truthful summary. Transient guest-stage failure paths were made single-report under the actual ERR trap. Final local focused results: proxy 24, transient unit 108, stage-state 6, QEMU-owner 7; shell/Python/workflow/diff checks pass. This is not production timing or hosted APT acceptance; exact-commit Sol re-review is pending.",
+      "Read-only trace of lib/vm/proxy.py timing: request_ms includes destination policy/DNS/connect plus request send, origin wait and client relay; direct-path upstream_ms starts after connect but before request send and is emitted after client sendall. It can distinguish pre-connect from post-connect time, not request-send, origin TTFB and downstream-relay components. Local regression confirms upstream HTTP 520 status bytes are forwarded unchanged; no live destination/provider attribution.",
+      "Deterministic tests/vm-proxy.test.py coverage: client half-close response relay, unchanged upstream 520, pre-response EOF 502 and idle-timeout 502; 26 tests pass. This validates local behavior only, not first-boot timing or hosted APT."
+    ],
+    "cases": [
+      "Owner reports run 44947379075 first initial VM start/readiness 480.334s, same-disk restart/readiness 18.275s, fresh provisioning 15.945s, candidate install 1.473s, forced-stop recovery 35.717s, final cleanup 18.733s, TUI 2.754s. Timings localize the delay to first start/readiness but do not attribute it.",
+      "Delegated source trace found cloud-init readiness waits for guest runcmd, which includes two apt updates/package installs, Docker repository/package setup, rootless Docker configuration and global npm OpenCode install. Host proxy/network-online dependencies and SSH polling remain possible contributors. No actual first-boot bug established; no timing bounds changed.",
+      "Source investigation distinguishes a first-only plausible cloud-init runcmd cost (apt/base packages, Docker repo and second apt, Docker packages, rootless setup, npm OpenCode) from possible host network-online/proxy delay, SSH poll time and protected readiness checks. No per-command guest timestamps exist; 480.334s first readiness cannot be attributed from current evidence. Same-disk 18.275s restart does not prove initial cause. Original bootstrap is materially similar; transient CI is smaller/non-comparable. No proven bug or justified timeout/coverage modification.",
+      "Sol APPROVED the consolidated acceptance gap analysis and owner runbook only. First-boot classification is accepted as cause UNKNOWN; measure on a genuinely fresh, separately owner-authorized disposable target with bounded host unit/QEMU/cloud-init/apt-dpkg/SSH-readiness timestamps. A same-disk rerun may not reproduce cloud-init first-boot costs. No action is authorized on either existing owner VM. If later evidence identifies a defect, obtain a separate Sol design review before implementation.",
+      "Evidence supports Ubuntu's npm APT package as a top-level source of the large split node-* / node-gyp tree; recommendations also account for compiler/docs packages. Shared bootstrap replaces only the npm APT package, retains unversioned Node, libnode-dev and build-essential, keeps rootless prerequisite recommendations, and leaves proxy/QEMU isolation and the 16-minute service bound unchanged. This is evidence for reducing package work, not proof that upstream network latency was not an additional cause or that the hosted readiness bound now passes. User-provided attempts 1/2 show hundreds of package downloads; attempt 3 step failed after 16 minutes and detailed log archive was unavailable (403).",
+      "Supersedes earlier ledger wording that conditioned the exact-SHA hosted run on restoration of agent GitHub write access: the user owns all pushes/merges, and no write-access action was attempted. The user pushed 710bbf67f52a11826a3e7bc2e5da8f1c8b9923cf; the corrective local SHA awaits exact-commit Sol review and will be handed to the user. Latest hosted run 45155780845 failed; cause and per-request timing remain unknown. A1 source-path evidence remains as recorded; A2/A3/A4 and production timing acceptance remain outstanding.",
+      "Sol Medium exact-commit review APPROVE for source commit 0c4aceba756f42307e44995fb19bf736ac7461ab against parent 710bbf67f52a11826a3e7bc2e5da8f1c8b9923cf; no remaining source findings. This is not hosted APT timing or performance acceptance: run 45155780845 failed, raw job logs return 403, exact production APT cause and end-to-end result remain unproven. #65 A1 source-path criterion remains as previously recorded; owner-authorized production timing and measurement criteria remain outstanding.",
+      "Run 45170492401 (source 9d8cd135f04dca2aa7648edf555ffed23779bdc0): owner reports production guest APT HTTP 520 for noble suite indexes; public API confirms production unit step failed, while transient KVM integration passed. GitHub raw Actions logs endpoint returns 403. Observed first-byte delay 12–16s is post-connect according to the proxy timing boundary, but component, HTTP 520 origin (destination vs intermediary), and cloud-provider contribution remain unknown. No performance deadline or policy change and no hosted acceptance claim."
+    ]
+  },
+  "models_used": []
+}

@@ -1,8 +1,8 @@
 [Unit]
 Description=Little Mester persistent OpenCode VM
-Requires=little-mester-vm-proxy.service
-BindsTo=little-mester-vm-proxy.service
-After=little-mester-vm-proxy.service
+Requires=little-mester-vm-proxy.service little-mester-vm-workspace.service little-mester-vm-metrics.service
+BindsTo=little-mester-vm-proxy.service little-mester-vm-workspace.service little-mester-vm-metrics.service
+After=little-mester-vm-proxy.service little-mester-vm-workspace.service little-mester-vm-metrics.service
 StartLimitIntervalSec=60s
 StartLimitBurst=3
 
@@ -15,7 +15,7 @@ RuntimeDirectory=little-mester-vm
 RuntimeDirectoryMode=0700
 UMask=0077
 ExecStartPre=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py check
-ExecStart=/usr/bin/qemu-system-x86_64 -name little-mester-system-vm -machine q35,accel=kvm -cpu host -smp 2 -m 4096 -enable-kvm -blockdev driver=file,node-name=system-file,filename=/var/lib/little-mester-vm/disk.qcow2,locking=on,auto-read-only=off -blockdev driver=qcow2,node-name=system-qcow2,file=system-file,auto-read-only=off -device virtio-blk-pci,drive=system-qcow2 -drive file=/var/lib/little-mester-vm/seed.iso,format=raw,if=none,id=cloud,readonly=on -device virtio-scsi-pci,id=scsi0 -device scsi-cd,drive=cloud -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:22222-:22,guestfwd=tcp:10.0.2.100:3128-cmd:socat - TCP:127.0.0.1:32128,restrict=on" -device virtio-net-pci,netdev=net0 -display none -serial stdio -monitor none -qmp unix:/run/little-mester-vm/qmp.sock,server=on,wait=off -no-reboot
+ExecStart=+/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py locked-service qemu
 ExecStartPost=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py guest-ready
 ExecStop=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py qmp-stop $MAINPID
 Restart=no
@@ -38,7 +38,7 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadOnlyPaths=/var/lib/little-mester-vm/seed.iso
-ReadWritePaths=/var/lib/little-mester-vm/disk.qcow2 /run/little-mester-vm
+ReadWritePaths=/var/lib/little-mester-vm/disk.qcow2 /run/little-mester-vm /etc/little-mester-vm/code-update.lock
 
 [Install]
 WantedBy=multi-user.target

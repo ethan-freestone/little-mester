@@ -150,6 +150,25 @@ class OwnerTests(unittest.TestCase):
         with self.assertRaises(OWNER.Refused):
             OWNER.load_json(state_path)
 
+    def test_owner_accepts_approved_cap_and_refuses_above_maximum(self):
+        self.state["overall_seconds"] = 2400
+        self.state["deadline_monotonic"] = time.monotonic() + 2400
+        STATE.write_state(self.run_dir, self.state)
+        owner = OWNER.Owner(self.run_dir, self.ctx)
+        self.assertGreater(owner.deadline, time.monotonic())
+        self.state["overall_seconds"] = 3001
+        STATE.write_state(self.run_dir, self.state)
+        with self.assertRaisesRegex(OWNER.Refused, "validated bound"):
+            OWNER.Owner(self.run_dir, self.ctx)
+
+    def test_shutdown_remains_allowed_after_overall_deadline(self):
+        owner = OWNER.Owner(self.run_dir, self.ctx)
+        owner.deadline = time.monotonic() - 1
+        owner.validate_owner = lambda: None
+        self.assertTrue(owner.dispatch("shutdown")["shutdown"])
+        with self.assertRaisesRegex(OWNER.Refused, "overall deadline expired"):
+            owner.dispatch("start-initial")
+
 
 if __name__ == "__main__":
     unittest.main()

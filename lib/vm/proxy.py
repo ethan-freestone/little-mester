@@ -6,18 +6,81 @@ files. CONNECT is restricted to 443; plain HTTP to 80. Every resolved address
 must be public and outside host-local/directly-connected networks.
 """
 import argparse
+import errno
 import ipaddress
+import itertools
+import logging
 import os
 import select
 import signal
 import socket
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
 _NAT64_WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
+_CONNECT_DEADLINE = 20.0
+_CONNECT_STAGGER = 0.25
+# Retire a blackholed nonblocking attempt so later same-family answers progress.
+_CANDIDATE_TIMEOUT = 3.0
+_MAX_ACTIVE_DIALS = 2
+_MAX_CANDIDATES = 16
+_SLOW_LOG_THRESHOLD = 1.0
+_LOG = logging.getLogger("vm-proxy")
+_REQUEST_IDS = itertools.count(1)
+_REQUEST_CONTEXT = threading.local()
+_monotonic = time.monotonic
+_wall_monotonic = time.monotonic
+
+
+def _safe_host(host):
+    """Return a short hostname token without accepting log-control characters."""
+    value = str(host).lower().rstrip(".")
+    try:
+        ipaddress.ip_address(value.strip("[]"))
+        return "ip-literal"
+    except ValueError:
+        pass
+    if len(value) > 120 or not value or any(
+        char not in "abcdefghijklmnopqrstuvwxyz0123456789.-:" for char in value
+    ):
+        return "invalid-host"
+    return value
+
+
+def _errno_category(error):
+    number = getattr(error, "errno", None)
+    return {
+        errno.ECONNREFUSED: "refused", errno.ETIMEDOUT: "timeout",
+        errno.ENETUNREACH: "network-unreachable", errno.EHOSTUNREACH: "host-unreachable",
+        errno.EADDRNOTAVAIL: "address-unavailable", errno.EACCES: "access-denied",
+    }.get(number, "connect-error")
+
+
+def _proxy_log(host, reason, **fields):
+    safe = _safe_host(host)
+    bounded = []
+    for key, value in list(fields.items())[:8]:
+        if isinstance(value, int):
+            value = max(0, min(value, 999_999_999))
+        elif (not isinstance(value, str) or len(value) > 120
+              or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                     "0123456789_.:-;" for char in value)):
+            value = "invalid"
+        bounded.append(f"{key}={value}")
+    summary = " ".join(bounded)
+    request_id = getattr(_REQUEST_CONTEXT, "request_id", "-")
+    _LOG.warning("proxy request=%s host=%s reason=%s %s", request_id, safe, reason, summary[:400])
+
+
+def _quiet_close(sock):
+    try:
+        sock.close()
+    except OSError:
+        pass
 
 
 def policy(_path=None):
@@ -223,26 +286,227 @@ def _is_allowed_public_destination(address, blocked_networks):
 
 
 def connect_public(host, port, blocked_networks=None):
-    addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    dns_started = _monotonic()
+    try:
+        addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except Exception:
+        _proxy_log(host, "dns-failed", elapsed_ms=int((_monotonic()-dns_started)*1000),
+                   reason_code="resolve-error")
+        raise
+    dns_elapsed = _monotonic() - dns_started
+    if dns_elapsed > _SLOW_LOG_THRESHOLD:
+        _proxy_log(host, "dns-slow", elapsed_ms=int(dns_elapsed * 1000))
     if blocked_networks is None:
-        blocked_networks = host_networks()
-    resolved = [ipaddress.ip_address(address[4][0]) for address in addresses]
+        network_started = _monotonic()
+        try:
+            blocked_networks = host_networks()
+        except Exception:
+            _proxy_log(host, "policy-failed", phase="host-networks",
+                       elapsed_ms=int((_monotonic()-network_started)*1000),
+                       reason_code="policy-error")
+            raise
+        network_elapsed = _monotonic() - network_started
+        if network_elapsed > _SLOW_LOG_THRESHOLD:
+            _proxy_log(host, "host-networks-slow", phase="policy",
+                       elapsed_ms=int(network_elapsed * 1000))
+    try:
+        resolved = [ipaddress.ip_address(address[4][0]) for address in addresses]
+    except (IndexError, TypeError, ValueError):
+        _proxy_log(host, "policy-failed", phase="dns-answer",
+                   reason_code="invalid-answer")
+        raise PermissionError("resolver returned an invalid address") from None
     if not resolved or any(
         not _is_allowed_public_destination(address, blocked_networks) for address in resolved
     ):
+        _proxy_log(host, "policy-denied", elapsed_ms=int((_monotonic()-dns_started)*1000),
+                   reason_code="destination-denied")
         raise PermissionError("non-public, host-local, or non-unicast destination")
-    # Connect to the IP we validated, avoiding a second DNS resolution.
-    last_error = None
-    for family, kind, proto, _, address in addresses:
-        sock = socket.socket(family, kind, proto)
-        sock.settimeout(20)
+    unique, seen = [], set()
+    for family, kind, proto, _, sockaddr in addresses:
+        key = (family, sockaddr)
+        if key not in seen:
+            seen.add(key)
+            unique.append((family, kind, proto, sockaddr))
+    # Preserve resolver preference while interleaving families and retaining
+    # same-family fallbacks. Validation above intentionally precedes this cap.
+    preferred = unique[0][0] if unique else None
+    order = []
+    queues = {}
+    for item in unique:
+        queues.setdefault(item[0], []).append(item)
+    while any(queues.values()):
+        for family in (preferred, socket.AF_INET6 if preferred == socket.AF_INET else socket.AF_INET):
+            if family is not None and queues.get(family):
+                order.append(queues[family].pop(0))
+        for family, queue in queues.items():
+            if family not in (preferred, socket.AF_INET, socket.AF_INET6) and queue:
+                order.append(queue.pop(0))
+    candidates = order[:_MAX_CANDIDATES]
+    if not candidates:
+        raise OSError(errno.EHOSTUNREACH, "no address candidates")
+
+    started_all = _monotonic()
+    deadline = started_all + _CONNECT_DEADLINE
+    active, winner = {}, None
+    index, launch_at = 0, started_all
+    last_error = OSError(errno.EHOSTUNREACH, "no connection candidate succeeded")
+    attempts = []
+    try:
+        while _monotonic() < deadline:
+            now = _monotonic()
+            expired = []
+            for sock, (family, ordinal, started) in list(active.items()):
+                elapsed = now - started
+                if elapsed >= _CANDIDATE_TIMEOUT:
+                    active.pop(sock, None)
+                    _quiet_close(sock)
+                    attempts.append((family, ordinal, elapsed, "timeout"))
+                    last_error = OSError(errno.ETIMEDOUT, "candidate connect deadline exceeded")
+                    _proxy_log(host, "connect-candidate-failed", phase="connect",
+                               elapsed_ms=int(elapsed * 1000), ordinal=ordinal,
+                               family="ipv6" if family == socket.AF_INET6 else "ipv4",
+                               reason_code="timeout")
+                    expired.append(sock)
+            if expired and index < len(candidates):
+                launch_at = min(launch_at, now)
+            if (index < len(candidates) and len(active) < _MAX_ACTIVE_DIALS
+                    and now >= launch_at):
+                family, kind, proto, sockaddr = candidates[index]
+                ordinal = index + 1
+                index += 1
+                try:
+                    sock = socket.socket(family, kind, proto)
+                except Exception:
+                    _proxy_log(host, "connect-failed", elapsed_ms=int((_monotonic()-started_all)*1000),
+                               ordinal=ordinal, family="ipv6" if family == socket.AF_INET6 else "ipv4",
+                               reason_code="socket-error")
+                    raise
+                started = _monotonic()
+                active[sock] = (family, ordinal, started)
+                try:
+                    sock.setblocking(False)
+                except Exception:
+                    _proxy_log(host, "connect-failed", elapsed_ms=int((_monotonic()-started_all)*1000),
+                               ordinal=ordinal,
+                               family="ipv6" if family == socket.AF_INET6 else "ipv4",
+                               reason_code="socket-setup-error")
+                    raise
+                try:
+                    result = sock.connect_ex(sockaddr)
+                except Exception as error:
+                    active.pop(sock, None)
+                    attempts.append((family, ordinal, _monotonic()-started,
+                                     _errno_category(error) if isinstance(error, OSError)
+                                     else "connect-error"))
+                    _quiet_close(sock)
+                    last_error = error if isinstance(error, OSError) else OSError(
+                        errno.ECONNABORTED, "connect failed")
+                    _proxy_log(host, "connect-candidate-failed", phase="connect",
+                               elapsed_ms=int((_monotonic()-started)*1000), ordinal=ordinal,
+                               family="ipv6" if family == socket.AF_INET6 else "ipv4",
+                               reason_code=_errno_category(error) if isinstance(error, OSError)
+                               else "connect-error")
+                    launch_at = _monotonic()
+                    continue
+                if result in (0, errno.EISCONN):
+                    active.pop(sock, None)
+                    winner = sock
+                    break
+                if result not in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY, errno.EINTR):
+                    last_error = OSError(result, "connect failed")
+                    attempts.append((family, ordinal, _monotonic() - started,
+                                     _errno_category(last_error)))
+                    _proxy_log(host, "connect-candidate-failed",
+                               phase="connect", family="ipv6" if family == socket.AF_INET6 else "ipv4",
+                               ordinal=ordinal, elapsed_ms=int((_monotonic()-started)*1000),
+                               reason_code=_errno_category(last_error))
+                    active.pop(sock, None)
+                    _quiet_close(sock)
+                    launch_at = _monotonic()
+                else:
+                    active[sock] = (family, ordinal, started)
+                    launch_at = _monotonic() + _CONNECT_STAGGER
+            if active:
+                wake = deadline
+                wake = min(wake, min(
+                    started + _CANDIDATE_TIMEOUT
+                    for _, _, started in active.values()
+                ))
+                if index < len(candidates) and len(active) < _MAX_ACTIVE_DIALS:
+                    wake = min(wake, launch_at)
+                try:
+                    _, writable, exceptional = select.select([], list(active), list(active),
+                                                               max(0, wake - _monotonic()))
+                except Exception:
+                    _proxy_log(host, "connect-failed", elapsed_ms=int((_monotonic()-started_all)*1000),
+                               reason_code="select-error")
+                    raise
+                for sock in dict.fromkeys(writable + exceptional):
+                    if sock not in active:
+                        continue
+                    family, ordinal, started = active.pop(sock)
+                    try:
+                        result = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                    except Exception:
+                        attempts.append((family, ordinal, _monotonic()-started,
+                                         "socket-status-error"))
+                        last_error = OSError(errno.ECONNABORTED, "socket status check failed")
+                        _quiet_close(sock)
+                        _proxy_log(host, "connect-candidate-failed", phase="connect",
+                                   elapsed_ms=int((_monotonic()-started)*1000), ordinal=ordinal,
+                                   family="ipv6" if family == socket.AF_INET6 else "ipv4",
+                                   reason_code="socket-status-error")
+                        continue
+                    if result == 0:
+                        if winner is None:
+                            winner = sock
+                        else:
+                            _quiet_close(sock)
+                    else:
+                        last_error = OSError(result or errno.ECONNABORTED, "connect failed")
+                        attempts.append((family, ordinal, _monotonic() - started,
+                                         _errno_category(last_error)))
+                        _quiet_close(sock)
+                if winner is not None:
+                    break
+            elif index >= len(candidates):
+                break
+            else:
+                select.select([], [], [], max(0, min(launch_at, deadline) - _monotonic()))
+        if winner is None:
+            if _monotonic() >= deadline:
+                last_error = OSError(errno.ETIMEDOUT, "connect deadline exceeded")
+            pending = [(family, ordinal, _monotonic()-started)
+                       for family, ordinal, started in active.values()]
+            _proxy_log(host, "connect-failed", elapsed_ms=int((_monotonic()-started_all)*1000),
+                       attempts=len(attempts), reason_code=_errno_category(last_error),
+                       candidates=";".join(
+                           f"{ 'ipv6' if family == socket.AF_INET6 else 'ipv4' }:{ordinal}:"
+                           f"{int(elapsed*1000)}:{category}"
+                           for family, ordinal, elapsed, category in attempts[:4]
+                       ), pending=";".join(
+                           f"{'ipv6' if family == socket.AF_INET6 else 'ipv4'}:{ordinal}:{int(elapsed*1000)}"
+                           for family, ordinal, elapsed in pending[:_MAX_ACTIVE_DIALS]
+                       ))
+            raise last_error
         try:
-            sock.connect(address)
-            return sock
-        except OSError as error:
-            last_error = error
-            sock.close()
-    raise last_error
+            winner.setblocking(True)
+            winner.settimeout(_CONNECT_DEADLINE)
+        except Exception:
+            _quiet_close(winner)
+            _proxy_log(host, "connect-failed", phase="winner-setup",
+                       family="ipv6" if winner.family == socket.AF_INET6 else "ipv4",
+                       reason_code="winner-setup-error")
+            raise
+        elapsed = _monotonic() - started_all
+        if elapsed > _SLOW_LOG_THRESHOLD:
+            _proxy_log(host, "connect-slow", elapsed_ms=int(elapsed*1000),
+                       family="ipv6" if winner.family == socket.AF_INET6 else "ipv4")
+        return winner
+    finally:
+        for sock in active:
+            if sock is not winner:
+                _quiet_close(sock)
 
 
 def parse_upstream_proxy(value):
@@ -308,15 +572,29 @@ class Proxy(BaseHTTPRequestHandler):
     def forward(self, tunnel):
         upstream = None
         response_started = False
+        request_started = _wall_monotonic()
+        transfer_started = request_started
+        first_byte = False
+        byte_count = 0
+        client_bytes = 0
+        log_host = "invalid-host"
+        io_side = "setup"
+        request_id = next(_REQUEST_IDS)
+        _REQUEST_CONTEXT.request_id = request_id
+        outcome = "complete"
         parent_proxy = getattr(self.server, "upstream_proxy", None)
         try:
             target = urlsplit("//" + self.path if tunnel else self.path)
             host = target.hostname
+            log_host = host or "invalid-host"
             port = target.port or (443 if tunnel else 80)
             if (not host or target.username or target.password or
                     (not tunnel and target.scheme != "http") or
                     port != (443 if tunnel else 80) or
                     not self.server.policy.allows(host)):
+                outcome = "denied"
+                _proxy_log(log_host, "request-denied", phase="validation",
+                           reason_code="policy-denied")
                 self.send_error(403)
                 return
 
@@ -324,7 +602,7 @@ class Proxy(BaseHTTPRequestHandler):
                 # Nested guests can reach public HTTP(S) only by chaining through
                 # the parent VM's already-restricted egress proxy. The parent
                 # remains responsible for DNS/IP and host-route validation.
-                upstream = socket.create_connection(parent_proxy, timeout=20)
+                upstream = socket.create_connection(parent_proxy, timeout=_CONNECT_DEADLINE)
                 if tunnel:
                     authority_host = f"[{host}]" if ":" in host else host
                     authority = f"{authority_host}:{port}"
@@ -364,6 +642,9 @@ class Proxy(BaseHTTPRequestHandler):
                     upstream.sendall(("\r\n".join(headers) + "\r\n\r\n").encode("iso-8859-1"))
             else:
                 upstream = connect_public(host, port)
+            transfer_started = _wall_monotonic()
+            _REQUEST_CONTEXT.request_connected_at = transfer_started
+            if not parent_proxy:
                 if tunnel:
                     self.send_response(200, "Connection established")
                     self.end_headers()
@@ -387,32 +668,81 @@ class Proxy(BaseHTTPRequestHandler):
             self.close_connection = True
             self.connection.settimeout(60)
             upstream.settimeout(60)
+            client_eof = False
             while True:
-                ready, _, _ = select.select([self.connection, upstream], [], [], 60)
+                read_sockets = [upstream]
+                if not client_eof:
+                    read_sockets.append(self.connection)
+                ready, _, _ = select.select(read_sockets, [], [], 60)
                 if not ready:
+                    outcome = "idle-timeout"
+                    _proxy_log(log_host, "transfer-idle-timeout",
+                               elapsed_ms=int((_wall_monotonic()-transfer_started)*1000),
+                               side="upstream-and-client", upstream_bytes=byte_count,
+                               client_bytes=client_bytes)
                     if not response_started:
                         self.send_error(502)
                     break
                 for source in ready:
+                    io_side = "upstream" if source is upstream else "client"
                     data = source.recv(65536)
                     if not data:
+                        elapsed = _wall_monotonic() - transfer_started
+                        side = "upstream" if source is upstream else "client"
                         if source is upstream and not response_started:
+                            outcome = "upstream-eof-before-response"
+                        if elapsed > _SLOW_LOG_THRESHOLD:
+                            _proxy_log(log_host, f"{side}-eof", elapsed_ms=int(elapsed*1000),
+                                        upstream_bytes=byte_count, client_bytes=client_bytes,
+                                        first_byte=int(first_byte))
+                        if source is self.connection:
+                            # A TCP write-side EOF can terminate a complete request
+                            # while the client still waits for the upstream response.
+                            # Propagate that half-close, but keep reading upstream.
+                            client_eof = True
+                            upstream.shutdown(socket.SHUT_WR)
+                            continue
+                        if not response_started:
                             self.send_error(502)
                         return
                     (upstream if source is self.connection else self.connection).sendall(data)
                     if source is upstream:
+                        byte_count += len(data)
+                        if not first_byte:
+                            first_byte = True
+                            elapsed = _wall_monotonic() - transfer_started
+                            request_elapsed = _wall_monotonic() - request_started
+                            if elapsed > _SLOW_LOG_THRESHOLD or request_elapsed > _SLOW_LOG_THRESHOLD:
+                                _proxy_log(log_host, "upstream-first-byte-slow",
+                                           phase="first-byte",
+                                           upstream_ms=int(elapsed*1000),
+                                           request_ms=int(request_elapsed*1000))
                         response_started = True
+                    else:
+                        client_bytes += len(data)
         except PermissionError:
+            outcome = "denied"
+            _proxy_log(log_host, "request-denied", phase="destination", reason_code="policy-denied")
             if parent_proxy and not response_started:
                 self.send_error(502)
             elif not response_started:
                 self.send_error(403)
         except (OSError, ValueError):
+            outcome = "io-error"
+            _proxy_log(log_host, "transfer-io-error", side=io_side,
+                       upstream_bytes=byte_count, client_bytes=client_bytes)
             if not response_started:
                 self.send_error(502)
         finally:
+            elapsed = _wall_monotonic() - transfer_started
+            request_elapsed = _wall_monotonic() - request_started
+            if request_elapsed > _SLOW_LOG_THRESHOLD or outcome != "complete":
+                _proxy_log(log_host, "forward-summary", total_ms=int(request_elapsed*1000),
+                           phase="transfer", result=outcome, first_byte=int(first_byte),
+                           upstream_bytes=byte_count, client_bytes=client_bytes)
             if upstream:
                 upstream.close()
+            _REQUEST_CONTEXT.request_id = "-"
 
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):

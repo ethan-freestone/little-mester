@@ -2,6 +2,7 @@
 # arbitrary systemd properties, unit names, or user-supplied arguments.
 %lm-vm-control ALL=(root) NOPASSWD: /usr/bin/systemctl start little-mester-vm.service
 %lm-vm-control ALL=(root) NOPASSWD: /usr/bin/systemctl stop little-mester-vm.service
+%lm-vm-control ALL=(root) NOPASSWD: /usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm-workspace.py configure
 %lm-vm-control ALL=(root) NOPASSWD: /usr/bin/stat --format=%f\:%d\:%i -- /var/lib/little-mester-vm/disk.qcow2
 %lm-vm-control ALL=(root) NOPASSWD: /usr/bin/cat -- /etc/sudoers.d/little-mester-vm
 %lm-vm-control ALL=(root) NOPASSWD: /usr/bin/stat --format=%f\:%u\:%g\:%h -- /etc/sudoers.d/little-mester-vm

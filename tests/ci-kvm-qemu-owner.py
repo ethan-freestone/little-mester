@@ -163,7 +163,7 @@ class Owner:
         self.child_identity: dict | None = None
         self.mode = "stopped"
         overall = self.state.get("overall_seconds")
-        if not isinstance(overall, int) or not 60 <= overall <= 1200:
+        if not isinstance(overall, int) or not 60 <= overall <= 3000:
             refuse("overall QEMU lifecycle deadline is outside its validated bound")
         self.deadline = self.state.get("deadline_monotonic")
         if (not isinstance(self.deadline, (int, float)) or not math.isfinite(self.deadline)

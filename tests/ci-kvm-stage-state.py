@@ -138,6 +138,8 @@ def validate_context(state: dict, args: argparse.Namespace) -> None:
 
 
 def init(args: argparse.Namespace) -> int:
+    if not 60 <= args.overall_seconds <= 3000:
+        fail("overall deadline is outside the supported bound")
     run_dir = pathlib.Path(args.run_dir)
     run_dir.mkdir(mode=0o700, parents=False, exist_ok=False)
     work = run_dir / "work"
@@ -182,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = pathlib.Path(args.run_dir)
     try:
         if args.command == "init":
-            if not 60 <= args.overall_seconds <= 1200:
+            if not 60 <= args.overall_seconds <= 3000:
                 fail("overall deadline is outside the supported bound")
             return init(args)
         state = read_state(run_dir)
