@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -315,6 +316,40 @@ def _run_npm(node: str, npm_cli: pathlib.Path, *arguments: str, env=None) -> str
     return result.stdout.strip()
 
 
+def _bounded_diagnostic_value(value: object, *, maximum: int = 180) -> str:
+    rendered = str(value).encode("unicode_escape").decode("ascii")
+    if len(rendered) > maximum:
+        return rendered[:maximum] + "..."
+    return rendered
+
+
+def _npm_policy_diagnostic(*, expected_version: str, actual_version: str,
+                           expected_prefix: str, actual_prefix: str,
+                           node: str, node_version: str, npm_cli: pathlib.Path,
+                           selected_global_config: str,
+                           confirmed_global_config: str) -> None:
+    """Emit only fixed npm policy fields; never dump environment or config contents."""
+    path_npm = shutil.which("npm")
+    fields = (
+        ("expected_version", expected_version),
+        ("observed_version", actual_version),
+        ("expected_prefix", expected_prefix),
+        ("observed_prefix", actual_prefix),
+        ("node_version", node_version),
+        ("node_path", node),
+        ("node_realpath", os.path.realpath(node)),
+        ("npm_cli_path", str(npm_cli)),
+        ("npm_cli_realpath", os.path.realpath(npm_cli)),
+        ("path_npm", path_npm or "not-found"),
+        ("path_npm_realpath", os.path.realpath(path_npm) if path_npm else "not-found"),
+        ("globalconfig_initial", selected_global_config),
+        ("globalconfig_reported", confirmed_global_config),
+    )
+    details = " ".join(
+        f"{name}={_bounded_diagnostic_value(value)!r}" for name, value in fields)
+    print(f"npm bootstrap policy diagnostic: {details}", file=sys.stderr)
+
+
 def install_npm(*, install_root: str = NPM_INSTALL_ROOT, bin_dir: str = NPM_BIN_DIR,
                 global_config: str | None = None, prefix: str = NPM_PREFIX,
                 node: str = NPM_NODE, opener=None) -> dict:
@@ -398,8 +433,22 @@ def install_npm(*, install_root: str = NPM_INSTALL_ROOT, bin_dir: str = NPM_BIN_
     actual_prefix = _run_npm(node, npm_cli, "config", "get", "prefix", env=npm_environment)
     confirmed_global_config = _run_npm(
         node, npm_cli, "config", "get", "globalconfig", env=npm_environment)
+    # npm derives its reported default globalconfig path from the effective
+    # prefix. Setting prefix=/usr/local can therefore move this reported path
+    # from the initial node prefix (/usr/etc/npmrc) to /usr/local/etc/npmrc.
+    # The initial file remains the one npm loaded; either that path or the
+    # effective-prefix-derived path is expected, but unrelated movement is not.
+    prefix_global_config = str(pathlib.Path(actual_prefix) / "etc/npmrc")
+    global_config_is_expected = confirmed_global_config in (
+        selected_global_config, prefix_global_config)
     if (actual_version != metadata["version"] or actual_prefix != prefix
-            or confirmed_global_config != selected_global_config):
+            or not global_config_is_expected):
+        _npm_policy_diagnostic(
+            expected_version=metadata["version"], actual_version=actual_version,
+            expected_prefix=prefix, actual_prefix=actual_prefix,
+            node=node, node_version=node_version, npm_cli=npm_cli,
+            selected_global_config=selected_global_config,
+            confirmed_global_config=confirmed_global_config)
         raise NpmBootstrapError("installed npm version or global prefix did not match policy")
     print("npm bootstrap: channel=next-10 "
           f"version={metadata['version']} integrity={metadata['integrity']} "

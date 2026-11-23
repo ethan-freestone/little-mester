@@ -1676,6 +1676,122 @@ class SystemdPolicyTests(unittest.TestCase):
             with self.assertRaises(bootstrap.NpmBootstrapError):
                 bootstrap._ensure_global_prefix_config(linked)
 
+    def test_npm_policy_accepts_prefix_derived_globalconfig_and_rejects_bad_values(self):
+        version = "10.9.11"
+        node_range = "^18.17.0 || >=20.5.0"
+        package_files = {
+            "package/package.json": json.dumps({
+                "name": "npm", "version": version,
+                "engines": {"node": node_range},
+                "bin": {"npm": "bin/npm-cli.js", "npx": "bin/npx-cli.js"},
+            }).encode(),
+            "package/bin/npm-cli.js": b"#!/usr/bin/env node\n",
+            "package/bin/npx-cli.js": b"#!/usr/bin/env node\n",
+            "package/node_modules/node-gyp/bin/node-gyp.js": b"#!/usr/bin/env node\n",
+            "package/node_modules/semver/package.json": b'{"name":"semver","version":"7.6.3"}',
+        }
+        archive_bytes = io.BytesIO()
+        with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+            for name, content in package_files.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(content)
+                member.mode = 0o755 if name.endswith(".js") else 0o644
+                archive.addfile(member, io.BytesIO(content))
+        artifact = archive_bytes.getvalue()
+        integrity = "sha512-" + base64.b64encode(hashlib.sha512(artifact).digest()).decode("ascii")
+        metadata = {
+            "name": "npm", "version": version, "engines": {"node": node_range},
+            "dist": {
+                "tarball": f"https://registry.npmjs.org/npm/-/npm-{version}.tgz",
+                "integrity": integrity,
+                "unpackedSize": sum(map(len, package_files.values())),
+            },
+        }
+        metadata_bytes = json.dumps(metadata).encode()
+
+        class RegistryResponse(io.BytesIO):
+            def __init__(self, body, url):
+                super().__init__(body)
+                self.url = url
+
+            def geturl(self):
+                return self.url
+
+        cases = (
+            ("expected", version, "/usr/local", "/usr/local/etc/npmrc", False),
+            ("bad-version", "10.9.10", "/usr/local", "/usr/local/etc/npmrc", True),
+            ("bad-prefix", version, "/opt/npm", "/usr/etc/npmrc", True),
+            ("bad-globalconfig", version, "/usr/local", "/opt/etc/npmrc", True),
+        )
+        for label, actual_version, actual_prefix, confirmed_config, should_fail in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory(
+                    prefix="lm-npm-policy-") as temporary:
+                root = pathlib.Path(temporary)
+                home = root / "home"
+                home.mkdir()
+                install_root = root / "usr/local/lib/node_modules"
+                bin_dir = root / "usr/local/bin"
+                selected_config = root / "usr/etc/npmrc"
+                calls = {"globalconfig": 0}
+
+                def registry_response(_opener, url, *, timeout, accept):
+                    body = (metadata_bytes if url == bootstrap.NPM_CHANNEL_URL else artifact)
+                    return RegistryResponse(body, url)
+
+                def run_npm(_node, _cli, *arguments, env=None,
+                            actual_version=actual_version, actual_prefix=actual_prefix,
+                            selected_config=selected_config,
+                            confirmed_config=confirmed_config, calls=calls):
+                    if arguments == ("--version",):
+                        return actual_version
+                    if arguments == ("config", "get", "prefix"):
+                        return actual_prefix
+                    if arguments == ("config", "get", "globalconfig"):
+                        calls["globalconfig"] += 1
+                        return (str(selected_config) if calls["globalconfig"] == 1
+                                else confirmed_config)
+                    self.fail(f"unexpected npm query: {arguments!r}")
+
+                path = f"{bin_dir}:/usr/bin:/bin"
+                with mock.patch.dict(os.environ, {
+                        "HOME": str(home), "PATH": path, "TOKEN": "do-not-log",
+                }, clear=True), \
+                        mock.patch.object(bootstrap, "_open_registry",
+                                          side_effect=registry_response), \
+                        mock.patch.object(bootstrap, "_node_version", return_value="18.19.1"), \
+                        mock.patch.object(bootstrap, "_verify_node_engine"), \
+                        mock.patch.object(bootstrap, "_run_npm", side_effect=run_npm), \
+                        contextlib.redirect_stderr(io.StringIO()) as diagnostics:
+                    if should_fail:
+                        with self.assertRaisesRegex(
+                                bootstrap.NpmBootstrapError,
+                                "installed npm version or global prefix"):
+                            bootstrap.install_npm(
+                                install_root=str(install_root), bin_dir=str(bin_dir),
+                                node="/usr/bin/node", opener=object())
+                    else:
+                        result = bootstrap.install_npm(
+                            install_root=str(install_root), bin_dir=str(bin_dir),
+                            node="/usr/bin/node", opener=object())
+                        self.assertEqual(result["version"], version)
+                        self.assertEqual(result["prefix"], "/usr/local")
+                        self.assertEqual(result["globalconfig"], str(selected_config))
+
+                if should_fail:
+                    output = diagnostics.getvalue()
+                    self.assertIn("npm bootstrap policy diagnostic:", output)
+                    self.assertIn("expected_version='10.9.11'", output)
+                    self.assertIn(f"observed_version='{actual_version}'", output)
+                    self.assertIn("expected_prefix='/usr/local'", output)
+                    self.assertIn(f"observed_prefix='{actual_prefix}'", output)
+                    self.assertIn("npm_cli_realpath=", output)
+                    self.assertIn("path_npm_realpath=", output)
+                    self.assertNotIn("do-not-log", output)
+                    self.assertLess(len(output), 4000)
+                else:
+                    self.assertEqual(diagnostics.getvalue(), "")
+                    self.assertEqual(selected_config.read_text(), "prefix=/usr/local\n")
+
     def test_npm_tarball_extraction_refuses_paths_outside_package(self):
         with tempfile.TemporaryDirectory(prefix="lm-npm-tar-safety-") as temporary:
             root = pathlib.Path(temporary)
