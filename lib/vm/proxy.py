@@ -668,8 +668,12 @@ class Proxy(BaseHTTPRequestHandler):
             self.close_connection = True
             self.connection.settimeout(60)
             upstream.settimeout(60)
+            client_eof = False
             while True:
-                ready, _, _ = select.select([self.connection, upstream], [], [], 60)
+                read_sockets = [upstream]
+                if not client_eof:
+                    read_sockets.append(self.connection)
+                ready, _, _ = select.select(read_sockets, [], [], 60)
                 if not ready:
                     outcome = "idle-timeout"
                     _proxy_log(log_host, "transfer-idle-timeout",
@@ -687,13 +691,18 @@ class Proxy(BaseHTTPRequestHandler):
                         side = "upstream" if source is upstream else "client"
                         if source is upstream and not response_started:
                             outcome = "upstream-eof-before-response"
-                        elif source is self.connection:
-                            outcome = "client-eof"
                         if elapsed > _SLOW_LOG_THRESHOLD:
                             _proxy_log(log_host, f"{side}-eof", elapsed_ms=int(elapsed*1000),
-                                       upstream_bytes=byte_count, client_bytes=client_bytes,
-                                       first_byte=int(first_byte))
-                        if source is upstream and not response_started:
+                                        upstream_bytes=byte_count, client_bytes=client_bytes,
+                                        first_byte=int(first_byte))
+                        if source is self.connection:
+                            # A TCP write-side EOF can terminate a complete request
+                            # while the client still waits for the upstream response.
+                            # Propagate that half-close, but keep reading upstream.
+                            client_eof = True
+                            upstream.shutdown(socket.SHUT_WR)
+                            continue
+                        if not response_started:
                             self.send_error(502)
                         return
                     (upstream if source is self.connection else self.connection).sendall(data)

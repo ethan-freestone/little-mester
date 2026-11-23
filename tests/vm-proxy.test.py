@@ -62,6 +62,87 @@ class DestinationPolicyTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_http_client_half_close_still_receives_upstream_response(self):
+        server = proxy.BoundedThreadingHTTPServer(("127.0.0.1", 0), proxy.Proxy)
+        server.policy = proxy.PolicyStore(None)
+        server.upstream_proxy = None
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+
+        upstream_listener = socket.socket()
+        upstream_listener.bind(("127.0.0.1", 0))
+        upstream_listener.listen(1)
+        upstream_requests = []
+        response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Length: 2\r\n"
+            b"Connection: close\r\n\r\n"
+            b"ok"
+        )
+
+        def serve_upstream():
+            connection, _ = upstream_listener.accept()
+            with connection:
+                request = bytearray()
+                while True:
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        break
+                    request.extend(chunk)
+                upstream_requests.append(bytes(request))
+                connection.sendall(response)
+                connection.shutdown(socket.SHUT_WR)
+
+        upstream_thread = threading.Thread(target=serve_upstream, daemon=True)
+        upstream_thread.start()
+        client = None
+        try:
+            with patch.object(
+                proxy,
+                "connect_public",
+                side_effect=lambda _host, _port: socket.create_connection(
+                    upstream_listener.getsockname(), timeout=2
+                ),
+            ):
+                client = socket.create_connection(server.server_address, timeout=2)
+                client.settimeout(2)
+                client.sendall(
+                    b"POST http://public.example/api?mode=fixture HTTP/1.1\r\n"
+                    b"Host: public.example\r\n"
+                    b"Content-Length: 4\r\n"
+                    b"X-Fixture: retained\r\n"
+                    b"Connection: keep-alive\r\n\r\n"
+                    b"body"
+                )
+                client.shutdown(socket.SHUT_WR)
+                received = bytearray()
+                while True:
+                    chunk = client.recv(4096)
+                    if not chunk:
+                        break
+                    received.extend(chunk)
+
+            upstream_thread.join(timeout=2)
+            self.assertFalse(upstream_thread.is_alive())
+            self.assertEqual(bytes(received), response)
+            self.assertEqual(len(upstream_requests), 1)
+            upstream_request = upstream_requests[0]
+            headers, body = upstream_request.split(b"\r\n\r\n", 1)
+            self.assertTrue(headers.startswith(
+                b"POST /api?mode=fixture HTTP/1.1\r\nHost: public.example\r\n"
+            ))
+            self.assertIn(b"Content-Length: 4", headers)
+            self.assertIn(b"X-Fixture: retained", headers)
+            self.assertIn(b"Connection: close", headers)
+            self.assertEqual(body, b"body")
+        finally:
+            if client is not None:
+                client.close()
+            upstream_listener.close()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
     def test_redirect_followup_to_private_target_is_denied_before_socket_creation(self):
         server = proxy.BoundedThreadingHTTPServer(("127.0.0.1", 0), proxy.Proxy)
         server.policy = proxy.PolicyStore(None)
@@ -523,7 +604,7 @@ class DestinationPolicyTests(unittest.TestCase):
         self.assertNotIn("connect failed", text)
 
     def _forward_fixture(self, path, *, idle=False, io_error=None, connect_delay=0.0,
-                         empty_upstream=False):
+                         empty_upstream=False, upstream_response=b"body-secret"):
         clock = type("Clock", (), {"now": 0.0})()
 
         class Client:
@@ -546,6 +627,9 @@ class DestinationPolicyTests(unittest.TestCase):
             def settimeout(self, _value):
                 pass
 
+            def shutdown(self, _how):
+                pass
+
             def sendall(self, _data):
                 pass
 
@@ -553,7 +637,7 @@ class DestinationPolicyTests(unittest.TestCase):
                 self.reads += 1
                 if empty_upstream and self.reads == 1:
                     return b""
-                return b"body-secret" if self.reads == 1 else b""
+                return upstream_response if self.reads == 1 else b""
 
             def close(self):
                 pass
@@ -592,13 +676,27 @@ class DestinationPolicyTests(unittest.TestCase):
             clock.now += 1.25
             if upstream.reads == 0:
                 return [upstream], [], []
-            return [handler.connection], [], []
+            if handler.connection in read:
+                return [handler.connection], [], []
+            return [upstream], [], []
 
         def connect(_host, _port):
             clock.now += connect_delay
             return upstream
 
         return handler, upstream, clock, fake_select, connect
+
+    def test_upstream_520_status_is_forwarded_unchanged(self):
+        response = b"HTTP/1.1 520 Origin Error\r\nContent-Length: 0\r\n\r\n"
+        handler, _, clock, fake_select, connect = self._forward_fixture(
+            "http://public.example/index", upstream_response=response)
+        with patch.object(proxy, "connect_public", side_effect=connect), \
+                patch.object(proxy.select, "select", side_effect=fake_select), \
+                patch.object(proxy, "_wall_monotonic", side_effect=lambda: clock.now):
+            proxy.Proxy.forward(handler, False)
+
+        self.assertIn(response, b"".join(handler.connection.sent))
+        self.assertEqual(handler.errors, [])
 
     def test_forward_denial_idle_first_byte_and_io_logs_are_redacted(self):
         secrets = ("/private/path", "query-secret", "header-secret", "token-secret",
@@ -628,6 +726,7 @@ class DestinationPolicyTests(unittest.TestCase):
         self.assertIn("side=upstream-and-client", idle_log)
         self.assertRegex(idle_log, r"total_ms=\d+")
         self.assertNotIn("query-secret", idle_log)
+        self.assertEqual(idle.errors, [502])
 
         fast, _, fast_clock, fast_select, fast_connect = self._forward_fixture(
             "http://public.example/secret?query-secret", connect_delay=3.0)

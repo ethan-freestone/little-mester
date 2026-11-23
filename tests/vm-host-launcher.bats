@@ -401,15 +401,15 @@ assert 'pr_merge_commit_second_parent' in production_job
 assert 'Exercise exact pinned production systemd VM unit on disposable hosted KVM' in production_job
 assert 'Require production systemd VM and proxy stopped' in production_job
 assert 'timeout-minutes: 45' in production_job
-staged_steps = [
-    'Prepare disposable guest and pinned inputs',
-    'Start real KVM guest and prove strict SSH readiness',
-    'Verify protected OpenCode config, TUI, and tmux',
-    'Verify restricted reboot, persistence, and egress',
-    'Exercise synthetic OAuth and browser-auth regressions',
-    'Prove final identity-safe cleanup',
+staged_invocations = [
+    'bash tests/ci-kvm-stage.sh --stage prepare --run-dir "$LM_CI_STATE_DIR"',
+    'bash tests/ci-kvm-stage.sh --stage boot --run-dir "$LM_CI_STATE_DIR"',
+    'bash tests/ci-kvm-stage.sh --stage config-tmux --run-dir "$LM_CI_STATE_DIR"',
+    'bash tests/ci-kvm-stage.sh --stage restricted-reboot-egress-persistence --run-dir "$LM_CI_STATE_DIR"',
+    'bash tests/ci-kvm-stage.sh --stage synthetic-oauth --run-dir "$LM_CI_STATE_DIR"',
+    'bash tests/ci-kvm-stage.sh --stage cleanup --run-dir "$LM_CI_STATE_DIR"',
 ]
-positions = [job.index(name) for name in staged_steps]
+positions = [job.index(invocation) for invocation in staged_invocations]
 assert positions == sorted(positions)
 assert 'if: always()' in job
 assert job.index('Exercise live OAuth harness cancellation cleanup') < job.index('Prove final identity-safe cleanup')
@@ -516,10 +516,12 @@ assert 'ci_kvm_stage_runtime_seconds' in text
 assert 'ssh-keyscan' not in text
 assert 'ci-qemu-oauth-bridge.py' in text and 'LM_CI_PUBLIC_KEY' in text
 assert 'synthetic-fixture' in text and 'token exchange and real model access are NOT_RUN' in text
-assert 'readiness_deadline=$((qemu_started + 180))' in text
+assert 'readiness_deadline=$((qemu_started + 900))' in text
 assert 'readiness_deadline=$((SECONDS + 60))' in text
 assert 'SECONDS < readiness_deadline && SECONDS < qemu_deadline' in text
-assert 'qemu_deadline=$((qemu_started + 300))' in text
+assert '(( readiness_deadline > qemu_deadline )) && readiness_deadline=$qemu_deadline' in text
+assert '--overall-seconds 2400' in text
+assert 'qemu_deadline=$((SECONDS + overall_remaining))' in text
 assert 'capture_qemu_identity || fail' in text
 assert 'process_starttime' in text and 'qemu_identity_matches' in text
 assert 'stop_owned_qemu || fail' in text
