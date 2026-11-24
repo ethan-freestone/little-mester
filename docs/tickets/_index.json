@@ -282,7 +282,109 @@
       "file_path": "ticket-048.json",
       "status": "draft",
       "area": "engine"
+    },
+    {
+      "number": 49,
+      "file_path": "ticket-049.json",
+      "status": "draft",
+      "area": "vm-v3"
+    },
+    {
+      "number": 50,
+      "file_path": "ticket-050.json",
+      "status": "resolved",
+      "area": "vm-v3"
+    },
+    {
+      "number": 51,
+      "file_path": "ticket-051.json",
+      "status": "active",
+      "area": "vm-v3"
+    },
+    {
+      "number": 52,
+      "file_path": "ticket-052.json",
+      "status": "draft",
+      "area": "workflow"
+    },
+    {
+      "number": 53,
+      "file_path": "ticket-053.json",
+      "status": "draft",
+      "area": "vm-v3"
+    },
+    {
+      "number": 54,
+      "file_path": "ticket-054.json",
+      "status": "draft",
+      "area": "vm-v3"
+    },
+    {
+      "number": 55,
+      "file_path": "ticket-055.json",
+      "status": "draft",
+      "area": "vm-v3"
+    },
+    {
+      "number": 56,
+      "file_path": "ticket-056.json",
+      "status": "draft",
+      "area": "vm-v3"
+    },
+    {
+      "number": 57,
+      "file_path": "ticket-057.json",
+      "status": "draft",
+      "area": "vm-v3"
+    },
+    {
+      "number": 58,
+      "file_path": "ticket-058.json",
+      "status": "draft",
+      "area": "workflow"
+    },
+    {
+      "number": 59,
+      "file_path": "ticket-059.json",
+      "status": "draft",
+      "area": "ticketing engine"
+    },
+    {
+      "number": 60,
+      "file_path": "ticket-060.json",
+      "status": "draft",
+      "area": "documentation"
+    },
+    {
+      "number": 61,
+      "file_path": "ticket-061.json",
+      "status": "draft",
+      "area": "vm-v3"
+    },
+    {
+      "number": 62,
+      "file_path": "ticket-062.json",
+      "status": "draft",
+      "area": "vm"
+    },
+    {
+      "number": 63,
+      "file_path": "ticket-063.json",
+      "status": "draft",
+      "area": "workflow"
+    },
+    {
+      "number": 64,
+      "file_path": "ticket-064.json",
+      "status": "active",
+      "area": "observability"
+    },
+    {
+      "number": 65,
+      "file_path": "ticket-065.json",
+      "status": "draft",
+      "area": "infra"
     }
   ],
-  "updated_at": "2026-11-06T23:17:17.903Z"
+  "updated_at": "2026-11-24T14:32:21.243Z"
 }

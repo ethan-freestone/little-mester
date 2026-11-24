@@ -1,0 +1,34 @@
+[Unit]
+Description=Little Mester public-only egress proxy for the system VM
+After=network-online.target
+Wants=network-online.target
+Before=little-mester-vm.service
+PartOf=little-mester-vm.service
+
+[Service]
+Type=exec
+User=lm-vm-proxy
+Group=lm-vm-proxy
+RuntimeDirectory=lm-vm-proxy
+RuntimeDirectoryMode=0700
+UMask=0077
+ExecStart=+/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py locked-service proxy
+ExecStartPost=/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py proxy-ready
+Restart=no
+KillMode=control-group
+TimeoutStopSec=10s
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/run/lm-vm-proxy /etc/little-mester-vm/code-update.lock
+
+[Install]
+WantedBy=multi-user.target

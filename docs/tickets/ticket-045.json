@@ -8,7 +8,7 @@
   "title": "Model-agnostic harness: local models and cloud providers",
   "objective": "Keep 'point me at a directory' working with no subscription (local models via opencode) while allowing paid providers (Kimi, Claude, OpenAI) when the user has them, with secrets kept out of the repo and image and provider switching documented.",
   "created_at": "2026-10-26T20:39:18.839Z",
-  "updated_at": "2026-10-26T20:50:56.509Z",
+  "updated_at": "2026-11-21T21:06:15.167Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -56,7 +56,11 @@
       "egress-denied cloud call"
     ],
     "created": [],
-    "cases": []
+    "cases": [
+      "Hosted run 44947379075 passed systemd production and standalone namespace diagnostic jobs; it did not exercise real ChatGPT browser OAuth or actual model responses and does not prove the local-provider/cloud switching criteria. #45 A1-A7 remain pending; use the Phase 1 owner flow for real provider acceptance and preserve credentials outside logs/tickets.",
+      "Owner-confirmed hosted CI run 44947379075, exact source head 90953b22cfe984e2f3d2ed44e5c5c5e64559ed81 and workflow SHA 3cf68b4cb51d86eefb10bbac2a2b6bd2bc45a971: production systemd VM acceptance and standalone namespace diagnostic both PASS. Diagnostic: unquoted production BindPaths passed source identity/isolation, quoted BindPaths reproduced original failure, reverse confirmed, cleanup passed. Production implemented gates, forced-stop recovery and cleanup passed. This closes the named hosted gates only; no full PR/owner/manual acceptance claim.",
+      "Run 44947379075 did not perform a real browser ChatGPT OAuth session or actual model response. Synthetic OAuth and bridge tests do not establish owner account/model behavior. #45 local/cloud provider criteria and real provider response remain pending; manual owner gate remains separate."
+    ]
   },
   "priority": "major",
   "parent": 35,

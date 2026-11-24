@@ -302,6 +302,12 @@ workspace is shared live rather than checked out inside the VM.
   only their ports through QEMU `guestfwd` entries (`10.0.2.100:11434` and `:8080`), not
   through a general host route. No model weights or GPUs enter the VM, and a CPU-only host
   still works with the same flow.
+- **Host metrics routing:** Docker-mode TUI uses the internal Compose service name
+  `metrics:19532`; direct-VM TUI uses the fixed guest endpoint `10.0.2.100:19532`, forwarded
+  by QEMU to the host-loopback metrics listener. The launcher selects a fixed `METRICS_MODE`
+  (`docker` or `vm`); the plugin maps only those modes and does not accept workspace-selected
+  URLs. Keep the VM route behind the existing `guestfwd` with `restrict=on`; do not publish a
+  metrics host port or add a direct host/LAN route.
 - **Egress:** QEMU user networking runs with `restrict=on`; the only way out is a host-side
   allowlisting HTTP(S) proxy exposed through `guestfwd` (`10.0.2.100:3128`). Docker, apt,
   npm and pip are configured to use it. This is where `.mester-egress` `allowed_domains`

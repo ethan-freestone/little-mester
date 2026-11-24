@@ -1,0 +1,1032 @@
+#!/usr/bin/env python3
+"""Explicit root installer for the fixed systemd VM slice; never auto-run."""
+
+from __future__ import annotations
+
+import grp
+import hashlib
+import fcntl
+import importlib.util
+import os
+import pathlib
+import pwd
+import re
+import secrets
+import shutil
+import stat
+import subprocess
+import sys
+
+
+FILES = {
+    "systemd/little-mester-vm.service.d/90-code-update-guard.conf":
+        ("/etc/systemd/system/little-mester-vm.service.d/90-code-update-guard.conf", 0o644),
+    "systemd/little-mester-vm-proxy.service.d/90-code-update-guard.conf":
+        ("/etc/systemd/system/little-mester-vm-proxy.service.d/90-code-update-guard.conf", 0o644),
+    "systemd/little-mester-vm-workspace.service.d/90-code-update-guard.conf":
+        ("/etc/systemd/system/little-mester-vm-workspace.service.d/90-code-update-guard.conf", 0o644),
+    "systemd/little-mester-vm-metrics.service.d/90-code-update-guard.conf":
+        ("/etc/systemd/system/little-mester-vm-metrics.service.d/90-code-update-guard.conf", 0o644),
+    "systemd/little-mester-vm.service": ("/etc/systemd/system/little-mester-vm.service", 0o644),
+    "systemd/little-mester-vm-proxy.service": ("/etc/systemd/system/little-mester-vm-proxy.service", 0o644),
+    "systemd/little-mester-vm-workspace.service":
+        ("/etc/systemd/system/little-mester-vm-workspace.service", 0o644),
+    "systemd/little-mester-vm-metrics.service":
+        ("/etc/systemd/system/little-mester-vm-metrics.service", 0o644),
+    "sudoers/little-mester-vm": ("/etc/sudoers.d/little-mester-vm", 0o440),
+    "lib/vm/system-vm.py": ("/usr/lib/little-mester-vm/system-vm.py", 0o644),
+    "lib/vm/system-vm-workspace.py": ("/usr/lib/little-mester-vm/system-vm-workspace.py", 0o644),
+    "lib/vm/system-vm-metrics.py": ("/usr/lib/little-mester-vm/system-vm-metrics.py", 0o644),
+    "lib/vm/parent-metrics.py": ("/usr/lib/little-mester-vm/parent-metrics.py", 0o644),
+    "lib/vm/parent-metrics-collect.py": ("/usr/lib/little-mester-vm/parent-metrics-collect.py", 0o644),
+    "lib/vm/guest-opencode-preferences.py":
+        ("/usr/lib/little-mester-vm/guest-opencode-preferences.py", 0o644),
+    "agent/opencode/plugins/host-metrics-tui/package.json":
+        ("/usr/lib/little-mester-vm/host-metrics-tui/package.json", 0o644),
+    "agent/opencode/plugins/host-metrics-tui/tui.tsx":
+        ("/usr/lib/little-mester-vm/host-metrics-tui/tui.tsx", 0o644),
+    "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js":
+        ("/usr/lib/little-mester-vm/host-metrics-tui/metrics-endpoint.js", 0o644),
+    "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts":
+        ("/usr/lib/little-mester-vm/host-metrics-tui/metrics-endpoint.d.ts", 0o644),
+    "lib/vm/guest-bootstrap.py": ("/usr/lib/little-mester-vm/guest-bootstrap.py", 0o644),
+    "lib/vm/parent-qemu.py": ("/usr/lib/little-mester-vm/parent-qemu.py", 0o644),
+    "lib/vm/parent-provision.py": ("/usr/lib/little-mester-vm/parent-provision.py", 0o644),
+    "lib/vm/parent-session-contract.py": ("/usr/lib/little-mester-vm/parent-session-contract.py", 0o644),
+    "lib/vm/guest-compatibility.py": ("/usr/lib/little-mester-vm/guest-compatibility.py", 0o644),
+    "lib/vm/guest-user-dirs.py": ("/usr/lib/little-mester-vm/guest-user-dirs.py", 0o644),
+    "lib/vm/proxy.py": ("/usr/lib/little-mester-vm/proxy.py", 0o644),
+    "lib/vm/browser-auth-session.py": ("/usr/lib/little-mester-vm/browser-auth-session.py", 0o644),
+    "lib/vm/callback-listener.py": ("/usr/lib/little-mester-vm/callback-listener.py", 0o644),
+    "lib/vm/host-dependencies.py": ("/usr/lib/little-mester-vm/host-dependencies.py", 0o644),
+    "agent/opencode/plugins/little-mester-exit-confirm/package.json":
+        ("/usr/lib/little-mester-vm/plugins/package.json", 0o644),
+    "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx":
+        ("/usr/lib/little-mester-vm/plugins/tui.tsx", 0o644),
+}
+DIRS = ("/usr/lib/little-mester-vm", "/usr/lib/little-mester-vm/plugins",
+         "/usr/lib/little-mester-vm/host-metrics-tui",
+         "/etc/little-mester-vm", "/etc/systemd/system/little-mester-vm-workspace.service.d",
+         "/etc/systemd/system/little-mester-vm.service.d",
+         "/etc/systemd/system/little-mester-vm-proxy.service.d",
+         "/etc/systemd/system/little-mester-vm-metrics.service.d",
+         "/var/lib/little-mester-vm")
+PROVISION_FINALS = (
+    "/var/lib/little-mester-vm/disk.qcow2",
+    "/var/lib/little-mester-vm/seed.iso",
+    "/etc/little-mester-vm/control_ed25519",
+    "/etc/little-mester-vm/control_ed25519.pub",
+    "/etc/little-mester-vm/ssh_host_ed25519_key",
+    "/etc/little-mester-vm/ssh_host_ed25519_key.pub",
+    "/etc/little-mester-vm/known_hosts",
+)
+PROVISION_PARTIALS = (
+    "/var/lib/little-mester-vm/base-image.part",
+    "/var/lib/little-mester-vm/base-image.qcow2",
+    "/var/lib/little-mester-vm/disk.qcow2.part",
+    "/var/lib/little-mester-vm/seed.iso.part",
+    "/var/lib/little-mester-vm/user-data",
+    "/var/lib/little-mester-vm/meta-data",
+)
+UPDATE_ADDITIONALS = frozenset({
+    "systemd/little-mester-vm.service.d/90-code-update-guard.conf",
+    "systemd/little-mester-vm-proxy.service.d/90-code-update-guard.conf",
+    "systemd/little-mester-vm-workspace.service.d/90-code-update-guard.conf",
+    "systemd/little-mester-vm-metrics.service.d/90-code-update-guard.conf",
+    "systemd/little-mester-vm-workspace.service",
+    "systemd/little-mester-vm-metrics.service",
+    "lib/vm/system-vm-workspace.py",
+    "lib/vm/system-vm-metrics.py",
+    "lib/vm/parent-metrics.py",
+    "lib/vm/parent-metrics-collect.py",
+    "lib/vm/guest-compatibility.py",
+    "lib/vm/guest-opencode-preferences.py",
+    "agent/opencode/plugins/host-metrics-tui/package.json",
+    "agent/opencode/plugins/host-metrics-tui/tui.tsx",
+    "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js",
+    "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts",
+})
+PERMANENT_INTERLOCK_RELATIVES = frozenset({
+    "systemd/little-mester-vm.service.d/90-code-update-guard.conf",
+    "systemd/little-mester-vm-proxy.service.d/90-code-update-guard.conf",
+    "systemd/little-mester-vm-workspace.service.d/90-code-update-guard.conf",
+    "systemd/little-mester-vm-metrics.service.d/90-code-update-guard.conf",
+    "systemd/little-mester-vm.service",
+    "systemd/little-mester-vm-proxy.service",
+    "systemd/little-mester-vm-workspace.service",
+    "systemd/little-mester-vm-metrics.service",
+    "sudoers/little-mester-vm",
+    "lib/vm/system-vm.py",
+    "lib/vm/system-vm-workspace.py",
+    "lib/vm/system-vm-metrics.py",
+    "lib/vm/parent-metrics.py",
+    "lib/vm/parent-metrics-collect.py",
+    "lib/vm/parent-qemu.py",
+    "lib/vm/parent-session-contract.py",
+    "lib/vm/guest-compatibility.py",
+    "lib/vm/guest-opencode-preferences.py",
+    "lib/vm/proxy.py",
+    "lib/vm/browser-auth-session.py",
+    "lib/vm/callback-listener.py",
+    "agent/opencode/plugins/little-mester-exit-confirm/package.json",
+    "agent/opencode/plugins/little-mester-exit-confirm/tui.tsx",
+    "agent/opencode/plugins/host-metrics-tui/package.json",
+    "agent/opencode/plugins/host-metrics-tui/tui.tsx",
+    "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js",
+    "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts",
+})
+PROTECTED_PARENTS = (
+    "/usr/lib", "/etc/systemd/system", "/etc/sudoers.d", "/etc", "/var/lib",
+)
+SYSTEM_UNITS = (
+    "little-mester-vm.service", "little-mester-vm-proxy.service",
+    "little-mester-vm-workspace.service", "little-mester-vm-metrics.service",
+)
+CODE_UPDATE_LOCK = pathlib.Path("/etc/little-mester-vm/code-update.lock")
+CODE_UPDATE_MARKER = pathlib.Path("/etc/little-mester-vm/code-update.in-progress")
+CODE_ROLLBACK_ROOT = pathlib.Path("/var/lib/little-mester-vm-code-rollback")
+
+
+def refuse(message: str) -> None:
+    raise RuntimeError(message)
+
+
+def source_payload(root: pathlib.Path, relative: str, owner: str) -> bytes:
+    payload = (root / relative).read_bytes()
+    if relative == "systemd/little-mester-vm-workspace.service":
+        owner_marker = b"@LM_VM_OWNER@"
+        group_marker = b"@LM_VM_OWNER_GROUP@"
+        if payload.count(owner_marker) != 2 or payload.count(group_marker) != 1:
+            refuse("workspace unit must bind both launcher and User to one fixed owner")
+        owner_info = pwd.getpwnam(owner)
+        owner_group = grp.getgrgid(owner_info.pw_gid).gr_name
+        payload = payload.replace(owner_marker, owner.encode("ascii"))
+        payload = payload.replace(group_marker, owner_group.encode("ascii"))
+    return payload
+
+
+def source_root() -> pathlib.Path:
+    entry = pathlib.Path(__file__).absolute()
+    current = pathlib.Path(entry.anchor)
+    for component in entry.parts[1:]:
+        current /= component
+        info = os.lstat(current)
+        if stat.S_ISLNK(info.st_mode):
+            refuse("installer path contains a symlink")
+    root = entry.parent.parent
+    if not re.fullmatch(r"[0-9a-f]{40}", root.name) or root.parent.name != "v3":
+        refuse("installer must be invoked from a root-protected pinned v3 installation")
+    for path in (root, *root.parents):
+        info = os.lstat(path)
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            refuse("pinned installer ancestry must be root-owned and not group/world writable")
+    return root
+
+
+def verify_source(root: pathlib.Path) -> None:
+    for relative in (*FILES, "tools/vm-system-install", "lib/vm/code-update-transaction.py"):
+        path = root / relative
+        for parent in path.parents:
+            if parent == root.parent:
+                break
+            info = os.lstat(parent)
+            if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                    or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+                refuse("pinned system VM install source ancestry is not protected")
+        info = os.lstat(path)
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            refuse("system VM install source is not a protected regular file")
+
+
+def ensure_group(name: str, *, allowed_members: set[str] = frozenset()) -> None:
+    try:
+        existing = grp.getgrnam(name)
+    except KeyError:
+        subprocess.run(["/usr/sbin/groupadd", "--system", name], check=True,
+                       stdin=subprocess.DEVNULL)
+    else:
+        if existing.gr_gid >= 1000:
+            refuse(f"existing {name} group is not in the protected system-group ID range")
+        unexpected = set(existing.gr_mem) - allowed_members
+        if unexpected:
+            refuse(f"existing {name} group has unexpected members; preserving it")
+
+
+def validate_group(name: str, *, allowed_members: set[str] = frozenset()) -> grp.struct_group | None:
+    try:
+        existing = grp.getgrnam(name)
+    except KeyError:
+        return None
+    if existing.gr_gid >= 1000:
+        refuse(f"existing {name} group is not in the protected system-group ID range")
+    unexpected = set(existing.gr_mem) - allowed_members
+    if unexpected:
+        refuse(f"existing {name} group has unexpected members; preserving it")
+    return existing
+
+
+def ensure_user(name: str, group: str, home: str) -> None:
+    try:
+        pwd.getpwnam(name)
+    except KeyError:
+        subprocess.run(["/usr/sbin/useradd", "--system", "--no-create-home", "--home-dir", home,
+                        "--shell", "/usr/sbin/nologin", "--gid", group, name], check=True,
+                       stdin=subprocess.DEVNULL)
+        return
+    user = pwd.getpwnam(name)
+    expected_group = grp.getgrnam(group).gr_gid
+    if (not 1 <= user.pw_uid < 1000 or user.pw_gid != expected_group
+            or user.pw_shell != "/usr/sbin/nologin" or user.pw_dir != home):
+        refuse(f"existing {name} identity differs from the fixed service identity; preserving it")
+
+
+def validate_user(name: str, group: str, home: str) -> pwd.struct_passwd | None:
+    try:
+        user = pwd.getpwnam(name)
+    except KeyError:
+        return None
+    try:
+        expected_group = grp.getgrnam(group).gr_gid
+    except KeyError as error:
+        raise RuntimeError(f"existing {name} account has no matching fixed primary group") from error
+    if (not 1 <= user.pw_uid < 1000 or user.pw_gid != expected_group
+            or user.pw_shell != "/usr/sbin/nologin" or user.pw_dir != home):
+        refuse(f"existing {name} identity differs from the fixed service identity; preserving it")
+    return user
+
+
+def validate_root_directory(path: pathlib.Path) -> os.stat_result:
+    current = pathlib.Path(path.anchor)
+    info = os.lstat(current)
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        refuse(f"host parent is not a root-controlled directory: {current}")
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError as error:
+            raise RuntimeError(f"required protected host parent is missing: {current}") from error
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            refuse(f"host parent is not a root-controlled directory: {current}")
+    return info
+
+
+def preflight(root: pathlib.Path, owner: str) -> None:
+    """Validate every fixed host target and prior state before the first mutation.
+
+    Any existing provisioning artifact blocks automatic continuation. In
+    particular, do not parse or adopt a service-writable disk as root.
+    """
+    sys.dont_write_bytecode = True
+    for raw in PROTECTED_PARENTS:
+        validate_root_directory(pathlib.Path(raw))
+
+    for name in ("lm-vm", "lm-vm-proxy", "lm-vm-control"):
+        validate_group(name, allowed_members={owner} if name == "lm-vm-control" else set())
+    validate_user("lm-vm", "lm-vm", "/var/lib/little-mester-vm")
+    validate_user("lm-vm-proxy", "lm-vm-proxy", "/var/empty")
+
+    for raw, group, mode in (
+        ("/usr/lib/little-mester-vm", "root", 0o755),
+        ("/usr/lib/little-mester-vm/plugins", "root", 0o755),
+        ("/usr/lib/little-mester-vm/host-metrics-tui", "root", 0o755),
+        ("/etc/little-mester-vm", "lm-vm-control", 0o750),
+        ("/etc/systemd/system/little-mester-vm-workspace.service.d", "root", 0o755),
+        ("/etc/systemd/system/little-mester-vm.service.d", "root", 0o755),
+        ("/etc/systemd/system/little-mester-vm-proxy.service.d", "root", 0o755),
+        ("/etc/systemd/system/little-mester-vm-metrics.service.d", "root", 0o755),
+        ("/var/lib/little-mester-vm", "lm-vm", 0o750),
+    ):
+        path = pathlib.Path(raw)
+        if path.exists() or path.is_symlink():
+            try:
+                gid = grp.getgrnam(group).gr_gid
+            except KeyError as error:
+                raise RuntimeError(f"existing fixed directory has no expected group: {path}") from error
+            info = os.lstat(path)
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != 0 or info.st_gid != gid or stat.S_IMODE(info.st_mode) != mode):
+                refuse(f"fixed system VM directory is unsafe: {path}")
+
+    for relative, (raw, mode) in FILES.items():
+        target = pathlib.Path(raw)
+        if not (target.exists() or target.is_symlink()):
+            continue
+        info = os.lstat(target)
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != mode
+                or target.read_bytes() != source_payload(root, relative, owner)):
+            refuse(f"preserving pre-existing non-matching protected install target: {target}")
+
+    for raw, allowed in (
+        ("/etc/little-mester-vm", {pathlib.Path(path).name for path in PROVISION_FINALS[2:]} |
+         {"workspace.json"}),
+        ("/var/lib/little-mester-vm",
+         {pathlib.Path(PROVISION_FINALS[0]).name, pathlib.Path(PROVISION_FINALS[1]).name,
+          *(pathlib.Path(path).name for path in PROVISION_PARTIALS)}),
+    ):
+        directory = pathlib.Path(raw)
+        if directory.is_dir() and not directory.is_symlink():
+            unexpected = {entry.name for entry in directory.iterdir()} - allowed
+            if unexpected:
+                refuse(f"unexpected fixed system VM state exists; preserving {directory}")
+
+    artifacts = (*PROVISION_FINALS, *PROVISION_PARTIALS)
+    if any(pathlib.Path(path).exists() or pathlib.Path(path).is_symlink()
+           for path in artifacts):
+        refuse("pre-existing system VM provisioning evidence exists; preserving it for owner inspection")
+
+
+def ensure_dir(path: pathlib.Path, *, group: str, mode: int) -> None:
+    current = pathlib.Path(path.anchor)
+    for component in path.parent.parts[1:]:
+        current /= component
+        info = os.lstat(current)
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            refuse("system VM directory ancestry is not root-controlled")
+    if path.exists() or path.is_symlink():
+        info = os.lstat(path)
+        gid = grp.getgrnam(group).gr_gid
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != 0 or info.st_gid != gid or stat.S_IMODE(info.st_mode) != mode):
+            refuse(f"fixed system VM directory is unsafe: {path}")
+        return
+    path.mkdir(mode=mode)
+    os.chown(path, 0, grp.getgrnam(group).gr_gid)
+    os.chmod(path, mode)
+
+
+def install_file(source: pathlib.Path, destination: pathlib.Path, mode: int,
+                 *, payload: bytes | None = None) -> None:
+    current = pathlib.Path(destination.anchor)
+    for component in destination.parent.parts[1:]:
+        current /= component
+        info = os.lstat(current)
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            refuse("system installation target ancestry is not root-controlled")
+    payload = source.read_bytes() if payload is None else payload
+    if destination.exists() or destination.is_symlink():
+        info = os.lstat(destination)
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != mode
+                or destination.read_bytes() != payload):
+            refuse(f"preserving pre-existing non-matching protected install target: {destination}")
+        return
+    fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    try:
+        view = memoryview(payload)
+        while view:
+            count = os.write(fd, view)
+            if count <= 0:
+                refuse("system VM install write made no progress")
+            view = view[count:]
+        os.fchmod(fd, mode)
+        os.fchown(fd, 0, 0)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _state_fingerprint(paths: tuple[pathlib.Path, ...]) -> dict[str, tuple]:
+    result = {}
+    for path in paths:
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            result[str(path)] = ("missing",)
+            continue
+        if (stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+                and path != pathlib.Path("/var/lib/little-mester-vm/disk.qcow2")):
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        else:
+            digest = "not-regular"
+        result[str(path)] = (info.st_dev, info.st_ino, info.st_uid, info.st_gid,
+                             stat.S_IMODE(info.st_mode), info.st_nlink, info.st_size,
+                             info.st_mtime_ns, info.st_ctime_ns, digest)
+    return result
+
+
+def _code_update_transaction(root: pathlib.Path):
+    path = root / "lib/vm/code-update-transaction.py"
+    spec = importlib.util.spec_from_file_location("system_vm_code_update_transaction", path)
+    if spec is None or spec.loader is None:
+        refuse("protected code-update transaction helper is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _update_maps(root: pathlib.Path, owner: str, control_gid: int):
+    target_map = {}
+    candidate = {}
+    for relative, (raw_target, mode) in FILES.items():
+        target = pathlib.Path(raw_target)
+        payload = source_payload(root, relative, owner)
+        target_map[raw_target] = target
+        candidate[raw_target] = (payload, mode, 0, 0)
+    group_ids = {"root": 0, "lm-vm-control": control_gid,
+                 "lm-vm": pwd.getpwnam("lm-vm").pw_gid}
+    directory_policy = (
+        ("/usr/lib/little-mester-vm", "root", 0o755),
+        ("/usr/lib/little-mester-vm/plugins", "root", 0o755),
+        ("/usr/lib/little-mester-vm/host-metrics-tui", "root", 0o755),
+        ("/etc/little-mester-vm", "lm-vm-control", 0o750),
+        ("/etc/systemd/system/little-mester-vm-workspace.service.d", "root", 0o755),
+        ("/etc/systemd/system/little-mester-vm.service.d", "root", 0o755),
+        ("/etc/systemd/system/little-mester-vm-proxy.service.d", "root", 0o755),
+        ("/etc/systemd/system/little-mester-vm-metrics.service.d", "root", 0o755),
+        ("/var/lib/little-mester-vm", "lm-vm", 0o750),
+    )
+    managed = {
+        raw: (pathlib.Path(raw), mode, 0, group_ids[group])
+        for raw, group, mode in directory_policy
+    }
+    return target_map, candidate, managed
+
+
+def _validate_update_target_ancestry(target: pathlib.Path) -> None:
+    current = pathlib.Path(target.anchor)
+    for component in target.parent.parts[1:]:
+        current /= component
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            break
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            refuse("protected update target ancestry is unsafe")
+
+
+def _ensure_code_update_lock(control_gid: int) -> int:
+    """Open the single fixed lock without following paths and take it exclusively."""
+    parent = CODE_UPDATE_LOCK.parent
+    info = os.lstat(parent)
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != 0 or info.st_gid != control_gid
+            or stat.S_IMODE(info.st_mode) != 0o750):
+        refuse("code-update lock parent is not the fixed protected config directory")
+    try:
+        fd = os.open(CODE_UPDATE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o660)
+    except OSError as error:
+        raise RuntimeError("could not open fixed code-update lock") from error
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            refuse("code-update lock is not a single-link regular file")
+        if info.st_size:
+            refuse("code-update lock file must remain empty")
+        if info.st_uid != 0 or info.st_gid != control_gid or stat.S_IMODE(info.st_mode) != 0o660:
+            if info.st_uid != 0:
+                refuse("code-update lock has an unexpected owner")
+            os.fchown(fd, 0, control_gid)
+            os.fchmod(fd, 0o660)
+            info = os.fstat(fd)
+            if (info.st_uid != 0 or info.st_gid != control_gid
+                    or stat.S_IMODE(info.st_mode) != 0o660):
+                refuse("code-update lock metadata could not be normalized")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("another fixed VM operation holds the code-update lock") from error
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _release_code_update_lock(fd: int) -> None:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _unit_state(unit: str) -> str:
+    result = subprocess.run(["/usr/bin/systemctl", "show", "--property=ActiveState",
+                             "--value", unit], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            text=True, check=False)
+    if result.returncode:
+        path = pathlib.Path("/etc/systemd/system") / unit
+        if unit in ("little-mester-vm-workspace.service", "little-mester-vm-metrics.service") \
+                and not path.exists() and not path.is_symlink():
+            return "not-installed"
+        refuse(f"could not verify fixed systemd unit state: {unit}")
+    state = result.stdout.strip()
+    if state not in ("inactive", "failed", "active", "activating", "deactivating", "reloading"):
+        refuse(f"fixed systemd unit state is ambiguous: {unit}")
+    return state
+
+
+def _require_system_units_stopped() -> None:
+    for unit in SYSTEM_UNITS:
+        state = _unit_state(unit)
+        if state not in ("inactive", "failed", "not-installed"):
+            refuse(f"code update/rollback requires all fixed services already stopped ({unit})")
+    jobs = subprocess.run(["/usr/bin/systemctl", "list-jobs", "--no-legend", "--no-pager"],
+                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL, text=True, check=False)
+    if jobs.returncode:
+        refuse("could not verify pending fixed systemd jobs")
+    if any(unit in line.split() for line in jobs.stdout.splitlines() for unit in SYSTEM_UNITS):
+        refuse("a fixed systemd service has a pending start/stop job")
+
+
+def _verify_effective_unit_guard(unit: str, owner: str, *,
+                                require_locked_launcher: bool = False) -> None:
+    expected_dropin = f"/etc/systemd/system/{unit}.d/90-code-update-guard.conf"
+    properties = {}
+    for name in ("DropInPaths", "ExecStart", "ExecStartPre", "ConditionPathExists"):
+        result = subprocess.run(["/usr/bin/systemctl", "show", f"--property={name}",
+                                 "--value", unit], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, check=False)
+        if result.returncode:
+            refuse(f"could not verify effective start guard for {unit}")
+        properties[name] = result.stdout.strip()
+    if expected_dropin not in properties["DropInPaths"].split():
+        refuse(f"fixed systemd unit did not load its protected start guard: {unit}")
+    command_pattern = re.compile(
+        r"\{\s*path=([^ ;]+)\s*;\s*argv\[\]=(.*?)\s*;\s*ignore_errors=.*?\}")
+    found = tuple(command_pattern.finditer(properties["ExecStartPre"]))
+    raw_commands = properties["ExecStartPre"]
+    if (not found or raw_commands.count("{ path=") != len(found)
+            or raw_commands.count("; argv[]=") != len(found)
+            or raw_commands.count("; ignore_errors=") != len(found)):
+        refuse(f"effective start-lock command list is malformed: {unit}")
+    observed = []
+    previous_end = 0
+    for command in found:
+        if raw_commands[previous_end:command.start()].strip() not in ("", ";"):
+            refuse(f"effective start-lock command list has extra data: {unit}")
+        observed.append((command.group(1), command.group(2)))
+        previous_end = command.end()
+    if raw_commands[previous_end:].strip():
+        refuse(f"effective start-lock command list has trailing data: {unit}")
+    guard = ["/usr/bin/flock", "--shared", "--nonblock", str(CODE_UPDATE_LOCK), "/usr/bin/true"]
+    expected = []
+    if unit == "little-mester-vm.service":
+        expected.append(("/usr/bin/python3",
+                         "/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py check"))
+    expected.append((guard[0], " ".join(guard)))
+    if tuple(observed) != tuple(expected):
+        refuse(f"effective start-lock guard is missing or overridden: {unit}")
+    if require_locked_launcher:
+        start_value = properties["ExecStart"]
+        start_match = re.fullmatch(
+            r"\{\s*path=([^ ;]+)\s*;\s*argv\[\]=(.*?)\s*;\s*ignore_errors=.*\}",
+            start_value)
+        expected_owner = pwd.getpwnam(owner).pw_name
+        role = {
+            "little-mester-vm.service": ["qemu"],
+            "little-mester-vm-proxy.service": ["proxy"],
+            "little-mester-vm-workspace.service": ["workspace", f"--owner={expected_owner}"],
+            "little-mester-vm-metrics.service": ["metrics"],
+        }.get(unit)
+        expected_start = ("/usr/bin/python3",
+                          "/usr/bin/python3 -I /usr/lib/little-mester-vm/system-vm.py locked-service "
+                          + " ".join(role or ()))
+        if (start_match is None or (start_match.group(1), start_match.group(2)) != expected_start):
+            refuse(f"effective locked-service launcher is missing or overridden: {unit}")
+    if f"!{CODE_UPDATE_MARKER}" not in properties["ConditionPathExists"]:
+        refuse(f"effective maintenance-marker guard is missing or overridden: {unit}")
+
+
+def _install_transaction_guards(root: pathlib.Path, owner: str, managed_dirs, *,
+                                txn, snapshot_path: pathlib.Path, target_map,
+                                expected_candidate, candidate_sha: str) -> None:
+    guard_entries = []
+    for relative, (raw_target, mode) in FILES.items():
+        if not relative.endswith("90-code-update-guard.conf"):
+            continue
+        guard_entries.append((root / relative, pathlib.Path(raw_target),
+                              source_payload(root, relative, owner), mode))
+    snapshot = txn._load_snapshot(snapshot_path)
+    prior = {entry["path"]: entry for entry in snapshot["targets"]}
+    for _source, destination, _payload, _mode in guard_entries:
+        logical = str(destination)
+        entry = prior[logical]
+        current = txn._current_state(destination)
+        old_data = txn._entry_data(entry)
+        old_match = (current is None if old_data is None else
+                     current == (old_data, entry["mode"], entry["uid"], entry["gid"]))
+        candidate_match = current == expected_candidate[logical]
+        if not old_match and not candidate_match:
+            refuse("start guard drifted from both snapshot and candidate; preserving evidence")
+    _install_directories(managed_dirs)
+    if not _guard_targets_match(root, owner):
+        _write_candidate_files(guard_entries, txn=txn, snapshot_path=snapshot_path,
+                               target_map=target_map, expected_candidate=expected_candidate,
+                               candidate_sha=candidate_sha)
+    subprocess.run(["/usr/bin/systemctl", "daemon-reload"],
+                   stdin=subprocess.DEVNULL, check=True)
+    for unit in SYSTEM_UNITS:
+        if _unit_state(unit) not in ("inactive", "failed", "not-installed"):
+            refuse(f"fixed service became active while installing transaction guards: {unit}")
+        if unit in ("little-mester-vm-workspace.service", "little-mester-vm-metrics.service") \
+                and not (pathlib.Path("/etc/systemd/system") / unit).exists():
+            continue
+        _verify_effective_unit_guard(unit, owner)
+
+
+def _install_permanent_interlock_assets(root: pathlib.Path, owner: str, txn,
+                                        snapshot_path: pathlib.Path, target_map,
+                                        expected_candidate, candidate_sha: str) -> None:
+    snapshot = txn._load_snapshot(snapshot_path)
+    prior = {entry["path"]: entry for entry in snapshot["targets"]}
+    pending = []
+    for relative in sorted(PERMANENT_INTERLOCK_RELATIVES):
+        if relative not in FILES:
+            refuse("permanent interlock manifest references an unknown protected asset")
+        raw_target, mode = FILES[relative]
+        destination = pathlib.Path(raw_target)
+        logical = str(destination)
+        current = txn._current_state(destination)
+        entry = prior[logical]
+        old_data = txn._entry_data(entry)
+        old_match = (current is None if old_data is None else
+                     current == (old_data, entry["mode"], entry["uid"], entry["gid"]))
+        candidate_match = current == expected_candidate[logical]
+        if not old_match and not candidate_match:
+            refuse("permanent interlock asset drifted from snapshot and candidate")
+        if not candidate_match:
+            pending.append((root / relative, destination,
+                            source_payload(root, relative, owner), mode))
+    if pending:
+        _write_candidate_files(pending, txn=txn, snapshot_path=snapshot_path,
+                               target_map=target_map, expected_candidate=expected_candidate,
+                               candidate_sha=candidate_sha)
+
+
+def _rollback_snapshot_path(candidate_sha: str) -> pathlib.Path:
+    return CODE_ROLLBACK_ROOT / f"{candidate_sha}.json"
+
+
+def _ensure_rollback_root() -> None:
+    if CODE_ROLLBACK_ROOT.exists() or CODE_ROLLBACK_ROOT.is_symlink():
+        info = os.lstat(CODE_ROLLBACK_ROOT)
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != 0o700):
+            refuse("rollback directory has unsafe identity or permissions")
+        return
+    CODE_ROLLBACK_ROOT.mkdir(mode=0o700)
+    os.chown(CODE_ROLLBACK_ROOT, 0, 0)
+    os.chmod(CODE_ROLLBACK_ROOT, 0o700)
+    parent_fd = os.open(CODE_ROLLBACK_ROOT.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _write_marker() -> None:
+    parent = CODE_UPDATE_MARKER.parent
+    temp = parent / f".{CODE_UPDATE_MARKER.name}.{os.getpid()}.{secrets.token_hex(8)}"
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchown(fd, 0, 0)
+        os.fchmod(fd, 0o600)
+        os.write(fd, b"protected-code-update-in-progress\n")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.link(temp, CODE_UPDATE_MARKER, follow_symlinks=False)
+        os.unlink(temp)
+        directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
+def _remove_marker() -> None:
+    try:
+        info = os.lstat(CODE_UPDATE_MARKER)
+    except FileNotFoundError:
+        return
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+        refuse("maintenance marker identity is unsafe; preserving it")
+    os.unlink(CODE_UPDATE_MARKER)
+    directory_fd = os.open(CODE_UPDATE_MARKER.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _validate_marker_if_present() -> bool:
+    try:
+        info = os.lstat(CODE_UPDATE_MARKER)
+    except FileNotFoundError:
+        return False
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+            or info.st_size > 128):
+        refuse("maintenance marker identity is unsafe; preserving it")
+    fd = os.open(CODE_UPDATE_MARKER, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        if os.read(fd, 129) != b"protected-code-update-in-progress\n":
+            refuse("maintenance marker content is unexpected; preserving it")
+    finally:
+        os.close(fd)
+    return True
+
+
+def _guard_targets_match(root: pathlib.Path, owner: str) -> bool:
+    for relative in (name for name in FILES if name.endswith("90-code-update-guard.conf")):
+        target = pathlib.Path(FILES[relative][0])
+        try:
+            info = os.lstat(target)
+            actual = target.read_bytes()
+        except OSError:
+            return False
+        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != 0 or info.st_gid != 0
+                or stat.S_IMODE(info.st_mode) != FILES[relative][1]
+                or actual != source_payload(root, relative, owner)):
+            return False
+    return True
+
+
+def _install_directories(managed_dirs) -> None:
+    for _logical, (path, mode, _uid, gid) in managed_dirs.items():
+        group = grp.getgrgid(gid).gr_name
+        ensure_dir(path, group=group, mode=mode)
+
+
+def _write_candidate_files(pending: list[tuple[pathlib.Path, pathlib.Path, bytes, int]], *,
+                           txn, snapshot_path: pathlib.Path, target_map,
+                           expected_candidate, candidate_sha: str) -> None:
+    txn.recover_candidate_stages(snapshot_path, target_map, expected_candidate,
+                                 candidate_sha=candidate_sha)
+    staged: list[tuple[pathlib.Path, pathlib.Path]] = []
+    for index, (_source, destination, payload, mode) in enumerate(pending):
+        logical_target = str(destination)
+        current = pathlib.Path(destination.anchor)
+        for component in destination.parent.parts[1:]:
+            current /= component
+            ancestor = os.lstat(current)
+            if (not stat.S_ISDIR(ancestor.st_mode) or stat.S_ISLNK(ancestor.st_mode)
+                    or ancestor.st_uid != 0 or ancestor.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+                refuse("protected update target ancestry is unsafe")
+        temp = txn.stage_candidate(snapshot_path, target_map,
+                                   logical_target=logical_target,
+                                   candidate_sha=candidate_sha, index=index,
+                                   payload=payload, mode=mode, uid=0, gid=0)
+        staged.append((temp, destination))
+    for temp, destination in staged:
+        os.replace(temp, destination)
+        directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        txn.clear_stage(snapshot_path, candidate_sha=candidate_sha, temp_path=temp)
+
+
+def _finish_code_operation(root: pathlib.Path, owner: str, before_state: dict,
+                           state_paths: tuple[pathlib.Path, ...], *, txn,
+                           snapshot_path: pathlib.Path, phase: str) -> None:
+    subprocess.run(["/usr/sbin/visudo", "-cf", "/etc/sudoers.d/little-mester-vm"],
+                   stdin=subprocess.DEVNULL, check=True)
+    subprocess.run(["/usr/bin/systemctl", "daemon-reload"],
+                   stdin=subprocess.DEVNULL, check=True)
+    if _state_fingerprint(state_paths) != before_state:
+        raise RuntimeError("protected VM state changed during code-only operation; preserving maintenance guard")
+    _require_system_units_stopped()
+    if not _guard_targets_match(root, owner):
+        raise RuntimeError("permanent start guards are not the expected candidate assets")
+    for unit in SYSTEM_UNITS:
+        path = pathlib.Path("/etc/systemd/system") / unit
+        if path.exists() or path.is_symlink():
+            _verify_effective_unit_guard(unit, owner, require_locked_launcher=True)
+    txn.set_snapshot_phase(snapshot_path, candidate_sha=root.name, phase=phase)
+    # This is the final mutation. Its unlink is atomic and durable; all protected
+    # runtime files, systemd state, unit guards, and guest-state fingerprints
+    # have been verified while the exclusive lock is still held.
+    _remove_marker()
+
+
+def _state_paths() -> tuple[pathlib.Path, ...]:
+    return tuple(pathlib.Path(path) for path in (
+        "/var/lib/little-mester-vm/disk.qcow2", "/var/lib/little-mester-vm/seed.iso",
+        "/etc/little-mester-vm/control_ed25519", "/etc/little-mester-vm/ssh_host_ed25519_key",
+        "/etc/little-mester-vm/control_ed25519.pub",
+        "/etc/little-mester-vm/ssh_host_ed25519_key.pub",
+        "/etc/little-mester-vm/known_hosts", "/etc/little-mester-vm/workspace.json",
+        "/etc/systemd/system/little-mester-vm-workspace.service.d/20-workspace.conf"))
+
+
+def update_code_only(root: pathlib.Path, owner: str, previous_sha: str) -> None:
+    """Interlocked, snapshot-backed protected host-code update; never starts VM."""
+    if os.geteuid() != 0:
+        refuse("code-only update requires explicit root through sudo")
+    if not re.fullmatch(r"[0-9a-f]{40}", previous_sha) or previous_sha == root.name:
+        refuse("previous installation must be a distinct full lowercase commit SHA")
+    previous = root.parent / previous_sha
+    if not previous.is_dir() or previous.is_symlink():
+        refuse("previous immutable installation is unavailable")
+    pwd.getpwnam(owner)
+    control_gid = grp.getgrnam("lm-vm-control").gr_gid
+    lock_fd = _ensure_code_update_lock(control_gid)
+    try:
+        _require_system_units_stopped()
+        if _validate_marker_if_present():
+            refuse("a protected code update/rollback is already incomplete; use its pinned rollback")
+        for unit in SYSTEM_UNITS:
+            runtime_mask = pathlib.Path("/run/systemd/system") / unit
+            if runtime_mask.exists() or runtime_mask.is_symlink():
+                refuse(f"fixed systemd unit already has a runtime mask; preserving it: {unit}")
+        state_paths = _state_paths()
+        before_state = _state_fingerprint(state_paths)
+        target_map, candidate, managed = _update_maps(root, owner, control_gid)
+        for relative, (raw_target, expected_mode) in FILES.items():
+            target = pathlib.Path(raw_target)
+            _validate_update_target_ancestry(target)
+            try:
+                info = os.lstat(target)
+            except FileNotFoundError:
+                if relative not in UPDATE_ADDITIONALS:
+                    refuse(f"code-only update requires existing protected asset: {target}")
+                continue
+            if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != 0 or info.st_gid != 0
+                    or stat.S_IMODE(info.st_mode) != expected_mode or info.st_nlink != 1):
+                refuse(f"protected install asset has unsafe metadata; preserving it: {target}")
+        txn = _code_update_transaction(root)
+        _ensure_rollback_root()
+        snapshot_path = _rollback_snapshot_path(root.name)
+        txn.publish_snapshot(snapshot_path, target_map, candidate_sha=root.name,
+                             previous_sha=previous_sha, managed_dirs=managed)
+        # Install higher-priority /etc drop-ins first. Their short shared-lock
+        # pre-start guard rejects starts after this exclusive lock is acquired;
+        # the post-reload unit-state/job check catches a legacy start already in
+        # flight before those guards became effective.
+        _install_transaction_guards(root, owner, managed, txn=txn,
+                                    snapshot_path=snapshot_path, target_map=target_map,
+                                    expected_candidate=candidate,
+                                    candidate_sha=root.name)
+        _require_system_units_stopped()
+        _write_marker()
+        pending = []
+        for relative, (raw_target, mode) in FILES.items():
+            if relative.endswith("90-code-update-guard.conf"):
+                continue
+            pending.append((root / relative, pathlib.Path(raw_target),
+                            source_payload(root, relative, owner), mode))
+        _write_candidate_files(pending, txn=txn, snapshot_path=snapshot_path,
+                               target_map=target_map, expected_candidate=candidate,
+                               candidate_sha=root.name)
+        _finish_code_operation(root, owner, before_state, state_paths, txn=txn,
+                                snapshot_path=snapshot_path, phase="verified-update")
+    except BaseException:
+        # On any incomplete operation, leave marker and the permanent guards in
+        # place. The snapshot is the recovery record; no automatic rollback.
+        raise
+    finally:
+        _release_code_update_lock(lock_fd)
+
+
+def rollback_code_only(root: pathlib.Path, owner: str, candidate_sha: str) -> None:
+    """Restore only fixed protected host assets from the retained snapshot."""
+    if os.geteuid() != 0:
+        refuse("code-only rollback requires explicit root through sudo")
+    if not re.fullmatch(r"[0-9a-f]{40}", candidate_sha) or candidate_sha != root.name:
+        refuse("rollback candidate SHA must match this protected installer")
+    control_gid = grp.getgrnam("lm-vm-control").gr_gid
+    lock_fd = _ensure_code_update_lock(control_gid)
+    try:
+        _require_system_units_stopped()
+        _validate_marker_if_present()
+        _ensure_rollback_root()
+        target_map, candidate, managed = _update_maps(root, owner, control_gid)
+        txn = _code_update_transaction(root)
+        snapshot_path = _rollback_snapshot_path(candidate_sha)
+        snapshot = txn._load_snapshot(snapshot_path)
+        if snapshot["candidate_sha"] != candidate_sha:
+            refuse("rollback snapshot candidate identity differs")
+        _install_transaction_guards(root, owner, managed, txn=txn,
+                                    snapshot_path=snapshot_path, target_map=target_map,
+                                    expected_candidate=candidate,
+                                    candidate_sha=candidate_sha)
+        if not CODE_UPDATE_MARKER.exists():
+            _write_marker()
+        _require_system_units_stopped()
+        state_paths = _state_paths()
+        before_state = _state_fingerprint(state_paths)
+        _install_permanent_interlock_assets(root, owner, txn, snapshot_path,
+                                            target_map, candidate, candidate_sha)
+        txn.restore_snapshot(snapshot_path, target_map, candidate,
+                             candidate_sha=candidate_sha, managed_dirs=managed,
+                             preserve_candidate_paths=frozenset(
+                                 FILES[relative][0] for relative in PERMANENT_INTERLOCK_RELATIVES))
+        _require_system_units_stopped()
+        _finish_code_operation(root, owner, before_state, state_paths, txn=txn,
+                                snapshot_path=snapshot_path, phase="verified-rollback")
+    finally:
+        _release_code_update_lock(lock_fd)
+
+
+def main() -> int:
+    try:
+        if os.geteuid() != 0:
+            refuse("explicit system VM installation requires root")
+        args = sys.argv[1:]
+        update_mode = len(args) == 3 and args[0] == "--update-code-only" and args[1] == "--previous-sha"
+        rollback_mode = len(args) == 3 and args[0] == "--rollback-code-only" and args[1] == "--candidate-sha"
+        if args and not (update_mode or rollback_mode):
+            refuse("supported operations are fresh install, --update-code-only --previous-sha SHA, or --rollback-code-only --candidate-sha SHA")
+        root = source_root()
+        verify_source(root)
+        owner = os.environ.get("SUDO_USER", "")
+        if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}\$?", owner) or owner == "root":
+            refuse("run the explicit installer through sudo from the intended owner account")
+        pwd.getpwnam(owner)
+        if update_mode:
+            previous_sha = args[2]
+            update_code_only(root, owner, previous_sha)
+            print("Code-only update complete. VM state was preserved; services remain stopped.")
+            return 0
+        if rollback_mode:
+            rollback_code_only(root, owner, args[2])
+            print("Code-only rollback complete. VM state was preserved; services remain stopped.")
+            return 0
+        try:
+            kvm_gid = grp.getgrnam("kvm").gr_gid
+            kvm = os.stat("/dev/kvm", follow_symlinks=False)
+        except (KeyError, OSError) as error:
+            raise RuntimeError("/dev/kvm and its pre-existing exact kvm group must be available") from error
+        if (not stat.S_ISCHR(kvm.st_mode) or kvm.st_gid != kvm_gid
+                or stat.S_IMODE(kvm.st_mode) & 0o060 != 0o060):
+            refuse("/dev/kvm must already grant group read/write through its kvm group; installer does not change host device policy")
+        for tool in ("/usr/bin/python3", "/usr/bin/curl", "/usr/bin/qemu-img",
+                     "/usr/bin/qemu-system-x86_64", "/usr/bin/genisoimage",
+                     "/usr/bin/ssh-keygen", "/usr/bin/socat", "/usr/bin/systemctl",
+                     "/usr/sbin/visudo", "/usr/sbin/groupadd", "/usr/sbin/useradd",
+                     "/usr/sbin/usermod"):
+            if not os.path.isfile(tool) or not os.access(tool, os.X_OK):
+                refuse(f"fixed system VM host dependency is unavailable: {pathlib.Path(tool).name}; "
+                       "review the pinned owner bootstrap's production/system-install scopes before retrying")
+        # Parse the exact pinned policy before creating accounts, files, or disks.
+        subprocess.run(["/usr/sbin/visudo", "-cf", str(root / "sudoers/little-mester-vm")],
+                       check=True, stdin=subprocess.DEVNULL)
+        preflight(root, owner)
+        # Do not claim a pre-existing system identity. Only groups and accounts
+        # with these exact fixed names are ever created by this explicit tool.
+        ensure_group("lm-vm")
+        ensure_group("lm-vm-proxy")
+        ensure_group("lm-vm-control", allowed_members={owner})
+        ensure_user("lm-vm", "lm-vm", "/var/lib/little-mester-vm")
+        ensure_user("lm-vm-proxy", "lm-vm-proxy", "/var/empty")
+        ensure_dir(pathlib.Path("/usr/lib/little-mester-vm"), group="root", mode=0o755)
+        ensure_dir(pathlib.Path("/usr/lib/little-mester-vm/plugins"), group="root", mode=0o755)
+        ensure_dir(pathlib.Path("/usr/lib/little-mester-vm/host-metrics-tui"),
+                   group="root", mode=0o755)
+        ensure_dir(pathlib.Path("/etc/little-mester-vm"), group="lm-vm-control", mode=0o750)
+        ensure_dir(pathlib.Path("/etc/systemd/system/little-mester-vm-workspace.service.d"),
+                   group="root", mode=0o755)
+        ensure_dir(pathlib.Path("/etc/systemd/system/little-mester-vm.service.d"),
+                   group="root", mode=0o755)
+        ensure_dir(pathlib.Path("/etc/systemd/system/little-mester-vm-proxy.service.d"),
+                   group="root", mode=0o755)
+        ensure_dir(pathlib.Path("/etc/systemd/system/little-mester-vm-metrics.service.d"),
+                   group="root", mode=0o755)
+        ensure_dir(pathlib.Path("/var/lib/little-mester-vm"), group="lm-vm", mode=0o750)
+        lock_fd = _ensure_code_update_lock(grp.getgrnam("lm-vm-control").gr_gid)
+        _release_code_update_lock(lock_fd)
+        for relative, (target, mode) in FILES.items():
+            install_file(root / relative, pathlib.Path(target), mode,
+                         payload=source_payload(root, relative, owner))
+        # Existing provisioning evidence was refused before any host mutation.
+        subprocess.run(["/usr/bin/python3", "-I", "/usr/lib/little-mester-vm/system-vm.py",
+                       "provision"], check=True, stdin=subprocess.DEVNULL)
+        subprocess.run(["/usr/sbin/usermod", "-a", "-G", "lm-vm-control", owner], check=True,
+                       stdin=subprocess.DEVNULL)
+        subprocess.run(["/usr/sbin/visudo", "-cf", "/etc/sudoers.d/little-mester-vm"],
+                       check=True, stdin=subprocess.DEVNULL)
+        subprocess.run(["/usr/bin/systemctl", "daemon-reload"], check=True,
+                       stdin=subprocess.DEVNULL)
+        print("Installed fixed little-mester-vm system unit; it is not enabled or started.")
+        return 0
+    except (OSError, KeyError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"REFUSED: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

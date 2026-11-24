@@ -1,0 +1,37 @@
+{
+  "id": 58,
+  "file_path": "/workspace/docs/tickets/ticket-058.json",
+  "number": 58,
+  "area": "workflow",
+  "type": "improvement",
+  "status": "draft",
+  "title": "Phase 3H candidate — expose ticket comments through MCP",
+  "objective": "Optional Phase 3H ticket-lifecycle/workflow follow-up. #57 owns the proportionate Phase 1 cleanup investigation and repair of existing MCP comment/audit behavior, including an owner-side service update/restart if evidence requires it; this ticket must not duplicate or derail that work. Consider this distinct append/read API only if cleanup evidence shows it is still needed and is substantial enough to defer. Do not implement before Phase 1 completion; refine its scope when Phase 3H approaches.",
+  "created_at": "2026-11-10T21:46:28.253Z",
+  "updated_at": "2026-11-24T14:32:21.230Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "MCP exposes append and read of timestamped ticket comments without replacing existing comments or modifying ticket lifecycle fields implicitly.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Comment operations validate ticket identity and body size, preserve audit/index synchronization, and have tests for append, readback, concurrent writers, and malformed input.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Once released, new handoffs use MCP comments and the temporary CLI append-comment exception is removed from the workflow; historical comments and tests.cases remain intact.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Implement and test MCP comment append/read after Phase 1; verify audit/index synchronization and concurrency."
+    ],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}

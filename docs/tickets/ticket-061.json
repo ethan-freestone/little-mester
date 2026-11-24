@@ -1,0 +1,40 @@
+{
+  "id": 61,
+  "file_path": "/workspace/docs/tickets/ticket-061.json",
+  "number": 61,
+  "area": "vm-v3",
+  "type": "improvement",
+  "status": "draft",
+  "title": "Phase 1.5 — Local inference and VM maintenance",
+  "objective": "After the Phase 1 cleanup and final acceptance/merge of feat/vm-approach-3, use the new VM to develop the remaining Phase 1.5 direction: local inference through appropriate backends; model compatibility, configuration, selection and performance; CPU, memory and GPU allocation/sharing across concurrent profiles; explicit profile-pinned runtime revision updates that preserve compatible persistent guest state; safe rollback/recovery; and an improved everyday VM maintenance experience. Profiles, multiple persistent environments, immutable SHA runtime pinning/inventory/pruning, and the simplified developer CLI were brought forward into #21 and must not be duplicated. This is roadmap direction; refine detailed acceptance against actual VM usage when Phase 1.5 approaches.",
+  "created_at": "2026-11-13T21:51:36.011Z",
+  "updated_at": "2026-11-24T14:32:21.225Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Phase 1.5 begins only after Phase 1 completion and uses the new VM; work does not duplicate profiles, persistent environments, immutable runtime installation/inventory/pruning, or CLI functionality delivered by #21.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Deliver an owner-agreed local-inference experience covering appropriate supported backends, model compatibility/configuration/selection, and practical performance.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Provide sensible CPU, memory and GPU allocation and sharing for concurrent VM profiles, informed by actual hardware and usage.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Allow an explicit profile-pinned runtime revision update while preserving compatible persistent guest state, with safe rollback/recovery and an approachable maintenance workflow.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [],
+    "created": [],
+    "cases": []
+  },
+  "models_used": []
+}

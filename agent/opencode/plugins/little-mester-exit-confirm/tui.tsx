@@ -2,7 +2,7 @@
 // little-mester.exit-confirm — Ctrl+C opens a confirmation dialog. There is no
 // instant single-key quit.
 //
-// Contract notes (verified against OpenCode 2.1.4 source):
+// Contract verified against the pinned OpenCode 2.2.5 PTY binary:
 // - `app.exit` is rebound to "none" in OPENCODE_CLI_CONFIG_CONTENT
 //   (agent/Dockerfile), so the defaults ctrl+c / ctrl+d / <leader>q never exit.
 // - While the dialog is closed this plugin binds ctrl+c only. No letter key is

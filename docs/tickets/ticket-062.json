@@ -1,0 +1,46 @@
+{
+  "id": 62,
+  "file_path": "/workspace/docs/tickets/ticket-062.json",
+  "number": 62,
+  "area": "vm",
+  "type": "feature",
+  "status": "draft",
+  "title": "Phase 3G candidate — per-run GitHub reachability and credentials",
+  "objective": "Phase 3G connected-repository integration candidate. Treat GitHub access as an optional capability and distinguish network reachability from authentication; ordinary public HTTP(S) access remains governed by the approved egress policy. Read-only GitHub access may reduce manual PR/CI reporting. Authenticated write operations, pushes and merges remain owner-controlled unless a later explicit decision changes that. Any future credentials or scoped grants require explicit authorization and must not reuse the host SSH identity. Refine exact capabilities, permissions and lifetime when Phase 3G approaches; this is not a Phase 1/2 deliverable.",
+  "created_at": "2026-11-18T21:00:34.833Z",
+  "updated_at": "2026-11-24T14:32:21.239Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "Any GitHub integration distinguishes optional network reachability from authentication; ordinary public HTTP(S) access continues to follow the separately approved egress policy.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "A narrowly scoped read-only GitHub integration may be enabled where it measurably reduces manual repository/PR/CI reporting; it does not imply write authority.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Authenticated writes, pushes and merges remain owner-controlled; credentials are explicit and do not reuse or persist the host SSH identity in reusable VM, workspace or session state.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Before Phase 3G implementation, refine the selected capabilities, permission and credential lifetime/revocation behavior, and tests against actual use; this roadmap ticket does not authorize implementation now.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Verify owner-controlled grant and separate injected SSH identity, independent of host SSH agent/identity.",
+      "Verify grant lifetime across run, VM restart, and session termination; revoke on session end and immediately on approved-workspace change; verify no credential survives persistence or reuse."
+    ],
+    "created": [],
+    "cases": [
+      "Scope review requested under #41: added A8-A9 requiring explicit owner-controlled temporary grant with a separate narrowly scoped injected SSH identity (never host SSH/agent/key), an explicit run/VM restart/session lifetime, revocation on session termination and workspace change, and no persistence across guest restart. Capability remains future/backlog only; no implementation or GitHub access occurred."
+    ]
+  },
+  "priority": "major",
+  "models_used": []
+}
