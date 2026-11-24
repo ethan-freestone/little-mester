@@ -75,27 +75,50 @@ lab-vm system up|down|status|ssh|auth|tui
 
 This is the current **single fixed system VM**, not a named-profile interface.
 It uses shared singleton state and systemd resources; its `down` behavior is
-not a promise of non-destructive persistent-profile shutdown. The separate
-`./lab vm` dispatcher and this fixed `lab-vm system` interface do not yet
-provide independent named profiles or per-profile runtime pins. Do not infer
-profile isolation from their existing workspace reassignment or from multiple
-SHA-addressed source trees.
+not a promise of non-destructive persistent-profile shutdown. This fixed
+`lab-vm system` interface does not provide independent named profiles or
+per-profile runtime pins. Do not infer profile isolation from its workspace
+reassignment or from multiple SHA-addressed source trees.
 
-The legacy `./lab` command also has a thin VM dispatcher. It pins the current
-checkout's full Git commit and forwards operations to the existing owner
-acceptance/runtime path; it does not implement a second VM controller:
+The `./lab vm system` route preserves the fixed singleton's current
+owner-acceptance/runtime path. It pins the current checkout's full Git commit;
+it does not implement a second VM controller:
 
 ```sh
-./lab vm up --dir PATH [--unsafe-recurse] [--reassign]
-./lab vm down|status|ssh|auth|tui|verify|accept
+./lab vm system up --dir PATH [--unsafe-recurse] [--reassign]
+./lab vm system down|status|ssh|auth|tui|verify|accept
 ./lab vm prepare-dependencies production|acceptance|system-install
 ```
 
-The existing shared host capability checker currently supports apt on Ubuntu
-and pacman on Arch and CachyOS; its present package map rejects Debian. The
-profile-integration support contract explicitly adds Debian as an apt-backed
-host before implementation is accepted. The small platform adapter must map
-exactly Ubuntu, Debian, Arch and CachyOS to apt/apt/pacman/pacman respectively;
+The additive named-profile CLI grammar is:
+
+```sh
+./lab vm [--profile NAME] install
+./lab vm [--profile NAME] up [WORKSPACE] [--dir WORKSPACE] [--unsafe-recurse] [--reassign]
+./lab vm [--profile NAME] status|ssh|auth|tui|down|verify|accept
+./lab vm [--profile NAME] settings show
+./lab vm [--profile NAME] settings set [--model openai/<id>] [--theme <name>]
+./lab vm profiles list
+./lab vm profiles show NAME
+./lab vm [--profile NAME] reset
+./lab vm [--profile NAME] remove
+./lab vm installations
+./lab vm prune --dry-run|<interactive confirmation>
+./lab vm bootstrap [--recover]
+./lab vm control update [--recover]
+```
+
+Profile requests use only the fixed helper protocol; they never load lifecycle
+code from the checkout. The public grammar and request builder are present, but
+profile operations require the signed common control artifact/helper. Bootstrap
+and control update fail closed until a signed artifact is available; there is
+no checkout-based privileged fallback. The global `prepare-dependencies` route
+remains separate, and only `./lab vm system ...` selects the transitional fixed
+singleton.
+
+The shared host capability checker maps Ubuntu and Debian to apt, and Arch and
+CachyOS to pacman. The small platform adapter must map exactly those four IDs
+to apt/apt/pacman/pacman respectively;
 other distribution IDs remain unsupported unless separately reviewed and
 validated. It checks fixed
 executable paths, `/usr/bin/python3` imports, KVM access, and a responsive
@@ -166,7 +189,7 @@ missing, conflicting, malformed, unsupported, or unavailable evidence fails
 closed. These observations do not establish a root cause for a mismatch and
 are not an exhaustive validation of all effective systemd policy.
 
-Inside the guest shell (`./lab vm ssh`), safe per-user model/theme settings are
+Inside the fixed singleton guest shell (`./lab vm system ssh`), safe per-user model/theme settings are
 available without editing protected OpenCode configuration:
 
 ```sh
@@ -183,7 +206,7 @@ uses a fixed private QMP socket and waits for the exact MainPID to exit. A
 failed/expired QMP exchange returns failure; systemd then applies the declared
 control-group TERM/KILL fallback. Automatic restart is disabled.
 
-### Planned profile-aware CLI contract — not implemented
+### Profile-aware CLI contract and current implementation status
 
 The next usability integration is designed to keep the mutable repository
 checkout, immutable protected runtime at `/opt/little-mester/v3/<SHA>`, and
@@ -196,8 +219,15 @@ remain on their existing protected owner-acceptance path. Switching checkout
 branches must not update,
 rebuild, or invalidate a profile. Identical immutable installs may be shared;
 profile state must remain isolated. A future explicit profile update/migration is
-out of scope. Treat the contract as design intent until the implementation,
-review, tests, and owner acceptance are complete.
+out of scope. The parser/request builder is implemented; the fixed helper and
+signed artifact handoff remain an integration prerequisite. Until installed,
+profile operations fail with a bootstrap prerequisite rather than falling back
+to checkout lifecycle code or silently targeting the fixed singleton.
+
+The fixed singleton verifiers enforce exact baseline drop-in sets and the
+stopped, unassigned workspace layout. Acceptance after common bootstrap still
+depends on the helper stream's exact manifest/guard schema; no guessed profile
+guard manifest is accepted.
 
 Owner design decision (2026-11-24): named profiles must remain usable alongside
 the original `feat/vm-approach` development VM. That VM is distinct from this

@@ -1,0 +1,192 @@
+#!/usr/bin/python3
+"""Public named-profile request builder for ``./lab vm``.
+
+This client is intentionally unprivileged. Lifecycle and profile state are
+owned by the fixed, versioned profile-control helper; this script only parses
+the public grammar and sends a bounded protocol-v1 request.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+HELPER = "/usr/libexec/little-mester-vm/profile-control"
+SUDO = "/usr/bin/sudo"
+DEFAULT_PROFILE = "default"
+RESERVED_PROFILES = frozenset({
+    "system", "profiles", "installations", "prune", "bootstrap", "control",
+    "prepare-dependencies",
+})
+PROFILE_NAME = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
+MODEL_ID = re.compile(r"openai/[A-Za-z0-9._+-]+\Z")
+THEME_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
+SHA = re.compile(r"[0-9a-f]{40}\Z")
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(
+        prog="./lab vm",
+        description="Manage a named persistent VM profile; profile defaults to 'default'.",
+        allow_abbrev=False,
+    )
+    result.add_argument("--profile", help="select a named profile (default: default)")
+    commands = result.add_subparsers(dest="command", required=True)
+
+    commands.add_parser("install", help="install this committed checkout into the selected profile")
+
+    up = commands.add_parser("up", help="start the selected profile and optionally assign a workspace")
+    up.add_argument("workspace", nargs="?", help="workspace path (overridden by --dir)")
+    up.add_argument("--dir", dest="workspace_dir", help="explicit workspace path")
+    up.add_argument("--unsafe-recurse", action="store_true",
+                    help="allow assigning the current checkout; without a path selects .")
+    up.add_argument("--reassign", action="store_true", help="explicitly replace a stopped profile's workspace")
+
+    for name in ("status", "ssh", "auth", "tui", "down", "verify", "accept", "reset", "remove"):
+        commands.add_parser(name)
+
+    settings = commands.add_parser("settings", help="show or change supported guest preferences")
+    settings_commands = settings.add_subparsers(dest="settings_command", required=True)
+    settings_commands.add_parser("show")
+    setting = settings_commands.add_parser("set")
+    setting.add_argument("--model", help="OpenCode model ID, for example openai/gpt-4.1")
+    setting.add_argument("--theme", help="OpenCode theme name")
+
+    profiles = commands.add_parser("profiles", help="list profiles or show one profile")
+    profile_commands = profiles.add_subparsers(dest="profiles_command", required=True)
+    profile_commands.add_parser("list")
+    show = profile_commands.add_parser("show")
+    show.add_argument("name")
+
+    commands.add_parser("installations", help="show immutable runtime inventory")
+    prune = commands.add_parser("prune", help="remove confirmed unused immutable runtime installs")
+    prune.add_argument("--dry-run", action="store_true", help="preview without changing files")
+
+    bootstrap = commands.add_parser("bootstrap", help="install the signed common host control artifact")
+    bootstrap.add_argument("--recover", action="store_true", help="recover only a matching bootstrap transaction")
+    control = commands.add_parser("control", help="manage the common host control artifact")
+    control_commands = control.add_subparsers(dest="control_command", required=True)
+    update = control_commands.add_parser("update")
+    update.add_argument("--recover", action="store_true", help="recover only the matching update transaction")
+    return result
+
+
+def _profile_name(value: str) -> str:
+    if not PROFILE_NAME.fullmatch(value) or value in RESERVED_PROFILES:
+        raise ValueError("profile name must match [a-z][a-z0-9-]{0,31} and not be reserved")
+    return value
+
+
+def _candidate_sha(repository: pathlib.Path) -> str:
+    try:
+        result = subprocess.run(
+            ["/usr/bin/git", "-C", str(repository), "rev-parse", "--verify", "HEAD"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, check=False,
+        )
+    except OSError as error:
+        raise ValueError("cannot run the fixed Git executable to resolve checkout HEAD") from error
+    sha = result.stdout.strip()
+    if result.returncode or not SHA.fullmatch(sha):
+        raise ValueError("checkout HEAD is not a full lowercase commit SHA")
+    return sha
+
+
+def request_for(args: argparse.Namespace, *, repository: pathlib.Path = ROOT) -> dict | None:
+    """Return the exact bounded helper request, or None for external artifact setup."""
+    command = args.command
+    if command in ("bootstrap", "control"):
+        if args.profile is not None:
+            raise ValueError(f"--profile is not valid with global {command}")
+        # The signed common artifact and its framed update payload are release
+        # inputs, not checkout paths. Never substitute this mutable script.
+        return None
+
+    if command == "installations" or command == "prune" or command == "profiles":
+        if args.profile is not None:
+            raise ValueError(f"--profile is not valid with global {command}")
+        if command == "installations":
+            return {"protocol": 1, "operation": "installations"}
+        if command == "prune":
+            return {"protocol": 1, "operation": "prune", "dry_run": bool(args.dry_run)}
+        if args.profiles_command == "list":
+            return {"protocol": 1, "operation": "profiles.list"}
+        return {"protocol": 1, "operation": "profiles.show",
+                "profile": _profile_name(args.name)}
+
+    profile = _profile_name(args.profile or DEFAULT_PROFILE)
+    request = {"protocol": 1, "operation": command, "profile": profile}
+    if command == "install":
+        candidate = _candidate_sha(repository)
+        request.update(repository_path=str(repository.resolve()), candidate_sha=candidate)
+    elif command == "up":
+        selected_workspace = args.workspace_dir if args.workspace_dir is not None else args.workspace
+        if selected_workspace is None and args.unsafe_recurse:
+            selected_workspace = "."
+        if args.reassign and selected_workspace is None:
+            raise ValueError("--reassign requires a newly selected workspace path")
+        if selected_workspace is not None:
+            request["workspace"] = selected_workspace
+        if args.unsafe_recurse:
+            request["unsafe_recurse"] = True
+        if args.reassign:
+            request["reassign"] = True
+    elif command == "settings":
+        if args.settings_command == "show":
+            request["operation"] = "settings.show"
+        else:
+            if args.model is None and args.theme is None:
+                raise ValueError("settings set needs --model, --theme, or both")
+            if args.model is not None:
+                if not MODEL_ID.fullmatch(args.model):
+                    raise ValueError("--model must be an OpenAI model ID such as openai/gpt-4.1")
+                request["model"] = args.model
+            if args.theme is not None:
+                if not THEME_NAME.fullmatch(args.theme):
+                    raise ValueError("--theme must be a 1-64 character OpenCode theme name")
+                request["theme"] = args.theme
+            request["operation"] = "settings.set"
+    return request
+
+
+def dispatch(request: dict, *, helper: str = HELPER,
+             runner=subprocess.run) -> int:
+    if not os.path.isfile(helper):
+        print("BLOCKED: the fixed profile-control helper is unavailable; run ./lab vm bootstrap first.",
+              file=sys.stderr)
+        return 3
+    payload = (json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    try:
+        result = runner([SUDO, helper], input=payload, check=False)
+    except OSError:
+        print("BLOCKED: the fixed sudo/helper request could not be started.", file=sys.stderr)
+        return 3
+    return result.returncode
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    try:
+        request = request_for(args)
+    except ValueError as error:
+        parser().error(str(error))
+    if request is None:
+        if args.command == "bootstrap":
+            print("BLOCKED: no enrolled-key-verified signed bootstrap artifact is available; no privileged code was run.",
+                  file=sys.stderr)
+        else:
+            print("BLOCKED: control update requires the signed artifact payload from common bootstrap; no change was made.",
+                  file=sys.stderr)
+        return 3
+    return dispatch(request)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
