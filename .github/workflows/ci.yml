@@ -94,6 +94,7 @@ jobs:
           python3 tests/vm-profile-runtime-install.test.py
           python3 tests/vm-profile-control-owner.test.py
           python3 tests/vm-systemd.test.py
+          python3 tests/vm-profile-cli.test.py
           python3 tests/vm-system-workspace.test.py
           python3 tests/vm-system-metrics.test.py
           python3 tests/vm-opencode-preferences.test.py

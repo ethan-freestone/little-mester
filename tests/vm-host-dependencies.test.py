@@ -344,6 +344,9 @@ class HostDependencyTests(unittest.TestCase):
         self.assertIn('dependency_scope=production', source)
         self.assertIn('dependency_scope=acceptance', source)
         self.assertIn('exec "$LAB_DIR/tools/vm-owner-acceptance" --system-vm', source)
+        self.assertIn('if [[ "$vm_route" == "system" ]]', source)
+        self.assertIn('if [[ "$vm_route" == "prepare-dependencies" ]]', source)
+        self.assertIn('exec /usr/bin/python3 -I "$LAB_DIR/tools/vm-profile-cli"', source)
         self.assertIn('setup)', source)
         self.assertIn('dc --profile setup', source)
 
