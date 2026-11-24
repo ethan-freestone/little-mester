@@ -11,7 +11,10 @@ const HISTORY_KEYS = [
   "run_id", "sequence", "timestamp", "gpu_util", "vram_pct", "gpu_temp",
   "availability",
 ]
+const DOCKER_METRICS_KEYS = ["timestamp", "cpu", "memory", "gpu", "temperatures"]
+const DOCKER_HISTORY_KEYS = ["t", "ts", "gpu_util", "vram_pct", "gpu_temp", "cpu_load"]
 const HISTORY_LIMIT = 240
+const DOCKER_HISTORY_LIMIT = 60
 const SPARK_CHARS = "▁▂▃▄▅▆█"
 
 function isObject(value) {
@@ -46,6 +49,16 @@ function isTimestamp(value) {
   return Number.isFinite(parsed) && new Date(parsed).toISOString() === value
 }
 
+// agent/metrics/gather.py uses UTC timestamps with second precision. Updates
+// that happen during the same second cannot be distinguished by the client.
+function isDockerTimestamp(value) {
+  if (typeof value !== "string"
+      || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(value)) return false
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed)
+    && new Date(parsed).toISOString().slice(0, 19) + "Z" === value
+}
+
 function isIdentity(value) {
   return typeof value.run_id === "string" && /^[0-9a-f]{32}$/.test(value.run_id)
     && Number.isSafeInteger(value.sequence) && value.sequence > 0
@@ -69,6 +82,15 @@ function isCpu(value) {
 function isMemory(value) {
   if (!hasKeys(value, ["total_gb", "used_gb", "available_gb", "percent"])
       || !isNumber(value.total_gb, Number.MIN_VALUE, 1_000_000)
+      || !isNumber(value.used_gb, 0, value.total_gb)
+      || !isNumber(value.available_gb, 0, value.total_gb)
+      || !isNumber(value.percent, 0, 100)) return false
+  return Math.abs(value.used_gb + value.available_gb - value.total_gb) <= 0.16
+}
+
+function isDockerMemory(value) {
+  if (!hasKeys(value, ["total_gb", "used_gb", "available_gb", "percent"])
+      || !isNumber(value.total_gb, 0, 1_000_000)
       || !isNumber(value.used_gb, 0, value.total_gb)
       || !isNumber(value.available_gb, 0, value.total_gb)
       || !isNumber(value.percent, 0, 100)) return false
@@ -119,6 +141,26 @@ export function isValidMetricsPayload(value) {
   return true
 }
 
+function isDockerCpu(value) {
+  return hasKeys(value, ["model", "load_avg_1m", "load_avg_5m", "load_avg_15m", "num_cpus"])
+    && isSafeText(value.model, 128)
+    && ["load_avg_1m", "load_avg_5m", "load_avg_15m"]
+      .every(key => isNumber(value[key], 0, 1_000_000))
+    && Number.isSafeInteger(value.num_cpus) && value.num_cpus >= 1 && value.num_cpus <= 4096
+}
+
+/** Validate only the legacy Docker producer's /metrics shape. */
+export function isValidDockerMetricsPayload(value) {
+  if (!hasKeys(value, DOCKER_METRICS_KEYS) || !isDockerTimestamp(value.timestamp)
+      || !isDockerCpu(value.cpu) || !isDockerMemory(value.memory)
+      || !Array.isArray(value.gpu) || value.gpu.length > 8
+      || !value.gpu.every(isGpu)
+      || new Set(value.gpu.map(gpu => gpu.index)).size !== value.gpu.length
+      || !Array.isArray(value.temperatures) || value.temperatures.length > 64
+      || !value.temperatures.every(isTemperature)) return false
+  return true
+}
+
 export function isValidHistorySample(value) {
   if (!hasKeys(value, HISTORY_KEYS) || !isIdentity(value)
       || !isAvailability(value.availability)
@@ -129,12 +171,25 @@ export function isValidHistorySample(value) {
     || (value.gpu_util === null && value.vram_pct === null && value.gpu_temp === null)
 }
 
+/** Validate only the legacy Docker producer's /history row shape. */
+export function isValidDockerHistorySample(value) {
+  return hasKeys(value, DOCKER_HISTORY_KEYS)
+    && isDockerTimestamp(value.t)
+    && isNumber(value.ts, 0, Number.MAX_SAFE_INTEGER)
+    && isNumber(value.gpu_util, 0, 100)
+    && isNumber(value.vram_pct, 0, 100)
+    && isNumber(value.gpu_temp, -100, 250)
+    && isNumber(value.cpu_load, 0, 1_000_000)
+}
+
 export function createInitialMetricsState() {
   return {
     mode: "expanded",
     history: [],
+    transport: null,
     runId: null,
     sequence: null,
+    legacyTimestamp: null,
     receivedAt: null,
     stale: false,
     gpu: null,
@@ -169,7 +224,11 @@ function snapshotToHistory(sample) {
 }
 
 function historyKey(sample) {
-  return `${sample.run_id}:${sample.sequence}`
+  if (typeof sample.run_id === "string") return `${sample.run_id}:${sample.sequence}`
+  if (typeof sample.monotonic_timestamp === "number") {
+    return `docker-history:${sample.monotonic_timestamp}`
+  }
+  return `docker-live:${sample.timestamp}`
 }
 
 function addHistory(history, sample) {
@@ -178,12 +237,18 @@ function addHistory(history, sample) {
   return [...history, sample].slice(-HISTORY_LIMIT)
 }
 
-export function applyMetricsPayload(state, sample, receivedAt) {
+export function applyMetricsPayload(state, sample, receivedAt, mode) {
+  if (mode === "vm") return applyVmMetricsPayload(state, sample, receivedAt)
+  if (mode === "docker") return applyDockerMetricsPayload(state, sample, receivedAt)
+  return { ...refreshMetricsFreshness(state, receivedAt), sourceStatus: "Host metrics · invalid response" }
+}
+
+function applyVmMetricsPayload(state, sample, receivedAt) {
+  if (state.transport !== null && state.transport !== "vm") {
+    return { ...refreshMetricsFreshness(state, receivedAt), sourceStatus: "Host metrics · invalid response" }
+  }
   if (!isValidMetricsPayload(sample)) {
-    return {
-      ...refreshMetricsFreshness(state, receivedAt),
-      sourceStatus: "Host metrics · invalid response",
-    }
+    return { ...refreshMetricsFreshness(state, receivedAt), sourceStatus: "Host metrics · invalid response" }
   }
   if (!isMetricsSampleNewer(state, sample)) {
     return refreshMetricsFreshness(state, receivedAt)
@@ -192,6 +257,7 @@ export function applyMetricsPayload(state, sample, receivedAt) {
   return {
     ...state,
     history: addHistory(state.history, snapshotToHistory(sample)),
+    transport: "vm",
     runId: sample.run_id,
     sequence: sample.sequence,
     receivedAt,
@@ -201,6 +267,99 @@ export function applyMetricsPayload(state, sample, receivedAt) {
     memory: sample.memory,
     temperatures: sample.temperatures,
     availability: sample.availability,
+    sourceStatus: "Host metrics",
+  }
+}
+
+function dockerSnapshotToHistory(sample) {
+  const gpu = sample.gpu[0]
+  return {
+    run_id: null,
+    sequence: null,
+    timestamp: sample.timestamp,
+    monotonic_timestamp: null,
+    gpu_util: gpu?.utilization_percent ?? null,
+    vram_pct: gpu && gpu.memory_total_mb > 0
+      ? Math.round(gpu.memory_used_mb * 1000 / gpu.memory_total_mb) / 10
+      : null,
+    gpu_temp: gpu?.temperature_c ?? null,
+  }
+}
+
+function dockerHistoryToChartSample(sample) {
+  return {
+    run_id: null,
+    sequence: null,
+    timestamp: sample.t,
+    monotonic_timestamp: sample.ts,
+    gpu_util: sample.gpu_util,
+    vram_pct: sample.vram_pct,
+    gpu_temp: sample.gpu_temp,
+  }
+}
+
+function compareDockerHistory(left, right) {
+  const byTimestamp = Date.parse(left.timestamp) - Date.parse(right.timestamp)
+  if (byTimestamp !== 0) return byTimestamp
+  return (left.monotonic_timestamp ?? Number.POSITIVE_INFINITY)
+    - (right.monotonic_timestamp ?? Number.POSITIVE_INFINITY)
+}
+
+function mergeDockerHistory(history, incoming) {
+  const incomingTimestamps = new Set(incoming.map(sample => sample.timestamp))
+  const mergedByKey = new Map()
+  for (const sample of history) {
+    if (typeof sample.run_id === "string") continue
+    // A legacy live row has no sub-second identity. Replace it with the
+    // producer's precise monotonic history row when that timestamp is seeded.
+    if (sample.monotonic_timestamp === null && incomingTimestamps.has(sample.timestamp)) continue
+    mergedByKey.set(historyKey(sample), sample)
+  }
+  for (const sample of incoming) mergedByKey.set(historyKey(sample), sample)
+  return [...mergedByKey.values()].sort(compareDockerHistory).slice(-HISTORY_LIMIT)
+}
+
+function applyDockerMetricsPayload(state, sample, receivedAt) {
+  if (state.transport !== null && state.transport !== "docker") {
+    return { ...refreshMetricsFreshness(state, receivedAt), sourceStatus: "Host metrics · invalid response" }
+  }
+  if (!isValidDockerMetricsPayload(sample)) {
+    return { ...refreshMetricsFreshness(state, receivedAt), sourceStatus: "Host metrics · invalid response" }
+  }
+
+  // Same-second Docker snapshots may be distinct producer updates, but the
+  // legacy timestamp cannot prove that. Only a strictly newer timestamp can
+  // advance freshness; sub-second samples may therefore be skipped.
+  if (state.legacyTimestamp !== null
+      && Date.parse(sample.timestamp) <= Date.parse(state.legacyTimestamp)) {
+    return refreshMetricsFreshness(state, receivedAt)
+  }
+
+  const gpu = sample.gpu[0] ?? null
+  const historySample = dockerSnapshotToHistory(sample)
+  const history = state.history.some(existing => existing.run_id === null
+      && existing.timestamp === sample.timestamp)
+    ? state.history
+    : mergeDockerHistory(state.history, [historySample])
+  return {
+    ...state,
+    history,
+    transport: "docker",
+    runId: null,
+    sequence: null,
+    legacyTimestamp: sample.timestamp,
+    receivedAt,
+    stale: false,
+    gpu,
+    cpu: sample.cpu,
+    memory: sample.memory,
+    temperatures: sample.temperatures,
+    availability: {
+      cpu: "available",
+      memory: "available",
+      gpus: gpu === null ? null : "available",
+      temperatures: sample.temperatures.length === 0 ? null : "available",
+    },
     sourceStatus: "Host metrics",
   }
 }
@@ -220,41 +379,37 @@ function orderedUnique(samples) {
   return result
 }
 
-export function seedMetricsHistory(state, samples, receivedAt) {
+export function seedMetricsHistory(state, samples, mode) {
+  if (mode === "vm") return seedVmMetricsHistory(state, samples)
+  if (mode === "docker") return seedDockerMetricsHistory(state, samples)
+  return state
+}
+
+function seedVmMetricsHistory(state, samples) {
+  if (state.transport !== null && state.transport !== "vm") return state
   if (!Array.isArray(samples) || !samples.every(isValidHistorySample)
-      || new Set(samples.map(sample => sample.run_id)).size > 1) {
-    return {
-      ...refreshMetricsFreshness(state, receivedAt),
-      sourceStatus: "Host metrics · invalid history",
-    }
-  }
+      || new Set(samples.map(sample => sample.run_id)).size > 1) return state
   const incoming = orderedUnique(samples)
   const targetRunId = state.runId ?? incoming.at(-1)?.run_id
-  if (targetRunId === undefined) return refreshMetricsFreshness(state, receivedAt)
+  if (targetRunId === undefined) return state
 
   const knownRuns = state.history.filter(sample => sample.run_id !== targetRunId)
   const merged = orderedUnique([
     ...state.history.filter(sample => sample.run_id === targetRunId),
     ...incoming.filter(sample => sample.run_id === targetRunId),
   ].sort((left, right) => left.sequence - right.sequence))
-  const latestIncoming = incoming.filter(sample => sample.run_id === targetRunId).at(-1)
-  const advancesIdentity = latestIncoming !== undefined
-    && (state.runId === null || (state.runId === targetRunId
-      && latestIncoming.sequence > state.sequence))
-
   return {
     ...state,
     history: [...knownRuns, ...merged].slice(-HISTORY_LIMIT),
-    ...(advancesIdentity ? {
-      runId: latestIncoming.run_id,
-      sequence: latestIncoming.sequence,
-      receivedAt,
-      stale: false,
-    } : { stale: isMetricsStale(state.receivedAt, receivedAt) }),
-    sourceStatus: state.receivedAt === null && advancesIdentity
-      ? "Host metrics"
-      : state.sourceStatus,
   }
+}
+
+function seedDockerMetricsHistory(state, samples) {
+  if (state.transport !== null && state.transport !== "docker") return state
+  if (!Array.isArray(samples) || samples.length > DOCKER_HISTORY_LIMIT
+      || !samples.every(isValidDockerHistorySample)) return state
+  const incoming = samples.map(dockerHistoryToChartSample)
+  return { ...state, history: mergeDockerHistory(state.history, incoming) }
 }
 
 export function isMetricsStale(receivedAt, now) {

@@ -23,6 +23,7 @@ PORT_ENVIRONMENT_VARIABLE = "LM_VM_METRICS_PORT"
 GUEST_PORT = 19532
 MAX_HISTORY = 60
 MAX_RESPONSE = 16 * 1024
+MAX_HISTORY_RESPONSE = 32 * 1024
 MIN_SAMPLE_INTERVAL = 0.4
 
 
@@ -130,12 +131,13 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
         # Avoid emitting request-controlled data to the host journal.
         return
 
-    def _respond(self, status: int, payload: object) -> None:
+    def _respond(self, status: int, payload: object,
+                 max_response: int = MAX_RESPONSE) -> None:
         try:
             body = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode("utf-8")
         except (TypeError, ValueError):
             status, body = 503, b'{"source":"host","unavailable":true}'
-        if len(body) > MAX_RESPONSE:
+        if len(body) > max_response:
             status, body = 503, b'{"source":"host","unavailable":true}'
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -170,7 +172,7 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
                 sample()
                 with LOCK:
                     result = [item["history"] for item in list(HISTORY)[-amount:]]
-                self._respond(200, result)
+                self._respond(200, result, max_response=MAX_HISTORY_RESPONSE)
                 return
             self._respond(404, {"error": "not_found"})
         except (ValueError, TypeError):

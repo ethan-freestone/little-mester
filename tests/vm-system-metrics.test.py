@@ -103,6 +103,53 @@ class MetricsHttpBoundaryTests(unittest.TestCase):
         self.assertEqual(self.request("/history?n=1&n=2")[0], 400)
         self.assertEqual(self.request("/metrics", host="attacker.example")[0], 400)
 
+    def test_maximum_valid_history_uses_32_kib_budget_while_metrics_stays_capped(self):
+        self.assertEqual(metrics.MAX_RESPONSE, 16 * 1024)
+        self.assertEqual(metrics.MAX_HISTORY_RESPONSE, 32 * 1024)
+        metrics.HISTORY.clear()
+        for sequence in range(1, metrics.MAX_HISTORY + 1):
+            metrics.HISTORY.append({
+                "payload": self.sample_payload,
+                "history": {
+                    "run_id": "a" * 32,
+                    "sequence": sequence,
+                    "timestamp": "2026-11-20T00:00:00.000Z",
+                    "gpu_util": None,
+                    "vram_pct": None,
+                    "gpu_temp": None,
+                    "availability": {
+                        name: "permission_denied"
+                        for name in ("cpu", "memory", "gpus", "temperatures")
+                    },
+                },
+            })
+
+        request = urllib.request.Request(self.base + "/history?n=60",
+                                         headers={"Host": "10.0.2.100:19532"})
+        with urllib.request.urlopen(request, timeout=2) as response:
+            body = response.read()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers.get("Content-Length"), str(len(body)))
+        self.assertGreater(len(body), metrics.MAX_RESPONSE,
+                           "a valid 60-row history can exceed the unchanged metrics budget")
+        self.assertLessEqual(len(body), metrics.MAX_HISTORY_RESPONSE)
+        self.assertEqual(len(json.loads(body)), metrics.MAX_HISTORY)
+
+        metrics.sample = lambda: {"padding": "x" * metrics.MAX_RESPONSE}
+        status, data = self.request("/metrics")
+        self.assertEqual(status, 503)
+        self.assertEqual(data, {"source": "host", "unavailable": True})
+
+    def test_history_response_over_budget_fails_closed(self):
+        metrics.HISTORY.clear()
+        metrics.HISTORY.append({
+            "payload": self.sample_payload,
+            "history": {"padding": "x" * metrics.MAX_HISTORY_RESPONSE},
+        })
+        status, data = self.request("/history?n=1")
+        self.assertEqual(status, 503)
+        self.assertEqual(data, {"source": "host", "unavailable": True})
+
     def test_listener_port_override_is_bounded_for_profile_instances(self):
         self.assertEqual(metrics.configured_port(None), metrics.DEFAULT_PORT)
         self.assertEqual(metrics.configured_port("23456"), 23456)

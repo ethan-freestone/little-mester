@@ -1,6 +1,7 @@
 export type SensorAvailability = "available" | "collector_failed" | "malformed" | "no_device"
   | "no_sensors" | "permission_denied" | "timeout" | "unsupported" | null
 export type SensorCode = Exclude<SensorAvailability, null>
+export type MetricsMode = "docker" | "vm"
 
 export interface Availability {
   cpu: SensorAvailability
@@ -9,7 +10,7 @@ export interface Availability {
   temperatures: SensorAvailability
 }
 
-export interface HistorySample {
+export interface VmHistorySample {
   run_id: string
   sequence: number
   timestamp: string
@@ -18,6 +19,18 @@ export interface HistorySample {
   gpu_temp: number | null
   availability: Record<"cpu" | "memory" | "gpus" | "temperatures", SensorCode>
 }
+
+export interface DockerHistorySample {
+  run_id: null
+  sequence: null
+  timestamp: string
+  monotonic_timestamp: number | null
+  gpu_util: number | null
+  vram_pct: number | null
+  gpu_temp: number | null
+}
+
+export type HistorySample = VmHistorySample | DockerHistorySample
 
 export interface CpuMetrics {
   model: string
@@ -53,8 +66,11 @@ export interface TemperatureMetrics {
 export interface MetricsState {
   mode: "compact" | "expanded"
   history: HistorySample[]
+  transport: MetricsMode | null
   runId: string | null
   sequence: number | null
+  /** Docker reports whole-second UTC timestamps; same-second updates are indistinguishable. */
+  legacyTimestamp: string | null
   receivedAt: number | null
   stale: boolean
   gpu: GpuMetrics | null
@@ -77,15 +93,34 @@ export interface MetricsPayload {
   temperatures: TemperatureMetrics[] | null
 }
 
+export interface DockerMetricsPayload {
+  timestamp: string
+  cpu: CpuMetrics
+  memory: MemoryMetrics
+  gpu: GpuMetrics[]
+  temperatures: TemperatureMetrics[]
+}
+
+export interface DockerHistoryPayloadSample {
+  t: string
+  ts: number
+  gpu_util: number
+  vram_pct: number
+  gpu_temp: number
+  cpu_load: number
+}
+
 export function isValidMetricsPayload(value: unknown): value is MetricsPayload
-export function isValidHistorySample(value: unknown): value is HistorySample
+export function isValidDockerMetricsPayload(value: unknown): value is DockerMetricsPayload
+export function isValidHistorySample(value: unknown): value is VmHistorySample
+export function isValidDockerHistorySample(value: unknown): value is DockerHistoryPayloadSample
 export function createInitialMetricsState(): MetricsState
 export function isMetricsSampleNewer(state: MetricsState, sample: unknown): boolean
 export function applyMetricsPayload(
-  state: MetricsState, sample: unknown, receivedAt: number,
+  state: MetricsState, sample: unknown, receivedAt: number, mode: MetricsMode,
 ): MetricsState
 export function seedMetricsHistory(
-  state: MetricsState, samples: unknown, receivedAt: number,
+  state: MetricsState, samples: unknown, mode: MetricsMode,
 ): MetricsState
 export function isMetricsStale(receivedAt: number | null, now: number): boolean
 export function refreshMetricsFreshness(state: MetricsState, now: number): MetricsState

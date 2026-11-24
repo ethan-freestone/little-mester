@@ -256,16 +256,19 @@ export default Plugin.define({
       setState(prev => ({ ...prev, mode: prev.mode === "compact" ? "expanded" : "compact" }))
     }
 
-    const metricsMode = process.env.METRICS_MODE
-    const metricsBase = metricsBaseForMode(metricsMode)
+    const configuredMode = process.env.METRICS_MODE
+    const metricsMode = configuredMode === "docker" || configuredMode === "vm"
+      ? configuredMode
+      : null
+    const metricsBase = metricsBaseForMode(configuredMode)
 
     /* Poll /history (first time) → seeds the data arrays. */
     function seedHistory() {
-      if (!metricsBase) return Promise.resolve()
-      return fetchMetricsJson<HistorySample[]>(metricsMode, "/history?n=60")
-        .then((data: HistorySample[]) => {
+      if (!metricsBase || !metricsMode) return Promise.resolve()
+      return fetchMetricsJson<unknown>(metricsMode, "/history?n=60")
+        .then((data: unknown) => {
           if (isDisposed) return
-          setState(prev => seedMetricsHistory(prev, data, globalThis.performance.now()))
+          setState(prev => seedMetricsHistory(prev, data, metricsMode))
         })
         .catch(() => {})
     }
@@ -274,7 +277,7 @@ export default Plugin.define({
     function pollMetrics() {
       const receivedAt = globalThis.performance.now()
       setState(prev => refreshMetricsFreshness(prev, receivedAt))
-      if (!metricsBase) {
+      if (!metricsBase || !metricsMode) {
         setState(prev => ({
           ...prev,
           sourceStatus: "Host metrics unavailable · mode not configured",
@@ -284,7 +287,7 @@ export default Plugin.define({
       fetchMetricsJson<unknown>(metricsMode, "/metrics")
         .then((data: unknown) => {
           if (isDisposed) return
-          setState(prev => applyMetricsPayload(prev, data, globalThis.performance.now()))
+          setState(prev => applyMetricsPayload(prev, data, globalThis.performance.now(), metricsMode))
         })
         .catch(() => {
           if (!isDisposed) {
