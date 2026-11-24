@@ -82,6 +82,46 @@ class SystemdPolicyTests(unittest.TestCase):
                 self.assertRaisesRegex(acceptance.AcceptanceError, "effective NoNewPrivs"):
             acceptance._verify_workspace_daemon_privileges()
 
+    def test_static_verifier_accepts_unassigned_workspace_only_without_20_dropin(self):
+        with tempfile.TemporaryDirectory(prefix="vm-unassigned-workspace-") as temporary:
+            assignment = pathlib.Path(temporary) / "workspace.json"
+            dropin = pathlib.Path(temporary) / "20-workspace.conf"
+            policy = type("Policy", (), {"ASSIGNMENT": assignment})()
+            with mock.patch.object(acceptance, "_WORKSPACE_DROPIN_PATH", str(dropin)):
+                self.assertIsNone(acceptance._workspace_assignment_for_verify(policy))
+                self.assertTrue(acceptance._workspace_dropin_matches(policy, None))
+                guard = acceptance._FIXED_GUARD_PATHS[acceptance.WORKSPACE_UNIT]
+                self.assertTrue(acceptance._exact_dropin_paths(guard, {guard}))
+                dropin.write_text("[Service]\nBindPaths=/workspace:/share\n", encoding="utf-8")
+                self.assertFalse(acceptance._workspace_dropin_matches(policy, None))
+                self.assertFalse(acceptance._exact_dropin_paths(
+                    guard + " " + str(dropin), {guard}))
+
+    def test_live_acceptance_still_requires_a_workspace_assignment(self):
+        with tempfile.TemporaryDirectory(prefix="vm-live-assignment-") as temporary:
+            path = str(pathlib.Path(temporary) / "workspace.json")
+            with mock.patch.object(acceptance, "_WORKSPACE_ASSIGNMENT_PATH", path), \
+                    self.assertRaisesRegex(acceptance.AcceptanceError, "requires an assigned workspace"):
+                acceptance._require_live_workspace_assignment()
+
+    def test_static_verifier_requires_assigned_workspace_dropin_bytes(self):
+        with tempfile.TemporaryDirectory(prefix="vm-assigned-workspace-") as temporary:
+            dropin = pathlib.Path(temporary) / "20-workspace.conf"
+            expected = b"[Service]\nBindPaths=/workspace:/run/share\n"
+            dropin.write_bytes(expected)
+            assignment = type("Assignment", (), {"path": pathlib.Path("/workspace")})()
+            policy = type("Policy", (), {
+                "_systemd_bind_path": lambda _self, _path: expected.decode("utf-8"),
+            })()
+            root_file = type("Info", (), {
+                "st_mode": stat.S_IFREG | 0o644, "st_uid": 0, "st_gid": 0, "st_nlink": 1,
+            })()
+            with mock.patch.object(acceptance, "_WORKSPACE_DROPIN_PATH", str(dropin)), \
+                 mock.patch.object(acceptance.os, "lstat", return_value=root_file):
+                self.assertTrue(acceptance._workspace_dropin_matches(policy, assignment))
+                dropin.write_bytes(b"[Service]\nBindPaths=/other:/run/share\n")
+                self.assertFalse(acceptance._workspace_dropin_matches(policy, assignment))
+
     def test_system_installer_discovers_root_from_protected_installed_location(self):
         for prefix in (pathlib.Path("/opt/little-mester"),
                        pathlib.Path("/srv/little-mester-ci")):
@@ -230,6 +270,8 @@ class SystemdPolicyTests(unittest.TestCase):
                 "/etc/little-mester-vm/code-update.lock /usr/bin/true ; "
                 "ignore_errors=no ; start_time=[n/a] }"),
             "ConditionPathExists": "!/etc/little-mester-vm/code-update.in-progress",
+            "BindPaths": "",
+            "MainPID": "0",
         }
 
         def show(command, **_kwargs):
@@ -247,6 +289,89 @@ class SystemdPolicyTests(unittest.TestCase):
             system_installer._verify_effective_unit_guard(unit, "owner")
             with self.assertRaisesRegex(RuntimeError, "locked-service launcher"):
                 system_installer._verify_effective_unit_guard(unit, "owner", require_locked_launcher=True)
+
+    def test_fixed_installer_requires_exact_guard_dropin_sets(self):
+        guard = "/etc/systemd/system/little-mester-vm.service.d/90-code-update-guard.conf"
+        self.assertTrue(system_installer._exact_effective_dropins(guard, {guard}))
+        self.assertFalse(system_installer._exact_effective_dropins(
+            guard + " /etc/systemd/system/little-mester-vm.service.d/extra.conf", {guard}))
+        self.assertFalse(system_installer._exact_effective_dropins(guard + " " + guard, {guard}))
+
+    def test_unassigned_workspace_installer_layout_requires_no_bind_dropin(self):
+        guard = "/etc/systemd/system/little-mester-vm-workspace.service.d/90-code-update-guard.conf"
+        with tempfile.TemporaryDirectory(prefix="vm-installer-unassigned-") as temporary:
+            dropin = pathlib.Path(temporary) / "20-workspace.conf"
+            policy = type("Policy", (), {})()
+            with mock.patch.object(system_installer, "WORKSPACE_DROPIN", dropin), \
+                 mock.patch.object(system_installer, "_workspace_assignment_and_policy",
+                                   return_value=(policy, None)):
+                expected, assignment, _policy = system_installer._verify_workspace_dropin("owner")
+                self.assertEqual(expected, {guard})
+                self.assertIsNone(assignment)
+                dropin.write_text("[Service]\nBindPaths=/workspace:/share\n", encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "must not have"):
+                    system_installer._verify_workspace_dropin("owner")
+
+    def test_assigned_workspace_installer_requires_exact_dropin_bytes_and_metadata(self):
+        with tempfile.TemporaryDirectory(prefix="vm-installer-assigned-") as temporary:
+            dropin = pathlib.Path(temporary) / "20-workspace.conf"
+            expected_bytes = b"[Service]\nBindPaths=/workspace:/run/share\n"
+            dropin.write_bytes(expected_bytes)
+            assignment = type("Assignment", (), {"path": pathlib.Path("/workspace")})()
+            policy = type("Policy", (), {
+                "_systemd_bind_path": lambda _self, _path: expected_bytes.decode("utf-8"),
+            })()
+            root_file = type("Info", (), {
+                "st_mode": stat.S_IFREG | 0o644, "st_uid": 0, "st_gid": 0, "st_nlink": 1,
+            })()
+            with mock.patch.object(system_installer, "WORKSPACE_DROPIN", dropin), \
+                 mock.patch.object(system_installer, "_workspace_assignment_and_policy",
+                                   return_value=(policy, assignment)), \
+                 mock.patch.object(system_installer.os, "lstat", return_value=root_file):
+                expected, observed_assignment, _policy = system_installer._verify_workspace_dropin("owner")
+                self.assertIn(str(dropin), expected)
+                self.assertIs(observed_assignment, assignment)
+                dropin.write_bytes(b"[Service]\nBindPaths=/other:/run/share\n")
+                with self.assertRaisesRegex(RuntimeError, "disagree"):
+                    system_installer._verify_workspace_dropin("owner")
+
+    def test_installer_verifies_unassigned_workspace_unit_is_stopped_and_unbound(self):
+        unit = "little-mester-vm-workspace.service"
+        guard = f"/etc/systemd/system/{unit}.d/90-code-update-guard.conf"
+        lock = ["/usr/bin/flock", "--shared", "--nonblock",
+                "/etc/little-mester-vm/code-update.lock", "/usr/bin/true"]
+        values = {
+            "DropInPaths": guard,
+            "ExecStart": "",
+            "ExecStartPre": ("{ path=/usr/bin/flock ; argv[]=" + " ".join(lock)
+                              + " ; ignore_errors=no ; start_time=[n/a] }"),
+            "ConditionPathExists": "!/etc/little-mester-vm/code-update.in-progress",
+            "BindPaths": "",
+            "MainPID": "0",
+        }
+
+        def show(command, **_kwargs):
+            property_name = next(arg.split("=", 1)[1] for arg in command
+                                 if arg.startswith("--property="))
+            return subprocess.CompletedProcess(command, 0, stdout=values[property_name], stderr="")
+
+        policy = type("Policy", (), {})()
+        with mock.patch.object(system_installer.subprocess, "run", side_effect=show), \
+             mock.patch.object(system_installer, "_verify_workspace_dropin",
+                               return_value=({guard}, None, policy)), \
+             mock.patch.object(system_installer, "_unit_state", return_value="inactive"):
+            system_installer._verify_effective_unit_guard(unit, "owner")
+            values["BindPaths"] = "/workspace:/run/little-mester-vm-workspace-share:rbind"
+            with self.assertRaisesRegex(RuntimeError, "effective bind"):
+                system_installer._verify_effective_unit_guard(unit, "owner")
+            values["BindPaths"] = ""
+            values["MainPID"] = "1"
+            with self.assertRaisesRegex(RuntimeError, "must be stopped"):
+                system_installer._verify_effective_unit_guard(unit, "owner")
+            values["MainPID"] = "0"
+            values["DropInPaths"] = guard + " /etc/systemd/system/extra.conf"
+            with self.assertRaisesRegex(RuntimeError, "unexpected drop-in set"):
+                system_installer._verify_effective_unit_guard(unit, "owner")
 
     def test_qemu_is_main_process_and_service_policy_has_bounded_cgroup_fallback(self):
         unit = (ROOT / "systemd/little-mester-vm.service").read_text()

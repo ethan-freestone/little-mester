@@ -158,6 +158,10 @@ SYSTEM_UNITS = (
 CODE_UPDATE_LOCK = pathlib.Path("/etc/little-mester-vm/code-update.lock")
 CODE_UPDATE_MARKER = pathlib.Path("/etc/little-mester-vm/code-update.in-progress")
 CODE_ROLLBACK_ROOT = pathlib.Path("/var/lib/little-mester-vm-code-rollback")
+WORKSPACE_ASSIGNMENT = pathlib.Path("/etc/little-mester-vm/workspace.json")
+WORKSPACE_DROPIN = pathlib.Path(
+    "/etc/systemd/system/little-mester-vm-workspace.service.d/20-workspace.conf")
+WORKSPACE_RUNTIME = pathlib.Path("/usr/lib/little-mester-vm/system-vm-workspace.py")
 
 
 def refuse(message: str) -> None:
@@ -537,6 +541,71 @@ def _unit_state(unit: str) -> str:
     return state
 
 
+def _load_workspace_policy():
+    """Load only the protected fixed-system workspace validator."""
+    current = pathlib.Path(WORKSPACE_RUNTIME.anchor)
+    for index, component in enumerate(WORKSPACE_RUNTIME.parts[1:]):
+        current /= component
+        info = os.lstat(current)
+        if index < len(WORKSPACE_RUNTIME.parts[1:]) - 1:
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+                refuse("installed workspace verifier ancestry is not protected")
+        elif (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+              or info.st_uid != 0 or info.st_nlink != 1
+              or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            refuse("installed workspace verifier is not a protected regular file")
+    spec = importlib.util.spec_from_file_location("fixed_system_workspace_policy", WORKSPACE_RUNTIME)
+    if spec is None or spec.loader is None:
+        refuse("installed workspace assignment verifier is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _workspace_assignment_and_policy(owner: str):
+    policy = _load_workspace_policy()
+    try:
+        os.lstat(WORKSPACE_ASSIGNMENT)
+    except FileNotFoundError:
+        return policy, None
+    try:
+        assignment = policy.read_assignment(
+            WORKSPACE_ASSIGNMENT, uid=pwd.getpwnam(owner).pw_uid)
+    except Exception as error:
+        raise RuntimeError("fixed workspace assignment is present but invalid") from error
+    return policy, assignment
+
+
+def _exact_effective_dropins(observed: str, expected: set[str]) -> bool:
+    paths = observed.split()
+    return len(paths) == len(expected) and len(set(paths)) == len(paths) and set(paths) == expected
+
+
+def _verify_workspace_dropin(owner: str) -> tuple[set[str], object | None, object]:
+    policy, assignment = _workspace_assignment_and_policy(owner)
+    guard = "/etc/systemd/system/little-mester-vm-workspace.service.d/90-code-update-guard.conf"
+    if assignment is None:
+        try:
+            os.lstat(WORKSPACE_DROPIN)
+        except FileNotFoundError:
+            return {guard}, None, policy
+        refuse("unassigned fixed workspace must not have a workspace bind drop-in")
+
+    try:
+        info = os.lstat(WORKSPACE_DROPIN)
+        actual = WORKSPACE_DROPIN.read_bytes()
+    except OSError as error:
+        raise RuntimeError("assigned workspace drop-in is unavailable") from error
+    expected = policy._systemd_bind_path(assignment.path).encode("utf-8")
+    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != 0 or info.st_gid != 0
+            or stat.S_IMODE(info.st_mode) != 0o644 or info.st_nlink != 1
+            or actual != expected):
+        refuse("workspace assignment and protected workspace drop-in disagree")
+    return {guard, str(WORKSPACE_DROPIN)}, assignment, policy
+
+
 def _require_system_units_stopped() -> None:
     for unit in SYSTEM_UNITS:
         state = _unit_state(unit)
@@ -555,7 +624,8 @@ def _verify_effective_unit_guard(unit: str, owner: str, *,
                                 require_locked_launcher: bool = False) -> None:
     expected_dropin = f"/etc/systemd/system/{unit}.d/90-code-update-guard.conf"
     properties = {}
-    for name in ("DropInPaths", "ExecStart", "ExecStartPre", "ConditionPathExists"):
+    for name in ("DropInPaths", "ExecStart", "ExecStartPre", "ConditionPathExists",
+                 "BindPaths", "MainPID"):
         result = subprocess.run(["/usr/bin/systemctl", "show", f"--property={name}",
                                  "--value", unit], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -563,8 +633,13 @@ def _verify_effective_unit_guard(unit: str, owner: str, *,
         if result.returncode:
             refuse(f"could not verify effective start guard for {unit}")
         properties[name] = result.stdout.strip()
-    if expected_dropin not in properties["DropInPaths"].split():
-        refuse(f"fixed systemd unit did not load its protected start guard: {unit}")
+    expected_dropins = {expected_dropin}
+    workspace_assignment = None
+    workspace_policy = None
+    if unit == "little-mester-vm-workspace.service":
+        expected_dropins, workspace_assignment, workspace_policy = _verify_workspace_dropin(owner)
+    if not _exact_effective_dropins(properties["DropInPaths"], expected_dropins):
+        refuse(f"fixed systemd unit loaded an unexpected drop-in set: {unit}")
     command_pattern = re.compile(
         r"\{\s*path=([^ ;]+)\s*;\s*argv\[\]=(.*?)\s*;\s*ignore_errors=.*?\}")
     found = tuple(command_pattern.finditer(properties["ExecStartPre"]))
@@ -609,6 +684,15 @@ def _verify_effective_unit_guard(unit: str, owner: str, *,
             refuse(f"effective locked-service launcher is missing or overridden: {unit}")
     if f"!{CODE_UPDATE_MARKER}" not in properties["ConditionPathExists"]:
         refuse(f"effective maintenance-marker guard is missing or overridden: {unit}")
+    if unit == "little-mester-vm-workspace.service":
+        if workspace_assignment is None:
+            if _unit_state(unit) != "inactive" or properties["MainPID"] not in ("", "0"):
+                refuse("unassigned fixed workspace unit must be stopped")
+            if properties["BindPaths"] not in ("", "-"):
+                refuse("unassigned fixed workspace unit has an effective bind")
+        elif not workspace_policy.effective_bind_paths_match(
+                properties["BindPaths"], workspace_assignment.path, workspace_policy.SHARE_DIR):
+            refuse("effective workspace bind does not match the protected assignment")
 
 
 def _install_transaction_guards(root: pathlib.Path, owner: str, managed_dirs, *,
