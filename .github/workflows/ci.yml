@@ -106,6 +106,8 @@ jobs:
           for test in tests/vm-parent-*.test.py; do
             python3 "$test"
           done
+      - name: Run maintenance fixture suite as root
+        run: sudo python3 -B -I tests/vm-control-maintenance.test.py
 
   # ── 4. Transient hosted QEMU guest integration; no TCG fallback ───
   transient-qemu-integration:
