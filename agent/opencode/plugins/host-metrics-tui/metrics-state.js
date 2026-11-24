@@ -231,10 +231,22 @@ function historyKey(sample) {
   return `docker-live:${sample.timestamp}`
 }
 
-function addHistory(history, sample) {
-  const key = historyKey(sample)
-  if (history.some(existing => historyKey(existing) === key)) return history
-  return [...history, sample].slice(-HISTORY_LIMIT)
+function mergeVmHistory(history, incoming, targetRunId) {
+  const retainedRuns = history.filter(sample => sample.run_id !== targetRunId)
+  const targetSamples = new Map()
+  for (const sample of history) {
+    if (sample.run_id !== targetRunId) continue
+    const key = historyKey(sample)
+    if (!targetSamples.has(key)) targetSamples.set(key, sample)
+  }
+  for (const sample of incoming) {
+    if (sample.run_id !== targetRunId) continue
+    const key = historyKey(sample)
+    if (!targetSamples.has(key)) targetSamples.set(key, sample)
+  }
+  const orderedTargetRun = [...targetSamples.values()]
+    .sort((left, right) => left.sequence - right.sequence)
+  return [...retainedRuns, ...orderedTargetRun].slice(-HISTORY_LIMIT)
 }
 
 export function applyMetricsPayload(state, sample, receivedAt, mode) {
@@ -256,7 +268,7 @@ function applyVmMetricsPayload(state, sample, receivedAt) {
 
   return {
     ...state,
-    history: addHistory(state.history, snapshotToHistory(sample)),
+    history: mergeVmHistory(state.history, [snapshotToHistory(sample)], sample.run_id),
     transport: "vm",
     runId: sample.run_id,
     sequence: sample.sequence,
@@ -364,21 +376,6 @@ function applyDockerMetricsPayload(state, sample, receivedAt) {
   }
 }
 
-function orderedUnique(samples) {
-  const result = []
-  const seen = new Set()
-  const lastSequence = new Map()
-  for (const sample of samples) {
-    if (!isValidHistorySample(sample)) continue
-    const key = historyKey(sample)
-    if (seen.has(key) || sample.sequence <= (lastSequence.get(sample.run_id) ?? 0)) continue
-    seen.add(key)
-    lastSequence.set(sample.run_id, sample.sequence)
-    result.push(sample)
-  }
-  return result
-}
-
 export function seedMetricsHistory(state, samples, mode) {
   if (mode === "vm") return seedVmMetricsHistory(state, samples)
   if (mode === "docker") return seedDockerMetricsHistory(state, samples)
@@ -389,18 +386,12 @@ function seedVmMetricsHistory(state, samples) {
   if (state.transport !== null && state.transport !== "vm") return state
   if (!Array.isArray(samples) || !samples.every(isValidHistorySample)
       || new Set(samples.map(sample => sample.run_id)).size > 1) return state
-  const incoming = orderedUnique(samples)
-  const targetRunId = state.runId ?? incoming.at(-1)?.run_id
+  const targetRunId = state.runId ?? samples.at(-1)?.run_id
   if (targetRunId === undefined) return state
 
-  const knownRuns = state.history.filter(sample => sample.run_id !== targetRunId)
-  const merged = orderedUnique([
-    ...state.history.filter(sample => sample.run_id === targetRunId),
-    ...incoming.filter(sample => sample.run_id === targetRunId),
-  ].sort((left, right) => left.sequence - right.sequence))
   return {
     ...state,
-    history: [...knownRuns, ...merged].slice(-HISTORY_LIMIT),
+    history: mergeVmHistory(state.history, samples, targetRunId),
   }
 }
 

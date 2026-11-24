@@ -110,6 +110,14 @@ function historySample(overrides = {}) {
   }
 }
 
+function vmHistoryRange(runId, first, last) {
+  return Array.from({ length: last - first + 1 }, (_, index) => historySample({
+    run_id: runId,
+    sequence: first + index,
+    gpu_util: Math.min(first + index, 100),
+  }))
+}
+
 function dockerSample(overrides = {}) {
   return {
     timestamp: "2026-11-20T00:00:00Z",
@@ -220,6 +228,118 @@ test("history arriving after a live poll fills older samples without duplicating
 
   assert.deepEqual(state.history.map(sample => sample.sequence), [1, 2])
   assert.equal(state.receivedAt, 100, "history's cached latest sample is not a freshness advance")
+})
+
+test("older-than-history first live identity advances readings and freshness in chart order", () => {
+  const runId = "a".repeat(32)
+  let state = seedMetricsHistory(createInitialMetricsState(), vmHistoryRange(runId, 2, 61), "vm")
+  const live = metricsSample({
+    run_id: runId,
+    sequence: 1,
+    cpu: { ...metricsSample().cpu, model: "First live CPU" },
+    gpu: [{ ...metricsSample().gpu[0], utilization_percent: 88 }],
+  })
+  state = applyMetricsPayload(state, live, 1234, "vm")
+
+  assert.deepEqual(state.history.map(sample => sample.sequence),
+    Array.from({ length: 61 }, (_, index) => index + 1))
+  assert.equal(state.runId, runId)
+  assert.equal(state.sequence, 1)
+  assert.equal(state.cpu.model, "First live CPU")
+  assert.equal(state.gpu.utilization_percent, 88)
+  assert.equal(state.receivedAt, 1234)
+  assert.equal(state.stale, false)
+})
+
+test("VM history seeded after live data is ordered without changing live freshness", () => {
+  const runId = "a".repeat(32)
+  let state = applyMetricsPayload(createInitialMetricsState(),
+    metricsSample({ run_id: runId, sequence: 1 }), 200, "vm")
+  state = refreshMetricsFreshness(state, 2200)
+  state = seedMetricsHistory(state, vmHistoryRange(runId, 2, 61), "vm")
+
+  assert.deepEqual(state.history.map(sample => sample.sequence),
+    Array.from({ length: 61 }, (_, index) => index + 1))
+  assert.equal(state.runId, runId)
+  assert.equal(state.sequence, 1)
+  assert.equal(state.receivedAt, 200)
+  assert.equal(state.stale, true)
+})
+
+test("VM history keeps existing duplicate rows while an equal live identity updates readings", () => {
+  const runId = "a".repeat(32)
+  const seeded = historySample({ sequence: 2, gpu_util: 45 })
+  let state = seedMetricsHistory(createInitialMetricsState(), [seeded], "vm")
+  state = seedMetricsHistory(state, [historySample({ sequence: 2, gpu_util: 99 })], "vm")
+  assert.equal(state.history[0].gpu_util, 45, "existing chart rows win duplicate history samples")
+
+  const live = metricsSample({
+    run_id: runId,
+    sequence: 2,
+    gpu: [{ ...metricsSample().gpu[0], utilization_percent: 70 }],
+  })
+  state = applyMetricsPayload(state, live, 420, "vm")
+  assert.equal(state.sequence, 2)
+  assert.equal(state.gpu.utilization_percent, 70, "accepted live data updates current readings")
+  assert.equal(state.receivedAt, 420)
+  assert.equal(state.history.length, 1)
+  assert.equal(state.history[0].gpu_util, 45, "the existing seeded chart row wins")
+})
+
+test("same-run delayed live samples do not backfill or refresh and recompute staleness", () => {
+  const runId = "a".repeat(32)
+  const current = metricsSample({
+    run_id: runId,
+    sequence: 2,
+    gpu: [{ ...metricsSample().gpu[0], utilization_percent: 62 }],
+  })
+  let state = applyMetricsPayload(createInitialMetricsState(), current, 1000, "vm")
+  state = applyMetricsPayload(state, metricsSample({
+    run_id: runId,
+    sequence: 1,
+    gpu: [{ ...metricsSample().gpu[0], utilization_percent: 12 }],
+  }), 3000, "vm")
+
+  assert.deepEqual(state.history.map(sample => sample.sequence), [2])
+  assert.equal(state.runId, runId)
+  assert.equal(state.sequence, 2)
+  assert.equal(state.gpu.utilization_percent, 62)
+  assert.equal(state.receivedAt, 1000)
+  assert.equal(state.stale, true, "staleness is inclusive at the two-second boundary")
+})
+
+test("VM history keeps restart blocks ordered and ignores late history for another run", () => {
+  const runA = "a".repeat(32)
+  const runB = "b".repeat(32)
+  let state = applyMetricsPayload(createInitialMetricsState(),
+    metricsSample({ run_id: runA, sequence: 10 }), 1000, "vm")
+  state = applyMetricsPayload(state,
+    metricsSample({ run_id: runB, sequence: 1 }), 1100, "vm")
+  state = seedMetricsHistory(state, vmHistoryRange(runB, 3, 4), "vm")
+  state = seedMetricsHistory(state, vmHistoryRange(runB, 2, 2), "vm")
+
+  assert.deepEqual(state.history.map(sample => [sample.run_id, sample.sequence]), [
+    [runA, 10], [runB, 1], [runB, 2], [runB, 3], [runB, 4],
+  ])
+  const beforeLateHistory = state.history
+  state = seedMetricsHistory(state, vmHistoryRange(runA, 9, 9), "vm")
+  assert.deepEqual(state.history, beforeLateHistory, "other-run history cannot reorder or backfill")
+  assert.equal(state.runId, runB)
+  assert.equal(state.sequence, 1, "history cannot advance the live identity")
+  assert.equal(state.receivedAt, 1100)
+})
+
+test("first live VM row obeys the history retention cap after ordered merging", () => {
+  const runId = "a".repeat(32)
+  let state = seedMetricsHistory(createInitialMetricsState(), vmHistoryRange(runId, 2, 241), "vm")
+  state = applyMetricsPayload(state, metricsSample({ run_id: runId, sequence: 1 }), 500, "vm")
+
+  assert.equal(state.history.length, 240)
+  assert.deepEqual(state.history.map(sample => sample.sequence),
+    Array.from({ length: 240 }, (_, index) => index + 2))
+  assert.equal(state.runId, runId)
+  assert.equal(state.sequence, 1)
+  assert.equal(state.receivedAt, 500)
 })
 
 test("history is chart-only in either arrival order and cannot advance VM live state", () => {
