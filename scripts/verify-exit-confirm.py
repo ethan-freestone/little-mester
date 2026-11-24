@@ -188,7 +188,7 @@ def spawn_pty(command, *, launcher_script=False, **kwargs):
 
 class Driver:
     def __init__(self, home, *, via_tmux=False, via_launcher=False,
-                 tmux_config_source=None):
+                 tmux_config_source=None, session_number=1):
         contract_path = os.path.join(ROOT, "lib", "vm", "parent-session-contract.py")
         contract_spec = importlib.util.spec_from_file_location("exit_confirm_session_contract", contract_path)
         if contract_spec is None or contract_spec.loader is None:
@@ -229,7 +229,7 @@ class Driver:
         os.chmod(self.tmux_config, 0o600)
         self.env = env
         self.child = None
-        self.log_path = os.path.join(home, "pty.log")
+        self.log_path = os.path.join(home, f"pty-session-{session_number}.log")
         self.log = None
         self.buffer = ""
         if self.via_tmux:
@@ -276,11 +276,11 @@ class Driver:
         else:
             command = [OPENCODE_BINARY, "--standalone", workspace]
         try:
+            self.log = open(self.log_path, "x", encoding="utf-8")  # noqa: SIM115
             self.child = spawn_pty(
                 command, launcher_script=via_launcher, cwd=workspace, env=env, encoding="utf-8",
                 codec_errors="replace", dimensions=(40, 120), timeout=20,
             )
-            self.log = open(self.log_path, "w", encoding="utf-8")  # noqa: SIM115
             self.wait(10)
         except BaseException:
             self.close()
@@ -371,7 +371,9 @@ class Driver:
                 [self.tmux, "-L", self.tmux_socket, "capture-pane", "-p", "-t", self.tmux_session],
                 env=self.env, capture_output=True, text=True, timeout=5, check=False,
             )
-            return result.returncode == 0 and DIALOG_TEXT in result.stdout
+            if result.returncode != 0:
+                raise RuntimeError(f"could not capture the tmux pane: {result.stderr.strip()}")
+            return DIALOG_TEXT in result.stdout
         return DIALOG_TEXT in self.buffer
 
     def prompt_text_visible(self, text):
@@ -380,8 +382,13 @@ class Driver:
                 [self.tmux, "-L", self.tmux_socket, "capture-pane", "-p", "-t", self.tmux_session],
                 env=self.env, capture_output=True, text=True, timeout=5, check=False,
             )
-            return result.returncode == 0 and text in result.stdout
+            if result.returncode != 0:
+                raise RuntimeError(f"could not capture the tmux pane: {result.stderr.strip()}")
+            return text in result.stdout
         return text in self.buffer
+
+    def live_tui(self):
+        return self.alive() and self.prompt_text_visible("Ask anything")
 
     def pane_pid(self):
         result = subprocess.run(
@@ -418,13 +425,16 @@ class Driver:
         if not self.via_tmux:
             raise RuntimeError("tmux detach requested without --via-tmux")
         pane_pid = self.pane_pid()
+        if not pane_pid:
+            return False
         self.child.sendcontrol("b")
         self.child.send("d")
         self.wait(0.5)
         detached = not self.child.isalive()
-        if self.child.isalive():
+        if not detached:
             return False
         self.child.close()
+        self.child = None
         self.child = pexpect.spawn(
             self.tmux,
             ["-L", self.tmux_socket, "-f", self.tmux_config,
@@ -434,15 +444,20 @@ class Driver:
             dimensions=(40, 120), timeout=20,
         )
         self.wait(0.5)
-        return detached and self.child.isalive() and pane_pid == self.pane_pid()
+        reattached_pid = self.pane_pid()
+        return detached and self.child.isalive() and bool(reattached_pid) and pane_pid == reattached_pid
 
     def close(self):
-        if self.child is not None and self.child.isalive():
-            self.child.close(force=True)
-        if self.via_tmux:
-            self._kill_tmux_server()
-        if self.log is not None and not self.log.closed:
-            self.log.close()
+        try:
+            if self.child is not None and self.child.isalive():
+                self.child.close(force=True)
+        finally:
+            try:
+                if self.via_tmux:
+                    self._kill_tmux_server()
+            finally:
+                if self.log is not None and not self.log.closed:
+                    self.log.close()
 
     def _kill_tmux_server(self):
         subprocess.run(
@@ -453,8 +468,196 @@ class Driver:
 
 
 def check(label, condition):
-    print(("ok   " if condition else "FAIL ") + label)
+    print(("PASS " if condition else "FAIL ") + label)
     return bool(condition)
+
+
+def required_skip(label, reason):
+    print(f"SKIP {label}: {reason}")
+    return False
+
+
+class PhaseLog:
+    """Keep bounded verifier phase boundaries apart from raw PTY output."""
+
+    def __init__(self, home):
+        self.path = os.path.join(home, "verification-phases.jsonl")
+        self.stream = open(self.path, "x", encoding="utf-8")  # noqa: SIM115
+        self.sequence = 0
+
+    def record(self, phase, event, **details):
+        self.sequence += 1
+        entry = {"sequence": self.sequence, "phase": phase, "event": event, **details}
+        self.stream.write(json.dumps(entry, sort_keys=True) + "\n")
+        self.stream.flush()
+
+    def close(self):
+        if not self.stream.closed:
+            self.stream.close()
+
+
+def ensure_dialog_open(driver):
+    """Establish an open-dialog precondition with at most one verified Ctrl+C."""
+    try:
+        if not driver.live_tui():
+            return False, "the TUI process or prompt is not live"
+        if driver.dialog_visible():
+            return True, "the dialog was already open"
+        driver.ctrl("c")
+        if not driver.live_tui():
+            return False, "the TUI stopped while opening the dialog"
+        if not driver.dialog_visible():
+            return False, "Ctrl+C did not open the dialog"
+        return True, "Ctrl+C opened the dialog from a verified closed state"
+    except Exception as error:  # noqa: BLE001 - turn state-query errors into explicit required skips
+        return False, f"state verification failed: {type(error).__name__}: {error}"
+
+
+def recover_to_closed_live_tui(driver):
+    """Close a visible dialog once, only after observing a live TUI and open dialog."""
+    try:
+        if not driver.live_tui():
+            return False, "the TUI process or prompt is not live"
+        if driver.dialog_visible():
+            driver.ctrl("c")
+        if not driver.live_tui():
+            return False, "the TUI stopped during recovery"
+        if driver.dialog_visible():
+            return False, "the dialog remained open after the bounded recovery action"
+        return True, "live TUI verified with the dialog closed"
+    except Exception as error:  # noqa: BLE001 - turn state-query errors into explicit required skips
+        return False, f"state verification failed: {type(error).__name__}: {error}"
+
+
+def run_fast_escape_trials(driver, *, trials=10, phase_log=None):
+    """Run independent timing and cancellation checks from verified open states."""
+    failures = []
+    attempted = 0
+    cancelled = 0
+
+    for trial in range(1, trials + 1):
+        if phase_log:
+            phase_log.record("fast_escape_trial", "start", trial=trial)
+        ready, reason = ensure_dialog_open(driver)
+        if not ready:
+            for skipped_trial in range(trial, trials + 1):
+                skip_reason = f"trial precondition unavailable: {reason}"
+                if phase_log:
+                    phase_log.record(
+                        "fast_escape_trial", "skip", trial=skipped_trial, reason=skip_reason,
+                    )
+                failures.append(not required_skip(
+                    f"fast Escape+n timing bound ({skipped_trial}/{trials})", skip_reason,
+                ))
+                failures.append(not required_skip(
+                    f"fast Escape+n cancellation ({skipped_trial}/{trials})", skip_reason,
+                ))
+            break
+
+        elapsed_ns = driver.send_fast("\x1b", "n")
+        attempted += 1
+        timing_valid = elapsed_ns <= FAST_ESCAPE_MAX_ELAPSED_NS
+        timing_label = (
+            "fast Escape+n driver-write interval (requested 30 ms, "
+            f"maximum 35 ms; {trial}/{trials}: {elapsed_ns / 1_000_000:.3f} ms)"
+        )
+        failures.append(not check(timing_label, timing_valid))
+
+        trial_cancelled = driver.live_tui() and not driver.dialog_visible()
+        cancelled += int(trial_cancelled)
+        failures.append(not check(
+            f"fast Escape+n cancels the dialog ({trial}/{trials})", trial_cancelled,
+        ))
+        if phase_log:
+            phase_log.record(
+                "fast_escape_trial", "result", trial=trial, elapsed_ns=elapsed_ns,
+                timing_valid=timing_valid, cancelled=trial_cancelled,
+            )
+
+    print(
+        f"Fast Escape+n cancellation: {cancelled}/{attempted} attempted; "
+        f"{attempted}/{trials} trials attempted"
+    )
+    if phase_log:
+        phase_log.record(
+            "fast_escape_trials", "complete", attempted=attempted, cancelled=cancelled,
+            requested=trials,
+        )
+    return failures, {"attempted": attempted, "cancelled": cancelled, "requested": trials}
+
+
+def run_reattach_evidence(driver, *, phase_log=None):
+    """Attempt reattach independently of trial results, gating it on safe recovery."""
+    failures = []
+    if phase_log:
+        phase_log.record("reattach_recovery", "start")
+    recovered, recovery_reason = recover_to_closed_live_tui(driver)
+    if phase_log:
+        phase_log.record(
+            "reattach_recovery", "result", recovered=recovered, reason=recovery_reason,
+        )
+    failures.append(not check(
+        "pre-reattach recovery confirms live TUI and closed dialog", recovered,
+    ))
+    if not recovered:
+        reason = f"safe recovery unavailable: {recovery_reason}"
+        failures.append(not required_skip(
+            "tmux disconnect and reattach preserve the TUI pane", reason,
+        ))
+        failures.append(not required_skip(
+            "Ctrl+C opens after tmux reattach", f"reattach was not attempted; {reason}",
+        ))
+        return failures
+
+    if phase_log:
+        phase_log.record("reattach", "start")
+    reattached = False
+    reattach_reason = "detach/reattach did not confirm the same live pane"
+    try:
+        reattached = bool(driver.detach_and_reattach())
+        if reattached:
+            reattach_reason = "reattached client confirms the same live pane"
+    except Exception as error:  # noqa: BLE001 - report reattach exceptions without dependent PASS
+        reattach_reason = f"detach/reattach raised {type(error).__name__}: {error}"
+    if phase_log:
+        phase_log.record(
+            "reattach", "result", reattached=reattached, reason=reattach_reason,
+        )
+    failures.append(not check("tmux disconnect and reattach preserve the TUI pane", reattached))
+    if not reattached:
+        failures.append(not required_skip(
+            "Ctrl+C opens after tmux reattach", f"reattach did not succeed: {reattach_reason}",
+        ))
+        return failures
+
+    try:
+        driver.buffer = ""
+        driver.ctrl("c")
+        dialog_opened = driver.alive() and driver.dialog_visible()
+        reason = "Ctrl+C did not open the dialog after the verified reattach"
+    except Exception as error:  # noqa: BLE001 - report assertion exceptions as failures
+        dialog_opened = False
+        reason = f"post-reattach assertion raised {type(error).__name__}: {error}"
+    if phase_log:
+        phase_log.record(
+            "reattach_dialog_assertion", "result", passed=dialog_opened,
+            reason="" if dialog_opened else reason,
+        )
+    failures.append(not check("Ctrl+C opens after tmux reattach", dialog_opened))
+    return failures
+
+
+def report_retained_artifacts(home):
+    print(f"\nPTY artifacts retained at: {home}")
+    session_logs = sorted(pathlib.Path(home).glob("pty-session-*.log"))
+    if session_logs:
+        for path in session_logs:
+            print(f"PTY session log: {path}")
+    else:
+        print("PTY session logs: none were created")
+    phase_log = pathlib.Path(home) / "verification-phases.jsonl"
+    if phase_log.exists():
+        print(f"Verifier phase log: {phase_log}")
 
 
 def main():
@@ -486,11 +689,19 @@ def main():
         sys.exit("OpenCode v2.2.5 is required; refusing to test an unpinned binary")
     home = tempfile.mkdtemp(prefix="opencode-exit-confirm-")
     workspace = os.path.join(home, "workspace")
-    os.mkdir(workspace, 0o700)
     driver = None
+    phase_log = None
     failures = []
+    all_checks_passed = False
     try:
-        driver = Driver(home, via_tmux=args.via_tmux, via_launcher=args.via_launcher)
+        os.mkdir(workspace, 0o700)
+        phase_log = PhaseLog(home)
+        mode_name = "launcher" if args.via_launcher else "tmux" if args.via_tmux else "direct"
+        phase_log.record("run", "start", mode=mode_name)
+        phase_log.record("session", "start", session=1, purpose="Y confirmation")
+        driver = Driver(
+            home, via_tmux=args.via_tmux, via_launcher=args.via_launcher, session_number=1,
+        )
         failures.append(not check("TUI started", driver.alive() and
                                   driver.prompt_text_visible("Ask anything")))
         if args.via_launcher:
@@ -517,91 +728,123 @@ def main():
         driver.ctrl("c")
         failures.append(not check("Ctrl+C opens the confirmation dialog", driver.alive() and driver.dialog_visible()))
 
-        # This bounds the driver's writes, not when tmux/OpenCode receive them.
-        # The guest's tmux client must not merge Escape+n into Alt+n.
+        post_reattach_ready = True
+        post_reattach_reason = ""
         if driver.via_tmux:
-            fast_escape_cancelled = True
-            for trial in range(1, 11):
-                elapsed_ns = driver.send_fast("\x1b", "n")
-                timing_valid = elapsed_ns <= FAST_ESCAPE_MAX_ELAPSED_NS
-                failures.append(not check(
-                    "fast Escape+n driver-write interval (requested 30 ms, "
-                    f"maximum 35 ms; {trial}/10: {elapsed_ns / 1_000_000:.3f} ms)",
-                    timing_valid,
-                ))
+            trial_failures, _ = run_fast_escape_trials(driver, phase_log=phase_log)
+            failures.extend(trial_failures)
+            ready, reason = ensure_dialog_open(driver)
+            if ready:
                 driver.buffer = ""
                 driver.ctrl("c")
-                trial_cancelled = driver.alive() and driver.dialog_visible()
-                fast_escape_cancelled = fast_escape_cancelled and trial_cancelled
+                cancelled_after_trials = driver.live_tui() and not driver.dialog_visible()
                 failures.append(not check(
-                    f"fast Escape+n cancellation outcome before Ctrl+C reopens ({trial}/10)",
-                    trial_cancelled))
-                if not trial_cancelled and driver.alive():
-                    # Ctrl+C cancelled the dialog instead of reopening it; restore
-                    # the open-dialog precondition for the next deterministic trial.
-                    driver.buffer = ""
-                    driver.ctrl("c")
+                    "Ctrl+C cancels after fast Escape trials", cancelled_after_trials,
+                ))
+                post_reattach_ready = cancelled_after_trials
+                if not cancelled_after_trials:
+                    post_reattach_reason = "the dialog did not reach a verified closed state"
+            else:
+                failures.append(not required_skip(
+                    "Ctrl+C cancels after fast Escape trials",
+                    f"dialog state unavailable after trials: {reason}",
+                ))
+                post_reattach_ready = False
+                post_reattach_reason = f"dialog state unavailable: {reason}"
+            # The reattach attempt is independent of all trial outcomes. The cancel
+            # assertion above leaves a verified closed dialog for recovery.
+            failures.extend(run_reattach_evidence(driver, phase_log=phase_log))
+
+            # A failed or skipped reattach may leave a different known state; observe
+            # it and establish an open dialog before the Escape-cancellation check.
+            post_reattach_ready, post_reattach_reason = ensure_dialog_open(driver)
+
+        if post_reattach_ready:
+            driver.send("\x1b")
             driver.buffer = ""
             driver.ctrl("c")
-            failures.append(not check("Ctrl+C cancels after fast Escape trials",
+            failures.append(not check("Esc cancels and Ctrl+C reopens",
+                                      driver.alive() and driver.dialog_visible()))
+            driver.buffer = ""
+            driver.ctrl("c")
+            failures.append(not check("Ctrl+C cancels without exiting",
                                       driver.alive() and not driver.dialog_visible()))
 
-            if fast_escape_cancelled:
-                failures.append(not check("tmux disconnect and reattach preserve the TUI pane",
-                                          driver.detach_and_reattach()))
+            driver.buffer = ""
+            driver.ctrl("c")
+            failures.append(not check("Ctrl+C reopens after cancel",
+                                      driver.alive() and driver.dialog_visible()))
+            driver.buffer = ""
+            driver.send("n")
+            failures.append(not check("n cancels without exiting",
+                                      driver.alive() and not driver.dialog_visible()))
 
             driver.buffer = ""
             driver.ctrl("c")
-            failures.append(not check("Ctrl+C opens after tmux reattach",
-                                      driver.alive() and driver.dialog_visible()))
+            driver.buffer = ""
+            driver.ctrl("c")
+            failures.append(not check("Ctrl+C cancels without exiting",
+                                      driver.alive() and not driver.dialog_visible()))
 
-        driver.send("\x1b")
-        driver.buffer = ""
-        driver.ctrl("c")
-        failures.append(not check("Esc cancels and Ctrl+C reopens", driver.alive() and driver.dialog_visible()))
-        driver.buffer = ""
-        driver.ctrl("c")
-        failures.append(not check("Ctrl+C cancels without exiting", driver.alive() and not driver.dialog_visible()))
+            driver.buffer = ""
+            driver.ctrl("c")
+            driver.send("Y")
+            time.sleep(1.5)
+            failures.append(not check("Y confirms and exits", not driver.alive()))
+        else:
+            for label in (
+                "Esc cancels and Ctrl+C reopens",
+                "Ctrl+C cancels without exiting",
+                "Ctrl+C reopens after cancel",
+                "n cancels without exiting",
+                "Ctrl+C cancels without exiting",
+                "Y confirms and exits",
+            ):
+                failures.append(not required_skip(label, post_reattach_reason))
 
-        driver.buffer = ""
-        driver.ctrl("c")
-        failures.append(not check("Ctrl+C reopens after cancel", driver.alive() and driver.dialog_visible()))
-        driver.buffer = ""
-        driver.send("n")
-        failures.append(not check("n cancels without exiting", driver.alive() and not driver.dialog_visible()))
-
-        driver.buffer = ""
-        driver.ctrl("c")
-        driver.buffer = ""
-        driver.ctrl("c")
-        failures.append(not check("Ctrl+C cancels without exiting", driver.alive() and not driver.dialog_visible()))
-
-        driver.buffer = ""
-        driver.ctrl("c")
-        driver.send("Y")
-        time.sleep(1.5)
-        failures.append(not check("Y confirms and exits", not driver.alive()))
+        phase_log.record("session", "complete", session=1)
         driver.close()
+        driver = None
 
-        driver = Driver(home, via_tmux=args.via_tmux, via_launcher=args.via_launcher)
+        phase_log.record("session", "start", session=2, purpose="Q confirmation")
+        driver = Driver(
+            home, via_tmux=args.via_tmux, via_launcher=args.via_launcher, session_number=2,
+        )
         driver.ctrl("c")
         driver.send("Q")
         time.sleep(1.5)
         failures.append(not check("Q confirms and exits", not driver.alive()))
-    finally:
-        if driver:
-            driver.close()
-        if any(failures):
-            print(f"\nPTY log kept at: {driver.log_path if driver else home}")
-        else:
-            shutil.rmtree(home, ignore_errors=True)
+        phase_log.record("session", "complete", session=2)
+        driver.close()
+        driver = None
 
-    failed = sum(failures)
-    if failed:
-        print(f"\n{failed} check(s) failed")
-        return 1
-    print("\nAll live exit-confirmation checks passed")
-    return 0
+        failed = sum(failures)
+        phase_log.record("run", "result", passed=(failed == 0), failed_checks=failed)
+        if failed:
+            print(f"\n{failed} check(s) failed")
+            return 1
+        print("\nAll live exit-confirmation checks passed")
+        all_checks_passed = True
+        return 0
+    finally:
+        active_exception = sys.exc_info()[0] is not None
+        cleanup_errors = []
+        if driver is not None:
+            try:
+                driver.close()
+            except BaseException as error:  # noqa: BLE001 - retain artifacts even on interruption
+                cleanup_errors.append(error)
+        if phase_log is not None:
+            try:
+                phase_log.close()
+            except BaseException as error:  # noqa: BLE001 - retain artifacts even on interruption
+                cleanup_errors.append(error)
+        if all_checks_passed and not active_exception and not cleanup_errors:
+            shutil.rmtree(home, ignore_errors=True)
+        else:
+            report_retained_artifacts(home)
+        if cleanup_errors and not active_exception:
+            raise cleanup_errors[0]
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Focused regression tests for the protected-launcher PTY verifier."""
 
+import contextlib
 import importlib.util
+import io
 import json
 import pathlib
 import shlex
@@ -9,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -197,6 +200,452 @@ class FastSendTimingTests(unittest.TestCase):
             self.assertEqual(child.delaybeforesend, 0.05)
         finally:
             child.close(force=True)
+
+
+class PhaseRecorder:
+    def __init__(self):
+        self.entries = []
+
+    def record(self, phase, event, **details):
+        self.entries.append({"phase": phase, "event": event, **details})
+
+
+class DialogStateDriver:
+    def __init__(self, outcomes=(), *, elapsed_ns=30_000_000, reattach_result=True,
+                 reattach_error=None, live=True, dialog_open=True, log=None):
+        self.via_tmux = True
+        self.outcomes = list(outcomes)
+        self.elapsed_ns = elapsed_ns
+        self.reattach_result = reattach_result
+        self.reattach_error = reattach_error
+        self.is_live = live
+        self.dialog_open = dialog_open
+        self.reattach_calls = 0
+        self.dialog_state_at_reattach = []
+        self.ctrl_calls = []
+        self.calls = []
+        self.buffer = ""
+        self.log = log
+
+    def live_tui(self):
+        return self.is_live
+
+    def alive(self):
+        return self.is_live
+
+    def dialog_visible(self):
+        return self.dialog_open
+
+    def ctrl(self, key):
+        self.calls.append(("ctrl", key))
+        self.ctrl_calls.append(key)
+        if key == "c" and self.is_live:
+            self.dialog_open = not self.dialog_open
+
+    def send_fast(self, first, second):
+        self.calls.append(("send_fast", first, second))
+        cancelled = self.outcomes.pop(0)
+        if cancelled:
+            self.dialog_open = False
+        return self.elapsed_ns
+
+    def detach_and_reattach(self):
+        self.calls.append(("detach_and_reattach",))
+        self.reattach_calls += 1
+        self.dialog_state_at_reattach.append(self.dialog_open)
+        if self.log is not None:
+            self.log.write("reattach-output-sentinel\n")
+            self.log.flush()
+        if self.reattach_error is not None:
+            raise self.reattach_error
+        return self.reattach_result
+
+
+class FastEscapeStateMachineTests(unittest.TestCase):
+    def run_trials(self, outcomes):
+        driver = DialogStateDriver(outcomes)
+        phase_log = PhaseRecorder()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            failures, summary = verifier.run_fast_escape_trials(
+                driver, phase_log=phase_log,
+            )
+        return driver, phase_log, output.getvalue(), failures, summary
+
+    def test_zero_mixed_and_ten_of_ten_cancellation_outcomes_are_distinct(self):
+        cases = (
+            ([False] * 10, 0),
+            ([True, False, True, False, False, True, False, True, False, True], 5),
+            ([True] * 10, 10),
+        )
+        for outcomes, expected_cancelled in cases:
+            with self.subTest(expected_cancelled=expected_cancelled):
+                driver, phase_log, output, failures, summary = self.run_trials(outcomes)
+                self.assertEqual(summary, {
+                    "attempted": 10, "cancelled": expected_cancelled, "requested": 10,
+                })
+                self.assertEqual(sum(failures), 10 - expected_cancelled)
+                self.assertIn(
+                    f"Fast Escape+n cancellation: {expected_cancelled}/10 attempted; "
+                    "10/10 trials attempted",
+                    output,
+                )
+                self.assertEqual(
+                    len([entry for entry in phase_log.entries
+                         if entry["event"] == "result"]),
+                    10,
+                )
+                self.assertEqual(
+                    len([call for call in driver.calls if call[0] == "send_fast"]), 10,
+                )
+                # Ctrl+C is issued only when state observation proves the dialog is closed.
+                self.assertEqual(len(driver.ctrl_calls), sum(outcomes[:-1]))
+
+    def test_timing_and_cancellation_failures_do_not_block_independent_reattach(self):
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="v-reattach-") as temp:
+            log_path = pathlib.Path(temp) / "pty-session-1.log"
+            with log_path.open("x", encoding="utf-8") as session_log:
+                driver = DialogStateDriver(
+                    [False] * 10, elapsed_ns=verifier.FAST_ESCAPE_MAX_ELAPSED_NS + 1,
+                    log=session_log,
+                )
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    trial_failures, summary = verifier.run_fast_escape_trials(driver)
+                    reattach_failures = verifier.run_reattach_evidence(driver)
+                self.assertEqual(summary["cancelled"], 0)
+                self.assertTrue(all(trial_failures))
+                self.assertFalse(any(reattach_failures))
+                self.assertEqual(driver.reattach_calls, 1)
+                self.assertEqual(driver.dialog_state_at_reattach, [False])
+                self.assertIn(("detach_and_reattach",), driver.calls)
+                self.assertIn("PASS tmux disconnect and reattach preserve the TUI pane",
+                              output.getvalue())
+                self.assertIn("PASS Ctrl+C opens after tmux reattach", output.getvalue())
+                self.assertEqual(len(trial_failures), 20)
+            self.assertIn("reattach-output-sentinel", log_path.read_text(encoding="utf-8"))
+
+    def test_unsafe_recovery_skips_both_reattach_assertions(self):
+        driver = DialogStateDriver(live=False)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            failures = verifier.run_reattach_evidence(driver)
+        self.assertTrue(all(failures))
+        self.assertEqual(driver.reattach_calls, 0)
+        self.assertIn("safe recovery unavailable", output.getvalue())
+        self.assertIn("SKIP tmux disconnect and reattach preserve the TUI pane", output.getvalue())
+        self.assertIn("SKIP Ctrl+C opens after tmux reattach", output.getvalue())
+        self.assertNotIn("PASS Ctrl+C opens after tmux reattach", output.getvalue())
+
+    def test_unavailable_trial_state_marks_every_unattempted_check_as_required_skip(self):
+        driver = DialogStateDriver(live=False)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            failures, summary = verifier.run_fast_escape_trials(driver)
+        self.assertEqual(sum(failures), 20)
+        self.assertEqual(summary, {"attempted": 0, "cancelled": 0, "requested": 10})
+        self.assertFalse(any(call[0] == "send_fast" for call in driver.calls))
+        self.assertIn("SKIP fast Escape+n timing bound (1/10)", output.getvalue())
+        self.assertIn("SKIP fast Escape+n cancellation (10/10)", output.getvalue())
+
+    def test_failed_and_exceptional_reattach_never_pass_dependent_assertion(self):
+        cases = (
+            (False, None, "did not succeed"),
+            (True, RuntimeError("injected reattach exception"), "raised RuntimeError"),
+        )
+        for reattach_result, reattach_error, expected_reason in cases:
+            with self.subTest(reattach_error=reattach_error):
+                driver = DialogStateDriver(
+                    reattach_result=reattach_result, reattach_error=reattach_error,
+                )
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    failures = verifier.run_reattach_evidence(driver)
+                self.assertTrue(any(failures))
+                self.assertEqual(driver.reattach_calls, 1)
+                self.assertIn(expected_reason, output.getvalue())
+                self.assertIn("SKIP Ctrl+C opens after tmux reattach", output.getvalue())
+                self.assertNotIn("PASS Ctrl+C opens after tmux reattach", output.getvalue())
+
+
+class SessionLogTests(unittest.TestCase):
+    class FakeChild:
+        def __init__(self, output=""):
+            self.output = output
+            self.alive = True
+
+        def isalive(self):
+            return self.alive
+
+        def close(self, force=False):
+            self.alive = False
+
+        def read_nonblocking(self, size, timeout):
+            if self.output:
+                output, self.output = self.output, ""
+                return output
+            raise verifier.pexpect.TIMEOUT("empty fixture")
+
+    def test_driver_logs_are_exclusive_distinct_and_reattach_output_stays_in_session_one(self):
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="v-session-logs-") as temp:
+            home = pathlib.Path(temp)
+            (home / "workspace").mkdir(mode=0o700)
+            previous_binary = verifier.OPENCODE_BINARY
+            verifier.OPENCODE_BINARY = "/fake/opencode"
+            children = [self.FakeChild(), self.FakeChild()]
+            try:
+                with (
+                    mock.patch.object(verifier, "spawn_pty", side_effect=children),
+                    mock.patch.object(verifier.Driver, "wait", lambda _self, _seconds: None),
+                ):
+                    first = verifier.Driver(str(home), session_number=1)
+                    first.log.write("first-Y-sentinel\n")
+                    first.log.flush()
+                    second = verifier.Driver(str(home), session_number=2)
+                    second.log.write("second-Q-sentinel\n")
+                    second.log.flush()
+
+                    with self.assertRaises(FileExistsError):
+                        verifier.Driver(str(home), session_number=1)
+
+                first.child = self.FakeChild("reattach-output-sentinel\n")
+                with mock.patch.object(verifier.time, "time", side_effect=(10, 10, 12)):
+                    first.wait(1)
+                first.close()
+                second.close()
+            finally:
+                verifier.OPENCODE_BINARY = previous_binary
+
+            first_log = home / "pty-session-1.log"
+            second_log = home / "pty-session-2.log"
+            self.assertIn("first-Y-sentinel", first_log.read_text(encoding="utf-8"))
+            self.assertIn("reattach-output-sentinel", first_log.read_text(encoding="utf-8"))
+            self.assertNotIn("second-Q-sentinel", first_log.read_text(encoding="utf-8"))
+            self.assertIn("second-Q-sentinel", second_log.read_text(encoding="utf-8"))
+
+    def test_actual_detach_reattach_spawns_attach_and_logs_its_output_to_origin_session(self):
+        class DetachingChild:
+            def __init__(self, *, live):
+                self.live = live
+                self.sent = []
+                self.closed = False
+
+            def sendcontrol(self, key):
+                self.sent.append(("control", key))
+
+            def send(self, text):
+                self.sent.append(("send", text))
+
+            def isalive(self):
+                return self.live
+
+            def close(self, force=False):
+                self.closed = True
+
+        class AttachedChild(DetachingChild):
+            def __init__(self):
+                super().__init__(live=True)
+                self.output = "reattached-pane-output-sentinel\n"
+
+            def read_nonblocking(self, size, timeout):
+                if self.output:
+                    output, self.output = self.output, ""
+                    return output
+                raise verifier.pexpect.TIMEOUT("empty fixture")
+
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="v-reattach-driver-") as temp:
+            home = pathlib.Path(temp)
+            (home / "workspace").mkdir(mode=0o700)
+            log_path = home / "pty-session-1.log"
+            log = log_path.open("x", encoding="utf-8")
+            driver = object.__new__(verifier.Driver)
+            driver.via_tmux = True
+            driver.child = DetachingChild(live=False)
+            driver.log = log
+            driver.log_path = str(log_path)
+            driver.tmux = "/usr/bin/tmux"
+            driver.tmux_socket = "private-test"
+            driver.tmux_config = str(home / "tmux.conf")
+            driver.tmux_session = "little-mester-opencode"
+            driver.env = {"PATH": "/usr/bin:/bin"}
+            driver.buffer = ""
+            driver.pane_pid = mock.Mock(side_effect=("4321", "4321"))
+            attached = AttachedChild()
+            detaching = driver.child
+            try:
+                with (
+                    mock.patch.object(verifier.pexpect, "spawn", return_value=attached) as spawn,
+                    mock.patch.object(verifier.time, "time", side_effect=(0, 1, 0, 0, 1)),
+                ):
+                    self.assertTrue(driver.detach_and_reattach())
+                self.assertEqual(driver.child, attached)
+                self.assertEqual(detaching.sent, [("control", "b"), ("send", "d")])
+                self.assertTrue(detaching.closed)
+                self.assertEqual(driver.pane_pid.call_count, 2)
+                self.assertEqual(
+                    driver.pane_pid.call_args_list,
+                    [mock.call(), mock.call()],
+                )
+                spawn.assert_called_once_with(
+                    "/usr/bin/tmux",
+                    ["-L", "private-test", "-f", str(home / "tmux.conf"),
+                     "attach-session", "-t", "little-mester-opencode"],
+                    cwd=str(home / "workspace"), env=driver.env, encoding="utf-8",
+                    codec_errors="replace", dimensions=(40, 120), timeout=20,
+                )
+            finally:
+                log.close()
+            self.assertIn(
+                "reattached-pane-output-sentinel", log_path.read_text(encoding="utf-8"),
+            )
+
+    def test_detach_reattach_rejects_changed_pane_identity(self):
+        class Child:
+            def __init__(self, *, live):
+                self.live = live
+
+            def sendcontrol(self, key):
+                pass
+
+            def send(self, text):
+                pass
+
+            def isalive(self):
+                return self.live
+
+            def close(self, force=False):
+                pass
+
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="v-reattach-identity-") as temp:
+            home = pathlib.Path(temp)
+            (home / "workspace").mkdir(mode=0o700)
+            driver = object.__new__(verifier.Driver)
+            driver.via_tmux = True
+            driver.child = Child(live=False)
+            driver.log_path = str(home / "pty-session-1.log")
+            driver.tmux = "/usr/bin/tmux"
+            driver.tmux_socket = "private-test"
+            driver.tmux_config = str(home / "tmux.conf")
+            driver.tmux_session = "little-mester-opencode"
+            driver.env = {"PATH": "/usr/bin:/bin"}
+            driver.pane_pid = mock.Mock(side_effect=("4321", "9999"))
+            driver.wait = mock.Mock()
+            with mock.patch.object(verifier.pexpect, "spawn", return_value=Child(live=True)):
+                self.assertFalse(driver.detach_and_reattach())
+            self.assertEqual(driver.pane_pid.call_count, 2)
+
+    def test_detach_refuses_missing_pane_identity_without_attempting_attach(self):
+        driver = object.__new__(verifier.Driver)
+        driver.via_tmux = True
+        driver.pane_pid = mock.Mock(return_value=None)
+        driver.child = mock.Mock()
+        self.assertFalse(driver.detach_and_reattach())
+        driver.pane_pid.assert_called_once_with()
+        driver.child.sendcontrol.assert_not_called()
+
+
+class ArtifactRetentionTests(unittest.TestCase):
+    class MainDriver:
+        def __init__(self, home, *, session_number, fail_early=False):
+            self.log_path = pathlib.Path(home) / f"pty-session-{session_number}.log"
+            self.log = self.log_path.open("x", encoding="utf-8")
+            self.log.write("first-session-sentinel\n")
+            self.log.flush()
+            self.via_tmux = False
+            self.is_live = True
+            self.dialog_open = False
+            self.buffer = ""
+            self.fail_early = fail_early
+
+        def alive(self):
+            return self.is_live
+
+        def prompt_text_visible(self, text):
+            return self.is_live and (text == "Ask anything" or text in self.buffer)
+
+        def dialog_visible(self):
+            return self.dialog_open
+
+        def ctrl(self, key):
+            if key == "c" and self.is_live:
+                self.dialog_open = not self.dialog_open
+
+        def send(self, text):
+            if self.fail_early and text == "yq":
+                raise RuntimeError("injected early verifier failure")
+            if text == "yq":
+                self.buffer += text
+            elif text in ("\x1b", "n"):
+                self.dialog_open = False
+            elif text in ("Y", "Q"):
+                self.is_live = False
+                self.dialog_open = False
+
+        def close(self):
+            if not self.log.closed:
+                self.log.close()
+
+    def run_main_exception_case(self, *, second_constructor_fails):
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="v-retained-") as root:
+            home = pathlib.Path(root) / "artifacts"
+            home.mkdir(mode=0o700)
+            constructed = []
+
+            def fake_driver(path, *, session_number, **_kwargs):
+                if session_number == 2 and second_constructor_fails:
+                    second_log = pathlib.Path(path) / "pty-session-2.log"
+                    with second_log.open("x", encoding="utf-8") as stream:
+                        stream.write("second-constructor-sentinel\n")
+                    raise RuntimeError("injected second-driver construction failure")
+                driver = self.MainDriver(
+                    path, session_number=session_number,
+                    fail_early=not second_constructor_fails,
+                )
+                constructed.append(driver)
+                return driver
+
+            output = io.StringIO()
+            previous_globals = (
+                verifier.OPENCODE_BINARY, verifier.ROOT, verifier.PLUGIN,
+                list(verifier.CLI_CONFIG["plugins"]),
+            )
+            version = SimpleNamespace(returncode=0, stdout="opencode v2.2.5\n", stderr="")
+            try:
+                with (
+                    mock.patch.object(verifier.tempfile, "mkdtemp", return_value=str(home)),
+                    mock.patch.object(verifier.shutil, "which", return_value="/fake/opencode"),
+                    mock.patch.object(verifier.subprocess, "run", return_value=version),
+                    mock.patch.object(verifier, "Driver", side_effect=fake_driver),
+                    mock.patch.object(verifier.time, "sleep"),
+                    mock.patch.object(sys, "argv", ["verify-exit-confirm.py"]),
+                    contextlib.redirect_stdout(output),
+                    self.assertRaisesRegex(RuntimeError, "injected"),
+                ):
+                    verifier.main()
+            finally:
+                (verifier.OPENCODE_BINARY, verifier.ROOT, verifier.PLUGIN,
+                 plugins) = previous_globals
+                verifier.CLI_CONFIG["plugins"] = plugins
+
+            first_log = home / "pty-session-1.log"
+            self.assertTrue(first_log.is_file())
+            self.assertIn("first-session-sentinel", first_log.read_text(encoding="utf-8"))
+            self.assertIn(f"PTY session log: {first_log}", output.getvalue())
+            if second_constructor_fails:
+                second_log = home / "pty-session-2.log"
+                self.assertIn("second-constructor-sentinel", second_log.read_text(encoding="utf-8"))
+                self.assertIn(f"PTY session log: {second_log}", output.getvalue())
+            phase_log = home / "verification-phases.jsonl"
+            self.assertTrue(phase_log.is_file())
+            self.assertIn('"event": "start"', phase_log.read_text(encoding="utf-8"))
+            self.assertNotIn("first-session-sentinel", phase_log.read_text(encoding="utf-8"))
+            self.assertEqual(len(constructed), 1)
+
+    def test_second_driver_construction_failure_retains_and_enumerates_first_log(self):
+        self.run_main_exception_case(second_constructor_fails=True)
+
+    def test_early_session_exception_retains_and_enumerates_first_log(self):
+        self.run_main_exception_case(second_constructor_fails=False)
 
 
 class IsolatedTmuxConfigTests(unittest.TestCase):
