@@ -17,6 +17,11 @@ import stat
 import subprocess
 import sys
 
+# This installer loads code-update-transaction.py from its immutable source
+# tree. Importlib's source loader otherwise writes __pycache__ beside that
+# protected code, invalidating the exact runtime inventory after installation.
+sys.dont_write_bytecode = True
+
 
 FILES = {
     "systemd/little-mester-vm.service.d/90-code-update-guard.conf":
