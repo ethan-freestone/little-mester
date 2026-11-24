@@ -6,14 +6,15 @@
   "type": "feature",
   "status": "draft",
   "title": "P1-05 — Final Phase 1 acceptance and merge readiness",
-  "objective": "P1-05 final Phase 1 acceptance, cleanup and merge readiness. Complete and accept the current usability integration PR #21 and its child work, then merge #21 into feat/vm-approach-3. Only after that acceptance, the owner creates a separate comprehensive cleanup PR from feat/vm-approach-3 and develops it inside the genuinely usable new VM. This remains the Phase 1 in-VM development acid test and is not part of #21; retain the existing cleanup acceptance criteria A7–A11. After cleanup, sustained development inside the new VM, exact-SHA final acceptance and independent review, obtain explicit owner approval to merge PR #17 (feat/vm-approach-3) into main. #21 alone does not complete Phase 1, and no merge is authorized by this ticket. Continue the approved Phase 1 workflow: runtime gates block only dependent work; continue independent authorized work and report concise blockers/handoffs.",
+  "objective": "P1-05 final acceptance, M4 cleanup roadmap, and merge readiness. Successor to #49/#51; depends on completion of P1-01 #53, P1-02 #54, P1-03 #55, and P1-04 #56. Roadmap: first complete and accept the M1–M3 gates; only after explicit owner authorization, develop the subsequent comprehensive M4 cleanup PR from inside the new VM; then run the final exact-SHA acceptance/reviews and obtain explicit owner merge approval. M4 is the Phase 1 in-VM development-workflow acid test, not work for the current integration PR. The cleanup includes code consolidation (A7), comprehensive ticket reconciliation (A8), documentation consolidation (A9), and a human-facing, CLI-tested README (A10). No merge absent explicit owner approval. Operating policy: docs/workflows/phase1-continuous-execution.md, including the owner-approved M1→M2→M3 priority and continuous-execution correction: a runtime gate blocks only dependent operations; continue independent authorized work. Handoffs identify the exact blocked assumption, independent work completed/remaining, and action to unlock it.",
   "created_at": "2026-11-10T21:46:28.245Z",
-  "updated_at": "2026-11-24T14:32:21.213Z",
+  "updated_at": "2026-11-24T11:48:38.189Z",
   "acceptance_criteria": [
     {
       "id": "A1",
       "text": "Record final integrated source SHA, ticket-evidence SHA and repository HEAD distinctly; preserve candidate a43e9aaa746af22dbd0ab106b5d12fc33b7fb982 smoke/cleanup/CI as historical evidence only.",
-      "status": "pending"
+      "status": "in-progress",
+      "evidence": "PR #20 source candidate a5597607e92b2c609ee56ac2cf520023b1fb95c6 passed owner-reported hosted run 45224666122 and is merged at e10ebd76e1e362c7b6e95bdb631d12c22b2e2d7f. This records one integrated foundation milestone only; final Phase 1 candidate/evidence commit is not yet established. No automated owner-acceptance report was supplied."
     },
     {
       "id": "A2",
@@ -23,7 +24,8 @@
     {
       "id": "A3",
       "text": "Owner demonstrates interactive TUI/model selection, exit-confirm behavior, accurate host metrics, and approved terminal configuration on a distinct interactive Dev VM and private bounded workspace.",
-      "status": "pending"
+      "status": "in-progress",
+      "evidence": "Owner reports actual Ariadne system VM TUI, real OpenAI authentication/connectivity/model response, visible host metrics (some sensors unavailable), dedicated workspace mount/reassignment, explicit unsafe-recurse repository access, and coexistence with the original VM. This is partial manual evidence only: exit-confirm/key reliability, approved terminal/clipboard configuration, accurate per-sensor values, private bounded workspace, persistence/cleanup, and a formal owner report remain unestablished."
     },
     {
       "id": "A4",
@@ -44,6 +46,26 @@
       "id": "A7",
       "text": "Before Phase 1 merge, M1–M3 must use shared production primitives wherever semantics match, with intentional lifecycle, trust, storage, and readiness differences documented. Start M4 only after M1–M3 gates and explicit owner authorization. M4 must retire superseded implementations and redundant tests, remove obsolete CI, fixtures, and docs, and publish a before/after line-count breakdown by production code, tests, docs/tickets, workflow/config, and generated/vendor files. Demonstrate material net code reduction by deleting only superseded or duplicate material—no arbitrary percentage target and no removal of security-critical negative tests or meaningful regressions. Sol independently reviews the exact consolidation for behavior regressions and needless complexity before owner merge approval.",
       "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "Comprehensive ticket reconciliation: review all tickets associated with Phase 1 and the VM implementation against actual implementation and test evidence; record meaningful resolutions explaining the final implementation, deviations from original proposals and rationale; resolve completed tickets and archive obsolete, superseded, abandoned or duplicate tickets through supported MCP tooling; identify genuine Phase 1 blockers separately from future enhancements; reconcile dependencies, parent/child links, epics and milestones; preserve ticket/audit history and pass ticket-store validation. Investigate the observed MCP comment-handling problems and whether the owner-side service requires an update or restart; if this proves substantial independent infrastructure work, create a separate follow-up ticket rather than making it derail Phase 1.",
+      "status": "pending"
+    },
+    {
+      "id": "A9",
+      "text": "Comprehensive documentation consolidation: inventory the repository's Markdown documentation and assess purpose, relevance and accuracy; consolidate durable, accurate content into a small coherent set of authoritative human-facing and technical documents (for example README.md, ARCHITECTURE.md and DECISIONS.md, without forcing those exact filenames); remove superseded plans, temporary implementation notes, duplicated runbooks, historical investigations and obsolete architecture descriptions; preserve useful historical rationale in decisions or ticket resolutions; update references/links; retain tool-, agent- or component-required documentation only with a clear reason. Do not satisfy this criterion by merely adding a document that describes the documentation inventory or by replacing the current corpus with another sprawling tree.",
+      "status": "pending"
+    },
+    {
+      "id": "A10",
+      "text": "Human-quality README: explain what Little Mester is, why to use it, what problems it solves, installation, a fast path to a working VM and agent, profiles/workspaces/installed revisions, common operations, key security boundaries in accessible language, and where technical detail lives. Use clear prose, concise tested examples and maintainable diagrams (Mermaid where useful); avoid implementation-history dumps, excessive bullets and unexplained internal terminology. Test the quick start against the final public CLI and record the exact command, environment, result and required prerequisites.",
+      "status": "pending"
+    },
+    {
+      "id": "A11",
+      "text": "Cleanup definition of done: the ticket store presents a coherent account of completed and remaining work; documentation is consolidated, accurate and maintainable; a new user can follow the tested README; a developer can understand the architecture without navigating numerous historical files; obsolete docs and implementation paths are removed; meaningful decisions/resolutions remain discoverable. Together with A7, the exact reviewed cleanup diff demonstrates a coherent product rather than a collection of development experiments. This future cleanup PR is the Phase 1 in-VM workflow acid test and is not part of the current integration PR or its child workstreams. Authorized common-control removal is itself a journaled transaction owned by #57: the signed bootstrap runner acquires exclusive maintenance/code-update/catalog/host-admission locks, removes only exact manifest-owned guards/helper/control files, preserves fixed-system 90 guards/base assets, releases the marker only after effective baseline verification, and supports matching signed recovery after interruption.",
+      "status": "pending"
     }
   ],
   "tests": {
@@ -53,7 +75,17 @@
       "Owner hands-on acceptance and independent cleanup evidence.",
       "Sol combined review, Claude adversarial assessment, and explicit owner merge approval.",
       "M4 exit review: after M1–M3 acceptance and explicit owner start approval, inventory shared primitives and documented intentional differences; identify superseded production implementations, duplicate tests, obsolete CI/fixtures/docs; remove only justified obsolete/duplicate material; report before/after categorized added/deleted/net lines and have Sol review exact final consolidation. Do not start M4 implementation before authorization.",
-      "Diagnose the existing ticket-store validation failure at audit entry #417 (2026-11-12T18:52:06.110Z, ticket #54, operation privacy-redaction); determine the supported audit-operation policy and an owner-authorized repair through the ticket engine/MCP, preserve audit history, and require validation to pass. Do not hand-edit _audit.json or rebaseline the audit."
+      "M4 roadmap gate: do not start the cleanup PR until M1–M3 gates are accepted and the owner explicitly authorizes it; perform development from inside the new VM and preserve the current integration/legacy fallback state.",
+      "Before any cleanup edits, inventory Phase 1/VM tickets and all Markdown documentation; reconcile only from genuine implementation/test evidence, preserve histories and use MCP for all ticket writes.",
+      "At M4 completion, run ticket-engine validation; review ticket relations/statuses; test all changed docs links/builds and the README quick start against the exact final public CLI; record actual commands, exact source SHA and outcomes.",
+      "For code consolidation, compare exact before/after file/line counts in the existing categories; retain security-critical negative tests and meaningful regressions; independent Sol review of the exact diff for behavior regressions and needless complexity.",
+      "Investigate MCP comment-handling behavior through the actual owner-side MCP path; determine whether update/restart is needed. If substantial, file a separate MCP infrastructure ticket rather than broadening M4.",
+      "During owner-authorized M4 cleanup, explicitly inventory the transitional fixed #20 system singleton, its package-owned profile-exclusion drop-in, helper/package references and documentation. Decide from actual replacement/acceptance evidence whether to retire them; if approved, stop the singleton, remove only verified package-owned guard/runtime/config/state through the reviewed cleanup plan, and confirm profile starts no longer depend on it. Do not gate, recap, or remove the original feat/vm-approach development VM under this item; preserve it unless separately authorized. Do not perform this audit/removal before M1–M3 gates and explicit M4 owner authorization.",
+      "Scope clarification: the temporary singleton exclusion is represented by package-owned additive guard drop-ins on the fixed singleton VM, proxy, workspace and metrics units, not a single main-unit drop-in. Authorized cleanup must inventory and remove only the verified package-owned files after the fixed singleton is stopped; it must not touch or gate feat/vm-approach.",
+      "Cleanup scope clarification: the transitional profile exclusion consists of four package-owned additive drop-ins on fixed singleton VM, proxy, workspace and metrics units, not one main-unit drop-in. Cleanup verifies package-manifest bytes and exact stopped state before removing only those four files; it does not edit base units or touch/gate feat/vm-approach.",
+      "M4 supersession: profile-exclusion guards are owned by the common signed control artifact/installer manifest, not a native package. Cleanup removes only the exact four verified guards after singleton stop and explicit authorization; no apt/pacman package-removal hook or control-package ownership is assumed.",
+      "Common-control removal fault injection: with all profile mappings/state/units absent and fixed singleton stopped, authorize only the signed bootstrap runner; acquire maintenance→code-update→catalog→host-admission locks, publish profile-control/remove journal+marker before mutation, remove exactly manifest-owned 95 guards/helper/manifest/minimal root/sudoers/enrollment/tmpfiles/dedicated group, preserve fixed 90 guards/base runtime/disk/credentials and dev VM, reload and verify exact baseline (or all-absent) state, then clear marker last. Interrupt at every step and prove bootstrap --recover resumes removal or restores the exact signed artifact; wrong/missing journal/artifact/owner/identity preserves marker. Never unlink the active /run lock inode; leave it until reboot and remove tmpfiles rule.",
+      "M4 verifier/removal baseline matrix: on installed fixed singleton units, preserve/validate workspace 20 exactly when its assignment exists and accept its absence only for a stopped unassigned installation; on all-absent singleton state, remove only manifest-owned 95 files and verify no stale unit drop-ins/state/jobs."
     ],
     "created": [],
     "cases": [

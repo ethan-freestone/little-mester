@@ -384,7 +384,37 @@
       "file_path": "ticket-065.json",
       "status": "draft",
       "area": "infra"
+    },
+    {
+      "number": 66,
+      "file_path": "ticket-066.json",
+      "status": "active",
+      "area": "vm-v3"
+    },
+    {
+      "number": 67,
+      "file_path": "ticket-067.json",
+      "status": "active",
+      "area": "vm-profiles"
+    },
+    {
+      "number": 68,
+      "file_path": "ticket-068.json",
+      "status": "active",
+      "area": "observability"
+    },
+    {
+      "number": 69,
+      "file_path": "ticket-069.json",
+      "status": "active",
+      "area": "tui"
+    },
+    {
+      "number": 70,
+      "file_path": "ticket-070.json",
+      "status": "active",
+      "area": "developer-experience"
     }
   ],
-  "updated_at": "2026-11-24T14:32:21.243Z"
+  "updated_at": "2026-11-24T12:25:23.851Z"
 }

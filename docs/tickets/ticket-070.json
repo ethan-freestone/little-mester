@@ -1,0 +1,90 @@
+{
+  "id": 70,
+  "file_path": "/workspace/docs/tickets/ticket-070.json",
+  "number": 70,
+  "area": "developer-experience",
+  "type": "feature",
+  "status": "active",
+  "title": "Repository-first VM CLI, pinned profile dispatch, and safe settings UX",
+  "objective": "Part of integration ticket #66 and shares a contract with #67. Provide a simple public ./lab vm interface while preserving the separation between source checkout, immutable installed runtime SHA and persistent profile. Also fix the observed installer bytecode defect and make ordinary supported OpenCode settings usable without weakening enforced policy. The shared design baseline is docs/vm-usability-integration.md; profile CLI dispatch uses the fixed helper and pinned runtime while preserving the singleton and global preparation compatibility paths. The fixed #20 singleton is transitional and mutually exclusive with profiles; the original feat/vm-approach development VM remains concurrent and untouched.",
+  "created_at": "2026-11-23T23:21:29.454Z",
+  "updated_at": "2026-11-24T12:25:23.851Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "A documented `./lab vm [--profile NAME]` grammar covers common bootstrap/control update, install, up, status, ssh, auth, tui, down, list/show, confirmed reset/removal and public acceptance; default profile is predictable, profile option placement is consistent, and global commands reject --profile.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Install derives the committed candidate SHA from the invoking checkout, reuses or creates the immutable protected install, and pins a new profile. All later profile commands dispatch only through that profile's recorded SHA; checkout changes have no implicit upgrade effect.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "`--unsafe-recurse` without explicit `--dir` means `--dir .`; explicit `--dir` wins. A different independent clone is an ordinary workspace unless it violates existing containment/safety checks. Reassignment is owner-friendly but explicit and lifecycle-safe.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Normal install/up/status/ssh/auth/tui/down and public acceptance are coherent, actionable, do not require users to manage SHA/paths/systemd primitives, and never silently destroy persistent state or fake real provider authentication.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Fix root cause of generated `__pycache__/code-update-transaction.cpython-314.pyc` in the immutable install; preserve strict manifest integrity and pass real install→system provision→pinned-tree verify→start regression without manual deletion.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "Ordinary supported preferences remain user-changeable/persistent while root-enforced permissions, plugins, provider/network policy and sharing remain protected; errors identify safe relative file and expected/observed metadata.",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "The public CLI exposes installations and prune with read-only dry-run, exact TTY confirmation, locked revalidation and no --yes bypass; global operations reject --profile. Preserve ./lab vm system ... as the fixed singleton route and ./lab vm prepare-dependencies as global host dependency setup. A common signed, owner-authorized artifact bootstraps/updates the helper and four manifest-owned singleton guards identically on Ubuntu, Debian, Arch and CachyOS; the same fixed helper performs explicit profile SHA-runtime installation from the committed Git tree. Apt/pacman are used only for system dependencies; the validated distro IDs are Ubuntu/Debian→apt and Arch/CachyOS→pacman. Common and legacy fixed-system update/rollback transactions share the exclusive maintenance lease, code-update lock and typed versioned marker; journals/markers precede every protected mutation, foreign owners refuse, and recovery is transaction-bound (with explicit journal-proven legacy v0 handling). Bootstrap requires either exact baseline interlocks on all four installed singleton units or all four singleton unit names absent (not masked) with no pre-existing drop-ins, state or jobs; in the absent case it installs the four manifest-owned guards before a later singleton install. Partial/masked/unknown states refuse. Temporary mutual exclusion uses the common race-safe shared/exclusive admission lock, leaves feat/vm-approach ungated, and checks actual host memory plus active-profile headroom. Both fixed-system verifiers enforce exact baseline or manifest-bound drop-in sets and ordered commands; invalid/partial manifests fail closed. Fresh fixed-system install also acquires the maintenance lease before safely creating any absent lock substrate, then holds the code-update lock and a protected-fixed-system install journal/marker before VM accounts/assets/unit files through provisioning, daemon-reload and exact verifier commit; lock release is not allowed before completion. Common bootstrap in the all-absent state safely establishes only the exact code-lock substrate under its maintenance lease; the workspace verifier permits no 20 drop-in only when the assignment is absent and the unit is stopped, and requires exact 20 bytes whenever an assignment exists.",
+      "status": "pending"
+    },
+    {
+      "id": "A8",
+      "text": "Profile requests use only the fixed helper’s bounded versioned schema; the common signed bootstrap/control artifact is verified against the administrator-enrolled key and absent/incompatible helper diagnostics name the common bootstrap prerequisite. All post-install commands use the profile-pinned runtime, not checkout code. The helper request/TTY contract keeps interactive stdin intact and rejects arbitrary argv/path/environment, incompatible APIs and confirmation bypasses.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "CLI parser/dispatch integration tests for option grammar, default profile, help, already-installed state, workspace precedence/reassignment, acceptance and confirmed reset/remove.",
+      "Ensure profile commands dispatch to recorded install A after checkout changes to B; installation of an existing profile with a different SHA must not silently retarget it.",
+      "Actual install-worker/import/provision sequence regression verifies no bytecode or generated artifacts and then re-runs exact installed-tree validation/start gate.",
+      "OpenCode V2 CLI/TUI settings reference: verify user-facing preference commands and persisted values against protected configuration; test enforced keys cannot be overwritten.",
+      "Acceptance remains owner-mediated for real OpenAI auth and Ariadne lifecycle; no credential use in automated tests.",
+      "CLI help/parser/dispatch cases for installations/prune, `--profile` rejection on global operations, status/reference output and redaction, dry-run read-only behavior, TTY exact-set confirmation, changed-set abort, and refusal of `--yes`/noninteractive pruning.",
+      "Compatibility regression proving `./lab vm system ...` still routes only to the fixed singleton and `./lab vm prepare-dependencies` remains the existing global prerequisite command.",
+      "Helper request-schema tests for unknown operations/fields, arbitrary paths/argv, absent package/enrollment, API mismatch-before-effects and proof profile operations dispatch to the stored SHA rather than checkout code.",
+      "PTY integration tests exercise the real public profile and singleton TUI routes with resize, Ctrl+C/input, disconnect, exit-status preservation and non-TTY refusal.",
+      "Metrics UI tests cover exact availability codes per sensor, null/empty unavailable values, no fabricated zeros, readable per-sensor reason labels and stale last-known values after two seconds.",
+      "CLI regression distinguishes the fixed system singleton, default named profile, and original feat/vm-approach development VM; profile/singleton conflict errors name blockers while the development VM remains routable and ungated. Test package-owned drop-in install/removal and preserve base singleton artifacts.",
+      "Exercise profile start admission with actual MemAvailable and active profile cgroup reservations; verify development VM memory usage lowers availability and failed admission leaves every existing VM running.",
+      "Singleton acceptance-verifier regression runs against the exact baseline without the signed control package and after package installation. It accepts only exact manifest-bound 95-profile-exclusion drop-ins and ordered commands on VM/proxy/workspace/metrics units, rejects missing/modified/reordered/extra/unowned guard files or commands, and preserves all base-unit and existing owner-acceptance checks.",
+      "Ledger supersession: any earlier singular “package-owned drop-in” test wording means the four exact package-owned guard drop-ins on the fixed singleton VM/proxy/workspace/metrics components. Preserve the current baseline without the package and the exact manifest-bound verifier allowlist after installation; do not weaken other singleton checks.",
+      "Common installation compatibility tests run bootstrap, control update/recovery, fixed-system verify/update/rollback and profile install using identical CLI/API/artifact semantics on Ubuntu and CachyOS; apt/pacman install only host dependencies. Test early transaction-marker creation before any fixed-system asset mutation, foreign-owner marker refusal in both directions, and exact marker-owner recovery.",
+      "Supersession for earlier test wording: “package absent/install package/package-owned drop-in” refers to common bootstrap absent/present and signed control-artifact ownership, not native package-manager delivery. Exercise both fixed-system verifiers (including vm-system-install update/rollback), and preserve identical commands across Ubuntu/CachyOS.",
+      "Fixed-system marker migration regression: the legacy installer/rollback emits typed owner/operation/transaction/SHA records and durable journals before any protected guard/file mutation; a crash in each phase is recovered only by the matching owner and candidate. Test prepared-journal-without-marker only when all target identities remain unchanged; marker-without-journal and foreign/unknown schemas refuse. Explicitly test legacy fixed marker v0 matching one unique snapshot, and refusal for ambiguous snapshots.",
+      "Verifier allowlist fixtures test strict exact baseline drop-in sets on all four units (no extra drop-ins) and exact manifest-bound expanded sets after bootstrap. Missing/invalid manifest plus any 95 guard, present manifest plus missing/modified guard, wrong digest, altered command/order, or extra/unowned drop-in fails in both system-acceptance and vm-system-install update/rollback. Bootstrap refuses when any baseline 90 guard/effective marker interlock is absent.",
+      "Bootstrap artifact regression installs the common systemd-tmpfiles rule for the stable root-owned control lock directory, safely creates/validates it on initial bootstrap before the rule exists, and verifies lock modes/path identities across reboot on Ubuntu and CachyOS.",
+      "Bootstrap-state supersession: earlier wording that bootstrap must refuse if any baseline 90 guard is missing applies only when any fixed singleton component unit is installed. The only other accepted state is all four unit fragments absent with no singleton state/jobs; bootstrap installs all four exact manifest-bound 95 guards in advance, and future fixed-system install must preserve/verify them. Partial/masked/unknown sets refuse.",
+      "Absent-singleton bootstrap edge: the all-absent accepted state also requires no pre-existing fixed-unit drop-in files, singleton state, masks or jobs. The common bootstrap creates only its exact four 95 guard files; later fixed-system installation loads and verifies them. This supersedes any test wording that only checks unit fragments/jobs.",
+      "Fresh fixed-system install transaction regression begins with no /etc/little-mester-vm directory or lm-vm-control group: safely create/validate exact root-only maintenance lock substrate, then group/config directory and code-update lock; publish protected-fixed-system/install journal+typed marker before VM accounts, state dirs, drop-ins, base units or provisioned state. Hold both locks through provisioning, daemon-reload and exact baseline/manifest guard verification; install 90 guards before base unit fragments and preserve preinstalled 95 guards. Fault-inject all stages, recover only matching journaled objects, and prove no automatic VM start or deletion of pre-existing state.",
+      "Debian prerequisite adapter regression: current host-dependencies.py rejects ID=debian, so implementation must add and test explicit Debian→apt mapping with package availability/version previews, no upgrade/removal, and all existing KVM/systemd/tool capability checks. Run identical CLI/control-artifact tests on Ubuntu, Debian, Arch and CachyOS; unknown distro IDs fail closed.",
+      "Common bootstrap safe-substrate regression covers missing /etc config directory/group/code-update lock: create only the exact validated group, directory and lock while holding the root-only maintenance lease, then acquire code lock before transaction marker/helper/guard installation. Retry after interruptions before the journal is idempotent; foreign/extra state refuses. Test both all-absent bootstrap and installed-unit fail-closed cases.",
+      "Workspace verifier state matrix: both system-acceptance static layout verification and vm-system-install update/rollback accept a stopped unassigned singleton only with no assignment record and no workspace 20 drop-in; if assignment exists, require exact 20 bytes/path identity. Assignment/drop-in mismatch, running unassigned state for live acceptance, or partial guard sets fail. Full live owner acceptance still requires assigned workspace.",
+      "Distribution matrix supersession: all earlier two-host Ubuntu/CachyOS-only test wording is incomplete; test all four required IDs—Ubuntu, Debian, Arch and CachyOS—with common control/runtime behavior and apt/pacman limited to prerequisites."
+    ],
+    "created": [],
+    "cases": [
+      "Owner reports install generated lib/vm/__pycache__/code-update-transaction.cpython-314.pyc inside the pinned SHA tree; immutable verification refused the tree. Owner manually removed the generated file and startup succeeded. This is a known defect to fix at source, not a supported workaround.",
+      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence."
+    ]
+  },
+  "models_used": []
+}

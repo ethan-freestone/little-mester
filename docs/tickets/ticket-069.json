@@ -1,0 +1,54 @@
+{
+  "id": 69,
+  "file_path": "/workspace/docs/tickets/ticket-069.json",
+  "number": 69,
+  "area": "tui",
+  "type": "bug",
+  "status": "active",
+  "title": "Make Ctrl+C and Escape reliable through the interactive VM PTY path",
+  "objective": "Part of integration ticket #66. Diagnose owner-reported intermittent Ctrl+C/Escape in the complete terminal→public launcher→SSH/PTTY→tmux→OpenCode path, then fix the demonstrated layer without weakening clipboard or host security protections.",
+  "created_at": "2026-11-23T23:21:29.447Z",
+  "updated_at": "2026-11-24T12:25:23.843Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "A source-backed behavior matrix distinguishes Ctrl+C/Escape in ordinary prompt entry, active generation, the exit-confirm modal and other menus; unspecified OpenCode contexts are not assigned invented semantics.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "The full interactive path reliably delivers the intended keys/signals and preserves normal local-terminal-like input, output, resize, reattach and session behavior.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Regression coverage exercises actual PTYs and the relevant launcher/SSH/tmux boundary, not only mocked key handlers; failures produce bounded actionable diagnostics.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Existing SSH restrictions, tmux/session identity, terminal clipboard protections and host security boundary remain intact; EscapeChar=none is not treated as an OSC-52 defense.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "The public helper request protocol does not consume terminal input: it reads bounded JSON first, then reopens the controlling TTY for the interactive client, preserves foreground process group and stdin/stdout/stderr, resize/signals, and returns the exact SSH exit status. Profile private keys are read only from their canonical protected paths, never staged in a workspace or generic temp directory, and strict guest host-key pinning is used without TOFU.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Reproduce repeated key cases through a controlling PTY at the supported pinned OpenCode binary and distinguish bytes from SIGINT at each PTY boundary.",
+      "Cover generation, ordinary prompt, exit-confirm cancel/confirm and supported menu behavior; test SSH disconnect/tmux reattach.",
+      "Add actual-PTY regression for the production interactive wrapper and retain existing key-binding unit coverage.",
+      "Owner performs final interactive Ariadne validation and clipboard canary under the documented safe terminal configuration.",
+      "Production-helper PTY test sends the JSON request separately from keystrokes typed after SSH starts; assert controlling TTY/foreground group, real input bytes, resize, Ctrl+C, exact exit status and non-TTY refusal. Verify no secret key bytes in argv/env/logs/temp/workspace and strict guest host-key pinning before first SSH."
+    ],
+    "created": [],
+    "cases": [
+      "Owner reports OpenCode TUI is operational on Ariadne but Ctrl+C/Escape behavior is intermittent. Exact failing context/key sequence and underlying cause are not yet established.",
+      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence."
+    ]
+  },
+  "models_used": []
+}
