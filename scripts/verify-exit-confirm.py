@@ -44,6 +44,8 @@ ROOT = DEFAULT_ROOT
 PLUGIN = os.path.join(ROOT, "agent", "opencode", "plugins", "little-mester-exit-confirm")
 
 DIALOG_TEXT = "Close Little Mester?"
+FAST_ESCAPE_GAP_SECONDS = 0.030
+FAST_ESCAPE_MAX_ELAPSED_NS = 35_000_000
 OPENCODE_BINARY = None
 CLI_CONFIG = {
     "plugins": [PLUGIN],
@@ -333,11 +335,28 @@ class Driver:
         self.child.send(text)
         self.wait(1.2)
 
-    def send_fast(self, first, second, *, gap=0.035):
-        self.child.send(first)
-        time.sleep(gap)
-        self.child.send(second)
+    def send_fast(self, first, second, *, gap=FAST_ESCAPE_GAP_SECONDS):
+        previous_delay = self.child.delaybeforesend
+        try:
+            self.child.delaybeforesend = None
+            started_ns = time.monotonic_ns()
+            try:
+                self.child.send(first)
+            finally:
+                self.child.delaybeforesend = previous_delay
+
+            time.sleep(gap)
+
+            self.child.delaybeforesend = None
+            try:
+                self.child.send(second)
+                elapsed_ns = time.monotonic_ns() - started_ns
+            finally:
+                self.child.delaybeforesend = previous_delay
+        finally:
+            self.child.delaybeforesend = previous_delay
         self.wait(0.25)
+        return elapsed_ns
 
     def ctrl(self, key):
         self.child.sendcontrol(key)
@@ -498,18 +517,24 @@ def main():
         driver.ctrl("c")
         failures.append(not check("Ctrl+C opens the confirmation dialog", driver.alive() and driver.dialog_visible()))
 
-        # The guest's tmux client must not merge a fast Escape+n sequence into
-        # an Alt+n key before OpenCode receives Escape as its own event.
+        # This bounds the driver's writes, not when tmux/OpenCode receive them.
+        # The guest's tmux client must not merge Escape+n into Alt+n.
         if driver.via_tmux:
             fast_escape_cancelled = True
             for trial in range(1, 11):
-                driver.send_fast("\x1b", "n")
+                elapsed_ns = driver.send_fast("\x1b", "n")
+                timing_valid = elapsed_ns <= FAST_ESCAPE_MAX_ELAPSED_NS
+                failures.append(not check(
+                    "fast Escape+n driver-write interval (requested 30 ms, "
+                    f"maximum 35 ms; {trial}/10: {elapsed_ns / 1_000_000:.3f} ms)",
+                    timing_valid,
+                ))
                 driver.buffer = ""
                 driver.ctrl("c")
                 trial_cancelled = driver.alive() and driver.dialog_visible()
                 fast_escape_cancelled = fast_escape_cancelled and trial_cancelled
                 failures.append(not check(
-                    f"fast Escape+n cancels before Ctrl+C reopens ({trial}/10)",
+                    f"fast Escape+n cancellation outcome before Ctrl+C reopens ({trial}/10)",
                     trial_cancelled))
                 if not trial_cancelled and driver.alive():
                     # Ctrl+C cancelled the dialog instead of reopening it; restore

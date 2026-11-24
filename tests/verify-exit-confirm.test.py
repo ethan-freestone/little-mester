@@ -30,6 +30,175 @@ verifier = load_module("verify_exit_confirm", SCRIPT_PATH)
 contract = load_module("verify_exit_confirm_contract", CONTRACT_PATH)
 
 
+class FakeClock:
+    def __init__(self):
+        self.now_ns = 123
+        self.sleeps = []
+
+    def monotonic_ns(self):
+        return self.now_ns
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now_ns += round(seconds * 1_000_000_000)
+
+    def advance(self, nanoseconds):
+        self.now_ns += nanoseconds
+
+
+class DelayAwareChild:
+    def __init__(self, clock, *, delaybeforesend=0.05, write_ns=(0, 0),
+                 hidden_second_delay_ns=0, fail_on_send=None):
+        self.clock = clock
+        self.delaybeforesend = delaybeforesend
+        self.write_ns = write_ns
+        self.hidden_second_delay_ns = hidden_second_delay_ns
+        self.fail_on_send = fail_on_send
+        self.calls = []
+
+    def send(self, text):
+        send_number = len(self.calls) + 1
+        self.calls.append((text, self.delaybeforesend))
+        if self.delaybeforesend is not None:
+            self.clock.sleep(self.delaybeforesend)
+        if send_number == 2 and self.hidden_second_delay_ns:
+            self.clock.sleep(self.hidden_second_delay_ns / 1_000_000_000)
+        self.clock.advance(self.write_ns[send_number - 1])
+        if send_number == self.fail_on_send:
+            raise RuntimeError("injected send failure")
+
+
+class FastSendTimingTests(unittest.TestCase):
+    def make_driver(self, clock, child, *, drain_ns=0):
+        driver = object.__new__(verifier.Driver)
+        driver.child = child
+        waits = []
+
+        def drain(seconds):
+            waits.append((seconds, child.delaybeforesend))
+            clock.advance(drain_ns)
+
+        driver.wait = drain
+        return driver, waits
+
+    def run_fast_send(self, driver, clock):
+        with (
+            mock.patch.object(verifier.time, "monotonic_ns", side_effect=clock.monotonic_ns),
+            mock.patch.object(verifier.time, "sleep", side_effect=clock.sleep),
+        ):
+            return driver.send_fast("\x1b", "n")
+
+    def test_fast_send_measures_both_writes_but_not_drain_and_restores_before_drain(self):
+        clock = FakeClock()
+        child = DelayAwareChild(clock, write_ns=(1_000_000, 2_000_000))
+        driver, waits = self.make_driver(clock, child, drain_ns=500_000_000)
+
+        elapsed_ns = self.run_fast_send(driver, clock)
+
+        self.assertEqual(child.calls, [("\x1b", None), ("n", None)])
+        self.assertEqual(clock.sleeps, [0.030])
+        self.assertEqual(elapsed_ns, 33_000_000)
+        self.assertEqual(waits, [(0.25, 0.05)])
+        self.assertEqual(clock.now_ns - 123, elapsed_ns + 500_000_000)
+        self.assertEqual(child.delaybeforesend, 0.05)
+
+    def test_fast_send_restores_nondefault_and_none_delays(self):
+        for previous_delay in (0.017, None):
+            with self.subTest(previous_delay=previous_delay):
+                clock = FakeClock()
+                child = DelayAwareChild(clock, delaybeforesend=previous_delay)
+                driver, waits = self.make_driver(clock, child)
+
+                self.assertEqual(self.run_fast_send(driver, clock), 30_000_000)
+
+                self.assertEqual(child.calls, [("\x1b", None), ("n", None)])
+                self.assertEqual(waits, [(0.25, previous_delay)])
+                self.assertIs(child.delaybeforesend, previous_delay)
+
+    def test_fast_send_restores_delay_on_either_send_exception(self):
+        for previous_delay in (0.017, None):
+            for fail_on_send in (1, 2):
+                with self.subTest(previous_delay=previous_delay, fail_on_send=fail_on_send):
+                    clock = FakeClock()
+                    child = DelayAwareChild(
+                        clock, delaybeforesend=previous_delay, fail_on_send=fail_on_send,
+                    )
+                    driver, waits = self.make_driver(clock, child)
+
+                    with self.assertRaisesRegex(RuntimeError, "injected send failure"):
+                        self.run_fast_send(driver, clock)
+
+                    self.assertTrue(all(delay is None for _, delay in child.calls))
+                    self.assertIs(child.delaybeforesend, previous_delay)
+                    self.assertEqual(waits, [])
+
+    def test_hidden_second_send_delay_fails_the_35ms_timing_bound(self):
+        clock = FakeClock()
+        child = DelayAwareChild(clock, write_ns=(1, 2), hidden_second_delay_ns=50_000_000)
+        driver, _ = self.make_driver(clock, child)
+
+        elapsed_ns = self.run_fast_send(driver, clock)
+
+        self.assertGreater(elapsed_ns, verifier.FAST_ESCAPE_MAX_ELAPSED_NS)
+        self.assertFalse(elapsed_ns <= verifier.FAST_ESCAPE_MAX_ELAPSED_NS)
+
+    def test_exact_35ms_is_accepted_and_one_nanosecond_over_is_rejected(self):
+        boundary = verifier.FAST_ESCAPE_MAX_ELAPSED_NS
+        for extra_write_ns, expected_elapsed, expected_valid in (
+            (0, boundary, True),
+            (1, boundary + 1, False),
+        ):
+            with self.subTest(extra_write_ns=extra_write_ns):
+                clock = FakeClock()
+                child = DelayAwareChild(
+                    clock, write_ns=(2_500_000, 2_500_000 + extra_write_ns),
+                )
+                driver, _ = self.make_driver(clock, child)
+
+                elapsed_ns = self.run_fast_send(driver, clock)
+
+                self.assertEqual(elapsed_ns, expected_elapsed)
+                self.assertEqual(
+                    elapsed_ns <= verifier.FAST_ESCAPE_MAX_ELAPSED_NS,
+                    expected_valid,
+                )
+
+    def test_ordinary_send_keeps_the_configured_delay(self):
+        clock = FakeClock()
+        child = DelayAwareChild(clock, delaybeforesend=0.05, write_ns=(1,))
+        driver, waits = self.make_driver(clock, child)
+
+        driver.send("x")
+
+        self.assertEqual(child.calls, [("x", 0.05)])
+        self.assertEqual(clock.sleeps, [0.05])
+        self.assertEqual(waits, [(1.2, 0.05)])
+        self.assertEqual(child.delaybeforesend, 0.05)
+
+    def test_real_pexpect_fast_sends_skip_only_the_implicit_delay(self):
+        child = verifier.pexpect.spawn("/bin/cat", [], encoding="utf-8", timeout=2)
+        child.delaybeforesend = 0.05
+        clock = FakeClock()
+        driver, waits = self.make_driver(clock, child)
+        try:
+            with (
+                mock.patch.object(verifier.time, "monotonic_ns", side_effect=clock.monotonic_ns),
+                mock.patch.object(verifier.time, "sleep", side_effect=clock.sleep),
+            ):
+                elapsed_ns = driver.send_fast("\x1b", "n")
+                self.assertEqual(clock.sleeps, [0.030])
+                self.assertEqual(elapsed_ns, 30_000_000)
+                self.assertEqual(child.delaybeforesend, 0.05)
+
+                driver.send("x")
+
+            self.assertEqual(clock.sleeps, [0.030, 0.05])
+            self.assertEqual(waits, [(0.25, 0.05), (1.2, 0.05)])
+            self.assertEqual(child.delaybeforesend, 0.05)
+        finally:
+            child.close(force=True)
+
+
 class IsolatedTmuxConfigTests(unittest.TestCase):
     def test_canonical_config_is_only_stripped_of_the_two_host_sources(self):
         expected = b"set-option -s escape-time 10\n"
