@@ -59,6 +59,19 @@ def cloud_init_result(status, *, return_code=0, extended_status=None,
 
 
 class SystemdPolicyTests(unittest.TestCase):
+    def test_loading_update_transaction_does_not_write_into_immutable_tree(self):
+        with tempfile.TemporaryDirectory(prefix="vm-immutable-import-") as temporary:
+            root = pathlib.Path(temporary)
+            helper = root / "lib/vm/code-update-transaction.py"
+            helper.parent.mkdir(parents=True)
+            helper.write_text("sentinel = 'loaded'\n", encoding="utf-8")
+
+            module = system_installer._code_update_transaction(root)
+
+            self.assertEqual(module.sentinel, "loaded")
+            self.assertTrue(system_installer.sys.dont_write_bytecode)
+            self.assertFalse((helper.parent / "__pycache__").exists())
+
     def test_workspace_daemon_acceptance_checks_kernel_nnp_not_unit_property(self):
         active = {"ActiveState": "active", "MainPID": "123"}
         with mock.patch.object(acceptance, "service_state", return_value=active), \

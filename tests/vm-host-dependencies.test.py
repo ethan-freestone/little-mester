@@ -153,16 +153,26 @@ class HostDependencyTests(unittest.TestCase):
 
     def test_only_validated_distribution_ids_select_backends(self):
         for distro, path, expected in (("ubuntu", dependencies.APT, "apt"),
+                                       ("debian", dependencies.APT, "apt"),
                                        ("cachyos", dependencies.PACMAN, "pacman"),
                                        ("arch", dependencies.PACMAN, "pacman")):
             with self.subTest(distro=distro), \
                  mock.patch.object(dependencies, "_os_release", return_value={"ID": distro}), \
                  mock.patch.object(dependencies, "_executable", side_effect=lambda p, selected=path: p == selected):
                 self.assertEqual(dependencies.detect_backend(), expected)
-        with mock.patch.object(dependencies, "_os_release", return_value={"ID": "debian", "ID_LIKE": "ubuntu"}), \
+        with mock.patch.object(dependencies, "_os_release", return_value={"ID": "linuxmint", "ID_LIKE": "ubuntu"}), \
              mock.patch.object(dependencies, "_executable", side_effect=lambda p: p == dependencies.APT), \
              self.assertRaisesRegex(dependencies.DependencyError, "not in the validated package mapping"):
             dependencies.detect_backend()
+
+    def test_debian_uses_the_explicit_apt_package_map(self):
+        with mock.patch.object(dependencies, "_os_release", return_value={"ID": "debian"}), \
+             mock.patch.object(dependencies, "_executable", side_effect=lambda p: p == dependencies.APT):
+            self.assertEqual(dependencies.detect_backend(), "apt")
+        package_list = dependencies.package_names("apt", "production")
+        self.assertIn("qemu-system-x86", package_list)
+        self.assertIn("virtiofsd", package_list)
+        self.assertEqual(package_list, dependencies.package_names("apt", "production"))
 
     def test_decline_stops_before_privileged_transaction(self):
         absent = [dependencies.Requirement("curl", "/usr/bin/curl", packages=(("apt", "curl"),))]
