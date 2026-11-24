@@ -7,7 +7,9 @@ import collections
 import http.server
 import importlib.util
 import json
+import os
 import pathlib
+import re
 import secrets
 import sys
 import threading
@@ -16,11 +18,30 @@ from urllib.parse import parse_qs, urlsplit
 
 
 HOST = "127.0.0.1"
-PORT = 32129
+DEFAULT_PORT = 32129
+PORT_ENVIRONMENT_VARIABLE = "LM_VM_METRICS_PORT"
 GUEST_PORT = 19532
 MAX_HISTORY = 60
 MAX_RESPONSE = 16 * 1024
 MIN_SAMPLE_INTERVAL = 0.4
+
+
+def configured_port(value: str | None) -> int:
+    """Select the fixed singleton port or a validated per-profile loopback port."""
+    if value is None:
+        return DEFAULT_PORT
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,5}", value):
+        raise ValueError(f"{PORT_ENVIRONMENT_VARIABLE} must be a decimal TCP port")
+    port = int(value)
+    if not 1024 <= port <= 65535:
+        raise ValueError(f"{PORT_ENVIRONMENT_VARIABLE} is outside the allowed port range")
+    return port
+
+
+# The fixed singleton retains its established default. The profile helper may
+# start one isolated service process per profile with its allocated loopback
+# port, keeping each process's run ID and history separate.
+PORT = configured_port(os.environ.get(PORT_ENVIRONMENT_VARIABLE))
 
 
 def load(name: str, filename: str):

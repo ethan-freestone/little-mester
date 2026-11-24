@@ -103,6 +103,13 @@ class MetricsHttpBoundaryTests(unittest.TestCase):
         self.assertEqual(self.request("/history?n=1&n=2")[0], 400)
         self.assertEqual(self.request("/metrics", host="attacker.example")[0], 400)
 
+    def test_listener_port_override_is_bounded_for_profile_instances(self):
+        self.assertEqual(metrics.configured_port(None), metrics.DEFAULT_PORT)
+        self.assertEqual(metrics.configured_port("23456"), 23456)
+        for value in ("", "80", "0", "65536", "+23456", " 23456", "２３４５６"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                metrics.configured_port(value)
+
     def test_writes_and_arbitrary_paths_are_rejected(self):
         status, data = self.request("/metrics", method="POST")
         self.assertEqual(status, 405)
