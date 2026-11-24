@@ -110,7 +110,7 @@ jobs:
       - name: Run maintenance fixture suite as root
         run: sudo python3 -B -I tests/vm-control-maintenance.test.py
       - name: Run owner enrollment fixture suite as root
-        run: sudo python3 -B -I tests/vm-profile-control-owner.test.py
+        run: sudo env LM_VM_REQUIRE_ACTUAL_SUDO_OWNER_REGRESSION=1 python3 -B -I tests/vm-profile-control-owner.test.py
 
   # ── 4. Transient hosted QEMU guest integration; no TCG fallback ───
   transient-qemu-integration:

@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterable
 
 ENROLLMENT_FILE = "/etc/little-mester-vm/control-owner.json"
 CONTROL_GROUP = "lm-vm-profile-control"
+ENROLLMENT_DIRECTORY_GROUP = "lm-vm-control"
 SCHEMA_VERSION = 1
 MAX_ENROLLMENT_BYTES = 256
 ENROLLMENT_DIRECTORY_MODE = 0o750
@@ -28,6 +29,7 @@ ENROLLMENT_FILE_MODE = 0o600
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
 _CANONICAL_UID = re.compile(r"^[1-9][0-9]*$")
+_CANONICAL_ACCOUNT_NAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}\$?$")
 
 
 class OwnerRefused(RuntimeError):
@@ -290,16 +292,16 @@ def _check_invocation(
     sudo_user: object,
 ) -> tuple[int, str]:
     if (type(real_uid) is not int or type(effective_uid) is not int
-            or effective_uid != 0 or real_uid <= 0):
-        raise OwnerRefused("owner authorization requires a root sudo invocation")
+            or real_uid != 0 or effective_uid != 0):
+        raise OwnerRefused("owner authorization requires a real/effective root sudo process")
     if not isinstance(sudo_uid, str) or not _CANONICAL_UID.fullmatch(sudo_uid):
         raise OwnerRefused("SUDO_UID is absent or not a canonical positive UID")
-    uid = int(sudo_uid)
-    if uid != real_uid:
-        raise OwnerRefused("SUDO_UID conflicts with the real invoking UID")
-    if (not isinstance(sudo_user, str) or not sudo_user
-            or sudo_user != sudo_user.strip()
-            or any(ord(char) < 0x21 or ord(char) == 0x7f for char in sudo_user)):
+    try:
+        uid = int(sudo_uid)
+    except ValueError as error:
+        raise OwnerRefused("SUDO_UID is outside the supported UID representation") from error
+    if (not isinstance(sudo_user, str)
+            or not _CANONICAL_ACCOUNT_NAME.fullmatch(sudo_user)):
         raise OwnerRefused("SUDO_USER is absent or invalid")
     return uid, sudo_user
 
@@ -336,6 +338,51 @@ def _resolve_account(
     return uid, primary_gid, account_name
 
 
+def _resolve_group_gid(
+    group_name: str,
+    *,
+    group_by_name: Callable[[str], object],
+    all_groups: Callable[[], Iterable[object]],
+    account_name: str | None = None,
+    primary_gid: int | None = None,
+) -> int:
+    try:
+        named_group = group_by_name(group_name)
+        entries = tuple(all_groups())
+    except Exception as error:
+        raise OwnerRefused(f"{group_name} group lookup failed") from error
+
+    group_gid = _field(named_group, "gr_gid")
+    named_name = _field(named_group, "gr_name")
+    if type(group_gid) is not int or group_gid <= 0 or named_name != group_name:
+        raise OwnerRefused(f"{group_name} group database entry is invalid")
+
+    matching_entry = False
+    account_is_member = False
+    try:
+        for entry in entries:
+            if _field(entry, "gr_name") == group_name:
+                entry_gid = _field(entry, "gr_gid")
+                if type(entry_gid) is not int or entry_gid != group_gid or matching_entry:
+                    raise OwnerRefused(f"{group_name} group database is inconsistent")
+                members = _field(entry, "gr_mem")
+                if not isinstance(members, (list, tuple)):
+                    raise OwnerRefused(f"{group_name} group membership data is invalid")
+                matching_entry = True
+                account_is_member = account_name is not None and account_name in members
+    except OwnerRefused:
+        raise
+    except (TypeError, ValueError) as error:
+        raise OwnerRefused(f"{group_name} group membership data is invalid") from error
+
+    if not matching_entry:
+        raise OwnerRefused(f"{group_name} group is absent from the group database")
+    if (account_name is not None and primary_gid != group_gid
+            and not account_is_member):
+        raise OwnerRefused("sudo owner is not a profile-control group member")
+    return group_gid
+
+
 def _resolve_control_group(
     *,
     account_name: str,
@@ -343,40 +390,13 @@ def _resolve_control_group(
     group_by_name: Callable[[str], object],
     all_groups: Callable[[], Iterable[object]],
 ) -> int:
-    try:
-        control_group = group_by_name(CONTROL_GROUP)
-        entries = tuple(all_groups())
-    except Exception as error:
-        raise OwnerRefused("profile-control group lookup failed") from error
-
-    control_gid = _field(control_group, "gr_gid")
-    control_name = _field(control_group, "gr_name")
-    if type(control_gid) is not int or control_gid <= 0 or control_name != CONTROL_GROUP:
-        raise OwnerRefused("profile-control group database entry is invalid")
-
-    matching_entry = False
-    supplementary_member = False
-    try:
-        for entry in entries:
-            if _field(entry, "gr_name") == CONTROL_GROUP:
-                entry_gid = _field(entry, "gr_gid")
-                if type(entry_gid) is not int or entry_gid != control_gid or matching_entry:
-                    raise OwnerRefused("profile-control group database is inconsistent")
-                members = _field(entry, "gr_mem")
-                if not isinstance(members, (list, tuple)):
-                    raise OwnerRefused("profile-control group membership data is invalid")
-                matching_entry = True
-                supplementary_member = account_name in members
-    except OwnerRefused:
-        raise
-    except (TypeError, ValueError) as error:
-        raise OwnerRefused("profile-control group membership data is invalid") from error
-
-    if not matching_entry:
-        raise OwnerRefused("profile-control group is absent from the group database")
-    if primary_gid != control_gid and not supplementary_member:
-        raise OwnerRefused("sudo owner is not a profile-control group member")
-    return control_gid
+    return _resolve_group_gid(
+        CONTROL_GROUP,
+        group_by_name=group_by_name,
+        all_groups=all_groups,
+        account_name=account_name,
+        primary_gid=primary_gid,
+    )
 
 
 def _authorize_owner(
@@ -413,10 +433,17 @@ def _authorize_owner(
         group_by_name=group_by_name,
         all_groups=all_groups,
     )
+    directory_group_gid = _resolve_group_gid(
+        ENROLLMENT_DIRECTORY_GROUP,
+        group_by_name=group_by_name,
+        all_groups=all_groups,
+    )
+    if directory_group_gid == control_group_gid:
+        raise OwnerRefused("profile-control and config-directory groups must be distinct")
     enrolled_uid = _parse_enrollment(_read_enrollment(
         control_path,
         owner_uid=enrollment_owner_uid,
-        directory_gid=control_group_gid,
+        directory_gid=directory_group_gid,
         file_gid=enrollment_file_gid,
         directory_mode=directory_mode,
         allowed_ancestor_uids=allowed_ancestor_uids,
@@ -435,8 +462,10 @@ def authorize_owner() -> OwnerIdentity:
     """Authorize and return the enrolled sudo caller using fixed host inputs.
 
     No path, UID, account, group, or request value is accepted from the caller.
-    The SUDO_* environment values are interpreted only as the conventional
-    sudo invocation context; they are not cryptographically authenticated.
+    Ordinary sudo runs this helper with real/effective UID 0/0. The SUDO_*
+    values identify the non-root caller and are checked against both passwd
+    lookup directions, but are not cryptographically authenticated; a
+    malicious root process can forge them.
     """
     return _authorize_owner(
         control_path=ENROLLMENT_FILE,

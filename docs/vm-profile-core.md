@@ -58,15 +58,21 @@ change before dispatching to this core.
 caller-provided path, identity, or request. It reads the fixed
 `/etc/little-mester-vm/control-owner.json` enrollment
 (`{"schema_version":1,"owner_uid":<positive integer>}`), requiring protected
-root-owned ancestry, a root:`lm-vm-profile-control` mode-`0750` enrollment
-directory, and a root:root mode-`0600`, single-link regular file. It validates
-the real/effective root sudo context, resolves `SUDO_UID` and `SUDO_USER` to one
-non-root account, checks primary or account-database supplementary membership
-in the fixed `lm-vm-profile-control` group, and returns immutable
-`OwnerIdentity(uid, primary_gid, account_name, control_group_gid)`. Missing,
-unsafe, changed, malformed, or mismatched state refuses without creating or
-repairing anything. `SUDO_*` values are conventional sudo context, not
-authenticated claims against a malicious root user or host administrator.
+root-owned ancestry, a root:`lm-vm-control` mode-`0750` enrollment directory,
+and a root:root mode-`0600`, single-link regular file. It independently resolves
+`lm-vm-control` for that directory check; the non-root owner need not belong to
+that shared config group. Ordinary sudo runs the helper with real/effective UID
+`0/0`; other process UIDs are refused even if `SUDO_*` is present. The gate
+requires canonical positive `SUDO_UID` and strictly formed `SUDO_USER`, resolves
+both passwd lookup directions to the same non-root account, and checks primary
+or account-database supplementary membership in the separate fixed
+`lm-vm-profile-control` authorization group. It returns immutable
+`OwnerIdentity(uid, primary_gid, account_name, control_group_gid)`, where
+`control_group_gid` is only the `lm-vm-profile-control` GID. Missing, unsafe,
+changed, malformed, or mismatched state refuses without creating or repairing
+anything. `SUDO_*` values are conventional sudo context, not authenticated
+claims: a malicious root process can forge them. This gate adds no parent
+process authentication.
 
 This is only an authorization primitive: it does not install sudoers rules,
 create the group or enrollment state, expose/install the fixed helper, inspect

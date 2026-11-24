@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import pathlib
+import pwd
 import signal
 import stat
 import sys
@@ -35,12 +36,13 @@ class OwnerFixture(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="vm-owner-gate-")
         self.root = pathlib.Path(self.temp.name)
         self.enrollment_owner_uid = os.geteuid()
-        self.control_gid = 46242 if self.enrollment_owner_uid == 0 else os.getegid()
+        self.directory_gid = 46241 if self.enrollment_owner_uid == 0 else os.getegid()
+        self.control_gid = 46242 if self.directory_gid != 46242 else 46243
         self.file_gid = 0 if self.enrollment_owner_uid == 0 else os.getegid()
         self.directory = self.root / "etc" / "little-mester-vm"
         self.directory.mkdir(mode=0o755, parents=True)
         os.chmod(self.root / "etc", 0o755)
-        os.chown(self.directory, self.enrollment_owner_uid, self.control_gid)
+        os.chown(self.directory, self.enrollment_owner_uid, self.directory_gid)
         os.chmod(self.directory, owner.ENROLLMENT_DIRECTORY_MODE)
         self.path = self.directory / "control-owner.json"
         self.account_gid = PRIMARY_GID
@@ -48,11 +50,17 @@ class OwnerFixture(unittest.TestCase):
         self._account_by_name_error = None
         self._account_by_uid_error = None
         self._group_by_name_error = None
+        self._directory_group_by_name_error = None
         self._groups_error = None
         self._group_gid_override = None
+        self._group_lookup_gid_override = None
+        self._directory_group_gid_override = None
+        self._directory_group_lookup_gid_override = None
+        self._omit_directory_group = False
         self._account_uid_by_name = CALLER_UID
         self._account_name_by_uid = ACCOUNT_NAME
         self._group_member_names = [ACCOUNT_NAME]
+        self._directory_group_member_names = []
         self._write_enrollment(CALLER_UID)
 
     def tearDown(self):
@@ -80,17 +88,33 @@ class OwnerFixture(unittest.TestCase):
         gid = self.control_gid if self._group_gid_override is None else self._group_gid_override
         return SimpleNamespace(gr_name=owner.CONTROL_GROUP, gr_gid=gid, gr_mem=list(self._group_member_names))
 
+    def _directory_group(self):
+        gid = (self.directory_gid if self._directory_group_gid_override is None
+               else self._directory_group_gid_override)
+        return SimpleNamespace(gr_name=owner.ENROLLMENT_DIRECTORY_GROUP, gr_gid=gid,
+                               gr_mem=list(self._directory_group_member_names))
+
     def _account_by_name(self, name: str):
         if self._account_by_name_error is not None:
             raise self._account_by_name_error
         return self._account(name, self._account_uid_by_name, self.account_gid)
 
     def _group_by_name(self, name: str):
-        if self._group_by_name_error is not None:
-            raise self._group_by_name_error
-        if name != owner.CONTROL_GROUP:
-            raise KeyError(name)
-        return self._group()
+        if name == owner.CONTROL_GROUP:
+            if self._group_by_name_error is not None:
+                raise self._group_by_name_error
+            group = self._group()
+            if self._group_lookup_gid_override is not None:
+                group.gr_gid = self._group_lookup_gid_override
+            return group
+        if name == owner.ENROLLMENT_DIRECTORY_GROUP:
+            if self._directory_group_by_name_error is not None:
+                raise self._directory_group_by_name_error
+            group = self._directory_group()
+            if self._directory_group_lookup_gid_override is not None:
+                group.gr_gid = self._directory_group_lookup_gid_override
+            return group
+        raise KeyError(name)
 
     def _account_by_uid(self, uid: int):
         if self._account_by_uid_error is not None:
@@ -100,23 +124,25 @@ class OwnerFixture(unittest.TestCase):
     def _all_groups(self):
         if self._groups_error is not None:
             raise self._groups_error
-        group = self._group()
+        groups = [self._group()]
         if not self._supplementary:
-            group.gr_mem = []
-        return [group]
+            groups[0].gr_mem = []
+        if not self._omit_directory_group:
+            groups.append(self._directory_group())
+        return groups
 
-    def authorize(self, *, invocation=None):
+    def authorize(self, *, invocation=None, all_groups=None):
         return owner._test_authorize_owner(
             control_path=str(self.path),
             enrollment_owner_uid=self.enrollment_owner_uid,
             enrollment_file_gid=self.file_gid,
             directory_mode=owner.ENROLLMENT_DIRECTORY_MODE,
-            invocation=(CALLER_UID, 0, str(CALLER_UID), ACCOUNT_NAME)
+            invocation=(0, 0, str(CALLER_UID), ACCOUNT_NAME)
             if invocation is None else invocation,
             account_by_name=self._account_by_name,
             account_by_uid=self._account_by_uid,
             group_by_name=self._group_by_name,
-            all_groups=self._all_groups,
+            all_groups=self._all_groups if all_groups is None else all_groups,
         )
 
     def _snapshot(self, path=None):
@@ -134,7 +160,7 @@ class OwnerFixture(unittest.TestCase):
             action()
         self.assertEqual(self._snapshot(), before)
 
-    def test_valid_identity_uses_resolved_primary_gid_and_dedicated_group_gid(self):
+    def test_valid_identity_uses_resolved_primary_gid_and_profile_control_gid(self):
         identity = self.authorize()
         self.assertEqual(identity, owner.OwnerIdentity(
             uid=CALLER_UID,
@@ -144,6 +170,22 @@ class OwnerFixture(unittest.TestCase):
         ))
         with self.assertRaises(dataclasses.FrozenInstanceError):
             identity.uid = 123
+
+    def test_shared_config_directory_uses_lm_vm_control_not_owner_group(self):
+        directory_info = os.stat(self.directory, follow_symlinks=False)
+        self.assertEqual(directory_info.st_gid, self.directory_gid)
+        self.assertNotEqual(self.directory_gid, self.control_gid)
+        self.assertEqual(self.authorize().control_group_gid, self.control_gid)
+
+    def test_owner_need_not_belong_to_shared_config_directory_group(self):
+        self._directory_group_member_names = []
+        self.assertEqual(self.authorize().uid, CALLER_UID)
+
+    def test_shared_group_membership_does_not_replace_profile_control_membership(self):
+        self._supplementary = False
+        self._directory_group_member_names = [ACCOUNT_NAME]
+        with self.assertRaises(owner.OwnerRefused):
+            self.authorize()
 
     def test_primary_group_membership_is_accepted_without_os_getgroups(self):
         self.account_gid = self.control_gid
@@ -165,17 +207,21 @@ class OwnerFixture(unittest.TestCase):
     def test_nonroot_missing_malformed_and_conflicting_sudo_context_refuse(self):
         cases = (
             (CALLER_UID, 1000, str(CALLER_UID), ACCOUNT_NAME),
-            (CALLER_UID, 0, None, ACCOUNT_NAME),
-            (CALLER_UID, 0, "", ACCOUNT_NAME),
-            (CALLER_UID, 0, "0", ACCOUNT_NAME),
-            (CALLER_UID, 0, "024680", ACCOUNT_NAME),
-            (CALLER_UID, 0, "+24680", ACCOUNT_NAME),
-            (CALLER_UID, 0, "24680x", ACCOUNT_NAME),
-            (CALLER_UID, 0, "24681", ACCOUNT_NAME),
-            (CALLER_UID, 0, str(CALLER_UID), None),
-            (CALLER_UID, 0, str(CALLER_UID), ""),
-            (CALLER_UID, 0, str(CALLER_UID), " fixture-owner"),
+            (CALLER_UID, 0, str(CALLER_UID), ACCOUNT_NAME),
+            (1000, 0, str(CALLER_UID), ACCOUNT_NAME),
+            (0, 0, None, ACCOUNT_NAME),
+            (0, 0, "", ACCOUNT_NAME),
             (0, 0, "0", "root"),
+            (0, 0, "024680", ACCOUNT_NAME),
+            (0, 0, "+24680", ACCOUNT_NAME),
+            (0, 0, "24680x", ACCOUNT_NAME),
+            (0, 0, "24681", ACCOUNT_NAME),
+            (0, 0, str(CALLER_UID), None),
+            (0, 0, str(CALLER_UID), ""),
+            (0, 0, str(CALLER_UID), " fixture-owner"),
+            (0, 0, str(CALLER_UID), "fixture/owner"),
+            (0, 0, str(CALLER_UID), "Fixture-Owner"),
+            (0, 0, str(CALLER_UID), "a" * 33),
         )
         for invocation in cases:
             with self.subTest(invocation=invocation), self.assertRaises(owner.OwnerRefused):
@@ -193,7 +239,7 @@ class OwnerFixture(unittest.TestCase):
 
         self._account_name_by_uid = ACCOUNT_NAME
         with self.assertRaises(owner.OwnerRefused):
-            self.authorize(invocation=(CALLER_UID, 0, str(CALLER_UID + 1), ACCOUNT_NAME))
+            self.authorize(invocation=(0, 0, str(CALLER_UID + 1), ACCOUNT_NAME))
 
     def test_account_lookup_errors_fail_closed(self):
         self._account_by_name_error = OSError("NSS unavailable")
@@ -274,22 +320,56 @@ class OwnerFixture(unittest.TestCase):
         with self.assertRaises(owner.OwnerRefused):
             self.authorize()
 
+    def test_shared_directory_group_lookup_and_nss_failures_refuse(self):
+        self._directory_group_by_name_error = KeyError(owner.ENROLLMENT_DIRECTORY_GROUP)
+        with self.assertRaises(owner.OwnerRefused):
+            self.authorize()
+
+        self._directory_group_by_name_error = None
+        self._omit_directory_group = True
+        with self.assertRaises(owner.OwnerRefused):
+            self.authorize()
+
+        self._omit_directory_group = False
+        self._directory_group_lookup_gid_override = self.directory_gid + 1
+        with self.assertRaises(owner.OwnerRefused):
+            self.authorize()
+
+        self._directory_group_lookup_gid_override = None
+        real_all_groups = self._all_groups
+        calls = 0
+
+        def fail_shared_group_enumeration():
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("shared group enumeration failed")
+            return real_all_groups()
+
+        with self.assertRaises(owner.OwnerRefused):
+            self.authorize(all_groups=fail_shared_group_enumeration)
+        self.assertEqual(calls, 2)
+
+    def test_authorization_and_config_directory_groups_cannot_alias_one_gid(self):
+        self._directory_group_gid_override = self.control_gid
+        with self.assertRaises(owner.OwnerRefused):
+            self.authorize()
+
     def test_group_database_absence_or_inconsistency_refuses(self):
         self._groups_error = None
         with mock.patch.object(self, "_all_groups", return_value=[]):
             with self.assertRaises(owner.OwnerRefused):
                 self.authorize()
 
-        self._group_gid_override = self.control_gid + 1
+        self._group_lookup_gid_override = self.control_gid + 1
         with self.assertRaises(owner.OwnerRefused):
             self.authorize()
 
     def test_directory_owner_group_and_exact_mode_are_protected(self):
-        original_gid = self.control_gid
-        self._group_gid_override = original_gid + 1
+        self._directory_group_gid_override = self.directory_gid + 1000
         with self.assertRaises(owner.OwnerRefused):
             self.authorize()
-        self._group_gid_override = None
+        self._directory_group_gid_override = None
 
         os.chmod(self.directory, 0o770)
         with self.assertRaises(owner.OwnerRefused):
@@ -321,7 +401,7 @@ class OwnerFixture(unittest.TestCase):
                 enrollment_owner_uid=self.enrollment_owner_uid,
                 enrollment_file_gid=self.file_gid,
                 directory_mode=owner.ENROLLMENT_DIRECTORY_MODE,
-                invocation=(CALLER_UID, 0, str(CALLER_UID), ACCOUNT_NAME),
+                invocation=(0, 0, str(CALLER_UID), ACCOUNT_NAME),
                 account_by_name=self._account_by_name,
                 account_by_uid=self._account_by_uid,
                 group_by_name=self._group_by_name,
@@ -459,7 +539,7 @@ class OwnerFixture(unittest.TestCase):
         file_info = os.stat(self.path, follow_symlinks=False)
         self.assertEqual((directory_info.st_uid, directory_info.st_gid,
                           stat.S_IMODE(directory_info.st_mode)),
-                         (0, self.control_gid, owner.ENROLLMENT_DIRECTORY_MODE))
+                         (0, self.directory_gid, owner.ENROLLMENT_DIRECTORY_MODE))
         self.assertEqual((file_info.st_uid, file_info.st_gid,
                           stat.S_IMODE(file_info.st_mode), file_info.st_nlink),
                          (0, 0, owner.ENROLLMENT_FILE_MODE, 1))
@@ -473,6 +553,44 @@ class OwnerFixture(unittest.TestCase):
             self.authorize()
         self.assertEqual(self._snapshot(), before)
 
+    def test_actual_sudo_context_and_passwd_records_authorize_through_fixture_seam(self):
+        invocation = (
+            os.getuid(),
+            os.geteuid(),
+            os.environ.get("SUDO_UID"),
+            os.environ.get("SUDO_USER"),
+        )
+        required = os.environ.get("LM_VM_REQUIRE_ACTUAL_SUDO_OWNER_REGRESSION") == "1"
+        sudo_uid = invocation[2]
+        is_sudo_context = (
+            invocation[0] == 0 and invocation[1] == 0
+            and isinstance(sudo_uid, str)
+            and owner._CANONICAL_UID.fullmatch(sudo_uid) is not None
+            and isinstance(invocation[3], str)
+        )
+        if not is_sudo_context:
+            if required:
+                self.fail("CI required the actual nonroot-origin sudo owner regression, but SUDO_* context is absent")
+            self.skipTest("requires a real/effective-root process with nonroot-origin SUDO_* context")
+
+        account_name = invocation[3]
+        self._group_member_names = [account_name]
+        self._write_enrollment(int(sudo_uid))
+        identity = owner._test_authorize_owner(
+            control_path=str(self.path),
+            enrollment_owner_uid=self.enrollment_owner_uid,
+            enrollment_file_gid=self.file_gid,
+            directory_mode=owner.ENROLLMENT_DIRECTORY_MODE,
+            invocation=invocation,
+            account_by_name=pwd.getpwnam,
+            account_by_uid=pwd.getpwuid,
+            group_by_name=self._group_by_name,
+            all_groups=self._all_groups,
+        )
+        self.assertEqual(identity.uid, int(sudo_uid))
+        self.assertEqual(identity.account_name, account_name)
+        self.assertEqual(identity.control_group_gid, self.control_gid)
+
     def test_public_api_has_no_path_identity_or_request_parameters(self):
         self.assertEqual(str(inspect.signature(owner.authorize_owner)), "() -> 'OwnerIdentity'")
         captured = {}
@@ -482,7 +600,7 @@ class OwnerFixture(unittest.TestCase):
             return owner.OwnerIdentity(1, 2, "fixed", 3)
 
         with mock.patch.object(owner, "_authorize_owner", side_effect=capture), \
-                mock.patch.object(owner.os, "getuid", return_value=CALLER_UID), \
+                mock.patch.object(owner.os, "getuid", return_value=0), \
                 mock.patch.object(owner.os, "geteuid", return_value=0), \
                 mock.patch.dict(os.environ, {
                     "SUDO_UID": str(CALLER_UID),
@@ -495,6 +613,8 @@ class OwnerFixture(unittest.TestCase):
         self.assertEqual(captured["control_path"], owner.ENROLLMENT_FILE)
         self.assertEqual(captured["enrollment_owner_uid"], 0)
         self.assertEqual(captured["enrollment_file_gid"], 0)
+        self.assertEqual(captured["real_uid"], 0)
+        self.assertEqual(captured["effective_uid"], 0)
 
 
 if __name__ == "__main__":
