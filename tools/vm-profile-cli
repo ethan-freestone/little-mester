@@ -28,7 +28,9 @@ RESERVED_PROFILES = frozenset({
 PROFILE_NAME = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
 MODEL_ID = re.compile(r"openai/[A-Za-z0-9._+-]+\Z")
 THEME_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
-SHA = re.compile(r"[0-9a-f]{40}\Z")
+SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+GIT = "/usr/bin/git"
+GIT_TIMEOUT_SECONDS = 5
 
 
 def parser() -> argparse.ArgumentParser:
@@ -84,18 +86,46 @@ def _profile_name(value: str) -> str:
     return value
 
 
+def _git_environment() -> dict[str, str]:
+    """Return the same fixed, allowlisted environment used by runtime install."""
+    return {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/nonexistent",
+        "XDG_CONFIG_HOME": "/nonexistent",
+        "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_PAGER": "cat",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_LITERAL_PATHSPECS": "1",
+    }
+
+
 def _candidate_sha(repository: pathlib.Path) -> str:
     try:
         result = subprocess.run(
-            ["/usr/bin/git", "-C", str(repository), "rev-parse", "--verify", "HEAD"],
+            [GIT, "--no-replace-objects", "-C", str(repository),
+             "rev-parse", "--verify", "HEAD^{commit}"],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, check=False,
+            text=True, check=False, env=_git_environment(),
+            timeout=GIT_TIMEOUT_SECONDS, close_fds=True,
         )
-    except OSError as error:
-        raise ValueError("cannot run the fixed Git executable to resolve checkout HEAD") from error
+    except FileNotFoundError:
+        raise ValueError("fixed Git executable /usr/bin/git is unavailable; restore the host Git package") from None
+    except subprocess.TimeoutExpired:
+        raise ValueError("fixed Git timed out while resolving checkout HEAD; check repository access and retry") from None
+    except OSError:
+        raise ValueError("cannot start fixed Git executable /usr/bin/git; check the host Git installation") from None
     sha = result.stdout.strip()
     if result.returncode or not SHA.fullmatch(sha):
-        raise ValueError("checkout HEAD is not a full lowercase commit SHA")
+        raise ValueError(
+            "cannot resolve checkout HEAD^{commit}; ensure this is a committed Git checkout "
+            "with a full lowercase 40- or 64-character SHA"
+        )
     return sha
 
 

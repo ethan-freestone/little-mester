@@ -6,7 +6,9 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import json
+import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -28,6 +30,32 @@ CORE_SPEC.loader.exec_module(core)
 class ProfileCliTests(unittest.TestCase):
     def parse(self, *argv):
         return cli.parser().parse_args(list(argv))
+
+    @staticmethod
+    def _fixture_git_environment():
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith("GIT_")}
+        environment.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"})
+        return environment
+
+    @classmethod
+    def _make_repository(cls, repository, *, object_format="sha1"):
+        repository.mkdir()
+        command = ["/usr/bin/git", "init", "-q"]
+        if object_format != "sha1":
+            command.append(f"--object-format={object_format}")
+        command.append(str(repository))
+        environment = cls._fixture_git_environment()
+        subprocess.run(command, check=True, env=environment)
+        (repository / "source.txt").write_text("committed\n", encoding="utf-8")
+        subprocess.run(["/usr/bin/git", "-C", str(repository), "add", "source.txt"],
+                       check=True, env=environment)
+        subprocess.run(["/usr/bin/git", "-C", str(repository), "-c", "user.name=test",
+                        "-c", "user.email=test@example.invalid", "commit", "-qm", "candidate"],
+                       check=True, env=environment)
+        result = subprocess.run(["/usr/bin/git", "-C", str(repository), "rev-parse", "HEAD"],
+                                check=True, text=True, stdout=subprocess.PIPE, env=environment)
+        return repository, result.stdout.strip()
 
     def test_default_profile_and_option_position(self):
         args = self.parse("up")
@@ -61,25 +89,146 @@ class ProfileCliTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires a newly selected"):
             cli.request_for(self.parse("up", "--reassign"))
 
-    def test_install_pins_only_committed_full_head_and_checkout_path(self):
+    def test_install_pins_committed_sha1_and_sha256_heads_and_ignores_dirty_files(self):
         with tempfile.TemporaryDirectory(prefix="vm-profile-cli-git-") as temporary:
-            repository = pathlib.Path(temporary)
-            subprocess = cli.subprocess
-            subprocess.run(["/usr/bin/git", "init", "-q", str(repository)], check=True)
-            (repository / "source.txt").write_text("committed\n", encoding="utf-8")
-            subprocess.run(["/usr/bin/git", "-C", str(repository), "add", "source.txt"], check=True)
-            subprocess.run(["/usr/bin/git", "-C", str(repository), "-c", "user.name=test",
-                            "-c", "user.email=test@example.invalid", "commit", "-qm", "candidate"],
-                           check=True)
-            sha = subprocess.run(["/usr/bin/git", "-C", str(repository), "rev-parse", "HEAD"],
-                                 check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
-            (repository / "source.txt").write_text("uncommitted\n", encoding="utf-8")
-            request = cli.request_for(self.parse("install"), repository=repository)
-            self.assertEqual(request, {
-                "protocol": 1, "operation": "install", "profile": "default",
-                "repository": str(repository.resolve()), "commit_sha": sha,
-            })
-            self.assertEqual(core.validate_request(request), request)
+            for object_format, expected_length in (("sha1", 40), ("sha256", 64)):
+                with self.subTest(object_format=object_format):
+                    repository, sha = self._make_repository(
+                        pathlib.Path(temporary) / object_format, object_format=object_format)
+                    self.assertEqual(len(sha), expected_length)
+                    (repository / "source.txt").write_text("uncommitted\n", encoding="utf-8")
+                    request = cli.request_for(self.parse("install"), repository=repository)
+                    self.assertEqual(request, {
+                        "protocol": 1, "operation": "install", "profile": "default",
+                        "repository": str(repository.resolve()), "commit_sha": sha,
+                    })
+                    self.assertEqual(core.validate_request(request), request)
+
+    def test_candidate_lookup_uses_fixed_git_clean_environment_and_timeout(self):
+        sha = "a" * 40
+        completed = subprocess.CompletedProcess([], 0, stdout=sha + "\n")
+        with mock.patch.object(cli.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(cli._candidate_sha(pathlib.Path("/checkout")), sha)
+        argv, kwargs = run.call_args
+        self.assertEqual(argv[0], [cli.GIT, "--no-replace-objects", "-C", "/checkout",
+                                   "rev-parse", "--verify", "HEAD^{commit}"])
+        self.assertEqual(kwargs["env"], {
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/nonexistent",
+            "XDG_CONFIG_HOME": "/nonexistent",
+            "LC_ALL": "C",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_PAGER": "cat",
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_LITERAL_PATHSPECS": "1",
+        })
+        self.assertEqual(kwargs["timeout"], cli.GIT_TIMEOUT_SECONDS)
+        self.assertGreater(kwargs["timeout"], 0)
+        self.assertIs(kwargs["stderr"], subprocess.DEVNULL)
+
+    def test_candidate_rejects_sha_outside_exact_lowercase_grammar(self):
+        invalid_shas = ("a" * 39, "a" * 41, "a" * 63, "a" * 65,
+                        "A" * 40, "g" * 40)
+        for sha in invalid_shas:
+            with self.subTest(sha=sha):
+                completed = subprocess.CompletedProcess([], 0, stdout=sha + "\n")
+                with mock.patch.object(cli.subprocess, "run", return_value=completed):
+                    with self.assertRaisesRegex(ValueError, "full lowercase 40- or 64-character SHA"):
+                        cli._candidate_sha(pathlib.Path("/checkout"))
+
+    def test_hostile_git_environment_and_global_config_are_ignored(self):
+        with tempfile.TemporaryDirectory(prefix="vm-profile-cli-hostile-git-") as temporary:
+            root = pathlib.Path(temporary)
+            repository, sha = self._make_repository(root / "expected")
+            other_repository, _ = self._make_repository(root / "other")
+            global_config = root / "hostile-gitconfig"
+            global_config.write_text("[malformed\n", encoding="utf-8")
+            hostile_environment = {
+                "GIT_DIR": str(other_repository / ".git"),
+                "GIT_WORK_TREE": str(other_repository),
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.repositoryformatversion",
+                "GIT_CONFIG_VALUE_0": "999",
+                "GIT_CONFIG_GLOBAL": str(global_config),
+                "GIT_CONFIG_NOSYSTEM": "0",
+            }
+            with mock.patch.dict(os.environ, hostile_environment):
+                request = cli.request_for(self.parse("install"), repository=repository)
+            self.assertEqual(request["commit_sha"], sha)
+            self.assertEqual(request["repository"], str(repository.resolve()))
+
+    def test_linked_worktree_resolves_its_committed_head(self):
+        with tempfile.TemporaryDirectory(prefix="vm-profile-cli-worktree-") as temporary:
+            root = pathlib.Path(temporary)
+            repository, sha = self._make_repository(root / "repository")
+            linked_worktree = root / "linked-worktree"
+            subprocess.run(["/usr/bin/git", "-C", str(repository), "worktree", "add", "-q",
+                            "--detach", str(linked_worktree), sha],
+                           check=True, env=self._fixture_git_environment())
+            request = cli.request_for(self.parse("install"), repository=linked_worktree)
+            self.assertEqual(request["repository"], str(linked_worktree.resolve()))
+            self.assertEqual(request["commit_sha"], sha)
+
+    def test_unborn_nonrepository_and_noncommit_heads_are_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="vm-profile-cli-invalid-git-") as temporary:
+            root = pathlib.Path(temporary)
+            nonrepository = root / "not-a-repository"
+            nonrepository.mkdir()
+
+            unborn = root / "unborn"
+            unborn.mkdir()
+            subprocess.run(["/usr/bin/git", "init", "-q", str(unborn)], check=True,
+                           env=self._fixture_git_environment())
+
+            noncommit, _ = self._make_repository(root / "noncommit")
+            environment = self._fixture_git_environment()
+            blob = subprocess.run(["/usr/bin/git", "-C", str(noncommit), "hash-object", "-w",
+                                   "--stdin"], input=b"not a commit\n", check=True,
+                                  stdout=subprocess.PIPE, text=False, env=environment).stdout.decode().strip()
+            (noncommit / ".git" / "refs" / "heads" / "not-a-commit").write_text(
+                blob + "\n", encoding="ascii")
+            subprocess.run(["/usr/bin/git", "-C", str(noncommit), "symbolic-ref", "HEAD",
+                            "refs/heads/not-a-commit"], check=True, env=environment)
+
+            for repository in (nonrepository, unborn, noncommit):
+                with self.subTest(repository=repository.name), self.assertRaisesRegex(
+                        ValueError, r"cannot resolve checkout HEAD\^\{commit\}"):
+                    cli.request_for(self.parse("install"), repository=repository)
+
+    def test_git_failure_and_stderr_are_sanitized(self):
+        failure = subprocess.CompletedProcess([], 128, stdout="", stderr="PRIVATE-GIT-DETAIL")
+        with mock.patch.object(cli.subprocess, "run", return_value=failure):
+            with self.assertRaisesRegex(ValueError, "cannot resolve checkout") as raised:
+                cli._candidate_sha(pathlib.Path("/checkout"))
+        self.assertNotIn("PRIVATE-GIT-DETAIL", str(raised.exception))
+
+    def test_missing_git_and_timeout_have_sanitized_actionable_errors(self):
+        with mock.patch.object(cli.subprocess, "run", side_effect=FileNotFoundError("PRIVATE-MISSING")):
+            with self.assertRaisesRegex(ValueError, "fixed Git executable /usr/bin/git is unavailable") as raised:
+                cli._candidate_sha(pathlib.Path("/checkout"))
+        self.assertNotIn("PRIVATE-MISSING", str(raised.exception))
+
+        timeout = subprocess.TimeoutExpired(
+            [cli.GIT], cli.GIT_TIMEOUT_SECONDS, output="PRIVATE-OUTPUT", stderr="PRIVATE-STDERR")
+        with mock.patch.object(cli.subprocess, "run", side_effect=timeout):
+            with self.assertRaisesRegex(ValueError, "fixed Git timed out") as raised:
+                cli._candidate_sha(pathlib.Path("/checkout"))
+        self.assertNotIn("PRIVATE-OUTPUT", str(raised.exception))
+        self.assertNotIn("PRIVATE-STDERR", str(raised.exception))
+
+    def test_non_install_requests_do_not_resolve_head(self):
+        with mock.patch.object(cli.subprocess, "run") as run:
+            for argv in (("status",), ("up",), ("settings", "show"),
+                         ("profiles", "list"), ("installations",),
+                         ("prune", "--dry-run"), ("bootstrap",), ("control", "update")):
+                with self.subTest(argv=argv):
+                    cli.request_for(self.parse(*argv))
+        run.assert_not_called()
 
     def test_profile_command_requests_match_the_fixed_helper_protocol(self):
         requests = (
