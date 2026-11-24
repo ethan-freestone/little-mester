@@ -908,6 +908,260 @@ def _manager_identity(device: int, inode: int) -> dict[str, Any]:
     }
 
 
+def build_remove_source_baseline(
+    seed_profile: dict[str, Any],
+    phase: str,
+    step: int,
+    target_role: str,
+    publication_state: str,
+    partial_location: str | None = None,
+) -> dict[str, Any]:
+    """Build a complete, legally ordered remove snapshot for source checks."""
+    roles = ("vm", "proxy", "workspace", "metrics")
+    phase_steps = {"prepared": 0, "units": 1, "state": 2, "accounts": 3, "finalizing": 4}
+    if phase not in phase_steps or phase_steps[phase] != step:
+        raise ValueError("remove phase and step do not match")
+    if target_role not in roles:
+        raise ValueError("unknown unit role")
+    if publication_state not in {"not_started", "publication_intent", "published"}:
+        raise ValueError("unknown publication state")
+    if publication_state == "publication_intent":
+        if partial_location not in {"stage", "final"}:
+            raise ValueError("publication intent requires a stage or final partial location")
+    elif partial_location is not None:
+        raise ValueError("partial location applies only to publication intent")
+
+    profile = copy.deepcopy(seed_profile)
+    installation = profile["installation"]
+    transaction = profile["transaction"]
+    source_id = installation["id"]
+    source_records = installation["unit_publication"]
+    source_identities: dict[str, dict[str, Any]] = {}
+    for index, role in enumerate(roles):
+        record = source_records[role]
+        identity = record.get("fragment_identity", record.get("stage_identity"))
+        source_identities[role] = copy.deepcopy(
+            identity if identity is not None else _file_identity("regular", 8, 701 + index)
+        )
+
+    target_index = roles.index(target_role)
+    publication: dict[str, dict[str, Any]] = {}
+    for index, role in enumerate(roles):
+        if index < target_index:
+            publication[role] = {
+                "state": "published",
+                "fragment_identity": copy.deepcopy(source_identities[role]),
+            }
+        elif index > target_index or publication_state == "not_started":
+            publication[role] = {"state": "not_started"}
+        elif publication_state == "publication_intent":
+            publication[role] = {
+                "state": "publication_intent",
+                "stage_identity": copy.deepcopy(source_identities[role]),
+            }
+        else:
+            publication[role] = {
+                "state": "published",
+                "fragment_identity": copy.deepcopy(source_identities[role]),
+            }
+
+    installation["unit_publication"] = publication
+    transaction["unit_publication"] = copy.deepcopy(publication)
+    transaction["phase"] = phase
+    transaction["step"] = step
+    transaction["source_install_id"] = source_id
+
+    unit_prefixes = ("unit-file.", "unit-stage.", "unit-manager.")
+    transaction["expected"] = [
+        item
+        for item in transaction["expected"]
+        if not item["selector"].startswith(unit_prefixes)
+    ]
+
+    def add(item: dict[str, Any]) -> None:
+        transaction["expected"].append(item)
+
+    def present(selector: str, evidence: str, identity: dict[str, Any]) -> None:
+        add({"selector": selector, "evidence": evidence, "identity": copy.deepcopy(identity)})
+
+    def absent(selector: str, evidence: str, publication_state: str) -> None:
+        item: dict[str, Any] = {
+            "selector": selector,
+            "evidence": evidence,
+            "install_transaction_id": source_id,
+        }
+        if evidence == "verified_absent":
+            item["publication_state"] = publication_state
+            if selector.startswith("unit-manager."):
+                item["manager_identity"] = {
+                    "load_state": "not-found",
+                    "active_state": "inactive",
+                    "job_state": "none",
+                    "daemon_reload": "completed",
+                }
+        add(item)
+
+    if phase == "prepared":
+        if publication_state == "publication_intent" and partial_location == "stage":
+            present(
+                f"unit-stage.{target_role}",
+                "observed_present",
+                publication[target_role]["stage_identity"],
+            )
+        elif publication_state == "publication_intent":
+            identity = publication[target_role]["stage_identity"]
+            present(f"unit-file.{target_role}", "observed_present", identity)
+            present(
+                f"unit-manager.{target_role}",
+                "observed_present",
+                _manager_identity(identity["device"], identity["inode"]),
+            )
+        elif publication_state == "published":
+            identity = publication[target_role]["fragment_identity"]
+            present(f"unit-file.{target_role}", "observed_present", identity)
+            present(
+                f"unit-manager.{target_role}",
+                "observed_present",
+                _manager_identity(identity["device"], identity["inode"]),
+            )
+    else:
+        for role in roles:
+            record = publication[role]
+            state = record["state"]
+            if state == "not_started":
+                absent(f"unit-file.{role}", "never_created", state)
+                absent(f"unit-manager.{role}", "never_created", state)
+            elif state == "publication_intent":
+                identity = record["stage_identity"]
+                if partial_location == "stage":
+                    present(f"unit-stage.{role}", "removal_intent", identity)
+                    absent(f"unit-file.{role}", "verified_absent", state)
+                    absent(f"unit-manager.{role}", "verified_absent", state)
+                else:
+                    present(f"unit-file.{role}", "removal_intent", identity)
+                    present(
+                        f"unit-manager.{role}",
+                        "removal_intent",
+                        _manager_identity(identity["device"], identity["inode"]),
+                    )
+            else:
+                identity = record["fragment_identity"]
+                present(f"unit-file.{role}", "removal_intent", identity)
+                present(
+                    f"unit-manager.{role}",
+                    "removal_intent",
+                    _manager_identity(identity["device"], identity["inode"]),
+                )
+
+    return profile
+
+
+def replace_remove_expected_record(
+    profile: dict[str, Any], selector: str, replacement: dict[str, Any] | None
+) -> None:
+    """Replace a selector's evidence, never layering it over stale evidence."""
+    expected = profile["transaction"]["expected"]
+    expected[:] = [item for item in expected if item["selector"] != selector]
+    if replacement is not None:
+        expected.append(copy.deepcopy(replacement))
+
+
+def remove_source_mutation_cases(
+    publication_state: str, partial_location: str | None = None
+) -> tuple[str, ...]:
+    if publication_state == "not_started":
+        return ("add-file-identity", "add-stage-identity", "add-manager-identity")
+    if publication_state == "publication_intent" and partial_location == "stage":
+        return ("foreign-stage-identity", "identity-bearing-final-alternate")
+    if publication_state == "publication_intent" and partial_location == "final":
+        return (
+            "foreign-final-identity",
+            "foreign-manager-fragment",
+            "identity-bearing-stage-alternate",
+        )
+    if publication_state == "published":
+        return (
+            "foreign-final-identity",
+            "foreign-manager-fragment",
+            "published-stage-identity-even-if-equal",
+            "paired-foreign-final-and-manager",
+        )
+    raise ValueError("publication state and partial location do not form a test case")
+
+
+def apply_remove_source_mutation(
+    profile: dict[str, Any], role: str, publication_state: str, case: str
+) -> None:
+    """Apply one target-only identity/evidence mutation to a copied baseline."""
+    expected = profile["transaction"]["expected"]
+    by_selector = {item["selector"]: item for item in expected}
+    publication = profile["transaction"]["unit_publication"][role]
+    role_index = ("vm", "proxy", "workspace", "metrics").index(role)
+
+    def foreign_file(identity: dict[str, Any]) -> dict[str, Any]:
+        changed = copy.deepcopy(identity)
+        changed["inode"] += 100
+        return changed
+
+    if case in {"add-file-identity", "add-stage-identity", "add-manager-identity"}:
+        selector = {
+            "add-file-identity": f"unit-file.{role}",
+            "add-stage-identity": f"unit-stage.{role}",
+            "add-manager-identity": f"unit-manager.{role}",
+        }[case]
+        if selector.startswith("unit-manager."):
+            identity = _manager_identity(9, 950 + role_index)
+        else:
+            identity = _file_identity("regular", 9, 950 + role_index)
+        replace_remove_expected_record(
+            profile, selector, {"selector": selector, "evidence": "observed_present", "identity": identity}
+        )
+        return
+
+    if case in {"foreign-stage-identity", "foreign-final-identity", "foreign-manager-fragment"}:
+        selector = {
+            "foreign-stage-identity": f"unit-stage.{role}",
+            "foreign-final-identity": f"unit-file.{role}",
+            "foreign-manager-fragment": f"unit-manager.{role}",
+        }[case]
+        item = copy.deepcopy(by_selector[selector])
+        if selector.startswith("unit-manager."):
+            item["identity"]["fragment_inode"] += 100
+        else:
+            item["identity"]["inode"] += 100
+        replace_remove_expected_record(profile, selector, item)
+        return
+
+    if case in {
+        "identity-bearing-final-alternate",
+        "identity-bearing-stage-alternate",
+        "published-stage-identity-even-if-equal",
+    }:
+        selector = f"unit-stage.{role}" if case != "identity-bearing-final-alternate" else f"unit-file.{role}"
+        identity = publication.get("stage_identity", publication.get("fragment_identity"))
+        replace_remove_expected_record(
+            profile,
+            selector,
+            {"selector": selector, "evidence": "observed_present", "identity": identity},
+        )
+        return
+
+    if case == "paired-foreign-final-and-manager":
+        file_selector = f"unit-file.{role}"
+        manager_selector = f"unit-manager.{role}"
+        file_item = copy.deepcopy(by_selector[file_selector])
+        manager_item = copy.deepcopy(by_selector[manager_selector])
+        changed = foreign_file(file_item["identity"])
+        file_item["identity"] = changed
+        manager_item["identity"]["fragment_device"] = changed["device"]
+        manager_item["identity"]["fragment_inode"] = changed["inode"]
+        replace_remove_expected_record(profile, file_selector, file_item)
+        replace_remove_expected_record(profile, manager_selector, manager_item)
+        return
+
+    raise ValueError(f"unknown remove source mutation case: {case}")
+
+
 def make_profile(owner_uid: int = 1000, name: str = "default", ssh_port: int = 22300) -> dict[str, Any]:
     digest = digest_for(owner_uid, name)
     install_id = "0" * 32
@@ -1429,99 +1683,72 @@ class VmProfileSchemaFixtures(unittest.TestCase):
                     with self.assertRaisesRegex(ContractError, "differs from protected mapping"):
                         validate_profile_semantics(mismatched_group, SCHEMA, RESOURCES)
 
-    def test_remove_source_identity_consistency_applies_to_every_phase_and_state(self) -> None:
+    def _assert_remove_source_mutations_reject(
+        self,
+        baseline: dict[str, Any],
+        role: str,
+        publication_state: str,
+        partial_location: str | None,
+        phase: str,
+        step: int,
+    ) -> None:
         roles = ("vm", "proxy", "workspace", "metrics")
-        phases = (("prepared", 0), ("units", 1), ("state", 2), ("accounts", 3), ("finalizing", 4))
+        self.assertEqual(tuple(baseline["installation"]["unit_publication"]), roles)
+        self.assertEqual(
+            baseline["installation"]["unit_publication"],
+            baseline["transaction"]["unit_publication"],
+        )
+        self.assertIsNot(
+            baseline["installation"]["unit_publication"],
+            baseline["transaction"]["unit_publication"],
+        )
+        for case in remove_source_mutation_cases(publication_state, partial_location):
+            with self.subTest(phase=phase, step=step, role=role, state=publication_state,
+                              location=partial_location, case=case):
+                # Establish that the exact candidate baseline accepts before
+                # applying one target-only evidence mutation.
+                self.assert_profile_valid(baseline)
+                candidate = copy.deepcopy(baseline)
+                apply_remove_source_mutation(candidate, role, publication_state, case)
+                validate_profile_schema(candidate, SCHEMA)
+                with self.assertRaises(ContractError):
+                    validate_profile_semantics(candidate, SCHEMA, RESOURCES)
 
-        def set_expected(profile: dict[str, Any], role: str, items: list[dict[str, Any]]) -> None:
-            expected = profile["transaction"]["expected"]
-            selectors = {f"unit-file.{role}", f"unit-stage.{role}", f"unit-manager.{role}"}
-            expected[:] = [item for item in expected if item["selector"] not in selectors]
-            expected.extend(copy.deepcopy(items))
+    def test_remove_source_prepared_baselines_precede_identity_mutations(self) -> None:
+        seed = self.read_fixture("valid-removing.json")
+        cases = (
+            ("not_started", None),
+            ("publication_intent", "stage"),
+            ("publication_intent", "final"),
+            ("published", None),
+        )
+        for role in ("vm", "proxy", "workspace", "metrics"):
+            for publication_state, partial_location in cases:
+                baseline = build_remove_source_baseline(
+                    seed, "prepared", 0, role, publication_state, partial_location
+                )
+                self._assert_remove_source_mutations_reject(
+                    baseline, role, publication_state, partial_location, "prepared", 0
+                )
 
-        def make_case(phase: str, step: int, role: str, state: str) -> tuple[dict[str, Any], dict[str, Any]]:
-            profile = self.read_fixture("valid-removing.json")
-            transaction = profile["transaction"]
-            transaction["phase"] = phase
-            transaction["step"] = step
-            if phase == "prepared":
-                transaction["expected"] = []
-            index = roles.index(role)
-            if state == "not_started":
-                record = {"state": "not_started"}
-            elif state == "publication_intent":
-                record = {"state": "publication_intent", "stage_identity": _file_identity("regular", 9, 850 + index)}
-            else:
-                record = copy.deepcopy(profile["installation"]["unit_publication"][role])
-            profile["installation"]["unit_publication"][role] = copy.deepcopy(record)
-            transaction["unit_publication"][role] = copy.deepcopy(record)
-            identity = record.get("stage_identity", record.get("fragment_identity", _file_identity("regular", 9, 950 + index)))
-            return profile, identity
-
+    def test_remove_source_later_phase_baselines_precede_identity_mutations(self) -> None:
+        seed = self.read_fixture("valid-removing.json")
+        phases = (("units", 1), ("state", 2), ("accounts", 3), ("finalizing", 4))
+        cases = (
+            ("not_started", None),
+            ("publication_intent", "stage"),
+            ("publication_intent", "final"),
+            ("published", None),
+        )
         for phase, step in phases:
-            for role in roles:
-                for state in ("not_started", "publication_intent", "published"):
-                    profile, retained = make_case(phase, step, role, state)
-                    foreign = _file_identity("regular", retained["device"], retained["inode"] + 100)
-                    cases = {
-                        "foreign-file": [{
-                            "selector": f"unit-file.{role}", "evidence": "observed_present", "identity": foreign,
-                        }],
-                        "foreign-stage": [{
-                            "selector": f"unit-stage.{role}", "evidence": "observed_present", "identity": foreign,
-                        }],
-                        "foreign-manager": [
-                            {"selector": f"unit-file.{role}", "evidence": "observed_present",
-                             "identity": foreign if state == "not_started" else copy.deepcopy(retained)},
-                            {"selector": f"unit-manager.{role}", "evidence": "observed_present",
-                             "identity": _manager_identity(foreign["device"], foreign["inode"])},
-                        ],
-                        "paired-foreign-final-manager": [
-                            {"selector": f"unit-file.{role}", "evidence": "observed_present", "identity": foreign},
-                            {"selector": f"unit-manager.{role}", "evidence": "observed_present", "identity": _manager_identity(foreign["device"], foreign["inode"])},
-                        ],
-                    }
-                    for case, supplied in cases.items():
-                        candidate = copy.deepcopy(profile)
-                        set_expected(candidate, role, supplied)
-                        with self.subTest(phase=phase, role=role, state=state, case=case):
-                            validate_profile_schema(candidate, SCHEMA)
-                            with self.assertRaises(ContractError):
-                                validate_profile_semantics(candidate, SCHEMA, RESOURCES)
-
-                    if state == "publication_intent":
-                        alternate = copy.deepcopy(profile)
-                        set_expected(alternate, role, [
-                            {"selector": f"unit-stage.{role}", "evidence": "observed_present", "identity": copy.deepcopy(retained)},
-                            {"selector": f"unit-file.{role}", "evidence": "observed_present", "identity": copy.deepcopy(retained)},
-                        ])
-                        with self.subTest(phase=phase, role=role, state=state, case="both-identity-bearing-alternates"):
-                            validate_profile_schema(alternate, SCHEMA)
-                            with self.assertRaises(ContractError):
-                                validate_profile_semantics(alternate, SCHEMA, RESOURCES)
-
-                    if state == "published":
-                        stage = copy.deepcopy(profile)
-                        set_expected(stage, role, [{
-                            "selector": f"unit-stage.{role}", "evidence": "observed_present", "identity": copy.deepcopy(retained),
-                        }])
-                        with self.subTest(phase=phase, role=role, state=state, case="published-stage-identity"):
-                            validate_profile_schema(stage, SCHEMA)
-                            with self.assertRaises(ContractError):
-                                validate_profile_semantics(stage, SCHEMA, RESOURCES)
-
-        # A source-consistent sparse prepared record is valid without implying
-        # that omitted stage/final/manager selectors were observed absent.
-        for fixture in (
-            "valid-removing-prepared-published.json",
-            "valid-removing-prepared-partial-stage.json",
-            "valid-removing-partial-not-started.json",
-            "valid-removing-partial-stage.json",
-            "valid-removing-partial-final.json",
-            "valid-removing-published-reload.json",
-        ):
-            with self.subTest(valid_fixture=fixture):
-                self.assert_profile_valid(self.read_fixture(fixture))
+            for role in ("vm", "proxy", "workspace", "metrics"):
+                for publication_state, partial_location in cases:
+                    baseline = build_remove_source_baseline(
+                        seed, phase, step, role, publication_state, partial_location
+                    )
+                    self._assert_remove_source_mutations_reject(
+                        baseline, role, publication_state, partial_location, phase, step
+                    )
 
     def test_profile_schema_is_closed_at_every_object_schema(self) -> None:
         def visit(node: Any) -> None:

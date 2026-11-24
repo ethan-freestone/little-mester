@@ -602,92 +602,75 @@ class ProfileMappingRawParserTests(unittest.TestCase):
                     with self.assertRaises(MAPPING.MappingRefused):
                         parse_value(mismatched_group)
 
-    def test_remove_source_consistency_covers_each_phase_role_and_publication_state(self) -> None:
-        phases = (("prepared", 0), ("units", 1), ("state", 2), ("accounts", 3), ("finalizing", 4))
-        roles = MAPPING.UNIT_ROLES
+    def _assert_remove_source_mutations_refuse(
+        self,
+        baseline: dict,
+        role: str,
+        publication_state: str,
+        partial_location: str | None,
+        phase: str,
+        step: int,
+    ) -> None:
+        self.assertEqual(
+            baseline["installation"]["unit_publication"],
+            baseline["transaction"]["unit_publication"],
+        )
+        self.assertIsNot(
+            baseline["installation"]["unit_publication"],
+            baseline["transaction"]["unit_publication"],
+        )
+        for case in SCHEMA_FIXTURE_CHECKER.remove_source_mutation_cases(
+            publication_state, partial_location
+        ):
+            with self.subTest(phase=phase, step=step, role=role, state=publication_state,
+                              location=partial_location, case=case):
+                # The unmodified, complete four-role baseline must parse before
+                # this case changes only the target role's evidence identity.
+                SCHEMA_FIXTURE_CHECKER.validate_profile_schema(baseline)
+                self.assertEqual(parse_value(baseline)["state"], "removing")
+                candidate = copy.deepcopy(baseline)
+                SCHEMA_FIXTURE_CHECKER.apply_remove_source_mutation(
+                    candidate, role, publication_state, case
+                )
+                SCHEMA_FIXTURE_CHECKER.validate_profile_schema(candidate)
+                with self.assertRaises(MAPPING.MappingRefused):
+                    parse_value(candidate)
 
-        def file_identity(device: int, inode: int) -> dict:
-            return {"device": device, "inode": inode, "kind": "regular", "link_count": 1}
+    def test_remove_source_prepared_baselines_precede_identity_mutations(self) -> None:
+        seed = fixture_value("valid-removing.json")
+        cases = (
+            ("not_started", None),
+            ("publication_intent", "stage"),
+            ("publication_intent", "final"),
+            ("published", None),
+        )
+        for role in MAPPING.UNIT_ROLES:
+            for publication_state, partial_location in cases:
+                baseline = SCHEMA_FIXTURE_CHECKER.build_remove_source_baseline(
+                    seed, "prepared", 0, role, publication_state, partial_location
+                )
+                self._assert_remove_source_mutations_refuse(
+                    baseline, role, publication_state, partial_location, "prepared", 0
+                )
 
-        def manager_identity(device: int, inode: int) -> dict:
-            return {
-                "fragment_device": device,
-                "fragment_inode": inode,
-                "load_state": "loaded",
-                "active_state": "inactive",
-                "job_state": "none",
-            }
-
+    def test_remove_source_later_phase_baselines_precede_identity_mutations(self) -> None:
+        seed = fixture_value("valid-removing.json")
+        phases = (("units", 1), ("state", 2), ("accounts", 3), ("finalizing", 4))
+        cases = (
+            ("not_started", None),
+            ("publication_intent", "stage"),
+            ("publication_intent", "final"),
+            ("published", None),
+        )
         for phase, step in phases:
-            for index, role in enumerate(roles):
-                for state in ("not_started", "publication_intent", "published"):
-                    profile = fixture_value("valid-removing.json")
-                    tx = profile["transaction"]
-                    tx["phase"], tx["step"] = phase, step
-                    if phase == "prepared":
-                        tx["expected"] = []
-                    if state == "not_started":
-                        record = {"state": "not_started"}
-                        retained = file_identity(8, 900 + index)
-                    elif state == "publication_intent":
-                        retained = file_identity(8, 800 + index)
-                        record = {"state": "publication_intent", "stage_identity": copy.deepcopy(retained)}
-                    else:
-                        record = copy.deepcopy(profile["installation"]["unit_publication"][role])
-                        retained = record["fragment_identity"]
-                    profile["installation"]["unit_publication"][role] = copy.deepcopy(record)
-                    tx["unit_publication"][role] = copy.deepcopy(record)
-                    target_selectors = {f"unit-file.{role}", f"unit-stage.{role}", f"unit-manager.{role}"}
-                    tx["expected"][:] = [item for item in tx["expected"] if item["selector"] not in target_selectors]
-                    foreign = file_identity(retained["device"], retained["inode"] + 101)
-                    cases = {
-                        "foreign-file": [{
-                            "selector": f"unit-file.{role}", "evidence": "observed_present", "identity": foreign,
-                        }],
-                        "foreign-stage": [{
-                            "selector": f"unit-stage.{role}", "evidence": "observed_present", "identity": foreign,
-                        }],
-                        "foreign-manager": [
-                            {"selector": f"unit-file.{role}", "evidence": "observed_present",
-                             "identity": foreign if state == "not_started" else copy.deepcopy(retained)},
-                            {"selector": f"unit-manager.{role}", "evidence": "observed_present",
-                             "identity": manager_identity(foreign["device"], foreign["inode"])},
-                        ],
-                        "paired-foreign-file-manager": [
-                            {"selector": f"unit-file.{role}", "evidence": "observed_present", "identity": foreign},
-                            {"selector": f"unit-manager.{role}", "evidence": "observed_present", "identity": manager_identity(foreign["device"], foreign["inode"])},
-                        ],
-                    }
-                    for case, items in cases.items():
-                        value = copy.deepcopy(profile)
-                        value["transaction"]["expected"].extend(copy.deepcopy(items))
-                        with self.subTest(phase=phase, role=role, state=state, case=case):
-                            SCHEMA_FIXTURE_CHECKER.validate_profile_schema(value)
-                            with self.assertRaises(MAPPING.MappingRefused):
-                                parse_value(value)
-
-                    if state == "publication_intent":
-                        alternate = copy.deepcopy(profile)
-                        alternate["transaction"]["expected"].extend([
-                            {"selector": f"unit-stage.{role}", "evidence": "observed_present", "identity": copy.deepcopy(retained)},
-                            {"selector": f"unit-file.{role}", "evidence": "observed_present", "identity": copy.deepcopy(retained)},
-                        ])
-                        with self.subTest(phase=phase, role=role, state=state, case="identity-bearing-alternates"):
-                            SCHEMA_FIXTURE_CHECKER.validate_profile_schema(alternate)
-                            with self.assertRaises(MAPPING.MappingRefused):
-                                parse_value(alternate)
-
-                    if state == "published":
-                        staged = copy.deepcopy(profile)
-                        staged["transaction"]["expected"].append({
-                            "selector": f"unit-stage.{role}",
-                            "evidence": "observed_present",
-                            "identity": copy.deepcopy(retained),
-                        })
-                        with self.subTest(phase=phase, role=role, state=state, case="published-stage-identity"):
-                            SCHEMA_FIXTURE_CHECKER.validate_profile_schema(staged)
-                            with self.assertRaises(MAPPING.MappingRefused):
-                                parse_value(staged)
+            for role in MAPPING.UNIT_ROLES:
+                for publication_state, partial_location in cases:
+                    baseline = SCHEMA_FIXTURE_CHECKER.build_remove_source_baseline(
+                        seed, phase, step, role, publication_state, partial_location
+                    )
+                    self._assert_remove_source_mutations_refuse(
+                        baseline, role, publication_state, partial_location, phase, step
+                    )
 
 
 class ProfileMappingNoEffectsTests(unittest.TestCase):
