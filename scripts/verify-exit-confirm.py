@@ -55,21 +55,38 @@ _EXPECTED_TMUX_SOURCES = {
     b"source-file -q /etc/tmux.conf\n",
     b"source-file -q ~/.tmux.conf\n",
 }
-_SOURCE_DIRECTIVE = re.compile(rb"(?:^|[;\s])(?:source-file|source)(?:[ \t]|$)")
+_TMUX_ALLOWED_SET_OPTIONS = (
+    re.compile(rb"set-option -s escape-time [0-9]+"),
+    re.compile(rb"set-option -g status-keys (?:vi|emacs)"),
+)
+_TMUX_COMMENT = re.compile(rb" *#[\x20-\x7e]*")
 
 
 def isolated_tmux_config(canonical_config):
-    """Remove only the two known host source lines from the canonical config."""
+    """Retain only the deliberately small, byte-exact tmux config grammar."""
     if not isinstance(canonical_config, bytes):
         raise TypeError("canonical tmux config must be bytes")
+
+    lines = canonical_config.split(b"\n")
+    final_newline = canonical_config.endswith(b"\n")
+    if final_newline:
+        lines.pop()
+
     retained = []
-    for line in canonical_config.splitlines(keepends=True):
+    for index, body in enumerate(lines):
+        has_newline = index < len(lines) - 1 or final_newline
+        line = body + (b"\n" if has_newline else b"")
         if line in _EXPECTED_TMUX_SOURCES:
             continue
-        candidate = line.lstrip()
-        if not candidate.startswith(b"#") and _SOURCE_DIRECTIVE.search(candidate):
-            raise ValueError(f"unexpected tmux source directive: {line!r}")
-        retained.append(line)
+
+        if body == b"" or any(pattern.fullmatch(body) for pattern in _TMUX_ALLOWED_SET_OPTIONS):
+            retained.append(line)
+            continue
+        if _TMUX_COMMENT.fullmatch(body) and b"\\" not in body:
+            retained.append(line)
+            continue
+        raise ValueError(f"unsupported tmux config line: {line!r}")
+
     return b"".join(retained)
 
 
@@ -170,6 +187,16 @@ def spawn_pty(command, *, launcher_script=False, **kwargs):
 class Driver:
     def __init__(self, home, *, via_tmux=False, via_launcher=False,
                  tmux_config_source=None):
+        contract_path = os.path.join(ROOT, "lib", "vm", "parent-session-contract.py")
+        contract_spec = importlib.util.spec_from_file_location("exit_confirm_session_contract", contract_path)
+        if contract_spec is None or contract_spec.loader is None:
+            raise RuntimeError("the protected guest session contract is unavailable")
+        contract = importlib.util.module_from_spec(contract_spec)
+        contract_spec.loader.exec_module(contract)
+        self.session_contract = contract
+        config_source = contract.TMUX_CONFIG if tmux_config_source is None else tmux_config_source
+        isolated_config = isolated_tmux_config(config_source)
+
         workspace = os.path.join(home, "workspace")
         server_config = os.path.join(home, "opencode.json")
         with open(server_config, "w", encoding="utf-8") as stream:
@@ -195,16 +222,8 @@ class Driver:
         self.tmux = "/usr/bin/tmux"
         self.tmux_socket = "lm-exit-confirm"
         self.tmux_session = "little-mester-opencode"
-        contract_path = os.path.join(ROOT, "lib", "vm", "parent-session-contract.py")
-        contract_spec = importlib.util.spec_from_file_location("exit_confirm_session_contract", contract_path)
-        if contract_spec is None or contract_spec.loader is None:
-            raise RuntimeError("the protected guest session contract is unavailable")
-        contract = importlib.util.module_from_spec(contract_spec)
-        contract_spec.loader.exec_module(contract)
-        self.session_contract = contract
         self.tmux_config = os.path.join(home, "little-mester-tmux.conf")
-        config_source = contract.TMUX_CONFIG if tmux_config_source is None else tmux_config_source
-        pathlib.Path(self.tmux_config).write_bytes(isolated_tmux_config(config_source))
+        pathlib.Path(self.tmux_config).write_bytes(isolated_config)
         os.chmod(self.tmux_config, 0o600)
         self.env = env
         self.child = None

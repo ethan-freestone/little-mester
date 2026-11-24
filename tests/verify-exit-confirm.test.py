@@ -46,14 +46,95 @@ class IsolatedTmuxConfigTests(unittest.TestCase):
             b"# keep this comment\nset-option -s escape-time 500\nset-option -g status-keys vi\n",
         )
 
-    def test_unexpected_source_directives_refuse_to_render(self):
-        for directive in (
+    def test_supported_lines_and_missing_final_newline_are_preserved(self):
+        cases = (
+            (b"set-option -s escape-time 500", b"set-option -s escape-time 500"),
+            (b"set-option -s escape-time 0\n", b"set-option -s escape-time 0\n"),
+            (b"set-option -s escape-time 12345678901234567890\n",
+             b"set-option -s escape-time 12345678901234567890\n"),
+            (b"set-option -g status-keys vi\n", b"set-option -g status-keys vi\n"),
+            (b"set-option -g status-keys emacs", b"set-option -g status-keys emacs"),
+            (b"\n  # printable ASCII comment; source-file is inert\n",
+             b"\n  # printable ASCII comment; source-file is inert\n"),
+        )
+        for config, expected in cases:
+            with self.subTest(config=config):
+                self.assertEqual(verifier.isolated_tmux_config(config), expected)
+
+    def test_unsupported_config_lines_are_rejected_as_a_whole(self):
+        rejected = (
+            # Quoted command names or arguments.
+            b'"set-option" -s escape-time 10\n',
+            b"'set-option' -s escape-time 10\n",
+            b'set-option -s "escape-time" 10\n',
+            b"set-option -s escape-time '10'\n",
+            # Source commands and command-name abbreviations.
             b"source-file -q /tmp/other-tmux.conf\n",
             b"source ~/.config/tmux.conf\n",
-            b"set-option -g status on; source-file /tmp/chained.conf\n",
-        ):
-            with self.subTest(directive=directive), self.assertRaises(ValueError):
-                verifier.isolated_tmux_config(contract.TMUX_CONFIG + directive)
+            b"sour -q /tmp/other-tmux.conf\n",
+            b"set -s escape-time 10\n",
+            b"set-option -s escape 10\n",
+            # Backslash commands, escaped separators, and continuations.
+            b"set-option -s escape-time 10\\; display-message unsafe\n",
+            b"set-option -s escape-time 10\\\n",
+            b"set-option -s escape-time \\\n10\n",
+            # Chained commands, including an otherwise removable source line.
+            b"set-option -s escape-time 10; display-message unsafe\n",
+            b"source-file -q /etc/tmux.conf; display-message unsafe\n",
+            # Control flow, shell commands, hooks, and format substitutions.
+            b"{\n",
+            b"}\n",
+            b"%if 1\n",
+            b"%endif\n",
+            b"run-shell 'touch /tmp/unsafe'\n",
+            b"if-shell 'true' 'display-message unsafe'\n",
+            b"set-hook -g after-new-window 'run-shell unsafe'\n",
+            b"set-option -s escape-time #{run-shell unsafe}\n",
+            b"set-option -s escape-time $(unsafe)\n",
+            # Unsupported options, flags, values, and extra arguments.
+            b"set-option -s escape-time\n",
+            b"set-option -s escape-time 10 extra\n",
+            b"set-option -- -s escape-time 10\n",
+            b"set-option -g escape-time 10\n",
+            b"set-option -s escape-time -1\n",
+            b"set-option -s escape-time 10ms\n",
+            b"set-option -s escape-time default\n",
+            b"set-option -g status-keys on\n",
+            b"set-option -g status-keys vi extra\n",
+            b"set-option -s escape-time 10 # inline comment\n",
+            # Almost-matching host sources must not be stripped.
+            b"source-file -q /etc/tmux.conf \n",
+            b" source-file -q /etc/tmux.conf\n",
+            b"source-file  -q /etc/tmux.conf\n",
+            b"source-file -q /etc/tmux.conf",
+            # Non-LF line endings and control/non-ASCII bytes.
+            b"set-option -s escape-time 10\r\n",
+            b"set-option -s escape-time 10\r",
+            b"set-option -s escape-time 10\x00\n",
+            b"set-option -s escape-time\t10\n",
+            b"# comment with tab\t\n",
+            b"# comment with control \x01\n",
+            b"# comment with DEL \x7f\n",
+            b"# non-ASCII comment \x80\n",
+        )
+        for config in rejected:
+            with self.subTest(config=config), self.assertRaises(ValueError):
+                verifier.isolated_tmux_config(config)
+
+    def test_invalid_config_is_rejected_before_any_file_or_tmux_launch(self):
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="v-invalid-") as home:
+            with (
+                mock.patch.object(verifier.subprocess, "run") as run,
+                mock.patch.object(verifier.pexpect, "spawn") as spawn,
+                self.assertRaises(ValueError),
+            ):
+                verifier.Driver(
+                    home, via_tmux=True,
+                    tmux_config_source=b"set-option -s escape-time 10; run-shell unsafe\n",
+                )
+            self.assertEqual(list(pathlib.Path(home).iterdir()), [])
+            run.assert_not_called()
+            spawn.assert_not_called()
 
 
 class LauncherRenderingTests(unittest.TestCase):
