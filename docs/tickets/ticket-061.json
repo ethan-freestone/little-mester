@@ -5,34 +5,29 @@
   "area": "vm-v3",
   "type": "improvement",
   "status": "draft",
-  "title": "Phase 1.5 — Everyday VM developer CLI and profiles",
-  "objective": "After Phase 1 is accepted and merged, provide a simple everyday developer CLI over the existing trusted VM lifecycle core; keep this roadmap separate from M2 acceptance and do not implement during M2.",
+  "title": "Phase 1.5 — Local inference and VM maintenance",
+  "objective": "After the Phase 1 cleanup and final acceptance/merge of feat/vm-approach-3, use the new VM to develop the remaining Phase 1.5 direction: local inference through appropriate backends; model compatibility, configuration, selection and performance; CPU, memory and GPU allocation/sharing across concurrent profiles; explicit profile-pinned runtime revision updates that preserve compatible persistent guest state; safe rollback/recovery; and an improved everyday VM maintenance experience. Profiles, multiple persistent environments, immutable SHA runtime pinning/inventory/pruning, and the simplified developer CLI were brought forward into #21 and must not be duplicated. This is roadmap direction; refine detailed acceptance against actual VM usage when Phase 1.5 approaches.",
   "created_at": "2026-11-13T21:51:36.011Z",
-  "updated_at": "2026-11-13T21:51:36.011Z",
+  "updated_at": "2026-11-24T14:32:21.225Z",
   "acceptance_criteria": [
     {
       "id": "A1",
-      "text": "Provide ./lab vm up /path/to/workspace, ./lab vm up --profile profile-1 --dir /path/to/workspace, and explicit ./lab vm up --unsafe-recurse forms, plus straightforward status, ssh, tui, stop, and profile-selection commands.",
+      "text": "Phase 1.5 begins only after Phase 1 completion and uses the new VM; work does not duplicate profiles, persistent environments, immutable runtime installation/inventory/pruning, or CLI functionality delivered by #21.",
       "status": "pending"
     },
     {
       "id": "A2",
-      "text": "Support a default profile and optional named profiles with safe validated workspace assignment and persistent defaults; each profile has independent persistent VM, disk, and session identities.",
+      "text": "Deliver an owner-agreed local-inference experience covering appropriate supported backends, model compatibility/configuration/selection, and practical performance.",
       "status": "pending"
     },
     {
       "id": "A3",
-      "text": "Define the exact semantics and safety consequences of --unsafe-recurse before implementing it; make recursion an explicit, auditable opt-in.",
+      "text": "Provide sensible CPU, memory and GPU allocation and sharing for concurrent VM profiles, informed by actual hardware and usage.",
       "status": "pending"
     },
     {
       "id": "A4",
-      "text": "Keep the trusted lifecycle, ownership, provenance, and rollback guarantees behind the simpler interface; do not create a second or weaker VM-management implementation.",
-      "status": "pending"
-    },
-    {
-      "id": "A5",
-      "text": "Deliver as Phase 1.5 after Phase 1; do not expand M2 acceptance or implement this roadmap during M2 except for a minimal compatibility decision needed to avoid throwaway interfaces.",
+      "text": "Allow an explicit profile-pinned runtime revision update while preserving compatible persistent guest state, with safe rollback/recovery and an approachable maintenance workflow.",
       "status": "pending"
     }
   ],

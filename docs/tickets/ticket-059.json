@@ -5,10 +5,10 @@
   "area": "ticketing engine",
   "type": "improvement",
   "status": "draft",
-  "title": "Reusable audited ticket redaction and comment revision operations",
-  "objective": "After Phase 1 is merged, design and implement reusable MCP operations for owner-authorized redaction of sensitive ticket content with private evidence retention, and revision-history-preserving edits to existing comments. This work is deferred until Phase 1 is complete.",
+  "title": "Phase 3H candidate — audited ticket redaction and comment revisions",
+  "objective": "Optional Phase 3H ticket-lifecycle capability for owner-authorized redaction and revision-history-preserving comment edits. It is not part of #21 or the Phase 1 cleanup except for any small, concrete MCP maintenance fix that #57 identifies. Treat this as roadmap direction; refine scope and authorization/privacy details when Phase 3H approaches, and do not begin future-phase implementation now.",
   "created_at": "2026-11-12T19:00:05.555Z",
-  "updated_at": "2026-11-12T19:33:03.537Z",
+  "updated_at": "2026-11-24T14:32:21.235Z",
   "acceptance_criteria": [
     {
       "id": "A1",

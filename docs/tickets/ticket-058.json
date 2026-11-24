@@ -5,10 +5,10 @@
   "area": "workflow",
   "type": "improvement",
   "status": "draft",
-  "title": "Post-Phase 1 backlog — expose ticket comments through MCP",
-  "objective": "Post-Phase-1 deferred backlog. Depends on Phase 1 completion/merge under P1-05 ticket #57; do not implement as part of current Phase 1 completion.",
+  "title": "Phase 3H candidate — expose ticket comments through MCP",
+  "objective": "Optional Phase 3H ticket-lifecycle/workflow follow-up. #57 owns the proportionate Phase 1 cleanup investigation and repair of existing MCP comment/audit behavior, including an owner-side service update/restart if evidence requires it; this ticket must not duplicate or derail that work. Consider this distinct append/read API only if cleanup evidence shows it is still needed and is substantial enough to defer. Do not implement before Phase 1 completion; refine its scope when Phase 3H approaches.",
   "created_at": "2026-11-10T21:46:28.253Z",
-  "updated_at": "2026-11-10T21:46:51.767Z",
+  "updated_at": "2026-11-24T14:32:21.230Z",
   "acceptance_criteria": [
     {
       "id": "A1",

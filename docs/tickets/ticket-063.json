@@ -5,10 +5,10 @@
   "area": "workflow",
   "type": "improvement",
   "status": "draft",
-  "title": "Enforce independent review and acceptance evidence for PR workflows",
-  "objective": "Add auditable ticket-linked controls for source-ticket linkage, per-commit cumulative-diff review evidence, independent reviewer identity/approval, and explicit owner acceptance gates before merge; separate follow-up, not part of PR #20.",
+  "title": "Phase 3H candidate — evidence-based review workflow refinement",
+  "objective": "Phase 3H workflow-refinement candidate. Use real development experience to improve proportional planning/review, source-ticket linkage, independent review and acceptance evidence where they demonstrably improve reliability. Prefer lightweight workflows and reuse existing OpenCode/GitHub capabilities; measure owner interventions, avoidable rework and task outcomes before adding automation. Existing detailed criteria are preliminary backlog notes, not a commitment to a bespoke enforcement framework; refine them when Phase 3H approaches. Not part of #21 or Phase 1 cleanup.",
   "created_at": "2026-11-21T11:59:07.926Z",
-  "updated_at": "2026-11-21T18:44:49.385Z",
+  "updated_at": "2026-11-24T14:32:21.243Z",
   "acceptance_criteria": [
     {
       "id": "A1",
