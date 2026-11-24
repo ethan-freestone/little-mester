@@ -7,6 +7,7 @@ import base64
 import contextlib
 import datetime
 import hashlib
+import http.client
 import importlib.machinery
 import importlib.util
 import inspect
@@ -24,6 +25,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+import urllib.request
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -2084,6 +2086,195 @@ class StageTimerTests(unittest.TestCase):
         self.assertIn('"outcome":"FAIL"', rendered)
         for forbidden in ("command-secret-value", "ghp_1234567890", "RuntimeError", "secret"):
             self.assertNotIn(forbidden, rendered)
+
+
+class HostMetricsAcceptanceTests(unittest.TestCase):
+    @staticmethod
+    def valid_payload():
+        return {
+            "source": "host", "run_id": "a" * 32, "sequence": 9,
+            "timestamp": "2026-11-20T00:00:00.000Z",
+            "cpu": None, "memory": None, "gpu": [],
+            "availability": {
+                "cpu": "unsupported", "memory": "permission_denied",
+                "gpus": "no_device", "temperatures": "no_sensors",
+            },
+            "temperatures": None,
+        }
+
+    def setUp(self):
+        with mock.patch.object(acceptance, "_guest_ssh") as guest_ssh:
+            acceptance._host_metrics_check()
+        guest_ssh.assert_called_once()
+        self.command = guest_ssh.call_args.args[0]
+        self.operation = guest_ssh.call_args.kwargs["operation"]
+        argv = shlex.split(self.command)
+        self.assertEqual(argv[:3], ["python3", "-I", "-c"])
+        self.assertEqual(len(argv), 4)
+        self.script = argv[3]
+        self.last_events = []
+
+    def execute_captured_script(self, payload, *, body=None, headers=None, post_status=405):
+        if body is None:
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        if headers is None:
+            headers = {
+                "Cache-Control": "no-store",
+                "Content-Length": str(len(body)),
+            }
+        events = self.last_events = []
+
+        class GetResponse:
+            def __init__(self):
+                self.headers = headers
+
+            def read(self, limit=-1):
+                events.append(("get-read", limit))
+                return body if limit < 0 else body[:limit]
+
+            def close(self):
+                events.append("get-close")
+
+        get_response = GetResponse()
+
+        def urlopen(url, *, timeout):
+            self.assertEqual(url, "http://10.0.2.100:19532/metrics")
+            self.assertEqual(timeout, 3)
+            events.append("get-request")
+            return get_response
+
+        class PostResponse:
+            status = post_status
+
+        class Connection:
+            def __init__(self, host, port, *, timeout):
+                if (host, port, timeout) != ("10.0.2.100", 19532, 3):
+                    raise AssertionError("unexpected host metrics POST endpoint")
+                events.append("post-connection")
+
+            def request(self, method, target):
+                if (method, target) != ("POST", "/metrics"):
+                    raise AssertionError("unexpected host metrics POST request")
+                events.append("post-request")
+
+            def getresponse(self):
+                events.append("post-response")
+                return PostResponse()
+
+            def close(self):
+                events.append("post-close")
+
+        with mock.patch.object(urllib.request, "urlopen", side_effect=urlopen), \
+                mock.patch.object(http.client, "HTTPConnection", Connection):
+            exec(compile(self.script, "<captured-host-metrics-command>", "exec"), {})
+        return events
+
+    def assert_rejected(self, payload, *, body=None, headers=None, post_status=405,
+                        post_expected=False):
+        with self.assertRaises((AssertionError, TypeError, ValueError)):
+            self.execute_captured_script(payload, body=body, headers=headers,
+                                         post_status=post_status)
+        self.assertIn("get-close", self.last_events)
+        self.assertEqual("post-request" in self.last_events, post_expected)
+        if post_expected:
+            self.assertIn("post-close", self.last_events)
+
+    def test_captured_command_checks_contract_and_consumes_post_405(self):
+        self.assertEqual(self.operation, "verify_host_metrics_transport")
+        events = self.execute_captured_script(self.valid_payload())
+        self.assertEqual(events, [
+            "get-request", ("get-read", 16385), "get-close",
+            "post-connection", "post-request", "post-response", "post-close",
+        ])
+        for sequence in (1, 2**63 - 1):
+            with self.subTest(sequence=sequence):
+                payload = self.valid_payload()
+                payload["sequence"] = sequence
+                self.execute_captured_script(payload)
+
+    def test_allowed_availability_statuses_and_unavailable_nulls_are_accepted(self):
+        statuses = (
+            "available", "unsupported", "no_device", "no_sensors", "timeout",
+            "permission_denied", "collector_failed", "malformed",
+        )
+        categories = ("cpu", "memory", "gpus", "temperatures")
+        for index, status in enumerate(statuses):
+            with self.subTest(status=status):
+                payload = self.valid_payload()
+                payload["availability"][categories[index % len(categories)]] = status
+                self.execute_captured_script(payload)
+
+    def test_exact_schema_rejects_legacy_missing_and_extra_fields(self):
+        legacy = self.valid_payload()
+        legacy.pop("run_id")
+        legacy.pop("sequence")
+        with self.subTest(case="legacy seven-field"):
+            self.assert_rejected(legacy)
+
+        for key in ("run_id", "sequence"):
+            with self.subTest(missing=key):
+                payload = self.valid_payload()
+                del payload[key]
+                self.assert_rejected(payload)
+
+        payload = self.valid_payload()
+        payload["unexpected"] = True
+        self.assert_rejected(payload)
+
+    def test_invalid_run_ids_and_sequences_are_rejected(self):
+        for run_id in ("", None, 123, "a" * 31, "a" * 33,
+                       "A" * 32, "g" * 32, "a" * 31 + "!"):
+            with self.subTest(run_id=run_id):
+                payload = self.valid_payload()
+                payload["run_id"] = run_id
+                self.assert_rejected(payload)
+
+        for sequence in (True, None, "9", 9.0, 0, -1, 2**63):
+            with self.subTest(sequence=sequence):
+                payload = self.valid_payload()
+                payload["sequence"] = sequence
+                self.assert_rejected(payload)
+
+    def test_existing_transport_source_gpu_availability_and_method_gates_remain(self):
+        body = json.dumps(self.valid_payload(), separators=(",", ":")).encode()
+        oversized = body + b" " * (16385 - len(body))
+        self.assertEqual(len(oversized), 16385)
+        self.assert_rejected(self.valid_payload(), body=oversized)
+
+        cases = []
+        payload = self.valid_payload()
+        payload["source"] = "guest"
+        cases.append(("wrong source", payload))
+        payload = self.valid_payload()
+        payload["gpu"] = None
+        cases.append(("non-list GPU", payload))
+        payload = self.valid_payload()
+        del payload["availability"]["gpus"]
+        cases.append(("missing availability", payload))
+        payload = self.valid_payload()
+        payload["availability"]["extra"] = "available"
+        cases.append(("extra availability", payload))
+        payload = self.valid_payload()
+        payload["availability"]["cpu"] = "unknown"
+        cases.append(("unknown status", payload))
+        for label, invalid in cases:
+            with self.subTest(case=label):
+                self.assert_rejected(invalid)
+
+        self.assert_rejected(self.valid_payload(), post_status=200, post_expected=True)
+
+    def test_get_cache_and_content_length_headers_are_enforced(self):
+        body = json.dumps(self.valid_payload(), separators=(",", ":")).encode()
+        invalid_headers = (
+            ("missing Cache-Control", {"Content-Length": str(len(body))}),
+            ("wrong Cache-Control", {"Cache-Control": "private", "Content-Length": str(len(body))}),
+            ("missing Content-Length", {"Cache-Control": "no-store"}),
+            ("malformed Content-Length", {"Cache-Control": "no-store", "Content-Length": "not-a-length"}),
+            ("mismatched Content-Length", {"Cache-Control": "no-store", "Content-Length": str(len(body) + 1)}),
+        )
+        for label, headers in invalid_headers:
+            with self.subTest(case=label):
+                self.assert_rejected(self.valid_payload(), headers=headers)
 
 
 if __name__ == "__main__":

@@ -1021,18 +1021,35 @@ def _metrics_loopback_check() -> None:
 
 
 def _host_metrics_check() -> None:
-    command = (
-        "python3 -I -c 'import http.client,json,urllib.request; "
-        "u=\"http://10.0.2.100:19532/metrics\"; r=urllib.request.urlopen(u,timeout=3); "
-        "b=r.read(16385); assert len(b)<=16384; d=json.loads(b); "
-        "assert set(d)=={\"source\",\"timestamp\",\"cpu\",\"memory\",\"gpu\",\"availability\",\"temperatures\"}; "
-        "assert d[\"source\"]==\"host\" and isinstance(d[\"gpu\"],list); "
-        "assert set(d[\"availability\"])=={\"cpu\",\"memory\",\"gpus\",\"temperatures\"}; "
-        "allowed={\"available\",\"unsupported\",\"no_device\",\"no_sensors\",\"timeout\","
-        "\"permission_denied\",\"collector_failed\",\"malformed\"}; "
-        "assert all(v in allowed for v in d[\"availability\"].values()); "
-        "c=http.client.HTTPConnection(\"10.0.2.100\",19532,timeout=3); "
-        "c.request(\"POST\",\"/metrics\"); p=c.getresponse(); assert p.status==405; c.close()'")
+    script = (
+        "import http.client,json,re,urllib.request\n"
+        "u=\"http://10.0.2.100:19532/metrics\"\n"
+        "r=urllib.request.urlopen(u,timeout=3)\n"
+        "try:\n"
+        " b=r.read(16385)\n"
+        " assert len(b)<=16384\n"
+        " assert r.headers.get(\"Cache-Control\")==\"no-store\"\n"
+        " assert r.headers.get(\"Content-Length\")==str(len(b))\n"
+        " d=json.loads(b)\n"
+        " assert set(d)=={\"source\",\"run_id\",\"sequence\",\"timestamp\",\"cpu\",\"memory\",\"gpu\",\"availability\",\"temperatures\"}\n"
+        " assert d[\"source\"]==\"host\" and isinstance(d[\"gpu\"],list)\n"
+        " assert isinstance(d[\"run_id\"],str) and re.fullmatch(r\"[0-9a-f]{32}\",d[\"run_id\"])\n"
+        " assert type(d[\"sequence\"]) is int and 1<=d[\"sequence\"]<=2**63-1\n"
+        " assert isinstance(d[\"availability\"],dict)\n"
+        " assert set(d[\"availability\"])=={\"cpu\",\"memory\",\"gpus\",\"temperatures\"}\n"
+        " allowed={\"available\",\"unsupported\",\"no_device\",\"no_sensors\",\"timeout\",\"permission_denied\",\"collector_failed\",\"malformed\"}\n"
+        " assert all(v in allowed for v in d[\"availability\"].values())\n"
+        "finally:\n"
+        " r.close()\n"
+        "c=http.client.HTTPConnection(\"10.0.2.100\",19532,timeout=3)\n"
+        "try:\n"
+        " c.request(\"POST\",\"/metrics\")\n"
+        " p=c.getresponse()\n"
+        " assert p.status==405\n"
+        "finally:\n"
+        " c.close()\n"
+    )
+    command = f"python3 -I -c {shlex.quote(script)}"
     _guest_ssh(command, operation="verify_host_metrics_transport")
 
 

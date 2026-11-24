@@ -93,6 +93,10 @@ class MetricsHttpBoundaryTests(unittest.TestCase):
         self.assertEqual(self.server.server_address[0], "127.0.0.1")
         status, data = self.request("/metrics")
         self.assertEqual(status, 200)
+        self.assertEqual(set(data), {
+            "source", "run_id", "sequence", "timestamp", "cpu", "memory",
+            "gpu", "availability", "temperatures",
+        })
         self.assertEqual(data["source"], "host")
         self.assertEqual(data["run_id"], "a" * 32)
         self.assertEqual(data["sequence"], 1)
@@ -268,7 +272,9 @@ class MetricsHttpBoundaryTests(unittest.TestCase):
         with urllib.request.urlopen(urllib.request.Request(
                 self.base + "/metrics", headers={"Host": "10.0.2.100:19532"}), timeout=2) as response:
             self.assertEqual(response.headers.get("Cache-Control"), "no-store")
-            self.assertEqual(json.loads(response.read()), payload)
+            body = response.read()
+            self.assertEqual(response.headers.get("Content-Length"), str(len(body)))
+            self.assertEqual(json.loads(body), payload)
         status, history = self.request("/history?n=60")
         self.assertEqual(status, 200)
         self.assertEqual(history, [metrics.HISTORY[0]["history"]])
