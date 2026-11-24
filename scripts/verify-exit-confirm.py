@@ -21,12 +21,13 @@ OpenCode configuration, credentials, and session variables; it supplies a minima
 private server config and overrides the CLI plugin list/keybinds.
 """
 
-import json
 import importlib.util
+import json
 import os
 import pathlib
-import shutil
+import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -50,8 +51,125 @@ CLI_CONFIG = {
 }
 
 
+_EXPECTED_TMUX_SOURCES = {
+    b"source-file -q /etc/tmux.conf\n",
+    b"source-file -q ~/.tmux.conf\n",
+}
+_SOURCE_DIRECTIVE = re.compile(rb"(?:^|[;\s])(?:source-file|source)(?:[ \t]|$)")
+
+
+def isolated_tmux_config(canonical_config):
+    """Remove only the two known host source lines from the canonical config."""
+    if not isinstance(canonical_config, bytes):
+        raise TypeError("canonical tmux config must be bytes")
+    retained = []
+    for line in canonical_config.splitlines(keepends=True):
+        if line in _EXPECTED_TMUX_SOURCES:
+            continue
+        candidate = line.lstrip()
+        if not candidate.startswith(b"#") and _SOURCE_DIRECTIVE.search(candidate):
+            raise ValueError(f"unexpected tmux source directive: {line!r}")
+        retained.append(line)
+    return b"".join(retained)
+
+
+def _replace_once(template, anchor, replacement, label):
+    count = template.count(anchor)
+    if count != 1:
+        raise RuntimeError(f"expected exactly one {label} template anchor; found {count}")
+    return template.replace(anchor, replacement, 1)
+
+
+def _shell_word(value):
+    return shlex.quote(os.fspath(value)).encode("utf-8")
+
+
+def render_test_launcher(template, *, workspace, home, tmux_tmp, tmux_config,
+                         server_config, runner, tmux_binary, socket):
+    """Render redirected paths into the exact protected launcher template.
+
+    The workspace and environment assignments belong to the outer launcher
+    shell. The tmux and runner paths belong to the /bin/sh -c payload, which is
+    itself quoted as one outer-shell word after its inner arguments are built.
+    """
+    if not isinstance(template, bytes):
+        raise TypeError("launcher template must be bytes")
+
+    launcher = _replace_once(
+        template, b"@WORKSPACE@", _shell_word(workspace), "workspace",
+    )
+    launcher = _replace_once(
+        launcher,
+        b"/usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth",
+        b"/usr/bin/true",
+        "auth preparation",
+    )
+    for anchor, value, label in (
+        (b" HOME=/home/mester ", b" HOME=" + _shell_word(home) + b" ", "HOME"),
+        (b" TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux ",
+         b" TMUX_TMPDIR=" + _shell_word(tmux_tmp) + b" ", "TMUX_TMPDIR"),
+        (b" XDG_DATA_HOME=/home/mester/.local/share ",
+         b" XDG_DATA_HOME=" + _shell_word(os.path.join(os.fspath(home), ".local/share")) + b" ",
+         "XDG_DATA_HOME"),
+        (b" XDG_CONFIG_HOME=/home/mester/.config ",
+         b" XDG_CONFIG_HOME=" + _shell_word(os.path.join(os.fspath(home), ".config")) + b" ",
+         "XDG_CONFIG_HOME"),
+        (b" OPENCODE_CONFIG=/etc/opencode/opencode.json ",
+         b" OPENCODE_CONFIG=" + _shell_word(server_config) + b" ", "OPENCODE_CONFIG"),
+    ):
+        launcher = _replace_once(launcher, anchor, value, label)
+
+    command_start = b"/bin/sh -c '"
+    command_end = b"' lm-opencode-launcher \"$@\""
+    if launcher.count(command_start) != 1 or launcher.count(command_end) != 1:
+        raise RuntimeError("expected exact protected-launcher /bin/sh -c anchors")
+    start = launcher.index(command_start)
+    payload_start = start + len(command_start)
+    payload_end = launcher.find(command_end, payload_start)
+    if payload_end < 0:
+        raise RuntimeError("protected-launcher /bin/sh -c anchors are out of order")
+
+    payload = launcher[payload_start:payload_end]
+    tmux_anchor = b"/usr/bin/tmux -f /etc/little-mester-tmux.conf"
+    if payload.count(tmux_anchor) != 3:
+        raise RuntimeError("expected three exact tmux command anchors in launcher payload")
+    tmux_command = b" ".join(
+        _shell_word(value)
+        for value in (tmux_binary, "-L", socket, "-f", tmux_config)
+    )
+    payload = payload.replace(tmux_anchor, tmux_command)
+    # tmux passes its shell-command argument to a pane shell. First quote the
+    # runner for that pane shell, then quote the resulting command string for
+    # the /bin/sh -c payload that invokes tmux.
+    pane_command = shlex.quote(os.fspath(runner))
+    payload = _replace_once(
+        payload, b"/usr/local/libexec/lm-opencode", _shell_word(pane_command),
+        "OpenCode runner",
+    )
+
+    # Quote the completed inner script for the outer launcher's shell. This
+    # second quoting layer is required because inner shell words can contain
+    # apostrophes, spaces, dollar signs, and shell metacharacters.
+    new_command = (
+        b"/bin/sh -c " + _shell_word(payload.decode("utf-8"))
+        + b" lm-opencode-launcher \"$@\""
+    )
+    command_end_index = payload_end + len(command_end)
+    return launcher[:start] + new_command + launcher[command_end_index:]
+
+
+def spawn_pty(command, *, launcher_script=False, **kwargs):
+    """Spawn direct argv normally, or an explicit /bin/sh argv for a launcher."""
+    if launcher_script:
+        # A one-element args list avoids pexpect's empty-args command splitting,
+        # which treats a launcher path containing spaces as multiple words.
+        return pexpect.spawn("/bin/sh", list(command), **kwargs)
+    return pexpect.spawn(command[0], command[1:], **kwargs)
+
+
 class Driver:
-    def __init__(self, home, *, via_tmux=False, via_launcher=False):
+    def __init__(self, home, *, via_tmux=False, via_launcher=False,
+                 tmux_config_source=None):
         workspace = os.path.join(home, "workspace")
         server_config = os.path.join(home, "opencode.json")
         with open(server_config, "w", encoding="utf-8") as stream:
@@ -85,9 +203,8 @@ class Driver:
         contract_spec.loader.exec_module(contract)
         self.session_contract = contract
         self.tmux_config = os.path.join(home, "little-mester-tmux.conf")
-        # Do not source host-wide or user tmux configuration in this disposable
-        # test server; retain the production setting under test.
-        pathlib.Path(self.tmux_config).write_bytes(b"set-option -s escape-time 10\n")
+        config_source = contract.TMUX_CONFIG if tmux_config_source is None else tmux_config_source
+        pathlib.Path(self.tmux_config).write_bytes(isolated_tmux_config(config_source))
         os.chmod(self.tmux_config, 0o600)
         self.env = env
         self.child = None
@@ -127,16 +244,19 @@ class Driver:
                     raise
                 command = [os.path.join(home, "lm-opencode-launcher")]
             else:
+                pane_command = " ".join(shlex.quote(argument) for argument in (
+                    OPENCODE_BINARY, "--standalone", workspace,
+                ))
                 command = [
                     self.tmux, "-L", self.tmux_socket, "-f", self.tmux_config,
                     "new-session", "-A", "-s", self.tmux_session, "-c", workspace,
-                    OPENCODE_BINARY, "--standalone", workspace,
+                    pane_command,
                 ]
         else:
             command = [OPENCODE_BINARY, "--standalone", workspace]
         try:
-            self.child = pexpect.spawn(
-                command[0], command[1:], cwd=workspace, env=env, encoding="utf-8",
+            self.child = spawn_pty(
+                command, launcher_script=via_launcher, cwd=workspace, env=env, encoding="utf-8",
                 codec_errors="replace", dimensions=(40, 120), timeout=20,
             )
             self.log = open(self.log_path, "w", encoding="utf-8")  # noqa: SIM115
@@ -162,30 +282,16 @@ class Driver:
         os.chmod(runner_path, 0o700)
 
         launcher_path = os.path.join(home, "lm-opencode-launcher")
-        launcher = self.session_contract.TUI_LAUNCHER_TEMPLATE.replace(
-            b"@WORKSPACE@", shlex.quote(workspace).encode(),
-        )
-        launcher = launcher.replace(
-            b"/usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth",
-            b"/usr/bin/true",
-        )
-        launcher = launcher.replace(
-            b"/home/mester/.local/share/opencode/tmux",
-            shlex.quote(os.path.join(home, "tmux")).encode(),
-        )
-        launcher = launcher.replace(b"/home/mester", shlex.quote(home).encode())
-        launcher = launcher.replace(
-            b"/etc/little-mester-tmux.conf", shlex.quote(self.tmux_config).encode(),
-        )
-        launcher = launcher.replace(
-            b"/etc/opencode/opencode.json", shlex.quote(server_config).encode(),
-        )
-        launcher = launcher.replace(
-            b"/usr/local/libexec/lm-opencode", shlex.quote(runner_path).encode(),
-        )
-        launcher = launcher.replace(
-            b"/usr/bin/tmux -f",
-            b"/usr/bin/tmux -L " + self.tmux_socket.encode("ascii") + b" -f",
+        launcher = render_test_launcher(
+            self.session_contract.TUI_LAUNCHER_TEMPLATE,
+            workspace=workspace,
+            home=home,
+            tmux_tmp=os.path.join(home, "tmux"),
+            tmux_config=self.tmux_config,
+            server_config=server_config,
+            runner=runner_path,
+            tmux_binary=self.tmux,
+            socket=self.tmux_socket,
         )
         pathlib.Path(launcher_path).write_bytes(launcher)
         os.chmod(launcher_path, 0o700)
