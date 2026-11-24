@@ -54,6 +54,8 @@ def _public_snapshot(snapshot: dict) -> dict:
     temperatures = available("temperatures")
     return {
         "source": "host",
+        "run_id": snapshot["run_id"],
+        "sequence": snapshot["sequence"],
         "timestamp": snapshot["sampled_at"],
         "cpu": cpu,
         "memory": memory,
@@ -84,10 +86,14 @@ def sample() -> dict:
         gpu = payload["gpu"][0] if payload["gpu"] else {}
         total = gpu.get("memory_total_mb", 0)
         history_item = {
-            "gpu_util": gpu.get("utilization_percent", 0),
-            "vram_pct": round(gpu.get("memory_used_mb", 0) * 100 / total, 1) if total else 0,
-            "gpu_temp": gpu.get("temperature_c", 0),
-            "source": "host",
+            "run_id": payload["run_id"],
+            "sequence": payload["sequence"],
+            "timestamp": payload["timestamp"],
+            "gpu_util": gpu.get("utilization_percent"),
+            "vram_pct": (round(gpu["memory_used_mb"] * 100 / total, 1)
+                         if total > 0 else None),
+            "gpu_temp": gpu.get("temperature_c"),
+            "availability": payload["availability"],
         }
         HISTORY.append({"payload": payload, "history": history_item})
         LAST_SAMPLE = time.monotonic()

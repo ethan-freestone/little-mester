@@ -8,9 +8,11 @@ import pathlib
 import socket
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -25,9 +27,15 @@ class MetricsHttpBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.old_port = metrics.PORT
         self.old_sample = metrics.sample
+        self.old_run_id = metrics.RUN_ID
+        self.old_sequence = metrics.SEQUENCE
+        self.old_last_sample = metrics.LAST_SAMPLE
+        self.old_min_sample_interval = metrics.MIN_SAMPLE_INTERVAL
+        self.old_history = list(metrics.HISTORY)
         metrics.PORT = 0
         self.sample_payload = {
-            "source": "host", "timestamp": "2026-11-20T00:00:00.000Z",
+            "source": "host", "run_id": "a" * 32, "sequence": 1,
+            "timestamp": "2026-11-20T00:00:00.000Z",
             "cpu": None, "memory": None, "gpu": [],
             "availability": {"cpu": "unsupported", "memory": "permission_denied",
                               "gpus": "no_device", "temperatures": "no_sensors"},
@@ -57,6 +65,12 @@ class MetricsHttpBoundaryTests(unittest.TestCase):
     def _restore_globals(self):
         metrics.sample = self.old_sample
         metrics.PORT = self.old_port
+        metrics.RUN_ID = self.old_run_id
+        metrics.SEQUENCE = self.old_sequence
+        metrics.LAST_SAMPLE = self.old_last_sample
+        metrics.MIN_SAMPLE_INTERVAL = self.old_min_sample_interval
+        metrics.HISTORY.clear()
+        metrics.HISTORY.extend(self.old_history)
 
     def _stop_fixture_server(self):
         if self.server is not None:
@@ -80,6 +94,8 @@ class MetricsHttpBoundaryTests(unittest.TestCase):
         status, data = self.request("/metrics")
         self.assertEqual(status, 200)
         self.assertEqual(data["source"], "host")
+        self.assertEqual(data["run_id"], "a" * 32)
+        self.assertEqual(data["sequence"], 1)
         self.assertIn("availability", data)
         self.assertEqual(self.request("/metrics?other=1")[0], 404)
         self.assertEqual(self.request("/history?n=60")[0], 200)
@@ -122,6 +138,8 @@ class MetricsHttpBoundaryTests(unittest.TestCase):
                 "utilization_percent": 10, "memory_total_mb": 8192,
                 "memory_used_mb": 1024, "memory_free_mb": 7168}]
         snapshot = {
+            "run_id": "a" * 32,
+            "sequence": 7,
             "sampled_at": "2026-11-20T00:00:00.000Z",
             "cpu": {"status": "ok", "error": None, "value": cpu},
             "memory": {"status": "ok", "error": None, "value": memory},
@@ -130,10 +148,106 @@ class MetricsHttpBoundaryTests(unittest.TestCase):
         }
         result = metrics._public_snapshot(snapshot)
         self.assertEqual(result["source"], "host")
+        self.assertEqual(result["run_id"], snapshot["run_id"])
+        self.assertEqual(result["sequence"], snapshot["sequence"])
+        self.assertEqual(result["timestamp"], snapshot["sampled_at"])
         self.assertEqual(result["gpu"], gpu)
         self.assertEqual(result["cpu"], cpu)
         self.assertEqual(result["memory"], memory)
         self.assertEqual(result["availability"]["temperatures"], "no_sensors")
+
+    @staticmethod
+    def _collector_snapshot(run_id, sequence, gpus):
+        category = metrics.contract.category
+        return {
+            "version": 1,
+            "run_id": run_id,
+            "sequence": sequence,
+            "sampled_at": "2026-11-20T00:00:00.000Z",
+            "sampling_duration_ms": 1,
+            "cpu": category("ok", {
+                "model": "Fixture CPU", "load_avg_1m": 0.0, "load_avg_5m": 0.0,
+                "load_avg_15m": 0.0, "num_cpus": 4,
+            }),
+            "memory": category("ok", {
+                "total_gb": 4.0, "used_gb": 2.0,
+                "available_gb": 2.0, "percent": 50.0,
+            }),
+            "gpus": gpus,
+            "temperatures": category("unavailable", None, "no_sensors"),
+        }
+
+    def _prepare_real_sample(self, *, gpus):
+        metrics.RUN_ID = "b" * 32
+        metrics.SEQUENCE = 0
+        metrics.LAST_SAMPLE = 0
+        metrics.HISTORY.clear()
+        adapters = {"cpu": None, "memory": None, "gpus": None, "temperatures": None}
+        with mock.patch.object(metrics.collector, "linux_proc_adapters", return_value=adapters), \
+                mock.patch.object(metrics.collector, "collect_snapshot",
+                                  side_effect=lambda *, run_id, sequence, **_kwargs:
+                                  self._collector_snapshot(run_id, sequence, gpus)):
+            return self.old_sample()
+
+    def test_cached_response_keeps_sample_identity_and_history_nulls(self):
+        metrics.MIN_SAMPLE_INTERVAL = 60
+        unavailable = metrics.contract.category("unavailable", None, "no_device")
+        payload = self._prepare_real_sample(gpus=unavailable)
+        cached = self.old_sample()
+
+        self.assertEqual(payload["run_id"], "b" * 32)
+        self.assertEqual(payload["sequence"], 1)
+        self.assertEqual(cached["run_id"], payload["run_id"])
+        self.assertEqual(cached["sequence"], payload["sequence"])
+        self.assertEqual(len(metrics.HISTORY), 1)
+        self.assertEqual(metrics.HISTORY[0]["history"], {
+            "run_id": "b" * 32,
+            "sequence": 1,
+            "timestamp": payload["timestamp"],
+            "gpu_util": None,
+            "vram_pct": None,
+            "gpu_temp": None,
+            "availability": payload["availability"],
+        })
+
+        metrics.sample = self.old_sample
+        with urllib.request.urlopen(urllib.request.Request(
+                self.base + "/metrics", headers={"Host": "10.0.2.100:19532"}), timeout=2) as response:
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertEqual(json.loads(response.read()), payload)
+        status, history = self.request("/history?n=60")
+        self.assertEqual(status, 200)
+        self.assertEqual(history, [metrics.HISTORY[0]["history"]])
+        self.assertEqual(len(metrics.HISTORY), 1, "cached endpoint requests must not append history")
+
+    def test_history_uses_null_for_invalid_vram_denominator_but_keeps_real_zeroes(self):
+        gpu = {
+            "index": 0, "name": "Fixture GPU", "temperature_c": 0,
+            "utilization_percent": 0, "memory_total_mb": 0,
+            "memory_used_mb": 0, "memory_free_mb": 0,
+        }
+        payload = self._prepare_real_sample(
+            gpus=metrics.contract.category("ok", [gpu]))
+        history = metrics.HISTORY[0]["history"]
+        self.assertEqual(payload["gpu"][0]["utilization_percent"], 0)
+        self.assertEqual(history["gpu_util"], 0)
+        self.assertEqual(history["gpu_temp"], 0)
+        self.assertIsNone(history["vram_pct"])
+
+    def test_new_collection_advances_sequence_within_the_same_service_run(self):
+        unavailable = metrics.contract.category("unavailable", None, "no_device")
+        first = self._prepare_real_sample(gpus=unavailable)
+        metrics.LAST_SAMPLE = time.monotonic() - 1
+        adapters = {"cpu": None, "memory": None, "gpus": None, "temperatures": None}
+        with mock.patch.object(metrics.collector, "linux_proc_adapters", return_value=adapters), \
+                mock.patch.object(metrics.collector, "collect_snapshot",
+                                  side_effect=lambda *, run_id, sequence, **_kwargs:
+                                  self._collector_snapshot(run_id, sequence, unavailable)):
+            second = self.old_sample()
+
+        self.assertEqual(first["run_id"], second["run_id"])
+        self.assertEqual((first["sequence"], second["sequence"]), (1, 2))
+        self.assertEqual([item["payload"]["sequence"] for item in metrics.HISTORY], [1, 2])
 
 
 if __name__ == "__main__":

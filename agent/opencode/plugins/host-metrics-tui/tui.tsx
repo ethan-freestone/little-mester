@@ -23,43 +23,33 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { createSignal, Show } from "solid-js"
 import { fetchMetricsJson, metricsBaseForMode } from "./metrics-endpoint.js"
+import {
+  applyMetricsPayload,
+  createInitialMetricsState,
+  displayMetric,
+  formatTemperatureSensors,
+  markMetricsUnavailable,
+  refreshMetricsFreshness,
+  seedMetricsHistory,
+  sparkline,
+  sparkRange,
+} from "./metrics-state.js"
+import type { HistorySample, MetricsState } from "./metrics-state.js"
 
 /* ------------------------------------------------------------------ */
-/* Sparkline helpers — ASCII chars ▁▂▃▄▅▆█, scaled to data range       */
+/* Display helpers — absent readings remain null until explicitly rendered. */
 /* ------------------------------------------------------------------ */
 
-const CHARS = "▁▂▃▄▅▆█".split("") as const  // 0→7
-type CharIdx = (typeof CHARS)[number]
-const N_CHARS = CHARS.length
-
-function scaleToChar(v: number, min: number, max: number): CharIdx {
-  if (min === max) return CHARS[4]  // flat data → middle char
-  const idx = Math.max(0, Math.min(N_CHARS - 1, Math.round((v - min) / (max - min) * (N_CHARS - 1))))
-  return CHARS[idx] as CharIdx
-}
-
-/** Sparkline of the last `width` samples, scaled to the visible range. */
-function sparkline(values: number[], width: number): string {
-  if (!values.length) return ""
-  const src = values.slice(-width)
-  const mn = Math.min(...src), mx = Math.max(...src)
-  return src.map(v => scaleToChar(v, mn, mx)).join("")
-}
-
-/** "min-max" of the samples — shown next to the sparkline in expanded mode. */
-function sparkRange(values: number[]): string {
-  if (!values.length) return ""
-  const mn = Math.min(...values), mx = Math.max(...values)
-  return `${mn}-${mx}`
-}
-
-function mbToGb(valMib: number | undefined): string {
+function mbToGb(valMib: number | null | undefined): string {
   if (valMib == null || valMib < 0) return "?"
   return (valMib / 1024).toFixed(1)
 }
 
-function lastValue(values: number[]): number {
-  return values.length ? values[values.length - 1] : 0
+function lastValue(values: Array<number | null>): number | null {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    if (values[index] !== null) return values[index]
+  }
+  return null
 }
 
 /* ------------------------------------------------------------------ */
@@ -86,121 +76,77 @@ function resolveTheme(theme: any): Theme {
 /* Shared reactive state                                                */
 /* ------------------------------------------------------------------ */
 
-interface State {
-  mode: "compact" | "expanded"
-  history: number[]    // GPU util % values
-  vramHistory: number[] // VRAM % values
-  tempVals: number[]   // GPU temps (only positive readings)
-  gpuUtil: number      // latest snapshot
-  gpuName: string
-  vramUsedMb: number
-  vramTotalMb: number
-  cpuModel: string
-  cpuCores: number
-  load1: number
-  load5: number
-  load15: number
-  ramUsedGb: number
-  ramTotalGb: number
-  ramPct: number
-  sourceStatus: string
-}
-
-function initialState(): State {
-  return {
-    mode: "expanded",
-    history: [],
-    vramHistory: [],
-    tempVals: [],
-    gpuUtil: 0,
-    gpuName: "?",
-    vramUsedMb: 0,
-    vramTotalMb: 0,
-    cpuModel: "CPU",
-    cpuCores: 0,
-    load1: 0,
-    load5: 0,
-    load15: 0,
-    ramUsedGb: 0,
-    ramTotalGb: 0,
-    ramPct: 0,
-    sourceStatus: "Host metrics unavailable",
-  }
-}
-
-interface MetricsPayload {
-  source?: string
-  availability?: Record<string, string>
-  cpu?: {
-    model?: string
-    load_avg_1m?: number
-    load_avg_5m?: number
-    load_avg_15m?: number
-    num_cpus?: number
-  }
-  memory?: {
-    total_gb?: number
-    used_gb?: number
-    percent?: number
-  }
-  gpu?: Array<{
-    name?: string
-    utilization_percent?: number
-    memory_used_mb?: number
-    memory_total_mb?: number
-    temperature_c?: number
-  }>
-}
+type State = MetricsState
 
 /* ------------------------------------------------------------------ */
 /* Display helpers (all return strings for <text> children)             */
 /* ------------------------------------------------------------------ */
 
-function gpuPercent(s: State): number {
-  return s.gpuUtil || lastValue(s.history)
+function historySeries(s: State, field: keyof HistorySample): Array<number | null> {
+  return s.history.map(sample => {
+    const value = sample[field]
+    return typeof value === "number" ? value : null
+  })
 }
 
-function vramPercent(s: State): number {
-  if (s.vramTotalMb > 0) return Math.round(100 * s.vramUsedMb / s.vramTotalMb)
-  return Math.round(lastValue(s.vramHistory))
+function vramPercent(s: State): number | null {
+  if (s.gpu && s.gpu.memory_total_mb > 0) {
+    return Math.round(100 * s.gpu.memory_used_mb / s.gpu.memory_total_mb)
+  }
+  const historical = lastValue(historySeries(s, "vram_pct"))
+  return historical === null ? null : Math.round(historical)
 }
 
 function tempText(s: State): string {
-  const t = lastValue(s.tempVals)
-  return `${t > 0 ? Math.round(t) : "?"}°C`
+  return displayMetric(s.gpu?.temperature_c, s.availability.gpus,
+    value => `${Math.round(Number(value))}°C`)
 }
 
 function gpuText(s: State): string {
-  return `${Math.round(gpuPercent(s))}%`
+  return displayMetric(s.gpu?.utilization_percent, s.availability.gpus,
+    value => `${Math.round(Number(value))}%`)
 }
 
 /** "6.0/7.0G" — compact VRAM readout. */
 function vramCompact(s: State): string {
-  if (s.vramTotalMb <= 0) return "n/a"
-  return `${mbToGb(s.vramUsedMb)}/${mbToGb(s.vramTotalMb)}G`
+  if (s.availability.gpus !== "available") return displayMetric(null, s.availability.gpus)
+  if (!s.gpu || s.gpu.memory_total_mb <= 0) return "—"
+  return `${mbToGb(s.gpu.memory_used_mb)}/${mbToGb(s.gpu.memory_total_mb)}G`
 }
 
 /** "6.0/7.0 GB (85%)" — expanded VRAM readout. */
 function vramDetail(s: State): string {
-  if (s.vramTotalMb <= 0) return "n/a"
-  return `${mbToGb(s.vramUsedMb)}/${mbToGb(s.vramTotalMb)} GB (${vramPercent(s)}%)`
+  if (s.availability.gpus !== "available") return displayMetric(null, s.availability.gpus)
+  if (!s.gpu || s.gpu.memory_total_mb <= 0) return "—"
+  const percent = displayMetric(vramPercent(s), "available", value => `${Math.round(Number(value))}%`)
+  return `${mbToGb(s.gpu.memory_used_mb)}/${mbToGb(s.gpu.memory_total_mb)} GB (${percent})`
 }
 
 function gpuLabel(s: State): string {
-  if (!s.gpuName || s.gpuName === "?") return ""
-  const short = s.gpuName.length > 22 ? `${s.gpuName.slice(0, 21)}…` : s.gpuName
+  if (!s.gpu?.name) return ""
+  const short = s.gpu.name.length > 22 ? `${s.gpu.name.slice(0, 21)}…` : s.gpu.name
   return short
 }
 
 function cpuText(s: State): string {
-  const model = s.cpuModel && s.cpuModel !== "unknown" ? s.cpuModel : "CPU"
-  const cores = s.cpuCores > 0 ? ` · ${s.cpuCores} cores` : ""
-  return `${model}${cores} · load ${s.load1.toFixed(2)}/${s.load5.toFixed(2)}/${s.load15.toFixed(2)}`
+  if (!s.cpu) return displayMetric(null, s.availability.cpu)
+  const model = s.cpu.model && s.cpu.model !== "unknown" ? s.cpu.model : "CPU"
+  return `${model} · ${s.cpu.num_cpus} cores · load ${s.cpu.load_avg_1m.toFixed(2)}`
+    + `/${s.cpu.load_avg_5m.toFixed(2)}/${s.cpu.load_avg_15m.toFixed(2)}`
 }
 
 function ramText(s: State): string {
-  if (s.ramTotalGb <= 0) return "? / ? GB"
-  return `${s.ramUsedGb.toFixed(1)} / ${s.ramTotalGb.toFixed(1)} GB (${s.ramPct.toFixed(0)}%)`
+  if (!s.memory) return displayMetric(null, s.availability.memory)
+  return `${s.memory.used_gb.toFixed(1)} / ${s.memory.total_gb.toFixed(1)} GB`
+    + ` (${s.memory.percent.toFixed(0)}%)`
+}
+
+function temperaturesText(s: State): string {
+  return formatTemperatureSensors(s.temperatures, s.availability.temperatures)
+}
+
+function sourceStatus(s: State): string {
+  return s.stale ? "Host metrics · stale" : s.sourceStatus
 }
 
 /* ------------------------------------------------------------------ */
@@ -225,13 +171,13 @@ function MetricsView(props: { state: () => State; theme: Theme; onToggle: () => 
 function CompactView(props: { state: () => State; theme: Theme }) {
   return (
     <box flexDirection="column" gap={0}>
-      <text fg={props.theme.muted}>{props.state().sourceStatus}</text>
+      <text fg={props.theme.muted}>{sourceStatus(props.state())}</text>
       <box flexDirection="row" gap={1}>
         <text>
           <span style={{ fg: props.theme.muted }}>GPU </span>
           {gpuText(props.state())}
         </text>
-        <text fg={props.theme.gpu}>{sparkline(props.state().history, SPARK_WIDTH)}</text>
+        <text fg={props.theme.gpu}>{sparkline(historySeries(props.state(), "gpu_util"), SPARK_WIDTH)}</text>
       </box>
       <box flexDirection="row" gap={1}>
         <text>
@@ -252,32 +198,35 @@ function ExpandedView(props: { state: () => State; theme: Theme }) {
         <text fg={props.theme.muted}>
           <strong>▸ System Monitor</strong>
         </text>
-      <text fg={props.theme.muted}>{props.state().sourceStatus}</text>
+        <text fg={props.theme.muted}>{sourceStatus(props.state())}</text>
       </box>
       <text fg={props.theme.muted}>{gpuLabel(props.state())}</text>
 
       {/* GPU */}
       <box flexDirection="row" gap={1}>
         <text fg={props.theme.muted}>GPU</text>
-        <text fg={props.theme.gpu}>{sparkline(props.state().history, SPARK_WIDTH)}</text>
+        <text fg={props.theme.gpu}>{sparkline(historySeries(props.state(), "gpu_util"), SPARK_WIDTH)}</text>
         <text>{gpuText(props.state())}</text>
-        <text fg={props.theme.gpu}>{sparkRange(props.state().history)}</text>
+        <text fg={props.theme.gpu}>{sparkRange(historySeries(props.state(), "gpu_util"))}</text>
       </box>
 
       {/* VRAM */}
       <box flexDirection="row" gap={1}>
         <text fg={props.theme.muted}>VRM</text>
-        <text fg={props.theme.vram}>{sparkline(props.state().vramHistory, SPARK_WIDTH)}</text>
+        <text fg={props.theme.vram}>{sparkline(historySeries(props.state(), "vram_pct"), SPARK_WIDTH)}</text>
         <text>{vramDetail(props.state())}</text>
-        <text fg={props.theme.vram}>{sparkRange(props.state().vramHistory)}</text>
+        <text fg={props.theme.vram}>{sparkRange(historySeries(props.state(), "vram_pct"))}</text>
       </box>
 
       {/* Temperature */}
       <box flexDirection="row" gap={1}>
         <text fg={props.theme.muted}>Tmp</text>
-        <text fg={props.theme.temp}>{sparkline(props.state().tempVals, SPARK_WIDTH)}</text>
+        <text fg={props.theme.temp}>{sparkline(historySeries(props.state(), "gpu_temp"), SPARK_WIDTH)}</text>
         <text>{tempText(props.state())}</text>
       </box>
+
+      {/* Optional host temperature sensors have their own availability state. */}
+      <text fg={props.theme.muted}>Sensors: {temperaturesText(props.state())}</text>
 
       {/* System overview */}
       <text fg={props.theme.muted}>
@@ -298,7 +247,7 @@ export default Plugin.define({
   id: "little-mester.host-metrics-tui",
 
   async setup(context) {
-    const [state, setState] = createSignal<State>(initialState())
+    const [state, setState] = createSignal<State>(createInitialMetricsState())
     const theme = resolveTheme(context.theme)
     let pollingId: ReturnType<typeof setInterval> | null = null
     let isDisposed = false
@@ -313,75 +262,35 @@ export default Plugin.define({
     /* Poll /history (first time) → seeds the data arrays. */
     function seedHistory() {
       if (!metricsBase) return Promise.resolve()
-      return fetchMetricsJson<Array<{ gpu_util?: number; vram_pct?: number; gpu_temp?: number }>>(
-        metricsMode, "/history?n=60")
-        .then((data: Array<{ gpu_util?: number; vram_pct?: number; gpu_temp?: number }>) => {
-          if (isDisposed || !Array.isArray(data) || !data.length) return
-          setState(prev => ({
-            ...prev,
-            history: data.map(s => s.gpu_util ?? 0).slice(-240),
-            vramHistory: data.map(s => Math.round(s.vram_pct ?? 0)).slice(-240),
-            tempVals: data
-              .filter(s => (s.gpu_temp ?? 0) > 0)
-              .map(s => Math.round(s.gpu_temp as number))
-              .slice(-20),
-          }))
+      return fetchMetricsJson<HistorySample[]>(metricsMode, "/history?n=60")
+        .then((data: HistorySample[]) => {
+          if (isDisposed) return
+          setState(prev => seedMetricsHistory(prev, data, globalThis.performance.now()))
         })
         .catch(() => {})
     }
 
     /* Poll /metrics → push latest data point. */
     function pollMetrics() {
+      const receivedAt = globalThis.performance.now()
+      setState(prev => refreshMetricsFreshness(prev, receivedAt))
       if (!metricsBase) {
-        setState(prev => ({ ...prev, sourceStatus: "Host metrics unavailable · mode not configured" }))
+        setState(prev => ({
+          ...prev,
+          sourceStatus: "Host metrics unavailable · mode not configured",
+        }))
         return
       }
-      fetchMetricsJson<MetricsPayload>(metricsMode, "/metrics")
-        .then((d: MetricsPayload) => {
+      fetchMetricsJson<unknown>(metricsMode, "/metrics")
+        .then((data: unknown) => {
           if (isDisposed) return
-          const g = d.gpu?.[0]
-          setState(prev => {
-            const history = [...prev.history]
-            const vramHistory = [...prev.vramHistory]
-            const tempVals = [...prev.tempVals]
-
-            const util = g?.utilization_percent
-            if (util != null) history.push(util)
-
-            const usedMb = g?.memory_used_mb ?? prev.vramUsedMb
-            const totalMb = g?.memory_total_mb ?? prev.vramTotalMb
-            if (totalMb > 0) vramHistory.push(Math.round(100 * usedMb / totalMb))
-
-            const temp = g?.temperature_c
-            if (temp != null && temp > 0) {
-              const rounded = Math.round(temp)
-              if (!tempVals.length || tempVals[tempVals.length - 1] !== rounded) tempVals.push(rounded)
-            }
-
-            return {
-              ...prev,
-              gpuName: g?.name || prev.gpuName,
-              gpuUtil: util ?? prev.gpuUtil,
-              vramUsedMb: usedMb,
-              vramTotalMb: totalMb,
-              history: history.slice(-240),
-              vramHistory: vramHistory.slice(-240),
-              tempVals: tempVals.slice(-20),
-              cpuModel: d.cpu?.model?.trim() || prev.cpuModel,
-              cpuCores: d.cpu?.num_cpus ?? prev.cpuCores,
-              load1: d.cpu?.load_avg_1m ?? prev.load1,
-              load5: d.cpu?.load_avg_5m ?? prev.load5,
-              load15: d.cpu?.load_avg_15m ?? prev.load15,
-              ramUsedGb: d.memory?.used_gb ?? prev.ramUsedGb,
-              ramTotalGb: d.memory?.total_gb ?? prev.ramTotalGb,
-              ramPct: d.memory?.percent ?? prev.ramPct,
-              sourceStatus: d.source === "host"
-                ? `Host metrics · ${Object.values(d.availability ?? {}).some(value => value !== "available") ? "some sensors unavailable" : "live"}`
-                : "Host metrics unavailable",
-            }
-          })
+          setState(prev => applyMetricsPayload(prev, data, globalThis.performance.now()))
         })
-        .catch(() => setState(prev => ({ ...prev, sourceStatus: "Host metrics unavailable" })))
+        .catch(() => {
+          if (!isDisposed) {
+            setState(prev => markMetricsUnavailable(prev, globalThis.performance.now()))
+          }
+        })
     }
 
     // Start polling (500ms cadence)

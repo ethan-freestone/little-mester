@@ -434,6 +434,8 @@ class SystemdPolicyTests(unittest.TestCase):
             "agent/opencode/plugins/host-metrics-tui/tui.tsx",
             "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js",
             "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts",
+            "agent/opencode/plugins/host-metrics-tui/metrics-state.js",
+            "agent/opencode/plugins/host-metrics-tui/metrics-state.d.ts",
             "systemd/little-mester-vm-proxy.service", "sudoers/little-mester-vm",
             "tools/vm-system-install", "lib/vm/guest-bootstrap.py",
             "lib/vm/guest-compatibility.py", "lib/vm/code-update-transaction.py",
@@ -458,6 +460,7 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn('"lib/vm/guest-opencode-preferences.py":', installer)
         self.assertIn('"agent/opencode/plugins/host-metrics-tui/tui.tsx":', installer)
         self.assertIn('"agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js":', installer)
+        self.assertIn('"agent/opencode/plugins/host-metrics-tui/metrics-state.js":', installer)
         self.assertIn('"systemd/little-mester-vm-metrics.service":', installer)
         self.assertIn('"systemd/little-mester-vm-workspace.service":', installer)
 
@@ -1534,6 +1537,7 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn("/etc/opencode/plugins/little-mester-exit-confirm/tui.tsx", files)
         self.assertIn("/etc/opencode/plugins/little-mester-host-metrics-tui/tui.tsx", files)
         self.assertIn("/etc/opencode/plugins/little-mester-host-metrics-tui/metrics-endpoint.js", files)
+        self.assertIn("/etc/opencode/plugins/little-mester-host-metrics-tui/metrics-state.js", files)
         self.assertIn("/etc/opencode/opencode-model.json", files)
         model_config = json.loads(files["/etc/opencode/opencode-model.json"]["content"])
         self.assertEqual(model_config["model"], "{env:LM_OPENCODE_MODEL}")
@@ -1881,6 +1885,8 @@ class SystemdPolicyTests(unittest.TestCase):
             shutil.copyfile(source_metrics_plugin / "tui.tsx", metrics_plugin_dir / "tui.tsx")
             shutil.copyfile(source_metrics_plugin / "metrics-endpoint.js", metrics_plugin_dir / "metrics-endpoint.js")
             shutil.copyfile(source_metrics_plugin / "metrics-endpoint.d.ts", metrics_plugin_dir / "metrics-endpoint.d.ts")
+            shutil.copyfile(source_metrics_plugin / "metrics-state.js", metrics_plugin_dir / "metrics-state.js")
+            shutil.copyfile(source_metrics_plugin / "metrics-state.d.ts", metrics_plugin_dir / "metrics-state.d.ts")
             (plugin_dir / "package.json").chmod(0o644)
             (plugin_dir / "tui.tsx").chmod(0o644)
             for asset in metrics_plugin_dir.iterdir():

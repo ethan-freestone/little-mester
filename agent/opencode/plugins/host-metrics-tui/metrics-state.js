@@ -1,0 +1,315 @@
+const AVAILABILITY_KEYS = ["cpu", "memory", "gpus", "temperatures"]
+const AVAILABILITY_CODES = new Set([
+  "available", "collector_failed", "malformed", "no_device", "no_sensors",
+  "permission_denied", "timeout", "unsupported",
+])
+const METRICS_KEYS = [
+  "source", "run_id", "sequence", "timestamp", "cpu", "memory", "gpu",
+  "availability", "temperatures",
+]
+const HISTORY_KEYS = [
+  "run_id", "sequence", "timestamp", "gpu_util", "vram_pct", "gpu_temp",
+  "availability",
+]
+const HISTORY_LIMIT = 240
+const SPARK_CHARS = "▁▂▃▄▅▆█"
+
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+function hasKeys(value, keys) {
+  return isObject(value)
+    && Object.keys(value).length === keys.length
+    && keys.every(key => Object.hasOwn(value, key))
+}
+
+function isNumber(value, minimum, maximum) {
+  return typeof value === "number" && Number.isFinite(value)
+    && value >= minimum && value <= maximum
+}
+
+function isNullableNumber(value, minimum, maximum) {
+  return value === null || isNumber(value, minimum, maximum)
+}
+
+function isSafeText(value, maximumLength) {
+  return typeof value === "string"
+    && new TextEncoder().encode(value).length <= maximumLength
+    && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)
+}
+
+function isTimestamp(value) {
+  if (typeof value !== "string"
+      || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value)) return false
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value
+}
+
+function isIdentity(value) {
+  return typeof value.run_id === "string" && /^[0-9a-f]{32}$/.test(value.run_id)
+    && Number.isSafeInteger(value.sequence) && value.sequence > 0
+    && isTimestamp(value.timestamp)
+}
+
+function isAvailability(value) {
+  return hasKeys(value, AVAILABILITY_KEYS)
+    && AVAILABILITY_KEYS.every(key => typeof value[key] === "string"
+      && AVAILABILITY_CODES.has(value[key]))
+}
+
+function isCpu(value) {
+  return hasKeys(value, ["model", "load_avg_1m", "load_avg_5m", "load_avg_15m", "num_cpus"])
+    && isSafeText(value.model, 128)
+    && ["load_avg_1m", "load_avg_5m", "load_avg_15m"]
+      .every(key => isNumber(value[key], 0, 1_000_000))
+    && Number.isSafeInteger(value.num_cpus) && value.num_cpus >= 1 && value.num_cpus <= 4096
+}
+
+function isMemory(value) {
+  if (!hasKeys(value, ["total_gb", "used_gb", "available_gb", "percent"])
+      || !isNumber(value.total_gb, Number.MIN_VALUE, 1_000_000)
+      || !isNumber(value.used_gb, 0, value.total_gb)
+      || !isNumber(value.available_gb, 0, value.total_gb)
+      || !isNumber(value.percent, 0, 100)) return false
+  return Math.abs(value.used_gb + value.available_gb - value.total_gb) <= 0.16
+}
+
+function isGpu(value) {
+  return hasKeys(value, ["index", "name", "temperature_c", "utilization_percent",
+    "memory_total_mb", "memory_used_mb", "memory_free_mb"])
+    && Number.isSafeInteger(value.index) && value.index >= 0 && value.index <= 7
+    && isSafeText(value.name, 128)
+    && isNumber(value.temperature_c, -100, 250)
+    && isNumber(value.utilization_percent, 0, 100)
+    && Number.isSafeInteger(value.memory_total_mb) && value.memory_total_mb >= 0
+    && value.memory_total_mb <= 2 ** 31 - 1
+    && Number.isSafeInteger(value.memory_used_mb) && value.memory_used_mb >= 0
+    && value.memory_used_mb <= 2 ** 31 - 1
+    && value.memory_used_mb <= value.memory_total_mb
+    && Number.isSafeInteger(value.memory_free_mb) && value.memory_free_mb >= 0
+    && value.memory_free_mb <= 2 ** 31 - 1
+    && value.memory_free_mb <= value.memory_total_mb
+}
+
+function isTemperature(value) {
+  return hasKeys(value, ["chip", "sensor", "temperature_c"])
+    && isSafeText(value.chip, 64)
+    && isSafeText(value.sensor, 64)
+    && isNumber(value.temperature_c, -100, 250)
+}
+
+export function isValidMetricsPayload(value) {
+  if (!hasKeys(value, METRICS_KEYS) || value.source !== "host" || !isIdentity(value)
+      || !isAvailability(value.availability) || !Array.isArray(value.gpu)
+      || value.gpu.length > 8 || !value.gpu.every(isGpu)
+      || new Set(value.gpu.map(gpu => gpu.index)).size !== value.gpu.length) return false
+
+  if ((value.availability.cpu === "available") !== (value.cpu !== null)
+      || (value.cpu !== null && !isCpu(value.cpu))) return false
+  if ((value.availability.memory === "available") !== (value.memory !== null)
+      || (value.memory !== null && !isMemory(value.memory))) return false
+  if ((value.availability.gpus === "available") !== (value.gpu.length > 0)) return false
+  if (value.availability.temperatures === "available") {
+    if (!Array.isArray(value.temperatures) || value.temperatures.length < 1
+        || value.temperatures.length > 64 || !value.temperatures.every(isTemperature)) return false
+  } else if (value.temperatures !== null) {
+    return false
+  }
+  return true
+}
+
+export function isValidHistorySample(value) {
+  if (!hasKeys(value, HISTORY_KEYS) || !isIdentity(value)
+      || !isAvailability(value.availability)
+      || !isNullableNumber(value.gpu_util, 0, 100)
+      || !isNullableNumber(value.vram_pct, 0, 100)
+      || !isNullableNumber(value.gpu_temp, -100, 250)) return false
+  return value.availability.gpus === "available"
+    || (value.gpu_util === null && value.vram_pct === null && value.gpu_temp === null)
+}
+
+export function createInitialMetricsState() {
+  return {
+    mode: "expanded",
+    history: [],
+    runId: null,
+    sequence: null,
+    receivedAt: null,
+    stale: false,
+    gpu: null,
+    cpu: null,
+    memory: null,
+    temperatures: null,
+    availability: { cpu: null, memory: null, gpus: null, temperatures: null },
+    sourceStatus: "Host metrics · waiting for sample",
+  }
+}
+
+export function isMetricsSampleNewer(state, sample) {
+  if (!isValidMetricsPayload(sample)) return false
+  if (state.runId === null) return true
+  if (sample.run_id !== state.runId) return true
+  return sample.sequence > state.sequence
+}
+
+function snapshotToHistory(sample) {
+  const gpu = sample.gpu[0]
+  return {
+    run_id: sample.run_id,
+    sequence: sample.sequence,
+    timestamp: sample.timestamp,
+    gpu_util: gpu?.utilization_percent ?? null,
+    vram_pct: gpu && gpu.memory_total_mb > 0
+      ? Math.round(gpu.memory_used_mb * 1000 / gpu.memory_total_mb) / 10
+      : null,
+    gpu_temp: gpu?.temperature_c ?? null,
+    availability: sample.availability,
+  }
+}
+
+function historyKey(sample) {
+  return `${sample.run_id}:${sample.sequence}`
+}
+
+function addHistory(history, sample) {
+  const key = historyKey(sample)
+  if (history.some(existing => historyKey(existing) === key)) return history
+  return [...history, sample].slice(-HISTORY_LIMIT)
+}
+
+export function applyMetricsPayload(state, sample, receivedAt) {
+  if (!isValidMetricsPayload(sample)) {
+    return {
+      ...refreshMetricsFreshness(state, receivedAt),
+      sourceStatus: "Host metrics · invalid response",
+    }
+  }
+  if (!isMetricsSampleNewer(state, sample)) {
+    return refreshMetricsFreshness(state, receivedAt)
+  }
+
+  return {
+    ...state,
+    history: addHistory(state.history, snapshotToHistory(sample)),
+    runId: sample.run_id,
+    sequence: sample.sequence,
+    receivedAt,
+    stale: false,
+    gpu: sample.gpu[0] ?? null,
+    cpu: sample.cpu,
+    memory: sample.memory,
+    temperatures: sample.temperatures,
+    availability: sample.availability,
+    sourceStatus: "Host metrics",
+  }
+}
+
+function orderedUnique(samples) {
+  const result = []
+  const seen = new Set()
+  const lastSequence = new Map()
+  for (const sample of samples) {
+    if (!isValidHistorySample(sample)) continue
+    const key = historyKey(sample)
+    if (seen.has(key) || sample.sequence <= (lastSequence.get(sample.run_id) ?? 0)) continue
+    seen.add(key)
+    lastSequence.set(sample.run_id, sample.sequence)
+    result.push(sample)
+  }
+  return result
+}
+
+export function seedMetricsHistory(state, samples, receivedAt) {
+  if (!Array.isArray(samples) || !samples.every(isValidHistorySample)
+      || new Set(samples.map(sample => sample.run_id)).size > 1) {
+    return {
+      ...refreshMetricsFreshness(state, receivedAt),
+      sourceStatus: "Host metrics · invalid history",
+    }
+  }
+  const incoming = orderedUnique(samples)
+  const targetRunId = state.runId ?? incoming.at(-1)?.run_id
+  if (targetRunId === undefined) return refreshMetricsFreshness(state, receivedAt)
+
+  const knownRuns = state.history.filter(sample => sample.run_id !== targetRunId)
+  const merged = orderedUnique([
+    ...state.history.filter(sample => sample.run_id === targetRunId),
+    ...incoming.filter(sample => sample.run_id === targetRunId),
+  ].sort((left, right) => left.sequence - right.sequence))
+  const latestIncoming = incoming.filter(sample => sample.run_id === targetRunId).at(-1)
+  const advancesIdentity = latestIncoming !== undefined
+    && (state.runId === null || (state.runId === targetRunId
+      && latestIncoming.sequence > state.sequence))
+
+  return {
+    ...state,
+    history: [...knownRuns, ...merged].slice(-HISTORY_LIMIT),
+    ...(advancesIdentity ? {
+      runId: latestIncoming.run_id,
+      sequence: latestIncoming.sequence,
+      receivedAt,
+      stale: false,
+    } : { stale: isMetricsStale(state.receivedAt, receivedAt) }),
+    sourceStatus: state.receivedAt === null && advancesIdentity
+      ? "Host metrics"
+      : state.sourceStatus,
+  }
+}
+
+export function isMetricsStale(receivedAt, now) {
+  return typeof receivedAt === "number" && Number.isFinite(receivedAt)
+    && typeof now === "number" && Number.isFinite(now)
+    && now - receivedAt >= 2000
+}
+
+export function refreshMetricsFreshness(state, now) {
+  return { ...state, stale: isMetricsStale(state.receivedAt, now) }
+}
+
+export function markMetricsUnavailable(state, now) {
+  return {
+    ...refreshMetricsFreshness(state, now),
+    sourceStatus: "Host metrics · retrying",
+  }
+}
+
+export function displayMetric(value, availability, format = String) {
+  if (availability !== null && availability !== "available") {
+    return `— (${availability})`
+  }
+  if (value === null || value === undefined) return "—"
+  return format(value)
+}
+
+export function formatTemperatureSensors(temperatures, availability) {
+  if (availability !== "available") return displayMetric(null, availability)
+  if (!Array.isArray(temperatures) || temperatures.length === 0) return "—"
+  const entries = temperatures.slice(0, 3).map(item =>
+    `${item.chip}/${item.sensor} ${Math.round(item.temperature_c)}°C`)
+  if (temperatures.length > entries.length) entries.push(`+${temperatures.length - entries.length}`)
+  return entries.join(", ")
+}
+
+export function sparkline(values, width) {
+  if (!Array.isArray(values) || !Number.isSafeInteger(width) || width < 1 || !values.length) return ""
+  const visible = values.slice(-width)
+  const present = visible.filter(value => typeof value === "number" && Number.isFinite(value))
+  if (!present.length) return " ".repeat(visible.length)
+  const minimum = Math.min(...present)
+  const maximum = Math.max(...present)
+  return visible.map(value => {
+    if (value === null || typeof value !== "number" || !Number.isFinite(value)) return " "
+    if (minimum === maximum) return SPARK_CHARS[4]
+    const index = Math.max(0, Math.min(SPARK_CHARS.length - 1,
+      Math.round((value - minimum) / (maximum - minimum) * (SPARK_CHARS.length - 1))))
+    return SPARK_CHARS[index]
+  }).join("")
+}
+
+export function sparkRange(values) {
+  if (!Array.isArray(values)) return ""
+  const present = values.filter(value => typeof value === "number" && Number.isFinite(value))
+  if (!present.length) return ""
+  return `${Math.min(...present)}-${Math.max(...present)}`
+}

@@ -101,7 +101,8 @@ PROTECTED_PLUGIN_ASSETS = {
 METRICS_PLUGIN_ASSETS = {
     f"/etc/opencode/plugins/little-mester-host-metrics-tui/{name}":
         (METRICS_PLUGIN_ROOT / name).read_bytes()
-    for name in ("package.json", "tui.tsx", "metrics-endpoint.js", "metrics-endpoint.d.ts")
+    for name in ("package.json", "tui.tsx", "metrics-endpoint.js", "metrics-endpoint.d.ts",
+                 "metrics-state.js", "metrics-state.d.ts")
 }
 PROTECTED_CONFIG_MODEL = json.dumps({
     "autoupdate": False,
@@ -188,6 +189,8 @@ def add_protected_session(data: dict, *, host_private: str, host_public: str,
             ("tui.tsx", "/etc/opencode/plugins/little-mester-host-metrics-tui/tui.tsx"),
             ("metrics-endpoint.js", "/etc/opencode/plugins/little-mester-host-metrics-tui/metrics-endpoint.js"),
             ("metrics-endpoint.d.ts", "/etc/opencode/plugins/little-mester-host-metrics-tui/metrics-endpoint.d.ts"),
+            ("metrics-state.js", "/etc/opencode/plugins/little-mester-host-metrics-tui/metrics-state.js"),
+            ("metrics-state.d.ts", "/etc/opencode/plugins/little-mester-host-metrics-tui/metrics-state.d.ts"),
         ))
     for name, destination in plugin_destinations:
         source_root = (METRICS_PLUGIN_ROOT if "host-metrics-tui" in destination else PLUGIN_ROOT)
