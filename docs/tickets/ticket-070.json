@@ -8,7 +8,7 @@
   "title": "Repository-first VM CLI, pinned profile dispatch, and safe settings UX",
   "objective": "Part of integration ticket #66 and shares a contract with #67. Provide a simple public ./lab vm interface while preserving the separation between source checkout, immutable installed runtime SHA and persistent profile. Also fix the observed installer bytecode defect and make ordinary supported OpenCode settings usable without weakening enforced policy. The shared design baseline is docs/vm-usability-integration.md; profile CLI dispatch uses the fixed helper and pinned runtime while preserving the singleton and global preparation compatibility paths. The fixed #20 singleton is transitional and mutually exclusive with profiles; the original feat/vm-approach development VM remains concurrent and untouched.",
   "created_at": "2026-11-23T23:21:29.454Z",
-  "updated_at": "2026-11-24T12:25:23.851Z",
+  "updated_at": "2026-11-24T13:04:53.097Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -80,10 +80,33 @@
       "Workspace verifier state matrix: both system-acceptance static layout verification and vm-system-install update/rollback accept a stopped unassigned singleton only with no assignment record and no workspace 20 drop-in; if assignment exists, require exact 20 bytes/path identity. Assignment/drop-in mismatch, running unassigned state for live acceptance, or partial guard sets fail. Full live owner acceptance still requires assigned workspace.",
       "Distribution matrix supersession: all earlier two-host Ubuntu/CachyOS-only test wording is incomplete; test all four required IDs—Ubuntu, Debian, Arch and CachyOS—with common control/runtime behavior and apt/pacman limited to prerequisites."
     ],
-    "created": [],
+    "created": [
+      "tests/vm-profile-cli.test.py",
+      "tests/vm-systemd.test.py",
+      "tests/vm-host-dependencies.test.py"
+    ],
     "cases": [
       "Owner reports install generated lib/vm/__pycache__/code-update-transaction.cpython-314.pyc inside the pinned SHA tree; immutable verification refused the tree. Owner manually removed the generated file and startup succeeded. This is a known defect to fix at source, not a supported workaround.",
-      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence."
+      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence.",
+      "tests/vm-profile-cli.test.py::ProfileCliTests.test_default_profile_and_option_position",
+      "tests/vm-profile-cli.test.py::ProfileCliTests.test_profile_names_fail_closed_for_reserved_or_malformed_names",
+      "tests/vm-profile-cli.test.py::ProfileCliTests.test_workspace_precedence_and_unsafe_recurse_defaults",
+      "tests/vm-profile-cli.test.py::ProfileCliTests.test_install_pins_only_committed_full_head_and_checkout_path",
+      "tests/vm-profile-cli.test.py::ProfileCliTests.test_settings_request_accepts_only_model_and_theme",
+      "tests/vm-profile-cli.test.py::ProfileCliTests.test_global_commands_reject_profile_and_prune_has_no_confirmation_bypass",
+      "tests/vm-profile-cli.test.py::ProfileCliTests.test_profiles_list_and_show_use_global_protocol_operations",
+      "tests/vm-profile-cli.test.py::ProfileCliTests.test_dispatch_sends_only_protocol_record_to_fixed_sudo_helper",
+      "tests/vm-profile-cli.test.py::ProfileCliTests.test_missing_helper_is_a_bootstrap_prerequisite_without_execution",
+      "tests/vm-profile-cli.test.py::ProfileCliTests.test_signed_bootstrap_is_not_replaced_by_mutable_checkout_execution",
+      "tests/vm-host-dependencies.test.py::HostDependencyTests.test_debian_uses_the_explicit_apt_package_map",
+      "tests/vm-systemd.test.py::SystemdPolicyTests.test_loading_update_transaction_does_not_write_into_immutable_tree",
+      "tests/vm-systemd.test.py::SystemdPolicyTests.test_static_verifier_accepts_unassigned_workspace_only_without_20_dropin",
+      "tests/vm-systemd.test.py::SystemdPolicyTests.test_live_acceptance_still_requires_a_workspace_assignment",
+      "tests/vm-systemd.test.py::SystemdPolicyTests.test_static_verifier_requires_assigned_workspace_dropin_bytes",
+      "tests/vm-systemd.test.py::SystemdPolicyTests.test_fixed_installer_requires_exact_guard_dropin_sets",
+      "tests/vm-systemd.test.py::SystemdPolicyTests.test_unassigned_workspace_installer_layout_requires_no_bind_dropin",
+      "tests/vm-systemd.test.py::SystemdPolicyTests.test_assigned_workspace_installer_requires_exact_dropin_bytes_and_metadata",
+      "tests/vm-systemd.test.py::SystemdPolicyTests.test_installer_verifies_unassigned_workspace_unit_is_stopped_and_unbound"
     ]
   },
   "models_used": []
