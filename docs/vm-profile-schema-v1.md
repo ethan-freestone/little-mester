@@ -74,8 +74,9 @@ state/config/runtime child removal and empty-directory checks; recorded account
 and group verification/removal without deleting a home; then final mapping
 unlink. The config directory may be removed only after that unlink and only if
 empty. Missing units during remove recovery are accepted only with durable
-matching removal intent or recorded install evidence that proves those exact
-units were never created. Unknown children are never recursively removed.
+matching removal intent or a matching retained source-install role record whose
+publication state is `not_started`. Unknown children are never recursively
+removed.
 
 The fixed `#20` singleton is excluded only by its four component unit/job states
 (VM, proxy, workspace, metrics). The distinct `feat/vm-approach` development VM
@@ -103,6 +104,7 @@ extension keys:
 | `state` | `installing`, `ready`, `resetting`, or `removing`. |
 | `runtime` | Exact object below, including the full 40- or 64-character lowercase SHA. |
 | `accounts` | Exact `vm` and `proxy` role objects below. |
+| `installation` | The retained install transaction ID, exact four-role unit-publication snapshot, and typed VM/proxy group-provenance records. It remains inside this one authoritative protected mapping after `transaction` is cleared; it is not a registry. |
 | `units` | Exact `vm`, `proxy`, `workspace`, and `metrics` unit names below. |
 | `workspace` | JSON `null` or the exact observation object below. It is never authority by itself. |
 | `ssh_port` | Integer from `22223` through `23222`, inclusive. |
@@ -150,22 +152,54 @@ keys. The fixed vectors below are normative and must be tested byte-for-byte:
 | `1000` | `work` | `1c04efbef58307f16a27` | `lmv-1c04efbef58307f16a27` | `lmp-1c04efbef58307f16a27` |
 | `65534` | `a` | `d2c5616a3545a5ad0e4b` | `lmv-d2c5616a3545a5ad0e4b` | `lmp-d2c5616a3545a5ad0e4b` |
 
-Every recomputed name must match exactly. Any generated-name or numeric-ID
-collision refuses before effects; the helper must not select a replacement
-identity or adopt an unmarked account.
+Every recomputed name must match exactly. A generated-name collision refuses;
+names never change to evade a collision. A numeric UID/GID collision may replace
+only the affected, still-unallocated `planned` numeric value. Append the exact
+old/new role-field values and fixed `numeric_collision` reason to the same
+protected install journal, atomically publish/fsync it before retry, and retain
+the install transaction ID. The append-only journal chain must match the
+currently mapped numeric values. Preserve owner UID, profile name, generated
+names, and runtime SHA pin. A `committed` identity never changes. Replanning is
+blocked while group creation is in `creation_intent` or a generated group is
+still allocated: reconcile/remove that exact group through its retained journal
+identity first; the current transaction never substitutes a group by name/GID.
+If needed, only a fresh explicit install after exact removal can select a new
+planned value. An ambiguous group creation is refused rather than adopted or
+retried by name.
 
 The approved baseline is two static non-login accounts and matching private
 primary groups per profile. The VM account alone receives supplementary `kvm`;
 the proxy account receives no supplementary groups; each generated primary group
-has no unexpected members. The frozen marker is the exact ASCII account comment
-`little-mester-vm-profile-v1:<canonical-owner-uid>:<profile-name>:<vm|proxy>`;
-the group marker appends `:<role>:group` after the profile name. The passwd home
-field is the empty string and no home directory is created or recursively
-removed. The shell must be the host's canonical root-owned, non-writable nologin
-executable. If the exact host path/identity, system UID/GID ranges, marker,
-bidirectional NSS identity, group membership, or no-process condition cannot be
-proven, refuse. These are safe fail-closed host checks; no account creation,
-marker verification, or removal implementation is claimed here.
+has no unexpected members. The exact ASCII passwd GECOS account-comment marker
+is `little-mester-vm-profile-v1/<canonical-owner-uid>/<profile-name>/<vm|proxy>`.
+It is identification only, never proof of ownership. The protected mapping and
+transaction journal, exact expected UID/GID, generated name, local account
+record, and NSS resolution must agree; the account's GECOS marker is checked as
+one field of that complete identity. Never adopt, modify, or delete an unrelated
+pre-existing account solely by name or marker.
+
+`/etc/group` has no comment/marker field. The protected `installation.groups`
+records and group transaction evidence instead contain a closed, bounded
+`schema_version=1` provenance tuple: owner UID, profile name, role, generated
+group name, exact GID, and origin install transaction ID. Recompute and compare
+every field against the protected mapping and exact local `/etc/group` plus NSS
+records, including membership; provenance alone or a matching name/GID alone is
+not proof. Before group creation, durably record `creation_intent`; only the
+uninterrupted operation may record `owned` after exact local/NSS verification.
+If recovery sees an unresolved creation intent, refuse even if a same-name
+record appears: do not adopt or delete it automatically. Report the role and
+transaction context without secrets and instruct the owner to leave the object
+and journal untouched while an administrator inspects the exact local/NSS
+identity and resolves the interrupted operation; do not suggest name-only
+cleanup.
+
+The passwd home field is the empty string and no home directory is created or
+recursively removed. The shell must be the host's canonical root-owned,
+non-writable nologin executable. If the exact host path/identity, system UID/GID
+ranges, complete protected/local/NSS identity, group membership, or no-process
+condition cannot be proven, refuse. These are safe fail-closed host checks; no
+account creation, identity verification, or removal implementation is claimed
+here.
 
 ### 2.2 Workspace observation and port derivation
 
@@ -202,14 +236,19 @@ atomic publication and protected ancestry checks remain mandatory.
 
 ## 3. Transaction v1
 
-A non-null transaction has exactly `schema_version`, `id`, `operation`, `phase`,
-`step`, and `expected`. `schema_version` is integer `1`; `id` is exactly 32
-lowercase hexadecimal characters generated randomly for that transaction;
-`step` is an integer in `0..4`; `expected` is a bounded array (at most 64) of
-closed, selector-discriminated objects. The transaction never accepts a path,
-unit name, account name, arbitrary dictionary, replacement identity, or
-caller-chosen selector. Selector resolution comes only from the closed resource
-table. A selector may occur at most once in an `expected` array.
+Every non-null transaction has the common fields `schema_version`, `id`,
+`operation`, `phase`, `step`, and `expected`. `schema_version` is integer `1`;
+`id` is exactly 32 lowercase hexadecimal characters; `step` is in `0..4`; and
+`expected` is a bounded array (at most 64) of closed, selector-discriminated
+objects. An install transaction additionally has the exact four-role
+`unit_publication` object and an append-only `numeric_replans` array of at most
+eight typed `{role, field, previous, replacement, reason}` records, where reason
+is exactly `numeric_collision`. A remove transaction has `source_install_id`
+and a complete copied `unit_publication` snapshot; reset has no operation-
+specific extra fields. The transaction never accepts a path, unit name, account name,
+arbitrary dictionary, replacement identity, or caller-chosen selector. Selector
+resolution comes only from the closed resource table. A selector may occur at
+most once in an `expected` array.
 
 | Operation | Exact phases and matching step | Allowed expected selectors |
 |---|---|---|
@@ -218,28 +257,92 @@ table. A selector may occur at most once in an `expected` array.
 | `remove` | `prepared=0`, `units=1`, `state=2`, `accounts=3`, `finalizing=4` | See `transaction_allowlists.remove` in the resource table. |
 
 The mapping-state/operation pairing is exact: `installing/install`,
-`resetting/reset`, and `removing/remove`. `ready` requires a null transaction and
-both account allocations `committed`. Reset changes only the seven fixed leaves
-below; retry keeps the same transaction and advances only after its durable
-intent/identity checks. Remove keeps the mapping/name reservation until final
-commit. No phase permits an unlisted selector or generic recursive walk.
+`resetting/reset`, and `removing/remove`. `ready` requires a null transaction,
+both account allocations `committed`, all four publication states `published`,
+and both group provenance records `owned`. The root `installation` source record
+retains the original install ID and complete unit snapshot through `ready`, reset,
+and removal. Reset changes only the seven fixed leaves below; retry keeps the
+same transaction and advances only after its durable intent/identity checks.
+Removal from `ready` copies that retained source record into the remove
+transaction. Removing a partial install copies the source ID and full four-role
+snapshot before replacing the install transaction. Remove keeps the
+mapping/name reservation until final commit. No phase permits an unlisted
+selector or generic recursive walk.
+
+### 3.1 Four-role unit publication and retained source
+
+The first durable `installing` mapping initializes `unit_publication` for exactly
+`vm`, `proxy`, `workspace`, and `metrics`, all `not_started`, before any unit
+stage or fragment write. The same source record is retained at the mapping root
+as `installation` (`id`, `unit_publication`, and the two typed group records),
+then copied into the install transaction. Publication remains inside the existing
+`install` phase and lifecycle order; it does not add a helper or change the
+approved lifecycle architecture. The fixed publication role order is VM, proxy,
+workspace, metrics, and role states form a monotonic prefix:
+
+```text
+not_started -> publication_intent -> published
+```
+
+For one role, generate its exact fixed fragment bytes into a private root-owned
+`0600` regular stage in `/etc/systemd/system`. Its basename is derived only from
+the fixed role, recomputed profile digest, and install transaction ID; it is not a
+caller path. Write/fsync the stage and capture its exact device/inode identity.
+Durably journal that identity with `publication_intent` before atomically
+renaming the stage to that role's final unit name. Fsync the directory, then
+durably mark `published` with the same exact final fragment identity. File
+identity is regular, single-link; ownership/mode and fixed ancestry are checked
+separately. A state never rolls back or substitutes a different inode.
+
+Recovery of `publication_intent` checks the one exact stage pathname and one
+exact final pathname. It may advance only when exactly one path contains the
+recorded inode: stage means finish the recorded rename; final means record
+`published`. Missing at both paths, both paths present, or any foreign identity
+refuses with the transaction retained. Intent is not proof of non-creation.
+For `published`, require the exact fragment identity at the final path and the
+matching systemd manager identity; never accept a replacement fragment.
+
+A remove record retains `source_install_id` and the complete four-role source
+snapshot. For a `not_started` role only, its matching source ID/state can support
+`never_created`. For `publication_intent`, removal must first find the exact
+recorded inode at the exact stage or final path; stage cleanup also records exact
+stage removal intent, final-path absence, and post-reload manager absence. For
+`published`, removal requires the exact final inode and durable removal intent,
+then daemon-reload and not-found/job-free verification. No phase-only inference,
+name-only adoption, or broad cleanup is authorized. A refusal diagnostic names
+the role and safe next action without credentials or other secrets; uncertain
+objects and the protected journal remain untouched.
 
 Each expected-object branch has exactly one selector class and an explicit
 evidence shape:
 
-* `observed_present`: exact no-follow observed identity. A file-system identity
-  records bounded device, inode, kind (`regular`, `directory`, or `socket`) and
-  single-link count. Account/group identities record the numeric UID/GID and
-  exact role marker. Unit-manager identity binds the loaded unit to the exact
-  fragment device/inode and records only `inactive`, `job_state=none`.
+* `observed_present`: exact no-follow observed identity. Regular files and
+  sockets record bounded device, inode, kind and `link_count=1`. Directories
+  record device, inode and kind only: Linux directory link count changes as
+  children are added/removed and is not a stable ownership identity. Before
+  `rmdir`, revalidate fd/path inode identity, exact owner/mode, protected
+  ancestry/mount boundaries, and emptiness immediately before the syscall.
+  Account identity records exact UID/GID plus the GECOS identification marker;
+  group identity records exact name/GID and typed protected provenance, not a
+  fictional group marker. The protected mapping/journal and local/NSS records
+  must agree. Unit-manager identity binds the loaded unit to the exact fragment
+  device/inode and records only `inactive`, `job_state=none`.
 * `expected_absent`: records only that the object was absent at that preflight.
   This is **not** permission to accept later absence after the operation could
   have created it.
-* `never_created`: allowed only for a unit-file or unit-manager selector in a
-  remove transaction. It carries a different `install_transaction_id` and an
-  install phase of `prepared`, `accounts`, or `state`, all before unit
-  publication. It proves non-creation, not removal. A later install phase cannot
-  be used to infer that a particular unit was never created.
+* `never_created`: allowed only for the matching unit-file, private stage, or
+  manager selector in a remove transaction. It carries the same `source_install_id`
+  as the retained installation record and is valid only when that specific role's
+  copied publication state is `not_started`. This supersedes the older
+  phase-only `prepared`/`accounts`/`state` rule: a global install phase never
+  proves that an individual unit was not created. `publication_intent` is not
+  `never_created`; it must reconcile the exact recorded stage or final inode or
+  refuse.
+* `verified_absent`: for unit-file/manager recovery only, carries the source
+  install ID and exact publication state after the prescribed identity check and
+  daemon-reload. Manager absence is recorded as `load_state=not-found`,
+  `active_state=inactive`, `job_state=none`, `daemon_reload=completed`. It does
+  not replace a required fragment removal intent.
 * `removal_intent`: stores the exact previously observed identity and is durably
   published/fsynced before unlink or account/unit removal. Later absence is
   accepted only for that same selector/identity, operation, and durable phase.
@@ -274,9 +377,12 @@ data is interpolated into other path components.
   idempotent only when the journal records that absence. Replaced identity,
   symlink, mount boundary, escape, or unknown child stops and retains the
   transaction. Reset never traverses a workspace.
-* Remove accepts only the table's fixed leaves and directories; it checks each
-  directory is empty before `rmdir`. It removes the four generated unit
-  fragments and reloads/verifies systemd before state/config cleanup; verifies
+* Remove accepts only the table's fixed leaves and directories; immediately
+  before each `rmdir`, it revalidates the exact fd/path inode, ownership/mode,
+  protected ancestry/mount identity, and emptiness. Directory link count is not
+  stored or compared. It removes the four generated unit fragments and
+  role-specific stages only under the retained publication snapshot, then
+  reloads/verifies systemd before state/config cleanup; verifies
   and removes generated accounts/groups without deleting homes; and unlinks the
   profile mapping last. It removes `C` only after mapping unlink and only when
   empty. Any unexpected child remains untouched and blocks completion.
@@ -363,7 +469,8 @@ unsupported selectors/actions must refuse rather than be guessed.
 
 This schema/fixture commit does not implement or establish the profile metadata
 reader/writer, atomic protected filesystem operations, transaction recovery,
-account marker inspection, systemd verification, fixed helper dispatch, signed
-bootstrap, workspace mount proof, inventory/pruning, or owner/live acceptance.
-Passing these fixtures is not filesystem-protection or crash-recovery evidence;
-the #67 implementation and acceptance ledger remains in progress.
+account/group identity inspection, systemd verification, fixed helper dispatch,
+signed bootstrap, workspace mount proof, inventory/pruning, or owner/live
+acceptance. Passing these schema and semantic/transition model fixtures is not
+filesystem-protection or crash-recovery evidence; the #67 implementation and
+acceptance ledger remains in progress.

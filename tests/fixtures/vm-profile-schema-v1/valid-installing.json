@@ -56,15 +56,24 @@
         "identity": {
           "uid": 995,
           "gid": 995,
-          "marker": "little-mester-vm-profile-v1:1000:default:vm"
+          "marker": "little-mester-vm-profile-v1/1000/default/vm"
         }
       },
       {
         "selector": "group.vm",
         "evidence": "observed_present",
         "identity": {
+          "name": "lmv-8b95a12479c85e8b1338",
           "gid": 995,
-          "marker": "little-mester-vm-profile-v1:1000:default:vm:group"
+          "provenance": {
+            "schema_version": 1,
+            "owner_uid": 1000,
+            "profile_name": "default",
+            "role": "vm",
+            "group_name": "lmv-8b95a12479c85e8b1338",
+            "gid": 995,
+            "origin_install_transaction_id": "11111111111111111111111111111111"
+          }
         }
       },
       {
@@ -75,6 +84,68 @@
         "selector": "group.proxy",
         "evidence": "expected_absent"
       }
-    ]
+    ],
+    "unit_publication": {
+      "vm": {
+        "state": "not_started"
+      },
+      "proxy": {
+        "state": "not_started"
+      },
+      "workspace": {
+        "state": "not_started"
+      },
+      "metrics": {
+        "state": "not_started"
+      }
+    },
+    "numeric_replans": []
+  },
+  "installation": {
+    "id": "11111111111111111111111111111111",
+    "unit_publication": {
+      "vm": {
+        "state": "not_started"
+      },
+      "proxy": {
+        "state": "not_started"
+      },
+      "workspace": {
+        "state": "not_started"
+      },
+      "metrics": {
+        "state": "not_started"
+      }
+    },
+    "groups": {
+      "vm": {
+        "name": "lmv-8b95a12479c85e8b1338",
+        "gid": 995,
+        "state": "owned",
+        "provenance": {
+          "schema_version": 1,
+          "owner_uid": 1000,
+          "profile_name": "default",
+          "role": "vm",
+          "group_name": "lmv-8b95a12479c85e8b1338",
+          "gid": 995,
+          "origin_install_transaction_id": "11111111111111111111111111111111"
+        }
+      },
+      "proxy": {
+        "name": "lmp-8b95a12479c85e8b1338",
+        "gid": 996,
+        "state": "not_started",
+        "provenance": {
+          "schema_version": 1,
+          "owner_uid": 1000,
+          "profile_name": "default",
+          "role": "proxy",
+          "group_name": "lmp-8b95a12479c85e8b1338",
+          "gid": 996,
+          "origin_install_transaction_id": "11111111111111111111111111111111"
+        }
+      }
+    }
   }
 }

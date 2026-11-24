@@ -480,14 +480,17 @@ Profile metadata is the authoritative profile-to-SHA mapping, stored as one
 root-owned atomic JSON record at
 `/etc/little-mester-vm/profiles/<name>/profile.json`. Schema v1 has exactly the
 owner UID, validated name, lifecycle state, nullable versioned transaction
-record (operation, phase, durable step and expected manager-owned object
-identities), runtime SHA and API versions, generated service account names and
-planned/committed UID/GID values, deterministic unit names, workspace canonical
-path plus filesystem identity/mount identity, and allocated SSH port; it
-contains no credentials. Unknown fields/schema versions fail closed.
-State, secrets/SSH identities and runtime sockets are under profile-scoped fixed
-roots, never under `/opt` or the exported workspace. No separate
-installation-reference database is introduced.
+record (operation, phase, durable step, expected manager-owned identities and
+operation-specific unit publication/source fields), runtime SHA and API
+versions, generated service account names and planned/committed UID/GID values,
+a retained install ID with a complete four-role unit-publication snapshot and
+typed group provenance, deterministic unit names, workspace canonical path plus
+filesystem/mount identity, and allocated SSH port; it contains no credentials.
+The source record remains within this one protected mapping after the install
+transaction clears; no separate installation-reference database is introduced.
+Unknown fields/schema versions fail closed. State, secrets/SSH identities and
+runtime sockets are under profile-scoped fixed roots, never under `/opt` or the
+exported workspace.
 
 The exact JSON field spellings, value bounds, deterministic account/unit
 derivation, transaction evidence encodings, and closed filesystem/runtime
@@ -511,8 +514,18 @@ login, and are created/removed by the CLI helper; this is not a general identity
 framework. Removal verifies the
 generated account identity and absence of running processes before deleting
 only those accounts; it verifies journaled UID/GID, system-range IDs,
-groups, nologin shell, empty home and manager marker, and never runs a recursive
-home deletion. A service for profile A must fail DAC access to profile B's
+groups, nologin shell and empty home, and never runs a recursive home deletion.
+The exact GECOS account marker is
+`little-mester-vm-profile-v1/<canonical-owner-uid>/<profile-name>/<role>`; it is
+identification only, never proof. The protected mapping/journal plus exact
+numeric identity and local/NSS account records must agree. `/etc/group` has no
+marker field: typed protected provenance binds role, generated group name, GID
+and source install transaction, and must agree with local/NSS group records and
+membership. A name/marker match alone never authorizes adoption, modification or
+deletion. Any interrupted group-creation intent whose outcome is ambiguous
+refuses without adoption/removal; diagnostics tell the owner to leave the object
+and journal untouched and request safe administrator inspection, without
+printing secrets. A service for profile A must fail DAC access to profile B's
 private state, while both may read the same root-owned immutable runtime. The
 helper derives a bounded account/unit suffix from the host owner UID
 and profile name (for example, separate `lmv-<digest>` and `lmp-<digest>`
@@ -805,15 +818,41 @@ after runtime publication but before mapping publication leaves a valid
 unreferenced managed runtime. A crash after mapping publication leaves the SHA
 referenced and the profile name reserved. Repeating an `installing` profile/SHA resumes only
 after exact artifact/account reconciliation; it refuses unknown or conflicting
-artifacts and never cleans them automatically. Account names and planned
-system UID/GID pairs are journaled
-before account creation. Each generated account carries an exact manager marker;
-recovery adopts only an exact name/UID/GID/shell/group/marker match and never
-deletes or adopts an unmarked OS account. ID collisions cause a new planned ID
-to be journaled before retry. Units are generated only after state ownership and
-accounts verify. The profile becomes `ready` only after all artifacts and
-effective units pass validation. All mapping/journal writes use root-owned temp
-files, `fsync`, atomic rename and parent-directory `fsync`.
+artifacts and never cleans them automatically. Account names, planned system
+UID/GID values, the origin install transaction, and group provenance are in the
+protected mapping/journal before the associated operation. Account GECOS carries
+only the canonical slash-form identification marker; marker alone never proves
+ownership. Exact name/UID/GID, mapping/journal, local account database and NSS
+must agree. A group has no `/etc/group` marker: typed bounded provenance in the
+protected mapping/journal binds role, group name, GID and origin install
+transaction, and local/NSS records must agree. Pre-existing accounts/groups are
+never adopted by name, GECOS marker, or matching numeric ID alone. Durable group
+`creation_intent` followed by an
+interruption is ambiguous and refuses, even if the current name/GID matches; it
+is not automatically retried, adopted or deleted. Diagnostics name the role and
+safe next step, not secrets, and direct the owner to preserve state for exact
+administrator inspection.
+
+A collision on an unallocated, still-`planned` numeric UID/GID may replace only
+that planned value by atomically journaling it before retry, while preserving
+the owner/profile, generated names, runtime pin and install transaction ID.
+Committed numeric identities never change. If group creation has started or
+succeeded while its account is still planned, no ID is replanned or group
+substituted: first reconcile/remove that exact group using its protected journal
+identity. The current transaction never substitutes that group; if it cannot
+be reconciled safely, refuse and retain the journal. Only after exact removal
+may a fresh explicit install select new planned values. This supersedes the older
+blanket numeric collision prohibition, but does not permit arbitrary ID
+selection. Units are
+generated only after state ownership and accounts verify. All four unit roles
+start `not_started` in the initial install journal before unit writes. The
+existing `units` phase publishes VM, proxy, workspace and metrics in that order:
+write/fsync a private exact same-directory stage, durably record
+`publication_intent` plus its device/inode, atomically rename and fsync the
+directory, then durably mark `published` with the same inode. States never roll
+back. The profile becomes `ready` only after all artifacts and effective units
+pass validation. All mapping/journal writes use root-owned temp files, `fsync`,
+atomic rename and parent-directory `fsync`.
 
 `down` stops every profile unit (VM, proxy, metrics, and workspace sharing),
 waits for systemd to report each fully inactive and for all unit-cgroup
@@ -822,16 +861,28 @@ themselves stop or kill anything. A fresh reset, or a fresh remove of a ready
 profile, requires every expected unit to be known, unmasked and fully inactive,
 with no queued job, listener, socket owner or surviving process; `failed`,
 `activating`, `deactivating`, unknown or masked states refuse before mutation.
-Removal of an `installing` profile uses its journal to identify which generated
-units were never created. During `removing` recovery, an absent/not-found unit
-is accepted only if the durable removal intent records the exact unit-file
-identity and phase; recovery daemon-reloads and verifies that it is absent with
-no queued job or surviving cgroup process. All remaining units must still be
-known, unmasked and inactive. An unjournaled missing/foreign unit, or any
-failed/unknown/masked state, refuses. Reset never removes unit files, so its
-recovery always requires all expected units to remain known and inactive. The
-readiness/status output identifies the exact unit/process preventing the
-operation.
+The initial install journal retains the exact unit-publication record for all
+four roles and their source install ID, including after transition to `ready`.
+Removal from `ready` copies that complete snapshot into its new remove
+transaction; removing a partial install copies the source snapshot before
+replacing the install transaction. This preserves explicit recovery/removal of
+partial installs within the existing lifecycle.
+
+`never_created` evidence is valid only for the matching role whose retained
+source snapshot says `not_started`, with the exact same source install ID. This
+supersedes the older global-phase-only `prepared`/`accounts`/`state` rule. For
+`publication_intent`, recovery does not infer non-creation: it accepts only the
+exact recorded inode at exactly one of the fixed private stage or final fragment
+path, otherwise refuses and retains the journal. A stage-only partial role is
+removed only with exact stage removal intent, verified final-path absence, and
+post-`daemon-reload` manager absence. A final or `published` fragment requires
+its exact inode and durable removal intent before unlink, followed by
+`daemon-reload` and not-found/job-free verification. Missing, duplicate, replaced
+or foreign identities refuse; never adopt by name. All other units remain
+known, unmasked and inactive with no surviving cgroup process. Reset never
+removes unit files, so its recovery always requires all expected units to remain
+known and inactive. Readiness/status output identifies the exact unit/process
+preventing the operation and gives a safe next step without secrets.
 
 After a fresh exact TTY confirmation, reset atomically writes a versioned
 `resetting` journal and deletes only these fixed profile-owned leaves using
@@ -852,29 +903,27 @@ from the last verified step. Other operations refuse while `resetting`.
 
 Remove similarly journals `removing`, retains the SHA reference and profile
 name reservation, and confirms the stopped predicate before mutation. It may
-remove a ready profile or recover an `installing` profile only when every
-present artifact exactly matches its journaled manager-owned identity and each
-absent artifact is expected absent at the durable install phase; unknown
-artifacts refuse and remain for inspection. Its
-durable phases are: (1) verify and unlink only the manager-generated unit files,
-then daemon-reload and verify the exact units are absent; (2) remove the fixed
-profile state/config/runtime directory entries with descriptor-relative
+remove a ready profile or recover an `installing` profile only when the complete
+source unit-publication snapshot and every current stage/final/account/group
+identity reconcile exactly; phase-only absence is not evidence. Its durable
+phases remain unchanged: (1) verify and unlink only the exact journal-owned
+manager-generated fragments/stages, then daemon-reload and verify exact units
+absent; (2) remove fixed profile state/config/runtime directory entries with
 no-follow traversal that rejects unknown entries and mount boundaries; (3)
 verify recorded system UID/GID, system-range IDs, primary/supplementary groups,
-nologin shell, empty home and account marker, then remove the generated user
-accounts and groups without deleting a home; (4) reacquire catalog then
-profile lock, revalidate the `removing` journal and absence of units/state/
-accounts, and unlink the mapping as the final commit. A crash after any phase
-restarts at that phase: already-absent manager-owned units/files/accounts are
-accepted only when the durable intent and recorded identity prove their removal
-or expected absence, while name reuse is
-blocked until the final mapping unlink. Any replacement/unmarked OS object stops
-recovery; it is never deleted or adopted. Retries require TTY reconfirmation and
-revalidate the journal-aware stopped predicate, including journal-proven absent
-units. Fault injection interrupts before/after every
-journal fsync, rename/unlink, daemon-reload, account/group removal and final
-commit; assertions prove no path under a workspace, another profile, or `/opt`
-can be reached by reset/remove.
+nologin shell, empty home and account GECOS identification marker together with
+the mapping/journal and local/NSS identity, then remove only proven generated
+accounts/groups without deleting a home; (4) reacquire catalog then profile
+lock, revalidate the `removing` journal and absence of units/state/accounts, and
+unlink the mapping as the final commit. A crash after any phase resumes only
+from matching durable identity/removal intent; name reuse is blocked until final
+mapping unlink. Any replacement, ambiguous group intent, or foreign OS object
+stops recovery; it is never deleted or adopted. Retries require TTY
+reconfirmation and revalidate the journal-aware stopped predicate, including
+role-specific `never_created` evidence and manager reload. Fault injection
+interrupts before/after every journal fsync, stage/final rename, unlink,
+daemon-reload, account/group removal and final commit; assertions prove no path
+under a workspace, another profile, or `/opt` can be reached by reset/remove.
 
 ## Public command grammar
 
@@ -1189,12 +1238,15 @@ change a profile's runtime pin.
   layout (including assignment-matched or absent workspace `20`) before marker
   removal and never unlinks the active `/run` lock inode.
 - Reset/remove fault injection covers every durable journal boundary, account
-  removal, unit reload and final mapping commit. In `removing` recovery, absent
-  units are accepted only when the durable intent/phase proves that exact
-  manager-owned unit was removed (or never created by the recorded install
-  phase); unjournaled absence, failed/unknown/masked units, jobs and surviving
-  processes refuse. Recovery is idempotent, requires TTY reconfirmation, and
-  never crosses into any workspace or `/opt` tree.
+  removal, unit publication stage/rename/reload and final mapping commit. In
+  `removing` recovery, `never_created` applies only to the matching role in the
+  retained four-role source record when its state is `not_started`; this
+  supersedes older global-phase wording. `publication_intent` reconciles only the
+  exact stage or final inode; `published` requires exact final identity and
+  removal intent. Unjournaled absence, foreign identity, unresolved group
+  creation, failed/unknown/masked units, jobs and surviving processes refuse.
+  Recovery is idempotent, requires TTY reconfirmation, and never crosses into
+  any workspace or `/opt` tree.
 - PTY tests use the production helper/SSH path to verify request framing is not
   consumed as terminal input, real stdin bytes, resize/SIGWINCH, Ctrl+C, foreground
   process group, disconnect/reattach and exact exit-status handling.

@@ -70,7 +70,180 @@
           "active_state": "inactive",
           "job_state": "none"
         }
+      },
+      {
+        "selector": "unit-file.proxy",
+        "evidence": "observed_present",
+        "identity": {
+          "device": 8,
+          "inode": 702,
+          "kind": "regular",
+          "link_count": 1
+        }
+      },
+      {
+        "selector": "unit-manager.proxy",
+        "evidence": "observed_present",
+        "identity": {
+          "fragment_device": 8,
+          "fragment_inode": 702,
+          "load_state": "loaded",
+          "active_state": "inactive",
+          "job_state": "none"
+        }
+      },
+      {
+        "selector": "unit-file.workspace",
+        "evidence": "observed_present",
+        "identity": {
+          "device": 8,
+          "inode": 703,
+          "kind": "regular",
+          "link_count": 1
+        }
+      },
+      {
+        "selector": "unit-manager.workspace",
+        "evidence": "observed_present",
+        "identity": {
+          "fragment_device": 8,
+          "fragment_inode": 703,
+          "load_state": "loaded",
+          "active_state": "inactive",
+          "job_state": "none"
+        }
+      },
+      {
+        "selector": "unit-file.metrics",
+        "evidence": "observed_present",
+        "identity": {
+          "device": 8,
+          "inode": 704,
+          "kind": "regular",
+          "link_count": 1
+        }
+      },
+      {
+        "selector": "unit-manager.metrics",
+        "evidence": "observed_present",
+        "identity": {
+          "fragment_device": 8,
+          "fragment_inode": 704,
+          "load_state": "loaded",
+          "active_state": "inactive",
+          "job_state": "none"
+        }
       }
-    ]
+    ],
+    "source_install_id": "11111111111111111111111111111111",
+    "unit_publication": {
+      "vm": {
+        "state": "published",
+        "fragment_identity": {
+          "device": 8,
+          "inode": 701,
+          "kind": "regular",
+          "link_count": 1
+        }
+      },
+      "proxy": {
+        "state": "published",
+        "fragment_identity": {
+          "device": 8,
+          "inode": 702,
+          "kind": "regular",
+          "link_count": 1
+        }
+      },
+      "workspace": {
+        "state": "published",
+        "fragment_identity": {
+          "device": 8,
+          "inode": 703,
+          "kind": "regular",
+          "link_count": 1
+        }
+      },
+      "metrics": {
+        "state": "published",
+        "fragment_identity": {
+          "device": 8,
+          "inode": 704,
+          "kind": "regular",
+          "link_count": 1
+        }
+      }
+    }
+  },
+  "installation": {
+    "id": "11111111111111111111111111111111",
+    "unit_publication": {
+      "vm": {
+        "state": "published",
+        "fragment_identity": {
+          "device": 8,
+          "inode": 701,
+          "kind": "regular",
+          "link_count": 1
+        }
+      },
+      "proxy": {
+        "state": "published",
+        "fragment_identity": {
+          "device": 8,
+          "inode": 702,
+          "kind": "regular",
+          "link_count": 1
+        }
+      },
+      "workspace": {
+        "state": "published",
+        "fragment_identity": {
+          "device": 8,
+          "inode": 703,
+          "kind": "regular",
+          "link_count": 1
+        }
+      },
+      "metrics": {
+        "state": "published",
+        "fragment_identity": {
+          "device": 8,
+          "inode": 704,
+          "kind": "regular",
+          "link_count": 1
+        }
+      }
+    },
+    "groups": {
+      "vm": {
+        "name": "lmv-8b95a12479c85e8b1338",
+        "gid": 995,
+        "state": "owned",
+        "provenance": {
+          "schema_version": 1,
+          "owner_uid": 1000,
+          "profile_name": "default",
+          "role": "vm",
+          "group_name": "lmv-8b95a12479c85e8b1338",
+          "gid": 995,
+          "origin_install_transaction_id": "11111111111111111111111111111111"
+        }
+      },
+      "proxy": {
+        "name": "lmp-8b95a12479c85e8b1338",
+        "gid": 996,
+        "state": "owned",
+        "provenance": {
+          "schema_version": 1,
+          "owner_uid": 1000,
+          "profile_name": "default",
+          "role": "proxy",
+          "group_name": "lmp-8b95a12479c85e8b1338",
+          "gid": 996,
+          "origin_install_transaction_id": "11111111111111111111111111111111"
+        }
+      }
+    }
   }
 }

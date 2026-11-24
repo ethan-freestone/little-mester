@@ -44,5 +44,76 @@
   },
   "ssh_port": 22300,
   "transaction": null,
-  "unexpected": true
+  "unexpected": true,
+  "installation": {
+    "id": "00000000000000000000000000000000",
+    "unit_publication": {
+      "vm": {
+        "state": "published",
+        "fragment_identity": {
+          "device": 8,
+          "inode": 701,
+          "kind": "regular",
+          "link_count": 1
+        }
+      },
+      "proxy": {
+        "state": "published",
+        "fragment_identity": {
+          "device": 8,
+          "inode": 702,
+          "kind": "regular",
+          "link_count": 1
+        }
+      },
+      "workspace": {
+        "state": "published",
+        "fragment_identity": {
+          "device": 8,
+          "inode": 703,
+          "kind": "regular",
+          "link_count": 1
+        }
+      },
+      "metrics": {
+        "state": "published",
+        "fragment_identity": {
+          "device": 8,
+          "inode": 704,
+          "kind": "regular",
+          "link_count": 1
+        }
+      }
+    },
+    "groups": {
+      "vm": {
+        "name": "lmv-8b95a12479c85e8b1338",
+        "gid": 995,
+        "state": "owned",
+        "provenance": {
+          "schema_version": 1,
+          "owner_uid": 1000,
+          "profile_name": "default",
+          "role": "vm",
+          "group_name": "lmv-8b95a12479c85e8b1338",
+          "gid": 995,
+          "origin_install_transaction_id": "00000000000000000000000000000000"
+        }
+      },
+      "proxy": {
+        "name": "lmp-8b95a12479c85e8b1338",
+        "gid": 996,
+        "state": "owned",
+        "provenance": {
+          "schema_version": 1,
+          "owner_uid": 1000,
+          "profile_name": "default",
+          "role": "proxy",
+          "group_name": "lmp-8b95a12479c85e8b1338",
+          "gid": 996,
+          "origin_install_transaction_id": "00000000000000000000000000000000"
+        }
+      }
+    }
+  }
 }
