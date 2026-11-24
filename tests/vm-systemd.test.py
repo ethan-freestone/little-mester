@@ -1751,6 +1751,10 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertTrue(data["ssh_keys"]["ed25519_private"].startswith("private-key"))
         files = {item["path"]: item for item in data["write_files"]}
         self.assertIn("/usr/local/bin/lm-opencode", files)
+        self.assertIn(contract.TMUX_CONFIG_PATH, files)
+        self.assertEqual(files[contract.TMUX_CONFIG_PATH]["owner"], "root:root")
+        self.assertEqual(files[contract.TMUX_CONFIG_PATH]["permissions"], "0644")
+        self.assertEqual(files[contract.TMUX_CONFIG_PATH]["content"].encode(), contract.TMUX_CONFIG)
         self.assertIn("/usr/local/libexec/lm-opencode-auth", files)
         self.assertIn("/usr/local/libexec/lm-guest-user-dirs.py", files)
         self.assertIn("/etc/opencode/plugins/little-mester-exit-confirm/tui.tsx", files)

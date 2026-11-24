@@ -11,6 +11,12 @@ import stat
 
 
 GUEST_HELPER = pathlib.Path(__file__).with_name("guest-user-dirs.py").read_bytes()
+TMUX_CONFIG_PATH = "/etc/little-mester-tmux.conf"
+TMUX_CONFIG = (
+    b"source-file -q /etc/tmux.conf\n"
+    b"source-file -q ~/.tmux.conf\n"
+    b"set-option -s escape-time 10\n"
+)
 
 TUI_LAUNCHER_TEMPLATE = b"""#!/bin/sh
 set -eu
@@ -21,7 +27,7 @@ fi
 /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth
 umask 077
 cd @WORKSPACE@
-exec /usr/bin/env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin TERM=${TERM:-xterm-256color} LANG=C.UTF-8 TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux XDG_DATA_HOME=/home/mester/.local/share XDG_CONFIG_HOME=/home/mester/.config OPENCODE_CONFIG=/etc/opencode/opencode.json OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_SHARE=1 OPENCODE_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 SENTRY_DSN= OTEL_EXPORTER_OTLP_ENDPOINT= OTEL_EXPORTER_OTLP_HEADERS= HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128 NO_PROXY=localhost,127.0.0.1,10.0.2.100 no_proxy=localhost,127.0.0.1,10.0.2.100 /usr/bin/tmux new-session -A -s little-mester-opencode /usr/local/libexec/lm-opencode "$@"
+exec /usr/bin/env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin TERM=${TERM:-xterm-256color} LANG=C.UTF-8 TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux XDG_DATA_HOME=/home/mester/.local/share XDG_CONFIG_HOME=/home/mester/.config OPENCODE_CONFIG=/etc/opencode/opencode.json OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_SHARE=1 OPENCODE_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 SENTRY_DSN= OTEL_EXPORTER_OTLP_ENDPOINT= OTEL_EXPORTER_OTLP_HEADERS= HTTP_PROXY=http://10.0.2.100:3128 HTTPS_PROXY=http://10.0.2.100:3128 http_proxy=http://10.0.2.100:3128 https_proxy=http://10.0.2.100:3128 NO_PROXY=localhost,127.0.0.1,10.0.2.100 no_proxy=localhost,127.0.0.1,10.0.2.100 /bin/sh -c 'if /usr/bin/tmux -f /etc/little-mester-tmux.conf show-options -s escape-time >/dev/null 2>&1; then /usr/bin/tmux -f /etc/little-mester-tmux.conf set-option -s escape-time 10; fi; exec /usr/bin/tmux -f /etc/little-mester-tmux.conf new-session -A -s little-mester-opencode /usr/local/libexec/lm-opencode "$@"' lm-opencode-launcher "$@"
 """
 DEFAULT_WORKSPACE = "/home/mester/workspace"
 SYSTEM_WORKSPACE = "/workspace"
@@ -79,6 +85,7 @@ exec /usr/bin/env -i HOME=/home/mester PATH=/usr/local/bin TERM=xterm-256color L
 
 ASSETS = {
     "/usr/local/bin/lm-opencode": (TUI_LAUNCHER, "0755"),
+    TMUX_CONFIG_PATH: (TMUX_CONFIG, "0644"),
     "/usr/local/libexec/lm-opencode": (OPENCODE_RUNNER, "0755"),
     "/usr/local/libexec/lm-opencode-auth": (AUTH_LAUNCHER, "0755"),
     "/usr/local/libexec/lm-guest-user-dirs.py": (GUEST_HELPER, "0644"),
