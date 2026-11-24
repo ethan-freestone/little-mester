@@ -91,6 +91,7 @@ jobs:
           python3 tests/vm-control-maintenance.test.py
           python3 tests/vm-profile-control-core.test.py
           python3 tests/vm-profile-runtime-install.test.py
+          python3 tests/vm-profile-control-owner.test.py
           python3 tests/vm-systemd.test.py
           python3 tests/vm-system-workspace.test.py
           python3 tests/vm-system-metrics.test.py
@@ -108,6 +109,8 @@ jobs:
           done
       - name: Run maintenance fixture suite as root
         run: sudo python3 -B -I tests/vm-control-maintenance.test.py
+      - name: Run owner enrollment fixture suite as root
+        run: sudo python3 -B -I tests/vm-profile-control-owner.test.py
 
   # ── 4. Transient hosted QEMU guest integration; no TCG fallback ───
   transient-qemu-integration:

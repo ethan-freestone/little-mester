@@ -8,7 +8,7 @@
   "title": "Independent persistent VM profiles pinned to immutable runtimes",
   "objective": "Part of integration ticket #66. Add independently manageable persistent VM profiles while parameterizing/reusing the fixed system VM implementation where safe. Each profile records its immutable installed runtime SHA; profiles using one SHA may share the code install. Do not implement runtime upgrade/migration or change the legacy feat/vm-approach VM. The shared design baseline is docs/vm-usability-integration.md, including fixed helper/common signed-control-artifact trust boundaries, crash-safe lifecycle semantics, per-profile service isolation, and safe runtime inventory/pruning. Owner decision (2026-11-24): the fixed #20 system singleton is temporarily mutually exclusive with named profile VMs through four minimal manifest-owned additive guards installed by the common signed control artifact, while the distinct original feat/vm-approach development VM must coexist with named profiles and must not be capped or gated. Profile admission uses actual host MemAvailable and profile cgroup reservations.",
   "created_at": "2026-11-23T23:21:29.433Z",
-  "updated_at": "2026-11-24T15:49:29.808Z",
+  "updated_at": "2026-11-24T17:52:14Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -111,7 +111,8 @@
     "created": [
       "tests/vm-profile-control-core.test.py",
       "tests/vm-profile-runtime-install.test.py",
-      "tests/vm-control-maintenance.test.py"
+      "tests/vm-control-maintenance.test.py",
+      "tests/vm-profile-control-owner.test.py"
     ],
     "cases": [
       "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence.",
@@ -152,7 +153,12 @@
       "MaintenanceFixture.test_non_boolean_exclusive_argument_is_refused",
       "Maintenance substrate validation: python3 -B -I tests/vm-control-maintenance.test.py passed (18 tests; 2 root-only ownership cases skipped on this non-root run).",
       "Regression validation: python3 -B -I tests/vm-profile-control-core.test.py passed (25 tests); python3 -B -I tests/vm-profile-runtime-install.test.py passed (10 tests).",
-      "Syntax/diff validation: python3 -B -I -m py_compile lib/vm/control-maintenance.py tests/vm-control-maintenance.test.py and git diff --check passed."
+      "Syntax/diff validation: python3 -B -I -m py_compile lib/vm/control-maintenance.py tests/vm-control-maintenance.test.py and git diff --check passed.",
+      "Owner gate cases: OwnerFixture.test_valid_identity_uses_resolved_primary_gid_and_dedicated_group_gid; test_primary_group_membership_is_accepted_without_os_getgroups; test_supplementary_account_database_membership_is_accepted; test_nonroot_missing_malformed_and_conflicting_sudo_context_refuse; test_uid_name_and_account_database_disagreement_refuse; test_enrolled_uid_must_match_resolved_invoker; test_duplicate_extra_and_non_object_json_are_refused; test_schema_version_must_be_exact_integer_one; test_owner_uid_must_be_exact_positive_integer; test_replacement_during_read_is_detected; test_content_change_during_read_is_detected; test_fifo_replacement_between_stat_and_open_is_nonblocking; test_public_api_has_no_path_identity_or_request_parameters.",
+      "Owner gate refusal fixtures: symlinked ancestry/file, unsafe directory and file modes, hardlink, missing/oversized/malformed/non-UTF8 enrollment, FIFO/non-regular files, group/account NSS errors, missing group membership, and no-repair checks.",
+      "Root owner-gate validation: sudo python3 -B -I tests/vm-profile-control-owner.test.py passed (28 tests, including genuine root-owned fixture and foreign-owner refusal); python3 -B -I tests/vm-profile-control-owner.test.py passed (28 tests, 2 root-only cases skipped).",
+      "Regression validation: python3 -B -I tests/vm-control-maintenance.test.py passed (18 tests; 2 root-only cases skipped); python3 -B -I tests/vm-profile-control-core.test.py passed (25 tests); python3 -B -I tests/vm-profile-runtime-install.test.py passed (10 tests).",
+      "Owner-gate syntax/diff/workflow validation: Python py_compile passed; git diff --check passed; TMPDIR=/tmp scripts/check-workflows.sh passed."
     ]
   },
   "models_used": []

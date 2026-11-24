@@ -52,6 +52,30 @@ or no profile field for list/inventory. The public CLI remains #70-owned; its
 request builder must use these exact names or coordinate a reviewed protocol
 change before dispatching to this core.
 
+## Read-only owner enrollment gate
+
+`lib/vm/profile-control-owner.py` exposes only `authorize_owner()`, with no
+caller-provided path, identity, or request. It reads the fixed
+`/etc/little-mester-vm/control-owner.json` enrollment
+(`{"schema_version":1,"owner_uid":<positive integer>}`), requiring protected
+root-owned ancestry, a root:`lm-vm-profile-control` mode-`0750` enrollment
+directory, and a root:root mode-`0600`, single-link regular file. It validates
+the real/effective root sudo context, resolves `SUDO_UID` and `SUDO_USER` to one
+non-root account, checks primary or account-database supplementary membership
+in the fixed `lm-vm-profile-control` group, and returns immutable
+`OwnerIdentity(uid, primary_gid, account_name, control_group_gid)`. Missing,
+unsafe, changed, malformed, or mismatched state refuses without creating or
+repairing anything. `SUDO_*` values are conventional sudo context, not
+authenticated claims against a malicious root user or host administrator.
+
+This is only an authorization primitive: it does not install sudoers rules,
+create the group or enrollment state, expose/install the fixed helper, inspect
+transaction markers, validate requests, read profile metadata, dispatch an
+installer, or execute runtime code. The future request path must compose the
+shared maintenance lease, owner authorization, marker-absence check, then
+request validation and effects, in that order. This gate is not owner
+acceptance or end-to-end profile support.
+
 ## Maintenance substrate interface and gap
 
 `lib/vm/control-maintenance.py` defines the fixed root-owned
@@ -72,8 +96,9 @@ in progress.
 ## Explicitly not implemented by this slice
 
 These modules are not the installed/root-owned helper and are not dispatched by
-the public `lab` CLI. They do not yet implement owner enrollment/authentication,
-profile metadata read/write or atomic journaling, catalog/profile/SHA locks, signed bootstrap,
+the public `lab` CLI. The read-only owner gate above does not implement owner
+enrollment/bootstrap, sudoers policy, or full helper authentication. The slice
+also lacks profile metadata read/write or atomic journaling, catalog/profile/SHA locks, signed bootstrap,
 systemd units, account/path allocation, start admission, lifecycle,
 inventory/pruning, or TTY confirmation. The installer primitive is not
 authorization: callers must not use it directly or execute a runtime until the
@@ -83,8 +108,10 @@ it is not caller authorization or a transaction protocol. The fixed #20
 singleton and the `feat/vm-approach` development VM remain untouched.
 
 The intended integration direction is: #70 constructs the bounded request and
-routes it to the fixed helper; the helper authorizes the enrolled sudo caller,
-loads the root-owned profile mapping, passes only its stored SHA to
+routes it to the fixed helper; the helper takes the shared maintenance lease,
+authorizes the enrolled sudo caller with `authorize_owner()`, checks marker
+absence, validates the request, loads the root-owned profile mapping, passes
+only its stored SHA to
 `resolve_pinned_runtime`, and then dispatches fixed operations. The core accepts
 no executable, unit name, QEMU option, environment, cwd or runtime path from a
 request.
