@@ -6,9 +6,9 @@
   "type": "feature",
   "status": "active",
   "title": "P1 follow-on — pinned profiles and VM usability integration",
-  "objective": "Deliver the next focused integration PR on feat/vm-useability-tweaks targeting feat/vm-approach-3. It coordinates four independently reviewed workstreams: VM profiles, host metrics, terminal behavior, and public CLI/settings. PR #20 is merged and owner reports successful live VM use; retain honest provenance and the outstanding defect list. This integration is not Phase 1 completion, a general VM migration system, or the later in-VM cleanup PR. Owner decision (2026-11-24): named profiles may coexist with the original feat/vm-approach development VM, distinct from the fixed #20 system singleton. Only the transitional fixed singleton is mutually exclusive with profiles through a minimal signed-package-owned systemd drop-in; profile starts use actual host MemAvailable and bounded profile cgroups. Consider singleton/drop-in retirement during #57 comprehensive cleanup after its gates and explicit owner authorization.",
+  "objective": "Deliver the next focused integration PR on feat/vm-useability-tweaks targeting feat/vm-approach-3. Coordinate independently reviewed workstreams for VM profiles, host metrics, terminal behavior, and public CLI/settings. PR #20 is merged and owner reports successful live VM use; retain honest provenance and outstanding defects. This is not Phase 1 completion, a general VM migration system, or the later in-VM cleanup PR. Owner decision (2026-11-24): named profiles may coexist with the original feat/vm-approach development VM, distinct from the fixed #20 singleton. Only the fixed singleton is mutually exclusive with profiles through four minimal manifest-owned additive systemd guards installed by the common signed control artifact and race-safe shared/exclusive admission lock; native package managers are dependency-only. Profile starts use actual host MemAvailable and bounded profile cgroups. Singleton guard retirement is deferred to #57 after its gates and explicit owner authorization.",
   "created_at": "2026-11-23T23:21:29.425Z",
-  "updated_at": "2026-11-24T12:25:23.820Z",
+  "updated_at": "2026-11-24T12:28:53.793Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -60,7 +60,8 @@
     "created": [],
     "cases": [
       "Owner-reported PR #20 baseline on Ariadne: fresh production system VM provisioning/startup/readiness, SSH, OpenCode 2.2.5, rootless Docker, TUI, real OpenAI auth/connectivity/model response, host metrics visible (some sensors unavailable), dedicated workspace mount/reassignment, explicit unsafe-recurse repository access, and coexistence with original feat/vm-approach VM. Hosted CI run 45224666122 passed for source a5597607e92b2c609ee56ac2cf520023b1fb95c6; merge commit is e10ebd76e1e362c7b6e95bdb631d12c22b2e2d7f. No automated owner-acceptance report was supplied. Owner reported installer-generated __pycache__/code-update-transaction.cpython-314.pyc inside the pinned tree; manually deleting it resolved integrity refusal and startup then succeeded. Fix the cause in this PR; do not preserve deletion as a workaround.",
-      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence."
+      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence.",
+      "Implementation streams started from approved design commit 846bb4ab6d9822e487a04a476bc2c92464664c50; clean child branches/worktrees: #67 feat/vm-profiles, #68 feat/vm-metrics-availability, #69 fix/vm-terminal-pty, #70 feat/vm-cli-settings. This records branch setup only; no child implementation, tests, or owner acceptance are implied."
     ]
   },
   "models_used": []
