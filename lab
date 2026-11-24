@@ -207,10 +207,30 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     vm)
       shift
       vm_route="${1:-}"
+      if [[ "$vm_route" == "--profile" && "${3:-}" == "prepare-dependencies" ]] ||
+         [[ "$vm_route" == --profile=* && "${2:-}" == "prepare-dependencies" ]]; then
+        echo "--profile is not valid with ./lab vm prepare-dependencies" >&2
+        echo "Usage: ./lab vm prepare-dependencies [production|acceptance|system-install]" >&2
+        exit 2
+      fi
       if [[ "$vm_route" == "prepare-dependencies" ]]; then
         shift
-        scope="${1:-production}"
-        [[ $# -eq 1 ]] || { echo "Usage: ./lab vm prepare-dependencies [production|acceptance|system-install]" >&2; exit 2; }
+        for arg in "$@"; do
+          case "$arg" in
+            --profile|--profile=*)
+              echo "--profile is not valid with ./lab vm prepare-dependencies" >&2
+              echo "Usage: ./lab vm prepare-dependencies [production|acceptance|system-install]" >&2
+              exit 2
+              ;;
+          esac
+        done
+        [[ $# -le 1 ]] || { echo "Usage: ./lab vm prepare-dependencies [production|acceptance|system-install]" >&2; exit 2; }
+        scope=production
+        [[ $# -eq 0 ]] || scope="$1"
+        case "$scope" in
+          production|acceptance|system-install) ;;
+          *) echo "Usage: ./lab vm prepare-dependencies [production|acceptance|system-install]" >&2; exit 2 ;;
+        esac
         exec "$LAB_DIR/tools/vm-owner-acceptance" --prepare-dependencies "$scope"
       fi
       if [[ "$vm_route" == "system" ]]; then
