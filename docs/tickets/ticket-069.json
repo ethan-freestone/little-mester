@@ -8,7 +8,7 @@
   "title": "Make Ctrl+C and Escape reliable through the interactive VM PTY path",
   "objective": "Part of integration ticket #66. Diagnose owner-reported intermittent Ctrl+C/Escape in the complete terminal→public launcher→SSH/PTTY→tmux→OpenCode path, then fix the demonstrated layer without weakening clipboard or host security protections.",
   "created_at": "2026-11-23T23:21:29.447Z",
-  "updated_at": "2026-11-24T12:25:23.843Z",
+  "updated_at": "2026-11-24T16:19:15.579Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -44,10 +44,13 @@
       "Owner performs final interactive Ariadne validation and clipboard canary under the documented safe terminal configuration.",
       "Production-helper PTY test sends the JSON request separately from keystrokes typed after SSH starts; assert controlling TTY/foreground group, real input bytes, resize, Ctrl+C, exact exit status and non-TTY refusal. Verify no secret key bytes in argv/env/logs/temp/workspace and strict guest host-key pinning before first SSH."
     ],
-    "created": [],
+    "created": [
+      "scripts/verify-exit-confirm.py --via-launcher: production guest launcher template, pre-existing tmux 500 ms repair, PTY resize and exit-confirm flow"
+    ],
     "cases": [
       "Owner reports OpenCode TUI is operational on Ariadne but Ctrl+C/Escape behavior is intermittent. Exact failing context/key sequence and underlying cause are not yet established.",
-      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence."
+      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence.",
+      "verify-exit-confirm.py --via-launcher: launcher resets escape-time 500 ms → 10 ms; 10/10 fast Escape+n cancellation trials; resize and detach/reattach pass on OpenCode 2.2.5"
     ]
   },
   "models_used": []

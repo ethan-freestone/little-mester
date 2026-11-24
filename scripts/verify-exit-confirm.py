@@ -13,6 +13,7 @@ behaviour that static tests cannot see:
 
 Usage:
     python3 scripts/verify-exit-confirm.py [repo-root] [--via-tmux]
+    python3 scripts/verify-exit-confirm.py [repo-root] [--via-launcher]
 
 Requires: Python 3 and pexpect (installed in the lab venv). Exits non-zero on
 any failed check. Requires exactly OpenCode v2.2.5. The script ignores inherited
@@ -25,6 +26,7 @@ import importlib.util
 import os
 import pathlib
 import shutil
+import shlex
 import stat
 import subprocess
 import sys
@@ -49,7 +51,7 @@ CLI_CONFIG = {
 
 
 class Driver:
-    def __init__(self, home, *, via_tmux=False):
+    def __init__(self, home, *, via_tmux=False, via_launcher=False):
         workspace = os.path.join(home, "workspace")
         server_config = os.path.join(home, "opencode.json")
         with open(server_config, "w", encoding="utf-8") as stream:
@@ -70,7 +72,8 @@ class Driver:
                 "OPENCODE_CLI_CONFIG_CONTENT": json.dumps(CLI_CONFIG),
             }
         )
-        self.via_tmux = via_tmux
+        self.via_tmux = via_tmux or via_launcher
+        self.via_launcher = via_launcher
         self.tmux = "/usr/bin/tmux"
         self.tmux_socket = "lm-exit-confirm"
         self.tmux_session = "little-mester-opencode"
@@ -80,13 +83,20 @@ class Driver:
             raise RuntimeError("the protected guest session contract is unavailable")
         contract = importlib.util.module_from_spec(contract_spec)
         contract_spec.loader.exec_module(contract)
+        self.session_contract = contract
         self.tmux_config = os.path.join(home, "little-mester-tmux.conf")
-        pathlib.Path(self.tmux_config).write_bytes(contract.TMUX_CONFIG)
+        # Do not source host-wide or user tmux configuration in this disposable
+        # test server; retain the production setting under test.
+        pathlib.Path(self.tmux_config).write_bytes(b"set-option -s escape-time 10\n")
         os.chmod(self.tmux_config, 0o600)
         self.env = env
-        if via_tmux:
+        self.child = None
+        self.log_path = os.path.join(home, "pty.log")
+        self.log = None
+        self.buffer = ""
+        if self.via_tmux:
             if not os.path.isfile(self.tmux):
-                raise RuntimeError("tmux is required for --via-tmux")
+                raise RuntimeError("tmux is required for a tmux-backed exit-confirm check")
             tmux_tmp = os.path.join(home, "tmux")
             try:
                 os.mkdir(tmux_tmp, 0o700)
@@ -96,21 +106,89 @@ class Driver:
                         or stat.S_IMODE(info.st_mode) != 0o700):
                     raise RuntimeError("private tmux test directory has unsafe ownership or mode")
             env["TMUX_TMPDIR"] = tmux_tmp
-            command = [
-                self.tmux, "-L", self.tmux_socket, "-f", self.tmux_config,
-                "new-session", "-A", "-s", self.tmux_session, "-c", workspace,
-                OPENCODE_BINARY, "--standalone", workspace,
-            ]
+            if via_launcher:
+                self._prepare_launcher_test(home, workspace, server_config)
+                try:
+                    subprocess.run(
+                        [self.tmux, "-L", self.tmux_socket, "-f", self.tmux_config,
+                         "new-session", "-d", "-s", "launcher-bootstrap", "/bin/sleep", "300"],
+                        env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE, text=True, timeout=5, check=True,
+                    )
+                    subprocess.run(
+                        [self.tmux, "-L", self.tmux_socket, "set-option", "-s", "escape-time", "500"],
+                        env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE, text=True, timeout=5, check=True,
+                    )
+                    if self.tmux_escape_time() != "escape-time 500":
+                        raise RuntimeError("test tmux server did not retain the 500 ms precondition")
+                except BaseException:
+                    self._kill_tmux_server()
+                    raise
+                command = [os.path.join(home, "lm-opencode-launcher")]
+            else:
+                command = [
+                    self.tmux, "-L", self.tmux_socket, "-f", self.tmux_config,
+                    "new-session", "-A", "-s", self.tmux_session, "-c", workspace,
+                    OPENCODE_BINARY, "--standalone", workspace,
+                ]
         else:
             command = [OPENCODE_BINARY, "--standalone", workspace]
-        self.child = pexpect.spawn(
-            command[0], command[1:], cwd=workspace, env=env, encoding="utf-8",
-            codec_errors="replace", dimensions=(40, 120), timeout=20,
+        try:
+            self.child = pexpect.spawn(
+                command[0], command[1:], cwd=workspace, env=env, encoding="utf-8",
+                codec_errors="replace", dimensions=(40, 120), timeout=20,
+            )
+            self.log = open(self.log_path, "w", encoding="utf-8")  # noqa: SIM115
+            self.wait(10)
+        except BaseException:
+            self.close()
+            raise
+
+    def _prepare_launcher_test(self, home, workspace, server_config):
+        """Render the protected guest launcher with only its fixed paths redirected."""
+        runner_path = os.path.join(home, "opencode-test-runner.py")
+        runner_source = (
+            "#!/usr/bin/python3\n"
+            "import json, os\n"
+            f"binary = {OPENCODE_BINARY!r}\n"
+            f"workspace = {workspace!r}\n"
+            f"cli_config = {json.dumps(CLI_CONFIG)!r}\n"
+            "environment = os.environ.copy()\n"
+            "environment['OPENCODE_CLI_CONFIG_CONTENT'] = cli_config\n"
+            "os.execve(binary, [binary, '--standalone', workspace], environment)\n"
         )
-        self.log_path = os.path.join(home, "pty.log")
-        self.log = open(self.log_path, "w", encoding="utf-8")  # noqa: SIM115
-        self.buffer = ""
-        self.wait(10)
+        pathlib.Path(runner_path).write_text(runner_source, encoding="utf-8")
+        os.chmod(runner_path, 0o700)
+
+        launcher_path = os.path.join(home, "lm-opencode-launcher")
+        launcher = self.session_contract.TUI_LAUNCHER_TEMPLATE.replace(
+            b"@WORKSPACE@", shlex.quote(workspace).encode(),
+        )
+        launcher = launcher.replace(
+            b"/usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-auth",
+            b"/usr/bin/true",
+        )
+        launcher = launcher.replace(
+            b"/home/mester/.local/share/opencode/tmux",
+            shlex.quote(os.path.join(home, "tmux")).encode(),
+        )
+        launcher = launcher.replace(b"/home/mester", shlex.quote(home).encode())
+        launcher = launcher.replace(
+            b"/etc/little-mester-tmux.conf", shlex.quote(self.tmux_config).encode(),
+        )
+        launcher = launcher.replace(
+            b"/etc/opencode/opencode.json", shlex.quote(server_config).encode(),
+        )
+        launcher = launcher.replace(
+            b"/usr/local/libexec/lm-opencode", shlex.quote(runner_path).encode(),
+        )
+        launcher = launcher.replace(
+            b"/usr/bin/tmux -f",
+            b"/usr/bin/tmux -L " + self.tmux_socket.encode("ascii") + b" -f",
+        )
+        pathlib.Path(launcher_path).write_bytes(launcher)
+        os.chmod(launcher_path, 0o700)
 
     def wait(self, seconds):
         end = time.time() + seconds
@@ -215,15 +293,19 @@ class Driver:
         return detached and self.child.isalive() and pane_pid == self.pane_pid()
 
     def close(self):
-        if self.child.isalive():
+        if self.child is not None and self.child.isalive():
             self.child.close(force=True)
         if self.via_tmux:
-            subprocess.run(
-                [self.tmux, "-L", self.tmux_socket, "kill-server"], env=self.env,
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, timeout=5, check=False,
-            )
-        self.log.close()
+            self._kill_tmux_server()
+        if self.log is not None and not self.log.closed:
+            self.log.close()
+
+    def _kill_tmux_server(self):
+        subprocess.run(
+            [self.tmux, "-L", self.tmux_socket, "kill-server"], env=self.env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=5, check=False,
+        )
 
 
 def check(label, condition):
@@ -238,8 +320,11 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("repo_root", nargs="?", default=DEFAULT_ROOT)
-    parser.add_argument("--via-tmux", action="store_true",
-                        help="exercise the pinned TUI through the guest's production tmux config")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--via-tmux", action="store_true",
+                      help="exercise the pinned TUI through the guest's tmux config")
+    mode.add_argument("--via-launcher", action="store_true",
+                      help="drive the production guest launcher template through a local tmux/OpenCode PTY")
     args = parser.parse_args()
     ROOT = os.path.abspath(args.repo_root)
     PLUGIN = os.path.join(ROOT, "agent", "opencode", "plugins", "little-mester-exit-confirm")
@@ -261,12 +346,18 @@ def main():
     driver = None
     failures = []
     try:
-        driver = Driver(home, via_tmux=args.via_tmux)
+        driver = Driver(home, via_tmux=args.via_tmux, via_launcher=args.via_launcher)
         failures.append(not check("TUI started", driver.alive() and
                                   driver.prompt_text_visible("Ask anything")))
-        if args.via_tmux:
+        if args.via_launcher:
+            failures.append(not check(
+                "production guest launcher repairs existing tmux escape-time from 500 ms to 10 ms",
+                driver.tmux_escape_time() == "escape-time 10",
+            ))
+        elif args.via_tmux:
             failures.append(not check("tmux escape-time is 10 ms",
                                       driver.tmux_escape_time() == "escape-time 10"))
+        if driver.via_tmux:
             resized, dimensions = driver.resize_and_check(32, 100)
             failures.append(not check(f"tmux PTY resize reached client ({dimensions})", resized))
 
@@ -284,7 +375,7 @@ def main():
 
         # The guest's tmux client must not merge a fast Escape+n sequence into
         # an Alt+n key before OpenCode receives Escape as its own event.
-        if args.via_tmux:
+        if driver.via_tmux:
             fast_escape_cancelled = True
             for trial in range(1, 11):
                 driver.send_fast("\x1b", "n")
@@ -342,7 +433,7 @@ def main():
         failures.append(not check("Y confirms and exits", not driver.alive()))
         driver.close()
 
-        driver = Driver(home, via_tmux=args.via_tmux)
+        driver = Driver(home, via_tmux=args.via_tmux, via_launcher=args.via_launcher)
         driver.ctrl("c")
         driver.send("Q")
         time.sleep(1.5)
