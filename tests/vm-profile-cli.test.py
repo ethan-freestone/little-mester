@@ -39,7 +39,7 @@ class ProfileCliTests(unittest.TestCase):
         return environment
 
     @classmethod
-    def _make_repository(cls, repository, *, object_format="sha1"):
+    def _make_repository(cls, repository, *, object_format="sha1", content="committed\n"):
         repository.mkdir()
         command = ["/usr/bin/git", "init", "-q"]
         if object_format != "sha1":
@@ -47,7 +47,7 @@ class ProfileCliTests(unittest.TestCase):
         command.append(str(repository))
         environment = cls._fixture_git_environment()
         subprocess.run(command, check=True, env=environment)
-        (repository / "source.txt").write_text("committed\n", encoding="utf-8")
+        (repository / "source.txt").write_text(content, encoding="utf-8")
         subprocess.run(["/usr/bin/git", "-C", str(repository), "add", "source.txt"],
                        check=True, env=environment)
         subprocess.run(["/usr/bin/git", "-C", str(repository), "-c", "user.name=test",
@@ -145,7 +145,9 @@ class ProfileCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="vm-profile-cli-hostile-git-") as temporary:
             root = pathlib.Path(temporary)
             repository, sha = self._make_repository(root / "expected")
-            other_repository, _ = self._make_repository(root / "other")
+            other_repository, hostile_sha = self._make_repository(
+                root / "other", content="hostile\n")
+            self.assertNotEqual(sha, hostile_sha)
             global_config = root / "hostile-gitconfig"
             global_config.write_text("[malformed\n", encoding="utf-8")
             hostile_environment = {
@@ -160,6 +162,7 @@ class ProfileCliTests(unittest.TestCase):
             with mock.patch.dict(os.environ, hostile_environment):
                 request = cli.request_for(self.parse("install"), repository=repository)
             self.assertEqual(request["commit_sha"], sha)
+            self.assertNotEqual(request["commit_sha"], hostile_sha)
             self.assertEqual(request["repository"], str(repository.resolve()))
 
     def test_linked_worktree_resolves_its_committed_head(self):
@@ -170,9 +173,23 @@ class ProfileCliTests(unittest.TestCase):
             subprocess.run(["/usr/bin/git", "-C", str(repository), "worktree", "add", "-q",
                             "--detach", str(linked_worktree), sha],
                            check=True, env=self._fixture_git_environment())
-            request = cli.request_for(self.parse("install"), repository=linked_worktree)
-            self.assertEqual(request["repository"], str(linked_worktree.resolve()))
-            self.assertEqual(request["commit_sha"], sha)
+            environment = self._fixture_git_environment()
+            subprocess.run(["/usr/bin/git", "-C", str(linked_worktree), "-c",
+                            "user.name=test", "-c", "user.email=test@example.invalid",
+                            "commit", "--allow-empty", "-qm", "linked candidate"],
+                           check=True, env=environment)
+            linked_sha = subprocess.run(
+                ["/usr/bin/git", "-C", str(linked_worktree), "rev-parse", "HEAD"],
+                check=True, text=True, stdout=subprocess.PIPE, env=environment).stdout.strip()
+            self.assertNotEqual(sha, linked_sha)
+
+            main_request = cli.request_for(self.parse("install"), repository=repository)
+            linked_request = cli.request_for(self.parse("install"), repository=linked_worktree)
+            self.assertEqual(main_request["repository"], str(repository.resolve()))
+            self.assertEqual(main_request["commit_sha"], sha)
+            self.assertEqual(linked_request["repository"], str(linked_worktree.resolve()))
+            self.assertEqual(linked_request["commit_sha"], linked_sha)
+            self.assertNotEqual(linked_request["commit_sha"], main_request["commit_sha"])
 
     def test_unborn_nonrepository_and_noncommit_heads_are_rejected(self):
         with tempfile.TemporaryDirectory(prefix="vm-profile-cli-invalid-git-") as temporary:
