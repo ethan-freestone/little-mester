@@ -68,6 +68,7 @@ export interface MetricsState {
   history: HistorySample[]
   transport: MetricsMode | null
   runId: string | null
+  pollGeneration: number
   sequence: number | null
   /** Docker reports whole-second UTC timestamps; same-second updates are indistinguishable. */
   legacyTimestamp: string | null
@@ -119,12 +120,18 @@ export function isMetricsSampleNewer(state: MetricsState, sample: unknown): bool
 export function applyMetricsPayload(
   state: MetricsState, sample: unknown, receivedAt: number, mode: MetricsMode,
 ): MetricsState
+export function applyMetricsPollResult(
+  state: MetricsState, sample: unknown, receivedAt: number, mode: MetricsMode, generation: number,
+): MetricsState
 export function seedMetricsHistory(
   state: MetricsState, samples: unknown, mode: MetricsMode,
 ): MetricsState
 export function isMetricsStale(receivedAt: number | null, now: number): boolean
 export function refreshMetricsFreshness(state: MetricsState, now: number): MetricsState
 export function markMetricsUnavailable(state: MetricsState, now: number): MetricsState
+export function markMetricsPollUnavailable(
+  state: MetricsState, now: number, mode: MetricsMode, generation: number,
+): MetricsState
 export function displayMetric(
   value: number | string | null | undefined,
   availability: SensorAvailability,

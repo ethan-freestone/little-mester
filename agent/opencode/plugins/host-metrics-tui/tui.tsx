@@ -24,11 +24,11 @@ import { Plugin } from "@opencode/plugin/tui"
 import { createSignal, Show } from "solid-js"
 import { fetchMetricsJson, metricsBaseForMode } from "./metrics-endpoint.js"
 import {
-  applyMetricsPayload,
+  applyMetricsPollResult,
   createInitialMetricsState,
   displayMetric,
   formatTemperatureSensors,
-  markMetricsUnavailable,
+  markMetricsPollUnavailable,
   refreshMetricsFreshness,
   seedMetricsHistory,
   sparkline,
@@ -284,14 +284,19 @@ export default Plugin.define({
         }))
         return
       }
+      const pollGeneration = state().pollGeneration
       fetchMetricsJson<unknown>(metricsMode, "/metrics")
         .then((data: unknown) => {
           if (isDisposed) return
-          setState(prev => applyMetricsPayload(prev, data, globalThis.performance.now(), metricsMode))
+          setState(prev => applyMetricsPollResult(
+            prev, data, globalThis.performance.now(), metricsMode, pollGeneration,
+          ))
         })
         .catch(() => {
           if (!isDisposed) {
-            setState(prev => markMetricsUnavailable(prev, globalThis.performance.now()))
+            setState(prev => markMetricsPollUnavailable(
+              prev, globalThis.performance.now(), metricsMode, pollGeneration,
+            ))
           }
         })
     }

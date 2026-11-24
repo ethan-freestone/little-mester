@@ -188,6 +188,7 @@ export function createInitialMetricsState() {
     history: [],
     transport: null,
     runId: null,
+    pollGeneration: 0,
     sequence: null,
     legacyTimestamp: null,
     receivedAt: null,
@@ -255,6 +256,13 @@ export function applyMetricsPayload(state, sample, receivedAt, mode) {
   return { ...refreshMetricsFreshness(state, receivedAt), sourceStatus: "Host metrics · invalid response" }
 }
 
+export function applyMetricsPollResult(state, sample, receivedAt, mode, generation) {
+  if (mode === "vm" && generation !== state.pollGeneration) {
+    return refreshMetricsFreshness(state, receivedAt)
+  }
+  return applyMetricsPayload(state, sample, receivedAt, mode)
+}
+
 function applyVmMetricsPayload(state, sample, receivedAt) {
   if (state.transport !== null && state.transport !== "vm") {
     return { ...refreshMetricsFreshness(state, receivedAt), sourceStatus: "Host metrics · invalid response" }
@@ -271,6 +279,7 @@ function applyVmMetricsPayload(state, sample, receivedAt) {
     history: mergeVmHistory(state.history, [snapshotToHistory(sample)], sample.run_id),
     transport: "vm",
     runId: sample.run_id,
+    pollGeneration: state.pollGeneration + (sample.run_id === state.runId ? 0 : 1),
     sequence: sample.sequence,
     receivedAt,
     stale: false,
@@ -418,6 +427,13 @@ export function markMetricsUnavailable(state, now) {
     ...refreshMetricsFreshness(state, now),
     sourceStatus: "Host metrics · retrying",
   }
+}
+
+export function markMetricsPollUnavailable(state, now, mode, generation) {
+  if (mode === "vm" && generation !== state.pollGeneration) {
+    return refreshMetricsFreshness(state, now)
+  }
+  return markMetricsUnavailable(state, now)
 }
 
 export function displayMetric(value, availability, format = String) {

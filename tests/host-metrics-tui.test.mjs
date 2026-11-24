@@ -1,8 +1,10 @@
 import assert from "node:assert/strict"
+import { readFile } from "node:fs/promises"
 import test from "node:test"
 
 import { fetchMetricsJson, metricsBaseForMode } from "../agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js"
 import {
+  applyMetricsPollResult,
   applyMetricsPayload,
   createInitialMetricsState,
   displayMetric,
@@ -11,6 +13,7 @@ import {
   isValidDockerMetricsPayload,
   isValidHistorySample,
   isValidMetricsPayload,
+  markMetricsPollUnavailable,
   refreshMetricsFreshness,
   seedMetricsHistory,
   sparkline,
@@ -196,6 +199,180 @@ test("identity advances once, cached samples do not append or refresh, and resta
   assert.equal(state.sequence, 1, "a new process run may restart its sequence")
   assert.equal(state.receivedAt, 3600)
   assert.equal(state.history.length, 3)
+})
+
+test("VM poll generation increments only for accepted run identity transitions", () => {
+  let state = createInitialMetricsState()
+  assert.equal(state.pollGeneration, 0)
+
+  state = applyMetricsPollResult(state, metricsSample({ sequence: 10 }), 100, "vm", 0)
+  assert.equal(state.pollGeneration, 1, "null-to-first-run invalidates outstanding requests")
+  state = applyMetricsPollResult(state, metricsSample({ sequence: 10 }), 200, "vm", 1)
+  assert.equal(state.pollGeneration, 1, "duplicate samples do not advance the generation")
+  state = applyMetricsPollResult(state, metricsSample({ sequence: 11 }), 300, "vm", 1)
+  assert.equal(state.pollGeneration, 1, "same-run sequence advances do not advance the generation")
+
+  state = applyMetricsPollResult(state,
+    metricsSample({ run_id: "b".repeat(32), sequence: 1 }), 400, "vm", 1)
+  assert.equal(state.pollGeneration, 2)
+  state = applyMetricsPollResult(state,
+    metricsSample({ run_id: "b".repeat(32), sequence: 2 }), 500, "vm", 2)
+  const afterB2 = state
+  state = applyMetricsPollResult(state,
+    metricsSample({ run_id: "b".repeat(32), sequence: 2 }), 600, "vm", 2)
+  state = applyMetricsPollResult(state,
+    metricsSample({ run_id: "b".repeat(32), sequence: 1 }), 700, "vm", 2)
+  assert.equal(state.pollGeneration, 2, "duplicate/older same-run responses do not advance it")
+  assert.equal(state.sequence, 2)
+  assert.equal(state.receivedAt, afterB2.receivedAt)
+  assert.equal(state.history.length, afterB2.history.length)
+
+  state = applyMetricsPollResult(state,
+    metricsSample({ run_id: "c".repeat(32), sequence: 1 }), 800, "vm", 2)
+  assert.equal(state.pollGeneration, 3, "each accepted run transition advances exactly once")
+})
+
+test("first VM identity invalidates parallel startup polls and history never advances the generation", () => {
+  const startupGeneration = 0
+  let state = applyMetricsPollResult(createInitialMetricsState(),
+    metricsSample({ run_id: "a".repeat(32), sequence: 1 }), 100, "vm", startupGeneration)
+  const firstRun = state
+  assert.equal(state.pollGeneration, 1)
+
+  state = applyMetricsPollResult(state,
+    metricsSample({ run_id: "b".repeat(32), sequence: 1 }), 200, "vm", startupGeneration)
+  assert.equal(state.runId, firstRun.runId)
+  assert.equal(state.sequence, firstRun.sequence)
+  assert.equal(state.receivedAt, firstRun.receivedAt)
+  assert.strictEqual(state.history, firstRun.history)
+  assert.strictEqual(state.cpu, firstRun.cpu)
+  assert.equal(state.pollGeneration, firstRun.pollGeneration)
+  assert.equal(state.sourceStatus, firstRun.sourceStatus)
+
+  state = seedMetricsHistory(state, [historySample({
+    run_id: firstRun.runId,
+    sequence: 2,
+  })], "vm")
+  assert.equal(state.pollGeneration, firstRun.pollGeneration,
+    "chart history does not participate in request invalidation")
+})
+
+test("a run transition makes delayed old-run responses inert while duplicates do not refresh receipt", () => {
+  let state = applyMetricsPollResult(createInitialMetricsState(), metricsSample({
+    run_id: "a".repeat(32), sequence: 10,
+    gpu: [{ ...metricsSample().gpu[0], utilization_percent: 50 }],
+  }), 1000, "vm", 0)
+  const requestStartedDuringA = state.pollGeneration
+  state = applyMetricsPollResult(state, metricsSample({
+    run_id: "b".repeat(32), sequence: 1,
+    gpu: [{ ...metricsSample().gpu[0], utilization_percent: 70 }],
+  }), 2000, "vm", requestStartedDuringA)
+  const afterB1 = state
+  assert.equal(state.pollGeneration, 2)
+
+  state = applyMetricsPollResult(state, metricsSample({
+    run_id: "a".repeat(32), sequence: 9,
+    gpu: [{ ...metricsSample().gpu[0], utilization_percent: 20 }],
+  }), 2500, "vm", requestStartedDuringA)
+  assert.equal(state.runId, afterB1.runId)
+  assert.equal(state.sequence, afterB1.sequence)
+  assert.equal(state.gpu.utilization_percent, afterB1.gpu.utilization_percent)
+  assert.strictEqual(state.history, afterB1.history)
+  assert.equal(state.receivedAt, afterB1.receivedAt)
+  assert.equal(state.pollGeneration, afterB1.pollGeneration)
+  assert.equal(state.sourceStatus, afterB1.sourceStatus)
+
+  state = applyMetricsPollResult(state, metricsSample({
+    run_id: "b".repeat(32), sequence: 1,
+    gpu: [{ ...metricsSample().gpu[0], utilization_percent: 99 }],
+  }), 4000, "vm", state.pollGeneration)
+  assert.equal(state.gpu.utilization_percent, 70)
+  assert.equal(state.sequence, 1)
+  assert.equal(state.receivedAt, 2000, "duplicate B1 does not refresh the receipt time")
+  assert.equal(state.history.length, afterB1.history.length)
+  assert.equal(state.stale, true, "duplicate B1 cannot refresh inclusive two-second freshness")
+})
+
+test("inverted same-run poll responses still use the sequence gate", () => {
+  let state = applyMetricsPollResult(createInitialMetricsState(),
+    metricsSample({ sequence: 1 }), 100, "vm", 0)
+  const concurrentGeneration = state.pollGeneration
+
+  state = applyMetricsPollResult(state, metricsSample({
+    sequence: 3,
+    gpu: [{ ...metricsSample().gpu[0], utilization_percent: 30 }],
+  }), 300, "vm", concurrentGeneration)
+  const afterNewerResponse = state
+  state = applyMetricsPollResult(state, metricsSample({
+    sequence: 2,
+    gpu: [{ ...metricsSample().gpu[0], utilization_percent: 20 }],
+  }), 400, "vm", concurrentGeneration)
+
+  assert.equal(state.sequence, 3)
+  assert.equal(state.gpu.utilization_percent, 30)
+  assert.equal(state.receivedAt, afterNewerResponse.receivedAt)
+  assert.equal(state.history.length, afterNewerResponse.history.length)
+  assert.equal(state.pollGeneration, concurrentGeneration)
+})
+
+test("current malformed and failed polls report their own status; obsolete outcomes preserve it", () => {
+  let state = applyMetricsPollResult(createInitialMetricsState(),
+    metricsSample({ sequence: 1 }), 100, "vm", 0)
+  const currentGeneration = state.pollGeneration
+  const currentData = state
+
+  state = applyMetricsPollResult(state, metricsSample({
+    sequence: 2, cpu: null,
+  }), 200, "vm", currentGeneration)
+  assert.equal(state.sourceStatus, "Host metrics · invalid response")
+  assert.equal(state.runId, currentData.runId)
+  assert.equal(state.sequence, currentData.sequence)
+  assert.equal(state.receivedAt, currentData.receivedAt)
+  assert.equal(state.pollGeneration, currentData.pollGeneration)
+  assert.strictEqual(state.history, currentData.history)
+  assert.strictEqual(state.cpu, currentData.cpu)
+
+  state = applyMetricsPollResult(state,
+    metricsSample({ run_id: "b".repeat(32), sequence: 1 }), 300, "vm", currentGeneration)
+  const afterTransition = state
+  assert.equal(state.sourceStatus, "Host metrics")
+
+  state = applyMetricsPollResult(state, metricsSample({
+    run_id: "a".repeat(32), sequence: 2, cpu: null,
+  }), 400, "vm", currentGeneration)
+  state = markMetricsPollUnavailable(state, 500, "vm", currentGeneration)
+  assert.equal(state.sourceStatus, afterTransition.sourceStatus)
+  assert.equal(state.runId, afterTransition.runId)
+  assert.equal(state.sequence, afterTransition.sequence)
+  assert.equal(state.receivedAt, afterTransition.receivedAt)
+  assert.strictEqual(state.history, afterTransition.history)
+  assert.strictEqual(state.cpu, afterTransition.cpu)
+
+  state = markMetricsPollUnavailable(state, 600, "vm", state.pollGeneration)
+  assert.equal(state.sourceStatus, "Host metrics · retrying",
+    "a current network failure is not represented as a malformed response")
+  assert.equal(state.receivedAt, afterTransition.receivedAt)
+})
+
+test("TUI poll callbacks pass their captured generation and skip late updates after disposal", async () => {
+  const tuiSource = await readFile(new URL(
+    "../agent/opencode/plugins/host-metrics-tui/tui.tsx", import.meta.url,
+  ), "utf8")
+
+  assert.match(tuiSource,
+    /const pollGeneration = state\(\)\.pollGeneration\s+fetchMetricsJson<unknown>\(metricsMode, "\/metrics"\)/,
+    "each /metrics request captures the generation immediately before dispatch")
+  assert.match(tuiSource,
+    /\.then\(\(data: unknown\) => \{\s*if \(isDisposed\) return\s*setState\(prev => applyMetricsPollResult\(\s*prev, data, globalThis\.performance\.now\(\), metricsMode, pollGeneration,/,
+    "success callbacks guard disposal and apply against current state with the captured generation")
+  assert.match(tuiSource,
+    /\.catch\(\(\) => \{\s*if \(!isDisposed\) \{\s*setState\(prev => markMetricsPollUnavailable\(\s*prev, globalThis\.performance\.now\(\), metricsMode, pollGeneration,/,
+    "failure callbacks guard disposal and pass the same generation to the retry status handler")
+
+  const historyPoll = tuiSource.slice(tuiSource.indexOf("function seedHistory()"),
+    tuiSource.indexOf("/* Poll /metrics"))
+  assert.doesNotMatch(historyPoll, /pollGeneration/,
+    "/history remains independent of metrics request generations")
 })
 
 test("history seeding deduplicates samples and preserves zero readings and unavailable gaps", () => {
