@@ -26,8 +26,8 @@ RESERVED_PROFILES = frozenset({
     "prepare-dependencies",
 })
 PROFILE_NAME = re.compile(r"[a-z][a-z0-9-]{0,31}\Z")
-MODEL_ID = re.compile(r"openai/[A-Za-z0-9._+-]+\Z")
-THEME_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
+MODEL_ID = re.compile(r"openai/[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+THEME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 GIT = "/usr/bin/git"
 GIT_TIMEOUT_SECONDS = 5
@@ -151,7 +151,7 @@ def request_for(args: argparse.Namespace, *, repository: pathlib.Path = ROOT) ->
         return {"protocol": 1, "operation": "profiles.show",
                 "profile": _profile_name(args.name)}
 
-    profile = _profile_name(args.profile or DEFAULT_PROFILE)
+    profile = _profile_name(DEFAULT_PROFILE if args.profile is None else args.profile)
     request = {"protocol": 1, "operation": command, "profile": profile}
     if command == "install":
         candidate = _candidate_sha(repository)

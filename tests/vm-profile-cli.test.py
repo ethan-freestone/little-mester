@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -25,11 +27,29 @@ CORE_LOADER = importlib.machinery.SourceFileLoader(
 CORE_SPEC = importlib.util.spec_from_loader(CORE_LOADER.name, CORE_LOADER)
 core = importlib.util.module_from_spec(CORE_SPEC)
 CORE_SPEC.loader.exec_module(core)
+PREFERENCES_LOADER = importlib.machinery.SourceFileLoader(
+    "vm_guest_preferences_test", str(ROOT / "lib/vm/guest-opencode-preferences.py"))
+PREFERENCES_SPEC = importlib.util.spec_from_loader(
+    PREFERENCES_LOADER.name, PREFERENCES_LOADER)
+guest_preferences = importlib.util.module_from_spec(PREFERENCES_SPEC)
+PREFERENCES_SPEC.loader.exec_module(guest_preferences)
 
 
 class ProfileCliTests(unittest.TestCase):
     def parse(self, *argv):
         return cli.parser().parse_args(list(argv))
+
+    def assert_main_refuses_without_execution(self, argv):
+        stderr = io.StringIO()
+        with mock.patch.object(cli, "dispatch") as dispatch, \
+                mock.patch.object(cli.subprocess, "run") as git_run, \
+                contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                cli.main(list(argv))
+        self.assertNotEqual(raised.exception.code, 0)
+        dispatch.assert_not_called()
+        git_run.assert_not_called()
+        return stderr.getvalue()
 
     @staticmethod
     def _fixture_git_environment():
@@ -58,14 +78,49 @@ class ProfileCliTests(unittest.TestCase):
         return repository, result.stdout.strip()
 
     def test_default_profile_and_option_position(self):
-        args = self.parse("up")
-        self.assertEqual(cli.request_for(args), {
+        self.assertEqual(cli.request_for(self.parse("up")), {
             "protocol": 1, "operation": "up", "profile": "default",
         })
-        args = self.parse("--profile", "amber", "status")
-        self.assertEqual(cli.request_for(args)["profile"], "amber")
-        with self.assertRaises(SystemExit):
-            self.parse("status", "--profile", "amber")
+        for selector, expected in (((), "default"),
+                                   (("--profile", "default"), "default"),
+                                   (("--profile", "amber"), "amber")):
+            with self.subTest(selector=selector):
+                request = cli.request_for(self.parse(*selector, "settings", "show"))
+                self.assertEqual(request, {
+                    "protocol": 1, "operation": "settings.show", "profile": expected,
+                })
+        self.assertEqual(cli.request_for(self.parse("--profile", "amber", "status"))["profile"],
+                         "amber")
+        for argv in (("status", "--profile", "amber"),
+                     ("settings", "--profile", "amber", "show"),
+                     ("settings", "show", "--profile", "amber"),
+                     ("settings", "set", "--model", "openai/gpt-4.1", "--profile", "amber")):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit):
+                self.parse(*argv)
+
+    def test_empty_explicit_profiles_refuse_before_dispatch_or_git(self):
+        profile_commands = (
+            ("install",), ("up",), ("status",), ("settings", "show"),
+            ("settings", "set", "--model", "openai/gpt-4.1"),
+        )
+        for selector in (("--profile", ""), ("--profile=",)):
+            for command in profile_commands:
+                argv = (*selector, *command)
+                with self.subTest(argv=argv):
+                    self.assert_main_refuses_without_execution(argv)
+
+    def test_empty_and_explicit_global_profiles_refuse_before_dispatch(self):
+        global_commands = (
+            ("profiles", "list"), ("profiles", "show", "amber"),
+            ("installations",), ("prune", "--dry-run"), ("bootstrap",),
+            ("control", "update"),
+        )
+        for selector in (("--profile", ""), ("--profile=",),
+                         ("--profile", "amber")):
+            for command in global_commands:
+                argv = (*selector, *command)
+                with self.subTest(argv=argv):
+                    self.assert_main_refuses_without_execution(argv)
 
     def test_profile_names_fail_closed_for_reserved_or_malformed_names(self):
         for name in ("System", "system", "profiles", "Bad_name", "a" * 33):
@@ -262,20 +317,60 @@ class ProfileCliTests(unittest.TestCase):
             with self.subTest(request=request):
                 self.assertEqual(core.validate_request(request), request)
 
-    def test_settings_request_accepts_only_model_and_theme(self):
-        self.assertEqual(cli.request_for(self.parse(
-            "settings", "set", "--model", "openai/gpt-4.1", "--theme", "dark")), {
-                "protocol": 1, "operation": "settings.set", "profile": "default",
-                "model": "openai/gpt-4.1", "theme": "dark",
-            })
+    def test_settings_requests_match_protocol_and_guest_parser(self):
+        accepted = (
+            (("settings", "set", "--model", "openai/gpt-4.1"),
+             {"model": "openai/gpt-4.1"}),
+            (("settings", "set", "--theme", "dark"), {"theme": "dark"}),
+            (("settings", "set", "--model", "openai/gpt-4.1", "--theme", "dark"),
+             {"model": "openai/gpt-4.1", "theme": "dark"}),
+            (("settings", "set", "--model", "openai/" + "a" * 121),
+             {"model": "openai/" + "a" * 121}),
+            (("settings", "set", "--theme", "a" * 64), {"theme": "a" * 64}),
+        )
+        for argv, preferences in accepted:
+            with self.subTest(argv=argv):
+                request = cli.request_for(self.parse(*argv))
+                self.assertEqual(request, {
+                    "protocol": 1, "operation": "settings.set", "profile": "default",
+                    **preferences,
+                })
+                self.assertEqual(core.validate_request(request), request)
+                payload = json.dumps(preferences, separators=(",", ":"))
+                self.assertEqual(guest_preferences.parse_preferences(payload), preferences)
+
         self.assertEqual(cli.request_for(self.parse("settings", "show")), {
             "protocol": 1, "operation": "settings.show", "profile": "default",
         })
-        for model in ("ollama/qwen3", "openai/../escape", "openai/bad model"):
+
+    def test_settings_values_enforce_narrow_grammar_and_exact_boundaries(self):
+        invalid_models = (
+            "", "openai/", "openai/.model", "openai/_model", "openai/-model",
+            "openai/+model", "openai/model+tag", "openai/model:tag",
+            "openai/bad model", "openai/model\n", "openai/model\x00",
+            "ollama/qwen3", "anthropic/claude",
+            "openai/" + "a" * 122,
+        )
+        for model in invalid_models:
             with self.subTest(model=model), self.assertRaisesRegex(ValueError, "OpenAI model ID"):
                 cli.request_for(self.parse("settings", "set", "--model", model))
+
+        invalid_themes = (
+            "", ".dark", "_dark", "-dark", "+dark", "dark+mode", "dark:mode",
+            "dark mode", "dark\n", "dark\x00", "a" * 65,
+        )
+        for theme in invalid_themes:
+            with self.subTest(theme=theme), self.assertRaisesRegex(ValueError, "theme name"):
+                cli.request_for(self.parse("settings", "set", f"--theme={theme}"))
+
         with self.assertRaisesRegex(ValueError, "needs --model"):
             cli.request_for(self.parse("settings", "set"))
+
+    def test_invalid_settings_values_refuse_without_execution_or_echo(self):
+        sentinel = "openai/PRIVATE_SENTINEL+VALUE"
+        output = self.assert_main_refuses_without_execution(
+            ("settings", "set", "--model", sentinel))
+        self.assertNotIn(sentinel, output)
 
     def test_global_commands_reject_profile_and_prune_has_no_confirmation_bypass(self):
         for argv in (("--profile", "dev", "installations"),
@@ -298,26 +393,32 @@ class ProfileCliTests(unittest.TestCase):
         })
 
     def test_dispatch_sends_only_protocol_record_to_fixed_sudo_helper(self):
-        with tempfile.TemporaryDirectory(prefix="vm-profile-helper-") as temporary:
-            helper = pathlib.Path(temporary) / "profile-control"
-            helper.touch()
-            captured = {}
+        captured = {}
+        calls = []
 
-            class Completed:
-                returncode = 0
+        class Completed:
+            returncode = 0
 
-            def run(argv, **kwargs):
-                captured["argv"] = argv
-                captured.update(kwargs)
-                return Completed()
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            captured["argv"] = argv
+            captured.update(kwargs)
+            return Completed()
 
-            request = {"protocol": 1, "operation": "settings.set", "profile": "default",
-                       "theme": "dark"}
-            self.assertEqual(cli.dispatch(request, helper=str(helper), runner=run), 0)
-            self.assertEqual(captured["argv"], [cli.SUDO, str(helper)])
-            self.assertEqual(json.loads(captured["input"]), request)
-            self.assertEqual(set(json.loads(captured["input"])),
-                             {"protocol", "operation", "profile", "theme"})
+        request = {"protocol": 1, "operation": "settings.set", "profile": "default",
+                   "theme": "dark"}
+        with mock.patch.object(cli.os.path, "isfile", return_value=True) as isfile:
+            self.assertEqual(cli.dispatch(request, runner=run), 0)
+        isfile.assert_called_once_with(cli.HELPER)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(captured["argv"], ["/usr/bin/sudo", cli.HELPER])
+        self.assertEqual(set(captured), {"argv", "input", "check"})
+        self.assertEqual(captured["check"], False)
+        self.assertEqual(captured["input"],
+                         (json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
+        self.assertEqual(json.loads(captured["input"]), request)
+        self.assertEqual(set(json.loads(captured["input"])),
+                         {"protocol", "operation", "profile", "theme"})
 
     def test_missing_helper_is_a_bootstrap_prerequisite_without_execution(self):
         runner = mock.Mock()
