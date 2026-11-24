@@ -21,9 +21,11 @@ INSTALL_MANIFEST_SCHEMA_VERSION = 1
 PROFILE_RUNTIME_API = 1
 CONTROL_HELPER_API = 1
 MAX_REQUEST_BYTES = 64 * 1024
-MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_INVENTORY_ENTRIES = 4096
 MAX_PATH_BYTES = 240
+# Leave room for every contract-valid inventory entry (maximum path, mode and
+# digest plus JSON framing), rather than rejecting a schema-valid installation.
+MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_FILE_BYTES = 16 * 1024 * 1024
 MAX_TREE_BYTES = 256 * 1024 * 1024
 MANIFEST_FILENAME = "manifest.json"

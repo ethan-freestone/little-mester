@@ -188,6 +188,31 @@ class RuntimeManifestTests(unittest.TestCase):
         manifest["control_helper_api_max"] = 3
         self.assertEqual(core.validate_runtime_manifest(manifest, pinned_sha=SHA_A)["commit_sha"], SHA_A)
 
+    def test_manifest_read_bound_covers_the_maximum_valid_inventory(self):
+        paths = [
+            f"lib/vm/inventory-{index:04d}-" + "a" * 218
+            for index in range(core.MAX_INVENTORY_ENTRIES - 2)
+        ]
+        paths.extend(("lib/vm/profile-runtime.py", "profile-runtime.json"))
+        manifest = {
+            "schema_version": 1,
+            "commit_sha": SHA_A,
+            "profile_runtime_api": 1,
+            "control_helper_api_min": 1,
+            "control_helper_api_max": 1,
+            "files": [
+                {"path": path, "git_mode": "100644", "sha256": "0" * 64}
+                for path in sorted(paths)
+            ],
+        }
+        encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        self.assertGreater(len(encoded), 1024 * 1024)
+        self.assertLessEqual(len(encoded), core.MAX_MANIFEST_BYTES)
+        self.assertEqual(
+            len(core.validate_runtime_manifest(manifest, pinned_sha=SHA_A)["files"]),
+            core.MAX_INVENTORY_ENTRIES,
+        )
+
     def test_rejects_unknown_schema_keys_wrong_pin_and_incompatible_apis(self):
         mutations = []
         unknown = self.valid_manifest()
