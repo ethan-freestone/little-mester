@@ -125,7 +125,7 @@ def request_for(args: argparse.Namespace, *, repository: pathlib.Path = ROOT) ->
     request = {"protocol": 1, "operation": command, "profile": profile}
     if command == "install":
         candidate = _candidate_sha(repository)
-        request.update(repository_path=str(repository.resolve()), candidate_sha=candidate)
+        request.update(repository=str(repository.resolve()), commit_sha=candidate)
     elif command == "up":
         selected_workspace = args.workspace_dir if args.workspace_dir is not None else args.workspace
         if selected_workspace is None and args.unsafe_recurse:
@@ -133,7 +133,10 @@ def request_for(args: argparse.Namespace, *, repository: pathlib.Path = ROOT) ->
         if args.reassign and selected_workspace is None:
             raise ValueError("--reassign requires a newly selected workspace path")
         if selected_workspace is not None:
-            request["workspace"] = selected_workspace
+            # The fixed helper protocol accepts only absolute paths. Keep this
+            # lexical (do not resolve symlinks here); the helper performs the
+            # authoritative path-identity and symlink checks.
+            request["workspace"] = os.path.abspath(selected_workspace)
         if args.unsafe_recurse:
             request["unsafe_recurse"] = True
         if args.reassign:
@@ -145,7 +148,7 @@ def request_for(args: argparse.Namespace, *, repository: pathlib.Path = ROOT) ->
             if args.model is None and args.theme is None:
                 raise ValueError("settings set needs --model, --theme, or both")
             if args.model is not None:
-                if not MODEL_ID.fullmatch(args.model):
+                if not MODEL_ID.fullmatch(args.model) or len(args.model) > 128:
                     raise ValueError("--model must be an OpenAI model ID such as openai/gpt-4.1")
                 request["model"] = args.model
             if args.theme is not None:

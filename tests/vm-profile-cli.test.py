@@ -18,6 +18,11 @@ LOADER = importlib.machinery.SourceFileLoader(
 SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 cli = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(cli)
+CORE_LOADER = importlib.machinery.SourceFileLoader(
+    "vm_profile_control_core_test", str(ROOT / "lib/vm/profile-control-core.py"))
+CORE_SPEC = importlib.util.spec_from_loader(CORE_LOADER.name, CORE_LOADER)
+core = importlib.util.module_from_spec(CORE_SPEC)
+CORE_SPEC.loader.exec_module(core)
 
 
 class ProfileCliTests(unittest.TestCase):
@@ -42,12 +47,17 @@ class ProfileCliTests(unittest.TestCase):
     def test_workspace_precedence_and_unsafe_recurse_defaults(self):
         args = self.parse("--profile", "dev", "up", "positional", "--dir", "explicit",
                           "--unsafe-recurse", "--reassign")
-        self.assertEqual(cli.request_for(args), {
+        request = cli.request_for(args)
+        self.assertEqual(request, {
             "protocol": 1, "operation": "up", "profile": "dev",
-            "workspace": "explicit", "unsafe_recurse": True, "reassign": True,
+            "workspace": str(pathlib.Path("explicit").absolute()),
+            "unsafe_recurse": True, "reassign": True,
         })
+        self.assertEqual(core.validate_request(request), request)
         args = self.parse("up", "--unsafe-recurse")
-        self.assertEqual(cli.request_for(args)["workspace"], ".")
+        request = cli.request_for(args)
+        self.assertEqual(request["workspace"], str(pathlib.Path(".").absolute()))
+        self.assertEqual(core.validate_request(request), request)
         with self.assertRaisesRegex(ValueError, "requires a newly selected"):
             cli.request_for(self.parse("up", "--reassign"))
 
@@ -67,8 +77,24 @@ class ProfileCliTests(unittest.TestCase):
             request = cli.request_for(self.parse("install"), repository=repository)
             self.assertEqual(request, {
                 "protocol": 1, "operation": "install", "profile": "default",
-                "repository_path": str(repository.resolve()), "candidate_sha": sha,
+                "repository": str(repository.resolve()), "commit_sha": sha,
             })
+            self.assertEqual(core.validate_request(request), request)
+
+    def test_profile_command_requests_match_the_fixed_helper_protocol(self):
+        requests = (
+            cli.request_for(self.parse("status")),
+            cli.request_for(self.parse("down")),
+            cli.request_for(self.parse("settings", "show")),
+            cli.request_for(self.parse("settings", "set", "--model", "openai/gpt-4.1")),
+            cli.request_for(self.parse("profiles", "list")),
+            cli.request_for(self.parse("profiles", "show", "amber")),
+            cli.request_for(self.parse("installations")),
+            cli.request_for(self.parse("prune", "--dry-run")),
+        )
+        for request in requests:
+            with self.subTest(request=request):
+                self.assertEqual(core.validate_request(request), request)
 
     def test_settings_request_accepts_only_model_and_theme(self):
         self.assertEqual(cli.request_for(self.parse(
