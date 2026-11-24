@@ -202,12 +202,15 @@ launch is enabled before its required owner-host QEMU fdset and single-writer va
 
 ## After Phase 1
 
-After Phase 1 merges, begin Phase 1.5 with a bounded ticket/backlog/roadmap review—not
-immediate local-model implementation. Reconcile completed and deferred work, identify
-duplicates/obsolete/oversized tickets, and propose the Phase 1.5 scope for owner agreement
-where material roadmap changes are needed. Only then implement and validate the agreed
-local-model development cutover. Keep later multi-VM/orchestration scope in its existing
-roadmap until that phase approaches. This roadmap does not authorize future-phase work.
+Phase 1 completes after the #21 usability integration is accepted and merged into
+`feat/vm-approach-3`, the owner-led in-VM cleanup PR is accepted, and final acceptance
+and review authorize PR #17 to merge into `main`. Follow the owner-refined roadmap in
+`docs/PROJECT-PLANNING.md`; do not add another planning cycle before the agreed Phase 1.5
+work. Profiles, independent persistent environments, runtime pinning and the improved
+CLI are already in #21 and must not be duplicated. Phase 1.5 focuses on local inference
+and the remaining VM maintenance direction there. Disposable sibling test-VM
+orchestration is Phase 2; agent-facing MCP access follows in Phase 3. Future-phase
+implementation still waits until its phase is reached and authorized.
 
 This workflow is currently maintained as a repository document referenced by tickets.
 Future work should migrate reusable workflow definitions and ticket associations into the
