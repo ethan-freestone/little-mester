@@ -8,7 +8,7 @@
   "title": "Independent persistent VM profiles pinned to immutable runtimes",
   "objective": "Part of integration ticket #66. Add independently manageable persistent VM profiles while parameterizing/reusing the fixed system VM implementation where safe. Each profile records its immutable installed runtime SHA; profiles using one SHA may share the code install. Do not implement runtime upgrade/migration or change the legacy feat/vm-approach VM. The shared design baseline is docs/vm-usability-integration.md, including fixed helper/common signed-control-artifact trust boundaries, crash-safe lifecycle semantics, per-profile service isolation, and safe runtime inventory/pruning. Owner decision (2026-11-24): the fixed #20 system singleton is temporarily mutually exclusive with named profile VMs through four minimal manifest-owned additive guards installed by the common signed control artifact, while the distinct original feat/vm-approach development VM must coexist with named profiles and must not be capped or gated. Profile admission uses actual host MemAvailable and profile cgroup reservations.",
   "created_at": "2026-11-23T23:21:29.433Z",
-  "updated_at": "2026-11-24T12:28:53.800Z",
+  "updated_at": "2026-11-24T12:46:33.911Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -23,7 +23,7 @@
     {
       "id": "A3",
       "text": "Commands for a profile use its recorded installed SHA, not the current checkout. Changing checkout branches cannot rebuild, invalidate, or retarget it; different profiles can pin different SHAs.",
-      "status": "pending"
+      "status": "in-progress"
     },
     {
       "id": "A4",
@@ -43,7 +43,7 @@
     {
       "id": "A7",
       "text": "A fixed, versioned root-owned profile-control helper is installed/updated through one distribution-independent signed control artifact and owner-authorized transaction; the host administrator enrolls the release key during common bootstrap. Native package managers are used only by the small platform adapter for host dependencies on exactly Ubuntu, Debian, Arch and CachyOS (apt on the first two; pacman on the latter two), never to install/update/remove the helper, guards or SHA runtimes. Root-owned owner enrollment and exact sudoers/protocol authorization are enforced. Common control and legacy fixed-system update/rollback transactions acquire the exclusive maintenance lease then the existing code-update lock, publish a versioned owner/operation/transaction/SHA marker plus durable journal before any protected mutation, refuse foreign markers, and recover/clear only their exact transaction; legacy v0 marker recovery is explicit and journal-proven. Common bootstrap requires either all four fixed singleton units with exact effective baseline code-update guards (workspace 20 matches its assignment, or is absent with no assignment), or all four unit names absent (not masked) with no pre-existing drop-ins, singleton state or jobs; in the absent case it may idempotently create only the exact lm-vm-control group, empty /etc/little-mester-vm root:group 0750 directory and empty root:group 0660 code-update lock under the exclusive maintenance lease, then installs all four manifest-owned profile guards before a later singleton install. Any partial/masked/unknown state refuses. Runtime install reads the exact committed Git tree as the invoking unprivileged owner, validates a bounded exact inventory, and never executes checkout code as root. The common signed artifact may add only the reviewed singleton guards; both fixed-system verifiers enforce exact baseline or manifest-bound drop-in sets and commands.",
-      "status": "pending"
+      "status": "in-progress"
     },
     {
       "id": "A8",
@@ -108,9 +108,17 @@
       "Distribution matrix supersession: earlier cross-distribution tests naming only Ubuntu/CachyOS are partial and are not sufficient; the acceptance matrix is exactly Ubuntu, Debian, Arch and CachyOS, with apt on Debian/Ubuntu and pacman on Arch/CachyOS. Current host-dependencies.py rejects Debian, which must be corrected in #70.",
       "Fixed singleton workspace verifier state regression covers both assigned and pristine-unassigned states: when assignment exists, exact 20 drop-in bytes and path identity are required; when absent, only a stopped unit with no 20 drop-in/bind is accepted by static layout verification. Full live owner acceptance remains assignment-required; stale/mixed state fails."
     ],
-    "created": [],
+    "created": [
+      "tests/vm-profile-control-core.test.py"
+    ],
     "cases": [
-      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence."
+      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence.",
+      "ProfileControlProtocolTests.test_accepts_exact_status_and_install_schemas",
+      "ProfileControlProtocolTests.test_read_request_bounds_streamed_input",
+      "RuntimeManifestTests.test_rejects_unsorted_duplicate_missing_and_unsafe_inventory",
+      "PinnedRuntimeTests.test_profiles_select_independent_sha_roots_without_checkout_resolution",
+      "PinnedRuntimeTests.test_rejects_missing_files_symlinks_and_wrong_modes",
+      "PinnedRuntimeTests.test_rejects_modified_runtime_digest_and_extra_inventory_path"
     ]
   },
   "models_used": []

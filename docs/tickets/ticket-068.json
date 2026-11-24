@@ -8,7 +8,7 @@
   "title": "Diagnose and improve physical-host metrics availability in the VM TUI",
   "objective": "Part of integration ticket #66 and related to existing #64. Explain owner-observed unavailable sensors from the actual host collector/service/transport/guest/TUI pipeline; fix demonstrated defects without broadening host access or adding an unreviewed transport.",
   "created_at": "2026-11-23T23:21:29.439Z",
-  "updated_at": "2026-11-24T12:25:23.838Z",
+  "updated_at": "2026-11-24T12:58:35.558Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -49,10 +49,31 @@
       "Preserve existing fixed loopback/QEMU guestfwd route and mode-specific Docker endpoint regression #64.",
       "History fixtures cover absent GPU, unavailable sensor codes, invalid VRAM denominator and collector errors as null values; repeated history requests/cached /metrics responses never create duplicate samples or false freshness. TUI tests cover run_id restart, advancing sequence, cache-control, null chart gaps, initial unavailable display and monotonic two-second stale boundary."
     ],
-    "created": [],
+    "created": [
+      "tests/host-metrics-tui.test.mjs",
+      "tests/vm-system-metrics.test.py",
+      "tests/ci-kvm-system-unit.py",
+      "tests/vm-systemd.test.py",
+      "tests/vm-parent-supervisor.test.py"
+    ],
     "cases": [
       "Owner-reported Ariadne production VM showed host metrics in the OpenCode TUI, with some sensors unavailable. This establishes visible VM metrics only; sensor identities/reasons, NVIDIA query result, physical-host CPU/RAM values, and Docker metrics were not supplied and remain to be diagnosed.",
-      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence."
+      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence.",
+      "tests/host-metrics-tui.test.mjs: only the fixed Docker and VM endpoints are selectable",
+      "tests/host-metrics-tui.test.mjs: Docker and VM modes fetch both metrics resources from their fixed endpoint",
+      "tests/host-metrics-tui.test.mjs: missing mode, unsupported paths, HTTP errors, and fetch errors fail closed",
+      "tests/host-metrics-tui.test.mjs: unavailable sensors render their reason and history keeps null gaps instead of zeroes",
+      "tests/host-metrics-tui.test.mjs: identity advances once, cached samples do not append or refresh, and restarts reset sequence",
+      "tests/host-metrics-tui.test.mjs: history seeding deduplicates samples and preserves zero readings and unavailable gaps",
+      "tests/host-metrics-tui.test.mjs: history arriving after a live poll fills older samples without duplicating the latest",
+      "tests/host-metrics-tui.test.mjs: temperature rendering distinguishes available sensors from unavailable sensors and chart gaps",
+      "tests/host-metrics-tui.test.mjs: malformed samples do not become fresh and stale status uses monotonic receipt time",
+      "tests/host-metrics-tui.test.mjs: unsafe host labels and inconsistent availability are rejected as malformed",
+      "tests/vm-system-metrics.test.py: MetricsHttpBoundaryTests.test_cached_response_keeps_sample_identity_and_history_nulls",
+      "tests/vm-system-metrics.test.py: MetricsHttpBoundaryTests.test_canonical_snapshot_is_labeled_and_projected_without_guest_values",
+      "tests/vm-system-metrics.test.py: MetricsHttpBoundaryTests.test_history_uses_null_for_invalid_vram_denominator_but_keeps_real_zeroes",
+      "tests/vm-system-metrics.test.py: MetricsHttpBoundaryTests.test_new_collection_advances_sequence_within_the_same_service_run",
+      "tests/vm-systemd.test.py: SystemdPolicyTests.test_install_manifest_contains_all_fixed_assets"
     ]
   },
   "models_used": []
