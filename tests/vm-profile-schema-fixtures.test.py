@@ -591,18 +591,25 @@ def _validate_install_publication_evidence(
                     raise ContractError(f"{role} unit object exists while publication is not_started")
         elif record["state"] == "publication_intent":
             identity = record["stage_identity"]
+            path_items = (
+                (f"unit-stage.{role}", stage_item),
+                (f"unit-file.{role}", file_item),
+            )
+            for selector, item in path_items:
+                if item is not None and "identity" in item and item["identity"] != identity:
+                    raise ContractError(f"{role} publication intent has a foreign identity at {selector}")
             matches = []
-            for item in (file_item, stage_item):
+            for _, item in path_items:
                 if item and item.get("identity") == identity and item["evidence"] == "observed_present":
                     matches.append(item)
-            if len(matches) > 1:
-                raise ContractError(f"{role} publication intent has both stage and final identity")
+            if len(matches) != 1:
+                raise ContractError(f"{role} publication intent must reconcile exactly one observed inode")
         elif record["state"] == "published":
             identity = record["fragment_identity"]
             if file_item is None or file_item["evidence"] != "observed_present" or file_item.get("identity") != identity:
                 raise ContractError(f"published {role} fragment lacks its exact final identity")
-            if stage_item is not None and stage_item["evidence"] == "observed_present":
-                raise ContractError(f"published {role} fragment still has a staging pathname")
+            if stage_item is not None and "identity" in stage_item:
+                raise ContractError(f"published {role} fragment has a staging-object identity")
 
 
 def _validate_remove_publication_evidence(
@@ -625,6 +632,8 @@ def _validate_remove_publication_evidence(
                 raise ContractError(f"unit-stage.{role} is not authorized by a not_started source record")
         elif record["state"] == "published":
             identity = record["fragment_identity"]
+            if stage_item is not None and "identity" in stage_item:
+                raise ContractError(f"published {role} fragment has a staging-object identity")
             if file_item is None or file_item["evidence"] not in {"observed_present", "removal_intent"} or file_item.get("identity") != identity:
                 raise ContractError(f"published {role} fragment lacks its exact final identity")
             if manager_item is None:
@@ -633,12 +642,25 @@ def _validate_remove_publication_evidence(
                 manager_identity = manager_item.get("identity", {})
                 if (manager_identity.get("fragment_device"), manager_identity.get("fragment_inode")) != (identity["device"], identity["inode"]):
                     raise ContractError(f"published {role} manager record differs from exact fragment")
-            elif manager_item["evidence"] != "verified_absent":
+            elif manager_item["evidence"] == "verified_absent":
+                if file_item["evidence"] != "removal_intent":
+                    raise ContractError(
+                        f"published {role} manager absence requires retained durable fragment removal intent"
+                    )
+            else:
                 raise ContractError(f"published {role} fragment lacks manager removal/reload evidence")
         else:
             identity = record["stage_identity"]
             stage_matches = stage_item is not None and stage_item["evidence"] == "removal_intent" and stage_item.get("identity") == identity
             final_matches = file_item is not None and file_item["evidence"] == "removal_intent" and file_item.get("identity") == identity
+            if stage_matches and file_item is not None and "identity" in file_item:
+                raise ContractError(
+                    f"{role} publication_intent has an identity-bearing alternate pathname at unit-file.{role}"
+                )
+            if final_matches and stage_item is not None and "identity" in stage_item:
+                raise ContractError(
+                    f"{role} publication_intent has an identity-bearing alternate pathname at unit-stage.{role}"
+                )
             if stage_matches == final_matches:
                 raise ContractError(f"{role} publication_intent must reconcile exactly one stage or final inode")
             if stage_matches:
@@ -1033,13 +1055,121 @@ class VmProfileSchemaFixtures(unittest.TestCase):
         wrong_inode = self.read_fixture("valid-removing-partial-stage.json")
         stage = next(item for item in wrong_inode["transaction"]["expected"] if item["selector"] == "unit-stage.proxy")
         stage["identity"]["inode"] += 1
-        with self.assertRaisesRegex(ContractError, "reconcile exactly"):
+        with self.assertRaisesRegex(ContractError, "exactly one stage or final inode"):
             self.assert_profile_valid(wrong_inode)
 
         wrong_source = self.read_fixture("valid-removing-partial-not-started.json")
         wrong_source["transaction"]["expected"][0]["install_transaction_id"] = "9" * 32
         with self.assertRaisesRegex(ContractError, "source record"):
             self.assert_profile_valid(wrong_source)
+
+    def test_publication_path_evidence_rejects_conflicts_and_requires_install_inode(self) -> None:
+        fixture_errors = {
+            "invalid-installing-partial-foreign-final.json": "foreign identity",
+            "invalid-installing-partial-foreign-stage.json": "foreign identity",
+            "invalid-installing-partial-both-present.json": "exactly one observed inode",
+            "invalid-installing-partial-missing-inode.json": "exactly one observed inode",
+            "invalid-removing-partial-final-foreign-stage.json": "identity-bearing alternate pathname",
+            "invalid-removing-partial-both-intents.json": "identity-bearing alternate pathname",
+            "invalid-removing-published-reload-without-fragment-intent.json": "retained durable fragment removal intent",
+        }
+        for filename, message in fixture_errors.items():
+            with self.subTest(fixture=filename):
+                fixture = self.read_fixture(filename)
+                validate_profile_schema(fixture, SCHEMA)
+                with self.assertRaisesRegex(ContractError, message):
+                    validate_profile_semantics(fixture, SCHEMA, RESOURCES)
+
+        # An installing intent may reconcile at either exact pathname, but an
+        # omitted alternate selector is not itself evidence of filesystem absence.
+        valid_stage = self.read_fixture("valid-installing-partial-publication.json")
+        validate_profile_semantics(valid_stage, SCHEMA, RESOURCES)
+        valid_final = copy.deepcopy(valid_stage)
+        stage_entry = next(
+            item for item in valid_final["transaction"]["expected"]
+            if item["selector"] == "unit-stage.proxy"
+        )
+        stage_entry["selector"] = "unit-file.proxy"
+        validate_profile_schema(valid_final, SCHEMA)
+        validate_profile_semantics(valid_final, SCHEMA, RESOURCES)
+
+        # Check both removal pathname directions with both identity-bearing
+        # alternate evidence forms: foreign observed identity and same-inode
+        # removal intent. Neither may be hidden by one matching primary path.
+        alternate_cases = []
+        stage_primary = self.read_fixture("valid-removing-partial-stage.json")
+        stage_identity = copy.deepcopy(
+            next(item for item in stage_primary["transaction"]["expected"]
+                 if item["selector"] == "unit-stage.proxy")["identity"]
+        )
+        foreign_file = copy.deepcopy(stage_primary)
+        foreign_file_entry = next(
+            item for item in foreign_file["transaction"]["expected"]
+            if item["selector"] == "unit-file.proxy"
+        )
+        foreign_file_entry.clear()
+        foreign_file_entry.update({
+            "selector": "unit-file.proxy",
+            "evidence": "observed_present",
+            "identity": _file_identity("regular", 8, stage_identity["inode"] + 10),
+        })
+        alternate_cases.append(("stage-to-final-observed", foreign_file))
+
+        same_inode_file = copy.deepcopy(stage_primary)
+        same_inode_entry = next(
+            item for item in same_inode_file["transaction"]["expected"]
+            if item["selector"] == "unit-file.proxy"
+        )
+        same_inode_entry.clear()
+        same_inode_entry.update({
+            "selector": "unit-file.proxy",
+            "evidence": "removal_intent",
+            "identity": stage_identity,
+        })
+        alternate_cases.append(("stage-to-final-removal-intent", same_inode_file))
+
+        final_primary = self.read_fixture("valid-removing-partial-final.json")
+        final_identity = copy.deepcopy(
+            next(item for item in final_primary["transaction"]["expected"]
+                 if item["selector"] == "unit-file.proxy")["identity"]
+        )
+        foreign_stage = copy.deepcopy(final_primary)
+        foreign_stage["transaction"]["expected"].append({
+            "selector": "unit-stage.proxy",
+            "evidence": "observed_present",
+            "identity": _file_identity("regular", 8, final_identity["inode"] + 10),
+        })
+        alternate_cases.append(("final-to-stage-observed", foreign_stage))
+
+        same_inode_stage = copy.deepcopy(final_primary)
+        same_inode_stage["transaction"]["expected"].append({
+            "selector": "unit-stage.proxy",
+            "evidence": "removal_intent",
+            "identity": final_identity,
+        })
+        alternate_cases.append(("final-to-stage-removal-intent", same_inode_stage))
+
+        for name, profile in alternate_cases:
+            with self.subTest(mutation=name):
+                validate_profile_schema(profile, SCHEMA)
+                with self.assertRaisesRegex(ContractError, "identity-bearing alternate pathname"):
+                    validate_profile_semantics(profile, SCHEMA, RESOURCES)
+
+        published_stage_identity = copy.deepcopy(
+            self.read_fixture("valid-removing-published-reload.json")
+        )
+        published_stage_identity["transaction"]["expected"].append({
+            "selector": "unit-stage.vm",
+            "evidence": "removal_intent",
+            "identity": copy.deepcopy(
+                next(item for item in published_stage_identity["transaction"]["expected"]
+                     if item["selector"] == "unit-file.vm")["identity"]
+            ),
+        })
+        validate_profile_schema(published_stage_identity, SCHEMA)
+        with self.assertRaisesRegex(ContractError, "staging-object identity"):
+            validate_profile_semantics(published_stage_identity, SCHEMA, RESOURCES)
+
     def test_profile_schema_is_closed_at_every_object_schema(self) -> None:
         def visit(node: Any) -> None:
             if isinstance(node, dict):

@@ -294,24 +294,35 @@ durably mark `published` with the same exact final fragment identity. File
 identity is regular, single-link; ownership/mode and fixed ancestry are checked
 separately. A state never rolls back or substitutes a different inode.
 
-Recovery of `publication_intent` checks the one exact stage pathname and one
-exact final pathname. It may advance only when exactly one path contains the
-recorded inode: stage means finish the recorded rename; final means record
-`published`. Missing at both paths, both paths present, or any foreign identity
-refuses with the transaction retained. Intent is not proof of non-creation.
-For `published`, require the exact fragment identity at the final path and the
-matching systemd manager identity; never accept a replacement fragment.
+Recovery of `publication_intent` inspects both the exact stage pathname and the
+exact final pathname. Exactly one supplied `observed_present` at either path
+must match the complete recorded stage inode identity: stage means finish the
+recorded rename; final means record `published`. Independently reject every
+supplied foreign identity at either pathname, including a foreign alternate
+object alongside one matching inode. Missing at both paths, both paths matching,
+or any foreign/conflicting identity refuses with the transaction retained.
+An omitted sparse alternate selector is not verified filesystem absence; actual
+recovery still checks both paths. Intent is not proof of non-creation. For
+`published`, require the exact fragment identity at the final path and the
+matching systemd manager identity; reject any supplied staging-object identity
+and never accept a replacement fragment.
 
 A remove record retains `source_install_id` and the complete four-role source
 snapshot. For a `not_started` role only, its matching source ID/state can support
-`never_created`. For `publication_intent`, removal must first find the exact
-recorded inode at the exact stage or final path; stage cleanup also records exact
-stage removal intent, final-path absence, and post-reload manager absence. For
-`published`, removal requires the exact final inode and durable removal intent,
-then daemon-reload and not-found/job-free verification. No phase-only inference,
-name-only adoption, or broad cleanup is authorized. A refusal diagnostic names
-the role and safe next action without credentials or other secrets; uncertain
-objects and the protected journal remain untouched.
+`never_created`. For `publication_intent`, removal requires exactly one matching
+`removal_intent` at the stage or final path and rejects any identity-bearing
+entry at the alternate pathname, whether foreign or the same inode. Stage
+cleanup also records exact stage removal intent, source-bound final-path absence,
+and post-reload manager absence. For `published`, removal requires the exact
+final inode and durable fragment removal intent before unlink and refuses any
+supplied staging-object identity; only then may it daemon-reload and verify
+not-found, inactive, and job-free state. A published
+manager `verified_absent` record must remain paired with `unit-file.<role>`
+`removal_intent` carrying the exact source fragment identity; `observed_present`
+is not a substitute. Cleanup additionally requires process-free verification.
+No phase-only inference, name-only adoption, or broad cleanup is authorized. A
+refusal diagnostic names the role and safe next action without credentials or
+other secrets; uncertain objects and the protected journal remain untouched.
 
 Each expected-object branch has exactly one selector class and an explicit
 evidence shape:
@@ -339,10 +350,16 @@ evidence shape:
   `never_created`; it must reconcile the exact recorded stage or final inode or
   refuse.
 * `verified_absent`: for unit-file/manager recovery only, carries the source
-  install ID and exact publication state after the prescribed identity check and
-  daemon-reload. Manager absence is recorded as `load_state=not-found`,
-  `active_state=inactive`, `job_state=none`, `daemon_reload=completed`. It does
-  not replace a required fragment removal intent.
+  install ID and exact publication state after the prescribed identity check
+  and daemon-reload. For staged publication this preserves source-bound
+  final-path absence. Manager absence is recorded as `load_state=not-found`,
+  `active_state=inactive`, `job_state=none`, `daemon_reload=completed`. For a
+  published role it is valid only with the paired `unit-file.<role>` durable
+  `removal_intent` and exact source fragment identity; `observed_present` cannot
+  replace that intent. The approved order remains durable unlink intent, unlink,
+  daemon reload, then not-found/inactive/job-free and process-free verification
+  before cleanup. A fixture models evidence relationships only; it does not
+  prove filesystem behavior, systemd state, or process freedom.
 * `removal_intent`: stores the exact previously observed identity and is durably
   published/fsynced before unlink or account/unit removal. Later absence is
   accepted only for that same selector/identity, operation, and durable phase.
