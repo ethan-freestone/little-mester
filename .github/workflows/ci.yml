@@ -87,6 +87,7 @@ jobs:
           python3 tests/ci-kvm-stage-state.test.py
           python3 tests/ci-kvm-qemu-owner.test.py
           python3 tests/vm-owner-acceptance.test.py
+          python3 tests/vm-profile-control-core.test.py
           python3 tests/vm-systemd.test.py
           python3 tests/vm-system-workspace.test.py
           python3 tests/vm-system-metrics.test.py
