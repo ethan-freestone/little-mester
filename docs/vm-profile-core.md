@@ -4,15 +4,16 @@ This note records the first executable slice of the approved contract in
 [`vm-usability-integration.md`](vm-usability-integration.md). It does not mark
 the profile system or ticket #67 complete.
 
-The normative profile-mapping encoding is now documented in
+The normative profile-mapping encoding is documented in
 [`vm-profile-schema-v1.md`](vm-profile-schema-v1.md), with a strict schema,
-closed resource-selector table, and fixture checker. Those files freeze the
-mapping and transaction encoding; they do **not** implement it. Existing
-implemented encodings in this slice are the bounded owner request/protocol,
-runtime manifest/descriptor, and enrollment record described below. A profile
-`profile.json` reader/writer, journal publisher/recovery consumer, mapping
-filesystem verifier, or helper dispatcher remains unimplemented; no ticket #67
-acceptance criterion is completed by the schema fixtures.
+closed resource-selector table, and fixture checker. This slice now adds only a
+stdlib-only parser and semantic validator for one complete v1 byte string;
+protected metadata opening, catalog scanning, locks, marker checking, atomic
+publication, recovery, and dispatch remain unimplemented. The parser does not
+authorize an owner or prove filesystem identity, and its returned mapping is
+validated data—not a capability, authorization result, or runtime permission.
+No ticket #67 acceptance criterion is completed by the schema fixtures or this
+parser.
 
 ## Current code seam
 
@@ -25,6 +26,19 @@ acceptance criterion is completed by the schema fixtures.
   integration baseline; protocol v1's framed `control.update` operation is not
   implemented in this slice and must integrate with the signed common
   bootstrap/update path.
+- `lib/vm/profile-control-mapping.py` exposes `profile_digest(owner_uid, name)`
+  and `parse_profile_mapping(raw, *, expected_owner_uid, expected_name)`. It
+  accepts only bounded UTF-8 bytes, rejects duplicate keys and excess nesting,
+  enforces the hard-coded closed mapping/transaction/resource contract, and
+  returns only a newly parsed record after complete semantic validation. It
+  performs no filesystem, subprocess, network, NSS, or owner-authorization
+  operation. Workspace paths and device/mount values are inert observations: the
+  parser never stats, opens, resolves, traverses, probes, or mounts them. Runtime
+  API ranges are checked for structural validity only; compatibility with an
+  installed helper or manifest is not established here. A single snapshot cannot
+  prove historical monotonicity or durable write ordering; the existing
+  transition-model tests remain fixture-only. The independent declarative
+  schema/fixture suite remains available and is not loaded at runtime.
 - `validate_runtime_manifest` checks the exact v1 install-manifest fields,
   sorted unique runtime inventory, approved file modes/paths, SHA pin, and helper
   and runtime API compatibility.
@@ -123,11 +137,29 @@ locks. The maintenance lease is only a fixed nonblocking substrate primitive;
 it is not caller authorization or a transaction protocol. The fixed #20
 singleton and the `feat/vm-approach` development VM remain untouched.
 
+The future reader's required preconditions/order are: take the nonblocking
+**shared maintenance lease**; call `authorize_owner()`; prove protected absence
+of `/etc/little-mester-vm/code-update.in-progress`; validate the request; acquire
+the shared catalog lock; acquire the shared profile lock; perform a protected
+descriptor-relative read of the fixed mapping; then pass those bytes to
+`parse_profile_mapping`. Only the maintenance substrate and owner-authorization
+primitive currently exist. There is no marker-absence checker, catalog scanner
+or lock, profile lock, protected mapping reader/writer, or helper dispatcher.
+The parser does not authorize or substitute for any precondition in that order.
+
+The later reader contract is the fixed path
+`/etc/little-mester-vm/profiles/<name>/profile.json`, with the profile directory
+root:root mode `0700` and mapping root:root mode `0600`, single-link regular.
+`/etc/little-mester-vm` is root:`lm-vm-control` mode `0750`; that GID is not the
+`lm-vm-profile-control` owner-authorization GID. The exact mode/group for the
+intermediate `/etc/little-mester-vm/profiles` directory is not specified and is
+not inferred here. Catalog/profile lock files are planned as root:root mode
+`0600`, single-link regular files under `/run/little-mester-vm-control`, acquired
+nonblocking and shared for this reader path. These are future protected-reader
+requirements only; this parser opens none of them.
+
 The intended integration direction is: #70 constructs the bounded request and
-routes it to the fixed helper; the helper takes the shared maintenance lease,
-authorizes the enrolled sudo caller with `authorize_owner()`, checks marker
-absence, validates the request, loads the root-owned profile mapping, passes
-only its stored SHA to
-`resolve_pinned_runtime`, and then dispatches fixed operations. The core accepts
-no executable, unit name, QEMU option, environment, cwd or runtime path from a
-request.
+routes it to the fixed helper; the helper follows the ordered preconditions
+above, passes only the mapping's stored SHA to `resolve_pinned_runtime`, and
+dispatches fixed operations. The core accepts no executable, unit name, QEMU
+option, environment, cwd or runtime path from a request.

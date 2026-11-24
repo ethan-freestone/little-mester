@@ -90,6 +90,7 @@ jobs:
           python3 tests/vm-owner-acceptance.test.py
           python3 tests/vm-control-maintenance.test.py
           python3 tests/vm-profile-control-core.test.py
+          python3 -B -I tests/vm-profile-control-mapping.test.py
           python3 tests/vm-profile-runtime-install.test.py
           python3 tests/vm-profile-control-owner.test.py
           python3 tests/vm-systemd.test.py
