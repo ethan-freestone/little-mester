@@ -4,6 +4,16 @@ This note records the first executable slice of the approved contract in
 [`vm-usability-integration.md`](vm-usability-integration.md). It does not mark
 the profile system or ticket #67 complete.
 
+The normative profile-mapping encoding is now documented in
+[`vm-profile-schema-v1.md`](vm-profile-schema-v1.md), with a strict schema,
+closed resource-selector table, and fixture checker. Those files freeze the
+mapping and transaction encoding; they do **not** implement it. Existing
+implemented encodings in this slice are the bounded owner request/protocol,
+runtime manifest/descriptor, and enrollment record described below. A profile
+`profile.json` reader/writer, journal publisher/recovery consumer, mapping
+filesystem verifier, or helper dispatcher remains unimplemented; no ticket #67
+acceptance criterion is completed by the schema fixtures.
+
 ## Current code seam
 
 `lib/vm/profile-control-core.py` is a side-effect-free core for the future fixed
@@ -32,7 +42,7 @@ the profile system or ticket #67 complete.
   owner's exact committed `HEAD`, verifies commit/tree/blob object IDs and the
   descriptor, extracts bounded bytes without checkout filters or execution,
   verifies a generated manifest, and publishes by a same-parent no-replace
-  rename. Interrupted `.staging-<SHA>-<nonce>` siblings are preserved for
+  rename. Interrupted `.staging-<full-SHA>-<16-lowercase-hex>` siblings are preserved for
   inspection. It assumes the future helper already authorized the owner and
   holds the maintenance/profile/SHA locks; it is not installed or dispatched.
 

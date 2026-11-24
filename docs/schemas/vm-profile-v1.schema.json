@@ -1,0 +1,372 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://little-mester.invalid/schemas/vm-profile-v1.schema.json",
+  "title": "Little Mester protected VM profile mapping v1",
+  "description": "Closed encoding for one authoritative profile mapping. See docs/vm-profile-schema-v1.md for semantic and host-validation requirements.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "owner_uid",
+    "name",
+    "state",
+    "runtime",
+    "accounts",
+    "units",
+    "workspace",
+    "ssh_port",
+    "transaction"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "owner_uid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+    "state": { "type": "string", "enum": ["installing", "ready", "resetting", "removing"] },
+    "runtime": { "$ref": "#/$defs/runtime" },
+    "accounts": { "$ref": "#/$defs/accounts" },
+    "units": { "$ref": "#/$defs/units" },
+    "workspace": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/workspace" }
+      ]
+    },
+    "ssh_port": { "type": "integer", "minimum": 22223, "maximum": 23222 },
+    "transaction": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/installTransaction" },
+        { "$ref": "#/$defs/resetTransaction" },
+        { "$ref": "#/$defs/removeTransaction" }
+      ]
+    }
+  },
+  "$defs": {
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit_sha", "profile_runtime_api", "control_helper_api_min", "control_helper_api_max"],
+      "properties": {
+        "commit_sha": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$", "minLength": 40, "maxLength": 64 },
+        "profile_runtime_api": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "control_helper_api_min": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "control_helper_api_max": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "uid", "gid", "allocation"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^lm[vp]-[0-9a-f]{20}$", "minLength": 24, "maxLength": 24 },
+        "uid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "gid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "allocation": { "type": "string", "enum": ["planned", "committed"] }
+      }
+    },
+    "accounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vm", "proxy"],
+      "properties": {
+        "vm": { "$ref": "#/$defs/account" },
+        "proxy": { "$ref": "#/$defs/account" }
+      }
+    },
+    "unit": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^little-mester-vm-p-[0-9a-f]{20}(?:-proxy|-workspace|-metrics)?\\.service$"
+    },
+    "units": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vm", "proxy", "workspace", "metrics"],
+      "properties": {
+        "vm": { "$ref": "#/$defs/unit" },
+        "proxy": { "$ref": "#/$defs/unit" },
+        "workspace": { "$ref": "#/$defs/unit" },
+        "metrics": { "$ref": "#/$defs/unit" }
+      }
+    },
+    "absolutePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/(?:[^/]+(?:/[^/]+)*)?$"
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical_path", "device", "inode", "mount_id", "mount", "unsafe_recurse"],
+      "properties": {
+        "canonical_path": { "$ref": "#/$defs/absolutePath" },
+        "device": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+        "inode": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
+        "mount_id": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "mount": { "$ref": "#/$defs/mount" },
+        "unsafe_recurse": { "type": "boolean" }
+      }
+    },
+    "mount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["major", "minor", "root", "mount_point"],
+      "properties": {
+        "major": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "minor": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "root": { "$ref": "#/$defs/absolutePath" },
+        "mount_point": { "$ref": "#/$defs/absolutePath" }
+      }
+    },
+    "fileSelector": {
+      "type": "string",
+      "enum": [
+        "profile.config-dir",
+        "state.root",
+        "state.vm-dir",
+        "state.client-dir",
+        "state.vm.disk",
+        "state.vm.seed",
+        "state.vm.host-key-private",
+        "state.vm.host-key-public",
+        "state.client.control-key-private",
+        "state.client.control-key-public",
+        "state.client.known-hosts",
+        "unit-file.vm",
+        "unit-file.proxy",
+        "unit-file.workspace",
+        "unit-file.metrics",
+        "runtime.root",
+        "runtime.vm-dir",
+        "runtime.vm.qmp-socket",
+        "runtime.proxy-dir",
+        "runtime.proxy.port",
+        "runtime.metrics-dir",
+        "runtime.metrics.port",
+        "runtime.workspace-dir",
+        "runtime.workspace.virtiofs-socket"
+      ]
+    },
+    "accountSelector": {
+      "type": "string",
+      "enum": ["account.vm", "account.proxy"]
+    },
+    "groupSelector": {
+      "type": "string",
+      "enum": ["group.vm", "group.proxy"]
+    },
+    "managerSelector": {
+      "type": "string",
+      "enum": ["unit-manager.vm", "unit-manager.proxy", "unit-manager.workspace", "unit-manager.metrics"]
+    },
+    "fileIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device", "inode", "kind", "link_count"],
+      "properties": {
+        "device": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+        "inode": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
+        "kind": { "type": "string", "enum": ["regular", "directory", "socket"] },
+        "link_count": { "type": "integer", "const": 1 }
+      }
+    },
+    "accountIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uid", "gid", "marker"],
+      "properties": {
+        "uid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "gid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "marker": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^little-mester-vm-profile-v1:[1-9][0-9]*:[a-z][a-z0-9-]{0,31}:(vm|proxy)$" }
+      }
+    },
+    "groupIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gid", "marker"],
+      "properties": {
+        "gid": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "marker": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^little-mester-vm-profile-v1:[1-9][0-9]*:[a-z][a-z0-9-]{0,31}:(vm|proxy):group$" }
+      }
+    },
+    "managerIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fragment_device", "fragment_inode", "load_state", "active_state", "job_state"],
+      "properties": {
+        "fragment_device": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+        "fragment_inode": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
+        "load_state": { "type": "string", "const": "loaded" },
+        "active_state": { "type": "string", "const": "inactive" },
+        "job_state": { "type": "string", "const": "none" }
+      }
+    },
+    "fileExpectedPresent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence", "identity"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/fileSelector" },
+        "evidence": { "type": "string", "const": "observed_present" },
+        "identity": { "$ref": "#/$defs/fileIdentity" }
+      }
+    },
+    "fileExpectedAbsent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/fileSelector" },
+        "evidence": { "type": "string", "const": "expected_absent" }
+      }
+    },
+    "fileRemovalIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence", "identity"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/fileSelector" },
+        "evidence": { "type": "string", "const": "removal_intent" },
+        "identity": { "$ref": "#/$defs/fileIdentity" }
+      }
+    },
+    "unitNeverCreated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence", "install_transaction_id", "install_phase"],
+      "properties": {
+        "selector": {
+          "type": "string",
+          "enum": ["unit-file.vm", "unit-file.proxy", "unit-file.workspace", "unit-file.metrics", "unit-manager.vm", "unit-manager.proxy", "unit-manager.workspace", "unit-manager.metrics"]
+        },
+        "evidence": { "type": "string", "const": "never_created" },
+        "install_transaction_id": { "type": "string", "pattern": "^[0-9a-f]{32}$", "minLength": 32, "maxLength": 32 },
+        "install_phase": { "type": "string", "enum": ["prepared", "accounts", "state"] }
+      }
+    },
+    "accountExpectedPresent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence", "identity"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/accountSelector" },
+        "evidence": { "type": "string", "enum": ["observed_present", "removal_intent"] },
+        "identity": { "$ref": "#/$defs/accountIdentity" }
+      }
+    },
+    "accountExpectedAbsent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/accountSelector" },
+        "evidence": { "type": "string", "const": "expected_absent" }
+      }
+    },
+    "groupExpectedPresent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence", "identity"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/groupSelector" },
+        "evidence": { "type": "string", "enum": ["observed_present", "removal_intent"] },
+        "identity": { "$ref": "#/$defs/groupIdentity" }
+      }
+    },
+    "groupExpectedAbsent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/groupSelector" },
+        "evidence": { "type": "string", "const": "expected_absent" }
+      }
+    },
+    "managerExpectedPresent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence", "identity"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/managerSelector" },
+        "evidence": { "type": "string", "enum": ["observed_present", "removal_intent"] },
+        "identity": { "$ref": "#/$defs/managerIdentity" }
+      }
+    },
+    "managerExpectedAbsent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/managerSelector" },
+        "evidence": { "type": "string", "const": "expected_absent" }
+      }
+    },
+    "expectedObject": {
+      "oneOf": [
+        { "$ref": "#/$defs/fileExpectedPresent" },
+        { "$ref": "#/$defs/fileExpectedAbsent" },
+        { "$ref": "#/$defs/fileRemovalIntent" },
+        { "$ref": "#/$defs/unitNeverCreated" },
+        { "$ref": "#/$defs/accountExpectedPresent" },
+        { "$ref": "#/$defs/accountExpectedAbsent" },
+        { "$ref": "#/$defs/groupExpectedPresent" },
+        { "$ref": "#/$defs/groupExpectedAbsent" },
+        { "$ref": "#/$defs/managerExpectedPresent" },
+        { "$ref": "#/$defs/managerExpectedAbsent" }
+      ]
+    },
+    "transactionBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "id", "operation", "phase", "step", "expected"],
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "id": { "type": "string", "pattern": "^[0-9a-f]{32}$", "minLength": 32, "maxLength": 32 },
+        "operation": { "type": "string" },
+        "phase": { "type": "string" },
+        "step": { "type": "integer", "minimum": 0, "maximum": 4 },
+        "expected": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/expectedObject" }
+        }
+      }
+    },
+    "installTransaction": {
+      "allOf": [
+        { "$ref": "#/$defs/transactionBase" },
+        {
+          "properties": {
+            "operation": { "type": "string", "const": "install" },
+            "phase": { "type": "string", "enum": ["prepared", "accounts", "state", "units", "verified"] }
+          }
+        }
+      ]
+    },
+    "resetTransaction": {
+      "allOf": [
+        { "$ref": "#/$defs/transactionBase" },
+        {
+          "properties": {
+            "operation": { "type": "string", "const": "reset" },
+            "phase": { "type": "string", "enum": ["prepared", "leaves", "verified"] }
+          }
+        }
+      ]
+    },
+    "removeTransaction": {
+      "allOf": [
+        { "$ref": "#/$defs/transactionBase" },
+        {
+          "properties": {
+            "operation": { "type": "string", "const": "remove" },
+            "phase": { "type": "string", "enum": ["prepared", "units", "state", "accounts", "finalizing"] }
+          }
+        }
+      ]
+    }
+  }
+}

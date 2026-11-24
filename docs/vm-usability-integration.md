@@ -9,6 +9,14 @@ divergent behavior. The integration PR remains based on
 `e10ebd76e1e362c7b6e95bdb631d12c22b2e2d7f` on
 `feat/vm-useability-tweaks`, targeting `feat/vm-approach-3`.
 
+The normative profile-mapping encoding and closed v1 resource-selector table
+are specified in [`vm-profile-schema-v1.md`](vm-profile-schema-v1.md), with the
+machine-readable mapping schema, resource table, and standard-library fixture
+checker linked there. That document is an encoding clarification of the approved
+architecture, not another architecture revision. The lifecycle, helper,
+publication/recovery, account/unit management, and owner/live acceptance remain
+unimplemented; schema and fixture evidence does not complete ticket #67.
+
 ## Three distinct identities and a narrow host control plane
 
 1. **Repository checkout** is development source and the public `./lab` CLI.
@@ -481,6 +489,12 @@ State, secrets/SSH identities and runtime sockets are under profile-scoped fixed
 roots, never under `/opt` or the exported workspace. No separate
 installation-reference database is introduced.
 
+The exact JSON field spellings, value bounds, deterministic account/unit
+derivation, transaction evidence encodings, and closed filesystem/runtime
+selectors are frozen by [`vm-profile-schema-v1.md`](vm-profile-schema-v1.md).
+That freeze does not imply a mapping reader/writer or lifecycle implementation
+exists.
+
 The design baseline prefers dedicated **static non-login system accounts per
 profile** (separate VM/metrics and proxy roles), with generated collision-checked
 names, no home directory, and exact profile-scoped filesystem permissions. This
@@ -622,10 +636,12 @@ separate from profile and singleton lifecycle dispatch.
 ### Runtime installation inventory and pruning
 
 The root helper reads direct children of `/opt/little-mester/v3` without
-following links. The reserved `.staging/`, `.staging-<SHA>-<nonce>` and
-`.gc-<SHA>-<nonce>` children are reported as `unknown/incomplete`, never accepted
-as runtimes or automatically deleted. Runtime publication stages into a unique
-same-parent `.staging-<SHA>-<nonce>` sibling and uses a no-replace atomic rename;
+following links. The reserved `.staging/` legacy entry and exact
+`.staging-<full-SHA>-<16-lowercase-hex>` and
+`.gc-<full-SHA>-<16-lowercase-hex>` children are reported as
+`unknown/incomplete`, never accepted as runtimes or automatically deleted.
+Runtime publication stages into a unique same-parent
+`.staging-<full-SHA>-<16-lowercase-hex>` sibling and uses a no-replace atomic rename;
 interrupted stages remain unknown for administrator inspection. Each new managed installation contains a root-owned,
 read-only manifest with exactly `schema_version`, full `commit_sha`,
 `profile_runtime_api`, `control_helper_api_min`, `control_helper_api_max`, and a
@@ -743,7 +759,8 @@ and rescans. If membership or verified size changed, it aborts and asks the owne
 to preview/confirm again; it never adds a newly eligible SHA to the already
 confirmed set. For each confirmed candidate it rechecks all mappings and unit
 states, takes the exclusive SHA lock nonblocking, and atomically renames only
-that runtime directory to a root-owned `.gc-<SHA>-<nonce>` quarantine name on
+that runtime directory to a root-owned
+`.gc-<full-SHA>-<16-lowercase-hex>` quarantine name on
 the same filesystem. It retains the SHA lock, releases the catalog lock, and
 then removes the quarantine tree descriptor-relatively without following links
 or crossing mount points. This keeps long deletion out of the global catalog
@@ -763,7 +780,8 @@ the profile and shared-SHA locks. Missing/corrupt pinned runtime bytes are not
 silently rebuilt by this fast path.
 For a new or recoverable `installing` profile, it releases catalog/profile locks,
 then reads committed Git blobs and extracts the bounded candidate into a unique
-root-owned `/opt/little-mester/v3/.staging-<SHA>-<nonce>` sibling. Same-parent
+root-owned `/opt/little-mester/v3/.staging-<full-SHA>-<16-lowercase-hex>`
+sibling. Same-parent
 atomic publication needs no temporary permission change on the immutable runtime
 root. No catalog lock is held during Git
 reads, blob copying, digesting or extraction. For an existing SHA target, it

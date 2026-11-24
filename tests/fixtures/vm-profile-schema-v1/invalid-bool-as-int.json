@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "owner_uid": true,
+  "name": "default",
+  "state": "ready",
+  "runtime": {
+    "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "profile_runtime_api": 1,
+    "control_helper_api_min": 1,
+    "control_helper_api_max": 3
+  },
+  "accounts": {
+    "vm": {
+      "name": "lmv-8b95a12479c85e8b1338",
+      "uid": 995,
+      "gid": 995,
+      "allocation": "committed"
+    },
+    "proxy": {
+      "name": "lmp-8b95a12479c85e8b1338",
+      "uid": 996,
+      "gid": 996,
+      "allocation": "committed"
+    }
+  },
+  "units": {
+    "vm": "little-mester-vm-p-8b95a12479c85e8b1338.service",
+    "proxy": "little-mester-vm-p-8b95a12479c85e8b1338-proxy.service",
+    "workspace": "little-mester-vm-p-8b95a12479c85e8b1338-workspace.service",
+    "metrics": "little-mester-vm-p-8b95a12479c85e8b1338-metrics.service"
+  },
+  "workspace": {
+    "canonical_path": "/workspaces/alpha",
+    "device": 2049,
+    "inode": 12345,
+    "mount_id": 7,
+    "mount": {
+      "major": 8,
+      "minor": 1,
+      "root": "/",
+      "mount_point": "/"
+    },
+    "unsafe_recurse": false
+  },
+  "ssh_port": 22300,
+  "transaction": null
+}
