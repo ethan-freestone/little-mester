@@ -346,6 +346,33 @@ def _validate_publication_record(publication: dict[str, Any], phase: str | None 
         raise ContractError("verified install requires all four unit fragments published")
 
 
+def _validate_reset_retained_source(profile: dict[str, Any]) -> None:
+    """Independently validate reset's retained account/group/unit source."""
+    owner_uid = profile["owner_uid"]
+    name = profile["name"]
+    installation = profile["installation"]
+    for role in ("vm", "proxy"):
+        account = profile["accounts"][role]
+        group = installation["groups"][role]
+        expected_provenance = expected_group_provenance(
+            owner_uid, name, role, account["gid"], installation["id"]
+        )
+        if (
+            account["allocation"] != "committed"
+            or group["state"] != "owned"
+            or group["name"] != account["name"]
+            or group["gid"] != account["gid"]
+            or group["provenance"] != expected_provenance
+        ):
+            raise ContractError("reset requires retained committed accounts and owned group provenance")
+    publication = installation["unit_publication"]
+    if any(
+        publication[role]["state"] != "published"
+        for role in ("vm", "proxy", "workspace", "metrics")
+    ):
+        raise ContractError("reset requires all retained unit publications to be published")
+
+
 def validate_profile_semantics(
     profile: Any, schema: dict[str, Any], resources: dict[str, Any]
 ) -> None:
@@ -428,16 +455,8 @@ def validate_profile_semantics(
     if state == "ready":
         if transaction is not None:
             raise ContractError("ready mapping must have null transaction")
-        if vm["allocation"] != "committed" or proxy["allocation"] != "committed":
-            raise ContractError("ready mapping requires committed VM and proxy accounts")
+        _validate_reset_retained_source(profile)
         _validate_publication_record(installation["unit_publication"])
-        if any(
-            installation["unit_publication"][role]["state"] != "published"
-            for role in ("vm", "proxy", "workspace", "metrics")
-        ):
-            raise ContractError("ready mapping requires the complete published unit snapshot")
-        if any(installation["groups"][role]["state"] != "owned" for role in ("vm", "proxy")):
-            raise ContractError("ready mapping requires exact owned-group provenance")
         return
 
     expected_operation = {"installing": "install", "resetting": "reset", "removing": "remove"}[state]
@@ -447,6 +466,9 @@ def validate_profile_semantics(
     phase = transaction["phase"]
     if transaction["step"] != _expected_step(operation, phase):
         raise ContractError("transaction step does not match its phase")
+
+    if operation == "reset":
+        _validate_reset_retained_source(profile)
 
     if operation == "install":
         _validate_numeric_replan_history(profile, transaction)
@@ -464,6 +486,10 @@ def validate_profile_semantics(
     by_selector, allowlists = _resource_maps(resources)
     allowed = set(allowlists[operation])
     expected_by_selector: dict[str, dict[str, Any]] = {}
+    if operation == "remove":
+        _validate_remove_publication_source_consistency(
+            transaction, _expected_by_selector(transaction)
+        )
     for item in transaction["expected"]:
         selector = item["selector"]
         if selector in expected_by_selector:
@@ -488,8 +514,22 @@ def validate_profile_semantics(
                     raise ContractError(f"{selector} identity differs from mapping UID/GID")
                 if identity["marker"] != expected_account_marker(owner_uid, name, role):
                     raise ContractError(f"{selector} GECOS marker differs from canonical identification marker")
-                if evidence == "observed_present" and record["allocation"] != "committed":
+                if evidence in {"observed_present", "removal_intent"} and record["allocation"] != "committed":
                     raise ContractError(f"{selector} present while allocation is only planned")
+                if evidence == "removal_intent":
+                    group = installation["groups"][role]
+                    expected_provenance = expected_group_provenance(
+                        owner_uid, name, role, record["gid"], install_id
+                    )
+                    if (
+                        group["state"] != "owned"
+                        or group["name"] != record["name"]
+                        or group["gid"] != record["gid"]
+                        or group["provenance"] != expected_provenance
+                    ):
+                        raise ContractError(
+                            f"{selector} removal intent lacks its exact owned primary-group provenance"
+                        )
             elif resource_kind == "host-group-identity":
                 role = selector.removeprefix("group.")
                 record = installation["groups"][role]
@@ -573,8 +613,9 @@ def validate_profile_semantics(
 
     if operation == "install":
         _validate_install_publication_evidence(transaction, expected_by_selector)
-    elif operation == "remove" and phase in {"units", "state", "accounts", "finalizing"}:
-        _validate_remove_publication_evidence(transaction, expected_by_selector)
+    elif operation == "remove":
+        if phase in {"units", "state", "accounts", "finalizing"}:
+            _validate_remove_publication_evidence(transaction, expected_by_selector)
 
 
 def _validate_install_publication_evidence(
@@ -585,6 +626,7 @@ def _validate_install_publication_evidence(
         record = publication[role]
         file_item = expected.get(f"unit-file.{role}")
         stage_item = expected.get(f"unit-stage.{role}")
+        manager_item = expected.get(f"unit-manager.{role}")
         if record["state"] == "not_started":
             for item in (file_item, stage_item):
                 if item and item["evidence"] in {"observed_present", "removal_intent"}:
@@ -610,6 +652,60 @@ def _validate_install_publication_evidence(
                 raise ContractError(f"published {role} fragment lacks its exact final identity")
             if stage_item is not None and "identity" in stage_item:
                 raise ContractError(f"published {role} fragment has a staging-object identity")
+            if (
+                manager_item is None
+                or manager_item["evidence"] != "observed_present"
+                or manager_item["identity"]["fragment_device"] != identity["device"]
+                or manager_item["identity"]["fragment_inode"] != identity["inode"]
+            ):
+                raise ContractError(f"published {role} fragment lacks exact present manager evidence")
+
+
+def _validate_remove_publication_source_consistency(
+    transaction: dict[str, Any], expected: dict[str, dict[str, Any]]
+) -> None:
+    """Independently bind supplied remove identities to the copied source."""
+    for role in ("vm", "proxy", "workspace", "metrics"):
+        record = transaction["unit_publication"][role]
+        file_item = expected.get(f"unit-file.{role}")
+        stage_item = expected.get(f"unit-stage.{role}")
+        manager_item = expected.get(f"unit-manager.{role}")
+        if record["state"] == "not_started":
+            if any(
+                item is not None and "identity" in item
+                for item in (file_item, stage_item, manager_item)
+            ):
+                raise ContractError(f"not_started {role} source has an identity-bearing unit object")
+        elif record["state"] == "publication_intent":
+            identity = record["stage_identity"]
+            path_items = (file_item, stage_item)
+            if sum(item is not None and "identity" in item for item in path_items) > 1:
+                raise ContractError(f"{role} source has identity-bearing alternate pathnames")
+            for item in path_items:
+                if item is not None and "identity" in item and item["identity"] != identity:
+                    raise ContractError(f"{role} supplied path identity differs from retained stage inode")
+            if manager_item is not None and "identity" in manager_item:
+                manager_identity = manager_item["identity"]
+                if (
+                    (manager_identity["fragment_device"], manager_identity["fragment_inode"])
+                    != (identity["device"], identity["inode"])
+                    or file_item is None
+                    or file_item.get("identity") != identity
+                ):
+                    raise ContractError(f"{role} manager identity lacks paired exact final-file evidence")
+        else:
+            identity = record["fragment_identity"]
+            if stage_item is not None and "identity" in stage_item:
+                raise ContractError(f"published {role} source has a staging-object identity")
+            if file_item is not None and "identity" in file_item and file_item["identity"] != identity:
+                raise ContractError(f"published {role} final identity differs from retained fragment")
+            if manager_item is not None and "identity" in manager_item:
+                manager_identity = manager_item["identity"]
+                if (
+                    manager_identity["fragment_device"] != identity["device"]
+                    or manager_identity["fragment_inode"] != identity["inode"]
+                ):
+                    raise ContractError(f"published {role} manager differs from retained fragment")
 
 
 def _validate_remove_publication_evidence(
@@ -883,6 +979,9 @@ class VmProfileSchemaFixtures(unittest.TestCase):
             "valid-removing-partial-stage.json",
             "valid-removing-partial-final.json",
             "valid-removing-published-reload.json",
+            "valid-removing-prepared-published.json",
+            "valid-removing-prepared-partial-stage.json",
+            "valid-removing-accounts-committed-intent.json",
         ):
             with self.subTest(fixture=name):
                 self.assert_profile_valid(self.read_fixture(name))
@@ -904,6 +1003,21 @@ class VmProfileSchemaFixtures(unittest.TestCase):
         validate_profile_schema(typed_but_mismatched, SCHEMA)
         with self.assertRaisesRegex(ContractError, "provenance"):
             validate_profile_semantics(typed_but_mismatched, SCHEMA, RESOURCES)
+
+        semantic_negatives = {
+            "invalid-removing-prepared-foreign-final-manager.json": "differs from retained fragment",
+            "invalid-removing-prepared-published-stage.json": "staging-object identity",
+            "invalid-removing-accounts-planned-intent.json": "only planned",
+            "invalid-installing-verified-missing-manager.json": "present manager evidence",
+            "invalid-installing-verified-absent-manager.json": "present manager evidence",
+            "invalid-resetting-incomplete-source.json": "retained committed accounts",
+        }
+        for filename, message in semantic_negatives.items():
+            with self.subTest(fixture=filename):
+                invalid = self.read_fixture(filename)
+                validate_profile_schema(invalid, SCHEMA)
+                with self.assertRaisesRegex(ContractError, message):
+                    validate_profile_semantics(invalid, SCHEMA, RESOURCES)
 
     def test_directory_identity_is_disjoint_from_single_link_file_and_socket_identity(self) -> None:
         directory_case = self.read_fixture("directory-nlink-2.json")
@@ -1024,6 +1138,10 @@ class VmProfileSchemaFixtures(unittest.TestCase):
         after["transaction"]["unit_publication"]["proxy"] = copy.deepcopy(published)
         after["transaction"]["expected"] = [item for item in after["transaction"]["expected"] if item["selector"] != "unit-stage.proxy"]
         after["transaction"]["expected"].append({"selector": "unit-file.proxy", "evidence": "observed_present", "identity": identity})
+        after["transaction"]["expected"].append({
+            "selector": "unit-manager.proxy", "evidence": "observed_present",
+            "identity": _manager_identity(identity["device"], identity["inode"]),
+        })
         validate_install_transition(before, after)
 
         skipped_phase = copy.deepcopy(after)
@@ -1055,7 +1173,7 @@ class VmProfileSchemaFixtures(unittest.TestCase):
         wrong_inode = self.read_fixture("valid-removing-partial-stage.json")
         stage = next(item for item in wrong_inode["transaction"]["expected"] if item["selector"] == "unit-stage.proxy")
         stage["identity"]["inode"] += 1
-        with self.assertRaisesRegex(ContractError, "exactly one stage or final inode"):
+        with self.assertRaisesRegex(ContractError, "differs from retained stage inode"):
             self.assert_profile_valid(wrong_inode)
 
         wrong_source = self.read_fixture("valid-removing-partial-not-started.json")
@@ -1169,6 +1287,241 @@ class VmProfileSchemaFixtures(unittest.TestCase):
         validate_profile_schema(published_stage_identity, SCHEMA)
         with self.assertRaisesRegex(ContractError, "staging-object identity"):
             validate_profile_semantics(published_stage_identity, SCHEMA, RESOURCES)
+
+    def test_install_published_roles_require_present_exact_manager_evidence(self) -> None:
+        roles = ("vm", "proxy", "workspace", "metrics")
+        for phase, step in (("units", 3), ("verified", 4)):
+            for role in roles:
+                for mutation in ("missing", "absent", "foreign"):
+                    profile = self.read_fixture("valid-installing-verified.json")
+                    profile["transaction"]["phase"] = phase
+                    profile["transaction"]["step"] = step
+                    if phase == "units":
+                        publication = profile["installation"]["unit_publication"]
+                        for index, published_role in enumerate(roles):
+                            if index > roles.index(role):
+                                publication[published_role] = {"state": "not_started"}
+                        profile["transaction"]["unit_publication"] = copy.deepcopy(publication)
+                        profile["transaction"]["expected"] = [
+                            item for item in profile["transaction"]["expected"]
+                            if item["selector"].startswith((
+                                "unit-file.", "unit-manager."
+                            ))
+                            and item["selector"].rsplit(".", 1)[1]
+                            in roles[: roles.index(role) + 1]
+                        ]
+                    manager = next(
+                        item for item in profile["transaction"]["expected"]
+                        if item["selector"] == f"unit-manager.{role}"
+                    )
+                    if mutation == "missing":
+                        profile["transaction"]["expected"].remove(manager)
+                    elif mutation == "absent":
+                        manager.clear()
+                        manager.update({"selector": f"unit-manager.{role}", "evidence": "expected_absent"})
+                    else:
+                        manager["identity"]["fragment_inode"] += 100
+                    with self.subTest(phase=phase, role=role, mutation=mutation):
+                        validate_profile_schema(profile, SCHEMA)
+                        with self.assertRaises(ContractError):
+                            validate_profile_semantics(profile, SCHEMA, RESOURCES)
+
+    def test_reset_source_is_complete_in_each_reset_phase(self) -> None:
+        for phase, step in (("prepared", 0), ("leaves", 1), ("verified", 2)):
+            for category, roles in (
+                ("account", ("vm", "proxy")),
+                ("group", ("vm", "proxy")),
+                ("publication", ("vm", "proxy", "workspace", "metrics")),
+            ):
+                for role in roles:
+                    profile = self.read_fixture("valid-resetting.json")
+                    transaction = profile["transaction"]
+                    transaction["phase"] = phase
+                    transaction["step"] = step
+                    if phase == "prepared":
+                        transaction["expected"] = []
+                    if category == "account":
+                        profile["accounts"][role]["allocation"] = "planned"
+                    elif category == "group":
+                        profile["installation"]["groups"][role]["state"] = "not_started"
+                    else:
+                        profile["installation"]["unit_publication"][role] = {"state": "not_started"}
+                    with self.subTest(phase=phase, category=category, role=role):
+                        validate_profile_schema(profile, SCHEMA)
+                        with self.assertRaises(ContractError):
+                            validate_profile_semantics(profile, SCHEMA, RESOURCES)
+
+    def test_account_removal_intents_need_committed_account_and_owned_group_source(self) -> None:
+        def put_expected(profile: dict[str, Any], selector: str, item: dict[str, Any] | None) -> None:
+            expected = profile["transaction"]["expected"]
+            expected[:] = [entry for entry in expected if entry["selector"] != selector]
+            if item is not None:
+                expected.append(item)
+
+        for phase, step in (("accounts", 3), ("finalizing", 4)):
+            for role in ("vm", "proxy"):
+                base = self.read_fixture("valid-removing.json")
+                base["transaction"]["phase"] = phase
+                base["transaction"]["step"] = step
+                account = base["accounts"][role]
+                intent = {
+                    "selector": f"account.{role}",
+                    "evidence": "removal_intent",
+                    "identity": _account_identity(1000, "default", role, account["uid"], account["gid"]),
+                }
+
+                # No group expected-object is required: the owned, exact
+                # protected primary-group record is retained in the mapping.
+                put_expected(base, f"account.{role}", copy.deepcopy(intent))
+                with self.subTest(phase=phase, role=role, case="no-group-evidence"):
+                    self.assertNotIn(
+                        f"group.{role}",
+                        {item["selector"] for item in base["transaction"]["expected"]},
+                    )
+                    validate_profile_schema(base, SCHEMA)
+                    validate_profile_semantics(base, SCHEMA, RESOURCES)
+
+                matching_group = _group_identity(
+                    1000, "default", role, account["gid"], base["installation"]["id"]
+                )
+                with_group = copy.deepcopy(base)
+                put_expected(with_group, f"group.{role}", {
+                    "selector": f"group.{role}", "evidence": "observed_present",
+                    "identity": copy.deepcopy(matching_group),
+                })
+                with self.subTest(phase=phase, role=role, case="matching-group-evidence"):
+                    validate_profile_schema(with_group, SCHEMA)
+                    validate_profile_semantics(with_group, SCHEMA, RESOURCES)
+
+                planned = copy.deepcopy(base)
+                planned["accounts"][role]["allocation"] = "planned"
+                with self.subTest(phase=phase, role=role, case="planned-account"):
+                    validate_profile_schema(planned, SCHEMA)
+                    with self.assertRaisesRegex(ContractError, "only planned"):
+                        validate_profile_semantics(planned, SCHEMA, RESOURCES)
+
+                planned_observation = copy.deepcopy(planned)
+                next(
+                    item for item in planned_observation["transaction"]["expected"]
+                    if item["selector"] == f"account.{role}"
+                )["evidence"] = "observed_present"
+                with self.subTest(phase=phase, role=role, case="planned-observed-present"):
+                    validate_profile_schema(planned_observation, SCHEMA)
+                    with self.assertRaisesRegex(ContractError, "only planned"):
+                        validate_profile_semantics(planned_observation, SCHEMA, RESOURCES)
+
+                unowned_group = copy.deepcopy(base)
+                unowned_group["installation"]["groups"][role]["state"] = "not_started"
+                with self.subTest(phase=phase, role=role, case="missing-owned-group-source"):
+                    validate_profile_schema(unowned_group, SCHEMA)
+                    with self.assertRaisesRegex(ContractError, "owned primary-group provenance"):
+                        validate_profile_semantics(unowned_group, SCHEMA, RESOURCES)
+
+                mismatched_group = copy.deepcopy(base)
+                wrong_identity = copy.deepcopy(matching_group)
+                wrong_identity["provenance"]["origin_install_transaction_id"] = "9" * 32
+                put_expected(mismatched_group, f"group.{role}", {
+                    "selector": f"group.{role}", "evidence": "observed_present",
+                    "identity": wrong_identity,
+                })
+                with self.subTest(phase=phase, role=role, case="mismatched-group-provenance"):
+                    validate_profile_schema(mismatched_group, SCHEMA)
+                    with self.assertRaisesRegex(ContractError, "differs from protected mapping"):
+                        validate_profile_semantics(mismatched_group, SCHEMA, RESOURCES)
+
+    def test_remove_source_identity_consistency_applies_to_every_phase_and_state(self) -> None:
+        roles = ("vm", "proxy", "workspace", "metrics")
+        phases = (("prepared", 0), ("units", 1), ("state", 2), ("accounts", 3), ("finalizing", 4))
+
+        def set_expected(profile: dict[str, Any], role: str, items: list[dict[str, Any]]) -> None:
+            expected = profile["transaction"]["expected"]
+            selectors = {f"unit-file.{role}", f"unit-stage.{role}", f"unit-manager.{role}"}
+            expected[:] = [item for item in expected if item["selector"] not in selectors]
+            expected.extend(copy.deepcopy(items))
+
+        def make_case(phase: str, step: int, role: str, state: str) -> tuple[dict[str, Any], dict[str, Any]]:
+            profile = self.read_fixture("valid-removing.json")
+            transaction = profile["transaction"]
+            transaction["phase"] = phase
+            transaction["step"] = step
+            if phase == "prepared":
+                transaction["expected"] = []
+            index = roles.index(role)
+            if state == "not_started":
+                record = {"state": "not_started"}
+            elif state == "publication_intent":
+                record = {"state": "publication_intent", "stage_identity": _file_identity("regular", 9, 850 + index)}
+            else:
+                record = copy.deepcopy(profile["installation"]["unit_publication"][role])
+            profile["installation"]["unit_publication"][role] = copy.deepcopy(record)
+            transaction["unit_publication"][role] = copy.deepcopy(record)
+            identity = record.get("stage_identity", record.get("fragment_identity", _file_identity("regular", 9, 950 + index)))
+            return profile, identity
+
+        for phase, step in phases:
+            for role in roles:
+                for state in ("not_started", "publication_intent", "published"):
+                    profile, retained = make_case(phase, step, role, state)
+                    foreign = _file_identity("regular", retained["device"], retained["inode"] + 100)
+                    cases = {
+                        "foreign-file": [{
+                            "selector": f"unit-file.{role}", "evidence": "observed_present", "identity": foreign,
+                        }],
+                        "foreign-stage": [{
+                            "selector": f"unit-stage.{role}", "evidence": "observed_present", "identity": foreign,
+                        }],
+                        "foreign-manager": [
+                            {"selector": f"unit-file.{role}", "evidence": "observed_present",
+                             "identity": foreign if state == "not_started" else copy.deepcopy(retained)},
+                            {"selector": f"unit-manager.{role}", "evidence": "observed_present",
+                             "identity": _manager_identity(foreign["device"], foreign["inode"])},
+                        ],
+                        "paired-foreign-final-manager": [
+                            {"selector": f"unit-file.{role}", "evidence": "observed_present", "identity": foreign},
+                            {"selector": f"unit-manager.{role}", "evidence": "observed_present", "identity": _manager_identity(foreign["device"], foreign["inode"])},
+                        ],
+                    }
+                    for case, supplied in cases.items():
+                        candidate = copy.deepcopy(profile)
+                        set_expected(candidate, role, supplied)
+                        with self.subTest(phase=phase, role=role, state=state, case=case):
+                            validate_profile_schema(candidate, SCHEMA)
+                            with self.assertRaises(ContractError):
+                                validate_profile_semantics(candidate, SCHEMA, RESOURCES)
+
+                    if state == "publication_intent":
+                        alternate = copy.deepcopy(profile)
+                        set_expected(alternate, role, [
+                            {"selector": f"unit-stage.{role}", "evidence": "observed_present", "identity": copy.deepcopy(retained)},
+                            {"selector": f"unit-file.{role}", "evidence": "observed_present", "identity": copy.deepcopy(retained)},
+                        ])
+                        with self.subTest(phase=phase, role=role, state=state, case="both-identity-bearing-alternates"):
+                            validate_profile_schema(alternate, SCHEMA)
+                            with self.assertRaises(ContractError):
+                                validate_profile_semantics(alternate, SCHEMA, RESOURCES)
+
+                    if state == "published":
+                        stage = copy.deepcopy(profile)
+                        set_expected(stage, role, [{
+                            "selector": f"unit-stage.{role}", "evidence": "observed_present", "identity": copy.deepcopy(retained),
+                        }])
+                        with self.subTest(phase=phase, role=role, state=state, case="published-stage-identity"):
+                            validate_profile_schema(stage, SCHEMA)
+                            with self.assertRaises(ContractError):
+                                validate_profile_semantics(stage, SCHEMA, RESOURCES)
+
+        # A source-consistent sparse prepared record is valid without implying
+        # that omitted stage/final/manager selectors were observed absent.
+        for fixture in (
+            "valid-removing-prepared-published.json",
+            "valid-removing-prepared-partial-stage.json",
+            "valid-removing-partial-not-started.json",
+            "valid-removing-partial-stage.json",
+            "valid-removing-partial-final.json",
+            "valid-removing-published-reload.json",
+        ):
+            with self.subTest(valid_fixture=fixture):
+                self.assert_profile_valid(self.read_fixture(fixture))
 
     def test_profile_schema_is_closed_at_every_object_schema(self) -> None:
         def visit(node: Any) -> None:

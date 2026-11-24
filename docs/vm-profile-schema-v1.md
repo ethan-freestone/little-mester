@@ -263,6 +263,10 @@ and both group provenance records `owned`. The root `installation` source record
 retains the original install ID and complete unit snapshot through `ready`, reset,
 and removal. Reset changes only the seven fixed leaves below; retry keeps the
 same transaction and advances only after its durable intent/identity checks.
+Both `ready` and `resetting` require retained committed accounts, both owned
+groups with exact protected provenance, and all four published unit records.
+This validates the retained source only; it does not assert that a `ready` state
+historically existed before a `resetting` snapshot.
 Removal from `ready` copies that retained source record into the remove
 transaction. Removing a partial install copies the source ID and full four-role
 snapshot before replacing the install transaction. Remove keeps the
@@ -303,12 +307,23 @@ object alongside one matching inode. Missing at both paths, both paths matching,
 or any foreign/conflicting identity refuses with the transaction retained.
 An omitted sparse alternate selector is not verified filesystem absence; actual
 recovery still checks both paths. Intent is not proof of non-creation. For
-`published`, require the exact fragment identity at the final path and the
-matching systemd manager identity; reject any supplied staging-object identity
-and never accept a replacement fragment.
+`published`, install evidence requires the exact final fragment and
+`unit-manager.<role>` as `observed_present`, with the manager device/inode equal
+to the retained fragment. This applies to partial `units` and complete
+`verified` snapshots; missing, absent, or foreign manager evidence refuses.
+Reject any supplied staging-object identity and never accept a replacement
+fragment.
 
 A remove record retains `source_install_id` and the complete four-role source
-snapshot. For a `not_started` role only, its matching source ID/state can support
+snapshot. Check supplied identities against this source in every remove phase,
+including `prepared`, separately from later completeness and durable-intent
+requirements. `not_started` rejects file, stage, and manager identities;
+`publication_intent` identities must match the complete retained stage inode,
+reject identity-bearing alternate pathnames, and bind any manager fragment to
+paired exact final-file evidence; `published` final-file and manager identities
+must bind to the exact retained fragment and any supplied stage identity
+refuses. Sparse omissions are not verified absence. For a `not_started` role
+only, its matching source ID/state can support
 `never_created`. For `publication_intent`, removal requires exactly one matching
 `removal_intent` at the stage or final path and rejects any identity-bearing
 entry at the alternate pathname, whether foreign or the same inode. Stage
@@ -364,6 +379,11 @@ evidence shape:
   published/fsynced before unlink or account/unit removal. Later absence is
   accepted only for that same selector/identity, operation, and durable phase.
   It cannot authorize replacement-identity adoption.
+  Account removal intent additionally requires a `committed` account identity
+  and its corresponding owned primary-group record with exact generated name,
+  GID, and protected origin provenance. Any supplied group evidence must match;
+  simultaneous group deletion intent is not required. The account GECOS marker
+  remains identification only, never ownership proof.
 
 File/account/group/manager object schemas are separately discriminated in the
 JSON Schema. The resource table is the operation allowlist; the fixture checker

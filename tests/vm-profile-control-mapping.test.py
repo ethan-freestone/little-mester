@@ -135,6 +135,12 @@ class ProfileMappingFixtureTests(unittest.TestCase):
             "invalid-removing-partial-final-foreign-stage.json",
             "invalid-removing-partial-both-intents.json",
             "invalid-removing-published-reload-without-fragment-intent.json",
+            "invalid-removing-prepared-foreign-final-manager.json",
+            "invalid-removing-prepared-published-stage.json",
+            "invalid-removing-accounts-planned-intent.json",
+            "invalid-installing-verified-missing-manager.json",
+            "invalid-installing-verified-absent-manager.json",
+            "invalid-resetting-incomplete-source.json",
         )
         for filename in names:
             value = fixture_value(filename)
@@ -467,6 +473,221 @@ class ProfileMappingRawParserTests(unittest.TestCase):
         value["transaction"]["source_install_id"] = "9" * 32
         with self.assertRaises(MAPPING.MappingRefused):
             parse_value(value)
+
+    def test_install_published_manager_evidence_is_required_for_each_role_and_phase(self) -> None:
+        for phase, step in (("units", 3), ("verified", 4)):
+            for role in MAPPING.UNIT_ROLES:
+                for mutation in ("missing", "expected_absent", "foreign"):
+                    value = fixture_value("valid-installing-verified.json")
+                    value["transaction"]["phase"] = phase
+                    value["transaction"]["step"] = step
+                    if phase == "units":
+                        publication = value["installation"]["unit_publication"]
+                        for index, published_role in enumerate(MAPPING.UNIT_ROLES):
+                            if index > MAPPING.UNIT_ROLES.index(role):
+                                publication[published_role] = {"state": "not_started"}
+                        value["transaction"]["unit_publication"] = copy.deepcopy(publication)
+                        value["transaction"]["expected"] = [
+                            item for item in value["transaction"]["expected"]
+                            if item["selector"].startswith(("unit-file.", "unit-manager."))
+                            and item["selector"].rsplit(".", 1)[1]
+                            in MAPPING.UNIT_ROLES[: MAPPING.UNIT_ROLES.index(role) + 1]
+                        ]
+                    expected = value["transaction"]["expected"]
+                    manager = next(
+                        item for item in expected
+                        if item["selector"] == f"unit-manager.{role}"
+                    )
+                    if mutation == "missing":
+                        expected.remove(manager)
+                    elif mutation == "expected_absent":
+                        manager.clear()
+                        manager.update({"selector": f"unit-manager.{role}", "evidence": "expected_absent"})
+                    else:
+                        manager["identity"]["fragment_inode"] += 100
+                    with self.subTest(phase=phase, role=role, mutation=mutation):
+                        SCHEMA_FIXTURE_CHECKER.validate_profile_schema(value)
+                        with self.assertRaises(MAPPING.MappingRefused):
+                            parse_value(value)
+
+    def test_reset_requires_complete_retained_source_in_every_reset_phase(self) -> None:
+        phases = (("prepared", 0), ("leaves", 1), ("verified", 2))
+        for phase, step in phases:
+            for category, roles in (
+                ("account", MAPPING.ACCOUNT_ROLES),
+                ("group", MAPPING.ACCOUNT_ROLES),
+                ("publication", MAPPING.UNIT_ROLES),
+            ):
+                for role in roles:
+                    value = fixture_value("valid-resetting.json")
+                    value["transaction"]["phase"] = phase
+                    value["transaction"]["step"] = step
+                    if phase == "prepared":
+                        value["transaction"]["expected"] = []
+                    if category == "account":
+                        value["accounts"][role]["allocation"] = "planned"
+                    elif category == "group":
+                        value["installation"]["groups"][role]["state"] = "not_started"
+                    else:
+                        value["installation"]["unit_publication"][role] = {"state": "not_started"}
+                    with self.subTest(phase=phase, category=category, role=role):
+                        SCHEMA_FIXTURE_CHECKER.validate_profile_schema(value)
+                        with self.assertRaises(MAPPING.MappingRefused):
+                            parse_value(value)
+
+    def test_account_removal_intent_binds_committed_account_and_owned_group_source(self) -> None:
+        for phase, step in (("accounts", 3), ("finalizing", 4)):
+            for role in MAPPING.ACCOUNT_ROLES:
+                base = fixture_value("valid-removing.json")
+                base["transaction"]["phase"] = phase
+                base["transaction"]["step"] = step
+                account = base["accounts"][role]
+                intent = {
+                    "selector": f"account.{role}",
+                    "evidence": "removal_intent",
+                    "identity": {
+                        "uid": account["uid"],
+                        "gid": account["gid"],
+                        "marker": f"little-mester-vm-profile-v1/1000/default/{role}",
+                    },
+                }
+                base["transaction"]["expected"].append(copy.deepcopy(intent))
+                with self.subTest(phase=phase, role=role, case="owned-group-retained-without-group-intent"):
+                    self.assertNotIn(
+                        f"group.{role}",
+                        {item["selector"] for item in base["transaction"]["expected"]},
+                    )
+                    SCHEMA_FIXTURE_CHECKER.validate_profile_schema(base)
+                    self.assertEqual(parse_value(base)["state"], "removing")
+
+                planned = copy.deepcopy(base)
+                planned["accounts"][role]["allocation"] = "planned"
+                with self.subTest(phase=phase, role=role, case="planned"):
+                    SCHEMA_FIXTURE_CHECKER.validate_profile_schema(planned)
+                    with self.assertRaises(MAPPING.MappingRefused):
+                        parse_value(planned)
+
+                planned_observation = copy.deepcopy(planned)
+                next(
+                    item for item in planned_observation["transaction"]["expected"]
+                    if item["selector"] == f"account.{role}"
+                )["evidence"] = "observed_present"
+                with self.subTest(phase=phase, role=role, case="planned-observed-present"):
+                    SCHEMA_FIXTURE_CHECKER.validate_profile_schema(planned_observation)
+                    with self.assertRaises(MAPPING.MappingRefused):
+                        parse_value(planned_observation)
+
+                missing_group = copy.deepcopy(base)
+                missing_group["installation"]["groups"][role]["state"] = "not_started"
+                with self.subTest(phase=phase, role=role, case="missing-owned-group"):
+                    SCHEMA_FIXTURE_CHECKER.validate_profile_schema(missing_group)
+                    with self.assertRaises(MAPPING.MappingRefused):
+                        parse_value(missing_group)
+
+                mismatched_group = copy.deepcopy(base)
+                group = mismatched_group["installation"]["groups"][role]
+                wrong_identity = {
+                    "name": group["name"],
+                    "gid": group["gid"],
+                    "provenance": copy.deepcopy(group["provenance"]),
+                }
+                wrong_identity["provenance"]["origin_install_transaction_id"] = "9" * 32
+                mismatched_group["transaction"]["expected"].append({
+                    "selector": f"group.{role}",
+                    "evidence": "observed_present",
+                    "identity": wrong_identity,
+                })
+                with self.subTest(phase=phase, role=role, case="mismatched-group-provenance"):
+                    SCHEMA_FIXTURE_CHECKER.validate_profile_schema(mismatched_group)
+                    with self.assertRaises(MAPPING.MappingRefused):
+                        parse_value(mismatched_group)
+
+    def test_remove_source_consistency_covers_each_phase_role_and_publication_state(self) -> None:
+        phases = (("prepared", 0), ("units", 1), ("state", 2), ("accounts", 3), ("finalizing", 4))
+        roles = MAPPING.UNIT_ROLES
+
+        def file_identity(device: int, inode: int) -> dict:
+            return {"device": device, "inode": inode, "kind": "regular", "link_count": 1}
+
+        def manager_identity(device: int, inode: int) -> dict:
+            return {
+                "fragment_device": device,
+                "fragment_inode": inode,
+                "load_state": "loaded",
+                "active_state": "inactive",
+                "job_state": "none",
+            }
+
+        for phase, step in phases:
+            for index, role in enumerate(roles):
+                for state in ("not_started", "publication_intent", "published"):
+                    profile = fixture_value("valid-removing.json")
+                    tx = profile["transaction"]
+                    tx["phase"], tx["step"] = phase, step
+                    if phase == "prepared":
+                        tx["expected"] = []
+                    if state == "not_started":
+                        record = {"state": "not_started"}
+                        retained = file_identity(8, 900 + index)
+                    elif state == "publication_intent":
+                        retained = file_identity(8, 800 + index)
+                        record = {"state": "publication_intent", "stage_identity": copy.deepcopy(retained)}
+                    else:
+                        record = copy.deepcopy(profile["installation"]["unit_publication"][role])
+                        retained = record["fragment_identity"]
+                    profile["installation"]["unit_publication"][role] = copy.deepcopy(record)
+                    tx["unit_publication"][role] = copy.deepcopy(record)
+                    target_selectors = {f"unit-file.{role}", f"unit-stage.{role}", f"unit-manager.{role}"}
+                    tx["expected"][:] = [item for item in tx["expected"] if item["selector"] not in target_selectors]
+                    foreign = file_identity(retained["device"], retained["inode"] + 101)
+                    cases = {
+                        "foreign-file": [{
+                            "selector": f"unit-file.{role}", "evidence": "observed_present", "identity": foreign,
+                        }],
+                        "foreign-stage": [{
+                            "selector": f"unit-stage.{role}", "evidence": "observed_present", "identity": foreign,
+                        }],
+                        "foreign-manager": [
+                            {"selector": f"unit-file.{role}", "evidence": "observed_present",
+                             "identity": foreign if state == "not_started" else copy.deepcopy(retained)},
+                            {"selector": f"unit-manager.{role}", "evidence": "observed_present",
+                             "identity": manager_identity(foreign["device"], foreign["inode"])},
+                        ],
+                        "paired-foreign-file-manager": [
+                            {"selector": f"unit-file.{role}", "evidence": "observed_present", "identity": foreign},
+                            {"selector": f"unit-manager.{role}", "evidence": "observed_present", "identity": manager_identity(foreign["device"], foreign["inode"])},
+                        ],
+                    }
+                    for case, items in cases.items():
+                        value = copy.deepcopy(profile)
+                        value["transaction"]["expected"].extend(copy.deepcopy(items))
+                        with self.subTest(phase=phase, role=role, state=state, case=case):
+                            SCHEMA_FIXTURE_CHECKER.validate_profile_schema(value)
+                            with self.assertRaises(MAPPING.MappingRefused):
+                                parse_value(value)
+
+                    if state == "publication_intent":
+                        alternate = copy.deepcopy(profile)
+                        alternate["transaction"]["expected"].extend([
+                            {"selector": f"unit-stage.{role}", "evidence": "observed_present", "identity": copy.deepcopy(retained)},
+                            {"selector": f"unit-file.{role}", "evidence": "observed_present", "identity": copy.deepcopy(retained)},
+                        ])
+                        with self.subTest(phase=phase, role=role, state=state, case="identity-bearing-alternates"):
+                            SCHEMA_FIXTURE_CHECKER.validate_profile_schema(alternate)
+                            with self.assertRaises(MAPPING.MappingRefused):
+                                parse_value(alternate)
+
+                    if state == "published":
+                        staged = copy.deepcopy(profile)
+                        staged["transaction"]["expected"].append({
+                            "selector": f"unit-stage.{role}",
+                            "evidence": "observed_present",
+                            "identity": copy.deepcopy(retained),
+                        })
+                        with self.subTest(phase=phase, role=role, state=state, case="published-stage-identity"):
+                            SCHEMA_FIXTURE_CHECKER.validate_profile_schema(staged)
+                            with self.assertRaises(MAPPING.MappingRefused):
+                                parse_value(staged)
 
 
 class ProfileMappingNoEffectsTests(unittest.TestCase):

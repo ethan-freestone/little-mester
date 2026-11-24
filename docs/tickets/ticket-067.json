@@ -8,7 +8,7 @@
   "title": "Independent persistent VM profiles pinned to immutable runtimes",
   "objective": "Part of integration ticket #66. Add independently manageable persistent VM profiles while parameterizing/reusing the fixed system VM implementation where safe. Each profile records its immutable installed runtime SHA; profiles using one SHA may share the code install. Do not implement runtime upgrade/migration or change the legacy feat/vm-approach VM. The shared design baseline is docs/vm-usability-integration.md, including fixed helper/common signed-control-artifact trust boundaries, crash-safe lifecycle semantics, per-profile service isolation, and safe runtime inventory/pruning. Owner decision (2026-11-24): the fixed #20 system singleton is temporarily mutually exclusive with named profile VMs through four minimal manifest-owned additive guards installed by the common signed control artifact, while the distinct original feat/vm-approach development VM must coexist with named profiles and must not be capped or gated. Profile admission uses actual host MemAvailable and profile cgroup reservations.",
   "created_at": "2026-11-23T23:21:29.433Z",
-  "updated_at": "2026-11-24T20:49:16.697Z",
+  "updated_at": "2026-11-24T21:15:17.156Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -114,7 +114,16 @@
       "tests/vm-control-maintenance.test.py",
       "tests/vm-profile-control-owner.test.py",
       "tests/vm-profile-schema-fixtures.test.py: standard-library-only declarative-subset and semantic checks; four valid lifecycle fixtures and invalid mapping/transaction fixtures. Does not prove filesystem protection or recovery.",
-      "tests/vm-profile-control-mapping.test.py: production parser fixtures, schema/resource cross-checks, strict-byte boundaries, publication security negatives, and side-effect prohibitions"
+      "tests/vm-profile-control-mapping.test.py: production parser fixtures, schema/resource cross-checks, strict-byte boundaries, publication security negatives, and side-effect prohibitions",
+      "tests/vm-profile-control-mapping.test.py: test_install_published_manager_evidence_is_required_for_each_role_and_phase",
+      "tests/vm-profile-control-mapping.test.py: test_reset_requires_complete_retained_source_in_every_reset_phase",
+      "tests/vm-profile-control-mapping.test.py: test_account_removal_intent_binds_committed_account_and_owned_group_source",
+      "tests/vm-profile-control-mapping.test.py: test_remove_source_consistency_covers_each_phase_role_and_publication_state",
+      "tests/vm-profile-schema-fixtures.test.py: test_install_published_roles_require_present_exact_manager_evidence",
+      "tests/vm-profile-schema-fixtures.test.py: test_reset_source_is_complete_in_each_reset_phase",
+      "tests/vm-profile-schema-fixtures.test.py: test_account_removal_intents_need_committed_account_and_owned_group_source",
+      "tests/vm-profile-schema-fixtures.test.py: test_remove_source_identity_consistency_applies_to_every_phase_and_state",
+      "tests/fixtures/vm-profile-schema-v1/: three valid prepared/account-intent fixtures and six schema-valid semantic-negative fixtures"
     ],
     "cases": [
       "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence.",
@@ -176,7 +185,10 @@
       "Contract regressions: python3 -B -I tests/vm-profile-schema-fixtures.test.py passed (18); vm-profile-control-core passed (25); vm-profile-runtime-install passed unprivileged (10).",
       "Maintenance/owner regressions: vm-control-maintenance passed (18; 2 root-only skips); vm-profile-control-owner passed (34; 3 actual-sudo/root-only skips in this unprivileged run).",
       "Static validation: bash scripts/check-workflows.sh passed; Python py_compile passed with PYTHONPYCACHEPREFIX=/tmp; git diff --check passed.",
-      "Docs consistency check reported 8 existing README.md/docs/DECISIONS.md drift/link failures; these files were not changed by this implementation."
+      "Docs consistency check reported 8 existing README.md/docs/DECISIONS.md drift/link failures; these files were not changed by this implementation.",
+      "Corrective v1 mapping/model regressions: parser suite passed (28 tests); independent schema/semantic model passed (22 tests), including all four install roles across partial units and verified, reset-source downgrades across all reset phases, both account roles in accounts/finalizing, and remove source identity cases across every phase/state/role.",
+      "Regression suites: vm-profile-control-core passed (25); unprivileged vm-profile-runtime-install passed (10); vm-control-maintenance passed (18, 2 expected root-only skips); vm-profile-control-owner passed (34, 3 expected root/sudo skips).",
+      "Static checks: bash scripts/check-workflows.sh passed. python3 -B -I scripts/check-docs-consistency.py retained 8 known drift/link failures in unchanged README.md and docs/DECISIONS.md. No filesystem, systemd, host, or crash-recovery behavior is established by these parser/model fixtures."
     ]
   },
   "models_used": [],
@@ -190,6 +202,11 @@
       "timestamp": "2026-11-24T20:49:16.696Z",
       "author": "cli",
       "body": "Added only the v1 bytes parser/semantic validator, its unit tests, CI invocation, and implementation-boundary documentation. Ticket status and all acceptance criteria remain unchanged; mapping bytes do not authorize an owner or prove filesystem state."
+    },
+    {
+      "timestamp": "2026-11-24T21:15:17.155Z",
+      "author": "cli",
+      "body": "Corrective #25 validator/model/docs update only. Ticket status, acceptance criteria, prior ledger history, and #417 were preserved; no schema structure or lifecycle/host implementation changed."
     }
   ]
 }

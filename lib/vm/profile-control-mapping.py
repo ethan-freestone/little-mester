@@ -718,6 +718,9 @@ def _validate_expected_semantics(
     installation = profile["installation"]
     source_publication = transaction.get("unit_publication")
 
+    if operation == "remove":
+        _validate_remove_publication_source_consistency(transaction, expected)
+
     for selector, item in expected.items():
         evidence = item["evidence"]
         kind = RESOURCE_KINDS[selector]
@@ -730,8 +733,20 @@ def _validate_expected_semantics(
                     _refuse()
                 if identity["marker"] != _account_marker(owner_uid, name, role):
                     _refuse()
-                if evidence == "observed_present" and account["allocation"] != "committed":
+                if evidence in ("observed_present", "removal_intent") and account["allocation"] != "committed":
                     _refuse()
+                if evidence == "removal_intent":
+                    group = installation["groups"][role]
+                    if (
+                        group["state"] != "owned"
+                        or group["name"] != account["name"]
+                        or group["gid"] != account["gid"]
+                        or group["provenance"]
+                        != _group_provenance(
+                            owner_uid, name, role, account["gid"], installation["id"]
+                        )
+                    ):
+                        _refuse()
             elif kind == "host-group-identity":
                 role = selector.removeprefix("group.")
                 group = installation["groups"][role]
@@ -807,8 +822,9 @@ def _validate_expected_semantics(
 
     if operation == "install":
         _validate_install_publication_evidence(transaction, expected)
-    elif operation == "remove" and phase in ("units", "state", "accounts", "finalizing"):
-        _validate_remove_publication_evidence(transaction, expected)
+    elif operation == "remove":
+        if phase in ("units", "state", "accounts", "finalizing"):
+            _validate_remove_publication_evidence(transaction, expected)
 
 
 def _validate_install_publication_evidence(
@@ -819,6 +835,7 @@ def _validate_install_publication_evidence(
         record = publication[role]
         file_item = expected.get(f"unit-file.{role}")
         stage_item = expected.get(f"unit-stage.{role}")
+        manager_item = expected.get(f"unit-manager.{role}")
         if record["state"] == "not_started":
             for item in (file_item, stage_item):
                 if item and item["evidence"] in ("observed_present", "removal_intent"):
@@ -848,6 +865,66 @@ def _validate_install_publication_evidence(
                 _refuse()
             if stage_item is not None and "identity" in stage_item:
                 _refuse()
+            if (
+                manager_item is None
+                or manager_item["evidence"] != "observed_present"
+                or manager_item["identity"]["fragment_device"] != identity["device"]
+                or manager_item["identity"]["fragment_inode"] != identity["inode"]
+            ):
+                _refuse()
+
+
+def _validate_remove_publication_source_consistency(
+    transaction: dict[str, Any], expected: dict[str, dict[str, Any]]
+) -> None:
+    """Bind supplied remove identities to the retained install snapshot.
+
+    Source consistency applies in ``prepared`` too. Omitted sparse selectors
+    are not observations of absence; later phases separately require complete
+    durable evidence.
+    """
+    for role in UNIT_ROLES:
+        record = transaction["unit_publication"][role]
+        file_item = expected.get(f"unit-file.{role}")
+        stage_item = expected.get(f"unit-stage.{role}")
+        manager_item = expected.get(f"unit-manager.{role}")
+
+        if record["state"] == "not_started":
+            if any(
+                item is not None and "identity" in item
+                for item in (file_item, stage_item, manager_item)
+            ):
+                _refuse()
+        elif record["state"] == "publication_intent":
+            identity = record["stage_identity"]
+            path_items = (file_item, stage_item)
+            if sum(item is not None and "identity" in item for item in path_items) > 1:
+                _refuse()
+            for item in path_items:
+                if item is not None and "identity" in item and item["identity"] != identity:
+                    _refuse()
+            if manager_item is not None and "identity" in manager_item:
+                manager_identity = manager_item["identity"]
+                if (
+                    (manager_identity["fragment_device"], manager_identity["fragment_inode"])
+                    != (identity["device"], identity["inode"])
+                    or file_item is None
+                    or file_item.get("identity") != identity
+                ):
+                    _refuse()
+        else:
+            identity = record["fragment_identity"]
+            if stage_item is not None and "identity" in stage_item:
+                _refuse()
+            if file_item is not None and "identity" in file_item and file_item["identity"] != identity:
+                _refuse()
+            if manager_item is not None and "identity" in manager_item:
+                manager_identity = manager_item["identity"]
+                if (
+                    manager_identity["fragment_device"] != identity["device"]
+                    or manager_identity["fragment_inode"] != identity["inode"]
+                ):
+                    _refuse()
 
 
 def _validate_remove_publication_evidence(
@@ -928,6 +1005,30 @@ def _validate_remove_publication_evidence(
                 _refuse()
 
 
+def _validate_retained_reset_source(profile: dict[str, Any]) -> None:
+    """Require reset's retained account, group, and unit source records."""
+    owner_uid = profile["owner_uid"]
+    name = profile["name"]
+    installation = profile["installation"]
+    for role in ACCOUNT_ROLES:
+        account = profile["accounts"][role]
+        group = installation["groups"][role]
+        if (
+            account["allocation"] != "committed"
+            or group["state"] != "owned"
+            or group["name"] != account["name"]
+            or group["gid"] != account["gid"]
+            or group["provenance"]
+            != _group_provenance(owner_uid, name, role, account["gid"], installation["id"])
+        ):
+            _refuse()
+    if any(
+        installation["unit_publication"][role]["state"] != "published"
+        for role in UNIT_ROLES
+    ):
+        _refuse()
+
+
 def _validate_profile(profile: Any) -> dict[str, Any]:
     root = _expect_object(
         profile,
@@ -983,7 +1084,7 @@ def _validate_profile(profile: Any) -> dict[str, Any]:
 
     installation = _expect_object(root["installation"], ("id", "unit_publication", "groups"))
     install_id = _transaction_id(installation["id"])
-    root_publication = _validate_unit_publication(installation["unit_publication"])
+    _validate_unit_publication(installation["unit_publication"])
     groups = _expect_object(installation["groups"], ACCOUNT_ROLES)
     for role in ACCOUNT_ROLES:
         group = _expect_object(groups[role], ("name", "gid", "state", "provenance"))
@@ -1042,15 +1143,12 @@ def _validate_profile(profile: Any) -> dict[str, Any]:
     if state == "ready":
         if transaction is not None:
             _refuse()
-        if any(accounts[role]["allocation"] != "committed" for role in ACCOUNT_ROLES):
-            _refuse()
-        if any(root_publication[role]["state"] != "published" for role in UNIT_ROLES):
-            _refuse()
-        if any(groups[role]["state"] != "owned" for role in ACCOUNT_ROLES):
-            _refuse()
+        _validate_retained_reset_source(root)
     else:
         if transaction is None:
             _refuse()
+        if state == "resetting":
+            _validate_retained_reset_source(root)
         _validate_transaction(transaction, state, root, installation)
 
     return root
