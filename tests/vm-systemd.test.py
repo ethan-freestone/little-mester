@@ -100,9 +100,13 @@ class SystemdPolicyTests(unittest.TestCase):
     def test_live_acceptance_still_requires_a_workspace_assignment(self):
         with tempfile.TemporaryDirectory(prefix="vm-live-assignment-") as temporary:
             path = str(pathlib.Path(temporary) / "workspace.json")
+            stopped = {"ActiveState": "inactive", "MainPID": "0"}
             with mock.patch.object(acceptance, "_WORKSPACE_ASSIGNMENT_PATH", path), \
+                 mock.patch.object(acceptance, "verify", return_value=(stopped, stopped)), \
+                 mock.patch.object(acceptance, "_lifecycle_preflight") as lifecycle, \
                     self.assertRaisesRegex(acceptance.AcceptanceError, "requires an assigned workspace"):
-                acceptance._require_live_workspace_assignment()
+                acceptance.accept(pathlib.Path("/opt/candidate"))
+            lifecycle.assert_not_called()
 
     def test_static_verifier_requires_assigned_workspace_dropin_bytes(self):
         with tempfile.TemporaryDirectory(prefix="vm-assigned-workspace-") as temporary:
@@ -1527,6 +1531,7 @@ class SystemdPolicyTests(unittest.TestCase):
                 raise OSError("report storage unavailable")
 
         with mock.patch.object(acceptance, "verify", return_value=(stopped, stopped)), \
+                mock.patch.object(acceptance, "_require_live_workspace_assignment"), \
                 mock.patch.object(acceptance, "_initial_running_state", return_value=False), \
                 mock.patch.object(acceptance, "_lifecycle_preflight"), \
                 mock.patch.object(acceptance, "_proxy_policy_checks"), \
