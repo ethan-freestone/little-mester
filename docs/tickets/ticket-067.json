@@ -110,7 +110,8 @@
     ],
     "created": [
       "tests/vm-profile-control-core.test.py",
-      "tests/vm-profile-runtime-install.test.py"
+      "tests/vm-profile-runtime-install.test.py",
+      "tests/vm-control-maintenance.test.py"
     ],
     "cases": [
       "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence.",
@@ -130,7 +131,28 @@
       "CommittedRuntimeInstallTests.test_hostile_local_filters_fsmonitor_and_hooks_are_never_executed",
       "CommittedRuntimeInstallTests.test_duplicate_git_tree_names_are_rejected",
       "CommittedRuntimeInstallTests.test_prepublication_crash_preserves_unknown_stage_and_retry_publishes",
-      "CommittedRuntimeInstallTests.test_postrename_crash_leaves_a_complete_target_that_retry_reuses"
+      "CommittedRuntimeInstallTests.test_postrename_crash_leaves_a_complete_target_that_retry_reuses",
+      "MaintenanceFixture.test_ensure_is_idempotent_and_creates_exact_private_fixture_objects",
+      "MaintenanceFixture.test_root_owned_fixture_matches_fixed_substrate_contract (root-only; skipped when the test process is not root)",
+      "MaintenanceFixture.test_normal_lease_refuses_missing_substrate_without_creating_it",
+      "MaintenanceFixture.test_retry_after_directory_creation_interruption",
+      "MaintenanceFixture.test_retry_after_lock_creation_interruption",
+      "MaintenanceFixture.test_symlinked_and_unsafe_ancestry_refuse_without_mutation",
+      "MaintenanceFixture.test_existing_substrate_symlink_is_preserved",
+      "MaintenanceFixture.test_existing_directory_with_wrong_mode_is_refused_and_preserved",
+      "MaintenanceFixture.test_wrong_lock_mode_and_hardlink_count_are_refused_without_repair",
+      "MaintenanceFixture.test_wrong_owner_is_root_only_and_preserved (root-only; skipped when the test process is not root)",
+      "MaintenanceFixture.test_lock_symlink_directory_and_fifo_are_rejected_and_preserved",
+      "MaintenanceFixture.test_replacement_between_path_stat_and_open_is_refused_and_preserved",
+      "MaintenanceFixture.test_replacement_after_flock_is_refused_and_both_objects_are_preserved",
+      "MaintenanceFixture.test_replacement_of_substrate_directory_after_flock_is_refused",
+      "MaintenanceFixture.test_shared_shared_succeeds_and_all_conflicting_modes_are_immediately_busy",
+      "MaintenanceFixture.test_lease_is_released_on_exception_and_process_exit",
+      "MaintenanceFixture.test_lease_descriptor_is_not_inherited_across_exec",
+      "MaintenanceFixture.test_non_boolean_exclusive_argument_is_refused",
+      "Maintenance substrate validation: python3 -B -I tests/vm-control-maintenance.test.py passed (18 tests; 2 root-only ownership cases skipped on this non-root run).",
+      "Regression validation: python3 -B -I tests/vm-profile-control-core.test.py passed (25 tests); python3 -B -I tests/vm-profile-runtime-install.test.py passed (10 tests).",
+      "Syntax/diff validation: python3 -B -I -m py_compile lib/vm/control-maintenance.py tests/vm-control-maintenance.test.py and git diff --check passed."
     ]
   },
   "models_used": []

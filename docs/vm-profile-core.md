@@ -52,17 +52,35 @@ or no profile field for list/inventory. The public CLI remains #70-owned; its
 request builder must use these exact names or coordinate a reviewed protocol
 change before dispatching to this core.
 
+## Maintenance substrate interface and gap
+
+`lib/vm/control-maintenance.py` defines the fixed root-owned
+`/run/little-mester-vm-control` mode-`0755` directory and its single-link,
+root-owned mode-`0600` `maintenance.lock`. The explicitly authorized future
+bootstrap/fixed-system installer may call `ensure_maintenance_substrate()` to
+create missing objects exclusively; it validates but never repairs existing
+objects. Ordinary dispatch uses `maintenance_lease(*, exclusive=...)`, which
+requires the substrate to exist, takes a nonblocking shared or exclusive
+`flock`, and yields the close-on-exec lock descriptor. `Busy` means lock
+contention; `Refused` means missing, unsafe, or changed substrate. Descriptor-
+relative no-follow opens and path/descriptor identity checks guard acquisition.
+The module does not authorize callers, install itself, create transaction
+markers/journals, or acquire the separate code-update lock. These are future
+bootstrap/helper responsibilities; ticket #67 acceptance criterion A7 remains
+in progress.
+
 ## Explicitly not implemented by this slice
 
 These modules are not the installed/root-owned helper and are not dispatched by
 the public `lab` CLI. They do not yet implement owner enrollment/authentication,
-profile metadata read/write or atomic journaling, locks, signed bootstrap,
+profile metadata read/write or atomic journaling, catalog/profile/SHA locks, signed bootstrap,
 systemd units, account/path allocation, start admission, lifecycle,
 inventory/pruning, or TTY confirmation. The installer primitive is not
 authorization: callers must not use it directly or execute a runtime until the
 fixed helper has validated protected profile metadata and holds the required
-locks. The fixed #20 singleton and the `feat/vm-approach` development VM remain
-untouched.
+locks. The maintenance lease is only a fixed nonblocking substrate primitive;
+it is not caller authorization or a transaction protocol. The fixed #20
+singleton and the `feat/vm-approach` development VM remain untouched.
 
 The intended integration direction is: #70 constructs the bounded request and
 routes it to the fixed helper; the helper authorizes the enrolled sudo caller,
