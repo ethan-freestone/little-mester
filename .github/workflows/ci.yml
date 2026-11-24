@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, feat/vm-approach-3]
+    # TEMP: #66 stacked-PR base branches; remove feature bases after the child stacks merge.
+    branches: [main, feat/vm-approach-3, feat/vm-useability-tweaks, feat/vm-profiles, feat/vm-cli-settings]
     types: [opened, synchronize, reopened]
 
 permissions:
