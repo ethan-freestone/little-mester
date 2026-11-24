@@ -270,6 +270,60 @@ def validate_runtime_manifest(
     return dict(manifest)
 
 
+def validate_runtime_descriptor(
+    descriptor: object,
+    *,
+    helper_api: int = CONTROL_HELPER_API,
+    runtime_api: int = PROFILE_RUNTIME_API,
+) -> dict:
+    """Validate the candidate's exact committed runtime inventory descriptor."""
+    if (type(helper_api) is not int or helper_api < 1
+            or type(runtime_api) is not int or runtime_api < 1):
+        raise Refused("helper or runtime API version is invalid")
+    if type(descriptor) is not dict:
+        raise Refused("profile runtime descriptor must be an object")
+    expected_keys = {
+        "schema_version", "profile_runtime_api", "control_helper_api_min",
+        "control_helper_api_max", "entrypoint", "files",
+    }
+    if set(descriptor) != expected_keys:
+        raise Refused("profile runtime descriptor keys do not match schema v1")
+    if (type(descriptor["schema_version"]) is not int
+            or descriptor["schema_version"] != INSTALL_MANIFEST_SCHEMA_VERSION):
+        raise Refused("profile runtime descriptor schema is unsupported")
+    api_fields = ("profile_runtime_api", "control_helper_api_min", "control_helper_api_max")
+    for field in api_fields:
+        if type(descriptor[field]) is not int or descriptor[field] < 1:
+            raise Refused("profile runtime descriptor API version is invalid")
+    if descriptor["profile_runtime_api"] != runtime_api:
+        raise Refused("profile runtime API is incompatible with this helper")
+    api_min = descriptor["control_helper_api_min"]
+    api_max = descriptor["control_helper_api_max"]
+    if api_min > api_max or not api_min <= helper_api <= api_max:
+        raise Refused("profile runtime requires an incompatible control-helper API")
+    if descriptor["entrypoint"] != "lib/vm/profile-runtime.py":
+        raise Refused("profile runtime entrypoint is not the fixed supported path")
+
+    files = descriptor["files"]
+    if type(files) is not list or not files or len(files) >= MAX_INVENTORY_ENTRIES:
+        raise Refused("profile runtime descriptor inventory is empty or exceeds its bound")
+    paths = []
+    for entry in files:
+        if type(entry) is not dict or set(entry) != {"path", "git_mode"}:
+            raise Refused("profile runtime descriptor entry is malformed")
+        path = _runtime_path(entry["path"])
+        if path == MANIFEST_FILENAME or path == "profile-runtime.json":
+            raise Refused("profile runtime descriptor cannot inventory itself")
+        if not isinstance(entry["git_mode"], str) or entry["git_mode"] not in {"100644", "100755"}:
+            raise Refused("profile runtime descriptor contains an unsafe Git mode")
+        paths.append(path)
+    if len(paths) != len(set(paths)):
+        raise Refused("profile runtime descriptor paths must be unique")
+    if "lib/vm/profile-runtime.py" not in paths:
+        raise Refused("profile runtime descriptor omits its fixed entrypoint")
+    return dict(descriptor)
+
+
 def _open_absolute_directory(path: pathlib.Path) -> int:
     if not path.is_absolute():
         raise Refused("runtime store path must be absolute")

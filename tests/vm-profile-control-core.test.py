@@ -213,6 +213,38 @@ class RuntimeManifestTests(unittest.TestCase):
             core.MAX_INVENTORY_ENTRIES,
         )
 
+    def test_validates_the_committed_runtime_descriptor_schema(self):
+        descriptor = {
+            "schema_version": 1,
+            "profile_runtime_api": 1,
+            "control_helper_api_min": 1,
+            "control_helper_api_max": 2,
+            "entrypoint": "lib/vm/profile-runtime.py",
+            "files": [{"path": "lib/vm/profile-runtime.py", "git_mode": "100755"}],
+        }
+        self.assertEqual(
+            core.validate_runtime_descriptor(descriptor, helper_api=2)["entrypoint"],
+            "lib/vm/profile-runtime.py",
+        )
+        bad_descriptors = []
+        duplicate = dict(descriptor)
+        duplicate["files"] = [*descriptor["files"], dict(descriptor["files"][0])]
+        bad_descriptors.append(duplicate)
+        wrong_entrypoint = dict(descriptor)
+        wrong_entrypoint["entrypoint"] = "lib/vm/arbitrary.py"
+        bad_descriptors.append(wrong_entrypoint)
+        descriptor_self_lists = dict(descriptor)
+        descriptor_self_lists["files"] = [
+            *descriptor["files"], {"path": "profile-runtime.json", "git_mode": "100644"},
+        ]
+        bad_descriptors.append(descriptor_self_lists)
+        incompatible = dict(descriptor)
+        incompatible["control_helper_api_min"] = 3
+        bad_descriptors.append(incompatible)
+        for bad in bad_descriptors:
+            with self.subTest(descriptor=bad), self.assertRaises(core.Refused):
+                core.validate_runtime_descriptor(bad, helper_api=2)
+
     def test_rejects_unknown_schema_keys_wrong_pin_and_incompatible_apis(self):
         mutations = []
         unknown = self.valid_manifest()

@@ -18,6 +18,10 @@ the profile system or ticket #67 complete.
 - `validate_runtime_manifest` checks the exact v1 install-manifest fields,
   sorted unique runtime inventory, approved file modes/paths, SHA pin, and helper
   and runtime API compatibility.
+- `validate_runtime_descriptor` checks the candidate's exact committed
+  `profile-runtime.json` schema, fixed entrypoint, unique bounded file inventory,
+  approved Git modes/paths, and helper/runtime API range before a future installer
+  reads any declared blobs.
 - `verify_runtime_installation` opens the selected SHA tree without following
   links and checks the complete inventory, ownership, immutability modes, file
   link counts, size bounds and digests. `resolve_pinned_runtime` takes the SHA
