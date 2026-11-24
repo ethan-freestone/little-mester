@@ -8,6 +8,7 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 import unittest
@@ -322,6 +323,30 @@ class PinnedRuntimeTests(unittest.TestCase):
             core.resolve_pinned_runtime(SHA_A, runtime_store=self.runtime_a.store, expected_uid=self.uid),
             self.runtime_a.directory,
         )
+
+    def test_staging_verification_requires_the_exact_reserved_name_and_opt_in(self):
+        stage_name = f".staging-{SHA_A}-0123456789abcdef"
+        stage = self.runtime_a.store / stage_name
+        self.runtime_a.make_directories_writable()
+        shutil.copytree(self.runtime_a.directory, stage, copy_function=shutil.copy2)
+        for directory in sorted((item for item in stage.rglob("*") if item.is_dir()), reverse=True):
+            os.chmod(directory, 0o555)
+        os.chmod(stage, 0o555)
+        os.chmod(self.runtime_a.store, 0o555)
+
+        with self.assertRaises(core.Refused):
+            core.verify_runtime_installation(stage, pinned_sha=SHA_A, expected_uid=self.uid)
+        self.assertEqual(
+            core.verify_runtime_installation(
+                stage, pinned_sha=SHA_A, expected_uid=self.uid, allow_staging=True,
+            )["commit_sha"],
+            SHA_A,
+        )
+        malformed = self.runtime_a.store / f".staging-{SHA_A}-not-a-nonce"
+        with self.assertRaises(core.Refused):
+            core.verify_runtime_installation(
+                malformed, pinned_sha=SHA_A, expected_uid=self.uid, allow_staging=True,
+            )
 
     def test_profiles_select_independent_sha_roots_without_checkout_resolution(self):
         runtime_b = RuntimeFixture(self.root, SHA_B, {

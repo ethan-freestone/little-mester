@@ -27,6 +27,14 @@ the profile system or ticket #67 complete.
   link counts, size bounds and digests. `resolve_pinned_runtime` takes the SHA
   supplied by the caller from protected profile metadata and resolves only
   `/opt/little-mester/v3/<SHA>`; it does not inspect checkout `HEAD`.
+- `lib/vm/profile-runtime-install.py` is a standalone extraction primitive for
+  the future helper. It asks fixed Git plumbing to read only the invoking
+  owner's exact committed `HEAD`, verifies commit/tree/blob object IDs and the
+  descriptor, extracts bounded bytes without checkout filters or execution,
+  verifies a generated manifest, and publishes by a same-parent no-replace
+  rename. Interrupted `.staging-<SHA>-<nonce>` siblings are preserved for
+  inspection. It assumes the future helper already authorized the owner and
+  holds the maintenance/profile/SHA locks; it is not installed or dispatched.
 
 The current manifest filename convention in this code is `manifest.json`; its
 schema-v1 inventory key is `files`. The
@@ -46,15 +54,15 @@ change before dispatching to this core.
 
 ## Explicitly not implemented by this slice
 
-This module is not the installed/root-owned helper and is not dispatched by the
-public `lab` CLI. It does not yet implement owner enrollment/authentication,
+These modules are not the installed/root-owned helper and are not dispatched by
+the public `lab` CLI. They do not yet implement owner enrollment/authentication,
 profile metadata read/write or atomic journaling, locks, signed bootstrap,
-runtime extraction/install, systemd units, account/path allocation, start
-admission, lifecycle, inventory/pruning, or TTY confirmation. Callers must not
-use the validator as authorization and must not execute a runtime until the
+systemd units, account/path allocation, start admission, lifecycle,
+inventory/pruning, or TTY confirmation. The installer primitive is not
+authorization: callers must not use it directly or execute a runtime until the
 fixed helper has validated protected profile metadata and holds the required
-runtime lock. The fixed #20 singleton and the `feat/vm-approach` development VM
-remain untouched.
+locks. The fixed #20 singleton and the `feat/vm-approach` development VM remain
+untouched.
 
 The intended integration direction is: #70 constructs the bounded request and
 routes it to the fixed helper; the helper authorizes the enrolled sudo caller,

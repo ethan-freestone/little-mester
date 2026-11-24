@@ -1,8 +1,11 @@
 # VM usability integration: shared profile and CLI contract
 
-**Status:** design baseline for tickets #66–#70; not implemented. The profile
-and CLI streams must use this contract or obtain an explicit reviewed change to
-it before implementing divergent behavior. The integration PR remains based on
+**Status:** design baseline for tickets #66–#70; implementation is in progress.
+Protocol/runtime validation and a standalone committed-tree installer primitive
+exist, but the fixed helper, signed bootstrap/update path, profile lifecycle and
+CLI integration are not implemented. The profile and CLI streams must use this
+contract or obtain an explicit reviewed change to it before implementing
+divergent behavior. The integration PR remains based on
 `e10ebd76e1e362c7b6e95bdb631d12c22b2e2d7f` on
 `feat/vm-useability-tweaks`, targeting `feat/vm-approach-3`.
 
@@ -619,9 +622,11 @@ separate from profile and singleton lifecycle dispatch.
 ### Runtime installation inventory and pruning
 
 The root helper reads direct children of `/opt/little-mester/v3` without
-following links. The reserved `.staging/` and `.gc-<SHA>-<nonce>` children are
-reported as `unknown/incomplete`, never accepted as runtimes or automatically
-deleted. Each new managed installation contains a root-owned,
+following links. The reserved `.staging/`, `.staging-<SHA>-<nonce>` and
+`.gc-<SHA>-<nonce>` children are reported as `unknown/incomplete`, never accepted
+as runtimes or automatically deleted. Runtime publication stages into a unique
+same-parent `.staging-<SHA>-<nonce>` sibling and uses a no-replace atomic rename;
+interrupted stages remain unknown for administrator inspection. Each new managed installation contains a root-owned,
 read-only manifest with exactly `schema_version`, full `commit_sha`,
 `profile_runtime_api`, `control_helper_api_min`, `control_helper_api_max`, and a
 sorted array of `{path, git_mode, sha256}` entries. The root helper generates
@@ -758,8 +763,9 @@ the profile and shared-SHA locks. Missing/corrupt pinned runtime bytes are not
 silently rebuilt by this fast path.
 For a new or recoverable `installing` profile, it releases catalog/profile locks,
 then reads committed Git blobs and extracts the bounded candidate into a unique
-root-owned staging tree under the reserved
-`/opt/little-mester/v3/.staging/` directory. No catalog lock is held during Git
+root-owned `/opt/little-mester/v3/.staging-<SHA>-<nonce>` sibling. Same-parent
+atomic publication needs no temporary permission change on the immutable runtime
+root. No catalog lock is held during Git
 reads, blob copying, digesting or extraction. For an existing SHA target, it
 briefly acquires catalog/profile/shared-SHA locks to snapshot the runtime-root
 and manifest identities, releases the catalog lock, and verifies the complete

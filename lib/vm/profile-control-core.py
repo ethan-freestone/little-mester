@@ -496,6 +496,7 @@ def verify_runtime_installation(
     helper_api: int = CONTROL_HELPER_API,
     runtime_api: int = PROFILE_RUNTIME_API,
     expected_uid: int = 0,
+    allow_staging: bool = False,
 ) -> dict:
     """Verify one complete immutable runtime tree without following links.
 
@@ -506,8 +507,18 @@ def verify_runtime_installation(
     pinned_sha = _valid_sha(pinned_sha, field="pinned_sha")
     if type(expected_uid) is not int or expected_uid < 0:
         raise Refused("expected runtime owner is invalid")
-    if not isinstance(runtime_directory, pathlib.Path) or runtime_directory.name != pinned_sha:
+    if type(allow_staging) is not bool:
+        raise Refused("runtime staging verification flag is invalid")
+    if not isinstance(runtime_directory, pathlib.Path):
         raise Refused("runtime directory does not match the profile's pinned SHA")
+    target_name = runtime_directory.name
+    if target_name != pinned_sha:
+        staging_prefix = f".staging-{pinned_sha}-"
+        staging_nonce = target_name.removeprefix(staging_prefix)
+        if (not allow_staging or not target_name.startswith(staging_prefix)
+                or len(staging_nonce) != 16
+                or any(char not in "0123456789abcdef" for char in staging_nonce)):
+            raise Refused("runtime directory does not match the profile's pinned SHA")
     store_path = runtime_directory.parent
     if ".." in store_path.parts or ".." in runtime_directory.parts:
         raise Refused("runtime path contains traversal components")
@@ -517,7 +528,7 @@ def verify_runtime_installation(
         store_info = os.fstat(store_fd)
         _check_directory(store_info, expected_uid=expected_uid, mode=None)
         target_fd = _open_child_directory(
-            store_fd, pinned_sha, expected_uid=expected_uid, expected_device=store_info.st_dev,
+            store_fd, target_name, expected_uid=expected_uid, expected_device=store_info.st_dev,
         )
         target_info = os.fstat(target_fd)
         _check_directory(target_info, expected_uid=expected_uid, mode=0o555)

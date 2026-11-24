@@ -8,7 +8,7 @@
   "title": "Independent persistent VM profiles pinned to immutable runtimes",
   "objective": "Part of integration ticket #66. Add independently manageable persistent VM profiles while parameterizing/reusing the fixed system VM implementation where safe. Each profile records its immutable installed runtime SHA; profiles using one SHA may share the code install. Do not implement runtime upgrade/migration or change the legacy feat/vm-approach VM. The shared design baseline is docs/vm-usability-integration.md, including fixed helper/common signed-control-artifact trust boundaries, crash-safe lifecycle semantics, per-profile service isolation, and safe runtime inventory/pruning. Owner decision (2026-11-24): the fixed #20 system singleton is temporarily mutually exclusive with named profile VMs through four minimal manifest-owned additive guards installed by the common signed control artifact, while the distinct original feat/vm-approach development VM must coexist with named profiles and must not be capped or gated. Profile admission uses actual host MemAvailable and profile cgroup reservations.",
   "created_at": "2026-11-23T23:21:29.433Z",
-  "updated_at": "2026-11-24T12:46:33.911Z",
+  "updated_at": "2026-11-24T15:49:29.808Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -109,7 +109,8 @@
       "Fixed singleton workspace verifier state regression covers both assigned and pristine-unassigned states: when assignment exists, exact 20 drop-in bytes and path identity are required; when absent, only a stopped unit with no 20 drop-in/bind is accepted by static layout verification. Full live owner acceptance remains assignment-required; stale/mixed state fails."
     ],
     "created": [
-      "tests/vm-profile-control-core.test.py"
+      "tests/vm-profile-control-core.test.py",
+      "tests/vm-profile-runtime-install.test.py"
     ],
     "cases": [
       "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence.",
@@ -118,7 +119,18 @@
       "RuntimeManifestTests.test_rejects_unsorted_duplicate_missing_and_unsafe_inventory",
       "PinnedRuntimeTests.test_profiles_select_independent_sha_roots_without_checkout_resolution",
       "PinnedRuntimeTests.test_rejects_missing_files_symlinks_and_wrong_modes",
-      "PinnedRuntimeTests.test_rejects_modified_runtime_digest_and_extra_inventory_path"
+      "PinnedRuntimeTests.test_rejects_modified_runtime_digest_and_extra_inventory_path",
+      "CommittedRuntimeInstallTests.test_installs_only_declared_committed_blobs_as_immutable_data_and_reuses_sha",
+      "CommittedRuntimeInstallTests.test_different_commits_publish_distinct_sha_roots",
+      "CommittedRuntimeInstallTests.test_refuses_head_mismatch_symlink_blobs_and_preserves_unknown_sha_target",
+      "CommittedRuntimeInstallTests.test_symlink_inventory_mode_is_rejected_without_publishing_runtime",
+      "CommittedRuntimeInstallTests.test_corrupted_loose_blob_is_rejected_against_its_git_object_id",
+      "CommittedRuntimeInstallTests.test_stalled_blob_pipe_is_bounded_by_a_deadline",
+      "PinnedRuntimeTests.test_staging_verification_requires_the_exact_reserved_name_and_opt_in",
+      "CommittedRuntimeInstallTests.test_hostile_local_filters_fsmonitor_and_hooks_are_never_executed",
+      "CommittedRuntimeInstallTests.test_duplicate_git_tree_names_are_rejected",
+      "CommittedRuntimeInstallTests.test_prepublication_crash_preserves_unknown_stage_and_retry_publishes",
+      "CommittedRuntimeInstallTests.test_postrename_crash_leaves_a_complete_target_that_retry_reuses"
     ]
   },
   "models_used": []
