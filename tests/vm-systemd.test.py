@@ -250,12 +250,13 @@ class SystemdPolicyTests(unittest.TestCase):
             print("BYTECODE_SUPPRESSION=PASS")
         """)
         cases = (
-            ("installer", "tools/vm-system-install", "lib/vm/code-update-transaction.py"),
-            ("runtime", "lib/vm/system-vm.py", "lib/vm/guest-compatibility.py"),
+            ("installer", "tools/vm-system-install", "lib/vm/code-update-transaction.py", ()),
+            ("runtime", "lib/vm/system-vm.py", "lib/vm/guest-compatibility.py",
+             ("lib/vm/opencode-version.py",)),
         )
         with tempfile.TemporaryDirectory(prefix="vm-bytecode-entrypoint-") as temporary:
             base = pathlib.Path(temporary)
-            for operation, source_relative, helper_relative in cases:
+            for operation, source_relative, helper_relative, dependency_relatives in cases:
                 with self.subTest(operation=operation):
                     root = base / operation
                     source = root / source_relative
@@ -264,6 +265,10 @@ class SystemdPolicyTests(unittest.TestCase):
                     helper.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(ROOT / source_relative, source)
                     shutil.copyfile(ROOT / helper_relative, helper)
+                    for dependency_relative in dependency_relatives:
+                        dependency = root / dependency_relative
+                        dependency.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(ROOT / dependency_relative, dependency)
                     command = [sys.executable, "-I", "-c", probe,
                                str(source), str(root), operation]
                     self.assertNotIn("-B", command)

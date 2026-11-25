@@ -466,7 +466,7 @@ out={'project_config_ignored':r.returncode==0 and not any(x in documents for x i
       'runtime_otel_sdk_disabled':process_env.get('OTEL_SDK_DISABLED')=='true',
       'runtime_otel_exporters_disabled':all(process_env.get(k)=='none' for k in ('OTEL_TRACES_EXPORTER','OTEL_LOGS_EXPORTER','OTEL_METRICS_EXPORTER')),
       'runtime_otlp_exporter_absent':not process_env.get('OTEL_EXPORTER_OTLP_ENDPOINT') and not process_env.get('OTEL_EXPORTER_OTLP_HEADERS'),
-       'runtime_opencode_version_supported':version.returncode==0 and version.stdout.strip()=='__EXPECTED_OPENCODE_EXECUTABLE_OUTPUT__'}
+        'runtime_opencode_version_supported':version.returncode==0 and version.stdout.strip()==b'__EXPECTED_OPENCODE_EXECUTABLE_OUTPUT__'}
 print(json.dumps(out,sort_keys=True,separators=(',',':')))
 '''.replace('HOSTILE_SHA', _M2_HOSTILE_CONFIG_SHA).replace(
     '__SUPPORTED_OPENCODE_VERSION__', _SESSION_CONTRACT.SUPPORTED_OPENCODE_VERSION).replace(

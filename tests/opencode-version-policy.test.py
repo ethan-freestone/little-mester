@@ -79,6 +79,25 @@ class OpenCodeVersionPolicyTests(unittest.TestCase):
         self.assertIn("runtime_opencode_version_supported", probe)
         self.assertNotIn("runtime_is_pinned_v225", probe)
 
+    def test_parent_state_probe_accepts_only_supported_executable_version_bytes(self):
+        lines = [line.strip() for line in parent_state._M2_PROTECTION_CHECK_SCRIPT.splitlines()
+                 if "'runtime_opencode_version_supported':" in line]
+        self.assertEqual(len(lines), 1)
+        expression = lines[0].partition(":")[2].strip().removesuffix("}").removesuffix(",")
+
+        supported = subprocess.CompletedProcess(
+            ["opencode", "--version"], 0,
+            stdout=(policy.EXPECTED_EXECUTABLE_OUTPUT + "\n").encode("ascii"), stderr=b"")
+        unsupported = subprocess.CompletedProcess(
+            ["opencode", "--version"], 0, stdout=b"opencode v9.9.9\n", stderr=b"")
+        failed = subprocess.CompletedProcess(
+            ["opencode", "--version"], 1,
+            stdout=(policy.EXPECTED_EXECUTABLE_OUTPUT + "\n").encode("ascii"), stderr=b"")
+
+        self.assertTrue(eval(expression, {"version": supported}))
+        self.assertFalse(eval(expression, {"version": unsupported}))
+        self.assertFalse(eval(expression, {"version": failed}))
+
     def test_ci_readiness_and_installation_derive_the_policy_without_literal_pins(self):
         readiness = (ROOT / "lib/vm/opencode-readiness.sh").read_text()
         self.assertIn("@EXPECTED_OPENCODE_EXECUTABLE_OUTPUT@", readiness)
