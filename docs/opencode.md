@@ -358,3 +358,26 @@ establish Ctrl+C behavior during generation, other OpenCode menus, SSH-host term
 clipboard handling, or the full profile helper request/TTY/exit-status contract. The
 terminal-specific OSC 52 mitigation and harmless clipboard canary remain governed by
 J.12; `EscapeChar=none` is not clipboard protection.
+
+**Hosted singleton production-terminal regression.** The hosted
+`production-systemd-vm-acceptance` job also runs
+`tests/ci-kvm-production-terminal.py` after exact shared owner acceptance has passed,
+while the fixed system VM is running and before forced-stop recovery. This is CI
+orchestration only; it is not installed in the guest or host runtime. It independently
+checks the workflow SHA against the candidate checkout and installed singleton dispatch
+assets, then drives the exact candidate-checkout command
+`<checkout>/lab vm system tui --prefix <disposable prefix>` in a controlling host PTY.
+All input (Ctrl+C, ten independent Escape+ASCII-`n` trials, tmux detach, and final `q`)
+travels through that PTY and the existing SSH guest PTY. A separate bounded SSH channel
+uses read-only tmux/session/pane observations only; it does not repair state or inject
+input. The gate checks fresh session/pane identity, `escape-time 10`, status off,
+modal/idle Ctrl+C behavior, 30 ms requested / 35 ms measured driver-write timing
+independently from cancellation, host-to-guest PTY resize, three same-pane detach/reattach
+attempts, clean `q` exit, and session cleanup. Missing hosted KVM, protected SSH
+credentials, or other prerequisites fail closed. Its sanitized JSONL evidence is private,
+bounded, and retained on failure; a required check that cannot be attempted is a failure.
+
+The profile terminal remains a separate, blocked acceptance path; this gate does not
+exercise it. Local unit tests validate orchestration and fail-closed contracts only. They
+do not run hosted KVM, establish owner acceptance, or count as evidence that this live
+gate has passed; only the corresponding hosted workflow result can establish that.

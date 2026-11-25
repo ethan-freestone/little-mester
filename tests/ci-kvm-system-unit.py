@@ -41,6 +41,13 @@ if _OWNER_ACCEPTANCE_SPEC is None or _OWNER_ACCEPTANCE_SPEC.loader is None:
 OWNER_ACCEPTANCE_MODULE = importlib.util.module_from_spec(_OWNER_ACCEPTANCE_SPEC)
 sys.modules[_OWNER_ACCEPTANCE_SPEC.name] = OWNER_ACCEPTANCE_MODULE
 _OWNER_ACCEPTANCE_SPEC.loader.exec_module(OWNER_ACCEPTANCE_MODULE)
+_TERMINAL_GATE_SPEC = importlib.util.spec_from_file_location(
+    "ci_kvm_production_terminal", REPO / "tests/ci-kvm-production-terminal.py")
+if _TERMINAL_GATE_SPEC is None or _TERMINAL_GATE_SPEC.loader is None:
+    raise RuntimeError("could not load the hosted production-terminal regression")
+TERMINAL_GATE = importlib.util.module_from_spec(_TERMINAL_GATE_SPEC)
+sys.modules[_TERMINAL_GATE_SPEC.name] = TERMINAL_GATE
+_TERMINAL_GATE_SPEC.loader.exec_module(TERMINAL_GATE)
 CI_INSTALL_PREFIX = pathlib.Path("/srv/little-mester-ci")
 CI_INSTALL_PARENT = CI_INSTALL_PREFIX / "v3"
 UNIT = "little-mester-vm.service"
@@ -3086,6 +3093,8 @@ def main() -> int:
         verify_workspace_startup_post()
         verify_pinned_tree_inventory(sha, phase="after-startup")
         verify_guest_cannot_read_escape()
+        with _timed_ci_stage("production_terminal_regression"):
+            TERMINAL_GATE.run_production_terminal_acceptance(REPO, CI_INSTALL_PREFIX, sha)
         with _timed_ci_stage("forced_stop_recovery"):
             force_systemd_fallback(installed_root)
     except BaseException as error:  # noqa: BLE001 - finally below must stop a started unit on cancellation
