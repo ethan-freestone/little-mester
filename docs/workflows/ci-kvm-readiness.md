@@ -2,7 +2,8 @@
 
 The CI `boot` gate waits for a fully provisioned transient guest, not merely
 for transport. Cloud-init `runcmd` runs apt index update, installs tmux,
-Node.js, npm and CA certificates, installs exactly `@opencode/cli@2.2.5`,
+Node.js, npm and CA certificates, installs the exact package spec derived from
+`lib/vm/opencode-version.py`,
 prepares workspace/user directories and SSH socket service, then publishes
 `/var/tmp/lm-kvm-trial-ready`. Serial output exposes START/END/FAIL substage
 markers with integer `SECONDS` elapsed time; apt update is deliberately

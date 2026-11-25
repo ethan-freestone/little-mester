@@ -506,9 +506,13 @@ files.extend({"path": path, "owner": "root:root", "permissions": mode, "encoding
                "content": base64.b64encode(content).decode("ascii")}
               for path, (content, mode) in contract.ASSETS.items())
 opencode_readiness = root / "lib/vm/opencode-readiness.sh"
+readiness_content = opencode_readiness.read_text().replace(
+    "@EXPECTED_OPENCODE_EXECUTABLE_OUTPUT@", contract.EXPECTED_OPENCODE_EXECUTABLE_OUTPUT)
+if "@EXPECTED_OPENCODE_EXECUTABLE_OUTPUT@" in readiness_content:
+    raise SystemExit("OpenCode readiness version policy was not rendered")
 files.append({"path": "/usr/local/libexec/lm-ci-opencode-readiness", "owner": "root:root",
               "permissions": "0755", "encoding": "b64",
-              "content": base64.b64encode(opencode_readiness.read_bytes()).decode("ascii")})
+              "content": base64.b64encode(readiness_content.encode("utf-8")).decode("ascii")})
 opencode_config_check = root / "tests/ci-opencode-config-check.py"
 files.append({"path": "/usr/local/libexec/lm-ci-opencode-config-check", "owner": "root:root",
               "permissions": "0755", "encoding": "b64",
@@ -599,7 +603,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 guest_stage apt-update apt-get update || exit $?
 guest_stage apt-install apt-get install -y --no-install-recommends tmux nodejs npm ca-certificates || exit $?
-guest_stage opencode-install npm install --global @opencode/cli@2.2.5 || exit $?
+guest_stage opencode-install npm install --global @OPENCODE_PACKAGE_SPEC@ || exit $?
 guest_stage workspace-user-dirs install -d -o mester -g mester -m 0700 /home/mester/workspace || exit $?
 guest_stage opencode-user-dirs /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-opencode 1000 || exit $?
 # cloud-init's ssh module generates keys in its init stage, before runcmd.
@@ -635,6 +639,10 @@ storage_report after-packages
 printf ready > /var/tmp/lm-kvm-trial-ready
 printf 'KVM_GUEST_PROVISION_DONE exit=0\n'
 '''
+install_command = install_command.replace("@OPENCODE_PACKAGE_SPEC@", contract.OPENCODE_PACKAGE_SPEC)
+install_command = install_command.replace("@OPENCODE_VERSION@", contract.SUPPORTED_OPENCODE_VERSION)
+if "@OPENCODE_" in install_command:
+    raise SystemExit("OpenCode install expectations were not rendered")
 config = {
     "ssh_pwauth": False,
     "disable_root": True,
@@ -828,7 +836,7 @@ pane_before="$(ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tm
 capture_tui_probe reattach 4 "$tmp" "$tmp_root" ssh_tty_guest "$repo_root/tests/ci-tui-diagnostic.py" fail
 pane_after="$(ssh_guest 'TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux tmux display-message -p -t little-mester-opencode:0.0 "#{pane_id}:#{pane_pid}"')"
 [[ "$pane_before" == "$pane_after" ]] || fail 'tmux reattachment did not preserve the live OpenCode pane identity'
-printf 'KVM_M2_INTEGRATION_PASS: real KVM guest, SSH, pinned OpenCode 2.2.5, protected config, tmux TUI process and persistent workspace fixture\n'
+printf 'KVM_M2_INTEGRATION_PASS: real KVM guest, SSH, pinned OpenCode @OPENCODE_VERSION@, protected config, tmux TUI process and persistent workspace fixture\n'
 python3 -I "$state_helper" set "${state_args[@]}" \
   --field persistence_content_sha256 --value "$persistence_content_sha256" \
   --field persistence_mount_sha256 --value "$persist_mount_sha256" \

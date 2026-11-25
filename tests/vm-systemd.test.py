@@ -656,7 +656,8 @@ class SystemdPolicyTests(unittest.TestCase):
             "agent/opencode/plugins/host-metrics-tui/metrics-state.d.ts",
             "systemd/little-mester-vm-proxy.service", "sudoers/little-mester-vm",
             "tools/vm-system-install", "lib/vm/guest-bootstrap.py",
-            "lib/vm/guest-compatibility.py", "lib/vm/code-update-transaction.py",
+            "lib/vm/guest-compatibility.py", "lib/vm/opencode-version.py",
+            "lib/vm/code-update-transaction.py",
             "systemd/little-mester-vm.service.d/90-code-update-guard.conf",
             "lib/vm/desktop-session-env.sh",
         }
@@ -1769,7 +1770,8 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertIn("dockerd-rootless-setuptool.sh install", provision)
         self.assertIn("prepare 1000", provision)
         self.assertIn("prepare 1000", provision)
-        self.assertIn("@opencode/cli@2.2.5", provision)
+        version_policy = bootstrap._opencode_version_policy()
+        self.assertIn(version_policy.PACKAGE_SPEC, provision)
         self.assertIn("apt-get install -y --no-install-recommends nodejs libnode-dev build-essential",
                       provision)
         self.assertNotIn("nodejs npm", provision)
@@ -1808,6 +1810,7 @@ class SystemdPolicyTests(unittest.TestCase):
 
     def test_smoke_and_system_use_same_provisioning_builder_with_workspace_specific_adaptation(self):
         helper = "/usr/local/sbin/mester-v3-user-dirs.py"
+        version_policy = bootstrap._opencode_version_policy()
         smoke_script = bootstrap.provision_script(1234, "virtiofs", helper)
         smoke_yaml = bootstrap.render_smoke_cloud_init(
             "smoke-v3", 1234,
@@ -1820,7 +1823,7 @@ class SystemdPolicyTests(unittest.TestCase):
         for provision in (smoke_script, system_script):
             with self.subTest(provision="shared npm install"):
                 self.assertLess(
-                    provision.index("npm install --global @opencode/cli@2.2.5"),
+                    provision.index("npm install --global " + version_policy.PACKAGE_SPEC),
                     provision.index(package_json_normalization))
         self.assertIn("guest-bootstrap.py\" smoke-cloud-init", (ROOT / "lib/vm/cloud-init.sh").read_text())
         self.assertIn("apt-get install -y docker-ce docker-ce-cli containerd.io", smoke_script)
@@ -1858,7 +1861,8 @@ class SystemdPolicyTests(unittest.TestCase):
     def test_opencode_package_json_normalization_sets_0644_idempotently(self):
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="vm-opencode-package-") as temporary:
             target = pathlib.Path(temporary) / "package.json"
-            target.write_text('{"version":"2.2.5"}\n', encoding="utf-8")
+            target.write_text(json.dumps({"version": bootstrap._opencode_version_policy().SUPPORTED_VERSION}) + "\n",
+                              encoding="utf-8")
             target.chmod(0o755)
             inspected = [
                 mock.Mock(st_mode=stat.S_IFREG | 0o755, st_uid=0, st_gid=0),
@@ -1877,7 +1881,8 @@ class SystemdPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="vm-opencode-package-") as temporary:
             root = pathlib.Path(temporary)
             target = root / "package.json"
-            target.write_text('{"version":"2.2.5"}\n', encoding="utf-8")
+            target.write_text(json.dumps({"version": bootstrap._opencode_version_policy().SUPPORTED_VERSION}) + "\n",
+                              encoding="utf-8")
             target.chmod(0o755)
 
             symlink = root / "package-link.json"
@@ -2098,6 +2103,7 @@ class SystemdPolicyTests(unittest.TestCase):
             shutil.copyfile(ROOT / "lib/vm/guest-opencode-preferences.py",
                             installed / "guest-opencode-preferences.py")
             shutil.copyfile(ROOT / "lib/vm/guest-bootstrap.py", installed / "guest-bootstrap.py")
+            shutil.copyfile(ROOT / "lib/vm/opencode-version.py", installed / "opencode-version.py")
             shutil.copyfile(ROOT / "lib/vm/parent-session-contract.py",
                             installed / "parent-session-contract.py")
             source_plugins = ROOT / "agent/opencode/plugins/little-mester-exit-confirm"

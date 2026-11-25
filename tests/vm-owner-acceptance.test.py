@@ -23,6 +23,10 @@ loader = importlib.machinery.SourceFileLoader("vm_owner_acceptance", str(ENTRY))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 acceptance = importlib.util.module_from_spec(spec)
 loader.exec_module(acceptance)
+VERSION_SPEC = importlib.util.spec_from_file_location(
+    "owner_acceptance_opencode_version", ROOT / "lib/vm/opencode-version.py")
+VERSION_CONTRACT = importlib.util.module_from_spec(VERSION_SPEC)
+VERSION_SPEC.loader.exec_module(VERSION_CONTRACT)
 
 
 class TTYBuffer(io.StringIO):
@@ -1001,7 +1005,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
             "update_share_positive_control_accepted": True,
             "hostile_fixture_is_expected_negative_control": True,
             "share_command_absent_from_pinned_runtime": True,
-            "runtime_is_pinned_v225": True,
+            "runtime_opencode_version_supported": True,
             "runtime_autoupdate_disabled": True,
             "runtime_sharing_disabled": True,
             "runtime_telemetry_optout": True,
@@ -1046,7 +1050,8 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 "uid": 0, "gid": 0, "mode": "0777",
             },
             "/usr/local/lib/node_modules/@opencode/cli/package.json": {
-                "type": "file", "uid": 0, "gid": 0, "mode": "0644", "version": "2.2.5",
+                "type": "file", "uid": 0, "gid": 0, "mode": "0644",
+                "version": contract.SUPPORTED_OPENCODE_VERSION,
             },
             "/usr/local/lib/node_modules/@opencode/cli/bin/opencode": {
                 "type": "file", "uid": 0, "gid": 0, "mode": "0755", "sha256": "1" * 64,
@@ -1064,6 +1069,13 @@ class OwnerAcceptanceTests(unittest.TestCase):
         with mock.patch.object(acceptance.subprocess, "run", side_effect=completed):
             result = acceptance.inspect_live_parent(ROOT)
         self.assertTrue(result["m2_contract_compatible"])
+        self.assertEqual(result["expected_supported_opencode_version"],
+                         contract.SUPPORTED_OPENCODE_VERSION)
+        self.assertEqual(result["guest_opencode_package_version"],
+                         contract.SUPPORTED_OPENCODE_VERSION)
+        self.assertIsNone(result["guest_opencode_executable_version"])
+        self.assertEqual(result["guest_opencode_executable_observation"],
+                         "not_run_by_read_only_inventory")
         self.assertEqual(result["parent_identity"]["disk"]["inode"], 2)
         self.assertIn("sha256", result["observed_guest_inventory"]["/usr/local/libexec/lm-opencode-auth"])
 
@@ -1516,7 +1528,7 @@ class OwnerAcceptanceTests(unittest.TestCase):
                 "protected_share_disabled", "runtime_config_sharing_disabled",
                 "update_share_positive_control_accepted",
                 "hostile_fixture_is_expected_negative_control",
-                "share_command_absent_from_pinned_runtime", "runtime_is_pinned_v225",
+                "share_command_absent_from_pinned_runtime", "runtime_opencode_version_supported",
                 "hostile_plugin_not_executed", "runtime_cwd_is_workspace",
                 "runtime_project_config_disabled", "runtime_config_path_protected",
                 "runtime_plugin_config_protected", "runtime_autoupdate_disabled",
@@ -1586,7 +1598,11 @@ class OwnerAcceptanceTests(unittest.TestCase):
                     (acceptance, "verify_install", {"return_value": pathlib.Path("/protected/install")}),
                     (acceptance, "installed_preflight", {}),
                     (acceptance, "inspect_live_parent", {"return_value": {
-                        "m2_contract_compatible": True, "guest_opencode_version": "opencode v2.2.5",
+                        "m2_contract_compatible": True,
+                        "expected_supported_opencode_version": VERSION_CONTRACT.SUPPORTED_VERSION,
+                        "guest_opencode_package_version": VERSION_CONTRACT.SUPPORTED_VERSION,
+                        "guest_opencode_executable_version": None,
+                        "guest_opencode_executable_observation": "not_run_by_read_only_inventory",
                         "guest_assets": {"protected": "verified"}}}),
                     (acceptance, "_parent_json", {"side_effect": parent_json}),
                     (acceptance, "_parent_ok", {"side_effect": lambda _root, *args, **_kwargs: (

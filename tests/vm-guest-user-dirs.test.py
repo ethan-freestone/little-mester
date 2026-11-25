@@ -21,6 +21,10 @@ HELPER_PATH = ROOT / "lib/vm/guest-user-dirs.py"
 SPEC = importlib.util.spec_from_file_location("guest_user_dirs", HELPER_PATH)
 guest_dirs = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guest_dirs)
+CONTRACT_SPEC = importlib.util.spec_from_file_location(
+    "guest_user_dirs_session_contract", ROOT / "lib/vm/parent-session-contract.py")
+CONTRACT = importlib.util.module_from_spec(CONTRACT_SPEC)
+CONTRACT_SPEC.loader.exec_module(CONTRACT)
 
 
 class GuestUserDirectoryTests(unittest.TestCase):
@@ -144,15 +148,17 @@ class GuestUserDirectoryTests(unittest.TestCase):
         self.assertFalse((self.home / ".local/share/opencode/auth.json").exists())
 
     @unittest.skipUnless(pathlib.Path("/usr/local/bin/opencode").is_file(),
-                         "pinned OpenCode executable is not installed")
+                         "supported OpenCode executable is not installed")
     def test_pinned_opencode_version_needs_prepared_default_state_chain(self):
         executable = pathlib.Path("/usr/local/bin/opencode")
         version = subprocess.run(
             [str(executable), "--version"], stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, check=False, timeout=8,
         )
-        if version.returncode != 0 or version.stdout.strip() != "opencode v2.2.5":
-            self.skipTest("installed OpenCode is not the pinned 2.2.5 runtime")
+        if (version.returncode != 0
+                or version.stdout.strip() != CONTRACT.EXPECTED_OPENCODE_EXECUTABLE_OUTPUT):
+            self.skipTest(
+                f"installed OpenCode is not the supported {CONTRACT.SUPPORTED_OPENCODE_VERSION} runtime")
 
         (self.home / ".local/share/opencode").mkdir(parents=True, mode=0o700)
         (self.home / ".local").chmod(0o700)
@@ -219,7 +225,7 @@ class GuestUserDirectoryTests(unittest.TestCase):
         self.assertTrue((self.home / ".local/state/opencode").is_dir())
         corrected = run_version()
         self.assertEqual(corrected.returncode, 0, corrected.stderr[:300])
-        self.assertEqual(corrected.stdout.strip(), "opencode v2.2.5")
+        self.assertEqual(corrected.stdout.strip(), CONTRACT.EXPECTED_OPENCODE_EXECUTABLE_OUTPUT)
 
     def test_proxy_configs_are_created_privately_without_following_existing_symlink(self):
         guest_dirs.prepare_rootless_config(self.home_fd, self.account.pw_uid, self.account.pw_gid)

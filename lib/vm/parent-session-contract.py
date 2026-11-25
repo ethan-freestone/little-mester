@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import json
 import pathlib
 import stat
@@ -32,6 +33,16 @@ exec /usr/bin/env -i HOME=/home/mester PATH=/usr/local/bin:/usr/bin:/bin TERM=${
 """
 DEFAULT_WORKSPACE = "/home/mester/workspace"
 SYSTEM_WORKSPACE = "/workspace"
+
+_VERSION_SPEC = importlib.util.spec_from_file_location(
+    "parent_contract_opencode_version", pathlib.Path(__file__).with_name("opencode-version.py"))
+if _VERSION_SPEC is None or _VERSION_SPEC.loader is None:
+    raise RuntimeError("supported OpenCode version policy is unavailable")
+_VERSION_POLICY = importlib.util.module_from_spec(_VERSION_SPEC)
+_VERSION_SPEC.loader.exec_module(_VERSION_POLICY)
+SUPPORTED_OPENCODE_VERSION = _VERSION_POLICY.SUPPORTED_VERSION
+EXPECTED_OPENCODE_EXECUTABLE_OUTPUT = _VERSION_POLICY.EXPECTED_EXECUTABLE_OUTPUT
+OPENCODE_PACKAGE_SPEC = _VERSION_POLICY.PACKAGE_SPEC
 
 
 def assets_for_workspace(workspace_path: str = DEFAULT_WORKSPACE) -> dict:
@@ -134,8 +145,8 @@ def readiness_checks(*, include_opencode: bool = True,
     if include_opencode:
         checks.extend([
             "if [ ! -x /usr/local/bin/opencode ]; then printf '%s\\n' 'KVM_M2_READINESS_FAIL check=opencode-executable path=/usr/local/bin/opencode'; exit 44; fi",
-            "opencode_version=$(/usr/local/bin/opencode --version 2>/dev/null) || { printf '%s\\n' 'KVM_M2_READINESS_FAIL check=opencode-version-command'; exit 44; }",
-            "if [ \"$opencode_version\" != 'opencode v2.2.5' ]; then printf '%s\\n' 'KVM_M2_READINESS_FAIL check=opencode-version expected=opencode-v2.2.5'; exit 44; fi",
+            f"opencode_version=$(/usr/local/bin/opencode --version 2>/dev/null) || {{ printf '%s\\n' 'KVM_M2_READINESS_FAIL check=opencode-version-command expected=opencode-v{SUPPORTED_OPENCODE_VERSION}'; exit 44; }}",
+            f"if [ \"$opencode_version\" != '{EXPECTED_OPENCODE_EXECUTABLE_OUTPUT}' ]; then opencode_version_safe=$(printf '%s' \"$opencode_version\" | tr -cd '[:alnum:].+ -' | cut -c1-80); printf 'KVM_M2_READINESS_FAIL check=opencode-version expected=opencode-v{SUPPORTED_OPENCODE_VERSION} observed=%s\\n' \"$opencode_version_safe\"; exit 44; fi",
         ])
     workspace_assets = assets_for_workspace(workspace_path)
     digests = {path: hashlib.sha256(content).hexdigest()

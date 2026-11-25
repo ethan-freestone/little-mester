@@ -29,6 +29,12 @@ if _CALLBACK_LISTENER_SPEC is None or _CALLBACK_LISTENER_SPEC.loader is None:
     raise RuntimeError("callback listener helper is unavailable")
 _CALLBACK_LISTENER = importlib.util.module_from_spec(_CALLBACK_LISTENER_SPEC)
 _CALLBACK_LISTENER_SPEC.loader.exec_module(_CALLBACK_LISTENER)
+_VERSION_SPEC = importlib.util.spec_from_file_location(
+    "browser_auth_opencode_version", pathlib.Path(__file__).with_name("opencode-version.py"))
+if _VERSION_SPEC is None or _VERSION_SPEC.loader is None:
+    raise RuntimeError("supported OpenCode version policy is unavailable")
+_VERSION_POLICY = importlib.util.module_from_spec(_VERSION_SPEC)
+_VERSION_SPEC.loader.exec_module(_VERSION_POLICY)
 
 MAX_AUTH_URL_LENGTH = 8192
 MAX_AUTH_OUTPUT_BYTES = 65536
@@ -102,7 +108,7 @@ def _single_value_query(raw_query: str) -> dict[str, str]:
 
 
 def validate_authorization_url(raw_url: str) -> int:
-    """Validate pinned OpenCode 2.2.5 OAuth shape and return its callback port."""
+    """Validate the supported OpenCode OAuth shape and return its callback port."""
     if not isinstance(raw_url, str) or not raw_url or len(raw_url) > MAX_AUTH_URL_LENGTH:
         raise AuthSessionError("authorization URL structure is invalid", 73)
     try:
@@ -137,7 +143,9 @@ def validate_authorization_url(raw_url: str) -> int:
             or query.get("id_token_add_organizations") != "true"
             or query.get("codex_cli_simplified_flow") != "true"
             or query.get("originator") != "opencode"):
-        raise AuthSessionError("authorization parameters do not match pinned OpenCode 2.2.5", 73)
+        raise AuthSessionError(
+            f"authorization parameters do not match supported OpenCode {_VERSION_POLICY.SUPPORTED_VERSION}",
+            73)
     if query.get("client_id") != PINNED_CLIENT_ID or not CLIENT_ID.fullmatch(query.get("client_id", "")):
         raise AuthSessionError("authorization client identifier is invalid", 73)
     if (
@@ -1009,7 +1017,10 @@ class BrowserAuthSession:
         clean = False
         try:
             self._optional_tty()
-            self._write_tty(b"Starting pinned OpenCode 2.2.5 ChatGPT browser authorization.\r\n")
+            auth_message = (
+                f"Starting supported OpenCode {_VERSION_POLICY.SUPPORTED_VERSION} "
+                "ChatGPT browser authorization.\r\n")
+            self._write_tty(auth_message.encode("ascii"))
             self._start_ssh()
             self._run_ui()
         except AuthSessionError as error:

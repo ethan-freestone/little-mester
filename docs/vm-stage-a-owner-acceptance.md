@@ -32,7 +32,7 @@
 | Settings | The protected launcher composes the theme into the pinned 2.2.5 CLI schema and passes the allowlisted model only through a separate root-protected server config; other config remains unavailable. | Which individual OpenCode settings UI writes were attempted by the owner. |
 | Metrics | The v3 guest loads a protected display plugin and reads the bounded host snapshot from a loopback-only sidecar over a fixed QEMU guest-forward; the legacy parent keeps its old plugin set. | Real GPU/sensor values and the pinned guest plugin behavior still need hosted-KVM/owner acceptance. |
 | Exit dialog | The plugin declares Esc/N cancellation and Y/Q confirmation in modal mode; pinned-binary CI now drives Esc, N, and Y in a real PTY. | The test has not run locally because pinned OpenCode 2.2.5 is not installed here. |
-| Version | Provisioning and readiness intentionally require `opencode v2.2.5`. | Whether a later pinned version is necessary; no version change is assumed. |
+| Version | Provisioning and readiness derive the supported package and exact executable output from `lib/vm/opencode-version.py`; package metadata and the executable's own version report remain distinct evidence. | Whether a later supported version is necessary; no version change is assumed. |
 | Install/update | Fresh install remains explicit and refuses existing state. The compatibility-gated code-only update snapshots protected host assets, serializes start/update, preserves disk, seed, keys, assignment and guest user data, never starts the VM, and has a matching rollback path. A separately authorized start performs the fixed compatibility gate before normal use. | These implementation paths still need exact-commit review and hosted production-systemd acceptance; neither owner VM has been inspected or operated. Guest mutation remains out of scope. |
 
 ## Workspace architecture decision
@@ -165,8 +165,9 @@ restart the currently running parent VM.
 - **TUI exit:** preserve the custom confirmation policy. Exercise Ctrl+C, Esc, N, Y, Q,
   prompt typing, repeated keys, tmux reconnect, and cancellation using the installed
   pinned binary and a PTY; static key-binding checks are not acceptance.
-- **Version:** retain OpenCode 2.2.5. Test the actual installed guest binary against
-  plugin APIs, settings behavior, auth workflow, and model selection before considering
+- **Version:** retain the centrally declared OpenCode 2.2.5. Test the actual
+  installed guest binary against plugin APIs, settings behavior, auth workflow,
+  and model selection before considering
   a separately reviewed pin change.
 - **Update/migration:** do not reimage or clone the existing disk. A code-only candidate
   update must refuse a running VM, stage and replace protected host code/unit assets from

@@ -738,7 +738,8 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
         raise AcceptanceError("all fixed production systemd units must already be loaded")
     # Validate the immutable installed runtime and protected disk identity without mutation.
     runtime = pathlib.Path("/usr/lib/little-mester-vm")
-    for name in ("system-vm.py", "guest-compatibility.py", "system-vm-workspace.py", "system-vm-metrics.py",
+    for name in ("system-vm.py", "guest-compatibility.py", "opencode-version.py",
+                 "system-vm-workspace.py", "system-vm-metrics.py",
                  "parent-metrics.py", "parent-metrics-collect.py", "guest-opencode-preferences.py",
                  "guest-bootstrap.py", "parent-qemu.py", "parent-provision.py",
                  "parent-session-contract.py", "guest-user-dirs.py", "proxy.py",

@@ -17,7 +17,6 @@ import shlex
 
 
 SYSTEM_WORKSPACE = "/workspace"
-OPENCODE_VERSION = "2.2.5"
 OPENCODE_PACKAGE_JSON = "/usr/local/lib/node_modules/@opencode/cli/package.json"
 MAX_ASSET_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 8192
@@ -35,6 +34,19 @@ def _contract_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _opencode_version_policy():
+    path = pathlib.Path(__file__).with_name("opencode-version.py")
+    spec = importlib.util.spec_from_file_location("guest_compat_opencode_version", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("supported OpenCode version policy is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+OPENCODE_VERSION = _opencode_version_policy().SUPPORTED_VERSION
 
 
 def expected_inventory(workspace_path: str = SYSTEM_WORKSPACE) -> dict[str, dict]:

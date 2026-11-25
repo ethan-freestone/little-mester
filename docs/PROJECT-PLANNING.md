@@ -85,20 +85,28 @@ create speculative tickets for every candidate capability.
 
 The current usability integration is PR #21, targeting `feat/vm-approach-3`.
 Finish the agreed implementation, independently review and test each child PR,
-get the child PRs through CI and merge them into #21, then pass combined #21 CI
-and automated acceptance. Perform real owner-host testing on Ariadne with actual
-OpenCode use, and merge #21 into `feat/vm-approach-3` after acceptance. Its scope
+get the child PRs through CI, and present each exact head for owner review.
+Merge a child into #21 only after explicit owner approval; then pass combined #21
+CI and automated acceptance. Perform real owner-host testing on Ariadne with
+actual OpenCode use, and merge #21 into `feat/vm-approach-3` only after acceptance
+and explicit owner approval. Its scope
 includes:
 
 - Independent persistent VM profiles and environments.
 - Shared immutable SHA-addressed runtime installations, inventory and pruning.
 - A simpler CLI and developer experience, host-metrics improvements, terminal
   interaction and settings fixes, and cross-distribution host support.
+- A maintainable OpenCode compatibility foundation: one supported-version
+  authority, identifiable version-sensitive integration seams, reproducible
+  supported guests, and explicit expected/package-reported/executable-reported
+  version validation. OpenCode 2.2.5 remains the supported version; no upgrade
+  or rollback mechanism is part of #21.
 
 After #21 is accepted and merged into `feat/vm-approach-3`, the owner will create
-a separate comprehensive cleanup PR from that branch and do the work inside the
-new VM. This remains Phase 1's in-VM development acid test; it is not part of
-#21. Retain the cleanup acceptance criteria already recorded on ticket #57.
+a separate comprehensive cleanup PR from that branch only after separately
+authorizing that workstream, and do the work inside the new VM. This remains
+Phase 1's in-VM development acid test; it is not part of #21 or this
+compatibility child. Retain the cleanup acceptance criteria already recorded on ticket #57.
 The cleanup should materially reduce unnecessary code and complexity, retire
 obsolete VM implementations and redundant infrastructure, consolidate logic,
 simplify tests without sacrificing meaningful coverage, and reconcile tickets.
@@ -111,34 +119,46 @@ counts for production code, tests and documentation, plus the agreed category
 breakdown, and name obsolete implementation paths removed. Do not set arbitrary
 line-count targets or trade away readability, security or correctness.
 
-Phase 1 completes only after that cleanup, sustained development inside the new
-VM, final acceptance and review; then the owner merges PR #17
-(`feat/vm-approach-3`) into `main`. The new VM becomes the everyday Little
-Mester development environment.
+The authorized work in this sequence stops after #21's combined acceptance and
+owner-approved merge into `feat/vm-approach-3`. Do not begin the separate cleanup
+PR or merge PR #17 (`feat/vm-approach-3`) into `main` without their separately
+authorized follow-on work and acceptance.
 
-### Phase 1.5 — Local inference and everyday VM maintenance
+### Phase 1.5 — Managed upgrades, rollback and everyday VM maintenance
 
 Profiles, multiple persistent environments, runtime pinning and the improved
 CLI have been brought forward into #21; do not duplicate them. The remaining
-focus is local inference through suitable backends (including llama.cpp or
-Ollama), model compatibility/configuration/selection, inference performance,
-GPU sharing across concurrent profiles, and sensible CPU/memory/GPU allocation.
-Also provide an explicit way to update a profile's pinned runtime while
-preserving compatible guest state, with safe rollback/recovery and a refined
-everyday maintenance experience. Develop this phase inside the new VM.
+work includes a generic supported upgrade process for Little Mester runtimes and
+managed guest software. Qualify an actual OpenCode upgrade from the currently
+supported 2.2.5 release, covering compatibility validation, configuration and
+persistent-data migrations, activation, failure recovery and rollback. Avoid a
+bespoke mechanism for each old/new version pair; investigate whether compatible
+OpenCode upgrades can be independent of Little Mester runtime upgrades. Initially
+it is acceptable to require a reviewed LM SHA containing the supported-version
+declaration. Example commands such as `./lab vm versions`, `./lab vm upgrade
+--check`, `./lab vm upgrade --opencode`, `./lab vm upgrade --runtime` and
+`./lab vm rollback` describe desired capabilities only; they are not settled CLI
+contracts.
 
-### Phase 2 — Disposable test VM orchestration
+This phase also retains the planned local-inference work (suitable backends such
+as llama.cpp or Ollama, model compatibility/configuration/selection, performance,
+GPU sharing across profiles, and sensible resource allocation) and a refined
+everyday maintenance experience. Develop the work inside the new VM.
+
+### Phase 2 — Disposable sibling VM orchestration
 
 Build controlled host-side provisioning, acceptance and cleanup for disposable
-candidate VMs, so testing changes cannot modify or endanger the persistent
-development VM. Provision from exact identifiable candidate revisions in
-independent temporary environments, with bounded resource allocation and
-concurrency, automated acceptance, structured results/logs/diagnostics,
-reliable cleanup, and isolation between candidates, persistent VMs and the
-host. Test VMs run as siblings of the development VM on the physical host, not
-through nested virtualization. Reuse Phase 1 profile/runtime infrastructure
-where appropriate. Phase 2 is host orchestration; agent-facing MCP access is
-Phase 3 work.
+candidate VMs, so compatibility qualification cannot modify or endanger the
+known-good development environment in which the coordinating LM instance runs.
+Provision from exact identifiable candidate revisions in independent temporary
+environments, with bounded resource allocation and concurrency, automated
+acceptance, structured results/logs/diagnostics, reliable cleanup, and isolation
+between candidates, persistent VMs and the host. In particular, test new
+OpenCode releases in disposable siblings rather than replacing the coordinator's
+own execution dependency. Test VMs run beside the development VM on the physical
+host, not through nested virtualization. Reuse Phase 1 profile/runtime
+infrastructure where appropriate. Phase 2 is host orchestration; agent-facing
+MCP access is Phase 3 work.
 
 ### Phase 3 — MCP bookshelf, project intelligence and developer workflows
 
@@ -152,8 +172,9 @@ workstreams, not a commitment to every named tool:
 
 - **3A — MCP and tooling bookshelf:** lightweight configuration, pinning,
   enabling and disabling of selected tools/servers, including project-specific
-  capabilities; do not build a bespoke framework where existing configuration
-  suffices.
+  capabilities and simple version management for appropriate managed MCP
+  servers, developer tools and other guest software; do not build a bespoke
+  framework where existing configuration suffices.
 - **3B — Test orchestration MCP:** narrowly expose approved Phase 2 requests,
   acceptance operations, results and cleanup. Do not expose unrestricted host
   shell, sudo, hypervisor access, or authority to replace the persistent runtime.
@@ -187,10 +208,15 @@ workstreams, not a commitment to every named tool:
 
 ### Phase 4 — Bounded autonomous development and self-correction
 
-Build on Phases 2 and 3 so Little Mester can implement a candidate, provision an
-isolated test environment, run relevant tests/acceptance, diagnose and correct
-failures, and repeat within explicit time, resource and retry budgets. Collect
-evidence and prepare a reviewed candidate for owner approval. Production
+Build on Phases 2 and 3 so Little Mester can take a task such as “create a branch
+and get the latest OpenCode release working”: discover upstream changes, identify
+incompatible assumptions, update implementation/tests, qualify the version in an
+isolated sibling environment, and prepare reviewed publication/merge handoffs.
+Bound the work with explicit time, resource and retry budgets. Following owner
+approval, use the trusted host-side lifecycle mechanism to activate the qualified
+upgrade, potentially including Little Mester itself. Preserve a recoverable
+known-good environment throughout; do not require an agent to remain operational
+while replacing the software on which its current execution depends. Production
 runtime updates, destructive operations and final merges remain owner-controlled.
 Phase 3 supplies tools and workflows; Phase 4 coordinates them into bounded
 engineering cycles.
