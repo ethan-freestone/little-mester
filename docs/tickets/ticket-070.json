@@ -8,7 +8,7 @@
   "title": "Repository-first VM CLI, pinned profile dispatch, and safe settings UX",
   "objective": "Part of integration ticket #66 and shares a contract with #67. Provide a simple public ./lab vm interface while preserving the separation between source checkout, immutable installed runtime SHA and persistent profile. Also fix the observed installer bytecode defect and make ordinary supported OpenCode settings usable without weakening enforced policy. The shared design baseline is docs/vm-usability-integration.md; profile CLI dispatch uses the fixed helper and pinned runtime while preserving the singleton and global preparation compatibility paths. The fixed #20 singleton is transitional and mutually exclusive with profiles; the original feat/vm-approach development VM remains concurrent and untouched.",
   "created_at": "2026-11-23T23:21:29.454Z",
-  "updated_at": "2026-11-24T13:04:53.097Z",
+  "updated_at": "2026-11-25T10:05:29.491Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -83,7 +83,8 @@
     "created": [
       "tests/vm-profile-cli.test.py",
       "tests/vm-systemd.test.py",
-      "tests/vm-host-dependencies.test.py"
+      "tests/vm-host-dependencies.test.py",
+      "tests/vm-opencode-preferences.test.py"
     ],
     "cases": [
       "Owner reports install generated lib/vm/__pycache__/code-update-transaction.cpython-314.pyc inside the pinned SHA tree; immutable verification refused the tree. Owner manually removed the generated file and startup succeeded. This is a known defect to fix at source, not a supported workaround.",
@@ -106,7 +107,9 @@
       "tests/vm-systemd.test.py::SystemdPolicyTests.test_fixed_installer_requires_exact_guard_dropin_sets",
       "tests/vm-systemd.test.py::SystemdPolicyTests.test_unassigned_workspace_installer_layout_requires_no_bind_dropin",
       "tests/vm-systemd.test.py::SystemdPolicyTests.test_assigned_workspace_installer_requires_exact_dropin_bytes_and_metadata",
-      "tests/vm-systemd.test.py::SystemdPolicyTests.test_installer_verifies_unassigned_workspace_unit_is_stopped_and_unbound"
+      "tests/vm-systemd.test.py::SystemdPolicyTests.test_installer_verifies_unassigned_workspace_unit_is_stopped_and_unbound",
+      "Settings show/set slice exact source 0c477ecd5b71f012c4231d1e5cde6420263e4101 (parent 91dadd6da3cae4784f8c0b5407c07bf97e6f3274): read-only show returns stored validated model/theme, unset state returns {} without file creation, round trips/partial updates preserve the other supported setting, bounded safe-relative metadata diagnostics, and malformed/duplicate/protected-key refusal preserve evidence. Local exact-SHA validation: python3 -B -I tests/vm-opencode-preferences.test.py 10 passed; tests/vm-profile-cli.test.py 23 passed; tests/vm-profile-control-core.test.py 25 passed; git diff HEAD^ HEAD --check passed.",
+      "Independent Sol Medium exact-SHA review of 0c477ecd5b71f012c4231d1e5cde6420263e4101: APPROVE, no actionable findings (review session ses_deddbd81affeWzA5iArr4dykHk). Scope is this local persisted-preference slice only; hosted/live persistence, helper/lifecycle integration, owner acceptance and #27 readiness are not established."
     ]
   },
   "models_used": []

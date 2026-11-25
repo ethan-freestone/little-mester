@@ -206,31 +206,62 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   case "${1:-}" in
     vm)
       shift
-      vm_operation="${1:-}"
-      [[ -n "$vm_operation" ]] || {
-        echo "Usage: ./lab vm {up [--dir PATH] [--unsafe-recurse] [--reassign]|down|status|ssh|auth|tui|verify|accept|prepare-dependencies} [OPTIONS]" >&2
+      vm_route="${1:-}"
+      if [[ "$vm_route" == "--profile" && "${3:-}" == "prepare-dependencies" ]] ||
+         [[ "$vm_route" == --profile=* && "${2:-}" == "prepare-dependencies" ]]; then
+        echo "--profile is not valid with ./lab vm prepare-dependencies" >&2
+        echo "Usage: ./lab vm prepare-dependencies [production|acceptance|system-install]" >&2
         exit 2
-      }
-      shift
-      if [[ "$vm_operation" == "prepare-dependencies" ]]; then
-        scope="${1:-production}"
-        [[ $# -eq 1 ]] || { echo "Usage: ./lab vm prepare-dependencies [production|acceptance|system-install]" >&2; exit 2; }
+      fi
+      if [[ "$vm_route" == "prepare-dependencies" ]]; then
+        shift
+        for arg in "$@"; do
+          case "$arg" in
+            --profile|--profile=*)
+              echo "--profile is not valid with ./lab vm prepare-dependencies" >&2
+              echo "Usage: ./lab vm prepare-dependencies [production|acceptance|system-install]" >&2
+              exit 2
+              ;;
+          esac
+        done
+        [[ $# -le 1 ]] || { echo "Usage: ./lab vm prepare-dependencies [production|acceptance|system-install]" >&2; exit 2; }
+        scope=production
+        [[ $# -eq 0 ]] || scope="$1"
+        case "$scope" in
+          production|acceptance|system-install) ;;
+          *) echo "Usage: ./lab vm prepare-dependencies [production|acceptance|system-install]" >&2; exit 2 ;;
+        esac
         exec "$LAB_DIR/tools/vm-owner-acceptance" --prepare-dependencies "$scope"
       fi
-      case "$vm_operation" in
-        up|down|status|ssh|auth|tui|verify|accept) ;;
-        *) echo "Unknown VM operation: $vm_operation" >&2; exit 2 ;;
-      esac
-      case "$vm_operation" in
-        up|ssh|auth|tui|accept)
-          dependency_scope=production
-          [[ "$vm_operation" != "accept" ]] || dependency_scope=acceptance
-          "$LAB_DIR/tools/vm-owner-acceptance" --prepare-dependencies "$dependency_scope"
-          ;;
-      esac
-      vm_sha="$(/usr/bin/git -C "$LAB_DIR" rev-parse --verify HEAD)" || die "cannot resolve the pinned VM candidate commit"
-      exec "$LAB_DIR/tools/vm-owner-acceptance" --system-vm "$vm_operation" \
-        --sha "$vm_sha" --repo "$LAB_DIR" "$@"
+      if [[ "$vm_route" == "system" ]]; then
+        shift
+        vm_operation="${1:-}"
+        [[ -n "$vm_operation" ]] || {
+          echo "Usage: ./lab vm system up|down|status|ssh|auth|tui|verify|accept" >&2
+          exit 2
+        }
+        shift
+        for arg in "$@"; do
+          case "$arg" in
+            --profile|--profile=*) die "--profile is not valid with the fixed ./lab vm system route" ;;
+          esac
+        done
+        case "$vm_operation" in
+          up|down|status|ssh|auth|tui|verify|accept) ;;
+          *) echo "Unknown fixed system VM operation: $vm_operation" >&2; exit 2 ;;
+        esac
+        case "$vm_operation" in
+          up|ssh|auth|tui|accept)
+            dependency_scope=production
+            [[ "$vm_operation" != "accept" ]] || dependency_scope=acceptance
+            "$LAB_DIR/tools/vm-owner-acceptance" --prepare-dependencies "$dependency_scope"
+            ;;
+        esac
+        vm_sha="$(/usr/bin/git -C "$LAB_DIR" rev-parse --verify HEAD)" || die "cannot resolve the pinned VM candidate commit"
+        exec "$LAB_DIR/tools/vm-owner-acceptance" --system-vm "$vm_operation" \
+          --sha "$vm_sha" --repo "$LAB_DIR" "$@"
+      fi
+      exec /usr/bin/python3 -I "$LAB_DIR/tools/vm-profile-cli" "$@"
       ;;
     setup)
       command -v pacman >/dev/null || die "automated setup is Arch/CachyOS only; see docs/01-host-setup.md"
@@ -465,7 +496,11 @@ HELPTEXT
       echo "  ./lab [flags] shell <path-to-workspace>"
       echo "  ./lab exec <path-to-workspace> '<command>'"
       echo "  ./lab setup | build | pull | stop | bench [--json] [-n N]"
-      echo "  ./lab vm {up|down|status|ssh|auth|tui|verify|accept|prepare-dependencies}"
+      echo "  ./lab vm [--profile NAME] install|up|status|ssh|auth|tui|down|verify|accept|settings|reset|remove"
+      echo "  ./lab vm profiles list|show NAME | installations | prune [--dry-run]"
+      echo "  ./lab vm bootstrap [--recover] | control update [--recover]"
+      echo "  ./lab vm system up|down|status|ssh|auth|tui|verify|accept"
+      echo "  ./lab vm prepare-dependencies [production|acceptance|system-install]"
       echo "  ./lab restart-llama [--cache] | tune [--analyse] | ai-analyze [OPTIONS]"
       echo
       echo "Flags (before path):"

@@ -51,6 +51,7 @@ _FIXED_GUARD_PATHS = {
     for unit in SYSTEM_UNITS
 }
 _WORKSPACE_DROPIN_PATH = "/etc/systemd/system/little-mester-vm-workspace.service.d/20-workspace.conf"
+_WORKSPACE_ASSIGNMENT_PATH = "/etc/little-mester-vm/workspace.json"
 CONFIG = pathlib.Path("/etc/little-mester-vm")
 DISK = "/var/lib/little-mester-vm/disk.qcow2"
 GUEST_PERSISTENCE_STATE = "/home/mester/.local/state"
@@ -666,6 +667,57 @@ def render_workspace_unit_template(payload: bytes, *, owner: str, owner_group: s
     return payload
 
 
+def _workspace_assignment_for_verify(workspace_policy):
+    """Return the verified owner assignment, or None for a pristine install."""
+    try:
+        os.lstat(workspace_policy.ASSIGNMENT)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise AcceptanceError("workspace assignment metadata is unavailable") from error
+    try:
+        return workspace_policy.read_assignment(
+            workspace_policy.ASSIGNMENT, uid=os.getuid())
+    except Exception as error:
+        raise AcceptanceError("workspace assignment is present but invalid") from error
+
+
+def _exact_dropin_paths(observed: str, expected: set[str]) -> bool:
+    paths = observed.split()
+    return len(paths) == len(expected) and len(set(paths)) == len(paths) and set(paths) == expected
+
+
+def _workspace_dropin_matches(workspace_policy, assignment) -> bool:
+    """Check the assignment-bound 20 drop-in, or its exact absence when unassigned."""
+    dropin = pathlib.Path(_WORKSPACE_DROPIN_PATH)
+    if assignment is None:
+        try:
+            os.lstat(dropin)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
+    try:
+        info = os.lstat(dropin)
+        return (stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+                and info.st_uid == 0 and info.st_gid == 0
+                and stat.S_IMODE(info.st_mode) == 0o644 and info.st_nlink == 1
+                and dropin.read_bytes()
+                == workspace_policy._systemd_bind_path(assignment.path).encode("utf-8"))
+    except OSError:
+        return False
+
+
+def _require_live_workspace_assignment() -> None:
+    try:
+        os.lstat(_WORKSPACE_ASSIGNMENT_PATH)
+    except FileNotFoundError as error:
+        raise AcceptanceError("live owner acceptance requires an assigned workspace") from error
+    except OSError as error:
+        raise AcceptanceError("live owner acceptance cannot inspect the workspace assignment") from error
+
+
 def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str, str]]:
     """Read-only verification: never starts, stops, installs, or repairs anything."""
     manager = run(["/usr/bin/systemctl", "show", "--property=Version", "--value"], timeout=5)
@@ -757,7 +809,7 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
     workspace_policy = importlib.util.module_from_spec(workspace_spec)
     sys.modules[workspace_spec.name] = workspace_policy
     workspace_spec.loader.exec_module(workspace_policy)
-    assignment = workspace_policy.read_assignment(workspace_policy.ASSIGNMENT, uid=os.getuid())
+    assignment = _workspace_assignment_for_verify(workspace_policy)
     properties = {}
     property_errors = {}
     for unit in SYSTEM_UNITS:
@@ -799,7 +851,7 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
               "locked-service"]
     expected_qemu_command = [*helper, "qemu"]
     expected_proxy = [*helper, "proxy"]
-    owner_account = pwd.getpwuid(assignment.uid)
+    owner_account = pwd.getpwuid(assignment.uid if assignment is not None else os.getuid())
     owner_name = owner_account.pw_name
     expected_workspace = [*helper, "workspace", f"--owner={owner_name}"]
     expected_metrics = [*helper, "metrics"]
@@ -825,7 +877,7 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
     }
     expected_metrics_commands = {"ExecStart": expected_metrics, "ExecStartPre": (guard_command,)}
 
-    expected_dropins = {
+    guard_dropins = {
         UNIT: "/etc/systemd/system/little-mester-vm.service.d/90-code-update-guard.conf",
         PROXY_UNIT: "/etc/systemd/system/little-mester-vm-proxy.service.d/90-code-update-guard.conf",
         WORKSPACE_UNIT: "/etc/systemd/system/little-mester-vm-workspace.service.d/90-code-update-guard.conf",
@@ -858,15 +910,12 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
         compare(unit, "FragmentPath", "fixed fragment path",
                 unit_values.get("FragmentPath", ""),
                 unit_values.get("FragmentPath") == _FIXED_FRAGMENT_PATHS[unit])
-        if unit == WORKSPACE_UNIT:
-            expected_workspace_dropins = {workspace_dropin, expected_dropins[unit]}
-            compare(unit, "DropInPaths", "exact assignment and guard drop-ins",
-                    unit_values.get("DropInPaths", ""),
-                    set(unit_values.get("DropInPaths", "").split()) == expected_workspace_dropins)
-        else:
-            compare(unit, "DropInPaths", "contains fixed guard drop-in",
-                    unit_values.get("DropInPaths", ""),
-                    expected_dropins[unit] in unit_values.get("DropInPaths", "").split())
+        unit_dropins = {guard_dropins[unit]}
+        if unit == WORKSPACE_UNIT and assignment is not None:
+            unit_dropins.add(workspace_dropin)
+        compare(unit, "DropInPaths", "exact baseline drop-in set",
+                unit_values.get("DropInPaths", ""),
+                _exact_dropin_paths(unit_values.get("DropInPaths", ""), unit_dropins))
         compare(unit, "Conditions", "effective negated maintenance-marker condition",
                 condition_states[unit], condition_states[unit] == "present")
         compare(unit, "NeedDaemonReload", "no", unit_values.get("NeedDaemonReload", ""),
@@ -918,6 +967,13 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
             compare(PROXY_UNIT, name, "empty or -", observed, observed in ("", "-"))
 
     if WORKSPACE_UNIT in unit_properties:
+        if assignment is None:
+            workspace_state = next((item for unit_name, item in zip(SYSTEM_UNITS, states)
+                                    if unit_name == WORKSPACE_UNIT), {})
+            compare(WORKSPACE_UNIT, "ActiveState", "inactive with no workspace assignment",
+                    workspace_state.get("ActiveState", ""),
+                    workspace_state.get("ActiveState") == "inactive"
+                    and workspace_state.get("MainPID", "0") == "0")
         workspace_group = grp.getgrgid(owner_account.pw_gid).gr_name
         workspace_checks = (
             ("User", owner_name, workspace_properties.get("User", "") == owner_name),
@@ -938,10 +994,14 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
             compare(WORKSPACE_UNIT, property_name, expected,
                     workspace_properties.get(property_name, ""), matches)
         bind_value = workspace_properties.get("BindPaths", "")
-        bind_matches = workspace_policy.effective_bind_paths_match(
-            bind_value, assignment.path, workspace_policy.SHARE_DIR)
-        compare(WORKSPACE_UNIT, "BindPaths", "assigned source to fixed share (rbind)",
-                bind_value, bind_matches)
+        if assignment is None:
+            bind_matches = bind_value in ("", "-")
+            expected_bind = "no workspace bind without assignment"
+        else:
+            bind_matches = workspace_policy.effective_bind_paths_match(
+                bind_value, assignment.path, workspace_policy.SHARE_DIR)
+            expected_bind = "assigned source to fixed share (rbind)"
+        compare(WORKSPACE_UNIT, "BindPaths", expected_bind, bind_value, bind_matches)
 
     if METRICS_UNIT in unit_properties:
         for name, expected in (("User", "lm-vm"), ("Group", "lm-vm"),
@@ -951,19 +1011,10 @@ def verify(root: pathlib.Path, progress=None) -> tuple[dict[str, str], dict[str,
             observed = metrics_properties.get(name, "")
             compare(METRICS_UNIT, name, expected, observed, observed == expected)
 
-    dropin = pathlib.Path(workspace_dropin)
-    try:
-        dropin_info = os.lstat(dropin)
-        dropin_matches = (stat.S_ISREG(dropin_info.st_mode) and not stat.S_ISLNK(dropin_info.st_mode)
-                          and dropin_info.st_uid == 0 and stat.S_IMODE(dropin_info.st_mode) == 0o644
-                          and dropin_info.st_nlink == 1
-                          and dropin.read_bytes()
-                          == workspace_policy._systemd_bind_path(assignment.path).encode("utf-8"))
-    except OSError:
-        dropin_matches = False
+    dropin_matches = _workspace_dropin_matches(workspace_policy, assignment)
     if not dropin_matches:
-        compare(WORKSPACE_UNIT, "BindPaths", "exact protected assignment drop-in",
-                "unavailable or differs from assigned bind", False)
+        compare(WORKSPACE_UNIT, "DropInPaths", "workspace drop-in matches assignment or is absent",
+                "unavailable, unowned, or inconsistent", False)
 
     if mismatches:
         raise AcceptanceError(
@@ -1231,6 +1282,7 @@ def _require_normal_stop(timeout: int = 30) -> None:
 def accept(root: pathlib.Path, progress=None) -> int:
     timer = StageTimer()
     initial_vm, initial_proxy = verify(root, progress=progress)
+    _require_live_workspace_assignment()
     vm_running = _initial_running_state(initial_vm, initial_proxy)
     sys.dont_write_bytecode = True
     _lifecycle_preflight(root)

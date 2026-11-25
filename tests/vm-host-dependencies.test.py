@@ -5,9 +5,13 @@ from __future__ import annotations
 
 import importlib.util
 import importlib.machinery
+import json
+import os
 import pathlib
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -26,6 +30,40 @@ OWNER_SPEC.loader.exec_module(owner_cli)
 
 
 class HostDependencyTests(unittest.TestCase):
+    @staticmethod
+    def _make_lab_dispatch_fixture(directory):
+        fixture = pathlib.Path(directory)
+        lab = fixture / "lab"
+        shutil.copy2(ROOT / "lab", lab)
+        tools = fixture / "tools"
+        tools.mkdir()
+        # Copy only the executable under test: never include .little-mester.conf.
+        dispatcher = tools / "vm-owner-acceptance"
+        dispatcher.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "with open(os.environ['VM_DISPATCH_RECORD'], 'a', encoding='utf-8') as record:\n"
+            "    record.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "raise SystemExit(int(os.environ.get('VM_DISPATCH_STATUS', '0')))\n",
+            encoding="utf-8",
+        )
+        dispatcher.chmod(0o755)
+        return lab, fixture / "dispatch-record.jsonl"
+
+    @staticmethod
+    def _run_lab(lab, record, *arguments, dispatcher_status=0):
+        environment = os.environ.copy()
+        environment["VM_DISPATCH_RECORD"] = str(record)
+        environment["VM_DISPATCH_STATUS"] = str(dispatcher_status)
+        return subprocess.run([str(lab), *arguments], env=environment, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+
+    @staticmethod
+    def _recorded_dispatches(record):
+        if not record.exists():
+            return []
+        return [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()]
+
     def test_kvm_capability_does_not_depend_on_sg_invokers_group_list(self):
         requirement = dependencies.Requirement("KVM", capability="kvm")
         device = type("Device", (), {
@@ -153,16 +191,26 @@ class HostDependencyTests(unittest.TestCase):
 
     def test_only_validated_distribution_ids_select_backends(self):
         for distro, path, expected in (("ubuntu", dependencies.APT, "apt"),
+                                       ("debian", dependencies.APT, "apt"),
                                        ("cachyos", dependencies.PACMAN, "pacman"),
                                        ("arch", dependencies.PACMAN, "pacman")):
             with self.subTest(distro=distro), \
                  mock.patch.object(dependencies, "_os_release", return_value={"ID": distro}), \
                  mock.patch.object(dependencies, "_executable", side_effect=lambda p, selected=path: p == selected):
                 self.assertEqual(dependencies.detect_backend(), expected)
-        with mock.patch.object(dependencies, "_os_release", return_value={"ID": "debian", "ID_LIKE": "ubuntu"}), \
+        with mock.patch.object(dependencies, "_os_release", return_value={"ID": "linuxmint", "ID_LIKE": "ubuntu"}), \
              mock.patch.object(dependencies, "_executable", side_effect=lambda p: p == dependencies.APT), \
              self.assertRaisesRegex(dependencies.DependencyError, "not in the validated package mapping"):
             dependencies.detect_backend()
+
+    def test_debian_uses_the_explicit_apt_package_map(self):
+        with mock.patch.object(dependencies, "_os_release", return_value={"ID": "debian"}), \
+             mock.patch.object(dependencies, "_executable", side_effect=lambda p: p == dependencies.APT):
+            self.assertEqual(dependencies.detect_backend(), "apt")
+        package_list = dependencies.package_names("apt", "production")
+        self.assertIn("qemu-system-x86", package_list)
+        self.assertIn("virtiofsd", package_list)
+        self.assertEqual(package_list, dependencies.package_names("apt", "production"))
 
     def test_decline_stops_before_privileged_transaction(self):
         absent = [dependencies.Requirement("curl", "/usr/bin/curl", packages=(("apt", "curl"),))]
@@ -328,14 +376,47 @@ class HostDependencyTests(unittest.TestCase):
         self.assertIn("--approve-system-vm-lifecycle", source)
         self.assertIn("--prepare-dependencies", source)
 
-    def test_vm_dispatcher_is_thin_and_preserves_docker_commands(self):
-        source = (ROOT / "lab").read_text()
-        self.assertIn('vm)', source)
-        self.assertIn('dependency_scope=production', source)
-        self.assertIn('dependency_scope=acceptance', source)
-        self.assertIn('exec "$LAB_DIR/tools/vm-owner-acceptance" --system-vm', source)
-        self.assertIn('setup)', source)
-        self.assertIn('dc --profile setup', source)
+    def test_vm_prepare_dependencies_routes_default_and_supported_scopes(self):
+        with tempfile.TemporaryDirectory(prefix="vm-host-dependencies-lab-") as temporary:
+            lab, record = self._make_lab_dispatch_fixture(temporary)
+            expected = []
+            for arguments, scope in ((["vm", "prepare-dependencies"], "production"),
+                                     (["vm", "prepare-dependencies", "production"], "production"),
+                                     (["vm", "prepare-dependencies", "acceptance"], "acceptance"),
+                                     (["vm", "prepare-dependencies", "system-install"], "system-install")):
+                with self.subTest(arguments=arguments):
+                    completed = self._run_lab(lab, record, *arguments)
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    expected.append(["--prepare-dependencies", scope])
+                    self.assertEqual(self._recorded_dispatches(record), expected)
+
+    def test_vm_prepare_dependencies_rejects_bad_arguments_and_profile_routes(self):
+        with tempfile.TemporaryDirectory(prefix="vm-host-dependencies-lab-") as temporary:
+            lab, record = self._make_lab_dispatch_fixture(temporary)
+            invalid_routes = (
+                ("vm", "prepare-dependencies", "unknown"),
+                ("vm", "prepare-dependencies", ""),
+                ("vm", "prepare-dependencies", "production", "extra"),
+                ("vm", "prepare-dependencies", "--profile", "named"),
+                ("vm", "prepare-dependencies", "--profile=named"),
+                ("vm", "prepare-dependencies", "acceptance", "--profile", "named"),
+                ("vm", "prepare-dependencies", "acceptance", "--profile=named"),
+                ("vm", "--profile", "named", "prepare-dependencies"),
+                ("vm", "--profile=named", "prepare-dependencies"),
+            )
+            for arguments in invalid_routes:
+                with self.subTest(arguments=arguments):
+                    completed = self._run_lab(lab, record, *arguments)
+                    self.assertEqual(completed.returncode, 2, completed.stderr)
+                    self.assertEqual(self._recorded_dispatches(record), [])
+
+    def test_vm_prepare_dependencies_preserves_dispatcher_status(self):
+        with tempfile.TemporaryDirectory(prefix="vm-host-dependencies-lab-") as temporary:
+            lab, record = self._make_lab_dispatch_fixture(temporary)
+            completed = self._run_lab(lab, record, "vm", "prepare-dependencies",
+                                      dispatcher_status=37)
+            self.assertEqual(completed.returncode, 37, completed.stderr)
+            self.assertEqual(self._recorded_dispatches(record), [["--prepare-dependencies", "production"]])
 
     def test_standalone_dependency_preparation_needs_no_candidate_sha(self):
         args = owner_cli.parser().parse_args(["--prepare-dependencies", "production"])

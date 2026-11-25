@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     # TEMP: #66 stacked-PR base branches; remove feature bases after the child stacks merge.
-    branches: [main, feat/vm-approach-3, feat/vm-useability-tweaks, feat/vm-metrics-availability, feat/vm-cli-settings]
+    branches: [main, feat/vm-approach-3, feat/vm-useability-tweaks, feat/vm-metrics-availability, feat/vm-profiles, feat/vm-cli-settings]
     types: [opened, synchronize, reopened]
 
 permissions:
@@ -94,6 +94,7 @@ jobs:
           python3 tests/vm-profile-runtime-install.test.py
           python3 tests/vm-profile-control-owner.test.py
           python3 tests/vm-systemd.test.py
+          python3 tests/vm-profile-cli.test.py
           python3 tests/vm-system-workspace.test.py
           python3 tests/vm-system-metrics.test.py
           python3 tests/vm-opencode-preferences.test.py

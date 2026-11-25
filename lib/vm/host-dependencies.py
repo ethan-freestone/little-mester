@@ -195,10 +195,10 @@ def detect_backend() -> str:
         if _executable(PACMAN):
             return "pacman"
         raise DependencyError(f"{distro} requires the supported pacman backend at {PACMAN}, which is unavailable")
-    if distro == "ubuntu":
+    if distro in {"ubuntu", "debian"}:
         if _executable(APT):
             return "apt"
-        raise DependencyError(f"Ubuntu requires the supported apt backend at {APT}, which is unavailable")
+        raise DependencyError(f"{distro} requires the supported apt backend at {APT}, which is unavailable")
     present = [name for name, path in (("apt", APT), ("pacman", PACMAN)) if _executable(path)]
     if len(present) == 1:
         # Package-manager presence alone does not establish compatible package
@@ -206,7 +206,7 @@ def detect_backend() -> str:
         raise DependencyError(f"{present[0]} is present, but this Linux distribution is not in the validated package mapping")
     if present:
         raise DependencyError("multiple supported package managers are present but the distribution family is ambiguous")
-    raise DependencyError("no supported package manager found (validated mappings: Ubuntu/apt and Arch or CachyOS/pacman)")
+    raise DependencyError("no supported package manager found (validated mappings: Ubuntu or Debian/apt and Arch or CachyOS/pacman)")
 
 
 def missing(scope: str) -> tuple[list[Requirement], list[str]]:
