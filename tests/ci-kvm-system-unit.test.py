@@ -605,6 +605,26 @@ class HostedSystemUnitTests(unittest.TestCase):
         self.assertIn("invoke_shared_acceptance(sha)", source)
         self.assertNotIn('invoke_lab(installed_root, "up", 16 * 60 + 45)', source)
 
+    def test_pinned_tree_inventory_reuses_the_strict_verifier_after_provision_and_startup(self):
+        source = SCRIPT.read_text()
+        provision = source.index('verify_pinned_tree_inventory(sha, phase="after-provision")')
+        acceptance = source.index("invoke_shared_acceptance(sha)", provision)
+        startup = source.index("verify_workspace_startup_post()", acceptance)
+        post_startup = source.index('verify_pinned_tree_inventory(sha, phase="after-startup")', startup)
+        self.assertLess(provision, acceptance)
+        self.assertLess(acceptance, startup)
+        self.assertLess(startup, post_startup)
+        self.assertIn("OWNER_ACCEPTANCE_MODULE.verify_install(REPO, sha, CI_INSTALL_PREFIX)", source)
+        self.assertNotIn("__pycache__", source)
+        for phase in ("after-provision", "after-startup"):
+            sha = "a" * 40
+            expected_root = unit.CI_INSTALL_PARENT / sha
+            with self.subTest(phase=phase), \
+                    mock.patch.object(unit.OWNER_ACCEPTANCE_MODULE, "verify_install",
+                                      return_value=expected_root) as verify:
+                unit.verify_pinned_tree_inventory(sha, phase=phase)
+            verify.assert_called_once_with(unit.REPO, sha, unit.CI_INSTALL_PREFIX)
+
     def test_hosted_acceptance_has_no_getunit_diagnostic_only_route(self):
         sha = "a" * 40
         with mock.patch.object(unit, "run") as run:

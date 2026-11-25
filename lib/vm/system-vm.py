@@ -34,6 +34,8 @@ import subprocess
 import sys
 import time
 
+sys.dont_write_bytecode = True
+
 
 SERVICE_USER = "lm-vm"
 PROXY_USER = "lm-vm-proxy"

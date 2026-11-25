@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import grp
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -31,6 +32,15 @@ if _WORKSPACE_MODULE_SPEC is None or _WORKSPACE_MODULE_SPEC.loader is None:
 WORKSPACE_MODULE = importlib.util.module_from_spec(_WORKSPACE_MODULE_SPEC)
 sys.modules[_WORKSPACE_MODULE_SPEC.name] = WORKSPACE_MODULE
 _WORKSPACE_MODULE_SPEC.loader.exec_module(WORKSPACE_MODULE)
+_OWNER_ACCEPTANCE_LOADER = importlib.machinery.SourceFileLoader(
+    "ci_vm_owner_acceptance", str(REPO / "tools/vm-owner-acceptance"))
+_OWNER_ACCEPTANCE_SPEC = importlib.util.spec_from_loader(
+    _OWNER_ACCEPTANCE_LOADER.name, _OWNER_ACCEPTANCE_LOADER)
+if _OWNER_ACCEPTANCE_SPEC is None or _OWNER_ACCEPTANCE_SPEC.loader is None:
+    raise RuntimeError("could not load the exact pinned-runtime inventory verifier")
+OWNER_ACCEPTANCE_MODULE = importlib.util.module_from_spec(_OWNER_ACCEPTANCE_SPEC)
+sys.modules[_OWNER_ACCEPTANCE_SPEC.name] = OWNER_ACCEPTANCE_MODULE
+_OWNER_ACCEPTANCE_SPEC.loader.exec_module(OWNER_ACCEPTANCE_MODULE)
 CI_INSTALL_PREFIX = pathlib.Path("/srv/little-mester-ci")
 CI_INSTALL_PARENT = CI_INSTALL_PREFIX / "v3"
 UNIT = "little-mester-vm.service"
@@ -2534,6 +2544,17 @@ def verify_installed_files() -> None:
     print("production_unit_install=PASS pinned_bytes=true sudoers=PASS")
 
 
+def verify_pinned_tree_inventory(sha: str, *, phase: str) -> None:
+    """Re-run the strict, read-only owner verifier on the complete pinned tree."""
+    require(phase in ("after-provision", "after-startup"),
+            "pinned runtime inventory phase is invalid")
+    root = OWNER_ACCEPTANCE_MODULE.verify_install(REPO, sha, CI_INSTALL_PREFIX)
+    expected_root = CI_INSTALL_PARENT / sha
+    require(root == expected_root,
+            "pinned runtime inventory verifier selected an unexpected install root")
+    print(f"production_pinned_tree_inventory=PASS phase={phase} sha={sha}")
+
+
 def production_host_preflight() -> None:
     """Require the system manager and noninteractive sudo before any install."""
     systemctl = "/usr/bin/systemctl"
@@ -3046,6 +3067,7 @@ def main() -> int:
         with _timed_ci_stage("fresh_provisioning"):
             run(["/usr/bin/sudo", "-n", str(installed_root / "tools/vm-system-install")], timeout=300)
         verify_installed_files()
+        verify_pinned_tree_inventory(sha, phase="after-provision")
         require_fixed_units_loaded()
         unit_identity_checks()
         workspace_path = disposable_workspace_path()
@@ -3062,6 +3084,7 @@ def main() -> int:
         escape_evidence = create_escape_sentinel(workspace_path)
         invoke_shared_acceptance(sha)
         verify_workspace_startup_post()
+        verify_pinned_tree_inventory(sha, phase="after-startup")
         verify_guest_cannot_read_escape()
         with _timed_ci_stage("forced_stop_recovery"):
             force_systemd_fallback(installed_root)

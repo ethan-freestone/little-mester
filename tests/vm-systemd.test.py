@@ -20,6 +20,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import textwrap
@@ -143,6 +144,52 @@ class SystemdPolicyTests(unittest.TestCase):
             self.assertEqual(system_installer.main(), 0)
         rollback.assert_called_once_with(root, "owner", "a" * 40)
         update.assert_not_called()
+
+    def test_installer_and_runtime_dynamic_imports_do_not_write_bytecode_without_b(self):
+        probe = textwrap.dedent("""\
+            import pathlib
+            import sys
+
+            if sys.dont_write_bytecode:
+                raise SystemExit("probe unexpectedly started with bytecode disabled")
+            source = pathlib.Path(sys.argv[1])
+            root = pathlib.Path(sys.argv[2])
+            operation = sys.argv[3]
+            namespace = {"__file__": str(source), "__name__": "bytecode_probe"}
+            exec(compile(source.read_bytes(), str(source), "exec"), namespace)
+            if operation == "installer":
+                namespace["_code_update_transaction"](root)
+            else:
+                namespace["_guest_compatibility_module"]()
+            if not sys.dont_write_bytecode:
+                raise SystemExit("entrypoint did not suppress bytecode before dynamic imports")
+            print("BYTECODE_SUPPRESSION=PASS")
+        """)
+        cases = (
+            ("installer", "tools/vm-system-install", "lib/vm/code-update-transaction.py"),
+            ("runtime", "lib/vm/system-vm.py", "lib/vm/guest-compatibility.py"),
+        )
+        with tempfile.TemporaryDirectory(prefix="vm-bytecode-entrypoint-") as temporary:
+            base = pathlib.Path(temporary)
+            for operation, source_relative, helper_relative in cases:
+                with self.subTest(operation=operation):
+                    root = base / operation
+                    source = root / source_relative
+                    helper = root / helper_relative
+                    source.parent.mkdir(parents=True)
+                    helper.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(ROOT / source_relative, source)
+                    shutil.copyfile(ROOT / helper_relative, helper)
+                    command = [sys.executable, "-I", "-c", probe,
+                               str(source), str(root), operation]
+                    self.assertNotIn("-B", command)
+                    result = subprocess.run(command, stdin=subprocess.DEVNULL,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            text=True, timeout=20, check=False)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), "BYTECODE_SUPPRESSION=PASS")
+                    self.assertEqual(list(root.rglob("__pycache__")), [])
+                    self.assertEqual(list(root.rglob("*.pyc")), [])
 
     def test_workspace_unit_owner_is_substituted_into_launcher_and_user(self):
         relative = "systemd/little-mester-vm-workspace.service"
