@@ -23,6 +23,8 @@ PREFERENCE_KEYS = frozenset({"model", "theme"})
 PREFERENCE_PATH = pathlib.Path("/home/mester/.local/state/opencode/preferences.json")
 PROTECTED_PLUGIN = "/etc/opencode/plugins/little-mester-exit-confirm"
 PROTECTED_METRICS_PLUGIN = "/etc/opencode/plugins/little-mester-host-metrics-tui"
+PREFERENCE_LABEL = "preferences.json"
+MAX_PREFERENCE_BYTES = 4096
 
 
 def _pairs(pairs):
@@ -71,22 +73,70 @@ def build_cli_config(preferences: dict[str, str], *, host_metrics: bool = False)
     return config
 
 
+def _metadata_value(value: int, *, maximum: int) -> str:
+    if type(value) is not int or value < 0:
+        return "other"
+    return str(value) if value <= maximum else "other"
+
+
+def _metadata_type(mode: int) -> str:
+    if stat.S_ISREG(mode):
+        return "regular"
+    if stat.S_ISDIR(mode):
+        return "directory"
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    return "other"
+
+
+def _metadata_refusal(info: os.stat_result, *, uid: int, parent: bool = False) -> Refused:
+    label = f"{PREFERENCE_LABEL} parent" if parent else PREFERENCE_LABEL
+    observed = (f"owner={_metadata_value(info.st_uid, maximum=4294967295)} "
+                f"type={_metadata_type(info.st_mode)} "
+                f"mode={stat.S_IMODE(info.st_mode):04o}")
+    if not parent:
+        links = "1" if info.st_nlink == 1 else ("0" if info.st_nlink <= 0 else ">1")
+        size = (str(info.st_size) if 0 <= info.st_size <= MAX_PREFERENCE_BYTES
+                else f">{MAX_PREFERENCE_BYTES}")
+        observed += f" links={links} size={size}"
+        expected = (f"owner={_metadata_value(uid, maximum=4294967295)} "
+                    f"type=regular mode=0600 links=1 size<={MAX_PREFERENCE_BYTES}")
+    else:
+        expected = (f"owner={_metadata_value(uid, maximum=4294967295)} "
+                    "type=directory mode=not-group/world-writable")
+    return Refused(f"{label} metadata unsafe: expected {expected}; observed {observed}")
+
+
+def _check_parent_metadata(info: os.stat_result, *, uid: int) -> None:
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+        raise _metadata_refusal(info, uid=uid, parent=True)
+
+
+def _check_file_metadata(info: os.stat_result, *, uid: int) -> None:
+    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1 or not 0 <= info.st_size <= MAX_PREFERENCE_BYTES):
+        raise _metadata_refusal(info, uid=uid)
+
+
 def _read_file(path: pathlib.Path, *, uid: int) -> bytes:
     try:
         info = os.lstat(path)
         parent = os.lstat(path.parent)
-        if (not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode)
-                or parent.st_uid != uid or parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-                or not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
-                or info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o600
-                or info.st_nlink != 1 or info.st_size > 4096):
-            raise Refused("preference file or parent has unsafe owner, type, mode, or size")
+        _check_parent_metadata(parent, uid=uid)
+        _check_file_metadata(info, uid=uid)
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             opened = os.fstat(fd)
             if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
                 raise Refused("preference file changed while opening")
-            return os.read(fd, 4097)
+            _check_file_metadata(opened, uid=uid)
+            data = os.read(fd, MAX_PREFERENCE_BYTES + 1)
+            if len(data) > MAX_PREFERENCE_BYTES:
+                raise Refused(f"{PREFERENCE_LABEL} metadata unsafe: expected "
+                              f"size<={MAX_PREFERENCE_BYTES}; observed size>{MAX_PREFERENCE_BYTES}")
+            return data
         finally:
             os.close(fd)
     except Refused:
@@ -107,18 +157,13 @@ def write_preferences(path: pathlib.Path, preferences: dict[str, str], *, uid: i
     try:
         parent = path.parent
         parent_info = os.lstat(parent)
-        if (not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode)
-                or parent_info.st_uid != uid or parent_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
-            raise Refused("preference directory is not private to the guest owner")
+        _check_parent_metadata(parent_info, uid=uid)
         try:
             existing = os.lstat(path)
         except FileNotFoundError:
             existing = None
         if existing is not None:
-            if (not stat.S_ISREG(existing.st_mode) or stat.S_ISLNK(existing.st_mode)
-                    or existing.st_uid != uid or stat.S_IMODE(existing.st_mode) != 0o600
-                    or existing.st_nlink != 1 or existing.st_size > 4096):
-                raise Refused("preserving unsafe pre-existing preference file")
+            _check_file_metadata(existing, uid=uid)
             parse_preferences(_read_file(path, uid=uid))
         temp = parent / f".{path.name}.{secrets.token_hex(12)}.tmp"
         payload = (json.dumps(safe, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
@@ -158,6 +203,7 @@ def main() -> int:
     config_parser.add_argument("--host-metrics", action="store_true",
                                help="load the fixed v3 host metrics display plugin")
     sub.add_parser("model", help="print the validated model preference, if one is set")
+    sub.add_parser("show", help="print validated model and theme preferences")
     set_parser = sub.add_parser("set", help="set only model and/or theme preferences")
     set_parser.add_argument("--model")
     set_parser.add_argument("--theme")
@@ -171,6 +217,9 @@ def main() -> int:
             return 0
         if args.action == "model":
             print(current.get("model", ""))
+            return 0
+        if args.action == "show":
+            print(json.dumps(current, sort_keys=True, separators=(",", ":")))
             return 0
         if not any((args.model is not None, args.theme is not None,
                     args.clear_model, args.clear_theme)):

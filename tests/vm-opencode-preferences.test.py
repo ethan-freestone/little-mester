@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Safe allowlisted OpenCode preference persistence tests."""
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -91,6 +94,135 @@ class PreferenceValidationTests(unittest.TestCase):
             with self.assertRaises(preferences.Refused):
                 preferences.write_preferences(path, {"model": "openai/gpt-5"}, uid=os.getuid())
             self.assertEqual(path.read_text(), '{"model":"openai/old"}\n')
+
+
+class PreferenceCommandTests(unittest.TestCase):
+    @staticmethod
+    def run_command(path, *arguments):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(preferences, "PREFERENCE_PATH", pathlib.Path(path)), \
+                mock.patch.object(sys, "argv", ["guest-opencode-preferences.py", *arguments]), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            result = preferences.main()
+        return result, stdout.getvalue(), stderr.getvalue()
+
+    def test_show_unset_is_read_only_and_does_not_create_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = pathlib.Path(temporary) / "not-created"
+            path = parent / "preferences.json"
+            result, stdout, stderr = self.run_command(path, "show")
+            self.assertEqual(result, 0)
+            self.assertEqual(stdout, "{}\n")
+            self.assertEqual(stderr, "")
+            self.assertFalse(parent.exists())
+            self.assertFalse(path.exists())
+
+    def test_commands_round_trip_and_partial_updates_preserve_other_preference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = pathlib.Path(temporary) / "state"
+            parent.mkdir(mode=0o700)
+            parent.chmod(0o700)
+            path = parent / "preferences.json"
+
+            result, _, stderr = self.run_command(
+                path, "set", "--model", "openai/gpt-4.1", "--theme", "dark")
+            self.assertEqual((result, stderr), (0, ""))
+            self.assertEqual(preferences.read_preferences(path, uid=os.getuid()), {
+                "model": "openai/gpt-4.1", "theme": "dark",
+            })
+
+            before_show = path.stat()
+            before_bytes = path.read_bytes()
+            result, stdout, stderr = self.run_command(path, "show")
+            self.assertEqual((result, stderr), (0, ""))
+            self.assertEqual(json.loads(stdout), {"model": "openai/gpt-4.1", "theme": "dark"})
+            after_show = path.stat()
+            self.assertEqual(path.read_bytes(), before_bytes)
+            self.assertEqual((after_show.st_ino, after_show.st_mtime_ns),
+                             (before_show.st_ino, before_show.st_mtime_ns))
+
+            result, _, stderr = self.run_command(path, "set", "--model", "openai/gpt-4.2")
+            self.assertEqual((result, stderr), (0, ""))
+            self.assertEqual(preferences.read_preferences(path, uid=os.getuid()), {
+                "model": "openai/gpt-4.2", "theme": "dark",
+            })
+            result, stdout, stderr = self.run_command(path, "model")
+            self.assertEqual((result, stdout, stderr), (0, "openai/gpt-4.2\n", ""))
+
+            result, _, stderr = self.run_command(path, "set", "--theme", "nord")
+            self.assertEqual((result, stderr), (0, ""))
+            self.assertEqual(preferences.read_preferences(path, uid=os.getuid()), {
+                "model": "openai/gpt-4.2", "theme": "nord",
+            })
+            result, _, stderr = self.run_command(path, "set", "--clear-model")
+            self.assertEqual((result, stderr), (0, ""))
+            self.assertEqual(preferences.read_preferences(path, uid=os.getuid()), {"theme": "nord"})
+            result, _, stderr = self.run_command(
+                path, "set", "--model", "openai/gpt-4.1", "--clear-theme")
+            self.assertEqual((result, stderr), (0, ""))
+            self.assertEqual(preferences.read_preferences(path, uid=os.getuid()), {
+                "model": "openai/gpt-4.1",
+            })
+
+    def test_metadata_diagnostics_are_bounded_and_do_not_leak_path_or_content(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = pathlib.Path(temporary) / "ABSOLUTE-PATH-PRIVATE-SENTINEL"
+            parent.mkdir(mode=0o700)
+            parent.chmod(0o700)
+            path = parent / "preferences.json"
+            content = '{"model":"PRIVATE-CONTENT-SENTINEL"}'
+            path.write_text(content, encoding="utf-8")
+            path.chmod(0o644)
+
+            result, stdout, stderr = self.run_command(path, "show")
+            self.assertEqual(result, 2)
+            self.assertEqual(stdout, "")
+            self.assertIn("preferences.json metadata unsafe", stderr)
+            self.assertIn(f"expected owner={os.getuid()} type=regular mode=0600 links=1 size<=4096",
+                          stderr)
+            self.assertIn(f"observed owner={os.getuid()} type=regular mode=0644", stderr)
+            self.assertNotIn(str(parent), stderr)
+            self.assertNotIn("PRIVATE-CONTENT-SENTINEL", stderr)
+            self.assertLess(len(stderr), 512)
+
+            path.chmod(0o600)
+            parent.chmod(0o777)
+            result, _, stderr = self.run_command(path, "show")
+            self.assertEqual(result, 2)
+            self.assertIn("preferences.json parent metadata unsafe", stderr)
+            self.assertIn("type=directory mode=not-group/world-writable", stderr)
+            self.assertIn("observed owner=", stderr)
+            self.assertIn("type=directory mode=0777", stderr)
+            self.assertNotIn(str(parent), stderr)
+            self.assertNotIn("PRIVATE-CONTENT-SENTINEL", stderr)
+            self.assertLess(len(stderr), 512)
+
+    def test_set_refuses_malformed_duplicate_and_protected_files_without_replacing_them(self):
+        invalid_documents = (
+            "{not-json PRIVATE-CONTENT-SENTINEL",
+            '{"model":"openai/old","model":"openai/PRIVATE-CONTENT-SENTINEL"}',
+            '{"plugins":["/ABSOLUTE-PATH-PRIVATE-SENTINEL"]}',
+            '{"permission":{"bash":"allow"}}',
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = pathlib.Path(temporary)
+            parent.chmod(0o700)
+            path = parent / "preferences.json"
+            for document in invalid_documents:
+                with self.subTest(document=document):
+                    original = document.encode("utf-8")
+                    path.write_bytes(original)
+                    path.chmod(0o600)
+                    result, stdout, stderr = self.run_command(
+                        path, "set", "--theme", "dark")
+                    self.assertEqual(result, 2)
+                    self.assertEqual(stdout, "")
+                    self.assertEqual(path.read_bytes(), original)
+                    self.assertNotIn(document, stderr)
+                    self.assertNotIn(str(parent), stderr)
+                    self.assertNotIn("PRIVATE-CONTENT-SENTINEL", stderr)
+                    self.assertNotIn("ABSOLUTE-PATH-PRIVATE-SENTINEL", stderr)
 
 
 if __name__ == "__main__":
