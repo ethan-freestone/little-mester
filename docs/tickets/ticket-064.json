@@ -8,7 +8,7 @@
   "title": "Restore Docker and VM metrics endpoint parity in the TUI",
   "objective": "PR #20 Phase 1 metrics regression (related to parent #35 and verification ticket #21): host-metrics-tui currently hardcodes the VM metrics address, while the Docker agent uses the Compose service name. Compare with feat/vm-approach and restore working Docker and VM behavior without weakening the VM egress/security architecture.",
   "created_at": "2026-11-21T16:41:08.238Z",
-  "updated_at": "2026-11-21T21:06:15.164Z",
+  "updated_at": "2026-11-23T23:22:18.582Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -28,7 +28,8 @@
     {
       "id": "A4",
       "text": "Existing metrics UI behavior and rendering remain intact; Docker and VM verification commands pass where the environment allows.",
-      "status": "pending"
+      "status": "in-progress",
+      "evidence": "Owner reports the fixed production VM displayed host metrics in the OpenCode TUI on Ariadne; some sensors showed unavailable. This is live VM-path evidence only. It does not establish Docker mode, per-sensor accuracy/availability, or the cause; follow-up is ticket #68."
     }
   ],
   "tests": {
@@ -67,7 +68,8 @@
       "Owner-confirmed hosted run 44947379075 on source head 90953b22cfe984e2f3d2ed44e5c5c5e64559ed81, workflow SHA 3cf68b4cb51d86eefb10bbac2a2b6bd2bc45a971: production systemd VM acceptance and standalone namespace diagnostic both PASSED. Namespace diagnostic reports unquoted production BindPaths succeeded with source identity/isolation, quoted BindPaths reproduced the original failure, reverse confirmation passed, and cleanup succeeded. Production acceptance passed implemented gates including forced-stop recovery and cleanup. This closes these hosted gates only; no full owner/manual or full PR #20 acceptance is claimed.",
       "Latest green run confirms production host-metrics transport acceptance only. It does not establish live Docker/VM TUI rendering, sensor/unavailable UX, or long-term preference/history behavior. Those remain pending owner/runtime acceptance; exact performance trace is under #65.",
       "Owner-confirmed hosted CI run 44947379075, exact source head 90953b22cfe984e2f3d2ed44e5c5c5e64559ed81 and workflow SHA 3cf68b4cb51d86eefb10bbac2a2b6bd2bc45a971: production systemd VM acceptance and standalone namespace diagnostic both PASS. Diagnostic: unquoted production BindPaths passed source identity/isolation, quoted BindPaths reproduced original failure, reverse confirmed, cleanup passed. Production implemented gates, forced-stop recovery and cleanup passed. This closes the named hosted gates only; no full PR/owner/manual acceptance claim.",
-      "This run confirms host-metrics transport acceptance, not actual live Docker/VM TUI rendering, host sensor values, or unavailable-sensor UX. Endpoint-selection mocks and HTTP transport fixtures are not rendered UI evidence. Sol-reviewed owner procedure requires separate visible Docker and VM metrics checks including unavailable sensors; all remain pending. #65 tracks first-boot attribution."
+      "This run confirms host-metrics transport acceptance, not actual live Docker/VM TUI rendering, host sensor values, or unavailable-sensor UX. Endpoint-selection mocks and HTTP transport fixtures are not rendered UI evidence. Sol-reviewed owner procedure requires separate visible Docker and VM metrics checks including unavailable sensors; all remain pending. #65 tracks first-boot attribution.",
+      "Owner-reported Ariadne VM metrics observation (2026-11-23): host metrics appeared in the production VM TUI; some sensors were unavailable. Does not identify sensors or cause and does not verify Docker mode. Follow-up diagnosis is tracked under #68."
     ]
   },
   "models_used": []

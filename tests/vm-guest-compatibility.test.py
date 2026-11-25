@@ -7,6 +7,7 @@ to or operate a VM. The production helper is planned at
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import pathlib
@@ -20,6 +21,23 @@ SPEC = importlib.util.spec_from_file_location("guest_compatibility", HELPER_PATH
 compatibility = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = compatibility
 SPEC.loader.exec_module(compatibility)
+
+METRICS_PLUGIN_FILES = (
+    "package.json",
+    "tui.tsx",
+    "metrics-endpoint.js",
+    "metrics-endpoint.d.ts",
+    "metrics-state.js",
+    "metrics-state.d.ts",
+)
+
+
+def _asset_label(expected, path=compatibility.OPENCODE_PACKAGE_JSON):
+    paths = sorted(
+        asset_path for asset_path, item in expected.items()
+        if item.get("kind") != "mount"
+    )
+    return f"asset-{paths.index(path) + 1}"
 
 
 def _entry(digest="a" * 64, *, kind="file", mode=0o644, uid=0, gid=0):
@@ -43,7 +61,8 @@ def _expected():
 
 def _response(expected=None):
     expected = _expected() if expected is None else expected
-    assets = {path: value for path, value in expected.items() if value["kind"] != "mount"}
+    assets = {path: dict(value) for path, value in expected.items()
+              if value["kind"] != "mount"}
     return {
         "schema": 1,
         "inventory": assets,
@@ -79,16 +98,21 @@ def _candidate_response():
 
 class GuestCompatibilityInventoryTests(unittest.TestCase):
     def test_exact_complete_inventory_matches(self):
-        status, diagnostics = _classify(_response())
-        self.assertEqual(status, "MATCH")
-        self.assertIsInstance(diagnostics, tuple)
+        self.assertEqual(_classify(_response()), ("MATCH", ()))
 
     def test_missing_expected_asset_is_mismatch(self):
-        document = _response()
-        del document["inventory"]["/etc/opencode/opencode.json"]
-        self.assertEqual(_classify(document)[0], "MISMATCH")
+        expected = _expected()
+        path = "/etc/opencode/opencode.json"
+        document = _response(expected)
+        del document["inventory"][path]
+        self.assertEqual(
+            _classify(document, expected),
+            ("MISMATCH", (f"{_asset_label(expected, path)}:missing",)),
+        )
 
     def test_wrong_digest_type_mode_uid_or_gid_is_mismatch(self):
+        expected = _expected()
+        path = "/etc/opencode/opencode.json"
         for field, wrong in (
             ("sha256", "d" * 64),
             ("kind", "directory"),
@@ -97,37 +121,46 @@ class GuestCompatibilityInventoryTests(unittest.TestCase):
             ("gid", 1000),
         ):
             with self.subTest(field=field):
-                document = _response()
-                document["inventory"]["/etc/opencode/opencode.json"][field] = wrong
-                self.assertEqual(_classify(document)[0], "MISMATCH")
+                document = _response(expected)
+                document["inventory"][path][field] = wrong
+                self.assertEqual(
+                    _classify(document, expected),
+                    ("MISMATCH", (f"{_asset_label(expected, path)}:mismatch",)),
+                )
 
     def test_workspace_mount_mismatch_is_mismatch(self):
         document = _response()
         document["mount"]["fstype"] = "9p"
-        self.assertEqual(_classify(document)[0], "MISMATCH")
+        self.assertEqual(_classify(document), ("MISMATCH", ("workspace-mount:mismatch",)))
 
     def test_malformed_incomplete_or_unexpected_schema_is_inconclusive(self):
         cases = (
-            b"not-json",
-            json.dumps({"schema": 1}).encode(),
-            json.dumps({"schema": 1, "inventory": [], "mount": {}}).encode(),
-            json.dumps({"schema": 1, "inventory": {}, "mount": {}, "extra": True}).encode(),
+            (b"not-json", ("response-invalid",)),
+            (json.dumps({"schema": 1}).encode(), ("response-schema",)),
+            (json.dumps({"schema": 1, "inventory": [], "mount": {}}).encode(),
+             ("response-schema",)),
+            (json.dumps({"schema": 1, "inventory": {}, "mount": {}, "extra": True}).encode(),
+             ("response-schema",)),
         )
         expected = _expected()
-        for raw in cases:
+        for raw, diagnostics in cases:
             with self.subTest(raw=raw[:30]):
-                status, _ = compatibility.classify_inventory(raw, expected)
-                self.assertEqual(status, "INCONCLUSIVE")
+                self.assertEqual(
+                    compatibility.classify_inventory(raw, expected),
+                    ("INCONCLUSIVE", diagnostics),
+                )
 
     def test_unexpected_inventory_path_is_inconclusive_not_accepted(self):
         document = _response()
         document["inventory"]["/home/mester/.local/share/opencode/auth.json"] = _entry()
-        self.assertEqual(_classify(document)[0], "INCONCLUSIVE")
+        self.assertEqual(_classify(document), ("INCONCLUSIVE", ("response-unexpected-path",)))
 
     def test_oversized_response_is_inconclusive(self):
         raw = json.dumps(_response()).encode()
-        status, _ = compatibility.classify_inventory(raw, _expected(), max_bytes=len(raw) - 1)
-        self.assertEqual(status, "INCONCLUSIVE")
+        self.assertEqual(
+            compatibility.classify_inventory(raw, _expected(), max_bytes=len(raw) - 1),
+            ("INCONCLUSIVE", ("response-size-or-type",)),
+        )
 
     def test_candidate_inventory_is_fixed_and_excludes_mutable_user_state(self):
         # Expected paths are fixed guest contract paths, not host fixture paths.
@@ -148,6 +181,38 @@ class GuestCompatibilityInventoryTests(unittest.TestCase):
         self.assertNotIn("/home/mester/.local/share/opencode/sessions", serialized)
         self.assertNotIn("/workspace/", serialized)
 
+    def test_metrics_plugin_assets_are_candidate_derived_regular_files(self):
+        expected = compatibility.expected_inventory("/workspace")
+        source_root = ROOT / "agent/opencode/plugins/host-metrics-tui"
+
+        for name in METRICS_PLUGIN_FILES:
+            path = f"/etc/opencode/plugins/little-mester-host-metrics-tui/{name}"
+            with self.subTest(path=path):
+                candidate_digest = hashlib.sha256((source_root / name).read_bytes()).hexdigest()
+                self.assertEqual(expected[path], {
+                    "kind": "file",
+                    "sha256": candidate_digest,
+                    "mode": 0o644,
+                    "uid": 0,
+                    "gid": 0,
+                })
+
+    def test_each_metrics_plugin_digest_mismatch_has_its_derived_label(self):
+        expected, document = _candidate_response()
+
+        for name in METRICS_PLUGIN_FILES:
+            path = f"/etc/opencode/plugins/little-mester-host-metrics-tui/{name}"
+            with self.subTest(path=path):
+                altered = json.loads(json.dumps(document))
+                digest = altered["inventory"][path]["sha256"]
+                altered["inventory"][path]["sha256"] = (
+                    "0" * 64 if digest != "0" * 64 else "1" * 64
+                )
+                self.assertEqual(
+                    _classify(altered, expected),
+                    ("MISMATCH", (f"{_asset_label(expected, path)}:mismatch",)),
+                )
+
     def test_opencode_package_json_contract_matches_and_fails_closed(self):
         expected, document = _candidate_response()
         package_path = compatibility.OPENCODE_PACKAGE_JSON
@@ -163,9 +228,47 @@ class GuestCompatibilityInventoryTests(unittest.TestCase):
             with self.subTest(field=field):
                 altered = json.loads(json.dumps(document))
                 altered["inventory"][package_path][field] = wrong
-                status, diagnostics = _classify(altered, expected)
-                self.assertEqual(status, "MISMATCH")
-                self.assertIn("asset-14:mismatch", diagnostics)
+                self.assertEqual(
+                    _classify(altered, expected),
+                    ("MISMATCH", (f"{_asset_label(expected, package_path)}:mismatch",)),
+                )
+
+    def test_package_diagnostic_label_tracks_sorted_paths_not_insertion_order(self):
+        expected, document = _candidate_response()
+        package_path = compatibility.OPENCODE_PACKAGE_JSON
+        original_label = _asset_label(expected, package_path)
+
+        reversed_document = {
+            "schema": 1,
+            "inventory": dict(reversed(list(document["inventory"].items()))),
+            "mount": document["mount"],
+        }
+        reversed_document["inventory"][package_path]["version"] = "2.2.4"
+        self.assertEqual(
+            _classify(reversed_document, expected),
+            ("MISMATCH", (f"{original_label}:mismatch",)),
+        )
+
+        earlier_path = "/etc/opencode/00-compatibility-test"
+        earlier_asset = _entry("e" * 64)
+        augmented_expected = dict(reversed(list(expected.items())))
+        augmented_expected[earlier_path] = earlier_asset
+        augmented_inventory = dict(reversed(list(document["inventory"].items())))
+        augmented_inventory[earlier_path] = dict(earlier_asset)
+        augmented_inventory[package_path]["version"] = "2.2.4"
+        augmented_document = {
+            "schema": 1,
+            "inventory": augmented_inventory,
+            "mount": document["mount"],
+        }
+
+        moved_label = _asset_label(augmented_expected, package_path)
+        self.assertEqual(int(moved_label.removeprefix("asset-")),
+                         int(original_label.removeprefix("asset-")) + 1)
+        self.assertEqual(
+            _classify(augmented_document, augmented_expected),
+            ("MISMATCH", (f"{moved_label}:mismatch",)),
+        )
 
     def test_expected_digests_are_candidate_derived_and_metadata_complete(self):
         expected = compatibility.expected_inventory("/workspace")
@@ -227,8 +330,11 @@ class GuestCompatibilityInventoryTests(unittest.TestCase):
             json.dumps(document, separators=(",", ":")).encode(), expected,
             cloud_init_ready_wait_ms=42)
 
+        package_label = _asset_label(expected, compatibility.OPENCODE_PACKAGE_JSON)
         self.assertIn(
-            "asset-14 expected{present=yes,regular=yes,version=2.2.5,mode=0644,uid=0,gid=0}", line)
+            f"{package_label} expected{{present=yes,regular=yes,version=2.2.5,mode=0644,uid=0,gid=0}}",
+            line,
+        )
         self.assertIn(
             "observed{present=yes,regular=yes,version=2.2.4,mode=0600,uid=1000,gid=1000,category=mismatch}",
             line)
@@ -242,30 +348,48 @@ class GuestCompatibilityInventoryTests(unittest.TestCase):
         self.assertNotIn("sha256", line)
         self.assertLessEqual(len(line.encode()), compatibility.MAX_FAILURE_EVIDENCE_BYTES)
 
-    def test_failure_evidence_reports_package_read_categories_without_inference(self):
+    def test_package_read_categories_have_exact_classification_and_evidence(self):
         expected, base = _candidate_response()
+        package_path = compatibility.OPENCODE_PACKAGE_JSON
+        package_label = _asset_label(expected, package_path)
+        expected_package = "present=yes,regular=yes,version=2.2.5,mode=0644,uid=0,gid=0"
         cases = (
-            ({"kind": "missing"}, "present=no,regular=no", "category=missing"),
-            ({"kind": "special"}, "present=yes,regular=no", "category=special"),
-            ({"kind": "unavailable"}, "present=unknown,regular=unknown", "category=unavailable"),
-            ({"kind": "oversize"}, "present=yes,regular=yes", "category=oversize"),
-            ({"kind": "invalid-version"}, "present=yes,regular=yes", "category=invalid-version"),
+            ({"kind": "missing"}, "MISMATCH", (f"{package_label}:mismatch",),
+             "present=no,regular=no,version=unknown,mode=unknown,uid=unknown,gid=unknown,category=missing"),
+            ({"kind": "special"}, "MISMATCH", (f"{package_label}:mismatch",),
+             "present=yes,regular=no,version=unknown,mode=unknown,uid=unknown,gid=unknown,category=special"),
+            ({"kind": "unavailable"}, "INCONCLUSIVE", ("asset-observation-incomplete",),
+             "present=unknown,regular=unknown,version=unknown,mode=unknown,uid=unknown,gid=unknown,category=unavailable"),
+            ({"kind": "oversize"}, "INCONCLUSIVE", ("asset-observation-incomplete",),
+             "present=yes,regular=yes,version=unknown,mode=unknown,uid=unknown,gid=unknown,category=oversize"),
+            ({"kind": "invalid-version"}, "INCONCLUSIVE", ("asset-observation-incomplete",),
+             "present=yes,regular=yes,version=unknown,mode=unknown,uid=unknown,gid=unknown,category=invalid-version"),
         )
-        for observation, presence, category in cases:
+        for observation, status, diagnostics, observed_package in cases:
             with self.subTest(observation=observation):
                 document = json.loads(json.dumps(base))
-                document["inventory"][compatibility.OPENCODE_PACKAGE_JSON] = observation
+                document["inventory"][package_path] = observation
+                self.assertEqual(_classify(document, expected), (status, diagnostics))
                 line = compatibility.format_failure_evidence(
                     json.dumps(document, separators=(",", ":")).encode(), expected)
-                self.assertIn(presence, line)
-                self.assertIn(category, line)
+                self.assertIn(
+                    f"{package_label} expected{{{expected_package}}} observed{{{observed_package}}}",
+                    line,
+                )
 
         document = json.loads(json.dumps(base))
-        del document["inventory"][compatibility.OPENCODE_PACKAGE_JSON]
+        del document["inventory"][package_path]
+        self.assertEqual(
+            _classify(document, expected),
+            ("MISMATCH", (f"{package_label}:missing",)),
+        )
         line = compatibility.format_failure_evidence(
             json.dumps(document, separators=(",", ":")).encode(), expected)
-        self.assertIn("present=unknown,regular=unknown", line)
-        self.assertIn("category=not-reported", line)
+        self.assertIn(
+            f"{package_label} expected{{{expected_package}}} observed{{present=unknown,regular=unknown,"
+            "version=unknown,mode=unknown,uid=unknown,gid=unknown,category=not-reported}",
+            line,
+        )
 
     def test_failure_evidence_bounds_malformed_responses_and_cloud_init_timing(self):
         expected, _document = _candidate_response()

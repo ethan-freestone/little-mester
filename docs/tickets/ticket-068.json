@@ -1,0 +1,86 @@
+{
+  "id": 68,
+  "file_path": "/workspace/docs/tickets/ticket-068.json",
+  "number": 68,
+  "area": "observability",
+  "type": "spike",
+  "status": "active",
+  "title": "Diagnose and improve physical-host metrics availability in the VM TUI",
+  "objective": "Part of integration ticket #66 and related to existing #64. Explain owner-observed unavailable sensors from the actual host collector/service/transport/guest/TUI pipeline; fix demonstrated defects without broadening host access or adding an unreviewed transport.",
+  "created_at": "2026-11-23T23:21:29.439Z",
+  "updated_at": "2026-11-25T00:14:20.825Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "A bounded owner-run diagnostic identifies the actual CPU, RAM, NVIDIA GPU and optional-temperature availability/error classifications and separates collector, service permission, transport, parser and UI causes.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "CPU and RAM shown as host metrics are collected from the physical host; CPU-only systems remain healthy; NVIDIA utilization/VRAM work on supported hardware/driver/service policy.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "The TUI displays explicit useful per-sensor availability rather than a vague warning or misleading zero values; an unavailable optional sensor does not break other metrics.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Tests cover available and unavailable GPU/temperature states, collector/service/transport/parser errors and rendering; owner diagnostics do not expose credentials or unrelated host data.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "No broad host access, Docker socket, new guest privilege/capability, new host listener or weakened egress policy is introduced.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "Metrics responses expose per-process run_id and strictly advancing sample sequence; cached responses preserve identity. Bounded history contains no fabricated zeroes, uses null for unavailable fields and never appends duplicate cached samples. The TUI disables HTTP cache, refreshes freshness only for a newer valid sample using monotonic receipt time, and renders retained data stale after two seconds without fabricating zero values.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "First obtain owner-approved read-only metrics response and fixed metrics-unit status/journal evidence; do not infer host NVIDIA availability from repository code.",
+      "Test GPU no-device, unsupported, permission-denied, timeout and available values in the real TUI rendering path; test CPU-only rendering.",
+      "If thermal sensors are requested, review a narrowly scoped read-only collector/service policy before implementation; no broad /sys access.",
+      "Preserve existing fixed loopback/QEMU guestfwd route and mode-specific Docker endpoint regression #64.",
+      "History fixtures cover absent GPU, unavailable sensor codes, invalid VRAM denominator and collector errors as null values; repeated history requests/cached /metrics responses never create duplicate samples or false freshness. TUI tests cover run_id restart, advancing sequence, cache-control, null chart gaps, initial unavailable display and monotonic two-second stale boundary.",
+      "For #26 merge evidence, obtain direct GET /metrics samples from the exact fresh Ariadne candidate and record source=host, stable run_id, advancing sequence/timestamp, CPU and memory readings/classifications, NVIDIA utilization/VRAM/temperature values, and temperature availability. The automated host_metrics_transport gate reads one response and checks schema/size/no-store/POST rejection; it does not prove sample progression or accuracy."
+    ],
+    "created": [
+      "tests/host-metrics-tui.test.mjs",
+      "tests/vm-system-metrics.test.py",
+      "tests/ci-kvm-system-unit.py",
+      "tests/vm-systemd.test.py",
+      "tests/vm-parent-supervisor.test.py"
+    ],
+    "cases": [
+      "Owner-reported Ariadne production VM showed host metrics in the OpenCode TUI, with some sensors unavailable. This establishes visible VM metrics only; sensor identities/reasons, NVIDIA query result, physical-host CPU/RAM values, and Docker metrics were not supplied and remain to be diagnosed.",
+      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence.",
+      "tests/host-metrics-tui.test.mjs: only the fixed Docker and VM endpoints are selectable",
+      "tests/host-metrics-tui.test.mjs: Docker and VM modes fetch both metrics resources from their fixed endpoint",
+      "tests/host-metrics-tui.test.mjs: missing mode, unsupported paths, HTTP errors, and fetch errors fail closed",
+      "tests/host-metrics-tui.test.mjs: unavailable sensors render their reason and history keeps null gaps instead of zeroes",
+      "tests/host-metrics-tui.test.mjs: identity advances once, cached samples do not append or refresh, and restarts reset sequence",
+      "tests/host-metrics-tui.test.mjs: history seeding deduplicates samples and preserves zero readings and unavailable gaps",
+      "tests/host-metrics-tui.test.mjs: history arriving after a live poll fills older samples without duplicating the latest",
+      "tests/host-metrics-tui.test.mjs: temperature rendering distinguishes available sensors from unavailable sensors and chart gaps",
+      "tests/host-metrics-tui.test.mjs: malformed samples do not become fresh and stale status uses monotonic receipt time",
+      "tests/host-metrics-tui.test.mjs: unsafe host labels and inconsistent availability are rejected as malformed",
+      "tests/vm-system-metrics.test.py: MetricsHttpBoundaryTests.test_cached_response_keeps_sample_identity_and_history_nulls",
+      "tests/vm-system-metrics.test.py: MetricsHttpBoundaryTests.test_canonical_snapshot_is_labeled_and_projected_without_guest_values",
+      "tests/vm-system-metrics.test.py: MetricsHttpBoundaryTests.test_history_uses_null_for_invalid_vram_denominator_but_keeps_real_zeroes",
+      "tests/vm-system-metrics.test.py: MetricsHttpBoundaryTests.test_new_collection_advances_sequence_within_the_same_service_run",
+      "tests/vm-systemd.test.py: SystemdPolicyTests.test_install_manifest_contains_all_fixed_assets",
+      "Owner visual acceptance on Ariadne (2026-11-24): the TUI displayed NVIDIA GPU utilization, VRAM and temperature; AMD CPU model, logical processor count and load averages; and host RAM usage. Optional temperature sensors reported no_sensors, accepted under the existing availability contract. This proves visual availability only; no direct payload values, advancing sequence, cadence, sensor accuracy or throughput were supplied. Actual CPU-utilization percentage/sparklines, hiding unavailable rows, and narrow-sidebar formatting are deferred and are not blockers for #26.",
+      "OWNER-REPORTED exact-SHA Ariadne live sample check (2026-11-24, candidate d60e142d44a6c7b68464b4a3712bce635f99fb4f): three GET /metrics responses passed source=host, stable run_id, strictly increasing sequences 1→2→3 and increasing timestamps; CPU, RAM and NVIDIA GPU availability/readings were present, with GPU utilization/VRAM/temperature populated. Separate optional temperatures returned no_sensors. This verifies progression and host-source labeling, in addition to the previously recorded visual TUI acceptance.",
+      "Bounded thermal-collection diagnosis: system-vm-metrics.py explicitly passes temperatures_adapter=None and parent-metrics-collect.py maps an absent adapter to no_sensors. Owner-reported sensors output confirms physical hwmon devices exist; the optional thermal collector is simply not wired. This is accepted as a non-blocking follow-up, not an expansion of #26.",
+      "OWNER SCOPE DECISION (2026-11-25): owner explicitly accepts the fresh-install metrics acceptance for #26 and accepts optional temperatures=no_sensors as non-blocking. Host sensors exist, but system-vm-metrics.py passes temperatures_adapter=None, so separate thermal readings are not collected. No thermal adapter is required for #26; sensor collection remains deferred.",
+      "Attribution clarification (2026-11-25): the claim that physical host sensors exist is based on owner-reported sensors(1) output, not independent host inspection in this workspace. Source inspection independently confirms only that system-vm-metrics.py passes temperatures_adapter=None and the collector can therefore report no_sensors."
+    ]
+  },
+  "models_used": []
+}

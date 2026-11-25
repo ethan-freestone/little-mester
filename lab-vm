@@ -98,6 +98,8 @@ dependencies = [
     root / "agent/opencode/plugins/host-metrics-tui/tui.tsx",
     root / "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js",
     root / "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts",
+    root / "agent/opencode/plugins/host-metrics-tui/metrics-state.js",
+    root / "agent/opencode/plugins/host-metrics-tui/metrics-state.d.ts",
 ]
 
 # Inspect the original lexical path before resolving anything. A symlink in

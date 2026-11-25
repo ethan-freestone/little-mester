@@ -73,6 +73,14 @@ The fixed owner interface is:
 lab-vm system up|down|status|ssh|auth|tui
 ```
 
+This is the current **single fixed system VM**, not a named-profile interface.
+It uses shared singleton state and systemd resources; its `down` behavior is
+not a promise of non-destructive persistent-profile shutdown. The separate
+`./lab vm` dispatcher and this fixed `lab-vm system` interface do not yet
+provide independent named profiles or per-profile runtime pins. Do not infer
+profile isolation from their existing workspace reassignment or from multiple
+SHA-addressed source trees.
+
 The legacy `./lab` command also has a thin VM dispatcher. It pins the current
 checkout's full Git commit and forwards operations to the existing owner
 acceptance/runtime path; it does not implement a second VM controller:
@@ -83,8 +91,13 @@ acceptance/runtime path; it does not implement a second VM controller:
 ./lab vm prepare-dependencies production|acceptance|system-install
 ```
 
-The shared host capability checker supports apt on Ubuntu and pacman on Arch
-and CachyOS (the distributions mapped and validated here). It checks fixed
+The existing shared host capability checker currently supports apt on Ubuntu
+and pacman on Arch and CachyOS; its present package map rejects Debian. The
+profile-integration support contract explicitly adds Debian as an apt-backed
+host before implementation is accepted. The small platform adapter must map
+exactly Ubuntu, Debian, Arch and CachyOS to apt/apt/pacman/pacman respectively;
+other distribution IDs remain unsupported unless separately reviewed and
+validated. It checks fixed
 executable paths, `/usr/bin/python3` imports, KVM access, and a responsive
 systemd manager. Production dependencies do not
 include `pexpect`; acceptance does. When packages are missing, it previews the
@@ -101,6 +114,10 @@ repositories and must decline if that is uncertain; the tool never performs
 that maintenance itself. Unsupported distribution identities, unsafe
 previews, non-installable requirements, and
 noninteractive missing-dependency cases fail without attempting installation.
+The exact same platform checks, package mappings, interactive preview/refusal
+behavior and dependency tests are required on Debian as on Ubuntu, and on Arch
+as on CachyOS. This adapter installs system dependencies only; the common signed
+control artifact and owner-authorized installer remain distribution-independent.
 Read-only `verify` and owner preflight do not invoke package setup. Pinned
 deployment and VM lifecycle approvals remain separate.
 Hosted CI reads the same apt package definitions for its VM host and local
@@ -165,3 +182,34 @@ must pass before QEMU starts; losing the proxy stops the VM unit. QEMU shutdown
 uses a fixed private QMP socket and waits for the exact MainPID to exit. A
 failed/expired QMP exchange returns failure; systemd then applies the declared
 control-group TERM/KILL fallback. Automatic restart is disabled.
+
+### Planned profile-aware CLI contract — not implemented
+
+The next usability integration is designed to keep the mutable repository
+checkout, immutable protected runtime at `/opt/little-mester/v3/<SHA>`, and
+persistent VM profile distinct. Its proposed shared interface and file-ownership
+boundaries are in [`vm-usability-integration.md`](vm-usability-integration.md).
+For named profiles, only an explicit `./lab vm [--profile NAME] install` may
+derive a candidate SHA from the checkout; subsequent profile commands use the
+selected profile's recorded installed SHA. Legacy fixed-system `verify`/`accept`
+remain on their existing protected owner-acceptance path. Switching checkout
+branches must not update,
+rebuild, or invalidate a profile. Identical immutable installs may be shared;
+profile state must remain isolated. A future explicit profile update/migration is
+out of scope. Treat the contract as design intent until the implementation,
+review, tests, and owner acceptance are complete.
+
+Owner design decision (2026-11-24): named profiles must remain usable alongside
+the original `feat/vm-approach` development VM. That VM is distinct from this
+fixed system singleton and is not gated, recapped, or redesigned by the profile
+integration. Only the transitional fixed singleton and named profile VMs are
+mutually exclusive. The common signed control artifact may add minimal
+`/etc/systemd` start-guard drop-ins to the fixed singleton's component units;
+native package managers are reserved for system dependencies. The guards must
+not replace the base units, protected runtime, disk, credentials, or affect the
+original development VM. Profile start admission checks actual host `MemAvailable`,
+active profiles' unused cgroup headroom, requested profile caps, and a host
+reserve.
+The singleton gate/drop-ins are temporary and their authorized retirement/removal
+belongs in the later comprehensive cleanup roadmap (#57), after its required
+gates and explicit owner authorization. None of this is implemented yet.

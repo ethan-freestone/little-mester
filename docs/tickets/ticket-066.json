@@ -1,0 +1,78 @@
+{
+  "id": 66,
+  "file_path": "/workspace/docs/tickets/ticket-066.json",
+  "number": 66,
+  "area": "vm-v3",
+  "type": "feature",
+  "status": "active",
+  "title": "P1 follow-on — pinned profiles and VM usability integration",
+  "objective": "Deliver the next focused integration PR on feat/vm-useability-tweaks targeting feat/vm-approach-3. Coordinate independently reviewed workstreams for VM profiles, host metrics, terminal behavior, and public CLI/settings. PR #20 is merged and owner reports successful live VM use; retain honest provenance and outstanding defects. This is not Phase 1 completion, a general VM migration system, or the later in-VM cleanup PR. Owner decision (2026-11-24): named profiles may coexist with the original feat/vm-approach development VM, distinct from the fixed #20 singleton. Only the fixed singleton is mutually exclusive with profiles through four minimal manifest-owned additive systemd guards installed by the common signed control artifact and race-safe shared/exclusive admission lock; native package managers are dependency-only. Profile starts use actual host MemAvailable and bounded profile cgroups. Singleton guard retirement is deferred to #57 after its gates and explicit owner authorization.",
+  "created_at": "2026-11-23T23:21:29.425Z",
+  "updated_at": "2026-11-25T00:10:08.026Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "A shared public CLI grammar and profile-to-immutable-runtime-SHA contract is documented and consistently implemented across profile and CLI workstreams before implementation diverges.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Four focused workstream branches have independent tickets, tests, exact-candidate review, and are integrated from the common PR #20 base without changing feat/vm-approach-3.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "The integrated candidate passes focused and full relevant local tests plus hosted CI; evidence records exact source SHA and run separately.",
+      "status": "pending"
+    },
+    {
+      "id": "A4",
+      "text": "Owner validates profiles, workspace behavior, TUI keys, useful host metrics, ordinary settings, real provider auth/model response, persistence, and public acceptance on Ariadne; no report/test is claimed before supplied.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "PR #20 remains merged; preserve the original feat/vm-approach VM as fallback; this integration does not start the later comprehensive cleanup PR or declare Phase 1 complete.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "The integration contract and implementation distinguish the original feat/vm-approach development VM from the fixed #20 system singleton. The development VM remains usable concurrently with named profiles and receives no cap or lifecycle changes. Only the fixed singleton is temporarily mutually exclusive via four minimal manifest-owned additive guards installed by the common signed control artifact and a race-safe shared/exclusive admission lock; bootstrap requires either exact baseline interlocks on all four installed singleton units or all four singleton unit names absent (not masked), no pre-existing unit drop-ins, state or jobs, installing guards before later singleton installation; partial/masked states refuse. Blockers are actionable. Profile starts account for actual host MemAvailable, active profile cgroup headroom and configured caps. Identical owner-facing install/lifecycle commands work on supported Ubuntu, Debian, Arch and CachyOS hosts; native package managers are used for system dependencies only. Singleton retirement/guard removal is deferred to #57 after gates and explicit authorization.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Document PR #20 source SHA a5597607e92b2c609ee56ac2cf520023b1fb95c6, hosted run 45224666122, merge commit e10ebd76e1e362c7b6e95bdb631d12c22b2e2d7f, and owner-reported manual evidence without inventing an automated owner report.",
+      "Maintain a truthful per-workstream test/review ledger and integrate exact source SHAs.",
+      "Owner-run Ariadne validation after hosted CI; preserve old VM and record outstanding evidence separately.",
+      "Cross-workstream acceptance separately starts the original development VM with profiles and verifies coexistence, while simultaneous fixed-singleton/profile starts are mutually excluded and identify the blocking profile. Record actual host MemAvailable/resource tests and defer singleton retirement/removal to the authorized #57 cleanup.",
+      "Cross-stream regression proves the original development VM remains active and ungated while profile starts honor its actual memory use; profile admission also reserves active profiles’ unused cgroup headroom. Install the signed control package and verify fixed-singleton owner acceptance before/after it, with only the exact package-owned component guards accepted.",
+      "Cross-distribution regression uses identical ./lab vm bootstrap, control update, profile install and lifecycle commands on Ubuntu and CachyOS; signed helper/runtime manifests and generated systemd units match. Only host dependency setup differs via apt versus pacman; no native package manager installs or updates the control helper, guards or SHA runtimes.",
+      "Supersession for earlier evidence wording: “install the signed control package” means run the common signed, distribution-independent bootstrap artifact, not install a Debian/Arch package. Both system-acceptance and tools/vm-system-install update/rollback verifiers must accept only the manifest-owned four guards after bootstrap; native package managers are dependency-only.",
+      "Cross-stream regression verifies common bootstrap refuses without exact effective baseline code-update interlocks on all four fixed singleton units; both existing fixed-system verifier paths enforce strict exact baseline/manifest-bound sets and only transaction-owner recovery clears a matching typed marker.",
+      "Manifest terminology correction: the common control artifact and bootstrap executable are signed; each immutable SHA-runtime manifest is generated root-owned by the fixed helper from the exact committed Git tree and validated against its inventory/digests, not separately signed. Cross-distribution tests compare both trust/manifest paths without conflating them.",
+      "Cross-stream bootstrap tests cover both accepted host states: all four fixed units with exact baseline interlocks, or all four absent with no singleton state/jobs and four guards preinstalled for a later fixed-system install. Partial, masked or malformed states refuse.",
+      "Bootstrap-state wording supersession: an absent fixed singleton is accepted only if all four names are truly absent (not masked), with no pre-existing drop-ins, singleton state or queued jobs. An installed singleton requires exact 90 guards on all four units; partial/malformed installs refuse.",
+      "Distribution-scope correction: support is required on all four named host IDs—Ubuntu, Debian, Arch and CachyOS—not only the Ubuntu/CachyOS representatives. The existing adapter currently rejects Debian; add the explicit Debian→apt mapping and test the same prerequisite/lifecycle contract across all four. Unknown derivatives remain unsupported until reviewed.",
+      "Cross-stream regression covers initial bootstrap with absent config/group/code-update lock and transaction-safe idempotent substrate creation, plus the stopped unassigned singleton layout with no workspace 20 drop-in; both fixed verifiers enforce exact assignment/drop-in correspondence.",
+      "On Ariadne, record exact-SHA read-only deployed-candidate verification for d60e142d44a6c7b68464b4a3712bce635f99fb4f. Only after separate owner authorization, run lifecycle acceptance and record network boundaries, metrics transport/schema, direct-egress refusal, TUI exit, same-disk persistence, disk identity and final VM state; preserve the legacy development VM.",
+      "Capture direct live /metrics samples on the accepted fresh Ariadne install: source=host, stable run_id for the service process, at least two strictly advancing sequence/timestamp observations, and actual CPU/RAM/NVIDIA readings plus all availability codes. Treat optional-temperature no_sensors according to contract; do not infer live progression or accuracy from the one-sample automated transport check or visual TUI acceptance."
+    ],
+    "created": [],
+    "cases": [
+      "Owner-reported PR #20 baseline on Ariadne: fresh production system VM provisioning/startup/readiness, SSH, OpenCode 2.2.5, rootless Docker, TUI, real OpenAI auth/connectivity/model response, host metrics visible (some sensors unavailable), dedicated workspace mount/reassignment, explicit unsafe-recurse repository access, and coexistence with original feat/vm-approach VM. Hosted CI run 45224666122 passed for source a5597607e92b2c609ee56ac2cf520023b1fb95c6; merge commit is e10ebd76e1e362c7b6e95bdb631d12c22b2e2d7f. No automated owner-acceptance report was supplied. Owner reported installer-generated __pycache__/code-update-transaction.cpython-314.pyc inside the pinned tree; manually deleting it resolved integrity refusal and startup then succeeded. Fix the cause in this PR; do not preserve deletion as a workaround.",
+      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence.",
+      "Implementation streams started from approved design commit 846bb4ab6d9822e487a04a476bc2c92464664c50; clean child branches/worktrees: #67 feat/vm-profiles, #68 feat/vm-metrics-availability, #69 fix/vm-terminal-pty, #70 feat/vm-cli-settings. This records branch setup only; no child implementation, tests, or owner acceptance are implied.",
+      "2026-11-24 #26 candidate d60e142d44a6c7b68464b4a3712bce635f99fb4f: hosted run 45500524514 passed all eight checks, including Production systemd VM acceptance. This is hosted candidate evidence, not owner Ariadne acceptance.",
+      "Owner-reported Ariadne fresh installation: candidate d60e142d44a6c7b68464b4a3712bce635f99fb4f provisioned successfully after unexpected generated Python bytecode was removed from the pinned installation. This is a fresh-install result only; it does not establish compatibility or preservation for the previously installed guest.",
+      "Owner-reported existing-install update attempt from a5597607e92b2c609ee56ac2cf520023b1fb95c6 to d60e142d44a6c7b68464b4a3712bce635f99fb4f was refused; the exact refusal output was lost. Keep upgrade compatibility unresolved: do not infer the refusal cause, claim preservation, or treat fresh provisioning as an upgrade pass.",
+      "OWNER-REPORTED Ariadne fixed-system acceptance (2026-11-24), exact candidate d60e142d44a6c7b68464b4a3712bce635f99fb4f: read-only verify PASS and lifecycle accept PASS. Report IDs: 20261124T234630Z-f06f7a0e60834a37b899daffc13d99aa and 20261124T234631Z-9dd8462ed6bb43979eb8aca15f5ee1c5. Every reported gate passed: deployed candidate, preflight, private-target policy, guest readiness/SSH, network boundaries, host-metrics transport, persistence fixture, direct-egress refusal, TUI exit, same-disk restart/persistence, and final state RUNNING. Disk device/inode remained 38:12486647. This does not resolve the separate prior-install update attempt.",
+      "OWNER-REPORTED live Ariadne /metrics sampling (2026-11-24): three source=host responses shared run_id 4e58646e18df65b834137c57a5480363 and sequences 1,2,3 with increasing timestamps (23:47:13.845Z, 23:47:15.878Z, 23:47:17.905Z); LIVE_METRICS_PASS. CPU: AMD Ryzen AI 9 HX 370 w/ Radeon 890M, 24 logical CPUs, load averages supplied. RAM: 61.9 GB total, 28.9 GB used, 33.0 GB available, 46.7%. NVIDIA GeForce RTX 5070 Laptop GPU: 0% utilization, 191/8151 MB used, 46 C. CPU/RAM/GPU availability was available; optional temperatures availability was no_sensors. This is distinct from and does not resolve the existing-install update attempt.",
+      "THERMAL COLLECTION CAUSE (source inspection at d60e142): lib/vm/system-vm-metrics.py passes temperatures_adapter=None; parent-metrics-collect.py returns no_sensors whenever that optional adapter is absent. Owner reports sensors(1) sees k10temp, AMD GPU, NVMe, ACPI and fan readings, so no_sensors reflects an unwired optional collector, not proof that physical sensors are absent. Owner accepts this as non-blocking; no thermal adapter is added to #26.",
+      "OWNER SCOPE DECISION (2026-11-25): owner explicitly accepts #26's fresh-install acceptance scope and defers existing-installation upgrade compatibility. The refused a5597607e92b2c609ee56ac2cf520023b1fb95c6→d60e142d44a6c7b68464b4a3712bce635f99fb4f update remains unresolved: exact refusal output was lost, cause is unknown, and no upgrade/preservation compatibility is claimed. This is an accepted limitation, not a #26 merge blocker under the fresh-install scope.",
+      "SCOPE/OWNERSHIP CORRECTION (2026-11-25): the earlier historical note saying to fix installer-generated __pycache__/code-update-transaction.cpython-314.pyc 'in this PR' is superseded. Track diagnosis and regression in existing installer/profiles workstream #25 / ticket #67; #26 remains acceptance/evidence-only for this issue and must not expand its implementation scope."
+    ]
+  },
+  "models_used": []
+}

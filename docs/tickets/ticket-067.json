@@ -1,0 +1,125 @@
+{
+  "id": 67,
+  "file_path": "/workspace/docs/tickets/ticket-067.json",
+  "number": 67,
+  "area": "vm-profiles",
+  "type": "feature",
+  "status": "active",
+  "title": "Independent persistent VM profiles pinned to immutable runtimes",
+  "objective": "Part of integration ticket #66. Add independently manageable persistent VM profiles while parameterizing/reusing the fixed system VM implementation where safe. Each profile records its immutable installed runtime SHA; profiles using one SHA may share the code install. Do not implement runtime upgrade/migration or change the legacy feat/vm-approach VM. The shared design baseline is docs/vm-usability-integration.md, including fixed helper/common signed-control-artifact trust boundaries, crash-safe lifecycle semantics, per-profile service isolation, and safe runtime inventory/pruning. Owner decision (2026-11-24): the fixed #20 system singleton is temporarily mutually exclusive with named profile VMs through four minimal manifest-owned additive guards installed by the common signed control artifact, while the distinct original feat/vm-approach development VM must coexist with named profiles and must not be capped or gated. Profile admission uses actual host MemAvailable and profile cgroup reservations.",
+  "created_at": "2026-11-23T23:21:29.433Z",
+  "updated_at": "2026-11-24T12:46:33.911Z",
+  "acceptance_criteria": [
+    {
+      "id": "A1",
+      "text": "A profile has a validated identity and protected atomic metadata associating it with one complete immutable SHA-addressed runtime; missing/unsafe metadata fails closed.",
+      "status": "pending"
+    },
+    {
+      "id": "A2",
+      "text": "Each profile has isolated persistent disk, seed, SSH identity/host verification, workspace assignment, network endpoints, lifecycle units, metrics state, and configuration; same-SHA immutable runtime bytes are shared rather than duplicated.",
+      "status": "pending"
+    },
+    {
+      "id": "A3",
+      "text": "Commands for a profile use its recorded installed SHA, not the current checkout. Changing checkout branches cannot rebuild, invalidate, or retarget it; different profiles can pin different SHAs.",
+      "status": "in-progress"
+    },
+    {
+      "id": "A4",
+      "text": "Default profile behavior is stable; list/show/status expose profile identity, lifecycle and pinned revision without exposing internal paths or secrets.",
+      "status": "pending"
+    },
+    {
+      "id": "A5",
+      "text": "Start, stop, reassignment and explicit confirmed reset/removal of one profile do not affect others; concurrent operations are serialized per profile and concurrent runtime use is supported within resource limits.",
+      "status": "pending"
+    },
+    {
+      "id": "A6",
+      "text": "No general-purpose profile runtime update/migration is implemented; the metadata contract makes a future explicit profile-to-SHA update natural.",
+      "status": "pending"
+    },
+    {
+      "id": "A7",
+      "text": "A fixed, versioned root-owned profile-control helper is installed/updated through one distribution-independent signed control artifact and owner-authorized transaction; the host administrator enrolls the release key during common bootstrap. Native package managers are used only by the small platform adapter for host dependencies on exactly Ubuntu, Debian, Arch and CachyOS (apt on the first two; pacman on the latter two), never to install/update/remove the helper, guards or SHA runtimes. Root-owned owner enrollment and exact sudoers/protocol authorization are enforced. Common control and legacy fixed-system update/rollback transactions acquire the exclusive maintenance lease then the existing code-update lock, publish a versioned owner/operation/transaction/SHA marker plus durable journal before any protected mutation, refuse foreign markers, and recover/clear only their exact transaction; legacy v0 marker recovery is explicit and journal-proven. Common bootstrap requires either all four fixed singleton units with exact effective baseline code-update guards (workspace 20 matches its assignment, or is absent with no assignment), or all four unit names absent (not masked) with no pre-existing drop-ins, singleton state or jobs; in the absent case it may idempotently create only the exact lm-vm-control group, empty /etc/little-mester-vm root:group 0750 directory and empty root:group 0660 code-update lock under the exclusive maintenance lease, then installs all four manifest-owned profile guards before a later singleton install. Any partial/masked/unknown state refuses. Runtime install reads the exact committed Git tree as the invoking unprivileged owner, validates a bounded exact inventory, and never executes checkout code as root. The common signed artifact may add only the reviewed singleton guards; both fixed-system verifiers enforce exact baseline or manifest-bound drop-in sets and commands.",
+      "status": "in-progress"
+    },
+    {
+      "id": "A8",
+      "text": "Each profile has stable profile-scoped service identities and exact filesystem/socket permissions (the baseline prefers static non-login VM/metrics and proxy accounts; an alternative is allowed only if it preserves the same persistence, isolation, cleanup and test contract and is reviewed). Shared immutable runtime files are root-owned/read-only. The workspace-sharing service runs in the common control artifact’s root-owned minimal RootDirectory with only its assigned workspace and own socket bind, private PID view, no other host filesystem or same-owner process access, and no fallback. Actual cross-profile service tests prove VM/metrics, proxy and workspace service namespaces cannot access another profile’s private disk, seed, keys, config, sockets or metrics history.",
+      "status": "pending"
+    },
+    {
+      "id": "A9",
+      "text": "down stops all profile units/processes without deleting state. Reset/remove require exact TTY confirmation and a fully stopped, job-free profile; reset deletes only the v1 allowlist of VM/seed/SSH identity leaves while preserving mapping/runtime pin, service accounts/units and workspace assignment; remove uses durable phases for exact unit removal/reload, fixed profile state/config removal, verified generated account/group removal, then mapping unlink last. During interrupted removal, absent units are accepted only when durable intent/phase proves the exact manager-owned unit was removed or never created by the recorded install phase; unjournaled absence and failed/unknown/masked units/jobs/processes refuse. Both preserve every workspace and installed runtime. Idempotent journals, account markers, inode checks and interruption tests prevent partial recovery from deleting or reusing unowned state.",
+      "status": "pending"
+    },
+    {
+      "id": "A10",
+      "text": "Inventory reads SHA runtime children without following links, snapshots profile references including stopped/transitional mappings, and reports verified allocated size plus reference/liveness/unknown status without credentials. Prune is a separate read-only dry-run or exact-TTY-confirmed operation; it rescans under nonblocking locks, aborts on candidate/size changes, then atomically quarantines only valid manifest trees with zero references and no active/transitional units/shared locks before deleting outside the catalog lock. Partial deletion becomes unknown/incomplete and is never auto-retried. Unknown/legacy, staging, malformed, incomplete, referenced, busy or unscannable installs are retained; no persistent refcount DB or profile-state GC.",
+      "status": "pending"
+    },
+    {
+      "id": "A11",
+      "text": "Named profile VMs can run concurrently within a race-safe host-memory admission budget using real MemTotal/MemAvailable, each active profile cgroup’s unused memory.max-minus-memory.current headroom, and configured profile caps. Admission covers the requested full cgroup cap plus existing profile headroom and a host reserve, and verifies total profile caps against MemTotal. The fixed #20 singleton is mutually exclusive with named profile units through four minimal manifest-owned additive guards installed by the common signed artifact and the common nonblocking shared/exclusive admission lock; refusals name blockers. Base units/runtime/disk/credentials are not replaced or capped, and no singleton workspace check or new singleton resource cap is added. The distinct feat/vm-approach development VM remains usable concurrently with profiles; no code, unit, state, cgroup cap or lifecycle route for it is changed.",
+      "status": "pending"
+    }
+  ],
+  "tests": {
+    "needed": [
+      "Fixture tests for two isolated profiles, same-SHA shared code, distinct-SHA selection and per-profile unit/resource isolation.",
+      "Checkout SHA A install, checkout switch to B, and assert profile remains pinned to A; commands dispatch to their profile's exact install.",
+      "Negative tests for invalid names, symlinked/malformed profile metadata, missing/unsafe install SHA, path traversal and cross-profile operation collisions.",
+      "Test confirmation and preservation semantics for reset/removal; no live owner profile deletion without explicit approval.",
+      "Sol design and exact-SHA review; owner-run multi-profile KVM/resource validation remains separate.",
+      "Helper package/bootstrap provenance, OS signature verification, owner enrollment, exact sudoers command, caller-UID checks, protocol and API mismatch-before-effects, and package-update compatibility preflight tests.",
+      "Adversarial install fixtures: hostile repo config/attributes/hooks, replaced/malformed HEAD, symlinks/gitlinks/path traversal/duplicate runtime entries, invalid modes/digests, and proof no candidate checkout/runtime code executes as root.",
+      "Two-profile DAC and systemd namespace regressions for VM/metrics, proxy, and workspace-sharing service attempts against another profile’s disk, seed, SSH identity, config, sockets and metrics history; both profiles may only read shared immutable runtime bytes.",
+      "Crash-injection tests before/after each reset/remove journal step, state unlink, unit removal/daemon-reload, account removal, and final mapping deletion; repeat recovery and prove workspace/runtime/other profiles unchanged.",
+      "Runtime inventory/prune tests with stopped references, active and transitional units, shared lock, in-progress profile operations, malformed catalog, unknown/legacy trees, partial/corrupt installs, exact confirmation, changed candidate set, and dry-run filesystem invariance. Assert only eligible SHA trees are removed and all other state remains byte-identical.",
+      "Workspace collision tests for equal, ancestor/descendant, symlink and bind-mount/filesystem aliases across profiles and fixed singleton; refuse if mount identity/disjointness cannot be proven.",
+      "Resource-admission tests for concurrent starts, active/activating/deactivating/failed VM cgroups, configured guest RAM plus fixed overhead, MemTotal/MemAvailable thresholds, missing/ambiguous data and proof failed admission never stops another VM.",
+      "Race tests for simultaneous singleton/profile start jobs from both public routes, including queued/activating/deactivating states; prove mutual exclusion, stable workspace snapshots, shared admission lock behavior, and blocker diagnostics naming exact profiles. Verify fixed singleton base unit/runtime/disk/credentials remain byte-identical and the single package-owned drop-in can be removed only through explicit authorized retirement.",
+      "Run the original feat/vm-approach development VM concurrently with multiple named profiles; verify it is not gated, capped, or modified. Exercise real MemAvailable threshold decisions while that VM consumes memory, profile cgroup reservations, missing/ambiguous /proc/meminfo, and proof denied admission never stops another VM.",
+      "Workspace confinement tests in the actual RootDirectory/systemd namespace: only assigned workspace/socket visible; deny /home, /etc, /var/lib, other workspaces/profile roots and host same-owner process inspection/signaling; include guest symlink/submount attempts.",
+      "Install staging fault injection before/after extraction, runtime rename, mapping publication, account and unit phases; assert no catalog-wide lock across Git reads or runtime deletion and safe resumption only for matching journaled artifacts.",
+      "Scope clarification supersedes older ledger wording suggesting fixed-singleton workspace-overlap checks: workspace alias/ancestor checks apply only between named profiles. Fixed-singleton exclusion is based on component-unit/job state, without singleton workspace comparison or a new singleton resource cap. Because systemd starts dependencies before the main VM ExecStartPre, test the same fixed guard on each singleton VM/proxy/workspace/metrics component; multiple singleton guards use the shared admission lock while profile starts use it exclusively.",
+      "Crash-injection tests before/after each reset/remove journal step, state unlink, unit removal/daemon-reload, account removal, and final mapping deletion; retry removal after unit files are absent and accept absence only with durable journal proof of exact prior removal or install-phase non-creation. Unjournaled absence/foreign state refuses; repeat recovery and prove workspace/runtime/other profiles unchanged.",
+      "Workspace collision tests for equal, ancestor/descendant, symlink and bind-mount/filesystem aliases between named profiles; refuse if mount identity/disjointness cannot be proven. Fixed-singleton exclusion uses only its component-unit/job state and never reads singleton workspace metadata.",
+      "Resource-admission tests for concurrent starts and active/activating/deactivating/failed VM cgroups, exact memory.max/current caps, existing profiles’ unused headroom, requested full cap, MemTotal/MemAvailable host reserve, malformed/missing data and proof failed admission never stops another VM.",
+      "Race tests for simultaneous singleton/profile starts from both public routes, queued/activating/deactivating jobs and the check-to-start window. Run all four singleton component guards concurrently using shared catalog/read and host-admission locks; profile starts use the host-admission lock exclusively. Include package-bootstrap race with legacy starts under the existing code-update interlock; prove mutual exclusion, no singleton workspace comparison, actionable blocker diagnostics, unchanged singleton base artifacts, and guard removal only with explicit authorized retirement.",
+      "Workspace confinement tests in the actual RootDirectory/systemd namespace: only assigned workspace and the narrow writable /run/profile socket bind are visible; start virtiofsd and prove it can create the socket with expected enrolled-owner UID/profile-VM GID/mode, VM can connect but cannot replace it, and root image/other paths remain read-only or inaccessible. Deny /home, /etc, /var/lib, other workspaces/profile roots and host same-owner process inspection/signaling; include guest symlink/submount attempts.",
+      "Install staging fault injection before/after extraction, runtime rename, mapping publication, account and unit phases; assert no catalog-wide lock across Git reads, full runtime-tree hashing or runtime deletion. During same-SHA verification, unrelated profile metadata operations complete; final ordered-lock revalidation rejects changed mapping/runtime identities. Assert safe resumption only for matching journaled artifacts.",
+      "Scope clarification: workspace alias/ancestor checks apply only between named profiles. Fixed-singleton exclusion is based on component-unit/job state without singleton workspace comparison or a new singleton resource cap. Because systemd starts dependencies before the VM ExecStartPre, install the exact fixed guard on VM, proxy, workspace and metrics components; all four guards may run concurrently with shared catalog/read and host-admission locks, while profile starts use host-admission exclusively.",
+      "Signed package/verifier integration: establish the current fixed-system acceptance baseline before package install, then install the signed package and pass owner acceptance with only the manifest-bound exact four package guards/commands; altered, missing, reordered, extra or unowned guards fail. Verify base units/runtime/disk/credentials remain byte-identical.",
+      "Initial-bootstrap race regression: serialize against the existing code-update lock, test each legacy singleton component start before, during and after guard installation, and prove a queued/activating job blocks bootstrap or a nonblocking guard refuses. Exercise maintenance/code-update markers, normal helper refusal, signed completion verification, interrupted package-manager repair/rollback, and package-removal refusal while profiles or units/jobs remain.",
+      "Supersession for earlier ledger wording: prior workspace-collision wording that includes the fixed singleton and prior single package-owned drop-in/single-guard language are historical and must not be implemented. Only four manifest-bound package guard drop-ins on the fixed singleton VM/proxy/workspace/metrics units are authorized; no singleton workspace metadata is read, and all four guards use shared read locks while profile starts use exclusive host admission. The initial pre-install hook serializes via the existing code-update lock and persistent markers; package files are installed only by the native package manager.",
+      "Ledger supersession: earlier test wording that says fixed-singleton workspace collision/snapshot, one package-owned drop-in, or one singleton-drop-in removal is superseded by the current design. Do not add a singleton workspace check. Exercise four exact package-owned component guards (VM/proxy/workspace/metrics), their shared catalog/read and host-admission behavior, and authorized byte-exact cleanup of those four files only.",
+      "Common installer supersedes all earlier native-package/bootstrap-hook wording in this ledger: test the signed distribution-independent control artifact and owner-authorized transaction on Ubuntu and CachyOS; native package managers handle declared host dependencies only. Common bootstrap/update/recovery, not apt/dpkg/pacman hooks, owns helper/runtime/guard files.",
+      "Common-installer verifier/marker regressions supersede earlier package-hook tests: run both fixed-system verifiers and tools/vm-system-install update/rollback with the common manifest-owned guards present; test legacy marker before first file mutation, foreign owner refusal, and recovery ownership. No native package transaction hook is an implementation dependency.",
+      "Transactions from both owners use the shared exclusive maintenance lease then fixed code-update lock. Fault-inject after prepared journal fsync, after typed marker publication, before/after each asset/guard mutation, daemon-reload, commit and marker unlink. Verify journal-only prepared recovery is allowed only with exact unchanged pre-transaction targets; marker without journal, wrong owner/transaction/SHA, unknown schema, or changed target refuses. Test current legacy v0 fixed-system marker only recovers through explicit rollback with one matching durable snapshot; common control recovery always refuses v0. Common bootstrap refuses if any of the four exact baseline 90-code-update guards/effective conditions is missing or malformed.",
+      "Profile up --dir lock-order regression commits assignment under catalog-exclusive then profile lock, releases catalog before host-admission-exclusive, and refuses overlapping assignments from another profile; starts without assignment use catalog-shared. Test failed admission preserves the documented committed assignment without deadlock or lock upgrade.",
+      "Control lock-path regression verifies the signed artifact installs a tmpfiles rule recreating only the root-owned mode-0755 /run/little-mester-vm-control directory; all maintenance/catalog/profile/admission files are root-only single-link regular locks, SHA locks are root-owned mode 0644 for service read-only shared flock, and services cannot replace them. Symlink, wrong owner/mode/link count, and reboot recreation faults fail closed.",
+      "Bootstrap-state compatibility regression accepts either all four fixed singleton units with exact effective 90 guards or all four unit fragments absent with no fixed state/jobs. In the absent case, bootstrap installs the four manifest-bound 95 guards before later singleton installation; then exercise tools/vm-system-install and both verifiers to prove those guards are preserved and accepted. Any partial, masked or malformed component set refuses.",
+      "Absent-singleton bootstrap edge: the all-absent accepted state also requires no pre-existing fixed-unit drop-in files, singleton state, masks or jobs. The common bootstrap creates only its exact four 95 guard files; later fixed-system installation loads and verifies them. This supersedes any test wording that only checks unit fragments/jobs.",
+      "Cross-distro implementation test matrix covers exactly Ubuntu, Debian, Arch and CachyOS; Debian uses the apt package-name map, Arch/CachyOS use pacman, and all helper/artifact/runtime/profile/systemd behavior remains common. Test unknown distribution IDs fail before package transactions.",
+      "Initial control-bootstrap substrate recovery test: with all four singleton units absent/no state/jobs, bootstrap may idempotently create only the exact lm-vm-control group, empty root-owned 0750 /etc/little-mester-vm directory and empty root:lm-vm-control 0660 code-update.lock under exclusive maintenance. Fault-inject after each substrate step and prove retry validates/adopts only exact objects; unexpected entries, members, ownership, mode or symlink refuse. With installed singleton units, missing/unsafe code lock refuses rather than reconstructing it.",
+      "Distribution matrix supersession: earlier cross-distribution tests naming only Ubuntu/CachyOS are partial and are not sufficient; the acceptance matrix is exactly Ubuntu, Debian, Arch and CachyOS, with apt on Debian/Ubuntu and pacman on Arch/CachyOS. Current host-dependencies.py rejects Debian, which must be corrected in #70.",
+      "Fixed singleton workspace verifier state regression covers both assigned and pristine-unassigned states: when assignment exists, exact 20 drop-in bytes and path identity are required; when absent, only a stopped unit with no 20 drop-in/bind is accepted by static layout verification. Full live owner acceptance remains assignment-required; stale/mixed state fails."
+    ],
+    "created": [
+      "tests/vm-profile-control-core.test.py"
+    ],
+    "cases": [
+      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence.",
+      "ProfileControlProtocolTests.test_accepts_exact_status_and_install_schemas",
+      "ProfileControlProtocolTests.test_read_request_bounds_streamed_input",
+      "RuntimeManifestTests.test_rejects_unsorted_duplicate_missing_and_unsafe_inventory",
+      "PinnedRuntimeTests.test_profiles_select_independent_sha_roots_without_checkout_resolution",
+      "PinnedRuntimeTests.test_rejects_missing_files_symlinks_and_wrong_modes",
+      "PinnedRuntimeTests.test_rejects_modified_runtime_digest_and_extra_inventory_path"
+    ]
+  },
+  "models_used": []
+}
