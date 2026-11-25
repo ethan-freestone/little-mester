@@ -24,6 +24,11 @@ CHECK_PATH = pathlib.Path(__file__).with_name("ci-opencode-config-check.py")
 CHECK_SPEC = importlib.util.spec_from_file_location("ci_opencode_config_check", CHECK_PATH)
 CONFIG_CHECK = importlib.util.module_from_spec(CHECK_SPEC)
 CHECK_SPEC.loader.exec_module(CONFIG_CHECK)
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+CONTRACT_SPEC = importlib.util.spec_from_file_location(
+    "project_config_session_contract", ROOT / "lib/vm/parent-session-contract.py")
+CONTRACT = importlib.util.module_from_spec(CONTRACT_SPEC)
+CONTRACT_SPEC.loader.exec_module(CONTRACT)
 
 
 class ProjectConfigIsolationTests(unittest.TestCase):
@@ -31,12 +36,15 @@ class ProjectConfigIsolationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.binary = shutil.which("opencode")
         if cls.binary is None:
-            raise unittest.SkipTest("pinned OpenCode v2.2.5 is unavailable")
+            raise unittest.SkipTest(
+                f"supported OpenCode {CONTRACT.SUPPORTED_OPENCODE_VERSION} is unavailable")
         version = subprocess.run([cls.binary, "--version"], check=False,
                                  capture_output=True, text=True, timeout=5,
                                  env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
-        if version.returncode != 0 or version.stdout.strip() != "opencode v2.2.5":
-            raise unittest.SkipTest("tests require exactly OpenCode v2.2.5")
+        if (version.returncode != 0
+                or version.stdout.strip() != CONTRACT.EXPECTED_OPENCODE_EXECUTABLE_OUTPUT):
+            raise unittest.SkipTest(
+                f"tests require exactly supported OpenCode {CONTRACT.SUPPORTED_OPENCODE_VERSION}")
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="opencode-project-config-")

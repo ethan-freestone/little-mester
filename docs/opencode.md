@@ -207,7 +207,7 @@ sequence is therefore **Ctrl+C, then Q** (Q presses the dialog's confirm action)
 - `agent/opencode/tui.json` is deleted: dead v1 config that would have bound exit to a single `q`.
 
 **Verification.** Static checks: `tests/tui-jsx.bats`, `tests/exit-confirm.bats`. The live check
-`scripts/verify-exit-confirm.py` requires Python 3, `pexpect`, and exactly OpenCode v2.2.5 on `PATH`;
+`scripts/verify-exit-confirm.py` requires Python 3, `pexpect`, and the exact supported OpenCode version declared in `lib/vm/opencode-version.py` on `PATH`;
 `--via-tmux` and `--via-launcher` also require local tmux. It drives a private standalone TUI through
 a pty using a temporary HOME and disposable workspace, and checks Ctrl+D, closed-dialog typing,
 dialog open/cancel behavior, and uppercase Y/Q confirmation. `--via-launcher` renders and drives the
@@ -282,15 +282,17 @@ remain unverified until that check is returned.
 
 ### J.13 OpenCode version policy for M2
 
-OpenCode `2.2.5` remains the approved reproducible M2 baseline. Do not install upstream latest
+OpenCode `2.2.5` remains the approved reproducible M2 baseline, declared in
+`lib/vm/opencode-version.py`. Do not install upstream latest
 into the M2 acceptance environment while launch, storage and lifecycle failures are being
 resolved; doing so would change the runtime under test. This is a temporary compatibility
 baseline, not a permanent version ceiling.
 
+The compatibility foundation derives live consumers from that one declaration;
+version-specific evidence below remains labelled by the binary it actually exercised.
 After M2, a separate version-promotion and persistent-disk upgrade design must establish:
 
-- one authoritative approved-version reference and CI/runtime parity against it;
-- a non-blocking compatibility lane that tracks upstream latest without changing acceptance;
+- a generic upgrade/rollback process with CI/runtime parity against the approved-version reference;
 - automated compatibility detection for CLI, plugin, TUI, auth, storage and database changes;
 - reviewed promotion, backup, migration, rollback and owner-approval procedures; and
 - non-destructive upgrades for already-provisioned persistent disks.
@@ -298,6 +300,10 @@ After M2, a separate version-promotion and persistent-disk upgrade design must e
 New installations may default to the latest **approved and tested** version only after that
 upgrade mechanism exists. Until then, retain the approved M2 baseline and refuse incompatible
 existing-parent assets without replacing or resetting persistent state.
+The generic upgrade/rollback, disposable-sibling qualification and bounded
+autonomous-correction direction is recorded in
+`docs/workflows/opencode-runtime-compatibility.md`; none is implemented by this
+version-policy increment.
 
 ### J.14 TUI key semantics across the tmux PTY (#69)
 

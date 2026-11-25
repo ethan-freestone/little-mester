@@ -502,7 +502,8 @@ assert 'ci_qemu_wait_process_identity' in qemu_stop_tests
 assert 'ssh_deletekeys' in text and '"ssh_deletekeys": True' in text
 assert 'guest cloud-init provisioning or SSH socket failed before SSH readiness' in text
 assert 'KVM_M2_READINESS_FAIL check=opencode-executable' in opencode_readiness_text
-assert 'KVM_M2_READINESS_FAIL check=%s expected=opencode-v2.2.5' in opencode_readiness_text
+assert 'KVM_M2_READINESS_FAIL check=%s expected=%s' in opencode_readiness_text
+assert '@EXPECTED_OPENCODE_EXECUTABLE_OUTPUT@' in opencode_readiness_text
 assert 'KVM_M2_READINESS_ENV_DIAG' in opencode_readiness_text
 assert 'runtime_dependencies=%s' in opencode_readiness_text
 assert 'ambient.err' in opencode_readiness_text and 'protected.err' in opencode_readiness_text

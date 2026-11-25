@@ -53,6 +53,7 @@ PINNED_INSTALL_ASSETS = {
         ("lib/vm/system-vm-workspace.py", 0o644),
     "/usr/lib/little-mester-vm/parent-qemu.py": ("lib/vm/parent-qemu.py", 0o644),
     "/usr/lib/little-mester-vm/guest-bootstrap.py": ("lib/vm/guest-bootstrap.py", 0o644),
+    "/usr/lib/little-mester-vm/opencode-version.py": ("lib/vm/opencode-version.py", 0o644),
     "/usr/lib/little-mester-vm/guest-opencode-preferences.py":
         ("lib/vm/guest-opencode-preferences.py", 0o644),
     "/etc/systemd/system/little-mester-vm.service": ("systemd/little-mester-vm.service", 0o644),

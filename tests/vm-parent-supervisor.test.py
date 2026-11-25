@@ -84,7 +84,9 @@ class SupervisorHandoffTests(unittest.TestCase):
                          parent_state._SESSION_CONTRACT.ASSETS)
         self.assertNotIn("/usr/local/bin/opencode --version",
                          parent_state._SESSION_CONTRACT.readiness_checks(include_opencode=False))
-        helper = (ROOT / "lib/vm/opencode-readiness.sh").read_text()
+        helper = (ROOT / "lib/vm/opencode-readiness.sh").read_text().replace(
+            "@EXPECTED_OPENCODE_EXECUTABLE_OUTPUT@",
+            parent_state._SESSION_CONTRACT.EXPECTED_OPENCODE_EXECUTABLE_OUTPUT)
         self.assertEqual(subprocess.run(["/bin/sh", "-n"], input=helper.encode(),
                                         check=False).returncode, 0)
         with tempfile.TemporaryDirectory() as directory:
@@ -94,7 +96,9 @@ class SupervisorHandoffTests(unittest.TestCase):
             package = root / "node_modules/@opencode/cli"
             binary = package / "bin/opencode.exe"
             binary.parent.mkdir(parents=True)
-            (package / "package.json").write_text('{"name":"@opencode/cli","version":"2.2.5"}')
+            (package / "package.json").write_text(
+                json.dumps({"name": "@opencode/cli",
+                            "version": parent_state._SESSION_CONTRACT.SUPPORTED_OPENCODE_VERSION}))
             fake_opencode = root / "bin/opencode"
             fake_opencode.parent.mkdir()
             fake_opencode.symlink_to(binary)
@@ -120,18 +124,28 @@ class SupervisorHandoffTests(unittest.TestCase):
                                       check=False)
 
             env_fallback = invoke(
-                "#!/bin/sh\nif [ \"${MODE:-}\" = ambient-fail ]; then echo private-output >&2; exit 9; fi\nprintf '%s\\n' 'opencode v2.2.5'\n",
+                "#!/bin/sh\nif [ \"${MODE:-}\" = ambient-fail ]; then echo private-output >&2; exit 9; fi\nprintf '%s\\n' '"
+                + parent_state._SESSION_CONTRACT.EXPECTED_OPENCODE_EXECUTABLE_OUTPUT + "'\n",
                 {"MODE": "ambient-fail"})
             self.assertEqual(env_fallback.returncode, 0, env_fallback.stderr)
-            self.assertIn("ambient_class=process-exit protected_version=pass", env_fallback.stdout)
+            self.assertIn("ambient_class=process-exit", env_fallback.stdout)
+            self.assertIn("expected=" + parent_state._SESSION_CONTRACT.EXPECTED_OPENCODE_EXECUTABLE_OUTPUT,
+                          env_fallback.stdout)
+            self.assertIn("executable_version="
+                          + parent_state._SESSION_CONTRACT.EXPECTED_OPENCODE_EXECUTABLE_OUTPUT,
+                          env_fallback.stdout)
             self.assertNotIn("private-output", env_fallback.stdout + env_fallback.stderr)
 
             wrong_version = invoke("#!/bin/sh\nprintf '%s\\n' 'opencode v9.9.9'\n")
             self.assertEqual(wrong_version.returncode, 44)
             self.assertIn("check=opencode-version", wrong_version.stdout)
             self.assertIn("ambient_class=version-mismatch", wrong_version.stdout)
-            self.assertIn("package_version=2.2.5", wrong_version.stdout)
-            self.assertNotIn("v9.9.9", wrong_version.stdout)
+            self.assertIn(
+                "package_version=" + parent_state._SESSION_CONTRACT.SUPPORTED_OPENCODE_VERSION,
+                wrong_version.stdout)
+            self.assertIn("expected=" + parent_state._SESSION_CONTRACT.EXPECTED_OPENCODE_EXECUTABLE_OUTPUT,
+                          wrong_version.stdout)
+            self.assertIn("executable_version=opencode v9.9.9", wrong_version.stdout)
 
             missing_interpreter = invoke("#!/missing/opencode-interpreter\n")
             self.assertEqual(missing_interpreter.returncode, 44)
@@ -154,7 +168,9 @@ class SupervisorHandoffTests(unittest.TestCase):
             self.assertEqual(timed_out.returncode, 44)
             self.assertIn("ambient_class=timeout", timed_out.stdout)
 
-            correct_version = invoke("#!/bin/sh\nprintf '%s\\n' 'opencode v2.2.5'\n")
+            correct_version = invoke(
+                "#!/bin/sh\nprintf '%s\\n' '"
+                + parent_state._SESSION_CONTRACT.EXPECTED_OPENCODE_EXECUTABLE_OUTPUT + "'\n")
             self.assertEqual(correct_version.returncode, 0, correct_version.stderr)
 
     def cleanup_gated_child(self, role, transition=None):
@@ -650,7 +666,8 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 "lib/vm/bounded-log.py", "lib/vm/executable-policy.py",
                 "lib/vm/browser-auth-session.py", "lib/vm/callback-listener.py", "lib/vm/virtiofs-socket.py",
                 "lib/vm/guest-user-dirs.py", "lib/vm/guest-opencode-preferences.py",
-                "lib/vm/parent-session-contract.py", "lib/vm/parent-state.py",
+                "lib/vm/parent-session-contract.py", "lib/vm/opencode-version.py",
+                "lib/vm/parent-state.py",
                 "lib/vm/parent-launcher.py", "lib/vm/parent-gate.py",
                 "lib/vm/parent-supervisor.py", "lib/vm/parent-qemu.py",
                 "lib/vm/parent-provision.py", "lib/vm/system-vm.py",
@@ -1364,7 +1381,8 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                                   if line.startswith("export OPENCODE_CLI_CONFIG_CONTENT="))
                 cli_content = json.loads(cli_export.split("=", 1)[1].strip("'"))
                 self.assertEqual(cli_content["keybinds"], {"app.exit": "none", "prompt.clear": "none"})
-                self.assertIn("test \"$(opencode --version)\" = 'opencode v2.2.5'",
+                self.assertIn("test \"$(opencode --version)\" = '"
+                              + parent_state._SESSION_CONTRACT.EXPECTED_OPENCODE_EXECUTABLE_OUTPUT + "'",
                               config["runcmd"][0][-1])
                 self.assertIn("guest-user-dirs.py prepare-opencode 1000",
                               config["runcmd"][0][-1])
@@ -1372,7 +1390,8 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                     self.assertEqual(real_run(["/bin/sh", "-n"], input=script.encode(),
                                               check=False).returncode, 0)
                 self.assertEqual(config["packages"], ["tmux", "nodejs", "npm"])
-                self.assertIn("@opencode/cli@2.2.5", config["runcmd"][0][-1])
+                self.assertIn(parent_state._SESSION_CONTRACT.OPENCODE_PACKAGE_SPEC,
+                              config["runcmd"][0][-1])
                 port = 22345
                 directory_fd = parent_state._open_directory_chain(create=False, home_override=self.home)
                 try:

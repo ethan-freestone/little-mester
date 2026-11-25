@@ -3,6 +3,7 @@
 set -u
 
 opencode_path=/usr/local/bin/opencode
+expected_opencode_output='@EXPECTED_OPENCODE_EXECUTABLE_OUTPUT@'
 if [ ! -x "$opencode_path" ]; then
   printf '%s\n' 'KVM_M2_READINESS_FAIL check=opencode-executable path=/usr/local/bin/opencode'
   exit 44
@@ -25,15 +26,18 @@ run_version() {
   (ulimit -f 64; timeout --signal=TERM --kill-after=1 3 "$@" "$opencode_path" --version \
     >"$output_file" 2>"$error_file")
 }
-version_is_pinned() {
-  [ "$(cat "$1")" = 'opencode v2.2.5' ]
+version_is_supported() {
+  [ "$(cat "$1")" = "$expected_opencode_output" ]
+}
+reported_version() {
+  head -n 1 "$1" | tr -cd '[:alnum:].+ -' | cut -c1-80
 }
 failure_class() {
   result=$1
   error_file=$2
   output_file=$3
   if [ "$result" -eq 0 ]; then
-    if version_is_pinned "$output_file"; then printf version-pass; else printf version-mismatch; fi
+    if version_is_supported "$output_file"; then printf version-pass; else printf version-mismatch; fi
     return
   fi
   case "$result" in
@@ -64,7 +68,7 @@ if run_version "$diagnostic_dir/ambient.out" "$diagnostic_dir/ambient.err"; then
 else
   ambient_status=$?
 fi
-if [ "$ambient_status" -eq 0 ] && version_is_pinned "$diagnostic_dir/ambient.out"; then
+if [ "$ambient_status" -eq 0 ] && version_is_supported "$diagnostic_dir/ambient.out"; then
   cleanup_diagnostics
   exit 0
 fi
@@ -85,10 +89,11 @@ if run_version "$diagnostic_dir/protected.out" "$diagnostic_dir/protected.err" \
 else
   protected_status=$?
 fi
-if [ "$protected_status" -eq 0 ] && version_is_pinned "$diagnostic_dir/protected.out"; then
-  printf 'KVM_M2_READINESS_ENV_DIAG ambient_exit=%s ambient_class=%s protected_version=pass\n' \
+if [ "$protected_status" -eq 0 ] && version_is_supported "$diagnostic_dir/protected.out"; then
+  printf 'KVM_M2_READINESS_ENV_DIAG ambient_exit=%s ambient_class=%s expected=%s executable_version=%s protected_version=pass\n' \
     "$ambient_status" \
-    "$(failure_class "$ambient_status" "$diagnostic_dir/ambient.err" "$diagnostic_dir/ambient.out")"
+    "$(failure_class "$ambient_status" "$diagnostic_dir/ambient.err" "$diagnostic_dir/ambient.out")" \
+    "$expected_opencode_output" "$(reported_version "$diagnostic_dir/protected.out")"
   cleanup_diagnostics
   exit 0
 fi
@@ -118,6 +123,11 @@ package_version=$(/usr/bin/python3 -c \
   'import json,pathlib,sys; p=pathlib.Path(sys.argv[1]).resolve().parent.parent / "package.json"; print(json.loads(p.read_text()).get("version", "unknown"))' \
   "$opencode_path" 2>/dev/null | tr -cd '[:alnum:].+-' | cut -c1-40)
 [ -n "$package_version" ] || package_version=unknown
+executable_version=unavailable
+if [ "$protected_status" -eq 0 ]; then
+  executable_version=$(reported_version "$diagnostic_dir/protected.out")
+  [ -n "$executable_version" ] || executable_version=empty
+fi
 runtime_dependencies=unavailable
 if command -v ldd >/dev/null 2>&1 \
     && timeout --signal=TERM --kill-after=1 2 ldd "$target" >"$diagnostic_dir/dependencies" 2>&1; then
@@ -132,9 +142,10 @@ elif [ -s "$diagnostic_dir/dependencies" ] \
 elif command -v ldd >/dev/null 2>&1; then
   runtime_dependencies=check-failed
 fi
-printf 'KVM_M2_READINESS_FAIL check=%s expected=opencode-v2.2.5 ambient_exit=%s ambient_class=%s protected_exit=%s protected_class=%s uid=%s home=%s home_mode_uid_gid=%s arch=%s binary_target=%s binary_format=%s binary_mode_uid_gid_size=%s package_version=%s runtime_dependencies=%s\n' \
-  "$failure_check" "$ambient_status" "$ambient_class" "$protected_status" "$protected_class" \
+printf 'KVM_M2_READINESS_FAIL check=%s expected=%s ambient_exit=%s ambient_class=%s protected_exit=%s protected_class=%s executable_version=%s package_version=%s uid=%s home=%s home_mode_uid_gid=%s arch=%s binary_target=%s binary_format=%s binary_mode_uid_gid_size=%s runtime_dependencies=%s\n' \
+  "$failure_check" "$expected_opencode_output" "$ambient_status" "$ambient_class" "$protected_status" "$protected_class" \
+  "$executable_version" "$package_version" \
   "$(id -u)" "$home_value" "$home_stat" "$(uname -m 2>/dev/null || printf unknown)" "$target_safe" \
-  "$binary_format" "$binary_stat" "$package_version" "$runtime_dependencies"
+  "$binary_format" "$binary_stat" "$runtime_dependencies"
 cleanup_diagnostics
 exit 44

@@ -630,7 +630,8 @@ class ArtifactRetentionTests(unittest.TestCase):
                 verifier.OPENCODE_BINARY, verifier.ROOT, verifier.PLUGIN,
                 list(verifier.CLI_CONFIG["plugins"]),
             )
-            version = SimpleNamespace(returncode=0, stdout="opencode v2.2.5\n", stderr="")
+            version = SimpleNamespace(
+                returncode=0, stdout=contract.EXPECTED_OPENCODE_EXECUTABLE_OUTPUT + "\n", stderr="")
             try:
                 with (
                     mock.patch.object(verifier.tempfile, "mkdtemp", return_value=str(home)),
@@ -1042,13 +1043,16 @@ class PinnedOpenCodeKeyEventPtyTests(unittest.TestCase):
     def setUpClass(cls):
         cls.binary = shutil.which("opencode")
         if cls.binary is None:
-            raise unittest.SkipTest("pinned OpenCode v2.2.5 is unavailable")
+            raise unittest.SkipTest(
+                f"supported OpenCode {contract.SUPPORTED_OPENCODE_VERSION} is unavailable")
         version = subprocess.run(
             [cls.binary, "--version"], capture_output=True, text=True,
             timeout=5, check=False,
         )
-        if version.returncode != 0 or version.stdout.strip() != "opencode v2.2.5":
-            raise unittest.SkipTest("pinned OpenCode v2.2.5 is unavailable")
+        if (version.returncode != 0
+                or version.stdout.strip() != contract.EXPECTED_OPENCODE_EXECUTABLE_OUTPUT):
+            raise unittest.SkipTest(
+                f"supported OpenCode {contract.SUPPORTED_OPENCODE_VERSION} is unavailable")
 
     def test_short_gap_captures_parsed_keys_and_live_modal_state(self):
         previous_binary = verifier.OPENCODE_BINARY

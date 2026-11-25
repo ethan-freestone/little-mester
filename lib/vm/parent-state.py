@@ -451,7 +451,9 @@ out={'project_config_ignored':r.returncode==0 and not any(x in documents for x i
       'hostile_fixture_is_expected_negative_control':hostile_sha=='HOSTILE_SHA',
       'hostile_fixture_cleaned_after_probe':hostile_fixture_absent,
      'share_command_absent_from_pinned_runtime':share_help.returncode==0 and 'share' not in subcommands,
-     'pinned_runtime_version':version.stdout.decode('ascii','replace').strip() if version.returncode==0 else None,
+       'expected_supported_opencode_version':'__SUPPORTED_OPENCODE_VERSION__',
+       'observed_opencode_executable_version':(version.stdout[:256].decode('ascii','replace').splitlines()[0][:80]
+                                                if version.returncode==0 and version.stdout else None),
      'hostile_plugin_not_executed':not os.path.exists(w+'/.lm-m2-hostile-plugin-ran'),
      'runtime_cwd_is_workspace':cwd==w,
      'runtime_project_config_disabled':process_env.get('OPENCODE_DISABLE_PROJECT_CONFIG')=='1',
@@ -464,9 +466,12 @@ out={'project_config_ignored':r.returncode==0 and not any(x in documents for x i
       'runtime_otel_sdk_disabled':process_env.get('OTEL_SDK_DISABLED')=='true',
       'runtime_otel_exporters_disabled':all(process_env.get(k)=='none' for k in ('OTEL_TRACES_EXPORTER','OTEL_LOGS_EXPORTER','OTEL_METRICS_EXPORTER')),
       'runtime_otlp_exporter_absent':not process_env.get('OTEL_EXPORTER_OTLP_ENDPOINT') and not process_env.get('OTEL_EXPORTER_OTLP_HEADERS'),
-      'runtime_is_pinned_v225':version.returncode==0 and version.stdout.decode('ascii','replace').strip()=='opencode v2.2.5'}
+        'runtime_opencode_version_supported':version.returncode==0 and version.stdout.strip()==b'__EXPECTED_OPENCODE_EXECUTABLE_OUTPUT__'}
 print(json.dumps(out,sort_keys=True,separators=(',',':')))
-'''.replace('HOSTILE_SHA', _M2_HOSTILE_CONFIG_SHA)
+'''.replace('HOSTILE_SHA', _M2_HOSTILE_CONFIG_SHA).replace(
+    '__SUPPORTED_OPENCODE_VERSION__', _SESSION_CONTRACT.SUPPORTED_OPENCODE_VERSION).replace(
+    '__EXPECTED_OPENCODE_EXECUTABLE_OUTPUT__',
+    _SESSION_CONTRACT.EXPECTED_OPENCODE_EXECUTABLE_OUTPUT)
 _M2_PROTECTION_CLEANUP_SCRIPT = f'''import hashlib,json,os,stat
 w='/home/mester/workspace'; d=os.open(w,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
 od=os.open('.opencode',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=d)

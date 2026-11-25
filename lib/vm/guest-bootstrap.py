@@ -6,6 +6,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -32,6 +33,21 @@ NPM_PREFIX = "/usr/local"
 NPM_GUEST_HELPER = "/usr/local/libexec/mester-vm-guest-bootstrap.py"
 OPENCODE_PACKAGE_JSON = pathlib.Path(
     "/usr/local/lib/node_modules/@opencode/cli/package.json")
+
+
+def _opencode_version_policy():
+    """Load host-side policy only when rendering provisioning commands.
+
+    The copy of this file embedded in a guest is a standalone bootstrap helper;
+    it must not require the host-only policy module to run its fixed subcommands.
+    """
+    path = pathlib.Path(__file__).with_name("opencode-version.py")
+    spec = importlib.util.spec_from_file_location("guest_bootstrap_opencode_version", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("supported OpenCode version policy is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class NpmBootstrapError(RuntimeError):
@@ -534,7 +550,7 @@ runuser -u mester -- env HOME=/home/mester python3 -I @HELPER@ verify-write
 runuser -u mester -- env HOME=/home/mester XDG_RUNTIME_DIR=/run/user/@UID@ DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/@UID@/bus systemctl --user daemon-reload
 runuser -u mester -- env HOME=/home/mester XDG_RUNTIME_DIR=/run/user/@UID@ DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/@UID@/bus dockerd-rootless-setuptool.sh install
 runuser -u mester -- env HOME=/home/mester XDG_RUNTIME_DIR=/run/user/@UID@ DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/@UID@/bus systemctl --user enable --now docker
-npm install --global @opencode/cli@2.2.5
+npm install --global @OPENCODE_PACKAGE_SPEC@
 # npm package metadata is data; normalize only a verified root-owned regular file.
 python3 -I @NPM_BOOTSTRAP@ normalize-opencode-package-json
 command -v opencode
@@ -583,9 +599,13 @@ def provision_script(uid: int, workspace: str, helper: str) -> str:
         setup = "install -d -o mester -g mester -m 0750 /home/mester/workspace"
     else:
         raise ValueError("guest workspace kind is unsupported")
+    version_policy = _opencode_version_policy()
     return (_PROVISION.replace("@WORKSPACE@", setup)
             .replace("@UID@", str(uid)).replace("@HELPER@", helper)
-            .replace("@NPM_BOOTSTRAP@", NPM_GUEST_HELPER))
+            .replace("@NPM_BOOTSTRAP@", NPM_GUEST_HELPER)
+            .replace("@OPENCODE_PACKAGE_SPEC@", version_policy.PACKAGE_SPEC)
+            .replace("@OPENCODE_EXPECTED_OUTPUT@",
+                     version_policy.EXPECTED_EXECUTABLE_OUTPUT))
 
 
 def bootstrap_payload() -> str:
@@ -631,6 +651,7 @@ def build_foundation(*, name: str, uid: int, ssh_key: str, workspace: str, helpe
 def build_legacy_parent_base(*, name: str, uid: int, ssh_key: str) -> dict:
     """Preserve the established parent base while sharing cloud-init assembly."""
     _safe(name, uid, ssh_key, "disk", "/usr/local/libexec/lm-guest-user-dirs.py")
+    version_policy = _opencode_version_policy()
     return {
         "hostname": name, "ssh_pwauth": False, "disable_root": True,
         "ssh_deletekeys": False,
@@ -642,8 +663,8 @@ def build_legacy_parent_base(*, name: str, uid: int, ssh_key: str) -> dict:
         "packages": ["tmux", "nodejs", "npm"],
         "runcmd": [["bash", "-lc", "install -d -o mester -g mester -m 0750 /home/mester/workspace && "
                     "/usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-opencode 1000 && "
-                    "npm install --global @opencode/cli@2.2.5 && "
-                    "test \"$(opencode --version)\" = 'opencode v2.2.5' && "
+                    f"npm install --global {version_policy.PACKAGE_SPEC} && "
+                    f"test \"$(opencode --version)\" = '{version_policy.EXPECTED_EXECUTABLE_OUTPUT}' && "
                     "chown root:root /usr/local/bin/opencode && chmod 0755 /usr/local/bin/opencode && "
                     "systemctl restart ssh"]],
     }

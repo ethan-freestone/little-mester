@@ -72,6 +72,7 @@ INSTALL_FILES = {
     "lib/vm/virtiofs-socket.py": 0o644,
     "lib/vm/guest-user-dirs.py": 0o644,
     "lib/vm/parent-session-contract.py": 0o644,
+    "lib/vm/opencode-version.py": 0o644,
     "lib/vm/guest-compatibility.py": 0o644,
     "lib/vm/code-update-transaction.py": 0o644,
     "lib/vm/parent-state.py": 0o644,
@@ -341,6 +342,7 @@ def inspect_live_parent(root: pathlib.Path) -> dict:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     expected = dict(module.ASSET_SHA256)
+    supported_opencode_version = module.SUPPORTED_OPENCODE_VERSION
     protected_config = json.dumps(
         {"autoupdate": False, "share": "disabled", "permission": {"edit": "ask", "bash": "ask"}},
         separators=(",", ":"),
@@ -371,7 +373,8 @@ def inspect_live_parent(root: pathlib.Path) -> dict:
         and opencode_link.get("target") == "../lib/node_modules/@opencode/cli/bin/opencode"
         and opencode_link.get("uid") == 0 and opencode_link.get("gid") == 0
         and package.get("type") == "file" and package.get("uid") == 0 and package.get("gid") == 0
-        and package.get("mode") == "0644" and package.get("version") == "2.2.5"
+        and package.get("mode") == "0644"
+        and package.get("version") == supported_opencode_version
         and executable.get("type") == "file" and executable.get("uid") == 0
         and executable.get("gid") == 0 and executable.get("mode") == "0755"
     )
@@ -382,7 +385,7 @@ def inspect_live_parent(root: pathlib.Path) -> dict:
         okay = item.get("type") == "file" and item.get("uid") == 0 and item.get("mode") == "0755"
         checks[path] = "PASS" if okay else "MISMATCH"
         compatible = compatible and okay
-    version_ok = package.get("version") == "2.2.5"
+    version_ok = package.get("version") == supported_opencode_version
     checks["opencode_package_version"] = "PASS" if version_ok else "MISMATCH"
     compatible = compatible and version_ok
     after = read_status()
@@ -404,7 +407,10 @@ def inspect_live_parent(root: pathlib.Path) -> dict:
         "guest_assets": checks,
         "observed_guest_inventory": observed_evidence,
         "expected_guest_sha256": expected,
-        "guest_opencode_version": package.get("version", "unavailable"),
+        "expected_supported_opencode_version": supported_opencode_version,
+        "guest_opencode_package_version": package.get("version", "unavailable"),
+        "guest_opencode_executable_version": None,
+        "guest_opencode_executable_observation": "not_run_by_read_only_inventory",
         "m2_contract_compatible": compatible,
         "inspection": "read_only_fixed_inventory",
     }
@@ -2035,7 +2041,10 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
         raise GateError("FAIL", "fresh guest protected asset inventory does not match the candidate")
     passed("guest_compatibility", {
         "m2_contract_compatible": True,
-        "guest_opencode_version": live.get("guest_opencode_version"),
+        "expected_supported_opencode_version": live.get("expected_supported_opencode_version"),
+        "guest_opencode_package_version": live.get("guest_opencode_package_version"),
+        "guest_opencode_executable_version": live.get("guest_opencode_executable_version"),
+        "guest_opencode_executable_observation": live.get("guest_opencode_executable_observation"),
         "guest_assets": live.get("guest_assets"),
         "disk_identity": new_identity,
     })
@@ -2155,7 +2164,7 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
         "project_config_ignored", "protected_update_disabled", "runtime_config_update_disabled",
         "protected_share_disabled", "runtime_config_sharing_disabled", "update_share_positive_control_accepted",
         "hostile_fixture_is_expected_negative_control",
-        "share_command_absent_from_pinned_runtime", "runtime_is_pinned_v225",
+        "share_command_absent_from_pinned_runtime", "runtime_opencode_version_supported",
         "hostile_plugin_not_executed", "runtime_cwd_is_workspace",
         "runtime_project_config_disabled", "runtime_config_path_protected",
         "runtime_plugin_config_protected", "runtime_autoupdate_disabled",
@@ -2246,7 +2255,7 @@ def run_parent_acceptance(root: pathlib.Path, model: str, data: dict,
         "project_config_ignored", "protected_update_disabled", "runtime_config_update_disabled",
         "protected_share_disabled", "runtime_config_sharing_disabled", "update_share_positive_control_accepted",
         "hostile_fixture_cleaned_after_probe",
-        "share_command_absent_from_pinned_runtime", "runtime_is_pinned_v225",
+        "share_command_absent_from_pinned_runtime", "runtime_opencode_version_supported",
         "hostile_plugin_not_executed", "runtime_cwd_is_workspace",
         "runtime_project_config_disabled", "runtime_config_path_protected",
         "runtime_plugin_config_protected", "runtime_autoupdate_disabled",

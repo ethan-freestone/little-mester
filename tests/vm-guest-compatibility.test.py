@@ -174,7 +174,8 @@ class GuestCompatibilityInventoryTests(unittest.TestCase):
         self.assertIn("/etc/opencode/plugins/little-mester-exit-confirm/", serialized)
         self.assertIn("/etc/opencode/plugins/little-mester-host-metrics-tui/", serialized)
         self.assertIn("/usr/local/lib/node_modules/@opencode/cli/package.json", serialized)
-        self.assertEqual(expected[compatibility.OPENCODE_PACKAGE_JSON]["version"], "2.2.5")
+        self.assertEqual(expected[compatibility.OPENCODE_PACKAGE_JSON]["version"],
+                         compatibility.OPENCODE_VERSION)
         self.assertNotIn("/home/mester/.local/state/opencode/preferences.json", serialized)
         self.assertNotIn("/home/mester/.local/share/opencode/auth.json", serialized)
         self.assertNotIn("/home/mester/.local/share/opencode/opencode.db", serialized)
@@ -282,7 +283,7 @@ class GuestCompatibilityInventoryTests(unittest.TestCase):
                     for metadata in ("mode", "uid", "gid"):
                         self.assertIsInstance(item.get(metadata), int)
                 elif item["kind"] == "version-json":
-                    self.assertEqual(item.get("version"), "2.2.5")
+                    self.assertEqual(item.get("version"), compatibility.OPENCODE_VERSION)
                     for metadata in ("mode", "uid", "gid"):
                         self.assertIsInstance(item.get(metadata), int)
 
@@ -332,7 +333,7 @@ class GuestCompatibilityInventoryTests(unittest.TestCase):
 
         package_label = _asset_label(expected, compatibility.OPENCODE_PACKAGE_JSON)
         self.assertIn(
-            f"{package_label} expected{{present=yes,regular=yes,version=2.2.5,mode=0644,uid=0,gid=0}}",
+            f"{package_label} expected{{present=yes,regular=yes,version={compatibility.OPENCODE_VERSION},mode=0644,uid=0,gid=0}}",
             line,
         )
         self.assertIn(
@@ -352,7 +353,8 @@ class GuestCompatibilityInventoryTests(unittest.TestCase):
         expected, base = _candidate_response()
         package_path = compatibility.OPENCODE_PACKAGE_JSON
         package_label = _asset_label(expected, package_path)
-        expected_package = "present=yes,regular=yes,version=2.2.5,mode=0644,uid=0,gid=0"
+        expected_package = (f"present=yes,regular=yes,version={compatibility.OPENCODE_VERSION},"
+                            "mode=0644,uid=0,gid=0")
         cases = (
             ({"kind": "missing"}, "MISMATCH", (f"{package_label}:mismatch",),
              "present=no,regular=no,version=unknown,mode=unknown,uid=unknown,gid=unknown,category=missing"),

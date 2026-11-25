@@ -16,7 +16,7 @@ Usage:
     python3 scripts/verify-exit-confirm.py [repo-root] [--via-launcher]
 
 Requires: Python 3 and pexpect (installed in the lab venv). Exits non-zero on
-any failed check. Requires exactly OpenCode v2.2.5. The script ignores inherited
+any failed check. Requires exactly the repository's supported OpenCode version. The script ignores inherited
 OpenCode configuration, credentials, and session variables; it supplies a minimal
 private server config and overrides the CLI plugin list/keybinds.
 """
@@ -51,6 +51,16 @@ CLI_CONFIG = {
     "plugins": [PLUGIN],
     "keybinds": {"app.exit": "none", "prompt.clear": "none"},
 }
+
+
+def load_session_contract(repo_root):
+    contract_path = os.path.join(repo_root, "lib", "vm", "parent-session-contract.py")
+    contract_spec = importlib.util.spec_from_file_location("exit_confirm_session_contract", contract_path)
+    if contract_spec is None or contract_spec.loader is None:
+        raise RuntimeError("the protected guest session contract is unavailable")
+    contract = importlib.util.module_from_spec(contract_spec)
+    contract_spec.loader.exec_module(contract)
+    return contract
 
 
 _EXPECTED_TMUX_SOURCES = {
@@ -191,13 +201,8 @@ class Driver:
     def __init__(self, home, *, via_tmux=False, via_launcher=False,
                  tmux_config_source=None, session_number=1,
                  reuse_existing_session=False, capture_key_events=False):
-        contract_path = os.path.join(ROOT, "lib", "vm", "parent-session-contract.py")
-        contract_spec = importlib.util.spec_from_file_location("exit_confirm_session_contract", contract_path)
-        if contract_spec is None or contract_spec.loader is None:
-            raise RuntimeError("the protected guest session contract is unavailable")
-        contract = importlib.util.module_from_spec(contract_spec)
-        contract_spec.loader.exec_module(contract)
-        self.session_contract = contract
+        self.session_contract = load_session_contract(ROOT)
+        contract = self.session_contract
         config_source = contract.TMUX_CONFIG if tmux_config_source is None else tmux_config_source
         isolated_config = isolated_tmux_config(config_source)
 
@@ -787,17 +792,18 @@ def main():
     ROOT = os.path.abspath(args.repo_root)
     PLUGIN = os.path.join(ROOT, "agent", "opencode", "plugins", "little-mester-exit-confirm")
     CLI_CONFIG["plugins"] = [PLUGIN]
+    expected_output = load_session_contract(ROOT).EXPECTED_OPENCODE_EXECUTABLE_OUTPUT
     OPENCODE_BINARY = shutil.which("opencode")
     if OPENCODE_BINARY is None:
-        sys.exit("opencode v2.2.5 is required on PATH")
+        sys.exit(f"{expected_output} is required on PATH")
     try:
         version = subprocess.run([OPENCODE_BINARY, "--version"], check=False,
                                  capture_output=True, text=True, timeout=5,
                                  env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
     except (OSError, subprocess.TimeoutExpired) as error:
-        sys.exit(f"could not verify pinned OpenCode version: {error}")
-    if version.returncode != 0 or version.stdout.strip() != "opencode v2.2.5":
-        sys.exit("OpenCode v2.2.5 is required; refusing to test an unpinned binary")
+        sys.exit(f"could not verify supported OpenCode version: {error}")
+    if version.returncode != 0 or version.stdout.strip() != expected_output:
+        sys.exit(f"{expected_output} is required; refusing to test an unsupported binary")
     home = tempfile.mkdtemp(prefix="opencode-exit-confirm-")
     workspace = os.path.join(home, "workspace")
     driver = None

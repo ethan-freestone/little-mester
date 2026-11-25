@@ -21,6 +21,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+VERSION_SPEC = importlib.util.spec_from_file_location(
+    "ci_kvm_opencode_version", ROOT / "lib/vm/opencode-version.py")
+VERSION_POLICY = importlib.util.module_from_spec(VERSION_SPEC)
+assert VERSION_SPEC.loader is not None
+VERSION_SPEC.loader.exec_module(VERSION_POLICY)
 SCRIPT = ROOT / "tests/ci-kvm-system-unit.py"
 SPEC = importlib.util.spec_from_file_location("ci_kvm_system_unit", SCRIPT)
 unit = importlib.util.module_from_spec(SPEC)
@@ -364,15 +369,19 @@ class HostedSystemUnitTests(unittest.TestCase):
     def test_transient_guest_substage_markers_and_progress_are_bounded(self):
         stage = (ROOT / "tests/ci-kvm-stage.sh").read_text()
         install = stage.split("install_command = r'''", 1)[1].split("'''", 1)[0]
+        rendered_install = install.replace("@OPENCODE_PACKAGE_SPEC@", VERSION_POLICY.PACKAGE_SPEC)
         self.assertIn("event=START name=%s", install)
         self.assertIn("event=END name=%s", install)
         self.assertIn("event=FAIL name=%s", install)
         self.assertIn('apt-get update ||', install)
         self.assertNotIn('apt-get update -qq', install)
-        self.assertIn('npm install --global @opencode/cli@2.2.5', install)
+        self.assertIn('npm install --global ' + VERSION_POLICY.PACKAGE_SPEC, rendered_install)
         self.assertIn('guest_stage apt-update apt-get update || exit $?', install)
         self.assertIn('guest_stage apt-install apt-get install -y --no-install-recommends', install)
-        self.assertIn('guest_stage opencode-install npm install --global @opencode/cli@2.2.5', install)
+        self.assertIn('guest_stage opencode-install npm install --global '
+                      + VERSION_POLICY.PACKAGE_SPEC, rendered_install)
+        self.assertIn('install_command = install_command.replace("@OPENCODE_PACKAGE_SPEC@", contract.OPENCODE_PACKAGE_SPEC)',
+                      stage)
         self.assertIn('guest_stage workspace-user-dirs install -d -o mester -g mester -m 0700 /home/mester/workspace || exit $?', install)
         self.assertIn('guest_stage opencode-user-dirs /usr/bin/python3 -I /usr/local/libexec/lm-guest-user-dirs.py prepare-opencode 1000 || exit $?', install)
         self.assertIn("printf 'KVM_GUEST_PROVISION_FAIL stage=%s exit=%s\\n' \"$stage\" \"$rc\"", install)
