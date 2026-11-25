@@ -72,6 +72,34 @@ execution or ticket status; if a future policy discusses waivers, require explic
 owner authorization and recorded justification, and never waive mandatory security
 review or owner-runtime acceptance.
 
+## Owner-host GitHub boundary and publication handoffs
+
+- The agent environment intentionally has no authenticated GitHub access and may not
+  resolve `github.com`. Do not probe DNS/network, invoke GitHub operations, request
+  credentials, or describe this expected boundary as an infrastructure incident.
+  The owner performs authenticated GitHub operations from Ariadne.
+- The agent performs local implementation, tests, Git coordination, and independent
+  review. `/workspace` shares Git objects and refs with the owner's
+  `$HOME/Development/little-mester`; guest-local worktrees are not accessible from
+  Ariadne. Preserve exact commit SHAs and recovery refs across that boundary.
+- At every reviewed publication checkpoint, automatically provide an **OWNER ACTION
+  REQUIRED** handoff with the exact candidate SHA, expected remote SHA, expected
+  parent SHA, a guarded copy-pasteable exact-SHA-to-ref push command, and the
+  applicable hosted-CI command. Do not require branch switching. Use a normal
+  fast-forward push whenever possible; use exact `--force-with-lease=<ref>:<expected>`
+  only when a reviewed history rewrite is necessary. Never merge a PR without
+  explicit owner authorization.
+- Put Bash syntax, including `set -euo pipefail`, inside `bash -c '…'`; disable
+  `GIT_PAGER` and `GH_PAGER` in owner command blocks. The publication block must
+  fetch, assert the expected remote and candidate parent SHAs, verify ancestry,
+  check the diff, and push the candidate SHA to the exact ref. The owner then watches
+  the relevant PR checks to completion. In stacked work, publish and qualify one
+  exact SHA before publishing its dependent branch; passing CI is not merge readiness.
+- Preserve the authorized stack order `#25 → #27 → #28 → compatibility`. If a
+  hosted merge-ref base differs from the verified stack parent, record both SHAs,
+  establish the PR base ref and ancestry from owner-provided metadata, and hold
+  dependent publication until reconciled.
+
 Future policy profiles may configure the same primitives for pair programming,
 autonomous operation, learning, testing, project management, or cleanup. Profiles are
 future policy, not current features. Do not implement workflow engines, MCP endpoints,

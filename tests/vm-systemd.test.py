@@ -1751,6 +1751,10 @@ class SystemdPolicyTests(unittest.TestCase):
         self.assertTrue(data["ssh_keys"]["ed25519_private"].startswith("private-key"))
         files = {item["path"]: item for item in data["write_files"]}
         self.assertIn("/usr/local/bin/lm-opencode", files)
+        self.assertIn(contract.TMUX_CONFIG_PATH, files)
+        self.assertEqual(files[contract.TMUX_CONFIG_PATH]["owner"], "root:root")
+        self.assertEqual(files[contract.TMUX_CONFIG_PATH]["permissions"], "0644")
+        self.assertEqual(files[contract.TMUX_CONFIG_PATH]["content"].encode(), contract.TMUX_CONFIG)
         self.assertIn("/usr/local/libexec/lm-opencode-auth", files)
         self.assertIn("/usr/local/libexec/lm-guest-user-dirs.py", files)
         self.assertIn("/etc/opencode/plugins/little-mester-exit-confirm/tui.tsx", files)
@@ -2188,12 +2192,11 @@ class SystemdPolicyTests(unittest.TestCase):
 
 
 class StageTimerTests(unittest.TestCase):
-    """Contract tests for the proposed safe, allowlisted stage timer API.
+    """Contract tests for the shared safe, allowlisted acceptance stage timer.
 
-    Assumed API: StageTimer(stream, wall_clock=..., monotonic=...) exposes a
+    StageTimer(stream, wall_clock=..., monotonic=...) exposes a
     ``timed_stage(label)`` context manager. It emits compact JSON records as
-    ``system_vm_stage=<json>`` lines. The source implementation is intentionally
-    not part of this tests-only change.
+    ``system_vm_stage=<json>`` lines.
     """
 
     class FlushRecordingStream(io.StringIO):
@@ -2247,6 +2250,22 @@ class StageTimerTests(unittest.TestCase):
             ("START", "guest_readiness_ssh"), ("END", "guest_readiness_ssh"),
             ("START", "guest_readiness_ssh"), ("END", "guest_readiness_ssh")])
         self.assertTrue(all(row["timestamp"].endswith("Z") for row in records))
+
+    def test_ci_production_terminal_regression_stage_is_allowlisted(self):
+        output = io.StringIO()
+        timer = acceptance.StageTimer(
+            output,
+            wall_clock=self.fixed_wall_clock(),
+            monotonic=iter((1.0, 2.25)).__next__)
+
+        with timer.timed_stage("production_terminal_regression"):
+            pass
+
+        self.assertEqual(
+            output.getvalue(),
+            self.line("START", "production_terminal_regression", "2026-11-21T12:00:00Z")
+            + self.line("END", "production_terminal_regression",
+                        "2026-11-21T12:00:01.250000Z", elapsed_ms=1250, outcome="PASS"))
 
     def test_failure_records_fail_and_reraises_original_baseexception(self):
         output = io.StringIO()

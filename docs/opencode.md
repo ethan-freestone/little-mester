@@ -207,13 +207,35 @@ sequence is therefore **Ctrl+C, then Q** (Q presses the dialog's confirm action)
 - `agent/opencode/tui.json` is deleted: dead v1 config that would have bound exit to a single `q`.
 
 **Verification.** Static checks: `tests/tui-jsx.bats`, `tests/exit-confirm.bats`. The live check
-`scripts/verify-exit-confirm.py` drives a private standalone TUI through a pty using a temporary
-HOME and disposable workspace, and asserts Ctrl+D is inert, `yq` types with the dialog closed,
-Ctrl+C opens the dialog, Esc/N/Ctrl+C cancel without exiting, and uppercase Y and Q confirm exit.
-The updated sequence passed against OpenCode 2.2.5 in the agent container on 2026-11-11. This
-establishes local pinned-binary behavior only; target-terminal clipboard canary and protected-guest
-configuration/provenance checks remain separate acceptance work. The image must be rebuilt/restarted
-for the baked `/etc/opencode` copy to replace any stale running copy.
+`scripts/verify-exit-confirm.py` requires Python 3, `pexpect`, and exactly OpenCode v2.2.5 on `PATH`;
+`--via-tmux` and `--via-launcher` also require local tmux. It drives a private standalone TUI through
+a pty using a temporary HOME and disposable workspace, and checks Ctrl+D, closed-dialog typing,
+dialog open/cancel behavior, and uppercase Y/Q confirmation. `--via-launcher` renders and drives the
+protected guest launcher template through a local tmux/OpenCode PTY. Its test-only auth-preparation
+command is replaced with `/usr/bin/true`, its runner adapter execs the pinned OpenCode binary, and
+protected paths are redirected to the private test home. The fixture does not run the host profile
+helper or SSH client.
+
+In tmux modes, each of up to ten Escape+`n` trials reports driver-write timing and cancellation
+independently; unavailable trial preconditions are reported as required SKIPs. Reattach evidence is
+attempted independently of trial results, but only after bounded recovery verifies a live TUI and
+closed dialog. A reattach PASS requires an actual detach and attach that preserves the same non-empty
+pane PID; only then is Ctrl+C sent and checked for opening the dialog. If recovery is unsafe or
+reattach fails/raises, both reattach assertions are reported as required SKIPs with reasons; a
+required SKIP fails the run and cannot erase earlier timing or cancellation failures.
+
+Each Driver exclusively creates its own raw session log, `pty-session-1.log` (Y) and
+`pty-session-2.log` (Q); reattach output remains in the originating session's log. Bounded run,
+session, trial, and recovery boundaries are recorded separately in `verification-phases.jsonl`.
+On any failed check, required SKIP, or exception, the temporary artifact directory is retained and
+the verifier prints every available session-log path. It removes disposable artifacts only after a
+fully successful run. The image must be rebuilt/restarted for the baked `/etc/opencode` copy to
+replace any stale running copy.
+
+The sequence was reported passed against OpenCode 2.2.5 in the agent container on 2026-11-11. The
+later local PTY diagnosis and qualification are recorded in J.14; neither local run is owner-VM
+acceptance. Target-terminal clipboard canary and protected-guest configuration/provenance checks
+remain separate acceptance work.
 
 ### J.11 OpenCode 2.2.5 project-config isolation probe (#55)
 
@@ -276,3 +298,86 @@ After M2, a separate version-promotion and persistent-disk upgrade design must e
 New installations may default to the latest **approved and tested** version only after that
 upgrade mechanism exists. Until then, retain the approved M2 baseline and refuse incompatible
 existing-parent assets without replacing or resetting persistent state.
+
+### J.14 TUI key semantics across the tmux PTY (#69)
+
+The supported guest launcher runs the pinned OpenCode 2.2.5 TUI inside the persistent
+`little-mester-opencode` tmux session. These layers have distinct key behavior; do not
+attribute OpenCode semantics to SSH or tmux:
+
+| Context | Ctrl+C | Escape | Evidence / boundary |
+|---|---|---|---|
+| Idle prompt, exit dialog closed | The Little Mester plugin opens its exit-confirm dialog; `app.exit` and `prompt.clear` are unbound. | The plugin does not bind Escape while closed; this document does not assign it an OpenCode action. | `agent/opencode/plugins/little-mester-exit-confirm/tui.tsx`, protected CLI keybind config, and the pinned-binary PTY check. |
+| Active generation | Not established by this increment. The plugin source has no generation-state predicate, but that alone does not prove which OpenCode keymap receives the event. | Not established. | Requires a pinned-binary generation test. |
+| Little Mester exit-confirm dialog | Cancels the dialog. | Cancels the dialog. `n` and the observed Escape-prefixed `alt+n` event also cancel; `y`/`q` confirms. | Plugin's `mode: "modal"` layer and `scripts/verify-exit-confirm.py` on OpenCode 2.2.5. |
+| Other OpenCode menus/dialogs | Not established by this increment. | Not established by this increment. | Their modal keymaps are OpenCode-owned; no behavior is inferred here. |
+
+**Observed PTY key-event diagnosis:** a test-only observer on the pinned TUI's parsed key events
+does not consume input and records each event with its raw sequence and active mode. Before the
+binding correction, a local `--via-tmux` run attempted all ten real PTY Escape+`n` writes; all ten
+driver-write intervals measured 30.1–30.6 ms (within the 35 ms bound), but only 2/10 canceled.
+Both cancellations delivered separate `escape` (modal) and `n` (base) events. Every failed trial
+delivered one modal event with `name: "n"`, `meta: true`, and raw `ESC+n`—the TUI's parsed
+Escape-prefixed `alt+n` event. The isolated tmux server's `escape-time` was verified as 10 ms, so
+these captures establish the key event that reached OpenCode, not which upstream layer caused the
+bytes to be combined or the exact byte-arrival interval at the TUI. The modal-only cancel binding
+now also accepts the demonstrated `alt+n` event, while retaining standalone Escape, `n`, and all
+other existing dialog-scoped bindings. The same local pinned-binary check then canceled 10/10 in
+`--via-tmux`; `--via-launcher` also canceled 10/10 after verifying the generated guest launcher
+repaired a pre-existing 500 ms tmux server to 10 ms. Each post-fix trial met the driver-write bound.
+
+The launcher reapplies the protected tmux settings when attaching to an already-running server;
+it does not restart the session, so reconnect behavior is preserved. These isolated local PTY runs
+exercise the pinned binary and, for `--via-launcher`, the generated launcher template. They do not
+modify or establish the state of the running development VM or owner guest.
+
+The protected tmux config also disables tmux's default status bar (the unwanted green strip).
+The launcher reapplies the global setting and, when the named OpenCode session already exists,
+its session-local setting on attach; it does not restart the session. The verifier checks that the
+effective status option is `off` in its isolated tmux session.
+
+The verifier requests a 30 ms gap between Escape and `n` and separately checks whether each of ten
+trials measures no more than 35,000,000 ns from immediately before the first driver write through
+immediately after the second. This is only a bound on the verifier's writes; it does not measure
+when tmux or OpenCode receive the bytes. Timing validity and dialog-cancellation outcome are
+reported independently. Reattach coverage is conditional on successful state-verified recovery;
+unsafe recovery or failed/exceptional reattach is reported as a required SKIP and fails the run.
+
+Earlier reviewer reports of short-gap failures are now consistent with the local key-event
+captures. The verifier's test-only observer and corrected cancellation result qualify the local
+OpenCode 2.2.5/tmux path only; they are not owner/manual terminal acceptance.
+
+`python3 scripts/verify-exit-confirm.py --via-launcher` exercises that exact launcher-template
+repair with a pre-existing 500 ms tmux server, captures the parsed TUI key events during the fast
+Escape+n trials, then checks resize, state-qualified detach/reattach, and dialog confirm/cancel.
+Reattach and its dependent dialog assertion are reported only when their prerequisites and actual
+pane-identity checks succeed.
+
+This is local pinned-binary/tmux evidence, not Ariadne/manual acceptance. It does not
+establish Ctrl+C behavior during generation, other OpenCode menus, SSH-host terminal
+clipboard handling, or the full profile helper request/TTY/exit-status contract. The
+terminal-specific OSC 52 mitigation and harmless clipboard canary remain governed by
+J.12; `EscapeChar=none` is not clipboard protection.
+
+**Hosted singleton production-terminal regression.** The hosted
+`production-systemd-vm-acceptance` job also runs
+`tests/ci-kvm-production-terminal.py` after exact shared owner acceptance has passed,
+while the fixed system VM is running and before forced-stop recovery. This is CI
+orchestration only; it is not installed in the guest or host runtime. It independently
+checks the workflow SHA against the candidate checkout and installed singleton dispatch
+assets, then drives the exact candidate-checkout command
+`<checkout>/lab vm system tui --prefix <disposable prefix>` in a controlling host PTY.
+All input (Ctrl+C, ten independent Escape+ASCII-`n` trials, tmux detach, and final `q`)
+travels through that PTY and the existing SSH guest PTY. A separate bounded SSH channel
+uses read-only tmux/session/pane observations only; it does not repair state or inject
+input. The gate checks fresh session/pane identity, `escape-time 10`, status off,
+modal/idle Ctrl+C behavior, 30 ms requested / 35 ms measured driver-write timing
+independently from cancellation, host-to-guest PTY resize, three same-pane detach/reattach
+attempts, clean `q` exit, and session cleanup. Missing hosted KVM, protected SSH
+credentials, or other prerequisites fail closed. Its sanitized JSONL evidence is private,
+bounded, and retained on failure; a required check that cannot be attempted is a failure.
+
+The profile terminal remains a separate, blocked acceptance path; this gate does not
+exercise it. Local unit tests validate orchestration and fail-closed contracts only. They
+do not run hosted KVM, establish owner acceptance, or count as evidence that this live
+gate has passed; only the corresponding hosted workflow result can establish that.

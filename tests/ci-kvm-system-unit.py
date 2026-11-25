@@ -539,6 +539,20 @@ def invoke_shared_acceptance(sha: str) -> None:
     run(["/usr/bin/sg", "lm-vm-control", "-c", command], timeout=45 * 60, capture=False)
 
 
+def invoke_production_terminal_acceptance() -> None:
+    """Run the required terminal gate with the installed control-group access."""
+    args = ["/usr/bin/python3", str(REPO / "tests/ci-kvm-production-terminal.py")]
+    command = "exec " + shlex.join(args)
+    run(["/usr/bin/sg", "lm-vm-control", "-c", command],
+        timeout=45 * 60, capture=False)
+
+
+def invoke_production_terminal_host_preflight() -> None:
+    """Check predictable terminal-gate tools before provisioning the VM."""
+    run(["/usr/bin/python3", str(REPO / "tests/ci-kvm-production-terminal.py"),
+         "--host-preflight"], timeout=15, capture=False)
+
+
 def verify_workspace_startup_post() -> None:
     """Require the actual fixed workspace ExecStartPost to finish successfully."""
     result = run(["/usr/bin/systemctl", "show", "--no-pager",
@@ -3033,6 +3047,7 @@ def main() -> int:
     try:
         hosted_kvm_guard()
         production_host_preflight()
+        invoke_production_terminal_host_preflight()
         fixed_name_preflight(install_parent=CI_INSTALL_PARENT)
         sha = os.environ["GITHUB_SHA"]
         source_sha = os.environ.get("LM_CI_SOURCE_HEAD_SHA", sha)
@@ -3086,6 +3101,8 @@ def main() -> int:
         verify_workspace_startup_post()
         verify_pinned_tree_inventory(sha, phase="after-startup")
         verify_guest_cannot_read_escape()
+        with _timed_ci_stage("production_terminal_regression"):
+            invoke_production_terminal_acceptance()
         with _timed_ci_stage("forced_stop_recovery"):
             force_systemd_fallback(installed_root)
     except BaseException as error:  # noqa: BLE001 - finally below must stop a started unit on cancellation

@@ -8,7 +8,7 @@
   "title": "Make Ctrl+C and Escape reliable through the interactive VM PTY path",
   "objective": "Part of integration ticket #66. Diagnose owner-reported intermittent Ctrl+C/Escape in the complete terminal→public launcher→SSH/PTTY→tmux→OpenCode path, then fix the demonstrated layer without weakening clipboard or host security protections.",
   "created_at": "2026-11-23T23:21:29.447Z",
-  "updated_at": "2026-11-24T12:25:23.843Z",
+  "updated_at": "2026-11-25T14:34:36.216Z",
   "acceptance_criteria": [
     {
       "id": "A1",
@@ -42,12 +42,30 @@
       "Cover generation, ordinary prompt, exit-confirm cancel/confirm and supported menu behavior; test SSH disconnect/tmux reattach.",
       "Add actual-PTY regression for the production interactive wrapper and retain existing key-binding unit coverage.",
       "Owner performs final interactive Ariadne validation and clipboard canary under the documented safe terminal configuration.",
-      "Production-helper PTY test sends the JSON request separately from keystrokes typed after SSH starts; assert controlling TTY/foreground group, real input bytes, resize, Ctrl+C, exact exit status and non-TTY refusal. Verify no secret key bytes in argv/env/logs/temp/workspace and strict guest host-key pinning before first SSH."
+      "Production-helper PTY test sends the JSON request separately from keystrokes typed after SSH starts; assert controlling TTY/foreground group, real input bytes, resize, Ctrl+C, exact exit status and non-TTY refusal. Verify no secret key bytes in argv/env/logs/temp/workspace and strict guest host-key pinning before first SSH.",
+      "Add safe fixed-ID subchecks for terminal credential preflight; prove stale process supplementary groups cannot pass authorization based only on NSS group membership.",
+      "Run the terminal gate through the authorized lm-vm-control group context and test exact sg command construction, failure propagation, and no direct fallback."
     ],
-    "created": [],
+    "created": [
+      "scripts/verify-exit-confirm.py --via-launcher: production guest launcher template, pre-existing tmux 500 ms repair, PTY resize and exit-confirm flow",
+      "tests/vm-systemd.test.py::StageTimerTests.test_ci_production_terminal_regression_stage_is_allowlisted",
+      "tests/ci-kvm-production-terminal.test.py::CredentialPreflightTests (effective control-group, effective-UID, and fixed credential subcheck regressions)",
+      "tests/ci-kvm-production-terminal.test.py::HostTerminalPreflightTests.test_host_prerequisite_failure_emits_only_fixed_id",
+      "tests/ci-kvm-system-unit.test.py::HostedSystemUnitTests.test_ci_runs_terminal_gate_in_effective_control_group_without_fallback",
+      "tests/ci-kvm-system-unit.test.py::HostedSystemUnitTests.test_ci_checks_terminal_host_tools_before_candidate_install"
+    ],
     "cases": [
       "Owner reports OpenCode TUI is operational on Ariadne but Ctrl+C/Escape behavior is intermittent. Exact failing context/key sequence and underlying cause are not yet established.",
-      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence."
+      "Sol Medium design review (2026-11-24): PASS at design level for the shared VM profile/runtime/CLI integration baseline in docs/vm-usability-integration.md and docs/systemd-vm.md; owner authorized implementation. This is design approval only, not implementation, test, security, host-validation, acceptance-criterion, or owner-acceptance evidence.",
+      "verify-exit-confirm.py --via-launcher: launcher resets escape-time 500 ms → 10 ms; 10/10 fast Escape+n cancellation trials; resize and detach/reattach pass on OpenCode 2.2.5",
+      "Production acceptance CI failure 45619336278: public VM acceptance passed, then CI failed before terminal PTY assertions because system-acceptance StageTimer omitted the fixed production_terminal_regression stage label. Added regression exercises the fixed label; production acceptance and terminal gates remain mandatory and unchanged.",
+      "Hosted run 45626146771: shared production VM acceptance, guest SSH/TUI/persistence, and post-start inventory passed; the new terminal regression passed hosted prerequisites, candidate SHA and installed-candidate checks, then failed at the credentials stage in 33 ms. All interaction checks were required skips; no terminal-key behavior was tested. The final cleanup passed.",
+      "Source trace: tests/ci-kvm-system-unit.py invokes shared owner acceptance through sg lm-vm-control but invokes the terminal gate directly. The installer creates /etc/little-mester-vm root:lm-vm-control mode 0750 and updates runner group membership after the current CI process started. The terminal gate permits NSS group membership as authorization, then directly lstat's the protected SSH files. A PermissionError at the first key-file lstat is a strong code-level explanation, not confirmed by the run: the gate deliberately logs only exception class and the retained private evidence was not supplied. Add safe subcheck IDs before claiming exact historical errno.",
+      "Base provenance discrepancy: GitHub workflow merge SHA c380d7ca5fa29ddaa033ebf242847cb7dd667ee9 had base/first parent 86c5f0928c59f40be769cf4dd4978b1da13d49e6 and source/second parent aaec9035fa9f6c2c0ddcbd68aa6f9207280c5f02. Previously verified #27 head is 1a784d342b66fef1b992e08e4bd3a88d1f3c7d6b. 86c5 is absent from the local object/ref store; its branch identity and ancestry to #27 remain unverified. Hold downstream compatibility publication pending owner PR-base metadata.",
+      "Sol pre-implementation design review of the narrow group-context/diagnostic plan: APPROVE, session ses_decee743effe1m8z3dHELMFdLj. Review requires effective-group validation, fixed /usr/bin/sg invocation with exact quoting and no direct fallback, preserved credential metadata/SSH security checks, allowlisted diagnostic IDs only, and fresh hosted CI reaching and passing all terminal interaction checks.",
+      "Local correction validation: production-terminal gate suite passed (25 tests), production system-unit orchestration suite passed (111 tests), owner acceptance suite passed (70 tests), and standalone --host-preflight passed. Python py_compile, git diff --check, and bash scripts/check-workflows.sh passed. These are local tests only; no hosted KVM or terminal interaction acceptance is claimed.",
+      "Environment-limited validation: vm-systemd.test.py ran 104 tests with 2 errors and 1 skip because unchanged lib/vm/guest-bootstrap.py and lib/vm/guest-user-dirs.py working copies are mester:mester mode 0664 while their Git blobs are 100644; protected-source helpers refused them. No ownership or modes were changed.",
+      "Docs-consistency check retains 8 existing README.md/docs/DECISIONS.md drift/link failures; the modified docs/workflows.md link resolves. Ticket validation reports pre-existing audit entry #417 with invalid operation 'privacy-redaction'; index is synchronized and no orphan tickets were found."
     ]
   },
   "models_used": []

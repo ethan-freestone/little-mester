@@ -1309,6 +1309,8 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 self.assertIn("ssh-ed25519", config["users"][0]["ssh_authorized_keys"][0])
                 self.assertEqual(config["ssh_keys"]["ed25519_private"],
                                  (self.state_dir / "ssh_host_ed25519_key").read_text())
+                self.assertEqual(sum(item.get("path") == "/etc/little-mester-tmux.conf"
+                                     for item in config["write_files"]), 1)
                 sshd_config = next(item for item in config["write_files"]
                                    if item["path"].endswith("99-little-mester-parent.conf"))
                 self.assertEqual(sshd_config["content"].count("\n"), 1)
@@ -1327,13 +1329,21 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 self.assertEqual(base64.b64decode(protected[plugin_path]["content"], validate=True), expected_plugin)
                 profile = protected["/etc/profile.d/little-mester-opencode.sh"]["content"]
                 launcher = protected["/usr/local/bin/lm-opencode"]["content"]
+                tmux_asset = protected["/etc/little-mester-tmux.conf"]
                 runner = protected["/usr/local/libexec/lm-opencode"]["content"]
                 auth_launcher = protected["/usr/local/libexec/lm-opencode-auth"]["content"]
                 guest_helper = protected["/usr/local/libexec/lm-guest-user-dirs.py"]["content"]
                 preferences_helper = protected["/usr/local/libexec/lm-guest-opencode-preferences.py"]["content"]
                 self.assertIn("OPENCODE_DISABLE_PROJECT_CONFIG=1", profile)
                 self.assertIn("little-mester-exit-confirm", profile)
-                self.assertIn("tmux new-session -A -s little-mester-opencode", launcher)
+                self.assertEqual(tmux_asset["owner"], "root:root")
+                self.assertEqual(tmux_asset["permissions"], "0644")
+                self.assertEqual(tmux_asset["content"].encode(),
+                                 parent_state._SESSION_CONTRACT.TMUX_CONFIG)
+                self.assertIn("/etc/little-mester-tmux.conf", launcher)
+                self.assertIn("show-options -s escape-time", launcher)
+                self.assertIn("set-option -s escape-time 10", launcher)
+                self.assertIn("new-session -A -s little-mester-opencode", launcher)
                 self.assertIn("XDG_CONFIG_HOME=/etc", runner)
                 self.assertIn("OPENCODE_CONFIG=/etc/opencode/opencode.json", runner)
                 self.assertIn("HTTP_PROXY=http://10.0.2.100:3128", runner)
@@ -1343,6 +1353,8 @@ raise SystemExit(module._run_interactive_ssh(json.loads(sys.argv[2])))
                 self.assertIn("prepare-auth", auth_launcher)
                 self.assertIn("auth login openai --method chatgpt-browser", auth_launcher)
                 self.assertIn("TMUX_TMPDIR=/home/mester/.local/share/opencode/tmux", launcher)
+                self.assertIn("/etc/little-mester-tmux.conf",
+                              parent_state._SESSION_CONTRACT.readiness_checks(include_opencode=False))
                 self.assertEqual(guest_helper.encode(), (ROOT / "lib/vm/guest-user-dirs.py").read_bytes())
                 self.assertEqual(preferences_helper.encode(),
                                  (ROOT / "lib/vm/guest-opencode-preferences.py").read_bytes())
