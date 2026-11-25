@@ -650,7 +650,7 @@ class ArtifactRetentionTests(unittest.TestCase):
 
 class IsolatedTmuxConfigTests(unittest.TestCase):
     def test_canonical_config_is_only_stripped_of_the_two_host_sources(self):
-        expected = b"set-option -s escape-time 10\n"
+        expected = b"set-option -s escape-time 10\nset-option -g status off\n"
         self.assertEqual(verifier.isolated_tmux_config(contract.TMUX_CONFIG), expected)
 
     def test_non_source_mutations_and_bytes_are_preserved(self):
@@ -661,7 +661,8 @@ class IsolatedTmuxConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             verifier.isolated_tmux_config(mutated),
-            b"# keep this comment\nset-option -s escape-time 500\nset-option -g status-keys vi\n",
+            b"# keep this comment\nset-option -s escape-time 500\nset-option -g status-keys vi\n"
+            b"set-option -g status off\n",
         )
 
     def test_supported_lines_and_missing_final_newline_are_preserved(self):
@@ -672,6 +673,8 @@ class IsolatedTmuxConfigTests(unittest.TestCase):
              b"set-option -s escape-time 12345678901234567890\n"),
             (b"set-option -g status-keys vi\n", b"set-option -g status-keys vi\n"),
             (b"set-option -g status-keys emacs", b"set-option -g status-keys emacs"),
+            (b"set-option -g status off\n", b"set-option -g status off\n"),
+            (b"set-option -g status off", b"set-option -g status off"),
             (b"\n  # printable ASCII comment; source-file is inert\n",
              b"\n  # printable ASCII comment; source-file is inert\n"),
         )
@@ -719,6 +722,9 @@ class IsolatedTmuxConfigTests(unittest.TestCase):
             b"set-option -s escape-time default\n",
             b"set-option -g status-keys on\n",
             b"set-option -g status-keys vi extra\n",
+            b"set-option -g status on\n",
+            b"set-option -g status off extra\n",
+            b"set-option -g status off; run-shell unsafe\n",
             b"set-option -s escape-time 10 # inline comment\n",
             # Almost-matching host sources must not be stripped.
             b"source-file -q /etc/tmux.conf \n",
@@ -819,7 +825,7 @@ class LauncherRenderingTests(unittest.TestCase):
         )
         self.assertEqual(launched.returncode, 0, launched.stderr)
         calls = [json.loads(line) for line in self.record_path.read_text().splitlines()]
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 6)
 
         prefix = ["-L", self.socket, "-f", str(self.tmux_config)]
         self.assertEqual(
@@ -827,6 +833,9 @@ class LauncherRenderingTests(unittest.TestCase):
             [
                 prefix + ["show-options", "-s", "escape-time"],
                 prefix + ["set-option", "-s", "escape-time", "10"],
+                prefix + ["set-option", "-g", "status", "off"],
+                prefix + ["has-session", "-t", "little-mester-opencode"],
+                prefix + ["set-option", "-t", "little-mester-opencode", "status", "off"],
                 prefix + [
                     "new-session", "-A", "-s", "little-mester-opencode",
                     shlex.quote(str(self.runner)), "--continue",
@@ -911,7 +920,8 @@ class LocalTmuxPtyTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.fake_opencode_dir.cleanup()
 
-    def run_driver_case(self, *, via_launcher, config_source=None, expected_escape_time):
+    def run_driver_case(self, *, via_launcher, config_source=None, expected_escape_time,
+                        reuse_existing_session=False):
         temp = tempfile.TemporaryDirectory(dir="/tmp", prefix="v-")
         home = pathlib.Path(temp.name) / "h space"
         home.mkdir(mode=0o700)
@@ -930,6 +940,7 @@ class LocalTmuxPtyTests(unittest.TestCase):
                 driver = verifier.Driver(
                     str(home), via_tmux=not via_launcher, via_launcher=via_launcher,
                     tmux_config_source=config_source,
+                    reuse_existing_session=reuse_existing_session,
                 )
             self.assertTrue(
                 driver.alive(),
@@ -995,6 +1006,13 @@ class LocalTmuxPtyTests(unittest.TestCase):
         self.run_driver_case(
             via_launcher=True,
             expected_escape_time="escape-time 10",
+        )
+
+    def test_via_launcher_hides_status_bar_on_existing_session(self):
+        self.run_driver_case(
+            via_launcher=True,
+            expected_escape_time="escape-time 10",
+            reuse_existing_session=True,
         )
 
 

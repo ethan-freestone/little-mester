@@ -60,6 +60,7 @@ _EXPECTED_TMUX_SOURCES = {
 _TMUX_ALLOWED_SET_OPTIONS = (
     re.compile(rb"set-option -s escape-time [0-9]+"),
     re.compile(rb"set-option -g status-keys (?:vi|emacs)"),
+    re.compile(rb"set-option -g status off"),
 )
 _TMUX_COMMENT = re.compile(rb" *#[\x20-\x7e]*")
 
@@ -150,8 +151,8 @@ def render_test_launcher(template, *, workspace, home, tmux_tmp, tmux_config,
 
     payload = launcher[payload_start:payload_end]
     tmux_anchor = b"/usr/bin/tmux -f /etc/little-mester-tmux.conf"
-    if payload.count(tmux_anchor) != 3:
-        raise RuntimeError("expected three exact tmux command anchors in launcher payload")
+    if payload.count(tmux_anchor) != 6:
+        raise RuntimeError("expected six exact tmux command anchors in launcher payload")
     tmux_command = b" ".join(
         _shell_word(value)
         for value in (tmux_binary, "-L", socket, "-f", tmux_config)
@@ -188,7 +189,8 @@ def spawn_pty(command, *, launcher_script=False, **kwargs):
 
 class Driver:
     def __init__(self, home, *, via_tmux=False, via_launcher=False,
-                 tmux_config_source=None, session_number=1):
+                 tmux_config_source=None, session_number=1,
+                 reuse_existing_session=False):
         contract_path = os.path.join(ROOT, "lib", "vm", "parent-session-contract.py")
         contract_spec = importlib.util.spec_from_file_location("exit_confirm_session_contract", contract_path)
         if contract_spec is None or contract_spec.loader is None:
@@ -247,12 +249,27 @@ class Driver:
             if via_launcher:
                 self._prepare_launcher_test(home, workspace, server_config)
                 try:
-                    subprocess.run(
-                        [self.tmux, "-L", self.tmux_socket, "-f", self.tmux_config,
-                         "new-session", "-d", "-s", "launcher-bootstrap", "/bin/sleep", "300"],
-                        env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                        stderr=subprocess.PIPE, text=True, timeout=5, check=True,
-                    )
+                    if reuse_existing_session:
+                        runner = shlex.quote(os.path.join(home, "opencode-test-runner.py"))
+                        subprocess.run(
+                            [self.tmux, "-L", self.tmux_socket, "-f", self.tmux_config,
+                             "new-session", "-d", "-s", self.tmux_session, "-c", workspace, runner],
+                            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True, timeout=5, check=True,
+                        )
+                        subprocess.run(
+                            [self.tmux, "-L", self.tmux_socket, "set-option", "-t",
+                             self.tmux_session, "status", "on"],
+                            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True, timeout=5, check=True,
+                        )
+                    else:
+                        subprocess.run(
+                            [self.tmux, "-L", self.tmux_socket, "-f", self.tmux_config,
+                             "new-session", "-d", "-s", "launcher-bootstrap", "/bin/sleep", "300"],
+                            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True, timeout=5, check=True,
+                        )
                     subprocess.run(
                         [self.tmux, "-L", self.tmux_socket, "set-option", "-s", "escape-time", "500"],
                         env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -282,6 +299,8 @@ class Driver:
                 codec_errors="replace", dimensions=(40, 120), timeout=20,
             )
             self.wait(10)
+            if self.via_tmux and self.tmux_status() != "off":
+                raise RuntimeError("the OpenCode tmux session status bar is not disabled")
         except BaseException:
             self.close()
             raise
@@ -401,6 +420,14 @@ class Driver:
     def tmux_escape_time(self):
         result = subprocess.run(
             [self.tmux, "-L", self.tmux_socket, "show-options", "-s", "escape-time"],
+            env=self.env, capture_output=True, text=True, timeout=5, check=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def tmux_status(self):
+        result = subprocess.run(
+            [self.tmux, "-L", self.tmux_socket, "show-options", "-A", "-v", "-t",
+             self.tmux_session, "status"],
             env=self.env, capture_output=True, text=True, timeout=5, check=False,
         )
         return result.stdout.strip() if result.returncode == 0 else None

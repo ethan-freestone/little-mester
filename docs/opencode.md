@@ -327,6 +327,11 @@ evidence for the current short-gap path. The guest launcher also reapplies that 
 attaching to an already-running server, so an existing session is not restarted and reconnect
 behavior is preserved.
 
+The protected tmux config also disables tmux's default status bar (the unwanted green strip).
+The launcher reapplies the global setting and, when the named OpenCode session already exists,
+its session-local setting on attach; it does not restart the session. The verifier checks that the
+effective status option is `off` in its isolated tmux session.
+
 The verifier requests a 30 ms gap between Escape and `n` and separately checks whether each of ten
 trials measures no more than 35,000,000 ns from immediately before the first driver write through
 immediately after the second. This is only a bound on the verifier's writes; it does not measure
