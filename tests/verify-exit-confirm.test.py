@@ -1080,6 +1080,10 @@ class PinnedOpenCodeKeyEventPtyTests(unittest.TestCase):
 
                             marker = len(driver.key_events())
                             elapsed_ns = driver.send_fast("\x1b", "n")
+                            self.assertLessEqual(
+                                elapsed_ns, verifier.FAST_ESCAPE_MAX_ELAPSED_NS,
+                                f"short-gap input exceeded the timing bound: {elapsed_ns} ns",
+                            )
                             events = driver.key_events_since(marker)
                             separate_keys = (
                                 len(events) == 2
