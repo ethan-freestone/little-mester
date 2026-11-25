@@ -2192,12 +2192,11 @@ class SystemdPolicyTests(unittest.TestCase):
 
 
 class StageTimerTests(unittest.TestCase):
-    """Contract tests for the proposed safe, allowlisted stage timer API.
+    """Contract tests for the shared safe, allowlisted acceptance stage timer.
 
-    Assumed API: StageTimer(stream, wall_clock=..., monotonic=...) exposes a
+    StageTimer(stream, wall_clock=..., monotonic=...) exposes a
     ``timed_stage(label)`` context manager. It emits compact JSON records as
-    ``system_vm_stage=<json>`` lines. The source implementation is intentionally
-    not part of this tests-only change.
+    ``system_vm_stage=<json>`` lines.
     """
 
     class FlushRecordingStream(io.StringIO):
@@ -2251,6 +2250,22 @@ class StageTimerTests(unittest.TestCase):
             ("START", "guest_readiness_ssh"), ("END", "guest_readiness_ssh"),
             ("START", "guest_readiness_ssh"), ("END", "guest_readiness_ssh")])
         self.assertTrue(all(row["timestamp"].endswith("Z") for row in records))
+
+    def test_ci_production_terminal_regression_stage_is_allowlisted(self):
+        output = io.StringIO()
+        timer = acceptance.StageTimer(
+            output,
+            wall_clock=self.fixed_wall_clock(),
+            monotonic=iter((1.0, 2.25)).__next__)
+
+        with timer.timed_stage("production_terminal_regression"):
+            pass
+
+        self.assertEqual(
+            output.getvalue(),
+            self.line("START", "production_terminal_regression", "2026-11-21T12:00:00Z")
+            + self.line("END", "production_terminal_regression",
+                        "2026-11-21T12:00:01.250000Z", elapsed_ms=1250, outcome="PASS"))
 
     def test_failure_records_fail_and_reraises_original_baseexception(self):
         output = io.StringIO()

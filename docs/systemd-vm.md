@@ -158,9 +158,11 @@ tools/vm-owner-acceptance --system-vm accept --sha <commit> --repo <source-repos
 confirmation or `--approve-system-vm-lifecycle`, checks the deployed candidate,
 network restrictions, OpenCode TUI, and same-disk persistence across restart,
 then leaves the VM running. Hosted CI invokes this same installed command, then
-runs CI-only forced-stop fault injection and disposable cleanup. Neither this
-command nor the fixed owner interface accepts a unit, disk path, QEMU option,
-arbitrary systemd property, or remote command. `up` waits for cloud-init, SSH,
+runs a production singleton terminal/PTTY regression through the public TUI
+command with read-only tmux observation, CI-only forced-stop fault injection,
+and disposable cleanup. Neither this command nor the fixed owner interface
+accepts a unit, disk path, QEMU option, arbitrary systemd property, or remote
+command. `up` waits for cloud-init, SSH,
 and the protected session-contract readiness checks, mounts the assigned
 workspace at `/workspace`, and proves host↔guest read/write access. `status`
 prints the assigned canonical directory. The first `up` must provide `--dir`;

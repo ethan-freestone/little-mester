@@ -467,7 +467,8 @@ _GITHUB_FINE_GRAINED_TOKEN = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")
 _TIMED_STAGE_LABELS = frozenset({
     "initial_vm_start_readiness", "acceptance_checks", "clean_vm_shutdown",
     "same_disk_restart_readiness", "forced_stop_recovery", "final_cleanup",
-    "candidate_install", "fresh_provisioning", "image_download_checksum",
+    "candidate_install", "fresh_provisioning", "production_terminal_regression",
+    "image_download_checksum",
     "image_conversion_resize", "cloud_seed_generation", "guest_readiness_ssh",
     "network_boundaries", "persistence_fixture", "host_metrics_transport",
     "direct_egress_blocked", "opencode_tui",
