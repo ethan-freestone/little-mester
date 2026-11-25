@@ -25,8 +25,8 @@ setup() {
 
 @test "exit-confirm keeps letter keys inside a dialog-gated modal layer" {
   run python3 - "$PLUGIN" <<'PY'
-import re
 import sys
+import re
 
 src = open(sys.argv[1], encoding="utf-8").read()
 try:
@@ -51,7 +51,8 @@ for spec in modal_binds:
             modal_letters.append(key)
 if not modal_letters:
     raise SystemExit("modal layer must bind y/q/n keys")
-if any(not re.fullmatch(r"(shift\+)?[yqn]", key) for key in modal_letters):
+allowed_modal_letters = {"y", "shift+y", "q", "shift+q", "n", "shift+n", "alt+n"}
+if any(key not in allowed_modal_letters for key in modal_letters):
     raise SystemExit(f"unexpected modal letter binds: {modal_letters}")
 
 modal_block = src[modal_start:]

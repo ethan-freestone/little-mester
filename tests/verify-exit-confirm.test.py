@@ -7,6 +7,7 @@ import io
 import json
 import pathlib
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -366,6 +367,26 @@ class FastEscapeStateMachineTests(unittest.TestCase):
                 self.assertIn(expected_reason, output.getvalue())
                 self.assertIn("SKIP Ctrl+C opens after tmux reattach", output.getvalue())
                 self.assertNotIn("PASS Ctrl+C opens after tmux reattach", output.getvalue())
+
+
+class LiveTuiStateTests(unittest.TestCase):
+    def test_tmux_dialog_visibility_does_not_require_idle_prompt_text(self):
+        driver = object.__new__(verifier.Driver)
+        driver.via_tmux = True
+        driver.alive = lambda: True
+        driver.tmux_pane_dead = lambda: "0"
+        driver.prompt_text_visible = mock.Mock(return_value=False)
+
+        self.assertTrue(driver.live_tui())
+        driver.prompt_text_visible.assert_not_called()
+
+    def test_dead_tmux_pane_is_not_a_live_tui(self):
+        driver = object.__new__(verifier.Driver)
+        driver.via_tmux = True
+        driver.alive = lambda: True
+        driver.tmux_pane_dead = lambda: "1"
+
+        self.assertFalse(driver.live_tui())
 
 
 class SessionLogTests(unittest.TestCase):
@@ -1014,6 +1035,79 @@ class LocalTmuxPtyTests(unittest.TestCase):
             expected_escape_time="escape-time 10",
             reuse_existing_session=True,
         )
+
+
+class PinnedOpenCodeKeyEventPtyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.binary = shutil.which("opencode")
+        if cls.binary is None:
+            raise unittest.SkipTest("pinned OpenCode v2.2.5 is unavailable")
+        version = subprocess.run(
+            [cls.binary, "--version"], capture_output=True, text=True,
+            timeout=5, check=False,
+        )
+        if version.returncode != 0 or version.stdout.strip() != "opencode v2.2.5":
+            raise unittest.SkipTest("pinned OpenCode v2.2.5 is unavailable")
+
+    def test_short_gap_captures_parsed_keys_and_live_modal_state(self):
+        previous_binary = verifier.OPENCODE_BINARY
+        verifier.OPENCODE_BINARY = self.binary
+        try:
+            for via_launcher in (False, True):
+                with self.subTest(via_launcher=via_launcher):
+                    with tempfile.TemporaryDirectory(dir="/tmp", prefix="v-pinned-pty-") as root:
+                        home = pathlib.Path(root)
+                        (home / "workspace").mkdir(mode=0o700)
+                        driver = None
+                        try:
+                            driver = verifier.Driver(
+                                str(home), via_tmux=not via_launcher,
+                                via_launcher=via_launcher, capture_key_events=True,
+                            )
+                            self.assertTrue(driver.live_tui())
+                            self.assertTrue(driver.prompt_text_visible("Ask anything"))
+                            driver.send("yq")
+                            self.assertTrue(driver.prompt_text_visible("yq"))
+
+                            driver.ctrl("c")
+                            self.assertTrue(driver.dialog_visible())
+                            self.assertFalse(driver.prompt_text_visible("Ask anything"))
+                            self.assertTrue(
+                                driver.live_tui(),
+                                "the prompt text has changed but the tmux pane process remains live",
+                            )
+
+                            marker = len(driver.key_events())
+                            elapsed_ns = driver.send_fast("\x1b", "n")
+                            events = driver.key_events_since(marker)
+                            separate_keys = (
+                                len(events) == 2
+                                and events[0]["name"] == "escape"
+                                and events[0]["mode"] == "modal"
+                                and events[1]["name"] == "n"
+                                and events[1]["meta"] is False
+                            )
+                            combined_key = (
+                                len(events) == 1
+                                and events[0]["name"] == "n"
+                                and events[0]["meta"] is True
+                                and events[0]["raw"] == "\x1bn"
+                                and events[0]["mode"] == "modal"
+                            )
+                            self.assertTrue(
+                                separate_keys or combined_key,
+                                f"unexpected pinned-TUI key events: "
+                                f"{json.dumps(events, sort_keys=True)}; "
+                                f"driver interval: {elapsed_ns} ns",
+                            )
+                            self.assertFalse(driver.dialog_visible())
+                            self.assertTrue(driver.live_tui())
+                        finally:
+                            if driver is not None:
+                                driver.close()
+        finally:
+            verifier.OPENCODE_BINARY = previous_binary
 
 
 if __name__ == "__main__":

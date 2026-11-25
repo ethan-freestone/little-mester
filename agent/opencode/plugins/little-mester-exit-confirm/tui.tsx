@@ -102,7 +102,8 @@ export default Plugin.define({
           id: "little-mester.exit-confirm.no",
           title: "Cancel closing Little Mester",
           group: "Little Mester",
-          bind: "escape,n,shift+n,ctrl+c",
+          // The pinned PTY can decode a short Escape+n write as meta+n.
+          bind: "escape,n,shift+n,alt+n,ctrl+c",
           run: () => finish(false),
         },
       ],

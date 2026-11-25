@@ -190,7 +190,7 @@ def spawn_pty(command, *, launcher_script=False, **kwargs):
 class Driver:
     def __init__(self, home, *, via_tmux=False, via_launcher=False,
                  tmux_config_source=None, session_number=1,
-                 reuse_existing_session=False):
+                 reuse_existing_session=False, capture_key_events=False):
         contract_path = os.path.join(ROOT, "lib", "vm", "parent-session-contract.py")
         contract_spec = importlib.util.spec_from_file_location("exit_confirm_session_contract", contract_path)
         if contract_spec is None or contract_spec.loader is None:
@@ -203,6 +203,14 @@ class Driver:
 
         workspace = os.path.join(home, "workspace")
         server_config = os.path.join(home, "opencode.json")
+        self.key_event_log = None
+        self.key_event_ready = None
+        self.cli_config = dict(CLI_CONFIG)
+        if capture_key_events:
+            self.key_event_log = os.path.join(home, f"pty-key-events-{session_number}.jsonl")
+            self.key_event_ready = os.path.join(home, f"pty-key-events-{session_number}.ready")
+            plugin = self._prepare_key_event_capture(home)
+            self.cli_config["plugins"] = [*CLI_CONFIG["plugins"], plugin]
         with open(server_config, "w", encoding="utf-8") as stream:
             json.dump({"$schema": "https://opencode.ai/config.json",
                        "autoupdate": False, "share": "disabled"}, stream)
@@ -218,7 +226,7 @@ class Driver:
                 "TERM": "xterm-256color",
                 "COLORTERM": "truecolor",
                 "OPENCODE_CONFIG": server_config,
-                "OPENCODE_CLI_CONFIG_CONTENT": json.dumps(CLI_CONFIG),
+                "OPENCODE_CLI_CONFIG_CONTENT": json.dumps(self.cli_config),
             }
         )
         self.via_tmux = via_tmux or via_launcher
@@ -299,6 +307,8 @@ class Driver:
                 codec_errors="replace", dimensions=(40, 120), timeout=20,
             )
             self.wait(10)
+            if self.key_event_ready is not None and not os.path.isfile(self.key_event_ready):
+                raise RuntimeError("test-only OpenTUI key-event observer did not load")
             if self.via_tmux and self.tmux_status() != "off":
                 raise RuntimeError("the OpenCode tmux session status bar is not disabled")
         except BaseException:
@@ -313,7 +323,7 @@ class Driver:
             "import json, os\n"
             f"binary = {OPENCODE_BINARY!r}\n"
             f"workspace = {workspace!r}\n"
-            f"cli_config = {json.dumps(CLI_CONFIG)!r}\n"
+            f"cli_config = {json.dumps(self.cli_config)!r}\n"
             "environment = os.environ.copy()\n"
             "environment['OPENCODE_CLI_CONFIG_CONTENT'] = cli_config\n"
             "os.execve(binary, [binary, '--standalone', workspace], environment)\n"
@@ -335,6 +345,49 @@ class Driver:
         )
         pathlib.Path(launcher_path).write_bytes(launcher)
         os.chmod(launcher_path, 0o700)
+
+    def _prepare_key_event_capture(self, home):
+        """Create an isolated plugin that records parsed key events without consuming them."""
+        plugin_dir = os.path.join(home, "test-key-event-capture")
+        os.mkdir(plugin_dir, 0o700)
+        pathlib.Path(plugin_dir, "package.json").write_text(
+            json.dumps({
+                "name": "lm-test-key-event-capture",
+                "type": "module",
+                "exports": {"./tui": "./tui.tsx"},
+            }),
+            encoding="utf-8",
+        )
+        source = f'''import {{ appendFileSync, writeFileSync }} from "node:fs"
+import {{ Plugin }} from "@opencode/plugin/tui"
+
+export default Plugin.define({{
+  id: "lm-test-key-event-capture",
+  setup(context) {{
+    const logPath = {json.dumps(self.key_event_log)}
+    const readyPath = {json.dumps(self.key_event_ready)}
+    writeFileSync(logPath, "", {{ mode: 0o600 }})
+    const listener = (key) => appendFileSync(logPath, JSON.stringify({{
+      mode: context.keymap.mode.current(),
+      name: key.name,
+      sequence: key.sequence,
+      raw: key.raw,
+      source: key.source,
+      eventType: key.eventType,
+      ctrl: key.ctrl,
+      shift: key.shift,
+      meta: key.meta,
+      option: key.option,
+      timestampNs: process.hrtime.bigint().toString(),
+    }}) + "\\n", {{ mode: 0o600 }})
+    context.renderer.keyInput.prependListener("keypress", listener)
+    writeFileSync(readyPath, JSON.stringify({{ pid: process.pid }}) + "\\n", {{ mode: 0o600 }})
+    return () => context.renderer.keyInput.off("keypress", listener)
+  }},
+}})
+'''
+        pathlib.Path(plugin_dir, "tui.tsx").write_text(source, encoding="utf-8")
+        return plugin_dir
 
     def wait(self, seconds):
         end = time.time() + seconds
@@ -407,12 +460,31 @@ class Driver:
         return text in self.buffer
 
     def live_tui(self):
-        return self.alive() and self.prompt_text_visible("Ask anything")
+        if not self.alive():
+            return False
+        return not self.via_tmux or self.tmux_pane_dead() == "0"
+
+    def key_events(self):
+        if self.key_event_log is None or not os.path.isfile(self.key_event_log):
+            return []
+        with open(self.key_event_log, encoding="utf-8") as stream:
+            return [json.loads(line) for line in stream if line.strip()]
+
+    def key_events_since(self, index):
+        return self.key_events()[index:]
 
     def pane_pid(self):
         result = subprocess.run(
             [self.tmux, "-L", self.tmux_socket, "display-message", "-p", "-t",
              self.tmux_session, "#{pane_pid}"],
+            env=self.env, capture_output=True, text=True, timeout=5, check=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def tmux_pane_dead(self):
+        result = subprocess.run(
+            [self.tmux, "-L", self.tmux_socket, "display-message", "-p", "-t",
+             self.tmux_session, "#{pane_dead}"],
             env=self.env, capture_output=True, text=True, timeout=5, check=False,
         )
         return result.stdout.strip() if result.returncode == 0 else None
@@ -527,7 +599,7 @@ def ensure_dialog_open(driver):
     """Establish an open-dialog precondition with at most one verified Ctrl+C."""
     try:
         if not driver.live_tui():
-            return False, "the TUI process or prompt is not live"
+            return False, "the TUI process or tmux pane is not live"
         if driver.dialog_visible():
             return True, "the dialog was already open"
         driver.ctrl("c")
@@ -544,7 +616,7 @@ def recover_to_closed_live_tui(driver):
     """Close a visible dialog once, only after observing a live TUI and open dialog."""
     try:
         if not driver.live_tui():
-            return False, "the TUI process or prompt is not live"
+            return False, "the TUI process or tmux pane is not live"
         if driver.dialog_visible():
             driver.ctrl("c")
         if not driver.live_tui():
@@ -581,9 +653,13 @@ def run_fast_escape_trials(driver, *, trials=10, phase_log=None):
                 ))
             break
 
+        key_event_start = len(driver.key_events()) if hasattr(driver, "key_events") else 0
         elapsed_ns = driver.send_fast("\x1b", "n")
         attempted += 1
         timing_valid = elapsed_ns <= FAST_ESCAPE_MAX_ELAPSED_NS
+        key_events = None
+        if hasattr(driver, "key_events_since"):
+            key_events = driver.key_events_since(key_event_start)
         timing_label = (
             "fast Escape+n driver-write interval (requested 30 ms, "
             f"maximum 35 ms; {trial}/{trials}: {elapsed_ns / 1_000_000:.3f} ms)"
@@ -595,10 +671,16 @@ def run_fast_escape_trials(driver, *, trials=10, phase_log=None):
         failures.append(not check(
             f"fast Escape+n cancels the dialog ({trial}/{trials})", trial_cancelled,
         ))
+        if key_events is not None:
+            print(
+                f"Fast Escape+n delivered key events ({trial}/{trials}): "
+                + json.dumps(key_events, sort_keys=True),
+            )
         if phase_log:
             phase_log.record(
                 "fast_escape_trial", "result", trial=trial, elapsed_ns=elapsed_ns,
                 timing_valid=timing_valid, cancelled=trial_cancelled,
+                key_events=key_events,
             )
 
     print(
@@ -682,6 +764,8 @@ def report_retained_artifacts(home):
             print(f"PTY session log: {path}")
     else:
         print("PTY session logs: none were created")
+    for path in sorted(pathlib.Path(home).glob("pty-key-events-*")):
+        print(f"PTY key-event evidence: {path}")
     phase_log = pathlib.Path(home) / "verification-phases.jsonl"
     if phase_log.exists():
         print(f"Verifier phase log: {phase_log}")
@@ -728,6 +812,7 @@ def main():
         phase_log.record("session", "start", session=1, purpose="Y confirmation")
         driver = Driver(
             home, via_tmux=args.via_tmux, via_launcher=args.via_launcher, session_number=1,
+            capture_key_events=args.via_tmux or args.via_launcher,
         )
         failures.append(not check("TUI started", driver.alive() and
                                   driver.prompt_text_visible("Ask anything")))
