@@ -17,7 +17,7 @@ export async function fetchMetricsJson(mode, path, fetchImpl = globalThis.fetch)
   if (!ALLOWED_PATHS.has(path)) throw new Error("unsupported metrics request path")
   if (typeof fetchImpl !== "function") throw new Error("fetch is unavailable")
 
-  const response = await fetchImpl(`${base}${path}`)
+  const response = await fetchImpl(`${base}${path}`, { cache: "no-store" })
   if (!response.ok) throw new Error(`metrics endpoint returned HTTP ${response.status}`)
   return response.json()
 }

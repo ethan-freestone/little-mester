@@ -7,7 +7,9 @@ import collections
 import http.server
 import importlib.util
 import json
+import os
 import pathlib
+import re
 import secrets
 import sys
 import threading
@@ -16,11 +18,31 @@ from urllib.parse import parse_qs, urlsplit
 
 
 HOST = "127.0.0.1"
-PORT = 32129
+DEFAULT_PORT = 32129
+PORT_ENVIRONMENT_VARIABLE = "LM_VM_METRICS_PORT"
 GUEST_PORT = 19532
 MAX_HISTORY = 60
 MAX_RESPONSE = 16 * 1024
+MAX_HISTORY_RESPONSE = 32 * 1024
 MIN_SAMPLE_INTERVAL = 0.4
+
+
+def configured_port(value: str | None) -> int:
+    """Select the fixed singleton port or a validated per-profile loopback port."""
+    if value is None:
+        return DEFAULT_PORT
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,5}", value):
+        raise ValueError(f"{PORT_ENVIRONMENT_VARIABLE} must be a decimal TCP port")
+    port = int(value)
+    if not 1024 <= port <= 65535:
+        raise ValueError(f"{PORT_ENVIRONMENT_VARIABLE} is outside the allowed port range")
+    return port
+
+
+# The fixed singleton retains its established default. The profile helper may
+# start one isolated service process per profile with its allocated loopback
+# port, keeping each process's run ID and history separate.
+PORT = configured_port(os.environ.get(PORT_ENVIRONMENT_VARIABLE))
 
 
 def load(name: str, filename: str):
@@ -54,6 +76,8 @@ def _public_snapshot(snapshot: dict) -> dict:
     temperatures = available("temperatures")
     return {
         "source": "host",
+        "run_id": snapshot["run_id"],
+        "sequence": snapshot["sequence"],
         "timestamp": snapshot["sampled_at"],
         "cpu": cpu,
         "memory": memory,
@@ -84,10 +108,14 @@ def sample() -> dict:
         gpu = payload["gpu"][0] if payload["gpu"] else {}
         total = gpu.get("memory_total_mb", 0)
         history_item = {
-            "gpu_util": gpu.get("utilization_percent", 0),
-            "vram_pct": round(gpu.get("memory_used_mb", 0) * 100 / total, 1) if total else 0,
-            "gpu_temp": gpu.get("temperature_c", 0),
-            "source": "host",
+            "run_id": payload["run_id"],
+            "sequence": payload["sequence"],
+            "timestamp": payload["timestamp"],
+            "gpu_util": gpu.get("utilization_percent"),
+            "vram_pct": (round(gpu["memory_used_mb"] * 100 / total, 1)
+                         if total > 0 else None),
+            "gpu_temp": gpu.get("temperature_c"),
+            "availability": payload["availability"],
         }
         HISTORY.append({"payload": payload, "history": history_item})
         LAST_SAMPLE = time.monotonic()
@@ -103,12 +131,13 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
         # Avoid emitting request-controlled data to the host journal.
         return
 
-    def _respond(self, status: int, payload: object) -> None:
+    def _respond(self, status: int, payload: object,
+                 max_response: int = MAX_RESPONSE) -> None:
         try:
             body = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode("utf-8")
         except (TypeError, ValueError):
             status, body = 503, b'{"source":"host","unavailable":true}'
-        if len(body) > MAX_RESPONSE:
+        if len(body) > max_response:
             status, body = 503, b'{"source":"host","unavailable":true}'
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -143,7 +172,7 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
                 sample()
                 with LOCK:
                     result = [item["history"] for item in list(HISTORY)[-amount:]]
-                self._respond(200, result)
+                self._respond(200, result, max_response=MAX_HISTORY_RESPONSE)
                 return
             self._respond(404, {"error": "not_found"})
         except (ValueError, TypeError):

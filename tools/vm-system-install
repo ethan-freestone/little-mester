@@ -49,6 +49,10 @@ FILES = {
         ("/usr/lib/little-mester-vm/host-metrics-tui/metrics-endpoint.js", 0o644),
     "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts":
         ("/usr/lib/little-mester-vm/host-metrics-tui/metrics-endpoint.d.ts", 0o644),
+    "agent/opencode/plugins/host-metrics-tui/metrics-state.js":
+        ("/usr/lib/little-mester-vm/host-metrics-tui/metrics-state.js", 0o644),
+    "agent/opencode/plugins/host-metrics-tui/metrics-state.d.ts":
+        ("/usr/lib/little-mester-vm/host-metrics-tui/metrics-state.d.ts", 0o644),
     "lib/vm/guest-bootstrap.py": ("/usr/lib/little-mester-vm/guest-bootstrap.py", 0o644),
     "lib/vm/parent-qemu.py": ("/usr/lib/little-mester-vm/parent-qemu.py", 0o644),
     "lib/vm/parent-provision.py": ("/usr/lib/little-mester-vm/parent-provision.py", 0o644),
@@ -105,6 +109,8 @@ UPDATE_ADDITIONALS = frozenset({
     "agent/opencode/plugins/host-metrics-tui/tui.tsx",
     "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js",
     "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts",
+    "agent/opencode/plugins/host-metrics-tui/metrics-state.js",
+    "agent/opencode/plugins/host-metrics-tui/metrics-state.d.ts",
 })
 PERMANENT_INTERLOCK_RELATIVES = frozenset({
     "systemd/little-mester-vm.service.d/90-code-update-guard.conf",
@@ -134,6 +140,8 @@ PERMANENT_INTERLOCK_RELATIVES = frozenset({
     "agent/opencode/plugins/host-metrics-tui/tui.tsx",
     "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.js",
     "agent/opencode/plugins/host-metrics-tui/metrics-endpoint.d.ts",
+    "agent/opencode/plugins/host-metrics-tui/metrics-state.js",
+    "agent/opencode/plugins/host-metrics-tui/metrics-state.d.ts",
 })
 PROTECTED_PARENTS = (
     "/usr/lib", "/etc/systemd/system", "/etc/sudoers.d", "/etc", "/var/lib",
