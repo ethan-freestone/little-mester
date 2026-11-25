@@ -72,6 +72,33 @@ class SystemdPolicyTests(unittest.TestCase):
             self.assertTrue(system_installer.sys.dont_write_bytecode)
             self.assertFalse((helper.parent / "__pycache__").exists())
 
+    def test_workspace_policy_loader_registers_dataclass_module_before_execution(self):
+        with tempfile.TemporaryDirectory(prefix="vm-workspace-policy-import-") as temporary:
+            root = pathlib.Path(temporary)
+            runtime = root / "lib/vm/system-vm-workspace.py"
+            runtime.parent.mkdir(parents=True)
+            shutil.copyfile(ROOT / "lib/vm/system-vm-workspace.py", runtime)
+            real_lstat = system_installer.os.lstat
+
+            def protected_lstat(path):
+                info = real_lstat(path)
+                mode = info.st_mode
+                if stat.S_ISDIR(mode):
+                    mode = stat.S_IFDIR | 0o755
+                elif stat.S_ISREG(mode):
+                    mode = stat.S_IFREG | 0o644
+                return mock.Mock(st_mode=mode, st_uid=0, st_nlink=1)
+
+            with mock.patch.object(system_installer, "WORKSPACE_RUNTIME", runtime), \
+                    mock.patch.object(system_installer.os, "lstat", side_effect=protected_lstat), \
+                    mock.patch.dict(sys.modules):
+                sys.modules.pop("fixed_system_workspace_policy", None)
+                policy = system_installer._load_workspace_policy()
+
+                self.assertIs(sys.modules["fixed_system_workspace_policy"], policy)
+                workspace = policy.Workspace(pathlib.Path("/workspace"), (1, 2), 1000)
+                self.assertEqual(workspace.path, pathlib.Path("/workspace"))
+
     def test_workspace_daemon_acceptance_checks_kernel_nnp_not_unit_property(self):
         active = {"ActiveState": "active", "MainPID": "123"}
         with mock.patch.object(acceptance, "service_state", return_value=active), \
