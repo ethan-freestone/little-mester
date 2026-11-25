@@ -17,6 +17,8 @@ import stat
 import subprocess
 import sys
 
+sys.dont_write_bytecode = True
+
 
 FILES = {
     "systemd/little-mester-vm.service.d/90-code-update-guard.conf":
@@ -289,7 +291,6 @@ def preflight(root: pathlib.Path, owner: str) -> None:
     Any existing provisioning artifact blocks automatic continuation. In
     particular, do not parse or adopt a service-writable disk as root.
     """
-    sys.dont_write_bytecode = True
     for raw in PROTECTED_PARENTS:
         validate_root_directory(pathlib.Path(raw))
 

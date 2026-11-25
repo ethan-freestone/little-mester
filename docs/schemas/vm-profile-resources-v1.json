@@ -1,0 +1,295 @@
+{
+  "schema_version": 1,
+  "description": "Closed v1 selector, path, identity, action, and refusal table. It is declarative contract data, not an inventory of implemented helper behavior.",
+  "profile_roots": {
+    "persistent_state": {
+      "template": "/var/lib/little-mester-vm/profiles/<name>",
+      "owner": "root:root",
+      "mode": "0711"
+    },
+    "protected_config": {
+      "template": "/etc/little-mester-vm/profiles/<name>",
+      "owner": "root:root",
+      "mode": "0700"
+    },
+    "runtime": {
+      "template": "/run/little-mester-vm-p-<digest>",
+      "owner": "root:root",
+      "mode": "0711"
+    }
+  },
+  "resources": [
+    {"selector": "profile.config-dir", "kind": "directory", "path_template": "/etc/little-mester-vm/profiles/<name>", "owner": "root:root", "mode": "0700", "operations": {"install": ["create-if-absent", "verify-identity"], "reset": [], "remove": ["rmdir-only-after-mapping-unlink-and-if-empty"]}},
+    {"selector": "profile.mapping", "kind": "regular-file", "path_template": "/etc/little-mester-vm/profiles/<name>/profile.json", "owner": "root:root", "mode": "0600", "operations": {"install": ["root-owned-temp-fsync-atomic-rename-parent-fsync"], "reset": ["preserve"], "remove": ["unlink-as-final-profile-commit"]}},
+    {"selector": "state.root", "kind": "directory", "path_template": "/var/lib/little-mester-vm/profiles/<name>", "owner": "root:root", "mode": "0711", "operations": {"install": ["create-if-absent", "verify-identity"], "reset": ["preserve"], "remove": ["rmdir-only-if-empty"]}},
+    {"selector": "state.vm-dir", "kind": "directory", "path_template": "/var/lib/little-mester-vm/profiles/<name>/vm", "owner": "vm-account:vm-group", "mode": "0700", "operations": {"install": ["create-if-absent", "verify-identity"], "reset": ["preserve"], "remove": ["rmdir-only-if-empty"]}},
+    {"selector": "state.client-dir", "kind": "directory", "path_template": "/var/lib/little-mester-vm/profiles/<name>/client", "owner": "enrolled-owner:enrolled-owner-primary-group", "mode": "0700", "operations": {"install": ["create-if-absent", "verify-identity"], "reset": ["preserve"], "remove": ["rmdir-only-if-empty"]}},
+    {"selector": "state.vm.disk", "kind": "regular-file", "path_template": "/var/lib/little-mester-vm/profiles/<name>/vm/disk.qcow2", "owner": "vm-account:vm-group", "mode": "0600", "operations": {"install": [], "reset": ["unlink-only-after-exact-identity-intent"], "remove": ["unlink-only-after-exact-identity-intent"]}},
+    {"selector": "state.vm.seed", "kind": "regular-file", "path_template": "/var/lib/little-mester-vm/profiles/<name>/vm/seed.iso", "owner": "vm-account:vm-group", "mode": "0600", "operations": {"install": [], "reset": ["unlink-only-after-exact-identity-intent"], "remove": ["unlink-only-after-exact-identity-intent"]}},
+    {"selector": "state.vm.host-key-private", "kind": "regular-file", "path_template": "/var/lib/little-mester-vm/profiles/<name>/vm/ssh_host_ed25519_key", "owner": "vm-account:vm-group", "mode": "0600", "operations": {"install": [], "reset": ["unlink-only-after-exact-identity-intent"], "remove": ["unlink-only-after-exact-identity-intent"]}},
+    {"selector": "state.vm.host-key-public", "kind": "regular-file", "path_template": "/var/lib/little-mester-vm/profiles/<name>/vm/ssh_host_ed25519_key.pub", "owner": "vm-account:vm-group", "mode": "0644", "operations": {"install": [], "reset": ["unlink-only-after-exact-identity-intent"], "remove": ["unlink-only-after-exact-identity-intent"]}},
+    {"selector": "state.client.control-key-private", "kind": "regular-file", "path_template": "/var/lib/little-mester-vm/profiles/<name>/client/control_ed25519", "owner": "enrolled-owner:enrolled-owner-primary-group", "mode": "0600", "operations": {"install": [], "reset": ["unlink-only-after-exact-identity-intent"], "remove": ["unlink-only-after-exact-identity-intent"]}},
+    {"selector": "state.client.control-key-public", "kind": "regular-file", "path_template": "/var/lib/little-mester-vm/profiles/<name>/client/control_ed25519.pub", "owner": "enrolled-owner:enrolled-owner-primary-group", "mode": "0644", "operations": {"install": [], "reset": ["unlink-only-after-exact-identity-intent"], "remove": ["unlink-only-after-exact-identity-intent"]}},
+    {"selector": "state.client.known-hosts", "kind": "regular-file", "path_template": "/var/lib/little-mester-vm/profiles/<name>/client/known_hosts", "owner": "enrolled-owner:enrolled-owner-primary-group", "mode": "0600", "operations": {"install": [], "reset": ["unlink-only-after-exact-identity-intent"], "remove": ["unlink-only-after-exact-identity-intent"]}},
+    {"selector": "unit-file.vm", "kind": "regular-file", "path_template": "/etc/systemd/system/little-mester-vm-p-<digest>.service", "owner": "root:root", "mode": "0644", "operations": {"install": ["publish-fixed-generated-fragment-after-durable-role-intent"], "reset": ["preserve"], "remove": ["unlink-exact-after-durable-intent", "daemon-reload", "verify-absent"]}},
+    {"selector": "unit-file.proxy", "kind": "regular-file", "path_template": "/etc/systemd/system/little-mester-vm-p-<digest>-proxy.service", "owner": "root:root", "mode": "0644", "operations": {"install": ["publish-fixed-generated-fragment-after-durable-role-intent"], "reset": ["preserve"], "remove": ["unlink-exact-after-durable-intent", "daemon-reload", "verify-absent"]}},
+    {"selector": "unit-file.workspace", "kind": "regular-file", "path_template": "/etc/systemd/system/little-mester-vm-p-<digest>-workspace.service", "owner": "root:root", "mode": "0644", "operations": {"install": ["publish-fixed-generated-fragment-after-durable-role-intent"], "reset": ["preserve"], "remove": ["unlink-exact-after-durable-intent", "daemon-reload", "verify-absent"]}},
+    {"selector": "unit-file.metrics", "kind": "regular-file", "path_template": "/etc/systemd/system/little-mester-vm-p-<digest>-metrics.service", "owner": "root:root", "mode": "0644", "operations": {"install": ["publish-fixed-generated-fragment-after-durable-role-intent"], "reset": ["preserve"], "remove": ["unlink-exact-after-durable-intent", "daemon-reload", "verify-absent"]}},
+    {"selector": "unit-stage.vm", "kind": "regular-file", "path_template": "/etc/systemd/system/.little-mester-vm-p-<digest>-vm.install-<install-transaction-id>.stage", "owner": "root:root", "mode": "0600", "operations": {"install": ["create-private-same-directory-stage-fsync-and-journal-exact-identity"], "reset": [], "remove": ["unlink-exact-after-durable-intent"]}},
+    {"selector": "unit-stage.proxy", "kind": "regular-file", "path_template": "/etc/systemd/system/.little-mester-vm-p-<digest>-proxy.install-<install-transaction-id>.stage", "owner": "root:root", "mode": "0600", "operations": {"install": ["create-private-same-directory-stage-fsync-and-journal-exact-identity"], "reset": [], "remove": ["unlink-exact-after-durable-intent"]}},
+    {"selector": "unit-stage.workspace", "kind": "regular-file", "path_template": "/etc/systemd/system/.little-mester-vm-p-<digest>-workspace.install-<install-transaction-id>.stage", "owner": "root:root", "mode": "0600", "operations": {"install": ["create-private-same-directory-stage-fsync-and-journal-exact-identity"], "reset": [], "remove": ["unlink-exact-after-durable-intent"]}},
+    {"selector": "unit-stage.metrics", "kind": "regular-file", "path_template": "/etc/systemd/system/.little-mester-vm-p-<digest>-metrics.install-<install-transaction-id>.stage", "owner": "root:root", "mode": "0600", "operations": {"install": ["create-private-same-directory-stage-fsync-and-journal-exact-identity"], "reset": [], "remove": ["unlink-exact-after-durable-intent"]}},
+    {"selector": "unit-manager.vm", "kind": "unit-manager-identity", "path_template": "systemd:<vm-unit>", "owner": null, "mode": null, "operations": {"install": ["daemon-reload-and-verify-exact-fragment"], "reset": ["verify-inactive-job-free"], "remove": ["record-exact-fragment-identity", "daemon-reload", "verify-not-found-job-free"]}},
+    {"selector": "unit-manager.proxy", "kind": "unit-manager-identity", "path_template": "systemd:<proxy-unit>", "owner": null, "mode": null, "operations": {"install": ["daemon-reload-and-verify-exact-fragment"], "reset": ["verify-inactive-job-free"], "remove": ["record-exact-fragment-identity", "daemon-reload", "verify-not-found-job-free"]}},
+    {"selector": "unit-manager.workspace", "kind": "unit-manager-identity", "path_template": "systemd:<workspace-unit>", "owner": null, "mode": null, "operations": {"install": ["daemon-reload-and-verify-exact-fragment"], "reset": ["verify-inactive-job-free"], "remove": ["record-exact-fragment-identity", "daemon-reload", "verify-not-found-job-free"]}},
+    {"selector": "unit-manager.metrics", "kind": "unit-manager-identity", "path_template": "systemd:<metrics-unit>", "owner": null, "mode": null, "operations": {"install": ["daemon-reload-and-verify-exact-fragment"], "reset": ["verify-inactive-job-free"], "remove": ["record-exact-fragment-identity", "daemon-reload", "verify-not-found-job-free"]}},
+    {"selector": "account.vm", "kind": "host-account-identity", "path_template": "NSS:user:lmv-<digest>", "owner": null, "mode": null, "operations": {"install": ["create-only-after-absence-and-durable-identity-intent", "verify-exact-mapping-journal-and-local-nss-identity"], "reset": ["preserve"], "remove": ["verify-recorded-identity-no-process-then-delete-without-home"]}},
+    {"selector": "group.vm", "kind": "host-group-identity", "path_template": "NSS:group:lmv-<digest>", "owner": null, "mode": null, "operations": {"install": ["create-only-after-local-and-nss-absence-and-durable-provenance-intent", "verify-exact-protected-provenance-and-local-nss-identity"], "reset": ["preserve"], "remove": ["verify-protected-provenance-gid-name-and-members-then-delete"]}},
+    {"selector": "account.proxy", "kind": "host-account-identity", "path_template": "NSS:user:lmp-<digest>", "owner": null, "mode": null, "operations": {"install": ["create-only-after-absence-and-durable-identity-intent", "verify-exact-mapping-journal-and-local-nss-identity"], "reset": ["preserve"], "remove": ["verify-recorded-identity-no-process-then-delete-without-home"]}},
+    {"selector": "group.proxy", "kind": "host-group-identity", "path_template": "NSS:group:lmp-<digest>", "owner": null, "mode": null, "operations": {"install": ["create-only-after-local-and-nss-absence-and-durable-provenance-intent", "verify-exact-protected-provenance-and-local-nss-identity"], "reset": ["preserve"], "remove": ["verify-protected-provenance-gid-name-and-members-then-delete"]}},
+    {"selector": "runtime.root", "kind": "directory", "path_template": "/run/little-mester-vm-p-<digest>", "owner": "root:root", "mode": "0711", "operations": {"install": [], "reset": ["preserve"], "remove": ["remove-known-children-only", "rmdir-only-if-empty"]}},
+    {"selector": "runtime.vm-dir", "kind": "directory", "path_template": "/run/little-mester-vm-p-<digest>/vm", "owner": "vm-account:vm-group", "mode": "0700", "operations": {"install": [], "reset": ["preserve"], "remove": ["rmdir-only-if-empty"]}},
+    {"selector": "runtime.vm.qmp-socket", "kind": "socket", "path_template": "/run/little-mester-vm-p-<digest>/vm/qmp.sock", "owner": "vm-account:vm-group", "mode": "0600", "operations": {"install": [], "reset": ["preserve"], "remove": ["unlink-only-after-all-units-stopped-and-exact-identity"]}},
+    {"selector": "runtime.proxy-dir", "kind": "directory", "path_template": "/run/little-mester-vm-p-<digest>/proxy", "owner": "proxy-account:proxy-group", "mode": "0700", "operations": {"install": [], "reset": ["preserve"], "remove": ["rmdir-only-if-empty"]}},
+    {"selector": "runtime.proxy.port", "kind": "regular-file", "path_template": "/run/little-mester-vm-p-<digest>/proxy/port", "owner": "proxy-account:proxy-group", "mode": "0600", "operations": {"install": [], "reset": ["preserve"], "remove": ["unlink-only-after-all-units-stopped-and-exact-identity"]}},
+    {"selector": "runtime.metrics-dir", "kind": "directory", "path_template": "/run/little-mester-vm-p-<digest>/metrics", "owner": "vm-account:vm-group", "mode": "0700", "operations": {"install": [], "reset": ["preserve"], "remove": ["rmdir-only-if-empty"]}},
+    {"selector": "runtime.metrics.port", "kind": "regular-file", "path_template": "/run/little-mester-vm-p-<digest>/metrics/port", "owner": "vm-account:vm-group", "mode": "0600", "operations": {"install": [], "reset": ["preserve"], "remove": ["unlink-only-after-all-units-stopped-and-exact-identity"]}},
+    {"selector": "runtime.workspace-dir", "kind": "directory", "path_template": "/run/little-mester-vm-p-<digest>/workspace", "owner": "enrolled-owner:vm-group", "mode": "2710", "operations": {"install": [], "reset": ["preserve"], "remove": ["rmdir-only-if-empty"]}},
+    {"selector": "runtime.workspace.virtiofs-socket", "kind": "socket", "path_template": "/run/little-mester-vm-p-<digest>/workspace/virtiofs.sock", "owner": "enrolled-owner:vm-group", "mode": "0660", "operations": {"install": [], "reset": ["preserve"], "remove": ["unlink-only-after-all-units-stopped-and-exact-identity"]}}
+  ],
+  "account_roles": {
+    "vm": {
+      "name": "lmv-<digest>",
+      "group_name": "lmv-<digest>",
+      "static": true,
+      "home_field": "empty string; do not create a home directory",
+      "shell": "the host's canonical root-owned non-writable nologin executable; if one exact canonical path cannot be proven, refuse",
+      "marker": "little-mester-vm-profile-v1/<canonical-owner-uid>/<profile-name>/vm (GECOS account comment; identification only)",
+      "supplementary_groups": [
+        "kvm"
+      ],
+      "reset": "preserve",
+      "remove": "verify protected mapping/journal, exact local/NSS UID/GID and GECOS identification marker, system range, groups, no-login shell, empty home and no processes; never delete a home"
+    },
+    "proxy": {
+      "name": "lmp-<digest>",
+      "group_name": "lmp-<digest>",
+      "static": true,
+      "home_field": "empty string; do not create a home directory",
+      "shell": "the host's canonical root-owned non-writable nologin executable; if one exact canonical path cannot be proven, refuse",
+      "marker": "little-mester-vm-profile-v1/<canonical-owner-uid>/<profile-name>/proxy (GECOS account comment; identification only)",
+      "supplementary_groups": [],
+      "reset": "preserve",
+      "remove": "verify protected mapping/journal, exact local/NSS UID/GID and GECOS identification marker, system range, groups, no-login shell, empty home and no processes; never delete a home"
+    },
+    "group_members": "empty; service account uses the group only as its primary group",
+    "validation": "Account GECOS marker is identification, never proof. The protected mapping/journal, exact expected UID/GID, exact generated name, local account/group databases and NSS must agree bidirectionally; validate account fields/groups/no-login shell and group membership. Group ownership is proven only by the exact protected provenance record plus local/NSS identity. Any mismatch, account lacking its exact GECOS identification marker, pre-existing object, unexpected member/process, or unprovable system range refuses; never adopt by name or marker.",
+    "group_provenance": "Typed bounded records in the protected mapping/install journal bind schema_version, owner_uid, profile_name, role, generated group_name, exact gid, and origin_install_transaction_id. /etc/group has no marker/comment field."
+  },
+  "ports": {
+    "ssh": {
+      "mapping_key": "ssh_port",
+      "minimum": 22223,
+      "maximum": 23222,
+      "listener": "127.0.0.1 only"
+    },
+    "proxy": {
+      "derivation": "ssh_port + 1",
+      "port_file": "/run/little-mester-vm-p-<digest>/proxy/port",
+      "encoding": "canonical decimal ASCII followed by one LF"
+    },
+    "metrics": {
+      "derivation": "ssh_port + 2",
+      "port_file": "/run/little-mester-vm-p-<digest>/metrics/port",
+      "encoding": "canonical decimal ASCII followed by one LF"
+    },
+    "admission": "Derived values must be in 1..65535, pairwise distinct, outside the fixed singleton reservation (SSH 22222), unique against every other profile and available on the intended loopback listener. A conflict refuses; never silently reallocate a committed profile."
+  },
+  "transaction_allowlists": {
+    "install": [
+      "profile.config-dir",
+      "state.root",
+      "state.vm-dir",
+      "state.client-dir",
+      "account.vm",
+      "group.vm",
+      "account.proxy",
+      "group.proxy",
+      "unit-stage.vm",
+      "unit-stage.proxy",
+      "unit-stage.workspace",
+      "unit-stage.metrics",
+      "unit-file.vm",
+      "unit-file.proxy",
+      "unit-file.workspace",
+      "unit-file.metrics",
+      "unit-manager.vm",
+      "unit-manager.proxy",
+      "unit-manager.workspace",
+      "unit-manager.metrics"
+    ],
+    "reset": [
+      "state.vm.disk",
+      "state.vm.seed",
+      "state.vm.host-key-private",
+      "state.vm.host-key-public",
+      "state.client.control-key-private",
+      "state.client.control-key-public",
+      "state.client.known-hosts"
+    ],
+    "remove": [
+      "profile.config-dir",
+      "state.root",
+      "state.vm-dir",
+      "state.client-dir",
+      "state.vm.disk",
+      "state.vm.seed",
+      "state.vm.host-key-private",
+      "state.vm.host-key-public",
+      "state.client.control-key-private",
+      "state.client.control-key-public",
+      "state.client.known-hosts",
+      "unit-file.vm",
+      "unit-file.proxy",
+      "unit-file.workspace",
+      "unit-file.metrics",
+      "unit-stage.vm",
+      "unit-stage.proxy",
+      "unit-stage.workspace",
+      "unit-stage.metrics",
+      "unit-manager.vm",
+      "unit-manager.proxy",
+      "unit-manager.workspace",
+      "unit-manager.metrics",
+      "account.vm",
+      "group.vm",
+      "account.proxy",
+      "group.proxy",
+      "runtime.root",
+      "runtime.vm-dir",
+      "runtime.vm.qmp-socket",
+      "runtime.proxy-dir",
+      "runtime.proxy.port",
+      "runtime.metrics-dir",
+      "runtime.metrics.port",
+      "runtime.workspace-dir",
+      "runtime.workspace.virtiofs-socket"
+    ]
+  },
+  "evidence": {
+    "observed_present": "Exact no-follow observed object identity. Regular files and sockets record device, inode, kind and link_count=1. Directories record device, inode and kind only because Linux directory link count changes as children are added or removed. Validate directory fd/path identity, exact owner/mode, protected ancestry and mount boundaries; immediately before rmdir revalidate those identities and prove emptiness. Account identity records exact numeric UID/GID plus the GECOS identification marker; group identity records exact name/GID and typed protected provenance, never a fictional /etc/group marker. Mapping/journal and local/NSS records must all agree. Manager identity binds the loaded unit to exact fragment device/inode and inactive, job-free state.",
+    "expected_absent": "An observation at the recorded preflight only. It is not authority to accept later absence after the operation may have created the object.",
+    "never_created": "Only a unit-file, private unit-stage, or manager-unit selector in a remove transaction may use this evidence. It carries source_install_id and is valid only for the matching role whose retained installation.unit_publication state is not_started. A global install phase is not proof. publication_intent is never_created proof of nothing: reconcile only the exact recorded stage/final inode or refuse.",
+    "removal_intent": "Durable intent to remove the exact observed identity, written and fsynced before unlink/delete. A later absence is acceptable only for that selector, matching identity, operation, and durable phase. Account removal intent requires a committed account identity and its corresponding owned primary-group record with exact generated name, GID, and protected origin provenance; any supplied group evidence must match, but simultaneous group deletion intent is not required. The account GECOS marker remains identification only, never ownership proof. Published fragments require exact fragment identity and removal intent; publication_intent removal requires exactly one matching stage/final removal_intent and rejects any identity-bearing entry at the alternate pathname, even the same inode. Published roles reject any supplied staging-object identity. It never authorizes replacement-identity adoption.",
+    "verified_absent": "Unit absence is bound to source_install_id and the retained publication state. For publication_intent it requires exact source-bound final-path absence after checking the exact stage identity. Manager evidence is load_state=not-found, active_state=inactive, job_state=none, daemon_reload=completed; for a published role it cannot replace the paired unit-file removal_intent retaining the exact source fragment identity. The approved sequence is durable fragment unlink intent, unlink, daemon-reload, then verify not-found/inactive/job-free and process-free before cleanup. A model fixture does not establish actual filesystem, systemd, or process-free behavior; never_created proof applies only to the matching not_started role."
+  },
+  "fixed_locks": {
+    "directory": {
+      "path": "/run/little-mester-vm-control",
+      "owner": "root:root",
+      "mode": "0755",
+      "must_not_be_group_or_world_writable": true
+    },
+    "files": [
+      {
+        "basename": "maintenance.lock",
+        "owner": "root:root",
+        "mode": "0600",
+        "single_link_regular": true
+      },
+      {
+        "basename": "catalog.lock",
+        "owner": "root:root",
+        "mode": "0600",
+        "single_link_regular": true
+      },
+      {
+        "basename": "host-admission.lock",
+        "owner": "root:root",
+        "mode": "0600",
+        "single_link_regular": true
+      },
+      {
+        "basename": "profile-<digest>.lock",
+        "owner": "root:root",
+        "mode": "0600",
+        "single_link_regular": true
+      },
+      {
+        "basename": "sha-<full-lowercase-40-or-64-hex-sha>.lock",
+        "owner": "root:root",
+        "mode": "0644",
+        "single_link_regular": true
+      }
+    ],
+    "separate_code_update_lock": {
+      "path": "/etc/little-mester-vm/code-update.lock",
+      "owner": "root:lm-vm-control",
+      "mode": "0660",
+      "single_link_regular": true
+    },
+    "acquisition": "All acquisitions are nonblocking and no-follow, with path/opened-inode identity checks. Preserve the approved lock orders in docs/vm-usability-integration.md; on contention release held locks and return BUSY/restart from the beginning, never wait while holding a higher-ranked lock."
+  },
+  "catalog_snapshots": {
+    "reference_projection": "Catalog shared lock protects a bounded membership/pin/owner/name/reservation/workspace projection only.",
+    "coherent_lifecycle_snapshot": "While catalog is shared, take all corresponding shared profile locks in sorted profile-name order; any contention is BUSY. Include every record, cap the catalog at 1000 profiles, and release catalog before hashing runtime trees. Revalidate the snapshot under ordered locks before mutation/prune.",
+    "critical_section": "Catalog lock is limited to mapping/assignment publication or unlink, bounded metadata snapshot and the short admission/start handoff through systemd activating. Never hold it for guest readiness, Git, full-tree hashing or runtime deletion."
+  },
+  "runtime_installation": {
+    "root": "/opt/little-mester/v3",
+    "manifest_basename": "manifest.json",
+    "manifest_inventory_key": "files",
+    "sha_directory": "<full lowercase 40-or-64-hex commit SHA>",
+    "stage_basename": ".staging-<full-SHA>-<16-lowercase-hex>",
+    "gc_basename": ".gc-<full-SHA>-<16-lowercase-hex>",
+    "stage_gc_policy": "A stage or quarantine may be acted on only when the current operation's durable journal records its exact basename and observed identity. Unknown/orphan stages and .gc entries are retained and reported unknown/incomplete. No prefix cleanup, broad matching, adoption, or automatic retry/deletion.",
+    "tree_policy": "Only a verified manifest-backed exact SHA tree is a managed runtime. Unknown children, links, malformed names, incomplete trees and legacy trees are preserved. Runtime publication is same-parent no-replace atomic rename; prune quarantines one exact recorded SHA and removes outside catalog lock while retaining its exclusive SHA lock."
+  },
+  "runtime_roles": {
+    "vm": "VM unit uses the vm account; qmp.sock is private to that role.",
+    "proxy": "Proxy unit uses its separate proxy account; only its runtime directory and derived port file are listed. No proxy persistent file is defined.",
+    "workspace": "Runs with enrolled owner UID and vm primary GID only inside the minimal root. The only host binds are the assigned workspace and this socket directory; no workspace deletion is allowed.",
+    "metrics": "Metrics unit uses the VM/metrics account and its derived runtime port file. History is in-memory only; no metrics-history file is defined.",
+    "access": "Other profile runtime roots/sockets/ports are private. Runtime cleanup is exact-selector-only after every profile unit is stopped/job-free."
+  },
+  "refuse_not_selectors": [
+    "Any selector, action, field or path not enumerated by this table/schema.",
+    "Unknown children below state, config or runtime roots; generic recursive deletion; path-prefix cleanup.",
+    "Proxy or metrics persistent files (none are specified by v1).",
+    "Browser-auth temporary directories, workspace probe files, provisioning scratch, or other unreviewed transient resources.",
+    "Unexpected systemd drop-ins or fragment paths; all four generated unit roles have only their exact fragments.",
+    "Orphan .staging-* or .gc-* runtime objects without the exact operation-journaled identity; no cleanup by prefix.",
+    "Workspace mutation/deletion, guessed bind aliases, or workspace identity accepted without current statx and mountinfo proof.",
+    "Common-control transaction markers/journals; they are a distinct schema and are not profile transactions."
+  ],
+  "unit_publication": {
+    "roles": [
+      "vm",
+      "proxy",
+      "workspace",
+      "metrics"
+    ],
+    "states": [
+      "not_started",
+      "publication_intent",
+      "published"
+    ],
+    "initialization": "All four roles are not_started in the durable install transaction before any unit staging/writes.",
+    "stage": "Fixed same-directory /etc/systemd/system stage basename is derived only from role, profile digest and install transaction ID; root:root 0600. Fsync the exact generated stage, record its device/inode identity with publication_intent, then atomically rename and fsync the directory before durably recording published with the same inode identity.",
+    "recovery": "States never roll back. publication_intent is not evidence that no fragment was created: inspect both exact stage and final role pathnames. Exactly one supplied observed_present must match the complete recorded stage inode identity; reject every supplied foreign identity at either pathname. An omitted sparse alternate selector is not verified filesystem absence; actual recovery still checks both paths. Missing at both, both matching, foreign/conflicting identity, or any ambiguity refuses. For every published role, install evidence requires the exact final fragment and unit-manager identity as observed_present, with manager device/inode equal to the retained fragment, including partial units and complete verified snapshots; missing, absent, or foreign manager evidence refuses. A published fragment requires the exact final inode and removal intent before unlink, followed by daemon-reload and not-found/job-free verification.",
+    "removal_source": "The single protected profile mapping retains the source install ID and complete four-role publication snapshot. A remove transaction copies both before replacing an install transaction; removal from ready copies the retained installation record. Source consistency is checked in every remove phase, including prepared, separately from later completeness and durable-intent requirements. not_started rejects supplied file/stage/manager identities; publication_intent identities must match the complete retained stage inode, reject identity-bearing alternate paths, and bind any manager fragment to paired exact final-file evidence; published final-file and manager identities bind to the exact retained fragment and any supplied stage identity refuses. Sparse omissions are not verified absence. never_created applies only to the matching role recorded not_started, never from a global phase."
+  },
+  "planned_id_replans": {
+    "install_transaction_field": "numeric_replans",
+    "maximum_entries": 8,
+    "entry_fields": [
+      "role",
+      "field",
+      "previous",
+      "replacement",
+      "reason"
+    ],
+    "reason": "numeric_collision",
+    "policy": "Append-only bounded journal; update only an affected still-planned UID/GID, preserve owner/profile/generated names/runtime pin/install transaction ID, and fsync the protected mapping before retry. The replacement must equal the current mapping value. Committed IDs never change. Any group creation intent or allocated group blocks replan until its exact journal identity is reconciled/removed; never substitute a group."
+  }
+}

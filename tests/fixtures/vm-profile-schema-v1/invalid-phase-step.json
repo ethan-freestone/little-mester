@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "owner_uid": 1000,
+  "name": "default",
+  "state": "installing",
+  "runtime": {
+    "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "profile_runtime_api": 1,
+    "control_helper_api_min": 1,
+    "control_helper_api_max": 3
+  },
+  "accounts": {
+    "vm": {
+      "name": "lmv-8b95a12479c85e8b1338",
+      "uid": 995,
+      "gid": 995,
+      "allocation": "committed"
+    },
+    "proxy": {
+      "name": "lmp-8b95a12479c85e8b1338",
+      "uid": 996,
+      "gid": 996,
+      "allocation": "planned"
+    }
+  },
+  "units": {
+    "vm": "little-mester-vm-p-8b95a12479c85e8b1338.service",
+    "proxy": "little-mester-vm-p-8b95a12479c85e8b1338-proxy.service",
+    "workspace": "little-mester-vm-p-8b95a12479c85e8b1338-workspace.service",
+    "metrics": "little-mester-vm-p-8b95a12479c85e8b1338-metrics.service"
+  },
+  "workspace": {
+    "canonical_path": "/workspaces/alpha",
+    "device": 2049,
+    "inode": 12345,
+    "mount_id": 7,
+    "mount": {
+      "major": 8,
+      "minor": 1,
+      "root": "/",
+      "mount_point": "/"
+    },
+    "unsafe_recurse": false
+  },
+  "ssh_port": 22300,
+  "transaction": {
+    "schema_version": 1,
+    "id": "11111111111111111111111111111111",
+    "operation": "install",
+    "phase": "units",
+    "step": 1,
+    "expected": [
+      {
+        "selector": "account.vm",
+        "evidence": "observed_present",
+        "identity": {
+          "uid": 995,
+          "gid": 995,
+          "marker": "little-mester-vm-profile-v1/1000/default/vm"
+        }
+      },
+      {
+        "selector": "group.vm",
+        "evidence": "observed_present",
+        "identity": {
+          "name": "lmv-8b95a12479c85e8b1338",
+          "gid": 995,
+          "provenance": {
+            "schema_version": 1,
+            "owner_uid": 1000,
+            "profile_name": "default",
+            "role": "vm",
+            "group_name": "lmv-8b95a12479c85e8b1338",
+            "gid": 995,
+            "origin_install_transaction_id": "11111111111111111111111111111111"
+          }
+        }
+      },
+      {
+        "selector": "account.proxy",
+        "evidence": "expected_absent"
+      },
+      {
+        "selector": "group.proxy",
+        "evidence": "expected_absent"
+      }
+    ],
+    "unit_publication": {
+      "vm": {
+        "state": "not_started"
+      },
+      "proxy": {
+        "state": "not_started"
+      },
+      "workspace": {
+        "state": "not_started"
+      },
+      "metrics": {
+        "state": "not_started"
+      }
+    },
+    "numeric_replans": []
+  },
+  "installation": {
+    "id": "11111111111111111111111111111111",
+    "unit_publication": {
+      "vm": {
+        "state": "not_started"
+      },
+      "proxy": {
+        "state": "not_started"
+      },
+      "workspace": {
+        "state": "not_started"
+      },
+      "metrics": {
+        "state": "not_started"
+      }
+    },
+    "groups": {
+      "vm": {
+        "name": "lmv-8b95a12479c85e8b1338",
+        "gid": 995,
+        "state": "owned",
+        "provenance": {
+          "schema_version": 1,
+          "owner_uid": 1000,
+          "profile_name": "default",
+          "role": "vm",
+          "group_name": "lmv-8b95a12479c85e8b1338",
+          "gid": 995,
+          "origin_install_transaction_id": "11111111111111111111111111111111"
+        }
+      },
+      "proxy": {
+        "name": "lmp-8b95a12479c85e8b1338",
+        "gid": 996,
+        "state": "not_started",
+        "provenance": {
+          "schema_version": 1,
+          "owner_uid": 1000,
+          "profile_name": "default",
+          "role": "proxy",
+          "group_name": "lmp-8b95a12479c85e8b1338",
+          "gid": 996,
+          "origin_install_transaction_id": "11111111111111111111111111111111"
+        }
+      }
+    }
+  }
+}

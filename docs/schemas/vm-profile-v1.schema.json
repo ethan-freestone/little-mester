@@ -1,0 +1,602 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://little-mester.invalid/schemas/vm-profile-v1.schema.json",
+  "title": "Little Mester protected VM profile mapping v1",
+  "description": "Closed encoding for one authoritative profile mapping. See docs/vm-profile-schema-v1.md for semantic and host-validation requirements. Account GECOS markers identify candidates only; protected mapping/journal and exact local/NSS identities are authoritative.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "owner_uid",
+    "name",
+    "state",
+    "runtime",
+    "accounts",
+    "installation",
+    "units",
+    "workspace",
+    "ssh_port",
+    "transaction"
+  ],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "owner_uid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+    "name": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z][a-z0-9-]{0,31}$"},
+    "state": {
+      "type": "string",
+      "enum": ["installing", "ready", "resetting", "removing"]
+    },
+    "runtime": {"$ref": "#/$defs/runtime"},
+    "accounts": {"$ref": "#/$defs/accounts"},
+    "units": {"$ref": "#/$defs/units"},
+    "workspace": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/workspace"}
+      ]
+    },
+    "ssh_port": {"type": "integer", "minimum": 22223, "maximum": 23222},
+    "transaction": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/installTransaction"},
+        {"$ref": "#/$defs/resetTransaction"},
+        {"$ref": "#/$defs/removeTransaction"}
+      ]
+    },
+    "installation": {"$ref": "#/$defs/installRecord"}
+  },
+  "$defs": {
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit_sha", "profile_runtime_api", "control_helper_api_min", "control_helper_api_max"],
+      "properties": {
+        "commit_sha": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$", "minLength": 40, "maxLength": 64},
+        "profile_runtime_api": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "control_helper_api_min": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "control_helper_api_max": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    },
+    "account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "uid", "gid", "allocation"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^lm[vp]-[0-9a-f]{20}$", "minLength": 24, "maxLength": 24},
+        "uid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "gid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "allocation": {
+          "type": "string",
+          "enum": ["planned", "committed"]
+        }
+      }
+    },
+    "accounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vm", "proxy"],
+      "properties": {
+        "vm": {"$ref": "#/$defs/account"},
+        "proxy": {"$ref": "#/$defs/account"}
+      }
+    },
+    "unit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^little-mester-vm-p-[0-9a-f]{20}(?:-proxy|-workspace|-metrics)?\\.service$"},
+    "units": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vm", "proxy", "workspace", "metrics"],
+      "properties": {
+        "vm": {"$ref": "#/$defs/unit"},
+        "proxy": {"$ref": "#/$defs/unit"},
+        "workspace": {"$ref": "#/$defs/unit"},
+        "metrics": {"$ref": "#/$defs/unit"}
+      }
+    },
+    "absolutePath": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^/(?:[^/]+(?:/[^/]+)*)?$"},
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical_path", "device", "inode", "mount_id", "mount", "unsafe_recurse"],
+      "properties": {
+        "canonical_path": {"$ref": "#/$defs/absolutePath"},
+        "device": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "inode": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+        "mount_id": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "mount": {"$ref": "#/$defs/mount"},
+        "unsafe_recurse": {"type": "boolean"}
+      }
+    },
+    "mount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["major", "minor", "root", "mount_point"],
+      "properties": {
+        "major": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "minor": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "root": {"$ref": "#/$defs/absolutePath"},
+        "mount_point": {"$ref": "#/$defs/absolutePath"}
+      }
+    },
+    "fileSelector": {
+      "type": "string",
+      "enum": [
+        "profile.config-dir",
+        "state.root",
+        "state.vm-dir",
+        "state.client-dir",
+        "state.vm.disk",
+        "state.vm.seed",
+        "state.vm.host-key-private",
+        "state.vm.host-key-public",
+        "state.client.control-key-private",
+        "state.client.control-key-public",
+        "state.client.known-hosts",
+        "unit-file.vm",
+        "unit-file.proxy",
+        "unit-file.workspace",
+        "unit-file.metrics",
+        "runtime.root",
+        "runtime.vm-dir",
+        "runtime.vm.qmp-socket",
+        "runtime.proxy-dir",
+        "runtime.proxy.port",
+        "runtime.metrics-dir",
+        "runtime.metrics.port",
+        "runtime.workspace-dir",
+        "runtime.workspace.virtiofs-socket",
+        "unit-stage.vm",
+        "unit-stage.proxy",
+        "unit-stage.workspace",
+        "unit-stage.metrics"
+      ]
+    },
+    "accountSelector": {
+      "type": "string",
+      "enum": ["account.vm", "account.proxy"]
+    },
+    "groupSelector": {
+      "type": "string",
+      "enum": ["group.vm", "group.proxy"]
+    },
+    "managerSelector": {
+      "type": "string",
+      "enum": ["unit-manager.vm", "unit-manager.proxy", "unit-manager.workspace", "unit-manager.metrics"]
+    },
+    "fileIdentity": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["device", "inode", "kind", "link_count"],
+          "properties": {
+            "device": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+            "inode": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+            "kind": {
+              "type": "string",
+              "enum": ["regular", "socket"]
+            },
+            "link_count": {"type": "integer", "const": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["device", "inode", "kind"],
+          "properties": {
+            "device": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+            "inode": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+            "kind": {"type": "string", "const": "directory"}
+          }
+        }
+      ]
+    },
+    "accountIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uid", "gid", "marker"],
+      "properties": {
+        "uid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "gid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "marker": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^little-mester-vm-profile-v1/[1-9][0-9]*/[a-z][a-z0-9-]{0,31}/(vm|proxy)$"}
+      }
+    },
+    "groupIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "gid", "provenance"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^lm[vp]-[0-9a-f]{20}$", "minLength": 24, "maxLength": 24},
+        "gid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "provenance": {"$ref": "#/$defs/groupProvenance"}
+      }
+    },
+    "managerIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fragment_device", "fragment_inode", "load_state", "active_state", "job_state"],
+      "properties": {
+        "fragment_device": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "fragment_inode": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+        "load_state": {"type": "string", "const": "loaded"},
+        "active_state": {"type": "string", "const": "inactive"},
+        "job_state": {"type": "string", "const": "none"}
+      }
+    },
+    "fileExpectedPresent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence", "identity"],
+      "properties": {
+        "selector": {"$ref": "#/$defs/fileSelector"},
+        "evidence": {"type": "string", "const": "observed_present"},
+        "identity": {"$ref": "#/$defs/fileIdentity"}
+      }
+    },
+    "fileExpectedAbsent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence"],
+      "properties": {
+        "selector": {"$ref": "#/$defs/fileSelector"},
+        "evidence": {"type": "string", "const": "expected_absent"}
+      }
+    },
+    "fileRemovalIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence", "identity"],
+      "properties": {
+        "selector": {"$ref": "#/$defs/fileSelector"},
+        "evidence": {"type": "string", "const": "removal_intent"},
+        "identity": {"$ref": "#/$defs/fileIdentity"}
+      }
+    },
+    "unitNeverCreated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence", "install_transaction_id"],
+      "properties": {
+        "selector": {
+          "type": "string",
+          "enum": [
+            "unit-file.vm",
+            "unit-file.proxy",
+            "unit-file.workspace",
+            "unit-file.metrics",
+            "unit-manager.vm",
+            "unit-manager.proxy",
+            "unit-manager.workspace",
+            "unit-manager.metrics",
+            "unit-stage.vm",
+            "unit-stage.proxy",
+            "unit-stage.workspace",
+            "unit-stage.metrics"
+          ]
+        },
+        "evidence": {"type": "string", "const": "never_created"},
+        "install_transaction_id": {"type": "string", "pattern": "^[0-9a-f]{32}$", "minLength": 32, "maxLength": 32}
+      }
+    },
+    "accountExpectedPresent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence", "identity"],
+      "properties": {
+        "selector": {"$ref": "#/$defs/accountSelector"},
+        "evidence": {
+          "type": "string",
+          "enum": ["observed_present", "removal_intent"]
+        },
+        "identity": {"$ref": "#/$defs/accountIdentity"}
+      }
+    },
+    "accountExpectedAbsent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence"],
+      "properties": {
+        "selector": {"$ref": "#/$defs/accountSelector"},
+        "evidence": {"type": "string", "const": "expected_absent"}
+      }
+    },
+    "groupExpectedPresent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence", "identity"],
+      "properties": {
+        "selector": {"$ref": "#/$defs/groupSelector"},
+        "evidence": {
+          "type": "string",
+          "enum": ["observed_present", "removal_intent", "creation_intent"]
+        },
+        "identity": {"$ref": "#/$defs/groupIdentity"}
+      }
+    },
+    "groupExpectedAbsent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence"],
+      "properties": {
+        "selector": {"$ref": "#/$defs/groupSelector"},
+        "evidence": {
+          "type": "string",
+          "const": "expected_absent",
+          "enum": ["expected_absent"]
+        }
+      }
+    },
+    "managerExpectedPresent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence", "identity"],
+      "properties": {
+        "selector": {"$ref": "#/$defs/managerSelector"},
+        "evidence": {
+          "type": "string",
+          "enum": ["observed_present", "removal_intent"]
+        },
+        "identity": {"$ref": "#/$defs/managerIdentity"}
+      }
+    },
+    "managerExpectedAbsent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence"],
+      "properties": {
+        "selector": {"$ref": "#/$defs/managerSelector"},
+        "evidence": {"type": "string", "const": "expected_absent"}
+      }
+    },
+    "expectedObject": {
+      "oneOf": [
+        {"$ref": "#/$defs/fileExpectedPresent"},
+        {"$ref": "#/$defs/fileExpectedAbsent"},
+        {"$ref": "#/$defs/fileRemovalIntent"},
+        {"$ref": "#/$defs/unitFileVerifiedAbsent"},
+        {"$ref": "#/$defs/unitNeverCreated"},
+        {"$ref": "#/$defs/accountExpectedPresent"},
+        {"$ref": "#/$defs/accountExpectedAbsent"},
+        {"$ref": "#/$defs/groupExpectedPresent"},
+        {"$ref": "#/$defs/groupExpectedAbsent"},
+        {"$ref": "#/$defs/managerExpectedPresent"},
+        {"$ref": "#/$defs/managerExpectedAbsent"},
+        {"$ref": "#/$defs/managerVerifiedAbsent"}
+      ]
+    },
+    "installTransaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "id", "operation", "phase", "step", "expected", "unit_publication", "numeric_replans"],
+      "properties": {
+        "schema_version": {"type": "integer", "const": 1},
+        "id": {"type": "string", "pattern": "^[0-9a-f]{32}$", "minLength": 32, "maxLength": 32},
+        "operation": {"type": "string", "const": "install"},
+        "phase": {
+          "type": "string",
+          "enum": ["prepared", "accounts", "state", "units", "verified"]
+        },
+        "step": {"type": "integer", "minimum": 0, "maximum": 4},
+        "expected": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/expectedObject"}
+        },
+        "unit_publication": {"$ref": "#/$defs/unitPublication"},
+        "numeric_replans": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {"$ref": "#/$defs/numericReplan"}
+        }
+      }
+    },
+    "resetTransaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "id", "operation", "phase", "step", "expected"],
+      "properties": {
+        "schema_version": {"type": "integer", "const": 1},
+        "id": {"type": "string", "pattern": "^[0-9a-f]{32}$", "minLength": 32, "maxLength": 32},
+        "operation": {"type": "string", "const": "reset"},
+        "phase": {
+          "type": "string",
+          "enum": ["prepared", "leaves", "verified"]
+        },
+        "step": {"type": "integer", "minimum": 0, "maximum": 4},
+        "expected": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/expectedObject"}
+        }
+      }
+    },
+    "removeTransaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "id", "operation", "phase", "step", "expected", "source_install_id", "unit_publication"],
+      "properties": {
+        "schema_version": {"type": "integer", "const": 1},
+        "id": {"type": "string", "pattern": "^[0-9a-f]{32}$", "minLength": 32, "maxLength": 32},
+        "operation": {"type": "string", "const": "remove"},
+        "phase": {
+          "type": "string",
+          "enum": ["prepared", "units", "state", "accounts", "finalizing"]
+        },
+        "step": {"type": "integer", "minimum": 0, "maximum": 4},
+        "expected": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/expectedObject"}
+        },
+        "source_install_id": {"type": "string", "pattern": "^[0-9a-f]{32}$", "minLength": 32, "maxLength": 32},
+        "unit_publication": {"$ref": "#/$defs/unitPublication"}
+      }
+    },
+    "regularFileIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device", "inode", "kind", "link_count"],
+      "properties": {
+        "device": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "inode": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+        "kind": {"type": "string", "const": "regular"},
+        "link_count": {"type": "integer", "const": 1}
+      }
+    },
+    "groupProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "owner_uid", "profile_name", "role", "group_name", "gid", "origin_install_transaction_id"],
+      "properties": {
+        "schema_version": {"type": "integer", "const": 1},
+        "owner_uid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "profile_name": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z][a-z0-9-]{0,31}$"},
+        "role": {
+          "type": "string",
+          "enum": ["vm", "proxy"]
+        },
+        "group_name": {"type": "string", "pattern": "^lm[vp]-[0-9a-f]{20}$", "minLength": 24, "maxLength": 24},
+        "gid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "origin_install_transaction_id": {"type": "string", "pattern": "^[0-9a-f]{32}$", "minLength": 32, "maxLength": 32}
+      }
+    },
+    "groupRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "gid", "state", "provenance"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^lm[vp]-[0-9a-f]{20}$", "minLength": 24, "maxLength": 24},
+        "gid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "state": {
+          "type": "string",
+          "enum": ["not_started", "creation_intent", "owned"]
+        },
+        "provenance": {"$ref": "#/$defs/groupProvenance"}
+      }
+    },
+    "groups": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vm", "proxy"],
+      "properties": {
+        "vm": {"$ref": "#/$defs/groupRecord"},
+        "proxy": {"$ref": "#/$defs/groupRecord"}
+      }
+    },
+    "unitPublicationNotStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": {"type": "string", "const": "not_started"}
+      }
+    },
+    "unitPublicationIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "stage_identity"],
+      "properties": {
+        "state": {"type": "string", "const": "publication_intent"},
+        "stage_identity": {"$ref": "#/$defs/regularFileIdentity"}
+      }
+    },
+    "unitPublicationPublished": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "fragment_identity"],
+      "properties": {
+        "state": {"type": "string", "const": "published"},
+        "fragment_identity": {"$ref": "#/$defs/regularFileIdentity"}
+      }
+    },
+    "unitPublicationRole": {
+      "oneOf": [
+        {"$ref": "#/$defs/unitPublicationNotStarted"},
+        {"$ref": "#/$defs/unitPublicationIntent"},
+        {"$ref": "#/$defs/unitPublicationPublished"}
+      ]
+    },
+    "unitPublication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vm", "proxy", "workspace", "metrics"],
+      "properties": {
+        "vm": {"$ref": "#/$defs/unitPublicationRole"},
+        "proxy": {"$ref": "#/$defs/unitPublicationRole"},
+        "workspace": {"$ref": "#/$defs/unitPublicationRole"},
+        "metrics": {"$ref": "#/$defs/unitPublicationRole"}
+      }
+    },
+    "installRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "unit_publication", "groups"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[0-9a-f]{32}$", "minLength": 32, "maxLength": 32},
+        "unit_publication": {"$ref": "#/$defs/unitPublication"},
+        "groups": {"$ref": "#/$defs/groups"}
+      }
+    },
+    "unitFileVerifiedAbsent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence", "install_transaction_id", "publication_state"],
+      "properties": {
+        "selector": {
+          "type": "string",
+          "enum": ["unit-file.vm", "unit-file.proxy", "unit-file.workspace", "unit-file.metrics"]
+        },
+        "evidence": {"type": "string", "const": "verified_absent"},
+        "install_transaction_id": {"type": "string", "pattern": "^[0-9a-f]{32}$", "minLength": 32, "maxLength": 32},
+        "publication_state": {"type": "string", "const": "publication_intent"}
+      }
+    },
+    "managerVerifiedAbsent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "evidence", "install_transaction_id", "publication_state", "manager_identity"],
+      "properties": {
+        "selector": {"$ref": "#/$defs/managerSelector"},
+        "evidence": {"type": "string", "const": "verified_absent"},
+        "install_transaction_id": {"type": "string", "pattern": "^[0-9a-f]{32}$", "minLength": 32, "maxLength": 32},
+        "publication_state": {
+          "type": "string",
+          "enum": ["publication_intent", "published"]
+        },
+        "manager_identity": {"$ref": "#/$defs/managerAbsenceIdentity"}
+      }
+    },
+    "numericReplan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "field", "previous", "replacement", "reason"],
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": ["vm", "proxy"]
+        },
+        "field": {
+          "type": "string",
+          "enum": ["uid", "gid"]
+        },
+        "previous": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "replacement": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+        "reason": {"type": "string", "const": "numeric_collision"}
+      }
+    },
+    "managerAbsenceIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["load_state", "active_state", "job_state", "daemon_reload"],
+      "properties": {
+        "load_state": {"type": "string", "const": "not-found"},
+        "active_state": {"type": "string", "const": "inactive"},
+        "job_state": {"type": "string", "const": "none"},
+        "daemon_reload": {"type": "string", "const": "completed"}
+      }
+    }
+  }
+}
